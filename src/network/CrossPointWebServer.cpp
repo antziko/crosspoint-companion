@@ -12,6 +12,8 @@
 
 #include "CrossPointSettings.h"
 #include "OpdsServerStore.h"
+#include "SdCardFontGlobals.h"
+#include "SdCardFontSystem.h"
 #include "SettingsList.h"
 #include "WebDAVHandler.h"
 #include "html/FilesPageHtml.generated.h"
@@ -22,8 +24,7 @@
 namespace {
 // Folders/files to hide from the web interface file browser
 // Note: Items starting with "." are automatically hidden
-const char* HIDDEN_ITEMS[] = {"System Volume Information", "XTCache"};
-constexpr size_t HIDDEN_ITEMS_COUNT = sizeof(HIDDEN_ITEMS) / sizeof(HIDDEN_ITEMS[0]);
+constexpr const char* HIDDEN_ITEMS[] = {"System Volume Information", "XTCache"};
 constexpr uint16_t UDP_PORTS[] = {54982, 48123, 39001, 44044, 59678};
 constexpr uint16_t LOCAL_UDP_PORT = 8134;
 
@@ -75,8 +76,8 @@ bool isProtectedItemName(const String& name) {
   if (name.startsWith(".")) {
     return true;
   }
-  for (size_t i = 0; i < HIDDEN_ITEMS_COUNT; i++) {
-    if (name.equals(HIDDEN_ITEMS[i])) {
+  for (const auto* item : HIDDEN_ITEMS) {
+    if (name.equals(item)) {
       return true;
     }
   }
@@ -120,6 +121,9 @@ void CrossPointWebServer::begin() {
   // Disable WiFi sleep to improve responsiveness and prevent 'unreachable' errors.
   // This is critical for reliable web server operation on ESP32.
   WiFi.setSleep(false);
+  // Default varies by ESP32 core version. The activity's loss-recovery loop
+  // relies on driver retries during transient disconnects.
+  WiFi.setAutoReconnect(true);
 
   // Note: WebServer class doesn't have setNoDelay() in the standard ESP32 library.
   // We rely on disabling WiFi sleep for responsiveness.
@@ -389,8 +393,8 @@ void CrossPointWebServer::scanFiles(const char* path, const std::function<void(F
 
     // Check against explicitly hidden items list
     if (!shouldHide) {
-      for (size_t i = 0; i < HIDDEN_ITEMS_COUNT; i++) {
-        if (fileName.equals(HIDDEN_ITEMS[i])) {
+      for (const auto* item : HIDDEN_ITEMS) {
+        if (fileName.equals(item)) {
           shouldHide = true;
           break;
         }
@@ -497,8 +501,8 @@ void CrossPointWebServer::handleDownload() const {
     server->send(403, "text/plain", "Cannot access system files");
     return;
   }
-  for (size_t i = 0; i < HIDDEN_ITEMS_COUNT; i++) {
-    if (itemName.equals(HIDDEN_ITEMS[i])) {
+  for (const auto* item : HIDDEN_ITEMS) {
+    if (itemName.equals(item)) {
       server->send(403, "text/plain", "Cannot access protected items");
       return;
     }
@@ -1033,8 +1037,8 @@ void CrossPointWebServer::handleDelete() const {
 
     // Check against explicitly protected items
     bool isProtected = false;
-    for (size_t i = 0; i < HIDDEN_ITEMS_COUNT; i++) {
-      if (itemName.equals(HIDDEN_ITEMS[i])) {
+    for (const auto* item : HIDDEN_ITEMS) {
+      if (itemName.equals(item)) {
         isProtected = true;
         break;
       }
@@ -1093,7 +1097,10 @@ void CrossPointWebServer::handleSettingsPage() const {
 }
 
 void CrossPointWebServer::handleGetSettings() const {
-  const auto& settings = getSettingsList();
+  // Pass the SD font registry so the fontFamily setting's enumStringValues
+  // includes SD-resident families — otherwise the web API only exposes the
+  // three built-in fonts.
+  const auto& settings = getSettingsList(&sdFontSystem.registry());
 
   server->setContentLength(CONTENT_LENGTH_UNKNOWN);
   server->send(200, "application/json", "");
@@ -1128,8 +1135,14 @@ void CrossPointWebServer::handleGetSettings() const {
           doc["value"] = static_cast<int>(s.valueGetter());
         }
         JsonArray options = doc["options"].to<JsonArray>();
-        for (const auto& opt : s.enumValues) {
-          options.add(I18N.get(opt));
+        if (!s.enumStringValues.empty()) {
+          for (const auto& opt : s.enumStringValues) {
+            options.add(opt);
+          }
+        } else {
+          for (const auto& opt : s.enumValues) {
+            options.add(I18N.get(opt));
+          }
         }
         break;
       }
@@ -1189,7 +1202,7 @@ void CrossPointWebServer::handlePostSettings() {
     return;
   }
 
-  const auto& settings = getSettingsList();
+  const auto& settings = getSettingsList(&sdFontSystem.registry());
   int applied = 0;
 
   for (const auto& s : settings) {
@@ -1207,7 +1220,9 @@ void CrossPointWebServer::handlePostSettings() {
       }
       case SettingType::ENUM: {
         const int val = doc[s.key].as<int>();
-        if (val >= 0 && val < static_cast<int>(s.enumValues.size())) {
+        const int maxVal = s.enumStringValues.empty() ? static_cast<int>(s.enumValues.size())
+                                                      : static_cast<int>(s.enumStringValues.size());
+        if (val >= 0 && val < maxVal) {
           if (s.valuePtr) {
             SETTINGS.*(s.valuePtr) = static_cast<uint8_t>(val);
           } else if (s.valueSetter) {
