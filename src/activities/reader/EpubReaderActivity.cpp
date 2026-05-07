@@ -685,6 +685,8 @@ void EpubReaderActivity::render(RenderLock&& lock) {
                                   SETTINGS.imageRendering)) {
       LOG_DBG("ERS", "Cache not found, building...");
 
+      GUI.drawPopup(renderer, tr(STR_INDEXING));
+
       const auto popupFn = [this]() { GUI.drawPopup(renderer, tr(STR_INDEXING)); };
 
       if (!section->createSectionFile(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
