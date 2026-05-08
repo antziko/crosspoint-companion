@@ -98,6 +98,7 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
       if (Dictionary::hasAltForms(cachePath.c_str())) {
         altFormWord = lookupWord;
         state = LookupState::AltFormPrompt;
+        owner.requestUpdate();
         return LookupEvent::None;
       }
 
