@@ -24,9 +24,12 @@ void DictionaryWordSelectActivity::onEnter() {
   textPool.reserve(512);
   extractWords(words, rows, textPool);
   mergeHyphenatedWords(words, rows, textPool);
-  // consumeInitialConfirm=true: the long-press that opened word selection may still
-  // be held, so ignore it until the user releases and presses again.
-  navigator.load(std::move(words), std::move(rows), std::move(textPool), true);
+  // Only consume the initial Confirm release if Confirm is still held at onEnter — i.e.
+  // we were opened mid hold-to-lookup. Other entry paths (e.g. reader menu → Lookup) have
+  // already released Confirm by the time we open, so consuming would swallow the user's
+  // first deliberate tap and force them to press twice.
+  const bool consumeInitialConfirm = mappedInput.isPressed(MappedInputManager::Button::Confirm);
+  navigator.load(std::move(words), std::move(rows), std::move(textPool), consumeInitialConfirm);
   requestUpdate();
 }
 
@@ -204,19 +207,18 @@ void DictionaryWordSelectActivity::loop() {
   if (controller.isActive()) {
     switch (controller.handleInput()) {
       case DictionaryLookupController::LookupEvent::FoundDefinition: {
-        startActivityForResult(
-            std::make_unique<DictionaryDefinitionActivity>(
-                renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(), true, cachePath,
-                controller.getRecordHistory(), controller.getLookupWord(),
-                DictionaryLookupController::toHistStatus(controller.getFoundStatus())),
-            [this](const ActivityResult& result) {
-              if (!result.isCancelled) {
-                setResult(ActivityResult{});
-                finish();
-              } else {
-                requestUpdate();
-              }
-            });
+        startActivityForResult(std::make_unique<DictionaryDefinitionActivity>(
+                                   renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(),
+                                   true, cachePath, controller.getRecordHistory(), controller.getLookupWord(),
+                                   DictionaryLookupController::toHistStatus(controller.getFoundStatus())),
+                               [this](const ActivityResult& result) {
+                                 if (!result.isCancelled) {
+                                   setResult(ActivityResult{});
+                                   finish();
+                                 } else {
+                                   requestUpdate();
+                                 }
+                               });
         break;
       }
       case DictionaryLookupController::LookupEvent::NotFoundDismissedBack:

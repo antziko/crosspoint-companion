@@ -45,20 +45,19 @@ void LookedUpWordsActivity::loop() {
   if (controller.isActive()) {
     switch (controller.handleInput()) {
       case DictionaryLookupController::LookupEvent::FoundDefinition: {
-        startActivityForResult(
-            std::make_unique<DictionaryDefinitionActivity>(
-                renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(), true, cachePath,
-                controller.getRecordHistory(), controller.getLookupWord(),
-                DictionaryLookupController::toHistStatus(controller.getFoundStatus())),
-            [this](const ActivityResult& result) {
-              entries = LookupHistory::load(cachePath);
-              if (!result.isCancelled) {
-                setResult(ActivityResult{});
-                finish();
-              } else {
-                requestUpdate();
-              }
-            });
+        startActivityForResult(std::make_unique<DictionaryDefinitionActivity>(
+                                   renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(),
+                                   true, cachePath, controller.getRecordHistory(), controller.getLookupWord(),
+                                   DictionaryLookupController::toHistStatus(controller.getFoundStatus())),
+                               [this](const ActivityResult& result) {
+                                 entries = LookupHistory::load(cachePath);
+                                 if (!result.isCancelled) {
+                                   setResult(ActivityResult{});
+                                   finish();
+                                 } else {
+                                   requestUpdate();
+                                 }
+                               });
         break;
       }
       case DictionaryLookupController::LookupEvent::NotFoundDismissedBack:
