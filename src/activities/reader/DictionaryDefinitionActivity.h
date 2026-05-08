@@ -9,6 +9,7 @@
 #include "../Activity.h"
 #include "util/DictionaryLookupController.h"
 #include "util/IpaUtils.h"
+#include "util/LookupHistory.h"
 #include "util/WordSelectNavigator.h"
 
 class DictionaryDefinitionActivity final : public Activity {
@@ -21,12 +22,17 @@ class DictionaryDefinitionActivity final : public Activity {
   //   Back/Confirm both return to caller (isCancelled=true). Unchanged from old behaviour.
   explicit DictionaryDefinitionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                         const std::string& headword, const DictLocation& location,
-                                        bool showLookupButton = false, std::string bookCachePath = "")
+                                        bool showLookupButton = false, std::string bookCachePath = "",
+                                        bool recordHistory = false, std::string historyWord = "",
+                                        LookupHistory::Status historyStatus = LookupHistory::Status::NotFound)
       : Activity("DictionaryDefinition", renderer, mappedInput),
         headword(headword),
         foundLocation(location),
         showLookupButton(showLookupButton),
         cachePath(std::move(bookCachePath)),
+        recordHistory(recordHistory),
+        historyWord(std::move(historyWord)),
+        historyStatus(historyStatus),
         controller(renderer, mappedInput, *this, cachePath) {}
 
   void onEnter() override;
@@ -39,6 +45,9 @@ class DictionaryDefinitionActivity final : public Activity {
   DictLocation foundLocation;
   bool showLookupButton;
   std::string cachePath;
+  bool recordHistory;
+  std::string historyWord;
+  LookupHistory::Status historyStatus;
   std::vector<std::string> chainWords;  // previous headwords for back-nav
   bool chainBackNavInProgress = false;
 

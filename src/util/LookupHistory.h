@@ -18,6 +18,10 @@ class LookupHistory {
   // Append word+status. Evicts oldest entries if over cap. Returns new entry count.
   static int addWord(const std::string& cachePath, const std::string& word, Status status);
 
+  // Conditional addWord: short-circuits if disabled, word empty, or cachePath empty.
+  // Single guarded entry point used by all dictionary lookup recording sites.
+  static void addWordIf(const std::string& cachePath, const std::string& word, Status status, bool enabled);
+
   // Load all entries in most-recent-first order.
   static std::vector<Entry> load(const std::string& cachePath);
 

@@ -19,6 +19,7 @@
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
 #include "util/IpaUtils.h"
+#include "util/LookupHistory.h"
 
 static constexpr char kBullet[] = "- ";
 
@@ -26,9 +27,8 @@ void DictionaryDefinitionActivity::onEnter() {
   Activity::onEnter();
   wrapText();
   requestUpdate();
-  // Record lookup history after triggering display update - the e-ink refresh
-  // happens in parallel with this file I/O, so user sees definition immediately.
-  controller.recordPendingHistory();
+  // SD write overlaps the e-ink refresh kicked by requestUpdate() on the render task.
+  LookupHistory::addWordIf(cachePath, historyWord, historyStatus, recordHistory);
 }
 
 void DictionaryDefinitionActivity::onExit() {
@@ -408,8 +408,9 @@ void DictionaryDefinitionActivity::loop() {
   // --- Controller active (LookingUp / AltFormPrompt / NotFound) ---
   if (controller.isActive()) {
     switch (controller.handleInput()) {
-      case DictionaryLookupController::LookupEvent::FoundDefinition:
-        if (!chainBackNavInProgress) {
+      case DictionaryLookupController::LookupEvent::FoundDefinition: {
+        const bool wasBackNav = chainBackNavInProgress;
+        if (!wasBackNav) {
           chainWords.push_back(headword);
         }
         chainBackNavInProgress = false;
@@ -419,7 +420,12 @@ void DictionaryDefinitionActivity::loop() {
         currentPage = 0;
         isWordSelectMode = false;
         requestUpdate();
+        // Chain-forward records; chain-back-nav (recordHistory=false) does not.
+        LookupHistory::addWordIf(cachePath, controller.getLookupWord(),
+                                 DictionaryLookupController::toHistStatus(controller.getFoundStatus()),
+                                 !wasBackNav && controller.getRecordHistory());
         break;
+      }
       case DictionaryLookupController::LookupEvent::NotFoundDismissedBack:
         requestUpdate();
         break;

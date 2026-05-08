@@ -92,10 +92,7 @@ class DictionaryLookupController {
   const std::string& getFoundWord() const { return foundWord; }
   const DictLocation& getFoundLocation() const { return foundLocation; }
   FoundStatus getFoundStatus() const { return foundStatus; }
-
-  // Record any pending history entry (deferred from lookup to avoid blocking).
-  // Call this after the definition is displayed to the user.
-  void recordPendingHistory();
+  bool getRecordHistory() const { return recordHistory_; }
 
  private:
   GfxRenderer& renderer;
@@ -112,7 +109,6 @@ class DictionaryLookupController {
   std::string foundWord;
   DictLocation foundLocation;
   std::string altFormWord;
-  std::string pendingHistoryWord;  // Deferred history recording
 
   // CLEANUP: on Auto-only commit, delete only this line (threshold/cache/method below drive Auto mode — keep)
   static constexpr uint32_t AUTO_POPUP_CSPT_ENTRY_THRESHOLD = 50000;

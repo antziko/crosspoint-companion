@@ -78,8 +78,6 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
         foundWord = lookupWord;
         foundStatus = nextIsSuggestion ? FoundStatus::Suggestion : FoundStatus::Direct;
         nextIsSuggestion = false;
-        // Defer history recording - will be done by recordPendingHistory() after definition is displayed
-        pendingHistoryWord = recordHistory_ ? lookupWord : "";
         return LookupEvent::FoundDefinition;
       }
 
@@ -92,9 +90,6 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
           foundLocation = std::move(loc);
           foundStatus = nextIsSuggestion ? FoundStatus::Suggestion : FoundStatus::Stem;
           nextIsSuggestion = false;
-          if (recordHistory_ && !cachePath.empty()) {
-            LookupHistory::addWord(cachePath, lookupWord, toHistStatus(foundStatus));
-          }
           return LookupEvent::FoundDefinition;
         }
       }
@@ -129,9 +124,6 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
           foundLocation = std::move(loc);
           foundStatus = nextIsSuggestion ? FoundStatus::Suggestion : FoundStatus::AltForm;
           nextIsSuggestion = false;
-          if (recordHistory_ && !cachePath.empty()) {
-            LookupHistory::addWord(cachePath, lookupWord, toHistStatus(foundStatus));
-          }
           return LookupEvent::FoundDefinition;
         }
       }
@@ -255,11 +247,11 @@ void DictionaryLookupController::handleLookupFailed() {
         });
     return;
   }
-  if (!cachePath.empty()) {
-    LookupHistory::addWord(cachePath, lookupWord, LookupHistory::Status::NotFound);
-  }
   nextIsSuggestion = false;
   setNotFound();
+  // Record after setNotFound() so the popup's requestUpdate() has kicked the render task —
+  // the SD write below overlaps the e-ink refresh on the main task.
+  LookupHistory::addWordIf(cachePath, lookupWord, LookupHistory::Status::NotFound, recordHistory_);
 }
 
 void DictionaryLookupController::progressCallback(void* ctx, int percent) {
@@ -283,13 +275,6 @@ void DictionaryLookupController::runLookup() {
   // Don't call requestUpdate(true) here - it triggers an unnecessary e-ink refresh
   // of the word select activity before transitioning to the definition activity.
   // The main loop polls lookupDone every ~10ms, so response time is still fast.
-}
-
-void DictionaryLookupController::recordPendingHistory() {
-  if (!pendingHistoryWord.empty() && !cachePath.empty()) {
-    LookupHistory::addWord(cachePath, pendingHistoryWord, toHistStatus(foundStatus));
-    pendingHistoryWord.clear();
-  }
 }
 
 bool DictionaryLookupController::shouldShowPopup() {

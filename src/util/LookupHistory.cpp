@@ -134,6 +134,11 @@ int LookupHistory::addWord(const std::string& cachePath, const std::string& word
   return static_cast<int>(entries.size());
 }
 
+void LookupHistory::addWordIf(const std::string& cachePath, const std::string& word, Status status, bool enabled) {
+  if (!enabled || word.empty() || cachePath.empty()) return;
+  addWord(cachePath, word, status);
+}
+
 std::vector<LookupHistory::Entry> LookupHistory::load(const std::string& cachePath) {
   auto entries = readAll(filePath(cachePath));
   std::reverse(entries.begin(), entries.end());
