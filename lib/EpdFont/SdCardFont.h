@@ -5,6 +5,15 @@
 #include "EpdFont.h"
 #include "EpdFontData.h"
 
+// On-disk binary format version for .cpfont files. Defined as a preprocessor
+// macro (rather than a constexpr) so it can be stringified into the SD-fonts
+// release URL — see FONT_MANIFEST_URL in FontDownloadActivity.h. No integer
+// suffix because stringification would include it (e.g. `4U` → `"4U"`). The
+// Python writers (lib/EpdFont/scripts/fontconvert_sdcard.py and
+// scripts/generate-font-manifest.py) carry matching constants and must be
+// bumped together. Reader enforcement: SdCardFont::load().
+#define CPFONT_VERSION 4
+
 class SdCardFont {
  public:
   static constexpr uint16_t MAX_PAGE_GLYPHS = 512;

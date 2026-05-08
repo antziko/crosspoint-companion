@@ -94,11 +94,11 @@ inline SettingInfo buildFontFamilySetting(const SdCardFontRegistry* registry) {
 // Each entry has a key (for JSON API) and category (for grouping).
 // ACTION-type entries and entries without a key are device-only.
 //
-// The static base list is constructed exactly once (master's optimization, #1086 +
-// #1636) so the per-entry SettingInfo cost is paid once. The font-family entry
-// is built-in only inside the base; when an SdCardFontRegistry with SD fonts is
-// supplied, that single entry is swapped in the per-call copy with a
-// registry-aware version. Callers without SD fonts pay only a vector copy.
+// The static list is constructed exactly once (master's optimization, #1086 +
+// #1636) so the per-entry SettingInfo cost is paid once. When an
+// SdCardFontRegistry is supplied AND has SD card fonts installed, the
+// font-family entry is replaced in a per-call copy with a registry-aware
+// version. Callers without SD fonts pay only a vector copy.
 inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* registry = nullptr) {
   static const std::vector<SettingInfo> baseList = [] {
     std::vector<SettingInfo> v = {
@@ -127,8 +127,8 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                             StrId::STR_CAT_DISPLAY),
 
         // --- Reader ---
-        // Built-in font-family entry; per-call swap installs the registry-aware
-        // version when SD fonts are present.
+        // Built-in font-family entry. Replaced per-call with a registry-aware
+        // version when SD fonts are installed.
         SettingInfo::Enum(StrId::STR_FONT_FAMILY, &CrossPointSettings::fontFamily,
                           {StrId::STR_NOTO_SERIF, StrId::STR_NOTO_SANS, StrId::STR_OPEN_DYSLEXIC}, "fontFamily",
                           StrId::STR_CAT_READER),
@@ -183,6 +183,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         SettingInfo::Enum(StrId::STR_SHORT_PWR_BTN, &CrossPointSettings::shortPwrBtn,
                           {StrId::STR_IGNORE, StrId::STR_SLEEP, StrId::STR_PAGE_TURN, StrId::STR_FORCE_REFRESH},
                           "shortPwrBtn", StrId::STR_CAT_CONTROLS),
+
         // --- System ---
         SettingInfo::Enum(StrId::STR_TIME_TO_SLEEP, &CrossPointSettings::sleepTimeout,
                           {StrId::STR_MIN_1, StrId::STR_MIN_5, StrId::STR_MIN_10, StrId::STR_MIN_15, StrId::STR_MIN_30},
@@ -239,12 +240,14 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
     };
     // Only show tilt page turn setting when the QMI8658 IMU is present (X3)
     if (halTiltSensor.isAvailable()) {
-      auto it =
-          std::find_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_SHORT_PWR_BTN; });
-      if (it != v.end()) {
-        v.insert(it + 1, SettingInfo::Enum(StrId::STR_TILT_PAGE_TURN, &CrossPointSettings::tiltPageTurn,
-                                           {StrId::STR_STATE_OFF, StrId::STR_NORMAL, StrId::STR_INVERTED},
-                                           "tiltPageTurn", StrId::STR_CAT_CONTROLS));
+      // Insert after the short power button setting (end of Controls section)
+      for (auto it = v.begin(); it != v.end(); ++it) {
+        if (it->nameId == StrId::STR_SHORT_PWR_BTN) {
+          v.insert(it + 1, SettingInfo::Enum(StrId::STR_TILT_PAGE_TURN, &CrossPointSettings::tiltPageTurn,
+                                             {StrId::STR_STATE_OFF, StrId::STR_NORMAL, StrId::STR_INVERTED},
+                                             "tiltPageTurn", StrId::STR_CAT_CONTROLS));
+          break;
+        }
       }
     }
     return v;

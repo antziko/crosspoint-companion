@@ -133,7 +133,6 @@ void SdCardFontRegistry::scanRoot(const char* rootPath, std::vector<SdCardFontFa
   }
   if (!root.isDirectory()) {
     LOG_ERR("SDREG", "Fonts path is not a directory: %s", rootPath);
-    root.close();
     return;
   }
 
@@ -172,7 +171,6 @@ void SdCardFontRegistry::scanRoot(const char* rootPath, std::vector<SdCardFontFa
       entry.close();
     }
   }
-  root.close();
 }
 
 bool SdCardFontRegistry::discover() {

@@ -97,7 +97,7 @@ bool FontDownloadActivity::fetchAndParseManifest() {
   }
 
   int version = doc["version"] | 0;
-  if (version != 1) {
+  if (version != FONTS_MANIFEST_VERSION) {
     LOG_ERR("FONT", "Unsupported manifest version: %d", version);
     errorMessage_ = "Unsupported manifest version";
     return false;

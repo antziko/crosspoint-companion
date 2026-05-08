@@ -6,7 +6,16 @@ name: Build & Publish SD Card Fonts
 # firmware can fetch them from a stable URL.
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/sd-fonts-v1 # remove when merging to main
 
+# metadata & binary version numbers to use for release
+env:
+  VERSION_METADATA: 1
+  VERSION_BINARY_FORMAT: 4
+  
+  
 jobs:
   build-fonts:
     runs-on: ubuntu-latest
@@ -40,15 +49,15 @@ jobs:
         run: >
           python3 scripts/generate-font-manifest.py
           --input dist
-          --base-url "https://github.com/${{ github.repository }}/releases/download/sd-fonts/"
+          --base-url "https://github.com/${{ github.repository }}/releases/download/sd-fonts-m${{ env.VERSION_METADATA }}-b${{ env.VERSION_BINARY_FORMAT }}/"
           --output dist/fonts.json
           --descriptions-from lib/EpdFont/scripts/sd-fonts.yaml
 
       - name: Publish to sd-fonts release
         uses: softprops/action-gh-release@v2.5.0
         with:
-          tag_name: sd-fonts
-          name: SD Card Fonts
+          tag_name: sd-fonts-m${{ env.VERSION_METADATA }}-b${{ env.VERSION_BINARY_FORMAT }}
+          name: SD Card Fonts (m${{ env.VERSION_METADATA }}-b${{ env.VERSION_BINARY_FORMAT }})
           body: |
             Pre-built `.cpfont` font files for CrossPoint Reader.
 
