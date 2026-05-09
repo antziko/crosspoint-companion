@@ -21,6 +21,7 @@
 #include "EpubReaderChapterSelectionActivity.h"
 #include "EpubReaderFootnotesActivity.h"
 #include "EpubReaderPercentSelectionActivity.h"
+#include "EpubReaderUtils.h"
 #include "KOReaderCredentialStore.h"
 #include "KOReaderSyncActivity.h"
 #include "LookedUpWordsActivity.h"
@@ -478,7 +479,9 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
           section.reset();
           epub->clearCache();
           epub->setupCacheDir();
-          saveProgress(backupSpine, backupPage, backupPageCount);
+          if (!saveProgress(backupSpine, backupPage, backupPageCount)) {
+            LOG_ERR("ERS", "Failed to save progress before cache clear");
+          }
         }
       }
       onGoHome();
@@ -516,9 +519,14 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
         std::string localChapterName = (tocIdx >= 0) ? epub->getTocItem(tocIdx).title : "";
         const std::string savedEpubPath = epub->getPath();
 
-        // Best-effort: persist current position so the reader resumes at the right page
-        // on return. If this fails KOSync still runs — the helper logs the error.
-        saveProgress(currentSpineIndex, currentPage, totalPages);
+        // Persist current position so the reader resumes at the right page on return.
+        // goToReader() depends on this file, so abort the sync if the write fails.
+        if (!saveProgress(currentSpineIndex, currentPage, totalPages)) {
+          LOG_ERR("KOSync", "Aborting sync because current progress could not be saved");
+          pendingSyncSaveError = true;
+          requestUpdate();
+          return;
+        }
 
         // Release Epub and Section to free ~65KB RAM for the TLS handshake.
         LOG_DBG("KOSync", "Releasing epub for sync (heap before: %u)", (unsigned)ESP.getFreeHeap());
@@ -647,6 +655,12 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     return;
   }
 
+  const auto showPendingSyncSaveError = [this]() {
+    if (!pendingSyncSaveError) return;
+    pendingSyncSaveError = false;
+    GUI.drawPopup(renderer, tr(STR_SAVE_PROGRESS_FAILED));
+  };
+
   // edge case handling for sub-zero spine index
   if (currentSpineIndex < 0) {
     currentSpineIndex = 0;
@@ -662,6 +676,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_END_OF_BOOK), true, EpdFontFamily::BOLD);
     renderer.displayBuffer();
     automaticPageTurnActive = false;
+    showPendingSyncSaveError();
     return;
   }
 
@@ -709,6 +724,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
                                       SETTINGS.imageRendering, popupFn)) {
         LOG_ERR("ERS", "Failed to persist page data to SD");
         section.reset();
+        showPendingSyncSaveError();
         return;
       }
     } else {
@@ -772,6 +788,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     renderStatusBar();
     renderer.displayBuffer();
     automaticPageTurnActive = false;
+    showPendingSyncSaveError();
     return;
   }
 
@@ -781,6 +798,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     renderStatusBar();
     renderer.displayBuffer();
     automaticPageTurnActive = false;
+    showPendingSyncSaveError();
     return;
   }
 
@@ -793,6 +811,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
       requestUpdate();  // Try again after clearing cache
                         // TODO: prevent infinite loop if the page keeps failing to load for some reason
       automaticPageTurnActive = false;
+      showPendingSyncSaveError();
       return;
     }
 
@@ -805,6 +824,8 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   }
   silentIndexNextChapterIfNeeded(viewportWidth, viewportHeight);
   saveProgress(currentSpineIndex, section->currentPage, section->pageCount);
+
+  showPendingSyncSaveError();
 
   if (pendingScreenshot) {
     pendingScreenshot = false;
@@ -845,7 +866,7 @@ void EpubReaderActivity::silentIndexNextChapterIfNeeded(const uint16_t viewportW
 }
 
 bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageCount) {
-  return ReaderUtils::saveProgress(*epub, spineIndex, currentPage, pageCount);
+  return EpubReaderUtils::saveProgress(*epub, spineIndex, currentPage, pageCount);
 }
 void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int orientedMarginTop,
                                         const int orientedMarginRight, const int orientedMarginBottom,

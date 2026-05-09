@@ -10,6 +10,7 @@
 #include <cassert>
 
 #include "Epub/Section.h"
+#include "EpubReaderUtils.h"
 #include "KOReaderCredentialStore.h"
 #include "KOReaderDocumentId.h"
 #include "MappedInputManager.h"
@@ -62,7 +63,11 @@ void KOReaderSyncActivity::ensureEpubLoaded() {
     epub = std::make_shared<Epub>(epubPath, "/.crosspoint");
     epub->setupCacheDir();
     // Load metadata only (no CSS needed for progress mapping, don't rebuild if cache is missing).
-    epub->load(false, true);
+    if (!epub->load(false, true)) {
+      LOG_ERR("KOSync", "Failed to load epub for progress mapping");
+      epub.reset();
+      return;
+    }
     LOG_DBG("KOSync", "Epub loaded (heap: %u)", (unsigned)ESP.getFreeHeap());
   }
 }
@@ -71,7 +76,7 @@ void KOReaderSyncActivity::saveProgressAndReturn(int spineIndex, int page) {
   // epub is guaranteed non-null here: ensureEpubLoaded() was called in performSync() before
   // SHOWING_RESULT state is entered, and this method is only called from that state.
   assert(epub);
-  if (!ReaderUtils::saveProgress(*epub, spineIndex, page, 0)) {
+  if (!EpubReaderUtils::saveProgress(*epub, spineIndex, page, 0)) {
     {
       RenderLock lock(*this);
       state = SYNC_FAILED;
@@ -165,6 +170,15 @@ void KOReaderSyncActivity::performSync() {
   // Epub was released before sync to free RAM for the TLS handshake — reload it now.
   hasRemoteProgress = true;
   ensureEpubLoaded();
+  if (!epub) {
+    {
+      RenderLock lock(*this);
+      state = SYNC_FAILED;
+      statusMessage = "";
+    }
+    requestUpdate(true);
+    return;
+  }
 
   KOReaderPosition koPos = {remoteProgress.progress, remoteProgress.percentage};
   remotePosition = ProgressMapper::toCrossPoint(epub, koPos, currentSpineIndex, totalPagesInSpine);
@@ -288,7 +302,6 @@ void KOReaderSyncActivity::render(RenderLock&&) {
     renderer.drawCenteredText(UI_10_FONT_ID, 120, tr(STR_PROGRESS_FOUND), true, EpdFontFamily::BOLD);
 
     // Remote chapter name requires Epub (loaded lazily in performSync before this state).
-    assert(epub);
     const int remoteTocIndex = epub->getTocIndexForSpineIndex(remotePosition.spineIndex);
     const std::string remoteChapter =
         (remoteTocIndex >= 0) ? epub->getTocItem(remoteTocIndex).title

@@ -8,10 +8,12 @@
 // On-disk binary format version for .cpfont files. Defined as a preprocessor
 // macro (rather than a constexpr) so it can be stringified into the SD-fonts
 // release URL — see FONT_MANIFEST_URL in FontDownloadActivity.h. No integer
-// suffix because stringification would include it (e.g. `4U` → `"4U"`). The
-// Python writers (lib/EpdFont/scripts/fontconvert_sdcard.py and
-// scripts/generate-font-manifest.py) carry matching constants and must be
-// bumped together. Reader enforcement: SdCardFont::load().
+// suffix because stringification would include it (e.g. `4U` → `"4U"`).
+//
+// The canonical version for the build tooling lives in
+// lib/EpdFont/scripts/cpfont_version.py. This firmware-side copy must be
+// bumped manually when the firmware is updated to support a new format.
+// Reader enforcement: SdCardFont::load().
 #define CPFONT_VERSION 4
 
 class SdCardFont {

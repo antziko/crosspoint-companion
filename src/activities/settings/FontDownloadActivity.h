@@ -8,21 +8,21 @@
 #include "activities/Activity.h"
 #include "util/ButtonNavigator.h"
 
-// JSON schema version of the fonts.json manifest. Bump when the manifest
-// shape changes. Mirrored by scripts/generate-font-manifest.py.
+// JSON schema version of the fonts.json manifest. The canonical version for
+// the build tooling lives in lib/EpdFont/scripts/cpfont_version.py. This
+// firmware-side copy must be bumped manually when the firmware is updated to
+// support a new manifest schema.
 #define FONTS_MANIFEST_VERSION 1
 
 #ifndef FONT_MANIFEST_URL
 // Manifest + .cpfont assets are published by .github/workflows/release-fonts.yml
-// to the "sd-fonts-m<META>-b<BIN>" GitHub release tag. The release tag pattern
-// must stay in sync with the `tag_name` field of release-fonts.yml; the
-// workflow derives it from the same two version numbers (VERSION_METADATA and
-// VERSION_BINARY_FORMAT) that this header derives from FONTS_MANIFEST_VERSION
-// and CPFONT_VERSION.
+// to the crosspoint-fonts repo under the "sd-fonts-m<META>-b<BIN>" tag. The tag
+// pattern must stay in sync with the workflow; it derives its version numbers
+// from lib/EpdFont/scripts/cpfont_version.py.
 #define FONT_MANIFEST_URL_STRINGIFY_INNER(x) #x
 #define FONT_MANIFEST_URL_STRINGIFY(x) FONT_MANIFEST_URL_STRINGIFY_INNER(x)
-#define FONT_MANIFEST_URL                                                                                            \
-  "https://github.com/crosspoint-reader/crosspoint-reader/releases/download/sd-fonts-m" FONT_MANIFEST_URL_STRINGIFY( \
+#define FONT_MANIFEST_URL                                                                                           \
+  "https://github.com/crosspoint-reader/crosspoint-fonts/releases/download/sd-fonts-m" FONT_MANIFEST_URL_STRINGIFY( \
       FONTS_MANIFEST_VERSION) "-b" FONT_MANIFEST_URL_STRINGIFY(CPFONT_VERSION) "/fonts.json"
 #endif
 

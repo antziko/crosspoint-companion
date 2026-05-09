@@ -23,6 +23,10 @@ import struct
 import sys
 from pathlib import Path
 
+# Import canonical version constants from the shared file in lib/EpdFont/scripts/
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib" / "EpdFont" / "scripts"))
+from cpfont_version import CPFONT_VERSION, FONTS_MANIFEST_VERSION
+
 # --- .cpfont binary format constants ---
 # Global header: 8s magic, H version, H flags, B styleCount, 19x reserved
 GLOBAL_HEADER_FORMAT = "<8sHHB19x"
@@ -34,9 +38,6 @@ STYLE_TOC_ENTRY_SIZE = 32
 STYLE_TOC_ENTRY_FORMAT = "<B31x"
 
 CPFONT_MAGIC = b"CPFONT\x00\x00"
-CPFONT_VERSION = 4
-
-FONTS_MANIFEST_VERSION = 1
 
 STYLE_NAMES = {0: "regular", 1: "bold", 2: "italic", 3: "bolditalic"}
 

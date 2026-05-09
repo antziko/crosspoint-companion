@@ -32,6 +32,8 @@ from collections import namedtuple
 
 from fontTools.ttLib import TTFont
 
+from cpfont_version import CPFONT_VERSION
+
 # --- Unicode interval presets ---
 
 INTERVAL_PRESETS = {
@@ -677,7 +679,6 @@ def generate_cpfont_multistyle(style_fonts, size, intervals, output_path,
     style_fonts: dict of {style_id: fontfile_path} e.g. {0: "Regular.ttf", 2: "Italic.ttf"}
     """
     MAGIC = b"CPFONT\x00\x00"
-    VERSION = 4
     HEADER_SIZE = 32
     STYLE_TOC_ENTRY_SIZE = 32
     flags = 1  # always 2-bit greyscale
@@ -708,7 +709,7 @@ def generate_cpfont_multistyle(style_fonts, size, intervals, output_path,
 
     # Build global header
     # V4 header: magic(8) + version(2) + flags(2) + styleCount(1) + reserved(19) = 32
-    header = struct.pack("<8sHHB19s", MAGIC, VERSION, flags, style_count, bytes(19))
+    header = struct.pack("<8sHHB19s", MAGIC, CPFONT_VERSION, flags, style_count, bytes(19))
     assert len(header) == HEADER_SIZE
 
     # Build style TOC entries
