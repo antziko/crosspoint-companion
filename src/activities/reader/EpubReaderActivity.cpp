@@ -51,14 +51,25 @@ int clampPercent(int percent) {
   return percent;
 }
 
+// SD card folder finished books are moved into. Single source of truth for the path.
+// constexpr ⇒ lives in flash .rodata, no DRAM cost.
+constexpr char READ_FOLDER[] = "/read";
+
+// True if path is inside READ_FOLDER (starts with "<READ_FOLDER>/"). Non-allocating so
+// it is cheap to call from loop(), and avoids reintroducing a separate "/Read/" literal.
+bool isInReadFolder(const std::string& path) {
+  constexpr size_t n = sizeof(READ_FOLDER) - 1;  // length of "/Read" (excludes NUL)
+  return path.size() > n && path.compare(0, n, READ_FOLDER) == 0 && path[n] == '/';
+}
+
 // Pick a non-colliding destination path inside /Read/ for a finished book.
 // Mirrors the suffixing scheme used elsewhere: "name.epub" -> "name (2).epub", etc.
 std::string buildReadFolderDestination(const std::string& srcPath) {
   const size_t lastSlash = srcPath.rfind('/');
   const std::string filename = (lastSlash != std::string::npos) ? srcPath.substr(lastSlash + 1) : srcPath;
 
-  Storage.mkdir("/Read");
-  std::string dstPath = "/Read/" + filename;
+  Storage.mkdir(READ_FOLDER);
+  std::string dstPath = std::string(READ_FOLDER) + "/" + filename;
   if (!Storage.exists(dstPath.c_str())) {
     return dstPath;
   }
@@ -68,7 +79,7 @@ std::string buildReadFolderDestination(const std::string& srcPath) {
   const std::string ext = (dotPos != std::string::npos) ? filename.substr(dotPos) : "";
   int suffix = 2;
   do {
-    dstPath = "/Read/" + base + " (" + std::to_string(suffix) + ")" + ext;
+    dstPath = std::string(READ_FOLDER) + "/" + base + " (" + std::to_string(suffix) + ")" + ext;
     suffix++;
   } while (Storage.exists(dstPath.c_str()) && suffix < 100);
   return dstPath;
@@ -190,7 +201,7 @@ void EpubReaderActivity::loop() {
   // finished. Arm the move here so ANY exit path (Back, Home, file browser) relocates the
   // book in onExit(); paging back off the end screen disarms it (book not actually finished).
   if (currentSpineIndex > 0 && currentSpineIndex >= epub->getSpineItemsCount()) {
-    pendingReadFolderMove = SETTINGS.moveFinishedToReadFolder && epub->getPath().rfind("/Read/", 0) != 0;
+    pendingReadFolderMove = SETTINGS.moveFinishedToReadFolder && !isInReadFolder(epub->getPath());
   } else {
     pendingReadFolderMove = false;
   }
