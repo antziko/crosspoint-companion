@@ -70,6 +70,17 @@ void RecentBooksStore::updatePath(const std::string& oldPath, const std::string&
   saveToFile();
 }
 
+bool RecentBooksStore::removeByPath(const std::string& path) {
+  auto it =
+      std::find_if(recentBooks.begin(), recentBooks.end(), [&](const RecentBook& book) { return book.path == path; });
+  if (it == recentBooks.end()) {
+    return false;
+  }
+  recentBooks.erase(it);
+  saveToFile();
+  return true;
+}
+
 bool RecentBooksStore::isMissing(const RecentBook& book) { return !Storage.exists(book.path.c_str()); }
 
 bool RecentBooksStore::pruneMissing() {

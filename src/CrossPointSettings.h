@@ -238,6 +238,8 @@ class CrossPointSettings {
   uint8_t showHiddenFiles = 0;
   // Move epub to /Read/ folder on SD card when finished (0 = disabled, 1 = enabled)
   uint8_t moveFinishedToReadFolder = 0;
+  // Remove a book from the Recent Books list when its End-of-Book screen is reached (0 = off, 1 = on)
+  uint8_t removeReadBooksFromRecents = 0;
   // Image rendering mode in EPUB reader
   uint8_t imageRendering = IMAGES_DISPLAY;
   // Lookup history entry cap (direct value)

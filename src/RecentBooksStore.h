@@ -43,6 +43,10 @@ class RecentBooksStore {
   void updatePath(const std::string& oldPath, const std::string& newPath, const std::string& oldCachePath,
                   const std::string& newCachePath);
 
+  // Remove the entry whose path matches (used when a book is finished/read).
+  // Returns true and persists if an entry was removed; no-op otherwise.
+  bool removeByPath(const std::string& path);
+
   // True if the book's backing file is no longer present on the SD card.
   static bool isMissing(const RecentBook& book);
 
