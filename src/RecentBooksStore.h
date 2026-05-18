@@ -43,9 +43,9 @@ class RecentBooksStore {
   void updatePath(const std::string& oldPath, const std::string& newPath, const std::string& oldCachePath,
                   const std::string& newCachePath);
 
-  // Remove the entry whose path matches (used when a book is finished/read).
-  // Returns true if an entry was found and removed (no-op + false otherwise).
-  // Persistence is best-effort: a failed save is logged, not reflected in the return.
+  // Remove the entry whose path matches. Returns true only if an entry was
+  // removed AND the change was persisted; on a persistence failure the removal
+  // is rolled back. Returns false for "no match" or a rolled-back failure.
   bool removeByPath(const std::string& path);
 
   // True if the book's backing file is no longer present on the SD card.

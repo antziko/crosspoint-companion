@@ -9,6 +9,7 @@
 #include <Xtc.h>
 
 #include <algorithm>
+#include <iterator>
 
 namespace {
 constexpr uint8_t RECENT_BOOKS_FILE_VERSION = 3;
@@ -76,11 +77,17 @@ bool RecentBooksStore::removeByPath(const std::string& path) {
   if (it == recentBooks.end()) {
     return false;
   }
+  // Unlike addBook/updateBook (best-effort persistence), a user-requested removal
+  // must be durable: if the save fails, roll back so the in-memory list stays in
+  // sync with disk and the caller can report failure (otherwise the book would
+  // silently reappear on next boot).
+  const size_t index = static_cast<size_t>(std::distance(recentBooks.begin(), it));
+  const RecentBook removed = *it;
   recentBooks.erase(it);
   if (!saveToFile()) {
-    // In-memory removal succeeded; persistence is best-effort here (consistent with
-    // addBook/updateBook). Log the failure but still report the entry as removed.
-    LOG_ERR("RBS", "Failed to persist removal of recent book: %s", path.c_str());
+    recentBooks.insert(recentBooks.begin() + index, removed);
+    LOG_ERR("RBS", "Failed to persist removal from recents: %s", path.c_str());
+    return false;
   }
   return true;
 }
