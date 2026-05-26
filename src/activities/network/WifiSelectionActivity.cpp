@@ -1,12 +1,14 @@
 #include "WifiSelectionActivity.h"
 
 #include <GfxRenderer.h>
+#include <HalClock.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <WiFi.h>
 
 #include <map>
 
+#include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "WifiCredentialStore.h"
 #include "activities/util/KeyboardEntryActivity.h"
@@ -247,6 +249,19 @@ void WifiSelectionActivity::checkConnectionStatus() {
     snprintf(ipStr, sizeof(ipStr), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
     connectedIP = ipStr;
     autoConnecting = false;
+
+    // Auto-sync only ever seeds the RTC: RAM mode loses time on every reboot anyway, so
+    // an "on WiFi connect" sync there would just be unpredictable noise. Users on RAM mode
+    // are expected to sync manually via the home / Clock settings "Sync Clock Now" action.
+    // For RTC mode the flag both gates this hook and persists once-synced via
+    // clockHasBeenSynced (clearable from the web UI to force a re-sync).
+    const bool rtcClock = halClock.hasRtc() && SETTINGS.statusBarClock == CrossPointSettings::CLOCK_RTC;
+    if (rtcClock && SETTINGS.autoSyncOnBoot && !halClock.syncedThisSession() && !SETTINGS.clockHasBeenSynced) {
+      if (halClock.syncFromNTP()) {
+        SETTINGS.clockHasBeenSynced = 1;
+        SETTINGS.saveToFile();
+      }
+    }
 
     // Save this as the last connected network - SD card operations need lock as
     // we use SPI for both

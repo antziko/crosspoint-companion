@@ -1,6 +1,7 @@
 #include "BaseTheme.h"
 
 #include <GfxRenderer.h>
+#include <HalClock.h>
 #include <HalPowerManager.h>
 #include <HalStorage.h>
 #include <Logging.h>
@@ -9,9 +10,12 @@
 #include <cstdint>
 #include <string>
 
+#include "CrossPointSettings.h"
 #include "I18n.h"
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
+#include "components/icons/clock_small.h"
+#include "components/icons/uptime_small.h"
 #include "fontIds.h"
 
 // Internal constants
@@ -19,6 +23,31 @@ namespace {
 constexpr int homeMenuMargin = 20;
 constexpr int homeMarginTop = 30;
 constexpr int subtitleY = 738;
+
+constexpr int kClockIconSize = 16;
+constexpr int kClockIconGap = 3;  // pixels between icon and text
+// Battery (drawBatteryLeft/Right) internally applies y += 6 before drawing, so a battery
+// requested at textY actually renders at textY+6. We mirror that for the clock icon so the
+// icon sits in the same vertical band as the battery and text glyphs (centered on the small
+// font's visual midline) instead of poking up like a superscript.
+constexpr int kClockIconYOffset = 4;
+
+// Build the clock-area label.
+// Writes either the synced wall-clock time or — when no time source is available — the
+// device session uptime (HH:MM since boot) into buf. Returns true when buf holds wall-clock
+// time (pair with ClockSmallIcon), false for uptime (pair with UptimeSmallIcon).
+// millis() wraps every ~49.7 days; uptime wraps with it, which is fine for a reader's
+// battery life.
+bool formatClockOrUptime(char* buf, size_t bufSize) {
+  if (halClock.hasTime() && halClock.formatTime(buf, bufSize, SETTINGS.clockUtcOffsetQ, SETTINGS.clockFormat == 1)) {
+    return true;
+  }
+  const unsigned long totalMin = millis() / 60000UL;
+  const unsigned long hours = (totalMin / 60UL) % 100UL;  // clamp to 2 digits for layout
+  const unsigned long mins = totalMin % 60UL;
+  snprintf(buf, bufSize, "%02lu:%02lu", hours, mins);
+  return false;
+}
 
 }  // namespace
 
@@ -322,11 +351,36 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
                    Rect{batteryX, rect.y + 5, BaseMetrics::values.batteryWidth, BaseMetrics::values.batteryHeight},
                    showBatteryPercentage);
 
+  // Clock in the top-left corner, mirrored against the battery on the top-right: appears
+  // unconditionally everywhere drawHeader is called when the clock feature is enabled and
+  // hideClock isn't ALWAYS. Shows the same icon+text combo as the reader status bar —
+  // clock icon + wall-clock time when synced, play icon + session uptime when not.
+  int clockTextWidth = 0;
+  if (SETTINGS.hideClock != CrossPointSettings::HIDE_CLOCK_ALWAYS &&
+      SETTINGS.statusBarClock != CrossPointSettings::CLOCK_OFF) {
+    char timeBuf[9];
+    const bool synced = formatClockOrUptime(timeBuf, sizeof(timeBuf));
+    const int textWidth = renderer.getTextWidth(SMALL_FONT_ID, timeBuf);
+    clockTextWidth = kClockIconSize + kClockIconGap + textWidth;
+    const int clockX = rect.x + BaseMetrics::values.contentSidePadding;
+    const int textY = rect.y + 5;
+    renderer.drawIcon(synced ? ClockSmallIcon : UptimeSmallIcon, clockX, textY + kClockIconYOffset, kClockIconSize,
+                      kClockIconSize);
+    renderer.drawText(SMALL_FONT_ID, clockX + kClockIconSize + kClockIconGap, textY, timeBuf);
+  }
+
   if (title) {
     int padding = rect.width - batteryX + BaseMetrics::values.batteryWidth;
-    auto truncatedTitle = renderer.truncatedText(UI_12_FONT_ID, title,
-                                                 rect.width - padding * 2 - BaseMetrics::values.contentSidePadding * 2,
-                                                 EpdFontFamily::BOLD);
+    // If the clock is showing, ensure the title doesn't overlap it. We center the title across
+    // the full width but truncate against the larger of left (clock) and right (battery) reserves.
+    int reservedLeftRight = padding;
+    if (clockTextWidth > 0) {
+      const int clockReserve = clockTextWidth + BaseMetrics::values.contentSidePadding + 10;
+      if (clockReserve > reservedLeftRight) reservedLeftRight = clockReserve;
+    }
+    auto truncatedTitle = renderer.truncatedText(
+        UI_12_FONT_ID, title, rect.width - reservedLeftRight * 2 - BaseMetrics::values.contentSidePadding * 2,
+        EpdFontFamily::BOLD);
     renderer.drawCenteredText(UI_12_FONT_ID, rect.y + 5, truncatedTitle.c_str(), true, EpdFontFamily::BOLD);
   }
 
@@ -742,6 +796,29 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
                         showBatteryPercentage);
   }
 
+  // Draw clock-area indicator next to battery on the left. Two independent gates:
+  // the clock feature must be enabled (statusBarClock) AND the user must not have hidden
+  // it for the reader context (hideClock). When the time source is ready a small clock
+  // icon and wall-clock time are shown; otherwise a play icon and session uptime appear
+  // so the user always has a sense of "time progressing" even with no NTP available.
+  int clockTextWidth = 0;
+  if (SETTINGS.hideClock == CrossPointSettings::HIDE_CLOCK_NEVER &&
+      SETTINGS.statusBarClock != CrossPointSettings::CLOCK_OFF) {
+    char timeBuf[9];
+    const bool synced = formatClockOrUptime(timeBuf, sizeof(timeBuf));
+    const int textWidth = renderer.getTextWidth(SMALL_FONT_ID, timeBuf);
+    clockTextWidth = kClockIconSize + kClockIconGap + textWidth;
+    const int batterySize = SETTINGS.statusBarBattery ? (showBatteryPercentage ? 50 : 20) : 0;
+    const int clockX =
+        metrics.statusBarHorizontalMargin + orientedMarginLeft + batterySize + (SETTINGS.statusBarBattery ? 10 : 0);
+    // Offset the icon by kClockIconYOffset so it sits in the same vertical band as the
+    // battery (drawBatteryLeft applies the same +6 internally) and the small-font glyphs,
+    // instead of riding above the baseline like a superscript.
+    renderer.drawIcon(synced ? ClockSmallIcon : UptimeSmallIcon, clockX, textY + kClockIconYOffset, kClockIconSize,
+                      kClockIconSize);
+    renderer.drawText(SMALL_FONT_ID, clockX + kClockIconSize + kClockIconGap, textY, timeBuf);
+  }
+
   // Draw Title
   if (!title.empty()) {
     textY -= textYOffset;
@@ -751,7 +828,10 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
         renderer.getScreenWidth() - (metrics.statusBarHorizontalMargin * 2) - orientedMarginLeft - orientedMarginRight;
 
     const int batterySize = SETTINGS.statusBarBattery ? (showBatteryPercentage ? 50 : 20) : 0;
-    const int titleMarginLeft = batterySize + 30;
+    const int clockReserve = clockTextWidth > 0 ? (clockTextWidth + 10) : 0;
+    // Clock is rendered after the battery on the left, so it eats into the title's left margin
+    // rather than its right margin.
+    const int titleMarginLeft = batterySize + clockReserve + 30;
     const int titleMarginRight = progressTextWidth + 30;
 
     // Attempt to center title on the screen, but if title is too wide then later we will center it within the

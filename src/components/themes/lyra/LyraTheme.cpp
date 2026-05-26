@@ -1,6 +1,7 @@
 #include "LyraTheme.h"
 
 #include <GfxRenderer.h>
+#include <HalClock.h>
 #include <HalGPIO.h>
 #include <HalPowerManager.h>
 #include <HalStorage.h>
@@ -10,10 +11,13 @@
 #include <string>
 #include <vector>
 
+#include "CrossPointSettings.h"
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
 #include "components/icons/book.h"
 #include "components/icons/book24.h"
+#include "components/icons/clock.h"
+#include "components/icons/clock_small.h"
 #include "components/icons/cover.h"
 #include "components/icons/file24.h"
 #include "components/icons/folder.h"
@@ -25,6 +29,7 @@
 #include "components/icons/settings2.h"
 #include "components/icons/text24.h"
 #include "components/icons/transfer.h"
+#include "components/icons/uptime_small.h"
 #include "components/icons/wifi.h"
 #include "fontIds.h"
 
@@ -75,6 +80,8 @@ const uint8_t* iconForName(UIIcon icon, int size) {
         return WifiIcon;
       case UIIcon::Hotspot:
         return HotspotIcon;
+      case UIIcon::Clock:
+        return ClockIcon;
       default:
         return nullptr;
     }
@@ -114,12 +121,39 @@ void LyraTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
                    Rect{batteryX, rect.y + 5, LyraMetrics::values.batteryWidth, LyraMetrics::values.batteryHeight},
                    showBatteryPercentage);
 
+  // Clock occupies the top-left, just inside the side padding, pushing the title right by
+  // the clock width when shown. Renders unconditionally alongside battery (top-right) so
+  // chrome is consistent — no surface that shows battery is missing the clock.
+  int clockReserve = 0;
+  if (SETTINGS.hideClock != CrossPointSettings::HIDE_CLOCK_ALWAYS &&
+      SETTINGS.statusBarClock != CrossPointSettings::CLOCK_OFF) {
+    constexpr int kClockIconSize = 16;
+    constexpr int kClockIconGap = 3;
+    constexpr int kClockIconYOffset = 4;  // mirror drawBatteryRight's internal +6 so icon sits on the text baseline
+    char timeBuf[9];
+    const bool synced = halClock.hasTime() && halClock.formatTime(timeBuf, sizeof(timeBuf), SETTINGS.clockUtcOffsetQ,
+                                                                  SETTINGS.clockFormat == 1);
+    if (!synced) {
+      const unsigned long totalMin = millis() / 60000UL;
+      const unsigned long hours = (totalMin / 60UL) % 100UL;
+      const unsigned long mins = totalMin % 60UL;
+      snprintf(timeBuf, sizeof(timeBuf), "%02lu:%02lu", hours, mins);
+    }
+    const int textWidth = renderer.getTextWidth(SMALL_FONT_ID, timeBuf);
+    clockReserve = kClockIconSize + kClockIconGap + textWidth + 10;  // trailing gap before title
+    const int clockX = rect.x + LyraMetrics::values.contentSidePadding;
+    const int textY = rect.y + 5;
+    renderer.drawIcon(synced ? ClockSmallIcon : UptimeSmallIcon, clockX, textY + kClockIconYOffset, kClockIconSize,
+                      kClockIconSize);
+    renderer.drawText(SMALL_FONT_ID, clockX + kClockIconSize + kClockIconGap, textY, timeBuf);
+  }
+
   int maxTitleWidth = title != nullptr ? renderer.getTextWidth(UI_12_FONT_ID, title, EpdFontFamily::BOLD) : 0;
   int maxSubtitleWidth =
       subtitle != nullptr ? renderer.getTextWidth(SMALL_FONT_ID, subtitle, EpdFontFamily::REGULAR) : 0;
 
   // Available space is the distance between the side paddings, and a with side padding between title and subtitle.
-  const int availableSpace = rect.width - LyraMetrics::values.contentSidePadding * 3;
+  const int availableSpace = rect.width - LyraMetrics::values.contentSidePadding * 3 - clockReserve;
 
   if (maxTitleWidth + maxSubtitleWidth > availableSpace) {
     if ((maxTitleWidth > availableSpace / 2) && (maxSubtitleWidth > availableSpace / 2)) {
@@ -138,7 +172,7 @@ void LyraTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
 
   if (title) {
     auto truncatedTitle = renderer.truncatedText(UI_12_FONT_ID, title, maxTitleWidth, EpdFontFamily::BOLD);
-    renderer.drawText(UI_12_FONT_ID, rect.x + LyraMetrics::values.contentSidePadding,
+    renderer.drawText(UI_12_FONT_ID, rect.x + LyraMetrics::values.contentSidePadding + clockReserve,
                       rect.y + LyraMetrics::values.batteryBarHeight + 3, truncatedTitle.c_str(), true,
                       EpdFontFamily::BOLD);
     renderer.drawLine(rect.x, rect.y + rect.height - 3, rect.x + rect.width - 1, rect.y + rect.height - 3, 3, true);

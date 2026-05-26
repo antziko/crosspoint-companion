@@ -4,6 +4,7 @@
 #include <FontDecompressor.h>
 #include <GfxRenderer.h>
 #include <HalDisplay.h>
+#include <HalClock.h>
 #include <HalGPIO.h>
 #include <HalPowerManager.h>
 #include <HalStorage.h>
@@ -247,6 +248,7 @@ void setup() {
   HalSystem::begin();
   gpio.begin();
   powerManager.begin();
+  halClock.begin();
   halTiltSensor.begin();
 
 #ifdef ENABLE_SERIAL_LOG

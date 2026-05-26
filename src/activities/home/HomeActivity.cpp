@@ -10,6 +10,7 @@
 #include <Xtc.h>
 
 #include <cstring>
+#include <memory>
 #include <vector>
 
 #include "CrossPointSettings.h"
@@ -17,6 +18,7 @@
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
+#include "activities/settings/ClockSyncActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -26,6 +28,9 @@ int HomeActivity::getMenuItemCount() const {
     count += recentBooks.size();
   }
   if (hasOpdsServers) {
+    count++;
+  }
+  if (showClockSync) {
     count++;
   }
   return count;
@@ -112,6 +117,7 @@ void HomeActivity::onEnter() {
   Activity::onEnter();
 
   hasOpdsServers = OPDS_STORE.hasServers();
+  showClockSync = SETTINGS.showNtpSyncOnHome && SETTINGS.statusBarClock != CrossPointSettings::CLOCK_OFF;
 
   selectorIndex = 0;
 
@@ -192,6 +198,7 @@ void HomeActivity::loop() {
     const int recentsIdx = idx++;
     const int opdsLibraryIdx = hasOpdsServers ? idx++ : -1;
     const int fileTransferIdx = idx++;
+    const int clockSyncIdx = showClockSync ? idx++ : -1;
     const int settingsIdx = idx;
 
     if (selectorIndex < recentBooks.size()) {
@@ -204,6 +211,8 @@ void HomeActivity::loop() {
       onOpdsBrowserOpen();
     } else if (menuSelectedIndex == fileTransferIdx) {
       onFileTransferOpen();
+    } else if (menuSelectedIndex == clockSyncIdx) {
+      startActivityForResult(std::make_unique<ClockSyncActivity>(renderer, mappedInput), nullptr);
     } else if (menuSelectedIndex == settingsIdx) {
       onSettingsOpen();
     }
@@ -233,6 +242,12 @@ void HomeActivity::render(RenderLock&&) {
   if (hasOpdsServers) {
     menuItems.insert(menuItems.begin() + 2, tr(STR_OPDS_BROWSER));
     menuIcons.insert(menuIcons.begin() + 2, Library);
+  }
+
+  if (showClockSync) {
+    // Insert just before Settings (always the last item) so order matches the loop() dispatch.
+    menuItems.insert(menuItems.end() - 1, tr(STR_CLOCK_SYNC_NOW));
+    menuIcons.insert(menuIcons.end() - 1, Clock);
   }
 
   if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {

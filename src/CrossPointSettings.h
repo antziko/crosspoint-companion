@@ -170,6 +170,14 @@ class CrossPointSettings {
 
   enum TILT_PAGE_TURN { TILT_OFF = 0, TILT_NORMAL = 1, TILT_NVERTED = 2, TILT_PAGE_TURN_COUNT };
 
+  // Status bar clock mode. Migration: existing X3 users had statusBarClock = 1 (on/off
+  // boolean) meaning "show RTC time" — that maps cleanly to CLOCK_RTC. New RAM mode is
+  // value 2. The "Show (RTC)" option is hidden on devices without a DS3231.
+  enum CLOCK_MODE { CLOCK_OFF = 0, CLOCK_RTC = 1, CLOCK_RAM = 2, CLOCK_MODE_COUNT };
+
+  // Clock visibility (modeled on HIDE_BATTERY_PERCENTAGE).
+  enum HIDE_CLOCK { HIDE_CLOCK_NEVER = 0, HIDE_CLOCK_READER = 1, HIDE_CLOCK_ALWAYS = 2, HIDE_CLOCK_COUNT };
+
   // Sleep screen settings
   uint8_t sleepScreen = DARK;
   // Sleep screen cover mode settings
@@ -185,6 +193,27 @@ class CrossPointSettings {
   uint8_t statusBarTitle = CHAPTER_TITLE;
   uint8_t statusBarBattery = 1;
   uint8_t xtcStatusBarMode = XTC_STATUS_BAR_HIDE;
+  // Status bar clock display mode (see CLOCK_MODE enum).
+  uint8_t statusBarClock = CLOCK_OFF;
+  // Where the clock is rendered (modeled on HIDE_BATTERY_PERCENTAGE).
+  //   HIDE_CLOCK_NEVER   — show on reader status bar + home/settings chrome
+  //   HIDE_CLOCK_READER  — show only on chrome (hide in reader)
+  //   HIDE_CLOCK_ALWAYS  — hide everywhere (clock feature still active for manual sync)
+  uint8_t hideClock = HIDE_CLOCK_NEVER;
+  // Clock UTC offset in quarter-hour steps, biased by 48 so it fits in uint8_t.
+  // Value 48 = UTC+0, 0 = UTC-12:00, 104 = UTC+14:00.
+  // Quarter-hour granularity supports oddball zones like Nepal (+5:45) and Chatham (+12:45).
+  uint8_t clockUtcOffsetQ = 48;
+  // Clock display format: 0 = 24-hour, 1 = 12-hour
+  uint8_t clockFormat = 0;
+  // Persisted "RTC has been synced once" flag — used only on RTC devices to suppress
+  // auto-sync on every subsequent WiFi connect. RAM-mode debounce lives in HalClock.
+  // Resetting to 0 (e.g. via the web UI) forces a re-sync on next WiFi connect.
+  uint8_t clockHasBeenSynced = 0;
+  // Auto-sync clock from NTP on the first WiFi connection of a session. Default on.
+  uint8_t autoSyncOnBoot = 1;
+  // Show a "Sync clock via NTP" entry on the home screen. Default off.
+  uint8_t showNtpSyncOnHome = 0;
   // Text rendering settings
   uint8_t extraParagraphSpacing = 1;
   uint8_t textAntiAliasing = 1;

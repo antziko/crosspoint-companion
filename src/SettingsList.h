@@ -115,6 +115,9 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         SettingInfo::Enum(StrId::STR_HIDE_BATTERY, &CrossPointSettings::hideBatteryPercentage,
                           {StrId::STR_NEVER, StrId::STR_IN_READER, StrId::STR_ALWAYS}, "hideBatteryPercentage",
                           StrId::STR_CAT_DISPLAY),
+        SettingInfo::Enum(StrId::STR_HIDE_CLOCK, &CrossPointSettings::hideClock,
+                          {StrId::STR_NEVER, StrId::STR_IN_READER, StrId::STR_ALWAYS}, "hideClock",
+                          StrId::STR_CAT_DISPLAY),
         SettingInfo::Enum(
             StrId::STR_REFRESH_FREQ, &CrossPointSettings::refreshFrequency,
             {StrId::STR_PAGES_1, StrId::STR_PAGES_5, StrId::STR_PAGES_10, StrId::STR_PAGES_15, StrId::STR_PAGES_30},
@@ -244,6 +247,24 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         SettingInfo::Enum(StrId::STR_XTC_STATUS_BAR, &CrossPointSettings::xtcStatusBarMode,
                           {StrId::STR_HIDE, StrId::STR_BOTTOM, StrId::STR_TOP}, "xtcStatusBarMode",
                           StrId::STR_CUSTOMISE_STATUS_BAR),
+        // Clock entries — grouped under their own "Clock" heading in the web UI.
+        // The device-side UI for these lives in ClockSettingsActivity (Settings → System → Clock).
+        // Range 0..104 = quarter-hour steps from UTC-12:00 to UTC+14:00, biased by 48.
+        SettingInfo::Enum(StrId::STR_CLOCK, &CrossPointSettings::statusBarClock,
+                          {StrId::STR_CLOCK_MODE_OFF, StrId::STR_CLOCK_MODE_RTC, StrId::STR_CLOCK_MODE_RAM},
+                          "statusBarClock", StrId::STR_CLOCK),
+        SettingInfo::Toggle(StrId::STR_CLOCK_AUTO_SYNC, &CrossPointSettings::autoSyncOnBoot, "autoSyncOnBoot",
+                            StrId::STR_CLOCK),
+        SettingInfo::Toggle(StrId::STR_CLOCK_SHOW_HOME_SYNC, &CrossPointSettings::showNtpSyncOnHome,
+                            "showNtpSyncOnHome", StrId::STR_CLOCK),
+        SettingInfo::Value(StrId::STR_CLOCK_UTC_OFFSET, &CrossPointSettings::clockUtcOffsetQ, {0, 104, 1},
+                           "clockUtcOffsetQ", StrId::STR_CLOCK),
+        SettingInfo::Enum(StrId::STR_CLOCK_FORMAT, &CrossPointSettings::clockFormat,
+                          {StrId::STR_CLOCK_FORMAT_24H, StrId::STR_CLOCK_FORMAT_12H}, "clockFormat", StrId::STR_CLOCK),
+        // Persistence flag for NTP debounce (RTC only). Resetting from the web UI forces
+        // a re-sync on next WiFi connect, which is useful when crossing time zones.
+        SettingInfo::Toggle(StrId::STR_CLOCK_SYNCED, &CrossPointSettings::clockHasBeenSynced, "clockHasBeenSynced",
+                            StrId::STR_CLOCK),
     };
     // Only show tilt page turn setting when the QMI8658 IMU is present (X3)
     if (halTiltSensor.isAvailable()) {

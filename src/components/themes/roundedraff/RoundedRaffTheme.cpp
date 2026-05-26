@@ -1,6 +1,7 @@
 #include "RoundedRaffTheme.h"
 
 #include <GfxRenderer.h>
+#include <HalClock.h>
 #include <HalStorage.h>
 #include <I18n.h>
 
@@ -9,9 +10,12 @@
 #include <string>
 #include <vector>
 
+#include "CrossPointSettings.h"
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
+#include "components/icons/clock_small.h"
 #include "components/icons/cover.h"
+#include "components/icons/uptime_small.h"
 #include "fontIds.h"
 
 namespace {
@@ -67,7 +71,7 @@ void RoundedRaffTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const 
     return;
   }
   const int sidePadding = RoundedRaffMetrics::values.contentSidePadding;
-  const int titleX = rect.x + sidePadding;
+  int titleX = rect.x + sidePadding;
   const int titleY = rect.y + 14;
 
   const bool showBatteryPercentage =
@@ -84,6 +88,31 @@ void RoundedRaffTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const 
     const int clearW = maxTextWidth + batteryPercentSpacing + RoundedRaffMetrics::values.batteryWidth;
     const int clearH = std::max(renderer.getTextHeight(SMALL_FONT_ID), RoundedRaffMetrics::values.batteryHeight + 8);
     renderer.fillRect(batteryIconX - maxTextWidth - batteryPercentSpacing, rect.y + 14, clearW, clearH, false);
+  }
+
+  // Clock at the top-left, pushing the title right by its width. Renders unconditionally
+  // alongside the battery (top-right) so chrome is consistent across surfaces — every
+  // place battery shows up, the clock shows up too.
+  if (SETTINGS.hideClock != CrossPointSettings::HIDE_CLOCK_ALWAYS &&
+      SETTINGS.statusBarClock != CrossPointSettings::CLOCK_OFF) {
+    constexpr int kClockIconSize = 16;
+    constexpr int kClockIconGap = 3;
+    constexpr int kClockIconYOffset = 4;  // mirror drawBattery*'s internal +6 so icon aligns with text baseline
+    char timeBuf[9];
+    const bool synced = halClock.hasTime() && halClock.formatTime(timeBuf, sizeof(timeBuf), SETTINGS.clockUtcOffsetQ,
+                                                                  SETTINGS.clockFormat == 1);
+    if (!synced) {
+      const unsigned long totalMin = millis() / 60000UL;
+      const unsigned long hours = (totalMin / 60UL) % 100UL;
+      const unsigned long mins = totalMin % 60UL;
+      snprintf(timeBuf, sizeof(timeBuf), "%02lu:%02lu", hours, mins);
+    }
+    const int textWidth = renderer.getTextWidth(SMALL_FONT_ID, timeBuf);
+    const int textY = rect.y + 14;
+    renderer.drawIcon(synced ? ClockSmallIcon : UptimeSmallIcon, titleX, textY + kClockIconYOffset, kClockIconSize,
+                      kClockIconSize);
+    renderer.drawText(SMALL_FONT_ID, titleX + kClockIconSize + kClockIconGap, textY, timeBuf);
+    titleX += kClockIconSize + kClockIconGap + textWidth + 10;
   }
 
   const int maxTitleWidth = std::max(0, batteryGroupLeftX - 20 - titleX);
