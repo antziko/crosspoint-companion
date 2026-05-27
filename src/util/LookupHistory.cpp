@@ -53,7 +53,7 @@ std::vector<LookupHistory::Entry> LookupHistory::readAll(const std::string& path
   std::vector<Entry> entries;
   entries.reserve(32);
 
-  FsFile file;
+  HalFile file;
   if (!Storage.openFileForRead("LH", path.c_str(), file)) return entries;
 
   char lineBuf[256];
@@ -91,7 +91,7 @@ std::vector<LookupHistory::Entry> LookupHistory::readAll(const std::string& path
 
 // Write all entries (oldest first) to the file, replacing existing content.
 bool LookupHistory::writeAll(const std::string& path, const std::vector<Entry>& entries) {
-  FsFile file;
+  HalFile file;
   if (!Storage.openFileForWrite("LH", path.c_str(), file)) {
     LOG_ERR("LH", "Failed to open for write: %s", path.c_str());
     return false;

@@ -42,7 +42,7 @@ std::string Dictionary::readDictPath(const char* cachePath) {
   // Try per-book dictionary.bin first when cachePath is provided.
   if (cachePath && cachePath[0] != '\0') {
     snprintf(binPath, sizeof(binPath), "%s/%s", cachePath, DICT_BIN);
-    FsFile f;
+    HalFile f;
     if (Storage.openFileForRead("DICT", binPath, f)) {
       const int sz = static_cast<int>(f.fileSize());
       if (sz > 0) {
@@ -62,7 +62,7 @@ std::string Dictionary::readDictPath(const char* cachePath) {
 
   // Read global dictionary.bin.
   snprintf(binPath, sizeof(binPath), "%s/%s", GLOBAL_DICT_DIR, DICT_BIN);
-  FsFile f;
+  HalFile f;
   if (!Storage.openFileForRead("DICT", binPath, f)) return "";
   const int sz = static_cast<int>(f.fileSize());
   if (sz <= 0) {
@@ -80,7 +80,7 @@ std::string Dictionary::readDictPath(const char* cachePath) {
 void Dictionary::saveGlobalDictPath(const char* folderPath) {
   char binPath[128];
   snprintf(binPath, sizeof(binPath), "%s/%s", GLOBAL_DICT_DIR, DICT_BIN);
-  FsFile f;
+  HalFile f;
   if (!Storage.openFileForWrite("DICT", binPath, f)) {
     LOG_ERR("DICT", "Could not write global dictionary path");
     return;
@@ -133,7 +133,7 @@ DictInfo Dictionary::readInfo(const char* folderPath) {
   std::string folder(folderPath);
   std::string ifoPath = DictPaths(folder).ifo();
 
-  FsFile file;
+  HalFile file;
   if (!Storage.openFileForRead("DICT", ifoPath.c_str(), file)) return info;
 
   // Validate header line byte by byte — no line buffer needed.
@@ -268,7 +268,7 @@ std::string Dictionary::cleanWord(const std::string& word) {
 // Low-level file reading helpers
 // ---------------------------------------------------------------------------
 
-int Dictionary::readWordInto(FsFile& file, char* buf, size_t bufSize) {
+int Dictionary::readWordInto(HalFile& file, char* buf, size_t bufSize) {
   size_t i = 0;
   while (i < bufSize - 1) {
     int ch = file.read();
@@ -310,7 +310,7 @@ static int cistrcmp(const char* a, const char* b) {
 uint32_t Dictionary::readCsptEntryCount(const char* cachePath) {
   std::string folderPath = readDictPath(cachePath);
   if (folderPath.empty()) return 0;
-  FsFile cspt;
+  HalFile cspt;
   if (!Storage.openFileForRead("DICT", DictPaths(folderPath).idxOftCspt().c_str(), cspt)) return 0;
   uint8_t hdr[CSPT_HEADER_SIZE];
   cspt.seekSet(0);
@@ -323,7 +323,7 @@ uint32_t Dictionary::readCsptEntryCount(const char* cachePath) {
   return entryCount;
 }
 
-bool Dictionary::binarySearchCspt(FsFile& cspt, const char* target, uint32_t idxFileSize, uint32_t* startByte,
+bool Dictionary::binarySearchCspt(HalFile& cspt, const char* target, uint32_t idxFileSize, uint32_t* startByte,
                                   uint32_t* endByte) {
   // Read and validate header (12 bytes).
   uint8_t hdr[CSPT_HEADER_SIZE];
@@ -383,17 +383,17 @@ bool Dictionary::binarySearchCspt(FsFile& cspt, const char* target, uint32_t idx
   return true;
 }
 
-void Dictionary::resolveScanBounds(const char* csptPath, const char* oftPath, FsFile& src, uint32_t srcFileSize,
+void Dictionary::resolveScanBounds(const char* csptPath, const char* oftPath, HalFile& src, uint32_t srcFileSize,
                                    const char* target, uint32_t* startByte, uint32_t* endByte) {
   // Try .cspt first (CrossPoint optimized index), fall back to .oft.
   bool boundsResolved = false;
-  FsFile cspt;
+  HalFile cspt;
   if (Storage.openFileForRead("DICT", csptPath, cspt)) {
     boundsResolved = binarySearchCspt(cspt, target, srcFileSize, startByte, endByte);
     cspt.close();
   }
   if (!boundsResolved) {
-    FsFile oft;
+    HalFile oft;
     if (Storage.openFileForRead("DICT", oftPath, oft)) {
       findPageBounds(oft, src, srcFileSize, target, startByte, endByte);
       oft.close();
@@ -401,8 +401,8 @@ void Dictionary::resolveScanBounds(const char* csptPath, const char* oftPath, Fs
   }
 }
 
-void Dictionary::findPageBounds(FsFile& oft, FsFile& src, uint32_t srcFileSize, const char* target, uint32_t* startByte,
-                                uint32_t* endByte) {
+void Dictionary::findPageBounds(HalFile& oft, HalFile& src, uint32_t srcFileSize, const char* target,
+                                uint32_t* startByte, uint32_t* endByte) {
   const uint32_t oftFileSize = static_cast<uint32_t>(oft.fileSize());
   const uint32_t numEntries = (oftFileSize > OFT_HEADER_SIZE) ? (oftFileSize - OFT_HEADER_SIZE) / 4 : 0;
   const uint32_t numPages = numEntries + 1;  // page 0 is implicit (starts at byte 0 in src)
@@ -449,7 +449,7 @@ void Dictionary::findPageBounds(FsFile& oft, FsFile& src, uint32_t srcFileSize, 
 // ---------------------------------------------------------------------------
 
 std::string Dictionary::readDefinition(const std::string& folderPath, uint32_t offset, uint32_t size) {
-  FsFile dict;
+  HalFile dict;
   if (!Storage.openFileForRead("DICT", DictPaths(folderPath).dict().c_str(), dict)) return "";
 
   dict.seekSet(offset);
@@ -473,7 +473,7 @@ DictLocation Dictionary::locate(const std::string& word, const DictLookupCallbac
   if (result.folderPath.empty()) return result;
 
   DictPaths dp(result.folderPath);
-  FsFile idx;
+  HalFile idx;
   if (!Storage.openFileForRead("DICT", dp.idx().c_str(), idx)) return result;
 
   const uint32_t idxFileSize = static_cast<uint32_t>(idx.fileSize());
@@ -535,7 +535,7 @@ std::string Dictionary::lookup(const std::string& word, const DictLookupCallback
 // Resolve the word at 0-based ordinal in .idx using .idx.oft for fast page seek.
 std::string Dictionary::wordAtOrdinal(const std::string& folderPath, uint32_t ordinal) {
   DictPaths dp(folderPath);
-  FsFile idx;
+  HalFile idx;
   if (!Storage.openFileForRead("DICT", dp.idx().c_str(), idx)) return "";
 
   const uint32_t pageNum = ordinal / OFT_STRIDE;
@@ -543,7 +543,7 @@ std::string Dictionary::wordAtOrdinal(const std::string& folderPath, uint32_t or
   uint32_t pageStartByte = 0;
 
   if (pageNum > 0) {
-    FsFile oft;
+    HalFile oft;
     if (Storage.openFileForRead("DICT", dp.idxOft().c_str(), oft)) {
       oft.seekSet(OFT_HEADER_SIZE + (pageNum - 1) * 4);
       uint8_t raw[4];
@@ -580,7 +580,7 @@ std::string Dictionary::resolveAltForm(const std::string& word, const char* cach
   DictPaths dp(folderPath);
   if (!Storage.exists(dp.syn().c_str())) return "";
 
-  FsFile syn;
+  HalFile syn;
   if (!Storage.openFileForRead("DICT", dp.syn().c_str(), syn)) return "";
 
   const uint32_t synFileSize = static_cast<uint32_t>(syn.fileSize());
@@ -826,14 +826,14 @@ std::vector<std::string> Dictionary::findSimilar(const std::string& word, int ma
   if (folderPath.empty()) return {};
 
   DictPaths dp(folderPath);
-  FsFile idx;
+  HalFile idx;
   if (!Storage.openFileForRead("DICT", dp.idx().c_str(), idx)) return {};
 
   const uint32_t idxFileSize = static_cast<uint32_t>(idx.fileSize());
   uint32_t centerStart = 0;
   uint32_t centerEnd = idxFileSize;
 
-  FsFile oft;
+  HalFile oft;
   const bool hasOft = Storage.openFileForRead("DICT", dp.idxOft().c_str(), oft);
 
   if (hasOft) {

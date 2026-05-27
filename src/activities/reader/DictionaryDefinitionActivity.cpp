@@ -290,7 +290,7 @@ void DictionaryDefinitionActivity::wrapPlain() {
 
   // Stream from .dict file — the full definition is never held in RAM.
   const std::string dictPath = foundLocation.folderPath + ".dict";
-  FsFile dictFile;
+  HalFile dictFile;
   if (!Storage.openFileForRead("DICT", dictPath.c_str(), dictFile)) return;
   dictFile.seekSet(foundLocation.offset);
 

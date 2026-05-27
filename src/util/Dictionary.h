@@ -114,7 +114,7 @@ class Dictionary {
 
   // Read a null-terminated word from an open file into buf (max bufSize-1 chars).
   // Returns the number of characters read (excluding null), or -1 on error.
-  static int readWordInto(FsFile& file, char* buf, size_t bufSize);
+  static int readWordInto(HalFile& file, char* buf, size_t bufSize);
 
   // Read the word at ordinal `ordinal` in .idx.
   // folderPath is the dictionary base path (e.g. /dictionary/dict-en-en/dict-data).
@@ -125,19 +125,19 @@ class Dictionary {
   // Binary search .oft to find the page boundary bytes in src containing target.
   // On return, *startByte and *endByte delimit the 32-word page to scan linearly.
   // srcFileSize is used as the upper bound when the page is the last one.
-  static void findPageBounds(FsFile& oft, FsFile& src, uint32_t srcFileSize, const char* target, uint32_t* startByte,
+  static void findPageBounds(HalFile& oft, HalFile& src, uint32_t srcFileSize, const char* target, uint32_t* startByte,
                              uint32_t* endByte);
 
   // Binary search .idx.oft.cspt to find the scan range in .idx containing target.
   // Returns true if .cspt was valid and bounds were set, false to fall back to .oft.
-  static bool binarySearchCspt(FsFile& cspt, const char* target, uint32_t idxFileSize, uint32_t* startByte,
+  static bool binarySearchCspt(HalFile& cspt, const char* target, uint32_t idxFileSize, uint32_t* startByte,
                                uint32_t* endByte);
 
   // Resolve the byte range in src to scan for target. Tries .cspt first; on miss or
   // absence, falls back to .oft. Callers must initialize *startByte=0, *endByte=srcFileSize
   // before calling — when both .cspt and .oft are absent, the bounds are left untouched
   // (full-file scan). Used by both .idx (locate) and .syn (resolveAltForm) lookups.
-  static void resolveScanBounds(const char* csptPath, const char* oftPath, FsFile& src, uint32_t srcFileSize,
+  static void resolveScanBounds(const char* csptPath, const char* oftPath, HalFile& src, uint32_t srcFileSize,
                                 const char* target, uint32_t* startByte, uint32_t* endByte);
 
   static int editDistance(const std::string& a, const std::string& b, int maxDist);

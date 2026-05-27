@@ -634,7 +634,7 @@ const std::vector<StyledSpan>& DictHtmlRenderer::renderFromFile(const char* dict
     return spans;
   }
 
-  FsFile file;
+  HalFile file;
   if (!Storage.openFileForRead("DICT", dictPath, file)) {
     LOG_ERR("DHTML", "Failed to open: %s", dictPath);
     parseError = true;

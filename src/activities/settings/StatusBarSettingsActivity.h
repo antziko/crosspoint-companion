@@ -21,6 +21,8 @@ class StatusBarSettingsActivity final : public Activity {
   ButtonNavigator buttonNavigator;
 
   int selectedIndex = 0;
+  // Decided in onEnter() based on halClock.hasRtc() so clock entries are hidden on X4.
+  int visibleItemCount = 0;
 
   void handleSelection();
 };

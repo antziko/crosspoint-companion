@@ -59,7 +59,7 @@ void DictionarySelectActivity::onEnter() {
   } else {
     // Per-book mode: read saved per-book path, pre-select it.
     currentBookDictPath = "";
-    FsFile f;
+    HalFile f;
     if (Storage.openFileForRead("DSEL", bookCachePath + "/dictionary.bin", f)) {
       const int sz = static_cast<int>(f.fileSize());
       if (sz > 0) {
@@ -270,7 +270,7 @@ void DictionarySelectActivity::applySelection() {
     Dictionary::saveGlobalDictPath(folder.c_str());
   } else {
     // Per-book mode: save to book cache.
-    FsFile f;
+    HalFile f;
     if (Storage.openFileForWrite("DSEL", bookCachePath + "/dictionary.bin", f)) {
       f.write(reinterpret_cast<const uint8_t*>(folder.c_str()), folder.size());
       f.close();
@@ -396,7 +396,7 @@ void DictionarySelectActivity::render(RenderLock&&) {
       // --- Raw view: forward-only SD streaming, character-wrapped per line ---
       char ifoPath[520];
       snprintf(ifoPath, sizeof(ifoPath), "%s.ifo", folderForIndex(selectedIndex).c_str());
-      FsFile ifoFile;
+      HalFile ifoFile;
       if (!Storage.openFileForRead("DSEL", ifoPath, ifoFile)) {
         renderer.drawText(UI_10_FONT_ID, x, y, tr(STR_DICT_NO_METADATA));
       } else {
