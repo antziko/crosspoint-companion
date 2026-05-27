@@ -604,6 +604,67 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       requestUpdate();
       break;
     }
+    case EpubReaderMenuActivity::MenuAction::INDEX_BOOK: {
+      if (!epub) {
+        break;
+      }
+      const int spineCount = epub->getSpineItemsCount();
+      if (spineCount <= 0) {
+        break;
+      }
+
+      // Viewport must match what render() computes so the cache key matches
+      // the on-demand path; otherwise the device would re-index anyway.
+      int marginTop, marginRight, marginBottom, marginLeft;
+      renderer.getOrientedViewableTRBL(&marginTop, &marginRight, &marginBottom, &marginLeft);
+      marginTop += SETTINGS.screenMargin;
+      marginLeft += SETTINGS.screenMargin;
+      marginRight += SETTINGS.screenMargin;
+      const uint8_t statusBarHeight = UITheme::getInstance().getStatusBarHeight();
+      marginBottom += std::max(SETTINGS.screenMargin, statusBarHeight);
+      const uint16_t viewportWidth = renderer.getScreenWidth() - marginLeft - marginRight;
+      const uint16_t viewportHeight = renderer.getScreenHeight() - marginTop - marginBottom;
+
+      // Hold the render lock so the framework cannot reload the member section
+      // out from under us while we iterate.
+      RenderLock lock(*this);
+
+      bool cancelled = false;
+      for (int i = 0; i < spineCount && !cancelled; ++i) {
+        char progressMsg[48];
+        snprintf(progressMsg, sizeof(progressMsg), tr(STR_INDEXING_PROGRESS), i + 1, spineCount);
+        GUI.drawPopup(renderer, progressMsg);
+
+        // Cancel granularity is one section: InputManager::update() is
+        // state-sampling, so a tap between sections (which can take seconds)
+        // would be dropped. Level-sample with isPressed instead — the user
+        // holds Back until the current section finishes. Already-built
+        // section files are kept, so re-invoking the action resumes.
+        mappedInput.update();
+        if (mappedInput.isPressed(MappedInputManager::Button::Back)) {
+          LOG_DBG("ERS", "Index whole book cancelled at %d/%d", i + 1, spineCount);
+          cancelled = true;
+          break;
+        }
+
+        Section s(epub, i, renderer);
+        if (s.loadSectionFile(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
+                              SETTINGS.extraParagraphSpacing, SETTINGS.paragraphAlignment, viewportWidth,
+                              viewportHeight, SETTINGS.hyphenationEnabled, SETTINGS.embeddedStyle,
+                              SETTINGS.imageRendering, SETTINGS.focusReadingEnabled)) {
+          continue;
+        }
+        const auto popupFn = [this, &progressMsg]() { GUI.drawPopup(renderer, progressMsg); };
+        if (!s.createSectionFile(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
+                                 SETTINGS.extraParagraphSpacing, SETTINGS.paragraphAlignment, viewportWidth,
+                                 viewportHeight, SETTINGS.hyphenationEnabled, SETTINGS.embeddedStyle,
+                                 SETTINGS.imageRendering, SETTINGS.focusReadingEnabled, popupFn)) {
+          LOG_ERR("ERS", "Failed to index section %d", i);
+        }
+      }
+      requestUpdate();
+      break;
+    }
     case EpubReaderMenuActivity::MenuAction::SYNC: {
       if (KOREADER_STORE.hasCredentials()) {
         const int currentPage = section ? section->currentPage : nextPageNumber;
