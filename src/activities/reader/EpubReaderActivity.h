@@ -37,6 +37,10 @@ class EpubReaderActivity final : public Activity {
   // Set when the reader is left at end-of-book and SETTINGS.moveFinishedToReadFolder is on.
   // Consumed in onExit() to relocate the finished book into /Read/.
   bool pendingReadFolderMove = false;
+  // True for one main-loop iteration after "Index whole book" finishes, so
+  // preventAutoSleep() can reset the inactivity timer that advanced during
+  // the synchronous indexing. Cleared at the top of loop().
+  bool indexingJustCompleted = false;
 
   // Footnote support
   std::vector<FootnoteEntry> currentPageFootnotes;
@@ -72,5 +76,6 @@ class EpubReaderActivity final : public Activity {
   void loop() override;
   void render(RenderLock&& lock) override;
   bool isReaderActivity() const override { return true; }
+  bool preventAutoSleep() override { return indexingJustCompleted; }
   ScreenshotInfo getScreenshotInfo() const override;
 };

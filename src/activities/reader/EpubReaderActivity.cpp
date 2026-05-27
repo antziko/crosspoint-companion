@@ -190,6 +190,10 @@ void EpubReaderActivity::loop() {
     return;
   }
 
+  // Clear the post-indexing sleep-suppress tag; it has already been observed
+  // by the inactivity check at the top of the current main-loop iteration.
+  indexingJustCompleted = false;
+
   // End-of-Book screen reached (currentSpineIndex == spine count) means the book is
   // finished. Two independent finished-book features key off this same condition.
   const bool atEndOfBook = currentSpineIndex > 0 && currentSpineIndex >= epub->getSpineItemsCount();
@@ -534,6 +538,13 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       // Hold the render lock so the framework cannot reload the member section
       // out from under us while we iterate.
       RenderLock lock(*this);
+
+      // Auto-sleep is checked in the main loop, which is blocked while we
+      // run. Without resetting the inactivity timer, a multi-minute index
+      // run would trigger deep sleep the instant we return. Tag the first
+      // post-indexing main-loop iteration so preventAutoSleep() fires
+      // before the sleep check.
+      indexingJustCompleted = true;
 
       bool cancelled = false;
       for (int i = 0; i < spineCount && !cancelled; ++i) {
