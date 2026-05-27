@@ -21,6 +21,7 @@ class EpubReaderMenuActivity final : public Activity {
     DISPLAY_QR,
     GO_HOME,
     SYNC,
+    INDEX_BOOK,
     DELETE_CACHE
   };
 
