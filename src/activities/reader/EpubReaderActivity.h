@@ -38,6 +38,10 @@ class EpubReaderActivity final : public Activity {
   // Tracks whether this book is currently removed from Recent Books by the
   // removeReadBooksFromRecents feature (set at End-of-Book, cleared if paged back in).
   bool recentsEntryRemoved = false;
+  // True for one main-loop iteration after "Index whole book" finishes, so
+  // preventAutoSleep() can reset the inactivity timer that advanced during
+  // the synchronous indexing. Cleared at the top of loop().
+  bool indexingJustCompleted = false;
 
   // Footnote support
   std::vector<FootnoteEntry> currentPageFootnotes;
@@ -75,5 +79,6 @@ class EpubReaderActivity final : public Activity {
   void loop() override;
   void render(RenderLock&& lock) override;
   bool isReaderActivity() const override { return true; }
+  bool preventAutoSleep() override { return indexingJustCompleted; }
   ScreenshotInfo getScreenshotInfo() const override;
 };
