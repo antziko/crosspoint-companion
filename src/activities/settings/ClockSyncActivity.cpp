@@ -11,6 +11,7 @@
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -33,7 +34,21 @@ void ClockSyncActivity::onEnter() {
   requestUpdate();
 }
 
-void ClockSyncActivity::onExit() { Activity::onExit(); }
+void ClockSyncActivity::onExit() {
+  Activity::onExit();
+
+  // NTP sync brings up the WiFi/LWIP/mbedTLS stack, which leaves the heap fragmented even
+  // after WiFi.disconnect() — a subsequent dictionary lookup (or any path that does several
+  // small std::string/std::vector allocations) can then std::bad_alloc → abort() under
+  // -fno-exceptions. Match the convention used by every other WiFi-using activity (Ota,
+  // Calibre, OPDS, KOReader, FontDownload, etc.): tear WiFi down and silent-restart so the
+  // heap comes back contiguous. The user lands back on Home with no visible reboot.
+  if (WiFi.getMode() != WIFI_MODE_NULL) {
+    WiFi.disconnect(false);
+    delay(30);
+    silentRestart();
+  }
+}
 
 void ClockSyncActivity::runSync() {
   if (WiFi.status() != WL_CONNECTED) {
