@@ -34,6 +34,7 @@ std::vector<EpubReaderMenuActivity::MenuItem> EpubReaderMenuActivity::buildMenuI
     items.push_back({MenuAction::LOOKUP_HISTORY, StrId::STR_LOOKUP_HISTORY});
   }
   items.push_back({MenuAction::SET_BOOK_DICTIONARY, StrId::STR_BOOK_DICTIONARY});
+  items.push_back({MenuAction::BOOKMARKS, StrId::STR_BOOKMARKS});
   items.push_back({MenuAction::ROTATE_SCREEN, StrId::STR_ORIENTATION});
   items.push_back({MenuAction::AUTO_PAGE_TURN, StrId::STR_AUTO_TURN_PAGES_PER_MIN});
   items.push_back({MenuAction::GO_TO_PERCENT, StrId::STR_GO_TO_PERCENT});
@@ -121,17 +122,17 @@ void EpubReaderMenuActivity::render(RenderLock&&) {
   GUI.drawList(
       renderer, Rect{screen.x, contentTop, screen.width, contentHeight}, menuItems.size(), selectedIndex,
       [this](int index) { return I18N.get(menuItems[index].labelId); }, nullptr, nullptr,
-      [this](int index) -> const char* {
+      [this](int index) -> std::string {
         const auto value = menuItems[index].action;
         if (value == MenuAction::ROTATE_SCREEN) {
           return I18N.get(orientationLabels[pendingOrientation]);
         } else if (value == MenuAction::AUTO_PAGE_TURN) {
           return pageTurnLabels[selectedPageTurnOption];
         } else if (value == MenuAction::SET_BOOK_DICTIONARY && !activeDictName.empty()) {
-          return activeDictName.c_str();
-        } else {
-          return "";
+          // Render currently active dictionary name on the right edge of the content area.
+          return activeDictName;
         }
+        return "";
       },
       true);
 

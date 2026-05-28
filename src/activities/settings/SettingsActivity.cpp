@@ -84,8 +84,10 @@ void SettingsActivity::rebuildSettingsLists() {
       StrId::STR_LOOKUP_HIST_CAP, &CrossPointSettings::lookupHistoryCap,
       {CrossPointSettings::HIST_CAP_MIN, CrossPointSettings::HIST_CAP_MAX, CrossPointSettings::HIST_CAP_STEP},
       "lookupHistoryCap", StrId::STR_CAT_READER));
-  readerSettings.push_back(SettingInfo::Toggle(StrId::STR_DICT_HOLD_TO_LOOKUP, &CrossPointSettings::holdToLookup,
-                                               "holdToLookup", StrId::STR_CAT_READER));
+  readerSettings.push_back(
+      SettingInfo::Enum(StrId::STR_HOLD_CONFIRM, &CrossPointSettings::holdConfirmAction,
+                        {StrId::STR_STATE_OFF, StrId::STR_HOLD_CONFIRM_BOOKMARK, StrId::STR_HOLD_CONFIRM_DICT},
+                        "holdConfirmAction", StrId::STR_CAT_READER));
   readerSettings.push_back(SettingInfo::Action(StrId::STR_CUSTOMISE_STATUS_BAR, SettingAction::CustomiseStatusBar));
 
   // Update currentSettings pointer and count for the active category

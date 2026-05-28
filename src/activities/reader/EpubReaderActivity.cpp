@@ -7,6 +7,7 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <JsonSettingsIO.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <esp_system.h>
@@ -17,9 +18,11 @@
 #include <limits>
 
 #include "../settings/DictionarySelectActivity.h"
+#include "BookmarkEntry.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "DictionaryWordSelectActivity.h"
+#include "EpubReaderBookmarksActivity.h"
 #include "EpubReaderChapterSelectionActivity.h"
 #include "EpubReaderFootnotesActivity.h"
 #include "EpubReaderPercentSelectionActivity.h"
@@ -34,6 +37,7 @@
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/BookmarkUtil.h"
 #include "util/Dictionary.h"
 #include "util/ScreenshotUtil.h"
 
@@ -255,17 +259,37 @@ void EpubReaderActivity::loop() {
     }
   }
 
-  // Hold Confirm → direct word-select (fire at threshold, 600ms).
-  if (SETTINGS.holdToLookup && mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
-      mappedInput.getHeldTime() >= Dictionary::LONG_PRESS_MS && section &&
-      Dictionary::exists(epub->getCachePath().c_str())) {
-    openWordSelect();
-    return;
+  // Hold-Confirm dispatch — mutually exclusive based on user setting.
+  // Dictionary uses 600 ms (Dictionary::LONG_PRESS_MS); Bookmark uses 400 ms (ReaderUtils::BOOKMARK_HOLD_MS).
+  if (section && mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
+    if (SETTINGS.holdConfirmAction == CrossPointSettings::HOLD_CONFIRM_DICTIONARY &&
+        mappedInput.getHeldTime() >= Dictionary::LONG_PRESS_MS && Dictionary::exists(epub->getCachePath().c_str())) {
+      ignoreNextConfirmRelease = true;
+      openWordSelect(/*framebufferContainsPage=*/true);
+      return;
+    }
+    if (SETTINGS.holdConfirmAction == CrossPointSettings::HOLD_CONFIRM_BOOKMARK &&
+        mappedInput.getHeldTime() >= ReaderUtils::BOOKMARK_HOLD_MS && !showBookmarkMessage) {
+      addBookmark();
+      showBookmarkMessage = true;
+      ignoreNextConfirmRelease = true;
+      bookmarkMessageTime = millis();
+      requestUpdate();
+    }
+  }
+
+  if (showBookmarkMessage && (millis() - bookmarkMessageTime) >= ReaderUtils::BOOKMARK_MESSAGE_DURATION_MS) {
+    showBookmarkMessage = false;
+    requestUpdate();
   }
 
   // Enter reader menu activity.
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    openReaderMenu();
+    if (ignoreNextConfirmRelease) {
+      ignoreNextConfirmRelease = false;
+    } else {
+      openReaderMenu();
+    }
   }
 
   // Suppress Back bleed-through after dictionary chain exit. Capture the flag BEFORE
@@ -460,7 +484,7 @@ void EpubReaderActivity::openReaderMenu() {
       });
 }
 
-void EpubReaderActivity::openWordSelect() {
+void EpubReaderActivity::openWordSelect(bool framebufferContainsPage) {
   auto pageForLookup = section ? section->loadPageFromSectionFile() : nullptr;
   if (!pageForLookup) {
     requestUpdate();
@@ -471,6 +495,19 @@ void EpubReaderActivity::openWordSelect() {
                                    &orientedMarginLeft);
   orientedMarginTop += SETTINGS.screenMargin;
   orientedMarginLeft += SETTINGS.screenMargin;
+
+  // Bottom reserved-area height (matches renderContents() at line 695-703). The
+  // word-select activity uses this to clear exactly the strip we drew the
+  // status-bar / auto-turn label into, so its first frame matches the menu
+  // path which wipes everything via clearScreen + page->render.
+  const uint8_t statusBarHeight = UITheme::getInstance().getStatusBarHeight();
+  const int reservedBottomHeight =
+      (automaticPageTurnActive &&
+       (statusBarHeight == 0 || statusBarHeight == UITheme::getInstance().getProgressBarHeight()))
+          ? std::max(
+                SETTINGS.screenMargin,
+                static_cast<uint8_t>(statusBarHeight + UITheme::getInstance().getMetrics().statusBarVerticalMargin))
+          : std::max(SETTINGS.screenMargin, statusBarHeight);
   std::string nextPageFirstWord;
   if (section && section->currentPage < section->pageCount - 1) {
     int savedPage = section->currentPage;
@@ -489,9 +526,9 @@ void EpubReaderActivity::openWordSelect() {
     }
   }
   const std::string bookCachePath = epub->getCachePath();
-  startActivityForResult(std::make_unique<DictionaryWordSelectActivity>(renderer, mappedInput, std::move(pageForLookup),
-                                                                        orientedMarginLeft, orientedMarginTop,
-                                                                        bookCachePath, nextPageFirstWord),
+  startActivityForResult(std::make_unique<DictionaryWordSelectActivity>(
+                             renderer, mappedInput, std::move(pageForLookup), orientedMarginLeft, orientedMarginTop,
+                             bookCachePath, nextPageFirstWord, framebufferContainsPage, reservedBottomHeight),
                          [this](const ActivityResult&) {
                            ignoreBackUntilRelease = true;
                            requestUpdate();
@@ -499,6 +536,18 @@ void EpubReaderActivity::openWordSelect() {
 }
 
 void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action) {
+  auto progressChangeResultHandler = [this](const ActivityResult& result) {
+    if (!result.isCancelled) {
+      const auto& sync = std::get<ProgressChangeResult>(result.data);
+      if (currentSpineIndex != sync.spineIndex || (section && section->currentPage != sync.page)) {
+        RenderLock lock(*this);
+        currentSpineIndex = sync.spineIndex;
+        nextPageNumber = sync.page;
+        section.reset();
+      }
+    }
+  };
+
   switch (action) {
     case EpubReaderMenuActivity::MenuAction::SELECT_CHAPTER: {
       const int spineIdx = currentSpineIndex;
@@ -552,26 +601,11 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
     }
     case EpubReaderMenuActivity::MenuAction::DISPLAY_QR: {
       if (section && section->currentPage >= 0 && section->currentPage < section->pageCount) {
-        auto p = section->loadPageFromSectionFile();
-        if (p) {
-          std::string fullText;
-          for (const auto& el : p->elements) {
-            if (el->getTag() == TAG_PageLine) {
-              const auto& line = static_cast<const PageLine&>(*el);
-              if (line.getBlock()) {
-                const auto& words = line.getBlock()->getWords();
-                for (const auto& w : words) {
-                  if (!fullText.empty()) fullText += " ";
-                  fullText += w;
-                }
-              }
-            }
-          }
-          if (!fullText.empty()) {
-            startActivityForResult(std::make_unique<QrDisplayActivity>(renderer, mappedInput, fullText),
-                                   [this](const ActivityResult& result) {});
-            break;
-          }
+        std::string fullText = section->getTextFromSectionFile();
+        if (!fullText.empty()) {
+          startActivityForResult(std::make_unique<QrDisplayActivity>(renderer, mappedInput, fullText),
+                                 [this](const ActivityResult& result) {});
+          break;
         }
       }
       // If no text or page loading failed, just close menu
@@ -690,12 +724,8 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
         }
 
         // Pre-compute local KO position and chapter name while Epub is still in RAM.
-        CrossPointPosition localPos = {currentSpineIndex, currentPage, totalPages};
-        if (paragraphIndex.has_value()) {
-          localPos.paragraphIndex = *paragraphIndex;
-          localPos.hasParagraphIndex = true;
-        }
-        KOReaderPosition localKoPos = ProgressMapper::toKOReader(epub, localPos);
+        CrossPointPosition localPos = getCurrentPosition();
+        SavedProgressPosition localKoPos = ProgressMapper::toSavedProgress(epub, localPos);
         const int tocIdx = epub->getTocIndexForSpineIndex(currentSpineIndex);
         std::string localChapterName = (tocIdx >= 0) ? epub->getTocItem(tocIdx).title : "";
         const std::string savedEpubPath = epub->getPath();
@@ -728,7 +758,9 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       break;
     }
     case EpubReaderMenuActivity::MenuAction::LOOKUP: {
-      openWordSelect();
+      // Menu activity rendered over the page; the framebuffer no longer
+      // matches what DictionaryWordSelectActivity expects.
+      openWordSelect(/*framebufferContainsPage=*/false);
       break;
     }
     case EpubReaderMenuActivity::MenuAction::LOOKUP_HISTORY: {
@@ -742,6 +774,12 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
     case EpubReaderMenuActivity::MenuAction::SET_BOOK_DICTIONARY: {
       startActivityForResult(std::make_unique<DictionarySelectActivity>(renderer, mappedInput, epub->getCachePath()),
                              [this](const ActivityResult&) { openReaderMenu(); });
+      break;
+    }
+    case EpubReaderMenuActivity::MenuAction::BOOKMARKS: {
+      startActivityForResult(
+          std::make_unique<EpubReaderBookmarksActivity>(renderer, mappedInput, epub, epub->getPath()),
+          progressChangeResultHandler);
       break;
     }
   }
@@ -1011,6 +1049,10 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   if (pendingScreenshot) {
     pendingScreenshot = false;
     ScreenshotUtil::takeScreenshot(renderer);
+  }
+
+  if (showBookmarkMessage) {
+    GUI.drawPopup(renderer, tr(STR_BOOKMARK_ADDED));
   }
 }
 
@@ -1290,6 +1332,58 @@ void EpubReaderActivity::restoreSavedPosition() {
   requestUpdate();
 }
 
+void EpubReaderActivity::addBookmark() {
+  if (!section || !epub) {
+    return;
+  }
+  LOG_DBG("ERS", "Adding bookmark at spine %d, page %d", currentSpineIndex, section ? section->currentPage : -1);
+  int currentPage;
+  int pageCount;
+  {
+    RenderLock lock(*this);
+    pageCount = section->pageCount;
+    currentPage = section->currentPage;
+  }
+
+  std::string pageText;
+  if (currentPage >= 0 && currentPage < pageCount) {
+    pageText = section->getTextFromSectionFile();
+  }
+
+  SavedProgressPosition progress = ProgressMapper::toSavedProgress(epub, getCurrentPosition());
+
+  BookmarkEntry entry;
+  entry.percentage = progress.percentage;
+  entry.xpath = progress.xpath;
+  entry.summary = BookmarkUtil::sanitizeBookmarkSummary(pageText);
+
+  // Add bookmark
+  const std::string path = BookmarkUtil::getBookmarkPath(epub->getPath());
+  LOG_DBG("ERS", "Bookmark path: %s", path.c_str());
+  const std::string bookmarksDir = BookmarkUtil::getBookmarksDir();
+  Storage.mkdir(bookmarksDir.c_str());
+  std::vector<BookmarkEntry> bookmarks;
+  if (Storage.exists(path.c_str())) {
+    LOG_DBG("ERS", "Existing bookmark file found, loading bookmarks");
+    String json = Storage.readFile(path.c_str());
+    if (!json.isEmpty()) {
+      JsonSettingsIO::loadBookmarks(bookmarks, json.c_str());
+    }
+  } else {
+    LOG_DBG("ERS", "No existing bookmark file, starting with empty bookmark list");
+  }
+  bookmarks.insert(bookmarks.begin(), entry);
+  LOG_DBG("ERS", "Saving bookmark to file: %s", path.c_str());
+  const bool ok = JsonSettingsIO::saveBookmarks(bookmarks, path.c_str());
+  if (ok) {
+    showBookmarkMessage = true;
+  } else {
+    LOG_ERR("ERS", "Failed to save bookmark to: %s", path.c_str());
+  }
+
+  requestUpdate();
+}
+
 ScreenshotInfo EpubReaderActivity::getScreenshotInfo() const {
   ScreenshotInfo info;
   info.readerType = ScreenshotInfo::ReaderType::Epub;
@@ -1309,4 +1403,24 @@ ScreenshotInfo EpubReaderActivity::getScreenshotInfo() const {
     }
   }
   return info;
+}
+
+CrossPointPosition EpubReaderActivity::getCurrentPosition() const {
+  const int currentPage = section ? section->currentPage : nextPageNumber;
+  const int totalPages = section ? section->pageCount : cachedChapterTotalPageCount;
+  std::optional<uint16_t> paragraphIndex;
+  if (section && currentPage >= 0 && currentPage < section->pageCount) {
+    const uint16_t paragraphPage =
+        currentPage > 0 ? static_cast<uint16_t>(currentPage - 1) : static_cast<uint16_t>(currentPage);
+    if (const auto pIdx = section->getParagraphIndexForPage(paragraphPage)) {
+      paragraphIndex = *pIdx;
+    }
+  }
+
+  CrossPointPosition localPos = {currentSpineIndex, currentPage, totalPages};
+  if (paragraphIndex.has_value()) {
+    localPos.paragraphIndex = *paragraphIndex;
+    localPos.hasParagraphIndex = true;
+  }
+  return localPos;
 }

@@ -36,7 +36,7 @@ struct PageResult {
   uint32_t page = 0;
 };
 
-struct SyncResult {
+struct ProgressChangeResult {
   int spineIndex = 0;
   int page = 0;
 };
@@ -61,7 +61,7 @@ struct FilePathResult {
 
 using ResultVariant =
     std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, PageResult,
-                 SyncResult, NetworkModeResult, FootnoteResult, WordResult, FilePathResult>;
+                 ProgressChangeResult, NetworkModeResult, FootnoteResult, WordResult, FilePathResult>;
 
 struct ActivityResult {
   bool isCancelled = false;

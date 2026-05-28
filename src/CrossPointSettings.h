@@ -287,7 +287,11 @@ class CrossPointSettings {
   static constexpr uint8_t HIST_CAP_STEP = 25;
   static constexpr uint8_t HIST_CAP_DEFAULT = 100;
   uint8_t lookupHistoryCap = HIST_CAP_DEFAULT;
-  uint8_t holdToLookup = 0;
+  // Action triggered by holding Confirm in the reader.
+  // OFF: no action (default). BOOKMARK: add bookmark @ BOOKMARK_HOLD_MS (400ms).
+  // DICTIONARY: open word-select @ Dictionary::LONG_PRESS_MS (600ms, requires per-book dictionary).
+  enum HOLD_CONFIRM_ACTION : uint8_t { HOLD_CONFIRM_OFF = 0, HOLD_CONFIRM_BOOKMARK = 1, HOLD_CONFIRM_DICTIONARY = 2 };
+  uint8_t holdConfirmAction = HOLD_CONFIRM_OFF;
   // Tilt-based page turning (X3 only — requires QMI8658 IMU)
   uint8_t tiltPageTurn = TILT_OFF;
   // Language setting (Language enum index, default 0 = EN)

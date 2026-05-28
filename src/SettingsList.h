@@ -180,8 +180,9 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
             StrId::STR_LOOKUP_HIST_CAP, &CrossPointSettings::lookupHistoryCap,
             {CrossPointSettings::HIST_CAP_MIN, CrossPointSettings::HIST_CAP_MAX, CrossPointSettings::HIST_CAP_STEP},
             "lookupHistoryCap", StrId::STR_NONE_OPT),
-        SettingInfo::Toggle(StrId::STR_DICT_HOLD_TO_LOOKUP, &CrossPointSettings::holdToLookup, "holdToLookup",
-                            StrId::STR_NONE_OPT),
+        SettingInfo::Enum(StrId::STR_HOLD_CONFIRM, &CrossPointSettings::holdConfirmAction,
+                          {StrId::STR_STATE_OFF, StrId::STR_HOLD_CONFIRM_BOOKMARK, StrId::STR_HOLD_CONFIRM_DICT},
+                          "holdConfirmAction", StrId::STR_NONE_OPT),
         // --- Controls ---
         SettingInfo::Enum(StrId::STR_SIDE_BTN_LAYOUT, &CrossPointSettings::sideButtonLayout,
                           {StrId::STR_PREV_NEXT, StrId::STR_NEXT_PREV, StrId::STR_DISABLED}, "sideButtonLayout",
