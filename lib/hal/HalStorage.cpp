@@ -125,6 +125,14 @@ bool HalStorage::openFileForWrite(const char* moduleName, const std::string& pat
   return openFileForWrite(moduleName, path.c_str(), file);
 }
 
+bool HalStorage::openFileForAppend(const char* moduleName, const char* path, HalFile& file) {
+  StorageLock lock;  // ensure thread safety for the duration of this function
+  FsFile fsFile;
+  bool ok = SDCard.openFileForAppend(moduleName, path, fsFile);
+  file = HalFile(std::make_unique<HalFile::Impl>(std::move(fsFile)));
+  return ok;
+}
+
 bool HalStorage::openFileForWrite(const char* moduleName, const String& path, HalFile& file) {
   return openFileForWrite(moduleName, path.c_str(), file);
 }

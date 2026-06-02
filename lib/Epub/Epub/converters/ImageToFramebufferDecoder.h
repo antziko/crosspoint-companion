@@ -17,6 +17,15 @@ struct RenderConfig {
   bool useGrayscale = true;
   bool useDithering = true;
   bool performanceMode = false;
+  // When true, dither to a pure 1-bit black/white halftone (pixel values 0 or 3
+  // only) instead of 4 gray levels. Used on X3, whose 4-level grayscale waveform
+  // is weak; 1-bit values also contribute nothing to grayscale planes, so the
+  // halftone survives a text-AA pass untouched.
+  bool oneBitDither = false;
+  // When oneBitDither is set, choose the ordered dither field: true = blue
+  // noise (organic, photographic), false = Bayer (regular grid). Driven by the
+  // user's Display > Image Dither setting.
+  bool ditherBlueNoise = true;
   bool useExactDimensions = false;  // If true, use maxWidth/maxHeight as exact output size (no recalculation)
   std::string cachePath;            // If non-empty, decoder will write pixel cache to this path
 };

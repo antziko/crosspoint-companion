@@ -75,6 +75,12 @@ class KOReaderSyncActivity final : public Activity {
   // Local progress as KOReader format (pre-computed before Epub was released)
   SavedProgressPosition localProgress;
 
+  // Bookmark sync summary, captured in syncBookmarks() for display on the result screen.
+  bool bmSynced = false;     // True once a bookmark sync attempt completed (counts valid)
+  int bmRemoteCount = 0;     // Bookmarks fetched from the server
+  int bmLocalCount = 0;      // Local bookmarks before merge
+  int bmMergedCount = 0;     // Total after union merge
+
   // Selection in result screen (0=Apply, 1=Upload)
   int selectedOption = 0;
 
@@ -87,6 +93,9 @@ class KOReaderSyncActivity final : public Activity {
   void onWifiSelectionComplete(bool success);
   void performSync();
   void performUpload();
+  // Pull + union-merge + push bookmarks alongside progress. Silent (logs only);
+  // never fails the progress sync. Requires `documentHash` already computed.
+  void syncBookmarks();
   void ensureEpubLoaded();
   void saveProgressAndReturn(int spineIndex, int page);
   void returnToReader();

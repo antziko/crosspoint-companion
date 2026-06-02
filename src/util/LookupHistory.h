@@ -5,7 +5,8 @@
 
 // Per-book lookup history. Stored as <cachePath>/dictionary_history.txt.
 // Format: one entry per line, "word|STATUS\n" where STATUS is a single char.
-// Oldest entry at top; newest at bottom. No deduplication.
+// Oldest entry at top; newest at bottom. Deduplicated: re-looking up a word
+// removes its previous entry and re-appends it as newest (refreshing status).
 class LookupHistory {
  public:
   enum class Status { Direct = 'D', Stem = 'T', AltForm = 'Y', Suggestion = 'S', NotFound = 'X' };

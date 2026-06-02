@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cassert>
 
+#include "BookmarkStore.h"
 #include "Epub/Section.h"
 #include "EpubReaderUtils.h"
 #include "KOReaderCredentialStore.h"
@@ -140,6 +141,12 @@ void KOReaderSyncActivity::performSync() {
   // Fetch remote progress
   const auto result = KOReaderSyncClient::getProgress(documentHash, remoteProgress);
 
+  // Sync bookmarks alongside progress whenever the server is reachable (OK or NOT_FOUND).
+  // Silent and best-effort: it never changes the progress sync outcome below.
+  if (result == KOReaderSyncClient::OK || result == KOReaderSyncClient::NOT_FOUND) {
+    syncBookmarks();
+  }
+
   if (result == KOReaderSyncClient::NOT_FOUND) {
     // No remote progress - offer to upload
     {
@@ -226,6 +233,57 @@ void KOReaderSyncActivity::performUpload() {
     state = UPLOAD_COMPLETE;
   }
   requestUpdate(true);
+}
+
+void KOReaderSyncActivity::syncBookmarks() {
+  {
+    RenderLock lock(*this);
+    state = SYNCING;
+    statusMessage = tr(STR_SYNCING_BOOKMARKS);
+  }
+  requestUpdateAndWait();
+
+  // Need the Epub for its title/author/path (used to key and re-save the local store).
+  ensureEpubLoaded();
+  if (!epub) {
+    LOG_ERR("KOSync", "Skipping bookmark sync: epub unavailable");
+    return;
+  }
+
+  // The reader unloaded its bookmarks when it exited; reload from disk for this book.
+  if (!BOOKMARKS.loadForBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), "epub")) {
+    LOG_ERR("KOSync", "Skipping bookmark sync: failed to load local bookmarks");
+    return;
+  }
+  bmLocalCount = static_cast<int>(BOOKMARKS.getBookmarks().size());
+
+  // Pull remote, reconcile with local (union bookmarks, propagate tombstoned deletes).
+  std::string remoteJson;
+  const auto getResult = KOReaderSyncClient::getBookmarks(documentHash, remoteJson);
+  if (getResult == KOReaderSyncClient::OK) {
+    // Elaborated type: BaseTheme.h's UIIcon enum has a 'Bookmark' enumerator that
+    // otherwise hides the struct in this translation unit.
+    std::vector<struct Bookmark> remoteBms;
+    std::vector<Tombstone> remoteTombs;
+    if (BookmarkStore::parseFromJson(remoteJson.c_str(), remoteBms, remoteTombs)) {
+      bmRemoteCount = static_cast<int>(remoteBms.size());
+      const size_t added = BOOKMARKS.mergeFrom(remoteBms, remoteTombs);  // self-persists
+      LOG_DBG("KOSync", "Merged %u remote bookmark(s)", (unsigned)added);
+    }
+  } else if (getResult != KOReaderSyncClient::NOT_FOUND) {
+    // Fetch failed, but still upload local set so the server learns our bookmarks.
+    LOG_ERR("KOSync", "Bookmark fetch failed: %s", KOReaderSyncClient::errorString(getResult));
+  }
+
+  bmMergedCount = static_cast<int>(BOOKMARKS.getBookmarks().size());
+  bmSynced = true;
+
+  // Push the reconciled set + tombstones so other devices converge on next sync.
+  const std::string localJson = BookmarkStore::serializeToJson(BOOKMARKS.getBookmarks(), BOOKMARKS.getTombstones());
+  const auto putResult = KOReaderSyncClient::updateBookmarks(documentHash, localJson);
+  if (putResult != KOReaderSyncClient::OK) {
+    LOG_ERR("KOSync", "Bookmark upload failed: %s", KOReaderSyncClient::errorString(putResult));
+  }
 }
 
 void KOReaderSyncActivity::onEnter() {
@@ -334,7 +392,16 @@ void KOReaderSyncActivity::render(RenderLock&&) {
              localProgress.percentage * 100);
     renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 200, localPageStr);
 
-    const int optionY = top + 230;
+    // Bookmark sync summary (merge is automatic; this is informational).
+    int optionY = top + 230;
+    if (bmSynced && (bmRemoteCount > 0 || bmLocalCount > 0)) {
+      // Extra gap separates the bookmark block from the local progress above it.
+      char bmStr[96];
+      snprintf(bmStr, sizeof(bmStr), tr(STR_BOOKMARK_DIFF_FORMAT), bmRemoteCount, bmLocalCount, bmMergedCount);
+      renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 248, tr(STR_BOOKMARKS), true);
+      renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 273, bmStr);
+      optionY = top + 305;
+    }
     const int optionHeight = 30;
 
     // Apply option
@@ -361,6 +428,12 @@ void KOReaderSyncActivity::render(RenderLock&&) {
   if (state == NO_REMOTE_PROGRESS) {
     UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top, tr(STR_NO_REMOTE_MSG), true, EpdFontFamily::BOLD);
     UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top + 40, tr(STR_UPLOAD_PROMPT));
+
+    if (bmSynced && (bmRemoteCount > 0 || bmLocalCount > 0)) {
+      char bmStr[96];
+      snprintf(bmStr, sizeof(bmStr), tr(STR_BOOKMARK_DIFF_FORMAT), bmRemoteCount, bmLocalCount, bmMergedCount);
+      UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top + 90, bmStr);
+    }
 
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_UPLOAD), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

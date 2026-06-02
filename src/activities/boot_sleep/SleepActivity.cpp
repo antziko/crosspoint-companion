@@ -1,5 +1,7 @@
 #include "SleepActivity.h"
 
+#include <esp_random.h>
+
 #include <Epub.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
@@ -66,6 +68,8 @@ void SleepActivity::renderCustomSleepScreen() const {
   HalFile file;
   if (Storage.openFileForRead("SLP", "/sleep.bmp", file)) {
     Bitmap bitmap(file, true);
+    bitmap.setOneBitDither(renderer.isX3());  // X3: 1-bit halftone, avoids wash-out
+    bitmap.setImageDitherMode(SETTINGS.imageDither);  // blue/bayer/error-diffusion (X4)
     if (bitmap.parseHeaders() == BmpReaderError::Ok) {
       LOG_DBG("SLP", "Loading: /sleep.bmp");
       renderBitmapSleepScreen(bitmap);
@@ -122,9 +126,11 @@ void SleepActivity::renderCustomSleepScreen() const {
       const uint16_t fileCount = static_cast<uint16_t>(std::min(numFiles, static_cast<size_t>(UINT16_MAX)));
       const uint8_t window =
           static_cast<uint8_t>(std::min(static_cast<size_t>(APP_STATE.recentSleepFill), numFiles - 1));
-      auto randomFileIndex = static_cast<uint16_t>(random(fileCount));
+      // Use the hardware TRNG (esp_random) rather than Arduino random(), which is
+      // never seeded here and so repeats the same sequence every boot.
+      auto randomFileIndex = static_cast<uint16_t>(esp_random() % fileCount);
       for (uint8_t attempt = 0; attempt < 20 && APP_STATE.isRecentSleep(randomFileIndex, window); attempt++) {
-        randomFileIndex = static_cast<uint16_t>(random(fileCount));
+        randomFileIndex = static_cast<uint16_t>(esp_random() % fileCount);
       }
       APP_STATE.pushRecentSleep(randomFileIndex);
       APP_STATE.saveToFile();
@@ -134,6 +140,8 @@ void SleepActivity::renderCustomSleepScreen() const {
         LOG_DBG("SLP", "Randomly loading: %s/%s", sleepDir, files[randomFileIndex].c_str());
         delay(100);
         Bitmap bitmap(randFile, true);
+        bitmap.setOneBitDither(renderer.isX3());  // X3: 1-bit halftone, avoids wash-out
+        bitmap.setImageDitherMode(SETTINGS.imageDither);  // blue/bayer/error-diffusion (X4)
         if (bitmap.parseHeaders() == BmpReaderError::Ok) {
           renderBitmapSleepScreen(bitmap);
           randFile.close();
@@ -207,9 +215,19 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap) const {
   }
 
   LOG_DBG("SLP", "drawing to %d x %d", x, y);
+
+  // Wipe ghosting from the previously displayed screen before drawing the
+  // wallpaper. Clear to white first, then a single mild HALF refresh (not FULL's
+  // black-white-black-white flash) removes most of the prior content.
+  renderer.clearScreen();
+  renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+
   renderer.clearScreen();
 
-  const bool hasGreyscale = bitmap.hasGreyscale() &&
+  // X3's 4-level grayscale (gc) waveform washes out mid-tones a few seconds
+  // after the clean BW frame is shown, so skip the grayscale overlay there and
+  // keep the dithered BW render (which already reproduces the image well).
+  const bool hasGreyscale = bitmap.hasGreyscale() && !renderer.isX3() &&
                             SETTINGS.sleepScreenCoverFilter == CrossPointSettings::SLEEP_SCREEN_COVER_FILTER::NO_FILTER;
 
   renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, cropX, cropY);

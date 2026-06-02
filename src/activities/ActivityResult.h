@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -59,9 +60,15 @@ struct FilePathResult {
   std::string path;
 };
 
+struct BookmarkResult {
+  uint16_t spineIndex = 0;
+  float progress = 0.0f;
+  uint16_t paragraphIndex = std::numeric_limits<uint16_t>::max();
+};
+
 using ResultVariant =
     std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, PageResult,
-                 ProgressChangeResult, NetworkModeResult, FootnoteResult, WordResult, FilePathResult>;
+                 ProgressChangeResult, NetworkModeResult, FootnoteResult, WordResult, FilePathResult, BookmarkResult>;
 
 struct ActivityResult {
   bool isCancelled = false;

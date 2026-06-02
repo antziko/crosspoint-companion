@@ -71,7 +71,8 @@ void TxtReaderActivity::loop() {
     return;
   }
 
-  const auto [prevTriggered, nextTriggered, fromTilt] = ReaderUtils::detectPageTurn(mappedInput);
+  [[maybe_unused]] const auto [prevTriggered, nextTriggered, fromTilt, fromSide] =
+      ReaderUtils::detectPageTurn(mappedInput);
   if (!prevTriggered && !nextTriggered) {
     return;
   }

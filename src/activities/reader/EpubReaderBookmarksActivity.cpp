@@ -1,15 +1,14 @@
 #include "EpubReaderBookmarksActivity.h"
 
+#include "../../BookmarkStore.h"
+
 #include <GfxRenderer.h>
-#include <HalStorage.h>
 #include <I18n.h>
-#include <JsonSettingsIO.h>
-#include <util/BookmarkUtil.h>
 
 #include <algorithm>
+#include <cmath>
 
 #include "MappedInputManager.h"
-#include "ProgressMapper.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -26,36 +25,9 @@ constexpr int LINE_HEIGHT = 60;
 void EpubReaderBookmarksActivity::onEnter() {
   Activity::onEnter();
 
-  if (!epub) {
-    return;
-  }
+  bookmarks = BOOKMARKS.getBookmarks();
+  LOG_DBG("EPB", "Loaded %d bookmarks", static_cast<int>(bookmarks.size()));
 
-  const std::string path = BookmarkUtil::getBookmarkPath(epubPath);
-  if (Storage.exists(path.c_str())) {
-    String json = Storage.readFile(path.c_str());
-    if (json.isEmpty()) {
-      LOG_ERR("EPB", "Failed to load bookmarks from %s. Empty bookmark file", path.c_str());
-      bookmarks.clear();
-      bookmarks.shrink_to_fit();
-    } else {
-      JsonSettingsIO::loadBookmarks(bookmarks, json.c_str());
-
-      // pre-compute bookmark page values for quicker rendering
-      for (auto& bookmark : bookmarks) {
-        CrossPointPosition pos = ProgressMapper::toCrossPoint(epub, {bookmark.xpath, bookmark.percentage}, renderer);
-        bookmark.computedSpineIndex = pos.spineIndex;
-        bookmark.computedChapterPageCount = pos.totalPages;
-        bookmark.computedChapterProgress = pos.pageNumber;
-      }
-    }
-  } else {
-    LOG_DBG("EPB", "No bookmark file found at %s, starting with empty bookmarks", path.c_str());
-    bookmarks.clear();
-    bookmarks.shrink_to_fit();
-  }
-  LOG_DBG("EPB", "Loaded %d bookmarks for book: %s", static_cast<int>(bookmarks.size()), epubPath.c_str());
-
-  // Trigger first update
   requestUpdate();
 }
 
@@ -64,12 +36,12 @@ void EpubReaderBookmarksActivity::onExit() { Activity::onExit(); }
 int EpubReaderBookmarksActivity::getGutterBottom(const GfxRenderer& renderer) {
   const auto orientation = renderer.getOrientation();
   const bool isPortrait = orientation == GfxRenderer::Orientation::Portrait;
-  return isPortrait ? 75 : 40;  // Reserve vertical space for button hints at the bottom
+  return isPortrait ? 75 : 40;
 }
 
 int EpubReaderBookmarksActivity::getListHeight(const GfxRenderer& renderer) {
   const auto pageHeight = renderer.getScreenHeight();
-  return pageHeight - getGutterBottom(renderer) - LINE_HEIGHT;  // Reserve vertical space for title and button hints
+  return pageHeight - getGutterBottom(renderer) - LINE_HEIGHT;
 }
 
 void EpubReaderBookmarksActivity::loop() {
@@ -77,19 +49,14 @@ void EpubReaderBookmarksActivity::loop() {
   if (confirmingDelete >= DELETE_MODE_DISPLAY) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       if (confirmingDelete == DELETE_MODE_DISPLAY) {
-        confirmingDelete = DELETE_MODE_CONFIRM;  // first confirmation, update text
+        confirmingDelete = DELETE_MODE_CONFIRM;
         requestUpdate();
         return;
       }
-      bookmarks.erase(bookmarks.begin() + selectorIndex);
-      const std::string path = BookmarkUtil::getBookmarkPath(epubPath);
-      Storage.mkdir(BookmarkUtil::getBookmarksDir().c_str());
-      if (!JsonSettingsIO::saveBookmarks(bookmarks, path.c_str())) {
-        LOG_ERR("EPB", "Failed to save bookmarks after delete");
-      }
+      BOOKMARKS.removeBookmarkAt(static_cast<size_t>(selectorIndex));
+      bookmarks = BOOKMARKS.getBookmarks();
 
-      // Move selector up if we deleted the last item
-      if (selectorIndex >= bookmarks.size() && selectorIndex > 0) {
+      if (selectorIndex >= static_cast<int>(bookmarks.size()) && selectorIndex > 0) {
         selectorIndex--;
       }
 
@@ -103,13 +70,12 @@ void EpubReaderBookmarksActivity::loop() {
     }
   }
 
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {  // Open
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     if (bookmarks.empty()) {
       return;
     }
-    auto bookmark = bookmarks.at(selectorIndex);
-    CrossPointPosition pos = ProgressMapper::toCrossPoint(epub, {bookmark.xpath, bookmark.percentage}, renderer);
-    setResult(ProgressChangeResult{pos.spineIndex, pos.pageNumber});
+    const struct Bookmark& bm = bookmarks.at(static_cast<size_t>(selectorIndex));
+    setResult(BookmarkResult{bm.spineIndex, bm.progress, bm.paragraphIndex});
     finish();
     return;
   } else if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
@@ -157,40 +123,36 @@ void EpubReaderBookmarksActivity::render(RenderLock&&) {
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
   const auto orientation = renderer.getOrientation();
-  // Landscape orientation: reserve a horizontal gutter for button hints.
   const bool isLandscapeCw = orientation == GfxRenderer::Orientation::LandscapeClockwise;
   const bool isLandscapeCcw = orientation == GfxRenderer::Orientation::LandscapeCounterClockwise;
-  // Inverted portrait: reserve vertical space for hints at the top.
   const bool isPortraitInverted = orientation == GfxRenderer::Orientation::PortraitInverted;
   const bool isPortrait = orientation == GfxRenderer::Orientation::Portrait;
   const int hintGutterWidth = (isLandscapeCw || isLandscapeCcw) ? 40 : 0;
-  // Landscape CW places hints on the left edge; CCW keeps them on the right.
   const int contentX = isLandscapeCw ? hintGutterWidth : 0;
   const int contentWidth = pageWidth - hintGutterWidth;
   const int hintGutterHeight = isPortraitInverted ? 50 : 0;
   const int hintGutterBottom = getGutterBottom(renderer);
   const int contentY = hintGutterHeight;
-  const int listY = contentY + LINE_HEIGHT;  // Reserve vertical space for title
+  const int listY = contentY + LINE_HEIGHT;
   const int listHeight = getListHeight(renderer);
-  const int numBookmarks = bookmarks.size();
+  const int numBookmarks = static_cast<int>(bookmarks.size());
 
-  // Manual centering to honor content gutters.
   const int titleX =
       contentX + (contentWidth - renderer.getTextWidth(UI_12_FONT_ID, tr(STR_BOOKMARKS), EpdFontFamily::BOLD)) / 2;
   renderer.drawText(UI_12_FONT_ID, titleX, 15 + contentY, tr(STR_BOOKMARKS), true, EpdFontFamily::BOLD);
 
-  const auto getBookmarkTitle = [this](int index) {
-    return bookmarks.at(confirmingDelete >= DELETE_MODE_DISPLAY ? selectorIndex : index).summary;
+  const auto getBookmarkTitle = [this](int index) -> std::string {
+    const struct Bookmark& bm = bookmarks.at(static_cast<size_t>(confirmingDelete >= DELETE_MODE_DISPLAY ? selectorIndex : index));
+    return bm.snippet[0] != '\0' ? std::string(bm.snippet) : std::string(tr(STR_BOOKMARK_INSTRUCTIONS));
   };
-  const auto getBookmarkSubtitle = [this](int index) {
-    auto bookmark = bookmarks.at(confirmingDelete >= DELETE_MODE_DISPLAY ? selectorIndex : index);
-    auto tocIndex = epub->getTocIndexForSpineIndex(bookmark.computedSpineIndex);
-    auto tocTitle = (tocIndex >= 0) ? (epub->getTocItem(tocIndex)).title : tr(STR_UNNAMED);
-    return std::to_string((int)bookmark.percentage) + "% - " + std::to_string(bookmark.computedChapterProgress) + "/" +
-           std::to_string(bookmark.computedChapterPageCount) + " - " + tocTitle;
+  const auto getBookmarkSubtitle = [this](int index) -> std::string {
+    const struct Bookmark& bm = bookmarks.at(static_cast<size_t>(confirmingDelete >= DELETE_MODE_DISPLAY ? selectorIndex : index));
+    const char* chapter = bm.chapterTitle[0] != '\0' ? bm.chapterTitle : tr(STR_UNNAMED);
+    char buf[80];
+    snprintf(buf, sizeof(buf), "%d%% - %s", static_cast<int>(std::lround(bm.progress * 100.0f)), chapter);
+    return std::string(buf);
   };
-  const auto getBookmarkIcon = [isPortrait](int index) {
-    // only enabled icon in portrait mode due to limitation with rotating icons for other orientations
+  const auto getBookmarkIcon = [isPortrait](int /*index*/) {
     return isPortrait ? UIIcon::Bookmark : UIIcon::None;
   };
 
@@ -199,7 +161,6 @@ void EpubReaderBookmarksActivity::render(RenderLock&&) {
       GUI.drawHelpText(renderer, Rect{0, pageHeight / 2 - LINE_HEIGHT * 2, contentWidth, LINE_HEIGHT},
                        tr(STR_CONFIRM_DELETE_BOOKMARK));
 
-      // render list with just the selected item for the user to confirm to delete
       GUI.drawList(renderer, Rect{contentX, pageHeight / 2, contentWidth, LINE_HEIGHT}, 1, 0, getBookmarkTitle,
                    getBookmarkSubtitle, getBookmarkIcon);
     } else {

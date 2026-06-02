@@ -64,6 +64,14 @@ class OpdsParser final : public Print {
 
   operator bool() { return !error(); }
 
+  // Expat error detail captured at the point of failure (valid after error()).
+  // errorDetail is a static string from XML_ErrorString; errorLine is 0 if none.
+  const char* getErrorDetail() const { return errorDetail; }
+  long getErrorLine() const { return errorLine; }
+
+  // True if entries were dropped by the memory guard (feed larger than RAM allows).
+  bool wasTruncated() const { return truncated; }
+
   /**
    * Get the parsed entries (both navigation and book entries).
    * @return Vector of OpdsEntry entries
@@ -107,4 +115,7 @@ class OpdsParser final : public Print {
   bool inId = false;
 
   bool errorOccured = false;
+  const char* errorDetail = "";  // static string from XML_ErrorString
+  long errorLine = 0;
+  bool truncated = false;  // entries dropped by memory guard
 };

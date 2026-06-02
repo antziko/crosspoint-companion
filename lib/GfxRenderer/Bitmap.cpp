@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "OrderedDither.h"  // 1-bit blue-noise / Bayer ordered dither
+
 // ============================================================================
 // IMAGE PROCESSING OPTIONS
 // ============================================================================
@@ -167,10 +169,19 @@ BmpReaderError Bitmap::parseHeaders() {
   //  - High-color + dithering disabled → simple quantization (no error diffusion)
   const bool highColor = !nativePalette;
   if (highColor && dithering) {
-    if (USE_ATKINSON) {
-      atkinsonDitherer = new AtkinsonDitherer(width);
+    if (oneBitDither) {
+      // X3: pure 1-bit halftone via stateless ordered dither (blue noise or
+      // Bayer) — no ditherer object needed; handled inline in packPixel.
+    } else if (ditherMode == IMG_DITHER_ERROR_DIFFUSION) {
+      // X4 error-diffusion (best photo quality; row-streamed BMP allows it).
+      if (USE_ATKINSON) {
+        atkinsonDitherer = new AtkinsonDitherer(width);
+      } else {
+        fsDitherer = new FloydSteinbergDitherer(width);
+      }
     } else {
-      fsDitherer = new FloydSteinbergDitherer(width);
+      // X4 ordered 4-level (blue noise or Bayer) — stateless, inline in packPixel.
+      fourLevelOrdered = true;
     }
   }
 
@@ -192,10 +203,23 @@ BmpReaderError Bitmap::readNextRow(uint8_t* data, uint8_t* rowBuffer) const {
   // Helper lambda to pack 2bpp color into the output stream
   auto packPixel = [&](const uint8_t lum) {
     uint8_t color;
-    if (atkinsonDitherer) {
-      color = atkinsonDitherer->processPixel(adjustPixel(lum), currentX);
+    if (oneBitDither) {
+      // Stateless 1-bit ordered dither. Map true(white)/false(black) to the
+      // 2bpp domain (3 / 0) so the BW render path's `val < 3` test draws black
+      // for 0 and white for 3. prevRowY is the current output row. The X3 tone
+      // curve is applied inside orderedDither1Bit, so pass raw luminance.
+      // Error-diffusion maps to blue noise on X3 (no 4-level path).
+      color = orderedDither1Bit(lum, currentX, prevRowY, ditherMode != IMG_DITHER_BAYER) ? 3 : 0;
+    } else if (fourLevelOrdered) {
+      // X4 ordered 4-level: X4 tone curve + blue-noise or 8x8 Bayer field.
+      color = orderedDither4Level(lum, currentX, prevRowY, ditherMode == IMG_DITHER_BLUE_NOISE);
+    } else if (atkinsonDitherer) {
+      // X4 (4-level error diffusion): lift midtones with the X4 tone curve first
+      // so e-ink dot gain doesn't leave grays muddy. Error diffusion then
+      // preserves that corrected tone.
+      color = atkinsonDitherer->processPixel(toneMapX4(adjustPixel(lum)), currentX);
     } else if (fsDitherer) {
-      color = fsDitherer->processPixel(adjustPixel(lum), currentX);
+      color = fsDitherer->processPixel(toneMapX4(adjustPixel(lum)), currentX);
     } else {
       if (nativePalette) {
         // Palette matches native gray levels: direct mapping (still apply brightness/contrast/gamma)
@@ -290,6 +314,10 @@ BmpReaderError Bitmap::rewindToData() const {
   // Reset dithering when rewinding
   if (fsDitherer) fsDitherer->reset();
   if (atkinsonDitherer) atkinsonDitherer->reset();
+  // Reset the row counter so the stateless ordered dither (1-bit and 4-level)
+  // uses the same y per row across the BW/LSB/MSB grayscale passes; otherwise
+  // each pass samples a different threshold row and the planes mismatch.
+  prevRowY = -1;
 
   return BmpReaderError::Ok;
 }

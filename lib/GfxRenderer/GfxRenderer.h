@@ -41,6 +41,11 @@ class GfxRenderer {
   uint16_t panelHeight = HalDisplay::DISPLAY_HEIGHT;
   uint16_t panelWidthBytes = HalDisplay::DISPLAY_WIDTH_BYTES;
   uint32_t frameBufferSize = HalDisplay::BUFFER_SIZE;
+  // Display > Image Dither, raw setting value (IMG_DITHER_* in OrderedDither.h).
+  uint8_t imageDitherMode_ = IMG_DITHER_BLUE_NOISE;
+  // True when images should render as a 1-bit halftone instead of 4-level gray
+  // (always on X3; on X4 when text AA is off, for true black + no two-stage flash).
+  bool oneBitImages_ = false;
   std::vector<uint8_t*> bwBufferChunks;
   std::map<int, EpdFontFamily> fontMap;
   // Mutable because ensureSdCardFontReady() is const (called from layout code
@@ -244,6 +249,25 @@ class GfxRenderer {
   // numRows)), bypassing the framebuffer. supportsStripGrayscale() gates use.
   void writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* scratch, int yStart, int numRows) const;
   bool supportsStripGrayscale() const;
+
+  // True when running on the X3 (UC81xx) panel. Image rendering uses this to
+  // choose 1-bit halftone over the X3 4-level grayscale waveform path.
+  bool isX3() const { return display.isX3Mode(); }
+
+  // Image dither algorithm (Display > Image Dither). Set from src (which owns
+  // CrossPointSettings) with the raw IMG_DITHER_* value; read by ImageBlock and
+  // the Bitmap path. Bridges the lib/src boundary so lib code never includes
+  // CrossPointSettings.
+  void setImageDitherMode(uint8_t mode) { imageDitherMode_ = mode; }
+  uint8_t imageDitherMode() const { return imageDitherMode_; }
+  // EPUB convenience: blue-noise vs Bayer for the stateless ordered path.
+  // Error-diffusion isn't possible on JPEG block decode, so it maps to blue
+  // noise (the best ordered field) for EPUB images.
+  bool imageDitherBlueNoise() const { return imageDitherMode_ != IMG_DITHER_BAYER; }
+  // 1-bit halftone vs 4-level grayscale for images. Set by the reader from
+  // (isX3 || text AA off); read by ImageBlock to pick the render path + cache.
+  void setOneBitImages(bool v) { oneBitImages_ = v; }
+  bool oneBitImages() const { return oneBitImages_; }
   bool storeBwBuffer();    // Returns true if buffer was stored successfully
   void restoreBwBuffer();  // Restore and free the stored buffer
   void cleanupGrayscaleWithFrameBuffer() const;

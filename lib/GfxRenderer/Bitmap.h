@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "BitmapHelpers.h"
+#include "OrderedDither.h"  // ImageDitherMode (IMG_DITHER_*)
 
 #pragma pack(push, 1)
 struct BmpHeader {
@@ -66,6 +67,16 @@ class Bitmap {
 
   explicit Bitmap(HalFile& file, bool dithering = false) : file(file), dithering(dithering) {}
   ~Bitmap();
+
+  // Render as a pure 1-bit black/white halftone (ordered dither) instead of
+  // 4-level grayscale. Used on X3, whose 4-level grayscale waveform washes out;
+  // a 1-bit halftone keeps full tonal detail. Call before parseHeaders().
+  void setOneBitDither(bool enable) { oneBitDither = enable; }
+  // Dither algorithm (Display > Image Dither, IMG_DITHER_* value):
+  //   X3 (oneBitDither): blue-noise vs Bayer 1-bit field (error-diffusion maps
+  //     to blue noise — X3 has no 4-level path).
+  //   X4 (4-level): blue-noise/Bayer ordered, or Atkinson/FS error-diffusion.
+  void setImageDitherMode(uint8_t mode) { ditherMode = mode; }
   BmpReaderError parseHeaders();
   BmpReaderError readNextRow(uint8_t* data, uint8_t* rowBuffer) const;
   BmpReaderError rewindToData() const;
@@ -83,6 +94,9 @@ class Bitmap {
 
   HalFile& file;
   bool dithering = false;
+  bool oneBitDither = false;          // 1-bit halftone instead of 4-level (X3)
+  uint8_t ditherMode = IMG_DITHER_BLUE_NOISE;  // IMG_DITHER_* (blue/bayer/error-diffusion)
+  bool fourLevelOrdered = false;      // X4 ordered 4-level (blue/bayer) vs error-diffusion
   int width = 0;
   int height = 0;
   bool topDown = false;

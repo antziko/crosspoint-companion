@@ -144,6 +144,8 @@ class CrossPointSettings {
     OFF = 0,
     CHAPTER_SKIP = 1,
     ORIENTATION_CHANGE = 2,
+    // Hold left front button = toggle bookmark; hold right = sync progress.
+    BOOKMARK_AND_SYNC = 3,
     LONG_PRESS_BUTTON_BEHAVIOR_COUNT
   };
 
@@ -152,6 +154,10 @@ class CrossPointSettings {
 
   // Image rendering in EPUB reader
   enum IMAGE_RENDERING { IMAGES_DISPLAY = 0, IMAGES_PLACEHOLDER = 1, IMAGES_SUPPRESS = 2, IMAGE_RENDERING_COUNT };
+
+  // 1-bit halftone dither algorithm (X3). Applies to all images: EPUB images,
+  // sleep wallpaper, BMP viewer. Both options are stateless ordered dithers.
+  enum IMAGE_DITHER { DITHER_BLUE_NOISE = 0, DITHER_BAYER = 1, DITHER_ERROR_DIFFUSION = 2, IMAGE_DITHER_COUNT };
 
   enum TILT_PAGE_TURN { TILT_OFF = 0, TILT_NORMAL = 1, TILT_NVERTED = 2, TILT_PAGE_TURN_COUNT };
 
@@ -227,8 +233,10 @@ class CrossPointSettings {
   char opdsPassword[64] = "";
   // Hide battery percentage
   uint8_t hideBatteryPercentage = HIDE_NEVER;
-  // Long-press page turn button behavior
+  // Long-press behavior for FRONT page-turn buttons (Left/Right)
   uint8_t longPressButtonBehavior = OFF;
+  // Long-press behavior for SIDE page-turn buttons (PageBack/PageForward)
+  uint8_t sideLongPressButtonBehavior = OFF;
   // UI Theme
   uint8_t uiTheme = LYRA;
   // Sunlight fading compensation
@@ -247,6 +255,8 @@ class CrossPointSettings {
   uint8_t moveFinishedToReadFolder = 0;
   // Image rendering mode in EPUB reader
   uint8_t imageRendering = IMAGES_DISPLAY;
+  // 1-bit halftone dither algorithm for all images (X3): blue noise vs Bayer
+  uint8_t imageDither = DITHER_BLUE_NOISE;
   // Lookup history entry cap (direct value)
   static constexpr uint8_t HIST_CAP_MIN = 25;
   static constexpr uint8_t HIST_CAP_MAX = 225;

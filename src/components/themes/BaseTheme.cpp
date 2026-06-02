@@ -727,7 +727,7 @@ void BaseTheme::fillPopupProgress(const GfxRenderer& renderer, const Rect& layou
 
 void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, const int currentPage,
                               const int pageCount, std::string title, const int paddingBottom, const int textYOffset,
-                              const bool fillMargin) const {
+                              const bool fillMargin, const bool isPageBookmarked) const {
   auto metrics = UITheme::getInstance().getMetrics();
   int orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft;
   renderer.getOrientedViewableTRBL(&orientedMarginTop, &orientedMarginRight, &orientedMarginBottom,
@@ -777,13 +777,29 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
     renderer.fillRect(barMarginLeft, progressBarY, barWidth, barHeight, true);
   }
 
+  // Bookmark indicator: small filled tab shape at far left of status bar.
+  static constexpr int bmIconW = 9;
+  static constexpr int bmIconH = 14;
+  static constexpr int bmIconGap = 4;
+  static constexpr int bmNotchDepth = 5;
+  const int leftClusterX = metrics.statusBarHorizontalMargin + orientedMarginLeft + 1;
+  const int bmTotalWidth = isPageBookmarked ? (bmIconW + bmIconGap) : 0;
+
+  if (isPageBookmarked) {
+    const int bmX = leftClusterX;
+    const int bmY = textY + (metrics.batteryHeight - bmIconH) / 2 + 5;
+    renderer.fillRect(bmX, bmY, bmIconW, bmIconH, true);
+    const int xNotch[3] = {bmX, bmX + bmIconW, bmX + bmIconW / 2};
+    const int yNotch[3] = {bmY + bmIconH, bmY + bmIconH, bmY + bmIconH - bmNotchDepth};
+    renderer.fillPolygon(xNotch, yNotch, 3, false);
+  }
+
   // Draw Battery
   const bool showBatteryPercentage =
       SETTINGS.hideBatteryPercentage == CrossPointSettings::HIDE_BATTERY_PERCENTAGE::HIDE_NEVER;
   if (SETTINGS.statusBarBattery) {
     GUI.drawBatteryLeft(renderer,
-                        Rect{metrics.statusBarHorizontalMargin + orientedMarginLeft + 1, textY, metrics.batteryWidth,
-                             metrics.batteryHeight},
+                        Rect{leftClusterX + bmTotalWidth, textY, metrics.batteryWidth, metrics.batteryHeight},
                         showBatteryPercentage);
   }
 
@@ -809,7 +825,7 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
         renderer.getScreenWidth() - (metrics.statusBarHorizontalMargin * 2) - orientedMarginLeft - orientedMarginRight;
 
     const int batterySize = SETTINGS.statusBarBattery ? (showBatteryPercentage ? 50 : 20) : 0;
-    const int titleMarginLeft = batterySize + 30;
+    const int titleMarginLeft = bmTotalWidth + batterySize + 30;
     const int clockReserve = clockTextWidth > 0 ? (clockTextWidth + 10) : 0;
     const int titleMarginRight = progressTextWidth + clockReserve + 30;
 

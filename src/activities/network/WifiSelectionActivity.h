@@ -69,9 +69,6 @@ class WifiSelectionActivity final : public Activity {
   // Whether network was connected using a saved password (skip save prompt)
   bool usedSavedPassword = false;
 
-  // Whether to attempt auto-connect on entry
-  const bool allowAutoConnect;
-
   // Whether we are attempting to auto-connect
   bool autoConnecting = false;
 
@@ -101,8 +98,8 @@ class WifiSelectionActivity final : public Activity {
   void onComplete(bool connected);
 
  public:
-  explicit WifiSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, bool autoConnect = true)
-      : Activity("WifiSelection", renderer, mappedInput), allowAutoConnect(autoConnect) {}
+  explicit WifiSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
+      : Activity("WifiSelection", renderer, mappedInput) {}
   void onEnter() override;
   void onExit() override;
   void loop() override;

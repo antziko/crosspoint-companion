@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include <OrderedDither.h>  // shared blue-noise / Bayer 1-bit dither (lib/GfxRenderer)
+
 // 4x4 Bayer matrix for ordered dithering
 inline const uint8_t bayer4x4[4][4] = {
     {0, 8, 2, 10},
@@ -24,4 +26,19 @@ inline uint8_t applyBayerDither4Level(uint8_t gray, int x, int y) {
   if (adjusted < 128) return 1;
   if (adjusted < 192) return 2;
   return 3;
+}
+
+// Single quantization entry point used by the image converters' hot loops.
+// Returns a 2-bit pixel value (0=black .. 3=white):
+//   oneBit       -> 1-bit halftone, value is 0 or 3 only (X3 path). `blueNoise`
+//                   selects the ordered dither field (blue noise vs Bayer).
+//   useDithering -> 4-level Bayer dither.
+//   else         -> plain 4-level quantization.
+inline uint8_t ditherPixel(uint8_t gray, int x, int y, bool useDithering, bool oneBit, bool blueNoise) {
+  if (oneBit) return orderedDither1Bit(gray, x, y, blueNoise) ? 3 : 0;
+  // X4: 4-level ordered dither with the X4 tone curve, blue-noise or 8x8 Bayer
+  // per the "Image Dither" setting (replaces the flat 4x4 applyBayerDither4Level).
+  if (useDithering) return orderedDither4Level(gray, x, y, blueNoise);
+  uint8_t q = gray / 85;
+  return q > 3 ? 3 : q;
 }

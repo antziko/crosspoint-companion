@@ -22,6 +22,8 @@ struct KOReaderProgress {
  *   GET /users/auth - Authenticate (validate credentials)
  *   GET /syncs/progress/:document - Get progress for a document
  *   PUT /syncs/progress - Update progress for a document
+ *   GET /syncs/bookmarks/:document - Get bookmarks for a document (self-hosted server extension)
+ *   PUT /syncs/bookmarks - Update bookmarks for a document (self-hosted server extension)
  *
  * Authentication:
  *   x-auth-user: username
@@ -51,6 +53,26 @@ class KOReaderSyncClient {
    * @return OK on success, error code on failure
    */
   static Error updateProgress(const KOReaderProgress& progress);
+
+  /**
+   * Get the bookmarks blob for a document (self-hosted server extension).
+   *
+   * The server stores bookmarks as an opaque pre-serialized JSON-array string;
+   * this returns that string verbatim for the caller to parse.
+   *
+   * @param documentHash The document hash (must match the progress hash for the book)
+   * @param outBookmarksJson Output: the JSON-array string (empty if server stored none)
+   * @return OK on success, NOT_FOUND if no bookmarks exist, error code on failure
+   */
+  static Error getBookmarks(const std::string& documentHash, std::string& outBookmarksJson);
+
+  /**
+   * Replace the bookmarks blob for a document (self-hosted server extension).
+   * @param documentHash The document hash
+   * @param bookmarksJson Pre-serialized JSON-array string of all bookmarks
+   * @return OK on success, error code on failure
+   */
+  static Error updateBookmarks(const std::string& documentHash, const std::string& bookmarksJson);
 
   /**
    * Get human-readable error message.

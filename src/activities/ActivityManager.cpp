@@ -20,7 +20,11 @@
 
 void ActivityManager::begin() {
   xTaskCreate(&renderTaskTrampoline, "ActivityManagerRender",
-              8192,              // Stack size
+              // EPUB section indexing (createSectionFile: expat parse + block
+              // layout + hyphenation + text measurement) runs on this task and
+              // is a deep call chain. 8192 left almost no margin and could
+              // corrupt/crash on complex chapters; 12288 gives headroom.
+              12288,             // Stack size
               this,              // Parameters
               1,                 // Priority
               &renderTaskHandle  // Task handle

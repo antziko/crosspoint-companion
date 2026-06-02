@@ -63,6 +63,14 @@ void BmpViewerActivity::onEnter() {
     loadSiblingImages();
   }
 
+  renderImage();
+}
+
+// Re-render path (manual refresh / requestUpdate). The framebuffer was cleared
+// to white before this runs, so re-decode and redraw the current bitmap.
+void BmpViewerActivity::render(RenderLock&&) { renderImage(); }
+
+void BmpViewerActivity::renderImage() {
   HalFile file;
 
   const auto pageWidth = renderer.getScreenWidth();
@@ -72,6 +80,8 @@ void BmpViewerActivity::onEnter() {
   // 1. Open the file
   if (Storage.openFileForRead("BMP", filePath, file)) {
     Bitmap bitmap(file, true);
+    bitmap.setOneBitDither(renderer.isX3());  // X3: 1-bit halftone, full tonal detail
+    bitmap.setImageDitherMode(SETTINGS.imageDither);  // blue/bayer/error-diffusion (X4)
 
     // 2. Parse headers to get dimensions
     if (bitmap.parseHeaders() == BmpReaderError::Ok) {
@@ -101,21 +111,51 @@ void BmpViewerActivity::onEnter() {
       bool hasNext = (siblingImages.size() > 1 && currentImageIndex != -1 &&
                       currentImageIndex < static_cast<int>(siblingImages.size()) - 1);
 
+      // If a sleep cover already exists, the Confirm button clears it (so the
+      // sleep screen can resume randomizing from the folder); otherwise it sets
+      // the current image as the cover.
+      coverExists = Storage.exists("/sleep.bmp");
+      const char* confirmLabel = coverExists ? tr(STR_CLEAR_BUTTON) : tr(STR_SET_SLEEP_COVER);
       const auto labels =
-          mappedInput.mapLabels(tr(STR_BACK), tr(STR_SET_SLEEP_COVER), (hasPrevious ? "<" : ""), (hasNext ? ">" : ""));
+          mappedInput.mapLabels(tr(STR_BACK), confirmLabel, (hasPrevious ? "<" : ""), (hasNext ? ">" : ""));
 
       GUI.fillPopupProgress(renderer, popupRect, 50);
 
+      // X4 (4-level grayscale) needs the multi-pass grayscale render to actually
+      // show grays; X3 produces a 1-bit halftone (0/3) so a single BW pass is
+      // correct. Without this, X4 BMPs showed only the 1-bit BW plane — too dark,
+      // and the dithered grays were invisible.
+      const bool hasGreyscale = bitmap.hasGreyscale() && !renderer.isX3();
+
+      // Wipe ghosting before drawing the image with a single mild HALF refresh
+      // (not FULL's black-white-black-white flash).
       renderer.clearScreen();
-      // Assuming drawBitmap defaults to 0,0 crop if omitted, or pass explicitly: drawBitmap(bitmap, x, y, pageWidth,
-      // pageHeight, 0, 0)
+      renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+
+      renderer.clearScreen();
       renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, 0, 0);
-
-      // Draw UI hints on the base layer
+      // Draw UI hints on the base (BW) layer
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-      // Single pass for non-grayscale images
+      renderer.displayBuffer(hasGreyscale ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
 
-      renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+      if (hasGreyscale) {
+        // Overlay the 4-level grayscale planes (LSB then MSB), then drive the
+        // panel with the combined gray frame — same sequence as the sleep cover.
+        bitmap.rewindToData();
+        renderer.clearScreen(0x00);
+        renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
+        renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, 0, 0);
+        renderer.copyGrayscaleLsbBuffers();
+
+        bitmap.rewindToData();
+        renderer.clearScreen(0x00);
+        renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
+        renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, 0, 0);
+        renderer.copyGrayscaleMsbBuffers();
+
+        renderer.displayGrayBuffer();
+        renderer.setRenderMode(GfxRenderer::BW);
+      }
 
     } else {
       // Handle file parsing error
@@ -176,6 +216,18 @@ void BmpViewerActivity::doSetSleepCover() {
   onEnter();
 }
 
+void BmpViewerActivity::doClearSleepCover() {
+  GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+
+  // Already gone counts as success; the sleep screen falls back to the random
+  // folder once /sleep.bmp is absent (SleepActivity checks it first).
+  const bool removed = !Storage.exists("/sleep.bmp") || Storage.remove("/sleep.bmp");
+
+  GUI.drawPopup(renderer, removed ? tr(STR_DONE) : tr(STR_FAILED_LOWER));
+  delay(1000);
+  onEnter();
+}
+
 void BmpViewerActivity::loop() {
   // Keep CPU awake/polling so 1st click works
   Activity::loop();
@@ -186,7 +238,11 @@ void BmpViewerActivity::loop() {
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    doSetSleepCover();
+    if (coverExists) {
+      doClearSleepCover();
+    } else {
+      doSetSleepCover();
+    }
     return;
   }
 

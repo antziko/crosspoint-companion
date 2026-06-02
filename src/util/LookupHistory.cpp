@@ -1,5 +1,7 @@
 #include "LookupHistory.h"
 
+#include <algorithm>
+
 #include <HalStorage.h>
 #include <Logging.h>
 
@@ -118,6 +120,12 @@ int LookupHistory::addWord(const std::string& cachePath, const std::string& word
 
   const std::string path = filePath(cachePath);
   auto entries = readAll(path);
+
+  // Deduplicate: drop any existing entry for this word so the re-lookup moves to
+  // the newest position (and refreshes its status) instead of adding a copy.
+  entries.erase(std::remove_if(entries.begin(), entries.end(),
+                               [&word](const Entry& e) { return e.word == word; }),
+                entries.end());
 
   Entry e;
   e.word = word;

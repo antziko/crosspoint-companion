@@ -3,6 +3,7 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <OpdsStream.h>
 #include <WiFi.h>
 
@@ -14,6 +15,7 @@
 #include "fontIds.h"
 #include "network/HttpDownloader.h"
 #include "util/BookCacheUtils.h"
+#include "util/SdDebugLog.h"
 #include "util/StringUtils.h"
 #include "util/UrlUtils.h"
 
@@ -23,6 +25,12 @@ constexpr int PAGE_ITEMS = 23;
 
 void OpdsBookBrowserActivity::onEnter() {
   Activity::onEnter();
+
+  // Fresh on-SD debug trace for this browsing session (readable at
+  // /opds_debug.log without a serial monitor).
+  SdDebugLog::setEnabled(true);
+  SdDebugLog::clear();
+  SdDebugLog::log("OPDS", "browser opened, free heap=%u", (unsigned)ESP.getFreeHeap());
 
   state = BrowserState::CHECK_WIFI;
   entries.clear();
@@ -195,23 +203,56 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
 
   std::string url = (path.find("http") == 0) ? path : UrlUtils::buildUrl(server.url, path);
   LOG_DBG("OPDS", "Fetching: %s", url.c_str());
+  SdDebugLog::log("OPDS", "fetch start, heap=%u, url=%s", (unsigned)ESP.getFreeHeap(), url.c_str());
+  // Two-phase fetch: download to a temp file first, then parse it AFTER the
+  // HTTPS connection is closed. A live TLS connection holds ~70KB (mbedtls
+  // record buffers + session) on top of the 48KB framebuffer, leaving only
+  // ~5KB free during the transfer — enough to stream bytes to a file (like a
+  // book download) but NOT enough for expat's working memory on a large feed,
+  // which fails mid-read at ~5KB free. Closing the connection frees the 70KB
+  // so the parse runs with full heap. (Streaming the parser concurrently with
+  // the TLS read only worked for tiny feeds that fit in the 5KB sliver.)
+  static constexpr const char* kTmpFeed = "/.opds_feed.tmp";
+  const auto dl = HttpDownloader::downloadToFile(url, kTmpFeed, nullptr, nullptr, server.username, server.password);
+  if (dl != HttpDownloader::OK) {
+    SdDebugLog::log("OPDS", "FETCH FAILED (http) code=%d, heap=%u", static_cast<int>(dl), (unsigned)ESP.getFreeHeap());
+    Storage.remove(kTmpFeed);
+    state = BrowserState::ERROR;
+    errorMessage = tr(STR_FETCH_FEED_FAILED);
+    requestUpdate();
+    return;
+  }
+
   OpdsParser parser;
   {
-    OpdsParserStream stream{parser};
-    if (!HttpDownloader::fetchUrl(url, stream, server.username, server.password)) {
+    auto rdbuf = makeUniqueNoThrow<uint8_t[]>(1024);
+    HalFile feedFile;
+    if (!rdbuf || !Storage.openFileForRead("OPDS", kTmpFeed, feedFile)) {
+      SdDebugLog::log("OPDS", "FEED reopen failed / OOM, heap=%u", (unsigned)ESP.getFreeHeap());
+      Storage.remove(kTmpFeed);
       state = BrowserState::ERROR;
       errorMessage = tr(STR_FETCH_FEED_FAILED);
       requestUpdate();
       return;
     }
+    for (int n = feedFile.read(rdbuf.get(), 1024); n > 0; n = feedFile.read(rdbuf.get(), 1024)) {
+      parser.write(rdbuf.get(), static_cast<size_t>(n));
+      if (parser.error()) break;
+    }
+    parser.flush();
   }
+  Storage.remove(kTmpFeed);
 
   if (!parser) {
+    SdDebugLog::log("OPDS", "PARSE FAILED: %s (line %ld), heap=%u", parser.getErrorDetail(), parser.getErrorLine(),
+                    (unsigned)ESP.getFreeHeap());
     state = BrowserState::ERROR;
     errorMessage = tr(STR_PARSE_FEED_FAILED);
     requestUpdate();
     return;
   }
+  SdDebugLog::log("OPDS", "fetch ok, %u entries%s, heap=%u", (unsigned)parser.getEntries().size(),
+                  parser.wasTruncated() ? " (TRUNCATED: feed too large for RAM)" : "", (unsigned)ESP.getFreeHeap());
 
   searchTemplate = parser.getSearchTemplate();
   const auto& nextUrl = parser.getNextPageUrl();

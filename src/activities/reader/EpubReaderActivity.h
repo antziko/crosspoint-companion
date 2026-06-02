@@ -12,6 +12,14 @@
 class EpubReaderActivity final : public Activity {
   std::shared_ptr<Epub> epub;
   std::unique_ptr<Section> section = nullptr;
+  // True right after this render rebuilt the section cache from scratch. If a
+  // page then STILL fails to load, the cache isn't the problem — stop instead of
+  // clearing + rebuilding forever (the old behavior looked "stuck on Indexing").
+  bool sectionJustRebuilt = false;
+  // Spine index whose cache build (createSectionFile) failed — e.g. SD write
+  // error / card full. Prevents re-entering the build every frame (the endless
+  // "Indexing" loop). Cleared when a chapter builds/loads OK.
+  int buildFailedSpine = -1;
   int currentSpineIndex = 0;
   int nextPageNumber = 0;
   std::optional<uint16_t> pendingPageJump;
@@ -35,6 +43,7 @@ class EpubReaderActivity final : public Activity {
   bool ignoreBackUntilRelease = false;    // Suppress Back bleed-through after dictionary chain exit
   bool ignoreNextConfirmRelease = false;  // Suppress menu open after hold-Confirm gesture fires
   bool showBookmarkMessage = false;
+  bool bookmarkMessageRemoved = false;  // false = "added", true = "removed" text
   // Tracks whether this book is currently removed from Recent Books by the
   // removeReadBooksFromRecents feature (set at End-of-Book, cleared if paged back in).
   bool recentsEntryRemoved = false;

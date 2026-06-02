@@ -610,8 +610,23 @@ void loop() {
   if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::FORCE_REFRESH &&
       mappedInputManager.wasReleased(MappedInputManager::Button::Power)) {
     LOG_DBG("MAIN", "Manual screen refresh triggered");
-    RenderLock lock;
-    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    // Whole-page ghost clear, then re-render (requestUpdate re-runs the active
+    // activity's render()). The clear is driven from a blanked framebuffer so it
+    // pushes the whole panel — not just changed pixels — clearing ghosting. The
+    // mode differs by panel because a HALF/FULL clear firms the e-ink particles
+    // too hard for the X4 grayscale LUT to darken back:
+    //   - X4: any grayscale content (EPUB AA pages, BMP grays, sleep wallpaper)
+    //     would wash whitish after a HALF/FULL clear. Use a FAST clear — the
+    //     same grayscale-safe technique as the image-blanking dance — so the
+    //     re-render's grayscale pass can restore the grays cleanly.
+    //   - X3: 1-bit panel, no grayscale image pass, so HALF gives a stronger
+    //     ghost clear with no washing risk.
+    {
+      RenderLock lock;
+      renderer.clearScreen();
+      renderer.displayBuffer(renderer.isX3() ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
+    }
+    activityManager.requestUpdate();
   }
 
   // Refresh the battery icon when USB is plugged or unplugged.

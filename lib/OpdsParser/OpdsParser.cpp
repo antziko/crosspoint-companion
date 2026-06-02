@@ -5,11 +5,44 @@
 
 #include <cstring>
 
+namespace {
+// Cap stored entries so a large unpaginated feed can't exhaust the heap and
+// trigger abort() (bare `new` is not nothrow with -fno-exceptions). Parsing
+// continues past the cap so the HTTP read completes cleanly; extra entries are
+// dropped. We deliberately do NOT reserve() up front: a big contiguous reserve
+// starves expat's own growing parse buffer mid-stream (it failed XML_GetBuffer
+// on even the small root feed). 64 is low enough that the vector's doublings
+// (…32→64) stay small transients, yet covers any usable page. Feeds that dump
+// hundreds of entries unpaginated are a server problem (should send rel="next").
+//
+// The cap is the ONLY guard: an instantaneous free-heap check is useless here
+// because mbedtls holds tens of KB of TLS record buffers during read, so the
+// momentary free heap dips far below the before/after snapshots and any
+// threshold misfires mid-stream (a small feed got cut to 4 entries that way).
+constexpr size_t MAX_ENTRIES = 64;
+}  // namespace
+
 OpdsParser::OpdsParser() {
   parser = XML_ParserCreate(nullptr);
   if (!parser) {
     errorOccured = true;
+    errorDetail = "out of memory (parser alloc)";
     LOG_DBG("OPDS", "Couldn't allocate memory for parser");
+    return;
+  }
+  // Pre-grow expat's parse buffer now, while the heap is still clean — before
+  // the TLS read churns it with ~16KB mbedtls record buffers. expat needs ~4KB
+  // contiguous (the buffer is bounded by XML_CONTEXT_BYTES + our 1KB feed chunk,
+  // not by feed size — verified across 1KB..69KB feeds), and it never shrinks,
+  // so reserving 8KB up front means it reuses that for the whole stream and
+  // never needs a fragmentation-sensitive grow mid-read. That mid-stream grow
+  // was failing XML_GetBuffer intermittently at ~73KB-free-but-fragmented,
+  // producing "out of memory (parse buffer)" on larger letter feeds.
+  if (!XML_GetBuffer(parser, 6144)) {
+    errorOccured = true;
+    errorDetail = "out of memory (parse buffer pregrow)";
+    LOG_DBG("OPDS", "Couldn't pre-grow parse buffer");
+    destroyXmlParser(parser);
   }
 }
 
@@ -33,6 +66,7 @@ size_t OpdsParser::write(const uint8_t* xmlData, const size_t length) {
     void* const buf = XML_GetBuffer(parser, toRead);
     if (!buf) {
       errorOccured = true;
+      errorDetail = "out of memory (parse buffer)";
       LOG_DBG("OPDS", "Couldn't allocate memory for buffer");
       destroyXmlParser(parser);
       return length;
@@ -42,8 +76,9 @@ size_t OpdsParser::write(const uint8_t* xmlData, const size_t length) {
 
     if (XML_ParseBuffer(parser, static_cast<int>(toRead), 0) == XML_STATUS_ERROR) {
       errorOccured = true;
-      LOG_DBG("OPDS", "Parse error at line %lu: %s", XML_GetCurrentLineNumber(parser),
-              XML_ErrorString(XML_GetErrorCode(parser)));
+      errorLine = XML_GetCurrentLineNumber(parser);
+      errorDetail = XML_ErrorString(XML_GetErrorCode(parser));  // static string, safe to keep
+      LOG_DBG("OPDS", "Parse error at line %ld: %s", errorLine, errorDetail);
       destroyXmlParser(parser);
       return length;
     }
@@ -54,8 +89,15 @@ size_t OpdsParser::write(const uint8_t* xmlData, const size_t length) {
 }
 
 void OpdsParser::flush() {
+  // write() already finalized-with-error and freed/nulled the parser, or the
+  // ctor failed to allocate it. Bail so we don't run XML_Parse on a NULL parser,
+  // which returns XML_ERROR_INVALID_ARGUMENT at line 0 and clobbers the real
+  // error detail write() captured. (Stream destructor always calls flush().)
+  if (errorOccured || !parser) return;
   if (XML_Parse(parser, nullptr, 0, XML_TRUE) != XML_STATUS_OK) {
     errorOccured = true;
+    errorLine = XML_GetCurrentLineNumber(parser);
+    errorDetail = XML_ErrorString(XML_GetErrorCode(parser));
     destroyXmlParser(parser);
   }
 }
@@ -70,6 +112,7 @@ void OpdsParser::clear() {
   currentEntry = OpdsEntry{};
   currentText.clear();
   inEntry = inTitle = inAuthor = inAuthorName = inId = false;
+  truncated = false;
 }
 
 std::vector<OpdsEntry> OpdsParser::getBooks() const {
@@ -157,7 +200,13 @@ void XMLCALL OpdsParser::endElement(void* userData, const XML_Char* name) {
 
   if (strcmp(name, "entry") == 0 || strstr(name, ":entry") != nullptr) {
     if (!self->currentEntry.title.empty() && !self->currentEntry.href.empty()) {
-      self->entries.push_back(self->currentEntry);
+      // Drop entries past the cap. Parsing continues so the HTTP read finishes;
+      // dropped => truncated flag.
+      if (self->entries.size() < MAX_ENTRIES) {
+        self->entries.push_back(self->currentEntry);
+      } else {
+        self->truncated = true;
+      }
     }
     self->inEntry = false;
   } else if (self->inEntry) {

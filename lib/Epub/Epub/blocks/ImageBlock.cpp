@@ -19,13 +19,24 @@ bool ImageBlock::imageExists() const { return Storage.exists(imagePath.c_str());
 
 namespace {
 
-std::string getCachePath(const std::string& imagePath) {
-  // Replace extension with .pxc (pixel cache)
+std::string getCachePath(const std::string& imagePath, bool oneBit, bool blueNoise) {
+  // Replace extension with the pixel-cache suffix. Different render paths
+  // produce different pixel data for the same image, so each uses a distinct
+  // suffix to avoid reading another's cache. The number is bumped whenever the
+  // dither/tone math changes so stale caches regenerate:
+  //   .px8n = X4 4-level, blue-noise field   (bumped: X4 gamma 0.65)
+  //   .px8b = X4 4-level, 8x8 Bayer field
+  //   .px6n = X3 / X4-AA-off 1-bit, blue-noise halftone
+  //   .px6b = X3 / X4-AA-off 1-bit, Bayer halftone
+  // Switching the Display > Image Dither setting therefore swaps cache files
+  // rather than serving stale pixels. (Orphaned older caches stay on the card;
+  // clear .crosspoint/ to reclaim that space.)
+  const char* suffix = oneBit ? (blueNoise ? ".px6n" : ".px6b") : (blueNoise ? ".px8n" : ".px8b");
   size_t dotPos = imagePath.rfind('.');
   if (dotPos != std::string::npos) {
-    return imagePath.substr(0, dotPos) + ".pxc";
+    return imagePath.substr(0, dotPos) + suffix;
   }
-  return imagePath + ".pxc";
+  return imagePath + suffix;
 }
 
 bool renderFromCache(GfxRenderer& renderer, const std::string& cachePath, int x, int y, int expectedWidth,
@@ -94,6 +105,16 @@ bool renderFromCache(GfxRenderer& renderer, const std::string& cachePath, int x,
 void ImageBlock::render(GfxRenderer& renderer, const int x, const int y) {
   LOG_DBG("IMG", "Rendering image at %d,%d: %s (%dx%d)", x, y, imagePath.c_str(), width, height);
 
+  // X3 renders images as a 1-bit halftone written during the BW pass. The
+  // grayscale (text-AA) passes re-render the page in GRAYSCALE_LSB/MSB modes;
+  // a 1-bit image contributes nothing to those planes and the gc bb cell
+  // preserves the halftone, so skip the (costly) image redraw entirely there.
+  const bool oneBit = renderer.oneBitImages();  // X3 always; X4 when text AA is off
+  const bool blueNoise = renderer.imageDitherBlueNoise();
+  if (oneBit && renderer.getRenderMode() != GfxRenderer::BW) {
+    return;
+  }
+
   const int screenWidth = renderer.getScreenWidth();
   const int screenHeight = renderer.getScreenHeight();
 
@@ -105,7 +126,7 @@ void ImageBlock::render(GfxRenderer& renderer, const int x, const int y) {
   }
 
   // Try to render from cache first
-  std::string cachePath = getCachePath(imagePath);
+  std::string cachePath = getCachePath(imagePath, oneBit, blueNoise);
   if (renderFromCache(renderer, cachePath, x, y, width, height)) {
     return;  // Successfully rendered from cache
   }
@@ -134,6 +155,8 @@ void ImageBlock::render(GfxRenderer& renderer, const int x, const int y) {
   config.maxHeight = height;
   config.useGrayscale = true;
   config.useDithering = true;
+  config.oneBitDither = oneBit;          // X3: 1-bit halftone instead of 4-level grayscale
+  config.ditherBlueNoise = blueNoise;    // blue noise vs Bayer (Display > Image Dither)
   config.performanceMode = false;
   config.useExactDimensions = true;  // Use pre-calculated dimensions to avoid rounding mismatches
   config.cachePath = cachePath;      // Enable caching during decode

@@ -132,6 +132,8 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
   if (stride <= 0 || blockH <= 0 || validW <= 0) return 1;
 
   const bool useDithering = ctx->config->useDithering;
+  const bool oneBit = ctx->config->oneBitDither;
+  const bool blueNoise = ctx->config->ditherBlueNoise;
   const bool caching = ctx->caching;
   const int32_t fineScaleFPX = ctx->fineScaleFPX;
   const int32_t invScaleFPX = ctx->invScaleFPX;
@@ -184,13 +186,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
       for (int dstX = dstXStart; dstX < dstXEnd; dstX++) {
         const int outX = cfgX + dstX;
         uint8_t gray = row[dstX - blockX];
-        uint8_t dithered;
-        if (useDithering) {
-          dithered = applyBayerDither4Level(gray, outX, outY);
-        } else {
-          dithered = gray / 85;
-          if (dithered > 3) dithered = 3;
-        }
+        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise);
         pw.writePixel(outX, dithered);
         if (caching) cw.writePixel(outX, dithered);
       }
@@ -243,13 +239,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
         int bot = ((int)row1[lx0] * fxInv + (int)row1[lx1] * fx) >> FP_SHIFT;
         uint8_t gray = (uint8_t)((top * fyInv + bot * fy) >> FP_SHIFT);
 
-        uint8_t dithered;
-        if (useDithering) {
-          dithered = applyBayerDither4Level(gray, outX, outY);
-        } else {
-          dithered = gray / 85;
-          if (dithered > 3) dithered = 3;
-        }
+        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise);
         pw.writePixel(outX, dithered);
         if (caching) cw.writePixel(outX, dithered);
       }
@@ -266,13 +256,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
         int bot = ((int)row1[lx0] * fxInv + (int)row1[lx0 + 1] * fx) >> FP_SHIFT;
         uint8_t gray = (uint8_t)((top * fyInv + bot * fy) >> FP_SHIFT);
 
-        uint8_t dithered;
-        if (useDithering) {
-          dithered = applyBayerDither4Level(gray, outX, outY);
-        } else {
-          dithered = gray / 85;
-          if (dithered > 3) dithered = 3;
-        }
+        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise);
         pw.writePixel(outX, dithered);
         if (caching) cw.writePixel(outX, dithered);
       }
@@ -292,13 +276,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
         int bot = ((int)row1[lx0] * fxInv + (int)row1[lx1] * fx) >> FP_SHIFT;
         uint8_t gray = (uint8_t)((top * fyInv + bot * fy) >> FP_SHIFT);
 
-        uint8_t dithered;
-        if (useDithering) {
-          dithered = applyBayerDither4Level(gray, outX, outY);
-        } else {
-          dithered = gray / 85;
-          if (dithered > 3) dithered = 3;
-        }
+        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise);
         pw.writePixel(outX, dithered);
         if (caching) cw.writePixel(outX, dithered);
       }
@@ -325,13 +303,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
       if (lx >= validW) lx = validW - 1;
       uint8_t gray = row[lx];
 
-      uint8_t dithered;
-      if (useDithering) {
-        dithered = applyBayerDither4Level(gray, outX, outY);
-      } else {
-        dithered = gray / 85;
-        if (dithered > 3) dithered = 3;
-      }
+      uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise);
       pw.writePixel(outX, dithered);
       if (caching) cw.writePixel(outX, dithered);
     }

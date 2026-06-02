@@ -7,6 +7,8 @@
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
 
+#include "util/SdDebugLog.h"
+
 #include <cstring>
 #include <functional>
 #include <string>
@@ -79,6 +81,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   esp_err_t err = esp_http_client_open(client, 0);
   if (err != ESP_OK) {
     LOG_ERR("HTTP", "open failed: %s", esp_err_to_name(err));
+    SdDebugLog::log("HTTP", "open failed: %s", esp_err_to_name(err));
     esp_http_client_cleanup(client);
     return HttpDownloader::HTTP_ERROR;
   }
@@ -98,6 +101,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
 
   if (status != 200) {
     LOG_ERR("HTTP", "unexpected status: %d", status);
+    SdDebugLog::log("HTTP", "unexpected status: %d", status);
     esp_http_client_cleanup(client);
     return HttpDownloader::HTTP_ERROR;
   }
@@ -109,6 +113,8 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   auto buf = makeUniqueNoThrow<char[]>(READ_CHUNK);
   if (!buf) {
     LOG_ERR("HTTP", "OOM: %u byte read buffer", (unsigned)READ_CHUNK);
+    SdDebugLog::log("HTTP", "OOM: %u byte read buffer, free heap=%u", (unsigned)READ_CHUNK,
+                    (unsigned)ESP.getFreeHeap());
     esp_http_client_cleanup(client);
     return HttpDownloader::HTTP_ERROR;
   }
@@ -121,11 +127,14 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
     const int read = esp_http_client_read(client, buf.get(), READ_CHUNK);
     if (read < 0) {
       LOG_ERR("HTTP", "read error after %zu bytes", sink.downloaded);
+      SdDebugLog::log("HTTP", "read error after %zu bytes, heap=%u", sink.downloaded, (unsigned)ESP.getFreeHeap());
       esp_http_client_cleanup(client);
       return HttpDownloader::HTTP_ERROR;
     }
     if (read == 0) break;  // all data received
     if (!sink.write(reinterpret_cast<const uint8_t*>(buf.get()), read)) {
+      SdDebugLog::log("HTTP", "sink write failed after %zu bytes, heap=%u (likely OOM in parser)", sink.downloaded,
+                      (unsigned)ESP.getFreeHeap());
       esp_http_client_cleanup(client);
       return HttpDownloader::FILE_ERROR;
     }
@@ -137,6 +146,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   esp_http_client_cleanup(client);
   if (!complete) {
     LOG_ERR("HTTP", "incomplete: got %zu of %zu bytes", sink.downloaded, sink.total);
+    SdDebugLog::log("HTTP", "incomplete: got %zu of %zu bytes", sink.downloaded, sink.total);
     return HttpDownloader::HTTP_ERROR;
   }
   return HttpDownloader::OK;

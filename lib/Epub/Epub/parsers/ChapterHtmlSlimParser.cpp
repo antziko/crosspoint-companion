@@ -22,6 +22,12 @@
 constexpr size_t MIN_SIZE_FOR_POPUP = 10 * 1024;  // 10KB
 constexpr size_t PARSE_BUFFER_SIZE = 1024;
 
+// An image with no explicit CSS size whose natural width is at least this
+// fraction of the container is treated as a "block" image and upscaled to the
+// full container width. Below it (small inline icons, emoji, dividers) keeps
+// its natural size.
+constexpr float LARGE_IMAGE_WIDTH_FRAC = 0.4f;
+
 constexpr const char* HEADER_TAGS[] = {"h1", "h2", "h3", "h4", "h5", "h6"};
 constexpr const char* BLOCK_TAGS[] = {"p", "li", "div", "br", "blockquote"};
 constexpr const char* BOLD_TAGS[] = {"b", "strong"};
@@ -510,8 +516,28 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                   }
                   if (displayHeight < 1) displayHeight = 1;
                   LOG_DBG("EHP", "Display size from CSS width: %dx%d", displayWidth, displayHeight);
+                } else if (dims.width >= static_cast<int>(LARGE_IMAGE_WIDTH_FRAC * containerWidth)) {
+                  // No explicit CSS size and the image is "large" (its natural
+                  // width is at least LARGE_IMAGE_WIDTH_FRAC of the container):
+                  // blow it up to the full container width, deriving height from
+                  // the aspect ratio. If that makes it taller than the page,
+                  // clamp the height to the page and shrink width to match (so an
+                  // image never splits across pages). Small inline images (icons,
+                  // emoji, dividers) skip this branch and keep their natural size.
+                  displayWidth = containerWidth;
+                  displayHeight =
+                      static_cast<int>(displayWidth * (static_cast<float>(dims.height) / dims.width) + 0.5f);
+                  if (displayHeight > self->viewportHeight) {
+                    displayHeight = self->viewportHeight;
+                    displayWidth =
+                        static_cast<int>(displayHeight * (static_cast<float>(dims.width) / dims.height) + 0.5f);
+                  }
+                  if (displayWidth < 1) displayWidth = 1;
+                  if (displayHeight < 1) displayHeight = 1;
+                  LOG_DBG("EHP", "Display size (full width): %dx%d", displayWidth, displayHeight);
                 } else {
-                  // Scale to fit container while maintaining aspect ratio
+                  // Small image, no CSS size: keep natural size (never upscale),
+                  // scaled down only if it somehow exceeds the container/page.
                   int maxWidth = containerWidth;
                   int maxHeight = self->viewportHeight;
                   float scaleX = (dims.width > maxWidth) ? (float)maxWidth / dims.width : 1.0f;

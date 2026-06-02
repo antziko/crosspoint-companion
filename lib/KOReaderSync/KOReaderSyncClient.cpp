@@ -233,6 +233,107 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
   return SERVER_ERROR;
 }
 
+KOReaderSyncClient::Error KOReaderSyncClient::getBookmarks(const std::string& documentHash,
+                                                          std::string& outBookmarksJson) {
+  lastHttpCode = 0;
+  outBookmarksJson.clear();
+  if (!KOREADER_STORE.hasCredentials()) {
+    LOG_DBG("KOSync", "No credentials configured");
+    return NO_CREDENTIALS;
+  }
+
+  std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/bookmarks/" + documentHash;
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  LOG_DBG("KOSync", "Getting bookmarks: %s (heap: %u)", url.c_str(), (unsigned)freeHeap);
+  if (freeHeap < MIN_HEAP_FOR_TLS) {
+    LOG_ERR("KOSync", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
+    return LOW_MEMORY;
+  }
+
+  ResponseBuffer buf;
+  esp_http_client_handle_t client = createClient(url.c_str(), &buf);
+  if (!client) return NETWORK_ERROR;
+
+  esp_err_t err = esp_http_client_perform(client);
+  const int httpCode = esp_http_client_get_status_code(client);
+  lastHttpCode = httpCode;
+  esp_http_client_cleanup(client);
+
+  LOG_DBG("KOSync", "Get bookmarks response: %d (err: %d)", httpCode, err);
+
+  if (err != ESP_OK) return NETWORK_ERROR;
+
+  if (httpCode == 200 && buf.data) {
+    JsonDocument doc;
+    const DeserializationError error = deserializeJson(doc, buf.data);
+    if (error) {
+      LOG_ERR("KOSync", "JSON parse failed: %s", error.c_str());
+      return JSON_ERROR;
+    }
+
+    // The server returns {} (no "bookmarks" field) when nothing is stored yet.
+    if (!doc["bookmarks"].is<const char*>()) {
+      return NOT_FOUND;
+    }
+    outBookmarksJson = doc["bookmarks"].as<std::string>();
+    LOG_DBG("KOSync", "Got bookmarks blob (%u bytes)", (unsigned)outBookmarksJson.size());
+    return OK;
+  }
+
+  if (httpCode == 401) return AUTH_FAILED;
+  if (httpCode == 404) return NOT_FOUND;
+  return SERVER_ERROR;
+}
+
+KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string& documentHash,
+                                                             const std::string& bookmarksJson) {
+  lastHttpCode = 0;
+  if (!KOREADER_STORE.hasCredentials()) {
+    LOG_DBG("KOSync", "No credentials configured");
+    return NO_CREDENTIALS;
+  }
+
+  std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/bookmarks";
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  LOG_DBG("KOSync", "Updating bookmarks: %s (heap: %u)", url.c_str(), (unsigned)freeHeap);
+  if (freeHeap < MIN_HEAP_FOR_TLS) {
+    LOG_ERR("KOSync", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
+    return LOW_MEMORY;
+  }
+
+  // The bookmarks array is sent as a single pre-serialized JSON string field so the
+  // server stores it as an opaque blob (it never parses bookmark contents).
+  JsonDocument doc;
+  doc["document"] = documentHash;
+  doc["bookmarks"] = bookmarksJson;
+
+  std::string body;
+  serializeJson(doc, body);
+
+  ResponseBuffer buf;
+  esp_http_client_handle_t client = createClient(url.c_str(), &buf, HTTP_METHOD_PUT);
+  if (!client) return NETWORK_ERROR;
+
+  if (esp_http_client_set_header(client, "Content-Type", "application/json") != ESP_OK ||
+      esp_http_client_set_post_field(client, body.c_str(), body.length()) != ESP_OK) {
+    LOG_ERR("KOSync", "Failed to set request body");
+    esp_http_client_cleanup(client);
+    return NETWORK_ERROR;
+  }
+
+  esp_err_t err = esp_http_client_perform(client);
+  const int httpCode = esp_http_client_get_status_code(client);
+  lastHttpCode = httpCode;
+  esp_http_client_cleanup(client);
+
+  LOG_DBG("KOSync", "Update bookmarks response: %d (err: %d)", httpCode, err);
+
+  if (err != ESP_OK) return NETWORK_ERROR;
+  if (httpCode == 200 || httpCode == 202) return OK;
+  if (httpCode == 401) return AUTH_FAILED;
+  return SERVER_ERROR;
+}
+
 const char* KOReaderSyncClient::errorString(Error error) {
   switch (error) {
     case OK:
