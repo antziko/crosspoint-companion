@@ -84,6 +84,12 @@ class KOReaderSyncActivity final : public Activity {
   // Selection in result screen (0=Apply, 1=Upload)
   int selectedOption = 0;
 
+  // After a successful upload the result screen auto-returns to the reader so the
+  // user doesn't have to press Back. millis() when UPLOAD_COMPLETE was entered;
+  // Back still returns immediately.
+  static constexpr unsigned long UPLOAD_COMPLETE_AUTO_RETURN_MS = 3000;
+  unsigned long uploadCompleteAt = 0;
+
   // Tracks whether this session activated WiFi. Set in onEnter past the credentials
   // check; checked in onExit to decide whether to silent-reboot. Can't rely on
   // WiFi.getMode() because performUpload() calls esp_wifi_stop() on the way out,

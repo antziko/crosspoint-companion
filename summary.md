@@ -184,3 +184,55 @@ isn't deleted mid-entry.
 teardown (disconnect + `silentRestart`) or auto-sleep (`WIFI_OFF`), WiFi is down and the next
 entry falls through to the usual scan/list. The session itself is unchanged — it lasts only as
 long as the network activity is active, bounded by the inactivity auto-sleep (default 10 min).
+
+---
+
+## 11. Bookmark sync — Last-Writer-Wins by Lamport version
+
+**Symptoms (multi-device, X3 + X4):** stale tombstones deleted freshly-created bookmarks
+(`remote 1 + local 3 -> total 1`); a re-added bookmark wouldn't propagate to the other device;
+and deletes wouldn't propagate. Root cause: the merge had no way to order create-vs-delete, so
+it picked a fixed winner — delete-wins lost re-adds, add-wins lost deletes. The C3 has no
+battery-backed RTC, so wall-clock timestamps aren't usable (`Bookmark.timestamp` was always 0).
+
+**Fix (`BookmarkStore.cpp/.h`):** order events with a per-book **Lamport logical clock** instead
+of a real clock.
+- `Bookmark.timestamp` is repurposed as **`version`** — same 4-byte on-disk slot, so the bookmark
+  file format is unchanged and pre-existing bookmarks read back as version 0 (lowest priority).
+- `Tombstone` gains a `version`; tombstone file format **v1 → v2** with auto-migration (legacy
+  tombstones load as version 0).
+- A per-book `lamportCounter`: `nextVersion()` (`++counter`) stamps every local add/delete so a
+  delete always outranks the bookmark it replaces; `observeVersion()` raises the counter past
+  every version seen from a remote during merge, so the next local edit outranks everything seen
+  (causal ordering). The counter is rebuilt on load as `max(version)` over all stored entries —
+  exact, because the highest-version entry always survives a merge (no separately persisted value).
+- **`mergeFrom` rewritten as LWW:** group local + remote bookmarks and tombstones by spot; per
+  spot the highest `version` wins (bookmark → alive, tombstone → dead); a version tie keeps the
+  bookmark (never silently lose one). Winners are tracked by pointer into the existing vectors —
+  no `Bookmark` copies (~124 B each), so RAM stays low even at the 1024 cap. Persists only on a
+  real change.
+- Sync blob JSON: bookmarks/tombstones now carry `version`; parse falls back to the legacy
+  `timestamp` key for older blobs.
+
+**Result:** delete propagates (tombstone newer than bookmark wins everywhere) **and** re-add
+resurrects (new bookmark newer than tombstone wins everywhere), converging with no clock. The
+sequential use-one-device-then-sync workflow orders correctly; truly concurrent edits between
+syncs fall to the bookmark-wins tie-break. Mixed-firmware fleet during rollout converges once
+both devices update (old firmware treats `version` as 0).
+
+**Not addressed (separate, deferred):** independently-created (non-synced) bookmarks at the same
+reading spot still get different keys on different-height screens (page-derived `progress` /
+`paragraphIndex`), so they won't dedupe cross-device. Synced bookmarks share identical keys.
+
+---
+
+## 12. KOReader sync — auto-return to reader after upload
+
+**Goal:** after a progress upload, return to the reader on its own instead of waiting for a manual
+Back press (the apply-remote path already auto-returned).
+
+**`KOReaderSyncActivity.cpp/.h`:** entering `UPLOAD_COMPLETE` records `uploadCompleteAt = millis()`;
+`loop()` returns to the reader once `UPLOAD_COMPLETE_AUTO_RETURN_MS` (3 s) elapses, leaving time to
+read the confirmation. Manual Back still returns immediately. Scope is the upload path only;
+`SYNC_FAILED` / `NO_CREDENTIALS` stay manual so their messages can be read. `loop()` runs every
+main-loop cycle (no keypress needed), the same cadence the WiFi connect-timeout relies on.

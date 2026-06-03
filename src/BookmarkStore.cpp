@@ -40,7 +40,8 @@ bool readBookmarkCount(HalFile& file, const uint8_t version, uint16_t& count) {
 // (stable across render settings) or, when no anchor exists, the same quantized intra-spine
 // progress. Quantizing avoids float-equality misses when the value round-trips through JSON.
 constexpr float PROGRESS_QUANTUM = 1000.0f;
-constexpr uint8_t TOMB_VERSION = 1;
+constexpr uint8_t TOMB_LEGACY_VERSION = 1;  // no per-tombstone Lamport version (reads back as 0)
+constexpr uint8_t TOMB_VERSION = 2;         // adds uint32_t version per tombstone
 
 bool keyMatch(uint16_t aSpine, uint16_t aPara, float aProg, uint16_t bSpine, uint16_t bPara, float bProg) {
   if (aSpine != bSpine) return false;
@@ -74,6 +75,7 @@ bool BookmarkStore::loadForBook(const std::string& filePath, const std::string& 
   bookTitle = title;
   bookAuthor = author;
   dirty = false;
+  lamportCounter = 0;  // reset the per-book clock; rebuilt from file versions below
   bookmarks.clear();
   if (bookmarks.capacity() < INITIAL_BOOKMARK_RESERVE) {
     bookmarks.reserve(INITIAL_BOOKMARK_RESERVE);
@@ -130,7 +132,7 @@ BookmarkStore::AddResult BookmarkStore::addBookmark(uint16_t spineIndex, float p
   Bookmark bm{};
   bm.spineIndex = spineIndex;
   bm.progress = progress;
-  bm.timestamp = 0;  // ESP32-C3 has no battery-backed RTC; reserved for future use
+  bm.version = nextVersion();  // newer than any prior add/delete for this book
   snprintf(bm.chapterTitle, sizeof(bm.chapterTitle), "%s", chapterTitle ? chapterTitle : "");
   bm.paragraphIndex = paragraphIndex;
   snprintf(bm.snippet, sizeof(bm.snippet), "%s", snippet ? snippet : "");
@@ -199,15 +201,18 @@ void BookmarkStore::clearAll() {
     }
     LOG_DBG("BKS", "Bookmark file deleted");
   }
-  // Tombstone every cleared bookmark so the wipe propagates on next sync.
+  // Tombstone every cleared bookmark so the wipe propagates on next sync. Each gets
+  // a fresh Lamport version (newer than the bookmark) so the delete wins the merge.
   for (const auto& bm : bookmarks) {
-    Tombstone t{bm.spineIndex, bm.paragraphIndex, bm.progress};
-    const bool known = std::any_of(tombstones.begin(), tombstones.end(),
-                                   [&](const Tombstone& e) { return sameTomb(e, t); });
-    if (!known) {
-      tombstones.push_back(t);
-      tombDirty = true;
+    const uint32_t v = nextVersion();
+    auto it = std::find_if(tombstones.begin(), tombstones.end(),
+                           [&](const Tombstone& e) { return sameTomb(e, Tombstone{bm.spineIndex, bm.paragraphIndex, bm.progress, 0}); });
+    if (it != tombstones.end()) {
+      it->version = v;
+    } else {
+      tombstones.push_back(Tombstone{bm.spineIndex, bm.paragraphIndex, bm.progress, v});
     }
+    tombDirty = true;
   }
   saveTombstones();
   bookmarks.clear();
@@ -263,11 +268,11 @@ bool BookmarkStore::readFromFile() {
       return false;
     }
     serialization::readPod(f, bm.progress);
-    if (f.available() < static_cast<int>(sizeof(bm.timestamp))) {
-      LOG_ERR("BKS", "Bookmark file truncated at timestamp, record %u", i);
+    if (f.available() < static_cast<int>(sizeof(bm.version))) {
+      LOG_ERR("BKS", "Bookmark file truncated at version, record %u", i);
       return false;
     }
-    serialization::readPod(f, bm.timestamp);
+    serialization::readPod(f, bm.version);  // legacy files stored 0 here (old "timestamp")
     const int chRead = f.read(bm.chapterTitle, sizeof(bm.chapterTitle));
     bm.chapterTitle[sizeof(bm.chapterTitle) - 1] = '\0';
     if (chRead != static_cast<int>(sizeof(bm.chapterTitle))) {
@@ -293,6 +298,7 @@ bool BookmarkStore::readFromFile() {
     } else {
       bm.snippet[0] = '\0';
     }
+    observeVersion(bm.version);  // rebuild the Lamport clock from stored versions
     bookmarks.push_back(bm);
   }
 
@@ -326,7 +332,7 @@ bool BookmarkStore::writeToFile() const {
   for (const auto& bm : bookmarks) {
     serialization::writePod(f, bm.spineIndex);
     serialization::writePod(f, bm.progress);
-    serialization::writePod(f, bm.timestamp);
+    serialization::writePod(f, bm.version);
     f.write(bm.chapterTitle, sizeof(bm.chapterTitle));
     serialization::writePod(f, bm.paragraphIndex);
     f.write(bm.snippet, sizeof(bm.snippet));
@@ -343,7 +349,7 @@ std::string BookmarkStore::serializeToJson(const std::vector<Bookmark>& bms, con
     JsonObject obj = arr.add<JsonObject>();
     obj["spineIndex"] = bm.spineIndex;
     obj["progress"] = bm.progress;
-    obj["timestamp"] = bm.timestamp;
+    obj["version"] = bm.version;  // Lamport version (formerly the always-0 "timestamp")
     obj["chapterTitle"] = bm.chapterTitle;
     obj["paragraphIndex"] = bm.paragraphIndex;
     obj["snippet"] = bm.snippet;
@@ -354,6 +360,7 @@ std::string BookmarkStore::serializeToJson(const std::vector<Bookmark>& bms, con
     obj["spineIndex"] = t.spineIndex;
     obj["paragraphIndex"] = t.paragraphIndex;
     obj["progress"] = t.progress;
+    obj["version"] = t.version;
   }
   std::string out;
   serializeJson(doc, out);
@@ -380,7 +387,8 @@ bool BookmarkStore::parseFromJson(const char* json, std::vector<Bookmark>& outBm
     Bookmark bm{};
     bm.spineIndex = obj["spineIndex"] | static_cast<uint16_t>(0);
     bm.progress = obj["progress"] | 0.0f;
-    bm.timestamp = obj["timestamp"] | static_cast<uint32_t>(0);
+    // New key is "version"; fall back to the legacy "timestamp" key (older blobs).
+    bm.version = obj["version"] | (obj["timestamp"] | static_cast<uint32_t>(0));
     bm.paragraphIndex = obj["paragraphIndex"] | static_cast<uint16_t>(UINT16_MAX);
     snprintf(bm.chapterTitle, sizeof(bm.chapterTitle), "%s", obj["chapterTitle"] | "");
     snprintf(bm.snippet, sizeof(bm.snippet), "%s", obj["snippet"] | "");
@@ -395,6 +403,7 @@ bool BookmarkStore::parseFromJson(const char* json, std::vector<Bookmark>& outBm
     t.spineIndex = obj["spineIndex"] | static_cast<uint16_t>(0);
     t.paragraphIndex = obj["paragraphIndex"] | static_cast<uint16_t>(UINT16_MAX);
     t.progress = obj["progress"] | 0.0f;
+    t.version = obj["version"] | static_cast<uint32_t>(0);
     outTombs.push_back(t);
   }
   return true;
@@ -414,7 +423,7 @@ bool BookmarkStore::readTombstones() {
 
   uint8_t version;
   serialization::readPod(f, version);
-  if (version != TOMB_VERSION) {
+  if (version != TOMB_LEGACY_VERSION && version != TOMB_VERSION) {
     LOG_ERR("BKS", "Unknown tombstone file version: %u", version);
     return false;
   }
@@ -428,7 +437,8 @@ bool BookmarkStore::readTombstones() {
 
   tombstones.clear();
   tombstones.reserve(count);
-  const int recordSize = static_cast<int>(sizeof(uint16_t) + sizeof(uint16_t) + sizeof(float));
+  int recordSize = static_cast<int>(sizeof(uint16_t) + sizeof(uint16_t) + sizeof(float));
+  if (version >= TOMB_VERSION) recordSize += static_cast<int>(sizeof(uint32_t));
   for (uint16_t i = 0; i < count; i++) {
     if (f.available() < recordSize) {
       LOG_ERR("BKS", "Tombstone file truncated at record %u", i);
@@ -438,7 +448,19 @@ bool BookmarkStore::readTombstones() {
     serialization::readPod(f, t.spineIndex);
     serialization::readPod(f, t.paragraphIndex);
     serialization::readPod(f, t.progress);
+    if (version >= TOMB_VERSION) {
+      serialization::readPod(f, t.version);
+    } else {
+      t.version = 0;  // legacy tombstone: lowest priority, loses to any stamped edit
+    }
+    observeVersion(t.version);
     tombstones.push_back(t);
+  }
+
+  if (version != TOMB_VERSION) {
+    tombDirty = true;
+    saveTombstones();  // migrate legacy .tomb to the versioned format
+    LOG_DBG("BKS", "Migrated tombstone file to version %u", TOMB_VERSION);
   }
   LOG_DBG("BKS", "Loaded %u tombstone(s)", count);
   return true;
@@ -459,6 +481,7 @@ bool BookmarkStore::writeTombstones() const {
     serialization::writePod(f, t.spineIndex);
     serialization::writePod(f, t.paragraphIndex);
     serialization::writePod(f, t.progress);
+    serialization::writePod(f, t.version);
   }
   LOG_DBG("BKS", "Saved %u tombstone(s)", count);
   return true;
@@ -475,11 +498,17 @@ void BookmarkStore::saveTombstones() {
 }
 
 void BookmarkStore::addTombstone(const Bookmark& bm) {
-  Tombstone t{bm.spineIndex, bm.paragraphIndex, bm.progress};
-  const bool known =
-      std::any_of(tombstones.begin(), tombstones.end(), [&](const Tombstone& e) { return sameTomb(e, t); });
-  if (known) return;
-  tombstones.push_back(t);
+  // Stamp newer than the bookmark being deleted so the delete wins the merge.
+  const uint32_t v = nextVersion();
+  for (auto& e : tombstones) {
+    if (sameTomb(e, Tombstone{bm.spineIndex, bm.paragraphIndex, bm.progress, 0})) {
+      e.version = v;  // refresh an existing tombstone so a re-delete still outranks
+      tombDirty = true;
+      saveTombstones();
+      return;
+    }
+  }
+  tombstones.push_back(Tombstone{bm.spineIndex, bm.paragraphIndex, bm.progress, v});
   tombDirty = true;
   saveTombstones();
 }
@@ -495,46 +524,105 @@ void BookmarkStore::clearTombstoneFor(const Bookmark& bm) {
 
 size_t BookmarkStore::mergeFrom(const std::vector<Bookmark>& remoteBookmarks,
                                 const std::vector<Tombstone>& remoteTombstones) {
-  // 1. Union remote tombstones into local.
-  for (const auto& rt : remoteTombstones) {
-    const bool known = std::any_of(tombstones.begin(), tombstones.end(),
-                                   [&](const Tombstone& t) { return sameTomb(t, rt); });
-    if (!known) {
-      tombstones.push_back(rt);
-      tombDirty = true;
+  // Last-writer-wins by Lamport version. For each spot, keep whichever of
+  // {bookmark, tombstone} carries the highest version across local + remote: a
+  // delete done after seeing a bookmark (higher version) propagates, and a re-add
+  // done after a delete (higher still) resurrects — both converge with no clock.
+  // On a version tie the live bookmark wins (never silently drop a user bookmark).
+  // Winners reference the source records by pointer to avoid copying Bookmark
+  // structs (~124 B each) during the merge.
+  struct Winner {
+    uint16_t spineIndex;
+    uint16_t paragraphIndex;
+    float progress;
+    uint32_t version;
+    const Bookmark* bm;  // non-null => bookmark wins this spot; null => tombstone wins
+  };
+  std::vector<Winner> winners;
+  winners.reserve(bookmarks.size() + tombstones.size() + remoteBookmarks.size() + remoteTombstones.size());
+
+  const auto consider = [&](uint16_t spine, uint16_t para, float prog, uint32_t version, const Bookmark* bm) {
+    observeVersion(version);  // advance the local clock past everything we see
+    for (auto& w : winners) {
+      if (keyMatch(w.spineIndex, w.paragraphIndex, w.progress, spine, para, prog)) {
+        const bool better = version > w.version || (version == w.version && bm != nullptr && w.bm == nullptr);
+        if (better) {
+          w.version = version;
+          w.bm = bm;
+        }
+        return;
+      }
+    }
+    winners.push_back(Winner{spine, para, prog, version, bm});
+  };
+
+  for (const auto& b : bookmarks) consider(b.spineIndex, b.paragraphIndex, b.progress, b.version, &b);
+  for (const auto& t : tombstones) consider(t.spineIndex, t.paragraphIndex, t.progress, t.version, nullptr);
+  for (const auto& b : remoteBookmarks) consider(b.spineIndex, b.paragraphIndex, b.progress, b.version, &b);
+  for (const auto& t : remoteTombstones) consider(t.spineIndex, t.paragraphIndex, t.progress, t.version, nullptr);
+
+  // Rebuild the bookmark + tombstone sets from the winners. Build into fresh
+  // vectors first; pointers in `winners` may reference the current `bookmarks`,
+  // so don't mutate it until the copies are made.
+  std::vector<Bookmark> newBookmarks;
+  std::vector<Tombstone> newTombstones;
+  newBookmarks.reserve(winners.size());
+  newTombstones.reserve(winners.size());
+  for (const auto& w : winners) {
+    if (w.bm != nullptr) {
+      if (newBookmarks.size() >= MAX_BOOKMARKS) {
+        LOG_ERR("BKS", "Bookmark limit (%u) reached during merge", MAX_BOOKMARKS);
+        continue;
+      }
+      newBookmarks.push_back(*w.bm);
+    } else {
+      newTombstones.push_back(Tombstone{w.spineIndex, w.paragraphIndex, w.progress, w.version});
     }
   }
 
-  // 2. Drop any local bookmark a tombstone covers (propagates deletes from other devices).
-  const size_t beforePrune = bookmarks.size();
-  std::erase_if(bookmarks, [&](const Bookmark& b) {
-    return std::any_of(tombstones.begin(), tombstones.end(), [&](const Tombstone& t) { return tombHits(t, b); });
-  });
-  if (bookmarks.size() != beforePrune) dirty = true;
-
-  // 3. Add remote bookmarks not already present and not tombstoned.
+  // Count bookmarks now present that weren't local before (for the return/log).
   size_t added = 0;
-  for (const auto& r : remoteBookmarks) {
-    if (bookmarks.size() >= MAX_BOOKMARKS) {
-      LOG_ERR("BKS", "Bookmark limit (%u) reached during merge", MAX_BOOKMARKS);
-      break;
-    }
-    const bool deleted = std::any_of(tombstones.begin(), tombstones.end(),
-                                     [&](const Tombstone& t) { return tombHits(t, r); });
-    if (deleted) continue;
-    const bool exists = std::any_of(bookmarks.begin(), bookmarks.end(),
-                                    [&](const Bookmark& l) { return sameBookmark(l, r); });
-    if (exists) continue;
-    bookmarks.push_back(r);
-    ++added;
+  for (const auto& nb : newBookmarks) {
+    const bool wasLocal = std::any_of(bookmarks.begin(), bookmarks.end(),
+                                      [&](const Bookmark& l) { return sameBookmark(l, nb); });
+    if (!wasLocal) ++added;
   }
-  if (added > 0) dirty = true;
 
-  if (dirty) {
+  // Persist only when something actually changed (sync is rare, but skip needless SD writes).
+  const auto bookmarkSetEqual = [](const std::vector<Bookmark>& a, const std::vector<Bookmark>& b) {
+    if (a.size() != b.size()) return false;
+    for (const auto& x : a) {
+      const bool match = std::any_of(b.begin(), b.end(),
+                                     [&](const Bookmark& y) { return sameBookmark(x, y) && x.version == y.version; });
+      if (!match) return false;
+    }
+    return true;
+  };
+  const auto tombSetEqual = [](const std::vector<Tombstone>& a, const std::vector<Tombstone>& b) {
+    if (a.size() != b.size()) return false;
+    for (const auto& x : a) {
+      const bool match =
+          std::any_of(b.begin(), b.end(), [&](const Tombstone& y) { return sameTomb(x, y) && x.version == y.version; });
+      if (!match) return false;
+    }
+    return true;
+  };
+
+  const bool bookmarksChanged = !bookmarkSetEqual(newBookmarks, bookmarks);
+  const bool tombsChanged = !tombSetEqual(newTombstones, tombstones);
+
+  bookmarks.swap(newBookmarks);
+  tombstones.swap(newTombstones);
+
+  if (bookmarksChanged) {
+    dirty = true;
     sortBookmarks();
     saveToFile();
   }
-  if (tombDirty) saveTombstones();
+  if (tombsChanged) {
+    tombDirty = true;
+    saveTombstones();
+  }
   return added;
 }
 

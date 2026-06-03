@@ -13,20 +13,27 @@ inline constexpr size_t BOOKMARK_SNIPPET_MAX = 64;
 struct Bookmark {
   uint16_t spineIndex;
   float progress;
-  uint32_t timestamp;
+  // Lamport version: a per-book logical clock bumped on every local add/delete, used
+  // to order create-vs-delete across devices without a real clock (ESP32-C3 has no
+  // battery-backed RTC). Higher version wins on merge. Occupies the slot that used to
+  // hold an always-zero "timestamp", so the on-disk bookmark format is unchanged —
+  // pre-existing bookmarks read back as version 0 (lowest priority).
+  uint32_t version;
   char chapterTitle[BOOKMARK_CHAPTER_TITLE_MAX];
   // Optional 1-based paragraph anchor from the section cache. UINT16_MAX means unavailable.
   uint16_t paragraphIndex = UINT16_MAX;
   char snippet[BOOKMARK_SNIPPET_MAX] = {};
 };
 
-// Marks a bookmark that was deleted locally, so sync removes it from the server and
-// other devices instead of resurrecting it via the additive merge. Identity mirrors the
-// merge key: (spineIndex, paragraphIndex) when an anchor exists, else (spineIndex, progress).
+// Marks a bookmark that was deleted, so sync removes it from the server and other
+// devices. Identity mirrors the merge key: (spineIndex, paragraphIndex) when an anchor
+// exists, else (spineIndex, progress). `version` is the Lamport stamp at deletion time;
+// merge keeps whichever of {bookmark, tombstone} for a spot has the higher version.
 struct Tombstone {
   uint16_t spineIndex;
   uint16_t paragraphIndex;  // UINT16_MAX if no anchor
   float progress;
+  uint32_t version = 0;
 };
 
 struct BookmarkedBookEntry {
@@ -72,10 +79,11 @@ class BookmarkStore {
   // first. Returns false on malformed JSON.
   static bool parseFromJson(const char* json, std::vector<Bookmark>& outBms, std::vector<Tombstone>& outTombs);
 
-  // Reconcile remote state into the currently loaded book and persist:
-  //   1. union remote tombstones into local,
-  //   2. drop any local bookmark hit by a tombstone (propagates deletes),
-  //   3. additively add remote bookmarks not already present and not tombstoned.
+  // Reconcile remote state into the currently loaded book and persist. Last-writer-
+  // wins by Lamport version: for each spot, the bookmark or tombstone with the higher
+  // version wins, so a delete done after seeing a bookmark propagates, and a re-add
+  // done after a delete resurrects — both converge without a wall clock. The local
+  // counter is advanced past every version seen so future local edits outrank them.
   // Self-persists both the bookmark and tombstone files. Returns bookmarks added.
   size_t mergeFrom(const std::vector<Bookmark>& remoteBookmarks, const std::vector<Tombstone>& remoteTombstones);
 
@@ -109,6 +117,16 @@ class BookmarkStore {
   std::string tombFilePath;
   bool dirty = false;
   bool tombDirty = false;
+
+  // Per-book Lamport clock. Reconstructed on load as the max version across all
+  // bookmarks and tombstones (the highest-version entry always survives a merge, so
+  // this lower bound is exact). nextVersion() stamps a new local edit; observeVersion()
+  // raises it past versions seen from a remote during merge.
+  uint32_t lamportCounter = 0;
+  uint32_t nextVersion() { return ++lamportCounter; }
+  void observeVersion(uint32_t v) {
+    if (v > lamportCounter) lamportCounter = v;
+  }
 
   bool readFromFile();
   bool writeToFile() const;

@@ -231,6 +231,7 @@ void KOReaderSyncActivity::performUpload() {
   {
     RenderLock lock(*this);
     state = UPLOAD_COMPLETE;
+    uploadCompleteAt = millis();  // start the auto-return countdown
   }
   requestUpdate(true);
 }
@@ -463,6 +464,12 @@ void KOReaderSyncActivity::render(RenderLock&&) {
 
 void KOReaderSyncActivity::loop() {
   if (state == NO_CREDENTIALS || state == SYNC_FAILED || state == UPLOAD_COMPLETE) {
+    // After a successful upload, return to the reader on its own once the user has
+    // had a moment to read the confirmation — no manual Back needed.
+    if (state == UPLOAD_COMPLETE && millis() - uploadCompleteAt >= UPLOAD_COMPLETE_AUTO_RETURN_MS) {
+      returnToReader();
+      return;
+    }
     if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
       returnToReader();
     }
