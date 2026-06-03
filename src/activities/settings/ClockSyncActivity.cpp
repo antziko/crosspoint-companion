@@ -10,17 +10,46 @@
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "SilentRestart.h"
+#include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
 void ClockSyncActivity::onEnter() {
   Activity::onEnter();
-  state = SYNCING;
+  state = PICKING_WIFI;
   syncedTime[0] = '\0';
-  requestUpdate();
+  // Bring up the radio and let the user pick a network first (saved networks
+  // connect with one tap). Once connected we run the NTP sync.
+  WiFi.mode(WIFI_STA);
+  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
+                         [this](const ActivityResult& result) { onWifiSelectionComplete(!result.isCancelled); });
 }
 
-void ClockSyncActivity::onExit() { Activity::onExit(); }
+void ClockSyncActivity::onExit() {
+  Activity::onExit();
+
+  // Release the radio cleanly. The WiFi stack can leave the SDK in a state that
+  // upsets later SD/SPI use, so silently restart once we're done (matches
+  // FontDownloadActivity).
+  if (WiFi.getMode() != WIFI_MODE_NULL) {
+    WiFi.disconnect(false);
+    delay(30);
+    silentRestart();
+  }
+}
+
+void ClockSyncActivity::onWifiSelectionComplete(const bool success) {
+  if (!success) {
+    finish();
+    return;
+  }
+
+  state = SYNCING;
+  // Render the "Syncing..." screen before the blocking NTP call.
+  requestUpdateAndWait();
+  runSync();
+}
 
 void ClockSyncActivity::runSync() {
   if (WiFi.status() != WL_CONNECTED) {
@@ -51,13 +80,9 @@ void ClockSyncActivity::runSync() {
 }
 
 void ClockSyncActivity::loop() {
-  if (state == SYNCING) {
-    // First-tick: render the "Syncing..." screen, then perform the (blocking) sync.
-    // requestUpdateAndWait below forces the render before we block on WiFi.
-    requestUpdateAndWait();
-    runSync();
-    return;
-  }
+  // WiFi selection and the (blocking) sync run from onWifiSelectionComplete.
+  // Here we only wait for the user to dismiss the result screen.
+  if (state == PICKING_WIFI || state == SYNCING) return;
 
   if (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
       mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {

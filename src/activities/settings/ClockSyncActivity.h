@@ -2,8 +2,9 @@
 
 #include "activities/Activity.h"
 
-// Manual NTP resync action. Runs a forced sync (bypassing the once-per-device debounce),
-// reports success/failure, then waits for Back. Requires WiFi to already be connected.
+// Manual NTP resync action. Presents the WiFi selection list first so the user
+// can connect, then runs a forced sync (bypassing the once-per-device debounce),
+// reports success/failure, and waits for Back.
 class ClockSyncActivity final : public Activity {
  public:
   explicit ClockSyncActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
@@ -16,9 +17,10 @@ class ClockSyncActivity final : public Activity {
   void render(RenderLock&&) override;
 
  private:
-  enum State { SYNCING, SUCCESS, NO_WIFI, FAILED };
-  State state = SYNCING;
+  enum State { PICKING_WIFI, SYNCING, SUCCESS, NO_WIFI, FAILED };
+  State state = PICKING_WIFI;
   char syncedTime[16] = {0};
 
+  void onWifiSelectionComplete(bool success);
   void runSync();
 };
