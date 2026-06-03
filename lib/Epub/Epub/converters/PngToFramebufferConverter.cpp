@@ -245,6 +245,7 @@ int pngDrawCallback(PNGDRAW* pDraw) {
 // Counts dark vs total sampled pixels (dark-fraction metric; see OrderedDither.h).
 struct PngLumProbe {
   uint32_t dark{0};
+  uint32_t bright{0};
   uint32_t count{0};
   int srcWidth{0};
   uint8_t* gray{nullptr};
@@ -261,6 +262,7 @@ int pngMeasureCallback(PNGDRAW* pDraw) {
                     pDraw->iHasAlpha);
   for (int x = 0; x < probe->srcWidth; x += 2) {  // sample every other column
     if (probe->gray[x] <= X4_DARK_PIXEL_CUTOFF) probe->dark++;
+    if (probe->gray[x] >= X4_BRIGHT_PIXEL_CUTOFF) probe->bright++;
     probe->count++;
   }
   return 1;
@@ -293,8 +295,13 @@ bool pngImageIsDark(const std::string& imagePath) {
   if (png->decode(&probe, 0) != PNG_SUCCESS || probe.count == 0) return true;
 
   const uint32_t darkPct = probe.dark * 100u / probe.count;
-  const bool brighten = darkPct >= X4_DARK_FRACTION_PCT;
-  LOG_DBG("PNG", "Dark pixels %u%% (%s)", darkPct, brighten ? "dark/brighten" : "light/skip");
+  const uint32_t brightPct = probe.bright * 100u / probe.count;
+  // Skip the brighten lift for bimodal high-contrast images (dark bg + bright text):
+  // lifting greys the background and crushes the white-text contrast.
+  const bool bimodalText = darkPct >= X4_DARK_FRACTION_PCT && brightPct >= X4_BRIGHT_FRACTION_PCT;
+  const bool brighten = darkPct >= X4_DARK_FRACTION_PCT && !bimodalText;
+  LOG_DBG("PNG", "Dark %u%% Bright %u%% (%s)", darkPct, brightPct,
+          brighten ? "dark/brighten" : (bimodalText ? "bimodal-text/skip" : "light/skip"));
   return brighten;
 }
 

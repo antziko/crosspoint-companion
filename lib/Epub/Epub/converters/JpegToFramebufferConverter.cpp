@@ -52,18 +52,25 @@ struct JpegContext {
   // 1/8-scale measure pass before the real decode; defaults true (= always
   // brighten, prior behaviour) when the probe can't run.
   bool brightenDark{true};
+
+  // Per-image bimodal-text verdict (dark bg + bright text). When set, the upscale
+  // path uses nearest-neighbor instead of bilinear so thin high-contrast strokes
+  // (e.g. a code/terminal screenshot) stay crisp instead of being blurred. Set by
+  // the same measure pass; defaults false (= bilinear, prior behaviour).
+  bool sharpUpscale{false};
 };
 
 // Accumulator for the measure pass — counts dark vs total pixels over a coarse
 // decode (dark-fraction metric; see OrderedDither.h).
 struct JpegLumProbe {
   uint32_t dark{0};
+  uint32_t bright{0};
   uint32_t count{0};
 };
 
 // Measure-pass draw callback: counts how many decoded pixels are dark
-// (luminance <= X4_DARK_PIXEL_CUTOFF). No scaling/dithering. pUser is a
-// JpegLumProbe*.
+// (luminance <= X4_DARK_PIXEL_CUTOFF) and how many are bright
+// (>= X4_BRIGHT_PIXEL_CUTOFF). No scaling/dithering. pUser is a JpegLumProbe*.
 int jpegMeasureCallback(JPEGDRAW* pDraw) {
   auto* probe = reinterpret_cast<JpegLumProbe*>(pDraw->pUser);
   if (!probe) return 0;
@@ -73,15 +80,18 @@ int jpegMeasureCallback(JPEGDRAW* pDraw) {
   const int blockH = pDraw->iHeight;
   if (stride <= 0 || blockH <= 0 || validW <= 0) return 1;
   uint32_t d = 0;
+  uint32_t b = 0;
   uint32_t c = 0;
   for (int row = 0; row < blockH; row++) {
     const uint8_t* p = &pixels[row * stride];
     for (int x = 0; x < validW; x++) {
       if (p[x] <= X4_DARK_PIXEL_CUTOFF) d++;
+      if (p[x] >= X4_BRIGHT_PIXEL_CUTOFF) b++;
       c++;
     }
   }
   probe->dark += d;
+  probe->bright += b;
   probe->count += c;
   return 1;
 }
@@ -173,6 +183,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
   const bool oneBit = ctx->config->oneBitDither;
   const bool blueNoise = ctx->config->ditherBlueNoise;
   const bool brighten = ctx->brightenDark;
+  const bool sharpUpscale = ctx->sharpUpscale;
   const bool caching = ctx->caching;
   const int32_t fineScaleFPX = ctx->fineScaleFPX;
   const int32_t invScaleFPX = ctx->invScaleFPX;
@@ -226,6 +237,33 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
         const int outX = cfgX + dstX;
         uint8_t gray = row[dstX - blockX];
         uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, brighten);
+        pw.writePixel(outX, dithered);
+        if (caching) cw.writePixel(outX, dithered);
+      }
+    }
+    return 1;
+  }
+
+  // === Nearest-neighbor upscale for bimodal high-contrast text images ===
+  // Bilinear (below) blends neighbouring pixels, which blurs the thin strokes of a
+  // code/terminal screenshot. Point-sampling keeps hard pixel edges — "blocky but
+  // crisp" — which reads far better for text. Only used when the probe flagged the
+  // image as bimodal text; photos keep the smoother bilinear path.
+  if (sharpUpscale && fineScaleFPX > FP_ONE && fineScaleFPY > FP_ONE) {
+    for (int dstY = dstYStart; dstY < dstYEnd; dstY++) {
+      const int outY = cfgY + dstY;
+      pw.beginRow(outY);
+      if (caching) cw.beginRow(outY, ctx->config->y);
+      int ly = (int)(((int64_t)dstY * invScaleFPY) >> FP_SHIFT) - blockY;
+      if (ly < 0) ly = 0;
+      if (ly >= blockH) ly = blockH - 1;
+      const uint8_t* row = &pixels[ly * stride];
+      for (int dstX = dstXStart; dstX < dstXEnd; dstX++) {
+        const int outX = cfgX + dstX;
+        int lx = (int)(((int64_t)dstX * invScaleFPX) >> FP_SHIFT) - blockX;
+        if (lx < 0) lx = 0;
+        if (lx >= validW) lx = validW - 1;
+        uint8_t dithered = ditherPixel(row[lx], outX, outY, useDithering, oneBit, blueNoise, brighten);
         pw.writePixel(outX, dithered);
         if (caching) cw.writePixel(outX, dithered);
       }
@@ -323,24 +361,46 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
     return 1;
   }
 
-  // === Nearest-neighbor (downscale: fineScale < 1.0) ===
+  // === Box-average downscale (fineScale < 1.0) ===
+  // JPEGDEC already performed the coarse 1/2..1/8 downscale (averaged in the IDCT),
+  // so the residual ratio here is in (0.5, 1.0] -> each dst pixel covers at most
+  // ~2x2 source pixels, and those rows lie within the current MCU block (>= 8 rows
+  // tall). Averaging that small window instead of point-sampling preserves thin
+  // strokes (e.g. text in a screenshot) that nearest-neighbor would drop. The
+  // window is clamped to the block, so a dst pixel straddling a block seam just
+  // averages the rows present -- a slight under-average, never an out-of-bounds read.
   for (int dstY = dstYStart; dstY < dstYEnd; dstY++) {
     const int outY = cfgY + dstY;
     pw.beginRow(outY);
     if (caching) cw.beginRow(outY, ctx->config->y);
-    const int32_t srcFyFP = dstY * invScaleFPY;
-    int ly = (srcFyFP >> FP_SHIFT) - blockY;
-    if (ly < 0) ly = 0;
-    if (ly >= blockH) ly = blockH - 1;
-    const uint8_t* row = &pixels[ly * stride];
+
+    int ly0 = (int)(((int64_t)dstY * invScaleFPY) >> FP_SHIFT) - blockY;
+    int ly1 = (int)(((int64_t)(dstY + 1) * invScaleFPY) >> FP_SHIFT) - blockY;
+    if (ly0 < 0) ly0 = 0;
+    if (ly0 >= blockH) ly0 = blockH - 1;
+    if (ly1 <= ly0) ly1 = ly0 + 1;
+    if (ly1 > blockH) ly1 = blockH;
 
     for (int dstX = dstXStart; dstX < dstXEnd; dstX++) {
       const int outX = cfgX + dstX;
-      const int32_t srcFxFP = dstX * invScaleFPX;
-      int lx = (srcFxFP >> FP_SHIFT) - blockX;
-      if (lx < 0) lx = 0;
-      if (lx >= validW) lx = validW - 1;
-      uint8_t gray = row[lx];
+
+      int lx0 = (int)(((int64_t)dstX * invScaleFPX) >> FP_SHIFT) - blockX;
+      int lx1 = (int)(((int64_t)(dstX + 1) * invScaleFPX) >> FP_SHIFT) - blockX;
+      if (lx0 < 0) lx0 = 0;
+      if (lx0 >= validW) lx0 = validW - 1;
+      if (lx1 <= lx0) lx1 = lx0 + 1;
+      if (lx1 > validW) lx1 = validW;
+
+      uint32_t sum = 0;
+      int count = 0;
+      for (int yy = ly0; yy < ly1; yy++) {
+        const uint8_t* row = &pixels[yy * stride];
+        for (int xx = lx0; xx < lx1; xx++) {
+          sum += row[xx];
+          count++;
+        }
+      }
+      const uint8_t gray = static_cast<uint8_t>(sum / count);  // count >= 1 by construction
 
       uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, brighten);
       pw.writePixel(outX, dithered);
@@ -355,7 +415,11 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
 // and returns whether the image is dark enough to warrant the X4 brighten curve.
 // Returns true (= brighten, prior behaviour) on any probe failure so a decode
 // error never regresses a dark image. Runs only on cache miss.
-bool jpegImageIsDark(const std::string& imagePath) {
+// Sets `bimodalText` (dark bg + bright text → crisp/nearest upscale + no brighten)
+// and returns the brighten verdict. On any probe failure: bimodalText=false and
+// returns true (= brighten, prior behaviour) so a decode error never regresses.
+bool jpegImageIsDark(const std::string& imagePath, bool& bimodalText) {
+  bimodalText = false;
   std::unique_ptr<JPEGDEC> jpeg(new (std::nothrow) JPEGDEC());
   if (!jpeg) return true;
 
@@ -369,8 +433,14 @@ bool jpegImageIsDark(const std::string& imagePath) {
   if (jpeg->decode(0, 0, JPEG_SCALE_EIGHTH) != 1 || probe.count == 0) return true;
 
   const uint32_t darkPct = probe.dark * 100u / probe.count;
-  const bool brighten = darkPct >= X4_DARK_FRACTION_PCT;
-  LOG_DBG("JPG", "Dark pixels %u%% (%s)", darkPct, brighten ? "dark/brighten" : "light/skip");
+  const uint32_t brightPct = probe.bright * 100u / probe.count;
+  // Bimodal high-contrast image (dark bg + bright text): skip the brighten lift
+  // (it greys the bg and crushes white-text contrast) AND use nearest-neighbor
+  // upscale (bilinear would blur the thin strokes).
+  bimodalText = darkPct >= X4_DARK_FRACTION_PCT && brightPct >= X4_BRIGHT_FRACTION_PCT;
+  const bool brighten = darkPct >= X4_DARK_FRACTION_PCT && !bimodalText;
+  LOG_DBG("JPG", "Dark %u%% Bright %u%% (%s)", darkPct, brightPct,
+          brighten ? "dark/brighten" : (bimodalText ? "bimodal-text/skip+sharp" : "light/skip"));
   return brighten;
 }
 
@@ -417,7 +487,9 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   // mean luminance so light/white-bg images skip the lift. Done before allocating
   // the real decoder so only one JPEGDEC (~20 KB) is ever live at a time. The 1-bit
   // (X3) and no-dither paths don't use the curve, so skip the probe entirely.
-  const bool brightenDark = (!config.oneBitDither && config.useDithering) ? jpegImageIsDark(imagePath) : true;
+  bool bimodalText = false;
+  const bool brightenDark =
+      (!config.oneBitDither && config.useDithering) ? jpegImageIsDark(imagePath, bimodalText) : true;
 
   std::unique_ptr<JPEGDEC> jpeg(new (std::nothrow) JPEGDEC());
   if (!jpeg) {
@@ -431,6 +503,7 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   ctx.screenWidth = renderer.getScreenWidth();
   ctx.screenHeight = renderer.getScreenHeight();
   ctx.brightenDark = brightenDark;
+  ctx.sharpUpscale = bimodalText;
 
   int rc = jpeg->open(imagePath.c_str(), jpegOpen, jpegClose, jpegRead, jpegSeek, jpegDrawCallback);
   const ScopedCleanup cleanup{[&jpeg]() { jpeg->close(); }};

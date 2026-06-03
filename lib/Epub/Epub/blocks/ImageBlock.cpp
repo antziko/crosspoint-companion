@@ -24,14 +24,14 @@ std::string getCachePath(const std::string& imagePath, bool oneBit, bool blueNoi
   // produce different pixel data for the same image, so each uses a distinct
   // suffix to avoid reading another's cache. The number is bumped whenever the
   // dither/tone math changes so stale caches regenerate:
-  //   .px10n = X4 4-level, blue-noise field  (bumped: dark-fraction brighten test)
-  //   .px10b = X4 4-level, 8x8 Bayer field
-  //   .px6n  = X3 / X4-AA-off 1-bit, blue-noise halftone
-  //   .px6b  = X3 / X4-AA-off 1-bit, Bayer halftone
+  //   .px12n = X4 4-level, blue-noise field  (bumped: bimodal-text nearest upscale +
+  //   .px12b = X4 4-level, 8x8 Bayer field    bright-fraction threshold retune)
+  //   .px7n  = X3 / X4-AA-off 1-bit, blue-noise halftone (JPEG box-average)
+  //   .px7b  = X3 / X4-AA-off 1-bit, Bayer halftone
   // Switching the Display > Image Dither setting therefore swaps cache files
   // rather than serving stale pixels. (Orphaned older caches stay on the card;
   // clear .crosspoint/ to reclaim that space.)
-  const char* suffix = oneBit ? (blueNoise ? ".px6n" : ".px6b") : (blueNoise ? ".px10n" : ".px10b");
+  const char* suffix = oneBit ? (blueNoise ? ".px7n" : ".px7b") : (blueNoise ? ".px12n" : ".px12b");
   size_t dotPos = imagePath.rfind('.');
   if (dotPos != std::string::npos) {
     return imagePath.substr(0, dotPos) + suffix;

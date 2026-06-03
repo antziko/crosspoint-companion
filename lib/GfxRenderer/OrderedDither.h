@@ -118,6 +118,19 @@ inline constexpr int X4_BLACK_ANCHOR = 0;
 inline constexpr uint8_t X4_DARK_PIXEL_CUTOFF = 80;
 inline constexpr uint8_t X4_DARK_FRACTION_PCT = 50;
 
+// Bimodal (high-contrast text) detection. A dark image that ALSO has a meaningful
+// share of near-white pixels is almost always white text on a dark background
+// (e.g. a terminal/code screenshot), not a dark photo. Brightening such an image
+// lifts the black background toward grey and crushes the white-text contrast, so
+// the brighten verdict skips it when both dark- and bright-fractions are high.
+//   X4_BRIGHT_PIXEL_CUTOFF : luminance (0..255) at/above which a pixel is "bright".
+//   X4_BRIGHT_FRACTION_PCT : treat as bimodal text when >= this % are bright.
+inline constexpr uint8_t X4_BRIGHT_PIXEL_CUTOFF = 200;
+// Text strokes are a SMALL share of a screenshot's pixels (thin glyphs on a large
+// dark field), so this fraction is intentionally low — a couple of % of pure-white
+// pixels alongside a mostly-dark image is the signature of white-on-black text.
+inline constexpr uint8_t X4_BRIGHT_FRACTION_PCT = 2;
+
 inline uint8_t toneMapX4(uint8_t gray) {
   static uint8_t lut[256];
   static bool ready = false;

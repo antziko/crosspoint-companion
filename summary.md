@@ -1,9 +1,9 @@
 # Change Summary — CrossPoint Reader (Xteink X3 / X4)
 
 Scope: image rendering quality (dither, tone, conditional dark-only brighten,
-full-width sizing), text anti-aliasing modes (Off/Antialiased/Sharp),
-manual-refresh behavior, OPDS browser robustness, EPUB indexing stability, and
-supporting infrastructure. X3 = UC81xx-class panel (792×528, 1-bit halftone path).
+full-width sizing, in-image text readability), text anti-aliasing modes
+(Off/Antialiased/Sharp), manual-refresh behavior, OPDS browser robustness, EPUB
+indexing stability, and supporting infrastructure. X3 = UC81xx-class panel (792×528, 1-bit halftone path).
 X4 = SSD1677 (800×480, native 4-level grayscale).
 Build: `pio run` (env `default`). `open-x4-sdk` is the low-level display/SD SDK.
 
@@ -170,12 +170,14 @@ X4 renders true 4-level grayscale.
 - `lib/Epub/Epub/converters/DitherUtils.h`, `lib/Epub/Epub/blocks/ImageBlock.cpp`:
   4-level path routes through `orderedDither4Level`. EPUB image cache suffix is
   versioned per render path so stale pixels aren't served, and is bumped whenever
-  the dither/tone math changes. **Current suffixes:** 4-level `.px10n` (blue) /
-  `.px10b` (Bayer) — bumped from `.px8*` (X4 gamma 0.65) → `.px9*` (conditional
-  brighten) → `.px10*` (dark-fraction metric); 1-bit (X3, or X4 with AA off)
-  `.px6n` / `.px6b`. (X3 is always `oneBit`, so the X4 gamma/4-level suffix bumps
-  never touch X3 caches.) Sharp and Antialiased modes share the 4-level `.px10*`
-  cache (both `oneBit=false`); the brighten verdict is baked per-image.
+  the dither/tone math changes. **Current suffixes:** 4-level `.px12n` (blue) /
+  `.px12b` (Bayer) — bumped `.px8*` (X4 gamma 0.65) → `.px9*` (conditional
+  brighten) → `.px10*` (dark-fraction metric) → `.px11*` (box-average + bimodal
+  brighten-skip) → `.px12*` (bimodal nearest upscale + bright-fraction retune; see
+  §17); 1-bit (X3, or X4 with AA off) `.px7n` / `.px7b`. (X3 is always `oneBit`, so
+  the X4 gamma/4-level suffix bumps never touch X3 caches.) Sharp and Antialiased
+  modes share the 4-level `.px12*` cache (both `oneBit=false`); the brighten/sharp
+  verdict is baked per-image.
 
 Quality ranking on X4 e-ink: error diffusion > blue noise > Bayer. Error
 diffusion is stateful (row order), so BMP/sleep can use it but EPUB (JPEG MCU
@@ -486,6 +488,44 @@ toggle): **Off / Antialiased / Sharp**.
 
 **Note:** the web settings UI treats `"textAntiAliasing"` as a checkbox; it now
 holds 0/1/2. Device UI is primary; web enum rendering is a possible follow-up.
+
+---
+
+## 17. Readability of text inside JPEG images (X4)
+
+Goal: make small text inside an embedded image (e.g. a code/terminal screenshot)
+legible with anti-aliasing on. Three changes in the JPEG converter, all driven by
+the existing 1/8-scale luminance probe — **no extra decode pass, ~0 heap**:
+
+- **Box-average residual downscale.** `jpegDrawCallback`'s downscale branch
+  averaged the in-block source window (≤ 2×2, since JPEGDEC's coarse 1/2..1/8 step
+  leaves a residual ratio in (0.5, 1.0]) instead of point-sampling. Keeps thin
+  strokes that nearest-neighbor dropped. The window is clamped to the current MCU
+  block, so a dst pixel straddling a block seam just averages the rows present —
+  no out-of-bounds read, no cross-block accumulator. (Helps books whose images are
+  *downscaled*; an upscaled low-res source is unaffected — see below.)
+
+- **Bimodal-text detection → skip brighten + nearest upscale.** The probe now also
+  counts *bright* pixels (`X4_BRIGHT_PIXEL_CUTOFF = 200`,
+  `X4_BRIGHT_FRACTION_PCT = 2`). An image that is mostly dark **and** has a small
+  share of pure-white pixels is white-on-dark text, not a dark photo. For these:
+  - **skip the `toneMapX4` brighten lift** — it greyed the black background and
+    crushed white-text contrast;
+  - **upscale nearest-neighbor instead of bilinear** — bilinear blends/blurs thin
+    strokes; point-sampling keeps hard "blocky but crisp" edges. Photos stay on the
+    smoother bilinear path (they aren't bimodal). Verdict logged as
+    `JPG Dark N% Bright M% (bimodal-text/skip+sharp)`.
+
+- **PNG converter** mirrors only the bimodal brighten-skip (consistency); the
+  thresholds live in `OrderedDither.h`, device-tunable.
+
+- **Cache suffix** bumped 4-level `.px10* → .px11* → .px12*` and 1-bit
+  `.px6* → .px7*` (`ImageBlock.cpp`) so stale pixels regenerate.
+
+**Hard limit:** none of this adds resolution. A low-res source (the test image was
+624 px wide, *upscaled* to fit) is soft in the original file; these changes raise
+contrast and edge crispness but cannot recover detail the source never had. There
+is no pan/zoom on Xteink, so fit-to-width is the ceiling.
 
 ---
 
