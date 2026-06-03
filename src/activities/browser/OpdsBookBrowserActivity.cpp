@@ -21,7 +21,26 @@
 
 namespace {
 constexpr int PAGE_ITEMS = 23;
+constexpr unsigned long GO_HOME_MS = 1000;  // hold BACK this long to jump to home
+
+// On-SD filename for a book entry (no directory). Single source of truth so the
+// downloader and the "already downloaded" indicator never diverge.
+std::string bookFileName(const OpdsEntry& book) {
+  return StringUtils::sanitizeFilename((book.author.empty() ? "" : book.author + " - ") + book.title) + ".epub";
 }
+
+// Download destination: the SD card root.
+std::string bookFilePath(const OpdsEntry& book) { return "/" + bookFileName(book); }
+
+// True if the book is already on the card: at the download root, or moved into
+// the finished-books folder ("/read", see READ_FOLDER in EpubReaderActivity.cpp).
+// Note: a finished book that collided on move may be "name (2).epub" in /read,
+// which this base-name check won't catch — the common case is covered.
+bool isBookOnDevice(const OpdsEntry& book) {
+  const std::string name = bookFileName(book);
+  return Storage.exists(("/" + name).c_str()) || Storage.exists(("/read/" + name).c_str());
+}
+}  // namespace
 
 void OpdsBookBrowserActivity::onEnter() {
   Activity::onEnter();
@@ -70,6 +89,19 @@ void OpdsBookBrowserActivity::loop() {
   }
   if (consumeBack && mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     consumeBack = false;
+    return;
+  }
+
+  // Long-press BACK -> jump straight to home, instead of stepping back up
+  // through every feed level. The lock swallows the eventual release so it
+  // doesn't also trigger a short-press navigateBack().
+  if (lockLongPressBack) {
+    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) lockLongPressBack = false;
+    return;
+  }
+  if (mappedInput.isPressed(MappedInputManager::Button::Back) && mappedInput.getHeldTime() >= GO_HOME_MS) {
+    lockLongPressBack = true;
+    onGoHome();
     return;
   }
 
@@ -183,8 +215,18 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
 
     for (size_t i = pageStartIndex; i < entries.size() && i < static_cast<size_t>(pageStartIndex + PAGE_ITEMS); i++) {
       const auto& entry = entries[i];
-      std::string displayText = (entry.type == OpdsEntryType::NAVIGATION) ? "> " + entry.title : entry.title;
-      if (entry.type == OpdsEntryType::BOOK && !entry.author.empty()) displayText += " - " + entry.author;
+      std::string displayText;
+      if (entry.type == OpdsEntryType::NAVIGATION) {
+        displayText = "> " + entry.title;
+      } else {
+        // Mark books already on the SD card (download root or finished "/read"
+        // folder). Prefix (not suffix) so the marker survives truncatedText().
+        // Re-checked each render, so a freshly downloaded book shows the mark
+        // immediately on the next draw.
+        const bool downloaded = isBookOnDevice(entry);
+        displayText = (downloaded ? "* " : "") + entry.title;
+        if (!entry.author.empty()) displayText += " - " + entry.author;
+      }
       auto item = renderer.truncatedText(UI_10_FONT_ID, displayText.c_str(), pageWidth - 40);
       renderer.drawText(UI_10_FONT_ID, 20, 60 + (i % PAGE_ITEMS) * 30, item.c_str(),
                         i != static_cast<size_t>(selectorIndex));
@@ -310,8 +352,7 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   // Build full download URL relative to the current feed, not the root server URL
   const std::string feedUrl = UrlUtils::buildUrl(server.url, currentPath);
   std::string downloadUrl = UrlUtils::buildUrl(feedUrl, book.href);
-  std::string filename =
-      "/" + StringUtils::sanitizeFilename((book.author.empty() ? "" : book.author + " - ") + book.title) + ".epub";
+  std::string filename = bookFilePath(book);
   LOG_DBG("OPDS", "Downloading: %s -> %s", downloadUrl.c_str(), filename.c_str());
 
   const auto result = HttpDownloader::downloadToFile(
