@@ -27,6 +27,13 @@
 namespace {
 constexpr int PAGE_ITEMS = 23;
 constexpr unsigned long GO_HOME_MS = 1000;  // hold BACK this long to jump to home
+// Minimum contiguous heap required before bringing up an HTTPS connection. The
+// mbedtls handshake needs ~40KB contiguous (see downloadBook), plus the RX/TX/
+// read buffers on top. Below this the connect or an in-flight read fails as an
+// OOM-in-disguise and can stall for minutes before surfacing (observed on X3:
+// heap collapsed to ~13KB mid-read, then a read error after a ~215s freeze).
+// Guarding here keeps the UI responsive and lets the user retry or back out.
+constexpr size_t MIN_CONTIGUOUS_HEAP_FOR_TLS = 44 * 1024;
 
 // On-SD filename for a book entry (no directory). Single source of truth so the
 // downloader and the "already downloaded" indicator never diverge.
@@ -331,6 +338,31 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   // so the parse runs with full heap. (Streaming the parser concurrently with
   // the TLS read only worked for tiny feeds that fit in the 5KB sliver.)
   static constexpr const char* kTmpFeed = "/.opds_feed.tmp";
+
+  // Free the current page's entries BEFORE the new feed's TLS connection comes
+  // up. A full page (e.g. 50 bookmark entries) holds ~33KB; leaving it allocated
+  // while mbedtls grabs its ~40KB contiguous handshake buffers is what starved
+  // the heap to ~13KB and stalled the read mid-stream on the X3 (see logs). This
+  // mirrors downloadBook's swap-to-free. Nothing below reads the old entries:
+  // they're fully replaced by the parser's results after the connection closes,
+  // and the ERROR paths don't touch the list.
+  std::vector<OpdsEntry>().swap(entries);
+
+  // Preflight the contiguous heap. If TLS can't get its buffers the connect or an
+  // in-flight read fails as an OOM-in-disguise and can hang for minutes; fail fast
+  // instead. entries were just freed, so a retry from the ERROR state has more
+  // headroom and can succeed.
+  const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (largestBlock < MIN_CONTIGUOUS_HEAP_FOR_TLS) {
+    SdDebugLog::log("OPDS", "fetch aborted: low heap, largest=%u free=%u", (unsigned)largestBlock,
+                    (unsigned)ESP.getFreeHeap());
+    LOG_ERR("OPDS", "Fetch aborted: low heap (largest=%u)", (unsigned)largestBlock);
+    state = BrowserState::ERROR;
+    errorMessage = tr(STR_MEMORY_ERROR);
+    requestUpdate();
+    return;
+  }
+
   std::string httpDetail;
   const auto dl =
       HttpDownloader::downloadToFile(url, kTmpFeed, nullptr, nullptr, server.username, server.password, &httpDetail);
@@ -468,8 +500,21 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   // is re-fetched after the download. Worst on the X3 (less RAM).
   const int savedIndex = selectorIndex;
   std::vector<OpdsEntry>().swap(entries);
+  const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   SdDebugLog::log("OPDS", "download start, heap=%u, largest=%u, url=%s", (unsigned)ESP.getFreeHeap(),
-                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), downloadUrl.c_str());
+                  (unsigned)largestBlock, downloadUrl.c_str());
+
+  // Same TLS heap preflight as fetchFeed: bail with a clear message rather than
+  // stalling for minutes on an OOM-in-disguise connect/read. RETRY reloads the
+  // feed (entries were freed above).
+  if (largestBlock < MIN_CONTIGUOUS_HEAP_FOR_TLS) {
+    SdDebugLog::log("OPDS", "download aborted: low heap, largest=%u", (unsigned)largestBlock);
+    LOG_ERR("OPDS", "Download aborted: low heap (largest=%u)", (unsigned)largestBlock);
+    state = BrowserState::ERROR;
+    errorMessage = tr(STR_MEMORY_ERROR);
+    requestUpdate();
+    return;
+  }
 
   std::string httpDetail;
   // Throttle redraws: the callback fires every ~2KB, but each e-ink refresh is

@@ -991,9 +991,13 @@ void EpubReaderActivity::render(RenderLock&& lock) {
                                   SETTINGS.imageRendering, SETTINGS.focusReadingEnabled)) {
       LOG_DBG("ERS", "Cache not found, building...");
 
-      GUI.drawPopup(renderer, tr(STR_INDEXING));
+      const Rect indexingPopup = GUI.drawPopup(renderer, tr(STR_INDEXING));
 
-      const auto popupFn = [this]() { GUI.drawPopup(renderer, tr(STR_INDEXING)); };
+      // Fill the popup's progress bar as the chapter is parsed so a long index on a
+      // big chapter no longer looks like a hang. pct is 0-100 from the parser.
+      const auto popupFn = [this, indexingPopup](const int pct) {
+        GUI.fillPopupProgress(renderer, indexingPopup, pct);
+      };
 
       if (!section->createSectionFile(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
                                       SETTINGS.extraParagraphSpacing, SETTINGS.paragraphAlignment, viewportWidth,

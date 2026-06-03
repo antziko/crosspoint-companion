@@ -1238,9 +1238,19 @@ bool ChapterHtmlSlimParser::parseAndBuildPages() {
     return false;
   }
 
-  // Get file size to decide whether to show indexing popup.
-  if (popupFn && file.size() >= MIN_SIZE_FOR_POPUP) {
-    popupFn();
+  // Get file size to decide whether to show indexing popup. Below the threshold
+  // the parse is fast enough that the popup just flickers, so skip it entirely.
+  const uint32_t totalBytes = file.size();
+  const bool showProgress = popupFn && totalBytes >= MIN_SIZE_FOR_POPUP;
+  // Each progress draw is a full ~637ms FAST e-ink refresh (see BmpViewerActivity),
+  // so throttle on elapsed time: redraws scale with parse duration, not chapter
+  // size, keeping the overhead bounded regardless of how big the chapter is.
+  constexpr uint32_t PROGRESS_REFRESH_INTERVAL_MS = 750;
+  uint32_t bytesRead = 0;
+  uint32_t lastProgressMs = 0;
+  if (showProgress) {
+    popupFn(0);
+    lastProgressMs = millis();
   }
 
   XML_SetUserData(parser, this);
@@ -1268,6 +1278,17 @@ bool ChapterHtmlSlimParser::parseAndBuildPages() {
     }
 
     done = file.available() == 0;
+
+    if (showProgress) {
+      bytesRead += len;
+      const uint32_t now = millis();
+      // Skip the redraw on the final buffer: the page render that follows replaces
+      // the popup immediately, so a 100% refresh here is wasted.
+      if (!done && now - lastProgressMs >= PROGRESS_REFRESH_INTERVAL_MS) {
+        popupFn(static_cast<int>(bytesRead * 100 / totalBytes));
+        lastProgressMs = now;
+      }
+    }
 
     if (XML_ParseBuffer(parser, static_cast<int>(len), done) == XML_STATUS_ERROR) {
       LOG_ERR("EHP", "Parse error at line %lu:\n%s", XML_GetCurrentLineNumber(parser),

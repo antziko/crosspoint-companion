@@ -104,3 +104,48 @@ I/O** — and kept beside the name so sorting can't desync the two. Trailing val
 Every other list is byte-identical (flag off by default).
 
 **Cost:** +4 bytes/file RAM, ~negligible flash; no extra I/O, no measurable CPU/heat.
+
+---
+
+## 7. OPDS X3 pagination OOM — freeze + read error
+
+**Symptom (X3 logs):** paging to the 2nd feed page (`?limit=50&offset=50`) failed with
+`read error after N bytes, heap=13104`, after a ~215 s UI freeze. The previous page's 50
+entries (~33 KB) were still held while the new feed's TLS connection came up; entries + the
+~54 KB mbedtls connection starved the heap, and the 16 KB record buffer couldn't be allocated
+mid-stream.
+
+**Fixes (`OpdsBookBrowserActivity.cpp`):**
+- `fetchFeed`: **free the `entries` vector before the new feed's TLS connection** (mirrors
+  `downloadBook` from §2). The parser fully repopulates `entries` after the connection closes;
+  ERROR paths don't read the list. This removed the multi-minute freeze (page-2 now fails fast
+  instead of hanging).
+- **TLS heap preflight** in both `fetchFeed` and `downloadBook`: if the largest contiguous free
+  block < `MIN_CONTIGUOUS_HEAP_FOR_TLS` (44 KB), bail to the ERROR state with `STR_MEMORY_ERROR`
+  instead of attempting a connect that OOMs mid-stream. RETRY reloads with more headroom (entries
+  already freed); BACK navigates out.
+
+**Note:** these stop the crash/freeze but can't make HTTPS page-2 *fit* on X3 — the prebuilt
+Arduino mbedtls bakes in `CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN=16384` (two 16 KB record buffers)
+and the `tls_dyn_buf_strategy` knob isn't in the esp_http_client header this build compiles
+against. **Reliable X3 OPDS = serve the catalog over plain `http://`** on a trusted network
+(frees the ~54 KB TLS cost; the firmware already supports http for local servers). The full
+firmware lever — shrinking the mbedtls record buffer — still needs a custom ESP-IDF build.
+
+---
+
+## 8. Reader "Indexing" popup — real progress bar
+
+**Goal:** a long chapter index showed a static "Indexing" popup with no movement and looked
+like a hang.
+
+**Fixes:** threaded a percent callback (`std::function<void(int)>`, was `void()`) through
+`ChapterHtmlSlimParser` → `Section::createSectionFile` → `EpubReaderActivity`. The parser tracks
+`bytesRead / file.size()` in the XML read loop and reports percent; `EpubReaderActivity` captures
+the popup `Rect` from `drawPopup` and fills the existing `fillPopupProgress` bar.
+
+**Cost / throttle:** each bar redraw is a full ~637 ms FAST e-ink refresh (see
+`BmpViewerActivity`), so updates are throttled on **elapsed time** (≥ 750 ms) — bounded overhead
+that scales with parse duration, not chapter size. The final-buffer redraw is skipped (the page
+render replaces the popup). Chapters under 10 KB still skip the popup entirely. Silent
+next-chapter prefetch passes no callback, so it draws nothing. No new heap, no new task.
