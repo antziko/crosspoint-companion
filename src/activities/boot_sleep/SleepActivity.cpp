@@ -129,29 +129,39 @@ void SleepActivity::renderCustomSleepScreen() const {
 
     const auto numFiles = files.size();
     if (numFiles > 0) {
-      // Pick a random wallpaper that hasn't been shown recently, so every image gets
-      // a turn before any repeats. Avoid as many recent picks as the history buffer
-      // holds, capped at numFiles-1 so at least one image is always eligible.
-      const uint16_t fileCount = static_cast<uint16_t>(std::min(numFiles, static_cast<size_t>(UINT16_MAX)));
-      const uint8_t window =
-          static_cast<uint8_t>(std::min(static_cast<size_t>(CrossPointState::SLEEP_RECENT_COUNT), numFiles - 1));
+      // Exhaustive shuffle-bag: show every image once, in random order, before any
+      // repeat. A persistent bitset (saved in state.json on the SD card) records which
+      // images were shown this cycle; when the cycle is exhausted, or the folder size
+      // changed, start a fresh cycle. State is ~68 bytes resident and there is no heap
+      // allocation here — the pick is done with two counting passes, not a temp list.
+      const uint16_t fileCount =
+          static_cast<uint16_t>(std::min(numFiles, static_cast<size_t>(CrossPointState::SLEEP_DECK_MAX)));
+      if (APP_STATE.sleepDeckSize != fileCount || APP_STATE.sleepDeckShownCount >= fileCount) {
+        APP_STATE.resetSleepDeck(fileCount);
+      }
 
-      // Build the eligible set (indices not in the recent window), then pick from it
-      // uniformly. Direct selection — not rejection sampling — guarantees a fresh
-      // image whenever one exists, even when the window covers nearly the whole folder
-      // (where random retries would usually keep landing on recent picks and repeat).
+      // Count images not yet shown this cycle, then pick the target-th of them.
       // Use the hardware TRNG (esp_random); Arduino random() is never seeded here.
-      std::vector<uint16_t> available;
-      available.reserve(fileCount);
+      uint16_t eligible = 0;
       for (uint16_t i = 0; i < fileCount; i++) {
-        if (!APP_STATE.isRecentSleep(i, window)) {
-          available.push_back(i);
+        if (!APP_STATE.isSleepShown(i)) eligible++;
+      }
+      uint16_t randomFileIndex = 0;
+      if (eligible == 0) {
+        // Shouldn't happen (reset above keeps one eligible), but stay safe.
+        randomFileIndex = static_cast<uint16_t>(esp_random() % fileCount);
+      } else {
+        const uint16_t target = static_cast<uint16_t>(esp_random() % eligible);
+        for (uint16_t i = 0, seen = 0; i < fileCount; i++) {
+          if (APP_STATE.isSleepShown(i)) continue;
+          if (seen == target) {
+            randomFileIndex = i;
+            break;
+          }
+          seen++;
         }
       }
-      const uint16_t randomFileIndex = available.empty()
-                                           ? static_cast<uint16_t>(esp_random() % fileCount)
-                                           : available[esp_random() % available.size()];
-      APP_STATE.pushRecentSleep(randomFileIndex);
+      APP_STATE.markSleepShown(randomFileIndex);
       APP_STATE.saveToFile();
       const auto filename = std::string(sleepDir) + "/" + files[randomFileIndex];
       HalFile randFile;

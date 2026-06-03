@@ -6,6 +6,7 @@
 #include <Serialization.h>
 
 #include <algorithm>
+#include <cstring>
 
 namespace {
 constexpr uint8_t STATE_FILE_VERSION = 4;
@@ -16,19 +17,21 @@ constexpr char STATE_FILE_BAK[] = "/.crosspoint/state.bin.bak";
 
 CrossPointState CrossPointState::instance;
 
-bool CrossPointState::isRecentSleep(uint16_t idx, uint8_t checkCount) const {
-  const uint8_t effectiveCount = std::min(checkCount, recentSleepFill);
-  for (uint8_t i = 0; i < effectiveCount; i++) {
-    const uint8_t slot = (recentSleepPos + SLEEP_RECENT_COUNT - 1 - i) % SLEEP_RECENT_COUNT;
-    if (recentSleepImages[slot] == idx) return true;
-  }
-  return false;
+bool CrossPointState::isSleepShown(uint16_t idx) const {
+  if (idx >= SLEEP_DECK_MAX) return false;
+  return (sleepDeckShown[idx >> 3] >> (idx & 7)) & 1u;
 }
 
-void CrossPointState::pushRecentSleep(uint16_t idx) {
-  recentSleepImages[recentSleepPos] = idx;
-  recentSleepPos = (recentSleepPos + 1) % SLEEP_RECENT_COUNT;
-  if (recentSleepFill < SLEEP_RECENT_COUNT) recentSleepFill++;
+void CrossPointState::markSleepShown(uint16_t idx) {
+  if (idx >= SLEEP_DECK_MAX || isSleepShown(idx)) return;
+  sleepDeckShown[idx >> 3] |= static_cast<uint8_t>(1u << (idx & 7));
+  if (sleepDeckShownCount < UINT16_MAX) sleepDeckShownCount++;
+}
+
+void CrossPointState::resetSleepDeck(uint16_t size) {
+  memset(sleepDeckShown, 0, sizeof(sleepDeckShown));
+  sleepDeckSize = size;
+  sleepDeckShownCount = 0;
 }
 
 bool CrossPointState::saveToFile() const {
@@ -77,11 +80,10 @@ bool CrossPointState::loadFromBinaryFile() {
 
   serialization::readString(inputFile, openEpubPath);
   if (version >= 2) {
+    // Legacy single recent-image byte. The shuffle-bag deck replaces it; consume
+    // the byte to keep parsing aligned, but don't seed anything (deck starts fresh).
     uint8_t legacyLastSleep = UINT8_MAX;
     serialization::readPod(inputFile, legacyLastSleep);
-    if (legacyLastSleep != UINT8_MAX) {
-      pushRecentSleep(static_cast<uint16_t>(legacyLastSleep));
-    }
   }
 
   if (version >= 3) {
