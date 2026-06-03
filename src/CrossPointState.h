@@ -16,6 +16,10 @@ class CrossPointState {
   uint8_t readerActivityLoadCount = 0;
   bool lastSleepFromReader = false;
   bool showBootScreen = true;
+  // Orientation the reader is currently using. Runtime only — NOT serialized.
+  // Inside an open EPUB: the book's saved orientation (or global default if none).
+  // Everywhere else: mirrors SETTINGS.orientation (global default). 0 == PORTRAIT.
+  uint8_t activeOrientation = 0;
 
   // Returns true if idx was shown within the last checkCount picks.
   // Walks backwards from the most recently written slot.

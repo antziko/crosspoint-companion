@@ -44,6 +44,10 @@ namespace {
 // pages per minute, first item is 1 to prevent division by zero if accessed
 constexpr int PAGE_TURN_RATES[] = {1, 1, 3, 6, 12};
 
+// Per-book orientation cache file (.crosspoint/epub_<hash>/orientation.bin).
+// Byte 0 = version, byte 1 = orientation value.
+constexpr uint8_t ORIENTATION_FILE_VERSION = 1;
+
 int clampPercent(int percent) {
   if (percent < 0) {
     return 0;
@@ -154,11 +158,24 @@ void EpubReaderActivity::onEnter() {
     return;
   }
 
-  // Configure screen orientation based on settings
-  // NOTE: This affects layout math and must be applied before any render calls.
-  ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
-
   epub->setupCacheDir();
+
+  // Load this book's saved orientation; fall back to the global default if none.
+  APP_STATE.activeOrientation = SETTINGS.orientation;
+  {
+    HalFile of;
+    if (Storage.openFileForRead("ERS", epub->getCachePath() + "/orientation.bin", of)) {
+      uint8_t odata[2];
+      if (of.read(odata, 2) == 2 && odata[0] == ORIENTATION_FILE_VERSION &&
+          odata[1] < CrossPointSettings::ORIENTATION_COUNT) {
+        APP_STATE.activeOrientation = odata[1];
+      }
+    }
+  }
+
+  // Configure screen orientation for this book.
+  // NOTE: This affects layout math and must be applied before any render calls.
+  ReaderUtils::applyOrientation(renderer, APP_STATE.activeOrientation);
 
   HalFile f;
   if (Storage.openFileForRead("ERS", epub->getCachePath() + "/progress.bin", f)) {
@@ -207,6 +224,8 @@ void EpubReaderActivity::onExit() {
 
   // Reset orientation back to portrait for the rest of the UI
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+  // Restore the global-default invariant for non-reader UI.
+  APP_STATE.activeOrientation = SETTINGS.orientation;
 
   APP_STATE.readerActivityLoadCount = 0;
   APP_STATE.saveToFile();
@@ -386,8 +405,9 @@ void EpubReaderActivity::loop() {
 
   if (longPress && lpBehavior == SETTINGS.ORIENTATION_CHANGE) {
     const uint8_t newOrientation =
-        nextTriggered ? (SETTINGS.orientation - 1 + SETTINGS.ORIENTATION_COUNT) % SETTINGS.ORIENTATION_COUNT
-                      : (SETTINGS.orientation + 1) % SETTINGS.ORIENTATION_COUNT;
+        nextTriggered
+            ? (APP_STATE.activeOrientation - 1 + SETTINGS.ORIENTATION_COUNT) % SETTINGS.ORIENTATION_COUNT
+            : (APP_STATE.activeOrientation + 1) % SETTINGS.ORIENTATION_COUNT;
     applyOrientation(newOrientation);
     requestUpdate();
     return;
@@ -514,7 +534,8 @@ void EpubReaderActivity::openReaderMenu() {
 
   startActivityForResult(
       std::make_unique<EpubReaderMenuActivity>(
-          renderer, mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent, SETTINGS.orientation,
+          renderer, mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent,
+          APP_STATE.activeOrientation,
           !currentPageFootnotes.empty(), isCurrentPageBookmarked,
           Dictionary::exists(epub->getCachePath().c_str()), std::move(activeDictName)),
       [this](const ActivityResult& result) {
@@ -789,8 +810,8 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
 }
 
 void EpubReaderActivity::applyOrientation(const uint8_t orientation) {
-  // No-op if the selected orientation matches current settings.
-  if (SETTINGS.orientation == orientation) {
+  // No-op if the selected orientation matches the book's current orientation.
+  if (APP_STATE.activeOrientation == orientation) {
     return;
   }
 
@@ -803,15 +824,26 @@ void EpubReaderActivity::applyOrientation(const uint8_t orientation) {
       nextPageNumber = section->currentPage;
     }
 
-    // Persist the selection so the reader keeps the new orientation on next launch.
-    SETTINGS.orientation = orientation;
-    SETTINGS.saveToFile();
+    // Persist per-book so this book keeps the new orientation on next launch.
+    // The global default (SETTINGS.orientation) is intentionally left untouched.
+    APP_STATE.activeOrientation = orientation;
+    saveOrientation();
 
     // Update renderer orientation to match the new logical coordinate system.
-    ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
+    ReaderUtils::applyOrientation(renderer, APP_STATE.activeOrientation);
 
     // Reset section to force re-layout in the new orientation.
     section.reset();
+  }
+}
+
+void EpubReaderActivity::saveOrientation() const {
+  HalFile f;
+  if (Storage.openFileForWrite("ERS", epub->getCachePath() + "/orientation.bin", f)) {
+    const uint8_t data[2] = {ORIENTATION_FILE_VERSION, APP_STATE.activeOrientation};
+    f.write(data, 2);
+  } else {
+    LOG_ERR("ERS", "Failed to save per-book orientation");
   }
 }
 
@@ -1141,10 +1173,12 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   // blue noise (the best ordered field) for EPUB.
   renderer.setImageDitherMode(SETTINGS.imageDither);
 
-  // Image render mode: 1-bit halftone on X3 always, and on X4 when text AA is
-  // off (true black, instant, no two-stage flash). 4-level grayscale only when
-  // text AA is on (the grayscale pass runs for text anyway).
-  renderer.setOneBitImages(renderer.isX3() || !SETTINGS.textAntiAliasing);
+  // Text AA mode (X4): Off = 1-bit images + black text; Antialiased = grey images +
+  // grey (AA) text; Sharp = grey images + true-black text. Images are 1-bit only in
+  // Off mode; text contributes grey to the grayscale planes only in Antialiased mode.
+  const uint8_t aaMode = SETTINGS.textAntiAliasing;
+  renderer.setOneBitImages(renderer.isX3() || aaMode == CrossPointSettings::TEXT_AA_OFF);
+  renderer.setTextAntiAlias(aaMode == CrossPointSettings::TEXT_AA_ANTIALIASED);
 
   // Font prewarm: scan pass accumulates text, then prewarm, then real render
   auto* fcm = renderer.getFontCacheManager();
@@ -1163,8 +1197,10 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   // a 1-bit image halftone, so it doesn't need the 4-level gray pass.)
   // 4-level grayscale images only exist when text AA is on (AA off => images are
   // 1-bit, drawn in the BW frame, needing no grayscale pass or blanking dance).
-  const bool grayImages = page->hasImages() && !renderer.isX3() && SETTINGS.textAntiAliasing;
-  const bool doGrayscalePass = SETTINGS.textAntiAliasing || grayImages;
+  const bool grayImages = page->hasImages() && !renderer.isX3() && aaMode != CrossPointSettings::TEXT_AA_OFF;
+  // Antialiased always runs the gray pass (text AA, even text-only pages). Sharp runs
+  // it only for image pages — pure-text Sharp pages stay single-pass solid black.
+  const bool doGrayscalePass = (aaMode == CrossPointSettings::TEXT_AA_ANTIALIASED) || grayImages;
   // Any grayscale image page must use the FAST_REFRESH blanking dance below
   // (even with text AA off): a HALF/FULL refresh sets the e-ink particles too
   // firmly for the following grayscale LUT to adjust, which washed image pages

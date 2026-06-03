@@ -1,6 +1,7 @@
 #include "MappedInputManager.h"
 
 #include "CrossPointSettings.h"
+#include "CrossPointState.h"
 
 bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint8_t) const) const {
   const auto sideLayout = SETTINGS.sideButtonLayout;
@@ -70,8 +71,8 @@ MappedInputManager::Labels MappedInputManager::mapLabels(const char* back, const
                                                          const char* next) const {
   // Swap previous/next labels to match the page turn direction swap in INVERTED and LANDSCAPE_CCW.
   const bool swapLabels =
-      SETTINGS.frontButtonFollowOrientation && (SETTINGS.orientation == CrossPointSettings::INVERTED ||
-                                                SETTINGS.orientation == CrossPointSettings::LANDSCAPE_CCW);
+      SETTINGS.frontButtonFollowOrientation && (APP_STATE.activeOrientation == CrossPointSettings::INVERTED ||
+                                                APP_STATE.activeOrientation == CrossPointSettings::LANDSCAPE_CCW);
   const char* leftLabel = swapLabels ? next : previous;
   const char* rightLabel = swapLabels ? previous : next;
 

@@ -29,6 +29,9 @@ void TxtReaderActivity::onEnter() {
     return;
   }
 
+  // TXT has no per-book orientation; keep the runtime active orientation in
+  // sync with the global default so shared reader swap/tilt logic stays correct.
+  APP_STATE.activeOrientation = SETTINGS.orientation;
   ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
 
   txt->setupCacheDir();
@@ -400,7 +403,7 @@ void TxtReaderActivity::renderPage() {
 
   ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
 
-  if (SETTINGS.textAntiAliasing) {
+  if (SETTINGS.textAntiAliasing == CrossPointSettings::TEXT_AA_ANTIALIASED) {
     ReaderUtils::renderAntiAliased(renderer, [&renderLines]() { renderLines(); });
   }
   // scope destructor clears font cache via FontCacheManager

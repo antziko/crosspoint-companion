@@ -381,6 +381,10 @@ void setup() {
   APP_STATE.loadFromFile();
   RECENT_BOOKS.loadFromFile();
 
+  // Seed runtime active orientation from the global default. Readers override
+  // this per-book; non-reader UI keeps it mirroring the global setting.
+  APP_STATE.activeOrientation = SETTINGS.orientation;
+
   // Clamp lookup history cap to valid range
   if (SETTINGS.lookupHistoryCap < CrossPointSettings::HIST_CAP_MIN ||
       SETTINGS.lookupHistoryCap > CrossPointSettings::HIST_CAP_MAX ||
@@ -528,7 +532,7 @@ void loop() {
   static unsigned long lastMemPrint = 0;
 
   gpio.update();
-  halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.orientation, activityManager.isReaderActivity());
+  halTiltSensor.update(SETTINGS.tiltPageTurn, APP_STATE.activeOrientation, activityManager.isReaderActivity());
 
   renderer.setFadingFix(SETTINGS.fadingFix);
 

@@ -79,6 +79,7 @@ class EpubReaderActivity final : public Activity {
   void openWordSelect(bool framebufferContainsPage);
   void onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action);
   void applyOrientation(uint8_t orientation);
+  void saveOrientation() const;
   void toggleAutoPageTurn(uint8_t selectedPageTurnOption);
   void pageTurn(bool isForwardTurn);
   void addBookmark();
