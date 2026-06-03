@@ -635,6 +635,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
         // the next menu-driven re-render.
         showBookmarkMessage = true;
         bookmarkMessageRemoved = true;
+        bookmarkMessageReturn = false;
         bookmarkMessageTime = millis();
         requestUpdate();
       } else {
@@ -699,9 +700,24 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       const int initialPercent = clampPercent(static_cast<int>(bookProgress + 0.5f));
       startActivityForResult(
           std::make_unique<EpubReaderPercentSelectionActivity>(renderer, mappedInput, initialPercent),
-          [this](const ActivityResult& result) {
+          [this, initialPercent](const ActivityResult& result) {
             if (!result.isCancelled) {
-              jumpToPercent(std::get<PercentResult>(result.data).percent);
+              const int targetPercent = clampPercent(std::get<PercentResult>(result.data).percent);
+
+              // Drop a "return here" bookmark at the current page before jumping, so the user
+              // can quickly get back. Works like SELECT_CHAPTER: only when actually moving and
+              // the page isn't already bookmarked (don't clobber a manual one). addBookmark()
+              // takes its own RenderLock, so call it before jumpToPercent() resets state.
+              if (section && section->pageCount > 0 && targetPercent != initialPercent) {
+                const float bmProgress =
+                    static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
+                if (!BOOKMARKS.hasBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
+                                                  section->pageCount)) {
+                  addBookmark(/*returnMark=*/true);
+                }
+              }
+
+              jumpToPercent(targetPercent);
             }
           });
       break;
@@ -1153,7 +1169,9 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   }
 
   if (showBookmarkMessage) {
-    const StrId msgId = bookmarkMessageRemoved ? StrId::STR_BOOKMARK_REMOVED : StrId::STR_BOOKMARK_ADDED;
+    const StrId msgId = bookmarkMessageRemoved   ? StrId::STR_BOOKMARK_REMOVED
+                        : bookmarkMessageReturn  ? StrId::STR_RETURN_MARK_ADDED
+                                                 : StrId::STR_BOOKMARK_ADDED;
     GUI.drawPopup(renderer, I18n::getInstance().get(msgId));
   }
 }
@@ -1522,6 +1540,7 @@ void EpubReaderActivity::addBookmark(bool returnMark) {
   if (addResult == BookmarkStore::AddResult::Added) {
     showBookmarkMessage = true;
     bookmarkMessageRemoved = false;
+    bookmarkMessageReturn = returnMark;
     bookmarkMessageTime = millis();  // own the auto-dismiss timer (any caller)
   } else {
     LOG_ERR("ERS", "Bookmark limit reached");

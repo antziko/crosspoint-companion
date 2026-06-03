@@ -44,6 +44,7 @@ class EpubReaderActivity final : public Activity {
   bool ignoreNextConfirmRelease = false;  // Suppress menu open after hold-Confirm gesture fires
   bool showBookmarkMessage = false;
   bool bookmarkMessageRemoved = false;  // false = "added", true = "removed" text
+  bool bookmarkMessageReturn = false;   // true = "return mark added" (overrides added text)
   // Tracks whether this book is currently removed from Recent Books by the
   // removeReadBooksFromRecents feature (set at End-of-Book, cleared if paged back in).
   bool recentsEntryRemoved = false;

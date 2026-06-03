@@ -284,3 +284,20 @@ teardown) runs at the top of both `silentRestart()` and `silentRestartToReader()
 paint was `FAST_REFRESH`, ghosting the pre-reboot "Progress found" frame. New one-shot
 `forceCleanRefreshNextPaint()` upgrades the next `displayBuffer()` to `HALF_REFRESH` (clears stale
 residue, no FULL black/white flash), triggered at boot only for `Silent` resume to `READER`.
+
+---
+
+## 15. Return mark on "Go to %" + distinct notification text
+
+**"Go to %" drops a return mark too (`EpubReaderActivity.cpp`):** the `GO_TO_PERCENT` result
+callback now mirrors `SELECT_CHAPTER` — before `jumpToPercent()` it drops a `returnMark` bookmark at
+the current page, guarded by `targetPercent != initialPercent` (actually moving) and
+`!hasBookmarkForPage(...)` (don't clobber a manual one). Captures `initialPercent` in the lambda;
+`addBookmark(returnMark=true)` is called before the jump because `jumpToPercent()` resets `section`.
+
+**Distinct toast text (`EpubReaderActivity.cpp/.h` + i18n):** new `bookmarkMessageReturn` flag, set
+from the `returnMark` arg in `addBookmark()` and cleared on the removal path. The reader popup now
+picks one of three strings: `STR_BOOKMARK_REMOVED` / new `STR_RETURN_MARK_ADDED` ("Return mark
+added.") / `STR_BOOKMARK_ADDED`. So a manual bookmark says "Bookmark added." while an auto chapter/
+percent jump says "Return mark added." English string added; other languages fall back until
+translated.
