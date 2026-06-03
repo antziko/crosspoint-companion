@@ -4,6 +4,8 @@
 #include <Logging.h>
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include <ctime>
 
@@ -116,8 +118,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
 
   esp_err_t err = esp_http_client_perform(client);
   const int httpCode = esp_http_client_get_status_code(client);
-  lastHttpCode = httpCode;
-  esp_http_client_cleanup(client);
+  lastHttpCode = httpCode;  esp_http_client_cleanup(client);
 
   LOG_DBG("KOSync", "Auth response: %d (err: %d)", httpCode, err);
 
@@ -149,8 +150,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
 
   esp_err_t err = esp_http_client_perform(client);
   const int httpCode = esp_http_client_get_status_code(client);
-  lastHttpCode = httpCode;
-  esp_http_client_cleanup(client);
+  lastHttpCode = httpCode;  esp_http_client_cleanup(client);
 
   LOG_DBG("KOSync", "Get progress response: %d (err: %d)", httpCode, err);
 
@@ -222,8 +222,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
 
   esp_err_t err = esp_http_client_perform(client);
   const int httpCode = esp_http_client_get_status_code(client);
-  lastHttpCode = httpCode;
-  esp_http_client_cleanup(client);
+  lastHttpCode = httpCode;  esp_http_client_cleanup(client);
 
   LOG_DBG("KOSync", "Update progress response: %d (err: %d)", httpCode, err);
 
@@ -256,8 +255,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getBookmarks(const std::string& do
 
   esp_err_t err = esp_http_client_perform(client);
   const int httpCode = esp_http_client_get_status_code(client);
-  lastHttpCode = httpCode;
-  esp_http_client_cleanup(client);
+  lastHttpCode = httpCode;  esp_http_client_cleanup(client);
 
   LOG_DBG("KOSync", "Get bookmarks response: %d (err: %d)", httpCode, err);
 
@@ -310,24 +308,43 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
   std::string body;
   serializeJson(doc, body);
 
-  ResponseBuffer buf;
-  esp_http_client_handle_t client = createClient(url.c_str(), &buf, HTTP_METHOD_PUT);
-  if (!client) return NETWORK_ERROR;
+  // The bookmark PUT is the last of several TLS handshakes in a sync, and on some devices the
+  // fresh handshake opened right after the bookmark GET's teardown fails to connect
+  // (ESP_ERR_HTTP_CONNECT) — a transient back-to-back reconnect issue, not a heap/auth fault.
+  // Retry the whole request a few times with a settle delay so the transport can recover. This
+  // matters because a dropped PUT means a local delete never reaches the server, so other
+  // devices never converge.
+  constexpr int kMaxAttempts = 3;
+  esp_err_t err = ESP_FAIL;
+  int httpCode = 0;
+  for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+    if (attempt > 0) {
+      LOG_DBG("KOSync", "Retrying bookmark upload (attempt %d/%d)", attempt + 1, kMaxAttempts);
+      vTaskDelay(pdMS_TO_TICKS(800));
+    }
 
-  if (esp_http_client_set_header(client, "Content-Type", "application/json") != ESP_OK ||
-      esp_http_client_set_post_field(client, body.c_str(), body.length()) != ESP_OK) {
-    LOG_ERR("KOSync", "Failed to set request body");
+    ResponseBuffer buf;
+    esp_http_client_handle_t client = createClient(url.c_str(), &buf, HTTP_METHOD_PUT);
+    if (!client) {
+      err = ESP_FAIL;
+      continue;
+    }
+    if (esp_http_client_set_header(client, "Content-Type", "application/json") != ESP_OK ||
+        esp_http_client_set_post_field(client, body.c_str(), body.length()) != ESP_OK) {
+      LOG_ERR("KOSync", "Failed to set request body");
+      esp_http_client_cleanup(client);
+      err = ESP_FAIL;
+      continue;
+    }
+
+    err = esp_http_client_perform(client);
+    httpCode = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
-    return NETWORK_ERROR;
+    LOG_DBG("KOSync", "Update bookmarks response: %d (err: %d, attempt %d)", httpCode, err, attempt + 1);
+
+    if (err == ESP_OK) break;  // got an HTTP response — no point retrying the transport
   }
-
-  esp_err_t err = esp_http_client_perform(client);
-  const int httpCode = esp_http_client_get_status_code(client);
   lastHttpCode = httpCode;
-  esp_http_client_cleanup(client);
-
-  LOG_DBG("KOSync", "Update bookmarks response: %d (err: %d)", httpCode, err);
-
   if (err != ESP_OK) return NETWORK_ERROR;
   if (httpCode == 200 || httpCode == 202) return OK;
   if (httpCode == 401) return AUTH_FAILED;

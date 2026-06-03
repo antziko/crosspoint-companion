@@ -287,6 +287,8 @@ void KOReaderSyncActivity::syncBookmarks() {
     // Fetch failed, but still upload local set so the server learns our bookmarks.
     LOG_ERR("KOSync", "Bookmark fetch failed: %s", KOReaderSyncClient::errorString(getResult));
   }
+  // NOT_FOUND just means the server has nothing stored yet — the fetch itself succeeded.
+  bmFetchOk = (getResult == KOReaderSyncClient::OK || getResult == KOReaderSyncClient::NOT_FOUND);
 
   bmMergedCount = countSyncable();
   bmSynced = true;
@@ -294,7 +296,10 @@ void KOReaderSyncActivity::syncBookmarks() {
   // Push the reconciled set + tombstones so other devices converge on next sync.
   const std::string localJson = BookmarkStore::serializeToJson(BOOKMARKS.getBookmarks(), BOOKMARKS.getTombstones());
   const auto putResult = KOReaderSyncClient::updateBookmarks(documentHash, localJson);
-  if (putResult != KOReaderSyncClient::OK) {
+  bmUploadOk = (putResult == KOReaderSyncClient::OK);
+  if (!bmUploadOk) {
+    // A failed upload means local deletes/additions never reached the server, so other
+    // devices won't converge. Surface this on the result screen rather than hiding it.
     LOG_ERR("KOSync", "Bookmark upload failed: %s", KOReaderSyncClient::errorString(putResult));
   }
 }
@@ -406,15 +411,21 @@ void KOReaderSyncActivity::render(RenderLock&&) {
              localProgress.percentage * 100);
     renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 200, localPageStr);
 
-    // Bookmark sync summary (merge is automatic; this is informational).
+    // Bookmark sync summary (merge is automatic; this is informational). Show it whenever a
+    // sync was attempted so the upload status is visible even with no bookmarks to merge.
     int optionY = top + 230;
-    if (bmSynced && (bmRemoteCount > 0 || bmLocalCount > 0)) {
+    if (bmSynced) {
       // Extra gap separates the bookmark block from the local progress above it.
       char bmStr[96];
       snprintf(bmStr, sizeof(bmStr), tr(STR_BOOKMARK_DIFF_FORMAT), bmRemoteCount, bmLocalCount, bmMergedCount);
-      renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 248, tr(STR_BOOKMARKS), true);
-      renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 273, bmStr);
-      optionY = top + 305;
+      char bmStatusStr[96];
+      snprintf(bmStatusStr, sizeof(bmStatusStr), tr(STR_BOOKMARK_SYNC_STATUS_FORMAT),
+               bmFetchOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER),
+               bmUploadOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER));
+      renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 240, tr(STR_BOOKMARKS), true);
+      renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 262, bmStr);
+      renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 284, bmStatusStr);
+      optionY = top + 312;
     }
     const int optionHeight = 30;
 
@@ -443,10 +454,15 @@ void KOReaderSyncActivity::render(RenderLock&&) {
     UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top, tr(STR_NO_REMOTE_MSG), true, EpdFontFamily::BOLD);
     UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top + 40, tr(STR_UPLOAD_PROMPT));
 
-    if (bmSynced && (bmRemoteCount > 0 || bmLocalCount > 0)) {
+    if (bmSynced) {
       char bmStr[96];
       snprintf(bmStr, sizeof(bmStr), tr(STR_BOOKMARK_DIFF_FORMAT), bmRemoteCount, bmLocalCount, bmMergedCount);
       UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top + 90, bmStr);
+      char bmStatusStr[96];
+      snprintf(bmStatusStr, sizeof(bmStatusStr), tr(STR_BOOKMARK_SYNC_STATUS_FORMAT),
+               bmFetchOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER),
+               bmUploadOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER));
+      UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top + 115, bmStatusStr);
     }
 
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_UPLOAD), "", "");

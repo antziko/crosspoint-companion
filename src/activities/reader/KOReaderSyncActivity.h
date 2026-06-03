@@ -80,6 +80,8 @@ class KOReaderSyncActivity final : public Activity {
   int bmRemoteCount = 0;     // Bookmarks fetched from the server
   int bmLocalCount = 0;      // Local bookmarks before merge
   int bmMergedCount = 0;     // Total after union merge
+  bool bmFetchOk = false;    // GET reached the server (OK or NOT_FOUND) — remote set is trustworthy
+  bool bmUploadOk = false;   // PUT succeeded — local set actually propagated to the server
 
   // Selection in result screen (0=Apply, 1=Upload)
   int selectedOption = 0;
