@@ -19,21 +19,15 @@ class RecentBooksActivity final : public Activity {
   // again so the release doesn't also open the book.
   bool longPressFired = false;
 
-  // Reorder gesture state: hold Left = move selected book up, hold Right = down.
-  // reorderActive swallows input until the held button is released; reorderDirty
-  // tracks whether any swap happened so we persist once when the gesture ends.
-  bool reorderActive = false;
-  bool reorderDirty = false;
-  unsigned long lastReorderMs = 0;
-
   // Recent tab state
   std::vector<RecentBook> recentBooks;
 
   // Data loading
   void loadRecentBooks();
 
-  // Move the selected entry up/down one slot (in-memory). Returns false if at the
-  // boundary. Updates selectorIndex + repaints; persistence is deferred to release.
+  // Move the selected entry up/down one slot, persist, and repaint. Returns false
+  // (no-op) at the list boundary. Driven by Left/Right taps — a tap, not a hold,
+  // because the X3 front buttons can't sustain a reliable held reading.
   bool moveSelectedUp();
   bool moveSelectedDown();
 

@@ -16,10 +16,6 @@
 namespace {
 // Hold threshold for the long-press "remove from list" action (firmware convention).
 constexpr unsigned long LONG_PRESS_MS = 1000;
-// Reorder: hold Left/Right this long to start moving the selected book, then step
-// again every REORDER_REPEAT_MS while still held (matches the nav continuous feel).
-constexpr unsigned long REORDER_HOLD_MS = 500;
-constexpr unsigned long REORDER_REPEAT_MS = 500;
 }  // namespace
 
 void RecentBooksActivity::loadRecentBooks() { recentBooks = RECENT_BOOKS.getBooks(); }
@@ -29,6 +25,7 @@ bool RecentBooksActivity::moveSelectedUp() {
     return false;
   }
   selectorIndex--;
+  RECENT_BOOKS.saveToFile();
   loadRecentBooks();
   requestUpdate();
   return true;
@@ -39,6 +36,7 @@ bool RecentBooksActivity::moveSelectedDown() {
     return false;
   }
   selectorIndex++;
+  RECENT_BOOKS.saveToFile();
   loadRecentBooks();
   requestUpdate();
   return true;
@@ -77,40 +75,18 @@ void RecentBooksActivity::loop() {
     return;
   }
 
-  // Reorder gesture: hold Left = move the selected book up, hold Right = move down.
-  // A tap on Left/Right still navigates the cursor (handled by buttonNavigator below);
-  // only a sustained hold enters reorder. Up/Down side buttons keep normal nav.
-  if (reorderActive) {
-    const bool leftHeld = mappedInput.isPressed(MappedInputManager::Button::Left);
-    const bool rightHeld = mappedInput.isPressed(MappedInputManager::Button::Right);
-    if (!leftHeld && !rightHeld) {
-      // Gesture ended — persist the new order once (no per-step SD writes).
-      reorderActive = false;
-      if (reorderDirty) {
-        RECENT_BOOKS.saveToFile();
-        reorderDirty = false;
-      }
-      return;  // swallow the release so it doesn't also move the cursor
-    }
-    if (millis() - lastReorderMs >= REORDER_REPEAT_MS) {
-      if (leftHeld ? moveSelectedUp() : moveSelectedDown()) {
-        reorderDirty = true;
-      }
-      lastReorderMs = millis();
-    }
+  // Reorder: tap Left = move the selected book up, tap Right = move it down. The
+  // cursor is moved with the Up/Down side buttons instead. Tap-based (not hold-based)
+  // because the X3 front buttons bounce into a stream of release events when held, so
+  // a sustained-press gesture never registers there — only discrete taps are reliable.
+  // Intercept before the buttonNavigator block so Left/Right don't also move the cursor.
+  if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+    moveSelectedUp();
     return;
   }
-
-  // Enter reorder when Left or Right is held past the threshold (with a valid selection).
-  if (selectorIndex < recentBooks.size() && mappedInput.getHeldTime() >= REORDER_HOLD_MS) {
-    const bool leftHeld = mappedInput.isPressed(MappedInputManager::Button::Left);
-    const bool rightHeld = mappedInput.isPressed(MappedInputManager::Button::Right);
-    if (leftHeld || rightHeld) {
-      reorderActive = true;
-      reorderDirty = (leftHeld ? moveSelectedUp() : moveSelectedDown());
-      lastReorderMs = millis();
-      return;
-    }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+    moveSelectedDown();
+    return;
   }
 
   // Long-press Confirm on the selected book: prompt to remove it from the list.
@@ -137,22 +113,27 @@ void RecentBooksActivity::loop() {
 
   int listSize = static_cast<int>(recentBooks.size());
 
-  buttonNavigator.onNextRelease([this, listSize] {
+  // Cursor moves on the Up/Down side buttons only — Left/Right are reserved for
+  // reordering above, so they are deliberately excluded from navigation here.
+  const std::vector<MappedInputManager::Button> downBtn{MappedInputManager::Button::Down};
+  const std::vector<MappedInputManager::Button> upBtn{MappedInputManager::Button::Up};
+
+  buttonNavigator.onRelease(downBtn, [this, listSize] {
     selectorIndex = ButtonNavigator::nextIndex(static_cast<int>(selectorIndex), listSize);
     requestUpdate();
   });
 
-  buttonNavigator.onPreviousRelease([this, listSize] {
+  buttonNavigator.onRelease(upBtn, [this, listSize] {
     selectorIndex = ButtonNavigator::previousIndex(static_cast<int>(selectorIndex), listSize);
     requestUpdate();
   });
 
-  buttonNavigator.onNextContinuous([this, listSize, pageItems] {
+  buttonNavigator.onContinuous(downBtn, [this, listSize, pageItems] {
     selectorIndex = ButtonNavigator::nextPageIndex(static_cast<int>(selectorIndex), listSize, pageItems);
     requestUpdate();
   });
 
-  buttonNavigator.onPreviousContinuous([this, listSize, pageItems] {
+  buttonNavigator.onContinuous(upBtn, [this, listSize, pageItems] {
     selectorIndex = ButtonNavigator::previousPageIndex(static_cast<int>(selectorIndex), listSize, pageItems);
     requestUpdate();
   });
