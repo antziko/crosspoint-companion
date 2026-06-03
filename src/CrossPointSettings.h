@@ -161,6 +161,11 @@ class CrossPointSettings {
 
   enum TILT_PAGE_TURN { TILT_OFF = 0, TILT_NORMAL = 1, TILT_NVERTED = 2, TILT_PAGE_TURN_COUNT };
 
+  // Text rendering on X4. Off: solid-black text + 1-bit images (fast, no two-stage
+  // flash). Antialiased: grey (AA) text + 4-level grey images. Sharp: true-black
+  // text + 4-level grey images (grayscale pass runs only on pages with an image).
+  enum TEXT_AA { TEXT_AA_OFF = 0, TEXT_AA_ANTIALIASED = 1, TEXT_AA_SHARP = 2, TEXT_AA_COUNT };
+
   enum QUICK_RESUME_SLEEP_SCREEN {
     QUICK_RESUME_NEVER = 0,
     QUICK_RESUME_AFTER_TIMEOUT = 1,
@@ -195,7 +200,7 @@ class CrossPointSettings {
   uint8_t clockHasBeenSynced = 0;
   // Text rendering settings
   uint8_t extraParagraphSpacing = 1;
-  uint8_t textAntiAliasing = 1;
+  uint8_t textAntiAliasing = TEXT_AA_ANTIALIASED;  // TEXT_AA enum (0=Off,1=Antialiased,2=Sharp)
   // Short power button click behaviour
   uint8_t shortPwrBtn = IGNORE;
   // EPUB reading orientation settings

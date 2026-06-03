@@ -34,11 +34,15 @@ inline uint8_t applyBayerDither4Level(uint8_t gray, int x, int y) {
 //                   selects the ordered dither field (blue noise vs Bayer).
 //   useDithering -> 4-level Bayer dither.
 //   else         -> plain 4-level quantization.
-inline uint8_t ditherPixel(uint8_t gray, int x, int y, bool useDithering, bool oneBit, bool blueNoise) {
+// `brighten` gates the X4 tone curve in the 4-level path: callers pass the
+// per-image dark-background verdict so light/white-bg images aren't washed out.
+// Ignored on the 1-bit (X3) and plain-quantize branches.
+inline uint8_t ditherPixel(uint8_t gray, int x, int y, bool useDithering, bool oneBit, bool blueNoise,
+                           bool brighten = true) {
   if (oneBit) return orderedDither1Bit(gray, x, y, blueNoise) ? 3 : 0;
   // X4: 4-level ordered dither with the X4 tone curve, blue-noise or 8x8 Bayer
   // per the "Image Dither" setting (replaces the flat 4x4 applyBayerDither4Level).
-  if (useDithering) return orderedDither4Level(gray, x, y, blueNoise);
+  if (useDithering) return orderedDither4Level(gray, x, y, blueNoise, brighten);
   uint8_t q = gray / 85;
   return q > 3 ? 3 : q;
 }

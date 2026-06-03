@@ -634,7 +634,7 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);
 
   // Anti-aliasing pass: overlay grayscale body text on top of the BW display
-  if (SETTINGS.textAntiAliasing) {
+  if (SETTINGS.textAntiAliasing == CrossPointSettings::TEXT_AA_ANTIALIASED) {
     ReaderUtils::renderAntiAliased(renderer, renderBody);
   }
 }

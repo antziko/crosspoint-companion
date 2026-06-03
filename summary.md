@@ -1,8 +1,9 @@
 # Change Summary — CrossPoint Reader (Xteink X3 / X4)
 
-Scope: image rendering quality (dither, tone, full-width sizing), manual-refresh
-behavior, OPDS browser robustness, EPUB indexing stability, and supporting
-infrastructure. X3 = UC81xx-class panel (792×528, 1-bit halftone path).
+Scope: image rendering quality (dither, tone, conditional dark-only brighten,
+full-width sizing), text anti-aliasing modes (Off/Antialiased/Sharp),
+manual-refresh behavior, OPDS browser robustness, EPUB indexing stability, and
+supporting infrastructure. X3 = UC81xx-class panel (792×528, 1-bit halftone path).
 X4 = SSD1677 (800×480, native 4-level grayscale).
 Build: `pio run` (env `default`). `open-x4-sdk` is the low-level display/SD SDK.
 
@@ -107,14 +108,13 @@ X4 renders true 4-level grayscale.
   only did a BW `FAST_REFRESH`. Added the grayscale multi-pass (LSB/MSB plane
   render → `displayGrayBuffer`) for X4, matching the sleep cover path.
 
-- **Text-AA toggles 4-level vs 1-bit on X4.** Final model: with **AA on** the
-  whole page (text + images) is 4-level grayscale; with **AA off** images render
-  as 1-bit BW (and there is no grayscale pass). `EpubReaderActivity`:
-  `setOneBitImages(isX3() || !textAntiAliasing)`,
-  `grayImages = hasImages() && !isX3() && textAntiAliasing`,
-  `doGrayscalePass = textAntiAliasing || grayImages`. (X4 4-level black is
-  lighter than 1-bit black — no true black on the gc waveform — so AA-off readers
-  who want maximum contrast get the 1-bit path.)
+- **Text-AA is now a 3-state mode on X4 (Off / Antialiased / Sharp).** See §16.
+  Off = 1-bit images + black text (fast, no gray pass); Antialiased = 4-level
+  images + grey (AA) text; Sharp = 4-level images + true-black text. Drives
+  `EpubReaderActivity`: `setOneBitImages(isX3() || aaMode==OFF)`,
+  `setTextAntiAlias(aaMode==ANTIALIASED)`,
+  `grayImages = hasImages() && !isX3() && aaMode!=OFF`,
+  `doGrayscalePass = (aaMode==ANTIALIASED) || grayImages`.
 
 - **AA-on image pages washed to near-white.** The grayscale LUT only sets
   correctly after the FAST_REFRESH blanking dance; a HALF/FULL refresh first sets
@@ -122,15 +122,34 @@ X4 renders true 4-level grayscale.
   (`imagePageWithAA = grayImages`); the no-bounding-box fallback also uses
   FAST_REFRESH (not HALF).
 
-- **Tone curve (final): mild midtone lift.** `toneMapX4` started as identity to
-  avoid an earlier overshoot (a strong lift pushed light tones to white, Bayer
-  clustering them into white blocks). But with only 4 levels, dark-grey detail
-  (e.g. grey terminal text on a dark background) collapsed into level 0/1 and
-  read as solid black. Set `X4_IMAGE_GAMMA = 0.65`, `X4_BLACK_ANCHOR = 0`: lifts
-  shadows/midtones up a level so detail separates from true black, while black
-  (0) and white (255) stay put. Device-tunable — lower toward 0.55 for more lift,
-  raise toward 0.85 if light areas blow to white. Each retune needs a pixel-cache
-  suffix bump (see §5) so stale (darker) caches regenerate.
+- **Tone curve: mild midtone lift.** `toneMapX4` (`X4_IMAGE_GAMMA = 0.65`,
+  `X4_BLACK_ANCHOR = 0`) lifts shadows/midtones up a level so dark-grey detail
+  (e.g. grey terminal text on a dark background) separates from true black,
+  while black (0) and white (255) stay put. Earlier identity-curve overshoot
+  history: a strong lift pushed light tones to white (Bayer clustered them into
+  white blocks), which is why the curve is mild + anchored. Device-tunable; each
+  retune needs a pixel-cache suffix bump (see §5).
+
+- **Brighten is now conditional — dark images only (EPUB images).** Applying the
+  lift to *every* image washed out light/white-background images (e.g. a
+  white-bg terminal screenshot read greyer). The EPUB converters now probe the
+  image before decoding and apply `toneMapX4` only when it is genuinely dark.
+  - **Metric: dark-pixel fraction**, not mean luminance. Mean is fooled by
+    bimodal images (white body + dark title bar averages below mid-grey yet is
+    clearly light). Counting dark pixels avoids that.
+    `X4_DARK_PIXEL_CUTOFF = 80` (a pixel is "dark" if luminance ≤ 80),
+    `X4_DARK_FRACTION_PCT = 50` (brighten only if ≥ 50% of sampled pixels are
+    dark) — both in `OrderedDither.h`, device-tunable.
+  - **Probe** runs only on cache miss (one-time per image), before the real
+    decoder is allocated so only one heavy decoder is live at a time:
+    `JpegToFramebufferConverter` decodes at 1/8 scale (`jpegImageIsDark`);
+    `PngToFramebufferConverter` samples every 4th row / 2nd column
+    (`pngImageIsDark`, reuses `convertLineToGray`). Defaults to brighten=true on
+    any probe failure (no regression).
+  - Threaded via a `brighten` flag: `ditherPixel(..., brighten)` →
+    `orderedDither4Level(..., brighten)` applies `toneMapX4` only when set. The
+    `brighten = true` default leaves the BMP/sleep path (`Bitmap.cpp`) always
+    lifting (out of scope; EPUB only). 1-bit (X3, `toneMapX3`) unaffected.
 
 ---
 
@@ -151,10 +170,12 @@ X4 renders true 4-level grayscale.
 - `lib/Epub/Epub/converters/DitherUtils.h`, `lib/Epub/Epub/blocks/ImageBlock.cpp`:
   4-level path routes through `orderedDither4Level`. EPUB image cache suffix is
   versioned per render path so stale pixels aren't served, and is bumped whenever
-  the dither/tone math changes. **Current suffixes:** 4-level `.px8n` (blue) /
-  `.px8b` (Bayer) — bumped for X4 gamma 0.65; 1-bit (X3, or X4 with AA off)
+  the dither/tone math changes. **Current suffixes:** 4-level `.px10n` (blue) /
+  `.px10b` (Bayer) — bumped from `.px8*` (X4 gamma 0.65) → `.px9*` (conditional
+  brighten) → `.px10*` (dark-fraction metric); 1-bit (X3, or X4 with AA off)
   `.px6n` / `.px6b`. (X3 is always `oneBit`, so the X4 gamma/4-level suffix bumps
-  never touch X3 caches.)
+  never touch X3 caches.) Sharp and Antialiased modes share the 4-level `.px10*`
+  cache (both `oneBit=false`); the brighten verdict is baked per-image.
 
 Quality ranking on X4 e-ink: error diffusion > blue noise > Bayer. Error
 diffusion is stateful (row order), so BMP/sleep can use it but EPUB (JPEG MCU
@@ -361,6 +382,113 @@ forget-prompt still triggers via `usedSavedPassword`.
 
 ---
 
+## 14. Clock sync — WiFi picker first (X3)
+
+**Goal:** "Settings > Sync clock now" required WiFi to already be connected; if it
+wasn't, it just showed a "No WiFi" hint and did nothing. On the X3 (DS3231 RTC)
+that meant the manual NTP resync was usually a dead end.
+
+**Now:** the activity presents the WiFi selection list first, then syncs.
+
+- `src/activities/settings/ClockSyncActivity.{h,cpp}`: added a `PICKING_WIFI`
+  state; `onEnter()` sets `WiFi.mode(WIFI_STA)` and launches
+  `WifiSelectionActivity` via `startActivityForResult`. On a successful pick,
+  `onWifiSelectionComplete()` renders "Syncing…" then runs the blocking
+  `halClock.syncFromNTP()`. `onExit()` releases the radio and `silentRestart()`s
+  if WiFi was brought up (mirrors `FontDownloadActivity`). Saved networks stay
+  one-tap (see §13).
+
+**Status:** kept. Independent of the font-fetch work below.
+
+---
+
+## 15. X3 over-the-air font download — investigated, NOT fixed (reverted)
+
+**Problem:** "Reader > Manage Fonts" always fails with "Failed to fetch font
+list" on the X3; fine on the X4. Same firmware binary on both (device type is
+detected at runtime).
+
+**Root cause (confirmed on device via an SD trace log):** the failure is the
+**TLS handshake inside `esp_http_client`**, not the network or the certificate.
+Layer-by-layer, on X3:
+
+- system clock correct, free heap ~62 KB, largest contiguous block ~49 KB
+- DNS `github.com` → `20.205.243.166` (OK), raw TCP `:443` (OK)
+- `WiFiClientSecure` insecure TLS (OK), and a bare `esp_tls_conn_new_sync()` with
+  the **same `crt_bundle` verification** to the same host **connects reliably**,
+  even at ~5 KB contiguous free
+- but `esp_http_client_open()` returns `ESP_ERR_HTTP_CONNECT`
+  **deterministically**, on every retry, regardless of `buffer_size` /
+  `keep_alive` / redirect options
+
+So `esp_http_client`'s own buffers, laid out around mbedtls's large handshake
+allocations, can't fit on the X3's tighter post-WiFi heap; the X4 has a little
+more contiguous headroom and squeaks by. Clock/cert/DNS/TCP/total-heap were all
+ruled out.
+
+**Why it's not fixed:** the only path that handshakes on X3 is bare `esp-tls`,
+which means hand-rolling the HTTP client (GET, header parse, GitHub's
+`github.com → objects.githubusercontent.com` 302, body streaming). A prototype
+got the **handshake working** (connects in ~2 s on a clean heap) but then hit two
+further walls: (1) a `std::string` allocation in the parser aborted under memory
+pressure — fixed by switching to fixed `char[]` buffers — and (2) after a clean
+connect the GET got **no response in 15 s** (request framing / esp-tls write
+subtlety, unresolved). Diminishing returns, so **all `HttpDownloader` /
+`FontDownloadActivity` changes were reverted to HEAD.**
+
+**Current state:** `src/network/HttpDownloader.cpp` and
+`src/activities/settings/FontDownloadActivity.cpp` are unchanged from HEAD. X3
+OTA font download remains broken; X4 unaffected.
+
+**Workaround for X3 users:** side-load fonts onto the SD card manually — see
+`docs/sd-card-fonts.md` / `FontInstaller` / `SdCardFont`. No download needed.
+
+**If retried later, two threads remain:** (1) debug the bare-esp-tls GET
+"no response" (the handshake itself is solved); (2) the durable fix — pin
+GitHub's single root CA instead of attaching the full `esp_crt_bundle`, cutting
+mbedtls handshake RAM by tens of KB so `esp_http_client` itself fits on X3.
+
+---
+
+## 16. Text AA — "Sharp" mode (true-black text + grayscale images, X4)
+
+**Goal:** with AA on, image-bearing pages render images in 4-level grayscale but
+the body text reads slightly *grey* (lifted), not solid black. Cause: font glyphs
+are 2-bit; the BW pass draws anti-aliased edge pixels solid black, but the
+grayscale LSB/MSB passes then re-mark those same edges as grey, pulling black text
+edges up to grey (`GfxRenderer.cpp` `renderCharImpl`). Users wanted true-black text
+while keeping grey images — a combination the old on/off toggle couldn't express.
+
+**Change:** the **Text Anti-Aliasing** setting is now a **3-state enum** (was a
+toggle): **Off / Antialiased / Sharp**.
+- **Off** (0) — 1-bit images + solid-black text, no grayscale pass (fast, no flash).
+- **Antialiased** (1) — 4-level grey images + grey (AA) text. (= old "on".)
+- **Sharp** (2) — 4-level grey images + **true-black text**.
+
+**Implementation:**
+- `src/CrossPointSettings.h`: `enum TEXT_AA { OFF, ANTIALIASED, SHARP }`; field stays
+  `uint8_t textAntiAliasing` (default `ANTIALIASED`). Persisted 0/1 map cleanly —
+  no migration.
+- `src/SettingsList.h`: `Toggle` → `Enum` with options
+  `{STR_TEXT_AA_OFF, STR_TEXT_AA_ANTIALIASED, STR_TEXT_AA_SHARP}`. New i18n keys in
+  `english.yaml` (regenerated; other languages fall back to English).
+- `lib/GfxRenderer/GfxRenderer.{h,cpp}`: new `textAntiAlias_` flag
+  (`setTextAntiAlias`/`textAntiAlias`, mirrors `oneBitImages_`). The two grayscale
+  glyph branches in `renderCharImpl` are gated on it — when false, glyphs mark
+  nothing in the grey planes, so edges keep the BW pass's solid black. Images
+  (`DirectPixelWriter`/`drawBitmapGrayscale`) don't consult it → keep their greys.
+- `src/activities/reader/EpubReaderActivity.cpp`: enum-aware pass logic (see §4).
+  In **Sharp**, the grayscale pass (and its two-stage FAST_REFRESH flash) runs
+  **only on pages that have an image** — pure-text Sharp pages stay single-pass
+  solid black, no flash.
+- `TxtReaderActivity.cpp` / `DictionaryDefinitionActivity.cpp` (text-only views, no
+  images): AA overlay now gated on `== ANTIALIASED`, so Sharp/Off render black text.
+
+**Note:** the web settings UI treats `"textAntiAliasing"` as a checkbox; it now
+holds 0/1/2. Device UI is primary; web enum rendering is a possible follow-up.
+
+---
+
 ## Notes
 
 - X3 rendering paths are unchanged by the X4 **tone/dither** work (1-bit halftone
@@ -368,9 +496,9 @@ forget-prompt still triggers via `usedSavedPassword`.
   affected by the shared, intentional changes: full-width image sizing (§10),
   the section cache version bump, and the manual-refresh / BMP-redraw fixes (§8,
   §9) — all fixes or intended, no regression.
-- Old EPUB image caches (`.pxc`, `.px4*`, `.px5*`, `.px7*`) are orphaned by the
-  suffix bumps — clear `.crosspoint/` on the SD card to reclaim space (caches
-  also regenerate automatically on next view).
+- Old EPUB image caches (`.pxc`, `.px4*`, `.px5*`, `.px7*`, `.px8*`, `.px9*`) are
+  orphaned by the suffix bumps — clear `.crosspoint/` on the SD card to reclaim
+  space (caches also regenerate automatically on next view).
 - If an EPUB file is empty/corrupt, the reader now shows an error rather than
   freezing or crashing.
 - Other smaller items handled earlier in the session: dictionary lookup

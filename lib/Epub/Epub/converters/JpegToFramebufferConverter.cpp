@@ -46,7 +46,45 @@ struct JpegContext {
 
   PixelCache cache;
   bool caching{false};
+
+  // Per-image dark-background verdict (mean luminance < threshold). Gates the X4
+  // brighten curve so light/white-bg images aren't washed out. Set by a cheap
+  // 1/8-scale measure pass before the real decode; defaults true (= always
+  // brighten, prior behaviour) when the probe can't run.
+  bool brightenDark{true};
 };
+
+// Accumulator for the measure pass — counts dark vs total pixels over a coarse
+// decode (dark-fraction metric; see OrderedDither.h).
+struct JpegLumProbe {
+  uint32_t dark{0};
+  uint32_t count{0};
+};
+
+// Measure-pass draw callback: counts how many decoded pixels are dark
+// (luminance <= X4_DARK_PIXEL_CUTOFF). No scaling/dithering. pUser is a
+// JpegLumProbe*.
+int jpegMeasureCallback(JPEGDRAW* pDraw) {
+  auto* probe = reinterpret_cast<JpegLumProbe*>(pDraw->pUser);
+  if (!probe) return 0;
+  const uint8_t* pixels = reinterpret_cast<uint8_t*>(pDraw->pPixels);
+  const int stride = pDraw->iWidth;
+  const int validW = pDraw->iWidthUsed;
+  const int blockH = pDraw->iHeight;
+  if (stride <= 0 || blockH <= 0 || validW <= 0) return 1;
+  uint32_t d = 0;
+  uint32_t c = 0;
+  for (int row = 0; row < blockH; row++) {
+    const uint8_t* p = &pixels[row * stride];
+    for (int x = 0; x < validW; x++) {
+      if (p[x] <= X4_DARK_PIXEL_CUTOFF) d++;
+      c++;
+    }
+  }
+  probe->dark += d;
+  probe->count += c;
+  return 1;
+}
 
 // File I/O callbacks use pFile->fHandle to access the HalFile*,
 // avoiding the need for global file state.
@@ -134,6 +172,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
   const bool useDithering = ctx->config->useDithering;
   const bool oneBit = ctx->config->oneBitDither;
   const bool blueNoise = ctx->config->ditherBlueNoise;
+  const bool brighten = ctx->brightenDark;
   const bool caching = ctx->caching;
   const int32_t fineScaleFPX = ctx->fineScaleFPX;
   const int32_t invScaleFPX = ctx->invScaleFPX;
@@ -186,7 +225,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
       for (int dstX = dstXStart; dstX < dstXEnd; dstX++) {
         const int outX = cfgX + dstX;
         uint8_t gray = row[dstX - blockX];
-        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise);
+        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, brighten);
         pw.writePixel(outX, dithered);
         if (caching) cw.writePixel(outX, dithered);
       }
@@ -239,7 +278,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
         int bot = ((int)row1[lx0] * fxInv + (int)row1[lx1] * fx) >> FP_SHIFT;
         uint8_t gray = (uint8_t)((top * fyInv + bot * fy) >> FP_SHIFT);
 
-        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise);
+        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, brighten);
         pw.writePixel(outX, dithered);
         if (caching) cw.writePixel(outX, dithered);
       }
@@ -256,7 +295,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
         int bot = ((int)row1[lx0] * fxInv + (int)row1[lx0 + 1] * fx) >> FP_SHIFT;
         uint8_t gray = (uint8_t)((top * fyInv + bot * fy) >> FP_SHIFT);
 
-        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise);
+        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, brighten);
         pw.writePixel(outX, dithered);
         if (caching) cw.writePixel(outX, dithered);
       }
@@ -276,7 +315,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
         int bot = ((int)row1[lx0] * fxInv + (int)row1[lx1] * fx) >> FP_SHIFT;
         uint8_t gray = (uint8_t)((top * fyInv + bot * fy) >> FP_SHIFT);
 
-        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise);
+        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, brighten);
         pw.writePixel(outX, dithered);
         if (caching) cw.writePixel(outX, dithered);
       }
@@ -303,13 +342,36 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
       if (lx >= validW) lx = validW - 1;
       uint8_t gray = row[lx];
 
-      uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise);
+      uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, brighten);
       pw.writePixel(outX, dithered);
       if (caching) cw.writePixel(outX, dithered);
     }
   }
 
   return 1;
+}
+
+// Cheap mean-luminance probe: decodes the JPEG at 1/8 scale (≈1/64 the pixels)
+// and returns whether the image is dark enough to warrant the X4 brighten curve.
+// Returns true (= brighten, prior behaviour) on any probe failure so a decode
+// error never regresses a dark image. Runs only on cache miss.
+bool jpegImageIsDark(const std::string& imagePath) {
+  std::unique_ptr<JPEGDEC> jpeg(new (std::nothrow) JPEGDEC());
+  if (!jpeg) return true;
+
+  int rc = jpeg->open(imagePath.c_str(), jpegOpen, jpegClose, jpegRead, jpegSeek, jpegMeasureCallback);
+  const ScopedCleanup cleanup{[&jpeg]() { jpeg->close(); }};
+  if (rc != 1) return true;
+
+  JpegLumProbe probe;
+  jpeg->setPixelType(EIGHT_BIT_GRAYSCALE);
+  jpeg->setUserPointer(&probe);
+  if (jpeg->decode(0, 0, JPEG_SCALE_EIGHTH) != 1 || probe.count == 0) return true;
+
+  const uint32_t darkPct = probe.dark * 100u / probe.count;
+  const bool brighten = darkPct >= X4_DARK_FRACTION_PCT;
+  LOG_DBG("JPG", "Dark pixels %u%% (%s)", darkPct, brighten ? "dark/brighten" : "light/skip");
+  return brighten;
 }
 
 }  // namespace
@@ -351,6 +413,12 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
     return false;
   }
 
+  // Only the 4-level X4 path applies the brighten tone curve. For that path, probe
+  // mean luminance so light/white-bg images skip the lift. Done before allocating
+  // the real decoder so only one JPEGDEC (~20 KB) is ever live at a time. The 1-bit
+  // (X3) and no-dither paths don't use the curve, so skip the probe entirely.
+  const bool brightenDark = (!config.oneBitDither && config.useDithering) ? jpegImageIsDark(imagePath) : true;
+
   std::unique_ptr<JPEGDEC> jpeg(new (std::nothrow) JPEGDEC());
   if (!jpeg) {
     LOG_ERR("JPG", "Failed to allocate JPEG decoder");
@@ -362,6 +430,7 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   ctx.config = &config;
   ctx.screenWidth = renderer.getScreenWidth();
   ctx.screenHeight = renderer.getScreenHeight();
+  ctx.brightenDark = brightenDark;
 
   int rc = jpeg->open(imagePath.c_str(), jpegOpen, jpegClose, jpegRead, jpegSeek, jpegDrawCallback);
   const ScopedCleanup cleanup{[&jpeg]() { jpeg->close(); }};

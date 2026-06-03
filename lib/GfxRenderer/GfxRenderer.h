@@ -46,6 +46,9 @@ class GfxRenderer {
   // True when images should render as a 1-bit halftone instead of 4-level gray
   // (always on X3; on X4 when text AA is off, for true black + no two-stage flash).
   bool oneBitImages_ = false;
+  // When false, glyphs contribute nothing to the grayscale planes, so anti-aliased
+  // text edges keep the BW pass's solid black ("Sharp" text). Images are unaffected.
+  bool textAntiAlias_ = true;
   std::vector<uint8_t*> bwBufferChunks;
   std::map<int, EpdFontFamily> fontMap;
   // Mutable because ensureSdCardFontReady() is const (called from layout code
@@ -268,6 +271,8 @@ class GfxRenderer {
   // (isX3 || text AA off); read by ImageBlock to pick the render path + cache.
   void setOneBitImages(bool v) { oneBitImages_ = v; }
   bool oneBitImages() const { return oneBitImages_; }
+  void setTextAntiAlias(bool v) { textAntiAlias_ = v; }
+  bool textAntiAlias() const { return textAntiAlias_; }
   bool storeBwBuffer();    // Returns true if buffer was stored successfully
   void restoreBwBuffer();  // Restore and free the stored buffer
   void cleanupGrayscaleWithFrameBuffer() const;

@@ -107,6 +107,17 @@ inline bool orderedDither1Bit(uint8_t gray, int x, int y, bool blueNoise) {
 inline constexpr float X4_IMAGE_GAMMA = 0.65f;
 inline constexpr int X4_BLACK_ANCHOR = 0;
 
+// Dark-background detection for the conditional X4 brighten curve. An image is
+// brightened only when a large SHARE of its pixels are dark — not when the mean
+// is low. Mean is fooled by bimodal images (e.g. a white-background terminal shot
+// with a dark title bar averages below mid-grey yet is clearly light); counting
+// dark pixels instead keeps white backgrounds from washing out.
+//   X4_DARK_PIXEL_CUTOFF : luminance (0..255) at/below which a pixel is "dark".
+//   X4_DARK_FRACTION_PCT : brighten only if >= this % of sampled pixels are dark.
+// Only the EPUB image converters (JPEG/PNG) consult these; BMP/sleep always lift.
+inline constexpr uint8_t X4_DARK_PIXEL_CUTOFF = 80;
+inline constexpr uint8_t X4_DARK_FRACTION_PCT = 50;
+
 inline uint8_t toneMapX4(uint8_t gray) {
   static uint8_t lut[256];
   static bool ready = false;
@@ -132,8 +143,8 @@ inline uint8_t toneMapX4(uint8_t gray) {
 // fields as the 1-bit path, so the "Image Dither" setting applies to X4 too,
 // and blue noise replaces the visible 4x4 crosshatch. Standard ordered-dither
 // quantization to 4 levels: level = floor(scaled + t), scaled = gray/255*3.
-inline uint8_t orderedDither4Level(uint8_t gray, int x, int y, bool blueNoise) {
-  gray = toneMapX4(gray);
+inline uint8_t orderedDither4Level(uint8_t gray, int x, int y, bool blueNoise, bool brighten = true) {
+  if (brighten) gray = toneMapX4(gray);
   const int thresh = blueNoise ? blueNoise64[y & 63][x & 63] : bayer8x8Thresh[y & 7][x & 7];
   const int level = (gray * 768 / 255 + thresh) / 256;  // 0..3
   return level > 3 ? 3 : static_cast<uint8_t>(level);
