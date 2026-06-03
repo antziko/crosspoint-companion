@@ -16,10 +16,11 @@ constexpr uint8_t COUNT_U16_VERSION = 3;
 constexpr uint8_t PARAGRAPH_ANCHOR_VERSION = 4;
 constexpr uint8_t SNIPPET_VERSION = 5;
 constexpr uint8_t RETURN_MARK_VERSION = 6;  // adds a per-bookmark "return here" flag byte
-constexpr uint8_t VERSION = 6;
+constexpr uint8_t CHAPTER_PAGES_VERSION = 7;  // adds chapterCurrentPage + chapterPageCount (two uint16)
+constexpr uint8_t VERSION = 7;
 constexpr bool isKnownVersion(uint8_t v) {
   return v == LEGACY_VERSION || v == COUNT_U16_VERSION || v == PARAGRAPH_ANCHOR_VERSION || v == SNIPPET_VERSION ||
-         v == RETURN_MARK_VERSION;
+         v == RETURN_MARK_VERSION || v == CHAPTER_PAGES_VERSION;
 }
 // Stored count is uint16_t in v3+, but we keep an in-memory safety cap for ESP32-C3 RAM.
 constexpr uint16_t MAX_BOOKMARKS = 1024;
@@ -120,7 +121,7 @@ void BookmarkStore::unload() {
 
 BookmarkStore::AddResult BookmarkStore::addBookmark(uint16_t spineIndex, float progress, int pageCount,
                                                     const char* chapterTitle, uint16_t paragraphIndex,
-                                                    const char* snippet, bool returnMark) {
+                                                    const char* snippet, bool returnMark, int currentPage) {
   if (pageCount > 0) {
     const float pageSlice = 1.0f / static_cast<float>(pageCount);
     const float pageStart = progress;
@@ -143,6 +144,8 @@ BookmarkStore::AddResult BookmarkStore::addBookmark(uint16_t spineIndex, float p
   bm.paragraphIndex = paragraphIndex;
   snprintf(bm.snippet, sizeof(bm.snippet), "%s", snippet ? snippet : "");
   bm.returnMark = returnMark;
+  bm.chapterCurrentPage = static_cast<uint16_t>(currentPage < 0 ? 0 : currentPage);
+  bm.chapterPageCount = static_cast<uint16_t>(pageCount < 0 ? 0 : pageCount);
 
   bookmarks.push_back(bm);
   sortBookmarks();
@@ -340,6 +343,17 @@ bool BookmarkStore::readFromFile() {
     } else {
       bm.returnMark = false;
     }
+    if (version >= CHAPTER_PAGES_VERSION) {
+      if (f.available() < static_cast<int>(sizeof(bm.chapterCurrentPage) + sizeof(bm.chapterPageCount))) {
+        LOG_ERR("BKS", "Bookmark file truncated at chapter pages, record %u", i);
+        return false;
+      }
+      serialization::readPod(f, bm.chapterCurrentPage);
+      serialization::readPod(f, bm.chapterPageCount);
+    } else {
+      bm.chapterCurrentPage = 0;
+      bm.chapterPageCount = 0;  // legacy bookmark: page position unknown, list shows title only
+    }
     observeVersion(bm.version);  // rebuild the Lamport clock from stored versions
     bookmarks.push_back(bm);
   }
@@ -380,6 +394,8 @@ bool BookmarkStore::writeToFile() const {
     f.write(bm.snippet, sizeof(bm.snippet));
     const uint8_t returnFlag = bm.returnMark ? 1 : 0;
     serialization::writePod(f, returnFlag);
+    serialization::writePod(f, bm.chapterCurrentPage);
+    serialization::writePod(f, bm.chapterPageCount);
   }
 
   LOG_DBG("BKS", "Saved %u bookmark(s)", count);
@@ -398,6 +414,8 @@ std::string BookmarkStore::serializeToJson(const std::vector<Bookmark>& bms, con
     obj["chapterTitle"] = bm.chapterTitle;
     obj["paragraphIndex"] = bm.paragraphIndex;
     obj["snippet"] = bm.snippet;
+    obj["chapterCurrentPage"] = bm.chapterCurrentPage;
+    obj["chapterPageCount"] = bm.chapterPageCount;
   }
   JsonArray tarr = doc["tombstones"].to<JsonArray>();
   for (const auto& t : tombs) {
@@ -437,6 +455,9 @@ bool BookmarkStore::parseFromJson(const char* json, std::vector<Bookmark>& outBm
     bm.paragraphIndex = obj["paragraphIndex"] | static_cast<uint16_t>(UINT16_MAX);
     snprintf(bm.chapterTitle, sizeof(bm.chapterTitle), "%s", obj["chapterTitle"] | "");
     snprintf(bm.snippet, sizeof(bm.snippet), "%s", obj["snippet"] | "");
+    // Display-only page snapshot; absent from older/other-firmware blobs → 0 (unknown).
+    bm.chapterCurrentPage = obj["chapterCurrentPage"] | static_cast<uint16_t>(0);
+    bm.chapterPageCount = obj["chapterPageCount"] | static_cast<uint16_t>(0);
     outBms.push_back(bm);
   }
 

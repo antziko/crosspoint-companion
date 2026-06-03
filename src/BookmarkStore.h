@@ -23,6 +23,13 @@ struct Bookmark {
   // Optional 1-based paragraph anchor from the section cache. UINT16_MAX means unavailable.
   uint16_t paragraphIndex = UINT16_MAX;
   char snippet[BOOKMARK_SNIPPET_MAX] = {};
+  // Display-only snapshot of the page position within the chapter at bookmark time, used to
+  // show "page X/Y" in the bookmark list. chapterCurrentPage is 0-based (display adds 1).
+  // Both are a snapshot: they go stale if render settings change the chapter's pagination, so
+  // they are advisory. 0 page count means "unknown" (legacy bookmark or a peer that didn't
+  // send it) and the list falls back to showing just the percentage + chapter title.
+  uint16_t chapterCurrentPage = 0;
+  uint16_t chapterPageCount = 0;
   // Session-only flag: true for the "return here" bookmark auto-dropped when the user
   // jumps to another chapter, so the reader can show a distinct icon for it. Deliberately
   // NOT serialized to the bookmark file and NOT synced — it is a within-session navigation
@@ -66,7 +73,7 @@ class BookmarkStore {
 
   AddResult addBookmark(uint16_t spineIndex, float progress, int pageCount, const char* chapterTitle,
                         uint16_t paragraphIndex = UINT16_MAX, const char* snippet = nullptr,
-                        bool returnMark = false);
+                        bool returnMark = false, int currentPage = 0);
   void removeBookmarkForPage(uint16_t spineIndex, float pageProgress, int pageCount);
   bool removeBookmarkAt(size_t index);
   // Consume the session "return here" mark at this spot (matched like the merge key):

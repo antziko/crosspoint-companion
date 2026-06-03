@@ -147,8 +147,14 @@ void EpubReaderBookmarksActivity::render(RenderLock&&) {
   const auto getBookmarkSubtitle = [this](int index) -> std::string {
     const struct Bookmark& bm = bookmarks.at(static_cast<size_t>(confirmingDelete >= DELETE_MODE_DISPLAY ? selectorIndex : index));
     const char* chapter = bm.chapterTitle[0] != '\0' ? bm.chapterTitle : tr(STR_UNNAMED);
-    char buf[80];
-    snprintf(buf, sizeof(buf), "%d%% - %s", static_cast<int>(std::lround(bm.progress * 100.0f)), chapter);
+    const int pct = static_cast<int>(std::lround(bm.progress * 100.0f));
+    char buf[96];
+    if (bm.chapterPageCount > 0) {
+      // Snapshot page position within the chapter (chapterCurrentPage is 0-based).
+      snprintf(buf, sizeof(buf), "%d%% - %d/%d - %s", pct, bm.chapterCurrentPage + 1, bm.chapterPageCount, chapter);
+    } else {
+      snprintf(buf, sizeof(buf), "%d%% - %s", pct, chapter);
+    }
     return std::string(buf);
   };
   const auto getBookmarkIcon = [this](int index) {

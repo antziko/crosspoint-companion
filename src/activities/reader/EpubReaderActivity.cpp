@@ -1542,7 +1542,7 @@ void EpubReaderActivity::addBookmark(bool returnMark) {
 
   LOG_DBG("ERS", "Adding bookmark at spine %d, page %d", currentSpineIndex, currentPage);
   const auto addResult =
-      BOOKMARKS.addBookmark(spine, progress, pageCount, chapterTitle, paragraphIndex, snippet, returnMark);
+      BOOKMARKS.addBookmark(spine, progress, pageCount, chapterTitle, paragraphIndex, snippet, returnMark, currentPage);
   if (addResult == BookmarkStore::AddResult::Added) {
     showBookmarkMessage = true;
     bookmarkMessageRemoved = false;
