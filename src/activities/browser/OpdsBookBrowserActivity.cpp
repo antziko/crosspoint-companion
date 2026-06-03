@@ -26,19 +26,59 @@ constexpr unsigned long GO_HOME_MS = 1000;  // hold BACK this long to jump to ho
 // On-SD filename for a book entry (no directory). Single source of truth so the
 // downloader and the "already downloaded" indicator never diverge.
 std::string bookFileName(const OpdsEntry& book) {
-  return StringUtils::sanitizeFilename((book.author.empty() ? "" : book.author + " - ") + book.title) + ".epub";
+  // "Title - Author.epub" (or "Title.epub" when no author). This order is the
+  // long-standing download convention — books already on the card use it, so the
+  // downloader and the "already downloaded" marker must match it exactly.
+  return StringUtils::sanitizeFilename(book.title + (book.author.empty() ? "" : " - " + book.author)) + ".epub";
 }
 
 // Download destination: the SD card root.
 std::string bookFilePath(const OpdsEntry& book) { return "/" + bookFileName(book); }
+
+// All plausible on-card filenames for a book entry, to make the "already
+// downloaded" marker tolerant of naming-order differences. OPDS feeds (and the
+// files already on the card) vary: author may sit in a separate field or be
+// embedded in the title, and the "Author - Title" / "Title - Author" order is
+// inconsistent across servers. Returns sanitized "*.epub" names, deduped.
+std::vector<std::string> bookFileNameCandidates(const OpdsEntry& book) {
+  std::vector<std::string> out;
+  out.reserve(4);
+  auto add = [&](const std::string& base) {
+    if (base.empty()) return;
+    std::string name = StringUtils::sanitizeFilename(base) + ".epub";
+    for (const std::string& existing : out) {
+      if (existing == name) return;
+    }
+    out.push_back(std::move(name));
+  };
+
+  const std::string& title = book.title;
+  const std::string& author = book.author;
+
+  add(title);  // title-only / already-combined as the feed presents it
+  if (!author.empty()) {
+    add(title + " - " + author);  // canonical download order
+    add(author + " - " + title);  // reversed
+  } else {
+    // No separate author: it may be embedded in the title as "A - B". Try the
+    // swapped arrangement so a card file in the other order still matches.
+    const size_t sep = title.rfind(" - ");
+    if (sep != std::string::npos) {
+      add(title.substr(sep + 3) + " - " + title.substr(0, sep));
+    }
+  }
+  return out;
+}
 
 // True if the book is already on the card: at the download root, or moved into
 // the finished-books folder ("/read", see READ_FOLDER in EpubReaderActivity.cpp).
 // Note: a finished book that collided on move may be "name (2).epub" in /read,
 // which this base-name check won't catch — the common case is covered.
 bool isBookOnDevice(const OpdsEntry& book) {
-  const std::string name = bookFileName(book);
-  return Storage.exists(("/" + name).c_str()) || Storage.exists(("/read/" + name).c_str());
+  for (const std::string& name : bookFileNameCandidates(book)) {
+    if (Storage.exists(("/" + name).c_str()) || Storage.exists(("/read/" + name).c_str())) return true;
+  }
+  return false;
 }
 }  // namespace
 
