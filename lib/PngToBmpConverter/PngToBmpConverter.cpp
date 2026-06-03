@@ -4,9 +4,11 @@
 #include <HalStorage.h>
 #include <InflateReader.h>
 #include <Logging.h>
+#include <Memory.h>
 
 #include <cstdio>
 #include <cstring>
+#include <new>  // std::nothrow
 
 #include "BitmapHelpers.h"
 
@@ -497,8 +499,15 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpO
     return false;
   }
 
-  // Initialize decode context
-  PngDecodeContext ctx = {};
+  // Initialize decode context on the heap: the struct embeds a 2KB read buffer
+  // plus a 768B palette (~2.9KB), too large to sit on the task stack. The `ctx`
+  // reference below keeps the rest of the function unchanged.
+  auto ctxPtr = makeUniqueNoThrow<PngDecodeContext>();
+  if (!ctxPtr) {
+    LOG_ERR("PNG", "OOM allocating PNG decode context");
+    return false;
+  }
+  PngDecodeContext& ctx = *ctxPtr;
   ctx.file = &pngFile;
   ctx.width = width;
   ctx.height = height;
@@ -624,14 +633,28 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpO
   FloydSteinbergDitherer* fsDitherer = nullptr;
   Atkinson1BitDitherer* atkinson1BitDitherer = nullptr;
 
+  bool ditherOk = true;
   if (oneBit) {
-    atkinson1BitDitherer = new Atkinson1BitDitherer(outWidth);
+    atkinson1BitDitherer = new (std::nothrow) Atkinson1BitDitherer(outWidth);
+    ditherOk = atkinson1BitDitherer && atkinson1BitDitherer->ok();
   } else if (!USE_8BIT_OUTPUT) {
     if (USE_ATKINSON) {
-      atkinsonDitherer = new AtkinsonDitherer(outWidth);
+      atkinsonDitherer = new (std::nothrow) AtkinsonDitherer(outWidth);
+      ditherOk = atkinsonDitherer && atkinsonDitherer->ok();
     } else if (USE_FLOYD_STEINBERG) {
-      fsDitherer = new FloydSteinbergDitherer(outWidth);
+      fsDitherer = new (std::nothrow) FloydSteinbergDitherer(outWidth);
+      ditherOk = fsDitherer && fsDitherer->ok();
     }
+  }
+  if (!ditherOk) {
+    LOG_ERR("PNG", "OOM allocating ditherer (outWidth=%d)", outWidth);
+    delete atkinsonDitherer;
+    delete fsDitherer;
+    delete atkinson1BitDitherer;
+    free(rowBuffer);
+    free(ctx.currentRow);
+    free(ctx.previousRow);
+    return false;
   }
 
   // Scaling accumulators
@@ -641,8 +664,20 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(HalFile& pngFile, Print& bmpO
   uint32_t nextOutY_srcStart = 0;
 
   if (needsScaling) {
-    rowAccum = new uint32_t[outWidth]();
-    rowCount = new uint16_t[outWidth]();
+    rowAccum = new (std::nothrow) uint32_t[outWidth]();
+    rowCount = new (std::nothrow) uint16_t[outWidth]();
+    if (!rowAccum || !rowCount) {
+      LOG_ERR("PNG", "OOM allocating scaling accumulators (outWidth=%d)", outWidth);
+      delete[] rowAccum;
+      delete[] rowCount;
+      delete atkinsonDitherer;
+      delete fsDitherer;
+      delete atkinson1BitDitherer;
+      free(rowBuffer);
+      free(ctx.currentRow);
+      free(ctx.previousRow);
+      return false;
+    }
     nextOutY_srcStart = scaleY_fp;
   }
 

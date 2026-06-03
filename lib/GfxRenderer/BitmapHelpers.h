@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <new>  // std::nothrow
 
 struct BmpHeader;
 
@@ -24,9 +25,10 @@ void createBmpHeader(BmpHeader* bmpHeader, int width, int height, BmpRowOrder ro
 class Atkinson1BitDitherer {
  public:
   explicit Atkinson1BitDitherer(int width) : width(width) {
-    errorRow0 = new int16_t[width + 4]();  // Current row
-    errorRow1 = new int16_t[width + 4]();  // Next row
-    errorRow2 = new int16_t[width + 4]();  // Row after next
+    errorRow0 = new (std::nothrow) int16_t[width + 4]();  // Current row
+    errorRow1 = new (std::nothrow) int16_t[width + 4]();  // Next row
+    errorRow2 = new (std::nothrow) int16_t[width + 4]();  // Row after next
+    ok_ = errorRow0 && errorRow1 && errorRow2;
   }
 
   ~Atkinson1BitDitherer() {
@@ -34,6 +36,10 @@ class Atkinson1BitDitherer {
     delete[] errorRow1;
     delete[] errorRow2;
   }
+
+  // True only if all error-row buffers allocated. Callers must check before use;
+  // on false the ditherer must not be used (deref would crash on a null row).
+  bool ok() const { return ok_; }
 
   // EXPLICITLY DELETE THE COPY CONSTRUCTOR
   Atkinson1BitDitherer(const Atkinson1BitDitherer& other) = delete;
@@ -94,6 +100,7 @@ class Atkinson1BitDitherer {
   int16_t* errorRow0;
   int16_t* errorRow1;
   int16_t* errorRow2;
+  bool ok_ = false;
 };
 
 // Atkinson dithering - distributes only 6/8 (75%) of error for cleaner results
@@ -105,9 +112,10 @@ class Atkinson1BitDitherer {
 class AtkinsonDitherer {
  public:
   explicit AtkinsonDitherer(int width) : width(width) {
-    errorRow0 = new int16_t[width + 4]();  // Current row
-    errorRow1 = new int16_t[width + 4]();  // Next row
-    errorRow2 = new int16_t[width + 4]();  // Row after next
+    errorRow0 = new (std::nothrow) int16_t[width + 4]();  // Current row
+    errorRow1 = new (std::nothrow) int16_t[width + 4]();  // Next row
+    errorRow2 = new (std::nothrow) int16_t[width + 4]();  // Row after next
+    ok_ = errorRow0 && errorRow1 && errorRow2;
   }
 
   ~AtkinsonDitherer() {
@@ -115,6 +123,10 @@ class AtkinsonDitherer {
     delete[] errorRow1;
     delete[] errorRow2;
   }
+
+  // True only if all error-row buffers allocated; callers must check before use.
+  bool ok() const { return ok_; }
+
   // **1. EXPLICITLY DELETE THE COPY CONSTRUCTOR**
   AtkinsonDitherer(const AtkinsonDitherer& other) = delete;
 
@@ -193,6 +205,7 @@ class AtkinsonDitherer {
   int16_t* errorRow0;
   int16_t* errorRow1;
   int16_t* errorRow2;
+  bool ok_ = false;
 };
 
 // Floyd-Steinberg error diffusion dithering with serpentine scanning
@@ -206,14 +219,18 @@ class AtkinsonDitherer {
 class FloydSteinbergDitherer {
  public:
   explicit FloydSteinbergDitherer(int width) : width(width), rowCount(0) {
-    errorCurRow = new int16_t[width + 2]();  // +2 for boundary handling
-    errorNextRow = new int16_t[width + 2]();
+    errorCurRow = new (std::nothrow) int16_t[width + 2]();  // +2 for boundary handling
+    errorNextRow = new (std::nothrow) int16_t[width + 2]();
+    ok_ = errorCurRow && errorNextRow;
   }
 
   ~FloydSteinbergDitherer() {
     delete[] errorCurRow;
     delete[] errorNextRow;
   }
+
+  // True only if both error-row buffers allocated; callers must check before use.
+  bool ok() const { return ok_; }
 
   // **1. EXPLICITLY DELETE THE COPY CONSTRUCTOR**
   FloydSteinbergDitherer(const FloydSteinbergDitherer& other) = delete;
@@ -319,4 +336,5 @@ class FloydSteinbergDitherer {
   int rowCount;
   int16_t* errorCurRow;
   int16_t* errorNextRow;
+  bool ok_ = false;
 };

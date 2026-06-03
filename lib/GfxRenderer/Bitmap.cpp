@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <new>  // std::nothrow
 
 #include "OrderedDither.h"  // 1-bit blue-noise / Bayer ordered dither
 
@@ -174,10 +175,22 @@ BmpReaderError Bitmap::parseHeaders() {
       // Bayer) — no ditherer object needed; handled inline in packPixel.
     } else if (ditherMode == IMG_DITHER_ERROR_DIFFUSION) {
       // X4 error-diffusion (best photo quality; row-streamed BMP allows it).
+      // On OOM (nothrow alloc fails) fall back to the stateless ordered 4-level
+      // path, which needs no buffers — degrades dither quality but never crashes.
       if (USE_ATKINSON) {
-        atkinsonDitherer = new AtkinsonDitherer(width);
+        atkinsonDitherer = new (std::nothrow) AtkinsonDitherer(width);
+        if (!atkinsonDitherer || !atkinsonDitherer->ok()) {
+          delete atkinsonDitherer;
+          atkinsonDitherer = nullptr;
+          fourLevelOrdered = true;
+        }
       } else {
-        fsDitherer = new FloydSteinbergDitherer(width);
+        fsDitherer = new (std::nothrow) FloydSteinbergDitherer(width);
+        if (!fsDitherer || !fsDitherer->ok()) {
+          delete fsDitherer;
+          fsDitherer = nullptr;
+          fourLevelOrdered = true;
+        }
       }
     } else {
       // X4 ordered 4-level (blue noise or Bayer) — stateless, inline in packPixel.
