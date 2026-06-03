@@ -2,6 +2,7 @@
 
 #include <GfxRenderer.h>
 #include <HalClock.h>
+#include <WiFi.h>
 #include <HalPowerManager.h>
 #include <HalStorage.h>
 #include <Logging.h>
@@ -107,15 +108,43 @@ void BaseTheme::drawBatteryRight(const GfxRenderer& renderer, Rect rect, const b
   const uint16_t percentage = powerManager.getBatteryPercentage();
   const int y = rect.y + 6;
 
+  int groupLeftX = rect.x;  // left edge of the battery group (icon, or percentage text if shown)
   if (showPercentage) {
     const auto percentageText = std::to_string(percentage) + "%";
     const int textWidth = renderer.getTextWidth(SMALL_FONT_ID, percentageText.c_str());
-    renderer.drawText(SMALL_FONT_ID, rect.x - textWidth - batteryPercentSpacing, rect.y, percentageText.c_str());
+    groupLeftX = rect.x - textWidth - batteryPercentSpacing;
+    renderer.drawText(SMALL_FONT_ID, groupLeftX, rect.y, percentageText.c_str());
   }
+
+  // WiFi bars sit just left of the battery group; only drawn while STA-connected.
+  drawWifiBars(renderer, groupLeftX - wifiBatterySpacing, y + rect.height);
 
   const Rect iconRect{rect.x, y, rect.width, rect.height};
   drawBatteryOutline(renderer, rect.x, y, rect.width, rect.height);
   fillBatteryIcon(renderer, iconRect, percentage);
+}
+
+void BaseTheme::drawWifiBars(const GfxRenderer& renderer, const int rightX, const int bottomY) {
+  constexpr int barWidth = 2;
+  constexpr int barGap = 1;
+  constexpr int barCount = 4;
+  constexpr int barHeights[barCount] = {3, 5, 7, 9};  // rising left-to-right
+  constexpr int totalWidth = barCount * barWidth + (barCount - 1) * barGap;
+  constexpr int maxHeight = barHeights[barCount - 1];
+  const int leftX = rightX - totalWidth;
+
+  // Clear our own footprint first so a stale "connected" indicator can't linger
+  // where a theme's header clear doesn't reach this far left (e.g. RoundedRaff).
+  renderer.fillRect(leftX, bottomY - maxHeight, totalWidth, maxHeight, false);
+
+  // Show only when associated to an AP. WiFi is torn down on exit from every
+  // network activity, so on Home/menus this is correctly blank.
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  for (int i = 0; i < barCount; i++) {
+    const int barX = leftX + i * (barWidth + barGap);
+    renderer.fillRect(barX, bottomY - barHeights[i], barWidth, barHeights[i], true);
+  }
 }
 
 void BaseTheme::drawProgressBar(const GfxRenderer& renderer, Rect rect, const size_t current,

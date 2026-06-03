@@ -149,3 +149,38 @@ the popup `Rect` from `drawPopup` and fills the existing `fillPopupProgress` bar
 that scales with parse duration, not chapter size. The final-buffer redraw is skipped (the page
 render replaces the popup). Chapters under 10 KB still skip the popup entirely. Silent
 next-chapter prefetch passes no callback, so it draws nothing. No new heap, no new task.
+
+---
+
+## 9. WiFi-connected indicator in the header
+
+**Goal:** show a WiFi icon beside the battery when connected.
+
+**`BaseTheme.cpp/.h`:** new shared `drawWifiBars()` draws small rising signal bars (4 bars,
+primitives — no asset; `drawIcon` can't scale the 32×32 `WifiIcon` down to the ~12 px header).
+Called from `drawBatteryRight`, positioned left of the battery group, so all three themes
+(Base/RoundedRaff/Lyra, which all route headers through `drawBatteryRight`) get it from one edit.
+Drawn **only when `WiFi.status() == WL_CONNECTED`**; self-clears its footprint first so a stale
+indicator can't linger where a theme's header clear doesn't reach that far left (RoundedRaff).
+
+**Behavior note:** WiFi is torn down on exit from every network activity, so this is correctly
+blank on Home/menus and appears on the header-using network screens where the link is up
+(KOReader sync, font download, Calibre, network-mode select). Read-only `WiFi.status()` query —
+no radio start, no heap, persistence/power design untouched.
+
+---
+
+## 10. Skip the WiFi list when already connected
+
+**Goal:** if WiFi is still connected, don't re-scan and re-pick — reuse the live connection.
+
+**`WifiSelectionActivity.cpp` (`onEnter`):** if `WiFi.status() == WL_CONNECTED` with a valid IP,
+populate `selectedSSID`/`connectedIP` from the current link, set state `CONNECTED`, and
+`onComplete(true)` immediately — skipping the scan/selection list. Safe from `onEnter` because
+`finish()` → `popActivity()` only sets a deferred pending Pop (handled next loop), so the activity
+isn't deleted mid-entry.
+
+**RAM design respected:** read-only reuse; does not make WiFi persistent. After the normal
+teardown (disconnect + `silentRestart`) or auto-sleep (`WIFI_OFF`), WiFi is down and the next
+entry falls through to the usual scan/list. The session itself is unchanged — it lasts only as
+long as the network activity is active, bounded by the inactivity auto-sleep (default 10 min).

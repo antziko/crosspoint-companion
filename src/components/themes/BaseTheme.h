@@ -217,6 +217,11 @@ class BaseTheme {
 
   // Shared constants and helpers for battery drawing (used by all themes)
   static constexpr int batteryPercentSpacing = 4;
+  static constexpr int wifiBatterySpacing = 6;  // gap between WiFi bars and the battery group
   static void drawBatteryOutline(const GfxRenderer& renderer, int x, int y, int battWidth, int rectHeight);
   static void drawBatteryLightningBolt(const GfxRenderer& renderer, int boltX, int boltY);
+  // Rising signal bars drawn so their right edge sits at rightX and their baseline at
+  // bottomY. No-op unless the device is associated to a WiFi AP (STA WL_CONNECTED), so
+  // it appears only on the network screens where WiFi is actually up.
+  static void drawWifiBars(const GfxRenderer& renderer, int rightX, int bottomY);
 };

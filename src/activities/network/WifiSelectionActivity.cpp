@@ -46,6 +46,24 @@ void WifiSelectionActivity::onEnter() {
            mac[3], mac[4], mac[5]);
   cachedMacAddress = std::string(macStr);
 
+  // If WiFi is already up (e.g. a prior network activity left the link
+  // connected), reuse it and skip the scan/selection list entirely. popActivity()
+  // is deferred (sets a pending Pop handled next loop), so finishing from onEnter
+  // is safe and won't delete this activity mid-entry.
+  if (WiFi.status() == WL_CONNECTED) {
+    const IPAddress ip = WiFi.localIP();
+    if (ip != IPAddress(0, 0, 0, 0)) {
+      selectedSSID = WiFi.SSID().c_str();
+      connectedIP = ip.toString().c_str();
+      state = WifiSelectionState::CONNECTED;
+      LOG_DBG("WIFI", "Already connected to %s (%s); skipping selection list", selectedSSID.c_str(),
+              connectedIP.c_str());
+      requestUpdate();
+      onComplete(true);
+      return;
+    }
+  }
+
   // Trigger first update to show scanning message
   requestUpdate();
 
