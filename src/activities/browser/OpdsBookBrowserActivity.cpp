@@ -6,9 +6,11 @@
 #include <Memory.h>
 #include <OpdsStream.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 
 #include <algorithm>
 #include <cctype>
+#include <vector>
 
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
@@ -35,8 +37,18 @@ std::string bookFileName(const OpdsEntry& book) {
   return StringUtils::sanitizeFilename(book.title + (book.author.empty() ? "" : " - " + book.author)) + ".epub";
 }
 
-// Download destination: the SD card root.
-std::string bookFilePath(const OpdsEntry& book) { return "/" + bookFileName(book); }
+// Per-server download folder, named after the OPDS server: "/<sanitized name>".
+// Empty server name falls back to the card root ("") so unnamed servers keep the
+// legacy root-download behavior.
+std::string serverFolder(const std::string& serverName) {
+  if (serverName.empty()) return "";
+  return "/" + StringUtils::sanitizeFilename(serverName);
+}
+
+// Download destination for a book under the given server folder ("" = root).
+std::string bookFilePath(const std::string& folder, const OpdsEntry& book) {
+  return (folder.empty() ? "/" : folder + "/") + bookFileName(book);
+}
 
 // All plausible on-card filenames for a book entry, to make the "already
 // downloaded" marker tolerant of naming-order differences. OPDS feeds (and the
@@ -73,12 +85,16 @@ std::vector<std::string> bookFileNameCandidates(const OpdsEntry& book) {
   return out;
 }
 
-// True if the book is already on the card: at the download root, or moved into
-// the finished-books folder ("/read", see READ_FOLDER in EpubReaderActivity.cpp).
-// Note: a finished book that collided on move may be "name (2).epub" in /read,
-// which this base-name check won't catch — the common case is covered.
-bool isBookOnDevice(const OpdsEntry& book) {
+// True if the book is already on the card: in this server's download folder, its
+// finished-books subfolder ("<folder>/read"), or the legacy card-root locations
+// ("/" and "/read") from before per-server folders existed.
+// Note: a finished book that collided on move may be "name (2).epub", which this
+// base-name check won't catch — the common case is covered.
+bool isBookOnDevice(const std::string& folder, const OpdsEntry& book) {
+  const std::string base = folder.empty() ? "" : folder;  // "/readeck" or ""
   for (const std::string& name : bookFileNameCandidates(book)) {
+    if (Storage.exists((base + "/" + name).c_str()) || Storage.exists((base + "/read/" + name).c_str())) return true;
+    // Legacy root locations (books downloaded before per-server folders).
     if (Storage.exists(("/" + name).c_str()) || Storage.exists(("/read/" + name).c_str())) return true;
   }
   return false;
@@ -225,7 +241,10 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
 
   if (state == BrowserState::ERROR) {
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 20, tr(STR_ERROR_MSG));
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 10, errorMessage.c_str());
+    // Truncate to the viewport so a long real-cause detail can't overflow the
+    // screen edge (X3 is narrower than X4).
+    const auto errLine = renderer.truncatedText(UI_10_FONT_ID, errorMessage.c_str(), pageWidth - 40);
+    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 10, errLine.c_str());
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_RETRY), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer();
@@ -239,6 +258,19 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
     if (downloadTotal > 0) {
       GUI.drawProgressBar(renderer, Rect{50, pageHeight / 2 + 20, pageWidth - 100, 20}, downloadProgress,
                           downloadTotal);
+    } else if (downloadProgress > 0) {
+      // Server sent no Content-Length (chunked / redirected CDN): no percentage,
+      // so show bytes received so far, scaled to KB / MB / GB as it grows.
+      char sizeText[32];
+      const double bytes = static_cast<double>(downloadProgress);
+      if (bytes < 1024.0 * 1024.0) {
+        snprintf(sizeText, sizeof(sizeText), "%.1f KB", bytes / 1024.0);
+      } else if (bytes < 1024.0 * 1024.0 * 1024.0) {
+        snprintf(sizeText, sizeof(sizeText), "%.1f MB", bytes / (1024.0 * 1024.0));
+      } else {
+        snprintf(sizeText, sizeof(sizeText), "%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
+      }
+      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 20, sizeText);
     }
     renderer.displayBuffer();
     return;
@@ -253,6 +285,7 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
   if (entries.empty()) {
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_NO_ENTRIES));
   } else {
+    const std::string dlFolder = serverFolder(server.name);
     const auto pageStartIndex = selectorIndex / PAGE_ITEMS * PAGE_ITEMS;
     renderer.fillRect(0, 60 + (selectorIndex % PAGE_ITEMS) * 30 - 2, pageWidth - 1, 30);
 
@@ -266,7 +299,7 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
         // folder). Prefix (not suffix) so the marker survives truncatedText().
         // Re-checked each render, so a freshly downloaded book shows the mark
         // immediately on the next draw.
-        const bool downloaded = isBookOnDevice(entry);
+        const bool downloaded = isBookOnDevice(dlFolder, entry);
         displayText = (downloaded ? "* " : "") + entry.title;
         if (!entry.author.empty()) displayText += " - " + entry.author;
       }
@@ -298,12 +331,18 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   // so the parse runs with full heap. (Streaming the parser concurrently with
   // the TLS read only worked for tiny feeds that fit in the 5KB sliver.)
   static constexpr const char* kTmpFeed = "/.opds_feed.tmp";
-  const auto dl = HttpDownloader::downloadToFile(url, kTmpFeed, nullptr, nullptr, server.username, server.password);
+  std::string httpDetail;
+  const auto dl =
+      HttpDownloader::downloadToFile(url, kTmpFeed, nullptr, nullptr, server.username, server.password, &httpDetail);
   if (dl != HttpDownloader::OK) {
-    SdDebugLog::log("OPDS", "FETCH FAILED (http) code=%d, heap=%u", static_cast<int>(dl), (unsigned)ESP.getFreeHeap());
+    SdDebugLog::log("OPDS", "FETCH FAILED (http) code=%d detail=%s heap=%u", static_cast<int>(dl),
+                    httpDetail.empty() ? "?" : httpDetail.c_str(), (unsigned)ESP.getFreeHeap());
+    LOG_ERR("OPDS", "Fetch failed: %s (url=%s)", httpDetail.empty() ? "?" : httpDetail.c_str(), url.c_str());
     Storage.remove(kTmpFeed);
     state = BrowserState::ERROR;
-    errorMessage = tr(STR_FETCH_FEED_FAILED);
+    // Append the real cause so a user without a serial cable sees it on screen.
+    errorMessage = httpDetail.empty() ? std::string(tr(STR_FETCH_FEED_FAILED))
+                                      : std::string(tr(STR_FETCH_FEED_FAILED)) + ": " + httpDetail;
     requestUpdate();
     return;
   }
@@ -331,8 +370,11 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   if (!parser) {
     SdDebugLog::log("OPDS", "PARSE FAILED: %s (line %ld), heap=%u", parser.getErrorDetail(), parser.getErrorLine(),
                     (unsigned)ESP.getFreeHeap());
+    LOG_ERR("OPDS", "Parse failed: %s (line %ld)", parser.getErrorDetail(), parser.getErrorLine());
     state = BrowserState::ERROR;
-    errorMessage = tr(STR_PARSE_FEED_FAILED);
+    const char* parseDetail = parser.getErrorDetail();
+    errorMessage = (parseDetail && parseDetail[0]) ? std::string(tr(STR_PARSE_FEED_FAILED)) + ": " + parseDetail
+                                                   : std::string(tr(STR_PARSE_FEED_FAILED));
     requestUpdate();
     return;
   }
@@ -347,8 +389,8 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   // Sort the page alphabetically (case-insensitive) by title, navigation folders
   // before books. Done before the prev/next links are added so those stay pinned at
   // the top/bottom. OPDS feeds are paginated server-side, so this orders the current
-  // page only — not the whole catalog. Toggleable under System > OPDS Servers.
-  if (SETTINGS.opdsSortAlphabetical) {
+  // page only — not the whole catalog. Per-server toggle, set in the server editor.
+  if (server.sortAlphabetical) {
     std::sort(entries.begin(), entries.end(), [](const OpdsEntry& a, const OpdsEntry& b) {
       if (a.type != b.type) return a.type < b.type;  // NAVIGATION (0) before BOOK (1)
       return std::lexicographical_compare(
@@ -400,33 +442,69 @@ void OpdsBookBrowserActivity::navigateBack() {
 }
 
 void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
+  // Copy by value: `book` references entries[selectorIndex], and we free the
+  // entries vector below to reclaim heap for the TLS handshake.
+  const OpdsEntry bookCopy = book;
+
   state = BrowserState::DOWNLOADING;
-  statusMessage = book.title;
+  statusMessage = bookCopy.title;
   downloadProgress = downloadTotal = 0;
   requestUpdate(true);
 
   // Build full download URL relative to the current feed, not the root server URL
   const std::string feedUrl = UrlUtils::buildUrl(server.url, currentPath);
-  std::string downloadUrl = UrlUtils::buildUrl(feedUrl, book.href);
-  std::string filename = bookFilePath(book);
+  std::string downloadUrl = UrlUtils::buildUrl(feedUrl, bookCopy.href);
+  // Contain each server's books in a folder named after the server, so finished
+  // books move into that folder's "read" subfolder (see EpubReaderActivity).
+  const std::string folder = serverFolder(server.name);
+  if (!folder.empty()) Storage.mkdir(folder.c_str());
+  std::string filename = bookFilePath(folder, bookCopy);
   LOG_DBG("OPDS", "Downloading: %s -> %s", downloadUrl.c_str(), filename.c_str());
 
+  // Free the feed list before connecting. A large feed (e.g. 50 bookmarks)
+  // leaves only ~39KB free, and the HTTPS handshake needs ~40KB contiguous for
+  // mbedtls buffers — so the connect fails with ESP_ERR_HTTP_CONNECT (an OOM in
+  // disguise). Releasing entries now gives TLS the headroom it needs; the list
+  // is re-fetched after the download. Worst on the X3 (less RAM).
+  const int savedIndex = selectorIndex;
+  std::vector<OpdsEntry>().swap(entries);
+  SdDebugLog::log("OPDS", "download start, heap=%u, largest=%u, url=%s", (unsigned)ESP.getFreeHeap(),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), downloadUrl.c_str());
+
+  std::string httpDetail;
+  // Throttle redraws: the callback fires every ~2KB, but each e-ink refresh is
+  // slow. Only repaint every 64KB so the bar/byte-count advances without
+  // flooding the render task.
+  size_t lastShown = 0;
   const auto result = HttpDownloader::downloadToFile(
       downloadUrl, filename,
-      [this](const size_t downloaded, const size_t total) {
+      [this, &lastShown](const size_t downloaded, const size_t total) {
         downloadProgress = downloaded;
         downloadTotal = total;
-        requestUpdate(true);
+        if (downloaded - lastShown >= 64 * 1024 || (total > 0 && downloaded >= total)) {
+          lastShown = downloaded;
+          requestUpdate(true);
+        }
       },
-      nullptr, server.username, server.password);
+      nullptr, server.username, server.password, &httpDetail);
 
   if (result == HttpDownloader::OK) {
     clearBookCache(filename);
-    state = BrowserState::BROWSING;
-  } else {
-    state = BrowserState::ERROR;
-    errorMessage = tr(STR_DOWNLOAD_FAILED);
+    // Reload the feed so the list (and the new "downloaded" marker) reappears;
+    // heap is free again. fetchFeed resets selectorIndex, so restore it after.
+    fetchFeed(currentPath);
+    if (!entries.empty()) selectorIndex = std::min<int>(savedIndex, entries.size() - 1);
+    requestUpdate();
+    return;
   }
+
+  SdDebugLog::log("OPDS", "DOWNLOAD FAILED code=%d detail=%s heap=%u", static_cast<int>(result),
+                  httpDetail.empty() ? "?" : httpDetail.c_str(), (unsigned)ESP.getFreeHeap());
+  LOG_ERR("OPDS", "Download failed: %s (url=%s)", httpDetail.empty() ? "?" : httpDetail.c_str(), downloadUrl.c_str());
+  state = BrowserState::ERROR;
+  // Show the real cause; RETRY reloads the feed (entries were freed above).
+  errorMessage = httpDetail.empty() ? std::string(tr(STR_DOWNLOAD_FAILED))
+                                    : std::string(tr(STR_DOWNLOAD_FAILED)) + ": " + httpDetail;
   requestUpdate();
 }
 

@@ -58,25 +58,35 @@ int clampPercent(int percent) {
   return percent;
 }
 
-// SD card folder finished books are moved into. Single source of truth for the path.
-// constexpr ⇒ lives in flash .rodata, no DRAM cost.
-constexpr char READ_FOLDER[] = "/read";
+// Name of the finished-books subfolder. The full path is relative to the book's
+// own folder, so a book in "/readeck/foo.epub" finishes into "/readeck/read/",
+// while a book at the card root still goes to "/read/" (back-compat).
+constexpr char READ_SUBFOLDER[] = "read";
 
-// True if path is inside READ_FOLDER (starts with "<READ_FOLDER>/"). Non-allocating so
-// it is cheap to call from loop(), and avoids reintroducing a separate "/Read/" literal.
+// True if the book already sits directly inside a "read" folder, i.e. its
+// immediate parent directory is named "read" ("/read/x", "/readeck/read/x").
+// Non-allocating-ish; cheap enough for loop(). Prevents re-moving finished books.
 bool isInReadFolder(const std::string& path) {
-  constexpr size_t n = sizeof(READ_FOLDER) - 1;  // length of "/Read" (excludes NUL)
-  return path.size() > n && path.compare(0, n, READ_FOLDER) == 0 && path[n] == '/';
+  const size_t lastSlash = path.rfind('/');
+  if (lastSlash == std::string::npos || lastSlash == 0) return false;  // root-level file
+  const size_t prevSlash = path.rfind('/', lastSlash - 1);
+  const std::string dirName = path.substr(prevSlash + 1, lastSlash - prevSlash - 1);
+  return dirName == READ_SUBFOLDER;
 }
 
-// Pick a non-colliding destination path inside /Read/ for a finished book.
-// Mirrors the suffixing scheme used elsewhere: "name.epub" -> "name (2).epub", etc.
+// Pick a non-colliding destination inside the "read" subfolder of the book's own
+// directory for a finished book. Mirrors the suffixing scheme used elsewhere:
+// "name.epub" -> "name (2).epub", etc.
 std::string buildReadFolderDestination(const std::string& srcPath) {
   const size_t lastSlash = srcPath.rfind('/');
   const std::string filename = (lastSlash != std::string::npos) ? srcPath.substr(lastSlash + 1) : srcPath;
+  // Parent dir without trailing slash: "" for a root file, "/readeck" for a
+  // server-foldered book. readDir then becomes "/read" or "/readeck/read".
+  const std::string parentDir = (lastSlash != std::string::npos) ? srcPath.substr(0, lastSlash) : "";
+  const std::string readDir = parentDir + "/" + READ_SUBFOLDER;
 
-  Storage.mkdir(READ_FOLDER);
-  std::string dstPath = std::string(READ_FOLDER) + "/" + filename;
+  Storage.mkdir(readDir.c_str());
+  std::string dstPath = readDir + "/" + filename;
   if (!Storage.exists(dstPath.c_str())) {
     return dstPath;
   }
@@ -86,7 +96,7 @@ std::string buildReadFolderDestination(const std::string& srcPath) {
   const std::string ext = (dotPos != std::string::npos) ? filename.substr(dotPos) : "";
   int suffix = 2;
   do {
-    dstPath = std::string(READ_FOLDER) + "/" + base + " (" + std::to_string(suffix) + ")" + ext;
+    dstPath = readDir + "/" + base + " (" + std::to_string(suffix) + ")" + ext;
     suffix++;
   } while (Storage.exists(dstPath.c_str()) && suffix < 100);
   return dstPath;

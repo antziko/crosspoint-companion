@@ -9,6 +9,11 @@ namespace FsHelpers {
 
 std::string normalisePath(const std::string& path);
 
+// Natural, case-insensitive ordering with directories ("name/") first. Exposed so
+// callers holding richer entries (name + metadata) can sort by name without
+// duplicating this logic.
+bool naturalFileLess(const std::string& str1, const std::string& str2);
+
 void sortFileList(std::vector<std::string>& strs);
 
 /**

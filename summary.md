@@ -1,85 +1,106 @@
-# Change Summary — OPDS, Recent Books, Sleep Wallpaper
+# Change Summary — OPDS robustness, downloads, file sizes
 
-Branch: `feat-dictionary`. Three independent changes, all build clean (`pio run`).
-Device verification (X3 + X4) still pending where noted.
-
----
-
-## 1. Sleep wallpaper — exhaustive shuffle-bag ("deck")
-
-**Goal:** every wallpaper in the sleep folder is shown once, in random order, before
-any repeat — instead of "random with a short memory" that let some images recur while
-others starved.
-
-**Mechanism (`SleepActivity.cpp`):**
-- Sort the BMP file list (`FsHelpers::sortFileList`) so a file's index is stable across
-  wakes — directory iteration order is not guaranteed, and the deck stores indices.
-- Track which images were shown this cycle in a persistent bitset. Pick uniformly among
-  the not-yet-shown images; when the cycle is exhausted (or the folder size changes),
-  start a fresh cycle. Selection is done with two counting passes — **no heap allocation**.
-
-**State (`CrossPointState.h/.cpp`):** replaces the old 16-entry "recent" circular buffer
-with a deck:
-- `sleepDeckShown[64]` bitset (1 bit per image, up to `SLEEP_DECK_MAX` = 512 images),
-  `sleepDeckSize`, `sleepDeckShownCount`. ~68 bytes resident (net +34 vs the old buffer).
-- Helpers `isSleepShown` / `markSleepShown` / `resetSleepDeck`.
-
-**Persistence (`JsonSettingsIO.cpp`):** deck saved in the existing `state.json` on the SD
-card (same file/cadence as before — no new file, no extra writes). Old state.json without
-the deck keys just starts a fresh cycle (no migration needed).
-
-**Resource profile:** stored on SD; ~68 bytes RAM; zero heap; two O(n) bitset passes at
-wake only (sleep is infrequent) → no measurable CPU/heat.
-
-**Limit:** up to 512 images tracked per folder; beyond that, extra images aren't picked
-(raise `SLEEP_DECK_MAX`, 8 bytes RAM per +64 images). Swapping files while keeping the
-same count can repeat/skip until the cycle ends, then self-heals.
+Branch: `feat-dictionary`. Builds clean (`pio run`). Device verification (X3 + X4) pending where noted.
 
 ---
 
-## 2. Recent Books — reorder, fixed for X3
+## 1. OPDS feed/download — real error on screen + in logs
 
-**Goal:** reorder the Recent Books list with the front Left/Right buttons.
+**Goal:** "Failed to fetch feed" gave no cause. Surface the real reason on the UI and serial/SD log.
 
-**Why the first attempt failed on X3:** the original used a *hold* gesture
-(`isPressed` + `getHeldTime`). On X3 the front Left/Right buttons bounce into a stream of
-release events when held (the cursor moved but the hold never registered), so any
-hold-based scheme is unreliable there. Confirm-hold works because that ADC value is stable.
+**`HttpDownloader.cpp/.h`:** `downloadToFile` gained an optional `std::string* errorDetail`.
+Every failure path fills a short reason via a stack-buffer helper (`setDetail`, no hot-path
+`std::string`): `"HTTP <code>"`, `"connect failed: <esp_err>"`, `"redirect failed"`,
+`"out of memory (heap=...)"`, `"read error after N bytes"`, `"incomplete: N/M bytes"`,
+`"empty response"`, `"cannot open SD file"`.
 
-**Fix (`RecentBooksActivity.h/.cpp`):** tap-based instead of hold-based.
-- **Tap Left** = move selected book up; **tap Right** = move it down (persisted per move).
-- **Cursor** moves on the **Up/Down side buttons** only; Left/Right are intercepted before
-  the navigator and excluded from cursor nav.
-- Works identically on X3 and X4. The recent list never paginates (`MAX_RECENT_BOOKS` = 10),
-  so dropping Left/Right from cursor nav costs nothing.
-- Store gains `moveUp` / `moveDown` (in-memory swap); activity persists via `saveToFile`.
-
-**Note:** opening any book still force-moves it to the front (recency model), so a manual
-arrangement holds only until the next book is opened.
+**`OpdsBookBrowserActivity.cpp`:** feed and parse failures now `LOG_ERR` + append the detail to
+the on-screen message (`"Failed to fetch feed: HTTP 401"`); error line truncated to viewport
+width (X3 narrower). Download failures likewise show the cause.
 
 ---
 
-## 3. OPDS browser — alphabetical sort (toggleable)
+## 2. X3 download out-of-memory fix
 
-**Goal:** show books A–Z, with an opt-out.
+**Symptom (X3 logs):** book download failed with `ESP_ERR_HTTP_CONNECT`, then
+`OOM: 2048 byte read buffer`. A 50-entry feed left only ~39 KB free; the HTTPS handshake
+needs ~40 KB contiguous, and the read buffer was allocated *after* the TLS connection (when
+heap is fragmented to a few KB).
 
-**Sort (`OpdsBookBrowserActivity.cpp`):** after each fetch, sort the page case-insensitively
-by title, navigation folders before books, before the prev/next page links are added (so
-those stay pinned top/bottom). Per-page only — OPDS feeds paginate server-side. Gated on the
-new setting.
+**Fixes:**
+- `OpdsBookBrowserActivity::downloadBook`: copy the book by value, then **free the `entries`
+  vector before connecting** (reclaims feed RAM for the TLS handshake); reload the feed after
+  a successful download and restore the selection. Logs `heap` + `largest free block` at start.
+- `HttpDownloader::runGet`: **allocate the read buffer first**, before opening the connection,
+  while 70 KB+ is free and contiguous — removes the post-connect OOM.
 
-**Toggle:** new setting `opdsSortAlphabetical` (default ON).
-- `CrossPointSettings.h` + `SettingsList.h`: hidden `STR_NONE_OPT` Toggle → persisted with
-  all settings (and the web settings API), but kept out of the generic Settings menu.
-- Surfaced/flipped in **System > OPDS Servers** (`OpdsServerListActivity.cpp`) as a bottom
-  row "Sort books alphabetically" with an ON/OFF subtitle (settings mode only, not picker).
-- i18n: added `STR_OPDS_SORT_ALPHABETICAL` (English; other languages fall back).
+**Note:** X3 is at the edge for HTTPS downloads (live mbedtls ~65 KB + 48 KB framebuffer). A
+mid-stream `read error` can still occur under pressure; the real further lever is shrinking
+mbedtls record buffers, which needs a custom ESP-IDF build (not the Arduino prebuilt libs).
 
 ---
 
-## Related, already committed earlier this branch
-- OPDS downloaded-marker now matches existing filenames in either order
-  (`Title - Author` / `Author - Title`, plus author-embedded-in-title) at `/` and `/read`.
-- Investigated X3 OPDS "slow to open": SD bus is 40 MHz on both, so the delta is the X3
-  e-ink refresh (16 MHz display SPI + forced full-syncs + extra settle, ×several refreshes
-  during open). Diagnostic: timestamped `/opds_debug.log`. No code change yet.
+## 3. Download progress on screen
+
+**`HttpDownloader.cpp`:** progress callback now fires even when the server sends no
+`Content-Length` (chunked / redirected CDN), with `total==0` meaning "size unknown".
+
+**`OpdsBookBrowserActivity.cpp` (DOWNLOADING render):** known size → percentage bar (as before);
+unknown size → bytes received, scaled `KB → MB → GB`. Redraws throttled to every 64 KB
+(e-ink refresh is slow). Applies to X3 and X4 (shared path, orientation-aware width).
+
+**`FontDownloadActivity.cpp` (regression guard):** keeps the manifest-provided size when the
+server omits `Content-Length` (`if (total > 0) fileTotal_ = total`).
+
+---
+
+## 4. Per-server download folders + finished-books subfolder
+
+**Goal:** contain each OPDS server's books in its own folder; move finished books into that
+folder's `read/` subfolder (e.g. server "readeck" → `/readeck/…`, finished → `/readeck/read/…`).
+
+**`OpdsBookBrowserActivity.cpp`:** `serverFolder(name)` → `/<sanitized server name>` (empty
+name = card root, legacy behavior). Downloads go to `/<server>/<file>.epub` (folder created on
+demand). The "already on device" marker checks `<folder>/`, `<folder>/read/`, **plus** legacy
+`/` and `/read/` so older downloads still show the `*`.
+
+**`EpubReaderActivity.cpp`:** the finished-books move is now **relative to the book's own
+folder** — `READ_SUBFOLDER = "read"`, destination `<parentDir>/read/`. Root books still go to
+`/read/` (back-compat). `isInReadFolder` rewritten to test whether the immediate parent dir is
+named `read` (prevents re-moving at any depth).
+
+The on-device file browser already navigates subfolders, so foldered books are openable.
+
+---
+
+## 5. OPDS alphabetical sort — now per-server (was global)
+
+**`OpdsServerStore.h` + `JsonSettingsIO.cpp`:** `OpdsServer` gained `bool sortAlphabetical`
+(persisted as `sort_az`, defaults true so existing servers keep sorting).
+
+**`OpdsSettingsActivity.cpp`:** the server editor now has a **Sort A-Z** toggle (Name / URL /
+Username / Password / Sort A-Z / Delete) with an ON/OFF value.
+
+**`OpdsServerListActivity.cpp`:** removed the global A-Z virtual toggle row.
+`OpdsBookBrowserActivity.cpp` sorts on `server.sortAlphabetical`.
+Removed the now-dead global `opdsSortAlphabetical` (`CrossPointSettings.h`, `SettingsList.h`).
+
+---
+
+## 6. File browser — show file size
+
+**Goal:** show each file's size on one line beside the extension, in a small font.
+
+**`FsHelpers.cpp/.h`:** extracted the natural-sort comparator as `naturalFileLess` (single
+source; `sortFileList` calls it) so richer entries can sort by name without duplicating logic.
+
+**`FileBrowserActivity.h/.cpp`:** `files` is now `vector<FileEntry{name, size}>` (+4 bytes/entry).
+Size is read from the already-fetched directory entry during `loadFiles()` — **no extra SD
+I/O** — and kept beside the name so sorting can't desync the two. Trailing value shows
+`"<ext>  <size>"`; `formatFileSize` renders MB with 1 decimal (GB past 1 GB); directories blank.
+
+**Themes (`BaseTheme` / `LyraTheme` / `RoundedRaffTheme` `drawList`):** added a defaulted
+`valueSmallFont = false` param so the file browser draws the value column in the small font.
+Every other list is byte-identical (flag off by default).
+
+**Cost:** +4 bytes/file RAM, ~negligible flash; no extra I/O, no measurable CPU/heat.

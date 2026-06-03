@@ -44,23 +44,26 @@ void FileBrowserActivity::loadFiles() {
     }
 
     if (file.isDirectory()) {
-      files.emplace_back(std::string(fileNameBuffer.get()) + "/");
+      files.push_back({std::string(fileNameBuffer.get()) + "/", 0});
     } else {
+      // Size comes from the already-fetched directory entry; no extra SD read.
+      const uint32_t fileSize = static_cast<uint32_t>(file.size());
       std::string_view filename{fileNameBuffer.get()};
       if (mode == Mode::PickFirmware) {
         // Firmware picker: only show .bin files.
         if (FsHelpers::checkFileExtension(filename, ".bin")) {
-          files.emplace_back(filename);
+          files.push_back({std::string(filename), fileSize});
         }
       } else if (FsHelpers::hasEpubExtension(filename) || FsHelpers::hasXtcExtension(filename) ||
                  FsHelpers::hasTxtExtension(filename) || FsHelpers::hasMarkdownExtension(filename) ||
                  FsHelpers::hasBmpExtension(filename)) {
-        files.emplace_back(filename);
+        files.push_back({std::string(filename), fileSize});
       }
     }
   }
   root.close();
-  FsHelpers::sortFileList(files);
+  std::sort(files.begin(), files.end(),
+            [](const FileEntry& a, const FileEntry& b) { return FsHelpers::naturalFileLess(a.name, b.name); });
 }
 
 void FileBrowserActivity::onEnter() {
@@ -213,7 +216,7 @@ void FileBrowserActivity::loop() {
     }
     if (files.empty()) return;
 
-    const std::string& entry = files[selectorIndex];
+    const std::string& entry = files[selectorIndex].name;
     bool isDirectory = (entry.back() == '/');
 
     // Firmware picker: select file -> return path; navigate into directories normally.
@@ -344,6 +347,18 @@ std::string getFileExtension(std::string filename) {
   return filename.substr(pos);
 }
 
+// Human-readable size in MB (1 decimal); switches to GB past 1 GB. Sub-MB files
+// still read as "0.x MB" — fine for ebooks, avoids a noisy KB/B unit.
+std::string formatFileSize(uint32_t bytes) {
+  char buf[16];
+  if (bytes < 1024u * 1024u * 1024u) {
+    snprintf(buf, sizeof(buf), "%.1f MB", bytes / (1024.0 * 1024.0));
+  } else {
+    snprintf(buf, sizeof(buf), "%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0));
+  }
+  return std::string(buf);
+}
+
 void FileBrowserActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
@@ -368,9 +383,15 @@ void FileBrowserActivity::render(RenderLock&&) {
   } else {
     GUI.drawList(
         renderer, Rect{0, contentTop, pageWidth, contentHeight}, files.size(), selectorIndex,
-        [this](int index) { return getFileName(files[index]); }, nullptr,
-        [this](int index) { return UITheme::getFileIcon(files[index]); },
-        [this](int index) { return getFileExtension(files[index]); }, false);
+        [this](int index) { return getFileName(files[index].name); }, nullptr,
+        [this](int index) { return UITheme::getFileIcon(files[index].name); },
+        // Trailing value: "<ext>  <size>" on one line (directories show nothing).
+        [this](int index) {
+          const std::string ext = getFileExtension(files[index].name);
+          if (ext.empty()) return std::string("");
+          return ext + "  " + formatFileSize(files[index].size);
+        },
+        false, nullptr, /*valueSmallFont=*/true);
   }
 
   // Full path display
@@ -404,7 +425,8 @@ void FileBrowserActivity::render(RenderLock&&) {
   const char* backLabel = (basepath == "/") ? (mode == Mode::PickFirmware ? tr(STR_BACK) : tr(STR_HOME)) : tr(STR_BACK);
   // In PickFirmware mode, Confirm on a .bin returns the path to the caller (not "open"); show
   // STR_SELECT instead. Directories in the same picker still descend, so keep STR_OPEN there.
-  const bool selectingFirmwareFile = mode == Mode::PickFirmware && !files.empty() && files[selectorIndex].back() != '/';
+  const bool selectingFirmwareFile =
+      mode == Mode::PickFirmware && !files.empty() && files[selectorIndex].name.back() != '/';
   const char* confirmLabel = files.empty() ? "" : (selectingFirmwareFile ? tr(STR_SELECT) : tr(STR_OPEN));
   const auto labels = mappedInput.mapLabels(backLabel, confirmLabel, files.empty() ? "" : tr(STR_DIR_UP),
                                             files.empty() ? "" : tr(STR_DIR_DOWN));
@@ -415,6 +437,6 @@ void FileBrowserActivity::render(RenderLock&&) {
 
 size_t FileBrowserActivity::findEntry(const std::string& name) const {
   for (size_t i = 0; i < files.size(); i++)
-    if (files[i] == name) return i;
+    if (files[i].name == name) return i;
   return 0;
 }

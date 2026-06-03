@@ -6,7 +6,8 @@ struct OpdsServer {
   std::string name;
   std::string url;
   std::string username;
-  std::string password;  // Plaintext in memory; obfuscated with hardware key on disk
+  std::string password;     // Plaintext in memory; obfuscated with hardware key on disk
+  bool sortAlphabetical = true;  // sort each browse page A-Z (per-server toggle)
 };
 
 class OpdsServerStore;

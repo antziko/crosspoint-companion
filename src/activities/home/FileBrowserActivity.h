@@ -29,9 +29,18 @@ class FileBrowserActivity final : public Activity {
 
   Mode mode = Mode::Books;
 
+  // One listed entry: display name (directories keep a trailing "/") plus the
+  // file size in bytes (0 for directories). Size is read from the directory entry
+  // during loadFiles() — no extra SD I/O — and kept beside the name so sorting
+  // never desyncs the two. +4 bytes/entry over a bare name.
+  struct FileEntry {
+    std::string name;
+    uint32_t size = 0;
+  };
+
   // Files state
   std::string basepath = "/";
-  std::vector<std::string> files;
+  std::vector<FileEntry> files;
   std::unique_ptr<char[]> fileNameBuffer;
 
   // Data loading

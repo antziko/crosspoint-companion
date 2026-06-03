@@ -40,8 +40,14 @@ class HttpDownloader {
 
   /**
    * Download a file to the SD card with optional credentials.
+   *
+   * If errorDetail is non-null, it receives a short human-readable failure
+   * reason (e.g. "HTTP 401", "connect failed: ESP_ERR_...", "out of memory")
+   * on any non-OK return, so callers can show the real cause on screen instead
+   * of a generic message.
    */
   static DownloadError downloadToFile(const std::string& url, const std::string& destPath,
                                       ProgressCallback progress = nullptr, bool* cancelFlag = nullptr,
-                                      const std::string& username = "", const std::string& password = "");
+                                      const std::string& username = "", const std::string& password = "",
+                                      std::string* errorDetail = nullptr);
 };

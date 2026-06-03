@@ -236,7 +236,6 @@ class CrossPointSettings {
   char opdsServerUrl[128] = "";
   char opdsUsername[64] = "";
   char opdsPassword[64] = "";
-  uint8_t opdsSortAlphabetical = 1;  // sort each browse page A-Z (toggle under System > OPDS Servers)
   // Hide battery percentage
   uint8_t hideBatteryPercentage = HIDE_NEVER;
   // Long-press behavior for FRONT page-turn buttons (Left/Right)

@@ -301,7 +301,9 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
         url, destPath,
         [this](size_t downloaded, size_t total) {
           fileProgress_ = downloaded;
-          fileTotal_ = total;
+          // Keep the manifest-provided size if the server sends no Content-Length
+          // (total==0); progress now fires for unknown-size downloads too.
+          if (total > 0) fileTotal_ = total;
           mappedInput.update();
           if (mappedInput.isPressed(MappedInputManager::Button::Back) ||
               mappedInput.wasPressed(MappedInputManager::Button::Back)) {

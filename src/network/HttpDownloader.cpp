@@ -9,6 +9,7 @@
 
 #include "util/SdDebugLog.h"
 
+#include <cstdarg>
 #include <cstring>
 #include <functional>
 #include <string>
@@ -34,7 +35,23 @@ struct Sink {
   bool* cancelFlag = nullptr;
   size_t total = 0;
   size_t downloaded = 0;
+  // Optional human-readable failure reason, surfaced to the caller (and the UI).
+  // Mirrors what's logged to SdDebugLog so a user without a serial cable can see
+  // the real cause (status code, OOM, esp_err) on the device screen.
+  std::string* detail = nullptr;
 };
+
+// snprintf into a stack buffer, then store the reason in *out (if provided).
+// Keeps the error path off std::string formatting while still giving the UI text.
+void setDetail(std::string* out, const char* fmt, ...) {
+  if (!out) return;
+  char buf[96];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+  out->assign(buf);
+}
 
 bool isRedirect(int status) {
   return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
@@ -47,6 +64,19 @@ bool isRedirect(int status) {
 // large/slow files and surfaces a short read directly.
 HttpDownloader::DownloadError runGet(const std::string& url, const std::string& username, const std::string& password,
                                      Sink& sink) {
+  // Allocate the read buffer FIRST, before the TLS connection exists. A live
+  // mbedtls connection holds ~65KB and fragments the heap; allocating this 2KB
+  // buffer afterwards fails on the X3 (only ~6KB, non-contiguous, left). Carving
+  // it now — while 70KB+ is free and contiguous — guarantees it.
+  auto buf = makeUniqueNoThrow<char[]>(READ_CHUNK);
+  if (!buf) {
+    LOG_ERR("HTTP", "OOM: %u byte read buffer", (unsigned)READ_CHUNK);
+    SdDebugLog::log("HTTP", "OOM: %u byte read buffer, free heap=%u", (unsigned)READ_CHUNK,
+                    (unsigned)ESP.getFreeHeap());
+    setDetail(sink.detail, "out of memory (heap=%u)", (unsigned)ESP.getFreeHeap());
+    return HttpDownloader::HTTP_ERROR;
+  }
+
   esp_http_client_config_t config = {};
   config.url = url.c_str();
   config.buffer_size = HTTP_RX_BUF;
@@ -64,6 +94,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   esp_http_client_handle_t client = esp_http_client_init(&config);
   if (!client) {
     LOG_ERR("HTTP", "client init failed");
+    setDetail(sink.detail, "client init failed");
     return HttpDownloader::HTTP_ERROR;
   }
 
@@ -82,6 +113,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   if (err != ESP_OK) {
     LOG_ERR("HTTP", "open failed: %s", esp_err_to_name(err));
     SdDebugLog::log("HTTP", "open failed: %s", esp_err_to_name(err));
+    setDetail(sink.detail, "connect failed: %s", esp_err_to_name(err));
     esp_http_client_cleanup(client);
     return HttpDownloader::HTTP_ERROR;
   }
@@ -92,6 +124,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
     err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
       LOG_ERR("HTTP", "redirect open failed: %s", esp_err_to_name(err));
+      setDetail(sink.detail, "redirect failed: %s", esp_err_to_name(err));
       esp_http_client_cleanup(client);
       return HttpDownloader::HTTP_ERROR;
     }
@@ -102,6 +135,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   if (status != 200) {
     LOG_ERR("HTTP", "unexpected status: %d", status);
     SdDebugLog::log("HTTP", "unexpected status: %d", status);
+    setDetail(sink.detail, "HTTP %d", status);
     esp_http_client_cleanup(client);
     return HttpDownloader::HTTP_ERROR;
   }
@@ -109,15 +143,6 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   // fetch_headers returns 0 for a chunked response (no Content-Length); leave
   // total at 0 so progress stays silent and the size check is skipped.
   sink.total = contentLength > 0 ? static_cast<size_t>(contentLength) : 0;
-
-  auto buf = makeUniqueNoThrow<char[]>(READ_CHUNK);
-  if (!buf) {
-    LOG_ERR("HTTP", "OOM: %u byte read buffer", (unsigned)READ_CHUNK);
-    SdDebugLog::log("HTTP", "OOM: %u byte read buffer, free heap=%u", (unsigned)READ_CHUNK,
-                    (unsigned)ESP.getFreeHeap());
-    esp_http_client_cleanup(client);
-    return HttpDownloader::HTTP_ERROR;
-  }
 
   while (true) {
     if (sink.cancelFlag && *sink.cancelFlag) {
@@ -128,6 +153,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
     if (read < 0) {
       LOG_ERR("HTTP", "read error after %zu bytes", sink.downloaded);
       SdDebugLog::log("HTTP", "read error after %zu bytes, heap=%u", sink.downloaded, (unsigned)ESP.getFreeHeap());
+      setDetail(sink.detail, "read error after %zu bytes", sink.downloaded);
       esp_http_client_cleanup(client);
       return HttpDownloader::HTTP_ERROR;
     }
@@ -135,11 +161,15 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
     if (!sink.write(reinterpret_cast<const uint8_t*>(buf.get()), read)) {
       SdDebugLog::log("HTTP", "sink write failed after %zu bytes, heap=%u (likely OOM in parser)", sink.downloaded,
                       (unsigned)ESP.getFreeHeap());
+      setDetail(sink.detail, "SD write failed after %zu bytes", sink.downloaded);
       esp_http_client_cleanup(client);
       return HttpDownloader::FILE_ERROR;
     }
     sink.downloaded += read;
-    if (sink.progress && sink.total > 0) sink.progress(sink.downloaded, sink.total);
+    // Report progress even when total is unknown (chunked / no Content-Length):
+    // callers can show a byte count instead of a percentage bar. total==0 means
+    // "size unknown".
+    if (sink.progress) sink.progress(sink.downloaded, sink.total);
   }
 
   const bool complete = esp_http_client_is_complete_data_received(client);
@@ -147,6 +177,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   if (!complete) {
     LOG_ERR("HTTP", "incomplete: got %zu of %zu bytes", sink.downloaded, sink.total);
     SdDebugLog::log("HTTP", "incomplete: got %zu of %zu bytes", sink.downloaded, sink.total);
+    setDetail(sink.detail, "incomplete: %zu/%zu bytes", sink.downloaded, sink.total);
     return HttpDownloader::HTTP_ERROR;
   }
   return HttpDownloader::OK;
@@ -183,7 +214,8 @@ bool HttpDownloader::fetchUrl(const std::string& url, const DataCallback& onData
 
 HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& url, const std::string& destPath,
                                                              ProgressCallback progress, bool* cancelFlag,
-                                                             const std::string& username, const std::string& password) {
+                                                             const std::string& username, const std::string& password,
+                                                             std::string* errorDetail) {
   LOG_DBG("HTTP", "Downloading: %s -> %s", url.c_str(), destPath.c_str());
 
   if (Storage.exists(destPath.c_str())) {
@@ -192,12 +224,14 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
   HalFile file;
   if (!Storage.openFileForWrite("HTTP", destPath.c_str(), file)) {
     LOG_ERR("HTTP", "Failed to open file for writing");
+    setDetail(errorDetail, "cannot open SD file for write");
     return FILE_ERROR;
   }
 
   Sink sink;
   sink.progress = std::move(progress);
   sink.cancelFlag = cancelFlag;
+  sink.detail = errorDetail;
   sink.write = [&file](const uint8_t* data, size_t len) { return file.write(data, len) == len; };
 
   const DownloadError result = runGet(url, username, password, sink);
@@ -211,6 +245,7 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
   }
   if (sink.downloaded == 0) {
     LOG_ERR("HTTP", "no data received");
+    setDetail(errorDetail, "empty response (0 bytes)");
     Storage.remove(destPath.c_str());
     return HTTP_ERROR;
   }

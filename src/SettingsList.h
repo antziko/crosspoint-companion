@@ -182,10 +182,6 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         SettingInfo::Enum(StrId::STR_HOLD_CONFIRM, &CrossPointSettings::holdConfirmAction,
                           {StrId::STR_STATE_OFF, StrId::STR_HOLD_CONFIRM_BOOKMARK, StrId::STR_HOLD_CONFIRM_DICT},
                           "holdConfirmAction", StrId::STR_NONE_OPT),
-        // OPDS A-Z sort. STR_NONE_OPT keeps it out of the generic settings menu; it is
-        // surfaced and toggled in OpdsServerListActivity (System > OPDS Servers).
-        SettingInfo::Toggle(StrId::STR_OPDS_SORT_ALPHABETICAL, &CrossPointSettings::opdsSortAlphabetical,
-                            "opdsSortAlphabetical", StrId::STR_NONE_OPT),
         // --- Controls ---
         SettingInfo::Enum(StrId::STR_SIDE_BTN_LAYOUT, &CrossPointSettings::sideButtonLayout,
                           {StrId::STR_PREV_NEXT, StrId::STR_NEXT_PREV, StrId::STR_DISABLED}, "sideButtonLayout",

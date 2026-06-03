@@ -306,10 +306,11 @@ void RoundedRaffTheme::drawList(const GfxRenderer& renderer, Rect rect, int item
                                 const std::function<std::string(int index)>& rowSubtitle,
                                 const std::function<UIIcon(int index)>& rowIcon,
                                 const std::function<std::string(int index)>& rowValue, bool highlightValue,
-                                const std::function<bool(int index)>& rowDimmed) const {
+                                const std::function<bool(int index)>& rowDimmed, bool valueSmallFont) const {
   (void)rowIcon;
   (void)highlightValue;
   (void)rowDimmed;
+  const auto valueFont = valueSmallFont ? SMALL_FONT_ID : kTitleFontId;
   const bool hasSubtitle = static_cast<bool>(rowSubtitle);
   const int titleLineHeight = renderer.getLineHeight(kTitleFontId);
   const int subtitleLineHeight = renderer.getLineHeight(kSubtitleFontId);
@@ -341,10 +342,10 @@ void RoundedRaffTheme::drawList(const GfxRenderer& renderer, Rect rect, int item
         const int maxValueWidth = std::max(0, rowWidth - kInteractiveInsetX * 2 - kMinValueGap - kMinTitleWidth);
         if (maxValueWidth > 0) {
           const std::string truncatedValue =
-              renderer.truncatedText(kTitleFontId, valueText.c_str(), maxValueWidth, EpdFontFamily::REGULAR);
-          const int valueW = renderer.getTextWidth(kTitleFontId, truncatedValue.c_str(), EpdFontFamily::REGULAR);
-          renderer.drawText(kTitleFontId, rowX + rowWidth - kInteractiveInsetX - valueW,
-                            rowY + (rowHeight - renderer.getLineHeight(kTitleFontId)) / 2, truncatedValue.c_str(),
+              renderer.truncatedText(valueFont, valueText.c_str(), maxValueWidth, EpdFontFamily::REGULAR);
+          const int valueW = renderer.getTextWidth(valueFont, truncatedValue.c_str(), EpdFontFamily::REGULAR);
+          renderer.drawText(valueFont, rowX + rowWidth - kInteractiveInsetX - valueW,
+                            rowY + (rowHeight - renderer.getLineHeight(valueFont)) / 2, truncatedValue.c_str(),
                             !isSelected, EpdFontFamily::REGULAR);
           textAreaWidth = std::max(0, textAreaWidth - valueW - kMinValueGap);
         }
