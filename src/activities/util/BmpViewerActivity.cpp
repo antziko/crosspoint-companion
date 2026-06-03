@@ -5,6 +5,7 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <Memory.h>
 
 #include <algorithm>
 
@@ -190,13 +191,18 @@ void BmpViewerActivity::doSetSleepCover() {
   HalFile inFile, outFile;
   if (Storage.openFileForRead("BMP", filePath, inFile)) {
     if (Storage.openFileForWrite("BMP", "/sleep.bmp", outFile)) {
-      char buffer[2048];
-      int bytesRead;
-      success = true;
-      while ((bytesRead = inFile.read(buffer, sizeof(buffer))) > 0) {
-        if (outFile.write(buffer, bytesRead) != bytesRead) {
-          success = false;
-          break;
+      // 2KB copy buffer on the heap (was on the stack); rendering/UI activities
+      // share a modest task stack.
+      constexpr size_t COPY_BUF_SIZE = 2048;
+      auto buffer = makeUniqueNoThrow<uint8_t[]>(COPY_BUF_SIZE);
+      if (buffer) {
+        int bytesRead;
+        success = true;
+        while ((bytesRead = inFile.read(buffer.get(), COPY_BUF_SIZE)) > 0) {
+          if (outFile.write(buffer.get(), bytesRead) != bytesRead) {
+            success = false;
+            break;
+          }
         }
       }
       outFile.close();

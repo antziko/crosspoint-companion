@@ -3,6 +3,7 @@
 #include <FsHelpers.h>
 #include <HalStorage.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <esp_task_wdt.h>
 
 #include "util/BookCacheUtils.h"
@@ -624,14 +625,22 @@ void WebDAVHandler::handleCopy(WebServer& s) {
     return;
   }
 
-  // Streaming copy with 4KB buffer on stack
-  uint8_t buf[4096];
+  // Streaming copy with a 4KB heap buffer (this runs on the web/loop task; a 4KB
+  // stack array was half that task's stack — moved to heap to avoid overflow).
+  constexpr size_t COPY_BUF_SIZE = 4096;
+  auto buf = makeUniqueNoThrow<uint8_t[]>(COPY_BUF_SIZE);
+  if (!buf) {
+    srcFile.close();
+    dstFile.close();
+    s.send(500, "text/plain", "Out of memory");
+    return;
+  }
   bool copyOk = true;
   while (srcFile.available()) {
     esp_task_wdt_reset();
-    int bytesRead = srcFile.read(buf, sizeof(buf));
+    int bytesRead = srcFile.read(buf.get(), COPY_BUF_SIZE);
     if (bytesRead <= 0) break;
-    size_t written = dstFile.write(buf, bytesRead);
+    size_t written = dstFile.write(buf.get(), bytesRead);
     if (written != (size_t)bytesRead) {
       copyOk = false;
       break;
