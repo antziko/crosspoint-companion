@@ -1,547 +1,85 @@
-# Change Summary — CrossPoint Reader (Xteink X3 / X4)
+# Change Summary — OPDS, Recent Books, Sleep Wallpaper
 
-Scope: image rendering quality (dither, tone, conditional dark-only brighten,
-full-width sizing, in-image text readability), text anti-aliasing modes
-(Off/Antialiased/Sharp), manual-refresh behavior, OPDS browser robustness, EPUB
-indexing stability, and supporting infrastructure. X3 = UC81xx-class panel (792×528, 1-bit halftone path).
-X4 = SSD1677 (800×480, native 4-level grayscale).
-Build: `pio run` (env `default`). `open-x4-sdk` is the low-level display/SD SDK.
+Branch: `feat-dictionary`. Three independent changes, all build clean (`pio run`).
+Device verification (X3 + X4) still pending where noted.
 
 ---
 
-## 1. OPDS browser — crash & hang fixes
+## 1. Sleep wallpaper — exhaustive shuffle-bag ("deck")
 
-**Problem:** Selecting "All" / large catalogs gave "failed to fetch", hangs at
-"Loading…", or crashes (`abort()`); some letter feeds failed with cryptic
-errors.
+**Goal:** every wallpaper in the sleep folder is shown once, in random order, before
+any repeat — instead of "random with a short memory" that let some images recur while
+others starved.
 
-**Root causes & fixes:**
+**Mechanism (`SleepActivity.cpp`):**
+- Sort the BMP file list (`FsHelpers::sortFileList`) so a file's index is stable across
+  wakes — directory iteration order is not guaranteed, and the deck stores indices.
+- Track which images were shown this cycle in a persistent bitset. Pick uniformly among
+  the not-yet-shown images; when the cycle is exhausted (or the folder size changes),
+  start a fresh cycle. Selection is done with two counting passes — **no heap allocation**.
 
-- **Large unpaginated feed → OOM abort.** `OpdsParser` accumulated entries until
-  the heap was exhausted (bare `new` is not nothrow with `-fno-exceptions`).
-  - `lib/OpdsParser/OpdsParser.{h,cpp}`: cap stored entries at `MAX_ENTRIES = 64`
-    (`truncated` flag when exceeded). Parsing continues so the HTTP read finishes.
+**State (`CrossPointState.h/.cpp`):** replaces the old 16-entry "recent" circular buffer
+with a deck:
+- `sleepDeckShown[64]` bitset (1 bit per image, up to `SLEEP_DECK_MAX` = 512 images),
+  `sleepDeckSize`, `sleepDeckShownCount`. ~68 bytes resident (net +34 vs the old buffer).
+- Helpers `isSleepShown` / `markSleepShown` / `resetSleepDeck`.
 
-- **False truncation of small feeds.** An instantaneous free-heap check inside
-  the parser misfired mid-stream (mbedtls TLS record buffers transiently consume
-  tens of KB), cutting small feeds to a few entries. Removed the heap check; the
-  count cap alone is the guard.
+**Persistence (`JsonSettingsIO.cpp`):** deck saved in the existing `state.json` on the SD
+card (same file/cadence as before — no new file, no extra writes). Old state.json without
+the deck keys just starts a fresh cycle (no migration needed).
 
-- **Real expat error masked.** The stream destructor always called `flush()`,
-  which ran `XML_Parse` on an already-freed/NULL parser → reported
-  `XML_ERROR_INVALID_ARGUMENT (line 0)` and overwrote the genuine error.
-  - `flush()` now bails if `errorOccured` or `parser == nullptr`.
+**Resource profile:** stored on SD; ~68 bytes RAM; zero heap; two O(n) bitset passes at
+wake only (sleep is infrequent) → no measurable CPU/heat.
 
-- **Fragmentation OOM ("out of memory (parse buffer)") on larger feeds.** expat
-  needs ~4 KB contiguous for its parse buffer; mid-TLS the heap was too
-  fragmented to provide it (≈73 KB free total, no 4 KB block). Verified on host
-  that expat's max single allocation is feed-size-independent (~4 KB).
-  - Pre-grow the parse buffer once in the ctor (`XML_GetBuffer(parser, 6144)`),
-    while the heap is clean (before TLS opens). expat reuses it for the whole
-    stream — no fragmentation-sensitive grow mid-read.
-  - An earlier `entries.reserve()` attempt was rejected: it stole the contiguous
-    block expat needed and made the OOM worse.
-
-- **TLS memory vs parse memory — the 69 KB feed hang.** A live HTTPS connection
-  holds ~70 KB (mbedtls record buffers + session) on top of the 48 KB
-  framebuffer, leaving only ~5 KB free during transfer. Streaming bytes to a file
-  needs ~0 heap (book downloads prove this), but expat needs ~15 KB working
-  memory, which doesn't fit in 5 KB → mid-read failure on large feeds.
-  - `src/activities/browser/OpdsBookBrowserActivity.cpp`: **two-phase fetch** —
-    download the feed to a temp SD file (`/.opds_feed.tmp`), close the
-    connection (frees the 70 KB), then parse the file with full heap.
+**Limit:** up to 512 images tracked per folder; beyond that, extra images aren't picked
+(raise `SLEEP_DECK_MAX`, 8 bytes RAM per +64 images). Swapping files while keeping the
+same count can repeat/skip until the cycle ends, then self-heals.
 
 ---
 
-## 2. EPUB reader — indexing crash, loop, and stack fixes
+## 2. Recent Books — reorder, fixed for X3
 
-**Problem (reported as X3-only):** moving to some chapters got "stuck on
-Indexing", later crashed/rebooted. Could still press Back.
+**Goal:** reorder the Recent Books list with the front Left/Right buttons.
 
-**Root cause:** the specific EPUB file on the SD card was **0 bytes** (truncated,
-likely by an earlier crash/unsafe power-off). Cached chapters (book.bin /
-section caches) still loaded, but any uncached chapter had to re-stream from the
-empty zip → "File too small to be a valid zip" → the old code re-indexed
-forever. (Confirmed by inspecting the SD: two `.epub` files were 0 bytes;
-re-copying them resolved it.)
+**Why the first attempt failed on X3:** the original used a *hold* gesture
+(`isPressed` + `getHeldTime`). On X3 the front Left/Right buttons bounce into a stream of
+release events when held (the cursor moved but the hold never registered), so any
+hold-based scheme is unreliable there. Confirm-hold works because that ADC value is stable.
 
-**Firmware now degrades gracefully** instead of looping/crashing:
+**Fix (`RecentBooksActivity.h/.cpp`):** tap-based instead of hold-based.
+- **Tap Left** = move selected book up; **tap Right** = move it down (persisted per move).
+- **Cursor** moves on the **Up/Down side buttons** only; Left/Right are intercepted before
+  the navigator and excluded from cursor nav.
+- Works identically on X3 and X4. The recent list never paginates (`MAX_RECENT_BOOKS` = 10),
+  so dropping Left/Right from cursor nav costs nothing.
+- Store gains `moveUp` / `moveDown` (in-memory swap); activity persists via `saveToFile`.
 
-- `src/activities/reader/EpubReaderActivity.{h,cpp}`:
-  - **Loop guard** (`buildFailedSpine`): a chapter whose index build fails shows
-    an error once instead of re-entering `createSectionFile` every frame;
-    navigating to another chapter clears the flag (allows retry).
-  - **`sectionJustRebuilt` guard**: a page that fails to load triggers exactly
-    one cache rebuild, not an infinite clear→rebuild loop.
-  - **Crash fix:** the new error paths called `renderStatusBar()` *after*
-    `section.reset()`. `renderStatusBar` dereferences `section->currentPage` /
-    `pageCount` with no null check → null deref → crash in `renderCharImpl`.
-    Removed `renderStatusBar()` from the null-section error paths.
-
-- `src/activities/ActivityManager.cpp`: render task stack **8192 → 12288**.
-  `createSectionFile` (expat parse + block layout + hyphenation + text
-  measurement) runs on this task and is a deep call chain with little margin.
+**Note:** opening any book still force-moves it to the front (recency model), so a manual
+arrangement holds only until the next book is opened.
 
 ---
 
-## 3. X3 image quality (from earlier in the session)
+## 3. OPDS browser — alphabetical sort (toggleable)
 
-X3's native 4-level grayscale waveform washes out, so images use a **1-bit
-ordered halftone** with a tone curve, bypassing the unreliable grayscale.
+**Goal:** show books A–Z, with an opt-out.
 
-- `lib/GfxRenderer/OrderedDither.h`: `toneMapX3` (gamma 0.70 + black anchor 28)
-  applied before a stateless 1-bit ordered dither over either a 64×64
-  void-and-cluster **blue-noise** field (`BlueNoise.h`, generated by
-  `scripts/gen_bluenoise.py`) or an 8×8 Bayer matrix.
-- `lib/GfxRenderer/Bitmap.cpp`, `lib/Epub/.../{DitherUtils.h,*Converter.cpp}`,
-  `ImageBlock.cpp`: X3 path (`oneBit = isX3()`) emits pure 0/3 halftone; per-mode
-  cache suffixes (`.pxn` blue / `.pxb` Bayer).
-- Sleep cover, BMP viewer, and EPUB images all share this path on X3.
+**Sort (`OpdsBookBrowserActivity.cpp`):** after each fetch, sort the page case-insensitively
+by title, navigation folders before books, before the prev/next page links are added (so
+those stay pinned top/bottom). Per-page only — OPDS feeds paginate server-side. Gated on the
+new setting.
 
----
-
-## 4. X4 image quality (sleep, BMP, EPUB images)
-
-X4 renders true 4-level grayscale.
-
-- **BMP viewer rendered 1-bit (too dark).** `src/activities/util/BmpViewerActivity.cpp`
-  only did a BW `FAST_REFRESH`. Added the grayscale multi-pass (LSB/MSB plane
-  render → `displayGrayBuffer`) for X4, matching the sleep cover path.
-
-- **Text-AA is now a 3-state mode on X4 (Off / Antialiased / Sharp).** See §16.
-  Off = 1-bit images + black text (fast, no gray pass); Antialiased = 4-level
-  images + grey (AA) text; Sharp = 4-level images + true-black text. Drives
-  `EpubReaderActivity`: `setOneBitImages(isX3() || aaMode==OFF)`,
-  `setTextAntiAlias(aaMode==ANTIALIASED)`,
-  `grayImages = hasImages() && !isX3() && aaMode!=OFF`,
-  `doGrayscalePass = (aaMode==ANTIALIASED) || grayImages`.
-
-- **AA-on image pages washed to near-white.** The grayscale LUT only sets
-  correctly after the FAST_REFRESH blanking dance; a HALF/FULL refresh first sets
-  e-ink particles too firmly. All grayscale image pages use the dance
-  (`imagePageWithAA = grayImages`); the no-bounding-box fallback also uses
-  FAST_REFRESH (not HALF).
-
-- **Tone curve: mild midtone lift.** `toneMapX4` (`X4_IMAGE_GAMMA = 0.65`,
-  `X4_BLACK_ANCHOR = 0`) lifts shadows/midtones up a level so dark-grey detail
-  (e.g. grey terminal text on a dark background) separates from true black,
-  while black (0) and white (255) stay put. Earlier identity-curve overshoot
-  history: a strong lift pushed light tones to white (Bayer clustered them into
-  white blocks), which is why the curve is mild + anchored. Device-tunable; each
-  retune needs a pixel-cache suffix bump (see §5).
-
-- **Brighten is now conditional — dark images only (EPUB images).** Applying the
-  lift to *every* image washed out light/white-background images (e.g. a
-  white-bg terminal screenshot read greyer). The EPUB converters now probe the
-  image before decoding and apply `toneMapX4` only when it is genuinely dark.
-  - **Metric: dark-pixel fraction**, not mean luminance. Mean is fooled by
-    bimodal images (white body + dark title bar averages below mid-grey yet is
-    clearly light). Counting dark pixels avoids that.
-    `X4_DARK_PIXEL_CUTOFF = 80` (a pixel is "dark" if luminance ≤ 80),
-    `X4_DARK_FRACTION_PCT = 50` (brighten only if ≥ 50% of sampled pixels are
-    dark) — both in `OrderedDither.h`, device-tunable.
-  - **Probe** runs only on cache miss (one-time per image), before the real
-    decoder is allocated so only one heavy decoder is live at a time:
-    `JpegToFramebufferConverter` decodes at 1/8 scale (`jpegImageIsDark`);
-    `PngToFramebufferConverter` samples every 4th row / 2nd column
-    (`pngImageIsDark`, reuses `convertLineToGray`). Defaults to brighten=true on
-    any probe failure (no regression).
-  - Threaded via a `brighten` flag: `ditherPixel(..., brighten)` →
-    `orderedDither4Level(..., brighten)` applies `toneMapX4` only when set. The
-    `brighten = true` default leaves the BMP/sleep path (`Bitmap.cpp`) always
-    lifting (out of scope; EPUB only). 1-bit (X3, `toneMapX3`) unaffected.
+**Toggle:** new setting `opdsSortAlphabetical` (default ON).
+- `CrossPointSettings.h` + `SettingsList.h`: hidden `STR_NONE_OPT` Toggle → persisted with
+  all settings (and the web settings API), but kept out of the generic Settings menu.
+- Surfaced/flipped in **System > OPDS Servers** (`OpdsServerListActivity.cpp`) as a bottom
+  row "Sort books alphabetically" with an ON/OFF subtitle (settings mode only, not picker).
+- i18n: added `STR_OPDS_SORT_ALPHABETICAL` (English; other languages fall back).
 
 ---
 
-## 5. Image Dither setting (3-way)
-
-- `src/CrossPointSettings.h`, `src/SettingsList.h`, `lib/I18n/translations/english.yaml`:
-  added a third option — **Error Diffusion** — alongside Blue Noise and Bayer
-  (`DITHER_BLUE_NOISE` / `DITHER_BAYER` / `DITHER_ERROR_DIFFUSION`).
-- `lib/GfxRenderer/OrderedDither.h`: shared `ImageDitherMode` enum;
-  `orderedDither4Level` (4-level ordered dither over the 8×8 Bayer or 64×64
-  blue-noise field).
-- `lib/GfxRenderer/GfxRenderer.h`: dither-mode bridge (`setImageDitherMode` /
-  `imageDitherMode`); `imageDitherBlueNoise()` maps error-diffusion → blue noise
-  for EPUB (JPEG block decode can't error-diffuse).
-- `lib/GfxRenderer/Bitmap.{h,cpp}`: BMP/sleep pick ordered (blue/bayer) vs
-  Atkinson/Floyd-Steinberg error-diffusion; `prevRowY` reset in `rewindToData`
-  so the stateless ordered dither uses the same y across the BW/LSB/MSB passes.
-- `lib/Epub/Epub/converters/DitherUtils.h`, `lib/Epub/Epub/blocks/ImageBlock.cpp`:
-  4-level path routes through `orderedDither4Level`. EPUB image cache suffix is
-  versioned per render path so stale pixels aren't served, and is bumped whenever
-  the dither/tone math changes. **Current suffixes:** 4-level `.px12n` (blue) /
-  `.px12b` (Bayer) — bumped `.px8*` (X4 gamma 0.65) → `.px9*` (conditional
-  brighten) → `.px10*` (dark-fraction metric) → `.px11*` (box-average + bimodal
-  brighten-skip) → `.px12*` (bimodal nearest upscale + bright-fraction retune; see
-  §17); 1-bit (X3, or X4 with AA off) `.px7n` / `.px7b`. (X3 is always `oneBit`, so
-  the X4 gamma/4-level suffix bumps never touch X3 caches.) Sharp and Antialiased
-  modes share the 4-level `.px12*` cache (both `oneBit=false`); the brighten/sharp
-  verdict is baked per-image.
-
-Quality ranking on X4 e-ink: error diffusion > blue noise > Bayer. Error
-diffusion is stateful (row order), so BMP/sleep can use it but EPUB (JPEG MCU
-blocks) falls back to blue noise.
-
-**X3 Bayer white-tint fix.** `orderedDither1Bit` used `gray > threshold` with a
-threshold field spanning 0..255; a cell holding 255 kept a black dot even on
-pure white (255 > 255 is false), showing a dotted-grey tint (worst on the
-regular Bayer grid). Threshold compressed to [2, 251] so pure white always beats
-it and pure black never does.
-
----
-
-## 6. SDK methods restored
-
-`lib/hal` calls two SDK methods that were missing from the `open-x4-sdk`
-submodule checkout (gitlink `344c479`), breaking the build once an unrelated
-include forced `HalDisplay.cpp` / `HalStorage.cpp` to recompile
-(`'EInkDisplay' has no member named 'isX3Mode'`, `'SDCardManager' has no member
-named 'openFileForAppend'`). Re-added to the SDK:
-
-- `open-x4-sdk/libs/display/EInkDisplay/include/EInkDisplay.h`: `isX3Mode()` —
-  public getter for the existing private `_x3Mode` flag.
-- `open-x4-sdk/libs/hardware/SDCardManager/{include,src}`: `openFileForAppend`
-  (`O_RDWR | O_CREAT | O_APPEND`), mirroring `openFileForWrite` without truncate.
-
-**Caveat:** these live in the submodule (separate `community-sdk` repo, currently
-uncommitted on a detached HEAD). A fresh `git submodule update` reverts them —
-commit upstream + bump the gitlink to persist.
-
----
-
-## 7. Debug infrastructure
-
-- `src/util/SdDebugLog.{h,cpp}` (new): timestamped SD log (`/opds_debug.log`,
-  64 KB rotation) for untethered debugging.
-- Kept: OPDS per-fetch / per-error logging (explicitly requested for diagnosing
-  OPDS failures without a serial monitor).
-- Removed (chatty diagnostics added during investigation): EPUB reader
-  breadcrumbs and the HTTP per-chunk progress log.
-
----
-
-## 8. Manual refresh (power-button short-press) — whole-page, no wash, no flash
-
-`src/main.cpp` (FORCE_REFRESH short-press handler). Goal: clear whole-page
-ghosting without (a) the FULL black-white-black-white flash users disliked, or
-(b) washing X4 grayscale content whitish.
-
-Evolution of the bug:
-- A pure `requestUpdate()` re-render only refreshes the image region: a plain
-  re-render is a differential FAST no-op on unchanged text, and image pages use
-  the FAST blanking dance on the image bbox only → text ghosting remained.
-- A whole-page `HALF`/`FULL` clear fixes that for BW, but firms e-ink particles
-  too hard for the X4 grayscale LUT to darken back → grayscale pages wash whitish.
-
-**Final:** blank the framebuffer (`clearScreen`) then drive the whole panel,
-mode by panel, then `requestUpdate()` to re-render:
-- **X4:** `FAST_REFRESH` — the grayscale-safe technique (same as the image
-  dance). Pushes the panel white without over-firming, so the re-render's
-  grayscale pass restores text + grays cleanly. Covers EPUB AA pages, BMP grays,
-  sleep wallpaper.
-- **X3:** `HALF_REFRESH` — 1-bit panel, no grayscale image pass, so HALF gives a
-  stronger ghost clear with no washing risk.
-
-(Gate is `renderer.isX3()`, not the text-AA setting, because BMP/sleep grayscale
-isn't governed by text AA.)
-
-## 9. BMP viewer — manual refresh now redraws
-
-`src/activities/util/BmpViewerActivity.{h,cpp}`. BMP viewer only drew in
-`onEnter()` and did not override `render()`, so a manual refresh
-(`clearScreen` + display, then `requestUpdate` → `render()`) cleared to white and
-nothing redrew — each press got whiter. Extracted the draw body into
-`renderImage()`, called from both `onEnter()` and a new `render(RenderLock&&)`
-override, so `requestUpdate` re-decodes and redraws the current bitmap.
-
-## 10. EPUB images — full container width for large/block images
-
-`lib/Epub/Epub/parsers/ChapterHtmlSlimParser.cpp`. The no-CSS sizing branch
-previously scaled to fit and never upscaled, so figures smaller than the column
-stayed small. Added: an image **with no explicit CSS size** whose natural width
-is ≥ `LARGE_IMAGE_WIDTH_FRAC` (0.4) of the container is upscaled to the full
-container width, height from the aspect ratio; if that overflows the page height
-it clamps to page height and shrinks width (never splits across pages). Small
-inline images (icons, emoji, dividers) and CSS-sized images are unchanged.
-
-- Shared layout code — applies to **both X3 and X4** (no panel gate). Sizing is
-  panel-independent; only the dither/tone differs.
-- `lib/Epub/Epub/Section.cpp`: `SECTION_FILE_VERSION` 24 → 25 so cached page
-  layouts rebuild once on next open.
-
-## 11. Sleep wallpaper ghosting
-
-`src/activities/boot_sleep/SleepActivity.cpp`: a `clearScreen` + `HALF_REFRESH`
-wipe before rendering the wallpaper clears prior-screen ghosting with a single
-mild refresh (not the FULL black-white-black-white flash). Uses
-`setImageDitherMode(SETTINGS.imageDither)` like the other image paths.
-
-## 12. KOReader sync — bookmark sync (new)
-
-**Goal:** extend the existing KOReader progress sync so bookmarks also sync
-between CrossPoint devices via a self-hosted `koreader/koreader-sync-server`.
-The kosync protocol has **no** bookmark endpoint (only `/syncs/progress`), and
-the real KOReader app keeps bookmarks in `.sdr` sidecars, not on the server — so
-this is a **self-hosted server extension, CrossPoint↔CrossPoint only** (no KOReader
-app interop).
-
-**Server** (`koreader-sync-server/`, separate repo — must be rebuilt/redeployed
-from source; the upstream `koreader/kosync:latest` image does **not** include
-these routes):
-- `config/routes.lua`: `PUT /syncs/bookmarks`, `GET /syncs/bookmarks/:document`.
-- `app/controllers/1/syncs_controller.lua`: `update_bookmarks` / `get_bookmarks`.
-  Redis hash `user:{u}:bookmarks:{document}` = `{bookmarks, timestamp}`. The
-  `bookmarks` field is an **opaque pre-serialized JSON string** — the server
-  never parses it (all merge logic lives on-device).
-
-**Firmware client** (`lib/KOReaderSync/KOReaderSyncClient.{h,cpp}`):
-- `getBookmarks(doc, outJson)` / `updateBookmarks(doc, json)` — mirror the
-  progress calls (same small-TLS-buffer + `MIN_HEAP_FOR_TLS` heap guards).
-
-**Bookmark store** (`src/BookmarkStore.{h,cpp}`):
-- **JSON (de)serialization** for the sync blob:
-  `{"bookmarks":[...],"tombstones":[...]}`. Legacy bare-array form still parses.
-- **Union merge** (`mergeFrom`): additive by identity key = `(spineIndex,
-  paragraphIndex)` when an anchor exists, else `(spineIndex, quantized progress)`
-  (`PROGRESS_QUANTUM = 1000`, survives JSON float round-trip).
-- **Sorted list:** `bookmarks` kept ordered by **section (spineIndex) then
-  position (progress)** on add/merge/load — the list view deletes by vector
-  index, so the store order is what the user sees.
-- **Tombstones (delete propagation):** local deletes
-  (`removeBookmarkAt`/`removeBookmarkForPage`/`clearAll`) record a `Tombstone`.
-  `mergeFrom` unions remote tombstones, drops locally-tombstoned bookmarks, and
-  skips re-adding them — so deletes converge across devices instead of
-  resurrecting. `addBookmark` clears a matching tombstone (re-bookmarking a
-  deleted spot sticks). Tombstones are **kept forever** (~8 bytes each; aging-out
-  was skipped — needs reliable timestamps, no RTC).
-- **Persistence:** tombstones live in a **separate sidecar file** so the bookmark
-  `.bin` format is untouched: `/.crosspoint/bookmarks/<type>_<crc32(path)>.tomb`
-  (`TOMB_VERSION = 1`), alongside the existing `<type>_<crc32(path)>.bin`.
-  `deleteForFilePath` removes both; `hasAnyBookmarks` ignores a lone `.tomb`.
-
-**Sync flow** (`src/activities/reader/KOReaderSyncActivity.{h,cpp}`):
-- `syncBookmarks()` is **folded into the existing "Sync Progress" action** — runs
-  automatically when the server is reachable (progress `OK` or `NOT_FOUND`),
-  before the Apply/Upload choice, independent of it. Reloads the book's bookmarks
-  (the reader unloads them on exit), pulls remote, reconciles, saves, pushes the
-  merged set + tombstones. Best-effort: a hard progress fetch error skips it.
-- **Result screen** ("Progress found!") now shows a bookmark summary line
-  (`STR_BOOKMARK_DIFF_FORMAT`: `remote N / local M -> T total`) with a vertical
-  gap separating it from the progress block; also shown on the
-  no-remote-progress screen. Informational only (merge is automatic).
-- i18n: `STR_SYNCING_BOOKMARKS`, `STR_BOOKMARK_DIFF_FORMAT` (english.yaml,
-  regenerated).
-
-**Behavior notes:**
-- Bookmarks merge is **automatic + additive**; Apply-vs-Upload only affects
-  progress. Server bookmark count now **decreases on delete** (PUT replaces the
-  blob with the pruned set); only the tombstone array grows.
-- Single device always shows `remote == local` after the first sync (it's in sync
-  with its own last upload) — a real diff appears only when a second device
-  contributes.
-- **Transport caveat (LAN):** the server's published port `7200` is **HTTPS with
-  a self-signed cert**, which the ESP32 CA bundle rejects (`NETWORK_ERROR` on
-  auth/sync). Use the plain-HTTP listener (`17200`, `http://<host>:17200`) or
-  front it with a real cert.
-
-**Open:** Apply-remote *progress* hangs at "Loading" after the reboot-to-reader
-(Upload-local is fine) — isolated to the applied remote position, **unrelated to
-bookmarks**; needs a serial trace. On-device cross-device delete propagation
-untested. clang-format pass pending (no binary in this env).
-
-## 13. WiFi — manual network selection (no silent auto-connect)
-
-**Goal:** let the user pick a WiFi network instead of the firmware
-auto-connecting to the last-used SSID on every network entry point.
-
-**Before:** `WifiSelectionActivity` ctor took `bool autoConnect = true`; on
-`onEnter()` it looked up `WIFI_STORE.getLastConnectedSsid()`, and if a saved
-credential existed, connected immediately — the scanned network list was never
-shown. While in the `AUTO_CONNECTING` state, `loop()` ignored all buttons, so the
-user couldn't abort for ~15 s (`CONNECTION_TIMEOUT_MS`). Only Settings > Network
-passed `false`.
-
-**Now:** always show the scanned list.
-
-- `src/activities/network/WifiSelectionActivity.h`: dropped the `autoConnect`
-  ctor param and the `allowAutoConnect` member.
-- `src/activities/network/WifiSelectionActivity.cpp` `onEnter()`: removed the
-  auto-connect-to-last-SSID block; always calls `startWifiScan()`.
-- `src/activities/settings/SettingsActivity.cpp`: dropped the now-redundant
-  `false` arg.
-
-**Behavior:** every entry point (web server, Calibre, KOReader, OTA, OPDS, font
-download, Settings) now shows the network list. Saved networks stay **one-tap** —
-`selectNetwork()` reuses the stored password and connects without re-prompting.
-Only the zero-tap last-SSID reconnect is gone. `getLastConnectedSsid()` is still
-written on connect and used by the web UI; it just no longer drives auto-connect.
-
-**Dead code left for review (not removed):** `WifiSelectionState::AUTO_CONNECTING`
-and the `autoConnecting` member are now unreachable (never set true) — the
-`attemptConnection()` ternary always picks `CONNECTING`, and the `CONNECTION_FAILED`
-forget-prompt still triggers via `usedSavedPassword`.
-
----
-
-## 14. Clock sync — WiFi picker first (X3)
-
-**Goal:** "Settings > Sync clock now" required WiFi to already be connected; if it
-wasn't, it just showed a "No WiFi" hint and did nothing. On the X3 (DS3231 RTC)
-that meant the manual NTP resync was usually a dead end.
-
-**Now:** the activity presents the WiFi selection list first, then syncs.
-
-- `src/activities/settings/ClockSyncActivity.{h,cpp}`: added a `PICKING_WIFI`
-  state; `onEnter()` sets `WiFi.mode(WIFI_STA)` and launches
-  `WifiSelectionActivity` via `startActivityForResult`. On a successful pick,
-  `onWifiSelectionComplete()` renders "Syncing…" then runs the blocking
-  `halClock.syncFromNTP()`. `onExit()` releases the radio and `silentRestart()`s
-  if WiFi was brought up (mirrors `FontDownloadActivity`). Saved networks stay
-  one-tap (see §13).
-
-**Status:** kept. Independent of the font-fetch work below.
-
----
-
-## 15. X3 over-the-air font download — investigated, NOT fixed (reverted)
-
-**Problem:** "Reader > Manage Fonts" always fails with "Failed to fetch font
-list" on the X3; fine on the X4. Same firmware binary on both (device type is
-detected at runtime).
-
-**Root cause (confirmed on device via an SD trace log):** the failure is the
-**TLS handshake inside `esp_http_client`**, not the network or the certificate.
-Layer-by-layer, on X3:
-
-- system clock correct, free heap ~62 KB, largest contiguous block ~49 KB
-- DNS `github.com` → `20.205.243.166` (OK), raw TCP `:443` (OK)
-- `WiFiClientSecure` insecure TLS (OK), and a bare `esp_tls_conn_new_sync()` with
-  the **same `crt_bundle` verification** to the same host **connects reliably**,
-  even at ~5 KB contiguous free
-- but `esp_http_client_open()` returns `ESP_ERR_HTTP_CONNECT`
-  **deterministically**, on every retry, regardless of `buffer_size` /
-  `keep_alive` / redirect options
-
-So `esp_http_client`'s own buffers, laid out around mbedtls's large handshake
-allocations, can't fit on the X3's tighter post-WiFi heap; the X4 has a little
-more contiguous headroom and squeaks by. Clock/cert/DNS/TCP/total-heap were all
-ruled out.
-
-**Why it's not fixed:** the only path that handshakes on X3 is bare `esp-tls`,
-which means hand-rolling the HTTP client (GET, header parse, GitHub's
-`github.com → objects.githubusercontent.com` 302, body streaming). A prototype
-got the **handshake working** (connects in ~2 s on a clean heap) but then hit two
-further walls: (1) a `std::string` allocation in the parser aborted under memory
-pressure — fixed by switching to fixed `char[]` buffers — and (2) after a clean
-connect the GET got **no response in 15 s** (request framing / esp-tls write
-subtlety, unresolved). Diminishing returns, so **all `HttpDownloader` /
-`FontDownloadActivity` changes were reverted to HEAD.**
-
-**Current state:** `src/network/HttpDownloader.cpp` and
-`src/activities/settings/FontDownloadActivity.cpp` are unchanged from HEAD. X3
-OTA font download remains broken; X4 unaffected.
-
-**Workaround for X3 users:** side-load fonts onto the SD card manually — see
-`docs/sd-card-fonts.md` / `FontInstaller` / `SdCardFont`. No download needed.
-
-**If retried later, two threads remain:** (1) debug the bare-esp-tls GET
-"no response" (the handshake itself is solved); (2) the durable fix — pin
-GitHub's single root CA instead of attaching the full `esp_crt_bundle`, cutting
-mbedtls handshake RAM by tens of KB so `esp_http_client` itself fits on X3.
-
----
-
-## 16. Text AA — "Sharp" mode (true-black text + grayscale images, X4)
-
-**Goal:** with AA on, image-bearing pages render images in 4-level grayscale but
-the body text reads slightly *grey* (lifted), not solid black. Cause: font glyphs
-are 2-bit; the BW pass draws anti-aliased edge pixels solid black, but the
-grayscale LSB/MSB passes then re-mark those same edges as grey, pulling black text
-edges up to grey (`GfxRenderer.cpp` `renderCharImpl`). Users wanted true-black text
-while keeping grey images — a combination the old on/off toggle couldn't express.
-
-**Change:** the **Text Anti-Aliasing** setting is now a **3-state enum** (was a
-toggle): **Off / Antialiased / Sharp**.
-- **Off** (0) — 1-bit images + solid-black text, no grayscale pass (fast, no flash).
-- **Antialiased** (1) — 4-level grey images + grey (AA) text. (= old "on".)
-- **Sharp** (2) — 4-level grey images + **true-black text**.
-
-**Implementation:**
-- `src/CrossPointSettings.h`: `enum TEXT_AA { OFF, ANTIALIASED, SHARP }`; field stays
-  `uint8_t textAntiAliasing` (default `ANTIALIASED`). Persisted 0/1 map cleanly —
-  no migration.
-- `src/SettingsList.h`: `Toggle` → `Enum` with options
-  `{STR_TEXT_AA_OFF, STR_TEXT_AA_ANTIALIASED, STR_TEXT_AA_SHARP}`. New i18n keys in
-  `english.yaml` (regenerated; other languages fall back to English).
-- `lib/GfxRenderer/GfxRenderer.{h,cpp}`: new `textAntiAlias_` flag
-  (`setTextAntiAlias`/`textAntiAlias`, mirrors `oneBitImages_`). The two grayscale
-  glyph branches in `renderCharImpl` are gated on it — when false, glyphs mark
-  nothing in the grey planes, so edges keep the BW pass's solid black. Images
-  (`DirectPixelWriter`/`drawBitmapGrayscale`) don't consult it → keep their greys.
-- `src/activities/reader/EpubReaderActivity.cpp`: enum-aware pass logic (see §4).
-  In **Sharp**, the grayscale pass (and its two-stage FAST_REFRESH flash) runs
-  **only on pages that have an image** — pure-text Sharp pages stay single-pass
-  solid black, no flash.
-- `TxtReaderActivity.cpp` / `DictionaryDefinitionActivity.cpp` (text-only views, no
-  images): AA overlay now gated on `== ANTIALIASED`, so Sharp/Off render black text.
-
-**Note:** the web settings UI treats `"textAntiAliasing"` as a checkbox; it now
-holds 0/1/2. Device UI is primary; web enum rendering is a possible follow-up.
-
----
-
-## 17. Readability of text inside JPEG images (X4)
-
-Goal: make small text inside an embedded image (e.g. a code/terminal screenshot)
-legible with anti-aliasing on. Three changes in the JPEG converter, all driven by
-the existing 1/8-scale luminance probe — **no extra decode pass, ~0 heap**:
-
-- **Box-average residual downscale.** `jpegDrawCallback`'s downscale branch
-  averaged the in-block source window (≤ 2×2, since JPEGDEC's coarse 1/2..1/8 step
-  leaves a residual ratio in (0.5, 1.0]) instead of point-sampling. Keeps thin
-  strokes that nearest-neighbor dropped. The window is clamped to the current MCU
-  block, so a dst pixel straddling a block seam just averages the rows present —
-  no out-of-bounds read, no cross-block accumulator. (Helps books whose images are
-  *downscaled*; an upscaled low-res source is unaffected — see below.)
-
-- **Bimodal-text detection → skip brighten + nearest upscale.** The probe now also
-  counts *bright* pixels (`X4_BRIGHT_PIXEL_CUTOFF = 200`,
-  `X4_BRIGHT_FRACTION_PCT = 2`). An image that is mostly dark **and** has a small
-  share of pure-white pixels is white-on-dark text, not a dark photo. For these:
-  - **skip the `toneMapX4` brighten lift** — it greyed the black background and
-    crushed white-text contrast;
-  - **upscale nearest-neighbor instead of bilinear** — bilinear blends/blurs thin
-    strokes; point-sampling keeps hard "blocky but crisp" edges. Photos stay on the
-    smoother bilinear path (they aren't bimodal). Verdict logged as
-    `JPG Dark N% Bright M% (bimodal-text/skip+sharp)`.
-
-- **PNG converter** mirrors only the bimodal brighten-skip (consistency); the
-  thresholds live in `OrderedDither.h`, device-tunable.
-
-- **Cache suffix** bumped 4-level `.px10* → .px11* → .px12*` and 1-bit
-  `.px6* → .px7*` (`ImageBlock.cpp`) so stale pixels regenerate.
-
-**Hard limit:** none of this adds resolution. A low-res source (the test image was
-624 px wide, *upscaled* to fit) is soft in the original file; these changes raise
-contrast and edge crispness but cannot recover detail the source never had. There
-is no pan/zoom on Xteink, so fit-to-width is the ceiling.
-
----
-
-## Notes
-
-- X3 rendering paths are unchanged by the X4 **tone/dither** work (1-bit halftone
-  + `toneMapX3`; X4 gamma and 4-level cache suffixes never touch X3). X3 *is*
-  affected by the shared, intentional changes: full-width image sizing (§10),
-  the section cache version bump, and the manual-refresh / BMP-redraw fixes (§8,
-  §9) — all fixes or intended, no regression.
-- Old EPUB image caches (`.pxc`, `.px4*`, `.px5*`, `.px7*`, `.px8*`, `.px9*`) are
-  orphaned by the suffix bumps — clear `.crosspoint/` on the SD card to reclaim
-  space (caches also regenerate automatically on next view).
-- If an EPUB file is empty/corrupt, the reader now shows an error rather than
-  freezing or crashing.
-- Other smaller items handled earlier in the session: dictionary lookup
-  de-duplication, sleep wallpaper randomization (`esp_random`), "Clear sleep
-  cover" action, separate front/side long-press behaviors, and the unified
-  "Bookmark added/removed" notification timeout.
+## Related, already committed earlier this branch
+- OPDS downloaded-marker now matches existing filenames in either order
+  (`Title - Author` / `Author - Title`, plus author-embedded-in-title) at `/` and `/read`.
+- Investigated X3 OPDS "slow to open": SD bus is 40 MHz on both, so the delta is the X3
+  e-ink refresh (16 MHz display SPI + forced full-syncs + extra settle, ×several refreshes
+  during open). Diagnostic: timestamped `/opds_debug.log`. No code change yet.
