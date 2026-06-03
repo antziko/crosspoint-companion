@@ -76,8 +76,10 @@ void BmpViewerActivity::renderImage() {
 
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
-  Rect popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
-  GUI.fillPopupProgress(renderer, popupRect, 20);  // Initial 20% progress
+  // "Loading" popup. No incremental progress fill: each fillPopupProgress() did a
+  // ~637ms FAST e-ink refresh, and the bar only covered the fast header-parse (the
+  // slow part is the image refresh chain below, which it never tracked).
+  GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
   // 1. Open the file
   if (Storage.openFileForRead("BMP", filePath, file)) {
     Bitmap bitmap(file, true);
@@ -120,7 +122,6 @@ void BmpViewerActivity::renderImage() {
       const auto labels =
           mappedInput.mapLabels(tr(STR_BACK), confirmLabel, (hasPrevious ? "<" : ""), (hasNext ? ">" : ""));
 
-      GUI.fillPopupProgress(renderer, popupRect, 50);
 
       // X4 (4-level grayscale) needs the multi-pass grayscale render to actually
       // show grays; X3 produces a 1-bit halftone (0/3) so a single BW pass is
