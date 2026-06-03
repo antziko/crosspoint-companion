@@ -583,10 +583,20 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   jpeg->setPixelType(EIGHT_BIT_GRAYSCALE);
   jpeg->setUserPointer(&ctx);
 
-  // Allocate cache buffer using final output dimensions
+  // Allocate cache buffer using final output dimensions. Skip caching when the
+  // buffer would rival the framebuffer (48KB): on a ~320KB device the cache
+  // competes with the live JPEG decoder + framebuffer and can starve the heap
+  // (observed min-free dipping to ~30KB on full-width image pages). A full-screen
+  // 800x480 image alone would want ~96KB. JPEG re-decode is cheap (~0.5s), so for
+  // oversized images we render live and skip the cache. Matches the PNG path.
+  static constexpr size_t JPEG_MAX_CACHE_BYTES = 48000;
   ctx.caching = !config.cachePath.empty();
   if (ctx.caching) {
-    if (!ctx.cache.allocate(destWidth, destHeight, config.x, config.y)) {
+    size_t cacheSize = (size_t)((destWidth + 3) / 4) * destHeight;
+    if (cacheSize > JPEG_MAX_CACHE_BYTES) {
+      LOG_DBG("JPG", "Skipping cache: %zu bytes exceeds JPEG limit (%zu)", cacheSize, JPEG_MAX_CACHE_BYTES);
+      ctx.caching = false;
+    } else if (!ctx.cache.allocate(destWidth, destHeight, config.x, config.y)) {
       LOG_ERR("JPG", "Failed to allocate cache buffer, continuing without caching");
       ctx.caching = false;
     }
