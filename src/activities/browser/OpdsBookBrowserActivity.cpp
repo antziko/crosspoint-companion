@@ -7,6 +7,9 @@
 #include <OpdsStream.h>
 #include <WiFi.h>
 
+#include <algorithm>
+#include <cctype>
+
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
@@ -340,6 +343,19 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   const auto& nextUrl = parser.getNextPageUrl();
   const auto& prevUrl = parser.getPrevPageUrl();
   entries = std::move(parser).getEntries();
+
+  // Sort the page alphabetically (case-insensitive) by title, navigation folders
+  // before books. Done before the prev/next links are added so those stay pinned at
+  // the top/bottom. OPDS feeds are paginated server-side, so this orders the current
+  // page only — not the whole catalog. Toggleable under System > OPDS Servers.
+  if (SETTINGS.opdsSortAlphabetical) {
+    std::sort(entries.begin(), entries.end(), [](const OpdsEntry& a, const OpdsEntry& b) {
+      if (a.type != b.type) return a.type < b.type;  // NAVIGATION (0) before BOOK (1)
+      return std::lexicographical_compare(
+          a.title.begin(), a.title.end(), b.title.begin(), b.title.end(),
+          [](unsigned char c1, unsigned char c2) { return std::tolower(c1) < std::tolower(c2); });
+    });
+  }
 
   if (!prevUrl.empty()) {
     entries.insert(entries.begin(), OpdsEntry{OpdsEntryType::NAVIGATION, tr(STR_PREV_PAGE), "", prevUrl, ""});

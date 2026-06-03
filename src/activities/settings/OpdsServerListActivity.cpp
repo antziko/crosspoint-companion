@@ -3,6 +3,7 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 
+#include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "OpdsSettingsActivity.h"
@@ -13,9 +14,10 @@
 
 int OpdsServerListActivity::getItemCount() const {
   int count = static_cast<int>(OPDS_STORE.getCount());
-  // In settings mode, append a virtual "Add Server" item; in picker mode, only show real servers
+  // In settings mode, append two virtual items: "Add Server" and the A-Z sort toggle.
+  // In picker mode, only show real servers.
   if (!pickerMode) {
-    count++;
+    count += 2;
   }
   return count;
 }
@@ -83,8 +85,14 @@ void OpdsServerListActivity::handleSelection() {
 
   if (selectedIndex < serverCount) {
     startActivityForResult(std::make_unique<OpdsSettingsActivity>(renderer, mappedInput, selectedIndex), resultHandler);
-  } else {
+  } else if (selectedIndex == serverCount) {
+    // "Add Server" virtual item
     startActivityForResult(std::make_unique<OpdsSettingsActivity>(renderer, mappedInput, -1), resultHandler);
+  } else {
+    // A-Z sort toggle virtual item: flip and persist in place.
+    SETTINGS.opdsSortAlphabetical = SETTINGS.opdsSortAlphabetical ? 0 : 1;
+    SETTINGS.saveToFile();
+    requestUpdate();
   }
 }
 
@@ -116,11 +124,19 @@ void OpdsServerListActivity::render(RenderLock&&) {
             const auto& server = servers[index];
             return server.name.empty() ? server.url : server.name;
           }
-          return std::string(I18n::getInstance().get(StrId::STR_ADD_SERVER));
+          if (index == serverCount) {
+            return std::string(I18n::getInstance().get(StrId::STR_ADD_SERVER));
+          }
+          return std::string(I18n::getInstance().get(StrId::STR_OPDS_SORT_ALPHABETICAL));
         },
         [&servers, serverCount](int index) {
-          if (index < serverCount && !servers[index].name.empty()) {
-            return servers[index].url;
+          if (index < serverCount) {
+            return servers[index].name.empty() ? std::string("") : servers[index].url;
+          }
+          if (index > serverCount) {
+            // A-Z sort toggle: show current state as the subtitle.
+            return std::string(I18n::getInstance().get(SETTINGS.opdsSortAlphabetical ? StrId::STR_STATE_ON
+                                                                                     : StrId::STR_STATE_OFF));
           }
           return std::string("");
         });
