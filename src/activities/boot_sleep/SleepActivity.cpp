@@ -2,6 +2,8 @@
 
 #include <esp_random.h>
 
+#include <vector>
+
 #include <Epub.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
@@ -119,19 +121,36 @@ void SleepActivity::renderCustomSleepScreen() const {
       files.emplace_back(filename);
       dirFile.close();
     }
+    // Sort so a file's index is stable across boots. Directory iteration order is
+    // not guaranteed, and the recent-history buffer below stores indices — without
+    // a stable mapping those indices could point at different files each wake, which
+    // silently defeats the no-repeat logic.
+    FsHelpers::sortFileList(files);
+
     const auto numFiles = files.size();
     if (numFiles > 0) {
-      // Pick a random wallpaper, excluding recently shown ones.
-      // Window: up to SLEEP_RECENT_COUNT entries, capped at numFiles-1.
+      // Pick a random wallpaper that hasn't been shown recently, so every image gets
+      // a turn before any repeats. Avoid as many recent picks as the history buffer
+      // holds, capped at numFiles-1 so at least one image is always eligible.
       const uint16_t fileCount = static_cast<uint16_t>(std::min(numFiles, static_cast<size_t>(UINT16_MAX)));
       const uint8_t window =
-          static_cast<uint8_t>(std::min(static_cast<size_t>(APP_STATE.recentSleepFill), numFiles - 1));
-      // Use the hardware TRNG (esp_random) rather than Arduino random(), which is
-      // never seeded here and so repeats the same sequence every boot.
-      auto randomFileIndex = static_cast<uint16_t>(esp_random() % fileCount);
-      for (uint8_t attempt = 0; attempt < 20 && APP_STATE.isRecentSleep(randomFileIndex, window); attempt++) {
-        randomFileIndex = static_cast<uint16_t>(esp_random() % fileCount);
+          static_cast<uint8_t>(std::min(static_cast<size_t>(CrossPointState::SLEEP_RECENT_COUNT), numFiles - 1));
+
+      // Build the eligible set (indices not in the recent window), then pick from it
+      // uniformly. Direct selection — not rejection sampling — guarantees a fresh
+      // image whenever one exists, even when the window covers nearly the whole folder
+      // (where random retries would usually keep landing on recent picks and repeat).
+      // Use the hardware TRNG (esp_random); Arduino random() is never seeded here.
+      std::vector<uint16_t> available;
+      available.reserve(fileCount);
+      for (uint16_t i = 0; i < fileCount; i++) {
+        if (!APP_STATE.isRecentSleep(i, window)) {
+          available.push_back(i);
+        }
       }
+      const uint16_t randomFileIndex = available.empty()
+                                           ? static_cast<uint16_t>(esp_random() % fileCount)
+                                           : available[esp_random() % available.size()];
       APP_STATE.pushRecentSleep(randomFileIndex);
       APP_STATE.saveToFile();
       const auto filename = std::string(sleepDir) + "/" + files[randomFileIndex];
