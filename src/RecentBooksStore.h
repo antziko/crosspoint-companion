@@ -42,6 +42,13 @@ class RecentBooksStore {
   // Persistence is best-effort: a failed save is logged, not reflected in the return.
   bool removeByPath(const std::string& path);
 
+  // Swap the entry at `index` with its neighbour above/below (manual reorder).
+  // In-memory only and does NOT persist — the caller saves once when the reorder
+  // gesture ends, to avoid an SD write per step while a button is held.
+  // Returns false (no-op) if the move is out of bounds.
+  bool moveUp(size_t index);
+  bool moveDown(size_t index);
+
   // Repoint an entry's path (and coverBmpPath, if it lived under the old cache dir) after the
   // backing file and cache dir were moved on disk. No-op if no entry matches oldPath.
   // Persists on success. Keeps the entry's list position (does not reorder).

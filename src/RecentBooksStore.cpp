@@ -70,6 +70,22 @@ bool RecentBooksStore::removeByPath(const std::string& path) {
   return true;
 }
 
+bool RecentBooksStore::moveUp(size_t index) {
+  if (index == 0 || index >= recentBooks.size()) {
+    return false;
+  }
+  std::swap(recentBooks[index - 1], recentBooks[index]);
+  return true;  // caller persists via saveToFile() when the reorder gesture ends
+}
+
+bool RecentBooksStore::moveDown(size_t index) {
+  if (index + 1 >= recentBooks.size()) {
+    return false;
+  }
+  std::swap(recentBooks[index], recentBooks[index + 1]);
+  return true;  // caller persists via saveToFile() when the reorder gesture ends
+}
+
 void RecentBooksStore::updatePath(const std::string& oldPath, const std::string& newPath,
                                   const std::string& oldCachePath, const std::string& newCachePath) {
   auto it = std::find_if(recentBooks.begin(), recentBooks.end(),
