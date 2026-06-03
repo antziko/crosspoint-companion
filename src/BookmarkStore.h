@@ -23,6 +23,11 @@ struct Bookmark {
   // Optional 1-based paragraph anchor from the section cache. UINT16_MAX means unavailable.
   uint16_t paragraphIndex = UINT16_MAX;
   char snippet[BOOKMARK_SNIPPET_MAX] = {};
+  // Session-only flag: true for the "return here" bookmark auto-dropped when the user
+  // jumps to another chapter, so the reader can show a distinct icon for it. Deliberately
+  // NOT serialized to the bookmark file and NOT synced — it is a within-session navigation
+  // aid, so it costs no on-disk format change and reverts to a plain bookmark on reload.
+  bool returnMark = false;
 };
 
 // Marks a bookmark that was deleted, so sync removes it from the server and other
@@ -60,10 +65,18 @@ class BookmarkStore {
   void unload();
 
   AddResult addBookmark(uint16_t spineIndex, float progress, int pageCount, const char* chapterTitle,
-                        uint16_t paragraphIndex = UINT16_MAX, const char* snippet = nullptr);
+                        uint16_t paragraphIndex = UINT16_MAX, const char* snippet = nullptr,
+                        bool returnMark = false);
   void removeBookmarkForPage(uint16_t spineIndex, float pageProgress, int pageCount);
   bool removeBookmarkAt(size_t index);
+  // Consume the session "return here" mark at this spot (matched like the merge key):
+  // removes it only when the matching bookmark is a return mark. Used when the user
+  // reopens it to navigate back — the one-shot aid has served its purpose. No-op (returns
+  // false) for a normal bookmark. Tombstones the delete so it also propagates on sync.
+  bool removeReturnMarkAt(uint16_t spineIndex, uint16_t paragraphIndex, float progress);
   bool hasBookmarkForPage(uint16_t spineIndex, float pageProgress, int pageCount);
+  // True when the bookmark covering this page is the session "return here" mark.
+  bool isReturnMarkForPage(uint16_t spineIndex, float pageProgress, int pageCount);
   const std::vector<Bookmark>& getBookmarks() const { return bookmarks; }
 
   // ---- KOReader bookmark sync (self-hosted server extension) ----

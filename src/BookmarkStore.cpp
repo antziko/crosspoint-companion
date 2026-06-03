@@ -14,7 +14,13 @@ namespace {
 constexpr uint8_t LEGACY_VERSION = 2;
 constexpr uint8_t COUNT_U16_VERSION = 3;
 constexpr uint8_t PARAGRAPH_ANCHOR_VERSION = 4;
-constexpr uint8_t VERSION = 5;
+constexpr uint8_t SNIPPET_VERSION = 5;
+constexpr uint8_t RETURN_MARK_VERSION = 6;  // adds a per-bookmark "return here" flag byte
+constexpr uint8_t VERSION = 6;
+constexpr bool isKnownVersion(uint8_t v) {
+  return v == LEGACY_VERSION || v == COUNT_U16_VERSION || v == PARAGRAPH_ANCHOR_VERSION || v == SNIPPET_VERSION ||
+         v == RETURN_MARK_VERSION;
+}
 // Stored count is uint16_t in v3+, but we keep an in-memory safety cap for ESP32-C3 RAM.
 constexpr uint16_t MAX_BOOKMARKS = 1024;
 constexpr size_t INITIAL_BOOKMARK_RESERVE = 8;
@@ -28,7 +34,7 @@ bool readBookmarkCount(HalFile& file, const uint8_t version, uint16_t& count) {
     return true;
   }
 
-  if (version == COUNT_U16_VERSION || version == PARAGRAPH_ANCHOR_VERSION || version == VERSION) {
+  if (version >= COUNT_U16_VERSION) {
     serialization::readPod(file, count);
     return true;
   }
@@ -114,7 +120,7 @@ void BookmarkStore::unload() {
 
 BookmarkStore::AddResult BookmarkStore::addBookmark(uint16_t spineIndex, float progress, int pageCount,
                                                     const char* chapterTitle, uint16_t paragraphIndex,
-                                                    const char* snippet) {
+                                                    const char* snippet, bool returnMark) {
   if (pageCount > 0) {
     const float pageSlice = 1.0f / static_cast<float>(pageCount);
     const float pageStart = progress;
@@ -136,6 +142,7 @@ BookmarkStore::AddResult BookmarkStore::addBookmark(uint16_t spineIndex, float p
   snprintf(bm.chapterTitle, sizeof(bm.chapterTitle), "%s", chapterTitle ? chapterTitle : "");
   bm.paragraphIndex = paragraphIndex;
   snprintf(bm.snippet, sizeof(bm.snippet), "%s", snippet ? snippet : "");
+  bm.returnMark = returnMark;
 
   bookmarks.push_back(bm);
   sortBookmarks();
@@ -156,7 +163,7 @@ void BookmarkStore::removeBookmarkForPage(uint16_t spineIndex, float pageProgres
   });
   if (it == bookmarks.end()) return;
 
-  addTombstone(*it);  // remember the delete so sync removes it everywhere
+  if (!it->returnMark) addTombstone(*it);  // device-only return marks never synced, so no tombstone
   bookmarks.erase(it);
   dirty = true;
   saveToFile();
@@ -165,8 +172,21 @@ void BookmarkStore::removeBookmarkForPage(uint16_t spineIndex, float pageProgres
 bool BookmarkStore::removeBookmarkAt(size_t index) {
   if (index >= bookmarks.size()) return false;
 
-  addTombstone(bookmarks[index]);  // remember the delete so sync removes it everywhere
+  if (!bookmarks[index].returnMark) addTombstone(bookmarks[index]);  // device-only: no tombstone for return marks
   bookmarks.erase(bookmarks.begin() + index);
+  dirty = true;
+  saveToFile();
+  return true;
+}
+
+bool BookmarkStore::removeReturnMarkAt(uint16_t spineIndex, uint16_t paragraphIndex, float progress) {
+  auto it = std::find_if(bookmarks.begin(), bookmarks.end(), [&](const Bookmark& b) {
+    return b.returnMark && keyMatch(b.spineIndex, b.paragraphIndex, b.progress, spineIndex, paragraphIndex, progress);
+  });
+  if (it == bookmarks.end()) return false;
+
+  // Device-only mark: it was never pushed, so no tombstone is needed to propagate a delete.
+  bookmarks.erase(it);
   dirty = true;
   saveToFile();
   return true;
@@ -180,6 +200,17 @@ bool BookmarkStore::hasBookmarkForPage(uint16_t spineIndex, float pageProgress, 
 
   return std::any_of(bookmarks.begin(), bookmarks.end(), [&](const Bookmark& b) {
     return b.spineIndex == spineIndex && b.progress >= pageStart && b.progress < pageEnd;
+  });
+}
+
+bool BookmarkStore::isReturnMarkForPage(uint16_t spineIndex, float pageProgress, int pageCount) {
+  if (pageCount <= 0) return false;
+  const float pageSlice = 1.0f / static_cast<float>(pageCount);
+  const float pageStart = pageProgress;
+  const float pageEnd = pageProgress + pageSlice;
+
+  return std::any_of(bookmarks.begin(), bookmarks.end(), [&](const Bookmark& b) {
+    return b.returnMark && b.spineIndex == spineIndex && b.progress >= pageStart && b.progress < pageEnd;
   });
 }
 
@@ -204,6 +235,7 @@ void BookmarkStore::clearAll() {
   // Tombstone every cleared bookmark so the wipe propagates on next sync. Each gets
   // a fresh Lamport version (newer than the bookmark) so the delete wins the merge.
   for (const auto& bm : bookmarks) {
+    if (bm.returnMark) continue;  // device-only return marks were never synced — nothing to propagate
     const uint32_t v = nextVersion();
     auto it = std::find_if(tombstones.begin(), tombstones.end(),
                            [&](const Tombstone& e) { return sameTomb(e, Tombstone{bm.spineIndex, bm.paragraphIndex, bm.progress, 0}); });
@@ -228,8 +260,7 @@ bool BookmarkStore::readFromFile() {
 
   uint8_t version;
   serialization::readPod(f, version);
-  if (version != LEGACY_VERSION && version != COUNT_U16_VERSION && version != PARAGRAPH_ANCHOR_VERSION &&
-      version != VERSION) {
+  if (!isKnownVersion(version)) {
     LOG_ERR("BKS", "Unknown bookmark file version: %u", version);
     return false;
   }
@@ -288,7 +319,7 @@ bool BookmarkStore::readFromFile() {
     } else {
       bm.paragraphIndex = UINT16_MAX;
     }
-    if (version >= VERSION) {
+    if (version >= SNIPPET_VERSION) {
       const int snippetRead = f.read(bm.snippet, sizeof(bm.snippet));
       bm.snippet[sizeof(bm.snippet) - 1] = '\0';
       if (snippetRead != static_cast<int>(sizeof(bm.snippet))) {
@@ -297,6 +328,17 @@ bool BookmarkStore::readFromFile() {
       }
     } else {
       bm.snippet[0] = '\0';
+    }
+    if (version >= RETURN_MARK_VERSION) {
+      uint8_t returnFlag = 0;
+      if (f.available() < static_cast<int>(sizeof(returnFlag))) {
+        LOG_ERR("BKS", "Bookmark file truncated at returnMark, record %u", i);
+        return false;
+      }
+      serialization::readPod(f, returnFlag);
+      bm.returnMark = returnFlag != 0;
+    } else {
+      bm.returnMark = false;
     }
     observeVersion(bm.version);  // rebuild the Lamport clock from stored versions
     bookmarks.push_back(bm);
@@ -336,6 +378,8 @@ bool BookmarkStore::writeToFile() const {
     f.write(bm.chapterTitle, sizeof(bm.chapterTitle));
     serialization::writePod(f, bm.paragraphIndex);
     f.write(bm.snippet, sizeof(bm.snippet));
+    const uint8_t returnFlag = bm.returnMark ? 1 : 0;
+    serialization::writePod(f, returnFlag);
   }
 
   LOG_DBG("BKS", "Saved %u bookmark(s)", count);
@@ -346,6 +390,7 @@ std::string BookmarkStore::serializeToJson(const std::vector<Bookmark>& bms, con
   JsonDocument doc;
   JsonArray arr = doc["bookmarks"].to<JsonArray>();
   for (const auto& bm : bms) {
+    if (bm.returnMark) continue;  // session "return here" mark is device-only — never synced
     JsonObject obj = arr.add<JsonObject>();
     obj["spineIndex"] = bm.spineIndex;
     obj["progress"] = bm.progress;
@@ -663,8 +708,7 @@ bool BookmarkStore::getAllBookmarkedBooks(std::vector<BookmarkedBookEntry>& out)
     }
     uint8_t version;
     serialization::readPod(f, version);
-    if (version != LEGACY_VERSION && version != COUNT_U16_VERSION && version != PARAGRAPH_ANCHOR_VERSION &&
-        version != VERSION) {
+    if (!isKnownVersion(version)) {
       LOG_DBG("BKS", "Skipping bookmark file with unknown version: %s", name.c_str());
       continue;
     }

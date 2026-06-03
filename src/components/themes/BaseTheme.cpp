@@ -765,7 +765,7 @@ void BaseTheme::fillPopupProgress(const GfxRenderer& renderer, const Rect& layou
 
 void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, const int currentPage,
                               const int pageCount, std::string title, const int paddingBottom, const int textYOffset,
-                              const bool fillMargin, const bool isPageBookmarked) const {
+                              const bool fillMargin, const bool isPageBookmarked, const bool isReturnMark) const {
   auto metrics = UITheme::getInstance().getMetrics();
   int orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft;
   renderer.getOrientedViewableTRBL(&orientedMarginTop, &orientedMarginRight, &orientedMarginBottom,
@@ -826,10 +826,21 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
   if (isPageBookmarked) {
     const int bmX = leftClusterX;
     const int bmY = textY + (metrics.batteryHeight - bmIconH) / 2 + 5;
-    renderer.fillRect(bmX, bmY, bmIconW, bmIconH, true);
-    const int xNotch[3] = {bmX, bmX + bmIconW, bmX + bmIconW / 2};
-    const int yNotch[3] = {bmY + bmIconH, bmY + bmIconH, bmY + bmIconH - bmNotchDepth};
-    renderer.fillPolygon(xNotch, yNotch, 3, false);
+    if (isReturnMark) {
+      // Auto "return here" mark: hollow tab so it reads differently from a normal (solid)
+      // bookmark at a glance. Outline the tab, then carve the V-notch — white out the
+      // straight bottom edge and draw the two diagonals up to the centre point.
+      renderer.drawRect(bmX, bmY, bmIconW, bmIconH, true);
+      const int bottomY = bmY + bmIconH - 1;
+      renderer.drawLine(bmX, bottomY, bmX + bmIconW - 1, bottomY, false);
+      renderer.drawLine(bmX, bottomY, bmX + bmIconW / 2, bottomY - bmNotchDepth, true);
+      renderer.drawLine(bmX + bmIconW - 1, bottomY, bmX + bmIconW / 2, bottomY - bmNotchDepth, true);
+    } else {
+      renderer.fillRect(bmX, bmY, bmIconW, bmIconH, true);
+      const int xNotch[3] = {bmX, bmX + bmIconW, bmX + bmIconW / 2};
+      const int yNotch[3] = {bmY + bmIconH, bmY + bmIconH, bmY + bmIconH - bmNotchDepth};
+      renderer.fillPolygon(xNotch, yNotch, 3, false);
+    }
   }
 
   // Draw Battery

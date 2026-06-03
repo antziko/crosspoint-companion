@@ -90,6 +90,9 @@ class KOReaderSyncActivity final : public Activity {
   static constexpr unsigned long UPLOAD_COMPLETE_AUTO_RETURN_MS = 3000;
   unsigned long uploadCompleteAt = 0;
 
+  // Guards returnToReader() so the level-triggered auto-return fires the reader switch once.
+  bool returning = false;
+
   // Tracks whether this session activated WiFi. Set in onEnter past the credentials
   // check; checked in onExit to decide whether to silent-reboot. Can't rely on
   // WiFi.getMode() because performUpload() calls esp_wifi_stop() on the way out,

@@ -163,8 +163,20 @@ enum class BootResume : uint8_t {
 // startDeepSleep() does not return, so a set latch only ends at the wakeup reset.
 static bool deepSleepInProgress = false;
 
+// Power the modem all the way down before a soft reset. Callers only WiFi.disconnect()
+// (radio left on); leaving it alive across ESP.restart() hangs early boot on X4 — the
+// reader's heavy SD/section load after the reboot tips it over, so the device sticks on
+// the "Loading" frame. Deep-sleep teardown does this same WIFI_OFF and resumes cleanly.
+static void wifiPowerDownForReboot() {
+  if (WiFi.getMode() != WIFI_MODE_NULL) {
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+  }
+}
+
 void silentRestart() {
   if (deepSleepInProgress) return;  // sleeping supersedes the heap-defrag reboot
+  wifiPowerDownForReboot();
   silentRebootTarget = SILENT_REBOOT_TARGET_HOME;
   silentRebootMagic = SILENT_REBOOT_MAGIC;
   LOG_DBG("MAIN", "Silent restart (target=home)");
@@ -179,6 +191,7 @@ void silentRestart() {
 
 void silentRestartToReader() {
   if (deepSleepInProgress) return;  // sleeping supersedes the heap-defrag reboot
+  wifiPowerDownForReboot();
   silentRebootTarget = SILENT_REBOOT_TARGET_READER;
   silentRebootMagic = SILENT_REBOOT_MAGIC;
   LOG_DBG("MAIN", "Silent restart (target=reader)");
@@ -502,6 +515,14 @@ void setup() {
     APP_STATE.readerActivityLoadCount++;
     APP_STATE.saveToFile();
     activityManager.goToReader(path);
+  }
+
+  if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_READER) {
+    // Seamless boot skips the panel clear, so the first reader paint (fast refresh) would
+    // ghost the pre-reboot frame — the KOReader sync "Progress found" screen bleeding
+    // through whitish under the page. Force one HALF_REFRESH to wipe it (clears the stale
+    // frame without FULL's hard black/white flash).
+    renderer.forceCleanRefreshNextPaint();
   }
 
   if (resume == BootResume::Silent) {

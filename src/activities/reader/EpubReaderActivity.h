@@ -82,7 +82,9 @@ class EpubReaderActivity final : public Activity {
   void saveOrientation() const;
   void toggleAutoPageTurn(uint8_t selectedPageTurnOption);
   void pageTurn(bool isForwardTurn);
-  void addBookmark();
+  // returnMark=true drops a session "return here" bookmark (distinct icon) used when
+  // jumping to another chapter, so the user can get back to where they were.
+  void addBookmark(bool returnMark = false);
 
   // Footnote navigation
   void navigateToHref(const std::string& href, bool savePosition = false);

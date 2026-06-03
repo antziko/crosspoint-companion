@@ -650,6 +650,20 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
           [this](const ActivityResult& result) {
             if (!result.isCancelled) {
               const auto& chapterResult = std::get<ChapterResult>(result.data);
+
+              // Drop a session "return here" bookmark at the current page before leaving
+              // this chapter, so the user can quickly get back. Only when actually switching
+              // chapters and the page isn't already bookmarked (don't clobber a manual one).
+              // Called before the RenderLock below — addBookmark() takes its own lock.
+              if (section && section->pageCount > 0 && chapterResult.spineIndex != currentSpineIndex) {
+                const float bmProgress =
+                    static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
+                if (!BOOKMARKS.hasBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
+                                                  section->pageCount)) {
+                  addBookmark(/*returnMark=*/true);
+                }
+              }
+
               RenderLock lock(*this);
 
               currentSpineIndex = chapterResult.spineIndex;
@@ -807,6 +821,9 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
           [this](const ActivityResult& result) {
             if (!result.isCancelled) {
               const auto& bm = std::get<BookmarkResult>(result.data);
+              // Reopening the "return here" mark consumes it: the one-shot aid for getting
+              // back has done its job, so drop it (no-op for a normal bookmark).
+              BOOKMARKS.removeReturnMarkAt(bm.spineIndex, bm.paragraphIndex, bm.progress);
               RenderLock lock(*this);
               currentSpineIndex = bm.spineIndex;
               pendingSpineProgress = bm.progress;
@@ -1391,12 +1408,18 @@ void EpubReaderActivity::renderStatusBar() const {
     title = epub->getTitle();
   }
 
-  const bool bookmarked = section && section->pageCount > 0 &&
-                          BOOKMARKS.hasBookmarkForPage(static_cast<uint16_t>(currentSpineIndex),
-                                                       static_cast<float>(section->currentPage) /
-                                                           static_cast<float>(section->pageCount),
-                                                       section->pageCount);
-  GUI.drawStatusBar(renderer, bookProgress, currentPage, pageCount, title, 0, textYOffset, true, bookmarked);
+  const float bmPageProgress =
+      (section && section->pageCount > 0)
+          ? static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount)
+          : 0.0f;
+  const bool bookmarked =
+      section && section->pageCount > 0 &&
+      BOOKMARKS.hasBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmPageProgress, section->pageCount);
+  const bool returnMark =
+      bookmarked &&
+      BOOKMARKS.isReturnMarkForPage(static_cast<uint16_t>(currentSpineIndex), bmPageProgress, section->pageCount);
+  GUI.drawStatusBar(renderer, bookProgress, currentPage, pageCount, title, 0, textYOffset, true, bookmarked,
+                    returnMark);
 }
 
 void EpubReaderActivity::navigateToHref(const std::string& hrefStr, const bool savePosition) {
@@ -1458,7 +1481,7 @@ void EpubReaderActivity::restoreSavedPosition() {
   requestUpdate();
 }
 
-void EpubReaderActivity::addBookmark() {
+void EpubReaderActivity::addBookmark(bool returnMark) {
   if (!section || !epub) {
     return;
   }
@@ -1494,7 +1517,8 @@ void EpubReaderActivity::addBookmark() {
   }
 
   LOG_DBG("ERS", "Adding bookmark at spine %d, page %d", currentSpineIndex, currentPage);
-  const auto addResult = BOOKMARKS.addBookmark(spine, progress, pageCount, chapterTitle, paragraphIndex, snippet);
+  const auto addResult =
+      BOOKMARKS.addBookmark(spine, progress, pageCount, chapterTitle, paragraphIndex, snippet, returnMark);
   if (addResult == BookmarkStore::AddResult::Added) {
     showBookmarkMessage = true;
     bookmarkMessageRemoved = false;

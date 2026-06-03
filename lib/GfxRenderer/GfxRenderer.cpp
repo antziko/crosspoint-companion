@@ -1260,7 +1260,12 @@ void GfxRenderer::invertScreen() const {
 void GfxRenderer::displayBuffer(const HalDisplay::RefreshMode refreshMode) const {
   auto elapsed = millis() - start_ms;
   LOG_DBG("GFX", "Time = %lu ms from clearScreen to displayBuffer", elapsed);
-  display.displayBuffer(refreshMode, fadingFix);
+  HalDisplay::RefreshMode mode = refreshMode;
+  if (forceCleanRefreshOnce_) {
+    mode = HalDisplay::HALF_REFRESH;  // clear ghosting once (e.g. first paint after silent reboot)
+    forceCleanRefreshOnce_ = false;
+  }
+  display.displayBuffer(mode, fadingFix);
 }
 
 size_t GfxRenderer::readFramebufferRegion(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint8_t* dst,

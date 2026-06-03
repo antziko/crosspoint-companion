@@ -236,3 +236,51 @@ Back press (the apply-remote path already auto-returned).
 read the confirmation. Manual Back still returns immediately. Scope is the upload path only;
 `SYNC_FAILED` / `NO_CREDENTIALS` stay manual so their messages can be read. `loop()` runs every
 main-loop cycle (no keypress needed), the same cadence the WiFi connect-timeout relies on.
+
+---
+
+## 13. EPUB reader — "return here" bookmark on chapter jump
+
+**Goal:** when the user jumps to another chapter, auto-drop a bookmark at the page they left so they
+can get back quickly, shown with a distinct (hollow) icon, and consumed once used.
+
+**Create (`EpubReaderActivity.cpp`):** the `SELECT_CHAPTER` handler drops a bookmark at the current
+page before switching, only when the target chapter differs and the page isn't already bookmarked
+(won't clobber a manual one). `addBookmark(bool returnMark)` passes the flag through.
+
+**Model (`BookmarkStore.h/.cpp`):** `Bookmark` gains a `returnMark` flag. Persisted to the bookmark
+file — format **v5 → v6** adds a per-record flag byte (`SNIPPET_VERSION=5`, `RETURN_MARK_VERSION=6`),
+`isKnownVersion()` centralizes the version checks, old files auto-migrate (flag reads false). So the
+hollow mark survives closing/reopening the book.
+
+**Device-only, never synced:** `serializeToJson` skips return marks; all delete paths
+(`removeBookmarkForPage` / `removeBookmarkAt` / `clearAll` / `removeReturnMarkAt`) skip the tombstone
+for a return mark — nothing to propagate. The sync summary counts (`KOReaderSyncActivity::syncBookmarks`)
+exclude return marks via `countSyncable()` so the totals match what actually syncs.
+
+**Distinct icon:** status bar (`BaseTheme::drawStatusBar`) draws a hollow tab vs the solid normal
+bookmark; bookmark list shows a hollow icon — new `UIIcon::BookmarkReturn` + 32×32 `bookmarkReturn.h`
+(outline derived from the solid glyph), wired in `LyraTheme` (the only theme that renders list icons).
+Driven by `BOOKMARKS.isReturnMarkForPage()` / `bm.returnMark`.
+
+**Consume on reopen:** opening the return mark from the bookmark list calls `removeReturnMarkAt()`
+(matches the merge key, only removes a return mark) — the one-shot aid is dropped once used.
+
+---
+
+## 14. KOReader sync — fix X4 return-to-reader (hang + ghosting)
+
+**Symptom:** on X4, returning from the sync screen showed "Loading" then hung / faded white; X3 only
+showed a grainy transition. Serial showed the silent reboot fired but X4 stuck.
+
+**Hang — WiFi left on across the soft reset (`main.cpp`):** callers only did `WiFi.disconnect(false)`
+(radio stays on); `ESP.restart()` with the modem alive wedged X4's heavy reader-boot. New
+`wifiPowerDownForReboot()` (`WiFi.disconnect(true)` + `WIFI_OFF`, mirroring the proven deep-sleep
+teardown) runs at the top of both `silentRestart()` and `silentRestartToReader()`.
+`KOReaderSyncActivity::onExit` simplified to rely on it; `returnToReader()` guarded fire-once
+(`returning`) since the auto-return check is level-triggered.
+
+**Ghosting — seamless boot skips the panel clear (`GfxRenderer` + `main.cpp`):** the first reader
+paint was `FAST_REFRESH`, ghosting the pre-reboot "Progress found" frame. New one-shot
+`forceCleanRefreshNextPaint()` upgrades the next `displayBuffer()` to `HALF_REFRESH` (clears stale
+residue, no FULL black/white flash), triggered at boot only for `Silent` resume to `READER`.

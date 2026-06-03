@@ -83,7 +83,13 @@ void KOReaderSyncActivity::saveProgressAndReturn(int spineIndex, int page) {
   returnToReader();
 }
 
-void KOReaderSyncActivity::returnToReader() { activityManager.goToReader(epubPath); }
+void KOReaderSyncActivity::returnToReader() {
+  // The auto-return check in loop() is level-triggered, so guard against re-entry: fire the
+  // reader switch exactly once.
+  if (returning) return;
+  returning = true;
+  activityManager.goToReader(epubPath);
+}
 
 void KOReaderSyncActivity::onWifiSelectionComplete(const bool success) {
   if (!success) {
@@ -256,7 +262,13 @@ void KOReaderSyncActivity::syncBookmarks() {
     LOG_ERR("KOSync", "Skipping bookmark sync: failed to load local bookmarks");
     return;
   }
-  bmLocalCount = static_cast<int>(BOOKMARKS.getBookmarks().size());
+  // Count only syncable bookmarks — device-only "return here" marks are never pushed,
+  // so excluding them keeps the summary consistent with what actually syncs.
+  const auto countSyncable = [] {
+    const auto& bms = BOOKMARKS.getBookmarks();
+    return static_cast<int>(std::count_if(bms.begin(), bms.end(), [](const struct Bookmark& b) { return !b.returnMark; }));
+  };
+  bmLocalCount = countSyncable();
 
   // Pull remote, reconcile with local (union bookmarks, propagate tombstoned deletes).
   std::string remoteJson;
@@ -276,7 +288,7 @@ void KOReaderSyncActivity::syncBookmarks() {
     LOG_ERR("KOSync", "Bookmark fetch failed: %s", KOReaderSyncClient::errorString(getResult));
   }
 
-  bmMergedCount = static_cast<int>(BOOKMARKS.getBookmarks().size());
+  bmMergedCount = countSyncable();
   bmSynced = true;
 
   // Push the reconciled set + tombstones so other devices converge on next sync.
@@ -318,8 +330,9 @@ void KOReaderSyncActivity::onExit() {
   Activity::onExit();
 
   if (wifiActivated) {
-    WiFi.disconnect(false);
-    delay(30);
+    // silentRestartToReader() powers the modem fully down (WIFI_OFF) before the soft
+    // reset — leaving the radio on across ESP.restart() hangs X4's reader-boot. No need
+    // to disconnect here first.
     silentRestartToReader();
   }
 }

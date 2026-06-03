@@ -36,6 +36,7 @@ class GfxRenderer {
   RenderMode renderMode;
   Orientation orientation;
   bool fadingFix;
+  mutable bool forceCleanRefreshOnce_ = false;  // one-shot HALF_REFRESH override (see forceCleanRefreshNextPaint)
   uint8_t* frameBuffer = nullptr;
   uint16_t panelWidth = HalDisplay::DISPLAY_WIDTH;
   uint16_t panelHeight = HalDisplay::DISPLAY_HEIGHT;
@@ -128,6 +129,12 @@ class GfxRenderer {
   int getScreenWidth() const;
   int getScreenHeight() const;
   void displayBuffer(HalDisplay::RefreshMode refreshMode = HalDisplay::FAST_REFRESH) const;
+  // Force the next displayBuffer() to use HALF_REFRESH (state-collapsed, ignores stale
+  // old-RAM residue) regardless of the mode requested, then revert to normal. Used to
+  // clear e-ink ghosting on the first paint after a silent reboot: the seamless boot skips
+  // the panel clear, so a fast paint would ghost the pre-reboot frame (e.g. the KOReader
+  // sync result screen) under the new content. HALF avoids FULL's hard black/white flash.
+  void forceCleanRefreshNextPaint() const { forceCleanRefreshOnce_ = true; }
   // Read a rectangular region of the 1-bpp framebuffer into 'dst'. Inputs are
   // SCREEN coordinates (the same coordinate system fillRect / drawText use).
   // Internally the rectangle is rotated into panel-memory coordinates and

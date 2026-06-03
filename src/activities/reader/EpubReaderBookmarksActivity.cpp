@@ -152,8 +152,11 @@ void EpubReaderBookmarksActivity::render(RenderLock&&) {
     snprintf(buf, sizeof(buf), "%d%% - %s", static_cast<int>(std::lround(bm.progress * 100.0f)), chapter);
     return std::string(buf);
   };
-  const auto getBookmarkIcon = [isPortrait](int /*index*/) {
-    return isPortrait ? UIIcon::Bookmark : UIIcon::None;
+  const auto getBookmarkIcon = [this, isPortrait](int index) {
+    if (!isPortrait) return UIIcon::None;
+    const struct Bookmark& bm =
+        bookmarks.at(static_cast<size_t>(confirmingDelete >= DELETE_MODE_DISPLAY ? selectorIndex : index));
+    return bm.returnMark ? UIIcon::BookmarkReturn : UIIcon::Bookmark;
   };
 
   if (numBookmarks > 0) {
