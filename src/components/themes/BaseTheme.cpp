@@ -21,6 +21,16 @@ constexpr int homeMenuMargin = 20;
 constexpr int homeMarginTop = 30;
 constexpr int subtitleY = 738;
 
+// Checkerboard-clear every other pixel over [x,x+width) x [y,y+height): black
+// glyphs already drawn there drop to ~50% coverage and read as grey ("dimmed"),
+// while white background pixels are unaffected. Panel-independent — works on the
+// X3 1-bit panel and the X4 4-level display alike.
+void dimTextRegionCheckerboard(const GfxRenderer& renderer, int x, int y, int width, int height) {
+  for (int py = y; py < y + height; py++)
+    for (int px = x; px < x + width; px++)
+      if ((px + py) % 2 == 0) renderer.drawPixel(px, py, false);
+}
+
 }  // namespace
 
 void BaseTheme::drawBatteryOutline(const GfxRenderer& renderer, int x, int y, int battWidth, int rectHeight) {
@@ -303,9 +313,7 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
       const int titleWidth = renderer.getTextWidth(font, item.c_str());
       const int lineH = renderer.getLineHeight(font);
       const int tx = rect.x + BaseMetrics::values.contentSidePadding;
-      for (int py = itemY; py < itemY + lineH; py++)
-        for (int px = tx; px < tx + titleWidth; px++)
-          if ((px + py) % 2 == 0) renderer.drawPixel(px, py, false);
+      dimTextRegionCheckerboard(renderer, tx, itemY, titleWidth, lineH);
     }
 
     if (rowSubtitle != nullptr) {
@@ -846,10 +854,15 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
       titleWidth = renderer.getTextWidth(SMALL_FONT_ID, title.c_str());
     }
 
-    renderer.drawText(SMALL_FONT_ID,
-                      titleMarginLeftAdjusted + metrics.statusBarHorizontalMargin + orientedMarginLeft +
-                          (availableTitleSpace - titleWidth) / 2,
-                      textY, title.c_str());
+    const int titleX = titleMarginLeftAdjusted + metrics.statusBarHorizontalMargin + orientedMarginLeft +
+                       (availableTitleSpace - titleWidth) / 2;
+    renderer.drawText(SMALL_FONT_ID, titleX, textY, title.c_str());
+
+    // Dim the title/chapter to a grey stipple so it recedes from the body text
+    // instead of competing with it. Surrounding pixels are white (title is
+    // centered within reserved margins), so the checkerboard only thins the
+    // glyphs.
+    dimTextRegionCheckerboard(renderer, titleX, textY, titleWidth, renderer.getLineHeight(SMALL_FONT_ID));
   }
 }
 
