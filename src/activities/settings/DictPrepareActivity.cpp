@@ -80,6 +80,16 @@ DictPrepareActivity::DictPrepareActivity(GfxRenderer& renderer, MappedInputManag
 
 DictPrepareActivity::~DictPrepareActivity() = default;
 
+bool DictPrepareActivity::updateProgressIfPercentChanged(Step& step, size_t progress, int& lastPercent) {
+  if (step.total == 0) return false;
+  const int percent = static_cast<int>((static_cast<uint64_t>(progress) * 100) / step.total);
+  if (percent == lastPercent) return false;
+  lastPercent = percent;
+  step.progress = progress;
+  requestUpdate(true);
+  return true;
+}
+
 void DictPrepareActivity::onEnter() {
   Activity::onEnter();
   state = State::CONFIRM;
@@ -335,6 +345,7 @@ bool DictPrepareActivity::extractFile(const char* dzPath, const char* outPath, S
 
   constexpr size_t PROGRESS_INTERVAL = 65536;
   size_t lastProgressPos = 0;
+  int lastPercent = -1;
   InflateStatus status;
   bool writeError = false;
 
@@ -353,8 +364,7 @@ bool DictPrepareActivity::extractFile(const char* dzPath, const char* outPath, S
     const size_t pos = inputFile.position();
     if (pos - lastProgressPos >= PROGRESS_INTERVAL) {
       lastProgressPos = pos;
-      step.progress = pos;
-      requestUpdate(true);
+      updateProgressIfPercentChanged(step, static_cast<uint32_t>(pos), lastPercent);
       vTaskDelay(1);
       if (cancelRequested) {
         writeError = true;
@@ -406,6 +416,7 @@ bool DictPrepareActivity::generateOft(const char* srcPath, const char* oftPath, 
 
   constexpr size_t PROGRESS_INTERVAL = 65536;
   size_t lastProgressPos = 0;
+  int lastPercent = -1;
   uint32_t entryCount = 0;
   bool error = false;
   uint8_t skipBuf[8];  // large enough for skipPerEntry (max 8)
@@ -454,8 +465,7 @@ bool DictPrepareActivity::generateOft(const char* srcPath, const char* oftPath, 
     const uint32_t pos = static_cast<uint32_t>(src.position());
     if (pos - lastProgressPos >= PROGRESS_INTERVAL) {
       lastProgressPos = pos;
-      step.progress = pos;
-      requestUpdate(true);
+      updateProgressIfPercentChanged(step, pos, lastPercent);
       vTaskDelay(1);
       if (cancelRequested) {
         error = true;
@@ -548,6 +558,7 @@ bool DictPrepareActivity::generateCspt(const char* srcPath, const char* oftPath,
   char prefixBuf[16];
   uint8_t entryBuf[20];  // 16 prefix + 4 offset
   uint32_t entriesWritten = 0;
+  int lastPercent = -1;
 
   auto writeEntry = [&](uint32_t idxOffset) -> bool {
     memset(prefixBuf, 0, 16);
@@ -567,7 +578,7 @@ bool DictPrepareActivity::generateCspt(const char* srcPath, const char* oftPath,
       return false;
     }
     entriesWritten++;
-    step.progress = entriesWritten;
+    updateProgressIfPercentChanged(step, entriesWritten, lastPercent);
     return true;
   };
 
@@ -624,7 +635,7 @@ bool DictPrepareActivity::generateCspt(const char* srcPath, const char* oftPath,
     if (!skipIdxEntries(16)) {
       // Page has fewer than 17 entries (last page) — no second sub-entry.
       // Progress update and continue to next page.
-      requestUpdate(true);
+      updateProgressIfPercentChanged(step, entriesWritten, lastPercent);
       vTaskDelay(1);
       continue;
     }
@@ -632,7 +643,7 @@ bool DictPrepareActivity::generateCspt(const char* srcPath, const char* oftPath,
     // Sub-entry 1: word at entry 16 of this page.
     const uint32_t midOffset = static_cast<uint32_t>(idx.position());
     if (midOffset >= idxFileSize) {
-      requestUpdate(true);
+      updateProgressIfPercentChanged(step, entriesWritten, lastPercent);
       vTaskDelay(1);
       continue;
     }
@@ -641,7 +652,7 @@ bool DictPrepareActivity::generateCspt(const char* srcPath, const char* oftPath,
       break;
     }
 
-    requestUpdate(true);
+    updateProgressIfPercentChanged(step, entriesWritten, lastPercent);
     vTaskDelay(1);
   }
 

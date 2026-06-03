@@ -67,6 +67,7 @@ class DictPrepareActivity final : public Activity {
   std::unique_ptr<DictPrepareTask> task;
 
   void detectSteps();
+  bool updateProgressIfPercentChanged(Step& step, size_t progress, int& lastPercent);
 
   // Runs all steps sequentially; called on FreeRTOS task.
   void runSteps();
