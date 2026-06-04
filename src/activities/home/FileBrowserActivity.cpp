@@ -190,6 +190,27 @@ bool FileBrowserActivity::removeDirFile(const std::string& fullPath) {
 }
 
 void FileBrowserActivity::loop() {
+  // Hold Back at root (button reads "Home") toggles show-hidden-files and reloads the list.
+  if (mode == Mode::Books && basepath == "/" && !lockLongPressBack && !hiddenToggleFired &&
+      mappedInput.isPressed(MappedInputManager::Button::Back) && mappedInput.getHeldTime() >= GO_HOME_MS) {
+    hiddenToggleFired = true;
+    SETTINGS.showHiddenFiles = !SETTINGS.showHiddenFiles;
+    SETTINGS.saveToFile();
+    loadFiles();
+    if (files.empty()) {
+      selectorIndex = 0;
+    } else if (selectorIndex >= files.size()) {
+      selectorIndex = files.size() - 1;
+    }
+    requestUpdate(true);
+    return;
+  }
+  // Swallow the Back release that ends the hold so the short-press "go home" does not also fire.
+  if (hiddenToggleFired) {
+    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) hiddenToggleFired = false;
+    return;
+  }
+
   // Long press BACK (1s+) goes to root folder (Books mode only).
   // In firmware-pick mode we keep navigation simple: short Back = up dir / cancel.
   if (mode == Mode::Books && mappedInput.isPressed(MappedInputManager::Button::Back) &&

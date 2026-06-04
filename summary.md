@@ -327,3 +327,41 @@ gate the gesture when the 8-server cap is full (no prompt when full; `addServer`
 
 **i18n (`english.yaml`):** `STR_OPDS_DUPLICATE_SERVER` ("Duplicate this server?"),
 `STR_OPDS_COPY_SUFFIX` (" (copy)"). Other languages fall back to English until translated.
+
+---
+
+## 17. Bookmark list — page X/Y subtitle
+
+**Goal:** show page position in the bookmark list so users can gauge how far into the chapter a bookmark is.
+
+**`BookmarkStore.h/.cpp`:** `Bookmark` gains `uint16_t chapterCurrentPage` and `uint16_t chapterPageCount` (0 = unknown). On-disk format **v6 → v7**; v6 files read both as 0 and auto-migrate on next save. `addBookmark` captures `currentPage` / `pageCount` at creation time — no epub load in the list.
+
+**`EpubReaderBookmarksActivity.cpp`:** subtitle shows `"<pct>% — <page>/<total> — <chapter>"` when page count is known; falls back to `"<pct>% — <chapter>"` otherwise. Page counts are a creation-time snapshot and may drift if render settings repaginate; chapter title stays stable.
+
+**Sync JSON:** both fields carried; `parseFromJson` defaults to 0 when absent — older/other-firmware peers stay compatible. Merge key, tombstones, and Lamport versioning unchanged.
+
+Port of the upstream `feat-dictionary` subtitle; upstream's version read fields (`computedChapterProgress`/`PageCount`) and an epub member removed in this fork, so it was dropped at merge. This re-implements the intent without re-adding the stale model.
+
+---
+
+## 18. Home screen — hold-Confirm to remove a recent book
+
+**Goal:** let users remove a book from the recent-books row on the home screen without navigating to the full recent-books list.
+
+**Gesture:** hold Confirm ≥ 1 s while a recent-book tile is selected → `ConfirmationActivity` "Remove from Recent Books?" → confirm → removed and cover tile dropped; selector clamped. Cancel → no change. A `longPressFired` guard swallows the release so the hold can't also open the book.
+
+**`HomeActivity.cpp/.h`:** `longPressFired` member + release-swallow guard (same pattern as `RecentBooksActivity`). `promptRemoveRecentBook` calls existing `RecentBooksStore::removeByPath` (persists), refreshes the recents vector, and clears the cached cover tile. No new strings or store changes — reuses `ConfirmationActivity` and `STR_REMOVE_FROM_RECENTS`.
+
+---
+
+## 19. File browser — hold Home to toggle show hidden files
+
+**Goal:** toggle "Show Hidden Files" in-place from the file browser without navigating to Settings.
+
+**Gesture:** hold Back ≥ 1 s while at the SD-card root (where the button hint already reads **HOME**) → `SETTINGS.showHiddenFiles` flipped, persisted via `SETTINGS.saveToFile()`, file list reloaded immediately. Hold again to toggle back. Selector clamped if the list shrinks.
+
+**No collision:** the existing hold-Back-to-root gesture requires `basepath != "/"` — our gesture is gated on `basepath == "/"`, so they never overlap. At root, hold-Back was previously a no-op.
+
+**`FileBrowserActivity.h/.cpp`:** `hiddenToggleFired` guard member (same swallow-release pattern as hold-Confirm-delete). Toggle fires on `isPressed(Back) && getHeldTime() >= GO_HOME_MS && basepath == "/"`, checked before the existing hold-Back branch. Short Back tap at root still goes home; hold Back in subfolders still jumps to root — both unchanged.
+
+**Persistence:** writes `SETTINGS.saveToFile()` — same call as SettingsActivity; the toggle is by definition a value change so no extra guard needed. The Settings-menu "Show Hidden Files" toggle reflects the same flag.
