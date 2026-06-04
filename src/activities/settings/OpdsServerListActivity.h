@@ -23,7 +23,9 @@ class OpdsServerListActivity final : public Activity {
   ButtonNavigator buttonNavigator;
   int selectedIndex = 0;
   bool pickerMode = false;
+  bool longPressFired = false;  // Swallow Confirm release after a hold-duplicate fires
 
   int getItemCount() const;
   void handleSelection();
+  void duplicateSelectedServer();
 };

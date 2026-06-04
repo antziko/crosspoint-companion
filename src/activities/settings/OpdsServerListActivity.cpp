@@ -9,8 +9,14 @@
 #include "OpdsSettingsActivity.h"
 #include "activities/ActivityManager.h"
 #include "activities/browser/OpdsBookBrowserActivity.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+
+namespace {
+// Hold threshold for long-press duplicate gesture (matches RECENT_LONG_PRESS_MS on home screen).
+constexpr unsigned long DUPLICATE_HOLD_MS = 1000;
+}  // namespace
 
 int OpdsServerListActivity::getItemCount() const {
   int count = static_cast<int>(OPDS_STORE.getCount());
@@ -43,7 +49,29 @@ void OpdsServerListActivity::loop() {
     return;
   }
 
-  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+  // After a hold-duplicate fired, swallow input until Confirm is physically released so
+  // the release doesn't also trigger a normal selection.
+  if (longPressFired) {
+    if (!mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
+      longPressFired = false;
+    }
+    return;
+  }
+
+  const int serverCount = static_cast<int>(OPDS_STORE.getCount());
+
+  // Hold Confirm on a real server row (settings mode only, room available) -> duplicate.
+  if (!pickerMode && selectedIndex < serverCount &&
+      OPDS_STORE.getCount() < OpdsServerStore::maxServers() &&
+      mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
+      mappedInput.getHeldTime() >= DUPLICATE_HOLD_MS) {
+    longPressFired = true;
+    duplicateSelectedServer();
+    return;
+  }
+
+  // Short tap: fire on release so the press-down doesn't race with the hold branch above.
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     handleSelection();
     return;
   }
@@ -89,6 +117,31 @@ void OpdsServerListActivity::handleSelection() {
     // "Add Server" virtual item
     startActivityForResult(std::make_unique<OpdsSettingsActivity>(renderer, mappedInput, -1), resultHandler);
   }
+}
+
+void OpdsServerListActivity::duplicateSelectedServer() {
+  const auto serverCount = static_cast<int>(OPDS_STORE.getCount());
+  if (selectedIndex >= serverCount) return;
+  const auto* src = OPDS_STORE.getServer(static_cast<size_t>(selectedIndex));
+  if (!src) return;
+
+  const std::string body = src->name.empty() ? src->url : src->name;
+
+  // Build the copy up-front; captured by value so the handler owns it.
+  OpdsServer copy = *src;
+  copy.name = (src->name.empty() ? src->url : src->name) + tr(STR_OPDS_COPY_SUFFIX);
+
+  auto handler = [this, copy](const ActivityResult& res) {
+    if (res.isCancelled) return;
+    if (!OPDS_STORE.addServer(copy)) return;  // at-limit safety; already logged in store
+    // Select the newly added copy.
+    selectedIndex = static_cast<int>(OPDS_STORE.getCount()) - 1;
+    requestUpdate(true);
+  };
+
+  startActivityForResult(
+      std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_OPDS_DUPLICATE_SERVER), body),
+      std::move(handler));
 }
 
 void OpdsServerListActivity::render(RenderLock&&) {

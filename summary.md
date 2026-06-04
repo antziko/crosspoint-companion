@@ -301,3 +301,29 @@ picks one of three strings: `STR_BOOKMARK_REMOVED` / new `STR_RETURN_MARK_ADDED`
 added.") / `STR_BOOKMARK_ADDED`. So a manual bookmark says "Bookmark added." while an auto chapter/
 percent jump says "Return mark added." English string added; other languages fall back until
 translated.
+
+---
+
+## 16. OPDS Servers — hold-Select to duplicate a server
+
+**Goal:** quickly clone an existing OPDS server entry (same host, tweak path/creds) without
+re-typing all fields.
+
+**Gesture:** hold Confirm ≥ 1 s on a real server row in settings mode → `ConfirmationActivity`
+"Duplicate this server?" (server name as body) → confirm → new entry appended with name
+`<original> (copy)` (or `<URL> (copy)` when unnamed); all fields copied; new row selected.
+Cancel → no change. Tap (release) still opens the editor as before.
+
+**`OpdsServerStore.h`:** added `static constexpr size_t maxServers()` so the list activity can
+gate the gesture when the 8-server cap is full (no prompt when full; `addServer` is a second guard).
+
+**`OpdsServerListActivity.cpp/.h`:**
+- `longPressFired` member + release-swallow guard (matches `HomeActivity` pattern).
+- `loop()` restructured: hold branch checked on `isPressed` + `getHeldTime() >= 1000`; normal
+  tap moved to `wasReleased` so press-down doesn't race with the hold path.
+- `duplicateSelectedServer()`: copies `OpdsServer` struct by value, appends `tr(STR_OPDS_COPY_SUFFIX)`,
+  shows `ConfirmationActivity`, calls `OPDS_STORE.addServer()` on confirm.
+- Guard: `!pickerMode`, `selectedIndex < serverCount`, `getCount() < maxServers()`.
+
+**i18n (`english.yaml`):** `STR_OPDS_DUPLICATE_SERVER` ("Duplicate this server?"),
+`STR_OPDS_COPY_SUFFIX` (" (copy)"). Other languages fall back to English until translated.

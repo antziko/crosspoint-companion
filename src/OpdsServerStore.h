@@ -38,6 +38,7 @@ class OpdsServerStore {
   OpdsServerStore& operator=(const OpdsServerStore&) = delete;
 
   static OpdsServerStore& getInstance() { return instance; }
+  static constexpr size_t maxServers() { return MAX_SERVERS; }
 
   bool saveToFile() const;
   bool loadFromFile();
