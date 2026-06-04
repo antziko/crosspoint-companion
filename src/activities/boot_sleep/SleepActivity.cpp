@@ -246,10 +246,10 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap) const {
   LOG_DBG("SLP", "drawing to %d x %d", x, y);
 
   // Wipe ghosting from the previously displayed screen before drawing the
-  // wallpaper. Clear to white first, then a single mild HALF refresh (not FULL's
-  // black-white-black-white flash) removes most of the prior content.
+  // wallpaper. Clear to white first, then a FULL refresh (full black/white
+  // flash) to completely clear prior content before showing the image.
   renderer.clearScreen();
-  renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+  renderer.displayBuffer(HalDisplay::FULL_REFRESH);
 
   renderer.clearScreen();
 

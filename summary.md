@@ -365,3 +365,13 @@ Port of the upstream `feat-dictionary` subtitle; upstream's version read fields 
 **`FileBrowserActivity.h/.cpp`:** `hiddenToggleFired` guard member (same swallow-release pattern as hold-Confirm-delete). Toggle fires on `isPressed(Back) && getHeldTime() >= GO_HOME_MS && basepath == "/"`, checked before the existing hold-Back branch. Short Back tap at root still goes home; hold Back in subfolders still jumps to root — both unchanged.
 
 **Persistence:** writes `SETTINGS.saveToFile()` — same call as SettingsActivity; the toggle is by definition a value change so no extra guard needed. The Settings-menu "Show Hidden Files" toggle reflects the same flag.
+
+---
+
+## 20. Sleep screen — full refresh before custom wallpaper
+
+**Goal:** eliminate ghosting from the prior screen under sleep-folder wallpapers.
+
+**`SleepActivity.cpp` (`renderBitmapSleepScreen`):** the pre-draw ghost-wipe at line 252 changed from `HALF_REFRESH` to `FULL_REFRESH`. The post-draw present (line 268) remains `HALF_REFRESH` to avoid a second disruptive flash over the final image.
+
+`FULL_REFRESH` drives the full black/white waveform from a white baseline, completely clearing the prior screen before the wallpaper is drawn. Scope is `renderBitmapSleepScreen` only (the shared path for both `CUSTOM` and `COVER_CUSTOM` modes); default, blank, and quick-resume sleep variants are untouched.
