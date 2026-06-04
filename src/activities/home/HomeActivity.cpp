@@ -10,6 +10,7 @@
 #include <Xtc.h>
 
 #include <cstring>
+#include <memory>
 #include <vector>
 
 #include "CrossPointSettings.h"
@@ -17,8 +18,14 @@
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+
+namespace {
+// Hold threshold for the long-press "remove from recents" action (matches RecentBooksActivity).
+constexpr unsigned long RECENT_LONG_PRESS_MS = 1000;
+}  // namespace
 
 int HomeActivity::getMenuItemCount() const {
   int count = 4;  // File Browser, Recents, File transfer, Settings
@@ -169,6 +176,24 @@ void HomeActivity::freeCoverBuffer() {
 void HomeActivity::loop() {
   const int menuCount = getMenuItemCount();
 
+  // After a long-press fired, swallow input until Confirm is physically released so the
+  // release doesn't also open the book (re-arm only once the button is up).
+  if (longPressFired) {
+    if (!mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
+      longPressFired = false;
+    }
+    return;
+  }
+
+  // Long-press Confirm on a recent book: prompt to remove it from the recent list.
+  if (selectorIndex < static_cast<int>(recentBooks.size()) &&
+      mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
+      mappedInput.getHeldTime() >= RECENT_LONG_PRESS_MS) {
+    longPressFired = true;
+    promptRemoveRecentBook(recentBooks[selectorIndex].path, recentBooks[selectorIndex].title);
+    return;
+  }
+
   buttonNavigator.onNext([this, menuCount] {
     selectorIndex = ButtonNavigator::nextIndex(selectorIndex, menuCount);
     requestUpdate();
@@ -271,6 +296,37 @@ void HomeActivity::render(RenderLock&&) {
 }
 
 void HomeActivity::onSelectBook(const std::string& path) { activityManager.goToReader(path); }
+
+void HomeActivity::promptRemoveRecentBook(const std::string& path, const std::string& title) {
+  auto handler = [this, path](const ActivityResult& res) {
+    if (res.isCancelled) {
+      return;
+    }
+    if (!RECENT_BOOKS.removeByPath(path)) {
+      return;
+    }
+    // Refresh the recents list and drop the cached cover so the home tile redraws.
+    freeCoverBuffer();
+    coverBufferStored = false;
+    coverRendered = false;
+    recentsLoaded = false;
+    recentsLoading = false;
+    const auto& metrics = UITheme::getInstance().getMetrics();
+    loadRecentBooks(metrics.homeRecentBooksCount);
+    const int menuCount = getMenuItemCount();
+    if (selectorIndex >= menuCount) {
+      selectorIndex = menuCount - 1;
+    }
+    if (selectorIndex < 0) {
+      selectorIndex = 0;
+    }
+    requestUpdate(true);
+  };
+
+  startActivityForResult(
+      std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_REMOVE_FROM_RECENTS), title),
+      std::move(handler));
+}
 
 void HomeActivity::onFileBrowserOpen() { activityManager.goToFileBrowser(); }
 
