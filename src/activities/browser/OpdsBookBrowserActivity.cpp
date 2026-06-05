@@ -27,13 +27,17 @@
 namespace {
 constexpr int PAGE_ITEMS = 23;
 constexpr unsigned long GO_HOME_MS = 1000;  // hold BACK this long to jump to home
-// Minimum contiguous heap required before bringing up an HTTPS connection. The
-// mbedtls handshake needs ~40KB contiguous (see downloadBook), plus the RX/TX/
-// read buffers on top. Below this the connect or an in-flight read fails as an
-// OOM-in-disguise and can stall for minutes before surfacing (observed on X3:
-// heap collapsed to ~13KB mid-read, then a read error after a ~215s freeze).
-// Guarding here keeps the UI responsive and lets the user retry or back out.
-constexpr size_t MIN_CONTIGUOUS_HEAP_FOR_TLS = 44 * 1024;
+// Minimum contiguous heap required before bringing up an HTTPS connection.
+// Sized for the shrunk mbedtls record buffers (custom_sdkconfig: DYNAMIC_BUFFER
+// + IN_CONTENT_LEN=8192/OUT=2048). With dynamic buffers the largest single
+// contiguous allocation the handshake makes is the IN record (~8.2KB); 24KB
+// gives ~3x headroom for that plus the HTTPClient RX/TX scratch. The old 44KB
+// value was sized for the default 16KB IN+OUT record buffers and, post-shrink,
+// false-rejected fetches that had ample heap: on-device logs showed aborts at
+// largest=34804 (X3) and largest=45044 (X4, under the 45056 gate by 12 bytes)
+// while total free was 68-86KB. Below this the connect or an in-flight read can
+// still fail as an OOM-in-disguise and stall, so a guard remains — just smaller.
+constexpr size_t MIN_CONTIGUOUS_HEAP_FOR_TLS = 24 * 1024;
 
 // On-SD filename for a book entry (no directory). Single source of truth so the
 // downloader and the "already downloaded" indicator never diverge.
@@ -111,12 +115,6 @@ bool isBookOnDevice(const std::string& folder, const OpdsEntry& book) {
 
 void OpdsBookBrowserActivity::onEnter() {
   Activity::onEnter();
-
-  // Fresh on-SD debug trace for this browsing session (readable at
-  // /opds_debug.log without a serial monitor).
-  SdDebugLog::setEnabled(true);
-  SdDebugLog::clear();
-  SdDebugLog::log("OPDS", "browser opened, free heap=%u", (unsigned)ESP.getFreeHeap());
 
   state = BrowserState::CHECK_WIFI;
   entries.clear();
@@ -342,8 +340,9 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
 
   // Free the current page's entries BEFORE the new feed's TLS connection comes
   // up. A full page (e.g. 50 bookmark entries) holds ~33KB; leaving it allocated
-  // while mbedtls grabs its ~40KB contiguous handshake buffers is what starved
-  // the heap to ~13KB and stalled the read mid-stream on the X3 (see logs). This
+  // while mbedtls grabs its handshake record buffers fragments the heap (free
+  // stays high but largest-contiguous collapses) and stalled the read mid-stream
+  // on the X3 (see logs). This
   // mirrors downloadBook's swap-to-free. Nothing below reads the old entries:
   // they're fully replaced by the parser's results after the connection closes,
   // and the ERROR paths don't touch the list.
@@ -364,11 +363,6 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     return;
   }
 
-  // [fix/tls-heap] handshake heap baseline: compare free vs largest contiguous
-  // block right before the TLS connect, to measure custom_sdkconfig mbedtls savings.
-  SdDebugLog::log("TLSMEM", "OPDS pre-handshake free=%u largest=%u", (unsigned)ESP.getFreeHeap(),
-                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-
   // Show "Connecting..." before the blocking TLS handshake. The render task is
   // event-driven (no timer), so nothing repaints while we're stalled inside the
   // handshake — paint the label now (And-Wait) so the user sees the stage instead
@@ -381,22 +375,46 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   // received (KB/MB) rather than a percentage. Throttle to every 8KB: each e-ink
   // repaint is slow and a small feed would otherwise flood the render task.
   size_t lastShown = 0;
+  // Elapsed-time clock for the progress label.
+  const uint32_t fetchStartMs = millis();
+  cancelFetch = false;
   const auto dl = HttpDownloader::downloadToFile(
       url, kTmpFeed,
-      [this, &lastShown](const size_t downloaded, const size_t total) {
+      [this, &lastShown, fetchStartMs](const size_t downloaded, const size_t total) {
+        // Poll Back every chunk (this fires per READ_CHUNK, not just per 8KB
+        // display step) so the user can abort a slow feed instead of rebooting.
+        // The downloader checks cancelFetch before the next socket read.
+        mappedInput.update();
+        if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+          cancelFetch = true;
+          return;
+        }
         if (downloaded - lastShown < 8 * 1024 && !(total > 0 && downloaded >= total)) return;
         lastShown = downloaded;
-        char sizeText[48];
+        char sizeText[64];
+        const unsigned elapsedS = (millis() - fetchStartMs) / 1000;
         const double bytes = static_cast<double>(downloaded);
         if (bytes < 1024.0 * 1024.0) {
-          snprintf(sizeText, sizeof(sizeText), "%s %.0f KB", tr(STR_DOWNLOADING), bytes / 1024.0);
+          snprintf(sizeText, sizeof(sizeText), "%s %.0f KB (%us)", tr(STR_DOWNLOADING), bytes / 1024.0, elapsedS);
         } else {
-          snprintf(sizeText, sizeof(sizeText), "%s %.1f MB", tr(STR_DOWNLOADING), bytes / (1024.0 * 1024.0));
+          snprintf(sizeText, sizeof(sizeText), "%s %.1f MB (%us)", tr(STR_DOWNLOADING), bytes / (1024.0 * 1024.0),
+                   elapsedS);
         }
         statusMessage = sizeText;
         requestUpdate(true);
       },
-      nullptr, server.username, server.password, &httpDetail);
+      &cancelFetch, server.username, server.password, &httpDetail);
+  if (dl == HttpDownloader::ABORTED) {
+    // User pressed Back during the transfer. Drop to ERROR (not a hard failure):
+    // Confirm retries, Back steps up a level — both handled in loop(). Avoids
+    // recursing into navigateBack() from inside fetchFeed on the main task stack.
+    Storage.remove(kTmpFeed);
+    state = BrowserState::ERROR;
+    errorMessage = tr(STR_LOADING_CANCELLED);
+    consumeBack = true;  // swallow the Back release that triggered the cancel
+    requestUpdate();
+    return;
+  }
   if (dl != HttpDownloader::OK) {
     SdDebugLog::log("OPDS", "FETCH FAILED (http) code=%d detail=%s heap=%u", static_cast<int>(dl),
                     httpDetail.empty() ? "?" : httpDetail.c_str(), (unsigned)ESP.getFreeHeap());
@@ -545,10 +563,11 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   LOG_DBG("OPDS", "Downloading: %s -> %s", downloadUrl.c_str(), filename.c_str());
 
   // Free the feed list before connecting. A large feed (e.g. 50 bookmarks)
-  // leaves only ~39KB free, and the HTTPS handshake needs ~40KB contiguous for
-  // mbedtls buffers — so the connect fails with ESP_ERR_HTTP_CONNECT (an OOM in
-  // disguise). Releasing entries now gives TLS the headroom it needs; the list
-  // is re-fetched after the download. Worst on the X3 (less RAM).
+  // holds ~33KB and fragments the heap, so even with shrunk mbedtls buffers the
+  // contiguous-heap preflight (MIN_CONTIGUOUS_HEAP_FOR_TLS) can abort or the
+  // connect fails with ESP_ERR_HTTP_CONNECT (an OOM in disguise). Releasing
+  // entries now gives TLS the contiguous headroom it needs; the list is
+  // re-fetched after the download. Worst on the X3 (less RAM).
   const int savedIndex = selectorIndex;
   std::vector<OpdsEntry>().swap(entries);
   const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
@@ -572,9 +591,17 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   // slow. Only repaint every 64KB so the bar/byte-count advances without
   // flooding the render task.
   size_t lastShown = 0;
+  cancelFetch = false;
   const auto result = HttpDownloader::downloadToFile(
       downloadUrl, filename,
       [this, &lastShown](const size_t downloaded, const size_t total) {
+        // Poll Back so a slow book download can be aborted instead of rebooting
+        // (fires per chunk; downloader checks cancelFetch before the next read).
+        mappedInput.update();
+        if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+          cancelFetch = true;
+          return;
+        }
         downloadProgress = downloaded;
         downloadTotal = total;
         if (downloaded - lastShown >= 64 * 1024 || (total > 0 && downloaded >= total)) {
@@ -582,7 +609,18 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
           requestUpdate(true);
         }
       },
-      nullptr, server.username, server.password, &httpDetail);
+      &cancelFetch, server.username, server.password, &httpDetail);
+
+  if (result == HttpDownloader::ABORTED) {
+    // User cancelled mid-download. downloadToFile already removed the partial
+    // file. Reload the feed (entries were freed above) so the list reappears.
+    SdDebugLog::log("OPDS", "download cancelled by user, heap=%u", (unsigned)ESP.getFreeHeap());
+    consumeBack = true;  // swallow the Back release that triggered the cancel
+    fetchFeed(currentPath);
+    if (!entries.empty()) selectorIndex = std::min<int>(savedIndex, entries.size() - 1);
+    requestUpdate();
+    return;
+  }
 
   if (result == HttpDownloader::OK) {
     clearBookCache(filename);

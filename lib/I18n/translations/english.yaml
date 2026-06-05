@@ -184,6 +184,7 @@ STR_RESTARTING_HINT: "Restarting... If device does not restart, hold the power b
 STR_NO_ENTRIES: "No entries found"
 STR_DOWNLOADING: "Downloading..."
 STR_PARSING: "Parsing..."
+STR_LOADING_CANCELLED: "Loading cancelled"
 STR_DOWNLOAD_FAILED: "Download failed"
 STR_ERROR_MSG: "Error:"
 STR_UNNAMED: "Unnamed"

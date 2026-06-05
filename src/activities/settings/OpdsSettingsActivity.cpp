@@ -8,6 +8,7 @@
 
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -162,14 +163,22 @@ void OpdsSettingsActivity::handleSelection() {
     saveServer();
     requestUpdate();
   } else if (selectedIndex == 5 && !isNewServer) {
-    // Delete flow is only available for existing servers.
-    if (!OPDS_STORE.removeServer(static_cast<size_t>(serverIndex))) {
-      LOG_ERR("OPS", "Failed to remove OPDS server at index %d", serverIndex);
-      showSaveError = true;
-      requestUpdate();
-      return;
-    }
-    finish();
+    // Delete flow is only available for existing servers. Confirm first so a
+    // mis-press on this row can't silently destroy a configured server.
+    const int idx = serverIndex;
+    const std::string& body = editServer.name.empty() ? editServer.url : editServer.name;
+    startActivityForResult(
+        std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_DELETE_SERVER), body),
+        [this, idx](const ActivityResult& res) {
+          if (res.isCancelled) return;
+          if (!OPDS_STORE.removeServer(static_cast<size_t>(idx))) {
+            LOG_ERR("OPS", "Failed to remove OPDS server at index %d", idx);
+            showSaveError = true;
+            requestUpdate();
+            return;
+          }
+          finish();
+        });
   }
 }
 

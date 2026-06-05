@@ -39,6 +39,10 @@ class OpdsBookBrowserActivity final : public Activity {
   std::string searchTemplate;
   bool consumeConfirm = false;
   bool consumeBack = false;  // Added missing member
+  // Set true (from the fetch progress callback, which polls Back) to abort an
+  // in-flight feed download. Read/written only on the main task — fetchFeed and
+  // its progress callback both run there — so no volatile/barrier needed.
+  bool cancelFetch = false;
   bool lockLongPressBack = false;  // swallow BACK release after long-press-to-home
   int selectorIndex = 0;
   std::string errorMessage;

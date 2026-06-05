@@ -6,6 +6,7 @@
 #include <base64.h>
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
+#include <esp_wifi.h>
 
 #include "util/SdDebugLog.h"
 
@@ -57,6 +58,19 @@ bool isRedirect(int status) {
   return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
 }
 
+// Disable WiFi modem power-save for the duration of a transfer, then restore the
+// default. At the default WIFI_PS_MIN_MODEM the radio sleeps between DTIM beacons;
+// on a marginal link (observed on the X3, fine on the X4 at the same AP) that
+// stalls the TCP window and makes a <1MB feed take minutes, with wild run-to-run
+// variance. OtaUpdater already does this around esp_https_ota (OtaUpdater.cpp:141);
+// OPDS fetch/download went through the default and paid for it. RAII so every
+// early return in runGet restores power-save. Costs extra radio power only while
+// a transfer is in flight.
+struct NoWifiSleep {
+  NoWifiSleep() { esp_wifi_set_ps(WIFI_PS_NONE); }
+  ~NoWifiSleep() { esp_wifi_set_ps(WIFI_PS_MIN_MODEM); }
+};
+
 // Streams a GET body through sink.write in READ_CHUNK pieces. Uses the manual
 // open/fetch_headers/read path rather than esp_http_client_perform(): perform()
 // pushes the whole body through an event callback and reports a chunked body
@@ -64,6 +78,10 @@ bool isRedirect(int status) {
 // large/slow files and surfaces a short read directly.
 HttpDownloader::DownloadError runGet(const std::string& url, const std::string& username, const std::string& password,
                                      Sink& sink) {
+  // Hold WiFi out of modem-sleep for the whole transfer (see NoWifiSleep). Scoped
+  // to runGet so it covers the handshake, body read loop, and every early return.
+  const NoWifiSleep noWifiSleep;
+
   // Allocate the read buffer FIRST, before the TLS connection exists. A live
   // mbedtls connection holds ~65KB and fragments the heap; allocating this 2KB
   // buffer afterwards fails on the X3 (only ~6KB, non-contiguous, left). Carving
