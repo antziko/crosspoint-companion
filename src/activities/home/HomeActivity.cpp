@@ -185,6 +185,26 @@ void HomeActivity::loop() {
     return;
   }
 
+  // After hold-Back fired, swallow input until Back is physically released.
+  if (backLongPressFired) {
+    if (!mappedInput.isPressed(MappedInputManager::Button::Back)) {
+      backLongPressFired = false;
+    }
+    return;
+  }
+
+  // Hold Back on the home screen: move the selector to the first recent book.
+  if (!recentBooks.empty() &&
+      mappedInput.isPressed(MappedInputManager::Button::Back) &&
+      mappedInput.getHeldTime() >= RECENT_LONG_PRESS_MS) {
+    backLongPressFired = true;
+    if (selectorIndex != 0) {
+      selectorIndex = 0;
+      requestUpdate();
+    }
+    return;
+  }
+
   // Long-press Confirm on a recent book: prompt to remove it from the recent list.
   if (selectorIndex < static_cast<int>(recentBooks.size()) &&
       mappedInput.isPressed(MappedInputManager::Button::Confirm) &&

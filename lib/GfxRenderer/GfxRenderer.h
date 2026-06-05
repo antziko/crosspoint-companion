@@ -138,6 +138,12 @@ class GfxRenderer {
   int getScreenWidth() const;
   int getScreenHeight() const;
   void displayBuffer(HalDisplay::RefreshMode refreshMode = HalDisplay::FAST_REFRESH) const;
+  // Push only the logical rectangle (lx,ly,lw,lh) to the panel using a windowed
+  // sub-rectangle refresh. The logical rect is mapped to byte-aligned native panel
+  // coordinates via the current orientation transform. Falls back to a full
+  // FAST_REFRESH if the mapping produces an invalid rect.
+  // EXPERIMENTAL — safe for single isolated refreshes; see HalDisplay::displayWindow.
+  void displayWindowRegion(int lx, int ly, int lw, int lh) const;
   // Force the next displayBuffer() to use HALF_REFRESH (state-collapsed, ignores stale
   // old-RAM residue) regardless of the mode requested, then revert to normal. Used to
   // clear e-ink ghosting on the first paint after a silent reboot: the seamless boot skips

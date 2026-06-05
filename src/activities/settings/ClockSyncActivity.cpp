@@ -30,12 +30,12 @@ void ClockSyncActivity::onExit() {
   Activity::onExit();
 
   // Release the radio cleanly. The WiFi stack can leave the SDK in a state that
-  // upsets later SD/SPI use, so silently restart once we're done (matches
-  // FontDownloadActivity).
+  // upsets later SD/SPI use, so silently restart once we're done and return to
+  // the Reader settings list (matches FontDownloadActivity).
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(false);
     delay(30);
-    silentRestart();
+    silentRestartToSettings(/*Reader=*/1);
   }
 }
 

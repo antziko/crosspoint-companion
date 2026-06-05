@@ -118,9 +118,11 @@ unsigned long t2 = 0;
 // Definitions for SilentRestart.h. RTC_NOINIT survives ESP.restart() but not power loss.
 RTC_NOINIT_ATTR uint32_t silentRebootMagic;
 RTC_NOINIT_ATTR uint32_t silentRebootTarget;
+RTC_NOINIT_ATTR uint32_t silentRebootSettingsCategory;  // category index for SETTINGS target
 constexpr uint32_t SILENT_REBOOT_MAGIC = 0xC1EAB007;
 constexpr uint32_t SILENT_REBOOT_TARGET_HOME = 0;
 constexpr uint32_t SILENT_REBOOT_TARGET_READER = 1;
+constexpr uint32_t SILENT_REBOOT_TARGET_SETTINGS = 2;  // settings list (category in silentRebootSettingsCategory)
 
 // How the device is coming back to life, resolved once at boot. Both resume
 // flows suppress the splash and leave the panel holding its pre-boot frame; a
@@ -175,6 +177,19 @@ void silentRestartToReader() {
   delay(50);
   ESP.restart();
 }
+
+void silentRestartToSettings(int category) {
+  if (deepSleepInProgress) return;  // sleeping supersedes the heap-defrag reboot
+  wifiPowerDownForReboot();
+  silentRebootTarget = SILENT_REBOOT_TARGET_SETTINGS;
+  silentRebootSettingsCategory = static_cast<uint32_t>(category);
+  silentRebootMagic = SILENT_REBOOT_MAGIC;
+  LOG_DBG("MAIN", "Silent restart (target=settings,cat=%d)", category);
+  GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+  delay(50);
+  ESP.restart();
+}
+
 
 // Verify power button press duration on wake-up from deep sleep
 // Pre-condition: isWakeupByPowerButton() == true
@@ -340,9 +355,14 @@ void setup() {
   // Bound the target range too — RTC_NOINIT memory is uninitialized on cold boot.
   const bool isSilentReboot = (silentRebootMagic == SILENT_REBOOT_MAGIC);
   const uint32_t snapshotTarget =
-      (isSilentReboot && silentRebootTarget <= SILENT_REBOOT_TARGET_READER) ? silentRebootTarget : 0;
+      (isSilentReboot && silentRebootTarget <= SILENT_REBOOT_TARGET_SETTINGS) ? silentRebootTarget : 0;
+  // Clamp category to valid range (0-3); RTC_NOINIT can hold garbage on cold boot.
+  static constexpr uint32_t SETTINGS_CATEGORY_COUNT = 4;
+  const uint32_t snapshotSettingsCategory =
+      (isSilentReboot && silentRebootSettingsCategory < SETTINGS_CATEGORY_COUNT) ? silentRebootSettingsCategory : 0;
   silentRebootMagic = 0;
   silentRebootTarget = 0;
+  silentRebootSettingsCategory = 0;
 
   gpio.begin();
   powerManager.begin();
@@ -470,6 +490,9 @@ void setup() {
   } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_READER &&
              !APP_STATE.openEpubPath.empty()) {
     activityManager.goToReader(APP_STATE.openEpubPath);
+  } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_SETTINGS) {
+    // Return to the settings category the user was in before the WiFi reboot.
+    activityManager.goToSettings(static_cast<int>(snapshotSettingsCategory));
   } else if (resume == BootResume::Silent) {
     // target == home (or reader with no open book): land on home — don't fall
     // through to the sleep-wake "resume reader" logic, which fires on stale

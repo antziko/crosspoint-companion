@@ -47,30 +47,30 @@ struct JpegContext {
   PixelCache cache;
   bool caching{false};
 
-  // Per-image dark-background verdict (mean luminance < threshold). Gates the X4
-  // brighten curve so light/white-bg images aren't washed out. Set by a cheap
-  // 1/8-scale measure pass before the real decode; defaults true (= always
-  // brighten, prior behaviour) when the probe can't run.
-  bool brightenDark{true};
+  // Per-image tone curve selection (see X4Tone in OrderedDither.h). Determined by
+  // a cheap 1/8-scale luminance probe before the real decode. Defaults to Brighten
+  // (= mild lift, prior behaviour for dark images) so a probe failure is safe.
+  X4Tone tone{X4Tone::Brighten};
 
-  // Per-image bimodal-text verdict (dark bg + bright text). When set, the upscale
-  // path uses nearest-neighbor instead of bilinear so thin high-contrast strokes
-  // (e.g. a code/terminal screenshot) stay crisp instead of being blurred. Set by
-  // the same measure pass; defaults false (= bilinear, prior behaviour).
+  // Per-image sharp-upscale verdict (text images). When set, the upscale path
+  // uses nearest-neighbor instead of bilinear so thin high-contrast strokes
+  // (e.g. code/terminal screenshots) stay crisp. Set by the same probe; defaults
+  // false (= bilinear, prior behaviour).
   bool sharpUpscale{false};
 };
 
-// Accumulator for the measure pass — counts dark vs total pixels over a coarse
-// decode (dark-fraction metric; see OrderedDither.h).
+// Accumulator for the measure pass — counts dark, bright, and mid-grey pixels
+// over a coarse decode (dark/bright/text-band fractions; see OrderedDither.h).
 struct JpegLumProbe {
   uint32_t dark{0};
   uint32_t bright{0};
+  uint32_t mid{0};   // pixels in [X4_TEXT_PIXEL_CUTOFF, X4_BRIGHT_PIXEL_CUTOFF)
   uint32_t count{0};
 };
 
-// Measure-pass draw callback: counts how many decoded pixels are dark
-// (luminance <= X4_DARK_PIXEL_CUTOFF) and how many are bright
-// (>= X4_BRIGHT_PIXEL_CUTOFF). No scaling/dithering. pUser is a JpegLumProbe*.
+// Measure-pass draw callback: counts dark (<=X4_DARK_PIXEL_CUTOFF), bright
+// (>=X4_BRIGHT_PIXEL_CUTOFF), and mid-grey ([X4_TEXT_PIXEL_CUTOFF,
+// X4_BRIGHT_PIXEL_CUTOFF)) pixels. No scaling/dithering. pUser is JpegLumProbe*.
 int jpegMeasureCallback(JPEGDRAW* pDraw) {
   auto* probe = reinterpret_cast<JpegLumProbe*>(pDraw->pUser);
   if (!probe) return 0;
@@ -81,17 +81,20 @@ int jpegMeasureCallback(JPEGDRAW* pDraw) {
   if (stride <= 0 || blockH <= 0 || validW <= 0) return 1;
   uint32_t d = 0;
   uint32_t b = 0;
+  uint32_t m = 0;
   uint32_t c = 0;
   for (int row = 0; row < blockH; row++) {
     const uint8_t* p = &pixels[row * stride];
     for (int x = 0; x < validW; x++) {
       if (p[x] <= X4_DARK_PIXEL_CUTOFF) d++;
       if (p[x] >= X4_BRIGHT_PIXEL_CUTOFF) b++;
+      if (p[x] >= X4_TEXT_PIXEL_CUTOFF && p[x] < X4_BRIGHT_PIXEL_CUTOFF) m++;
       c++;
     }
   }
   probe->dark += d;
   probe->bright += b;
+  probe->mid += m;
   probe->count += c;
   return 1;
 }
@@ -182,7 +185,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
   const bool useDithering = ctx->config->useDithering;
   const bool oneBit = ctx->config->oneBitDither;
   const bool blueNoise = ctx->config->ditherBlueNoise;
-  const bool brighten = ctx->brightenDark;
+  const X4Tone tone = ctx->tone;
   const bool sharpUpscale = ctx->sharpUpscale;
   const bool caching = ctx->caching;
   const int32_t fineScaleFPX = ctx->fineScaleFPX;
@@ -236,7 +239,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
       for (int dstX = dstXStart; dstX < dstXEnd; dstX++) {
         const int outX = cfgX + dstX;
         uint8_t gray = row[dstX - blockX];
-        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, brighten);
+        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, tone);
         pw.writePixel(outX, dithered);
         if (caching) cw.writePixel(outX, dithered);
       }
@@ -263,7 +266,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
         int lx = (int)(((int64_t)dstX * invScaleFPX) >> FP_SHIFT) - blockX;
         if (lx < 0) lx = 0;
         if (lx >= validW) lx = validW - 1;
-        uint8_t dithered = ditherPixel(row[lx], outX, outY, useDithering, oneBit, blueNoise, brighten);
+        uint8_t dithered = ditherPixel(row[lx], outX, outY, useDithering, oneBit, blueNoise, tone);
         pw.writePixel(outX, dithered);
         if (caching) cw.writePixel(outX, dithered);
       }
@@ -316,7 +319,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
         int bot = ((int)row1[lx0] * fxInv + (int)row1[lx1] * fx) >> FP_SHIFT;
         uint8_t gray = (uint8_t)((top * fyInv + bot * fy) >> FP_SHIFT);
 
-        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, brighten);
+        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, tone);
         pw.writePixel(outX, dithered);
         if (caching) cw.writePixel(outX, dithered);
       }
@@ -333,7 +336,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
         int bot = ((int)row1[lx0] * fxInv + (int)row1[lx0 + 1] * fx) >> FP_SHIFT;
         uint8_t gray = (uint8_t)((top * fyInv + bot * fy) >> FP_SHIFT);
 
-        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, brighten);
+        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, tone);
         pw.writePixel(outX, dithered);
         if (caching) cw.writePixel(outX, dithered);
       }
@@ -353,7 +356,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
         int bot = ((int)row1[lx0] * fxInv + (int)row1[lx1] * fx) >> FP_SHIFT;
         uint8_t gray = (uint8_t)((top * fyInv + bot * fy) >> FP_SHIFT);
 
-        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, brighten);
+        uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, tone);
         pw.writePixel(outX, dithered);
         if (caching) cw.writePixel(outX, dithered);
       }
@@ -402,7 +405,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
       }
       const uint8_t gray = static_cast<uint8_t>(sum / count);  // count >= 1 by construction
 
-      uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, brighten);
+      uint8_t dithered = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, tone);
       pw.writePixel(outX, dithered);
       if (caching) cw.writePixel(outX, dithered);
     }
@@ -411,37 +414,49 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
   return 1;
 }
 
-// Cheap mean-luminance probe: decodes the JPEG at 1/8 scale (≈1/64 the pixels)
-// and returns whether the image is dark enough to warrant the X4 brighten curve.
-// Returns true (= brighten, prior behaviour) on any probe failure so a decode
-// error never regresses a dark image. Runs only on cache miss.
-// Sets `bimodalText` (dark bg + bright text → crisp/nearest upscale + no brighten)
-// and returns the brighten verdict. On any probe failure: bimodalText=false and
-// returns true (= brighten, prior behaviour) so a decode error never regresses.
-bool jpegImageIsDark(const std::string& imagePath, bool& bimodalText) {
-  bimodalText = false;
+// Luminance probe: decodes the JPEG at 1/8 scale (≈1/64 the pixels) and
+// classifies the image into one of four tonal classes, returning the X4 tone
+// curve to apply and setting `sharpUpscale` when thin strokes need nearest-
+// neighbor upscale instead of bilinear.
+//
+// Classification (in priority order):
+//   white-on-dark  : dark≥50% && bright≥2%  → X4Tone::None,     sharp=true
+//   grey-on-dark   : dark≥50% && bright<2%
+//                    && mid∈[MIN,MAX]%       → X4Tone::DarkText, sharp=true
+//   dark photo     : dark≥50% (else)         → X4Tone::Brighten, sharp=false
+//   light image    : else                    → X4Tone::None,     sharp=false
+//
+// On any probe failure: returns X4Tone::Brighten, sharpUpscale=false so a
+// decode error never regresses a dark image.
+X4Tone jpegImageIsDark(const std::string& imagePath, bool& sharpUpscale) {
+  sharpUpscale = false;
   std::unique_ptr<JPEGDEC> jpeg(new (std::nothrow) JPEGDEC());
-  if (!jpeg) return true;
+  if (!jpeg) return X4Tone::Brighten;
 
   int rc = jpeg->open(imagePath.c_str(), jpegOpen, jpegClose, jpegRead, jpegSeek, jpegMeasureCallback);
   const ScopedCleanup cleanup{[&jpeg]() { jpeg->close(); }};
-  if (rc != 1) return true;
+  if (rc != 1) return X4Tone::Brighten;
 
   JpegLumProbe probe;
   jpeg->setPixelType(EIGHT_BIT_GRAYSCALE);
   jpeg->setUserPointer(&probe);
-  if (jpeg->decode(0, 0, JPEG_SCALE_EIGHTH) != 1 || probe.count == 0) return true;
+  if (jpeg->decode(0, 0, JPEG_SCALE_EIGHTH) != 1 || probe.count == 0) return X4Tone::Brighten;
 
-  const uint32_t darkPct = probe.dark * 100u / probe.count;
+  const uint32_t darkPct   = probe.dark   * 100u / probe.count;
   const uint32_t brightPct = probe.bright * 100u / probe.count;
-  // Bimodal high-contrast image (dark bg + bright text): skip the brighten lift
-  // (it greys the bg and crushes white-text contrast) AND use nearest-neighbor
-  // upscale (bilinear would blur the thin strokes).
-  bimodalText = darkPct >= X4_DARK_FRACTION_PCT && brightPct >= X4_BRIGHT_FRACTION_PCT;
-  const bool brighten = darkPct >= X4_DARK_FRACTION_PCT && !bimodalText;
-  LOG_DBG("JPG", "Dark %u%% Bright %u%% (%s)", darkPct, brightPct,
-          brighten ? "dark/brighten" : (bimodalText ? "bimodal-text/skip+sharp" : "light/skip"));
-  return brighten;
+  const uint32_t midPct    = probe.mid    * 100u / probe.count;
+
+  const X4Tone tone = classifyImageTone(darkPct, brightPct, midPct);
+  // Text images (white-on-dark → None+dark, grey-on-dark → DarkText) need sharp
+  // upscale; dark photos (Brighten) and light images (None+not-dark) use bilinear.
+  sharpUpscale = (tone != X4Tone::Brighten) && (darkPct >= X4_DARK_FRACTION_PCT);
+
+  const char* label = (tone == X4Tone::DarkText)  ? "grey-on-dark/darktext+sharp"
+                    : (tone == X4Tone::None && darkPct >= X4_DARK_FRACTION_PCT) ? "white-on-dark/sharp"
+                    : (tone == X4Tone::Brighten)   ? "dark/brighten"
+                                                   : "light/skip";
+  LOG_DBG("JPG", "Dark %u%% Bright %u%% Mid %u%% (%s)", darkPct, brightPct, midPct, label);
+  return tone;
 }
 
 }  // namespace
@@ -483,13 +498,14 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
     return false;
   }
 
-  // Only the 4-level X4 path applies the brighten tone curve. For that path, probe
-  // mean luminance so light/white-bg images skip the lift. Done before allocating
-  // the real decoder so only one JPEGDEC (~20 KB) is ever live at a time. The 1-bit
-  // (X3) and no-dither paths don't use the curve, so skip the probe entirely.
-  bool bimodalText = false;
-  const bool brightenDark =
-      (!config.oneBitDither && config.useDithering) ? jpegImageIsDark(imagePath, bimodalText) : true;
+  // Only the 4-level X4 path applies a tone curve. For that path, probe luminance
+  // to classify the image (light / dark-photo / grey-on-dark / white-on-dark) and
+  // select the right curve + upscale mode. Done before allocating the real decoder
+  // so only one JPEGDEC (~20 KB) is ever live at a time. The 1-bit (X3) and
+  // no-dither paths don't use the curve, so skip the probe entirely.
+  bool sharpUpscale = false;
+  const X4Tone tone =
+      (!config.oneBitDither && config.useDithering) ? jpegImageIsDark(imagePath, sharpUpscale) : X4Tone::None;
 
   std::unique_ptr<JPEGDEC> jpeg(new (std::nothrow) JPEGDEC());
   if (!jpeg) {
@@ -502,8 +518,8 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   ctx.config = &config;
   ctx.screenWidth = renderer.getScreenWidth();
   ctx.screenHeight = renderer.getScreenHeight();
-  ctx.brightenDark = brightenDark;
-  ctx.sharpUpscale = bimodalText;
+  ctx.tone = tone;
+  ctx.sharpUpscale = sharpUpscale;
 
   int rc = jpeg->open(imagePath.c_str(), jpegOpen, jpegClose, jpegRead, jpegSeek, jpegDrawCallback);
   const ScopedCleanup cleanup{[&jpeg]() { jpeg->close(); }};

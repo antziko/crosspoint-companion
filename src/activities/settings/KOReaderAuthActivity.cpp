@@ -41,9 +41,15 @@ void KOReaderAuthActivity::performAuthentication() {
     if (result == KOReaderSyncClient::OK) {
       state = SUCCESS;
       statusMessage = tr(STR_AUTH_SUCCESS);
+      // targetServerIndex was set active in onEnter(); leave it as the sync server.
     } else {
       state = FAILED;
       errorMessage = KOReaderSyncClient::errorString(result);
+      // Restore the previous active server so a failed auth doesn't change the sync server.
+      if (targetServerIndex >= 0 && previousActiveIndex >= 0) {
+        KOREADER_STORE.setActiveIndex(previousActiveIndex);
+        KOREADER_STORE.saveToFile();
+      }
     }
   }
   requestUpdate();
@@ -51,6 +57,13 @@ void KOReaderAuthActivity::performAuthentication() {
 
 void KOReaderAuthActivity::onEnter() {
   Activity::onEnter();
+
+  // If a specific server should be tested, make it active now so the sync client reads its creds.
+  if (targetServerIndex >= 0) {
+    previousActiveIndex = KOREADER_STORE.getActiveIndex();
+    KOREADER_STORE.setActiveIndex(targetServerIndex);
+    KOREADER_STORE.saveToFile();
+  }
 
   // Check if already connected
   if (WiFi.status() == WL_CONNECTED) {
@@ -69,7 +82,7 @@ void KOReaderAuthActivity::onExit() {
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(false);
     delay(30);
-    silentRestart();
+    silentRestartToSettings(/*System=*/3);
   }
 }
 

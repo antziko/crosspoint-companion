@@ -146,6 +146,7 @@ struct SettingInfo {
 class SettingsActivity final : public Activity {
   ButtonNavigator buttonNavigator;
 
+  int initialCategory = 0;         // Category to open on first onEnter()
   int selectedCategoryIndex = 0;  // Currently selected category
   int selectedSettingIndex = 0;
   int settingsCount = 0;
@@ -170,8 +171,8 @@ class SettingsActivity final : public Activity {
   void syncQuickResumeTimeoutForSleepScreen(bool sleepScreenChanged, bool quickResumeTimeoutChanged);
 
  public:
-  explicit SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-      : Activity("Settings", renderer, mappedInput) {}
+  explicit SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, int initialCategory = 0)
+      : Activity("Settings", renderer, mappedInput), initialCategory(initialCategory) {}
   void onEnter() override;
   void onExit() override;
   void loop() override;

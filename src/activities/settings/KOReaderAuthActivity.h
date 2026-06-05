@@ -10,8 +10,14 @@
  */
 class KOReaderAuthActivity final : public Activity {
  public:
-  explicit KOReaderAuthActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-      : Activity("KOReaderAuth", renderer, mappedInput) {}
+  /**
+   * @param targetServerIndex Index into KOReaderCredentialStore to make active before
+   *        authenticating, or -1 (default) to authenticate without changing the active server.
+   *        On success the target server stays active; on failure the previous active is restored.
+   */
+  explicit KOReaderAuthActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
+                                int targetServerIndex = -1)
+      : Activity("KOReaderAuth", renderer, mappedInput), targetServerIndex(targetServerIndex) {}
 
   void onEnter() override;
   void onExit() override;
@@ -25,6 +31,8 @@ class KOReaderAuthActivity final : public Activity {
   State state = WIFI_SELECTION;
   std::string statusMessage;
   std::string errorMessage;
+  int targetServerIndex;
+  int previousActiveIndex = -1;
 
   void onWifiSelectionComplete(bool success);
   void performAuthentication();

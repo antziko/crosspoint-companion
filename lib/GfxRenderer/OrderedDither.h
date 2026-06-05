@@ -18,6 +18,20 @@ enum ImageDitherMode : uint8_t {
   IMG_DITHER_ERROR_DIFFUSION = 2,
 };
 
+// X4 tone curve selector — three regimes for the 4-level ordered-dither path.
+// Passed through the image-converter hot loops so each image uses the curve
+// matched to its content class (detected by the pre-decode luminance probe).
+//
+//   None     : no tone curve; 4-level quantization with raw input luminance.
+//              Used for light/white-background images and the bimodal white-text
+//              path where the background must not be lifted.
+//   Brighten : mild lift via toneMapX4 (gamma 0.65). Default for dark photos.
+//   DarkText : stronger lift via toneMapX4DarkText (gamma 0.50 + black anchor).
+//              Used for grey text on a dark background (terminal/code screenshots
+//              where text is not pure white). Pushes mid-grey text up a level
+//              while anchoring the background to solid black.
+enum class X4Tone : uint8_t { None, Brighten, DarkText };
+
 // --- X3 tone curve (gamma) applied before 1-bit dithering -------------------
 // 1-bit dithering ties white-dot density directly to the gray value, but e-ink
 // "dot gain" (black dots spread larger than their cell) makes dithered midtones
@@ -131,6 +145,53 @@ inline constexpr uint8_t X4_BRIGHT_PIXEL_CUTOFF = 200;
 // pixels alongside a mostly-dark image is the signature of white-on-black text.
 inline constexpr uint8_t X4_BRIGHT_FRACTION_PCT = 2;
 
+// --- Grey-text-on-dark detection (DarkText tone path) -----------------------
+// A dark image whose text is GREY (not white) — typical of many terminal/code
+// screenshots where text colour is e.g. #AAAAAA or similar — has no near-white
+// pixels to trigger the bimodal threshold above. Without special handling those
+// images fall into the "dark photo" bucket and get only the mild Brighten curve,
+// leaving grey text barely one level above the black background.
+//
+// Detection criterion (applied only when X4_DARK_FRACTION_PCT is already met):
+//   1. Near-white fraction is LOW (< X4_BRIGHT_FRACTION_PCT) — not white-on-dark.
+//   2. Mid-grey fraction is in [MIN, MAX] — enough grey pixels for text but not
+//      so many that it looks like a continuous-tone photo with uniform midtones.
+//
+//   X4_TEXT_PIXEL_CUTOFF    : lower bound of the "grey text" band.
+//                             Pixels in [X4_TEXT_PIXEL_CUTOFF, X4_BRIGHT_PIXEL_CUTOFF)
+//                             are counted as mid-grey candidates.
+//   X4_TEXT_FRACTION_MIN_PCT: minimum % of mid-grey pixels (sparse glyph coverage).
+//   X4_TEXT_FRACTION_MAX_PCT: maximum % of mid-grey pixels. A smooth-gradient photo
+//                             has continuous midtones well above this; sparse text
+//                             glyphs on a dark field stay under it.
+//
+// TUNE THESE on-device:
+//   Raise TEXT_PIXEL_CUTOFF if very dark grey text isn't detected.
+//   Lower TEXT_FRACTION_MAX_PCT if dark photos are wrongly classified as grey-text.
+inline constexpr uint8_t X4_TEXT_PIXEL_CUTOFF = 110;
+inline constexpr uint8_t X4_TEXT_FRACTION_MIN_PCT = 2;
+inline constexpr uint8_t X4_TEXT_FRACTION_MAX_PCT = 25;
+
+// --- X4 DarkText tone curve -------------------------------------------------
+// Stronger lift specifically for grey-text-on-dark images. The Brighten curve
+// (gamma 0.65) is too mild — grey text in the ~110–190 luminance band quantizes
+// to level 1 (near-black) after the 4-level dither, invisible against the
+// background. A gamma of 0.50 pushes those midtones up to levels 2–3 (visible
+// grey / near-white). The black anchor (40) forces true-black background pixels
+// to stay solid black so the lifted curve doesn't grey out the bg.
+//
+// NOTE: changing these constants changes dithered pixel data stored in the EPUB
+// pixel cache. Bump the cache suffix in ImageBlock.cpp whenever retuning.
+//
+// TUNE THESE on-device:
+//   X4_DARKTEXT_GAMMA       : lower = brighter midtones (push grey text up further).
+//                             0.50 is a fairly aggressive lift; try 0.45 if still dark.
+//   X4_DARKTEXT_BLACK_ANCHOR: larger = more bg pixels forced solid black. Should be
+//                             just below the typical bg luminance. 40 handles most
+//                             near-black backgrounds; raise to ~60 if bg greys out.
+inline constexpr float X4_DARKTEXT_GAMMA = 0.50f;
+inline constexpr int X4_DARKTEXT_BLACK_ANCHOR = 40;
+
 inline uint8_t toneMapX4(uint8_t gray) {
   static uint8_t lut[256];
   static bool ready = false;
@@ -151,13 +212,44 @@ inline uint8_t toneMapX4(uint8_t gray) {
   return lut[gray];
 }
 
-// 4-level ordered dither (returns 0..3) with the X4 tone curve. Uses the shared
-// 8x8 Bayer or 64x64 blue-noise field (caller picks via `blueNoise`) — same
-// fields as the 1-bit path, so the "Image Dither" setting applies to X4 too,
+// Tone LUT for the DarkText path. Mirrors toneMapX4 but uses
+// X4_DARKTEXT_GAMMA / X4_DARKTEXT_BLACK_ANCHOR for a stronger lift.
+inline uint8_t toneMapX4DarkText(uint8_t gray) {
+  static uint8_t lut[256];
+  static bool ready = false;
+  if (!ready) {
+    const float span = 255.0f - X4_DARKTEXT_BLACK_ANCHOR;
+    for (int i = 0; i < 256; i++) {
+      if (i <= X4_DARKTEXT_BLACK_ANCHOR || span <= 0.0f) {
+        lut[i] = 0;
+        continue;
+      }
+      float n = (i - X4_DARKTEXT_BLACK_ANCHOR) / span;
+      float c = (X4_DARKTEXT_GAMMA == 1.0f) ? n : powf(n, X4_DARKTEXT_GAMMA);
+      int v = static_cast<int>(c * 255.0f + 0.5f);
+      lut[i] = v > 255 ? 255 : static_cast<uint8_t>(v);
+    }
+    ready = true;
+  }
+  return lut[gray];
+}
+
+// 4-level ordered dither (returns 0..3) with selectable X4 tone curve. Uses the
+// shared 8x8 Bayer or 64x64 blue-noise field (caller picks via `blueNoise`) —
+// same fields as the 1-bit path, so the "Image Dither" setting applies to X4 too,
 // and blue noise replaces the visible 4x4 crosshatch. Standard ordered-dither
 // quantization to 4 levels: level = floor(scaled + t), scaled = gray/255*3.
-inline uint8_t orderedDither4Level(uint8_t gray, int x, int y, bool blueNoise, bool brighten = true) {
-  if (brighten) gray = toneMapX4(gray);
+//
+// `tone` selects which curve is applied before quantization:
+//   None     : raw input (no lift)
+//   Brighten : mild toneMapX4 (default; dark photos, BMP path)
+//   DarkText : strong toneMapX4DarkText (grey text on dark background)
+inline uint8_t orderedDither4Level(uint8_t gray, int x, int y, bool blueNoise, X4Tone tone = X4Tone::Brighten) {
+  switch (tone) {
+    case X4Tone::Brighten:  gray = toneMapX4(gray); break;
+    case X4Tone::DarkText:  gray = toneMapX4DarkText(gray); break;
+    case X4Tone::None:      break;
+  }
   const int thresh = blueNoise ? blueNoise64[y & 63][x & 63] : bayer8x8Thresh[y & 7][x & 7];
   const int level = (gray * 768 / 255 + thresh) / 256;  // 0..3
   return level > 3 ? 3 : static_cast<uint8_t>(level);

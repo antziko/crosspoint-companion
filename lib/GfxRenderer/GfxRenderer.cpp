@@ -1399,6 +1399,18 @@ void GfxRenderer::displayBuffer(const HalDisplay::RefreshMode refreshMode) const
   display.displayBuffer(mode, fadingFix);
 }
 
+void GfxRenderer::displayWindowRegion(int lx, int ly, int lw, int lh) const {
+  const AlignedMemRect mem = screenRectToAlignedMemRect(orientation, lx, ly, lw, lh, panelWidth, panelHeight);
+  if (!mem.valid) {
+    // Fallback: full-frame fast refresh so callers always get a panel update.
+    LOG_DBG("GFX", "displayWindowRegion: invalid rect (%d,%d,%d,%d) — fallback to full refresh", lx, ly, lw, lh);
+    display.displayBuffer(HalDisplay::FAST_REFRESH, fadingFix);
+    return;
+  }
+  LOG_DBG("GFX", "displayWindowRegion: native (%d,%d,%d,%d)", mem.x, mem.y, mem.w, mem.h);
+  display.displayWindow(mem.x, mem.y, mem.w, mem.h);
+}
+
 size_t GfxRenderer::readFramebufferRegion(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint8_t* dst,
                                           size_t dstCapacity) const {
   if (dst == nullptr || w == 0 || h == 0) return 0;

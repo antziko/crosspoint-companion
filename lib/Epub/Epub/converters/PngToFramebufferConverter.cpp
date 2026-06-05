@@ -39,11 +39,10 @@ struct PngContext {
 
   uint8_t* grayLineBuffer{nullptr};
 
-  // Per-image dark-background verdict (mean luminance < threshold). Gates the X4
-  // brighten curve so light/white-bg images aren't washed out. Set by a sampled
-  // measure pass before the real decode; defaults true (= always brighten, prior
-  // behaviour) when the probe can't run.
-  bool brightenDark{true};
+  // Per-image tone curve selection (see X4Tone in OrderedDither.h). Determined by
+  // a sampled luminance probe before the real decode. Defaults to Brighten
+  // (= mild lift, prior behaviour for dark images) so a probe failure is safe.
+  X4Tone tone{X4Tone::Brighten};
 };
 
 // File I/O callbacks use pFile->fHandle to access the HalFile*,
@@ -202,7 +201,7 @@ int pngDrawCallback(PNGDRAW* pDraw) {
   bool useDithering = ctx->config->useDithering;
   bool oneBit = ctx->config->oneBitDither;
   bool blueNoise = ctx->config->ditherBlueNoise;
-  bool brighten = ctx->brightenDark;
+  X4Tone tone = ctx->tone;
   bool caching = ctx->caching;
 
   // Pre-compute orientation and render-mode state once per row
@@ -224,7 +223,7 @@ int pngDrawCallback(PNGDRAW* pDraw) {
     if (outX < screenWidth) {
       uint8_t gray = ctx->grayLineBuffer[srcX];
 
-      uint8_t ditheredGray = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, brighten);
+      uint8_t ditheredGray = ditherPixel(gray, outX, outY, useDithering, oneBit, blueNoise, tone);
       pw.writePixel(outX, ditheredGray);
       if (caching) cw.writePixel(outX, ditheredGray);
     }
@@ -242,18 +241,19 @@ int pngDrawCallback(PNGDRAW* pDraw) {
 
 // Accumulator + scratch for the measure pass. `gray` is a srcWidth-byte scratch
 // buffer reused across rows so convertLineToGray can handle every PNG pixel type.
-// Counts dark vs total sampled pixels (dark-fraction metric; see OrderedDither.h).
+// Counts dark, bright, and mid-grey sampled pixels (see OrderedDither.h).
 struct PngLumProbe {
   uint32_t dark{0};
   uint32_t bright{0};
+  uint32_t mid{0};   // pixels in [X4_TEXT_PIXEL_CUTOFF, X4_BRIGHT_PIXEL_CUTOFF)
   uint32_t count{0};
   int srcWidth{0};
   uint8_t* gray{nullptr};
 };
 
-// Measure-pass draw callback: counts dark pixels over a sampled subset of
-// rows/columns (PNGdec has no cheap downscale, so we sample to keep it light).
-// pUser is a PngLumProbe*.
+// Measure-pass draw callback: counts dark, bright, and mid-grey pixels over a
+// sampled subset of rows/columns (PNGdec has no cheap downscale, so we sample
+// to keep it light). pUser is a PngLumProbe*.
 int pngMeasureCallback(PNGDRAW* pDraw) {
   auto* probe = reinterpret_cast<PngLumProbe*>(pDraw->pUser);
   if (!probe || !probe->gray) return 0;
@@ -263,46 +263,50 @@ int pngMeasureCallback(PNGDRAW* pDraw) {
   for (int x = 0; x < probe->srcWidth; x += 2) {  // sample every other column
     if (probe->gray[x] <= X4_DARK_PIXEL_CUTOFF) probe->dark++;
     if (probe->gray[x] >= X4_BRIGHT_PIXEL_CUTOFF) probe->bright++;
+    if (probe->gray[x] >= X4_TEXT_PIXEL_CUTOFF && probe->gray[x] < X4_BRIGHT_PIXEL_CUTOFF) probe->mid++;
     probe->count++;
   }
   return 1;
 }
 
-// Sampled mean-luminance probe: decodes the PNG once and returns whether the
-// image is dark enough to warrant the X4 brighten curve. Returns true (= brighten,
-// prior behaviour) on any probe failure. Runs only on cache miss.
-bool pngImageIsDark(const std::string& imagePath) {
-  if (ESP.getFreeHeap() < MIN_FREE_HEAP_FOR_PNG) return true;
+// Sampled luminance probe: decodes the PNG once and classifies the image into
+// one of four tonal classes (see jpegImageIsDark for the full classification
+// rationale). Returns the X4 tone curve to apply; returns X4Tone::Brighten on
+// any probe failure so a decode error never regresses a dark image.
+X4Tone pngImageIsDark(const std::string& imagePath) {
+  if (ESP.getFreeHeap() < MIN_FREE_HEAP_FOR_PNG) return X4Tone::Brighten;
 
   std::unique_ptr<PNG> png(new (std::nothrow) PNG());
-  if (!png) return true;
+  if (!png) return X4Tone::Brighten;
 
   int rc = png->open(imagePath.c_str(), pngOpenWithHandle, pngCloseWithHandle, pngReadWithHandle, pngSeekWithHandle,
                      pngMeasureCallback);
   const ScopedCleanup cleanup{[&png]() { png->close(); }};
-  if (rc != PNG_SUCCESS) return true;
+  if (rc != PNG_SUCCESS) return X4Tone::Brighten;
 
   const int srcWidth = png->getWidth();
-  if (srcWidth <= 0) return true;
-  if (requiredPngInternalBufferBytes(srcWidth, png->getPixelType()) > PNG_MAX_BUFFERED_PIXELS) return true;
+  if (srcWidth <= 0) return X4Tone::Brighten;
+  if (requiredPngInternalBufferBytes(srcWidth, png->getPixelType()) > PNG_MAX_BUFFERED_PIXELS) return X4Tone::Brighten;
 
   PngLumProbe probe;
   probe.srcWidth = srcWidth;
   auto grayBuf = makeUniqueNoThrow<uint8_t[]>(srcWidth);
-  if (!grayBuf) return true;
+  if (!grayBuf) return X4Tone::Brighten;
   probe.gray = grayBuf.get();
 
-  if (png->decode(&probe, 0) != PNG_SUCCESS || probe.count == 0) return true;
+  if (png->decode(&probe, 0) != PNG_SUCCESS || probe.count == 0) return X4Tone::Brighten;
 
-  const uint32_t darkPct = probe.dark * 100u / probe.count;
+  const uint32_t darkPct   = probe.dark   * 100u / probe.count;
   const uint32_t brightPct = probe.bright * 100u / probe.count;
-  // Skip the brighten lift for bimodal high-contrast images (dark bg + bright text):
-  // lifting greys the background and crushes the white-text contrast.
-  const bool bimodalText = darkPct >= X4_DARK_FRACTION_PCT && brightPct >= X4_BRIGHT_FRACTION_PCT;
-  const bool brighten = darkPct >= X4_DARK_FRACTION_PCT && !bimodalText;
-  LOG_DBG("PNG", "Dark %u%% Bright %u%% (%s)", darkPct, brightPct,
-          brighten ? "dark/brighten" : (bimodalText ? "bimodal-text/skip" : "light/skip"));
-  return brighten;
+  const uint32_t midPct    = probe.mid    * 100u / probe.count;
+
+  const X4Tone tone = classifyImageTone(darkPct, brightPct, midPct);
+  const char* label = (tone == X4Tone::DarkText)  ? "grey-on-dark/darktext"
+                    : (tone == X4Tone::None && darkPct >= X4_DARK_FRACTION_PCT) ? "white-on-dark/skip"
+                    : (tone == X4Tone::Brighten)   ? "dark/brighten"
+                                                   : "light/skip";
+  LOG_DBG("PNG", "Dark %u%% Bright %u%% Mid %u%% (%s)", darkPct, brightPct, midPct, label);
+  return tone;
 }
 
 }  // namespace
@@ -345,11 +349,11 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
     return false;
   }
 
-  // Only the 4-level X4 path applies the brighten tone curve. For that path, probe
-  // mean luminance so light/white-bg images skip the lift. Done before allocating
-  // the real decoder so only one PNG decoder (~42 KB) is ever live at a time. The
+  // Only the 4-level X4 path applies a tone curve. For that path, probe luminance
+  // to classify the image and select the right curve. Done before allocating the
+  // real decoder so only one PNG decoder (~42 KB) is ever live at a time. The
   // 1-bit (X3) and no-dither paths don't use the curve, so skip the probe entirely.
-  const bool brightenDark = (!config.oneBitDither && config.useDithering) ? pngImageIsDark(imagePath) : true;
+  const X4Tone tone = (!config.oneBitDither && config.useDithering) ? pngImageIsDark(imagePath) : X4Tone::None;
 
   // Heap-allocate PNG decoder (~42 KB) - freed at end of function
   std::unique_ptr<PNG> png(new (std::nothrow) PNG());
@@ -363,7 +367,7 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
   ctx.config = &config;
   ctx.screenWidth = renderer.getScreenWidth();
   ctx.screenHeight = renderer.getScreenHeight();
-  ctx.brightenDark = brightenDark;
+  ctx.tone = tone;
 
   int rc = png->open(imagePath.c_str(), pngOpenWithHandle, pngCloseWithHandle, pngReadWithHandle, pngSeekWithHandle,
                      pngDrawCallback);

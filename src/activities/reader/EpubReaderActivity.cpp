@@ -9,6 +9,7 @@
 #include <I18n.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <Serialization.h>
 #include <esp_system.h>
 
 #include <algorithm>
@@ -18,6 +19,9 @@
 
 #include "../settings/DictionarySelectActivity.h"
 #include "BookmarkStore.h"
+#include "ReaderOptionsActivity.h"
+#include "ReaderSettingsIO.h"
+#include "SdCardFontSystem.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "DictionaryWordSelectActivity.h"
@@ -187,6 +191,34 @@ void EpubReaderActivity::onEnter() {
   // NOTE: This affects layout math and must be applied before any render calls.
   ReaderUtils::applyOrientation(renderer, APP_STATE.activeOrientation);
 
+  // Load per-book reader settings; seed from current globals on first open.
+  {
+    CrossPointSettings::ReaderOverride bookOverride;
+    if (!ReaderSettingsIO::load(epub->getCachePath(), bookOverride)) {
+      // First open — snapshot the current global render defaults for this book.
+      bookOverride.active = true;
+      bookOverride.fontFamily = SETTINGS.fontFamily;
+      bookOverride.fontSize = SETTINGS.fontSize;
+      bookOverride.lineSpacing = SETTINGS.lineSpacing;
+      bookOverride.paragraphAlignment = SETTINGS.paragraphAlignment;
+      bookOverride.hyphenationEnabled = SETTINGS.hyphenationEnabled;
+      bookOverride.extraParagraphSpacing = SETTINGS.extraParagraphSpacing;
+      static_assert(sizeof(bookOverride.sdFontFamilyName) == sizeof(SETTINGS.sdFontFamilyName),
+                    "sdFontFamilyName size mismatch");
+      strncpy(bookOverride.sdFontFamilyName, SETTINGS.sdFontFamilyName,
+              sizeof(bookOverride.sdFontFamilyName) - 1);
+      bookOverride.sdFontFamilyName[sizeof(bookOverride.sdFontFamilyName) - 1] = '\0';
+      if (!ReaderSettingsIO::write(epub->getCachePath(), bookOverride)) {
+        LOG_ERR("ERS", "Failed to seed per-book reader settings");
+      }
+    }
+    SETTINGS.setReaderOverride(bookOverride);
+  }
+
+  // Reload any SD-card font at this book's (override) size before the first layout,
+  // so SD/CJK fonts honor the per-book font size like built-in fonts do.
+  sdFontSystem.ensureLoaded(renderer);
+
   HalFile f;
   if (Storage.openFileForRead("ERS", epub->getCachePath() + "/progress.bin", f)) {
     uint8_t data[6];
@@ -231,6 +263,12 @@ void EpubReaderActivity::onEnter() {
 
 void EpubReaderActivity::onExit() {
   Activity::onExit();
+
+  // Restore global render settings view for home screen / settings / TXT reader.
+  SETTINGS.clearReaderOverride();
+  // Reload any SD-card font back to the global size so the home/library UI (which
+  // does not re-sync the SD font itself) matches the global font size again.
+  sdFontSystem.ensureLoaded(renderer);
 
   // Reset orientation back to portrait for the rest of the UI
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
@@ -325,17 +363,18 @@ void EpubReaderActivity::loop() {
     }
     if (SETTINGS.holdConfirmAction == CrossPointSettings::HOLD_CONFIRM_BOOKMARK &&
         mappedInput.getHeldTime() >= ReaderUtils::BOOKMARK_HOLD_MS && !showBookmarkMessage) {
-      addBookmark();
-      showBookmarkMessage = true;
       ignoreNextConfirmRelease = true;
-      bookmarkMessageTime = millis();
-      requestUpdate();
+      addBookmark(false, /*lightRefresh=*/true);
     }
   }
 
   if (showBookmarkMessage && (millis() - bookmarkMessageTime) >= ReaderUtils::BOOKMARK_MESSAGE_DURATION_MS) {
     showBookmarkMessage = false;
-    requestUpdate();
+    if (!bookmarkMessageLightRefresh) {
+      // Popup path: re-render to clear the center popup off the page content.
+      requestUpdate();
+    }
+    bookmarkMessageLightRefresh = false;
   }
 
   // Enter reader menu activity.
@@ -535,18 +574,11 @@ void EpubReaderActivity::openReaderMenu() {
     }
   }
 
-  bool isCurrentPageBookmarked = false;
-  if (section && section->pageCount > 0) {
-    const float bmProgress = static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
-    isCurrentPageBookmarked = BOOKMARKS.hasBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
-                                                           section->pageCount);
-  }
-
   startActivityForResult(
       std::make_unique<EpubReaderMenuActivity>(
           renderer, mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent,
           APP_STATE.activeOrientation,
-          !currentPageFootnotes.empty(), isCurrentPageBookmarked,
+          !currentPageFootnotes.empty(),
           Dictionary::exists(epub->getCachePath().c_str()), std::move(activeDictName)),
       [this](const ActivityResult& result) {
         // Always apply orientation change even if the menu was cancelled
@@ -629,17 +661,12 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       const uint16_t spine = static_cast<uint16_t>(currentSpineIndex);
       const float progress = static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
       if (BOOKMARKS.hasBookmarkForPage(spine, progress, section->pageCount)) {
+        // Remove: update only the status-bar strip so the image stays untouched.
         BOOKMARKS.removeBookmarkForPage(spine, progress, section->pageCount);
-        // Use the timed message (auto-dismisses) instead of a sticky popup, so
-        // it clears when toggled from the reader (e.g. long-press), not just on
-        // the next menu-driven re-render.
-        showBookmarkMessage = true;
-        bookmarkMessageRemoved = true;
-        bookmarkMessageReturn = false;
-        bookmarkMessageTime = millis();
-        requestUpdate();
+        lightStatusBarRefresh();
       } else {
-        addBookmark();
+        // Add: same light-refresh path — tab appears without re-rendering the page.
+        addBookmark(false, /*lightRefresh=*/true);
       }
       break;
     }
@@ -661,7 +688,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
                     static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
                 if (!BOOKMARKS.hasBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
                                                   section->pageCount)) {
-                  addBookmark(/*returnMark=*/true);
+                  addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
                 }
               }
 
@@ -713,7 +740,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
                     static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
                 if (!BOOKMARKS.hasBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
                                                   section->pageCount)) {
-                  addBookmark(/*returnMark=*/true);
+                  addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
                 }
               }
 
@@ -829,6 +856,24 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
     case EpubReaderMenuActivity::MenuAction::SET_BOOK_DICTIONARY: {
       startActivityForResult(std::make_unique<DictionarySelectActivity>(renderer, mappedInput, epub->getCachePath()),
                              [this](const ActivityResult&) { openReaderMenu(); });
+      break;
+    }
+    case EpubReaderMenuActivity::MenuAction::READER_OPTIONS: {
+      startActivityForResult(
+          std::make_unique<ReaderOptionsActivity>(renderer, mappedInput, epub->getCachePath(),
+                                                  SETTINGS.getReaderOverride()),
+          [this](const ActivityResult&) {
+            // Re-layout: the per-book settings may have changed, so discard the
+            // cached section and let render() rebuild it with the new parameters.
+            RenderLock lock(*this);
+            // Reload any SD-card font at the new (override) size first; the
+            // size-encoded font ID then forces the section cache to rebuild.
+            sdFontSystem.ensureLoaded(renderer);
+            section.reset();
+            // The options screen exits on a Back press; swallow the matching
+            // release so it doesn't bubble up to the reader's onGoHome().
+            ignoreBackUntilRelease = true;
+          });
       break;
     }
     case EpubReaderMenuActivity::MenuAction::VIEW_BOOKMARKS: {
@@ -1019,9 +1064,9 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     section = std::unique_ptr<Section>(new Section(epub, currentSpineIndex, renderer));
 
     if (!section->loadSectionFile(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
-                                  SETTINGS.extraParagraphSpacing, SETTINGS.paragraphAlignment, viewportWidth,
-                                  viewportHeight, SETTINGS.hyphenationEnabled, SETTINGS.embeddedStyle,
-                                  SETTINGS.imageRendering, SETTINGS.focusReadingEnabled)) {
+                                  SETTINGS.getReaderExtraParagraphSpacing(), SETTINGS.getReaderParagraphAlignment(),
+                                  viewportWidth, viewportHeight, SETTINGS.getReaderHyphenationEnabled(),
+                                  SETTINGS.embeddedStyle, SETTINGS.imageRendering, SETTINGS.focusReadingEnabled)) {
       LOG_DBG("ERS", "Cache not found, building...");
 
       const Rect indexingPopup = GUI.drawPopup(renderer, tr(STR_INDEXING));
@@ -1033,9 +1078,10 @@ void EpubReaderActivity::render(RenderLock&& lock) {
       };
 
       if (!section->createSectionFile(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
-                                      SETTINGS.extraParagraphSpacing, SETTINGS.paragraphAlignment, viewportWidth,
-                                      viewportHeight, SETTINGS.hyphenationEnabled, SETTINGS.embeddedStyle,
-                                      SETTINGS.imageRendering, SETTINGS.focusReadingEnabled, popupFn)) {
+                                      SETTINGS.getReaderExtraParagraphSpacing(), SETTINGS.getReaderParagraphAlignment(),
+                                      viewportWidth, viewportHeight, SETTINGS.getReaderHyphenationEnabled(),
+                                      SETTINGS.embeddedStyle, SETTINGS.imageRendering, SETTINGS.focusReadingEnabled,
+                                      popupFn)) {
         LOG_ERR("ERS", "Failed to persist page data to SD");
         buildFailedSpine = currentSpineIndex;  // stop the per-frame rebuild loop
         section.reset();
@@ -1168,7 +1214,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     ScreenshotUtil::takeScreenshot(renderer);
   }
 
-  if (showBookmarkMessage) {
+  if (showBookmarkMessage && !bookmarkMessageLightRefresh) {
     const StrId msgId = bookmarkMessageRemoved   ? StrId::STR_BOOKMARK_REMOVED
                         : bookmarkMessageReturn  ? StrId::STR_RETURN_MARK_ADDED
                                                  : StrId::STR_BOOKMARK_ADDED;
@@ -1193,17 +1239,17 @@ void EpubReaderActivity::silentIndexNextChapterIfNeeded(const uint16_t viewportW
 
   Section nextSection(epub, nextSpineIndex, renderer);
   if (nextSection.loadSectionFile(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
-                                  SETTINGS.extraParagraphSpacing, SETTINGS.paragraphAlignment, viewportWidth,
-                                  viewportHeight, SETTINGS.hyphenationEnabled, SETTINGS.embeddedStyle,
-                                  SETTINGS.imageRendering, SETTINGS.focusReadingEnabled)) {
+                                  SETTINGS.getReaderExtraParagraphSpacing(), SETTINGS.getReaderParagraphAlignment(),
+                                  viewportWidth, viewportHeight, SETTINGS.getReaderHyphenationEnabled(),
+                                  SETTINGS.embeddedStyle, SETTINGS.imageRendering, SETTINGS.focusReadingEnabled)) {
     return;
   }
 
   LOG_DBG("ERS", "Silently indexing next chapter: %d", nextSpineIndex);
   if (!nextSection.createSectionFile(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
-                                     SETTINGS.extraParagraphSpacing, SETTINGS.paragraphAlignment, viewportWidth,
-                                     viewportHeight, SETTINGS.hyphenationEnabled, SETTINGS.embeddedStyle,
-                                     SETTINGS.imageRendering, SETTINGS.focusReadingEnabled)) {
+                                     SETTINGS.getReaderExtraParagraphSpacing(), SETTINGS.getReaderParagraphAlignment(),
+                                     viewportWidth, viewportHeight, SETTINGS.getReaderHyphenationEnabled(),
+                                     SETTINGS.embeddedStyle, SETTINGS.imageRendering, SETTINGS.focusReadingEnabled)) {
     LOG_ERR("ERS", "Failed silent indexing for chapter: %d", nextSpineIndex);
   }
 }
@@ -1215,6 +1261,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
                                         const int orientedMarginRight, const int orientedMarginBottom,
                                         const int orientedMarginLeft) {
   const auto t0 = millis();
+  lastPageUsedGrayscale = false;  // cleared here; set below if grayscale pass runs
 
   // Propagate the image-dither choice (Display > Image Dither) to the renderer
   // so ImageBlock picks the dither field. EPUB images decode in JPEG blocks, so
@@ -1304,6 +1351,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   // cost stays close to one render. Both text (drawPixel) and images
   // (DirectPixelWriter) honor the active strip target.
   if (doGrayscalePass && renderer.supportsStripGrayscale()) {
+    lastPageUsedGrayscale = true;
     constexpr int STRIP_ROWS = 80;
     const int gh = renderer.getDisplayHeight();
     const int gwBytes = renderer.getDisplayWidthBytes();
@@ -1357,6 +1405,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     // Fallback path for a controller without strip support. grayscale rendering
     // TODO: Only do this if font supports it
     if (doGrayscalePass) {
+      lastPageUsedGrayscale = true;
       // Save the BW frame before the grayscale passes overwrite it, restore
       // after. Only needed when grayscale actually renders.
       renderer.storeBwBuffer();
@@ -1446,6 +1495,49 @@ void EpubReaderActivity::renderStatusBar() const {
                     returnMark);
 }
 
+void EpubReaderActivity::lightStatusBarRefresh() {
+  const int barH = static_cast<int>(UITheme::getInstance().getStatusBarHeight());
+  if (barH == 0) return;  // no status bar → no bookmark indicator to update
+
+  RenderLock lock(*this);
+
+  int orientedTop, orientedRight, orientedBottom, orientedLeft;
+  renderer.getOrientedViewableTRBL(&orientedTop, &orientedRight, &orientedBottom, &orientedLeft);
+
+  const int sw = renderer.getScreenWidth();
+  const int sh = renderer.getScreenHeight();
+
+  // Cover the full bar height plus the 14px bookmark tab that extends above it,
+  // with a small extra margin. Clamp to screen top.
+  constexpr int BOOKMARK_TAB_EXTRA = 20;
+  int stripY = sh - barH - orientedBottom - BOOKMARK_TAB_EXTRA;
+  if (stripY < 0) stripY = 0;
+  const int stripH = sh - stripY;
+
+  // Blank the strip to white so a removed bookmark tab doesn't ghost, then
+  // redraw the bar (which draws the tab only if still bookmarked).
+  renderer.fillRect(0, stripY, sw, stripH, false);
+  renderStatusBar();
+
+  if (lastPageUsedGrayscale) {
+    // AA/grayscale image page: a windowed FAST_REFRESH scans the full SSD1677
+    // panel and drives grayscale particles even for "no-change" pixels, causing
+    // progressive darkening on repeated toggles. Instead push the full BW
+    // framebuffer once — the image reverts from AA to 1-bit (still readable)
+    // until the next page turn re-applies grayscale. Tab appears immediately.
+    // No layout recompute, no image re-decode — just a single FAST push of
+    // already-rendered 1-bit content.
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    // Page no longer shows AA; treat subsequent toggles as non-AA.
+    lastPageUsedGrayscale = false;
+    return;
+  }
+
+  // Non-AA page: windowed sub-rectangle push — image area is pure 1-bit and
+  // can tolerate repeated FAST passes without charge accumulation.
+  renderer.displayWindowRegion(0, stripY, sw, stripH);
+}
+
 void EpubReaderActivity::navigateToHref(const std::string& hrefStr, const bool savePosition) {
   if (!epub) return;
 
@@ -1505,7 +1597,7 @@ void EpubReaderActivity::restoreSavedPosition() {
   requestUpdate();
 }
 
-void EpubReaderActivity::addBookmark(bool returnMark) {
+void EpubReaderActivity::addBookmark(bool returnMark, bool lightRefresh) {
   if (!section || !epub) {
     return;
   }
@@ -1544,15 +1636,26 @@ void EpubReaderActivity::addBookmark(bool returnMark) {
   const auto addResult =
       BOOKMARKS.addBookmark(spine, progress, pageCount, chapterTitle, paragraphIndex, snippet, returnMark, currentPage);
   if (addResult == BookmarkStore::AddResult::Added) {
-    showBookmarkMessage = true;
-    bookmarkMessageRemoved = false;
-    bookmarkMessageReturn = returnMark;
-    bookmarkMessageTime = millis();  // own the auto-dismiss timer (any caller)
+    if (lightRefresh) {
+      // Interactive toggle: update only the status-bar strip (image untouched).
+      // Also set showBookmarkMessage + bookmarkMessageTime as a debounce timer so
+      // hold-Confirm doesn't re-fire every loop tick while the button is held.
+      showBookmarkMessage = true;
+      bookmarkMessageLightRefresh = true;
+      bookmarkMessageTime = millis();
+      lightStatusBarRefresh();
+    } else {
+      // Navigation return-mark or other full-render path: show the timed popup
+      // and schedule a full re-render as before.
+      showBookmarkMessage = true;
+      bookmarkMessageRemoved = false;
+      bookmarkMessageReturn = returnMark;
+      bookmarkMessageTime = millis();
+      requestUpdate();
+    }
   } else {
     LOG_ERR("ERS", "Bookmark limit reached");
   }
-
-  requestUpdate();
 }
 
 ScreenshotInfo EpubReaderActivity::getScreenshotInfo() const {

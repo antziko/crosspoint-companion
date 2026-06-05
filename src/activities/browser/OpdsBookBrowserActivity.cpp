@@ -68,8 +68,9 @@ std::vector<std::string> bookFileNameCandidates(const OpdsEntry& book) {
   auto add = [&](const std::string& base) {
     if (base.empty()) return;
     std::string name = StringUtils::sanitizeFilename(base) + ".epub";
-    for (const std::string& existing : out) {
-      if (existing == name) return;
+    if (std::any_of(out.begin(), out.end(),
+                    [&name](const std::string& existing) { return existing == name; })) {
+      return;
     }
     out.push_back(std::move(name));
   };

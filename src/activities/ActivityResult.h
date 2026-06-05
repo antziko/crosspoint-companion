@@ -70,10 +70,18 @@ struct BookmarkResult {
   uint16_t paragraphIndex = std::numeric_limits<uint16_t>::max();
 };
 
+// Font picked in FontSelectionActivity. When isBuiltin, builtinIndex is the
+// built-in family index; otherwise sdFamilyName names the chosen SD-card family.
+struct FontSelectionResult {
+  bool isBuiltin = true;
+  uint8_t builtinIndex = 0;
+  std::string sdFamilyName;
+};
+
 using ResultVariant =
     std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, IntervalResult,
                  PageResult, ProgressChangeResult, NetworkModeResult, FootnoteResult, WordResult, FilePathResult,
-                 BookmarkResult>;
+                 BookmarkResult, FontSelectionResult>;
 
 struct ActivityResult {
   bool isCancelled = false;

@@ -2,6 +2,7 @@
 
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <Logging.h>
 
 #include <cstring>
 
@@ -13,15 +14,46 @@
 #include "fontIds.h"
 
 namespace {
-constexpr int MENU_ITEMS = 5;
-const StrId menuNames[MENU_ITEMS] = {StrId::STR_USERNAME, StrId::STR_PASSWORD, StrId::STR_SYNC_SERVER_URL,
-                                     StrId::STR_DOCUMENT_MATCHING, StrId::STR_AUTHENTICATE};
+// Rows always present for an existing server.
+// New servers only show the first BASE_ITEMS_NEW rows (no Authenticate or Delete).
+constexpr int BASE_ITEMS_NEW = 5;       // Name, Username, Password, Sync Server URL, Doc Matching
+constexpr int BASE_ITEMS_EXISTING = 6;  // + Authenticate
+
+// Row indices (shared between getMenuItemCount, handleSelection, render)
+constexpr int ROW_NAME = 0;
+constexpr int ROW_USERNAME = 1;
+constexpr int ROW_PASSWORD = 2;
+constexpr int ROW_URL = 3;
+constexpr int ROW_DOC_MATCH = 4;
+constexpr int ROW_AUTHENTICATE = 5;
+constexpr int ROW_DELETE = 6;
 }  // namespace
+
+int KOReaderSettingsActivity::getMenuItemCount() const {
+  if (isNewServer) return BASE_ITEMS_NEW;
+  int count = BASE_ITEMS_EXISTING;
+  if (KOREADER_STORE.getCount() > 1) count++;  // Delete only when not the last server
+  return count;
+}
 
 void KOReaderSettingsActivity::onEnter() {
   Activity::onEnter();
 
   selectedIndex = 0;
+  isNewServer = (serverIndex < 0);
+  showSaveError = false;
+
+  if (!isNewServer) {
+    const auto* server = KOREADER_STORE.getServer(static_cast<size_t>(serverIndex));
+    if (server) {
+      editServer = *server;
+    } else {
+      // Server was removed between navigation and entering this screen — treat as new
+      isNewServer = true;
+      serverIndex = -1;
+    }
+  }
+
   requestUpdate();
 }
 
@@ -38,72 +70,122 @@ void KOReaderSettingsActivity::loop() {
     return;
   }
 
-  // Handle navigation
-  buttonNavigator.onNext([this] {
-    selectedIndex = (selectedIndex + 1) % MENU_ITEMS;
+  const int menuItems = getMenuItemCount();
+  buttonNavigator.onNext([this, menuItems] {
+    selectedIndex = (selectedIndex + 1) % static_cast<size_t>(menuItems);
     requestUpdate();
   });
-
-  buttonNavigator.onPrevious([this] {
-    selectedIndex = (selectedIndex + MENU_ITEMS - 1) % MENU_ITEMS;
+  buttonNavigator.onPrevious([this, menuItems] {
+    selectedIndex = (selectedIndex + static_cast<size_t>(menuItems) - 1) % static_cast<size_t>(menuItems);
     requestUpdate();
   });
 }
 
+bool KOReaderSettingsActivity::saveServer() {
+  bool success = false;
+
+  if (isNewServer) {
+    success = KOREADER_STORE.addServer(editServer);
+    if (success) {
+      // Promote to existing so subsequent field edits update in-place
+      isNewServer = false;
+      serverIndex = static_cast<int>(KOREADER_STORE.getCount()) - 1;
+    } else {
+      LOG_ERR("KRS", "Failed to add KOReader sync server");
+    }
+  } else {
+    success = KOREADER_STORE.updateServer(static_cast<size_t>(serverIndex), editServer);
+    if (!success) {
+      LOG_ERR("KRS", "Failed to update KOReader sync server at index %d", serverIndex);
+    }
+  }
+
+  showSaveError = !success;
+  if (showSaveError) {
+    requestUpdate();
+  }
+  return success;
+}
+
 void KOReaderSettingsActivity::handleSelection() {
-  if (selectedIndex == 0) {
-    // Username
-    startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_KOREADER_USERNAME),
-                                                                   KOREADER_STORE.getUsername(), 64, InputType::Text),
-                           [this](const ActivityResult& result) {
-                             if (!result.isCancelled) {
-                               const auto& kb = std::get<KeyboardResult>(result.data);
-                               KOREADER_STORE.setCredentials(kb.text, KOREADER_STORE.getPassword());
-                               KOREADER_STORE.saveToFile();
-                             }
-                           });
-  } else if (selectedIndex == 1) {
-    // Password
+  if (selectedIndex == ROW_NAME) {
     startActivityForResult(
-        std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_KOREADER_PASSWORD),
-                                                KOREADER_STORE.getPassword(), 64, InputType::Password),
+        std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_SERVER_NAME), editServer.name, 63,
+                                               InputType::Text),
         [this](const ActivityResult& result) {
           if (!result.isCancelled) {
-            const auto& kb = std::get<KeyboardResult>(result.data);
-            KOREADER_STORE.setCredentials(KOREADER_STORE.getUsername(), kb.text);
-            KOREADER_STORE.saveToFile();
+            editServer.name = std::get<KeyboardResult>(result.data).text;
+            saveServer();
+            requestUpdate();
           }
         });
-  } else if (selectedIndex == 2) {
-    // Sync Server URL - prefill with https:// if empty to save typing
-    const std::string currentUrl = KOREADER_STORE.getServerUrl();
-    const std::string prefillUrl = currentUrl.empty() ? "https://" : currentUrl;
-    startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_SYNC_SERVER_URL),
-                                                                   prefillUrl, 128, InputType::Url),
-                           [this](const ActivityResult& result) {
-                             if (!result.isCancelled) {
-                               const auto& kb = std::get<KeyboardResult>(result.data);
-                               const std::string urlToSave =
-                                   (kb.text == "https://" || kb.text == "http://") ? "" : kb.text;
-                               KOREADER_STORE.setServerUrl(urlToSave);
-                               KOREADER_STORE.saveToFile();
-                             }
-                           });
-  } else if (selectedIndex == 3) {
-    // Document Matching - toggle between Filename and Binary
-    const auto current = KOREADER_STORE.getMatchMethod();
-    const auto newMethod =
-        (current == DocumentMatchMethod::FILENAME) ? DocumentMatchMethod::BINARY : DocumentMatchMethod::FILENAME;
-    KOREADER_STORE.setMatchMethod(newMethod);
-    KOREADER_STORE.saveToFile();
+
+  } else if (selectedIndex == ROW_USERNAME) {
+    startActivityForResult(
+        std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_KOREADER_USERNAME),
+                                               editServer.username, 64, InputType::Text),
+        [this](const ActivityResult& result) {
+          if (!result.isCancelled) {
+            editServer.username = std::get<KeyboardResult>(result.data).text;
+            saveServer();
+            requestUpdate();
+          }
+        });
+
+  } else if (selectedIndex == ROW_PASSWORD) {
+    startActivityForResult(
+        std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_KOREADER_PASSWORD),
+                                               editServer.password, 64, InputType::Password),
+        [this](const ActivityResult& result) {
+          if (!result.isCancelled) {
+            editServer.password = std::get<KeyboardResult>(result.data).text;
+            saveServer();
+            requestUpdate();
+          }
+        });
+
+  } else if (selectedIndex == ROW_URL) {
+    const std::string prefillUrl = editServer.serverUrl.empty() ? "https://" : editServer.serverUrl;
+    startActivityForResult(
+        std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_SYNC_SERVER_URL), prefillUrl, 128,
+                                               InputType::Url),
+        [this](const ActivityResult& result) {
+          if (!result.isCancelled) {
+            const auto& text = std::get<KeyboardResult>(result.data).text;
+            editServer.serverUrl = (text == "https://" || text == "http://") ? "" : text;
+            saveServer();
+            requestUpdate();
+          }
+        });
+
+  } else if (selectedIndex == ROW_DOC_MATCH) {
+    // Toggle between Filename and Binary
+    editServer.matchMethod = (editServer.matchMethod == DocumentMatchMethod::FILENAME)
+                                 ? DocumentMatchMethod::BINARY
+                                 : DocumentMatchMethod::FILENAME;
+    saveServer();
     requestUpdate();
-  } else if (selectedIndex == 4) {
-    // Authenticate
-    if (!KOREADER_STORE.hasCredentials()) {
-      // Can't authenticate without credentials - just show message briefly
+
+  } else if (selectedIndex == ROW_AUTHENTICATE && !isNewServer) {
+    // Credentials must be set before authenticating
+    if (editServer.username.empty() || editServer.password.empty()) {
       return;
     }
-    startActivityForResult(std::make_unique<KOReaderAuthActivity>(renderer, mappedInput), [](const ActivityResult&) {});
+    // Pass serverIndex so the auth activity makes this server active before testing,
+    // and restores the previous active server if authentication fails.
+    startActivityForResult(std::make_unique<KOReaderAuthActivity>(renderer, mappedInput, serverIndex),
+                           [](const ActivityResult&) {});
+
+  } else if (selectedIndex == ROW_DELETE && !isNewServer) {
+    // Delete only available when more than one server exists
+    if (KOREADER_STORE.getCount() <= 1) return;
+    if (!KOREADER_STORE.removeServer(static_cast<size_t>(serverIndex))) {
+      LOG_ERR("KRS", "Failed to remove KOReader sync server at index %d", serverIndex);
+      showSaveError = true;
+      requestUpdate();
+      return;
+    }
+    finish();
   }
 }
 
@@ -114,37 +196,61 @@ void KOReaderSettingsActivity::render(RenderLock&&) {
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_KOREADER_SYNC));
+  const char* header = isNewServer ? tr(STR_ADD_SERVER) : tr(STR_KOREADER_SYNC);
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, header);
 
   const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
   const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing * 2;
+  const int menuItems = getMenuItemCount();
+  const int activeIdx = KOREADER_STORE.getActiveIndex();
+
+  static constexpr StrId ROW_LABELS[] = {
+      StrId::STR_SERVER_NAME,        // 0 Name
+      StrId::STR_KOREADER_USERNAME,  // 1 Username
+      StrId::STR_KOREADER_PASSWORD,  // 2 Password
+      StrId::STR_SYNC_SERVER_URL,    // 3 Sync Server URL
+      StrId::STR_DOCUMENT_MATCHING,  // 4 Document Matching
+      StrId::STR_AUTHENTICATE,       // 5 Authenticate
+  };
+
   GUI.drawList(
-      renderer, Rect{0, contentTop, pageWidth, contentHeight}, static_cast<int>(MENU_ITEMS),
-      static_cast<int>(selectedIndex), [](int index) { return std::string(I18N.get(menuNames[index])); }, nullptr,
-      nullptr,
-      [this](int index) {
-        // Draw status for each setting
-        if (index == 0) {
-          auto username = KOREADER_STORE.getUsername();
-          return username.empty() ? std::string(tr(STR_NOT_SET)) : username;
-        } else if (index == 1) {
-          return KOREADER_STORE.getPassword().empty() ? std::string(tr(STR_NOT_SET)) : std::string("******");
-        } else if (index == 2) {
-          auto serverUrl = KOREADER_STORE.getServerUrl();
-          return serverUrl.empty() ? std::string(tr(STR_DEFAULT_VALUE)) : serverUrl;
-        } else if (index == 3) {
-          return KOREADER_STORE.getMatchMethod() == DocumentMatchMethod::FILENAME ? std::string(tr(STR_FILENAME))
-                                                                                  : std::string(tr(STR_BINARY));
-        } else if (index == 4) {
-          return KOREADER_STORE.hasCredentials() ? "" : std::string("[") + tr(STR_SET_CREDENTIALS_FIRST) + "]";
+      renderer, Rect{0, contentTop, pageWidth, contentHeight}, menuItems, static_cast<int>(selectedIndex),
+      [this](int index) -> std::string {
+        if (index < BASE_ITEMS_EXISTING) {
+          return std::string(I18N.get(ROW_LABELS[index]));
         }
-        return std::string(tr(STR_NOT_SET));
+        return std::string(tr(STR_DELETE_SERVER));
+      },
+      nullptr, nullptr,
+      [this, activeIdx](int index) -> std::string {
+        if (index == ROW_NAME) {
+          return editServer.name.empty() ? std::string(tr(STR_NOT_SET)) : editServer.name;
+        } else if (index == ROW_USERNAME) {
+          return editServer.username.empty() ? std::string(tr(STR_NOT_SET)) : editServer.username;
+        } else if (index == ROW_PASSWORD) {
+          return editServer.password.empty() ? std::string(tr(STR_NOT_SET)) : std::string("******");
+        } else if (index == ROW_URL) {
+          return editServer.serverUrl.empty() ? std::string(tr(STR_DEFAULT_VALUE)) : editServer.serverUrl;
+        } else if (index == ROW_DOC_MATCH) {
+          return editServer.matchMethod == DocumentMatchMethod::FILENAME ? std::string(tr(STR_FILENAME))
+                                                                        : std::string(tr(STR_BINARY));
+        } else if (index == ROW_AUTHENTICATE) {
+          if (editServer.username.empty() || editServer.password.empty()) {
+            return std::string("[") + tr(STR_SET_CREDENTIALS_FIRST) + "]";
+          }
+          // Show filled-circle when this server is the active sync server
+          return (serverIndex == activeIdx) ? std::string("\xE2\x80\xA2") : std::string("");
+        }
+        return std::string("");
       },
       true);
 
-  // Draw help text at bottom
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+
+  if (showSaveError) {
+    GUI.drawPopup(renderer, tr(STR_ERROR_GENERAL_FAILURE));
+  }
 
   renderer.displayBuffer();
 }

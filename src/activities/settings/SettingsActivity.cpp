@@ -13,7 +13,7 @@
 #include "DictionarySelectActivity.h"
 #include "FontDownloadActivity.h"
 #include "FontSelectionActivity.h"
-#include "KOReaderSettingsActivity.h"
+#include "KOReaderServerListActivity.h"
 #include "LanguageSelectActivity.h"
 #include "MappedInputManager.h"
 #include "OpdsServerListActivity.h"
@@ -114,8 +114,8 @@ void SettingsActivity::rebuildSettingsLists() {
 void SettingsActivity::onEnter() {
   Activity::onEnter();
 
-  // Reset selection to first category
-  selectedCategoryIndex = 0;
+  // Reset selection to the requested category (default 0 = Display).
+  selectedCategoryIndex = initialCategory;
   selectedSettingIndex = 0;
   preserveQuickResumeTimeoutOn =
       SETTINGS.quickResumeSleepScreen == CrossPointSettings::QUICK_RESUME_SLEEP_SCREEN::QUICK_RESUME_AFTER_TIMEOUT;
@@ -229,11 +229,23 @@ void SettingsActivity::toggleCurrentSetting() {
   } else if (setting.type == SettingType::ENUM && setting.valueGetter && setting.valueSetter) {
     if (setting.nameId == StrId::STR_FONT_FAMILY) {
       // Launch font selection submenu instead of cycling
-      startActivityForResult(std::make_unique<FontSelectionActivity>(renderer, mappedInput, &sdFontSystem.registry()),
-                             [this](const ActivityResult&) {
-                               SETTINGS.saveToFile();
-                               rebuildSettingsLists();
-                             });
+      startActivityForResult(
+          std::make_unique<FontSelectionActivity>(renderer, mappedInput, &sdFontSystem.registry(), SETTINGS.fontFamily,
+                                                  SETTINGS.sdFontFamilyName),
+          [this](const ActivityResult& result) {
+            if (!result.isCancelled && std::holds_alternative<FontSelectionResult>(result.data)) {
+              const auto& sel = std::get<FontSelectionResult>(result.data);
+              if (sel.isBuiltin) {
+                SETTINGS.fontFamily = sel.builtinIndex;
+                SETTINGS.sdFontFamilyName[0] = '\0';
+              } else {
+                strncpy(SETTINGS.sdFontFamilyName, sel.sdFamilyName.c_str(), sizeof(SETTINGS.sdFontFamilyName) - 1);
+                SETTINGS.sdFontFamilyName[sizeof(SETTINGS.sdFontFamilyName) - 1] = '\0';
+              }
+              SETTINGS.saveToFile();
+              rebuildSettingsLists();
+            }
+          });
       return;
     }
     const uint8_t totalValues = setting.enumStringValues.empty()
@@ -260,7 +272,7 @@ void SettingsActivity::toggleCurrentSetting() {
         startActivityForResult(std::make_unique<StatusBarSettingsActivity>(renderer, mappedInput), resultHandler);
         break;
       case SettingAction::KOReaderSync:
-        startActivityForResult(std::make_unique<KOReaderSettingsActivity>(renderer, mappedInput), resultHandler);
+        startActivityForResult(std::make_unique<KOReaderServerListActivity>(renderer, mappedInput), resultHandler);
         break;
       case SettingAction::OPDSBrowser:
         startActivityForResult(std::make_unique<OpdsServerListActivity>(renderer, mappedInput), resultHandler);

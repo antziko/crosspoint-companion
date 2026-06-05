@@ -6,7 +6,9 @@
 #include "CrossPointSettings.h"
 
 static uint8_t fontSizeEnumFromSettings() {
-  uint8_t e = SETTINGS.fontSize;
+  // Honor the per-book reader override when active (epub reading); falls back to
+  // the global size at boot and in non-epub readers.
+  uint8_t e = SETTINGS.getReaderFontSize();
   if (e >= CrossPointSettings::FONT_SIZE_COUNT) e = 1;  // default to MEDIUM
   return e;
 }
@@ -51,9 +53,18 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
     registry_.discover();
   }
 
-  const char* wantedFamily = SETTINGS.sdFontFamilyName;
+  // Honor the per-book reader override's family when active; otherwise the global.
+  const char* wantedFamily = SETTINGS.getReaderSdFontFamilyName();
   const std::string& currentFamily = manager_.currentFamilyName();
   const uint8_t sizeEnum = fontSizeEnumFromSettings();
+
+  // On load failure we only clear the *global* selection; when a per-book override
+  // font fails we leave settings untouched (render falls back to a built-in font)
+  // so a missing per-book font can't wipe the user's global font choice.
+  const bool overrideActive = SETTINGS.getReaderOverride().active;
+  const auto clearWantedFamily = [overrideActive]() {
+    if (!overrideActive) SETTINGS.sdFontFamilyName[0] = '\0';
+  };
 
   if (wantedFamily[0] == '\0') {
     if (!currentFamily.empty()) {
@@ -71,7 +82,7 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
     if (!family) {
       LOG_DBG("SDFS", "SD font family disappeared: %s (clearing)", wantedFamily);
       manager_.unloadAll(renderer);
-      SETTINGS.sdFontFamilyName[0] = '\0';
+      clearWantedFamily();
       return;
     }
     auto sizes = family->availableSizes();
@@ -93,11 +104,11 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
       LOG_DBG("SDFS", "Loaded SD font family: %s", wantedFamily);
     } else {
       LOG_ERR("SDFS", "Failed to load SD font family: %s (clearing)", wantedFamily);
-      SETTINGS.sdFontFamilyName[0] = '\0';
+      clearWantedFamily();
     }
   } else {
     LOG_DBG("SDFS", "SD font family not found: %s (clearing)", wantedFamily);
-    SETTINGS.sdFontFamilyName[0] = '\0';
+    clearWantedFamily();
   }
 }
 

@@ -49,11 +49,19 @@ void OpdsServerListActivity::loop() {
     return;
   }
 
+  // Track whether Confirm was pressed inside this activity.
+  // Releases from a press that originated in a parent activity (e.g. SettingsActivity fires on
+  // wasPressed, leaving the release for us) are ignored so we don't auto-open the first row.
+  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+    confirmPressActive = true;
+  }
+
   // After a hold-duplicate fired, swallow input until Confirm is physically released so
   // the release doesn't also trigger a normal selection.
   if (longPressFired) {
     if (!mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
       longPressFired = false;
+      confirmPressActive = false;
     }
     return;
   }
@@ -61,18 +69,22 @@ void OpdsServerListActivity::loop() {
   const int serverCount = static_cast<int>(OPDS_STORE.getCount());
 
   // Hold Confirm on a real server row (settings mode only, room available) -> duplicate.
-  if (!pickerMode && selectedIndex < serverCount &&
+  if (confirmPressActive && !pickerMode && selectedIndex < serverCount &&
       OPDS_STORE.getCount() < OpdsServerStore::maxServers() &&
       mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
       mappedInput.getHeldTime() >= DUPLICATE_HOLD_MS) {
     longPressFired = true;
+    confirmPressActive = false;
     duplicateSelectedServer();
     return;
   }
 
-  // Short tap: fire on release so the press-down doesn't race with the hold branch above.
+  // Short tap: only act on releases whose press originated inside this activity.
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    handleSelection();
+    if (confirmPressActive) {
+      confirmPressActive = false;
+      handleSelection();
+    }
     return;
   }
 

@@ -375,3 +375,53 @@ Port of the upstream `feat-dictionary` subtitle; upstream's version read fields 
 **`SleepActivity.cpp` (`renderBitmapSleepScreen`):** the pre-draw ghost-wipe at line 252 changed from `HALF_REFRESH` to `FULL_REFRESH`. The post-draw present (line 268) remains `HALF_REFRESH` to avoid a second disruptive flash over the final image.
 
 `FULL_REFRESH` drives the full black/white waveform from a white baseline, completely clearing the prior screen before the wallpaper is drawn. Scope is `renderBitmapSleepScreen` only (the shared path for both `CUSTOM` and `COVER_CUSTOM` modes); default, blank, and quick-resume sleep variants are untouched.
+
+---
+
+## 21. Reader Options (per-book) — apply live + single-source I/O
+
+**Symptoms (page menu → Reader Options):** changes did not take effect on the book, and after editing the screen exited all the way to Home.
+
+**Exit-to-Home fix (`EpubReaderActivity.cpp`):** the `READER_OPTIONS` result callback now sets `ignoreBackUntilRelease = true`. Reader Options consumes the Back **press**, but its **release** bled through into the reader's `onGoHome()` (`wasReleased(Back)`), navigating out. Swallowing the trailing release keeps the user in the book.
+
+**Apply-on-return fix:** the same callback takes a `RenderLock`, calls `sdFontSystem.ensureLoaded(renderer)`, then `section.reset()` so the page reflows with the just-saved override (built-in font size already changed the font ID; SD fonts now reload — see §22).
+
+**Single-source persistence (`ReaderSettingsIO.{h,cpp}`, new):** `reader_settings.bin` load/write was duplicated in `EpubReaderActivity` and the options editor — drift risk on field order / file version. Extracted to `namespace ReaderSettingsIO { load(); write(); }` (constants `READER_SETTINGS_FILE_VERSION = 1`, `READER_SETTINGS_FILENAME`). Both the reader (seed/load on open) and `ReaderOptionsActivity::persistAndApply` now call the shared functions; the writer and reader can no longer diverge.
+
+---
+
+## 22. Per-book font size for SD (CJK) fonts
+
+**Symptom:** in Reader Options the per-book **font size** worked for built-in Latin fonts but had no effect for SD-card fonts (Japanese/Chinese/Korean). Root cause: `SdCardFontSystem::fontSizeEnumFromSettings()` read the **global** `SETTINGS.fontSize`, the single SD font was only ever loaded at that global size, and the reader never asked it to reload — so the page font ID never changed and the section cache never invalidated.
+
+**Key fact:** the SD font ID already encodes point size (`SdCardFontManager::computeFontId(hash, family, pointSize)`). Once the font is actually reloaded at the override size, `getFontId()` returns a different ID and the section layout cache invalidates **automatically** — no `SECTION_FILE_VERSION` bump.
+
+**Fixes:**
+- `CrossPointSettings.{h,cpp}`: new override-aware `getReaderFontSize()` (returns `readerOverride.fontSize` when active, else global), mirroring the existing `getReaderFontId`/alignment getters.
+- `SdCardFontSystem.cpp`: `fontSizeEnumFromSettings()` reads `getReaderFontSize()`. This makes both `begin()` (boot/global) and `ensureLoaded()` honor the override when active and fall back to global otherwise.
+- `EpubReaderActivity.cpp`: call `sdFontSystem.ensureLoaded(renderer)` at three points — after `setReaderOverride` in **onEnter** (match this book's size before first layout), in the **Reader Options return** callback (reload at the new size, see §21), and after `clearReaderOverride` in **onExit** (restore the global SD size for Home/library).
+
+**Decision (confirmed):** only one SD font is loaded at one size, shared by the page and the dictionary popup's CJK glyph fallback. Page size wins — the dictionary's primary (Latin) text keeps its own global dict font/size, and there is **no SD reload on dictionary open/close** (no lookup slowdown). CJK glyphs inside the popup follow the current per-book page size (accepted limitation of the single-SD-font model).
+
+---
+
+## 23. Reader Options → Font Family — full picker (built-in + SD)
+
+**Goal:** Reader Options' font-family item should offer the **full** font list (built-in + SD-card fonts), like the global *Reader > Reader Font Family* screen, instead of cycling the two built-ins only.
+
+**Refactor (`FontSelectionActivity.{h,cpp}`):** the shared picker no longer reads/writes global `SETTINGS` for its selection. Constructor now takes the current selection (`uint8_t currentBuiltinFamily`, `std::string currentSdFamilyName`); `handleSelection()` builds a `FontSelectionResult` and returns it via `setResult()` + `finish()`. The "Selected" marker uses a new `currentSelectionIndex()` helper.
+
+**Result type (`ActivityResult.h`):** new `struct FontSelectionResult { bool isBuiltin; uint8_t builtinIndex; std::string sdFamilyName; }` added to `ResultVariant`.
+
+**Reader Options (`ReaderOptionsActivity.cpp`):** the Confirm handler special-cases the font-family item to launch the picker via `startActivityForResult`; the callback applies the `FontSelectionResult` to **this book's** `localOverride` (builtin index, or `strncpy` the SD family name) and `persistAndApply()`. The old built-in-only cycle case was removed.
+
+**Global parity (`SettingsActivity.cpp`):** the global Reader Font Family launch now passes `SETTINGS.fontFamily` / `SETTINGS.sdFontFamilyName` and the callback applies the returned result to global settings, then `saveToFile()` + `rebuildSettingsLists()` — behavior unchanged from before, just routed through the new result path.
+
+**Override-aware family (`CrossPointSettings.{h,cpp}` + `SdCardFontSystem.cpp`):** new `getReaderSdFontFamilyName()` (override-aware). `ensureLoaded()` resolves the wanted family from it; a per-book SD font that fails to load only clears the *global* selection when no override is active (`clearWantedFamily` lambda) — a missing per-book font can never wipe the user's global font choice.
+
+---
+
+## 24. cppcheck cleanups (`pio check -e default`)
+
+- **`OpdsBookBrowserActivity.cpp`:** the entry-dedup loop in the `add` lambda replaced with `std::any_of` (`<algorithm>` already included) — clearer intent, same behavior.
+- **`KOReaderServerListActivity.cpp`:** removed a dead `if (itemCount > 0)` guard (`getItemCount()` is always ≥ 1); added a comment, navigation lambdas unchanged.

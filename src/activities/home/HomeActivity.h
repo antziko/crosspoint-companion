@@ -19,6 +19,7 @@ class HomeActivity final : public Activity {
   bool coverRendered = false;      // Track if cover has been rendered once
   bool coverBufferStored = false;  // Track if cover buffer is stored
   bool longPressFired = false;     // Swallow Confirm release after a long-press fired
+  bool backLongPressFired = false;  // Swallow Back release after a hold-Back fired
   uint8_t* coverBuffer = nullptr;  // HomeActivity's own buffer for cover image
   size_t coverBufferSize = 0;      // Bytes allocated to coverBuffer
   // Logical rect last passed to drawRecentBookCover. The cover snapshot only

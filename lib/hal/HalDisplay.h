@@ -40,6 +40,11 @@ class HalDisplay {
 
   void displayBuffer(RefreshMode mode = RefreshMode::FAST_REFRESH, bool turnOffScreen = false);
   void refreshDisplay(RefreshMode mode = RefreshMode::FAST_REFRESH, bool turnOffScreen = false);
+  // Push only the rectangle (x,y,w,h) — native panel coordinates, x and w must
+  // be multiples of 8. On X4 this is a true sub-rectangle refresh that leaves the
+  // rest of the panel untouched; on X3 it falls back to a full FAST_REFRESH.
+  // EXPERIMENTAL: safe for single isolated refreshes; avoid rapid consecutive calls.
+  void displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool turnOffScreen = false);
 
   // Power management
   void deepSleep();

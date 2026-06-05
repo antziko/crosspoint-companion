@@ -43,8 +43,13 @@ class EpubReaderActivity final : public Activity {
   bool ignoreBackUntilRelease = false;    // Suppress Back bleed-through after dictionary chain exit
   bool ignoreNextConfirmRelease = false;  // Suppress menu open after hold-Confirm gesture fires
   bool showBookmarkMessage = false;
-  bool bookmarkMessageRemoved = false;  // false = "added", true = "removed" text
-  bool bookmarkMessageReturn = false;   // true = "return mark added" (overrides added text)
+  bool bookmarkMessageRemoved = false;   // false = "added", true = "removed" text
+  bool bookmarkMessageReturn = false;    // true = "return mark added" (overrides added text)
+  // Set when the bookmark action used a light (windowed) refresh instead of a
+  // full re-render. The showBookmarkMessage flag is still set as a debounce timer
+  // so hold-Confirm doesn't re-fire every tick; this flag prevents the dismiss
+  // from calling requestUpdate() and prevents the popup from drawing.
+  bool bookmarkMessageLightRefresh = false;
   // Tracks whether this book is currently removed from Recent Books by the
   // removeReadBooksFromRecents feature (set at End-of-Book, cleared if paged back in).
   bool recentsEntryRemoved = false;
@@ -52,6 +57,12 @@ class EpubReaderActivity final : public Activity {
   // Set when the reader is left at end-of-book and SETTINGS.moveFinishedToReadFolder is on.
   // Consumed in onExit() to relocate the finished book into /Read/.
   bool pendingReadFolderMove = false;
+
+  // Set after a page is rendered with the AA grayscale strip passes. Used by
+  // lightStatusBarRefresh to skip the panel push on AA image pages: even a
+  // windowed FAST_REFRESH applies the LUT to the full panel and gradually
+  // darkens grayscale particles. Cleared at the start of each new render.
+  bool lastPageUsedGrayscale = false;
 
   // Footnote support
   std::vector<FootnoteEntry> currentPageFootnotes;
@@ -85,7 +96,14 @@ class EpubReaderActivity final : public Activity {
   void pageTurn(bool isForwardTurn);
   // returnMark=true drops a session "return here" bookmark (distinct icon) used when
   // jumping to another chapter, so the user can get back to where they were.
-  void addBookmark(bool returnMark = false);
+  // lightRefresh=true performs a status-bar-only windowed panel update instead of a
+  // full page re-render (use for interactive same-page toggles on image/AA pages).
+  void addBookmark(bool returnMark = false, bool lightRefresh = false);
+
+  // Redraw only the status-bar strip and push it via a windowed sub-rectangle
+  // refresh, leaving the page content (including any AA images) untouched on the
+  // panel. Used for interactive bookmark toggles that must not disturb the image.
+  void lightStatusBarRefresh();
 
   // Footnote navigation
   void navigateToHref(const std::string& href, bool savePosition = false);

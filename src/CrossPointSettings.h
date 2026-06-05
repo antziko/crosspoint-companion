@@ -172,6 +172,21 @@ class CrossPointSettings {
     QUICK_RESUME_SLEEP_SCREEN_COUNT
   };
 
+  // Per-book reader settings override.
+  // When active, SETTINGS.getReaderFontId(), getReaderLineCompression(), and the
+  // three getReader*() accessors below return values from this struct instead of
+  // the global members.  Never serialised to settings.json.
+  struct ReaderOverride {
+    bool active = false;
+    uint8_t fontFamily = NOTOSERIF;
+    uint8_t fontSize = MEDIUM;
+    uint8_t lineSpacing = NORMAL;
+    uint8_t paragraphAlignment = JUSTIFIED;
+    uint8_t hyphenationEnabled = 0;
+    uint8_t extraParagraphSpacing = 1;
+    char sdFontFamilyName[32] = "";
+  };
+
   // Sleep screen settings
   uint8_t sleepScreen = DARK;
   // Sleep screen cover mode settings
@@ -299,9 +314,25 @@ class CrossPointSettings {
     return (shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP) ? 10 : 400;
   }
   int getReaderFontId() const;
+  // Font-size enum (SMALL..EXTRA_LARGE) honoring the per-book override when active.
+  uint8_t getReaderFontSize() const;
+  // SD-card font family name honoring the per-book override when active (empty
+  // string means "use a built-in font"). Returned pointer is owned by settings.
+  const char* getReaderSdFontFamilyName() const;
   int getDefinitionFontId() const;
   float getDefinitionLineCompression() const;
   int getLookupHistoryCapValue() const { return lookupHistoryCap; }
+
+  // Per-book override control.
+  void setReaderOverride(const ReaderOverride& ov);
+  void clearReaderOverride();
+  const ReaderOverride& getReaderOverride() const { return readerOverride; }
+
+  // Per-book aware reader accessors.
+  // When an override is active these return override values; otherwise globals.
+  uint8_t getReaderParagraphAlignment() const;
+  uint8_t getReaderHyphenationEnabled() const;
+  uint8_t getReaderExtraParagraphSpacing() const;
 
   // If count_only is true, returns the number of settings items that would be written.
   uint8_t writeSettings(HalFile& file, bool count_only = false) const;
@@ -315,6 +346,13 @@ class CrossPointSettings {
  private:
   bool loadFromBinaryFile();
   bool migrateLanguageBinaryFile();
+
+  // In-memory per-book override. Never persisted to settings.json.
+  ReaderOverride readerOverride;
+
+  // Shared computation helpers used by both global and override code paths.
+  static int computeBuiltinFontId(uint8_t family, uint8_t size);
+  static float computeLineCompression(uint8_t family, uint8_t lineSpacing, const char* sdFontName);
 
  public:
   float getReaderLineCompression() const;

@@ -9,8 +9,24 @@
 #include "fontIds.h"
 
 FontSelectionActivity::FontSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                             const SdCardFontRegistry* registry)
-    : Activity("FontSelect", renderer, mappedInput), registry_(registry) {}
+                                             const SdCardFontRegistry* registry, uint8_t currentBuiltinFamily,
+                                             std::string currentSdFamilyName)
+    : Activity("FontSelect", renderer, mappedInput),
+      registry_(registry),
+      currentBuiltinFamily_(currentBuiltinFamily),
+      currentSdFamilyName_(std::move(currentSdFamilyName)) {}
+
+int FontSelectionActivity::currentSelectionIndex() const {
+  if (!currentSdFamilyName_.empty() && registry_) {
+    const auto& families = registry_->getFamilies();
+    for (int i = 0; i < static_cast<int>(families.size()); i++) {
+      if (families[i].name == currentSdFamilyName_) {
+        return CrossPointSettings::BUILTIN_FONT_COUNT + i;
+      }
+    }
+  }
+  return currentBuiltinFamily_ < CrossPointSettings::BUILTIN_FONT_COUNT ? currentBuiltinFamily_ : 0;
+}
 
 void FontSelectionActivity::onEnter() {
   Activity::onEnter();
@@ -29,19 +45,7 @@ void FontSelectionActivity::onEnter() {
     }
   }
 
-  // Find current selection
-  selectedIndex_ = 0;
-  if (SETTINGS.sdFontFamilyName[0] != '\0' && registry_) {
-    const auto& families = registry_->getFamilies();
-    for (int i = 0; i < static_cast<int>(families.size()); i++) {
-      if (families[i].name == SETTINGS.sdFontFamilyName) {
-        selectedIndex_ = CrossPointSettings::BUILTIN_FONT_COUNT + i;
-        break;
-      }
-    }
-  } else {
-    selectedIndex_ = SETTINGS.fontFamily < CrossPointSettings::BUILTIN_FONT_COUNT ? SETTINGS.fontFamily : 0;
-  }
+  selectedIndex_ = currentSelectionIndex();
 
   requestUpdate();
 }
@@ -85,17 +89,19 @@ void FontSelectionActivity::loop() {
 
 void FontSelectionActivity::handleSelection() {
   const auto& font = fonts_[selectedIndex_];
+  FontSelectionResult result;
   if (font.settingIndex < CrossPointSettings::BUILTIN_FONT_COUNT) {
-    SETTINGS.fontFamily = font.settingIndex;
-    SETTINGS.sdFontFamilyName[0] = '\0';
+    result.isBuiltin = true;
+    result.builtinIndex = font.settingIndex;
   } else if (registry_) {
-    int sdIdx = font.settingIndex - CrossPointSettings::BUILTIN_FONT_COUNT;
+    const int sdIdx = font.settingIndex - CrossPointSettings::BUILTIN_FONT_COUNT;
     const auto& families = registry_->getFamilies();
     if (sdIdx < static_cast<int>(families.size())) {
-      strncpy(SETTINGS.sdFontFamilyName, families[sdIdx].name.c_str(), sizeof(SETTINGS.sdFontFamilyName) - 1);
-      SETTINGS.sdFontFamilyName[sizeof(SETTINGS.sdFontFamilyName) - 1] = '\0';
+      result.isBuiltin = false;
+      result.sdFamilyName = families[sdIdx].name;
     }
   }
+  setResult(ActivityResult{std::move(result)});
   finish();
 }
 
@@ -112,18 +118,7 @@ void FontSelectionActivity::render(RenderLock&&) {
   const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
 
   // Determine which font index is currently active (to mark as "Selected")
-  int currentFontIndex = 0;
-  if (SETTINGS.sdFontFamilyName[0] != '\0' && registry_) {
-    const auto& families = registry_->getFamilies();
-    for (int i = 0; i < static_cast<int>(families.size()); i++) {
-      if (families[i].name == SETTINGS.sdFontFamilyName) {
-        currentFontIndex = CrossPointSettings::BUILTIN_FONT_COUNT + i;
-        break;
-      }
-    }
-  } else {
-    currentFontIndex = SETTINGS.fontFamily < CrossPointSettings::BUILTIN_FONT_COUNT ? SETTINGS.fontFamily : 0;
-  }
+  const int currentFontIndex = currentSelectionIndex();
 
   GUI.drawList(
       renderer, Rect{0, contentTop, pageWidth, contentHeight}, static_cast<int>(fonts_.size()), selectedIndex_,

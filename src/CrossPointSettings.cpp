@@ -282,9 +282,11 @@ bool CrossPointSettings::loadFromBinaryFile() {
   return true;
 }
 
-float CrossPointSettings::getReaderLineCompression() const {
+// static
+float CrossPointSettings::computeLineCompression(const uint8_t family, const uint8_t lineSpacing,
+                                                  const char* sdFontName) {
   // SD card fonts use same compression as Bookerly (the most neutral values)
-  if (sdFontFamilyName[0] != '\0') {
+  if (sdFontName && sdFontName[0] != '\0') {
     switch (lineSpacing) {
       case TIGHT:
         return 0.95f;
@@ -296,7 +298,7 @@ float CrossPointSettings::getReaderLineCompression() const {
     }
   }
 
-  switch (fontFamily) {
+  switch (family) {
     case NOTOSERIF:
     default:
       switch (lineSpacing) {
@@ -319,6 +321,14 @@ float CrossPointSettings::getReaderLineCompression() const {
           return 1.0f;
       }
   }
+}
+
+float CrossPointSettings::getReaderLineCompression() const {
+  if (readerOverride.active) {
+    return computeLineCompression(readerOverride.fontFamily, readerOverride.lineSpacing,
+                                  readerOverride.sdFontFamilyName);
+  }
+  return computeLineCompression(fontFamily, lineSpacing, sdFontFamilyName);
 }
 
 unsigned long CrossPointSettings::getSleepTimeoutMs() const {
@@ -403,18 +413,12 @@ float CrossPointSettings::getDefinitionLineCompression() const {
   }
 }
 
-int CrossPointSettings::getReaderFontId() const {
-  // Check SD card font first
-  if (sdFontFamilyName[0] != '\0' && sdFontIdResolver) {
-    int id = sdFontIdResolver(sdFontResolverCtx, sdFontFamilyName, fontSize);
-    if (id != 0) return id;
-    // Fall through to built-in if SD font not found
-  }
-
-  switch (fontFamily) {
+// static
+int CrossPointSettings::computeBuiltinFontId(const uint8_t family, const uint8_t size) {
+  switch (family) {
     case NOTOSERIF:
     default:
-      switch (fontSize) {
+      switch (size) {
         case SMALL:
           return NOTOSERIF_12_FONT_ID;
         case MEDIUM:
@@ -426,7 +430,7 @@ int CrossPointSettings::getReaderFontId() const {
           return NOTOSERIF_18_FONT_ID;
       }
     case NOTOSANS:
-      switch (fontSize) {
+      switch (size) {
         case SMALL:
           return NOTOSANS_12_FONT_ID;
         case MEDIUM:
@@ -438,4 +442,49 @@ int CrossPointSettings::getReaderFontId() const {
           return NOTOSANS_18_FONT_ID;
       }
   }
+}
+
+int CrossPointSettings::getReaderFontId() const {
+  if (readerOverride.active) {
+    if (readerOverride.sdFontFamilyName[0] != '\0' && sdFontIdResolver) {
+      int id = sdFontIdResolver(sdFontResolverCtx, readerOverride.sdFontFamilyName, readerOverride.fontSize);
+      if (id != 0) return id;
+    }
+    return computeBuiltinFontId(readerOverride.fontFamily, readerOverride.fontSize);
+  }
+
+  // Check SD card font first
+  if (sdFontFamilyName[0] != '\0' && sdFontIdResolver) {
+    int id = sdFontIdResolver(sdFontResolverCtx, sdFontFamilyName, fontSize);
+    if (id != 0) return id;
+    // Fall through to built-in if SD font not found
+  }
+
+  return computeBuiltinFontId(fontFamily, fontSize);
+}
+
+uint8_t CrossPointSettings::getReaderFontSize() const {
+  return readerOverride.active ? readerOverride.fontSize : fontSize;
+}
+
+const char* CrossPointSettings::getReaderSdFontFamilyName() const {
+  return readerOverride.active ? readerOverride.sdFontFamilyName : sdFontFamilyName;
+}
+
+void CrossPointSettings::setReaderOverride(const ReaderOverride& ov) { readerOverride = ov; }
+
+void CrossPointSettings::clearReaderOverride() {
+  readerOverride = ReaderOverride{};  // resets active = false + all fields to defaults
+}
+
+uint8_t CrossPointSettings::getReaderParagraphAlignment() const {
+  return readerOverride.active ? readerOverride.paragraphAlignment : paragraphAlignment;
+}
+
+uint8_t CrossPointSettings::getReaderHyphenationEnabled() const {
+  return readerOverride.active ? readerOverride.hyphenationEnabled : hyphenationEnabled;
+}
+
+uint8_t CrossPointSettings::getReaderExtraParagraphSpacing() const {
+  return readerOverride.active ? readerOverride.extraParagraphSpacing : extraParagraphSpacing;
 }
