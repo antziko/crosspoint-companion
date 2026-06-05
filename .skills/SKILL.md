@@ -538,6 +538,29 @@ find src -name "*.cpp" -o -name "*.h" | xargs clang-format -i
 clang-format -i src/**/*.cpp src/**/*.h
 ```
 
+### Host Unit Tests (gtest)
+
+Host-side gtest suites live in `test/` (not firmware — they build with the host
+toolchain, NOT ESP-IDF). Google Test is fetched via CMake FetchContent on first
+configure. AI agents CAN and SHOULD run these — they need no hardware.
+
+```bash
+# Via PlatformIO (registered by scripts/register_unit_tests_target.py)
+pio run -t unit-tests
+
+# Direct CMake/CTest
+cmake -S test -B build/test
+cmake --build build/test
+ctest --test-dir build/test --output-on-failure -j
+
+# Single suite
+cmake --build build/test --target StreamingJsonParserTest
+build/test/streaming_json_parser/StreamingJsonParserTest --gtest_filter='*'
+```
+
+Suites include: `dict-html-renderer`, `streaming_json_parser`,
+`release_json_parser`, `differential_rounding`, `hyphenation_eval`, `language`.
+
 ### Debugging Crashes
 
 **Common Crash Causes**:
@@ -795,16 +818,17 @@ build_flags =
 
 **AI agent scope** (what you CAN verify):
 1. ✅ **Build**: `pio run -t clean && pio run` (0 errors/warnings)
-2. ✅ **Quality**: `pio check` + `find src -name "*.cpp" -o -name "*.h" | xargs clang-format -i`
-3. ✅ **Format**: Commit messages (`feat:`/`fix:`), no `.gitignore`-excluded files staged (e.g., `*.generated.h`, `.pio/`, `platformio.local.ini`)
-4. ✅ **CI**: Fix GitHub Actions failures before review
-5. ✅ **Code review**: Ensure orientation-aware logic is correct in all 4 modes by inspecting switch/case coverage
+2. ✅ **Unit tests**: `pio run -t unit-tests` (host gtest — no hardware needed; run when touching parsers, dictionary, hyphenation, rendering logic)
+3. ✅ **Quality**: `pio check` + `find src -name "*.cpp" -o -name "*.h" | xargs clang-format -i`
+4. ✅ **Format**: Commit messages (`feat:`/`fix:`), no `.gitignore`-excluded files staged (e.g., `*.generated.h`, `.pio/`, `platformio.local.ini`)
+5. ✅ **CI**: Fix GitHub Actions failures before review
+6. ✅ **Code review**: Ensure orientation-aware logic is correct in all 4 modes by inspecting switch/case coverage
 
 **Human tester scope** (flag these for the user):
-6. 🔲 **Device**: Test on hardware
-7. 🔲 **Orientations**: Verify all 4 modes (Portrait/Inverted/Landscape CW/CCW)
-8. 🔲 **Heap**: `ESP.getFreeHeap()` > 50KB, no leaks
-9. 🔲 **Cache**: If EPUB modified, delete `.crosspoint/` and verify re-parse
+7. 🔲 **Device**: Test on hardware
+8. 🔲 **Orientations**: Verify all 4 modes (Portrait/Inverted/Landscape CW/CCW)
+9. 🔲 **Heap**: `ESP.getFreeHeap()` > 50KB, no leaks
+10. 🔲 **Cache**: If EPUB modified, delete `.crosspoint/` and verify re-parse
 
 ### CI/CD Pipeline Awareness
 
@@ -895,9 +919,11 @@ rm -rf /path/to/sd/.crosspoint/epub_<hash>/sections/
 
 **Source**: `lib/Epub/Epub/Section.cpp`, `lib/Epub/Epub/BookMetadataCache.cpp`
 
-**Current Versions** (as of docs/file-formats.md):
-- `book.bin`: **Version 5** (metadata structure)
-- `section.bin`: **Version 24** (layout structure)
+**Current Versions** (source of truth is the code constants, not docs):
+- `book.bin`: **Version 6** — `BOOK_CACHE_VERSION` in `lib/Epub/Epub/BookMetadataCache.cpp`
+- `section.bin`: **Version 25** — `SECTION_FILE_VERSION` in `lib/Epub/Epub/Section.cpp`
+
+Note: `docs/file-formats.md` may lag the code; trust the constants above.
 
 **Version Increment Rules**:
 1. **ALWAYS increment version** BEFORE changing binary structure
@@ -921,6 +947,20 @@ struct PageLine {
 ---
 
 ## Dictionary Subsystem Quality Rules (Non-Negotiable)
+
+**Code map** (StarDict-format offline dictionaries; verify roles in-file before editing):
+
+| Path | Role |
+|------|------|
+| `src/util/Dictionary.{h,cpp}` | Core: `Dictionary` class + `DictPaths`/`DictInfo`/`DictLocation`/`DictLookupCallbacks` structs. On-device lookup over prepared dict files. |
+| `src/util/DictLookupTask.{h,cpp}` | FreeRTOS `Task` doing the blocking lookup off the UI thread. |
+| `src/util/DictPrepareTask.{h,cpp}` | One-time on-device preprocessing (decompress + offset index) for `DictPrepareActivity`. |
+| `src/util/DictionaryLookupController.{h,cpp}` | Drives lookup flow + render for the calling `Activity`. |
+| `src/util/DictionaryActivityUtils.h` | Shared helpers for dictionary-facing activities. |
+| `lib/DictHtmlRenderer/` | `DictHtmlRenderer` — renders dictionary entry HTML to the display. |
+| `scripts/dictionary_tools.py` | **Host** offline tool: `prep` / `lookup` / `merge` StarDict dicts. Not firmware. |
+| `docs/dictionary.md`, `docs/dictionary-development.md` | Format + workflow docs. |
+| `test/dict-html-renderer/`, `test/dictionaries/`, `test/data/dictionary-*` | gtest suite + fixtures (run via `pio run -t unit-tests`). |
 
 **Planning requirement:**
 - Use Plan mode before any implementation work
