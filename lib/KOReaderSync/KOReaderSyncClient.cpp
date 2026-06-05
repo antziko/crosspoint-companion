@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <Logging.h>
 #include <esp_crt_bundle.h>
+#include <esp_heap_caps.h>
 #include <esp_http_client.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -106,7 +107,9 @@ KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
 
   std::string url = KOREADER_STORE.getBaseUrl() + "/users/auth";
   const uint32_t freeHeap = ESP.getFreeHeap();
-  LOG_DBG("KOSync", "Authenticating: %s (heap: %u)", url.c_str(), (unsigned)freeHeap);
+  // [fix/tls-heap] handshake heap baseline: free vs largest contiguous block.
+  LOG_DBG("KOSync", "Authenticating: %s (free=%u largest=%u)", url.c_str(), (unsigned)freeHeap,
+          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   if (freeHeap < MIN_HEAP_FOR_TLS) {
     LOG_ERR("KOSync", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
     return LOW_MEMORY;

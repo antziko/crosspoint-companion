@@ -293,7 +293,6 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
   if (entries.empty()) {
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_NO_ENTRIES));
   } else {
-    const std::string dlFolder = serverFolder(server.name);
     const auto pageStartIndex = selectorIndex / PAGE_ITEMS * PAGE_ITEMS;
     renderer.fillRect(0, 60 + (selectorIndex % PAGE_ITEMS) * 30 - 2, pageWidth - 1, 30);
 
@@ -305,9 +304,10 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
       } else {
         // Mark books already on the SD card (download root or finished "/read"
         // folder). Prefix (not suffix) so the marker survives truncatedText().
-        // Re-checked each render, so a freshly downloaded book shows the mark
-        // immediately on the next draw.
-        const bool downloaded = isBookOnDevice(dlFolder, entry);
+        // Read from the per-feed cache (refreshDownloadedCache), so cursor moves
+        // don't re-stat the SD card; a freshly downloaded book is re-cached by the
+        // feed reload at the end of downloadBook().
+        const bool downloaded = i < downloadedCache.size() && downloadedCache[i];
         displayText = (downloaded ? "* " : "") + entry.title;
         if (!entry.author.empty()) displayText += " - " + entry.author;
       }
@@ -364,9 +364,39 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     return;
   }
 
+  // [fix/tls-heap] handshake heap baseline: compare free vs largest contiguous
+  // block right before the TLS connect, to measure custom_sdkconfig mbedtls savings.
+  SdDebugLog::log("TLSMEM", "OPDS pre-handshake free=%u largest=%u", (unsigned)ESP.getFreeHeap(),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
+  // Show "Connecting..." before the blocking TLS handshake. The render task is
+  // event-driven (no timer), so nothing repaints while we're stalled inside the
+  // handshake — paint the label now (And-Wait) so the user sees the stage instead
+  // of a frozen "Loading...".
+  statusMessage = tr(STR_CONNECTING);
+  requestUpdateAndWait();
+
   std::string httpDetail;
-  const auto dl =
-      HttpDownloader::downloadToFile(url, kTmpFeed, nullptr, nullptr, server.username, server.password, &httpDetail);
+  // Feed transfer progress. Feeds usually carry no Content-Length, so show bytes
+  // received (KB/MB) rather than a percentage. Throttle to every 8KB: each e-ink
+  // repaint is slow and a small feed would otherwise flood the render task.
+  size_t lastShown = 0;
+  const auto dl = HttpDownloader::downloadToFile(
+      url, kTmpFeed,
+      [this, &lastShown](const size_t downloaded, const size_t total) {
+        if (downloaded - lastShown < 8 * 1024 && !(total > 0 && downloaded >= total)) return;
+        lastShown = downloaded;
+        char sizeText[48];
+        const double bytes = static_cast<double>(downloaded);
+        if (bytes < 1024.0 * 1024.0) {
+          snprintf(sizeText, sizeof(sizeText), "%s %.0f KB", tr(STR_DOWNLOADING), bytes / 1024.0);
+        } else {
+          snprintf(sizeText, sizeof(sizeText), "%s %.1f MB", tr(STR_DOWNLOADING), bytes / (1024.0 * 1024.0));
+        }
+        statusMessage = sizeText;
+        requestUpdate(true);
+      },
+      nullptr, server.username, server.password, &httpDetail);
   if (dl != HttpDownloader::OK) {
     SdDebugLog::log("OPDS", "FETCH FAILED (http) code=%d detail=%s heap=%u", static_cast<int>(dl),
                     httpDetail.empty() ? "?" : httpDetail.c_str(), (unsigned)ESP.getFreeHeap());
@@ -379,6 +409,11 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     requestUpdate();
     return;
   }
+
+  // Parse runs after the connection closes (frees TLS heap). Label it: on a large
+  // feed the parse itself is a noticeable, otherwise-silent stall.
+  statusMessage = tr(STR_PARSING);
+  requestUpdateAndWait();
 
   OpdsParser parser;
   {
@@ -439,10 +474,25 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     entries.push_back(OpdsEntry{OpdsEntryType::NAVIGATION, tr(STR_NEXT_PAGE), "", nextUrl, ""});
   }
 
+  // Compute the on-SD marker once now, not per render. This is the single point
+  // every feed (re)load funnels through, including the post-download reload at
+  // the end of downloadBook().
+  refreshDownloadedCache();
+
   selectorIndex = 0;
   state = entries.empty() ? BrowserState::ERROR : BrowserState::BROWSING;
   if (entries.empty()) errorMessage = tr(STR_NO_ENTRIES);
   requestUpdate();
+}
+
+void OpdsBookBrowserActivity::refreshDownloadedCache() {
+  downloadedCache.assign(entries.size(), 0);
+  const std::string dlFolder = serverFolder(server.name);
+  for (size_t i = 0; i < entries.size(); i++) {
+    if (entries[i].type == OpdsEntryType::BOOK) {
+      downloadedCache[i] = isBookOnDevice(dlFolder, entries[i]) ? 1 : 0;
+    }
+  }
 }
 
 void OpdsBookBrowserActivity::navigateToEntry(const OpdsEntry& entry) {

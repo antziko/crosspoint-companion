@@ -29,6 +29,11 @@ class OpdsBookBrowserActivity final : public Activity {
   ButtonNavigator buttonNavigator;
   BrowserState state = BrowserState::LOADING;
   std::vector<OpdsEntry> entries;
+  // Cached "book already on SD" flag per entry (1=on device, 0=not/navigation).
+  // Computed once per feed load — NOT per render — so cursor moves don't re-stat
+  // the SD card (~276 Storage.exists() calls/keypress before this cache). Parallel
+  // to `entries`; refreshed by refreshDownloadedCache() whenever entries change.
+  std::vector<uint8_t> downloadedCache;
   std::vector<std::string> navigationHistory;
   std::string currentPath;
   std::string searchTemplate;
@@ -47,6 +52,7 @@ class OpdsBookBrowserActivity final : public Activity {
   void launchWifiSelection();
   void onWifiSelectionComplete(bool connected);
   void fetchFeed(const std::string& path);
+  void refreshDownloadedCache();
   void navigateToEntry(const OpdsEntry& entry);
   void navigateBack();
   void downloadBook(const OpdsEntry& book);

@@ -5,6 +5,7 @@
 #include <I18n.h>
 #include <Logging.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 #include <esp_sntp.h>
 #include <esp_wifi.h>
 
@@ -23,6 +24,7 @@
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/SdDebugLog.h"
 
 namespace {
 void syncTimeWithNTP() {
@@ -143,6 +145,12 @@ void KOReaderSyncActivity::performSync() {
     statusMessage = tr(STR_FETCH_PROGRESS);
   }
   requestUpdateAndWait();
+
+  // [fix/tls-heap] Persist handshake heap to SD so the X3 (USB-locked, no serial)
+  // can report the mbedtls savings. Mirrors the OPDS TLSMEM line; same /opds_debug.log.
+  SdDebugLog::setEnabled(true);
+  SdDebugLog::log("TLSMEM", "KOSync pre-handshake free=%u largest=%u", (unsigned)ESP.getFreeHeap(),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
   // Fetch remote progress
   const auto result = KOReaderSyncClient::getProgress(documentHash, remoteProgress);

@@ -2,6 +2,13 @@
 .idea
 .DS_Store
 .vscode
+# pioarduino source-build byproducts (generated when custom_sdkconfig forces an
+# ESP-IDF-from-source build). Source of truth is platformio.ini's custom_sdkconfig.
+managed_components/
+dependencies.lock
+sdkconfig.default
+sdkconfig.defaults
+.dummy/
 lib/EpdFont/fontsrc
 lib/I18n/I18nKeys.h
 lib/I18n/I18nStrings.h
