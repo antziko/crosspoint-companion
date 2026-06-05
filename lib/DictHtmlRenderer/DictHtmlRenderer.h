@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+class HalFile;  // fwd-decl; full definition only needed in the .cpp
+
 /**
  * A styled text span produced by DictHtmlRenderer.
  */
@@ -46,6 +48,22 @@ class DictHtmlRenderer {
   // definition is never held in RAM. Entity resolution handles cross-chunk boundaries.
   // The file must be open for reading; caller is responsible for close.
   const std::vector<StyledSpan>& renderFromFile(const char* dictPath, uint32_t offset, uint32_t size);
+
+  // Span delivery for the streaming render path. fn is invoked once per finished
+  // span; span.text is valid ONLY for the duration of the call (it points into
+  // reusable scratch), so the sink MUST copy it immediately. Function-pointer +
+  // ctx (NOT std::function) per the project's binary-size rules.
+  struct SpanSink {
+    void* ctx = nullptr;
+    void (*fn)(void* ctx, const StyledSpan& span) = nullptr;
+    void operator()(const StyledSpan& span) const { fn(ctx, span); }
+  };
+
+  // Stream-render from a .dict file, delivering each span to `sink` as it is
+  // produced. Unlike renderFromFile(), the whole-definition textBuf and spans
+  // vector are NEVER materialized — peak RAM is one span's scratch. Returns true
+  // on success. Used by the definition view so only one page is ever resident.
+  bool renderFromFileStreaming(const char* dictPath, uint32_t offset, uint32_t size, const SpanSink& sink);
 
 #ifdef DICT_HTML_RENDERER_TRACK_UNKNOWN
   bool hasUnknownTags() const { return unknownTagCount > 0; }
@@ -123,6 +141,11 @@ class DictHtmlRenderer {
   void emitText(const char* s, int len);
   void flushPending();
 
+  // Shared parse driver: feeds an already-open, already-seeked file through expat
+  // (synthetic root + 512-byte chunk loop + entity resolution). Used by both the
+  // batch renderFromFile() and the streaming renderFromFileStreaming().
+  void parseOpenFile(HalFile& file, uint32_t size);
+
   // Feed a buffer through the entity resolver into expat. If the buffer ends mid-entity,
   // the partial entity is written to carry/carryLen for prepending to the next chunk.
   // Set isLast=true for the final chunk (no carryover possible).
@@ -144,6 +167,10 @@ class DictHtmlRenderer {
 
   XML_Parser parser = nullptr;
   bool parseError = false;
+
+  // When set (streaming mode), pushSpan() delivers spans here instead of
+  // accumulating into textBuf/spans. Null in batch mode. Cleared by reset().
+  SpanSink spanSink_;
 
 #ifdef DICT_HTML_RENDERER_TRACK_UNKNOWN
   static void extractLastWord(const char* text, int len, char* out, int outSize);

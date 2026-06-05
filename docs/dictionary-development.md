@@ -23,21 +23,39 @@ The dictionary feature uses the StarDict format. Relevant file types:
 
 Minimum for lookup: `.dict` + `.idx`. Without `.ifo`, HTML definitions render as plain text (no `sametypesequence` detection).
 
+## Definition Rendering Pipeline
+
+The definition viewer (`DictionaryDefinitionActivity`) renders one page at a time, so peak RAM is bounded by a single page regardless of how large the definition is (a multi-megabyte hostile entry cannot OOM the device). The pipeline is fully streamed:
+
+1. **Parse (`DictHtmlRenderer`, lib):** expat parses the `.dict` HTML entry in 512-byte chunks and **streams** each finished styled span to a sink (`renderFromFileStreaming`). The whole-definition text buffer and span vector are never materialized — `pendingText` (one span) is the only scratch.
+2. **Wrap (`DictLayout::Wrapper`, `src/util`):** spans are word-wrapped into display lines as they arrive. A `LineSink` keeps only the **target page's** lines (discarding the rest as they are produced) and counts the total for the page indicator. Width measurement is injected (`Measurer`), so the wrap logic is renderer-independent and host-unit-testable.
+3. **Pool (`TextPool`, `src/util`):** the kept page's segment text is copied into one per-page buffer; segments reference it by `{offset, len}` instead of owning a `std::string` each (fewer, larger allocations → less heap fragmentation over a long session).
+
+**Paging re-parses from the definition start every turn** (both forward and back) — there is no persistent parser kept alive across turns. Per-turn cost is one parse, invisible against the 1–2 s e-ink refresh; this was a deliberate choice for consistent forward/back paging speed (the kept-alive-forward optimization was declined).
+
+**Back-navigation chain (`LookupChain`, `src/util`):** chained lookups keep a compact back-stack — `{history-index, page}` per entry, not owned headword strings — bounded by the Dictionary History Limit. The headword is resolved from the persisted lookup history on back-nav. See its header for the two load-bearing invariants (distance-from-newest addressing; non-contiguous-subset under back-then-forward).
+
 ## Test Infrastructure Layout
 
 ```
 test/
   data/
-    dictionary-sources/               # 19 JSON source-of-truth files
-    dictionary-epub-chapters/          # 22 HTML chapter files for test epub
+    dictionary-sources/               # JSON source-of-truth files (one per test dict)
+    dictionary-epub-chapters/          # ch01..ch22 HTML chapter files for test epub
     generate_dictionaries.py           # JSON sources -> test/dictionaries/
     generate_dictionary_test_epub.py   # HTML chapters -> test/epubs/test_dictionary.epub
   dictionaries/                        # generated StarDict binary output
   epubs/                               # generated test epub
-  dict-html-renderer/                  # host-side smoke test
+  dict-html-renderer/                  # host-side smoke test: DictHtmlRenderer (parser)
     DictHtmlRendererTest.cpp
     run.sh
     README.md
+  dict-layout/                         # host litmus: DictLayout wrap/pagination + page-collector
+    DictLayoutTest.cpp
+    run.sh
+  lookup-chain/                        # host litmus: LookupChain back-stack invariants
+    LookupChainTest.cpp
+    run.sh
 
 scripts/
   dictionary_tools.py                  # standalone CLI: prep, lookup, merge
@@ -57,6 +75,7 @@ scripts/
 | `phrase` | Ch 13 | Multi-word phrase entries |
 | `html-definitions` | Ch 18 | HTML definitions (sametypesequence=h) |
 | `ipa-phonetic` | Ch 19 | IPA Unicode character rendering |
+| `chain-stress` | Ch 22 | Chained-OOM stress: 5 large (~22 KB text / ~30 pp) style-dense HTML entries that cyclically name the next headword — deep chaining + heap-flat acceptance. Synthetic (`word_prefix: chain_stress`). |
 
 ### Pre-processing (Ch 4-5)
 
@@ -154,7 +173,7 @@ The test EPUB (`test/epubs/test_dictionary.epub`) is generated from HTML chapter
 
 1. Edit HTML in `test/data/dictionary-epub-chapters/`:
    - `cover.html`, `toc_notice.html` — front matter
-   - `ch01_*.html` through `ch20_*.html` — chapters (sorted by filename)
+   - `ch01_*.html` through `ch22_*.html` — chapters (sorted by filename)
 
 2. Regenerate:
    ```bash
@@ -171,12 +190,19 @@ Tests the `DictHtmlRenderer` library on the host (no device required).
 bash test/dict-html-renderer/run.sh
 ```
 
-Requires `gcc` and `g++`. Runs 14 tests:
-- 7 dictionary entry tests against `html-definitions` dictionary
-- 5 boundary condition tests (malformed XML, large input, deep nesting, control chars)
-- 2 IPA utility unit tests (isIpaCodepoint, splitIpaRuns)
+Requires `gcc` and `g++`. The build supplies host stubs for the device-only
+`HalStorage.h` / `Logging.h` (see `test/dict-html-renderer/stubs/`) so the
+file-based render paths compile and run off-device. Runs 15 tests:
+- 7 dictionary entry tests against the `html-definitions` dictionary
+- 1 streaming-parity test (`renderFromFileStreaming` vs batch `render`, all entries)
+- 5 boundary condition tests (malformed XML, large input, long paragraph, deep nesting, control chars)
+- 2 IPA utility unit tests (`isIpaCodepoint`, `splitIpaRuns`, incl. added codepoints + combining marks)
 
 See `test/dict-html-renderer/README.md` for details.
+
+Two further host litmuses cover the layout side (no device required):
+- `bash test/dict-layout/run.sh` — `DictLayout` wrap/pagination + page-collector vs a reference oracle.
+- `bash test/lookup-chain/run.sh` — `LookupChain` back-stack invariants (distance-from-newest, non-contiguous subset, eviction).
 
 ## Standalone CLI Tools
 
@@ -262,7 +288,7 @@ Case-insensitive binary search over prefixes finds the largest entry `i` whose p
 
 ## Known Limitations
 
-**Multi-word selection cannot span page boundaries.** Words on the next page are not loaded into memory, so extending a multi-word selection past the last word on the current page is not possible. Workaround: reduce the reader font size so that more words fit on a single page, perform the phrase lookup, then restore the original font size. A complete fix would require significant changes to the rendering engine and is out of scope for the dictionary feature.
+**Multi-word selection cannot span page boundaries.** Only the current page of a definition is ever resident in RAM — this is inherent to the streaming render pipeline (see Definition Rendering Pipeline), which holds one page at a time so large definitions cannot exhaust memory. Words on adjacent pages are therefore not available to extend a multi-word selection past the last word on the current page. Workaround: reduce the reader font size so that more words fit on a single page, perform the phrase lookup, then restore the original font size. A complete fix would require holding more than one page (defeating the RAM bound) and is out of scope for the dictionary feature.
 
 ## Naming Conventions
 

@@ -1,9 +1,12 @@
 // Smoke test for DictHtmlRenderer.
-// Reads all 6 entries from test/dictionaries/expat-full/ and passes each
-// full entry to renderer.render() — exactly as on-device code would.
-// Checks the complete span output against expected values.
+// Reads the entries from test/dictionaries/html-definitions/ and passes each full
+// entry to renderer.render() — exactly as on-device code would — checking the
+// complete span output against expected values. Also verifies that the streaming
+// path (renderFromFileStreaming, reading the .dict file via the HalStorage stub)
+// produces identical spans, plus boundary cases and the IPA utility functions.
 //
-// Build and run via test/run_dict_html_renderer.sh.
+// Build and run via test/dict-html-renderer/run.sh (host; provides stub
+// HalStorage.h / Logging.h so the file-based renderer compiles off-device).
 // Exit code: 0 = all pass, 1 = any failure or unexpected unknown tags.
 // DICT_HTML_RENDERER_TRACK_UNKNOWN is defined by the build script via -D flag.
 
@@ -116,6 +119,31 @@ static bool spanMatches(const StyledSpan& got, const ExpectedSpan& exp) {
   return true;
 }
 
+// A span copied out of the renderer (text owned), for comparing batch render()
+// output against the streaming renderFromFileStreaming() output. Streaming
+// delivers span.text valid only during the callback, so it must be copied.
+struct CollectedSpan {
+  std::string text;
+  bool bold, italic, underline, strikethrough, isListItem, newlineBefore;
+  uint8_t indentLevel;
+  bool operator==(const CollectedSpan& o) const {
+    return text == o.text && bold == o.bold && italic == o.italic && underline == o.underline &&
+           strikethrough == o.strikethrough && isListItem == o.isListItem && newlineBefore == o.newlineBefore &&
+           indentLevel == o.indentLevel;
+  }
+};
+
+static CollectedSpan collect(const StyledSpan& s) {
+  return {s.text ? s.text : "", s.bold,       s.italic,        s.underline,
+          s.strikethrough,      s.isListItem, s.newlineBefore, s.indentLevel};
+}
+
+// SpanSink callback for renderFromFileStreaming: appends each delivered span to a
+// std::vector<CollectedSpan>* passed as ctx (copying text immediately).
+static void collectSink(void* ctx, const StyledSpan& s) {
+  static_cast<std::vector<CollectedSpan>*>(ctx)->push_back(collect(s));
+}
+
 // Run one test entry. Passes full raw entry content to renderer.render(),
 // the same way on-device lookup code does. Returns true on pass.
 static bool runTest(const std::string& word, const std::string& content, DictHtmlRenderer& renderer,
@@ -148,7 +176,7 @@ static bool runTest(const std::string& word, const std::string& content, DictHtm
       if (!expectUnknownTags) {
         printf("  Action:  Tag was blindly stripped. Add it to the renderer's tag registry\n");
         printf("           with an explicit handling decision (strip-keep, strip-all, format, etc.)\n");
-        printf("           then add a test case for it to test/dictionaries/expat-full/.\n");
+        printf("           then add a test case for it to test/dictionaries/html-definitions/.\n");
       }
     }
   }
@@ -321,14 +349,16 @@ static const std::vector<ExpectedSpan> kFormatTags = {
 
 // StripKeep
 // Full entry:
-//   <p>Three cases where the tag is stripped but its text content is kept.</p>
+//   <p>Four cases where the tag is stripped but its text content is kept.</p>
 //   <p>Case 1: span tag stripped, text kept. Expected: visible span text</p>
 //   <p>Case 2: single unknown tag stripped, text kept. Expected: visible unknown text</p>
 //   <p>Case 3: nested unknown tags both stripped, innermost text kept. ...</p>
+//   <p>Case 4: anchor tag stripped, text kept. Expected: visible anchor text</p>
 //   <p>----------</p>
 //   <p><span>visible span text</span></p>
 //   <p><unknowntag>visible unknown text</unknowntag></p>
 //   <p><outertag><innertag>visible nested text</innertag></outertag></p>
+//   <p><a href="#">visible anchor text</a></p>
 //   <p>----------</p>
 // unknowntag / outertag / innertag are intentional unknown tags — expectUnknownTags=true.
 static const std::vector<ExpectedSpan> kStripKeep = {
@@ -490,6 +520,52 @@ int main(int argc, char** argv) {
   }
 
   // ---------------------------------------------------------------------------
+  // Group D: streaming parity — renderFromFileStreaming() must produce exactly the
+  // same spans as the batch render() for every entry. Exercises the Stage 2b
+  // streaming span-sink path (reads the .dict file via the HalStorage stub; never
+  // materializes the whole-definition textBuf/spans vector).
+  // ---------------------------------------------------------------------------
+  {
+    printf("\n=== streaming parity (renderFromFileStreaming vs render) ===\n");
+    bool allPass = true;
+    for (const auto& test : tests) {
+      const DictEntry* found = nullptr;
+      for (const auto& e : entries) {
+        if (e.word == test.word) {
+          found = &e;
+          break;
+        }
+      }
+      if (!found || found->offset + found->length > dictData.size()) {
+        printf("  %s: entry unavailable FAIL\n", test.word);
+        allPass = false;
+        continue;
+      }
+      const std::string raw = dictData.substr(found->offset, found->length);
+
+      // Batch spans — copied out, since render() reuses its buffer on the next call.
+      std::vector<CollectedSpan> batch;
+      for (const auto& s : renderer.render(raw.c_str(), static_cast<int>(raw.size()))) batch.push_back(collect(s));
+
+      // Streamed spans read from the .dict file.
+      std::vector<CollectedSpan> stream;
+      DictHtmlRenderer::SpanSink sink{&stream, &collectSink};
+      renderer.renderFromFileStreaming(dictPath.c_str(), found->offset, found->length, sink);
+
+      bool match = batch.size() == stream.size();
+      for (size_t i = 0; match && i < batch.size(); i++) match = (batch[i] == stream[i]);
+      printf("  %s: batch %zu / stream %zu spans %s\n", test.word, batch.size(), stream.size(),
+             match ? "OK" : "MISMATCH");
+      if (!match) allPass = false;
+    }
+    printf("  %s\n", allPass ? "PASS" : "FAIL");
+    if (allPass)
+      passed++;
+    else
+      failed++;
+  }
+
+  // ---------------------------------------------------------------------------
   // B1: parseError — malformed XML produces partial output
   // The renderer wraps input in <_root>...</_root>. Unclosed tags cause a parse
   // error, but partial spans accumulated before the error are still returned.
@@ -616,6 +692,14 @@ int main(int argc, char** argv) {
         {0x1DBF, true, "U+1DBF (Phonetic Extensions Supplement end)"},
         {0x1DC0, false, "U+1DC0 (above Phonetic Ext Supplement)"},
         {0x0061, false, "U+0061 (ASCII 'a')"},
+        // Individual IPA letters outside the block ranges (added by the IPA merge).
+        {0x00E6, true, "U+00E6 (ae)"},
+        {0x00F0, true, "U+00F0 (eth)"},
+        {0x0153, true, "U+0153 (oe)"},
+        {0x03B2, true, "U+03B2 (beta)"},
+        {0x03B8, true, "U+03B8 (theta)"},
+        {0x00E5, false, "U+00E5 (a-ring — not IPA)"},
+        {0x03B1, false, "U+03B1 (alpha — not in the IPA subset)"},
     };
     bool allPass = true;
     for (const auto& c : cases) {
@@ -698,6 +782,22 @@ int main(int argc, char** argv) {
                       runs[1].text.size() == 4 && !runs[2].isIpa && runs[2].text == "cd";
       printf("  \"ab\"+U+0250+U+0251+\"cd\" → %zu run(s) (expected 3, IPA run len 4)%s\n", runs.size(),
              ok ? "" : " FAIL");
+      if (!ok) allPass = false;
+    }
+
+    // Combining mark attaches to the current run (IPA-merge behavior):
+    // U+0250 (IPA) + U+0301 (combining acute) → one IPA run of 4 bytes.
+    {
+      std::string s;
+      s += '\xC9';
+      s += '\x90';  // U+0250 (IPA)
+      s += '\xCC';
+      s += '\x81';  // U+0301 (combining acute)
+      std::vector<IpaTextSpan> runs;
+      splitIpaRuns(s.c_str(), runs);
+      const bool ok = runs.size() == 1 && runs[0].isIpa && runs[0].text.size() == 4;
+      printf("  U+0250+U+0301(combining) → %zu run(s), isIpa=%d (expected 1, true)%s\n", runs.size(),
+             runs.empty() ? -1 : (int)runs[0].isIpa, ok ? "" : " FAIL");
       if (!ok) allPass = false;
     }
 

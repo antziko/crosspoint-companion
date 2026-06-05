@@ -28,6 +28,7 @@ CXXFLAGS=(
   -pedantic
   -DDICT_HTML_RENDERER_TRACK_UNKNOWN
   "${COMMON_DEFINES[@]}"
+  -I"$ROOT_DIR/test/dict-html-renderer/stubs"  # host stubs for HalStorage.h / Logging.h (device-only headers)
   -I"$ROOT_DIR"
   -I"$ROOT_DIR/lib"
   -I"$ROOT_DIR/lib/expat"

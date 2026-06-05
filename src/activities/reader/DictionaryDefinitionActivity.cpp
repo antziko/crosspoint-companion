@@ -21,6 +21,7 @@
 #include "util/DictionaryActivityUtils.h"
 #include "util/IpaUtils.h"
 #include "util/LookupHistory.h"
+#include "util/TextPool.h"
 
 static constexpr char kBullet[] = "- ";
 
@@ -30,6 +31,12 @@ void DictionaryDefinitionActivity::onEnter() {
   requestUpdate();
   // SD write overlaps the e-ink refresh kicked by requestUpdate() on the render task.
   LookupHistory::addWordIf(cachePath, historyWord, historyStatus, recordHistory);
+
+  // Seed the back-nav chain. The initial word is the newest history entry iff it
+  // was just logged (same condition addWordIf applies internally).
+  chain_.reset(SETTINGS.getLookupHistoryCapValue());
+  const bool initialLogged = recordHistory && !historyWord.empty() && !cachePath.empty();
+  chain_.setCurrentHistIndex(initialLogged ? 0 : -1);
 }
 
 void DictionaryDefinitionActivity::onExit() {
@@ -47,10 +54,9 @@ int DictionaryDefinitionActivity::getLineHeight() const {
 // ---------------------------------------------------------------------------
 
 void DictionaryDefinitionActivity::wrapText() {
-  layoutLines.clear();
-  layoutLines.reserve(32);
   isWordSelectMode = false;
   navigator.reset();
+  currentPage = 0;  // new definition always starts at page 0
 
   const auto orient = renderer.getOrientation();
   const auto metrics = UITheme::getInstance().getMetrics();
@@ -71,6 +77,21 @@ void DictionaryDefinitionActivity::wrapText() {
   linesPerPage = (renderer.getScreenHeight() - topArea - bottomArea) / getLineHeight();
   if (linesPerPage < 1) linesPerPage = 1;
 
+  loadPage(currentPage);
+}
+
+// Re-parse the definition and lay out ONLY `page` into layoutLines. The wrap
+// produces every line, but collectLineSink keeps only this page's lines (the
+// rest are produced then dropped, so peak RAM is one page, not the whole
+// definition) and counts all lines to recompute totalPages. Called on entry and
+// on every page turn (Stage 2a: re-parse every turn, both directions).
+void DictionaryDefinitionActivity::loadPage(int page) {
+  layoutLines.clear();
+  layoutLines.reserve(static_cast<size_t>(linesPerPage) + 1);
+  pagePool_.clear();
+  collectTargetPage_ = page;
+  collectLineCount_ = 0;
+
   // Choose rendering path based on dictionary content type
   const DictInfo info = Dictionary::readInfo(foundLocation.folderPath.c_str());
   if (info.valid && info.sametypesequence[0] == 'h') {
@@ -79,8 +100,30 @@ void DictionaryDefinitionActivity::wrapText() {
     wrapPlain();
   }
 
-  totalPages = (static_cast<int>(layoutLines.size()) + linesPerPage - 1) / linesPerPage;
-  if (totalPages < 1) totalPages = 1;
+  totalPages = DictLayout::paginate(collectLineCount_, linesPerPage);
+}
+
+void DictionaryDefinitionActivity::collectLineSink(void* ctx, DictLayout::LayoutLine&& line) {
+  auto* self = static_cast<DictionaryDefinitionActivity*>(ctx);
+  const int idx = self->collectLineCount_++;
+  const int start = self->collectTargetPage_ * self->linesPerPage;
+  if (idx < start || idx >= start + self->linesPerPage) return;  // not on this page — discard
+
+  // Pool the kept line's text: each (already same-style-merged) segment becomes
+  // one null-terminated pool entry referenced by {offset, len}.
+  PooledLine pooled;
+  pooled.indentLevel = line.indentLevel;
+  pooled.isListItem = line.isListItem;
+  pooled.segments.reserve(line.segments.size());
+  for (const auto& seg : line.segments) {
+    PooledSegment ps;
+    ps.offset = TextPool::append(self->pagePool_, seg.text.c_str(), seg.text.size());
+    ps.len = static_cast<uint16_t>(seg.text.size());
+    ps.style = seg.style;
+    ps.isIpa = seg.isIpa;
+    pooled.segments.push_back(ps);
+  }
+  self->layoutLines.push_back(std::move(pooled));
 }
 
 // ---------------------------------------------------------------------------
@@ -101,144 +144,39 @@ int DictionaryDefinitionActivity::getMixedWidth(std::vector<IpaTextSpan>& ipaRun
 // HTML path: run DictHtmlRenderer, lay out spans into LayoutLines
 // ---------------------------------------------------------------------------
 
-void DictionaryDefinitionActivity::wrapHtml() {
-  std::vector<IpaTextSpan> ipaRuns;
-  const int screenWidth = renderer.getScreenWidth();
-  const int maxWidth = screenWidth - leftPadding - rightPadding;
+int DictionaryDefinitionActivity::measureWidthAdapter(void* ctx, const char* text, EpdFontFamily::Style style,
+                                                      bool isIpa) {
+  auto* self = static_cast<DictionaryDefinitionActivity*>(ctx);
+  const int fontId = isIpa ? IPA_FONT_ID : SETTINGS.getDefinitionFontId();
+  return self->renderer.getTextWidth(fontId, text, style);
+}
 
-  // Indent step: 3 spaces worth of pixels at regular weight
+void DictionaryDefinitionActivity::wrapHtml() {
+  const int maxWidth = renderer.getScreenWidth() - leftPadding - rightPadding;
+  // Indent step: 3 spaces worth of pixels at regular weight.
   const int indentStep = renderer.getTextWidth(SETTINGS.getDefinitionFontId(), "   ");
   const int bulletWidth = renderer.getTextWidth(SETTINGS.getDefinitionFontId(), kBullet);
 
-  // Heap-allocate the renderer — internal buffers are too large for the stack.
-  // Stream from .dict file — the full definition is never held in RAM.
-  auto htmlRenderer = std::make_unique<DictHtmlRenderer>();
+  // Fully streamed: the renderer delivers spans one at a time to the Wrapper, the
+  // Wrapper emits completed lines to the page collector, and the collector keeps
+  // only the current page. Neither the whole-definition span/textBuf (renderer)
+  // nor all pages of lines (here) is ever materialized.
+  DictLayout::Measurer measure{this, &DictionaryDefinitionActivity::measureWidthAdapter};
+  DictLayout::LineSink lineSink{this, &DictionaryDefinitionActivity::collectLineSink};
+  DictLayout::Wrapper wrapper(DictLayout::WrapMetrics{maxWidth, indentStep, bulletWidth}, measure, lineSink);
+
+  // Renderer is a reused activity member (3.1-A): renderFromFileStreaming resets
+  // it each call (XML_ParserReset, not free+create), so no per-turn object/parser
+  // churn. Streaming means it never materializes the whole-definition buffers.
   const std::string dictPath = foundLocation.folderPath + ".dict";
-  const auto& spans = htmlRenderer->renderFromFile(dictPath.c_str(), foundLocation.offset, foundLocation.size);
+  const DictHtmlRenderer::SpanSink spanSink{&wrapper, &DictionaryDefinitionActivity::feedSpanToWrapper};
+  htmlRenderer_.renderFromFileStreaming(dictPath.c_str(), foundLocation.offset, foundLocation.size, spanSink);
+  wrapper.finish();
+  // Only the kept page's span text was ever copied into layoutLines.
+}
 
-  LayoutLine currentLine;
-  int currentX = 0;
-
-  auto flushLine = [&]() {
-    if (!currentLine.segments.empty()) {
-      layoutLines.push_back(std::move(currentLine));
-      currentLine = LayoutLine{};
-    }
-  };
-
-  auto startLine = [&](uint8_t indent, bool listItem) {
-    currentLine.indentLevel = indent;
-    currentLine.isListItem = listItem;
-    currentX = indent * indentStep + (listItem ? bulletWidth : 0);
-  };
-
-  auto appendToLine = [&](const std::string& text, EpdFontFamily::Style style, bool isIpa, int width) {
-    if (!currentLine.segments.empty() && currentLine.segments.back().style == style &&
-        currentLine.segments.back().isIpa == isIpa) {
-      currentLine.segments.back().text += text;
-    } else {
-      currentLine.segments.push_back({text, style, isIpa});
-    }
-    currentX += width;
-  };
-
-  auto appendMixed = [&](const char* text, EpdFontFamily::Style style) {
-    ipaRuns.clear();
-    splitIpaRuns(text, ipaRuns);
-    for (const auto& run : ipaRuns) {
-      const int fontId = run.isIpa ? IPA_FONT_ID : SETTINGS.getDefinitionFontId();
-      appendToLine(run.text, style, run.isIpa, renderer.getTextWidth(fontId, run.text.c_str(), style));
-    }
-  };
-
-  // Break a single token at codepoint boundaries when it is wider than the available line width.
-  auto breakToken = [&](const std::string& tok, EpdFontFamily::Style style, uint8_t indentLevel) {
-    const auto* bp = reinterpret_cast<const uint8_t*>(tok.c_str());
-    std::string pending;
-    int pendingWidth = 0;
-    uint32_t cp;
-    while ((cp = utf8NextCodepoint(&bp))) {
-      char buf[4];
-      const int cpLen = utf8EncodeCodepoint(cp, buf);
-      std::string cpStr(buf, cpLen);
-      const int fontId = isIpaCodepoint(cp) ? IPA_FONT_ID : SETTINGS.getDefinitionFontId();
-      const int cpWidth = renderer.getTextWidth(fontId, cpStr.c_str(), style);
-      if (!pending.empty() && currentX + pendingWidth + cpWidth > maxWidth) {
-        appendMixed(pending.c_str(), style);
-        flushLine();
-        startLine(indentLevel, false);
-        pending.clear();
-        pendingWidth = 0;
-      }
-      pending += cpStr;
-      pendingWidth += cpWidth;
-    }
-    if (!pending.empty()) appendMixed(pending.c_str(), style);
-  };
-
-  startLine(0, false);
-
-  for (const auto& span : spans) {
-    if (!span.text || span.text[0] == '\0') continue;
-
-    EpdFontFamily::Style style;
-    if (span.bold && span.italic) {
-      style = EpdFontFamily::BOLD_ITALIC;
-    } else if (span.bold) {
-      style = EpdFontFamily::BOLD;
-    } else if (span.italic) {
-      style = EpdFontFamily::ITALIC;
-    } else {
-      style = EpdFontFamily::REGULAR;
-    }
-    if (span.underline) style = static_cast<EpdFontFamily::Style>(style | EpdFontFamily::UNDERLINE);
-
-    if (span.newlineBefore) {
-      flushLine();
-      startLine(span.indentLevel, span.isListItem);
-    }
-
-    const int spanWidth = getMixedWidth(ipaRuns, span.text, style);
-    if (currentX + spanWidth <= maxWidth) {
-      // Fast path: entire span fits on the current line.
-      appendMixed(span.text, style);
-    } else {
-      // Word-wrap within the span.
-      const char* p = span.text;
-      while (*p) {
-        bool hadSpace = false;
-        while (*p == ' ') {
-          hadSpace = true;
-          ++p;
-        }
-        if (!*p) break;
-
-        const char* tokStart = p;
-        while (*p && *p != ' ') ++p;
-        std::string tok(tokStart, p - tokStart);
-
-        bool lineIsEmpty = currentLine.segments.empty();
-        std::string candidate = (!lineIsEmpty && hadSpace) ? " " + tok : tok;
-        int candidateWidth = getMixedWidth(ipaRuns, candidate.c_str(), style);
-
-        if (currentX + candidateWidth > maxWidth && !lineIsEmpty) {
-          flushLine();
-          startLine(span.indentLevel, false);
-          candidate = tok;
-          candidateWidth = getMixedWidth(ipaRuns, tok.c_str(), style);
-        }
-
-        if (currentX + candidateWidth > maxWidth) {
-          breakToken(candidate, style, span.indentLevel);
-        } else {
-          appendMixed(candidate.c_str(), style);
-        }
-      }
-    }
-  }
-
-  flushLine();
-  // htmlRenderer freed here; span text has been copied into layoutLines
+void DictionaryDefinitionActivity::feedSpanToWrapper(void* ctx, const StyledSpan& span) {
+  static_cast<DictLayout::Wrapper*>(ctx)->onSpan(span);
 }
 
 // ---------------------------------------------------------------------------
@@ -255,15 +193,16 @@ void DictionaryDefinitionActivity::wrapPlain() {
   std::string currentLineText;
   int currentLineWidth = 0;
 
+  DictLayout::LineSink sink{this, &DictionaryDefinitionActivity::collectLineSink};
   auto flushLine = [&]() {
     if (currentLineText.empty()) return;
-    LayoutLine line;
+    DictLayout::LayoutLine line;
     ipaRuns.clear();
     splitIpaRuns(currentLineText.c_str(), ipaRuns);
     for (const auto& run : ipaRuns) {
       line.segments.push_back({run.text, EpdFontFamily::REGULAR, run.isIpa});
     }
-    layoutLines.push_back(std::move(line));
+    sink(std::move(line));
     currentLineText.clear();
     currentLineWidth = 0;
   };
@@ -336,10 +275,9 @@ void DictionaryDefinitionActivity::extractWordsFromLayout() {
   std::string textPool;
   textPool.reserve(512);
 
-  const int startLineIdx = currentPage * linesPerPage;
   const int lineHeight = getLineHeight();  // cached for loop
-  for (int i = 0; i < linesPerPage && (startLineIdx + i) < static_cast<int>(layoutLines.size()); i++) {
-    const LayoutLine& line = layoutLines[startLineIdx + i];
+  for (int i = 0; i < linesPerPage && i < static_cast<int>(layoutLines.size()); i++) {
+    const PooledLine& line = layoutLines[i];
     const int16_t lineY = static_cast<int16_t>(bodyStartY + i * lineHeight);
     int x = leftPadding + line.indentLevel * indentStep;
 
@@ -350,7 +288,7 @@ void DictionaryDefinitionActivity::extractWordsFromLayout() {
     for (const auto& seg : line.segments) {
       const int segFontId = seg.isIpa ? IPA_FONT_ID : SETTINGS.getDefinitionFontId();
       const int spaceWidth = renderer.getSpaceWidth(segFontId, seg.style);
-      const char* p = seg.text.c_str();
+      const char* p = pagePool_.data() + seg.offset;
       while (*p) {
         while (*p == ' ') {
           x += spaceWidth;
@@ -411,20 +349,28 @@ void DictionaryDefinitionActivity::loop() {
     switch (controller.handleInput()) {
       case DictionaryLookupController::LookupEvent::FoundDefinition: {
         const bool wasBackNav = chainBackNavInProgress;
+        const bool willLog = !wasBackNav && controller.getRecordHistory();
         if (!wasBackNav) {
-          chainWords.push_back(headword);
+          // Forward: push a back-entry for the word being left (current headword,
+          // on currentPage), referencing its history position.
+          chain_.onForward(static_cast<uint16_t>(currentPage), willLog);
         }
         chainBackNavInProgress = false;
         headword = controller.getFoundWord();
         foundLocation = controller.getFoundLocation();
-        wrapText();
-        currentPage = 0;
+        wrapText();  // resets currentPage to 0 and loads page 0
+        if (wasBackNav) {
+          // Re-derive the now-current word's history position and restore its page.
+          chain_.setCurrentHistIndex(pendingBack_.histIndex);
+          currentPage = (pendingBack_.page < totalPages) ? pendingBack_.page : (totalPages - 1);
+          if (currentPage < 0) currentPage = 0;
+          if (currentPage > 0) loadPage(currentPage);
+        }
         isWordSelectMode = false;
         requestUpdate();
-        // Chain-forward records; chain-back-nav (recordHistory=false) does not.
+        // Chain-forward records; chain-back-nav does not.
         LookupHistory::addWordIf(cachePath, controller.getLookupWord(),
-                                 DictionaryLookupController::toHistStatus(controller.getFoundStatus()),
-                                 !wasBackNav && controller.getRecordHistory());
+                                 DictionaryLookupController::toHistStatus(controller.getFoundStatus()), willLog);
         break;
       }
       case DictionaryLookupController::LookupEvent::NotFoundDismissedBack:
@@ -477,11 +423,13 @@ void DictionaryDefinitionActivity::loop() {
 
   if (prevPage && currentPage > 0) {
     currentPage--;
+    loadPage(currentPage);
     requestUpdate();
   }
 
   if (nextPage && currentPage < totalPages - 1) {
     currentPage++;
+    loadPage(currentPage);
     requestUpdate();
   }
 
@@ -502,12 +450,16 @@ void DictionaryDefinitionActivity::loop() {
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Back) &&
       (!showLookupButton || mappedInput.getHeldTime() < Dictionary::LONG_PRESS_MS)) {
-    if (!cachePath.empty() && !chainWords.empty()) {
-      std::string prevWord = chainWords.back();
-      chainWords.pop_back();
-      chainBackNavInProgress = true;
-      controller.startLookup(prevWord, false);
-      return;
+    if (!cachePath.empty() && !chain_.empty()) {
+      pendingBack_ = chain_.pop();
+      // Resolve the prior headword from the persisted history by distance-from-newest.
+      const auto hist = LookupHistory::load(cachePath);  // newest-first
+      if (pendingBack_.histIndex < hist.size()) {
+        chainBackNavInProgress = true;
+        controller.startLookup(hist[pendingBack_.histIndex].word, false);
+        return;
+      }
+      // Unresolvable (should not happen under the depth cap) — fall through to exit.
     }
     DictUtils::cancelAndFinish(*this);
     return;
@@ -556,12 +508,12 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
                       metrics.headerHeight},
                  headword.c_str());
 
-  // Body: draw layout lines for the current page (BW pass)
-  const int startLine = currentPage * linesPerPage;
+  // Body: draw layout lines for the current page (BW pass). layoutLines holds
+  // only the current page (Stage 2a streaming), so it is indexed from 0.
   const int lineHeight = getLineHeight();  // cached for loop + renderHighlight
   auto renderBody = [&]() {
-    for (int i = 0; i < linesPerPage && (startLine + i) < static_cast<int>(layoutLines.size()); i++) {
-      const LayoutLine& line = layoutLines[startLine + i];
+    for (int i = 0; i < linesPerPage && i < static_cast<int>(layoutLines.size()); i++) {
+      const PooledLine& line = layoutLines[i];
       const int y = bodyStartY + i * lineHeight;
       int x = leftPadding + line.indentLevel * indentStep;
 
@@ -572,13 +524,14 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
 
       for (const auto& seg : line.segments) {
         const int segFontId = seg.isIpa ? IPA_FONT_ID : SETTINGS.getDefinitionFontId();
-        renderer.drawText(segFontId, x, y, seg.text.c_str(), true, seg.style);
+        const char* segText = pagePool_.data() + seg.offset;
+        renderer.drawText(segFontId, x, y, segText, true, seg.style);
         if ((seg.style & EpdFontFamily::UNDERLINE) != 0) {
-          const int segWidth = renderer.getTextWidth(segFontId, seg.text.c_str(), seg.style);
+          const int segWidth = renderer.getTextWidth(segFontId, segText, seg.style);
           const int underlineY = y + renderer.getFontAscenderSize(segFontId) + 2;
           renderer.drawLine(x, underlineY, x + segWidth, underlineY, true);
         }
-        x += renderer.getTextAdvanceX(segFontId, seg.text.c_str(), seg.style);
+        x += renderer.getTextAdvanceX(segFontId, segText, seg.style);
       }
     }
   };

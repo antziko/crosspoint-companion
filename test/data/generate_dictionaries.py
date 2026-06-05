@@ -427,7 +427,40 @@ def build_data_driven(cfg: dict, out_dir: str, yaml_dir: str) -> None:
 # Synthetic definition templates
 # ---------------------------------------------------------------------------
 
-def _make_def_all_prep(n: int, word_prefix: str) -> bytes:
+def _make_def_chain_stress(n: int, word_prefix: str, word_count: int) -> bytes:
+    """Large, style-dense HTML definition for the chained-OOM stress dict.
+
+    Two stress properties on purpose:
+      - ~23 KB of text / ~30 pages — worst-case for per-page layout memory.
+      - 8 style transitions per line — maximises per-page styled-segment count
+        (the allocation the text-pool must absorb without fragmenting).
+
+    Embeds the NEXT headword (cyclic: word_count -> 1) as selectable plain text on
+    every line, so a tester can chain deterministically and arbitrarily deep
+    (also exercises the lookup-chain depth cap / history eviction)."""
+    total = word_count if word_count > 0 else 1
+    nxt = f"{word_prefix}_{(n % total) + 1:05d}"
+    branch = f"{word_prefix}_{((n + 1) % total) + 1:05d}"
+    tags = ["b", "i", "u", "code", "em", "strong"]
+    # "** word **" (spaces INSIDE the markers) makes the headword a clean standalone
+    # token for word-select (cleanWord strips the bare "**", keeps the word) AND an
+    # easy visual anchor in the dense text.
+    out = [f"<h1>Chained OOM stress entry {n:05d}</h1>",
+           "<p>Large style-dense definition for layout-memory stress.</p>",
+           f"<p>CHAIN &mdash; to continue the chain, look up ** {nxt} ** (it also appears on every page below).</p>",
+           f"<p>BRANCH &mdash; for the back-then-forward test, look up ** {branch} ** instead.</p>"]
+    for ln in range(120):
+        words = []
+        for w in range(8):
+            tag = tags[(n + ln + w) % len(tags)]
+            words.append(f"<{tag}>tok{ln:03d}{w}</{tag}>")
+            words.append(f"plainword{ln:03d}{w}")
+        words.insert(5, f"** {nxt} **")  # next headword: anchored + selectable, mid-line on every line
+        out.append(f"<p>line {ln:03d} " + " ".join(words) + "</p>")
+    return "".join(out).encode("utf-8")
+
+
+def _make_def_all_prep(n: int, word_prefix: str, word_count: int = 0) -> bytes:
     """~900-byte definition for all_prep_word dicts."""
     parts = [
         f"Entry {n:05d}.",
@@ -449,7 +482,7 @@ def _make_def_all_prep(n: int, word_prefix: str) -> bytes:
     return " ".join(parts).encode("utf-8")
 
 
-def _make_def_long_prep(n: int, word_prefix: str) -> bytes:
+def _make_def_long_prep(n: int, word_prefix: str, word_count: int = 0) -> bytes:
     """~200-byte definition for long_prep_word dicts."""
     parts = [
         f"Entry {n:05d}.",
@@ -466,6 +499,7 @@ def _make_def_long_prep(n: int, word_prefix: str) -> bytes:
 _DEFINITION_FN = {
     "all_prep_word": _make_def_all_prep,
     "long_prep_word": _make_def_long_prep,
+    "chain_stress": _make_def_chain_stress,
 }
 
 
@@ -504,7 +538,7 @@ def build_synthetic(cfg: dict, out_dir: str) -> None:
 
     for n in range(1, word_count + 1):
         word = f"{word_prefix}_{n:05d}"
-        defn = make_def(n, word_prefix)
+        defn = make_def(n, word_prefix, word_count)
         off = dict_buf.tell()
         size = len(defn)
         dict_buf.write(defn)
@@ -548,15 +582,31 @@ def build_synthetic(cfg: dict, out_dir: str) -> None:
                       file=sys.stderr)
     del dict_bytes
 
-    # Write .idx (always uncompressed)
+    # Write .idx (always uncompressed) and, when requested, the CrossPoint
+    # accelerator indexes (.idx.oft and .idx.oft.cspt).
     with open(stem + ".idx", "wb") as f:
         f.write(idx_bytes)
+    generate_cspt = meta.get("generate_cspt", False)
+    if generate_oft:
+        idx_oft_bytes = build_idx_oft(idx_bytes)
+        with open(stem + ".idx.oft", "wb") as f:
+            f.write(idx_oft_bytes)
+        if generate_cspt:
+            with open(stem + ".idx.oft.cspt", "wb") as f:
+                f.write(build_cspt(idx_bytes, idx_oft_bytes, skip_per_entry=8))
 
-    # Write .syn / .syn.dz
+    # Write .syn / .syn.dz (+ optional .syn.oft / .syn.oft.cspt)
     syn_count = None
     if syn_bytes:
         print("Compressing .syn.dz ..." if compress else "Writing .syn ...")
         write_or_compress(stem + ".syn", syn_bytes, compress)
+        if generate_oft:
+            syn_oft_bytes = build_syn_oft(syn_bytes)
+            with open(stem + ".syn.oft", "wb") as f:
+                f.write(syn_oft_bytes)
+            if meta.get("generate_syn_cspt", False):
+                with open(stem + ".syn.oft.cspt", "wb") as f:
+                    f.write(build_cspt(syn_bytes, syn_oft_bytes, skip_per_entry=4))
         del syn_bytes
         syn_count = total_synonyms
 
@@ -565,7 +615,11 @@ def build_synthetic(cfg: dict, out_dir: str) -> None:
     exts = [".ifo",
             ".dict" + (".dz" if compress else ""),
             ".idx",
-            (".syn" + (".dz" if compress else "")) if syn_count else None]
+            ".idx.oft" if generate_oft else None,
+            ".idx.oft.cspt" if (generate_oft and generate_cspt) else None,
+            (".syn" + (".dz" if compress else "")) if syn_count else None,
+            ".syn.oft" if (generate_oft and syn_count) else None,
+            ".syn.oft.cspt" if (generate_oft and syn_count and meta.get("generate_syn_cspt", False)) else None]
     _print_summary(out_dir, stem_name, exts)
     print(f"\nTotal generation time: {time.monotonic() - t0:.1f}s")
     if not generate_oft:

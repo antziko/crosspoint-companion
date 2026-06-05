@@ -98,6 +98,10 @@ From a definition screen, you can look up any word within the definition text wi
 6. Short-press **Back** again to go back through the chain (each press returns to the previous definition).
 7. Long-press **Back** at any point to exit directly to the reader.
 
+Going back returns you to each prior definition **on the page you were reading** when you chained away from it, not the first page.
+
+**Chain depth limit:** the chain can hold at most as many entries as the **Dictionary History Limit** (Settings). If you chain deeper than that, the oldest chain entries are dropped to match the history window, so backing out eventually returns you to the reader rather than to an entry that has scrolled out of history.
+
 ---
 
 ## Phrase / Multi-word Lookup
@@ -142,7 +146,7 @@ Each book maintains its own lookup history, accessible from the reader menu.
 3. Select any entry and press **Confirm** to look it up again. Press **Back** from the definition to return to the history screen.
 4. To delete an entry, long-press **Confirm** on it. A confirmation popup appears -- press **Confirm** to delete, or **Back** to cancel.
 
-The history list is capped at the **Dictionary History Limit** value in Settings. When the cap is reached, the oldest entry is removed to make room for the new one.
+The history list is capped at the **Dictionary History Limit** value in Settings. When the cap is reached, the oldest entry is removed to make room for the new one. This limit also bounds how deep a chained lookup can go back (see Chaining Lookups): the back-navigation chain references the history list, so it cannot return to a word that has scrolled out of it.
 
 ---
 
