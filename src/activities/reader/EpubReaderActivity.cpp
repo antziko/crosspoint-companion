@@ -40,6 +40,7 @@
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "util/Dictionary.h"
 #include "util/ScreenshotUtil.h"
 
@@ -677,32 +678,34 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
           std::make_unique<EpubReaderChapterSelectionActivity>(renderer, mappedInput, epub, path, spineIdx),
           [this](const ActivityResult& result) {
             if (!result.isCancelled) {
-              const auto& chapterResult = std::get<ChapterResult>(result.data);
+              const auto chapterResult = std::get<ChapterResult>(result.data);
 
-              // Drop a session "return here" bookmark at the current page before leaving
-              // this chapter, so the user can quickly get back. Only when actually switching
-              // chapters and the page isn't already bookmarked (don't clobber a manual one).
-              // Called before the RenderLock below — addBookmark() takes its own lock.
+              auto doNavigate = [this, chapterResult]() {
+                RenderLock lock(*this);
+                currentSpineIndex = chapterResult.spineIndex;
+                pendingAnchor = chapterResult.anchor;
+                nextPageNumber = 0;
+                section.reset();
+              };
+
               if (section && section->pageCount > 0 && chapterResult.spineIndex != currentSpineIndex) {
                 const float bmProgress =
                     static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
                 if (!BOOKMARKS.hasBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
                                                   section->pageCount)) {
-                  addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
+                  startActivityForResult(
+                      std::make_unique<ConfirmationActivity>(renderer, mappedInput,
+                                                             tr(STR_CONFIRM_ADD_RETURN_MARK), ""),
+                      [this, doNavigate](const ActivityResult& confirmResult) {
+                        if (!confirmResult.isCancelled) {
+                          addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
+                        }
+                        doNavigate();
+                      });
+                  return;
                 }
               }
-
-              RenderLock lock(*this);
-
-              currentSpineIndex = chapterResult.spineIndex;
-
-              // If anchor is not empty, it will be used later to calculate the page number.
-              pendingAnchor = chapterResult.anchor;
-
-              // Otherwise page 0 will be used.
-              nextPageNumber = 0;
-
-              section.reset();
+              doNavigate();
             }
           });
       break;
@@ -731,20 +734,26 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
             if (!result.isCancelled) {
               const int targetPercent = clampPercent(std::get<PercentResult>(result.data).percent);
 
-              // Drop a "return here" bookmark at the current page before jumping, so the user
-              // can quickly get back. Works like SELECT_CHAPTER: only when actually moving and
-              // the page isn't already bookmarked (don't clobber a manual one). addBookmark()
-              // takes its own RenderLock, so call it before jumpToPercent() resets state.
+              auto doNavigate = [this, targetPercent]() { jumpToPercent(targetPercent); };
+
               if (section && section->pageCount > 0 && targetPercent != initialPercent) {
                 const float bmProgress =
                     static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
                 if (!BOOKMARKS.hasBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
                                                   section->pageCount)) {
-                  addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
+                  startActivityForResult(
+                      std::make_unique<ConfirmationActivity>(renderer, mappedInput,
+                                                             tr(STR_CONFIRM_ADD_RETURN_MARK), ""),
+                      [this, doNavigate](const ActivityResult& confirmResult) {
+                        if (!confirmResult.isCancelled) {
+                          addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
+                        }
+                        doNavigate();
+                      });
+                  return;
                 }
               }
-
-              jumpToPercent(targetPercent);
+              doNavigate();
             }
           });
       break;
