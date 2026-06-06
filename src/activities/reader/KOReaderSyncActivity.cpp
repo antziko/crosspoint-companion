@@ -213,6 +213,10 @@ void KOReaderSyncActivity::performUpload() {
   }
   requestUpdateAndWait();
 
+  // Release epub before the TLS handshake to free ~30KB RAM. localProgress was
+  // pre-computed before the Epub was released, so this is safe.
+  epub.reset();
+
   // localProgress was pre-computed in EpubReaderActivity before the Epub was released.
   KOReaderProgress progress;
   progress.document = documentHash;
@@ -250,15 +254,21 @@ void KOReaderSyncActivity::syncBookmarks() {
   }
   requestUpdateAndWait();
 
-  // Need the Epub for its title/author/path (used to key and re-save the local store).
+  // Get title/author from epub, then release it before TLS calls to free ~30KB RAM
+  // for the handshake. epubPath is already a member so loadForBook doesn't need epub live.
+  // If epub fails to load, proceed with empty strings — the bookmark file is keyed by
+  // the path CRC, not by title/author (those are display metadata only).
   ensureEpubLoaded();
-  if (!epub) {
-    LOG_ERR("KOSync", "Skipping bookmark sync: epub unavailable");
-    return;
+  std::string bookTitle;
+  std::string bookAuthor;
+  if (epub) {
+    bookTitle = epub->getTitle();
+    bookAuthor = epub->getAuthor();
+    epub.reset();  // Release before TLS calls; performSync reloads after syncBookmarks returns
   }
 
   // The reader unloaded its bookmarks when it exited; reload from disk for this book.
-  if (!BOOKMARKS.loadForBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), "epub")) {
+  if (!BOOKMARKS.loadForBook(epubPath, bookTitle, bookAuthor, "epub")) {
     LOG_ERR("KOSync", "Skipping bookmark sync: failed to load local bookmarks");
     return;
   }
@@ -348,8 +358,15 @@ void KOReaderSyncActivity::render(RenderLock&&) {
   auto metrics = UITheme::getInstance().getMetrics();
   Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 
+  const auto* activeServer = KOREADER_STORE.getServer(static_cast<size_t>(KOREADER_STORE.getActiveIndex()));
+  char syncHeader[72];
+  if (activeServer && !activeServer->name.empty()) {
+    snprintf(syncHeader, sizeof(syncHeader), "%s - %s", tr(STR_KOREADER_SYNC), activeServer->name.c_str());
+  } else {
+    snprintf(syncHeader, sizeof(syncHeader), "%s", tr(STR_KOREADER_SYNC));
+  }
   GUI.drawHeader(renderer, Rect{screen.x, screen.y + metrics.topPadding, screen.width, metrics.headerHeight},
-                 tr(STR_KOREADER_SYNC));
+                 syncHeader);
 
   int top = screen.y + screen.height / 2 - 40;
   if (state == NO_CREDENTIALS) {

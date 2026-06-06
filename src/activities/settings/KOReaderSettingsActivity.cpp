@@ -16,9 +16,9 @@
 
 namespace {
 // Rows always present for an existing server.
-// New servers only show the first BASE_ITEMS_NEW rows (no Authenticate or Delete).
+// New servers only show the first BASE_ITEMS_NEW rows (no Set Active, Authenticate, or Delete).
 constexpr int BASE_ITEMS_NEW = 5;       // Name, Username, Password, Sync Server URL, Doc Matching
-constexpr int BASE_ITEMS_EXISTING = 6;  // + Authenticate
+constexpr int BASE_ITEMS_EXISTING = 7;  // + Set as Active + Authenticate
 
 // Row indices (shared between getMenuItemCount, handleSelection, render)
 constexpr int ROW_NAME = 0;
@@ -26,8 +26,9 @@ constexpr int ROW_USERNAME = 1;
 constexpr int ROW_PASSWORD = 2;
 constexpr int ROW_URL = 3;
 constexpr int ROW_DOC_MATCH = 4;
-constexpr int ROW_AUTHENTICATE = 5;
-constexpr int ROW_DELETE = 6;
+constexpr int ROW_SET_ACTIVE = 5;
+constexpr int ROW_AUTHENTICATE = 6;
+constexpr int ROW_DELETE = 7;
 }  // namespace
 
 int KOReaderSettingsActivity::getMenuItemCount() const {
@@ -167,6 +168,13 @@ void KOReaderSettingsActivity::handleSelection() {
     saveServer();
     requestUpdate();
 
+  } else if (selectedIndex == ROW_SET_ACTIVE && !isNewServer) {
+    if (serverIndex != KOREADER_STORE.getActiveIndex()) {
+      KOREADER_STORE.setActiveIndex(serverIndex);
+      KOREADER_STORE.saveToFile();
+      requestUpdate();
+    }
+
   } else if (selectedIndex == ROW_AUTHENTICATE && !isNewServer) {
     // Credentials must be set before authenticating
     if (editServer.username.empty() || editServer.password.empty()) {
@@ -219,7 +227,8 @@ void KOReaderSettingsActivity::render(RenderLock&&) {
       StrId::STR_KOREADER_PASSWORD,  // 2 Password
       StrId::STR_SYNC_SERVER_URL,    // 3 Sync Server URL
       StrId::STR_DOCUMENT_MATCHING,  // 4 Document Matching
-      StrId::STR_AUTHENTICATE,       // 5 Authenticate
+      StrId::STR_SET_AS_ACTIVE,      // 5 Set as Active
+      StrId::STR_AUTHENTICATE,       // 6 Authenticate
   };
 
   GUI.drawList(
@@ -243,12 +252,13 @@ void KOReaderSettingsActivity::render(RenderLock&&) {
         } else if (index == ROW_DOC_MATCH) {
           return editServer.matchMethod == DocumentMatchMethod::FILENAME ? std::string(tr(STR_FILENAME))
                                                                         : std::string(tr(STR_BINARY));
+        } else if (index == ROW_SET_ACTIVE) {
+          return (serverIndex == activeIdx) ? std::string("\xE2\x80\xA2") : std::string("");
         } else if (index == ROW_AUTHENTICATE) {
           if (editServer.username.empty() || editServer.password.empty()) {
             return std::string("[") + tr(STR_SET_CREDENTIALS_FIRST) + "]";
           }
-          // Show filled-circle when this server is the active sync server
-          return (serverIndex == activeIdx) ? std::string("\xE2\x80\xA2") : std::string("");
+          return std::string("");
         }
         return std::string("");
       },

@@ -28,6 +28,10 @@ constexpr int HTTP_BUF_SIZE = 2048;
 // ~50KB free after WiFi connects, the session drove min-free-ever down to 2600 bytes before
 // failing with MBEDTLS_ERR_X509_ALLOC_FAILED (-0x2880). Check total free heap (not max
 // contiguous block) because the failure mode is aggregate exhaustion, not one large alloc.
+//
+// On X3 in settings context after WiFi, only ~53KB is free — below this threshold.
+// Auth-from-settings will show LOW_MEMORY on X3 with HTTPS servers. The workaround is
+// to sync from within the reader, which releases the epub first and frees enough RAM.
 constexpr uint32_t MIN_HEAP_FOR_TLS = 55000;
 
 // Response buffer for reading HTTP body
@@ -368,7 +372,7 @@ const char* KOReaderSyncClient::errorString(Error error) {
     case NOT_FOUND:
       return "No progress found";
     case LOW_MEMORY:
-      return "Not enough memory for sync — please retry";
+      return "Not enough memory for HTTPS sync. Open a book and sync from the reader instead.";
     default:
       return "Unknown error";
   }
