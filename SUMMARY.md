@@ -635,8 +635,7 @@ size for big feeds on X3.
 New cross-cutting feature: per-book + global reading-time tracking (X3 RTC-dated, X4 undated),
 two stats screens, and a new home-screen theme ("Vega") that surfaces it on the home screen.
 Full design/status tracked in `plan.md`. Phase 1+2 last build-verified via `pio run -e default`
--> SUCCESS; Phase 2.5 (Vega) **build verification on hardware is the user's own — not run from
-this session** (standing preference).
+-> SUCCESS; Phase 2.5 (Vega) **verified on hardware (X3/X4) by the user — closed**.
 
 ## 35. Reading Stats core — per-book + global tracking, X3-dated / X4-undated
 
@@ -759,7 +758,7 @@ Five issues found and fixed while building out and refining the hero card:
   via `gen_i18n.py`)
 
 ## Open follow-ups
-- Build + on-device verification (X3 + X4) for Phase 2.5 — user builds.
+- ~~Build + on-device verification (X3 + X4) for Phase 2.5~~ — done, verified by user.
 - Phase 3 (KOReader stats sync) — paused, needs a re-plan against the v3 `BookReadingStats`
   schema (the existing Phase-3 sketch in `plan.md` references the dropped v2 shape).
 

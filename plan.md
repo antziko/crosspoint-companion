@@ -16,7 +16,7 @@
 - Chart icon added to `BaseTheme`/`LyraTheme`, 14 i18n strings added to `english.yaml`
 - Build verified: `pio run -e default` → SUCCESS
 
-## Phase 2.5 — New Home Theme ✅ DONE (build verification pending — user builds)
+## Phase 2.5 — New Home Theme ✅ DONE — verified on hardware by user
 New theme for `src/components/themes/` (sibling to `lyra/`, `roundedraff/`). Layout spec from user:
 ```
 ———— hero: current/most-recent book (cover + details)
@@ -232,6 +232,6 @@ Phase 1 → Phase 2 → Phase 2.5 → Phase 3 → Phase 4
 ```
 Phase 1 is the dependency for everything. Phase 1, 2 & 2.5 complete (incl. post-implementation
 fixes — darkening, OOB-crop clamp, progress-bar tracking label, title-overflow guard, UTC-aware
-"Last read on ..."); **build verification on hardware (X3 + X4) still pending — user builds**.
+"Last read on ..."); **verified on hardware by user — Phase 2.5 closed**.
 Phase 3 (KOReader Sync) paused — needs a re-plan against the v3 `BookReadingStats` schema (the v2
 references in its section above are now stale) before implementation.
