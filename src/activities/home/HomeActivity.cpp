@@ -6,6 +6,7 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <Memory.h>
 #include <Utf8.h>
 #include <Xtc.h>
 
@@ -19,6 +20,7 @@
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
 #include "activities/util/ConfirmationActivity.h"
+#include "activities/reader/GlobalReadingStats.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -33,6 +35,9 @@ int HomeActivity::getMenuItemCount() const {
     count += recentBooks.size();
   }
   if (hasOpdsServers) {
+    count++;
+  }
+  if (hasReadingStats) {
     count++;
   }
   return count;
@@ -120,11 +125,20 @@ void HomeActivity::onEnter() {
 
   hasOpdsServers = OPDS_STORE.hasServers();
 
+  // Brief heap probe (struct embeds a ~785-byte ReadingTimeHistory — never a
+  // stack local) just to decide whether the menu entry should be shown.
+  hasReadingStats = false;
+  if (auto globalStats = makeUniqueNoThrow<GlobalReadingStats>()) {
+    hasReadingStats = GlobalReadingStats::load(*globalStats) && globalStats->totalReadingSeconds > 0;
+  }
+
   const auto& metrics = UITheme::getInstance().getMetrics();
   loadRecentBooks(metrics.homeRecentBooksCount);
 
   const auto base = static_cast<int>(recentBooks.size());
-  selectorIndex = initialMenuItem == HomeMenuItem::NONE ? 0 : base + menuItemToIndex(initialMenuItem, hasOpdsServers);
+  selectorIndex = initialMenuItem == HomeMenuItem::NONE
+                      ? 0
+                      : base + menuItemToIndex(initialMenuItem, hasOpdsServers, hasReadingStats);
 
   // Trigger first update
   requestUpdate();
@@ -229,7 +243,7 @@ void HomeActivity::loop() {
       onSelectBook(recentBooks[selectorIndex].path);
     } else {
       const int menuIndex = selectorIndex - static_cast<int>(recentBooks.size());
-      switch (indexToMenuItem(menuIndex, hasOpdsServers)) {
+      switch (indexToMenuItem(menuIndex, hasOpdsServers, hasReadingStats)) {
         case HomeMenuItem::FILE_BROWSER:
           onFileBrowserOpen();
           break;
@@ -238,6 +252,9 @@ void HomeActivity::loop() {
           break;
         case HomeMenuItem::OPDS_BROWSER:
           onOpdsBrowserOpen();
+          break;
+        case HomeMenuItem::READING_STATS:
+          onReadingStatsOpen();
           break;
         case HomeMenuItem::FILE_TRANSFER:
           onFileTransferOpen();
@@ -283,6 +300,12 @@ void HomeActivity::render(RenderLock&&) {
   if (hasOpdsServers) {
     menuItems.insert(menuItems.begin() + 2, tr(STR_OPDS_BROWSER));
     menuIcons.insert(menuIcons.begin() + 2, Library);
+  }
+
+  if (hasReadingStats) {
+    const size_t pos = hasOpdsServers ? 3 : 2;
+    menuItems.insert(menuItems.begin() + pos, tr(STR_READING_STATS));
+    menuIcons.insert(menuIcons.begin() + pos, Chart);
   }
 
   if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
@@ -357,3 +380,5 @@ void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
 void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
+
+void HomeActivity::onReadingStatsOpen() { activityManager.goToReadingStats(); }

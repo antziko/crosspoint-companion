@@ -111,7 +111,8 @@ enum UIIcon {
   Wifi,
   Hotspot,
   Bookmark,
-  BookmarkReturn  // hollow bookmark for the session "return here" mark
+  BookmarkReturn,  // hollow bookmark for the session "return here" mark
+  Chart
 };
 
 enum class KeyboardKeyType { Normal, Shift, Mode, Space, Del, Ok, Disabled };

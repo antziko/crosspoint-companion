@@ -1102,21 +1102,31 @@ void GfxRenderer::drawIcon(const uint8_t bitmap[], const int x, const int y, con
 void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, const int maxWidth, const int maxHeight,
                              const float cropX, const float cropY) const {
   if (fontCacheManager_ && fontCacheManager_->isScanning()) return;
+
+  // Negative crop means the target tile is proportionally wider/taller than
+  // the source bitmap (tileRatio > sourceRatio) -- callers compute crop as
+  // 1 - tileRatio/sourceRatio and don't guard against that. Left unclamped,
+  // it drives cropPixX/cropPixY negative below and walks outputRow[] out of
+  // its malloc'd bounds. Clamp to "no crop" instead -- the bitmap just won't
+  // fill the tile on that axis.
+  const float safeCropX = std::max(0.0f, cropX);
+  const float safeCropY = std::max(0.0f, cropY);
+
   // For 1-bit bitmaps, use optimized 1-bit rendering path (no crop support for 1-bit)
-  if (bitmap.is1Bit() && cropX == 0.0f && cropY == 0.0f) {
+  if (bitmap.is1Bit() && safeCropX == 0.0f && safeCropY == 0.0f) {
     drawBitmap1Bit(bitmap, x, y, maxWidth, maxHeight);
     return;
   }
 
   float scale = 1.0f;
   bool isScaled = false;
-  int cropPixX = std::floor(bitmap.getWidth() * cropX / 2.0f);
-  int cropPixY = std::floor(bitmap.getHeight() * cropY / 2.0f);
+  int cropPixX = std::floor(bitmap.getWidth() * safeCropX / 2.0f);
+  int cropPixY = std::floor(bitmap.getHeight() * safeCropY / 2.0f);
   LOG_DBG("GFX", "Cropping %dx%d by %dx%d pix, is %s", bitmap.getWidth(), bitmap.getHeight(), cropPixX, cropPixY,
           bitmap.isTopDown() ? "top-down" : "bottom-up");
 
-  const float croppedWidth = (1.0f - cropX) * static_cast<float>(bitmap.getWidth());
-  const float croppedHeight = (1.0f - cropY) * static_cast<float>(bitmap.getHeight());
+  const float croppedWidth = (1.0f - safeCropX) * static_cast<float>(bitmap.getWidth());
+  const float croppedHeight = (1.0f - safeCropY) * static_cast<float>(bitmap.getHeight());
   bool hasTargetBounds = false;
   float fitScale = 1.0f;
 

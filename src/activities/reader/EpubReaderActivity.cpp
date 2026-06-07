@@ -5,6 +5,7 @@
 #include <FontCacheManager.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
+#include <HalClock.h>
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Logging.h>
@@ -18,6 +19,7 @@
 #include <limits>
 
 #include "../settings/DictionarySelectActivity.h"
+#include "BookStatsActivity.h"
 #include "BookmarkStore.h"
 #include "ReaderOptionsActivity.h"
 #include "ReaderSettingsIO.h"
@@ -30,6 +32,7 @@
 #include "EpubReaderFootnotesActivity.h"
 #include "EpubReaderPercentSelectionActivity.h"
 #include "EpubReaderUtils.h"
+#include "GlobalReadingStats.h"
 #include "KOReaderCredentialStore.h"
 #include "KOReaderSyncActivity.h"
 #include "LookedUpWordsActivity.h"
@@ -37,6 +40,7 @@
 #include "ProgressMapper.h"
 #include "QrDisplayActivity.h"
 #include "ReaderUtils.h"
+#include "ReadingTimeHistory.h"
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -164,6 +168,51 @@ void buildBookmarkSnippet(const Page& page, char* out, const size_t outSize) {
   }
 }
 
+// Persists `sessionSecs` of reading time to both per-book and global stats on exit.
+// `dated` is true when the RTC (X3 only) supplied a calendar date for this session;
+// dated sessions feed the weekly/monthly/yearly/heatmap history, undated ones (X4,
+// no clock) fall back to `unattributedSeconds` — counted in totals but not dated.
+void recordReadingSession(const std::string& cachePath, BookReadingStats& bookStats, uint32_t sessionSecs,
+                          bool dated, uint16_t year, uint8_t month, uint8_t day, uint8_t dayOfWeek,
+                          uint8_t hour, uint8_t minute) {
+  if (sessionSecs > 0) {
+    bookStats.totalReadingSeconds += sessionSecs;
+    if (dated) {
+      // "Last read on ..." stamp for the Vega hero card -- only set on dated
+      // (X3 + RTC) sessions, encoded the same way as ReadingTimeHistory's
+      // heatmapAnchorDay so the UI can reuse its day-index formatting helpers.
+      // An undated session further down leaves this untouched rather than
+      // clobbering a known-good stamp with "unknown".
+      bookStats.lastReadDayIndex = readingHistoryDayIndex(year, month, day);
+      bookStats.lastReadHour = hour;
+      bookStats.lastReadMinute = minute;
+
+      auto bookHistory = makeUniqueNoThrow<ReadingTimeHistory>();
+      if (bookHistory) {
+        const std::string historyPath = cachePath + "/book_time_history.bin";
+        ReadingTimeHistory::load(historyPath, *bookHistory);
+        bookHistory->recordDay(year, month, day, dayOfWeek, sessionSecs);
+        ReadingTimeHistory::save(historyPath, *bookHistory);
+      }
+    } else {
+      bookStats.unattributedSeconds += sessionSecs;
+    }
+
+    auto global = makeUniqueNoThrow<GlobalReadingStats>();
+    if (global) {
+      GlobalReadingStats::load(*global);
+      global->totalReadingSeconds += sessionSecs;
+      if (dated) {
+        global->history.recordDay(year, month, day, dayOfWeek, sessionSecs);
+      } else {
+        global->unattributedSeconds += sessionSecs;
+      }
+      global->save();
+    }
+  }
+  bookStats.save(cachePath);
+}
+
 }  // namespace
 
 void EpubReaderActivity::onEnter() {
@@ -258,12 +307,30 @@ void EpubReaderActivity::onEnter() {
 
   BOOKMARKS.loadForBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), "epub");
 
+  readingStats = BookReadingStats::load(epub->getCachePath());
+  sessionStartMs = millis();
+
   // Trigger first update
   requestUpdate();
 }
 
 void EpubReaderActivity::onExit() {
   Activity::onExit();
+
+  if (epub && sessionStartMs > 0) {
+    const uint32_t sessionSecs = static_cast<uint32_t>((millis() - sessionStartMs) / 1000UL);
+
+    uint8_t dayOfWeek = 0, day = 0, month = 0;
+    uint16_t year = 0;
+    const bool dated = halClock.isAvailable() && halClock.getDate(dayOfWeek, day, month, year);
+    uint8_t hour = 0, minute = 0;
+    if (dated) halClock.getTime(hour, minute);
+    recordReadingSession(epub->getCachePath(), readingStats, sessionSecs, dated, year, month, day, dayOfWeek, hour,
+                         minute);
+
+    sessionStartMs = 0UL;
+    pageShownAtMs = 0UL;
+  }
 
   // Restore global render settings view for home screen / settings / TXT reader.
   SETTINGS.clearReaderOverride();
@@ -575,6 +642,7 @@ void EpubReaderActivity::openReaderMenu() {
     }
   }
 
+  pageShownAtMs = 0UL;
   startActivityForResult(
       std::make_unique<EpubReaderMenuActivity>(
           renderer, mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent,
@@ -634,6 +702,7 @@ void EpubReaderActivity::openWordSelect(bool framebufferContainsPage) {
     }
   }
   const std::string bookCachePath = epub->getCachePath();
+  pageShownAtMs = 0UL;
   startActivityForResult(std::make_unique<DictionaryWordSelectActivity>(
                              renderer, mappedInput, std::move(pageForLookup), orientedMarginLeft, orientedMarginTop,
                              bookCachePath, nextPageFirstWord, framebufferContainsPage, reservedBottomHeight),
@@ -903,6 +972,22 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
           });
       break;
     }
+    case EpubReaderMenuActivity::MenuAction::BOOK_STATS: {
+      float bookProgress = 0.0f;
+      if (epub && epub->getBookSize() > 0 && section && section->pageCount > 0) {
+        const float chapterProgress = static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
+        bookProgress = epub->calculateProgress(currentSpineIndex, chapterProgress) * 100.0f;
+      }
+      const int progressPercent = clampPercent(static_cast<int>(bookProgress + 0.5f));
+      startActivityForResult(
+          std::make_unique<BookStatsActivity>(renderer, mappedInput, epub->getTitle(), epub->getCachePath(),
+                                               progressPercent),
+          [this](const ActivityResult&) {
+            ignoreBackUntilRelease = true;
+            requestUpdate();
+          });
+      break;
+    }
   }
 }
 
@@ -971,6 +1056,19 @@ void EpubReaderActivity::toggleAutoPageTurn(const uint8_t selectedPageTurnOption
 
 void EpubReaderActivity::pageTurn(bool isForwardTurn) {
   if (isForwardTurn) {
+    if (pageShownAtMs > 0) {
+      const unsigned long dwell = millis() - pageShownAtMs;
+      constexpr unsigned long MIN_DWELL_MS = 2000UL;
+      if (dwell >= MIN_DWELL_MS) {
+        const uint32_t dwellSecs = static_cast<uint32_t>(dwell / 1000UL);
+        if (readingStats.avgSecondsPerForwardPage == 0 ||
+            dwellSecs <= 2U * static_cast<uint32_t>(readingStats.avgSecondsPerForwardPage)) {
+          readingStats.recordForwardPageRead(dwellSecs);
+        }
+      }
+      pageShownAtMs = 0UL;
+    }
+
     if (section->currentPage < section->pageCount - 1) {
       section->currentPage++;
     } else {
@@ -1215,6 +1313,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   }
   silentIndexNextChapterIfNeeded(viewportWidth, viewportHeight);
   saveProgress(currentSpineIndex, section->currentPage, section->pageCount);
+  pageShownAtMs = millis();
 
   showPendingSyncSaveError();
 
@@ -1349,6 +1448,12 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     pagesUntilFullRefresh = 1;
   } else {
     ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
+    // X3 halftone image residue: 1-bit halftone dots leave charge that FAST_REFRESH
+    // can't fully clear on the next page. Force HALF on the next page to drive every
+    // pixel to its target — same fix as the X4 grayscale residue path above.
+    if (page->hasImages() && renderer.isX3()) {
+      pagesUntilFullRefresh = 1;
+    }
   }
   const auto tDisplay = millis();
 

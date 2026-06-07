@@ -852,16 +852,38 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
                         showBatteryPercentage);
   }
 
-  // Draw Clock (X3 only — DS3231 RTC)
+  // Draw Date and Clock (X3 only — DS3231 RTC). Layout: [date] [clock] [progress%]
+  char dateBuf[12] = {};
+  int dateTextWidth = 0;
+  char timeBuf[9] = {};
   int clockTextWidth = 0;
-  if (SETTINGS.statusBarClock && halClock.isAvailable()) {
-    char timeBuf[9];
-    if (halClock.formatTime(timeBuf, sizeof(timeBuf), SETTINGS.clockUtcOffsetQ, SETTINGS.clockFormat == 1)) {
-      clockTextWidth = renderer.getTextWidth(SMALL_FONT_ID, timeBuf);
-      // Position to the left of the progress text (with a small gap)
-      const int clockX = renderer.getScreenWidth() - metrics.statusBarHorizontalMargin - orientedMarginRight -
-                         progressTextWidth - (progressTextWidth > 0 ? 10 : 0) - clockTextWidth;
-      renderer.drawText(SMALL_FONT_ID, clockX, textY, timeBuf);
+
+  if (halClock.isAvailable()) {
+    if (SETTINGS.statusBarDate) {
+      if (halClock.formatDate(dateBuf, sizeof(dateBuf), SETTINGS.clockUtcOffsetQ, SETTINGS.dateFormat)) {
+        dateTextWidth = renderer.getTextWidth(SMALL_FONT_ID, dateBuf);
+      }
+    }
+    if (SETTINGS.statusBarClock) {
+      if (halClock.formatTime(timeBuf, sizeof(timeBuf), SETTINGS.clockUtcOffsetQ, SETTINGS.clockFormat == 1)) {
+        clockTextWidth = renderer.getTextWidth(SMALL_FONT_ID, timeBuf);
+      }
+    }
+  }
+
+  const int dateClockGap = (dateTextWidth > 0 && clockTextWidth > 0) ? 6 : 0;
+  const int totalDateClockWidth = dateTextWidth + dateClockGap + clockTextWidth;
+
+  if (totalDateClockWidth > 0) {
+    const int rightEdge = renderer.getScreenWidth() - metrics.statusBarHorizontalMargin - orientedMarginRight -
+                          progressTextWidth - (progressTextWidth > 0 ? 10 : 0);
+    int x = rightEdge - totalDateClockWidth;
+    if (dateTextWidth > 0) {
+      renderer.drawText(SMALL_FONT_ID, x, textY, dateBuf);
+      x += dateTextWidth + dateClockGap;
+    }
+    if (clockTextWidth > 0) {
+      renderer.drawText(SMALL_FONT_ID, x, textY, timeBuf);
     }
   }
 
@@ -875,7 +897,7 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
 
     const int batterySize = SETTINGS.statusBarBattery ? (showBatteryPercentage ? 50 : 20) : 0;
     const int titleMarginLeft = bmTotalWidth + batterySize + 30;
-    const int clockReserve = clockTextWidth > 0 ? (clockTextWidth + 10) : 0;
+    const int clockReserve = totalDateClockWidth > 0 ? (totalDateClockWidth + 10) : 0;
     const int titleMarginRight = progressTextWidth + clockReserve + 30;
 
     // Attempt to center title on the screen, but if title is too wide then later we will center it within the

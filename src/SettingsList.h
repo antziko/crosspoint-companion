@@ -176,7 +176,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
             "refreshFrequency", StrId::STR_CAT_DISPLAY),
         SettingInfo::Enum(StrId::STR_UI_THEME, &CrossPointSettings::uiTheme,
                           {StrId::STR_THEME_CLASSIC, StrId::STR_THEME_LYRA, StrId::STR_THEME_LYRA_EXTENDED,
-                           StrId::STR_THEME_ROUNDEDRAFF},
+                           StrId::STR_THEME_ROUNDEDRAFF, StrId::STR_THEME_VEGA},
                           "uiTheme", StrId::STR_CAT_DISPLAY),
         SettingInfo::Toggle(StrId::STR_SUNLIGHT_FADING_FIX, &CrossPointSettings::fadingFix, "fadingFix",
                             StrId::STR_CAT_DISPLAY),
@@ -326,6 +326,13 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         // on next WiFi connect, which is useful when crossing time zones.
         SettingInfo::Toggle(StrId::STR_CLOCK_SYNCED, &CrossPointSettings::clockHasBeenSynced, "clockHasBeenSynced",
                             StrId::STR_CUSTOMISE_STATUS_BAR),
+        // Date display (X3 only — DS3231 provides full date after NTP sync)
+        SettingInfo::Toggle(StrId::STR_DATE, &CrossPointSettings::statusBarDate, "statusBarDate",
+                            StrId::STR_CUSTOMISE_STATUS_BAR),
+        SettingInfo::Enum(StrId::STR_DATE_FORMAT, &CrossPointSettings::dateFormat,
+                          {StrId::STR_DATE_FMT_0, StrId::STR_DATE_FMT_1, StrId::STR_DATE_FMT_2,
+                           StrId::STR_DATE_FMT_3},
+                          "dateFormat", StrId::STR_CUSTOMISE_STATUS_BAR),
     };
     // Only show tilt page turn setting when the QMI8658 IMU is present (X3)
     if (halTiltSensor.isAvailable()) {

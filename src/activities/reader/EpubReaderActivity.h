@@ -5,6 +5,7 @@
 
 #include <optional>
 
+#include "BookReadingStats.h"
 #include "EpubReaderMenuActivity.h"
 #include "ProgressMapper.h"
 #include "activities/Activity.h"
@@ -57,6 +58,12 @@ class EpubReaderActivity final : public Activity {
   // Set when the reader is left at end-of-book and SETTINGS.moveFinishedToReadFolder is on.
   // Consumed in onExit() to relocate the finished book into /Read/.
   bool pendingReadFolderMove = false;
+
+  BookReadingStats readingStats;
+  unsigned long sessionStartMs = 0UL;
+  // Set to millis() after each full page render; cleared to 0 while a subactivity is active.
+  // Forward pageTurn measures elapsed time here for pace estimation.
+  unsigned long pageShownAtMs = 0UL;
 
   // Set after a page is rendered with the AA grayscale strip passes. Used by
   // lightStatusBarRefresh to skip the panel push on AA image pages: even a

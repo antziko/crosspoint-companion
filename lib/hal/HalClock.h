@@ -14,6 +14,12 @@ class HalClock {
   mutable uint8_t _cachedMinute = 0;
   mutable bool _hasCachedTime = false;
   mutable unsigned long _lastPollMs = 0;
+  mutable uint8_t _cachedDayOfWeek = 0;
+  mutable uint8_t _cachedDate = 0;
+  mutable uint8_t _cachedMonth = 0;
+  mutable uint16_t _cachedYear = 0;
+  mutable bool _hasCachedDate = false;
+  mutable unsigned long _lastDatePollMs = 0;
 
   static constexpr unsigned long CLOCK_POLL_MS = 10000;  // 10 seconds
 
@@ -35,6 +41,18 @@ class HalClock {
   // Returns false if RTC is not available.
   bool formatTime(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHoursBiased = 48, bool use12Hour = false) const;
 
+  // Get current date from DS3231. dayOfWeek is 1-7 (1=Sunday); month is 1-12.
+  // Returns false if RTC is not available.
+  bool getDate(uint8_t& dayOfWeek, uint8_t& date, uint8_t& month, uint16_t& year) const;
+
+  // Format date into a caller-provided buffer. Needs >=12 bytes.
+  // utcOffsetQuarterHoursBiased: same encoding as formatTime() (48 = UTC+0).
+  // dateFormat: 0="30 Jun", 1="Mon, 30 Jun", 2="30/06", 3="Mon, 30/06"
+  // Adjusts the displayed date by ±1 day when the offset crosses midnight.
+  // Returns false if RTC is not available.
+  bool formatDate(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHoursBiased = 48,
+                  uint8_t dateFormat = 0) const;
+
   // Sync the DS3231 RTC from an NTP server. Requires WiFi to be connected.
   // Blocks for up to ~5s while waiting for SNTP response.
   // Returns true if the RTC was successfully updated.
@@ -45,4 +63,5 @@ class HalClock {
 
  private:
   bool writeTimeToRTC(uint8_t hour, uint8_t minute, uint8_t second);
+  bool writeDateToRTC(uint8_t dayOfWeek, uint8_t date, uint8_t month, uint16_t year);
 };

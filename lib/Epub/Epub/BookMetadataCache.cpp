@@ -276,6 +276,31 @@ bool BookMetadataCache::buildBookBin(const std::string& epubPath, const BookMeta
   spineFile.close();
   tocFile.close();
 
+  // Write an empty, human-readable label file *next to* the opaque epub_<hash> dir (in the
+  // parent .crosspoint dir, not inside it) so the cache is identifiable from the parent listing
+  // without opening the folder. Named "<hash-dir>--<title>-by-<author>.txt" so it sorts adjacent
+  // to its folder. Filename carries all info; file is empty.
+  const size_t slash = cachePath.rfind('/');
+  if (slash != std::string::npos) {
+    const std::string parentDir = cachePath.substr(0, slash);          // e.g. /.crosspoint
+    const std::string hashDirName = cachePath.substr(slash + 1);       // e.g. epub_<hash>
+    char titleBuf[80];
+    char authorBuf[64];
+    FsHelpers::sanitizePathComponentForFat32(metadata.title.c_str(), titleBuf, sizeof(titleBuf));
+    FsHelpers::sanitizePathComponentForFat32(metadata.author.c_str(), authorBuf, sizeof(authorBuf));
+    std::string labelPath = parentDir + "/" + hashDirName + "--" + (titleBuf[0] != '\0' ? titleBuf : "untitled");
+    if (authorBuf[0] != '\0') {
+      labelPath += "-by-";
+      labelPath += authorBuf;
+    }
+    labelPath += ".txt";
+    HalFile labelFile;
+    if (Storage.openFileForWrite("BMC", labelPath, labelFile)) {
+      // Empty file: the filename carries the info. HalFile destructor closes at scope exit.
+      LOG_DBG("BMC", "Wrote cache label: %s", labelPath.c_str());
+    }
+  }
+
   LOG_DBG("BMC", "Successfully built book.bin");
   return true;
 }

@@ -29,6 +29,8 @@ enum MenuItem {
   ITEM_CLOCK_FORMAT,      // X3 only
   ITEM_CLOCK_UTC_OFFSET,  // X3 only, launches ClockOffsetActivity
   ITEM_CLOCK_SYNC,        // X3 only, launches ClockSyncActivity
+  ITEM_DATE,              // X3 only
+  ITEM_DATE_FORMAT,       // X3 only
   ITEM_COUNT
 };
 
@@ -47,10 +49,17 @@ const StrId menuNames[FULL_MENU_ITEMS] = {
     StrId::STR_CLOCK_FORMAT,
     StrId::STR_CLOCK_UTC_OFFSET,
     StrId::STR_CLOCK_SYNC_NOW,
+    StrId::STR_DATE,
+    StrId::STR_DATE_FORMAT,
 };
 
 constexpr int CLOCK_FORMAT_ITEMS = 2;
 const StrId clockFormatNames[CLOCK_FORMAT_ITEMS] = {StrId::STR_CLOCK_FORMAT_24H, StrId::STR_CLOCK_FORMAT_12H};
+
+constexpr int DATE_FORMAT_ITEMS = 4;
+const StrId dateFormatNames[DATE_FORMAT_ITEMS] = {
+    StrId::STR_DATE_FMT_0, StrId::STR_DATE_FMT_1, StrId::STR_DATE_FMT_2, StrId::STR_DATE_FMT_3,
+};
 
 std::string formatUtcOffset(uint8_t biasedQ) {
   // biasedQ is in quarter-hour steps, biased by 48 (so 48 = UTC+0).
@@ -110,6 +119,10 @@ void StatusBarSettingsActivity::onEnter() {
 
   if (SETTINGS.clockFormat >= CLOCK_FORMAT_ITEMS) {
     SETTINGS.clockFormat = 0;
+  }
+
+  if (SETTINGS.dateFormat >= DATE_FORMAT_ITEMS) {
+    SETTINGS.dateFormat = 0;
   }
 
   requestUpdate();
@@ -188,6 +201,12 @@ void StatusBarSettingsActivity::handleSelection() {
     case ITEM_CLOCK_SYNC:
       startActivityForResult(std::make_unique<ClockSyncActivity>(renderer, mappedInput), nullptr);
       return;
+    case ITEM_DATE:
+      SETTINGS.statusBarDate = (SETTINGS.statusBarDate + 1) % 2;
+      break;
+    case ITEM_DATE_FORMAT:
+      SETTINGS.dateFormat = (SETTINGS.dateFormat + 1) % DATE_FORMAT_ITEMS;
+      break;
     default:
       return;
   }
@@ -234,6 +253,12 @@ void StatusBarSettingsActivity::render(RenderLock&&) {
             return formatUtcOffset(SETTINGS.clockUtcOffsetQ);
           case ITEM_CLOCK_SYNC:
             return SETTINGS.clockHasBeenSynced ? tr(STR_CLOCK_SYNCED) : tr(STR_NOT_SET);
+          case ITEM_DATE:
+            return SETTINGS.statusBarDate ? tr(STR_SHOW) : tr(STR_HIDE);
+          case ITEM_DATE_FORMAT: {
+            const uint8_t fmt = SETTINGS.dateFormat < DATE_FORMAT_ITEMS ? SETTINGS.dateFormat : 0;
+            return std::string(I18N.get(dateFormatNames[fmt]));
+          }
           default:
             return tr(STR_HIDE);
         }

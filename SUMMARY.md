@@ -570,3 +570,203 @@ size for big feeds on X3.
 - Verify the source-build switch (§25) across all 4 envs + WiFi/OTA on hardware before production.
 - Properly drop `KEEP_PEER_CERTIFICATE` (find the selector) for a small extra heap win.
 - X3 + big HTTPS feeds: use an http mirror or smaller page size; not a firmware fix.
+
+---
+
+# Part C — KOReader Sync HTTPS fixes (X3 heap + UX)
+
+## 31. KOReader HTTPS auth from settings — better error + workaround UX
+
+**Symptom (X3):** Authenticating a KOReader sync server with HTTPS always showed "not enough memory for sync" on X3. X4 with HTTPS or any HTTP worked fine.
+
+**Root cause:** `MIN_HEAP_FOR_TLS = 55000` in `KOReaderSyncClient.cpp`. After WiFi connects in settings context, X3 has only ~53KB free — below the 55KB threshold. The threshold is correct: Cloudflare 3-cert chains exhaust ~48KB during mbedTLS X509 parse; with only 53KB available the session starves to 2600 bytes min-free before failing with `MBEDTLS_ERR_X509_ALLOC_FAILED`. The threshold cannot be safely lowered for Cloudflare users.
+
+**Investigated and reverted:**
+- Lowering threshold to 40KB: guard passed but TLS still failed (`NETWORK_ERROR`).
+- Increasing `HTTP_BUF_SIZE` 2048→4096: still failed, also triggered crash reporter via `silentRestartToSettings()` (the "crash" was intentional but noisy).
+
+**Shipped fix:** Updated `LOW_MEMORY` error string from generic "please retry" to `"Not enough memory for HTTPS sync. Open a book and sync from the reader instead."` — which is the actual valid workaround (reader context frees the epub before TLS, see §32).
+
+**Files:** `lib/KOReaderSync/KOReaderSyncClient.cpp` (error string + comment).
+
+---
+
+## 32. KOReader HTTPS sync from reader — "fetch ok / upload failed"
+
+**Symptom:** Syncing from within the reader with HTTPS: bookmark fetch succeeded but upload failed.
+
+**Root cause:** `syncBookmarks()` called `ensureEpubLoaded()` then attempted two sequential TLS connections (GET bookmarks, PUT bookmarks) with the epub still in memory. The epub holds ~30KB of parsed data. After the first TLS handshake + JSON allocations, remaining free heap was below 55KB, and the second TLS (PUT) was blocked by the `MIN_HEAP_FOR_TLS` gate. Similarly, `performUpload()` called `updateProgress()` TLS with the epub loaded.
+
+**Fix (`KOReaderSyncActivity.cpp`):**
+- `syncBookmarks()`: extract title and author from epub, then `epub.reset()` **before** any TLS call. `loadForBook()` keys on path CRC (already available as `epubPath` member), not title/author — these are only display metadata, safe to capture first. After sync completes `performSync()` reloads the epub for the reader.
+- `performUpload()`: added `epub.reset()` before the `updateProgress()` TLS call.
+
+**Result:** both TLS calls in bookmark sync and progress upload now have ~30KB more free heap, pushing well above the 55KB threshold.
+
+**Files:** `src/activities/reader/KOReaderSyncActivity.cpp`.
+
+---
+
+## 33. KOReader settings — "Set as Active" (no WiFi needed)
+
+**Goal:** Switch the active sync server without authenticating (no WiFi required). Previously the only path to change `activeIndex` was via the Authenticate row, which needs WiFi and credentials.
+
+**Change (`KOReaderSettingsActivity.cpp`):** Added `ROW_SET_ACTIVE = 5`, shifting `ROW_AUTHENTICATE` to 6, `ROW_DELETE` to 7, and `BASE_ITEMS_EXISTING` to 7. Only one server can be active; the bullet (•) value marker on `ROW_SET_ACTIVE` shows which server is currently active. Selecting the row on the already-active server is a no-op; selecting it on any other server calls `KOREADER_STORE.setActiveIndex()` + `saveToFile()` immediately — no WiFi, no restart.
+
+**i18n (`lib/I18n/translations/english.yaml`):** Added `STR_SET_AS_ACTIVE: "Set as Active"`. Other languages fall back to English until translated.
+
+**Files:** `src/activities/settings/KOReaderSettingsActivity.cpp`, `lib/I18n/translations/english.yaml`.
+
+---
+
+## 34. KOReader sync header shows active server name
+
+**Goal:** "KOReader Sync" header was generic when multiple servers exist; users couldn't confirm which server was active.
+
+**Change (`KOReaderSyncActivity.cpp` `render()`):** Reads `KOREADER_STORE.getServer(activeIndex)`. If the server has a non-empty name, header becomes `"KOReader Sync - <name>"` (stack buffer `char[72]`, `snprintf`). Falls back to plain `"KOReader Sync"` when name is empty or server pointer is null.
+
+**Files:** `src/activities/reader/KOReaderSyncActivity.cpp`.
+
+---
+---
+
+# Part D — Reading Stats feature + Vega home theme (checkpoint)
+
+New cross-cutting feature: per-book + global reading-time tracking (X3 RTC-dated, X4 undated),
+two stats screens, and a new home-screen theme ("Vega") that surfaces it on the home screen.
+Full design/status tracked in `plan.md`. Phase 1+2 last build-verified via `pio run -e default`
+-> SUCCESS; Phase 2.5 (Vega) **build verification on hardware is the user's own — not run from
+this session** (standing preference).
+
+## 35. Reading Stats core — per-book + global tracking, X3-dated / X4-undated
+
+**`BookReadingStats` (`src/activities/reader/BookReadingStats.{h,cpp}`, new):** per-book
+`stats.bin` — binary, versioned, reject-on-mismatch ("fresh start" on schema bump by design, no
+migration code). v3 = 19 bytes: `totalReadingSeconds`/`unattributedSeconds` (u32 each),
+`avgSecondsPerForwardPage`/`paceSampleCount` (u16 each), `lastReadDayIndex` (u32),
+`lastReadHour`/`lastReadMinute` (u8 each).
+
+**`ReadingTimeHistory` (new):** weekly/monthly/yearly time buckets + a 730-day heatmap bitset,
+keyed by a flat day-index (`readingHistoryDayIndex`/`readingHistoryDateFromDayIndex`/
+`readingHistoryDayOfWeek` — proleptic-calendar counter anchored at 2000-01-01 = day 0, leap-year
+aware via `isLeapYear`/`kDaysInMonth`; weekday is pure `dayIndex % 7`). X3-only (needs RTC).
+
+**`GlobalReadingStats` (new):** cumulative totals + an embedded `ReadingTimeHistory`, persisted
+to `/.crosspoint/global_stats.bin`.
+
+**Wiring (`EpubReaderActivity.cpp`):** pace sampling (forward-page seconds, outlier-filtered —
+see `8b34c3d2`) and `recordReadingSession()` called once per session from `onExit` (debounced
+per CLAUDE.md, not per page-turn); one `halClock.getDate()`/`getTime()` pair, gated by RTC
+availability (`dated`). Raw RTC values are stored with **no UTC offset applied** — same
+convention the status-bar clock uses; the offset is applied at *display* time (see §38).
+
+**`HalClock` gains date support (`lib/hal/HalClock.{h,cpp}`, `HalGPIO.h`):** `getDate()`/
+`formatDate()` (DS3231 day-of-week/date/month/year registers — new `DS3231_DOW_REG`), mirroring
+the existing `getTime()`/`formatTime()` cache + UTC-offset + rollover pattern, incl. the
+`>104`-corrupted-value clamp. New `STR_DATE_FORMAT`/`STR_DATE_FMT_0..3` settings +
+`StatusBarSettingsActivity` picker.
+
+## 36. Reading Stats UI — per-book and global screens
+
+**`BookStatsActivity` (new, reader menu -> "Book Stats"):** total time, dated/undated split,
+estimated time remaining (progress-percent extrapolation from `avgSecondsPerForwardPage`),
+Timeline/Heatmap tabs.
+
+**`ReadingStatsActivity` (new, Home menu -> "Reading Stats", shown only when
+`totalReadingSeconds > 0`):** same tab layout, sourced from `GlobalReadingStats`.
+
+**Wiring:** `ActivityManager` (`HomeMenuItem::READING_STATS`, `goToReadingStats()`),
+`HomeActivity` (conditional menu entry), new `Chart` `UIIcon` + `chart.h` glyph (wired into
+`BaseTheme`/`LyraTheme`'s `iconForName`), 14 new i18n strings (`STR_READING_STATS`,
+`STR_BOOK_STATS`, `STR_STATS_*`).
+
+## 37. Vega — new home-screen theme: hero book + "next 3" + icon menu
+
+**Goal (user spec, `plan.md`):** one current/most-recent book front-and-center (cover + title +
+progress bar + duration + chapter + "Last read on ..."), a compact "next 3" row below it, and a
+horizontal icon-only bottom menu — replacing the generic recent-books grid.
+
+**`VegaTheme.{h,cpp}` (new, `src/components/themes/vega/`):** `class VegaTheme : public LyraTheme`
+(same derivation `Lyra3CoversTheme` uses — Lyra's chrome for free). Overrides
+`drawRecentBookCover` (hero card + cached `loadHeroDetails()` self-contained EPUB I/O inside the
+existing `coverRendered` snapshot gate, "next 3" row, selection highlights) and `drawButtonMenu`
+(bottom-anchored horizontal icon row + centred label + filled-highlight selection — mcrosson's
+`GfxRenderer` has no `drawIconInverted`). `VegaMetrics::values` derives `homeCoverTileHeight`
+from shared layout constants so metrics and draw geometry can't drift; `homeRecentBooksCount = 4`.
+
+**Hero data sourcing:** progress %/chapter derive on demand from the existing `progress.bin` +
+`epub.calculateProgress`/`getTocItem` (metadata-only `epub.load(false, true)`, the same
+lightweight call `loadRecentCovers` already makes for thumbnails). New
+`EpubReaderUtils::Progress`/`loadProgress` shared helper mirrors `EpubReaderActivity::onEnter`'s
+read-side `progress.bin` parsing (4-or-6-byte format). "Last read on ..." sources
+`BookReadingStats::load()`.
+
+**Wiring:** `CrossPointSettings::UI_THEME::VEGA = 4`, `SettingsList.h` theme picker, `UITheme.cpp`
+`setTheme()` case. New `STR_CONTINUE_READING`/`STR_HOME_LAST_READ_FORMAT`/`STR_NO_OPEN_BOOK`/
+`STR_THEME_VEGA` i18n strings.
+
+## 38. Vega fixes — cover darkening, OOB crop, progress-bar label, title overflow, UTC
+
+Five issues found and fixed while building out and refining the hero card:
+
+- **Cover darkening on "next 3":** thumbnails were drawn downscaled from a larger cached size,
+  and `GfxRenderer::drawBitmap`'s nearest-neighbour downscale collapses pre-dithered 1-bit pixels
+  via OR-only-dark BW compositing (a 2-into-1 collapse of ~50%-dithered source art renders ~75%
+  black — visibly darker than the source). Fix: `VegaMetrics` draws "next 3" thumbnails at
+  **native** `homeCoverHeight` — exactly the cached-thumbnail generation size
+  (`UITheme::getCoverThumbPath`/`Epub::generateThumbBmp`) — landing `fitScale` at `1.0` (no
+  downscale, no darkening). 140x226 native, `homeCoverTileHeight` 544, cover-buffer ~31.9 KB.
+
+- **Negative-crop OOB read/write in `GfxRenderer::drawBitmap`** (`lib/GfxRenderer/GfxRenderer.cpp`,
+  pre-existing — also present in shipped `Lyra3CoversTheme`/`SleepActivity`, not Vega-only): when
+  a tile is proportionally wider/taller than its source bitmap, callers' `crop = 1 -
+  tileRatio/sourceRatio` goes negative, driving `cropPixX`/`cropPixY` negative and walking
+  `outputRow[]` out of its `malloc`'d bounds (under- *and* over-read). Fixed at the shared call
+  site — `std::max(0.0f, cropX/cropY)` clamp ("no crop" instead of OOB) — closes the hole for all
+  three callers (Vega, Lyra3Covers, SleepActivity) in one edit.
+
+- **Hero progress-bar label tracks the fill position:** "`NN% - <duration>`" combined onto a
+  single line, right-aligned over the bar's current fill edge (`fillEdgeX`, computed once and
+  shared with the fill draw so they can't drift apart) — like a tooltip following a slider thumb,
+  clamped to `[textX, textX+textW]` so it stays fully visible near 0%/100%.
+
+- **Title can no longer push the detail block past the cover:** `detailBlockH` is now summed
+  from the *actual* optional elements present (progress/bar/duration/chapter/last-read), and
+  `titleMaxLines = min(staticCeiling, (coverH - gap - detailBlockH) / titleLineH)` — guarantees
+  `title + gap + details <= coverH`. Title font `UI_12_FONT_ID -> UI_10_FONT_ID` (more chars/line).
+
+- **"Last read on ..." now respects the user's UTC offset:** `lastReadDayIndex/Hour/Minute` are
+  stored as raw RTC reads with no offset applied (matching the status-bar clock's convention);
+  `formatLastRead` (`VegaTheme.cpp:52`) applies `SETTINGS.clockUtcOffsetQ` at *display* time with
+  the same offset+rollover arithmetic as `HalClock::formatTime`/`formatDate` — including the
+  `>104` corrupted-value clamp — shifting the day-index by ±1 on a midnight crossing and
+  re-deriving date/weekday via the proleptic-calendar helpers from §35 (leap-year safe by
+  construction, since ±1 on a flat day-index always lands on the adjacent calendar day). Verified
+  end-to-end across the full `[-12:00,+14:00]` offset range with concrete numeric traces.
+
+## Files touched by Part D
+- New: `src/activities/reader/{BookReadingStats,GlobalReadingStats,ReadingTimeHistory,
+  BookStatsActivity,ReadingStatsActivity}.{h,cpp}`, `src/components/themes/vega/VegaTheme.{h,cpp}`,
+  `src/components/icons/chart.h`, `plan.md`
+- Modified: `lib/hal/HalClock.{h,cpp}`, `lib/hal/HalGPIO.h`, `lib/GfxRenderer/GfxRenderer.cpp`,
+  `lib/Epub/Epub/BookMetadataCache.cpp` (debug aid: human-readable `.crosspoint` cache-folder
+  label files — `<hash-dir>--<title>-by-<author>.txt`, empty, filename-only), `src/activities/
+  reader/{EpubReaderActivity,EpubReaderMenuActivity,EpubReaderUtils}.{h,cpp}`,
+  `src/activities/home/HomeActivity.{h,cpp}`, `src/activities/ActivityManager.{h,cpp}`,
+  `src/components/themes/{BaseTheme,UITheme}.{h,cpp}`, `src/components/themes/lyra/LyraTheme.cpp`,
+  `src/activities/settings/StatusBarSettingsActivity.cpp`, `src/CrossPointSettings.h`,
+  `src/SettingsList.h`, `lib/I18n/translations/*.yaml` (English authored; others auto-fallback
+  via `gen_i18n.py`)
+
+## Open follow-ups
+- Build + on-device verification (X3 + X4) for Phase 2.5 — user builds.
+- Phase 3 (KOReader stats sync) — paused, needs a re-plan against the v3 `BookReadingStats`
+  schema (the existing Phase-3 sketch in `plan.md` references the dropped v2 shape).
+
+---
+
+## Files touched by Part C (vs prior commits)
+- `lib/KOReaderSync/KOReaderSyncClient.cpp` — improved LOW_MEMORY error string + comment
+- `src/activities/reader/KOReaderSyncActivity.cpp` — epub.reset() before TLS in syncBookmarks/performUpload; active server name in header
+- `src/activities/settings/KOReaderSettingsActivity.cpp` — Set as Active row (ROW_SET_ACTIVE=5), shifted ROW_AUTHENTICATE/DELETE
+- `lib/I18n/translations/english.yaml` — `STR_SET_AS_ACTIVE`
