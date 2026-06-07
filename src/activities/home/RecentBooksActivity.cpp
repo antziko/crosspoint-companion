@@ -9,6 +9,7 @@
 
 #include "MappedInputManager.h"
 #include "RecentBooksStore.h"
+#include "activities/reader/ReaderUtils.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -45,6 +46,10 @@ bool RecentBooksActivity::moveSelectedDown() {
 void RecentBooksActivity::onEnter() {
   Activity::onEnter();
 
+  // One of the few non-reader screens that follows SETTINGS.displayOrientation
+  // (the hold-to-rotate gesture is handled in loop(), see resolveSideNavAction).
+  ReaderUtils::applyOrientation(renderer, SETTINGS.displayOrientation);
+
   // Prune entries whose backing files are gone; this is one of two interaction
   // points where the persistent store gets cleaned (the other is addBook).
   if (RECENT_BOOKS.pruneMissing()) {
@@ -60,12 +65,14 @@ void RecentBooksActivity::onEnter() {
 
 void RecentBooksActivity::onExit() {
   Activity::onExit();
+
+  // Reset orientation back to portrait for the rest of the UI.
+  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+
   recentBooks.clear();
 }
 
 void RecentBooksActivity::loop() {
-  const int pageItems = UITheme::getInstance().getNumberOfItemsPerPage(renderer, true, false, true, true);
-
   // After a long-press has fired, swallow input until Confirm is physically released
   // (so the release doesn't also open the book; re-arm only once the button is up).
   if (longPressFired) {
@@ -111,32 +118,36 @@ void RecentBooksActivity::loop() {
     onGoHome();
   }
 
-  int listSize = static_cast<int>(recentBooks.size());
+  const int listSize = static_cast<int>(recentBooks.size());
 
   // Cursor moves on the Up/Down side buttons only — Left/Right are reserved for
   // reordering above, so they are deliberately excluded from navigation here.
-  const std::vector<MappedInputManager::Button> downBtn{MappedInputManager::Button::Down};
-  const std::vector<MappedInputManager::Button> upBtn{MappedInputManager::Button::Up};
-
-  buttonNavigator.onRelease(downBtn, [this, listSize] {
-    selectorIndex = ButtonNavigator::nextIndex(static_cast<int>(selectorIndex), listSize);
-    requestUpdate();
-  });
-
-  buttonNavigator.onRelease(upBtn, [this, listSize] {
-    selectorIndex = ButtonNavigator::previousIndex(static_cast<int>(selectorIndex), listSize);
-    requestUpdate();
-  });
-
-  buttonNavigator.onContinuous(downBtn, [this, listSize, pageItems] {
-    selectorIndex = ButtonNavigator::nextPageIndex(static_cast<int>(selectorIndex), listSize, pageItems);
-    requestUpdate();
-  });
-
-  buttonNavigator.onContinuous(upBtn, [this, listSize, pageItems] {
-    selectorIndex = ButtonNavigator::previousPageIndex(static_cast<int>(selectorIndex), listSize, pageItems);
-    requestUpdate();
-  });
+  // Single-step only (no continuous page-jump): holding side Up/Down is
+  // reserved for the display-orientation-cycle gesture instead.
+  switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Down)) {
+    case ReaderUtils::SideNavAction::STEP:
+      selectorIndex = ButtonNavigator::nextIndex(static_cast<int>(selectorIndex), listSize);
+      requestUpdate();
+      break;
+    case ReaderUtils::SideNavAction::ROTATE:
+      ReaderUtils::cycleDisplayOrientation(renderer, -1);
+      requestUpdate();
+      break;
+    case ReaderUtils::SideNavAction::NONE:
+      break;
+  }
+  switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Up)) {
+    case ReaderUtils::SideNavAction::STEP:
+      selectorIndex = ButtonNavigator::previousIndex(static_cast<int>(selectorIndex), listSize);
+      requestUpdate();
+      break;
+    case ReaderUtils::SideNavAction::ROTATE:
+      ReaderUtils::cycleDisplayOrientation(renderer, 1);
+      requestUpdate();
+      break;
+    case ReaderUtils::SideNavAction::NONE:
+      break;
+  }
 }
 
 void RecentBooksActivity::promptRemoveBook(const std::string& path, const std::string& title) {

@@ -34,6 +34,35 @@ inline void applyOrientation(GfxRenderer& renderer, const uint8_t orientation) {
   }
 }
 
+// Outcome of resolveSideNavAction — what a non-reader screen should do in
+// response to its physical side Up/Down button this frame.
+enum class SideNavAction { NONE, STEP, ROTATE };
+
+// Side Up/Down double as list navigation AND (when the user has opted in via
+// SETTINGS.sideLongPressButtonBehavior == ORIENTATION_CHANGE) a hold gesture
+// that cycles the non-reader display orientation -- mirroring the reader's
+// hold-to-rotate. A single press can't safely fire both, so when the gesture
+// is enabled we switch to release-based detection (measure hold time first,
+// like detectPageTurn's usePress branch); otherwise we keep the snappier
+// press-based single-step navigation these screens already had.
+inline SideNavAction resolveSideNavAction(const MappedInputManager& input, const MappedInputManager::Button button) {
+  if (SETTINGS.sideLongPressButtonBehavior != SETTINGS.ORIENTATION_CHANGE) {
+    return input.wasPressed(button) ? SideNavAction::STEP : SideNavAction::NONE;
+  }
+
+  if (!input.wasReleased(button)) return SideNavAction::NONE;
+  return input.getHeldTime() > SKIP_HOLD_MS ? SideNavAction::ROTATE : SideNavAction::STEP;
+}
+
+// Cycles SETTINGS.displayOrientation by `step` (+1/-1, wrapping) and applies it
+// immediately. Mirrors EpubReaderActivity's hold-to-rotate persistence.
+inline void cycleDisplayOrientation(GfxRenderer& renderer, const int8_t step) {
+  SETTINGS.displayOrientation =
+      (SETTINGS.displayOrientation + step + SETTINGS.ORIENTATION_COUNT) % SETTINGS.ORIENTATION_COUNT;
+  applyOrientation(renderer, SETTINGS.displayOrientation);
+  SETTINGS.saveToFile();
+}
+
 struct PageTurnResult {
   bool prev;
   bool next;

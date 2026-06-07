@@ -11,6 +11,7 @@
 
 #include "BookReadingStats.h"
 #include "MappedInputManager.h"
+#include "ReaderUtils.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -32,6 +33,10 @@ ReadingStatsActivity::ReadingStatsActivity(GfxRenderer& renderer, MappedInputMan
 void ReadingStatsActivity::onEnter() {
   Activity::onEnter();
 
+  // One of the few non-reader screens that follows SETTINGS.displayOrientation
+  // (the hold-to-rotate gesture is handled in loop(), see resolveSideNavAction).
+  ReaderUtils::applyOrientation(renderer, SETTINGS.displayOrientation);
+
   stats = makeUniqueNoThrow<GlobalReadingStats>();
   if (stats) {
     GlobalReadingStats::load(*stats);
@@ -41,7 +46,12 @@ void ReadingStatsActivity::onEnter() {
   requestUpdate();
 }
 
-void ReadingStatsActivity::onExit() { Activity::onExit(); }
+void ReadingStatsActivity::onExit() {
+  Activity::onExit();
+
+  // Reset orientation back to portrait for the rest of the UI.
+  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+}
 
 void ReadingStatsActivity::buildTimelineRows() {
   timelineRows.clear();
@@ -125,14 +135,32 @@ void ReadingStatsActivity::loop() {
     const int visibleRows = std::max(1, content.height / rowHeight);
     const int maxOffset = std::max(0, static_cast<int>(timelineRows.size()) - visibleRows);
 
-    buttonNavigator.onRelease({MappedInputManager::Button::Up}, [this] {
-      scrollOffset = std::max(0, scrollOffset - 1);
-      requestUpdate();
-    });
-    buttonNavigator.onRelease({MappedInputManager::Button::Down}, [this, maxOffset] {
-      scrollOffset = std::min(maxOffset, scrollOffset + 1);
-      requestUpdate();
-    });
+    // Physical side Up/Down: single-step scroll -- holding them is reserved
+    // for the display-orientation-cycle gesture instead.
+    switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Up)) {
+      case ReaderUtils::SideNavAction::STEP:
+        scrollOffset = std::max(0, scrollOffset - 1);
+        requestUpdate();
+        break;
+      case ReaderUtils::SideNavAction::ROTATE:
+        ReaderUtils::cycleDisplayOrientation(renderer, 1);
+        requestUpdate();
+        break;
+      case ReaderUtils::SideNavAction::NONE:
+        break;
+    }
+    switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Down)) {
+      case ReaderUtils::SideNavAction::STEP:
+        scrollOffset = std::min(maxOffset, scrollOffset + 1);
+        requestUpdate();
+        break;
+      case ReaderUtils::SideNavAction::ROTATE:
+        ReaderUtils::cycleDisplayOrientation(renderer, -1);
+        requestUpdate();
+        break;
+      case ReaderUtils::SideNavAction::NONE:
+        break;
+    }
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {

@@ -15,6 +15,7 @@
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
+#include "activities/reader/ReaderUtils.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -116,6 +117,10 @@ bool isBookOnDevice(const std::string& folder, const OpdsEntry& book) {
 void OpdsBookBrowserActivity::onEnter() {
   Activity::onEnter();
 
+  // One of the few non-reader screens that follows SETTINGS.displayOrientation
+  // (the hold-to-rotate gesture is handled in loop(), see resolveSideNavAction).
+  ReaderUtils::applyOrientation(renderer, SETTINGS.displayOrientation);
+
   state = BrowserState::CHECK_WIFI;
   entries.clear();
   navigationHistory.clear();
@@ -133,6 +138,10 @@ void OpdsBookBrowserActivity::onEnter() {
 
 void OpdsBookBrowserActivity::onExit() {
   Activity::onExit();
+
+  // Reset orientation back to portrait for the rest of the UI.
+  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+
   entries.clear();
   navigationHistory.clear();
 
@@ -208,22 +217,51 @@ void OpdsBookBrowserActivity::loop() {
     }
 
     if (!entries.empty()) {
-      buttonNavigator.onNextRelease([this] {
+      const auto navigateNext = [this] {
         selectorIndex = ButtonNavigator::nextIndex(selectorIndex, entries.size());
         requestUpdate();
-      });
-      buttonNavigator.onPreviousRelease([this] {
+      };
+      const auto navigatePrevious = [this] {
         selectorIndex = ButtonNavigator::previousIndex(selectorIndex, entries.size());
         requestUpdate();
-      });
-      buttonNavigator.onNextContinuous([this] {
+      };
+
+      // Front Left/Right: single-step on release + continuous page-jump while held.
+      buttonNavigator.onRelease({MappedInputManager::Button::Right}, navigateNext);
+      buttonNavigator.onRelease({MappedInputManager::Button::Left}, navigatePrevious);
+      buttonNavigator.onContinuous({MappedInputManager::Button::Right}, [this] {
         selectorIndex = ButtonNavigator::nextPageIndex(selectorIndex, entries.size(), PAGE_ITEMS);
         requestUpdate();
       });
-      buttonNavigator.onPreviousContinuous([this] {
+      buttonNavigator.onContinuous({MappedInputManager::Button::Left}, [this] {
         selectorIndex = ButtonNavigator::previousPageIndex(selectorIndex, entries.size(), PAGE_ITEMS);
         requestUpdate();
       });
+
+      // Physical side Up/Down: single-step only (no continuous page-jump) --
+      // holding them is reserved for the display-orientation-cycle gesture.
+      switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Down)) {
+        case ReaderUtils::SideNavAction::STEP:
+          navigateNext();
+          break;
+        case ReaderUtils::SideNavAction::ROTATE:
+          ReaderUtils::cycleDisplayOrientation(renderer, -1);
+          requestUpdate();
+          break;
+        case ReaderUtils::SideNavAction::NONE:
+          break;
+      }
+      switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Up)) {
+        case ReaderUtils::SideNavAction::STEP:
+          navigatePrevious();
+          break;
+        case ReaderUtils::SideNavAction::ROTATE:
+          ReaderUtils::cycleDisplayOrientation(renderer, 1);
+          requestUpdate();
+          break;
+        case ReaderUtils::SideNavAction::NONE:
+          break;
+      }
     }
   }
 }

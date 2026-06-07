@@ -769,3 +769,72 @@ Five issues found and fixed while building out and refining the hero card:
 - `src/activities/reader/KOReaderSyncActivity.cpp` — epub.reset() before TLS in syncBookmarks/performUpload; active server name in header
 - `src/activities/settings/KOReaderSettingsActivity.cpp` — Set as Active row (ROW_SET_ACTIVE=5), shifted ROW_AUTHENTICATE/DELETE
 - `lib/I18n/translations/english.yaml` — `STR_SET_AS_ACTIVE`
+
+---
+---
+
+# Part E — Hold-to-rotate display orientation on browse/list screens
+
+## 39. `SETTINGS.displayOrientation` — scoped to 4 screens, never ambient
+
+**Goal:** let users rotate Browse Files / Recent Books / OPDS Browser / Reading Stats independently
+of the reader's orientation — e.g. landscape for wider list columns — **without** that bleeding
+into Home, Settings, or File Transfer (which must always stay Portrait).
+
+**Design correction (caught mid-implementation):** the first pass made `displayOrientation` a
+global ambient default — applied at boot, restored by the reader/sleep activities on exit. That
+leaked non-Portrait orientation into Home/Settings/File Transfer whenever the user navigated there
+from a rotated screen. **Fixed** by making each of the four screens **self-manage** orientation:
+apply `SETTINGS.displayOrientation` in `onEnter`, force-reset to `Portrait` in `onExit` — the same
+per-activity pattern `EpubReaderActivity`/`TxtReaderActivity`/`SleepActivity` already use for the
+*reader's* orientation, just not shared as ambient state. This guarantees correctness regardless of
+navigation order; `main.cpp`, `EpubReaderActivity`, `TxtReaderActivity`, `SleepActivity`,
+`HomeActivity` are untouched (verified zero diff vs HEAD).
+
+**New setting (`CrossPointSettings.h` / `SettingsList.h` / `english.yaml`):**
+`uint8_t displayOrientation = PORTRAIT`, registered as `SettingInfo::Enum` under
+`STR_CAT_DISPLAY` → "Display Orientation" (`STR_DISPLAY_ORIENTATION`), auto-persisted via the
+generic settings-list JSON I/O.
+
+**New helpers (`ReaderUtils.h`)** — generalize the reader's existing hold-to-rotate so the four
+list screens can reuse it without duplicating gesture-timing logic:
+- `enum class SideNavAction { NONE, STEP, ROTATE }`
+- `resolveSideNavAction(input, button)`: when `SETTINGS.sideLongPressButtonBehavior !=
+  ORIENTATION_CHANGE`, returns `STEP` on press (snappy single-step nav, unchanged feel). When the
+  gesture *is* enabled, switches to release-based detection — measuring hold duration before
+  deciding, mirroring `detectPageTurn`'s `usePress` branch — `ROTATE` if held > `SKIP_HOLD_MS`
+  (700 ms), else `STEP`. A single press can't safely fire both list-nav and rotate, hence the
+  switch to release-based timing only when the gesture is opted into.
+- `cycleDisplayOrientation(renderer, step)`: cycles `SETTINGS.displayOrientation` ±1 (wrapping),
+  applies immediately via `applyOrientation`, persists with `saveToFile()` — mirrors the reader's
+  hold-to-rotate persistence exactly.
+
+**The four screens (`FileBrowserActivity`, `RecentBooksActivity`, `OpdsBookBrowserActivity`,
+`ReadingStatsActivity`):** identical `onEnter`/`onExit` pair (`applyOrientation` /
+`setOrientation(Portrait)`). In `loop()`, physical side Up/Down are routed through
+`resolveSideNavAction`: `STEP` → existing single-step list-cursor/scroll move, `ROTATE` →
+`cycleDisplayOrientation(±1)`, `NONE` → no-op. Front Left/Right keep their prior behavior
+unchanged (continuous-repeat page-jump in the browsers; reorder in `RecentBooksActivity`, which
+uniquely reserves Left/Right for that and was left untouched). Replacing the old continuous-scroll
+side-button handlers with single-step removes the page-jump on those two buttons — a deliberate
+trade so holding them can be measured for the rotate gesture; this matches how the reader already
+treats Up/Down once any long-press behavior is active.
+
+**Sign convention note (`ReadingStatsActivity`):** Up→`cycleDisplayOrientation(+1)`,
+Down→`cycleDisplayOrientation(-1)` — opposite of the list-cursor STEP direction on that axis, but
+consistent with the reader's existing hold-to-rotate convention (hold "previous"/Up rotates `+1`,
+"next"/Down rotates `-1`).
+
+**Verification:** `pio run` → SUCCESS (RAM 31.4%, Flash ~81%); `pio run -t unit-tests` → 79/79
+pass. Hardware checklist (user, pending): hold-rotate on all 4 screens × 4 orientations; confirm
+Home/Settings/File Transfer stay Portrait in practice; confirm `displayOrientation` persists
+across reboot.
+
+## Files touched by Part E
+- `src/activities/reader/ReaderUtils.h` — `SideNavAction`, `resolveSideNavAction`,
+  `cycleDisplayOrientation`
+- `src/activities/home/{FileBrowserActivity,RecentBooksActivity}.cpp` — onEnter/onExit + side-button rotate gesture
+- `src/activities/browser/OpdsBookBrowserActivity.cpp` — onEnter/onExit + side-button rotate gesture
+- `src/activities/reader/ReadingStatsActivity.cpp` — onEnter/onExit + side-button rotate gesture
+- `src/CrossPointSettings.h`, `src/SettingsList.h` — `displayOrientation` setting
+- `lib/I18n/translations/english.yaml` — `STR_DISPLAY_ORIENTATION`

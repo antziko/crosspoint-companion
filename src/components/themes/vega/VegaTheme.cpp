@@ -279,7 +279,12 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
     renderer.drawText(UI_10_FONT_ID, textX, textY, line.c_str(), true, EpdFontFamily::BOLD);
     textY += titleLineH;
   }
-  textY += kLineGap;
+
+  // Detail block (progress/duration/chapter/last-read) bottom-aligns to the
+  // hero cover's bottom edge instead of trailing the title -- titleMaxLines
+  // above already guarantees title + kLineGap + detailBlockH <= coverH, so
+  // this can't overlap the title even at max line count.
+  textY = coverY + coverH - detailBlockH;
 
   // "xx% - duration" rides one line above the bar, right-aligned over the
   // bar's current fill edge (fillEdgeX) -- like a tooltip following a slider

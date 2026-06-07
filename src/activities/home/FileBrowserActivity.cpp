@@ -10,6 +10,7 @@
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "activities/reader/ReaderUtils.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -69,6 +70,10 @@ void FileBrowserActivity::loadFiles() {
 void FileBrowserActivity::onEnter() {
   Activity::onEnter();
 
+  // One of the few non-reader screens that follows SETTINGS.displayOrientation
+  // (the hold-to-rotate gesture is handled in loop(), see resolveSideNavAction).
+  ReaderUtils::applyOrientation(renderer, SETTINGS.displayOrientation);
+
   fileNameBuffer = makeUniqueNoThrow<char[]>(NAME_BUFFER_SIZE);
   if (!fileNameBuffer) {
     LOG_ERR("FileBrowser", "malloc failed for name buffer");
@@ -104,6 +109,10 @@ void FileBrowserActivity::onEnter() {
 
 void FileBrowserActivity::onExit() {
   Activity::onExit();
+
+  // Reset orientation back to portrait for the rest of the UI.
+  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+
   files.clear();
   fileNameBuffer.reset();
 }
@@ -327,25 +336,52 @@ void FileBrowserActivity::loop() {
   }
 
   int listSize = static_cast<int>(files.size());
-  buttonNavigator.onNextRelease([this, listSize] {
+
+  const auto navigateNext = [this, listSize] {
     selectorIndex = ButtonNavigator::nextIndex(static_cast<int>(selectorIndex), listSize);
     requestUpdate();
-  });
-
-  buttonNavigator.onPreviousRelease([this, listSize] {
+  };
+  const auto navigatePrevious = [this, listSize] {
     selectorIndex = ButtonNavigator::previousIndex(static_cast<int>(selectorIndex), listSize);
     requestUpdate();
-  });
+  };
 
-  buttonNavigator.onNextContinuous([this, listSize, pageItems] {
+  // Front Left/Right: single-step on release + continuous page-jump while held.
+  buttonNavigator.onRelease({MappedInputManager::Button::Right}, navigateNext);
+  buttonNavigator.onRelease({MappedInputManager::Button::Left}, navigatePrevious);
+  buttonNavigator.onContinuous({MappedInputManager::Button::Right}, [this, listSize, pageItems] {
     selectorIndex = ButtonNavigator::nextPageIndex(static_cast<int>(selectorIndex), listSize, pageItems);
     requestUpdate();
   });
-
-  buttonNavigator.onPreviousContinuous([this, listSize, pageItems] {
+  buttonNavigator.onContinuous({MappedInputManager::Button::Left}, [this, listSize, pageItems] {
     selectorIndex = ButtonNavigator::previousPageIndex(static_cast<int>(selectorIndex), listSize, pageItems);
     requestUpdate();
   });
+
+  // Physical side Up/Down: single-step only (no continuous page-jump) -- holding
+  // them is reserved for the display-orientation-cycle gesture.
+  switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Down)) {
+    case ReaderUtils::SideNavAction::STEP:
+      navigateNext();
+      break;
+    case ReaderUtils::SideNavAction::ROTATE:
+      ReaderUtils::cycleDisplayOrientation(renderer, -1);
+      requestUpdate();
+      break;
+    case ReaderUtils::SideNavAction::NONE:
+      break;
+  }
+  switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Up)) {
+    case ReaderUtils::SideNavAction::STEP:
+      navigatePrevious();
+      break;
+    case ReaderUtils::SideNavAction::ROTATE:
+      ReaderUtils::cycleDisplayOrientation(renderer, 1);
+      requestUpdate();
+      break;
+    case ReaderUtils::SideNavAction::NONE:
+      break;
+  }
 }
 
 std::string getFileName(std::string filename) {

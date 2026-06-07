@@ -4,7 +4,7 @@ Orientation doc for Claude Code sessions. Companion to `CLAUDE.md` (rules) and `
 
 ## 1. What this project does
 
-Open-source e-reader **firmware** for the ESP32-C3-based Xteink X4 / X3 (800×480 mono E-Ink, ~380KB RAM, no PSRAM, 16MB flash, SD card storage). Renders EPUB 2/3, `.xtc/.xtch`, `.txt`, `.bmp`. Features: hyphenation, kerning, footnotes, bookmarks, go-to-percent, focus reading, orientation control, offline StarDict dictionary lookup, KOReader progress sync, custom SD fonts, tilt page turn (X3), and wireless workflows (file-transfer web UI, EPUB optimizer, web settings API, OTA, Calibre/OPDS).
+Open-source e-reader **firmware** for the ESP32-C3-based Xteink X4 / X3 (800×480 mono E-Ink, ~380KB RAM, no PSRAM, 16MB flash, SD card storage). Renders EPUB 2/3, `.xtc/.xtch`, `.txt`, `.bmp`. Features: hyphenation, kerning, footnotes, bookmarks, go-to-percent, focus reading, orientation control, offline StarDict dictionary lookup, reading-time stats (per-book + global, heatmap on X3), KOReader progress sync, custom SD fonts, tilt page turn (X3), and wireless workflows (file-transfer web UI, EPUB optimizer, web settings API, OTA, Calibre/OPDS).
 
 Hard constraint: **stability under ~380KB RAM**. Single 48KB framebuffer. See `CLAUDE.md` Resource Protocol before allocating.
 
@@ -18,7 +18,7 @@ Hard constraint: **stability under ~380KB RAM**. Single 48KB framebuffer. See `C
 | `src/network/` | Web server, HTTP downloader, OTA updater, firmware flasher, WebDAV. HTML UIs generated into `src/network/html/*.generated.h`. |
 | `src/util/` | Shared helpers: dictionary core, bookmarks, lookup history, screenshots, string/URL utils, `Task.h`. |
 | `src/platform/` | Low-level platform shims (e.g. efuse check skip). |
-| `src/components/` | Icons + themes. |
+| `src/components/` | Icons + themes (`themes/{lyra,roundedraff,vega}` + `BaseTheme`; `CrossPointSettings::UI_THEME` enum lists all 5: Classic/Lyra/Lyra3Covers/RoundedRaff/Vega). |
 | `lib/` | Internal libraries. Key ones below. |
 | `lib/hal/` | **Hardware Abstraction Layer** — `HalStorage`/`HalGPIO`/`HalDisplay` etc. ALL SDK access routes here (SdFat not thread-safe — see `CLAUDE.md`). |
 | `lib/Epub/` | EPUB parse + layout engine; `.crosspoint/` cache writer (`book.bin`, `section.bin`). |
@@ -87,11 +87,15 @@ python scripts/gen_i18n.py lib/I18n/translations lib/I18n/   # i18n tables
 
 **Input:** physical buttons → `InputManager` (SDK) → `HalGPIO` → `MappedInputManager` (logical buttons, user-remappable + orientation transforms) → activity. Use `MappedInputManager::Button::*`, never raw GPIO.
 
+**Non-reader orientation control:** `SETTINGS.displayOrientation` is scoped to four list/browse screens only (`FileBrowserActivity`, `RecentBooksActivity`, `OpdsBookBrowserActivity`, `ReadingStatsActivity`) — Home/Settings/File Transfer always stay Portrait. Each screen self-manages: applies the setting in `onEnter`, force-resets to Portrait in `onExit` (mirrors the reader's per-activity orientation handling, just non-ambient). Side Up/Down route through `ReaderUtils::resolveSideNavAction` — short press = list-step, long press while `SETTINGS.sideLongPressButtonBehavior == ORIENTATION_CHANGE` = `ReaderUtils::cycleDisplayOrientation` (cycles + persists + applies immediately, mirroring the reader's hold-to-rotate).
+
 **All SD I/O** serialized through `HalStorage` mutex (`Storage` singleton). `HalFile`, not raw `FsFile`.
 
 **Dictionary lookup:** reader word-select → `DictionaryLookupController` → `DictLookupTask` (off-UI FreeRTOS task) → `Dictionary` (StarDict over prepared offset files) → `DictHtmlRenderer` → definition activity. Prep is one-time via `DictPrepareTask` / `scripts/dictionary_tools.py prep`.
 
 **Networking:** `NetworkModeSelectionActivity` → WiFi → `CrossPointWebServer` (file transfer, settings API, WebDAV) / `HttpDownloader` (OPDS/Calibre) / `OtaUpdater`.
+
+**Reading stats:** `EpubReaderActivity` tracks session time → `BookReadingStats` (`<cachePath>/stats.bin`, v3) + `GlobalReadingStats` (`.crosspoint/global_stats.bin`, v1) → `ReadingTimeHistory` (dated weekly/monthly/yearly + heatmap breakdown, X3-only; `<cachePath>/book_time_history.bin` / `.crosspoint/global_time_history.bin`) → rendered by `BookStatsActivity` / `ReadingStatsActivity` (`ActivityManager::goToReadingStats`).
 
 ## 7. Common change points
 
@@ -102,7 +106,10 @@ python scripts/gen_i18n.py lib/I18n/translations lib/I18n/   # i18n tables
 - **UI text** → add `STR_*` to `lib/I18n/translations/english.yaml`, regen, use `tr(STR_*)`. Never hardcode.
 - **Web UI** → edit `data/html/`, not `*.generated.h`.
 - **Button mapping** → `src/MappedInputManager.cpp`.
-- **Dictionary** → `src/util/Dict*` + `lib/DictHtmlRenderer/` (see `CLAUDE.md` non-negotiable dictionary rules: plan-mode first, verify before assuming).
+- **Dictionary** → `src/util/Dict*` (incl. `DictionaryRegistry` — scans SD for installed StarDict dicts, mirrors `SdCardFontRegistry`) + `lib/DictHtmlRenderer/` (see `CLAUDE.md` non-negotiable dictionary rules: plan-mode first, verify before assuming).
+- **Reading stats** → `src/activities/reader/{BookReadingStats,GlobalReadingStats,ReadingTimeHistory,BookStatsActivity,ReadingStatsActivity}`. Bump `STATS_FILE_VERSION`/`GLOBAL_STATS_FILE_VERSION` on binary-format change.
+- **Home themes** → `src/components/themes/<name>/` (extend `BaseTheme`); register in `CrossPointSettings::UI_THEME` + `SettingsList.h`.
+- **Orientation-toggle screens** → only the four browse/list screens named above follow `SETTINGS.displayOrientation`; adding a fifth means the same `onEnter`-apply / `onExit`-reset-to-Portrait pair + `ReaderUtils::resolveSideNavAction`/`cycleDisplayOrientation` wiring — never make orientation ambient/global (it would leak into Home/Settings/File Transfer).
 
 ## 8. Unknowns / risky areas
 
