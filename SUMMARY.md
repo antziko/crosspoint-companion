@@ -838,3 +838,26 @@ across reboot.
 - `src/activities/reader/ReadingStatsActivity.cpp` — onEnter/onExit + side-button rotate gesture
 - `src/CrossPointSettings.h`, `src/SettingsList.h` — `displayOrientation` setting
 - `lib/I18n/translations/english.yaml` — `STR_DISPLAY_ORIENTATION`
+
+---
+
+## 40. Fix — hold-to-rotate dead on Reading Stats Heatmap tab
+
+**Symptom:** on `ReadingStatsActivity`, the §39 hold-to-rotate gesture (side Up/Down long-press)
+worked on the Timeline tab but did nothing on the Heatmap tab.
+
+**Cause (`ReadingStatsActivity.cpp:132`):** the `resolveSideNavAction`/`cycleDisplayOrientation`
+switches were nested inside `if (selectedTab == Tab::Timeline && !timelineRows.empty())` — guarding
+scroll-state setup (`contentRect`/`maxOffset`) that ROTATE doesn't need. On the Heatmap tab (or an
+empty Timeline) `resolveSideNavAction` was never even called, so the long-press was never measured
+and never produced `ROTATE`.
+
+**Fix:** moved the two `resolveSideNavAction` switches out of that tab check (mirroring how the
+other three §39 screens call it unconditionally in `loop()`). `STEP` now checks a `canScrollTimeline`
+flag before touching `scrollOffset`/`maxOffset` (computed only when that flag is true); `ROTATE`
+fires unconditionally on both tabs, same as `FileBrowserActivity`/`RecentBooksActivity`/
+`OpdsBookBrowserActivity`.
+
+**Verification:** `pio run` clean. Hardware checklist (user, pending): hold side Up/Down on the
+Heatmap tab with `sideLongPressButtonBehavior == ORIENTATION_CHANGE` set — display should rotate;
+Timeline-tab scroll behavior unchanged.

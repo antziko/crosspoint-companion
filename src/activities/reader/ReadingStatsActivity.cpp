@@ -129,38 +129,47 @@ void ReadingStatsActivity::loop() {
     return;
   }
 
-  if (selectedTab == Tab::Timeline && !timelineRows.empty()) {
+  // Scroll only applies on the Timeline tab; the Heatmap tab has nothing to
+  // scroll. The rotate gesture, however, must fire on BOTH tabs -- so the
+  // resolveSideNavAction calls below stay outside this tab check.
+  const bool canScrollTimeline = selectedTab == Tab::Timeline && !timelineRows.empty();
+  int maxOffset = 0;
+  if (canScrollTimeline) {
     const Rect content = contentRect();
     const int rowHeight = renderer.getLineHeight(UI_10_FONT_ID) + 10;
     const int visibleRows = std::max(1, content.height / rowHeight);
-    const int maxOffset = std::max(0, static_cast<int>(timelineRows.size()) - visibleRows);
+    maxOffset = std::max(0, static_cast<int>(timelineRows.size()) - visibleRows);
+  }
 
-    // Physical side Up/Down: single-step scroll -- holding them is reserved
-    // for the display-orientation-cycle gesture instead.
-    switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Up)) {
-      case ReaderUtils::SideNavAction::STEP:
+  // Physical side Up/Down: single-step scroll (Timeline only) -- holding them
+  // is reserved for the display-orientation-cycle gesture (both tabs).
+  switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Up)) {
+    case ReaderUtils::SideNavAction::STEP:
+      if (canScrollTimeline) {
         scrollOffset = std::max(0, scrollOffset - 1);
         requestUpdate();
-        break;
-      case ReaderUtils::SideNavAction::ROTATE:
-        ReaderUtils::cycleDisplayOrientation(renderer, 1);
-        requestUpdate();
-        break;
-      case ReaderUtils::SideNavAction::NONE:
-        break;
-    }
-    switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Down)) {
-      case ReaderUtils::SideNavAction::STEP:
+      }
+      break;
+    case ReaderUtils::SideNavAction::ROTATE:
+      ReaderUtils::cycleDisplayOrientation(renderer, 1);
+      requestUpdate();
+      break;
+    case ReaderUtils::SideNavAction::NONE:
+      break;
+  }
+  switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Down)) {
+    case ReaderUtils::SideNavAction::STEP:
+      if (canScrollTimeline) {
         scrollOffset = std::min(maxOffset, scrollOffset + 1);
         requestUpdate();
-        break;
-      case ReaderUtils::SideNavAction::ROTATE:
-        ReaderUtils::cycleDisplayOrientation(renderer, -1);
-        requestUpdate();
-        break;
-      case ReaderUtils::SideNavAction::NONE:
-        break;
-    }
+      }
+      break;
+    case ReaderUtils::SideNavAction::ROTATE:
+      ReaderUtils::cycleDisplayOrientation(renderer, -1);
+      requestUpdate();
+      break;
+    case ReaderUtils::SideNavAction::NONE:
+      break;
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
