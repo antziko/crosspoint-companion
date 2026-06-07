@@ -861,3 +861,86 @@ fires unconditionally on both tabs, same as `FileBrowserActivity`/`RecentBooksAc
 **Verification:** `pio run` clean. Hardware checklist (user, pending): hold side Up/Down on the
 Heatmap tab with `sideLongPressButtonBehavior == ORIENTATION_CHANGE` set — display should rotate;
 Timeline-tab scroll behavior unchanged.
+
+---
+---
+
+# Part F — Heatmap intensity levels + reading-session local-date fix
+
+## 41. Heatmap 4-level intensity (None/Light/Moderate/Heavy) + UTC-offset session-date bug — FIXED
+
+**Goal (user spec):** upgrade the reading-stats heatmap from a binary "did you read that day"
+presence bitmap to a 4-shade intensity grid: white = untracked or no reading, light gray = ≤30min,
+dark gray = ≤1h, black = >1h.
+
+**`ReadingTimeHistory.{h,cpp}`:** `heatmapBits` repacked 1 bit/day (730-day presence bitmap) →
+2 bits/day (`enum class HeatmapLevel { None, Light, Moderate, Heavy }`,
+`HEATMAP_BYTES = (HEATMAP_DAYS*2+7)/8`). New `classifyHeatmapLevel(seconds)` buckets by
+`HEATMAP_LIGHT_MAX_SECONDS` (30min) / `HEATMAP_MODERATE_MAX_SECONDS` (1h), inclusive lower tier.
+New persisted `heatmapAnchorSeconds` running per-day total — `recordDay` reclassifies the anchor
+slot from the *accumulated* total on every call (a calendar day gets one `recordDay()` per
+session, possibly several) rather than overwriting from a single session's length, which would
+misclassify e.g. two 20-min sessions as "Light" instead of the correct 40-min "Moderate". Backdated
+sessions (clock-adjustment edge case) can only raise, never lower, an already-finalized slot — no
+running total is kept for past days. New `getHeatmapLevel(daysAgo)`; `isHeatmapDaySet()` kept as a
+thin `!= None` wrapper for callers that only care about presence. `HISTORY_FILE_VERSION` 1 → 2
+(new field forces a fresh start by design — reject-on-mismatch, same convention as
+`BookReadingStats`, no migration code).
+
+**Render (`BookStatsActivity.cpp` / `ReadingStatsActivity.cpp`):** grid fill switched from
+binary solid-black/dithered-gray to an exhaustive `switch` on `HeatmapLevel` →
+`Color::Black` (solid `fillRect`) / `DarkGray` / `LightGray` (`fillRectDither`), `None` left
+blank. Untracked days and tracked-but-no-reading days now render identically (both white) —
+collapsing a distinction the old binary model drew that the new 4-level one doesn't need.
+
+**Tests (`test/reading-time-history/`, new gtest suite, 7 cases):** threshold-boundary
+inclusivity, same-day accumulation crossing a level, day-rollover finalize+reset of the running
+total, multi-day shift across packed-byte boundaries (2 bits/day → 4 days/byte), backdated
+upgrade-only semantics, persistence round-trip of `heatmapAnchorSeconds`, presence-wrapper
+agreement. Registered in `test/CMakeLists.txt`. While bringing the suite up, fixed a stub bug:
+`HalFile::read` stubbed as `uint8_t*` vs the real `void*` (`lib/hal/HalStorage.h:88`) —
+`Serialization::readString`'s `char*` call site failed `-fpermissive` conversion.
+
+**Bug found + fixed while verifying — reading sessions dated by raw RTC, not local calendar
+day:** `EpubReaderActivity::onExit` called `halClock.getDate()`/`getTime()` raw — no
+`SETTINGS.clockUtcOffsetQ` applied — before handing the date to `recordReadingSession` →
+`ReadingTimeHistory::recordDay`. A session started just after local midnight could still read
+as the RTC's previous (UTC-ish) day, so it accumulated into *yesterday's* heatmap/weekly/
+monthly/yearly buckets instead of starting today's — exactly the "still shows Sunday, not
+Monday" symptom that surfaced this. This was already known and worked around for *display only*
+(§38's `formatLastRead` re-applies the offset to the stored "Last read on..." stamp) but the
+underlying stats storage itself was never corrected.
+
+- New `HalClock::getLocalDateTime(utcOffsetQuarterHoursBiased, ...)` (`lib/hal/HalClock.{h,cpp}`)
+  factors the offset+rollover arithmetic shared by `formatDate`/`formatTime`/
+  `VegaTheme::formatLastRead` into one tested implementation returning fields (not a string),
+  for callers that need to *bucket* data by local calendar day rather than just display it.
+- `EpubReaderActivity::onExit` now calls it with `SETTINGS.clockUtcOffsetQ`, so
+  `year/month/day/dayOfWeek/hour/minute` — and therefore every weekly/monthly/yearly/heatmap
+  bucket and `lastReadDayIndex/Hour/Minute` — are stored as local-calendar values going forward.
+- `VegaTheme::formatLastRead` simplified: the stored values are now already local, so its §38
+  offset-reapplication was removed (kept, it would have double-shifted the displayed stamp).
+
+**Note:** `pio run` not yet re-run after the `HalClock`/`EpubReaderActivity`/`VegaTheme` edits —
+interrupted before the full firmware build could confirm they compile (host gtest only exercises
+`ReadingTimeHistory.cpp`). Flag for build + on-device verification: heatmap shading on X3/X4,
+"Last read on..." correctness across non-zero `clockUtcOffsetQ`, heap.
+
+## Files touched by Part F
+- `src/activities/reader/ReadingTimeHistory.{h,cpp}` — 2-bit intensity heatmap,
+  `heatmapAnchorSeconds`, `HISTORY_FILE_VERSION` 1→2
+- `src/activities/reader/{BookStatsActivity,ReadingStatsActivity}.cpp` — 4-shade grid render
+- `lib/hal/HalClock.{h,cpp}` — new `getLocalDateTime()`
+- `src/activities/reader/EpubReaderActivity.cpp` — session date capture via
+  `getLocalDateTime(SETTINGS.clockUtcOffsetQ, ...)`
+- `src/components/themes/vega/VegaTheme.cpp` — `formatLastRead` simplified (no longer
+  re-applies the UTC offset)
+- New: `test/reading-time-history/` (gtest suite + stubs + `CMakeLists.txt`), registered in
+  `test/CMakeLists.txt`
+
+## Open follow-ups
+- Build (`pio run`) + on-device verification: heatmap shading on hardware, "Last read" stamp
+  with a non-default `clockUtcOffsetQ`, heap
+- Existing on-disk per-book/global history files reset to fresh on first load
+  (`HISTORY_FILE_VERSION` bump) — by design (matches `BookReadingStats` convention); worth a
+  release-note line so users aren't surprised their heatmap history resets once

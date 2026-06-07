@@ -370,10 +370,10 @@ void ReadingStatsActivity::renderHeatmap(const Rect& rect) const {
     renderer.drawText(SMALL_FONT_ID, gridX - 4 - textW, labelY, initial);
   }
 
-  // Grid: solid black for tracked days with at least one recorded session,
-  // dithered gray for tracked days with none, and left blank for dates outside
-  // the tracked range (the tail end of this week, or before recording began) —
-  // so "no data yet" reads differently from "no reading that day".
+  // Grid: shade each tracked day by reading-intensity level — light gray for
+  // <=30min, dark gray for <=1h, solid black for >1h. Untracked days and
+  // tracked days with no reading both render as plain white (None), so "no
+  // data yet" and "no reading that day" are visually indistinguishable by design.
   for (int col = 0; col < columns; ++col) {
     const uint32_t monday = weekMonday(col);
     for (uint32_t row = 0; row < static_cast<uint32_t>(ROWS); ++row) {
@@ -381,10 +381,18 @@ void ReadingStatsActivity::renderHeatmap(const Rect& rect) const {
       if (dayIdx > anchorDay || dayIdx < oldestTrackedDay) continue;
       const int cx = gridX + col * cellSize;
       const int cy = gridY + static_cast<int>(row) * cellSize;
-      if (history.isHeatmapDaySet(anchorDay - dayIdx)) {
-        renderer.fillRect(cx, cy, cellSize - CELL_GAP, cellSize - CELL_GAP, true);
-      } else {
-        renderer.fillRectDither(cx, cy, cellSize - CELL_GAP, cellSize - CELL_GAP, Color::LightGray);
+      switch (history.getHeatmapLevel(anchorDay - dayIdx)) {
+        case ReadingTimeHistory::HeatmapLevel::Heavy:
+          renderer.fillRect(cx, cy, cellSize - CELL_GAP, cellSize - CELL_GAP, true);
+          break;
+        case ReadingTimeHistory::HeatmapLevel::Moderate:
+          renderer.fillRectDither(cx, cy, cellSize - CELL_GAP, cellSize - CELL_GAP, Color::DarkGray);
+          break;
+        case ReadingTimeHistory::HeatmapLevel::Light:
+          renderer.fillRectDither(cx, cy, cellSize - CELL_GAP, cellSize - CELL_GAP, Color::LightGray);
+          break;
+        case ReadingTimeHistory::HeatmapLevel::None:
+          break;
       }
     }
   }

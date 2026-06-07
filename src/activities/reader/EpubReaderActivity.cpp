@@ -320,11 +320,14 @@ void EpubReaderActivity::onExit() {
   if (epub && sessionStartMs > 0) {
     const uint32_t sessionSecs = static_cast<uint32_t>((millis() - sessionStartMs) / 1000UL);
 
-    uint8_t dayOfWeek = 0, day = 0, month = 0;
+    // Use the local calendar day (RTC raw date + SETTINGS.clockUtcOffsetQ), not the
+    // RTC's raw date -- a session that starts just after local midnight must be
+    // attributed to "today", not the RTC's still-previous UTC-ish day, or the
+    // weekly/monthly/yearly/heatmap history buckets it under the wrong date.
+    uint8_t dayOfWeek = 0, day = 0, month = 0, hour = 0, minute = 0;
     uint16_t year = 0;
-    const bool dated = halClock.isAvailable() && halClock.getDate(dayOfWeek, day, month, year);
-    uint8_t hour = 0, minute = 0;
-    if (dated) halClock.getTime(hour, minute);
+    const bool dated = halClock.isAvailable() &&
+                       halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, dayOfWeek, day, month, year, hour, minute);
     recordReadingSession(epub->getCachePath(), readingStats, sessionSecs, dated, year, month, day, dayOfWeek, hour,
                          minute);
 

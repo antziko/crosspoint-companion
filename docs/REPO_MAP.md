@@ -95,7 +95,7 @@ python scripts/gen_i18n.py lib/I18n/translations lib/I18n/   # i18n tables
 
 **Networking:** `NetworkModeSelectionActivity` → WiFi → `CrossPointWebServer` (file transfer, settings API, WebDAV) / `HttpDownloader` (OPDS/Calibre) / `OtaUpdater`.
 
-**Reading stats:** `EpubReaderActivity` tracks session time → `BookReadingStats` (`<cachePath>/stats.bin`, v3) + `GlobalReadingStats` (`.crosspoint/global_stats.bin`, v1) → `ReadingTimeHistory` (dated weekly/monthly/yearly + heatmap breakdown, X3-only; `<cachePath>/book_time_history.bin` / `.crosspoint/global_time_history.bin`) → rendered by `BookStatsActivity` / `ReadingStatsActivity` (`ActivityManager::goToReadingStats`).
+**Reading stats:** `EpubReaderActivity` tracks session time, dated via `HalClock::getLocalDateTime(SETTINGS.clockUtcOffsetQ, ...)` (local-calendar day/time — UTC-offset + midnight-rollover corrected, *not* raw RTC reads) → `BookReadingStats` (`<cachePath>/stats.bin`, v3) + `GlobalReadingStats` (`.crosspoint/global_stats.bin`, v1) → `ReadingTimeHistory` (dated weekly/monthly/yearly + 730-day heatmap, X3-only; `<cachePath>/book_time_history.bin` / `.crosspoint/global_time_history.bin`, `HISTORY_FILE_VERSION` v2 — heatmap is 2-bit/day `HeatmapLevel{None,Light,Moderate,Heavy}` classified from each day's *accumulated* reading seconds, not a presence bitmap) → rendered by `BookStatsActivity` / `ReadingStatsActivity` (`ActivityManager::goToReadingStats`) as a 4-shade grid (white/light-gray/dark-gray/black). Covered by `test/reading-time-history/` gtest suite.
 
 ## 7. Common change points
 

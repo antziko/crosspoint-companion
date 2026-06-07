@@ -53,6 +53,17 @@ class HalClock {
   bool formatDate(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHoursBiased = 48,
                   uint8_t dateFormat = 0) const;
 
+  // Get the local calendar date/time: raw RTC reads with utcOffsetQuarterHoursBiased
+  // applied and the date/day-of-week rolled by ±1 day when the offset crosses midnight
+  // (same arithmetic as formatDate/formatTime, returned as fields instead of a string).
+  // dayOfWeek is 1-7 (1=Sunday); month is 1-12; hour/minute are 0-23/0-59, already wrapped.
+  // Use this -- not raw getDate()/getTime() -- for anything that buckets data by the
+  // user's local calendar day (e.g. reading-history stats), so a session started just
+  // after local midnight isn't attributed to the RTC's still-previous UTC day.
+  // Returns false if RTC is not available.
+  bool getLocalDateTime(uint8_t utcOffsetQuarterHoursBiased, uint8_t& dayOfWeek, uint8_t& date, uint8_t& month,
+                        uint16_t& year, uint8_t& hour, uint8_t& minute) const;
+
   // Sync the DS3231 RTC from an NTP server. Requires WiFi to be connected.
   // Blocks for up to ~5s while waiting for SNTP response.
   // Returns true if the RTC was successfully updated.

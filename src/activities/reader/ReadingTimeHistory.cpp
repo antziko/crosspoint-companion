@@ -7,22 +7,37 @@
 #include <cstring>
 
 namespace {
-constexpr uint8_t HISTORY_FILE_VERSION = 1;
+constexpr uint8_t HISTORY_FILE_VERSION = 2;
 constexpr uint8_t kDaysInMonth[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
 bool isLeapYear(uint16_t year) { return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0; }
 
-bool heatmapBitSet(const uint8_t* bits, size_t bitIndex) {
-  if (bitIndex >= ReadingTimeHistory::HEATMAP_DAYS) return false;
-  return (bits[bitIndex / 8] & static_cast<uint8_t>(1U << (bitIndex % 8))) != 0;
+// 2 bits/day, packed 4-per-byte. A day's bit-pair never crosses a byte boundary
+// since 8 % 2 == 0, so no cross-byte masking is needed.
+uint8_t heatmapLevelGet(const uint8_t* bits, size_t dayIndex) {
+  if (dayIndex >= ReadingTimeHistory::HEATMAP_DAYS) return 0;
+  const size_t bitPos = dayIndex * 2;
+  return (bits[bitPos / 8] >> (bitPos % 8)) & 0x3U;
 }
-void heatmapSetBit(uint8_t* bits, size_t bitIndex) {
-  if (bitIndex >= ReadingTimeHistory::HEATMAP_DAYS) return;
-  bits[bitIndex / 8] |= static_cast<uint8_t>(1U << (bitIndex % 8));
+void heatmapLevelSet(uint8_t* bits, size_t dayIndex, uint8_t level) {
+  if (dayIndex >= ReadingTimeHistory::HEATMAP_DAYS) return;
+  const size_t bitPos = dayIndex * 2;
+  const size_t byteIdx = bitPos / 8;
+  const uint8_t shift = static_cast<uint8_t>(bitPos % 8);
+  bits[byteIdx] = static_cast<uint8_t>((bits[byteIdx] & ~(0x3U << shift)) | ((level & 0x3U) << shift));
 }
-// Shifts every set bit "older" by `days` slots (bit i moves to bit i+days),
+// Classifies a day's accumulated reading time into a HeatmapLevel ordinal.
+uint8_t classifyHeatmapLevel(uint32_t seconds) {
+  if (seconds == 0) return 0;
+  if (seconds <= ReadingTimeHistory::HEATMAP_LIGHT_MAX_SECONDS) return 1;
+  if (seconds <= ReadingTimeHistory::HEATMAP_MODERATE_MAX_SECONDS) return 2;
+  return 3;
+}
+// Shifts every level "older" by `days` slots (slot i moves to slot i+days),
 // dropping anything that falls past the end. Called when a new most-recent day
 // arrives so the existing history keeps its place relative to the new anchor.
+// Temp-buffer pattern (vs. in-place) avoids overwriting source slots that
+// later iterations still need to read, since the shift ranges overlap.
 void heatmapShiftOlder(uint8_t* bits, uint32_t days) {
   if (days == 0) return;
   if (days >= ReadingTimeHistory::HEATMAP_DAYS) {
@@ -31,7 +46,8 @@ void heatmapShiftOlder(uint8_t* bits, uint32_t days) {
   }
   uint8_t shifted[ReadingTimeHistory::HEATMAP_BYTES] = {};
   for (size_t i = 0; i + days < ReadingTimeHistory::HEATMAP_DAYS; i++) {
-    if (heatmapBitSet(bits, i)) heatmapSetBit(shifted, i + days);
+    const uint8_t level = heatmapLevelGet(bits, i);
+    if (level != 0) heatmapLevelSet(shifted, i + days, level);
   }
   memcpy(bits, shifted, ReadingTimeHistory::HEATMAP_BYTES);
 }
@@ -81,17 +97,40 @@ void ReadingTimeHistory::recordDay(uint16_t year, uint8_t month, uint8_t day, ui
 
   const uint32_t dayIdx = readingHistoryDayIndex(year, month, day);
 
-  // Heatmap: mark presence for this day, sliding the anchor forward if this is
-  // the most recent day seen yet.
-  if (heatmapAnchorDay == 0 && !heatmapBitSet(heatmapBits, 0)) {
+  // Heatmap: classify this day's *accumulated* reading time into an intensity
+  // level. A single calendar day can receive multiple recordDay() calls (one
+  // per reading session), so the anchor slot tracks a running seconds total
+  // and is reclassified from that total on every call — not set once from a
+  // single session's duration (that would misclassify e.g. two 20-minute
+  // sessions as "Light" instead of the correct "Moderate" 40-minute total).
+  if (heatmapAnchorDay == 0 && getHeatmapLevel(0) == HeatmapLevel::None) {
+    // First-ever dated entry.
     heatmapAnchorDay = dayIdx;
-    heatmapSetBit(heatmapBits, 0);
+    heatmapAnchorSeconds = seconds;
+    heatmapLevelSet(heatmapBits, 0, classifyHeatmapLevel(heatmapAnchorSeconds));
+  } else if (dayIdx == heatmapAnchorDay) {
+    // Same day as the running total — accumulate and reclassify.
+    heatmapAnchorSeconds += seconds;
+    heatmapLevelSet(heatmapBits, 0, classifyHeatmapLevel(heatmapAnchorSeconds));
   } else if (dayIdx > heatmapAnchorDay) {
+    // A new most-recent day: finalize by shifting the old anchor's slot into
+    // place, then start a fresh running total for this day.
     heatmapShiftOlder(heatmapBits, dayIdx - heatmapAnchorDay);
     heatmapAnchorDay = dayIdx;
-    heatmapSetBit(heatmapBits, 0);
+    heatmapAnchorSeconds = seconds;
+    heatmapLevelSet(heatmapBits, 0, classifyHeatmapLevel(heatmapAnchorSeconds));
   } else {
-    heatmapSetBit(heatmapBits, heatmapAnchorDay - dayIdx);
+    // Backdated session (e.g. clock adjustment landed on a day before the
+    // current anchor). We have no stored running total for past days, so this
+    // is best-effort: classify just this single session and only raise the
+    // existing level, never lower it — a multi-session backdated day may
+    // therefore under-classify, but never display a level higher than it
+    // actually earned.
+    const size_t slot = heatmapAnchorDay - dayIdx;
+    const uint8_t candidate = classifyHeatmapLevel(seconds);
+    if (candidate > heatmapLevelGet(heatmapBits, slot)) {
+      heatmapLevelSet(heatmapBits, slot, candidate);
+    }
   }
 
   // Weekly: bucket by the Monday of this date's week. DS3231 dayOfWeek is
@@ -124,9 +163,9 @@ void ReadingTimeHistory::recordDay(uint16_t year, uint8_t month, uint8_t day, ui
   }
 }
 
-bool ReadingTimeHistory::isHeatmapDaySet(size_t daysAgo) const {
-  if (heatmapAnchorDay == 0 && !heatmapBitSet(heatmapBits, 0)) return false;
-  return heatmapBitSet(heatmapBits, daysAgo);
+ReadingTimeHistory::HeatmapLevel ReadingTimeHistory::getHeatmapLevel(size_t daysAgo) const {
+  if (heatmapAnchorDay == 0 && heatmapLevelGet(heatmapBits, 0) == 0) return HeatmapLevel::None;
+  return static_cast<HeatmapLevel>(heatmapLevelGet(heatmapBits, daysAgo));
 }
 
 bool ReadingTimeHistory::load(const std::string& path, ReadingTimeHistory& out) {
@@ -145,6 +184,7 @@ bool ReadingTimeHistory::load(const std::string& path, ReadingTimeHistory& out) 
   serialization::readPod(f, out.yearly);
   serialization::readPod(f, out.heatmapBits);
   serialization::readPod(f, out.heatmapAnchorDay);
+  serialization::readPod(f, out.heatmapAnchorSeconds);
   f.close();
   return true;
 }
@@ -161,6 +201,7 @@ bool ReadingTimeHistory::save(const std::string& path, const ReadingTimeHistory&
   serialization::writePod(f, history.yearly);
   serialization::writePod(f, history.heatmapBits);
   serialization::writePod(f, history.heatmapAnchorDay);
+  serialization::writePod(f, history.heatmapAnchorSeconds);
   f.close();
   return true;
 }

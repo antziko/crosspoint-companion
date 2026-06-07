@@ -50,38 +50,15 @@ constexpr const char* MONTH_ABBR[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun"
                                         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
 void formatLastRead(uint32_t dayIndex, uint8_t hour, uint8_t minute, char* buf, size_t len) {
-  // dayIndex/hour/minute are stored as raw RTC reads (EpubReaderActivity.cpp's
-  // onExit -- halClock.getDate()/getTime(), no offset applied), same convention
-  // as the status bar's clock. Apply SETTINGS.clockUtcOffsetQ here at display
-  // time -- identical offset+rollover arithmetic to HalClock::formatTime/
-  // formatDate (HalClock.cpp:108-115, 222-243) -- so "Last read on ..." shows
-  // the same local time as the rest of the UI, and stays correct if the user
-  // changes their UTC offset later (raw value on disk is untouched).
-  // Clamp against corrupted persisted values, same guard HalClock::formatTime/
-  // formatDate apply (HalClock.cpp:109) -- keeps the result in [-12:00,+14:00]
-  // and keeps the single +-1440 rollover correction below valid.
-  uint8_t offsetQ = SETTINGS.clockUtcOffsetQ;
-  if (offsetQ > 104) offsetQ = 104;
-  const int offsetMins = (static_cast<int>(offsetQ) - 48) * 15;
-  int totalMins = static_cast<int>(hour) * 60 + static_cast<int>(minute) + offsetMins;
-  int dayShift = 0;
-  if (totalMins < 0) {
-    totalMins += 1440;
-    dayShift = -1;
-  } else if (totalMins >= 1440) {
-    totalMins -= 1440;
-    dayShift = 1;
-  }
-  // dayIndex is sentinel-gated >= 1 by the caller (0 = "never recorded"), so
-  // dayIndex - 1 can't underflow.
-  const uint32_t adjustedDayIndex = static_cast<uint32_t>(static_cast<int>(dayIndex) + dayShift);
-  hour = static_cast<uint8_t>(totalMins / 60);
-  minute = static_cast<uint8_t>(totalMins % 60);
-
+  // dayIndex/hour/minute are stored as local-calendar values -- EpubReaderActivity's
+  // onExit captures them via HalClock::getLocalDateTime(SETTINGS.clockUtcOffsetQ, ...),
+  // which already applies the UTC-offset+rollover arithmetic (HalClock.cpp) before
+  // persisting (see BookReadingStats::lastReadDayIndex). No further correction here --
+  // re-applying the offset at display time would double-shift the stamp.
   uint16_t year;
   uint8_t month, day;
-  readingHistoryDateFromDayIndex(adjustedDayIndex, year, month, day);
-  const uint8_t dow = readingHistoryDayOfWeek(adjustedDayIndex);
+  readingHistoryDateFromDayIndex(dayIndex, year, month, day);
+  const uint8_t dow = readingHistoryDayOfWeek(dayIndex);
   const char* dowStr = (dow >= 1 && dow <= 7) ? DOW_ABBR[dow - 1] : "???";
   const char* monStr = (month >= 1 && month <= 12) ? MONTH_ABBR[month - 1] : "?";
   char dateTime[40];

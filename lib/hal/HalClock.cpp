@@ -209,6 +209,49 @@ static uint8_t daysInMonth(uint8_t month, uint16_t year) {
   return d;
 }
 
+bool HalClock::getLocalDateTime(uint8_t utcOffsetQuarterHoursBiased, uint8_t& dayOfWeek, uint8_t& date,
+                                uint8_t& month, uint16_t& year, uint8_t& hour, uint8_t& minute) const {
+  uint8_t dow, rawDate, mo, h, m;
+  uint16_t yr;
+  if (!getDate(dow, rawDate, mo, yr)) return false;
+  if (!getTime(h, m)) return false;
+  if (mo < 1 || mo > 12) return false;
+
+  // Same offset+rollover arithmetic as formatDate (HalClock.cpp:212-244) and
+  // VegaTheme::formatLastRead, factored out here so callers that need to *bucket*
+  // data by local day (not just display it) get one shared, tested implementation.
+  if (utcOffsetQuarterHoursBiased > 104) utcOffsetQuarterHoursBiased = 104;
+  const int offsetMins = (static_cast<int>(utcOffsetQuarterHoursBiased) - 48) * 15;
+  int localMins = static_cast<int>(h) * 60 + static_cast<int>(m) + offsetMins;
+
+  int d = static_cast<int>(rawDate);
+  uint8_t wd = dow;  // DS3231: 1=Sunday .. 7=Saturday
+
+  if (localMins < 0) {
+    localMins += 1440;
+    if (--d < 1) {
+      if (--mo < 1) { mo = 12; yr--; }
+      d = daysInMonth(mo, yr);
+    }
+    wd = static_cast<uint8_t>(((static_cast<int>(wd) - 2 + 7) % 7) + 1);
+  } else if (localMins >= 1440) {
+    localMins -= 1440;
+    if (++d > daysInMonth(mo, yr)) {
+      d = 1;
+      if (++mo > 12) { mo = 1; yr++; }
+    }
+    wd = static_cast<uint8_t>((wd % 7) + 1);
+  }
+
+  dayOfWeek = wd;
+  date = static_cast<uint8_t>(d);
+  month = mo;
+  year = yr;
+  hour = static_cast<uint8_t>(localMins / 60);
+  minute = static_cast<uint8_t>(localMins % 60);
+  return true;
+}
+
 bool HalClock::formatDate(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHoursBiased,
                           uint8_t dateFormat) const {
   if (!buf || bufSize < 4) return false;
