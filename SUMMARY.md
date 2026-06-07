@@ -944,3 +944,66 @@ interrupted before the full firmware build could confirm they compile (host gtes
 - Existing on-disk per-book/global history files reset to fresh on first load
   (`HISTORY_FILE_VERSION` bump) — by design (matches `BookReadingStats` convention); worth a
   release-note line so users aren't surprised their heatmap history resets once
+
+---
+
+# Part G — Delete-cache confirm, OPDS status-line fix, TLS-buffer investigation
+
+## 42. Reader "Delete Book Cache" — confirmation dialog
+
+**Symptom:** The reader menu's "Delete Book Cache" wiped the cache immediately on select —
+one mis-press destroyed the book's parsed/rendered cache (forcing a slow full re-parse).
+
+**Fix (`EpubReaderActivity.cpp`, `DELETE_CACHE` action):** Wrap the destructive block in
+`startActivityForResult(ConfirmationActivity(...))`. On `isCancelled`, return without touching
+the cache; on confirm, run the existing clear-and-save-progress block (`section.reset()` →
+`clearCache()` → `setupCacheDir()` → `saveProgress()`), then `onGoHome()`. Mirrors the
+delete-confirmation pattern from §29 / §5's bookmark delete.
+
+**i18n:** `STR_CONFIRM_DELETE_CACHE: "Delete book cache?"`.
+
+**Files:** `src/activities/reader/EpubReaderActivity.cpp`, `lib/I18n/translations/english.yaml`.
+
+---
+
+## 43. OPDS browser — duplicate/garbled status lines after download
+
+**Symptom:** After a book download finished (or was cancelled with Back), the screen briefly
+stacked mismatched status lines — e.g. the fixed `Downloading...` label + a stale byte counter
+(`24 KB / 10.1 KB`) overlaid on the reload's `Connecting.../Parsing...`.
+
+**Root cause:** `downloadBook()` calls `fetchFeed()` to reload the list after a download, but
+left `state` at `DOWNLOADING`. `fetchFeed()` paints its own phase text into `statusMessage`
+(rendered as one centered line in `LOADING`), while the DOWNLOADING render branch *also* drew
+the fixed label + the stale `downloadProgress`/`downloadTotal` from the just-finished transfer.
+
+**Fix (`OpdsBookBrowserActivity.cpp`):** In both the `ABORTED` and `OK` branches, before the
+`fetchFeed()` reload, drop to `state = LOADING`, set `statusMessage = STR_LOADING`, and zero
+`downloadProgress`/`downloadTotal` — mirroring the `navigateToEntry`/`navigateBack` reset
+pattern. One clean status line.
+
+**Files:** `src/activities/browser/OpdsBookBrowserActivity.cpp`.
+
+---
+
+## 44. X3 HTTPS TLS-buffer tuning — INVESTIGATED, reverted to known-good (no change shipped)
+
+**Context:** Chasing slow OPDS *downloads* on X3 over HTTPS, an A/B experiment raised
+`CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN` 8192→16384 (and briefly turned `DYNAMIC_BUFFER` off with
+static 16384/16384). The off-variant immediately broke KOSync upload-from-reader
+(`LOW_MEMORY` / "fetch ok / upload failed") — exactly the failure §31/§32 + the
+`MIN_HEAP_FOR_TLS=55000` budget exist to prevent (`KOReaderSyncClient.cpp:26-35`).
+
+**Git evidence (`git log -p platformio.ini`):** `IN_CONTENT_LEN` has been touched by exactly
+**one** commit ever — `944cc0a3`, which set it to **8192**. `16384` was never committed; it
+existed only as the throwaway experiment. So the "suddenly fast OPDS *browsing* on X3+HTTPS"
+state = the shipped **8192** config (§25) + the **24KB** preflight gate (§26), *not* 16384.
+Slow *downloads* are the separate internal-SRAM/TCP-RTO hardware edge (Appendix) — independent
+of record-buffer size, not fixable by this knob.
+
+**Outcome:** `platformio.ini` reverted byte-for-byte to HEAD
+(`DYNAMIC_BUFFER=y`, `ASYMMETRIC=y`, `IN=8192`, `OUT=2048`). **No TLS change shipped** — the
+known-good config was already correct. Downloads over HTTPS on X3 stay slow by hardware limit;
+workaround remains plain `http://` for the catalog (Appendix).
+
+**Files:** none (investigation only; working tree restored to HEAD).

@@ -654,6 +654,15 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
     // file. Reload the feed (entries were freed above) so the list reappears.
     SdDebugLog::log("OPDS", "download cancelled by user, heap=%u", (unsigned)ESP.getFreeHeap());
     consumeBack = true;  // swallow the Back release that triggered the cancel
+    // Drop back to LOADING before the reload: fetchFeed paints its own status
+    // lines (Connecting.../Parsing.../byte counts) into `statusMessage`, and
+    // those render as a single centered line in LOADING. Leaving `state` at
+    // DOWNLOADING would additionally draw the fixed "Downloading..." label and
+    // the stale downloadProgress/downloadTotal from the just-finished transfer
+    // on top of it — duplicated, mismatched status lines (see screenshots).
+    state = BrowserState::LOADING;
+    statusMessage = tr(STR_LOADING);
+    downloadProgress = downloadTotal = 0;
     fetchFeed(currentPath);
     if (!entries.empty()) selectorIndex = std::min<int>(savedIndex, entries.size() - 1);
     requestUpdate();
@@ -664,6 +673,11 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
     clearBookCache(filename);
     // Reload the feed so the list (and the new "downloaded" marker) reappears;
     // heap is free again. fetchFeed resets selectorIndex, so restore it after.
+    // Same DOWNLOADING -> LOADING reset as the ABORTED path above, and for the
+    // same reason: avoid stacking fetchFeed's status lines on the download UI.
+    state = BrowserState::LOADING;
+    statusMessage = tr(STR_LOADING);
+    downloadProgress = downloadTotal = 0;
     fetchFeed(currentPath);
     if (!entries.empty()) selectorIndex = std::min<int>(savedIndex, entries.size() - 1);
     requestUpdate();
