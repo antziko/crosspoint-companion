@@ -91,7 +91,7 @@ python scripts/gen_i18n.py lib/I18n/translations lib/I18n/   # i18n tables
 
 **All SD I/O** serialized through `HalStorage` mutex (`Storage` singleton). `HalFile`, not raw `FsFile`.
 
-**Dictionary lookup:** reader word-select → `DictionaryLookupController` → `DictLookupTask` (off-UI FreeRTOS task) → `Dictionary` (StarDict over prepared offset files) → `DictHtmlRenderer` → definition activity. Prep is one-time via `DictPrepareTask` / `scripts/dictionary_tools.py prep`.
+**Dictionary lookup:** reader word-select → `DictionaryLookupController` → `DictLookupTask` (off-UI FreeRTOS task) → `Dictionary` (StarDict over prepared offset files) → `DictHtmlRenderer` → definition activity. Prep is one-time via `DictPrepareTask` / `scripts/dictionary_tools.py prep`. If no prepared dictionary is installed, hold-Confirm shows a brief `STR_DICT_NO_DICT_SET` popup (`showNoDictionaryMessage`, `DICTIONARY_MESSAGE_DURATION_MS = 1500 ms` from `ReaderUtils.h`) instead of opening word-select.
 
 **Networking:** `NetworkModeSelectionActivity` → WiFi → `CrossPointWebServer` (file transfer, settings API, WebDAV) / `HttpDownloader` (OPDS/Calibre) / `OtaUpdater`.
 

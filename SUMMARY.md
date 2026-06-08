@@ -1161,3 +1161,21 @@ elsewhere. Reuses §15's string/activity wiring entirely — no new strings, no 
 bump.
 
 **Files:** `src/activities/reader/EpubReaderActivity.cpp:967-1003`.
+
+---
+
+## 51. Reader — "No Dictionary installed" popup on hold-Confirm (upstream)
+
+**Goal:** when hold-Confirm fires the dictionary gesture but no prepared dictionary is installed, surface a brief popup instead of silently doing nothing.
+
+**`EpubReaderActivity.cpp` / `.h`:** the `HOLD_CONFIRM_DICTIONARY` branch in `loop()` now has two sub-paths:
+- `Dictionary::exists(cachePath)` → open word-select (unchanged).
+- else → set `showNoDictionaryMessage = true`, `ignoreNextConfirmRelease = true`, record `noDictionaryMessageTime = millis()`.
+
+Timer dismissal uses `DICTIONARY_MESSAGE_DURATION_MS = 1500` ms — a new constant in `ReaderUtils.h` (bookmark messages stay at `BOOKMARK_MESSAGE_DURATION_MS = 2500`). `render()` draws `STR_DICT_NO_DICT_SET` popup when the flag is set.
+
+**`EpubReaderActivity.h`:** `bool showNoDictionaryMessage = false` + `unsigned long noDictionaryMessageTime = 0UL` added (auto-merged cleanly with the existing local bookmark-message flags).
+
+**i18n:** `STR_DICT_NO_DICT_SET` already in `english.yaml` from prior dictionary work; other languages fall back until translated.
+
+**Source:** upstream PR #12 (`feat-dictionary`, WuTofu, commits `1b496e68` + `7cc10123`).
