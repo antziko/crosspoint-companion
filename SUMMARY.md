@@ -1068,31 +1068,40 @@ pre-allocation idea was assessed at <10% likely to help and not pursued.
 
 **Files:** none (analysis only, against `_X3_https/opds_debug.log`).
 
-## 47. KOSync bookmark PUT failing 3/3 with `ESP_ERR_HTTP_CONNECT` right after a successful GET — FIXED
+## 47. KOSync bookmark PUT failing 3/3 with `ESP_ERR_HTTP_CONNECT` right after a successful GET — FIX REVERTED (proven ineffective)
 
 **Symptom:** In the collected trace, `BOOKMARKS_GET` succeeded (200 OK, slowly) but the
 immediately-following `BOOKMARKS_PUT` failed all 3 retry attempts with `ESP_ERR_HTTP_CONNECT`
 (0x7002 = 28674 — verified against the actual ESP-IDF `esp_http_client.h`, not assumed).
 
-**Root cause:** `createClient` doesn't set `config.keep_alive_enable` — every call tears down
-and opens a fresh TCP+TLS connection. The PUT's `createClient` ran ~19ms after the GET's
-`esp_http_client_cleanup`, colliding with the still-releasing socket/TLS-session/DNS-resolver
-state from the prior connection. **Not heap starvation** — heap was healthy (54KB free / 45KB
-largest) at the moment of the PUT's connect failure, ruling out the Appendix's mechanism for
-this specific failure.
+**Original theory (now falsified — see Addendum):** `createClient` doesn't set
+`config.keep_alive_enable` — every call tears down and opens a fresh TCP+TLS connection. The
+PUT's `createClient` ran ~19ms after the GET's `esp_http_client_cleanup`, colliding with the
+still-releasing socket/TLS-session/DNS-resolver state from the prior connection. Heap looked
+healthy (54KB free / 45KB largest) at the moment of the PUT's connect failure, which seemed to
+rule out the Appendix's heap-starvation mechanism for this specific failure — both GETs in the
+failing block succeeded (slowly, 200 OK), only the PUT failed 3/3, which argued against a
+cold-WiFi-link explanation too.
 
-**Why this fix over "settle delay after WiFi connects":** both GETs in the failing block
-succeeded (slowly, but 200 OK) — only the PUT failed, 3/3. A cold-WiFi-link explanation would
-have broken the GETs too; "stale connection-teardown collision ~19ms later" fits the evidence
-exactly.
+**Original fix (now reverted):** `vTaskDelay(pdMS_TO_TICKS(800))` inserted between the
+bookmark-merge (`bmSynced = true`) and the `updateBookmarks` PUT call — intended to give the
+GET's connection time to fully release before the PUT opened a new one.
 
-**Fix (`KOReaderSyncActivity::syncBookmarks`):** `vTaskDelay(pdMS_TO_TICKS(800))` inserted
-between the bookmark-merge (`bmSynced = true`) and the `updateBookmarks` PUT call — gives the
-GET's connection time to fully release before the PUT opens a new one. 800ms matches
-`updateBookmarks`'s own retry backoff (`KOReaderSyncClient.cpp:389`), a duration already proven
-safe on this stack; costs nothing in heap (just a task delay).
+**Addendum (2026-06-08) — REVERTED after a fresh trace falsified the theory:** A new
+`opds_debug.log` capture (10 boot sessions) included two sync attempts running the *fixed*
+firmware (identified by the ~819-821ms gap matching `vTaskDelay(800)`). **Both still failed PUT
+3/3 with the identical `ESP_ERR_HTTP_CONNECT`** — the delay changed nothing. Building a
+session-by-session table across all 10 sessions revealed the real correlate: not GET→PUT timing,
+but whether **every** connect in a sync session lands fast (<25ms — only session 1, the lone
+success) or **all** of them land slow (1.6-4.4s, sessions 2-10, all failing at the connect stage
+with `HTTP_EVENT_ON_CONNECTED` never firing). That's the *same* X3 internal-SRAM/heap-fragmentation
+hardware condition from §46/the Appendix — a uniform per-session hardware state, not a
+fixable stale-connection timing race. Reverted in commit `11656ad9` (the
+`vTaskDelay`/comment block removed; `syncBookmarks` now goes straight from merge to PUT as
+before). No firmware-level fix is known for this — see §46's LOW-feasibility verdict, which
+now also covers this PUT-specific symptom.
 
-**Files:** `src/activities/reader/KOReaderSyncActivity.cpp:300-314`.
+**Files:** `src/activities/reader/KOReaderSyncActivity.cpp` (delay removed, commit `11656ad9`).
 
 ## 48. OPDS download screen — show full book title instead of single-line ellipsis truncation — FIXED
 
