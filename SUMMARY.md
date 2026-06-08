@@ -1007,3 +1007,127 @@ known-good config was already correct. Downloads over HTTPS on X3 stay slow by h
 workaround remains plain `http://` for the catalog (Appendix).
 
 **Files:** none (investigation only; working tree restored to HEAD).
+
+---
+
+# Part H — X3 HTTPS troubleshooting instrumentation + KOSync bookmark-PUT fix + OPDS download-name UX
+
+## 45. SD-based HTTPS troubleshooting trace (`SdDebugLog`) wired into the OPDS/KOSync paths — NEW
+
+**Goal:** Capture on-device evidence for the X3 HTTPS slowness (Appendix/§44) without a serial
+cable — `SdDebugLog::setEnabled()`-gated, writes to SD, 4MB ring (`MAX_LOG_BYTES`).
+
+**Wiring (`onEnter`/`onExit` of each activity that drives an HTTPS call):**
+- `OpdsBookBrowserActivity` — covers feed-fetch + book-download (`runGet`).
+- `KOReaderSyncActivity` — covers `authenticate`/`getProgress`/`updateProgress`/
+  `getBookmarks`/`updateBookmarks`.
+- `KOReaderAuthActivity` — covers `authenticate` from the settings flow.
+
+**Instrumentation added:**
+- `HttpDownloader::runGet` — `CONNECT`/`STALL`/`XFER`/`DONE`/`HTTP` lines: heap, largest
+  contiguous block (8-bit + internal), RSSI, byte counts, elapsed/rate. `STALL` fires on any
+  per-chunk read gap > 1s (`STALL_LOG_THRESHOLD_MS`).
+- `KOReaderSyncClient` — new `beginTrace()`/`endTrace()` + `httpEventHandler` hooks logging
+  `KOSYNC`/`STALL` lines (TLS-connect duration, inter-event stall gaps, request/response size +
+  elapsed) for `AUTH`, `PROGRESS_GET/PUT`, `BOOKMARKS_GET/PUT` — mirrors `runGet`'s shape so
+  the `perform()`-based path and the streaming-GET path produce directly comparable evidence.
+
+**Structural fix required mid-implementation:** `SdDebugLog` lived in `src/util/`, but
+`KOReaderSyncClient.cpp` is under `lib/KOReaderSync/` — PlatformIO's Library Dependency Finder
+gives `lib/` libraries an isolated include path that does **not** see `src/` (confirmed by the
+build error `fatal error: util/SdDebugLog.h: No such file or directory`). Moved it to
+`lib/SdDebugLog/` (matching the `Logging`/`Memory` cross-cutting-utility convention) via
+`git mv`, history preserved; updated all 5 include sites from `"util/SdDebugLog.h"` to
+`<SdDebugLog.h>`.
+
+**Files:** `lib/SdDebugLog/{SdDebugLog.h,cpp}` (moved from `src/util/`), `lib/KOReaderSync/KOReaderSyncClient.cpp`,
+`src/network/HttpDownloader.cpp`, `src/activities/browser/OpdsBookBrowserActivity.cpp`,
+`src/activities/reader/KOReaderSyncActivity.cpp`, `src/activities/settings/KOReaderAuthActivity.cpp`.
+
+## 46. X3 OPDS-feed-stall analysis (from collected `opds_debug.log`, 602 lines / ~19.5min trace) — CONCLUSIVE, feasibility LOW
+
+**Root mechanism confirmed:** a live TLS session permanently consumes ~55-60KB of the single
+unified heap (no PSRAM on C3 — empirically `MALLOC_CAP_INTERNAL == MALLOC_CAP_8BIT`, refining
+the Appendix's "internal vs 8-bit" framing: there is no separate spare pool, everything craters
+together). During transfer, free heap sits at 5-13KB with 2-6KB largest contiguous block
+(median 2548B across 283 stall samples) — too small for a WiFi RX buffer (~1.6KB) to allocate
+contiguously, so frames drop and TCP RTO stalls each read 13-114s (avg 23.6s). One trace: 283
+stalls totaling ~1h51m cumulative dead time; ~38KB transfers took 56s-5.8min (109-700 B/s vs
+X4's ~63KB/s).
+
+**New finding beyond the Appendix:** the failure isn't read-loop-specific — it spans
+connect-establishment and write/PUT paths too (9 outright `ESP_ERR_HTTP_CONNECT` + 12 mid-transfer
+read errors observed; see §47 for the specific KOSync PUT failure this surfaced). Rules out any
+read-loop-only firmware mitigation.
+
+**Verdict:** feasibility to fix in firmware **LOW** (at or below the Appendix's prior 20-30%
+estimate — arguably lower given there's no spare memory pool to shift load into, and the issue
+isn't confined to one transport direction). Recommendation: don't invest further firmware effort;
+practical workarounds remain an HTTP mirror or smaller server pages (Appendix). A speculative
+pre-allocation idea was assessed at <10% likely to help and not pursued.
+
+**Files:** none (analysis only, against `_X3_https/opds_debug.log`).
+
+## 47. KOSync bookmark PUT failing 3/3 with `ESP_ERR_HTTP_CONNECT` right after a successful GET — FIXED
+
+**Symptom:** In the collected trace, `BOOKMARKS_GET` succeeded (200 OK, slowly) but the
+immediately-following `BOOKMARKS_PUT` failed all 3 retry attempts with `ESP_ERR_HTTP_CONNECT`
+(0x7002 = 28674 — verified against the actual ESP-IDF `esp_http_client.h`, not assumed).
+
+**Root cause:** `createClient` doesn't set `config.keep_alive_enable` — every call tears down
+and opens a fresh TCP+TLS connection. The PUT's `createClient` ran ~19ms after the GET's
+`esp_http_client_cleanup`, colliding with the still-releasing socket/TLS-session/DNS-resolver
+state from the prior connection. **Not heap starvation** — heap was healthy (54KB free / 45KB
+largest) at the moment of the PUT's connect failure, ruling out the Appendix's mechanism for
+this specific failure.
+
+**Why this fix over "settle delay after WiFi connects":** both GETs in the failing block
+succeeded (slowly, but 200 OK) — only the PUT failed, 3/3. A cold-WiFi-link explanation would
+have broken the GETs too; "stale connection-teardown collision ~19ms later" fits the evidence
+exactly.
+
+**Fix (`KOReaderSyncActivity::syncBookmarks`):** `vTaskDelay(pdMS_TO_TICKS(800))` inserted
+between the bookmark-merge (`bmSynced = true`) and the `updateBookmarks` PUT call — gives the
+GET's connection time to fully release before the PUT opens a new one. 800ms matches
+`updateBookmarks`'s own retry backoff (`KOReaderSyncClient.cpp:389`), a duration already proven
+safe on this stack; costs nothing in heap (just a task delay).
+
+**Files:** `src/activities/reader/KOReaderSyncActivity.cpp:300-314`.
+
+## 48. OPDS download screen — show full book title instead of single-line ellipsis truncation — FIXED
+
+**Symptom:** The "Downloading…" screen showed the book title via
+`renderer.truncatedText(UI_10_FONT_ID, statusMessage.c_str(), pageWidth - 40)` on one line —
+long titles were cut short with an ellipsis, hiding the actual book name from the user.
+
+**Fix (`OpdsBookBrowserActivity::render`, `DOWNLOADING` branch):** Replaced the single-line
+`truncatedText` + fixed-offset draw with `renderer.wrappedText(UI_10_FONT_ID, statusMessage.c_str(),
+pageWidth - 40, 2)` — wraps the title over up to 2 centered lines (the same helper §38's title-
+overflow fix and `CrashActivity` use; it falls back to ellipsis-truncating only the rare title
+that can't fit even 2 lines). The progress bar / byte-count line position (`barY`) is now
+computed from the actual number of wrapped lines × `getLineHeight()`, so it never overlaps the
+title block regardless of whether the title needed 1 or 2 lines. Orientation-aware throughout
+(`pageWidth`/`pageHeight`/`getLineHeight`, no hardcoded dimensions).
+
+**Files:** `src/activities/browser/OpdsBookBrowserActivity.cpp:305-329`.
+
+## 49. `esp_http_client` `buffer_size` (RX) bump to ~16KB for OPDS GET — analyzed, NOT recommended
+
+User asked whether raising `HttpDownloader.cpp:23`'s `HTTP_RX_BUF` (4096) to ~16354 would speed
+up OPDS GETs. Traced the actual mechanism in `esp_http_client.c` (the framework source, not
+assumed): `config.buffer_size` becomes `client->buffer_size_rx`, a single `malloc` at client
+init (`esp_http_client.c:920-921`); each `esp_http_client_read` clamps its transport read to
+`min(need_read, buffer_size_rx)` (`esp_http_client.c:1335-1336`) — and `need_read` is bounded by
+**our own** `READ_CHUNK = 2048` (`HttpDownloader.cpp:30,193`), which is already smaller than the
+current 4096 buffer. So the clamp never engages today, and a bigger `buffer_size_rx` changes
+nothing about body-read throughput or "splitting" — `READ_CHUNK` is the actual limiter (kept at
+2KB deliberately, per `HttpDownloader.cpp:95-98`, so it can be carved from contiguous heap before
+the TLS handshake fragments it).
+
+**What it WOULD do:** balloon the one-time `malloc(buffer_size_rx)` from 4KB → ~16KB — an extra
+~12KB grabbed at exactly the moment the ~55-60KB TLS session is also competing for the same
+scarce contiguous heap that §46 showed craters to 2-6KB largest block during stalls. That raises
+`ESP_ERR_HTTP_CONNECT`/OOM risk (the `MIN_CONTIGUOUS_HEAP_FOR_TLS` preflight, `OpdsBookBrowserActivity.cpp:618,625`,
+would trip more often), making things worse, not better. **Verdict: don't change it.**
+
+**Files:** none (analysis only).

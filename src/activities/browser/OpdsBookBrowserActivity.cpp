@@ -5,6 +5,7 @@
 #include <Logging.h>
 #include <Memory.h>
 #include <OpdsStream.h>
+#include <SdDebugLog.h>
 #include <WiFi.h>
 #include <esp_heap_caps.h>
 
@@ -21,7 +22,6 @@
 #include "fontIds.h"
 #include "network/HttpDownloader.h"
 #include "util/BookCacheUtils.h"
-#include "util/SdDebugLog.h"
 #include "util/StringUtils.h"
 #include "util/UrlUtils.h"
 
@@ -117,6 +117,11 @@ bool isBookOnDevice(const std::string& folder, const OpdsEntry& book) {
 void OpdsBookBrowserActivity::onEnter() {
   Activity::onEnter();
 
+  // X3 HTTPS troubleshooting: enable the SD trace for the lifetime of this
+  // activity (covers feed fetch + book download, both of which call runGet).
+  // See SdDebugLog.h / SUMMARY.md Part B Appendix.
+  SdDebugLog::setEnabled(true);
+
   // One of the few non-reader screens that follows SETTINGS.displayOrientation
   // (the hold-to-rotate gesture is handled in loop(), see resolveSideNavAction).
   ReaderUtils::applyOrientation(renderer, SETTINGS.displayOrientation);
@@ -138,6 +143,8 @@ void OpdsBookBrowserActivity::onEnter() {
 
 void OpdsBookBrowserActivity::onExit() {
   Activity::onExit();
+
+  SdDebugLog::setEnabled(false);
 
   // Reset orientation back to portrait for the rest of the UI.
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
@@ -297,11 +304,21 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
 
   if (state == BrowserState::DOWNLOADING) {
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 40, tr(STR_DOWNLOADING));
-    auto title = renderer.truncatedText(UI_10_FONT_ID, statusMessage.c_str(), pageWidth - 40);
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 10, title.c_str());
+
+    // Show the full title wrapped over up to 2 lines instead of single-line
+    // ellipsis truncation; wrappedText itself falls back to truncatedText only
+    // if a title is so long it can't fit even 2 lines (see GfxRenderer.cpp).
+    const auto lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+    const auto titleLines = renderer.wrappedText(UI_10_FONT_ID, statusMessage.c_str(), pageWidth - 40, 2);
+    int titleY = pageHeight / 2 - 10;
+    for (const auto& line : titleLines) {
+      renderer.drawCenteredText(UI_10_FONT_ID, titleY, line.c_str());
+      titleY += lineHeight;
+    }
+
+    const int barY = titleY + 10;
     if (downloadTotal > 0) {
-      GUI.drawProgressBar(renderer, Rect{50, pageHeight / 2 + 20, pageWidth - 100, 20}, downloadProgress,
-                          downloadTotal);
+      GUI.drawProgressBar(renderer, Rect{50, barY, pageWidth - 100, 20}, downloadProgress, downloadTotal);
     } else if (downloadProgress > 0) {
       // Server sent no Content-Length (chunked / redirected CDN): no percentage,
       // so show bytes received so far, scaled to KB / MB / GB as it grows.
@@ -314,7 +331,7 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
       } else {
         snprintf(sizeText, sizeof(sizeText), "%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
       }
-      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 20, sizeText);
+      renderer.drawCenteredText(UI_10_FONT_ID, barY, sizeText);
     }
     renderer.displayBuffer();
     return;

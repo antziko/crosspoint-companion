@@ -2,6 +2,7 @@
 
 #include <ArduinoJson.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
 #include <freertos/FreeRTOS.h>
@@ -34,11 +35,24 @@ constexpr int HTTP_BUF_SIZE = 2048;
 // to sync from within the reader, which releases the epub first and frees enough RAM.
 constexpr uint32_t MIN_HEAP_FOR_TLS = 55000;
 
+// X3 HTTPS troubleshooting instrumentation (SdDebugLog "STALL"): a gap between
+// esp_http_client event-callback fires longer than this is logged with a
+// heap+RSSI snapshot. Mirrors HttpDownloader::runGet's per-chunk-read probe so
+// the perform()-based GET/PUT path here produces directly comparable evidence
+// to the streaming-GET path. See SUMMARY.md Part B Appendix.
+constexpr uint32_t STALL_LOG_THRESHOLD_MS = 1000;
+
 // Response buffer for reading HTTP body
 struct ResponseBuffer {
   char* data = nullptr;
   int len = 0;
   int capacity = 0;
+
+  // Set by beginTrace() before perform(); read by httpEventHandler to log
+  // connect-time and stall events to SD. Null traceTag = no tracing (cheap).
+  const char* traceTag = nullptr;
+  uint32_t requestStartMs = 0;
+  uint32_t lastEventMs = 0;
 
   ~ResponseBuffer() { free(data); }
 
@@ -52,10 +66,31 @@ struct ResponseBuffer {
   }
 };
 
-// HTTP event handler to collect response body
+// HTTP event handler: collects the response body, and (when traceTag is set)
+// logs TLS-connect duration and any stall between successive data events.
 esp_err_t httpEventHandler(esp_http_client_event_t* evt) {
   auto* buf = static_cast<ResponseBuffer*>(evt->user_data);
-  if (evt->event_id == HTTP_EVENT_ON_DATA && buf) {
+  if (!buf) return ESP_OK;
+
+  if (buf->traceTag) {
+    const uint32_t now = millis();
+    if (evt->event_id == HTTP_EVENT_ON_CONNECTED) {
+      SdDebugLog::log("KOSYNC", "%s TLS connected after %lums", buf->traceTag,
+                      (unsigned long)(now - buf->requestStartMs));
+      buf->lastEventMs = now;
+    } else if (evt->event_id == HTTP_EVENT_ON_DATA) {
+      const uint32_t gapMs = now - buf->lastEventMs;
+      if (gapMs > STALL_LOG_THRESHOLD_MS) {
+        const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
+        SdDebugLog::log("STALL", "%s gap=%lums bytes=%d heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d",
+                        buf->traceTag, (unsigned long)gapMs, buf->len, snap.heapFree, snap.largest8Bit,
+                        snap.internalFree, snap.internalLargest, (int)snap.rssi);
+      }
+      buf->lastEventMs = now;
+    }
+  }
+
+  if (evt->event_id == HTTP_EVENT_ON_DATA) {
     if (buf->ensure(buf->len + evt->data_len + 1)) {
       memcpy(buf->data + buf->len, evt->data, evt->data_len);
       buf->len += evt->data_len;
@@ -65,6 +100,25 @@ esp_err_t httpEventHandler(esp_http_client_event_t* evt) {
     }
   }
   return ESP_OK;
+}
+
+// Logs a pre-request heap+RSSI snapshot (see SdDebugLog::NetSnapshot) and arms
+// `buf` so httpEventHandler logs connect/stall events under the same tag.
+void beginTrace(ResponseBuffer& buf, const char* tag, size_t bodyLen = 0) {
+  buf.traceTag = tag;
+  buf.requestStartMs = millis();
+  buf.lastEventMs = buf.requestStartMs;
+  const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
+  SdDebugLog::log("KOSYNC", "%s req body=%u heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d", tag,
+                  (unsigned)bodyLen, snap.heapFree, snap.largest8Bit, snap.internalFree, snap.internalLargest,
+                  (int)snap.rssi);
+}
+
+// Logs the outcome + total elapsed time, in the same {bytes, elapsed, rate}
+// shape HttpDownloader's DONE line uses so GET/PUT traces read consistently.
+void endTrace(const ResponseBuffer& buf, const char* tag, int httpCode, esp_err_t err) {
+  SdDebugLog::log("KOSYNC", "%s resp code=%d err=%d elapsed=%lums bytes=%d", tag, httpCode, (int)err,
+                  (unsigned long)(millis() - buf.requestStartMs), buf.len);
 }
 
 // Create configured esp_http_client with small TLS buffers
@@ -117,6 +171,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
   }
 
   ResponseBuffer buf;
+  beginTrace(buf, "AUTH");
   esp_http_client_handle_t client = createClient(url.c_str(), &buf);
   if (!client) return NETWORK_ERROR;
 
@@ -124,6 +179,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
   const int httpCode = esp_http_client_get_status_code(client);
   lastHttpCode = httpCode;  esp_http_client_cleanup(client);
 
+  endTrace(buf, "AUTH", httpCode, err);
   LOG_DBG("KOSync", "Auth response: %d (err: %d)", httpCode, err);
 
   if (err != ESP_OK) return NETWORK_ERROR;
@@ -149,6 +205,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
   }
 
   ResponseBuffer buf;
+  beginTrace(buf, "PROGRESS_GET");
   esp_http_client_handle_t client = createClient(url.c_str(), &buf);
   if (!client) return NETWORK_ERROR;
 
@@ -156,6 +213,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
   const int httpCode = esp_http_client_get_status_code(client);
   lastHttpCode = httpCode;  esp_http_client_cleanup(client);
 
+  endTrace(buf, "PROGRESS_GET", httpCode, err);
   LOG_DBG("KOSync", "Get progress response: %d (err: %d)", httpCode, err);
 
   if (err != ESP_OK) return NETWORK_ERROR;
@@ -214,6 +272,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
   LOG_DBG("KOSync", "Request body: %s", body.c_str());
 
   ResponseBuffer buf;
+  beginTrace(buf, "PROGRESS_PUT", body.length());
   esp_http_client_handle_t client = createClient(url.c_str(), &buf, HTTP_METHOD_PUT);
   if (!client) return NETWORK_ERROR;
 
@@ -228,6 +287,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
   const int httpCode = esp_http_client_get_status_code(client);
   lastHttpCode = httpCode;  esp_http_client_cleanup(client);
 
+  endTrace(buf, "PROGRESS_PUT", httpCode, err);
   LOG_DBG("KOSync", "Update progress response: %d (err: %d)", httpCode, err);
 
   if (err != ESP_OK) return NETWORK_ERROR;
@@ -254,6 +314,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getBookmarks(const std::string& do
   }
 
   ResponseBuffer buf;
+  beginTrace(buf, "BOOKMARKS_GET");
   esp_http_client_handle_t client = createClient(url.c_str(), &buf);
   if (!client) return NETWORK_ERROR;
 
@@ -261,6 +322,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getBookmarks(const std::string& do
   const int httpCode = esp_http_client_get_status_code(client);
   lastHttpCode = httpCode;  esp_http_client_cleanup(client);
 
+  endTrace(buf, "BOOKMARKS_GET", httpCode, err);
   LOG_DBG("KOSync", "Get bookmarks response: %d (err: %d)", httpCode, err);
 
   if (err != ESP_OK) return NETWORK_ERROR;
@@ -328,6 +390,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
     }
 
     ResponseBuffer buf;
+    beginTrace(buf, "BOOKMARKS_PUT", body.length());
     esp_http_client_handle_t client = createClient(url.c_str(), &buf, HTTP_METHOD_PUT);
     if (!client) {
       err = ESP_FAIL;
@@ -344,6 +407,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
     err = esp_http_client_perform(client);
     httpCode = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
+    endTrace(buf, "BOOKMARKS_PUT", httpCode, err);
     LOG_DBG("KOSync", "Update bookmarks response: %d (err: %d, attempt %d)", httpCode, err, attempt + 1);
 
     if (err == ESP_OK) break;  // got an HTTP response — no point retrying the transport

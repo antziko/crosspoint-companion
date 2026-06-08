@@ -4,6 +4,7 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
 #include <WiFi.h>
 #include <esp_sntp.h>
 #include <esp_wifi.h>
@@ -303,6 +304,15 @@ void KOReaderSyncActivity::syncBookmarks() {
   bmMergedCount = countSyncable();
   bmSynced = true;
 
+  // X3 HTTPS: getBookmarks just tore down its TLS connection; opening the PUT's
+  // connection within ~20ms of that collided with the still-releasing socket/TLS
+  // session and failed every retry with ESP_ERR_HTTP_CONNECT (heap was healthy at
+  // the time, so this isn't the heap-starvation issue — see SdDebugLog trace /
+  // SUMMARY.md Part B Appendix). 800ms matches updateBookmarks' own retry backoff,
+  // a duration already proven safe on this stack, and gives the GET's connection
+  // time to fully release before the PUT opens a new one.
+  vTaskDelay(pdMS_TO_TICKS(800));
+
   // Push the reconciled set + tombstones so other devices converge on next sync.
   const std::string localJson = BookmarkStore::serializeToJson(BOOKMARKS.getBookmarks(), BOOKMARKS.getTombstones());
   const auto putResult = KOReaderSyncClient::updateBookmarks(documentHash, localJson);
@@ -316,6 +326,12 @@ void KOReaderSyncActivity::syncBookmarks() {
 
 void KOReaderSyncActivity::onEnter() {
   Activity::onEnter();
+
+  // X3 HTTPS troubleshooting: enable the SD trace for the lifetime of this
+  // activity (covers KOReaderSyncClient's authenticate/getProgress/updateProgress/
+  // getBookmarks/updateBookmarks calls). See SdDebugLog.h / SUMMARY.md Part B Appendix.
+  SdDebugLog::setEnabled(true);
+
   ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
 
   // Check for credentials first
@@ -343,6 +359,8 @@ void KOReaderSyncActivity::onEnter() {
 
 void KOReaderSyncActivity::onExit() {
   Activity::onExit();
+
+  SdDebugLog::setEnabled(false);
 
   if (wifiActivated) {
     // silentRestartToReader() powers the modem fully down (WIFI_OFF) before the soft

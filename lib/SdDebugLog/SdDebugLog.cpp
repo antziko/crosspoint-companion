@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 #include <HalStorage.h>
+#include <esp_heap_caps.h>
+#include <esp_wifi.h>
 
 #include <cstdarg>
 #include <cstdio>
@@ -10,7 +12,11 @@ namespace SdDebugLog {
 namespace {
 bool g_enabled = false;
 // Rotate (truncate) once the log passes this size so it can't grow unbounded.
-constexpr size_t MAX_LOG_BYTES = 64 * 1024;
+// Sized for an extended X3 HTTPS troubleshooting collection run (many transfer
+// attempts over "some time") rather than a single-session trace — SD card space
+// is not the constrained resource here (RAM is); 4MB is a blink to write/read
+// and holds tens of thousands of lines.
+constexpr size_t MAX_LOG_BYTES = 4 * 1024 * 1024;
 }  // namespace
 
 void setEnabled(bool enabled) { g_enabled = enabled; }
@@ -44,6 +50,17 @@ void log(const char* tag, const char* fmt, ...) {
   if (!Storage.openFileForAppend("SDLOG", PATH, file)) return;
   file.write(line, static_cast<size_t>(len));
   // HalFile closes on scope exit (DESTRUCTOR_CLOSES_FILE).
+}
+
+NetSnapshot captureNetSnapshot() {
+  NetSnapshot snap{};
+  snap.heapFree = ESP.getFreeHeap();
+  snap.largest8Bit = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  snap.internalFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  snap.internalLargest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+  wifi_ap_record_t apInfo = {};
+  snap.rssi = (esp_wifi_sta_get_ap_info(&apInfo) == ESP_OK) ? apInfo.rssi : 0;
+  return snap;
 }
 
 }  // namespace SdDebugLog

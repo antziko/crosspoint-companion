@@ -2,6 +2,7 @@
 
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <SdDebugLog.h>
 #include <WiFi.h>
 
 #include "KOReaderCredentialStore.h"
@@ -58,6 +59,11 @@ void KOReaderAuthActivity::performAuthentication() {
 void KOReaderAuthActivity::onEnter() {
   Activity::onEnter();
 
+  // X3 HTTPS troubleshooting: enable the SD trace for the lifetime of this
+  // activity (covers KOReaderSyncClient::authenticate). See SdDebugLog.h /
+  // SUMMARY.md Part B Appendix.
+  SdDebugLog::setEnabled(true);
+
   // If a specific server should be tested, make it active now so the sync client reads its creds.
   if (targetServerIndex >= 0) {
     previousActiveIndex = KOREADER_STORE.getActiveIndex();
@@ -78,6 +84,8 @@ void KOReaderAuthActivity::onEnter() {
 
 void KOReaderAuthActivity::onExit() {
   Activity::onExit();
+
+  SdDebugLog::setEnabled(false);
 
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(false);

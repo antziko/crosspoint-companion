@@ -3,12 +3,11 @@
 #include <Arduino.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <SdDebugLog.h>
 #include <base64.h>
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
 #include <esp_wifi.h>
-
-#include "util/SdDebugLog.h"
 
 #include <cstdarg>
 #include <cstring>
@@ -29,6 +28,17 @@ constexpr int HTTP_TX_BUF = 1024;
 // HTTPClient's uint16 setTimeout it doesn't silently truncate.
 constexpr int HTTP_TIMEOUT_MS = 60000;
 constexpr size_t READ_CHUNK = 2048;
+
+// X3 HTTPS troubleshooting instrumentation (SdDebugLog "STALL"/"XFER"): a
+// per-chunk read taking longer than this is logged with a heap+RSSI snapshot —
+// the prior X3 stall investigation found internal-SRAM starvation (WiFi RX
+// buffers can't allocate -> dropped frames -> TCP RTO) produced exactly this
+// shape of multi-second per-read gap. See SUMMARY.md Part B Appendix.
+constexpr uint32_t STALL_LOG_THRESHOLD_MS = 1000;
+// Periodic transfer-progress summary cadence. Coarse on purpose: each
+// SdDebugLog::log() does two SD opens + a mutex lock, so logging every
+// 2KB chunk would itself perturb the transfer being measured.
+constexpr size_t XFER_LOG_BYTES = 32 * 1024;
 
 struct Sink {
   std::function<bool(const uint8_t*, size_t)> write;  // returns false to abort the transfer
@@ -162,6 +172,19 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   // total at 0 so progress stays silent and the size check is skipped.
   sink.total = contentLength > 0 ? static_cast<size_t>(contentLength) : 0;
 
+  // Baseline at the start of streaming (post-handshake): pairs with the STALL
+  // snapshots taken mid-transfer so a trace shows whether internal-SRAM
+  // fragmentation grows over the life of the connection.
+  {
+    const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
+    SdDebugLog::log("CONNECT", "heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d total=%zu url=%s",
+                    snap.heapFree, snap.largest8Bit, snap.internalFree, snap.internalLargest, (int)snap.rssi,
+                    sink.total, url.c_str());
+  }
+  const uint32_t transferStartMs = millis();
+  uint32_t lastChunkMs = transferStartMs;
+  size_t lastXferLogBytes = 0;
+
   while (true) {
     if (sink.cancelFlag && *sink.cancelFlag) {
       esp_http_client_cleanup(client);
@@ -176,6 +199,20 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
       return HttpDownloader::HTTP_ERROR;
     }
     if (read == 0) break;  // all data received
+
+    // Flag any single read that blocked unusually long. gapMs measures the
+    // socket-read latency directly (computed before sink.write touches SD), so
+    // it isolates network stalls from SD-write slowness.
+    const uint32_t now = millis();
+    const uint32_t gapMs = now - lastChunkMs;
+    lastChunkMs = now;
+    if (gapMs > STALL_LOG_THRESHOLD_MS) {
+      const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
+      SdDebugLog::log("STALL", "gap=%lums bytes=%zu heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d",
+                      (unsigned long)gapMs, sink.downloaded, snap.heapFree, snap.largest8Bit, snap.internalFree,
+                      snap.internalLargest, (int)snap.rssi);
+    }
+
     if (!sink.write(reinterpret_cast<const uint8_t*>(buf.get()), read)) {
       SdDebugLog::log("HTTP", "sink write failed after %zu bytes, heap=%u (likely OOM in parser)", sink.downloaded,
                       (unsigned)ESP.getFreeHeap());
@@ -188,10 +225,26 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
     // callers can show a byte count instead of a percentage bar. total==0 means
     // "size unknown".
     if (sink.progress) sink.progress(sink.downloaded, sink.total);
+
+    if (sink.downloaded - lastXferLogBytes >= XFER_LOG_BYTES) {
+      lastXferLogBytes = sink.downloaded;
+      const uint32_t elapsedMs = now - transferStartMs;
+      const unsigned bytesPerSec = elapsedMs > 0 ? (unsigned)(sink.downloaded * 1000UL / elapsedMs) : 0;
+      SdDebugLog::log("XFER", "bytes=%zu elapsed=%lums rate=%uB/s heap=%u", sink.downloaded,
+                      (unsigned long)elapsedMs, bytesPerSec, (unsigned)ESP.getFreeHeap());
+    }
   }
 
   const bool complete = esp_http_client_is_complete_data_received(client);
   esp_http_client_cleanup(client);
+
+  {
+    const uint32_t totalElapsedMs = millis() - transferStartMs;
+    const unsigned bytesPerSec = totalElapsedMs > 0 ? (unsigned)(sink.downloaded * 1000UL / totalElapsedMs) : 0;
+    SdDebugLog::log("DONE", "complete=%d bytes=%zu elapsed=%lums rate=%uB/s", (int)complete, sink.downloaded,
+                    (unsigned long)totalElapsedMs, bytesPerSec);
+  }
+
   if (!complete) {
     LOG_ERR("HTTP", "incomplete: got %zu of %zu bytes", sink.downloaded, sink.total);
     SdDebugLog::log("HTTP", "incomplete: got %zu of %zu bytes", sink.downloaded, sink.total);

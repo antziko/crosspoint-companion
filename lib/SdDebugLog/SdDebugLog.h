@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 // Lightweight on-SD debug log so failures can be inspected untethered (no serial
 // monitor). Currently used to capture OPDS browser / HTTP fetch errors.
 //
@@ -20,5 +22,23 @@ void clear();
 
 // Append one printf-style line, prefixed with millis() and tag. No-op if disabled.
 void log(const char* tag, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+
+// Heap fragmentation + radio snapshot, captured together because their
+// correlation is the diagnostic signal: the X3 HTTPS-stall investigation found
+// `internalLargest` (contiguous internal-SRAM, where WiFi RX buffers must come
+// from — needs ~1.6KB blocks) cratering to ~2KB during slow transfers while
+// `largest8Bit`/`heapFree` looked fine and RSSI stayed steady. See SUMMARY.md
+// Part B Appendix. Both HTTP code paths (HttpDownloader's streaming GET and
+// KOReaderSyncClient's perform()-based GET/PUT) log this shape so their traces
+// are directly comparable.
+struct NetSnapshot {
+  uint32_t heapFree;
+  uint32_t largest8Bit;
+  uint32_t internalFree;
+  uint32_t internalLargest;
+  int8_t rssi;
+};
+
+NetSnapshot captureNetSnapshot();
 
 }  // namespace SdDebugLog
