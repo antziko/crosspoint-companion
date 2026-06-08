@@ -1140,3 +1140,24 @@ scarce contiguous heap that §46 showed craters to 2-6KB largest block during st
 would trip more often), making things worse, not better. **Verdict: don't change it.**
 
 **Files:** none (analysis only).
+
+## 50. EPUB reader — "select bookmark" prompts for a return mark before jumping (mirrors §15)
+
+**Goal:** picking a bookmark from "View Bookmarks" can carry the reader far from the current
+spot with no easy way back. §15 already added this guard to "Select Chapter" and "Go to %"; this
+extends the same guard to bookmark selection.
+
+**Change (`EpubReaderActivity::onReaderMenuConfirm`, `VIEW_BOOKMARKS` case):** navigation is now
+wrapped in a `doNavigate` lambda (the original body: `removeReturnMarkAt` + spine/progress jump +
+`section.reset()`). Before calling it, if `section->pageCount > 0` and
+`!BOOKMARKS.hasBookmarkForPage(currentSpineIndex, currentProgress, pageCount)` — i.e. the current
+page carries neither a hollow return mark nor a normal bookmark — shows the existing
+`ConfirmationActivity`/`STR_CONFIRM_ADD_RETURN_MARK` prompt; confirming calls
+`addBookmark(/*returnMark=*/true, lightRefresh=true)` before `doNavigate()`, declining just
+navigates. No "actually moving" check needed (unlike §15's chapter/percent cases): if
+`hasBookmarkForPage` is false for the current page, the selected bookmark — which IS a bookmark
+somewhere — cannot be the one covering the current page, so the jump is guaranteed to go
+elsewhere. Reuses §15's string/activity wiring entirely — no new strings, no cache/format version
+bump.
+
+**Files:** `src/activities/reader/EpubReaderActivity.cpp:967-1003`.

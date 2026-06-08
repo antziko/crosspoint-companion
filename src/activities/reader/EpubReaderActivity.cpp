@@ -970,14 +970,36 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
           [this](const ActivityResult& result) {
             if (!result.isCancelled) {
               const auto& bm = std::get<BookmarkResult>(result.data);
-              // Reopening the "return here" mark consumes it: the one-shot aid for getting
-              // back has done its job, so drop it (no-op for a normal bookmark).
-              BOOKMARKS.removeReturnMarkAt(bm.spineIndex, bm.paragraphIndex, bm.progress);
-              RenderLock lock(*this);
-              currentSpineIndex = bm.spineIndex;
-              pendingSpineProgress = bm.progress;
-              pendingPercentJump = true;
-              section.reset();
+
+              auto doNavigate = [this, bm]() {
+                // Reopening the "return here" mark consumes it: the one-shot aid for getting
+                // back has done its job, so drop it (no-op for a normal bookmark).
+                BOOKMARKS.removeReturnMarkAt(bm.spineIndex, bm.paragraphIndex, bm.progress);
+                RenderLock lock(*this);
+                currentSpineIndex = bm.spineIndex;
+                pendingSpineProgress = bm.progress;
+                pendingPercentJump = true;
+                section.reset();
+              };
+
+              if (section && section->pageCount > 0) {
+                const float bmProgress =
+                    static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
+                if (!BOOKMARKS.hasBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
+                                                  section->pageCount)) {
+                  startActivityForResult(
+                      std::make_unique<ConfirmationActivity>(renderer, mappedInput,
+                                                             tr(STR_CONFIRM_ADD_RETURN_MARK), ""),
+                      [this, doNavigate](const ActivityResult& confirmResult) {
+                        if (!confirmResult.isCancelled) {
+                          addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
+                        }
+                        doNavigate();
+                      });
+                  return;
+                }
+              }
+              doNavigate();
             }
           });
       break;
