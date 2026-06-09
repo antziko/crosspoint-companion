@@ -1323,3 +1323,35 @@ image falls back to live re-decode (slower, uncached). Both non-fatal; candidate
 trick later.
 
 **Files:** `lib/InflateReader/InflateReader.{cpp,h}`, `lib/EpdFont/SdCardFont.cpp`.
+
+## 61. Home covers blank on Vega = cover-thumb JPEG guard rejected valid covers under fragmentation — RESOLVED
+
+**Symptom:** some books with a real cover image showed only a placeholder on the home screen (Vega theme).
+
+**Diagnosis:** added a temporary SD-routed probe (`SdDebugLog` in `HomeActivity::loadRecentCovers` +
+`Epub::generateThumbBmp`, X3-readable via `/opds_debug.log` — X3 has no serial). Device log showed the cover
+`cover.jpeg` was valid; failure was the JPEG decoder heap guard:
+`Not enough heap for JPEG decoder (48384 free, need 53248)`. The guard checked **total free** against
+`JPEG_DECODER_SIZE (20KB) + 32KB` slack. But the real constraint is a single ~20KB contiguous block (the JPEGDEC
+object); `MaxAlloc` was 40948 — plenty. §59's −32KB reservation made the false rejection routine. All thumb-path
+buffers are `makeUniqueNoThrow` + null-checked → a shortfall already fails gracefully (placeholder), never crashes.
+
+**Change (`JpegToBmpConverter.cpp`):** replaced the total-free guard with a **largest-contiguous-block** guard —
+`heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < JPEG_DECODER_SIZE + 8*1024` (28672). Targets the true
+fragmentation constraint; the failing cover (MaxAlloc 40948 > 28672) now decodes. Added `#include <esp_heap_caps.h>`.
+The SD cover probe was stripped after diagnosis (kept the `LOG_DBG/LOG_ERR` lines and §57 session-skip marker).
+
+**Batch committed alongside §61** (device-pending fixes from §55–60 follow-up work):
+- **#1 thumb scale-aware** (`JpegToBmpConverter.cpp`): pick JPEGDEC 1/2..1/8 denom so the decode grid fits
+  `MAX_IMAGE_WIDTH 2048` / `MAX_IMAGE_HEIGHT 3072` instead of rejecting large covers outright.
+- **#3 keep cover path** (`HomeActivity.cpp`): stop wiping the persisted `coverBmpPath` on a (often transient,
+  fragmentation-driven) thumb-gen failure — a later attempt on a freer heap regenerates it; meanwhile the tile
+  shows a placeholder rather than permanently losing the cover.
+- **streaming-band borrow** (`PixelCache.h`): `StreamingPixelCache` band malloc falls back to
+  `InflateReader::acquireScratch()` (the §59/§60 reserved window) when malloc fails, so large grayscale images
+  cache instead of re-decoding every page.
+- **heap-floor guard** (`Section.cpp`): before the chapter parser, bail (clean `return false`, remove temp files)
+  if `esp_get_free_heap_size() < 48KB` — turns the §59-era parser `bad_alloc` abort into a graceful skip.
+
+**Files:** `lib/JpegToBmpConverter/JpegToBmpConverter.cpp`, `src/activities/home/HomeActivity.cpp`,
+`lib/Epub/Epub/converters/PixelCache.h`, `lib/Epub/Epub/Section.cpp`.

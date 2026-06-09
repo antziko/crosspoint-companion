@@ -72,44 +72,40 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
   for (RecentBook& book : recentBooks) {
     if (!book.coverBmpPath.empty()) {
       std::string coverPath = UITheme::getCoverThumbPath(book.coverBmpPath, coverHeight);
-      if (!Storage.exists(coverPath.c_str())) {
-        // If epub, try to load the metadata for title/author and cover
-        if (FsHelpers::hasEpubExtension(book.path)) {
-          Epub epub(book.path, "/.crosspoint");
-          // Skip loading css since we only need metadata here
-          epub.load(false, true);
+      if (Storage.exists(coverPath.c_str())) {
+        // Thumb already present — drawCoverTile renders it.
+      } else if (FsHelpers::hasEpubExtension(book.path)) {
+        Epub epub(book.path, "/.crosspoint");
+        // Skip loading css since we only need metadata here
+        epub.load(false, true);
 
+        // Try to generate thumbnail image for Continue Reading card
+        if (!showingLoading) {
+          showingLoading = true;
+          popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+        }
+        GUI.fillPopupProgress(renderer, popupRect, 10 + progress * (90 / recentBooks.size()));
+        // Don't wipe the persisted cover path on failure: thumb generation can fail
+        // transiently (heap fragmentation), and clearing it would blank the cover
+        // until the book is reopened. drawCoverTile falls back to a placeholder when
+        // the thumb file is absent; a later attempt (fresh heap) regenerates it.
+        epub.generateThumbBmp(coverHeight);
+        coverRendered = false;
+        requestUpdate();
+      } else if (FsHelpers::hasXtcExtension(book.path)) {
+        // Handle XTC file
+        Xtc xtc(book.path, "/.crosspoint");
+        if (xtc.load()) {
           // Try to generate thumbnail image for Continue Reading card
           if (!showingLoading) {
             showingLoading = true;
             popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
           }
           GUI.fillPopupProgress(renderer, popupRect, 10 + progress * (90 / recentBooks.size()));
-          bool success = epub.generateThumbBmp(coverHeight);
-          if (!success) {
-            RECENT_BOOKS.updateBook(book.path, book.title, book.author, "");
-            book.coverBmpPath = "";
-          }
+          // See note above: don't wipe the cover path on a (possibly transient) failure.
+          xtc.generateThumbBmp(coverHeight);
           coverRendered = false;
           requestUpdate();
-        } else if (FsHelpers::hasXtcExtension(book.path)) {
-          // Handle XTC file
-          Xtc xtc(book.path, "/.crosspoint");
-          if (xtc.load()) {
-            // Try to generate thumbnail image for Continue Reading card
-            if (!showingLoading) {
-              showingLoading = true;
-              popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
-            }
-            GUI.fillPopupProgress(renderer, popupRect, 10 + progress * (90 / recentBooks.size()));
-            bool success = xtc.generateThumbBmp(coverHeight);
-            if (!success) {
-              RECENT_BOOKS.updateBook(book.path, book.title, book.author, "");
-              book.coverBmpPath = "";
-            }
-            coverRendered = false;
-            requestUpdate();
-          }
         }
       }
     }

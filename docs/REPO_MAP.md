@@ -114,6 +114,7 @@ python scripts/gen_i18n.py lib/I18n/translations lib/I18n/   # i18n tables
 ## 8. Unknowns / risky areas
 
 - **RAM ceiling (~380KB, single framebuffer)**: largest ongoing risk. Justify every heap alloc; use `makeUniqueNoThrow`; bare `new` aborts (no exceptions). Grayscale needs temp buffer + restore.
+- **Heap fragmentation, not total-free, is the real limit**: under churn `MaxAlloc` (largest contiguous block) drops well below total free, so big single allocs (JPEG decoder ~20KB, inflate window 32KB, font advance table ~16KB) fail even with plenty free. Pre-alloc guards must check `heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)`, not `ESP.getFreeHeap()` (see §61 cover-thumb fix). The §59 reserved inflate window doubles as a shared big-transient scratch pool via `InflateReader::acquireScratch()` (font table §60, streaming-cache band §61). See `SUMMARY.md` §55–61.
 - **SdFat thread-safety**: concurrent SD access panics FreeRTOS (issue #518). NEVER bypass `HalStorage` mutex.
 - **ISR / flash-cache rules**: ISRs in `IRAM_ATTR`, their data in `DRAM_ATTR`; no mutex from ISR. See `CLAUDE.md` pitfalls.
 - **RISC-V alignment**: no casting `uint8_t*` to wider type — `memcpy`. Affects all cache deserialization.

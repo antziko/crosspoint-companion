@@ -1,6 +1,7 @@
 #pragma once
 
 #include <HalStorage.h>
+#include <InflateReader.h>
 #include <Logging.h>
 #include <stdint.h>
 
@@ -103,11 +104,24 @@ struct StreamingPixelCache {
   int bandStartRow{0};  // local row index held at band[0]
   int writtenRows{0};   // next local row to flush to file (flush cursor)
   bool ok{false};
-  uint8_t* rowPtr{nullptr};  // current row within band (set by beginRow), or null
+  bool borrowedScratch{false};  // band points at the shared inflate window, not malloc
+  uint8_t* rowPtr{nullptr};      // current row within band (set by beginRow), or null
 
   StreamingPixelCache() = default;
   StreamingPixelCache(const StreamingPixelCache&) = delete;
   StreamingPixelCache& operator=(const StreamingPixelCache&) = delete;
+
+  // Release the band buffer however it was obtained (borrowed window vs malloc).
+  void releaseBand() {
+    if (!band) return;
+    if (borrowedScratch) {
+      InflateReader::releaseScratch();
+      borrowedScratch = false;
+    } else {
+      free(band);
+    }
+    band = nullptr;
+  }
 
   // Open the cache file, write the header, allocate the band. bandRowsCap must
   // exceed the dest-row height of one decoded block (a few rows; 128 is ample).
@@ -117,16 +131,23 @@ struct StreamingPixelCache {
     originX = ox;
     bandRows = bandRowsCap;
     bytesPerRow = (w + 3) / 4;
-    band = (uint8_t*)malloc((size_t)bytesPerRow * bandRows);
+    const size_t bandBytes = (size_t)bytesPerRow * bandRows;
+    band = (uint8_t*)malloc(bandBytes);
     if (!band) {
-      LOG_ERR("IMG", "Streaming cache: band alloc failed (%d bytes)", bytesPerRow * bandRows);
-      return false;
+      // Heap too fragmented for the band — borrow the reserved 32KB inflate window
+      // (free here: JPEG decode doesn't inflate). Keeps the streaming cache working
+      // under pressure instead of falling back to a slow multi-decode, no-cache page.
+      band = InflateReader::acquireScratch(bandBytes);
+      borrowedScratch = (band != nullptr);
+      if (!band) {
+        LOG_ERR("IMG", "Streaming cache: band alloc failed (%zu bytes)", bandBytes);
+        return false;
+      }
     }
-    memset(band, 0, (size_t)bytesPerRow * bandRows);
+    memset(band, 0, bandBytes);
     if (!Storage.openFileForWrite("IMG", cachePath, file)) {
       LOG_ERR("IMG", "Streaming cache: open failed: %s", cachePath.c_str());
-      free(band);
-      band = nullptr;
+      releaseBand();
       return false;
     }
     uint16_t w16 = (uint16_t)w;
@@ -183,22 +204,16 @@ struct StreamingPixelCache {
   // Flush the rest and close. Returns true only if the whole image was written.
   bool finish() {
     if (!ok) {
-      if (band) {
-        free(band);
-        band = nullptr;
-      }
+      releaseBand();
       return false;
     }
     flushBelow(height);
     file.close();
     const bool complete = (writtenRows >= height);
-    free(band);
-    band = nullptr;
+    releaseBand();
     ok = false;
     return complete;
   }
 
-  ~StreamingPixelCache() {
-    if (band) free(band);
-  }
+  ~StreamingPixelCache() { releaseBand(); }
 };

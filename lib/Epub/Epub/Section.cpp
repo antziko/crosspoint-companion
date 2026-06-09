@@ -3,6 +3,7 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Serialization.h>
+#include <esp_system.h>
 
 #include "Epub/css/CssParser.h"
 #include "Page.h"
@@ -232,6 +233,27 @@ bool Section::createSectionFile(const int fontId, const float lineCompression, c
         tocAnchors.push_back(std::move(entry.anchor));
       }
     }
+  }
+
+  // Heap-floor guard. The chapter parser builds many small std::strings (words,
+  // blocks, pages); if free heap is already critically low, one of those throws
+  // std::bad_alloc which — with -fno-exceptions — aborts the firmware (reboot).
+  // Bail gracefully instead: the caller surfaces the "out of bounds" screen with
+  // the on-screen [E2 ... heap=N] overlay (readable on the USB-locked X3), and the
+  // user can retry with more free heap (fewer open activities / after a reboot).
+  // 48KB clears the parser's peak with margin; normal reads sit at 80KB+ free.
+  constexpr size_t MIN_FREE_HEAP_FOR_PARSE = 48 * 1024;
+  const size_t freeHeap = esp_get_free_heap_size();
+  if (freeHeap < MIN_FREE_HEAP_FOR_PARSE) {
+    LOG_ERR("SCT", "Low heap (%u < %u) before parse — skip to avoid OOM crash", (unsigned)freeHeap,
+            (unsigned)MIN_FREE_HEAP_FOR_PARSE);
+    Storage.remove(tmpHtmlPath.c_str());
+    file.close();
+    Storage.remove(filePath.c_str());
+    if (cssParser) {
+      cssParser->clear();
+    }
+    return false;
   }
 
   ChapterHtmlSlimParser visitor(

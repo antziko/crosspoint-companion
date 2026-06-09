@@ -5,6 +5,7 @@
 #include <JPEGDEC.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <esp_heap_caps.h>
 
 #include <cstdio>
 #include <cstring>
@@ -163,7 +164,12 @@ namespace {
 // Max MCU height supported by any JPEG (4:2:0 chroma = 16 rows, 4:4:4 = 8 rows)
 constexpr int MAX_MCU_HEIGHT = 16;
 constexpr size_t JPEG_DECODER_SIZE = 20 * 1024;
-constexpr size_t MIN_FREE_HEAP = JPEG_DECODER_SIZE + 32 * 1024;
+// Guard on the largest contiguous block, not total free. The real constraint is
+// fitting the single ~20KB JPEGDEC object; the remaining per-row buffers are
+// makeUniqueNoThrow + null-checked, so any further shortfall fails gracefully
+// (placeholder thumbnail) rather than crashing. Total-free guards over-rejected
+// valid covers on a fragmented heap (e.g. 48KB free / 41KB MaxAlloc).
+constexpr size_t MIN_LARGEST_BLOCK = JPEG_DECODER_SIZE + 8 * 1024;
 
 // Static file pointer for JPEGDEC open callback.
 // Safe in single-threaded embedded context; never accessed concurrently.
@@ -388,8 +394,10 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(HalFile& jpegFile, Print& b
                                                      int targetHeight, bool oneBit, bool crop) {
   LOG_DBG("JPG", "Converting JPEG to %s BMP (target: %dx%d)", oneBit ? "1-bit" : "2-bit", targetWidth, targetHeight);
 
-  if (ESP.getFreeHeap() < MIN_FREE_HEAP) {
-    LOG_ERR("JPG", "Not enough heap for JPEG decoder (%u free, need %u)", ESP.getFreeHeap(), MIN_FREE_HEAP);
+  const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (largestBlock < MIN_LARGEST_BLOCK) {
+    LOG_ERR("JPG", "Not enough contiguous heap for JPEG decoder (%u largest block, need %u)", largestBlock,
+            MIN_LARGEST_BLOCK);
     return false;
   }
 
@@ -411,23 +419,48 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(HalFile& jpegFile, Print& b
 
   const int srcWidth = jpeg->getWidth();
   const int srcHeight = jpeg->getHeight();
-  const bool progressiveDecode = (jpeg->getJPEGType() == JPEG_MODE_PROGRESSIVE);
-  // JPEGDEC forces progressive streams to JPEG_SCALE_EIGHTH in DecodeJPEG,
-  // so callback coordinates and MCU buffering must use the reduced decode grid.
-  const int decodedSrcWidth = progressiveDecode ? ((srcWidth + 7) >> 3) : srcWidth;
-  const int decodedSrcHeight = progressiveDecode ? ((srcHeight + 7) >> 3) : srcHeight;
-
   LOG_DBG("JPG", "JPEG dimensions: %dx%d", srcWidth, srcHeight);
-  if (progressiveDecode) {
-    LOG_DBG("JPG", "Progressive JPEG decode uses 1/8 source: %dx%d", decodedSrcWidth, decodedSrcHeight);
-  }
 
+  // The decoded grid (decodedSrc*) drives the per-row MCU buffer below, so it must
+  // stay within budget. Use JPEGDEC's built-in 1/2..1/8 downscale to bring a large
+  // cover under the cap instead of rejecting it outright (which left those books
+  // with no home-screen thumbnail). Progressive streams are forced to 1/8 by
+  // JPEGDEC; for baseline, pick the smallest denom that fits.
   constexpr int MAX_IMAGE_WIDTH = 2048;
   constexpr int MAX_IMAGE_HEIGHT = 3072;
 
-  if (srcWidth <= 0 || srcHeight <= 0 || srcWidth > MAX_IMAGE_WIDTH || srcHeight > MAX_IMAGE_HEIGHT) {
-    LOG_DBG("JPG", "Image too large or invalid (%dx%d), max supported: %dx%d", srcWidth, srcHeight, MAX_IMAGE_WIDTH,
-            MAX_IMAGE_HEIGHT);
+  if (srcWidth <= 0 || srcHeight <= 0) {
+    LOG_DBG("JPG", "Invalid JPEG dimensions: %dx%d", srcWidth, srcHeight);
+    return false;
+  }
+
+  const bool progressiveDecode = (jpeg->getJPEGType() == JPEG_MODE_PROGRESSIVE);
+  int jpegScaleOption = 0;  // 0 = full resolution
+  int scaleDenom = 1;
+  if (progressiveDecode) {
+    jpegScaleOption = JPEG_SCALE_EIGHTH;
+    scaleDenom = 8;
+  } else {
+    while (scaleDenom < 8 && (((srcWidth + scaleDenom - 1) / scaleDenom) > MAX_IMAGE_WIDTH ||
+                              ((srcHeight + scaleDenom - 1) / scaleDenom) > MAX_IMAGE_HEIGHT)) {
+      scaleDenom *= 2;
+    }
+    jpegScaleOption = (scaleDenom == 8)   ? JPEG_SCALE_EIGHTH
+                      : (scaleDenom == 4) ? JPEG_SCALE_QUARTER
+                      : (scaleDenom == 2) ? JPEG_SCALE_HALF
+                                          : 0;
+  }
+  const int decodedSrcWidth = (srcWidth + scaleDenom - 1) / scaleDenom;
+  const int decodedSrcHeight = (srcHeight + scaleDenom - 1) / scaleDenom;
+
+  if (scaleDenom > 1) {
+    LOG_DBG("JPG", "JPEG decode uses 1/%d source: %dx%d", scaleDenom, decodedSrcWidth, decodedSrcHeight);
+  }
+
+  // Reject only if even the smallest decode grid (1/8) still exceeds the cap.
+  if (decodedSrcWidth > MAX_IMAGE_WIDTH || decodedSrcHeight > MAX_IMAGE_HEIGHT) {
+    LOG_DBG("JPG", "Image too large (%dx%d, grid %dx%d), max grid: %dx%d", srcWidth, srcHeight, decodedSrcWidth,
+            decodedSrcHeight, MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
     return false;
   }
 
@@ -547,7 +580,7 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(HalFile& jpegFile, Print& b
   jpeg->setPixelType(EIGHT_BIT_GRAYSCALE);
   jpeg->setUserPointer(&ctx);
 
-  rc = jpeg->decode(0, 0, 0);
+  rc = jpeg->decode(0, 0, jpegScaleOption);
 
   if (rc != 1 || ctx.error) {
     LOG_ERR("JPG", "JPEG decode failed (rc=%d, err=%d)", rc, jpeg->getLastError());
