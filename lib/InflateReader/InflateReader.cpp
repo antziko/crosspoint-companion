@@ -15,14 +15,23 @@ constexpr size_t INFLATE_DICT_SIZE = 32768;
 // fragmenter. Reserve it once in BSS and hand it out via an in-use flag: callers
 // get a guaranteed contiguous window with zero malloc churn. The rare concurrent
 // inflate (e.g. web-server task while reading) falls back to malloc — never worse
-// than before. Zero-initialised static => the flag starts clear.
-uint8_t s_inflateWindow[INFLATE_DICT_SIZE];
+// than before. Zero-initialised static => the flag starts clear. alignas(8) so the
+// buffer can be safely borrowed as a wider type (uint32_t[]) on RISC-V.
+alignas(8) uint8_t s_inflateWindow[INFLATE_DICT_SIZE];
 std::atomic_flag s_inflateWindowInUse;
 }  // namespace
 
 // Guarantee the cast pattern in the header comment is valid.
 static_assert(std::is_standard_layout<InflateReader>::value,
               "InflateReader must be standard-layout for the uzlib callback cast to work");
+
+uint8_t* InflateReader::acquireScratch(size_t need) {
+  if (need > INFLATE_DICT_SIZE) return nullptr;
+  if (s_inflateWindowInUse.test_and_set(std::memory_order_acquire)) return nullptr;  // window busy
+  return s_inflateWindow;
+}
+
+void InflateReader::releaseScratch() { s_inflateWindowInUse.clear(std::memory_order_release); }
 
 InflateReader::~InflateReader() { deinit(); }
 

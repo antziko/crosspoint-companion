@@ -1,6 +1,7 @@
 #include "SdCardFont.h"
 
 #include <HalStorage.h>
+#include <InflateReader.h>
 #include <Logging.h>
 #include <Utf8.h>
 
@@ -1164,10 +1165,20 @@ int SdCardFont::buildAdvanceTableRange(Iter begin, Iter end, bool includeSpace, 
 
   // +2 reserved slots for space and hyphen injected after the main scan.
   static constexpr uint32_t MAX_UNIQUE_CODEPOINTS = 4096;
+  static constexpr size_t CODEPOINTS_BYTES = (MAX_UNIQUE_CODEPOINTS + 2) * sizeof(uint32_t);  // ~16KB
   uint32_t* codepoints = new (std::nothrow) uint32_t[MAX_UNIQUE_CODEPOINTS + 2];
+  bool borrowedScratch = false;
   if (!codepoints) {
-    LOG_ERR("SDCF", "buildAdvanceTable: failed to allocate codepoint buffer (%u bytes)", MAX_UNIQUE_CODEPOINTS * 4);
-    return -1;
+    // Heap too fragmented for the ~16KB buffer (the +32KB inflate-window reservation
+    // tightens the pool). Borrow that reserved window: it's free here — section-build
+    // inflate completes before layout/prewarm, and plain render doesn't inflate. This
+    // recovers the full advance table instead of falling back to mini-kern.
+    codepoints = reinterpret_cast<uint32_t*>(InflateReader::acquireScratch(CODEPOINTS_BYTES));
+    if (!codepoints) {
+      LOG_ERR("SDCF", "buildAdvanceTable: failed to allocate codepoint buffer (%zu bytes)", CODEPOINTS_BYTES);
+      return -1;
+    }
+    borrowedScratch = true;
   }
   uint32_t cpCount = 0;
   bool hitCap = false;
@@ -1187,7 +1198,11 @@ int SdCardFont::buildAdvanceTableRange(Iter begin, Iter end, bool includeSpace, 
   }
   std::sort(codepoints, codepoints + cpCount);
   int totalMissed = fetchAdvancesForCodepoints(codepoints, cpCount, styleMask);
-  delete[] codepoints;
+  if (borrowedScratch) {
+    InflateReader::releaseScratch();
+  } else {
+    delete[] codepoints;
+  }
   stats_.prewarmTotalMs = millis() - startMs;
   return totalMissed;
 }

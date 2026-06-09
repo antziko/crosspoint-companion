@@ -84,6 +84,15 @@ class InflateReader {
   // uzlib struct directly (e.g. updating source/source_limit).
   uzlib_uncomp* raw() { return &decomp; }
 
+  // Borrow the reserved 32KB DEFLATE window as a general scratch buffer. Lets a
+  // caller that needs a large transient buffer (<= 32768 bytes) avoid malloc when
+  // the heap is too fragmented to satisfy it. Returns nullptr if the window is in
+  // use (an inflate is active, or another borrow is outstanding) or `need` is too
+  // large; the caller must then fall back. The buffer is 8-byte aligned.
+  // Pair every successful acquireScratch() with exactly one releaseScratch().
+  static uint8_t* acquireScratch(size_t need);
+  static void releaseScratch();
+
  private:
   uzlib_uncomp decomp = {};  // MUST stay first (offset 0) for the uzlib callback cast
   uint8_t* ringBuffer = nullptr;

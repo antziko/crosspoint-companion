@@ -1297,9 +1297,29 @@ codepoint buffer falls back to the compact mini-kern (text renders fine), and th
 contiguous) skips an occasional inline image / cover thumb (handled by §56/§57). No crashes; reading works
 throughout. Net: a *fatal* failure (couldn't open uncached books) traded for *cosmetic* degradation.
 
-**Follow-up (planned, §2 of the decision):** let `buildAdvanceTable` borrow the now-reserved inflate window when
-it's free (sequential within a section build) to recover full-table font quality without more RAM.
+**Follow-up:** see §60 — `buildAdvanceTable` now borrows the reserved window, recovering font quality.
 
 **Files:** `lib/InflateReader/InflateReader.{cpp,h}`.
 
-**Files:** diagnostics only (removed after confirmation); the actual fixes are §55–57.
+## 60. Lend the reserved inflate window as scratch to recover font quality — DEVICE-CONFIRMED
+
+**Goal:** §59's +32KB reservation tightened the heap so `SdCardFont::buildAdvanceTableRange`'s ~16KB codepoint
+buffer (`uint32_t[4098]`) failed on heavy builds → fell back to mini-kern. Recover the full advance table without
+adding RAM.
+
+**Change:** `InflateReader` gained `acquireScratch(need)` / `releaseScratch()` — lend the reserved 32KB window
+(now `alignas(8)` for the wider-type cast) via the same atomic in-use flag. `buildAdvanceTableRange`, when its
+`new` fails, borrows the window instead of returning -1. Safe because the window is free here — section-build
+inflate completes before layout/prewarm, plain render doesn't inflate, and font glyph decode uses
+`FontDecompressor` (not `InflateReader`). A concurrent inflate (web task) → `acquireScratch` returns null → today's
+graceful mini-kern fallback. Single linear exit → always released.
+
+**Device result:** 0 `buildAdvanceTable` failures (was many), 0 "out of bounds", 24 pages rendered. RAM unchanged
+(reuses the §59 window).
+
+**Residual (graceful, not regressions):** under the tighter pool, the home recent-book cover buffer (32640 B) and
+the §55 streaming-cache band (~15KB) still OOM occasionally — the cover card skips its image, and an oversized
+image falls back to live re-decode (slower, uncached). Both non-fatal; candidates for the same borrow-the-window
+trick later.
+
+**Files:** `lib/InflateReader/InflateReader.{cpp,h}`, `lib/EpdFont/SdCardFont.cpp`.
