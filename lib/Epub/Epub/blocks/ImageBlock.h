@@ -28,4 +28,10 @@ class ImageBlock final : public Block {
   std::string imagePath;
   int16_t width;
   int16_t height;
+  // Set once a decode fails (e.g. source exceeds the decoder's max-pixel limit, or
+  // OOM). The page is re-rendered many times per display (BW + grayscale strips);
+  // without this, an un-decodable image is re-decoded — and re-fails — on every
+  // pass, hanging the page for tens of seconds and churning the heap. Persists for
+  // the life of this block (the current section view), so we retry at most once.
+  bool decodeFailed = false;
 };

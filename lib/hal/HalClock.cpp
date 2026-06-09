@@ -3,11 +3,24 @@
 #include <Logging.h>
 #include <WiFi.h>
 #include <esp_sntp.h>
+#include <sys/time.h>
 #include <time.h>
 
 #include <cassert>
 
 HalClock halClock;  // Singleton instance
+
+// Earliest plausible "real" UTC epoch (2020-01-01). The system clock starts at
+// ~0 (1970) on a cold boot and only jumps past this once NTP delivers a packet.
+static constexpr time_t MIN_VALID_EPOCH = 1577836800L;
+
+// X4 has no battery-backed RTC chip. The ESP RTC-backed POSIX clock may survive a
+// software reset, but to be robust we also stash the last-known epoch here.
+// RTC_NOINIT survives ESP.restart() (the silent heap-defrag reboot) but is cleared
+// on power loss — exactly the lifetime we want for an approximate carry-over time.
+RTC_NOINIT_ATTR uint32_t halClockSavedEpoch;
+RTC_NOINIT_ATTR uint32_t halClockSavedMagic;
+static constexpr uint32_t HALCLOCK_EPOCH_MAGIC = 0x7B105AFE;
 
 // DS3231 register layout (BCD encoded):
 //   0x00: Seconds  (bits 6-4 = tens, bits 3-0 = ones)
@@ -20,6 +33,25 @@ static uint8_t decToBcd(uint8_t dec) { return ((dec / 10) << 4) | (dec % 10); }
 void HalClock::begin() {
   if (!gpio.deviceIsX3()) {
     _available = false;
+    // X4: no RTC chip, but time can survive a software reset (e.g. the silent
+    // heap-defrag restart taken when returning home from the network flow).
+    // Prefer the IDF RTC-backed POSIX clock if it's still valid; otherwise fall
+    // back to the epoch we stashed in RTC_NOINIT before the restart. Either way,
+    // adopt it so the home top-bar clock keeps showing instead of vanishing.
+    if (time(nullptr) > MIN_VALID_EPOCH) {
+      _ntpConfigured = true;
+      LOG_INF("CLK", "Adopted RTC-preserved system time after reset");
+    } else if (halClockSavedMagic == HALCLOCK_EPOCH_MAGIC && halClockSavedEpoch > MIN_VALID_EPOCH) {
+      const struct timeval tv = {.tv_sec = static_cast<time_t>(halClockSavedEpoch), .tv_usec = 0};
+      settimeofday(&tv, nullptr);
+      _ntpConfigured = true;
+      LOG_INF("CLK", "Restored system time from RTC_NOINIT after reset");
+    }
+    // Consume the stash so it's only valid for the immediate next boot (the ~2s
+    // silent restart). A deep sleep can last hours — its elapsed time is unknown
+    // on X4 — so a leftover epoch must NOT be restored on a later wake; that path
+    // re-syncs NTP instead (see the QuickResume block in main.cpp).
+    halClockSavedMagic = 0;
     return;
   }
 
@@ -47,8 +79,26 @@ void HalClock::begin() {
   getTime(h, m);
 }
 
+void HalClock::persistTimeAcrossReboot() const {
+  // X3 keeps time in the DS3231 across resets; nothing to stash.
+  if (_available) return;
+  const time_t now = time(nullptr);
+  if (now <= MIN_VALID_EPOCH) return;  // never synced this session — nothing to carry over
+  halClockSavedEpoch = static_cast<uint32_t>(now);
+  halClockSavedMagic = HALCLOCK_EPOCH_MAGIC;
+}
+
 bool HalClock::getTime(uint8_t& hour, uint8_t& minute) const {
-  if (!_available) return false;
+  if (!_available) {
+    if (!isPosixTimeValid()) return false;
+    // X4: read POSIX system clock set by NTP (async SNTP may have completed after syncFromNTP() timed out)
+    time_t now = time(nullptr);
+    struct tm t;
+    gmtime_r(&now, &t);
+    hour = static_cast<uint8_t>(t.tm_hour);
+    minute = static_cast<uint8_t>(t.tm_min);
+    return true;
+  }
 
   const unsigned long now = millis();
   if (_lastPollMs != 0 && (now - _lastPollMs) < CLOCK_POLL_MS) {
@@ -150,7 +200,18 @@ bool HalClock::writeTimeToRTC(uint8_t hour, uint8_t minute, uint8_t second) {
 }
 
 bool HalClock::getDate(uint8_t& dayOfWeek, uint8_t& date, uint8_t& month, uint16_t& year) const {
-  if (!_available) return false;
+  if (!_available) {
+    if (!isPosixTimeValid()) return false;
+    // X4: read POSIX system clock set by NTP (async SNTP may have completed after syncFromNTP() timed out)
+    time_t now = time(nullptr);
+    struct tm t;
+    gmtime_r(&now, &t);
+    dayOfWeek = static_cast<uint8_t>(t.tm_wday + 1);  // tm_wday: 0=Sunday; DS3231: 1=Sunday
+    date = static_cast<uint8_t>(t.tm_mday);
+    month = static_cast<uint8_t>(t.tm_mon + 1);
+    year = static_cast<uint16_t>(1900 + t.tm_year);
+    return true;
+  }
 
   const unsigned long now = millis();
   if (_hasCachedDate && _lastDatePollMs != 0 && (now - _lastDatePollMs) < CLOCK_POLL_MS) {
@@ -325,9 +386,7 @@ bool HalClock::writeDateToRTC(uint8_t dayOfWeek, uint8_t date, uint8_t month, ui
   return true;
 }
 
-bool HalClock::syncFromNTP() {
-  if (!_available) return false;
-
+bool HalClock::syncFromNTP(uint32_t maxWaitMs) {
   if (WiFi.status() != WL_CONNECTED) {
     LOG_ERR("CLK", "WiFi not connected, cannot sync NTP");
     return false;
@@ -335,35 +394,46 @@ bool HalClock::syncFromNTP() {
 
   LOG_INF("CLK", "Starting NTP sync...");
   configTzTime("UTC0", "pool.ntp.org", "time.nist.gov");
+  // Mark configured so isPosixTimeValid() / getTime() / getDate() pick up the async SNTP
+  // result even if we time out below before the first packet arrives.
+  _ntpConfigured = true;
 
-  // Wait for SNTP sync to complete (up to 5 seconds)
-  constexpr int maxAttempts = 50;
+  // Poll for SNTP completion in 100ms steps up to maxWaitMs.
+  const int maxAttempts = static_cast<int>(maxWaitMs / 100);
   for (int i = 0; i < maxAttempts; i++) {
     if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
       time_t now = time(nullptr);
       struct tm timeinfo;
       gmtime_r(&now, &timeinfo);
 
-      if (!writeTimeToRTC(timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec)) {
-        return false;
-      }
-      LOG_INF("CLK", "RTC set to %02d:%02d:%02d UTC", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+      if (_available) {
+        // X3: persist time and date to DS3231 hardware RTC
+        if (!writeTimeToRTC(timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec)) {
+          return false;
+        }
+        LOG_INF("CLK", "RTC set to %02d:%02d:%02d UTC", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
 
-      // Also write the date — tm_wday is 0=Sunday, DS3231 uses 1-based (1=Sunday)
-      const uint8_t dow = static_cast<uint8_t>(timeinfo.tm_wday + 1);
-      const uint8_t day = static_cast<uint8_t>(timeinfo.tm_mday);
-      const uint8_t mon = static_cast<uint8_t>(timeinfo.tm_mon + 1);
-      const uint16_t yr = static_cast<uint16_t>(1900 + timeinfo.tm_year);
-      if (!writeDateToRTC(dow, day, mon, yr)) {
-        LOG_ERR("CLK", "NTP time synced but date write failed (non-fatal)");
+        // tm_wday is 0=Sunday, DS3231 uses 1-based (1=Sunday)
+        const uint8_t dow = static_cast<uint8_t>(timeinfo.tm_wday + 1);
+        const uint8_t day = static_cast<uint8_t>(timeinfo.tm_mday);
+        const uint8_t mon = static_cast<uint8_t>(timeinfo.tm_mon + 1);
+        const uint16_t yr = static_cast<uint16_t>(1900 + timeinfo.tm_year);
+        if (!writeDateToRTC(dow, day, mon, yr)) {
+          LOG_ERR("CLK", "NTP time synced but date write failed (non-fatal)");
+        } else {
+          LOG_INF("CLK", "RTC date set to %04u-%02u-%02u", (unsigned)yr, (unsigned)mon, (unsigned)day);
+        }
       } else {
-        LOG_INF("CLK", "RTC date set to %04u-%02u-%02u", (unsigned)yr, (unsigned)mon, (unsigned)day);
+        // X4: POSIX system clock already set by configTzTime/SNTP
+        LOG_INF("CLK", "System clock set to %02d:%02d:%02d UTC", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
       }
       return true;
     }
     delay(100);
   }
 
-  LOG_ERR("CLK", "NTP sync timed out");
+  // SNTP not yet complete — _ntpConfigured is set so async completion will be
+  // picked up by isPosixTimeValid() on the next clock read.
+  LOG_INF("CLK", "NTP sync pending (SNTP still in progress)");
   return false;
 }

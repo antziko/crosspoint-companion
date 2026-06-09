@@ -8,7 +8,7 @@ namespace {
 
 // On-disk layout version for reader_settings.bin. Bump if the field layout below
 // changes so older files are rejected and re-seeded.
-constexpr uint8_t READER_SETTINGS_FILE_VERSION = 1;
+constexpr uint8_t READER_SETTINGS_FILE_VERSION = 3;
 
 // Relative path inside the epub cache dir (epub_<hash>/).
 constexpr char READER_SETTINGS_FILENAME[] = "/reader_settings.bin";
@@ -36,6 +36,7 @@ bool load(const std::string& cachePath, CrossPointSettings::ReaderOverride& out)
   serialization::readPod(f, out.extraParagraphSpacing);
   f.read(reinterpret_cast<uint8_t*>(out.sdFontFamilyName), sizeof(out.sdFontFamilyName));
   out.sdFontFamilyName[sizeof(out.sdFontFamilyName) - 1] = '\0';
+  serialization::readPod(f, out.minSessionMinutes);
   out.active = true;
   return true;
 }
@@ -54,6 +55,7 @@ bool write(const std::string& cachePath, const CrossPointSettings::ReaderOverrid
   serialization::writePod(f, ov.hyphenationEnabled);
   serialization::writePod(f, ov.extraParagraphSpacing);
   f.write(reinterpret_cast<const uint8_t*>(ov.sdFontFamilyName), sizeof(ov.sdFontFamilyName));
+  serialization::writePod(f, ov.minSessionMinutes);
   return true;
 }
 

@@ -279,10 +279,18 @@ bool BookmarkStore::readFromFile() {
   }
 
   std::string tmp;
-  serialization::readString(f, tmp);  // title — not validated
-  serialization::readString(f, tmp);  // author — not validated
-  std::string storedPath;
-  serialization::readString(f, storedPath);
+  // A false return means the length prefix exceeded the bytes left in the file —
+  // the file is corrupt. Delete it so a clean store regenerates instead of
+  // failing every open. (Closes f first; SdFat requires close before remove.)
+  if (!serialization::readString(f, tmp) ||      // title
+      !serialization::readString(f, tmp) ||      // author
+      !serialization::readString(f, tmp)) {      // stored path
+    LOG_ERR("BKS", "Corrupt bookmark file (bad string length), resetting: %s", storeFilePath.c_str());
+    f.close();
+    Storage.remove(storeFilePath.c_str());
+    return false;
+  }
+  const std::string& storedPath = tmp;
   if (storedPath != bookFilePath) {
     LOG_ERR("BKS", "Bookmark file path mismatch, file may belong to a different book");
     return false;

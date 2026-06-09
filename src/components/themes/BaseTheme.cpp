@@ -381,6 +381,8 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
                    Rect{batteryX, rect.y + 5, BaseMetrics::values.batteryWidth, BaseMetrics::values.batteryHeight},
                    showBatteryPercentage);
 
+  drawTopBarClockDate(renderer, rect.x + BaseMetrics::values.contentSidePadding, rect.y + 5);
+
   if (title) {
     int padding = rect.width - batteryX + BaseMetrics::values.batteryWidth;
     auto truncatedTitle = renderer.truncatedText(UI_12_FONT_ID, title,
@@ -397,6 +399,25 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
                       rect.x + rect.width - BaseMetrics::values.contentSidePadding - truncatedSubtitleWidth, subtitleY,
                       truncatedSubtitle.c_str(), true);
   }
+}
+
+void BaseTheme::drawTopBarClockDate(const GfxRenderer& renderer, int x, int y) const {
+  if (!halClock.isAvailable() || (!SETTINGS.homeTopBarDate && !SETTINGS.homeTopBarClock)) return;
+  char dateBuf[12] = {};
+  char timeBuf[9] = {};
+  const bool hasDate = SETTINGS.homeTopBarDate &&
+      halClock.formatDate(dateBuf, sizeof(dateBuf), SETTINGS.clockUtcOffsetQ, SETTINGS.homeTopBarDateFormat);
+  const bool hasTime = SETTINGS.homeTopBarClock &&
+      halClock.formatTime(timeBuf, sizeof(timeBuf), SETTINGS.clockUtcOffsetQ, SETTINGS.clockFormat == 1);
+  if (!hasDate && !hasTime) return;
+  char dtBuf[24] = {};
+  if (hasDate && hasTime)
+    snprintf(dtBuf, sizeof(dtBuf), "%s  %s", dateBuf, timeBuf);
+  else if (hasDate)
+    snprintf(dtBuf, sizeof(dtBuf), "%s", dateBuf);
+  else
+    snprintf(dtBuf, sizeof(dtBuf), "%s", timeBuf);
+  renderer.drawText(SMALL_FONT_ID, x, y, dtBuf, true);
 }
 
 void BaseTheme::drawSubHeader(const GfxRenderer& renderer, Rect rect, const char* label, const char* rightLabel) const {

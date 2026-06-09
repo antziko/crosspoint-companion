@@ -14,7 +14,7 @@
 #include "fontIds.h"
 
 namespace {
-constexpr int SUMMARY_LINES = 2;
+constexpr int SUMMARY_LINES = 3;
 
 // Matches the abbreviations HalClock::formatDate() draws into its date strings —
 // these are short calendar labels, not full sentences, so (like that code) they
@@ -26,11 +26,12 @@ const char* monthAbbr(uint8_t month) { return (month >= 1 && month <= 12) ? MONT
 }  // namespace
 
 BookStatsActivity::BookStatsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string bookTitle,
-                                     std::string cachePath, int progressPercent)
+                                     std::string cachePath, int progressPercent, SessionContext session)
     : Activity("BookStats", renderer, mappedInput),
       bookTitle(std::move(bookTitle)),
       cachePath(std::move(cachePath)),
-      progressPercent(progressPercent) {}
+      progressPercent(progressPercent),
+      session(session) {}
 
 void BookStatsActivity::onEnter() {
   Activity::onEnter();
@@ -158,6 +159,14 @@ void BookStatsActivity::render(RenderLock&&) {
   const int lineHeight = renderer.getLineHeight(SMALL_FONT_ID) + 2;
   int y = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
 
+  if (session.elapsedSecs > 0) {
+    char sessionBuf[32];
+    BookReadingStats::formatDuration(session.elapsedSecs, sessionBuf, sizeof(sessionBuf));
+    std::string sessionLine = std::string(tr(STR_STATS_SESSION_TIME)) + ": " + sessionBuf;
+    renderer.drawText(SMALL_FONT_ID, leftX, y, sessionLine.c_str());
+  }
+  y += lineHeight;
+
   char totalBuf[32];
   BookReadingStats::formatDuration(stats.totalReadingSeconds, totalBuf, sizeof(totalBuf));
   std::string line1 = std::string(tr(STR_STATS_TIME_READING)) + ": " + totalBuf;
@@ -239,7 +248,22 @@ void BookStatsActivity::renderTimeline(const Rect& rect) const {
 }
 
 void BookStatsActivity::renderHeatmap(const Rect& rect) const {
-  if (!history || !history->hasAnyData()) {
+  // If the current session qualifies (elapsed >= threshold, dated, valid date),
+  // fold it into an in-memory scratch copy so today's reading is visible without
+  // waiting for onExit() to commit to disk.
+  std::unique_ptr<ReadingTimeHistory> scratchHistory;
+  if (session.elapsedSecs > 0 && session.elapsedSecs >= session.thresholdSecs &&
+      session.dated && session.year >= 2000) {
+    scratchHistory = makeUniqueNoThrow<ReadingTimeHistory>();
+    if (scratchHistory) {
+      if (history) *scratchHistory = *history;
+      scratchHistory->recordDay(session.year, session.month, session.day, session.dayOfWeek,
+                                session.elapsedSecs);
+    }
+  }
+  const ReadingTimeHistory* h = scratchHistory ? scratchHistory.get() : history.get();
+
+  if (!h || !h->hasAnyData()) {
     const int lineH = renderer.getLineHeight(SMALL_FONT_ID);
     const int midY = rect.y + rect.height / 2 - lineH;
     renderer.drawCenteredText(UI_10_FONT_ID, midY, tr(STR_STATS_NO_HISTORY));
@@ -293,7 +317,7 @@ void BookStatsActivity::renderHeatmap(const Rect& rect) const {
   // convention is 1=Sunday..7=Saturday (readingHistoryDayOfWeek matches it); the
   // number of days past that week's Monday is `(dow + 5) % 7`, which doubles as
   // the Mon=0..Sun=6 row index for any day index.
-  const uint32_t anchorDay = history->heatmapAnchorDay;
+  const uint32_t anchorDay = h->heatmapAnchorDay;
   const uint32_t anchorRow = (static_cast<uint32_t>(readingHistoryDayOfWeek(anchorDay)) + 5U) % 7U;
   const uint32_t anchorWeekMonday = anchorDay - anchorRow;
   const uint32_t oldestTrackedDay = anchorDay >= ReadingTimeHistory::HEATMAP_DAYS - 1
@@ -315,7 +339,7 @@ void BookStatsActivity::renderHeatmap(const Rect& rect) const {
     for (uint32_t row = 0; row < static_cast<uint32_t>(ROWS); ++row) {
       const uint32_t dayIdx = monday + row;
       if (dayIdx > anchorDay || dayIdx < oldestTrackedDay) continue;
-      if (history->isHeatmapDaySet(anchorDay - dayIdx)) ++activeDays;
+      if (h->isHeatmapDaySet(anchorDay - dayIdx)) ++activeDays;
     }
   }
   uint16_t oldYear, newYear;
@@ -362,7 +386,7 @@ void BookStatsActivity::renderHeatmap(const Rect& rect) const {
       if (dayIdx > anchorDay || dayIdx < oldestTrackedDay) continue;
       const int cx = gridX + col * cellSize;
       const int cy = gridY + static_cast<int>(row) * cellSize;
-      switch (history->getHeatmapLevel(anchorDay - dayIdx)) {
+      switch (h->getHeatmapLevel(anchorDay - dayIdx)) {
         case ReadingTimeHistory::HeatmapLevel::Heavy:
           renderer.fillRect(cx, cy, cellSize - CELL_GAP, cellSize - CELL_GAP, true);
           break;

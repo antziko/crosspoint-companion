@@ -1,6 +1,7 @@
 #pragma once
 #include <I18n.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -18,8 +19,20 @@ struct Rect;
 // dated history (cachePath/book_time_history.bin, X3-only).
 class BookStatsActivity final : public Activity {
  public:
+  // Snapshot of the in-progress reading session, passed at construction so
+  // the heatmap can show today's reading without waiting for onExit().
+  struct SessionContext {
+    uint32_t elapsedSecs = 0;
+    uint32_t thresholdSecs = 0;  // effective gate; 0 = always show
+    bool dated = false;
+    uint16_t year = 0;
+    uint8_t month = 0;
+    uint8_t day = 0;
+    uint8_t dayOfWeek = 0;
+  };
+
   explicit BookStatsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string bookTitle,
-                             std::string cachePath, int progressPercent);
+                             std::string cachePath, int progressPercent, SessionContext session);
 
   void onEnter() override;
   void onExit() override;
@@ -38,6 +51,7 @@ class BookStatsActivity final : public Activity {
   std::string bookTitle;
   std::string cachePath;
   int progressPercent = 0;
+  SessionContext session;
 
   BookReadingStats stats;
   // ~785 bytes — heap-allocated, never a stack local (see ReadingTimeHistory.h).

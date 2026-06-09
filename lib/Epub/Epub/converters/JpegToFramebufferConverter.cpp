@@ -45,6 +45,9 @@ struct JpegContext {
   int32_t invScaleFPY{1 << 16};   // Y: dst -> src row mapping
 
   PixelCache cache;
+  // Non-null when the image is too big for a full RAM buffer: rows stream to SD
+  // during decode instead. Mutually exclusive with `cache` (full-buffer path).
+  StreamingPixelCache* stream{nullptr};
   bool caching{false};
 
   // Per-image tone curve selection (see X4Tone in OrderedDither.h). Determined by
@@ -226,7 +229,13 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
 
   DirectCacheWriter cw;
   if (caching) {
-    cw.init(ctx->cache.buffer, ctx->cache.bytesPerRow, ctx->cache.originX);
+    if (ctx->stream) {
+      cw.initStreaming(ctx->stream);
+      // Rows below this block's top belong to fully-decoded MCU-rows — flush them.
+      cw.flushBelow(dstYStart);
+    } else {
+      cw.init(ctx->cache.buffer, ctx->cache.bytesPerRow, ctx->cache.originX);
+    }
   }
 
   // === 1:1 fast path: no scaling math ===
@@ -536,7 +545,13 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
     return false;
   }
 
-  if (!validateImageDimensions(srcWidth, srcHeight, "JPEG")) {
+  // JPEGDEC downscales by jpegScaleDenom (1/2..1/8) before delivering pixels, so the
+  // decode cost tracks the *scaled* grid, not the raw source. Reject only absurd raw
+  // dimensions here (overflow safety); the real pixel-budget check is on the scaled
+  // grid below, once jpegScaleDenom is known. (A 1478x2367 cover is 3.5M raw px —
+  // over MAX_SOURCE_PIXELS — but scales to well under it and decodes fine.)
+  if (srcWidth > 30000 || srcHeight > 30000) {
+    LOG_ERR("JPG", "JPEG source dimensions unreasonable: %dx%d", srcWidth, srcHeight);
     return false;
   }
 
@@ -584,6 +599,14 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
 
   ctx.scaledSrcWidth = (srcWidth + jpegScaleDenom - 1) / jpegScaleDenom;
   ctx.scaledSrcHeight = (srcHeight + jpegScaleDenom - 1) / jpegScaleDenom;
+
+  // Pixel-budget check on the actual decode grid (after JPEGDEC's built-in scaling).
+  if (ctx.scaledSrcWidth * ctx.scaledSrcHeight > MAX_SOURCE_PIXELS) {
+    LOG_ERR("JPG", "Scaled decode grid too large (%dx%d = %d px), max %d", ctx.scaledSrcWidth, ctx.scaledSrcHeight,
+            ctx.scaledSrcWidth * ctx.scaledSrcHeight, MAX_SOURCE_PIXELS);
+    return false;
+  }
+
   ctx.dstWidth = destWidth;
   ctx.dstHeight = destHeight;
   ctx.fineScaleFPX = (int32_t)((int64_t)destWidth * FP_ONE / ctx.scaledSrcWidth);
@@ -599,21 +622,30 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   jpeg->setPixelType(EIGHT_BIT_GRAYSCALE);
   jpeg->setUserPointer(&ctx);
 
-  // Allocate cache buffer using final output dimensions. Skip caching when the
-  // buffer would rival the framebuffer (48KB): on a ~320KB device the cache
-  // competes with the live JPEG decoder + framebuffer and can starve the heap
-  // (observed min-free dipping to ~30KB on full-width image pages). A full-screen
-  // 800x480 image alone would want ~96KB. JPEG re-decode is cheap (~0.5s), so for
-  // oversized images we render live and skip the cache. Matches the PNG path.
-  static constexpr size_t JPEG_MAX_CACHE_BYTES = 48000;
+  // Caching the decoded px13n lets the grayscale tiled passes re-render the image
+  // from SD (~10 strips x 2 planes) instead of re-decoding it each band — without
+  // it an image page is ~20 re-decodes (seconds to minutes). Two strategies:
+  //   * Small images (<= 48KB at 2bpp) keep the full-RAM-buffer path: decode into
+  //     one buffer, write once. Fast, no per-row SD writes.
+  //   * Larger images (e.g. a full-page cover, ~80KB) can't fit a contiguous RAM
+  //     buffer on this device (largest free block ~63KB), so stream rows to SD as
+  //     the decode passes them. Keeps full 4-level quality, one decode.
+  // Streaming needs raster (top-to-bottom) row delivery, so progressive JPEGs
+  // (non-raster) fall back to no-cache.
+  static constexpr size_t JPEG_MAX_FULL_BUFFER_BYTES = 48000;
+  static constexpr int STREAM_BAND_ROWS = 128;
+  StreamingPixelCache streamCache;
   ctx.caching = !config.cachePath.empty();
   if (ctx.caching) {
-    size_t cacheSize = (size_t)((destWidth + 3) / 4) * destHeight;
-    if (cacheSize > JPEG_MAX_CACHE_BYTES) {
-      LOG_DBG("JPG", "Skipping cache: %zu bytes exceeds JPEG limit (%zu)", cacheSize, JPEG_MAX_CACHE_BYTES);
-      ctx.caching = false;
-    } else if (!ctx.cache.allocate(destWidth, destHeight, config.x, config.y)) {
-      LOG_ERR("JPG", "Failed to allocate cache buffer, continuing without caching");
+    const size_t cacheSize = (size_t)((destWidth + 3) / 4) * destHeight;
+    if (cacheSize <= JPEG_MAX_FULL_BUFFER_BYTES && ctx.cache.allocate(destWidth, destHeight, config.x, config.y)) {
+      // full-buffer path
+    } else if (!isProgressive &&
+               streamCache.begin(config.cachePath, destWidth, destHeight, config.x, STREAM_BAND_ROWS)) {
+      ctx.stream = &streamCache;
+      LOG_DBG("JPG", "Streaming cache to SD: %dx%d (%zu bytes)", destWidth, destHeight, cacheSize);
+    } else {
+      LOG_DBG("JPG", "Caching disabled (%s)", isProgressive ? "progressive" : "cache init failed");
       ctx.caching = false;
     }
   }
@@ -624,14 +656,26 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
 
   if (rc != 1) {
     LOG_ERR("JPG", "Decode failed (rc=%d, lastError=%d)", rc, jpeg->getLastError());
+    if (ctx.stream) {
+      streamCache.finish();                     // close the file before removing it
+      Storage.remove(config.cachePath.c_str());  // drop the partial cache
+    }
     return false;
   }
 
   LOG_DBG("JPG", "JPEG decoding complete - render time: %lu ms", decodeTime);
 
-  // Write cache file if caching was enabled
+  // Persist the cache. Full-buffer path writes in one shot; streaming has already
+  // written most rows during decode and only needs a final flush + close.
   if (ctx.caching) {
-    ctx.cache.writeToFile(config.cachePath);
+    if (ctx.stream) {
+      if (!streamCache.finish()) {
+        LOG_ERR("JPG", "Streaming cache incomplete; removing partial file");
+        Storage.remove(config.cachePath.c_str());
+      }
+    } else {
+      ctx.cache.writeToFile(config.cachePath);
+    }
   }
 
   return true;

@@ -105,14 +105,14 @@ void BookReadingStats::recordForwardPageRead(uint32_t seconds) {
 
 void BookReadingStats::formatDuration(uint32_t seconds, char* buf, size_t len) {
   if (seconds < 60) {
-    snprintf(buf, len, "< 1 min");
+    snprintf(buf, len, "%lus", static_cast<unsigned long>(seconds));
     return;
   }
   const uint32_t hours = seconds / 3600;
   const uint32_t minutes = (seconds % 3600) / 60;
   if (hours == 0) {
-    snprintf(buf, len, "%lu min", static_cast<unsigned long>(minutes));
+    snprintf(buf, len, "%lum", static_cast<unsigned long>(minutes));
   } else {
-    snprintf(buf, len, "%luh %lu min", static_cast<unsigned long>(hours), static_cast<unsigned long>(minutes));
+    snprintf(buf, len, "%luh %lum", static_cast<unsigned long>(hours), static_cast<unsigned long>(minutes));
   }
 }

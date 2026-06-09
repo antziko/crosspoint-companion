@@ -24,6 +24,7 @@
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
+#include "WifiCredentialStore.h"
 #include "SdCardFontSystem.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
@@ -165,6 +166,7 @@ void silentRestart() {
   // Home. Select on the default selectorIndex=0 then opens the most-recent
   // book, looking like a trampoline back to the reader they just exited.
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+  halClock.persistTimeAcrossReboot();  // X4: carry NTP-synced time across the soft reset
   delay(50);
   ESP.restart();
 }
@@ -176,6 +178,7 @@ void silentRestartToReader() {
   silentRebootMagic = SILENT_REBOOT_MAGIC;
   LOG_DBG("MAIN", "Silent restart (target=reader)");
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+  halClock.persistTimeAcrossReboot();  // X4: carry NTP-synced time across the soft reset
   delay(50);
   ESP.restart();
 }
@@ -188,6 +191,7 @@ void silentRestartToSettings(int category) {
   silentRebootMagic = SILENT_REBOOT_MAGIC;
   LOG_DBG("MAIN", "Silent restart (target=settings,cat=%d)", category);
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+  halClock.persistTimeAcrossReboot();  // X4: carry NTP-synced time across the soft reset
   delay(50);
   ESP.restart();
 }
@@ -337,6 +341,55 @@ void setupDisplayAndFonts(bool seamless = false) {
   LOG_DBG("MAIN", "Fonts setup");
 }
 
+// X4 has no RTC chip, so the system clock is lost on every full boot / deep-sleep
+// wake. When the home top-bar clock or date is enabled and a WiFi network is
+// saved, silently reconnect and sync NTP in a background task so the clock fills
+// in shortly after boot — on both quick-resume and splash boots. No-op on X3
+// (hardware RTC), when time is already valid, when the clock feature is off, or
+// when no WiFi network is saved (so non-clock users never power the radio).
+static void maybeStartBackgroundNtpSync() {
+  if (halClock.hasHardwareRtc() || halClock.isSystemTimeValid()) return;
+  if (!SETTINGS.homeTopBarClock && !SETTINGS.homeTopBarDate) return;
+  WIFI_STORE.loadFromFile();
+  const std::string& lastSsid = WIFI_STORE.getLastConnectedSsid();
+  if (lastSsid.empty()) return;
+
+  struct NtpBgCtx {
+    char ssid[33];
+    char pass[65];
+  };
+  static NtpBgCtx ntpBgCtx;
+  strncpy(ntpBgCtx.ssid, lastSsid.c_str(), sizeof(ntpBgCtx.ssid) - 1);
+  ntpBgCtx.ssid[sizeof(ntpBgCtx.ssid) - 1] = '\0';
+  ntpBgCtx.pass[0] = '\0';
+  if (const WifiCredential* cred = WIFI_STORE.findCredential(lastSsid)) {
+    strncpy(ntpBgCtx.pass, cred->password.c_str(), sizeof(ntpBgCtx.pass) - 1);
+    ntpBgCtx.pass[sizeof(ntpBgCtx.pass) - 1] = '\0';
+  }
+  xTaskCreate(
+      [](void* arg) {
+        const auto* ctx = static_cast<NtpBgCtx*>(arg);
+        WiFi.mode(WIFI_STA);
+        if (ctx->pass[0]) {
+          WiFi.begin(ctx->ssid, ctx->pass);
+        } else {
+          WiFi.begin(ctx->ssid);
+        }
+        for (int i = 0; i < 80 && WiFi.status() != WL_CONNECTED; ++i) {
+          vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        if (WiFi.status() == WL_CONNECTED) {
+          // This task owns the connection, so wait out a slow SNTP packet
+          // (Problem A) before tearing WiFi down — longer than the 5s UI default.
+          halClock.syncFromNTP(20000);
+          WiFi.disconnect(true);
+          WiFi.mode(WIFI_OFF);
+        }
+        vTaskDelete(nullptr);
+      },
+      "ntp_bg", 4096, &ntpBgCtx, 1, nullptr);
+}
+
 void setup() {
   t1 = millis();
 
@@ -478,9 +531,14 @@ void setup() {
       } else {
         activityManager.goToBoot();  // frame file missing, fall back to the splash
       }
+      // X4: time is lost on deep sleep — background-sync NTP if the clock is on.
+      maybeStartBackgroundNtpSync();
       break;
     case BootResume::Splash:
       activityManager.goToBoot();
+      // X4: full boot also loses time — sync in the background so the home clock
+      // refreshes on every wake, not just quick-resume wakes.
+      maybeStartBackgroundNtpSync();
       break;
   }
 

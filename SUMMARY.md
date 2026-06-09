@@ -1179,3 +1179,102 @@ Timer dismissal uses `DICTIONARY_MESSAGE_DURATION_MS = 1500` ms — a new consta
 **i18n:** `STR_DICT_NO_DICT_SET` already in `english.yaml` from prior dictionary work; other languages fall back until translated.
 
 **Source:** upstream PR #12 (`feat-dictionary`, WuTofu, commits `1b496e68` + `7cc10123`).
+
+---
+
+# Part I — X4 clock-availability, bookmark-crash hardening, and the image-decode/heap-fragmentation chain
+
+## 52. X4 home top-bar clock — survives the silent restart + auto-syncs on every boot — FIXED (device-confirmed)
+
+**Symptom:** on X4 (no DS3231 RTC) the home top-bar date/time showed on the WiFi screen but vanished on
+return home, and never appeared after sleep.
+
+**Root causes & fixes:**
+- **Lost across the silent restart (Fix B).** The WebServer→home flow does `silentRestart()` → `ESP.restart()`
+  (`RTC_SW_CPU_RST`), wiping the RAM-only `_ntpConfigured`. Added `HalClock::persistTimeAcrossReboot()` —
+  stashes the synced epoch in `RTC_NOINIT_ATTR` (survives `ESP.restart()`, not power loss), called before each
+  `silentRestart*` in `main.cpp`. `HalClock::begin()` (X4 branch) adopts a still-valid RTC-backed clock, else
+  restores the stashed epoch via `settimeofday`, then **consumes the stash** (clears magic) so a later
+  deep-sleep wake (unknown elapsed time) re-syncs instead of restoring a stale time.
+- **No sync on wake (Option 2).** Extracted the QuickResume-only background NTP task into
+  `maybeStartBackgroundNtpSync()` (`main.cpp`), now called on **both** QuickResume **and** Splash boots, gated on
+  `!hasHardwareRtc() && !isSystemTimeValid()` + clock-on (`homeTopBarClock||homeTopBarDate`) + a saved WiFi SSID.
+  The user's device uses full (DARK) sleep → wake = Splash, so the Splash hook is what makes it work.
+- **Problem A (slow SNTP).** `syncFromNTP(uint32_t maxWaitMs = 5000)` — the background task passes `20000` so a
+  slow SNTP packet isn't cut off when the task tears WiFi down; UI callers keep 5s.
+
+**Files:** `lib/hal/HalClock.{h,cpp}`, `src/main.cpp`. See memories `project-ntp-x4-clock`, `project-home-top-bar-clock`.
+
+## 53. X4 reader status-bar clock/date settings unlocked — FIXED
+
+**Goal:** `Settings > Reader > Customise Status Bar` hid the clock/date items on X4 (gated on `halClock.isAvailable()`,
+false until NTP syncs). Since X4 can now get time over WiFi, the menu must show regardless of current sync state.
+
+**Change (`StatusBarSettingsActivity.cpp`):** gate is now `halClock.isAvailable() || !halClock.hasHardwareRtc()` —
+X4 (no hardware RTC) always shows the full menu so the user can enable the clock and trigger a sync. `ClockSyncActivity`
+is WiFi+NTP based, so all items work on X4. X3 unchanged.
+
+## 54. Bookmark corrupt-file crash (`abort`) on one book — FIXED (device-confirmed)
+
+**Root cause (decoded from `crash_report.txt`):** NOT OOM (112KB free). `BookmarkStore::readFromFile` →
+`serialization::readString` did `s.resize(len)` with a garbage `len` from a corrupt bookmark `.bin` →
+`std::length_error` → `terminate` → `abort` (under `-fno-exceptions`).
+
+**Change:** both `serialization::readString` overloads now bound `len` by the bytes remaining in the
+stream/file (a serialized string can't exceed what's left) and return `bool`; on a bad length they leave the
+string empty and return false. Hardens **all** file deserialization, not just bookmarks. `readFromFile` detects
+the corruption (false return), closes + `Storage.remove`s the bad file so a clean store regenerates, and the
+book opens (bookmark load failure is non-fatal). Host stubs gained `available()`.
+
+**Files:** `lib/Serialization/Serialization.h`, `src/BookmarkStore.cpp`, `test/*/stubs/HalStorage.h`.
+
+## 55. Image streaming px13n cache — oversized images cache at full 4-level grayscale — FIXED (device-confirmed)
+
+**Symptom:** on X4 with AntiAlias on, a full-page cover took *minutes*: the grayscale render walks ~10 strips × 2
+planes, and an uncached image **re-decodes the JPEG in every strip** (~20×). Caching was skipped because the 2bpp
+px13n buffer (~80KB) exceeds both the cap and X4's largest free block (~63KB), so the full-RAM `PixelCache` can't
+allocate.
+
+**Change:** added `StreamingPixelCache` (`PixelCache.h`) — a small (128-row) band buffer that flushes finalized
+rows to SD **during the single decode**, producing the exact same `.px13n` file (reader unchanged). The JPEG
+callback already feeds the cache writer in raster row order; `DirectCacheWriter` was unified to drive either the
+full-RAM buffer (small images, ≤48KB) or the streaming writer (larger), flushing rows strictly below the current
+block's top (finalized by completed MCU-rows) so same-MCU-row blocks never hit a flushed row. Progressive JPEGs
+(non-raster) fall back to no-cache; partial/incomplete streams are removed. Result: one decode, then every
+strip/pass/reopen reads the cache. **Device log:** `Streaming cache to SD: 464x701 (81316 bytes)` → one 2.8s
+decode → ~13× `Cache render complete`.
+
+**Files:** `lib/Epub/Epub/converters/PixelCache.h`, `DirectPixelWriter.h`, `JpegToFramebufferConverter.cpp`.
+
+## 56. JPEG "image too large" rejected valid covers + failed-decode retry storm — FIXED (device-confirmed)
+
+**Two bugs feeding an endless failed-decode loop:**
+- The max-pixel check (`MAX_SOURCE_PIXELS = 3145728`) ran on **raw source** dims (e.g. 1478×2367 = 3.5M px) *before*
+  JPEGDEC's built-in 1/2–1/8 downscale. Moved it to the **scaled decode grid** (raw dims keep only a 30000/side
+  overflow guard), so a cover that downscales to ~219K px now decodes.
+- A failed decode wasn't remembered, so an un-decodable image re-decoded on every render pass (~20×, tens of
+  seconds, heap churn). Added `ImageBlock::decodeFailed` — retry at most once per section view. Also: skip image
+  decode entirely during the font-prewarm **scan pass** (`isFontCacheScanning()`), which draws nothing.
+
+**Files:** `lib/Epub/Epub/converters/JpegToFramebufferConverter.cpp`, `lib/Epub/Epub/blocks/ImageBlock.{h,cpp}`.
+
+## 57. Home cover-thumb generation retried every visit on failure — FIXED
+
+**Change (`Epub::generateThumbBmp`):** a failed thumb (heavy inflate + JPEG/PNG decode) is recorded in a
+**session-only** `s_failedThumbGen` set so the home screen stops re-running it on every visit. In-RAM (not an SD
+marker) so a fresh-heap reboot retries once — no permanent lockout of a cover that only failed transiently under
+fragmentation.
+
+**Files:** `lib/Epub/Epub.cpp`.
+
+## 58. "Out of bounds" on reader = heap fragmentation, not SD / section logic — RESOLVED via §55–57
+
+**Investigation:** the reader's `STR_OUT_OF_BOUNDS` screen (4 branches in `EpubReaderActivity::render`) fired with
+free heap ~25KB. Per-transition `[HEAP]` logging proved **no leak** (onExit recovers to ~120KB). The real cause:
+the ZIP **inflate window needs 32768 bytes contiguous** (`InflateReader::init`), but `MaxAlloc` (largest free
+block) dipped below 32KB — dynamic **fragmentation** driven by the repeated failed-image / thumb decode churn
+(boot `MaxAlloc` is ~114KB; no fixed fragmenter). Killing the churn (§55 streaming, §56 scaled-limit +
+`decodeFailed`, §57 thumb marker) keeps `MaxAlloc` above 32KB (device-confirmed floor ~34.8KB) → inflate succeeds
+→ section build works → no more "out of bounds". The reserved-static-window fallback (Option A) was **not** needed.
+
+**Files:** diagnostics only (removed after confirmation); the actual fixes are §55–57.

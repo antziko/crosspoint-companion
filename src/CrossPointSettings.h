@@ -185,6 +185,9 @@ class CrossPointSettings {
     uint8_t hyphenationEnabled = 0;
     uint8_t extraParagraphSpacing = 1;
     char sdFontFamilyName[32] = "";
+    // 0xFF = inherit global minSessionMinutes; 0 = always; 1–30 = min N minutes.
+    static constexpr uint8_t MIN_SESSION_USE_GLOBAL = 0xFF;
+    uint8_t minSessionMinutes = MIN_SESSION_USE_GLOBAL;
   };
 
   // Sleep screen settings
@@ -208,6 +211,11 @@ class CrossPointSettings {
   uint8_t statusBarDate = 0;
   // Date format (X3 only): 0="30 Jun", 1="Mon, 30 Jun", 2="30/06", 3="Mon, 30/06"
   uint8_t dateFormat = 0;
+  // Home top bar display — independent from reader status bar (requires RTC)
+  uint8_t homeTopBarClock = 0;
+  uint8_t homeTopBarDate = 0;
+  // Home top bar date format: same codes as dateFormat
+  uint8_t homeTopBarDateFormat = 0;
   // Clock UTC offset in quarter-hour steps, biased by 48 so it fits in uint8_t.
   // Value 48 = UTC+0, 0 = UTC-12:00, 104 = UTC+14:00.
   // Quarter-hour granularity supports oddball zones like Nepal (+5:45) and Chatham (+12:45).
@@ -279,6 +287,9 @@ class CrossPointSettings {
   uint8_t removeReadBooksFromRecents = 0;
   // Move epub to /Read/ folder on SD card when finished (0 = disabled, 1 = enabled)
   uint8_t moveFinishedToReadFolder = 0;
+  // Minimum session duration (minutes) before reading time is committed to stats.
+  // 0 = always commit (default). Sessions shorter than this are discarded.
+  uint8_t minSessionMinutes = 0;
   // Image rendering mode in EPUB reader
   uint8_t imageRendering = IMAGES_DISPLAY;
   // 1-bit halftone dither algorithm for all images (X3): blue noise vs Bayer

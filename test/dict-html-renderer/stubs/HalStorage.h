@@ -27,6 +27,15 @@ class HalFile {
     if (!fp_ || n <= 0) return 0;
     return static_cast<int>(std::fread(buf, 1, static_cast<size_t>(n), fp_));
   }
+  int available() {
+    if (!fp_) return 0;
+    const long cur = std::ftell(fp_);
+    if (cur < 0) return 0;
+    std::fseek(fp_, 0, SEEK_END);
+    const long end = std::ftell(fp_);
+    std::fseek(fp_, cur, SEEK_SET);
+    return static_cast<int>(end - cur);
+  }
   void close() {
     if (fp_) {
       std::fclose(fp_);

@@ -7,6 +7,8 @@
 #include <PngToBmpConverter.h>
 #include <ZipFile.h>
 
+#include <set>
+
 #include "Epub/parsers/ContainerParser.h"
 #include "Epub/parsers/ContentOpfParser.h"
 #include "Epub/parsers/TocNavParser.h"
@@ -653,10 +655,24 @@ bool Epub::generateCoverBmp(bool cropped) const {
 std::string Epub::getThumbBmpPath() const { return cachePath + "/thumb_[HEIGHT].bmp"; }
 std::string Epub::getThumbBmpPath(int height) const { return cachePath + "/thumb_" + std::to_string(height) + ".bmp"; }
 
+// Thumb paths that failed to generate this session (e.g. cover too large to decode
+// in the currently-available heap). Cover-thumb generation inflates + decodes the
+// full cover JPEG/PNG — heavy and heap-hungry — and the home screen re-attempts it
+// on every visit. Without this, a book whose cover can't be decoded churns the heap
+// (and fragments it) on every home render. Session-only: cleared on reboot, so a
+// fresh-heap boot retries once. Not persisted to SD (avoids locking out a cover that
+// only failed transiently under fragmentation).
+static std::set<std::string> s_failedThumbGen;
+
 bool Epub::generateThumbBmp(int height) const {
   // Already generated, return true
   if (Storage.exists(getThumbBmpPath(height).c_str())) {
     return true;
+  }
+
+  // Already failed this session — don't re-run the heavy decode and churn the heap.
+  if (s_failedThumbGen.count(getThumbBmpPath(height)) != 0) {
+    return false;
   }
 
   if (!bookMetadataCache || !bookMetadataCache->isLoaded()) {
@@ -701,6 +717,7 @@ bool Epub::generateThumbBmp(int height) const {
     if (!success) {
       LOG_ERR("EBP", "Failed to generate thumb BMP from JPG cover image");
       Storage.remove(getThumbBmpPath(height).c_str());
+      s_failedThumbGen.insert(getThumbBmpPath(height));  // don't retry this session
     }
     LOG_DBG("EBP", "Generated thumb BMP from JPG cover image, success: %s", success ? "yes" : "no");
     return success;
@@ -736,6 +753,7 @@ bool Epub::generateThumbBmp(int height) const {
     if (!success) {
       LOG_ERR("EBP", "Failed to generate thumb BMP from PNG cover image");
       Storage.remove(getThumbBmpPath(height).c_str());
+      s_failedThumbGen.insert(getThumbBmpPath(height));  // don't retry this session
     }
     LOG_DBG("EBP", "Generated thumb BMP from PNG cover image, success: %s", success ? "yes" : "no");
     return success;

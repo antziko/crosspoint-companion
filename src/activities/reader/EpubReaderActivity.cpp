@@ -320,16 +320,27 @@ void EpubReaderActivity::onExit() {
   if (epub && sessionStartMs > 0) {
     const uint32_t sessionSecs = static_cast<uint32_t>((millis() - sessionStartMs) / 1000UL);
 
-    // Use the local calendar day (RTC raw date + SETTINGS.clockUtcOffsetQ), not the
-    // RTC's raw date -- a session that starts just after local midnight must be
-    // attributed to "today", not the RTC's still-previous UTC-ish day, or the
-    // weekly/monthly/yearly/heatmap history buckets it under the wrong date.
-    uint8_t dayOfWeek = 0, day = 0, month = 0, hour = 0, minute = 0;
-    uint16_t year = 0;
-    const bool dated = halClock.isAvailable() &&
-                       halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, dayOfWeek, day, month, year, hour, minute);
-    recordReadingSession(epub->getCachePath(), readingStats, sessionSecs, dated, year, month, day, dayOfWeek, hour,
-                         minute);
+    // Determine effective minimum session threshold: per-book override wins unless
+    // it is set to MIN_SESSION_USE_GLOBAL, in which case fall back to global setting.
+    const auto& ov = SETTINGS.getReaderOverride();
+    const uint8_t thresholdMins =
+        (ov.active && ov.minSessionMinutes != CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL)
+            ? ov.minSessionMinutes
+            : SETTINGS.minSessionMinutes;
+    const uint32_t thresholdSecs = static_cast<uint32_t>(thresholdMins) * 60U;
+
+    if (sessionSecs >= thresholdSecs) {
+      // Use the local calendar day (RTC raw date + SETTINGS.clockUtcOffsetQ), not the
+      // RTC's raw date -- a session that starts just after local midnight must be
+      // attributed to "today", not the RTC's still-previous UTC-ish day, or the
+      // weekly/monthly/yearly/heatmap history buckets it under the wrong date.
+      uint8_t dayOfWeek = 0, day = 0, month = 0, hour = 0, minute = 0;
+      uint16_t year = 0;
+      const bool dated = halClock.isAvailable() &&
+                         halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, dayOfWeek, day, month, year, hour, minute);
+      recordReadingSession(epub->getCachePath(), readingStats, sessionSecs, dated, year, month, day, dayOfWeek, hour,
+                           minute);
+    }
 
     sessionStartMs = 0UL;
     pageShownAtMs = 0UL;
@@ -1024,9 +1035,24 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
         bookProgress = epub->calculateProgress(currentSpineIndex, chapterProgress) * 100.0f;
       }
       const int progressPercent = clampPercent(static_cast<int>(bookProgress + 0.5f));
+      BookStatsActivity::SessionContext session;
+      session.elapsedSecs =
+          sessionStartMs > 0 ? static_cast<uint32_t>((millis() - sessionStartMs) / 1000UL) : 0UL;
+      {
+        const auto& ov = SETTINGS.getReaderOverride();
+        const uint8_t thresholdMins =
+            (ov.active && ov.minSessionMinutes != CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL)
+                ? ov.minSessionMinutes
+                : SETTINGS.minSessionMinutes;
+        session.thresholdSecs = static_cast<uint32_t>(thresholdMins) * 60U;
+        uint8_t hour = 0, minute = 0;
+        session.dated = halClock.isAvailable() &&
+                        halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, session.dayOfWeek, session.day,
+                                                  session.month, session.year, hour, minute);
+      }
       startActivityForResult(
           std::make_unique<BookStatsActivity>(renderer, mappedInput, epub->getTitle(), epub->getCachePath(),
-                                               progressPercent),
+                                               progressPercent, session),
           [this](const ActivityResult&) {
             ignoreBackUntilRelease = true;
             requestUpdate();
@@ -1204,6 +1230,11 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     LOG_ERR("ERS", "Skipping rebuild of chapter %d that already failed to index", currentSpineIndex);
     renderer.clearScreen();
     renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_OUT_OF_BOUNDS), true, EpdFontFamily::BOLD);
+    {
+      char dbg[48];
+      snprintf(dbg, sizeof(dbg), "[E1 spine=%d heap=%u]", currentSpineIndex, (unsigned)esp_get_free_heap_size());
+      renderer.drawCenteredText(UI_12_FONT_ID, 330, dbg, true);
+    }
     // No renderStatusBar(): section is null here, and it dereferences section->.
     renderer.displayBuffer();
     automaticPageTurnActive = false;
@@ -1239,6 +1270,11 @@ void EpubReaderActivity::render(RenderLock&& lock) {
         section.reset();
         renderer.clearScreen();
         renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_OUT_OF_BOUNDS), true, EpdFontFamily::BOLD);
+        {
+          char dbg[48];
+          snprintf(dbg, sizeof(dbg), "[E2 spine=%d heap=%u]", currentSpineIndex, (unsigned)esp_get_free_heap_size());
+          renderer.drawCenteredText(UI_12_FONT_ID, 330, dbg, true);
+        }
         // No renderStatusBar(): section was just reset (null) and it derefs section->.
         renderer.displayBuffer();
         showPendingSyncSaveError();
@@ -1316,6 +1352,12 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   if (section->currentPage < 0 || section->currentPage >= section->pageCount) {
     LOG_DBG("ERS", "Page out of bounds: %d (max %d)", section->currentPage, section->pageCount);
     renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_OUT_OF_BOUNDS), true, EpdFontFamily::BOLD);
+    {
+      char dbg[56];
+      snprintf(dbg, sizeof(dbg), "[E3 pg=%d/%d heap=%u]", section->currentPage, section->pageCount,
+               (unsigned)esp_get_free_heap_size());
+      renderer.drawCenteredText(UI_12_FONT_ID, 330, dbg, true);
+    }
     renderStatusBar();
     renderer.displayBuffer();
     automaticPageTurnActive = false;
@@ -1334,6 +1376,11 @@ void EpubReaderActivity::render(RenderLock&& lock) {
         section.reset();
         renderer.clearScreen();
         renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_OUT_OF_BOUNDS), true, EpdFontFamily::BOLD);
+        {
+          char dbg[48];
+          snprintf(dbg, sizeof(dbg), "[E4 spine=%d heap=%u]", currentSpineIndex, (unsigned)esp_get_free_heap_size());
+          renderer.drawCenteredText(UI_12_FONT_ID, 330, dbg, true);
+        }
         // No renderStatusBar(): section was just reset (null) and it derefs section->.
         renderer.displayBuffer();
         automaticPageTurnActive = false;

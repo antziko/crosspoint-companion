@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "ButtonRemapActivity.h"
+#include "HomeTopBarSettingsActivity.h"
 #include "ClearCacheActivity.h"
 #include "CrossPointSettings.h"
 #include "DictionarySelectActivity.h"
@@ -90,6 +91,7 @@ void SettingsActivity::rebuildSettingsLists() {
   readerSettings.push_back(std::move(histCapSetting));
   readerSettings.push_back(std::move(holdConfirmSetting));
   readerSettings.push_back(SettingInfo::Action(StrId::STR_CUSTOMISE_STATUS_BAR, SettingAction::CustomiseStatusBar));
+  displaySettings.push_back(SettingInfo::Action(StrId::STR_CUSTOMISE_TOP_BAR, SettingAction::CustomiseTopBar));
 
   // Update currentSettings pointer and count for the active category
   switch (selectedCategoryIndex) {
@@ -275,6 +277,9 @@ void SettingsActivity::toggleCurrentSetting() {
         break;
       case SettingAction::CustomiseStatusBar:
         startActivityForResult(std::make_unique<StatusBarSettingsActivity>(renderer, mappedInput), resultHandler);
+        break;
+      case SettingAction::CustomiseTopBar:
+        startActivityForResult(std::make_unique<HomeTopBarSettingsActivity>(renderer, mappedInput), resultHandler);
         break;
       case SettingAction::KOReaderSync:
         startActivityForResult(std::make_unique<KOReaderServerListActivity>(renderer, mappedInput), resultHandler);

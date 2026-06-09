@@ -23,7 +23,7 @@ class ReaderOptionsActivity final : public Activity {
   void render(RenderLock&&) override;
 
  private:
-  static constexpr int ITEM_COUNT = 6;
+  static constexpr int ITEM_COUNT = 7;
 
   std::string cachePath;
   CrossPointSettings::ReaderOverride localOverride;

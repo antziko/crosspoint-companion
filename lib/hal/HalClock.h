@@ -10,6 +10,7 @@ extern HalClock halClock;  // Singleton
 
 class HalClock {
   bool _available = false;
+  bool _ntpConfigured = false;  // set when configTzTime() called; SNTP runs async after this
   mutable uint8_t _cachedHour = 0;
   mutable uint8_t _cachedMinute = 0;
   mutable bool _hasCachedTime = false;
@@ -27,8 +28,21 @@ class HalClock {
   // Call after gpio.begin() and powerManager.begin() (I2C already initialised for X3)
   void begin();
 
-  // True if the DS3231 RTC is present on this device
-  bool isAvailable() const { return _available; }
+  // X4 only: stash the current POSIX epoch in RTC_NOINIT before a software reset
+  // (the heap-defrag silent restart) so begin() can restore it on the way back up.
+  // No-op if the system clock isn't NTP-valid yet, or on X3 (DS3231 persists itself).
+  // RTC_NOINIT survives ESP.restart() but not power loss — same lifetime as the
+  // silent-reboot flags in main.cpp.
+  void persistTimeAcrossReboot() const;
+
+  // True if time is available: DS3231 (X3) or NTP-synced POSIX clock (X4)
+  bool isAvailable() const { return _available || isPosixTimeValid(); }
+
+  // True if a hardware DS3231 RTC is present (X3 only)
+  bool hasHardwareRtc() const { return _available; }
+
+  // True if the POSIX system clock has been synced via NTP (X4 only; in-memory, lost on deep sleep)
+  bool isSystemTimeValid() const { return isPosixTimeValid(); }
 
   // Get current hour (0-23) and minute (0-59).
   // Returns false if RTC is not available.
@@ -65,14 +79,21 @@ class HalClock {
                         uint16_t& year, uint8_t& hour, uint8_t& minute) const;
 
   // Sync the DS3231 RTC from an NTP server. Requires WiFi to be connected.
-  // Blocks for up to ~5s while waiting for SNTP response.
-  // Returns true if the RTC was successfully updated.
+  // Blocks up to maxWaitMs while waiting for SNTP (default 5s for UI callers;
+  // background callers that own the WiFi connection should pass a longer budget
+  // so a slow SNTP packet isn't cut off by the caller tearing WiFi down).
+  // Returns true if the clock was successfully set.
   //
   // Debouncing (skip if already synced once) is enforced by the caller, not here,
   // so the HAL stays free of any app-layer settings dependency.
-  bool syncFromNTP();
+  bool syncFromNTP(uint32_t maxWaitMs = 5000);
 
  private:
+  // Returns true if POSIX system clock has a plausible UTC epoch (> Jan 1 2020).
+  // Checked lazily each call so the async SNTP background sync is picked up automatically
+  // even if syncFromNTP() timed out while SNTP was still in progress.
+  bool isPosixTimeValid() const { return _ntpConfigured && time(nullptr) > 1577836800L; }
+
   bool writeTimeToRTC(uint8_t hour, uint8_t minute, uint8_t second);
   bool writeDateToRTC(uint8_t dayOfWeek, uint8_t date, uint8_t month, uint16_t year);
 };

@@ -25,7 +25,14 @@ enum ItemIndex : int {
   PARA_ALIGNMENT = 3,
   HYPHENATION = 4,
   EXTRA_SPACING = 5,
+  MIN_SESSION = 6,
 };
+
+// Ordered cycle of valid per-book min-session values:
+// 0xFF = use global, 0 = always, then fixed minute thresholds.
+static constexpr uint8_t MIN_SESSION_CYCLE[] = {
+    CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL, 0, 1, 2, 3, 5};
+static constexpr int MIN_SESSION_CYCLE_COUNT = static_cast<int>(sizeof(MIN_SESSION_CYCLE));
 
 }  // namespace
 
@@ -117,6 +124,18 @@ void ReaderOptionsActivity::cycleCurrentItem() {
     case EXTRA_SPACING:
       localOverride.extraParagraphSpacing = localOverride.extraParagraphSpacing ? 0 : 1;
       break;
+    case MIN_SESSION: {
+      // Find current position in cycle table and advance by one.
+      int pos = 0;
+      for (int i = 0; i < MIN_SESSION_CYCLE_COUNT; i++) {
+        if (MIN_SESSION_CYCLE[i] == localOverride.minSessionMinutes) {
+          pos = i;
+          break;
+        }
+      }
+      localOverride.minSessionMinutes = MIN_SESSION_CYCLE[(pos + 1) % MIN_SESSION_CYCLE_COUNT];
+      break;
+    }
     default:
       return;
   }
@@ -146,6 +165,8 @@ const char* ReaderOptionsActivity::getItemName(const int index) {
       return tr(STR_HYPHENATION);
     case EXTRA_SPACING:
       return tr(STR_EXTRA_SPACING);
+    case MIN_SESSION:
+      return tr(STR_MIN_SESSION_FOR_STATS);
     default:
       return "";
   }
@@ -187,6 +208,24 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
       return localOverride.hyphenationEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     case EXTRA_SPACING:
       return localOverride.extraParagraphSpacing ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+    case MIN_SESSION: {
+      const uint8_t v = localOverride.minSessionMinutes;
+      if (v == CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL) {
+        const uint8_t g = SETTINGS.minSessionMinutes;
+        if (g == 0) {
+          char buf[32];
+          snprintf(buf, sizeof(buf), "%s (%s)", tr(STR_DEFAULT_VALUE), tr(STR_ALWAYS));
+          return std::string(buf);
+        }
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%s (%u min)", tr(STR_DEFAULT_VALUE), static_cast<unsigned>(g));
+        return std::string(buf);
+      }
+      if (v == 0) return tr(STR_ALWAYS);
+      char buf[16];
+      snprintf(buf, sizeof(buf), "%u min", static_cast<unsigned>(v));
+      return std::string(buf);
+    }
     default:
       return "";
   }

@@ -241,4 +241,9 @@ class BaseTheme {
   // bottomY. No-op unless the device is associated to a WiFi AP (STA WL_CONNECTED), so
   // it appears only on the network screens where WiFi is actually up.
   static void drawWifiBars(const GfxRenderer& renderer, int rightX, int bottomY);
+
+ protected:
+  // Draw top-bar clock/date at (x, y) if the user has enabled them and time is available.
+  // Called from drawHeader() overrides in all themes so the feature works universally.
+  void drawTopBarClockDate(const GfxRenderer& renderer, int x, int y) const;
 };

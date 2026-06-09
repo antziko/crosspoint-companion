@@ -103,6 +103,20 @@ bool renderFromCache(GfxRenderer& renderer, const std::string& cachePath, int x,
 }  // namespace
 
 void ImageBlock::render(GfxRenderer& renderer, const int x, const int y) {
+  // The scan/prewarm pass only measures text to warm the font cache — it draws
+  // nothing to the framebuffer. Decoding the image here is pure waste, and for a
+  // large JPEG it costs seconds. The real BW + grayscale passes draw the image.
+  if (renderer.isFontCacheScanning()) {
+    return;
+  }
+
+  // A prior pass already failed to decode this image (too large / OOM). Don't
+  // re-attempt it on every BW + grayscale-strip pass — that re-fails each time,
+  // hanging the page for tens of seconds and fragmenting the heap.
+  if (decodeFailed) {
+    return;
+  }
+
   LOG_DBG("IMG", "Rendering image at %d,%d: %s (%dx%d)", x, y, imagePath.c_str(), width, height);
 
   // X3 renders images as a 1-bit halftone written during the BW pass. The
@@ -182,6 +196,7 @@ void ImageBlock::render(GfxRenderer& renderer, const int x, const int y) {
   bool success = decoder->decodeToFramebuffer(imagePath, renderer, config);
   if (!success) {
     LOG_ERR("IMG", "Failed to decode image: %s", imagePath.c_str());
+    decodeFailed = true;  // don't retry on the remaining render passes for this view
     return;
   }
 

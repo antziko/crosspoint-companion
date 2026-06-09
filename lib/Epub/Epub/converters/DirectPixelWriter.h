@@ -4,6 +4,8 @@
 #include <HalDisplay.h>
 #include <stdint.h>
 
+#include "PixelCache.h"
+
 // Direct framebuffer writer that eliminates per-pixel overhead from the image
 // rendering hot path.  Pre-computes orientation transform as linear coefficients
 // and caches render-mode state so the inner loop is: one multiply, one add,
@@ -149,23 +151,48 @@ struct DirectPixelWriter {
 //
 // Caller guarantees coordinates are within cache bounds.
 struct DirectCacheWriter {
-  uint8_t* buffer;
-  int bytesPerRow;
-  int originX;
-  uint8_t* rowPtr;  // Pre-computed for current row
+  uint8_t* buffer{nullptr};
+  int bytesPerRow{0};
+  int originX{0};
+  uint8_t* rowPtr{nullptr};            // Pre-computed for current row (null = skip)
+  StreamingPixelCache* stream{nullptr};  // non-null => stream rows to SD instead of a full buffer
 
+  // Full-buffer mode: the whole image fits in RAM and is written in one shot at the end.
   void init(uint8_t* cacheBuffer, int cacheBytesPerRow, int cacheOriginX) {
     buffer = cacheBuffer;
     bytesPerRow = cacheBytesPerRow;
     originX = cacheOriginX;
     rowPtr = nullptr;
+    stream = nullptr;
+  }
+
+  // Streaming mode: oversized image, rows flushed to SD as the decode passes them.
+  void initStreaming(StreamingPixelCache* s) {
+    stream = s;
+    bytesPerRow = s->bytesPerRow;
+    originX = s->originX;
+    rowPtr = nullptr;
+  }
+
+  // Streaming only: flush rows finalized by completed MCU-rows (no-op for full buffer).
+  inline void flushBelow(int localRowWatermark) {
+    if (stream) stream->flushBelow(localRowWatermark);
   }
 
   // Call once per row before the column loop.
-  inline void beginRow(int screenY, int cacheOriginY) { rowPtr = buffer + (screenY - cacheOriginY) * bytesPerRow; }
+  inline void beginRow(int screenY, int cacheOriginY) {
+    if (stream) {
+      stream->beginRow(screenY, cacheOriginY);
+      rowPtr = stream->rowPtr;
+    } else {
+      rowPtr = buffer + (screenY - cacheOriginY) * bytesPerRow;
+    }
+  }
 
-  // Write a 2-bit pixel value. No bounds checking.
+  // Write a 2-bit pixel value. rowPtr is null only in streaming mode if a row fell
+  // outside the band (shouldn't happen given flushBelow); the guard prevents a stray write.
   inline void writePixel(int screenX, uint8_t value) const {
+    if (!rowPtr) return;
     const int localX = screenX - originX;
     const int byteIdx = localX >> 2;            // localX / 4
     const int bitShift = 6 - (localX & 3) * 2;  // MSB first: pixel 0 at bits 6-7

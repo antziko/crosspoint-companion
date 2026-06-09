@@ -94,7 +94,13 @@ void StatusBarSettingsActivity::onEnter() {
   Activity::onEnter();
 
   selectedIndex = 0;
-  visibleItemCount = halClock.isAvailable() ? FULL_MENU_ITEMS : BASE_MENU_ITEMS;
+  // Show the clock/date items when the device can have a clock: X3 (DS3231, always
+  // available) or X4 (no hardware RTC, but gets time from NTP over WiFi). The X4
+  // menu must stay visible even before the first sync so the user can enable the
+  // clock and trigger a sync — so gate on capability (!hasHardwareRtc), not on the
+  // current isAvailable() state which is false on X4 until time arrives.
+  const bool deviceCanHaveClock = halClock.isAvailable() || !halClock.hasHardwareRtc();
+  visibleItemCount = deviceCanHaveClock ? FULL_MENU_ITEMS : BASE_MENU_ITEMS;
 
   // Clamp statusBarProgressBar and statusBarTitle in case of corrupt/migrated data
   if (SETTINGS.statusBarProgressBar >= PROGRESS_BAR_ITEMS) {

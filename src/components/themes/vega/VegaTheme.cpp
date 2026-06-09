@@ -3,8 +3,10 @@
 #include <Epub.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
+#include <HalClock.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <Memory.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -80,6 +82,8 @@ struct HeroDetails {
   std::string chapterTitle;
   bool hasDuration = false;
   char durationText[24] = {};
+  bool hasTodayDuration = false;
+  char todayDurationText[24] = {};
   bool hasLastRead = false;
   char lastReadText[64] = {};
 };
@@ -117,6 +121,24 @@ HeroDetails loadHeroDetails(const RecentBook& book) {
                    sizeof(details.lastReadText));
     details.hasLastRead = true;
   }
+
+  if (halClock.isAvailable()) {
+    uint8_t dow = 0, day = 0, month = 0;
+    uint16_t year = 0;
+    if (halClock.getDate(dow, day, month, year)) {
+      const uint32_t todayIdx = readingHistoryDayIndex(year, month, day);
+      auto history = makeUniqueNoThrow<ReadingTimeHistory>();
+      if (history) {
+        ReadingTimeHistory::load(epub.getCachePath() + "/book_time_history.bin", *history);
+        if (history->heatmapAnchorDay == todayIdx && history->heatmapAnchorSeconds > 0) {
+          BookReadingStats::formatDuration(history->heatmapAnchorSeconds, details.todayDurationText,
+                                          sizeof(details.todayDurationText));
+          details.hasTodayDuration = true;
+        }
+      }
+    }
+  }
+
   return details;
 }
 
@@ -224,32 +246,29 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
 
   const HeroDetails& details = cachedHeroDetails;
 
-  // Sum the exact heights the detail block below will occupy (mirrors the
-  // sequential textY += additions in the draw calls further down -- if those
-  // ever change, this must change with them) so the title's line budget can be
-  // sized to guarantee title + gap + details fits within coverH. Without this,
-  // a long title could push progress/bar/duration/chapter/last-read below the
-  // hero cover's bottom edge into the "Next 3" row.
+  // Bottom block height: progress-section + today + lastRead.
+  // Chapter moves to the top block so is excluded here.
   int detailBlockH = 0;
   if (details.hasProgress) {
-    detailBlockH += textLineH + kLineGap;            // "xx% - duration" label (combined, tracks bar fill)
+    detailBlockH += textLineH + kLineGap;            // "xx% - duration" label
     detailBlockH += kProgressBarHeight + kLineGap;   // bar
+    if (details.hasTodayDuration) {
+      detailBlockH += textLineH + kLineGap;          // "Today: X" line
+    }
   } else if (details.hasDuration) {
-    detailBlockH += textLineH + kLineGap;            // duration alone, left-aligned
-  }
-  if (!details.chapterTitle.empty()) {
-    detailBlockH += textLineH + kLineGap;            // wrappedText(..., 1) -- always 1 line
+    detailBlockH += textLineH + kLineGap;            // duration alone
   }
   if (details.hasLastRead) {
     detailBlockH += textLineH;                       // last element, no trailing gap
   }
 
-  // Largest line count that still leaves room for the detail block within
-  // coverH, capped by kHeroTitleMaxLines (the "don't ramble forever" ceiling).
-  const int availableForTitle = coverH - kLineGap - detailBlockH;
+  // Top block: title lines + chapter (1 line). Budget title so both blocks fit.
+  const int chapterLineH = details.chapterTitle.empty() ? 0 : (textLineH + kLineGap);
+  const int availableForTitle = coverH - chapterLineH - detailBlockH;
   const int dynamicTitleMaxLines = std::max(1, availableForTitle / titleLineH);
   const int titleMaxLines = std::min(kHeroTitleMaxLines, dynamicTitleMaxLines);
 
+  // Draw book name (top-aligned)
   const std::string& heroTitle = hero.title.empty() ? hero.path : hero.title;
   const auto titleLines = renderer.wrappedText(UI_10_FONT_ID, heroTitle.c_str(), textW, titleMaxLines);
   for (const auto& line : titleLines) {
@@ -257,17 +276,18 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
     textY += titleLineH;
   }
 
-  // Detail block (progress/duration/chapter/last-read) bottom-aligns to the
-  // hero cover's bottom edge instead of trailing the title -- titleMaxLines
-  // above already guarantees title + kLineGap + detailBlockH <= coverH, so
-  // this can't overlap the title even at max line count.
+  // Draw chapter (top-aligned, directly under book name)
+  if (!details.chapterTitle.empty()) {
+    const auto chapterLines = renderer.wrappedText(SMALL_FONT_ID, details.chapterTitle.c_str(), textW, 1);
+    for (const auto& line : chapterLines) {
+      renderer.drawText(SMALL_FONT_ID, textX, textY, line.c_str(), true);
+    }
+  }
+
+  // Bottom block anchored to cover bottom edge
   textY = coverY + coverH - detailBlockH;
 
-  // "xx% - duration" rides one line above the bar, right-aligned over the
-  // bar's current fill edge (fillEdgeX) -- like a tooltip following a slider
-  // thumb -- instead of sitting at the left margin. fillEdgeX is computed
-  // once, shared by the label and the fill draw, so they can't drift apart.
-  // Clamped so the label stays inside [textX, textX+textW] near 0%/100%.
+  // "xx% - duration" rides one line above the bar, aligned over the fill edge.
   const int barInnerX = textX + 2;
   const int barInnerW = textW - 4;
   const int fillW = details.hasProgress ? barInnerW * details.progressPercent / 100 : 0;
@@ -294,18 +314,16 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
       renderer.fillRect(barInnerX, textY + 2, fillW, kProgressBarHeight - 4, true);
     }
     textY += kProgressBarHeight + kLineGap;
+
+    if (details.hasTodayDuration) {
+      char todayLine[40];
+      snprintf(todayLine, sizeof(todayLine), "%s: %s", tr(STR_STATS_TODAY), details.todayDurationText);
+      renderer.drawText(SMALL_FONT_ID, textX, textY, todayLine, true);
+      textY += textLineH + kLineGap;
+    }
   } else if (details.hasDuration) {
     renderer.drawText(SMALL_FONT_ID, textX, textY, details.durationText, true);
     textY += textLineH + kLineGap;
-  }
-
-  if (!details.chapterTitle.empty()) {
-    const auto chapterLines = renderer.wrappedText(SMALL_FONT_ID, details.chapterTitle.c_str(), textW, 1);
-    for (const auto& line : chapterLines) {
-      renderer.drawText(SMALL_FONT_ID, textX, textY, line.c_str(), true);
-      textY += textLineH;
-    }
-    textY += kLineGap;
   }
 
   if (details.hasLastRead) {
