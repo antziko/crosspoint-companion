@@ -9,6 +9,7 @@
 #include <HalPowerManager.h>
 #include <HalStorage.h>
 #include <HalSystem.h>
+#include <InflateReader.h>
 #include <HalTiltSensor.h>
 #include <I18n.h>
 #include <Logging.h>
@@ -405,6 +406,15 @@ void setup() {
 #endif
 
   HalSystem::begin();
+
+  // Reserve the shared 32KB DEFLATE inflate window now, while the heap is pristine,
+  // so it is guaranteed contiguous (the §59 "out of bounds" guarantee). Held on the
+  // heap rather than BSS so it can be released for a TLS handshake (KOReader sync),
+  // with the post-sync reboot re-running this on a fresh heap. Non-fatal on failure:
+  // inflate falls back to per-call malloc (pre-reservation behaviour).
+  if (!InflateReader::ensureWindow()) {
+    LOG_ERR("MAIN", "Inflate window reservation failed; inflate will fall back to malloc");
+  }
 
   // Read-and-clear so a panic later in setup() doesn't loop into silent reboot.
   // Bound the target range too — RTC_NOINIT memory is uninitialized on cold boot.

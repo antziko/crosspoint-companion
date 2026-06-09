@@ -3,6 +3,7 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <InflateReader.h>
 #include <Logging.h>
 #include <SdDebugLog.h>
 #include <WiFi.h>
@@ -100,6 +101,13 @@ void KOReaderSyncActivity::onWifiSelectionComplete(const bool success) {
   }
 
   LOG_DBG("KOSync", "WiFi connected, starting sync");
+
+  // Hand the 32KB inflate window back to the heap for the TLS handshakes below.
+  // This activity never builds sections (so it never needs the window), the epub
+  // was already released by EpubReaderActivity, and onExit() always reboots — which
+  // re-reserves the window on a fresh heap — so it is never re-allocated here.
+  InflateReader::releaseWindow();
+  LOG_DBG("KOSync", "Released inflate window for TLS (heap: %u)", (unsigned)ESP.getFreeHeap());
 
   {
     RenderLock lock(*this);

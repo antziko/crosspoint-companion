@@ -35,6 +35,12 @@ constexpr int HTTP_BUF_SIZE = 2048;
 // to sync from within the reader, which releases the epub first and frees enough RAM.
 constexpr uint32_t MIN_HEAP_FOR_TLS = 55000;
 
+// Plain HTTP does no TLS handshake, so it never allocates the mbedTLS arena. It
+// needs only the fixed rx/tx buffers (HTTP_BUF_SIZE each), the esp_http_client
+// struct, and a small JSON doc — a few KB. Gate HTTP requests on this far lower
+// bar so a local http:// sync server isn't rejected by the TLS-sized guard.
+constexpr uint32_t MIN_HEAP_FOR_HTTP = 12000;
+
 // X3 HTTPS troubleshooting instrumentation (SdDebugLog "STALL"): a gap between
 // esp_http_client event-callback fires longer than this is logged with a
 // heap+RSSI snapshot. Mirrors HttpDownloader::runGet's per-chunk-read probe so
@@ -153,6 +159,24 @@ esp_http_client_handle_t createClient(const char* url, ResponseBuffer* buf,
 
   return client;
 }
+
+// Pre-flight the heap for an HTTP(S) request. HTTPS needs the full mbedTLS
+// handshake arena; plain HTTP needs only the small fixed buffers. Returns true if
+// there is enough free heap, otherwise logs and returns false. The caller maps
+// false to LOW_MEMORY. `url` carries the scheme (from getBaseUrl()).
+bool heapOkForUrl(const std::string& url, const char* tag) {
+  const bool https = url.rfind("https://", 0) == 0;
+  const uint32_t need = https ? MIN_HEAP_FOR_TLS : MIN_HEAP_FOR_HTTP;
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  LOG_DBG("KOSync", "%s: %s (free=%u, need=%u, %s)", tag, url.c_str(), (unsigned)freeHeap, (unsigned)need,
+          https ? "https" : "http");
+  if (freeHeap < need) {
+    LOG_ERR("KOSync", "Insufficient heap: %u bytes free (need %u for %s)", freeHeap, need,
+            https ? "TLS handshake" : "HTTP");
+    return false;
+  }
+  return true;
+}
 }  // namespace
 
 KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
@@ -163,12 +187,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
   }
 
   std::string url = KOREADER_STORE.getBaseUrl() + "/users/auth";
-  const uint32_t freeHeap = ESP.getFreeHeap();
-  LOG_DBG("KOSync", "Authenticating: %s (free=%u)", url.c_str(), (unsigned)freeHeap);
-  if (freeHeap < MIN_HEAP_FOR_TLS) {
-    LOG_ERR("KOSync", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
-    return LOW_MEMORY;
-  }
+  if (!heapOkForUrl(url, "AUTH")) return LOW_MEMORY;
 
   ResponseBuffer buf;
   beginTrace(buf, "AUTH");
@@ -197,12 +216,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
   }
 
   std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/progress/" + documentHash;
-  const uint32_t freeHeap = ESP.getFreeHeap();
-  LOG_DBG("KOSync", "Getting progress: %s (heap: %u)", url.c_str(), (unsigned)freeHeap);
-  if (freeHeap < MIN_HEAP_FOR_TLS) {
-    LOG_ERR("KOSync", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
-    return LOW_MEMORY;
-  }
+  if (!heapOkForUrl(url, "PROGRESS_GET")) return LOW_MEMORY;
 
   ResponseBuffer buf;
   beginTrace(buf, "PROGRESS_GET");
@@ -251,12 +265,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
   }
 
   std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/progress";
-  const uint32_t freeHeap = ESP.getFreeHeap();
-  LOG_DBG("KOSync", "Updating progress: %s (heap: %u)", url.c_str(), (unsigned)freeHeap);
-  if (freeHeap < MIN_HEAP_FOR_TLS) {
-    LOG_ERR("KOSync", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
-    return LOW_MEMORY;
-  }
+  if (!heapOkForUrl(url, "PROGRESS_PUT")) return LOW_MEMORY;
 
   // Build JSON body
   JsonDocument doc;
@@ -306,12 +315,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getBookmarks(const std::string& do
   }
 
   std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/bookmarks/" + documentHash;
-  const uint32_t freeHeap = ESP.getFreeHeap();
-  LOG_DBG("KOSync", "Getting bookmarks: %s (heap: %u)", url.c_str(), (unsigned)freeHeap);
-  if (freeHeap < MIN_HEAP_FOR_TLS) {
-    LOG_ERR("KOSync", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
-    return LOW_MEMORY;
-  }
+  if (!heapOkForUrl(url, "BOOKMARKS_GET")) return LOW_MEMORY;
 
   ResponseBuffer buf;
   beginTrace(buf, "BOOKMARKS_GET");
@@ -358,12 +362,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
   }
 
   std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/bookmarks";
-  const uint32_t freeHeap = ESP.getFreeHeap();
-  LOG_DBG("KOSync", "Updating bookmarks: %s (heap: %u)", url.c_str(), (unsigned)freeHeap);
-  if (freeHeap < MIN_HEAP_FOR_TLS) {
-    LOG_ERR("KOSync", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
-    return LOW_MEMORY;
-  }
+  if (!heapOkForUrl(url, "BOOKMARKS_PUT")) return LOW_MEMORY;
 
   // The bookmarks array is sent as a single pre-serialized JSON string field so the
   // server stores it as an opaque blob (it never parses bookmark contents).

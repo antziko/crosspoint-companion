@@ -93,6 +93,19 @@ class InflateReader {
   static uint8_t* acquireScratch(size_t need);
   static void releaseScratch();
 
+  // Allocate the shared 32KB DEFLATE window. Call once at boot (setup()) while the
+  // heap is pristine so the block is guaranteed contiguous — the same guarantee the
+  // old static-BSS array gave, but now freeable. Idempotent. Returns false if the
+  // allocation fails, in which case init(true)/acquireScratch fall back to per-call
+  // malloc (the pre-reservation behaviour).
+  static bool ensureWindow();
+
+  // Free the shared window to hand its 32KB back to the heap (e.g. to make room for
+  // a TLS handshake). Only frees when the window is not currently in use; a safe
+  // no-op otherwise or if already freed. After release, init(true)/acquireScratch
+  // fall back to malloc until ensureWindow() runs again (typically the next boot).
+  static void releaseWindow();
+
  private:
   uzlib_uncomp decomp = {};  // MUST stay first (offset 0) for the uzlib callback cast
   uint8_t* ringBuffer = nullptr;

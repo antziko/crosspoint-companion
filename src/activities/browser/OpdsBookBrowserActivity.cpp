@@ -40,6 +40,17 @@ constexpr unsigned long GO_HOME_MS = 1000;  // hold BACK this long to jump to ho
 // still fail as an OOM-in-disguise and stall, so a guard remains — just smaller.
 constexpr size_t MIN_CONTIGUOUS_HEAP_FOR_TLS = 24 * 1024;
 
+// Plain HTTP does no TLS handshake, so it needs no mbedTLS record buffers — only
+// a few KB contiguous for rx/tx and the client struct. A local http:// OPDS
+// server must not be rejected by the TLS-sized contiguous gate above.
+constexpr size_t MIN_CONTIGUOUS_HEAP_FOR_HTTP = 8 * 1024;
+
+// Contiguous-heap bar for a request, picked by URL scheme. `url` carries the
+// scheme (https://, http://, or a relative path that resolves under server.url).
+inline size_t minContiguousForUrl(const std::string& url) {
+  return url.rfind("https://", 0) == 0 ? MIN_CONTIGUOUS_HEAP_FOR_TLS : MIN_CONTIGUOUS_HEAP_FOR_HTTP;
+}
+
 // On-SD filename for a book entry (no directory). Single source of truth so the
 // downloader and the "already downloaded" indicator never diverge.
 std::string bookFileName(const OpdsEntry& book) {
@@ -408,7 +419,7 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   // instead. entries were just freed, so a retry from the ERROR state has more
   // headroom and can succeed.
   const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  if (largestBlock < MIN_CONTIGUOUS_HEAP_FOR_TLS) {
+  if (largestBlock < minContiguousForUrl(url)) {
     SdDebugLog::log("OPDS", "fetch aborted: low heap, largest=%u free=%u", (unsigned)largestBlock,
                     (unsigned)ESP.getFreeHeap());
     LOG_ERR("OPDS", "Fetch aborted: low heap (largest=%u)", (unsigned)largestBlock);
@@ -632,7 +643,7 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   // Same TLS heap preflight as fetchFeed: bail with a clear message rather than
   // stalling for minutes on an OOM-in-disguise connect/read. RETRY reloads the
   // feed (entries were freed above).
-  if (largestBlock < MIN_CONTIGUOUS_HEAP_FOR_TLS) {
+  if (largestBlock < minContiguousForUrl(downloadUrl)) {
     SdDebugLog::log("OPDS", "download aborted: low heap, largest=%u", (unsigned)largestBlock);
     LOG_ERR("OPDS", "Download aborted: low heap (largest=%u)", (unsigned)largestBlock);
     state = BrowserState::ERROR;
