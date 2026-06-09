@@ -124,6 +124,7 @@ class DictionaryLookupController {
 
   void runLookup();
   void handleLookupFailed();
+  void showMemoryErrorAndReset();
   static void progressCallback(void* ctx, int percent);
   static bool cancelCallback(void* ctx);
 };

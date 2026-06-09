@@ -11,6 +11,7 @@
 #include "CrossPointSettings.h"
 #include "DictLookupTask.h"
 #include "MappedInputManager.h"
+#include "Memory.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/Dictionary.h"
@@ -41,7 +42,12 @@ void DictionaryLookupController::startLookup(const std::string& word, bool recor
     GUI.drawPopup(renderer, tr(STR_DICT_LOOKING_UP));
     renderer.displayBuffer(HalDisplay::FAST_REFRESH);
   }
-  task = std::make_unique<DictLookupTask>(*this);
+  task = makeUniqueNoThrow<DictLookupTask>(*this);
+  if (!task) {
+    LOG_ERR("DICT", "OOM: DictLookupTask");
+    showMemoryErrorAndReset();
+    return;
+  }
   task->start("DictLookup", 4096, 1);
 }
 
@@ -222,6 +228,17 @@ void DictionaryLookupController::lookupOrPopup(const std::string& rawWord) {
   }
 }
 
+void DictionaryLookupController::showMemoryErrorAndReset() {
+  {
+    RenderLock lock;
+    GUI.drawPopup(renderer, tr(STR_MEMORY_ERROR));
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+  }
+  vTaskDelay(1000 / portTICK_PERIOD_MS);
+  state = LookupState::Idle;
+  owner.requestUpdate();
+}
+
 void DictionaryLookupController::showNoWordPopup() {
   {
     // Serialize with render task — see comment in startLookup() for the race this prevents.
@@ -236,16 +253,21 @@ void DictionaryLookupController::showNoWordPopup() {
 void DictionaryLookupController::handleLookupFailed() {
   auto similar = Dictionary::findSimilar(lookupWord, 6, cachePath.c_str());
   if (!similar.empty()) {
-    owner.startActivityForResult(
-        std::make_unique<DictionarySuggestionsActivity>(renderer, mappedInput, std::move(similar)),
-        [this](const ActivityResult& result) {
-          if (result.isCancelled) {
-            setNotFound();
-            return;
-          }
-          const auto& wr = std::get<WordResult>(result.data);
-          startLookupAsSuggestion(wr.word);
-        });
+    auto sugActivity = makeUniqueNoThrow<DictionarySuggestionsActivity>(renderer, mappedInput, std::move(similar));
+    if (!sugActivity) {
+      LOG_ERR("DICT", "OOM: DictionarySuggestionsActivity");
+      nextIsSuggestion = false;
+      showMemoryErrorAndReset();
+      return;
+    }
+    owner.startActivityForResult(std::move(sugActivity), [this](const ActivityResult& result) {
+      if (result.isCancelled) {
+        setNotFound();
+        return;
+      }
+      const auto& wr = std::get<WordResult>(result.data);
+      startLookupAsSuggestion(wr.word);
+    });
     return;
   }
   nextIsSuggestion = false;

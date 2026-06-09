@@ -10,6 +10,7 @@
 
 #include "I18nKeys.h"
 #include "MappedInputManager.h"
+#include "Memory.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/DictPrepareTask.h"
@@ -190,7 +191,13 @@ void DictPrepareActivity::loop() {
         steps[i].total = 0;
       }
       requestUpdateAndWait();
-      task = std::make_unique<DictPrepareTask>(*this);
+      task = makeUniqueNoThrow<DictPrepareTask>(*this);
+      if (!task) {
+        LOG_ERR("DICT_PREP", "OOM: DictPrepareTask");
+        state = State::FAILED;
+        requestUpdate();
+        return;
+      }
       task->start("DictPrep", 4096, 1);
       return;
     }
@@ -294,11 +301,19 @@ void DictPrepareActivity::runSteps() {
 
 bool DictPrepareActivity::extractFile(const char* dzPath, const char* outPath, Step& step) {
   HalFile inputFile;
-  std::unique_ptr<PrepDecompCtx> ctx(new PrepDecompCtx{});
+  auto ctx = makeUniqueNoThrow<PrepDecompCtx>();
+  if (!ctx) {
+    LOG_ERR("DICT_PREP", "OOM: PrepDecompCtx");
+    return false;
+  }
   ctx->file = &inputFile;
 
   constexpr size_t OUT_BUF_SIZE = 4096;
-  std::unique_ptr<uint8_t[]> outBuf(new uint8_t[OUT_BUF_SIZE]);
+  auto outBuf = makeUniqueNoThrow<uint8_t[]>(OUT_BUF_SIZE);
+  if (!outBuf) {
+    LOG_ERR("DICT_PREP", "OOM: decompression buffer");
+    return false;
+  }
 
   auto fail = [&] {
     inputFile.close();
