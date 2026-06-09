@@ -1274,7 +1274,32 @@ free heap ~25KB. Per-transition `[HEAP]` logging proved **no leak** (onExit reco
 the ZIP **inflate window needs 32768 bytes contiguous** (`InflateReader::init`), but `MaxAlloc` (largest free
 block) dipped below 32KB — dynamic **fragmentation** driven by the repeated failed-image / thumb decode churn
 (boot `MaxAlloc` is ~114KB; no fixed fragmenter). Killing the churn (§55 streaming, §56 scaled-limit +
-`decodeFailed`, §57 thumb marker) keeps `MaxAlloc` above 32KB (device-confirmed floor ~34.8KB) → inflate succeeds
-→ section build works → no more "out of bounds". The reserved-static-window fallback (Option A) was **not** needed.
+`decodeFailed`, §57 thumb marker) raised the typical floor, but a later device test still hit "out of bounds":
+opening an *uncached* book whose **section build** thrashes the heap dropped `MaxAlloc` to ~23–29KB and **stuck**
+there (110KB free, idle) — the section build's own 32KB inflate malloc/free is the dominant fragmenter. So §55–57
+reduced but did not eliminate it.
+
+## 59. Reserve the DEFLATE inflate window in BSS — durable "out of bounds" fix (Option A) — DEVICE-CONFIRMED
+
+**Change (`InflateReader`):** the 32KB DEFLATE back-reference window is now a file-scope BSS array
+(`s_inflateWindow[32768]`) handed out via an `std::atomic_flag` in-use guard, instead of `malloc`/`free` on every
+`init(true)`. Callers get a guaranteed-contiguous window regardless of heap fragmentation, and the per-section-build
+32KB malloc/free churn (itself the main fragmenter, confirmed by `[FRAG]` probes: `MaxAlloc` 47092→23540 *during*
+the section build) is gone. A concurrent inflate (e.g. web-server task while reading) falls back to `malloc` —
+never worse than before. `~InflateReader()`→`deinit()` releases the flag (RAII); `decomp` stays at offset 0 for the
+uzlib callback cast.
+
+**Device result:** 0 "out of bounds" across 7 uncached section builds, 19 pages rendered, no crash.
+
+**Cost (RAM):** +32KB static (heap pool 223→191KB; build RAM 31.4%→41.4%). The device is at the memory edge, so the
+tighter pool surfaces **graceful** secondary OOMs during heavy section builds: font `buildAdvanceTable`'s 16KB
+codepoint buffer falls back to the compact mini-kern (text renders fine), and the JPEG decoder (needs 36–53KB
+contiguous) skips an occasional inline image / cover thumb (handled by §56/§57). No crashes; reading works
+throughout. Net: a *fatal* failure (couldn't open uncached books) traded for *cosmetic* degradation.
+
+**Follow-up (planned, §2 of the decision):** let `buildAdvanceTable` borrow the now-reserved inflate window when
+it's free (sequential within a section build) to recover full-table font quality without more RAM.
+
+**Files:** `lib/InflateReader/InflateReader.{cpp,h}`.
 
 **Files:** diagnostics only (removed after confirmation); the actual fixes are §55–57.

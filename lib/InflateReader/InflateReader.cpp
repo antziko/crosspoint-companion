@@ -1,11 +1,24 @@
 #include "InflateReader.h"
 
+#include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <type_traits>
 
 namespace {
 constexpr size_t INFLATE_DICT_SIZE = 32768;
-}
+
+// DEFLATE's 32KB back-reference window can't be malloc'd reliably once the heap
+// fragments during a reading session (largest free block dips below 32KB), which
+// broke every uncached section build ("out of bounds") and cover-thumb decode.
+// Worse, malloc-ing+freeing this 32KB on every section build was itself a primary
+// fragmenter. Reserve it once in BSS and hand it out via an in-use flag: callers
+// get a guaranteed contiguous window with zero malloc churn. The rare concurrent
+// inflate (e.g. web-server task while reading) falls back to malloc — never worse
+// than before. Zero-initialised static => the flag starts clear.
+uint8_t s_inflateWindow[INFLATE_DICT_SIZE];
+std::atomic_flag s_inflateWindowInUse;
+}  // namespace
 
 // Guarantee the cast pattern in the header comment is valid.
 static_assert(std::is_standard_layout<InflateReader>::value,
@@ -14,11 +27,19 @@ static_assert(std::is_standard_layout<InflateReader>::value,
 InflateReader::~InflateReader() { deinit(); }
 
 bool InflateReader::init(const bool streaming) {
-  deinit();  // free any previously allocated ring buffer and reset state
+  deinit();  // release any previously held window and reset state
 
   if (streaming) {
-    ringBuffer = static_cast<uint8_t*>(malloc(INFLATE_DICT_SIZE));
-    if (!ringBuffer) return false;
+    // Prefer the shared static window: guaranteed 32KB contiguous regardless of
+    // heap fragmentation, and no malloc/free churn. If another inflate already
+    // holds it (rare — inflate is sequential on the UI task), fall back to malloc.
+    if (!s_inflateWindowInUse.test_and_set(std::memory_order_acquire)) {
+      ringBuffer = s_inflateWindow;
+      usingStaticWindow = true;
+    } else {
+      ringBuffer = static_cast<uint8_t*>(malloc(INFLATE_DICT_SIZE));
+      if (!ringBuffer) return false;
+    }
     memset(ringBuffer, 0, INFLATE_DICT_SIZE);
   }
 
@@ -27,7 +48,11 @@ bool InflateReader::init(const bool streaming) {
 }
 
 void InflateReader::deinit() {
-  if (ringBuffer) {
+  if (usingStaticWindow) {
+    s_inflateWindowInUse.clear(std::memory_order_release);
+    usingStaticWindow = false;
+    ringBuffer = nullptr;
+  } else if (ringBuffer) {
     free(ringBuffer);
     ringBuffer = nullptr;
   }
