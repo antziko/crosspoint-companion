@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
+#include <esp_heap_caps.h>
 
 #include <algorithm>
 #include <array>
@@ -40,6 +42,12 @@ constexpr size_t READ_BUFFER_SIZE = 512;
 // Maximum number of CSS rules to store in the selector map
 // Prevents unbounded memory growth from pathological CSS files
 constexpr size_t MAX_RULES = 1500;
+
+// Headroom (bytes) required beyond the rule-vector's next-growth allocation before
+// we let it reallocate. Covers the transient where the old block is still held plus
+// the inserted entry's string copy. Below this, parsing stops gracefully instead of
+// aborting on a failed `new` (X3, fragmented heap). See processRuleBlockWithStyle.
+constexpr size_t CSS_GROWTH_HEAP_MARGIN = 6 * 1024;
 
 // Minimum free heap required to apply CSS during rendering
 // If below this threshold, we skip CSS to avoid display artifacts.
@@ -390,6 +398,11 @@ CssStyle CssParser::parseDeclarations(const std::string& declBlock) {
 // Rule processing
 
 void CssParser::processRuleBlockWithStyle(const std::string& selectorGroup, const CssStyle& style) {
+  // A prior insert hit the heap floor (see below) — stop storing rules entirely.
+  if (cssHeapBail_) {
+    return;
+  }
+
   // Check if we've reached the rule limit before processing
   if (rulesBySelector_.size() >= MAX_RULES) {
     LOG_DBG("CSS", "Reached max rules limit (%zu), stopping CSS parsing", MAX_RULES);
@@ -480,6 +493,26 @@ void CssParser::processRuleBlockWithStyle(const std::string& selectorGroup, cons
     if (it != rulesBySelector_.end() && it->first == key) {
       it->second.applyOver(style);
     } else if (style.defined.anySet()) {
+      // Growing the vector reallocates to ~2x: it needs that many bytes in ONE
+      // contiguous block while the old block is still held. On a tight/fragmented
+      // heap (X3, CSS-heavy book) that bare-`new` aborts() under -fno-exceptions
+      // (root cause of the CssParser.cpp OOM crash). Pre-check the largest free
+      // block and stop gracefully instead — the book renders with partial CSS.
+      using RuleEntry = std::pair<std::string, CssStyle>;
+      if (rulesBySelector_.size() == rulesBySelector_.capacity()) {
+        const size_t newCap = rulesBySelector_.capacity() ? rulesBySelector_.capacity() * 2 : 8;
+        const size_t needBytes = newCap * sizeof(RuleEntry) + CSS_GROWTH_HEAP_MARGIN;
+        const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+        if (largest < needBytes) {
+          SdDebugLog::log("CSS", "rule-store growth bailed: rules=%u cap=%u need=%u largest=%u free=%u",
+                          (unsigned)rulesBySelector_.size(), (unsigned)rulesBySelector_.capacity(),
+                          (unsigned)needBytes, (unsigned)largest, (unsigned)ESP.getFreeHeap());
+          LOG_ERR("CSS", "Low contiguous heap, stopping CSS parse at %u rules (need %u, largest %u)",
+                  (unsigned)rulesBySelector_.size(), (unsigned)needBytes, (unsigned)largest);
+          cssHeapBail_ = true;
+          return;
+        }
+      }
       rulesBySelector_.insert(it, std::make_pair(key, style));
     }
   }

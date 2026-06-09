@@ -112,6 +112,13 @@ class CssParser {
   // binary search via findRule(); inserts keep the vector ordered.
   std::vector<std::pair<std::string, CssStyle>> rulesBySelector_;
 
+  // Set when a rule insert was skipped because growing the vector would need a
+  // contiguous block the (X3) heap can't supply — a bare-`new` there would abort()
+  // under -fno-exceptions. Once set, the rest of the parse stops storing rules so
+  // the book renders with partial CSS instead of crashing. Persists across the
+  // book's CSS files (heap stays tight once exhausted).
+  bool cssHeapBail_ = false;
+
   // Binary-search lookup into the sorted rules vector. Returns nullptr if absent.
   [[nodiscard]] const CssStyle* findRule(const std::string& key) const;
 

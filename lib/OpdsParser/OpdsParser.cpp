@@ -1,7 +1,9 @@
 #include "OpdsParser.h"
 
 #include <Logging.h>
+#include <SdDebugLog.h>
 #include <XmlParserUtils.h>
+#include <esp_heap_caps.h>
 
 #include <cstring>
 
@@ -20,6 +22,27 @@ namespace {
 // momentary free heap dips far below the before/after snapshots and any
 // threshold misfires mid-stream (a small feed got cut to 4 entries that way).
 constexpr size_t MAX_ENTRIES = 64;
+
+// Headroom (bytes) required beyond the entry vector's next-growth allocation before
+// we let it reallocate. Covers the inserted entry's string copies plus safety. Below
+// this, parsing stops adding entries (truncated) instead of aborting on a failed
+// `new` — the X3's heap drops to ~2KB largest-block during the TLS read, so a large
+// feed's vector growth would otherwise crash. See endElement.
+constexpr size_t OPDS_GROWTH_HEAP_MARGIN = 2 * 1024;
+
+// True if the largest contiguous free block can cover the entry vector's next
+// doubling (from curCapacity) plus margin. When false, the caller stops adding
+// entries rather than letting the reallocation's bare-`new` abort() on a starved
+// heap. Logs the shortfall to SD for the (serial-less) X3.
+bool heapCanGrowEntries(size_t curCapacity) {
+  const size_t newCap = curCapacity ? curCapacity * 2 : 8;
+  const size_t needBytes = newCap * sizeof(OpdsEntry) + OPDS_GROWTH_HEAP_MARGIN;
+  const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (largest >= needBytes) return true;
+  SdDebugLog::log("OPDS", "entries growth bailed: count=%u need=%u largest=%u free=%u", (unsigned)curCapacity,
+                  (unsigned)needBytes, (unsigned)largest, (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
+  return false;
+}
 }  // namespace
 
 OpdsParser::OpdsParser() {
@@ -202,10 +225,19 @@ void XMLCALL OpdsParser::endElement(void* userData, const XML_Char* name) {
     if (!self->currentEntry.title.empty() && !self->currentEntry.href.empty()) {
       // Drop entries past the cap. Parsing continues so the HTTP read finishes;
       // dropped => truncated flag.
-      if (self->entries.size() < MAX_ENTRIES) {
-        self->entries.push_back(self->currentEntry);
-      } else {
+      if (self->entries.size() >= MAX_ENTRIES) {
         self->truncated = true;
+      } else if (self->entries.size() == self->entries.capacity() &&
+                 !heapCanGrowEntries(self->entries.capacity())) {
+        // Growing the vector reallocates (old + new block held at once) at the
+        // moment the TLS read has the heap at its tightest. That bare-`new` aborts()
+        // under -fno-exceptions on the X3 (a 37KB feed crashed here at ~7KB free).
+        // Stop adding entries and mark the feed truncated instead of crashing. The
+        // check is need-proportional, so small feeds (tiny growth steps) are
+        // unaffected — only a large feed on a starved heap gets capped.
+        self->truncated = true;
+      } else {
+        self->entries.push_back(self->currentEntry);
       }
     }
     self->inEntry = false;

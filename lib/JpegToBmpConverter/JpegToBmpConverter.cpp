@@ -5,6 +5,7 @@
 #include <JPEGDEC.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <SdDebugLog.h>
 #include <esp_heap_caps.h>
 
 #include <cstdio>
@@ -398,6 +399,8 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(HalFile& jpegFile, Print& b
   if (largestBlock < MIN_LARGEST_BLOCK) {
     LOG_ERR("JPG", "Not enough contiguous heap for JPEG decoder (%u largest block, need %u)", largestBlock,
             MIN_LARGEST_BLOCK);
+    SdDebugLog::log("JPG", "cover bail: low-heap largest=%u need=%u free=%u target=%dx%d", (unsigned)largestBlock,
+                    (unsigned)MIN_LARGEST_BLOCK, (unsigned)ESP.getFreeHeap(), targetWidth, targetHeight);
     return false;
   }
 
@@ -412,6 +415,8 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(HalFile& jpegFile, Print& b
   int rc = jpeg->open("", bmpJpegOpen, bmpJpegClose, bmpJpegRead, bmpJpegSeek, bmpDrawCallback);
   if (rc != 1) {
     LOG_ERR("JPG", "JPEG open failed (err=%d)", jpeg->getLastError());
+    SdDebugLog::log("JPG", "cover bail: open failed err=%d free=%u largest=%u", jpeg->getLastError(),
+                    (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     return false;
   }
 
@@ -431,6 +436,7 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(HalFile& jpegFile, Print& b
 
   if (srcWidth <= 0 || srcHeight <= 0) {
     LOG_DBG("JPG", "Invalid JPEG dimensions: %dx%d", srcWidth, srcHeight);
+    SdDebugLog::log("JPG", "cover bail: bad dimensions %dx%d", srcWidth, srcHeight);
     return false;
   }
 

@@ -7,8 +7,10 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Memory.h>
+#include <SdDebugLog.h>
 #include <Utf8.h>
 #include <Xtc.h>
+#include <esp_heap_caps.h>
 
 #include <cstring>
 #include <memory>
@@ -68,6 +70,11 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
   bool showingLoading = false;
   Rect popupRect;
 
+  // Trace cover thumb generation to SD: on the X3 (no serial) some covers fail to
+  // render and the failure is otherwise silent (placeholder shown). Per-book result
+  // + heap below shows whether it's low-heap, a decode error, or bad dimensions.
+  SdDebugLog::setEnabled(true);
+
   int progress = 0;
   for (RecentBook& book : recentBooks) {
     if (!book.coverBmpPath.empty()) {
@@ -89,7 +96,10 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
         // transiently (heap fragmentation), and clearing it would blank the cover
         // until the book is reopened. drawCoverTile falls back to a placeholder when
         // the thumb file is absent; a later attempt (fresh heap) regenerates it.
-        epub.generateThumbBmp(coverHeight);
+        const bool ok = epub.generateThumbBmp(coverHeight);
+        SdDebugLog::log("COVER", "epub thumb %s: free=%u largest=%u path=%s", ok ? "ok" : "FAILED",
+                        (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                        book.path.c_str());
         coverRendered = false;
         requestUpdate();
       } else if (FsHelpers::hasXtcExtension(book.path)) {
@@ -103,7 +113,10 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
           }
           GUI.fillPopupProgress(renderer, popupRect, 10 + progress * (90 / recentBooks.size()));
           // See note above: don't wipe the cover path on a (possibly transient) failure.
-          xtc.generateThumbBmp(coverHeight);
+          const bool ok = xtc.generateThumbBmp(coverHeight);
+          SdDebugLog::log("COVER", "xtc thumb %s: free=%u largest=%u path=%s", ok ? "ok" : "FAILED",
+                          (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                          book.path.c_str());
           coverRendered = false;
           requestUpdate();
         }

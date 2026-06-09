@@ -4,6 +4,8 @@
 #include <HalStorage.h>
 #include <JpegToBmpConverter.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
+#include <esp_heap_caps.h>
 #include <PngToBmpConverter.h>
 #include <ZipFile.h>
 
@@ -301,12 +303,17 @@ void Epub::parseCssFiles() const {
     return;
   }
 
-  // No cache yet - parse CSS files
+  // No cache yet - parse CSS files. Trace heap to SD: a CSS-heavy book on the X3
+  // (no serial) can exhaust the heap mid-parse and abort in the rule store — the
+  // per-file snapshot below shows the depletion leading up to it.
+  SdDebugLog::setEnabled(true);
   for (const auto& cssPath : cssFiles) {
     LOG_DBG("EBP", "Parsing CSS file: %s", cssPath.c_str());
 
     // Check heap before parsing - CSS parsing allocates heavily
     const uint32_t freeHeap = ESP.getFreeHeap();
+    SdDebugLog::log("CSS", "parse file=%s free=%u largest=%u", cssPath.c_str(), (unsigned)freeHeap,
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     if (freeHeap < MIN_HEAP_FOR_CSS_PARSING) {
       LOG_ERR("EBP", "Insufficient heap for CSS parsing (%u bytes free, need %zu), skipping: %s", freeHeap,
               MIN_HEAP_FOR_CSS_PARSING, cssPath.c_str());

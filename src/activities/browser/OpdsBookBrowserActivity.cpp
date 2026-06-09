@@ -1,7 +1,9 @@
 #include "OpdsBookBrowserActivity.h"
 
 #include <GfxRenderer.h>
+#include <HalGPIO.h>
 #include <I18n.h>
+#include <InflateReader.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <OpdsStream.h>
@@ -414,6 +416,16 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   // and the ERROR paths don't touch the list.
   std::vector<OpdsEntry>().swap(entries);
 
+  // X3 only: hand the 32KB inflate window back to the heap for the feed parse. The
+  // X3 has far less headroom than X4, and a large feed's entry vector + strings OOMs
+  // (crashes) without it. This activity never inflates EPUB content, and onExit()
+  // silent-restarts (re-reserving the window on a fresh heap), so it is never
+  // re-allocated under fragmentation. Idempotent across the feed's repeated fetches.
+  // X4 is excluded: there the freed block fragmented the TLS handshake (30s reads).
+  if (gpio.deviceIsX3()) {
+    InflateReader::releaseWindow();
+  }
+
   // Preflight the contiguous heap. If TLS can't get its buffers the connect or an
   // in-flight read fails as an OOM-in-disguise and can hang for minutes; fail fast
   // instead. entries were just freed, so a retry from the ERROR state has more
@@ -551,11 +563,26 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     });
   }
 
-  if (!prevUrl.empty()) {
-    entries.insert(entries.begin(), OpdsEntry{OpdsEntryType::NAVIGATION, tr(STR_PREV_PAGE), "", prevUrl, ""});
-  }
-  if (!nextUrl.empty()) {
-    entries.push_back(OpdsEntry{OpdsEntryType::NAVIGATION, tr(STR_NEXT_PAGE), "", nextUrl, ""});
+  // Appending the prev/next nav links grows the just-moved, tightly-sized vector.
+  // On the X3's starved heap (a 37KB feed leaves ~2KB largest-block) that bare-`new`
+  // reallocation aborts() under -fno-exceptions. Reserve once, guarded by the largest
+  // contiguous block; if it won't fit, drop the nav links rather than crash — the
+  // page's books still render (the user just can't page-forward/back on that feed).
+  const size_t navLinks = (prevUrl.empty() ? 0 : 1) + (nextUrl.empty() ? 0 : 1);
+  if (navLinks > 0) {
+    const size_t needBytes = (entries.size() + navLinks) * sizeof(OpdsEntry) + 1024;
+    if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) >= needBytes) {
+      entries.reserve(entries.size() + navLinks);
+      if (!prevUrl.empty()) {
+        entries.insert(entries.begin(), OpdsEntry{OpdsEntryType::NAVIGATION, tr(STR_PREV_PAGE), "", prevUrl, ""});
+      }
+      if (!nextUrl.empty()) {
+        entries.push_back(OpdsEntry{OpdsEntryType::NAVIGATION, tr(STR_NEXT_PAGE), "", nextUrl, ""});
+      }
+    } else {
+      SdDebugLog::log("OPDS", "nav links dropped: low heap size=%u need=%u largest=%u", (unsigned)entries.size(),
+                      (unsigned)needBytes, (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    }
   }
 
   // Compute the on-SD marker once now, not per render. This is the single point
