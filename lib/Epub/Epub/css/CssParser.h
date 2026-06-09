@@ -3,7 +3,6 @@
 #include <HalStorage.h>
 
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -31,7 +30,8 @@
 class CssParser {
  public:
   // Bump when CSS cache format or rules change; section caches are invalidated when this changes
-  static constexpr uint8_t CSS_CACHE_VERSION = 6;
+  // v7: drop rules whose style sets no e-ink-relevant property (heap saving on CSS-heavy books)
+  static constexpr uint8_t CSS_CACHE_VERSION = 7;
 
   explicit CssParser(std::string cachePath) : cachePath(std::move(cachePath)) {}
   ~CssParser() = default;
@@ -104,8 +104,16 @@ class CssParser {
   bool loadFromCache();
 
  private:
-  // Storage: maps normalized selector -> style properties
-  std::unordered_map<std::string, CssStyle> rulesBySelector_;
+  // Storage: normalized selector -> style properties, kept sorted by selector.
+  // A flat vector (one contiguous allocation) instead of std::unordered_map
+  // (one separate heap node per rule). CSS-heavy EPUBs hold 200+ rules; the
+  // per-node allocations fragmented the heap and pushed big books past the
+  // section parser's heap floor (reader "out of bounds"). Lookups use
+  // binary search via findRule(); inserts keep the vector ordered.
+  std::vector<std::pair<std::string, CssStyle>> rulesBySelector_;
+
+  // Binary-search lookup into the sorted rules vector. Returns nullptr if absent.
+  [[nodiscard]] const CssStyle* findRule(const std::string& key) const;
 
   std::string cachePath;
 

@@ -435,14 +435,42 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(HalFile& jpegFile, Print& b
   }
 
   const bool progressiveDecode = (jpeg->getJPEGType() == JPEG_MODE_PROGRESSIVE);
+
+  // Desired final output size from the caller target (or full source when none).
+  // Computed from the ORIGINAL source so it is independent of the decode grid;
+  // used both to drive the BMP dimensions below and to pick the decode downscale.
+  int desiredOutWidth = srcWidth;
+  int desiredOutHeight = srcHeight;
+  if (targetWidth > 0 && targetHeight > 0 && (srcWidth != targetWidth || srcHeight != targetHeight)) {
+    const float scaleToFitWidth = static_cast<float>(targetWidth) / srcWidth;
+    const float scaleToFitHeight = static_cast<float>(targetHeight) / srcHeight;
+    const float scale = crop ? ((scaleToFitWidth > scaleToFitHeight) ? scaleToFitWidth : scaleToFitHeight)
+                             : ((scaleToFitWidth < scaleToFitHeight) ? scaleToFitWidth : scaleToFitHeight);
+    desiredOutWidth = static_cast<int>(srcWidth * scale);
+    desiredOutHeight = static_cast<int>(srcHeight * scale);
+    if (desiredOutWidth < 1) desiredOutWidth = 1;
+    if (desiredOutHeight < 1) desiredOutHeight = 1;
+  }
+
   int jpegScaleOption = 0;  // 0 = full resolution
   int scaleDenom = 1;
   if (progressiveDecode) {
     jpegScaleOption = JPEG_SCALE_EIGHTH;
     scaleDenom = 8;
   } else {
+    // (a) Keep the decode grid within the memory-safety cap.
     while (scaleDenom < 8 && (((srcWidth + scaleDenom - 1) / scaleDenom) > MAX_IMAGE_WIDTH ||
                               ((srcHeight + scaleDenom - 1) / scaleDenom) > MAX_IMAGE_HEIGHT)) {
+      scaleDenom *= 2;
+    }
+    // (b) Target-aware: keep halving the grid while it still fully covers the
+    // desired output. JPEGDEC's 1/2..1/8 downscale shrinks the per-row MCU
+    // buffer (MAX_MCU_HEIGHT * gridWidth) linearly — that buffer is the large
+    // contiguous allocation that failed for big covers under heap fragmentation,
+    // leaving the home screen stuck on a placeholder. For a 226px thumbnail this
+    // drops a 1456-wide grid (~23 KB row buffer) to ~182-wide (~3 KB).
+    while (scaleDenom < 8 && ((srcWidth + scaleDenom * 2 - 1) / (scaleDenom * 2)) >= desiredOutWidth &&
+           ((srcHeight + scaleDenom * 2 - 1) / (scaleDenom * 2)) >= desiredOutHeight) {
       scaleDenom *= 2;
     }
     jpegScaleOption = (scaleDenom == 8)   ? JPEG_SCALE_EIGHTH
@@ -464,9 +492,10 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(HalFile& jpegFile, Print& b
     return false;
   }
 
-  // Calculate output dimensions (pre-scale to fit display exactly)
-  int outWidth = srcWidth;
-  int outHeight = srcHeight;
+  // Final output dimensions: the caller target (desiredOut, computed above), or
+  // the decoder-native grid when no explicit target was given.
+  int outWidth = desiredOutWidth;
+  int outHeight = desiredOutHeight;
   if (targetWidth <= 0 || targetHeight <= 0) {
     // Without an explicit target, keep decoder-native dimensions.
     outWidth = decodedSrcWidth;
@@ -480,26 +509,9 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(HalFile& jpegFile, Print& b
   uint32_t scaleY_fp = 65536;
   bool needsScaling = false;
 
-  if (targetWidth > 0 && targetHeight > 0 && (srcWidth != targetWidth || srcHeight != targetHeight)) {
-    const float scaleToFitWidth = static_cast<float>(targetWidth) / srcWidth;
-    const float scaleToFitHeight = static_cast<float>(targetHeight) / srcHeight;
-    float scale = 1.0f;
-    if (crop) {
-      scale = (scaleToFitWidth > scaleToFitHeight) ? scaleToFitWidth : scaleToFitHeight;
-    } else {
-      scale = (scaleToFitWidth < scaleToFitHeight) ? scaleToFitWidth : scaleToFitHeight;
-    }
-
-    outWidth = static_cast<int>(srcWidth * scale);
-    outHeight = static_cast<int>(srcHeight * scale);
-    if (outWidth < 1) outWidth = 1;
-    if (outHeight < 1) outHeight = 1;
-
+  if (scaleSrcWidth != outWidth || scaleSrcHeight != outHeight) {
     LOG_DBG("JPG", "Scaling source %dx%d (decode grid %dx%d) -> %dx%d (target %dx%d)", srcWidth, srcHeight,
             scaleSrcWidth, scaleSrcHeight, outWidth, outHeight, targetWidth, targetHeight);
-  }
-
-  if (scaleSrcWidth != outWidth || scaleSrcHeight != outHeight) {
     scaleX_fp = (static_cast<uint32_t>(scaleSrcWidth) << 16) / outWidth;
     scaleY_fp = (static_cast<uint32_t>(scaleSrcHeight) << 16) / outHeight;
     needsScaling = true;

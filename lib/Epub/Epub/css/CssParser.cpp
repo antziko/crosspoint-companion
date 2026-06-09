@@ -466,12 +466,21 @@ void CssParser::processRuleBlockWithStyle(const std::string& selectorGroup, cons
       return;
     }
 
-    // Store or merge with existing
-    auto it = rulesBySelector_.find(key);
-    if (it != rulesBySelector_.end()) {
+    // Store or merge with existing (vector kept sorted by selector for binary search).
+    // Skip rules that set no e-ink-relevant property: resolveStyle only ever
+    // applyOver()s a matched rule, and applyOver(emptyStyle) is a no-op, so an
+    // absent selector and a present-but-empty one produce identical output.
+    // Calibre stylesheets often carry hundreds of class rules that set only
+    // color / font-family / text-transform (all unsupported) — storing each
+    // wasted ~130 B of heap and could push a CSS-heavy book past the parser's
+    // heap floor, leaving the reader stuck on the "out of bounds" screen.
+    auto it = std::lower_bound(
+        rulesBySelector_.begin(), rulesBySelector_.end(), key,
+        [](const std::pair<std::string, CssStyle>& e, const std::string& k) { return e.first < k; });
+    if (it != rulesBySelector_.end() && it->first == key) {
       it->second.applyOver(style);
-    } else {
-      rulesBySelector_[key] = style;
+    } else if (style.defined.anySet()) {
+      rulesBySelector_.insert(it, std::make_pair(key, style));
     }
   }
 }
@@ -626,6 +635,16 @@ bool CssParser::loadFromStream(HalFile& source) {
 
 // Style resolution
 
+const CssStyle* CssParser::findRule(const std::string& key) const {
+  const auto it = std::lower_bound(
+      rulesBySelector_.begin(), rulesBySelector_.end(), key,
+      [](const std::pair<std::string, CssStyle>& e, const std::string& k) { return e.first < k; });
+  if (it != rulesBySelector_.end() && it->first == key) {
+    return &it->second;
+  }
+  return nullptr;
+}
+
 CssStyle CssParser::resolveStyle(const std::string& tagName, const std::string& classAttr) const {
   static bool lowHeapWarningLogged = false;
   if (ESP.getFreeHeap() < MIN_FREE_HEAP_FOR_CSS) {
@@ -640,9 +659,8 @@ CssStyle CssParser::resolveStyle(const std::string& tagName, const std::string& 
   const std::string tag = normalized(tagName);
 
   // 1. Apply element-level style (lowest priority)
-  const auto tagIt = rulesBySelector_.find(tag);
-  if (tagIt != rulesBySelector_.end()) {
-    result.applyOver(tagIt->second);
+  if (const CssStyle* tagStyle = findRule(tag)) {
+    result.applyOver(*tagStyle);
   }
 
   // TODO: Support combinations of classes (e.g. style on .class1.class2)
@@ -652,10 +670,8 @@ CssStyle CssParser::resolveStyle(const std::string& tagName, const std::string& 
 
     for (const auto& cls : classes) {
       std::string classKey = "." + normalized(cls);
-
-      auto classIt = rulesBySelector_.find(classKey);
-      if (classIt != rulesBySelector_.end()) {
-        result.applyOver(classIt->second);
+      if (const CssStyle* classStyle = findRule(classKey)) {
+        result.applyOver(*classStyle);
       }
     }
 
@@ -663,10 +679,8 @@ CssStyle CssParser::resolveStyle(const std::string& tagName, const std::string& 
     // 3. Apply element.class styles (higher priority)
     for (const auto& cls : classes) {
       std::string combinedKey = tag + "." + normalized(cls);
-
-      auto combinedIt = rulesBySelector_.find(combinedKey);
-      if (combinedIt != rulesBySelector_.end()) {
-        result.applyOver(combinedIt->second);
+      if (const CssStyle* combinedStyle = findRule(combinedKey)) {
+        result.applyOver(*combinedStyle);
       }
     }
   }
@@ -803,6 +817,9 @@ bool CssParser::loadFromCache() {
     rulesBySelector_.clear();
     return false;
   }
+
+  // One contiguous allocation for all rules instead of per-node growth reallocs.
+  rulesBySelector_.reserve(ruleCount);
 
   auto hasRemainingBytes = [&file](const size_t neededBytes) -> bool {
     return static_cast<size_t>(file.available()) >= neededBytes;
@@ -941,8 +958,19 @@ bool CssParser::loadFromCache() {
     style.defined.direction = (definedBits & 1 << 16) != 0;
     style.defined.verticalAlign = (definedBits & 1 << 17) != 0;
 
-    rulesBySelector_[selector] = style;
+    // Defend against caches that still carry empty rules (see store-time note):
+    // an empty style contributes nothing to resolveStyle, so don't hold its heap.
+    if (style.defined.anySet()) {
+      rulesBySelector_.emplace_back(std::move(selector), style);
+    }
   }
+
+  // Cache entries are written in (unordered) container order; restore the sorted
+  // invariant that findRule()'s binary search relies on.
+  std::sort(rulesBySelector_.begin(), rulesBySelector_.end(),
+            [](const std::pair<std::string, CssStyle>& a, const std::pair<std::string, CssStyle>& b) {
+              return a.first < b.first;
+            });
 
   LOG_DBG("CSS", "Loaded %u rules from cache", ruleCount);
   return true;

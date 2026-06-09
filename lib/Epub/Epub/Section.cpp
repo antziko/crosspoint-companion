@@ -241,12 +241,23 @@ bool Section::createSectionFile(const int fontId, const float lineCompression, c
   // Bail gracefully instead: the caller surfaces the "out of bounds" screen with
   // the on-screen [E2 ... heap=N] overlay (readable on the USB-locked X3), and the
   // user can retry with more free heap (fewer open activities / after a reboot).
-  // 48KB clears the parser's peak with margin; normal reads sit at 80KB+ free.
-  constexpr size_t MIN_FREE_HEAP_FOR_PARSE = 48 * 1024;
+  //
+  // Scale the floor with the section's HTML size. The parser's peak working set
+  // grows with how much markup it chews, so a 3KB front-matter page needs far
+  // less than a 50KB chapter. A blanket 48KB floor needlessly rejected small
+  // sections on CSS-heavy books (~25KB resident CSS leaves free hovering just
+  // under 48KB), stranding the reader on "out of bounds" even though the parse
+  // would have fit easily. Floor ranges from a low base for tiny sections up to
+  // the original 48KB cap for large chapters; the cap preserves the crash margin
+  // that big sections still need. fileSize is the inflated (uncompressed) HTML.
+  constexpr size_t PARSE_FLOOR_MIN = 36 * 1024;
+  constexpr size_t PARSE_FLOOR_MAX = 48 * 1024;
+  size_t requiredHeap = PARSE_FLOOR_MIN + fileSize;
+  if (requiredHeap > PARSE_FLOOR_MAX) requiredHeap = PARSE_FLOOR_MAX;
   const size_t freeHeap = esp_get_free_heap_size();
-  if (freeHeap < MIN_FREE_HEAP_FOR_PARSE) {
-    LOG_ERR("SCT", "Low heap (%u < %u) before parse — skip to avoid OOM crash", (unsigned)freeHeap,
-            (unsigned)MIN_FREE_HEAP_FOR_PARSE);
+  if (freeHeap < requiredHeap) {
+    LOG_ERR("SCT", "Low heap (%u < %u, html=%u) before parse — skip to avoid OOM crash", (unsigned)freeHeap,
+            (unsigned)requiredHeap, (unsigned)fileSize);
     Storage.remove(tmpHtmlPath.c_str());
     file.close();
     Storage.remove(filePath.c_str());

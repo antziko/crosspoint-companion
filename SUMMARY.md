@@ -1355,3 +1355,48 @@ The SD cover probe was stripped after diagnosis (kept the `LOG_DBG/LOG_ERR` line
 
 **Files:** `lib/JpegToBmpConverter/JpegToBmpConverter.cpp`, `src/activities/home/HomeActivity.cpp`,
 `lib/Epub/Epub/converters/PixelCache.h`, `lib/Epub/Epub/Section.cpp`.
+
+## 62. Reader "out of bounds" on CSS-heavy books (Project Hail Mary) = CSS heap pressure + over-conservative parse floor — RESOLVED
+
+**Symptom:** opening *Andy Weir - Project Hail Mary* dropped straight to the "out of bounds" screen
+(`[E1 spine=N heap=M]`). Front-matter and chapters failed to index. Unaffected books opened fine.
+
+**Diagnosis (device logs, three iterations):** the book carries **294 CSS rules** (vs ~63 for a typical book).
+The section parser logged `Low heap (38352 < 49152) before parse — skip to avoid OOM crash` — the §61-batch
+heap-floor guard (`Section.cpp`, blanket 48KB) bailing because resident CSS ate the headroom, so no pages built →
+page index out of range → "out of bounds". Two compounding costs:
+1. **CSS footprint** — ~234 useful rules × ~100B `CssStyle` + container overhead held resident the whole parse.
+2. **Container fragmentation** — rules lived in `std::unordered_map`, i.e. one separately-malloc'd node per rule;
+   234 tiny allocations fragmented the heap and added ~5–6KB node/bucket overhead.
+
+**Changes (three landed together):**
+- **Drop empty CSS rules** (`CssParser.cpp`, `CSS_CACHE_VERSION` 6→7): skip storing any rule whose `CssStyle`
+  sets no e-ink-relevant property. `resolveStyle` only ever `applyOver()`s a matched rule and `applyOver(empty)`
+  is a no-op, so an absent selector and a present-but-empty one are identical in output — safe to drop. Filtered
+  at both parse-time store and cache load. Result: 294→234 rules, free heap 38352→45700.
+- **`unordered_map` → sorted flat `std::vector<pair<string,CssStyle>>`** (`CssParser.{h,cpp}`): one contiguous
+  allocation instead of 234 fragmenting nodes; lookups via `findRule()` binary search (`std::lower_bound`),
+  inserts keep the vector ordered, cache load `reserve()`s then `std::sort`s once. Saves the per-node overhead and
+  defragments. Sections 3/4/5 then parsed and rendered.
+- **Size-aware parse floor** (`Section.cpp`): replace the blanket 48KB with
+  `required = clamp(36KB + inflatedHtmlBytes, 36KB, 48KB)`. The parser's peak working set scales with section
+  size, so a 3KB front-matter page no longer needs the same headroom as a 50KB chapter. Last blocker was index 2
+  (3165B HTML) failing by **712 bytes** (48440 < 49152); it now needs only ~40KB. Large chapters keep the 48KB
+  cap (crash margin unchanged). Log now prints `html=N` for the failing section.
+
+**Notes:** `buildFailedSpine` (`EpubReaderActivity.cpp`) is RAM-only and cleared by navigating away — no SD lockout,
+no `.crosspoint/` delete needed. Empty-rule drop is layout-neutral (no-ops removed) so `SECTION_FILE_VERSION` stays
+25; only `CSS_CACHE_VERSION` bumped (self-invalidates `/css_rules.cache`). Front-matter is fixed device-confirmed
+through §62 iterations; large novel chapters now have the best odds yet but sit near the 48KB cap (~50KB free) —
+next lever if one trips: reclaim font-cache heap during parse, or lower the cap.
+
+**Also in this batch — Home cover-thumb scale-aware decode (§61 #1 follow-through), device-confirmed:** the thumb
+JPEG path (`JpegToBmpConverter::jpegFileToBmpStreamInternal`) only downscaled the decode grid to fit the
+`MAX_IMAGE` safety cap, so a 1456-wide cover decoded at full width → ~23KB contiguous MCU row buffer that failed
+under fragmentation (or tripped the §61 28KB block guard), stranding the home tile on a placeholder. Now
+**target-aware**: compute the desired output first, then pick the largest JPEGDEC 1/8..1/2 denom whose grid still
+covers the output. A 226px thumbnail decodes at ~183px grid (~3KB row buffer, was ~23KB) and ~64× fewer pixels.
+Device log confirms: `JPEG decode uses 1/8 source: 183x275 … success: yes`.
+
+**Files:** `lib/Epub/Epub/css/CssParser.{h,cpp}`, `lib/Epub/Epub/Section.cpp`,
+`lib/JpegToBmpConverter/JpegToBmpConverter.cpp`.
