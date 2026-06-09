@@ -1400,3 +1400,77 @@ Device log confirms: `JPEG decode uses 1/8 source: 183x275 … success: yes`.
 
 **Files:** `lib/Epub/Epub/css/CssParser.{h,cpp}`, `lib/Epub/Epub/Section.cpp`,
 `lib/JpegToBmpConverter/JpegToBmpConverter.cpp`.
+
+## 63. §59's +32KB inflate window starved HTTPS — make it heap-backed + reclaimable — DEVICE-CONFIRMED (commit 7dc4f437)
+
+**Symptom:** after §59 reserved the 32KB DEFLATE window in BSS (heap pool 223→191KB), HTTPS KOSync on X4 failed
+the TLS heap preflight with `LOW_MEMORY` (`Insufficient heap for TLS handshake: 30016 free, need 55000`). The
+reading-time "out of bounds" fix had eaten the network headroom.
+
+**Diagnosis:** the 32KB window is needed only while *decompressing EPUB content* (reading) — never during OPDS/KOSync,
+which don't inflate. Yet as a static BSS array it sat resident the whole time. Pre-§59 it was malloc-on-demand, so it
+was *free* during a sync; §59 made it permanent.
+
+**Change:** move the window from a BSS array to a **heap buffer** (`InflateReader`): reserved once at boot via
+`ensureWindow()` while the heap is pristine (still guaranteed contiguous — the §59 guarantee), but freeable via
+`releaseWindow()`. `init(true)`/`acquireScratch()` fall back to `malloc` when it's released. `.bss` drops exactly
+32KB. KOSync calls `releaseWindow()` before its handshakes; its `onExit` silent-restart re-reserves it on a fresh
+heap, so it is **never re-`malloc`'d under fragmentation** (no §59 regression). HTTP requests are scheme-gated to
+skip the TLS-sized preflight entirely (`heapOkForUrl` in `KOReaderSyncClient`, `minContiguousForUrl` in
+`OpdsBookBrowserActivity`) — plain `http://` does no handshake, so the local-server case (Calibre) stops being
+falsely rejected. Result: HTTPS KOSync GET/progress sync restored (200s); HTTP OPDS/KOSync work.
+
+**Did NOT fix (different bottlenecks, not heap-amount):** (a) **X4 HTTPS OPDS** — releasing the window there made it
+*worse* (30s reads / "memory error"): freeing a mid-session block ≠ a pristine pool, so the TLS handshake's many
+small allocations re-fragment and still crater. The OPDS reclaim was **reverted** on X4. (b) **KOSync `BOOKMARKS_PUT`**
+— the window is already released; the residual failure is the 3rd back-to-back handshake starving the *socket*
+(§47), connection state not heap. Both need bigger levers (framebuffer→heap, or a from-source `MBEDTLS_DYNAMIC_BUFFER`
+build); both judged out-of-scope vs. the cost/risk.
+
+**Lesson:** a release-and-reboot reclaim only helps when the bottleneck is heap *amount*. It does nothing for
+*contiguous-block fragmentation during a handshake* or *socket exhaustion* — diagnose which before reaching for it.
+Freeing a buffer mid-session is not equivalent to never having allocated it (the heap layout differs).
+
+## 64. X3 OOM-abort crashes in CSS / OPDS parse — graceful bails + X3 window reclaim — addr2line-CONFIRMED (commit 75163b86)
+
+**Symptom:** X3 (less RAM than X4, USB-locked / no serial) crashed opening CSS-heavy books and browsing large OPDS
+feeds. Three `crash_report.txt`s, all `abort() ... at PC 0x4219xxxx`.
+
+**Diagnosis (addr2line on `firmware.elf`):** all three are the **same class** — a bare-`new` *container reallocation*
+hitting OOM, which under `-fno-exceptions` calls `abort()` (does **not** return null):
+1. `CssParser` rule vector (`std::vector<pair<string,CssStyle>>`) growing on insert.
+2. `OpdsParser::endElement` — `entries.push_back` growing on a 37KB feed at ~7KB free.
+3. `OpdsBookBrowserActivity` — appending prev/next nav links reallocates the just-moved entry vector.
+
+The SD trace (added this batch — X3 has no serial) showed feed parses running at `largest8=2036`, free ~7KB, with
+13–40s `STALL`s: the heap is exhausted *during the fetch*, not at baseline (~64KB between feeds).
+
+**Changes:**
+- **Graceful bails** at each growth point: pre-check `heap_caps_get_largest_free_block` against the *next
+  reallocation size* (need-proportional, so small feeds don't misfire as a fixed free-heap threshold did — see the
+  `OpdsParser.cpp` note that an earlier fixed check cut a small feed to 4 entries); on shortfall, stop adding /
+  mark truncated instead of aborting. Book/feed renders partial, never crashes.
+- **X3 inflate-window reclaim** (`gpio.deviceIsX3()` only): release the 32KB window before an OPDS fetch (OPDS never
+  inflates; `onExit` silent-restart re-reserves). +32KB lets the entry vector fit — X3 OPDS device-confirmed working,
+  HTTP and HTTPS. **X4 excluded** (the §63 fragmentation reason; X4 retest gave "memory error" again).
+- **SD instrumentation**: per-CSS-file heap snapshot, the bail points, JPEG cover-decode bail reasons, per-cover
+  `generateThumbBmp` result.
+
+**Covers "not rendering":** confirmed via the trace to be **transient fragmentation** — the same cover that bailed
+(`largest=17396 < 28672`) succeeded on a later attempt (`largest=47092`). The existing guard safe-degrades to a
+placeholder and regenerates; not a bug. No code change.
+
+**Lessons:**
+- On `-fno-exceptions` ESP32, **every** container that grows (`vector::push_back`/`insert`, `string` append, map
+  insert) is a latent `abort()` on a starved heap — not just explicit `new`. Count-based caps (`MAX_RULES`,
+  `MAX_ENTRIES`) don't protect against it; the failure is the *contiguous reallocation*, so guards must check
+  `largest_free_block` proportional to the next growth.
+- Whack-a-mole is the tell: three crash sites, one root (X3 OPDS over-budget). Per-site bails stop the crash; the
+  systemic relief was the +32KB reclaim. Prefer the systemic lever once the pattern is clear.
+- For a serial-less target, route diagnostics to SD (`SdDebugLog`) and read the panic ring buffer in
+  `crash_report.txt`; `addr2line` on the matching `firmware.elf` resolves the abort even from an uncommitted build
+  (version string unchanged) — the call chain, not the exact line, is the signal.
+
+**Files:** `lib/Epub/Epub/css/CssParser.{h,cpp}`, `lib/Epub/Epub.cpp`, `lib/OpdsParser/OpdsParser.cpp`,
+`src/activities/browser/OpdsBookBrowserActivity.cpp`, `src/activities/home/HomeActivity.cpp`,
+`lib/JpegToBmpConverter/JpegToBmpConverter.cpp`.

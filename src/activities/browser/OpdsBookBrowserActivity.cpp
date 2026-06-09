@@ -421,7 +421,8 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   // (crashes) without it. This activity never inflates EPUB content, and onExit()
   // silent-restarts (re-reserving the window on a fresh heap), so it is never
   // re-allocated under fragmentation. Idempotent across the feed's repeated fetches.
-  // X4 is excluded: there the freed block fragmented the TLS handshake (30s reads).
+  // X4 excluded: there the freed mid-session block fragments rather than helps — the
+  // HTTPS handshake still craters (30s reads) or fails the preflight ("memory error").
   if (gpio.deviceIsX3()) {
     InflateReader::releaseWindow();
   }
