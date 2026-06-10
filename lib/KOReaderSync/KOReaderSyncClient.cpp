@@ -47,6 +47,13 @@ constexpr int HTTP_BUF_SIZE = 2048;
 // On X3 in settings context after WiFi, only ~53KB is free — below this threshold.
 // Auth-from-settings will show LOW_MEMORY on X3 with HTTPS servers. The workaround is
 // to sync from within the reader, which releases the epub first and frees enough RAM.
+// Tested down to 50000 (X4, settings-context, kosync.yapaa.org Cloudflare tunnel): even with
+// ~50.9KB free after the inflate-window release, mbedtls_ssl_setup failed with SSL_ALLOC_FAILED
+// (-0x7F00). The killer is contiguous space, not total free: the SSL in_buf + out_buf each need
+// ~16KB contiguous, and after the first carves the lone 32KB block the second can't fit. So the
+// real bar is two 16KB slabs, which settings-context (no epub to release) can't supply. Keep the
+// guard high enough to fail fast with a clean LOW_MEMORY ("sync from the reader") message instead
+// of an mbedTLS connect error. Reader-context sync frees ~65KB epub and handshakes fine.
 constexpr uint32_t MIN_HEAP_FOR_TLS = 55000;
 
 // Plain HTTP does no TLS handshake, so it never allocates the mbedTLS arena. It

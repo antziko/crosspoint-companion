@@ -2,6 +2,7 @@
 
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <InflateReader.h>
 #include <SdDebugLog.h>
 #include <WiFi.h>
 
@@ -30,6 +31,14 @@ void KOReaderAuthActivity::onWifiSelectionComplete(const bool success) {
     statusMessage = tr(STR_AUTHENTICATING);
   }
   requestUpdate();
+
+  // Reclaim the 32KB inflate window (reserved at boot in main.cpp) for the TLS
+  // handshake. Settings-context auth never inflates, and onExit() always reboots
+  // (silentRestartToSettings) — which re-reserves the window on a fresh heap — so
+  // it is never re-allocated here. Without this, X3 has only ~53KB free during
+  // the handshake, below MIN_HEAP_FOR_TLS, and HTTPS auth fails with LOW_MEMORY.
+  // Mirrors KOReaderSyncActivity's reader-context release.
+  InflateReader::releaseWindow();
 
   performAuthentication();
 }
