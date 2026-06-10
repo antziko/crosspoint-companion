@@ -376,9 +376,12 @@ void BookStatsActivity::renderHeatmap(const Rect& rect) const {
   }
 
   // Grid: shade each tracked day by reading-intensity level — light gray for
-  // <=30min, dark gray for <=1h, solid black for >1h. Untracked days and
-  // tracked days with no reading both render as plain white (None), so "no
-  // data yet" and "no reading that day" are visually indistinguishable by design.
+  // <=30min, dark gray for <=1h, solid black for >1h. Each cell's footprint is
+  // cellSize - CELL_GAP, leaving a 1px white strip on its right and bottom, so
+  // every neighbour (horizontal and vertical) is separated by 1px of white and
+  // no two cells ever share or double a border. Untracked days and tracked days
+  // with no reading both render as plain white (None), so "no data yet" and "no
+  // reading that day" are visually indistinguishable by design.
   for (int col = 0; col < columns; ++col) {
     const uint32_t monday = weekMonday(col);
     for (uint32_t row = 0; row < static_cast<uint32_t>(ROWS); ++row) {
@@ -401,4 +404,9 @@ void BookStatsActivity::renderHeatmap(const Rect& rect) const {
       }
     }
   }
+
+  // Single frame around the whole grid, 1px white gutter outside the cells so an
+  // edge cell never merges into it. gridWidth/gridHeight include the trailing
+  // right/bottom CELL_GAP, so subtract it before adding the gutter + frame.
+  renderer.drawRect(gridX - 2, gridY - 2, gridWidth - CELL_GAP + 4, gridHeight - CELL_GAP + 4, true);
 }

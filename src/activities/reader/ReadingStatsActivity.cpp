@@ -370,14 +370,13 @@ void ReadingStatsActivity::renderHeatmap(const Rect& rect) const {
     renderer.drawText(SMALL_FONT_ID, gridX - 4 - textW, labelY, initial);
   }
 
-  // Grid: every in-range day gets a 1px black border so the rows and columns are
-  // clearly delineated — including no-reading days, which would otherwise be
-  // invisible white. The intensity shade fills the interior (inset 1px inside the
-  // border): light gray for <=30min, dark gray for <=1h, solid black for >1h. The
-  // CELL_GAP leaves a 1px white separator between neighbours so adjacent borders
-  // (and adjacent solid-black days) stay visually distinct. Out-of-range cells
-  // (before tracking started / after today) are skipped entirely — unbordered
-  // blank — so "no data yet" still reads differently from an in-range no-reading day.
+  // Grid: shade each tracked day by reading-intensity level — light gray for
+  // <=30min, dark gray for <=1h, solid black for >1h. Each cell's footprint is
+  // cellSize - CELL_GAP, leaving a 1px white strip on its right and bottom, so
+  // every neighbour (horizontal and vertical) is separated by 1px of white and
+  // no two cells ever share or double a border. Untracked days and tracked days
+  // with no reading both render as plain white (None), so "no data yet" and "no
+  // reading that day" are visually indistinguishable by design.
   for (int col = 0; col < columns; ++col) {
     const uint32_t monday = weekMonday(col);
     for (uint32_t row = 0; row < static_cast<uint32_t>(ROWS); ++row) {
@@ -385,27 +384,24 @@ void ReadingStatsActivity::renderHeatmap(const Rect& rect) const {
       if (dayIdx > anchorDay || dayIdx < oldestTrackedDay) continue;
       const int cx = gridX + col * cellSize;
       const int cy = gridY + static_cast<int>(row) * cellSize;
-      const int box = cellSize - CELL_GAP;  // cell footprint; the gap separates neighbours
-
-      // Border first, then fill the interior so the fill never paints over the border.
-      renderer.drawRect(cx, cy, box, box, true);
-      const int fx = cx + 1;
-      const int fy = cy + 1;
-      const int fillSize = box - 2;
-      if (fillSize <= 0) continue;  // cell too small for an interior (shouldn't happen at cellFloor)
       switch (history.getHeatmapLevel(anchorDay - dayIdx)) {
         case ReadingTimeHistory::HeatmapLevel::Heavy:
-          renderer.fillRect(fx, fy, fillSize, fillSize, true);
+          renderer.fillRect(cx, cy, cellSize - CELL_GAP, cellSize - CELL_GAP, true);
           break;
         case ReadingTimeHistory::HeatmapLevel::Moderate:
-          renderer.fillRectDither(fx, fy, fillSize, fillSize, Color::DarkGray);
+          renderer.fillRectDither(cx, cy, cellSize - CELL_GAP, cellSize - CELL_GAP, Color::DarkGray);
           break;
         case ReadingTimeHistory::HeatmapLevel::Light:
-          renderer.fillRectDither(fx, fy, fillSize, fillSize, Color::LightGray);
+          renderer.fillRectDither(cx, cy, cellSize - CELL_GAP, cellSize - CELL_GAP, Color::LightGray);
           break;
         case ReadingTimeHistory::HeatmapLevel::None:
           break;
       }
     }
   }
+
+  // Single frame around the whole grid, 1px white gutter outside the cells so an
+  // edge cell never merges into it. gridWidth/gridHeight include the trailing
+  // right/bottom CELL_GAP, so subtract it before adding the gutter + frame.
+  renderer.drawRect(gridX - 2, gridY - 2, gridWidth - CELL_GAP + 4, gridHeight - CELL_GAP + 4, true);
 }
