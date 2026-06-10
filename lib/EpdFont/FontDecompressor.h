@@ -2,6 +2,7 @@
 
 #include <InflateReader.h>
 
+#include <memory>
 #include <vector>
 
 #include "EpdFontData.h"
@@ -69,11 +70,19 @@ class FontDecompressor {
   // Kept in byte-aligned format; individual glyphs are compacted on demand into hotGlyphBuf.
   const EpdFontData* hotGroupFont = nullptr;
   uint16_t hotGroupIndex = UINT16_MAX;
-  std::vector<uint8_t> hotGroup;
+  // Nothrow heap buffer (NOT std::vector): vector::resize throws bad_alloc on
+  // OOM, which under -fno-exceptions calls std::terminate -> abort(). This path
+  // runs in the render loop on the tight X3 heap, so the allocation must degrade
+  // gracefully (return nullptr -> glyph skipped) instead of crashing. Grow-only:
+  // hotGroupCap is the allocated size, hotGroupSize the current logical length.
+  std::unique_ptr<uint8_t[]> hotGroup;
+  uint32_t hotGroupCap = 0;
+  uint32_t hotGroupSize = 0;
 
   // Scratch buffer for compacting a single glyph from the hot group.
-  // Valid until the next getBitmap() call.
-  std::vector<uint8_t> hotGlyphBuf;
+  // Valid until the next getBitmap() call. Same nothrow grow-only policy.
+  std::unique_ptr<uint8_t[]> hotGlyphBuf;
+  uint32_t hotGlyphBufCap = 0;
 
   void freePageBuffer();
   void freeHotGroup();

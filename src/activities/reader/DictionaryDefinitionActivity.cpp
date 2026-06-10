@@ -1,6 +1,7 @@
 #include "DictionaryDefinitionActivity.h"
 
 #include <DictHtmlRenderer.h>
+#include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
@@ -27,6 +28,15 @@ static constexpr char kBullet[] = "- ";
 
 void DictionaryDefinitionActivity::onEnter() {
   Activity::onEnter();
+  // Heap reclaim: this activity is PUSHED on top of a still-resident reader
+  // (ActivityManager keeps the backgrounded activity alive — no onExit). On the
+  // tight X3 heap that leaves little headroom for the dictionary's own layout +
+  // glyph decompress. Drop the reader's prewarmed font-cache page slots now; we
+  // re-prewarm our own glyphs in wrapText() below, and the reader auto-re-prewarms
+  // on its next render after this activity is popped. Self-healing, ~tens of KB.
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    fcm->clearCache();
+  }
   wrapText();
   requestUpdate();
   // SD write overlaps the e-ink refresh kicked by requestUpdate() on the render task.

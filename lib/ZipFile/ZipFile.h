@@ -8,6 +8,26 @@
 
 class ZipFile {
  public:
+  // Phase A-2 diagnostics: readFileToStream() has many distinct failure exits,
+  // each LOG_ERR'd — invisible on the USB-locked X3. This sub-reason is threaded
+  // out so the [E2/STREAM:<tag>] overlay says WHICH one fired for a given spine.
+  enum class StreamResult : uint8_t {
+    Ok = 0,
+    OpenFail,       // zip could not be opened
+    NotFound,       // entry name not in central dir (href ↔ zip-name mismatch)
+    BadOffset,      // bad/corrupt local header offset
+    Oom,            // chunk buffer allocation failed
+    ShortRead,      // STORED entry: read returned 0 before end
+    WriteFail,      // output stream (temp HTML) write failed
+    InflateInit,    // inflate window allocation/init failed
+    DeflateError,   // corrupt/truncated deflate stream
+    SizeMismatch,   // inflated size != central-dir uncompressed size
+    Oversize,       // produced more than expected (corrupt)
+    Unsupported,    // compression method neither STORED nor DEFLATED
+  };
+  // Short tag for overlays/logs, e.g. "NOTFOUND". Never null.
+  static const char* streamResultTag(StreamResult r);
+
   struct FileStatSlim {
     uint16_t method;             // Compression method
     uint32_t compressedSize;     // Compressed size
@@ -69,7 +89,7 @@ class ZipFile {
   // Due to the memory required to run each of these, it is recommended to not preopen the zip file for multiple
   // These functions will open and close the zip as needed
   uint8_t* readFileToMemory(const char* filename, size_t* size = nullptr, bool trailingNullByte = false);
-  bool readFileToStream(const char* filename, Print& out, size_t chunkSize);
+  bool readFileToStream(const char* filename, Print& out, size_t chunkSize, StreamResult* outResult = nullptr);
 
   template <typename F>
   bool enumerateFilePaths(F&& callback) {

@@ -11,6 +11,7 @@
 #include <Logging.h>
 #include <Memory.h>
 #include <Serialization.h>
+#include <ZipFile.h>
 #include <esp_system.h>
 
 #include <algorithm>
@@ -1260,20 +1261,36 @@ void EpubReaderActivity::render(RenderLock&& lock) {
         GUI.fillPopupProgress(renderer, indexingPopup, pct);
       };
 
+      Section::BuildFailure buildFailure;
       if (!section->createSectionFile(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
                                       SETTINGS.getReaderExtraParagraphSpacing(), SETTINGS.getReaderParagraphAlignment(),
                                       viewportWidth, viewportHeight, SETTINGS.getReaderHyphenationEnabled(),
                                       SETTINGS.embeddedStyle, SETTINGS.imageRendering, SETTINGS.focusReadingEnabled,
-                                      popupFn)) {
+                                      popupFn, &buildFailure)) {
         LOG_ERR("ERS", "Failed to persist page data to SD");
         buildFailedSpine = currentSpineIndex;  // stop the per-frame rebuild loop
         section.reset();
         renderer.clearScreen();
         renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_OUT_OF_BOUNDS), true, EpdFontFamily::BOLD);
         {
-          char dbg[48];
-          snprintf(dbg, sizeof(dbg), "[E2 spine=%d heap=%u]", currentSpineIndex, (unsigned)esp_get_free_heap_size());
+          // Phase-A overlay: buildFailure carries WHICH branch failed + the heap
+          // captured AT the failure point (before createSectionFile's cleanup), so
+          // this is the real number, not the post-reset heap. Line 1: reason+heap.
+          // Line 2: heap floor + inflated HTML size (LowHeap diagnosis).
+          char dbg[72];
+          if (buildFailure.reason == Section::BuildFailure::Reason::Stream) {
+            // Phase A-2: append the ZipFile sub-reason so STREAM says which exit.
+            snprintf(dbg, sizeof(dbg), "[E2/STREAM:%s spine=%d heap=%u]",
+                     ZipFile::streamResultTag(static_cast<ZipFile::StreamResult>(buildFailure.streamSub)),
+                     currentSpineIndex, (unsigned)buildFailure.failHeap);
+          } else {
+            snprintf(dbg, sizeof(dbg), "[E2/%s spine=%d heap=%u]", Section::buildFailureTag(buildFailure.reason),
+                     currentSpineIndex, (unsigned)buildFailure.failHeap);
+          }
           renderer.drawCenteredText(UI_12_FONT_ID, 330, dbg, true);
+          char dbg2[64];
+          snprintf(dbg2, sizeof(dbg2), "floor=%u html=%u", (unsigned)buildFailure.floor, (unsigned)buildFailure.htmlSize);
+          renderer.drawCenteredText(UI_12_FONT_ID, 355, dbg2, true);
         }
         // No renderStatusBar(): section was just reset (null) and it derefs section->.
         renderer.displayBuffer();

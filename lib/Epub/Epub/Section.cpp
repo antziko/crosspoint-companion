@@ -149,11 +149,41 @@ bool Section::clearCache() const {
   return true;
 }
 
+const char* Section::buildFailureTag(BuildFailure::Reason r) {
+  switch (r) {
+    case BuildFailure::Reason::Stream:
+      return "STREAM";
+    case BuildFailure::Reason::LowHeap:
+      return "LOWHEAP";
+    case BuildFailure::Reason::OpenWrite:
+      return "OPENW";
+    case BuildFailure::Reason::Parse:
+      return "PARSE";
+    case BuildFailure::Reason::Lut:
+      return "LUT";
+    case BuildFailure::Reason::None:
+      return "NONE";
+  }
+  return "?";
+}
+
 bool Section::createSectionFile(const int fontId, const float lineCompression, const bool extraParagraphSpacing,
                                 const uint8_t paragraphAlignment, const uint16_t viewportWidth,
                                 const uint16_t viewportHeight, const bool hyphenationEnabled, const bool embeddedStyle,
                                 const uint8_t imageRendering, const bool focusReadingEnabled,
-                                const std::function<void(int)>& popupFn) {
+                                const std::function<void(int)>& popupFn, BuildFailure* outFailure) {
+  // Record which failure branch fired + free heap captured BEFORE any cleanup
+  // (Storage.remove / cssParser->clear / file.close recover heap, so sampling
+  // after them hides the real failure-point number). See Section.h::BuildFailure.
+  const auto setFailure = [outFailure](BuildFailure::Reason reason, uint32_t floor, uint32_t htmlSize,
+                                       uint8_t streamSub = 0) {
+    if (!outFailure) return;
+    outFailure->reason = reason;
+    outFailure->failHeap = esp_get_free_heap_size();
+    outFailure->floor = floor;
+    outFailure->htmlSize = htmlSize;
+    outFailure->streamSub = streamSub;
+  };
   const auto localPath = epub->getSpineItem(spineIndex).href;
   const auto tmpHtmlPath = epub->getCachePath() + "/.tmp_" + std::to_string(spineIndex) + ".html";
 
@@ -166,6 +196,7 @@ bool Section::createSectionFile(const int fontId, const float lineCompression, c
   // Retry logic for SD card timing issues
   bool success = false;
   uint32_t fileSize = 0;
+  uint8_t streamReason = 0;  // last attempt's ZipFile::StreamResult (Phase A-2)
   for (int attempt = 0; attempt < 3 && !success; attempt++) {
     if (attempt > 0) {
       LOG_DBG("SCT", "Retrying stream (attempt %d)...", attempt + 1);
@@ -181,7 +212,7 @@ bool Section::createSectionFile(const int fontId, const float lineCompression, c
     if (!Storage.openFileForWrite("SCT", tmpHtmlPath, tmpHtml)) {
       continue;
     }
-    success = epub->readItemContentsToStream(localPath, tmpHtml, 1024);
+    success = epub->readItemContentsToStream(localPath, tmpHtml, 1024, &streamReason);
     fileSize = tmpHtml.size();
     // Explicitly close() file before calling Storage.remove()
     tmpHtml.close();
@@ -195,12 +226,14 @@ bool Section::createSectionFile(const int fontId, const float lineCompression, c
 
   if (!success) {
     LOG_ERR("SCT", "Failed to stream item contents to temp file after retries");
+    setFailure(BuildFailure::Reason::Stream, 0, 0, streamReason);
     return false;
   }
 
   LOG_DBG("SCT", "Streamed temp HTML to %s (%d bytes)", tmpHtmlPath.c_str(), fileSize);
 
   if (!Storage.openFileForWrite("SCT", filePath, file)) {
+    setFailure(BuildFailure::Reason::OpenWrite, 0, fileSize);
     return false;
   }
   writeSectionFileHeader(fontId, lineCompression, extraParagraphSpacing, paragraphAlignment, viewportWidth,
@@ -258,6 +291,7 @@ bool Section::createSectionFile(const int fontId, const float lineCompression, c
   if (freeHeap < requiredHeap) {
     LOG_ERR("SCT", "Low heap (%u < %u, html=%u) before parse — skip to avoid OOM crash", (unsigned)freeHeap,
             (unsigned)requiredHeap, (unsigned)fileSize);
+    setFailure(BuildFailure::Reason::LowHeap, requiredHeap, fileSize);
     Storage.remove(tmpHtmlPath.c_str());
     file.close();
     Storage.remove(filePath.c_str());
@@ -280,6 +314,7 @@ bool Section::createSectionFile(const int fontId, const float lineCompression, c
   Storage.remove(tmpHtmlPath.c_str());
   if (!success) {
     LOG_ERR("SCT", "Failed to parse XML and build pages");
+    setFailure(BuildFailure::Reason::Parse, 0, fileSize);
     // Explicitly close() file before calling Storage.remove()
     file.close();
     Storage.remove(filePath.c_str());
@@ -302,6 +337,7 @@ bool Section::createSectionFile(const int fontId, const float lineCompression, c
 
   if (hasFailedLutRecords) {
     LOG_ERR("SCT", "Failed to write LUT due to invalid page positions");
+    setFailure(BuildFailure::Reason::Lut, 0, fileSize);
     // Explicitly close() file before calling Storage.remove()
     file.close();
     Storage.remove(filePath.c_str());

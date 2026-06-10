@@ -441,15 +441,60 @@ uint8_t* ZipFile::readFileToMemory(const char* filename, size_t* size, const boo
   return data;
 }
 
-bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t chunkSize) {
+const char* ZipFile::streamResultTag(StreamResult r) {
+  switch (r) {
+    case StreamResult::Ok:
+      return "OK";
+    case StreamResult::OpenFail:
+      return "OPENFAIL";
+    case StreamResult::NotFound:
+      return "NOTFOUND";
+    case StreamResult::BadOffset:
+      return "BADOFFSET";
+    case StreamResult::Oom:
+      return "OOM";
+    case StreamResult::ShortRead:
+      return "SHORTREAD";
+    case StreamResult::WriteFail:
+      return "WRITEFAIL";
+    case StreamResult::InflateInit:
+      return "INFLATEINIT";
+    case StreamResult::DeflateError:
+      return "DEFLATEERR";
+    case StreamResult::SizeMismatch:
+      return "SIZEMISMATCH";
+    case StreamResult::Oversize:
+      return "OVERSIZE";
+    case StreamResult::Unsupported:
+      return "UNSUPPORTED";
+  }
+  return "?";
+}
+
+bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t chunkSize, StreamResult* outResult) {
+  // Default to Ok; overwritten at each failure exit below.
+  const auto setResult = [outResult](StreamResult r) {
+    if (outResult) *outResult = r;
+  };
+  setResult(StreamResult::Ok);
+
   const ScopedOpenClose zip{*this};
-  if (!zip) return false;
+  if (!zip) {
+    setResult(StreamResult::OpenFail);
+    return false;
+  }
 
   FileStatSlim fileStat = {};
-  if (!loadFileStatSlim(filename, &fileStat)) return false;
+  if (!loadFileStatSlim(filename, &fileStat)) {
+    setResult(StreamResult::NotFound);
+    return false;
+  }
 
   const long fileOffset = getDataOffset(fileStat);
-  if (fileOffset < 0) return false;
+  if (fileOffset < 0) {
+    setResult(StreamResult::BadOffset);
+    return false;
+  }
 
   file.seek(fileOffset);
   const auto deflatedDataSize = fileStat.compressedSize;
@@ -460,6 +505,7 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
     const auto buffer = static_cast<uint8_t*>(malloc(chunkSize));
     if (!buffer) {
       LOG_ERR("ZIP", "Failed to allocate memory for buffer");
+      setResult(StreamResult::Oom);
       return false;
     }
 
@@ -468,12 +514,14 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
       const size_t dataRead = file.read(buffer, remaining < chunkSize ? remaining : chunkSize);
       if (dataRead == 0) {
         LOG_ERR("ZIP", "Could not read more bytes");
+        setResult(StreamResult::ShortRead);
         free(buffer);
         return false;
       }
 
       if (out.write(buffer, dataRead) != dataRead) {
         LOG_ERR("ZIP", "Failed to write all output bytes to stream");
+        setResult(StreamResult::WriteFail);
         free(buffer);
         return false;
       }
@@ -488,12 +536,14 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
     auto* fileReadBuffer = static_cast<uint8_t*>(malloc(chunkSize));
     if (!fileReadBuffer) {
       LOG_ERR("ZIP", "Failed to allocate memory for zip file read buffer");
+      setResult(StreamResult::Oom);
       return false;
     }
 
     auto* outputBuffer = static_cast<uint8_t*>(malloc(chunkSize));
     if (!outputBuffer) {
       LOG_ERR("ZIP", "Failed to allocate memory for output buffer");
+      setResult(StreamResult::Oom);
       free(fileReadBuffer);
       return false;
     }
@@ -506,6 +556,7 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
 
     if (!ctx.reader.init(true)) {
       LOG_ERR("ZIP", "Failed to init inflate reader");
+      setResult(StreamResult::InflateInit);
       free(outputBuffer);
       free(fileReadBuffer);
       return false;
@@ -523,12 +574,14 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
       if (totalProduced > static_cast<size_t>(inflatedDataSize)) {
         LOG_ERR("ZIP", "Decompressed size exceeds expected (%zu > %zu)", totalProduced,
                 static_cast<size_t>(inflatedDataSize));
+        setResult(StreamResult::Oversize);
         break;
       }
 
       if (produced > 0) {
         if (out.write(outputBuffer, produced) != produced) {
           LOG_ERR("ZIP", "Failed to write all output bytes to stream");
+          setResult(StreamResult::WriteFail);
           break;
         }
       }
@@ -537,6 +590,7 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
         if (totalProduced != static_cast<size_t>(inflatedDataSize)) {
           LOG_ERR("ZIP", "Decompressed size mismatch (expected %zu, got %zu)", static_cast<size_t>(inflatedDataSize),
                   totalProduced);
+          setResult(StreamResult::SizeMismatch);
           break;
         }
         LOG_DBG("ZIP", "Decompressed %d bytes into %d bytes", deflatedDataSize, inflatedDataSize);
@@ -546,6 +600,7 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
 
       if (status == InflateStatus::Error) {
         LOG_ERR("ZIP", "Decompression failed");
+        setResult(StreamResult::DeflateError);
         break;
       }
       // InflateStatus::Ok: output buffer full, continue
@@ -557,5 +612,6 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
   }
 
   LOG_ERR("ZIP", "Unsupported compression method");
+  setResult(StreamResult::Unsupported);
   return false;
 }

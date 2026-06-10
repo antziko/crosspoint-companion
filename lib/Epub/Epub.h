@@ -59,7 +59,11 @@ class Epub {
   bool generateThumbBmp(int height) const;
   uint8_t* readItemContentsToBytes(const std::string& itemHref, size_t* size = nullptr,
                                    bool trailingNullByte = false) const;
-  bool readItemContentsToStream(const std::string& itemHref, Print& out, size_t chunkSize) const;
+  // outStreamReason (optional) receives the underlying ZipFile::StreamResult cast
+  // to uint8_t, so callers can report WHICH stream sub-failure occurred without
+  // pulling ZipFile.h into this header. Map via ZipFile::streamResultTag().
+  bool readItemContentsToStream(const std::string& itemHref, Print& out, size_t chunkSize,
+                                uint8_t* outStreamReason = nullptr) const;
   bool getItemSize(const std::string& itemHref, size_t* size) const;
   BookMetadataCache::SpineEntry getSpineItem(int spineIndex) const;
   BookMetadataCache::TocEntry getTocItem(int tocIndex) const;

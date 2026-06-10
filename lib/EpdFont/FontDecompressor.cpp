@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <Utf8.h>
 
 #include <cstdlib>
@@ -33,12 +34,13 @@ void FontDecompressor::freePageBuffer() {
 }
 
 void FontDecompressor::freeHotGroup() {
-  hotGroup.clear();
-  hotGroup.shrink_to_fit();
+  hotGroup.reset();
+  hotGroupCap = 0;
+  hotGroupSize = 0;
   hotGroupFont = nullptr;
   hotGroupIndex = UINT16_MAX;
-  hotGlyphBuf.clear();
-  hotGlyphBuf.shrink_to_fit();
+  hotGlyphBuf.reset();
+  hotGlyphBufCap = 0;
 }
 
 uint16_t FontDecompressor::getGroupIndex(const EpdFontData* fontData, uint32_t glyphIndex) {
@@ -170,22 +172,31 @@ const uint8_t* FontDecompressor::getBitmap(const EpdFontData* fontData, const Ep
   }
 
   // Check if hot group already has this group decompressed — if not, decompress it
-  if (!(!hotGroup.empty() && hotGroupFont == fontData && hotGroupIndex == groupIndex)) {
+  if (!(hotGroup && hotGroupSize > 0 && hotGroupFont == fontData && hotGroupIndex == groupIndex)) {
     stats.cacheMisses++;
     const EpdFontGroup& group = fontData->groups[groupIndex];
 
-    hotGroup.resize(group.uncompressedSize);
-    if (hotGroup.empty()) {
-      LOG_ERR("FDC", "Failed to allocate %u bytes for hot group %u", group.uncompressedSize, groupIndex);
-      hotGroupFont = nullptr;
-      hotGroupIndex = UINT16_MAX;
-      stats.getBitmapTimeUs += micros() - tStart;
-      return nullptr;
+    // Grow-only nothrow alloc. makeUniqueNoThrow returns nullptr on OOM (never
+    // aborts), so a low-heap render skips the glyph instead of crashing.
+    if (group.uncompressedSize > hotGroupCap) {
+      auto buf = makeUniqueNoThrow<uint8_t[]>(group.uncompressedSize);
+      if (!buf) {
+        LOG_ERR("FDC", "OOM: %u bytes for hot group %u", group.uncompressedSize, groupIndex);
+        hotGroup.reset();
+        hotGroupCap = 0;
+        hotGroupSize = 0;
+        hotGroupFont = nullptr;
+        hotGroupIndex = UINT16_MAX;
+        stats.getBitmapTimeUs += micros() - tStart;
+        return nullptr;
+      }
+      hotGroup = std::move(buf);
+      hotGroupCap = group.uncompressedSize;
     }
+    hotGroupSize = group.uncompressedSize;
 
-    if (!decompressGroup(fontData, groupIndex, hotGroup.data(), group.uncompressedSize)) {
-      hotGroup.clear();
-      hotGroup.shrink_to_fit();
+    if (!decompressGroup(fontData, groupIndex, hotGroup.get(), group.uncompressedSize)) {
+      hotGroupSize = 0;
       hotGroupFont = nullptr;
       hotGroupIndex = UINT16_MAX;
       stats.getBitmapTimeUs += micros() - tStart;
@@ -200,18 +211,21 @@ const uint8_t* FontDecompressor::getBitmap(const EpdFontData* fontData, const Ep
   }
 
   // Compact just the requested glyph from byte-aligned data into scratch buffer
-  if (glyph->dataLength > hotGlyphBuf.size()) {
-    hotGlyphBuf.resize(glyph->dataLength);
-  }
-  if (hotGlyphBuf.empty()) {
-    stats.getBitmapTimeUs += micros() - tStart;
-    return nullptr;
+  if (glyph->dataLength > hotGlyphBufCap) {
+    auto buf = makeUniqueNoThrow<uint8_t[]>(glyph->dataLength);
+    if (!buf) {
+      LOG_ERR("FDC", "OOM: %u bytes for glyph scratch", glyph->dataLength);
+      stats.getBitmapTimeUs += micros() - tStart;
+      return nullptr;
+    }
+    hotGlyphBuf = std::move(buf);
+    hotGlyphBufCap = glyph->dataLength;
   }
 
   uint32_t alignedOff = getAlignedOffset(fontData, groupIndex, glyphIndex);
-  compactSingleGlyph(&hotGroup[alignedOff], hotGlyphBuf.data(), glyph->width, glyph->height);
+  compactSingleGlyph(hotGroup.get() + alignedOff, hotGlyphBuf.get(), glyph->width, glyph->height);
   stats.getBitmapTimeUs += micros() - tStart;
-  return hotGlyphBuf.data();
+  return hotGlyphBuf.get();
 }
 
 // --- Prewarm: pre-decompress glyph bitmaps for a page of text ---

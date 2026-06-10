@@ -791,14 +791,19 @@ uint8_t* Epub::readItemContentsToBytes(const std::string& itemHref, size_t* size
   return content;
 }
 
-bool Epub::readItemContentsToStream(const std::string& itemHref, Print& out, const size_t chunkSize) const {
+bool Epub::readItemContentsToStream(const std::string& itemHref, Print& out, const size_t chunkSize,
+                                    uint8_t* outStreamReason) const {
   if (itemHref.empty()) {
     LOG_DBG("EBP", "Failed to read item, empty href");
+    if (outStreamReason) *outStreamReason = static_cast<uint8_t>(ZipFile::StreamResult::NotFound);
     return false;
   }
 
   const std::string path = FsHelpers::normalisePath(itemHref);
-  return ZipFile(filepath).readFileToStream(path.c_str(), out, chunkSize);
+  ZipFile::StreamResult res = ZipFile::StreamResult::Ok;
+  const bool ok = ZipFile(filepath).readFileToStream(path.c_str(), out, chunkSize, &res);
+  if (outStreamReason) *outStreamReason = static_cast<uint8_t>(res);
+  return ok;
 }
 
 bool Epub::getItemSize(const std::string& itemHref, size_t* size) const {
