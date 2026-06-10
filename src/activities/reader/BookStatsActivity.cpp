@@ -224,7 +224,7 @@ void BookStatsActivity::renderTimeline(const Rect& rect) const {
     const int midY = rect.y + rect.height / 2 - lineH;
     renderer.drawCenteredText(UI_10_FONT_ID, midY, tr(STR_STATS_NO_HISTORY));
     if (!halClock.isAvailable()) {
-      renderer.drawCenteredText(SMALL_FONT_ID, midY + lineH + 6, tr(STR_STATS_X3_ONLY));
+      renderer.drawCenteredText(SMALL_FONT_ID, midY + lineH + 6, tr(STR_STATS_NEEDS_CLOCK));
     }
     return;
   }
@@ -268,7 +268,7 @@ void BookStatsActivity::renderHeatmap(const Rect& rect) const {
     const int midY = rect.y + rect.height / 2 - lineH;
     renderer.drawCenteredText(UI_10_FONT_ID, midY, tr(STR_STATS_NO_HISTORY));
     if (!halClock.isAvailable()) {
-      renderer.drawCenteredText(SMALL_FONT_ID, midY + lineH + 6, tr(STR_STATS_X3_ONLY));
+      renderer.drawCenteredText(SMALL_FONT_ID, midY + lineH + 6, tr(STR_STATS_NEEDS_CLOCK));
     }
     return;
   }

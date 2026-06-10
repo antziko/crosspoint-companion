@@ -358,7 +358,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
     // on next WiFi connect, which is useful when crossing time zones.
     v.push_back(SettingInfo::Toggle(StrId::STR_CLOCK_SYNCED, &CrossPointSettings::clockHasBeenSynced,
                                     "clockHasBeenSynced", StrId::STR_CUSTOMISE_STATUS_BAR));
-    // Date display (X3 only — DS3231 provides full date after NTP sync)
+    // Date display (needs a clock: X3 DS3231 RTC, or X4 NTP over WiFi)
     v.push_back(SettingInfo::Toggle(StrId::STR_DATE, &CrossPointSettings::statusBarDate, "statusBarDate",
                                     StrId::STR_CUSTOMISE_STATUS_BAR));
     v.push_back(SettingInfo::Enum(StrId::STR_DATE_FORMAT, &CrossPointSettings::dateFormat,

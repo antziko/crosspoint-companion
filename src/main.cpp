@@ -343,14 +343,19 @@ void setupDisplayAndFonts(bool seamless = false) {
 }
 
 // X4 has no RTC chip, so the system clock is lost on every full boot / deep-sleep
-// wake. When the home top-bar clock or date is enabled and a WiFi network is
-// saved, silently reconnect and sync NTP in a background task so the clock fills
-// in shortly after boot — on both quick-resume and splash boots. No-op on X3
-// (hardware RTC), when time is already valid, when the clock feature is off, or
-// when no WiFi network is saved (so non-clock users never power the radio).
+// wake. When any clock-dependent feature is enabled — home top-bar clock/date,
+// reader status-bar clock/date — and a WiFi network is saved, silently reconnect
+// and sync NTP in a background task so the clock fills in shortly after boot, on
+// both quick-resume and splash boots. A valid clock is also what lets reading
+// sessions get dated (BookReadingStats), so enabling the status-bar clock/date is
+// enough to make X4 stats land on the timeline/heatmap instead of "Undated". No-op
+// on X3 (hardware RTC), when time is already valid, when every clock feature is off,
+// or when no WiFi network is saved (so non-clock users never power the radio).
 static void maybeStartBackgroundNtpSync() {
   if (halClock.hasHardwareRtc() || halClock.isSystemTimeValid()) return;
-  if (!SETTINGS.homeTopBarClock && !SETTINGS.homeTopBarDate) return;
+  if (!SETTINGS.homeTopBarClock && !SETTINGS.homeTopBarDate && !SETTINGS.statusBarClock &&
+      !SETTINGS.statusBarDate)
+    return;
   WIFI_STORE.loadFromFile();
   const std::string& lastSsid = WIFI_STORE.getLastConnectedSsid();
   if (lastSsid.empty()) return;

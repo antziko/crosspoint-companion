@@ -205,13 +205,13 @@ class CrossPointSettings {
   uint8_t statusBarTitle = CHAPTER_TITLE;
   uint8_t statusBarBattery = 1;
   uint8_t xtcStatusBarMode = XTC_STATUS_BAR_HIDE;
-  // Clock display in status bar (X3 only, requires DS3231 RTC)
+  // Clock display in status bar (needs a clock: X3 DS3231 RTC, or X4 NTP over WiFi)
   uint8_t statusBarClock = 0;
-  // Date display in status bar (X3 only, requires DS3231 RTC)
+  // Date display in status bar (needs a clock: X3 DS3231 RTC, or X4 NTP over WiFi)
   uint8_t statusBarDate = 0;
-  // Date format (X3 only): 0="30 Jun", 1="Mon, 30 Jun", 2="30/06", 3="Mon, 30/06"
+  // Date format: 0="30 Jun", 1="Mon, 30 Jun", 2="30/06", 3="Mon, 30/06"
   uint8_t dateFormat = 0;
-  // Home top bar display — independent from reader status bar (requires RTC)
+  // Home top bar display — independent from reader status bar (needs a clock: X3 RTC or X4 NTP)
   uint8_t homeTopBarClock = 0;
   uint8_t homeTopBarDate = 0;
   // Home top bar date format: same codes as dateFormat
