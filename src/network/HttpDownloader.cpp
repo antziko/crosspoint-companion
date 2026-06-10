@@ -92,6 +92,15 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   // to runGet so it covers the handshake, body read loop, and every early return.
   const NoWifiSleep noWifiSleep;
 
+  // Entry snapshot: the cleanest heap state for this request (before the read
+  // buffer, the esp_http_client struct, or the TLS arena exist). The delta from
+  // here to the post-open snapshot below is the per-request + handshake cost.
+  {
+    const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
+    SdDebugLog::log("HTTP", "GET start: heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d url=%s", s.heapFree,
+                    s.largest8Bit, s.internalFree, s.internalLargest, (int)s.rssi, url.c_str());
+  }
+
   // Allocate the read buffer FIRST, before the TLS connection exists. A live
   // mbedtls connection holds ~65KB and fragments the heap; allocating this 2KB
   // buffer afterwards fails on the X3 (only ~6KB, non-contiguous, left). Carving
@@ -137,13 +146,33 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   // open()/read() does not auto-follow redirects (only perform() does), so step
   // 30x responses manually. OPDS download endpoints and the GitHub release CDN
   // both redirect.
+  // Snapshot immediately before the (blocking) connect+TLS handshake, then again
+  // after, with the handshake duration. The before/after heap delta is the
+  // mbedTLS arena cost — the bulk of the HTTPS pressure on the X3/X4 — and a
+  // failed open here on https:// is almost always that arena OOMing, surfaced as
+  // ESP_ERR_HTTP_CONNECT.
+  {
+    const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
+    SdDebugLog::log("HTTP", "pre-open (handshake): heap=%u largest8=%u intFree=%u intLargest=%u", s.heapFree,
+                    s.largest8Bit, s.internalFree, s.internalLargest);
+  }
+  const uint32_t openStartMs = millis();
   esp_err_t err = esp_http_client_open(client, 0);
   if (err != ESP_OK) {
+    const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
     LOG_ERR("HTTP", "open failed: %s", esp_err_to_name(err));
-    SdDebugLog::log("HTTP", "open failed: %s", esp_err_to_name(err));
+    SdDebugLog::log("HTTP", "open failed: %s after %lums, heap=%u largest8=%u intFree=%u intLargest=%u",
+                    esp_err_to_name(err), (unsigned long)(millis() - openStartMs), s.heapFree, s.largest8Bit,
+                    s.internalFree, s.internalLargest);
     setDetail(sink.detail, "connect failed: %s", esp_err_to_name(err));
     esp_http_client_cleanup(client);
     return HttpDownloader::HTTP_ERROR;
+  }
+  {
+    const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
+    SdDebugLog::log("HTTP", "post-open: handshake=%lums heap=%u largest8=%u intFree=%u intLargest=%u",
+                    (unsigned long)(millis() - openStartMs), s.heapFree, s.largest8Bit, s.internalFree,
+                    s.internalLargest);
   }
   int64_t contentLength = esp_http_client_fetch_headers(client);
   int status = esp_http_client_get_status_code(client);

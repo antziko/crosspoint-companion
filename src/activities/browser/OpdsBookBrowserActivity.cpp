@@ -40,7 +40,13 @@ constexpr unsigned long GO_HOME_MS = 1000;  // hold BACK this long to jump to ho
 // largest=34804 (X3) and largest=45044 (X4, under the 45056 gate by 12 bytes)
 // while total free was 68-86KB. Below this the connect or an in-flight read can
 // still fail as an OOM-in-disguise and stall, so a guard remains — just smaller.
-constexpr size_t MIN_CONTIGUOUS_HEAP_FOR_TLS = 24 * 1024;
+//
+// Lowered 24KB -> 18KB: X4 SD traces showed the FIRST HTTPS fetch succeeds, then
+// the handshake fragments the heap so the SECOND fetch sees largest=24564 and was
+// false-rejected by the old 24576 gate (by 12 bytes) with 67KB total free. 18KB
+// still gives ~2.2x the ~8.2KB IN record (the largest single handshake alloc), so
+// a genuinely-too-fragmented heap is still caught.
+constexpr size_t MIN_CONTIGUOUS_HEAP_FOR_TLS = 18 * 1024;
 
 // Plain HTTP does no TLS handshake, so it needs no mbedTLS record buffers — only
 // a few KB contiguous for rx/tx and the client struct. A local http:// OPDS
@@ -305,10 +311,17 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
 
   if (state == BrowserState::ERROR) {
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 20, tr(STR_ERROR_MSG));
-    // Truncate to the viewport so a long real-cause detail can't overflow the
-    // screen edge (X3 is narrower than X4).
-    const auto errLine = renderer.truncatedText(UI_10_FONT_ID, errorMessage.c_str(), pageWidth - 40);
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 10, errLine.c_str());
+    // Wrap the real-cause detail over up to 3 lines instead of single-line
+    // ellipsis truncation, so the full error (e.g. "connect failed:
+    // ESP_ERR_HTTP_CONNECT") is visible. wrappedText falls back to truncatedText
+    // only if it can't fit even 3 lines (see GfxRenderer.cpp). X3 is narrower than X4.
+    const auto lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+    const auto errLines = renderer.wrappedText(UI_10_FONT_ID, errorMessage.c_str(), pageWidth - 40, 3);
+    int errY = pageHeight / 2 + 10;
+    for (const auto& line : errLines) {
+      renderer.drawCenteredText(UI_10_FONT_ID, errY, line.c_str());
+      errY += lineHeight;
+    }
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_RETRY), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer();

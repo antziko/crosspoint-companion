@@ -233,14 +233,33 @@ void SdFirmwareUpdateActivity::render(RenderLock&&) {
     // Percent label is drawn by BaseTheme::drawProgressBar; this slot is left intentionally empty
     // so the do-not-power-off line below stays at the same Y as before.
     y += lineHeight + metrics.verticalSpacing;
-    renderer.drawCenteredText(UI_10_FONT_ID, y, tr(STR_FIRMWARE_UPDATE_DO_NOT_POWER_OFF));
+    // Wrap the warning over up to 2 lines instead of clipping at the screen edge.
+    const auto warnLines = renderer.wrappedText(UI_10_FONT_ID, tr(STR_FIRMWARE_UPDATE_DO_NOT_POWER_OFF), pageWidth - 40, 2);
+    for (const auto& line : warnLines) {
+      renderer.drawCenteredText(UI_10_FONT_ID, y, line.c_str());
+      y += lineHeight;
+    }
   } else if (state == State::SUCCESS) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_COMPLETE), true, EpdFontFamily::BOLD);
-    renderer.drawCenteredText(UI_10_FONT_ID, top + lineHeight + metrics.verticalSpacing, tr(STR_RESTARTING_HINT));
+    // Wrap the restart hint ("...hold the power for a few seconds...") over up to 3
+    // lines instead of a single centered line that runs off both edges (X3 narrower).
+    const auto hintLines = renderer.wrappedText(UI_10_FONT_ID, tr(STR_RESTARTING_HINT), pageWidth - 40, 3);
+    int hintY = top + lineHeight + metrics.verticalSpacing;
+    for (const auto& line : hintLines) {
+      renderer.drawCenteredText(UI_10_FONT_ID, hintY, line.c_str());
+      hintY += lineHeight;
+    }
   } else if (state == State::FAILED) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_FAILED), true, EpdFontFamily::BOLD);
     if (!errorMessage.empty()) {
-      renderer.drawCenteredText(UI_10_FONT_ID, top + lineHeight + metrics.verticalSpacing, errorMessage.c_str());
+      // Wrap so a long detail can't run off both screen edges (consistency with
+      // the other error screens; X3 is narrower than X4).
+      const auto errLines = renderer.wrappedText(UI_10_FONT_ID, errorMessage.c_str(), pageWidth - 40, 3);
+      int errY = top + lineHeight + metrics.verticalSpacing;
+      for (const auto& line : errLines) {
+        renderer.drawCenteredText(UI_10_FONT_ID, errY, line.c_str());
+        errY += lineHeight;
+      }
     }
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

@@ -516,7 +516,16 @@ void KOReaderSyncActivity::render(RenderLock&&) {
 
   if (state == SYNC_FAILED) {
     UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top, tr(STR_SYNC_FAILED_MSG), true, EpdFontFamily::BOLD);
-    UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top + 40, statusMessage.c_str());
+    // Wrap the detail (statusMessage may hold the long errorString, e.g. the
+    // LOW_MEMORY text) over up to 3 lines instead of a single centered line that
+    // runs off both screen edges.
+    const auto detailLineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+    const auto detailLines = renderer.wrappedText(UI_10_FONT_ID, statusMessage.c_str(), screen.width - 40, 3);
+    int detailY = top + 40;
+    for (const auto& line : detailLines) {
+      UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, detailY, line.c_str());
+      detailY += detailLineHeight;
+    }
 
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

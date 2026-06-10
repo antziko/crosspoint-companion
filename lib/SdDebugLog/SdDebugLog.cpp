@@ -1,7 +1,9 @@
 #include "SdDebugLog.h"
 
 #include <Arduino.h>
+#include <HalGPIO.h>
 #include <HalStorage.h>
+#include <Logging.h>
 #include <esp_heap_caps.h>
 #include <esp_wifi.h>
 
@@ -34,8 +36,21 @@ void log(const char* tag, const char* fmt, ...) {
   vsnprintf(msg, sizeof(msg), fmt, args);
   va_end(args);
 
+  // Device tag (X3/X4) on every line so a mixed-device trace stays separable —
+  // the HTTPS heap behaviour differs between the X3 (96KB dual framebuffer) and
+  // X4 (48KB single). gpio is initialised at boot; all network logging is runtime.
+  const bool isX4 = gpio.deviceIsX4();
+  const char* model = isX4 ? "X4" : "X3";
+
+  // Serial mirror is X4-only: the X3 is USB-locked (no usable serial), so only the
+  // X4 emits the live trace. SD logging below is unconditional and runs on BOTH
+  // devices. (LOG_INF also compiles to nothing without ENABLE_SERIAL_LOG.)
+  if (isX4) {
+    LOG_INF(tag, "[%s] %s", model, msg);
+  }
+
   char line[256];
-  const int len = snprintf(line, sizeof(line), "[%lu] %s: %s\n", millis(), tag, msg);
+  const int len = snprintf(line, sizeof(line), "[%lu][%s] %s: %s\n", millis(), model, tag, msg);
   if (len <= 0) return;
 
   // Rotate if the file has grown too large (cheap size check before append).
@@ -49,6 +64,11 @@ void log(const char* tag, const char* fmt, ...) {
   HalFile file;
   if (!Storage.openFileForAppend("SDLOG", PATH, file)) return;
   file.write(line, static_cast<size_t>(len));
+  // Force the write (data + dir entry + FAT) to the card NOW. The activities that
+  // enable this log (OPDS / KOSync) silent-restart on exit, and an abrupt
+  // ESP.restart() before the close-sync lands drops a freshly-created file — which
+  // is exactly why /opds_debug.txt never appeared on the X4 despite log() running.
+  file.flush();
   // HalFile closes on scope exit (DESTRUCTOR_CLOSES_FILE).
 }
 

@@ -112,7 +112,15 @@ void KOReaderAuthActivity::render(RenderLock&&) {
     renderer.drawCenteredText(UI_10_FONT_ID, top + height + 10, tr(STR_SYNC_READY));
   } else if (state == FAILED) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_AUTH_FAILED), true, EpdFontFamily::BOLD);
-    renderer.drawCenteredText(UI_10_FONT_ID, top + height + 10, errorMessage.c_str());
+    // Wrap the detail over up to 3 lines instead of a single centered line that
+    // runs off both screen edges (the LOW_MEMORY string is long; X3 is narrower
+    // than X4). Mirrors the wrappedText pattern in OpdsBookBrowserActivity.
+    const auto errLines = renderer.wrappedText(UI_10_FONT_ID, errorMessage.c_str(), pageWidth - 40, 3);
+    int errY = top + height + 10;
+    for (const auto& line : errLines) {
+      renderer.drawCenteredText(UI_10_FONT_ID, errY, line.c_str());
+      errY += height;
+    }
   }
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");

@@ -620,7 +620,14 @@ void FontDownloadActivity::render(RenderLock&&) {
     renderer.drawCenteredText(UI_10_FONT_ID, centerY - lineHeight, tr(STR_FONT_INSTALL_FAILED), true,
                               EpdFontFamily::BOLD);
     if (!errorMessage_.empty()) {
-      renderer.drawCenteredText(UI_10_FONT_ID, centerY + metrics.verticalSpacing, errorMessage_.c_str());
+      // Wrap the detail (some include a filename, e.g. "Download failed: <name>")
+      // over up to 3 lines instead of a single centered line that runs off both edges.
+      const auto errLines = renderer.wrappedText(UI_10_FONT_ID, errorMessage_.c_str(), pageWidth - 40, 3);
+      int errY = centerY + metrics.verticalSpacing;
+      for (const auto& line : errLines) {
+        renderer.drawCenteredText(UI_10_FONT_ID, errY, line.c_str());
+        errY += lineHeight;
+      }
     }
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_RETRY), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

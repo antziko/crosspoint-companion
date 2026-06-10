@@ -5,6 +5,7 @@
 #include <SdDebugLog.h>
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
+#include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -18,6 +19,19 @@ namespace {
 // Device identifier for CrossPoint reader
 constexpr char DEVICE_NAME[] = "CrossPoint";
 constexpr char DEVICE_ID[] = "crosspoint-reader";
+
+// Hold WiFi out of modem-sleep for the duration of a request, then restore the
+// default. At WIFI_PS_MIN_MODEM the radio sleeps between DTIM beacons; on a
+// marginal link that drops handshake packets and the TLS handshake stalls to a
+// timeout (ESP_ERR_HTTP_CONNECT) — observed on the X3, where even the first
+// KOSync GET never connected while the X4 (more headroom) merely ran slow.
+// HttpDownloader already does this for OPDS/downloads (HttpDownloader.cpp:79);
+// KOSync went through the default and paid for it. RAII so every return path
+// restores power-save. See HttpDownloader's NoWifiSleep.
+struct NoWifiSleep {
+  NoWifiSleep() { esp_wifi_set_ps(WIFI_PS_NONE); }
+  ~NoWifiSleep() { esp_wifi_set_ps(WIFI_PS_MIN_MODEM); }
+};
 
 // Small TLS buffers to fit in ESP32-C3's limited heap (~46KB free after WiFi).
 // KOSync payloads are tiny JSON (<1KB), so 2KB buffers are sufficient.
@@ -81,8 +95,13 @@ esp_err_t httpEventHandler(esp_http_client_event_t* evt) {
   if (buf->traceTag) {
     const uint32_t now = millis();
     if (evt->event_id == HTTP_EVENT_ON_CONNECTED) {
-      SdDebugLog::log("KOSYNC", "%s TLS connected after %lums", buf->traceTag,
-                      (unsigned long)(now - buf->requestStartMs));
+      // Snapshot right after the TLS handshake: this is where the mbedTLS arena
+      // (CA bundle parse + record buffers) has just been carved out of the heap,
+      // so it shows the post-handshake headroom the body read has to live in.
+      const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
+      SdDebugLog::log("KOSYNC", "%s TLS connected after %lums heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d",
+                      buf->traceTag, (unsigned long)(now - buf->requestStartMs), snap.heapFree, snap.largest8Bit,
+                      snap.internalFree, snap.internalLargest, (int)snap.rssi);
       buf->lastEventMs = now;
     } else if (evt->event_id == HTTP_EVENT_ON_DATA) {
       const uint32_t gapMs = now - buf->lastEventMs;
@@ -123,8 +142,14 @@ void beginTrace(ResponseBuffer& buf, const char* tag, size_t bodyLen = 0) {
 // Logs the outcome + total elapsed time, in the same {bytes, elapsed, rate}
 // shape HttpDownloader's DONE line uses so GET/PUT traces read consistently.
 void endTrace(const ResponseBuffer& buf, const char* tag, int httpCode, esp_err_t err) {
-  SdDebugLog::log("KOSYNC", "%s resp code=%d err=%d elapsed=%lums bytes=%d", tag, httpCode, (int)err,
-                  (unsigned long)(millis() - buf.requestStartMs), buf.len);
+  // Include the esp_err name (ESP_ERR_HTTP_CONNECT vs a TLS/alloc error tells
+  // transport-fail from handshake-OOM apart) and a post-op heap snapshot taken
+  // after cleanup so a leak or non-reclaimed arena across a sync shows up.
+  const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
+  SdDebugLog::log("KOSYNC",
+                  "%s resp code=%d err=%d(%s) elapsed=%lums bytes=%d heap=%u largest8=%u intFree=%u intLargest=%u", tag,
+                  httpCode, (int)err, esp_err_to_name(err), (unsigned long)(millis() - buf.requestStartMs), buf.len,
+                  snap.heapFree, snap.largest8Bit, snap.internalFree, snap.internalLargest);
 }
 
 // Create configured esp_http_client with small TLS buffers
@@ -170,6 +195,16 @@ bool heapOkForUrl(const std::string& url, const char* tag) {
   const uint32_t freeHeap = ESP.getFreeHeap();
   LOG_DBG("KOSync", "%s: %s (free=%u, need=%u, %s)", tag, url.c_str(), (unsigned)freeHeap, (unsigned)need,
           https ? "https" : "http");
+  // Record the preflight decision to SD: an AUTH/PUT that fails here returns
+  // LOW_MEMORY *before* any TLS attempt, so the on-device error ("not enough
+  // memory") looks identical to a real handshake failure. This line disambiguates
+  // — REJECT means the gate blocked it, not the network.
+  {
+    const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
+    SdDebugLog::log("KOSYNC", "%s gate: free=%u need=%u %s largest8=%u intFree=%u intLargest=%u -> %s", tag,
+                    (unsigned)freeHeap, (unsigned)need, https ? "https" : "http", snap.largest8Bit, snap.internalFree,
+                    snap.internalLargest, (freeHeap < need) ? "REJECT" : "ok");
+  }
   if (freeHeap < need) {
     LOG_ERR("KOSync", "Insufficient heap: %u bytes free (need %u for %s)", freeHeap, need,
             https ? "TLS handshake" : "HTTP");
@@ -189,6 +224,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
   std::string url = KOREADER_STORE.getBaseUrl() + "/users/auth";
   if (!heapOkForUrl(url, "AUTH")) return LOW_MEMORY;
 
+  const NoWifiSleep noWifiSleep;
   ResponseBuffer buf;
   beginTrace(buf, "AUTH");
   esp_http_client_handle_t client = createClient(url.c_str(), &buf);
@@ -218,6 +254,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
   std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/progress/" + documentHash;
   if (!heapOkForUrl(url, "PROGRESS_GET")) return LOW_MEMORY;
 
+  const NoWifiSleep noWifiSleep;
   ResponseBuffer buf;
   beginTrace(buf, "PROGRESS_GET");
   esp_http_client_handle_t client = createClient(url.c_str(), &buf);
@@ -280,6 +317,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
 
   LOG_DBG("KOSync", "Request body: %s", body.c_str());
 
+  const NoWifiSleep noWifiSleep;
   ResponseBuffer buf;
   beginTrace(buf, "PROGRESS_PUT", body.length());
   esp_http_client_handle_t client = createClient(url.c_str(), &buf, HTTP_METHOD_PUT);
@@ -317,6 +355,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getBookmarks(const std::string& do
   std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/bookmarks/" + documentHash;
   if (!heapOkForUrl(url, "BOOKMARKS_GET")) return LOW_MEMORY;
 
+  const NoWifiSleep noWifiSleep;
   ResponseBuffer buf;
   beginTrace(buf, "BOOKMARKS_GET");
   esp_http_client_handle_t client = createClient(url.c_str(), &buf);
@@ -379,6 +418,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
   // Retry the whole request a few times with a settle delay so the transport can recover. This
   // matters because a dropped PUT means a local delete never reaches the server, so other
   // devices never converge.
+  const NoWifiSleep noWifiSleep;  // keep the radio awake across all retry attempts
   constexpr int kMaxAttempts = 3;
   esp_err_t err = ESP_FAIL;
   int httpCode = 0;
