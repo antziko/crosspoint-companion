@@ -1474,3 +1474,18 @@ placeholder and regenerates; not a bug. No code change.
 **Files:** `lib/Epub/Epub/css/CssParser.{h,cpp}`, `lib/Epub/Epub.cpp`, `lib/OpdsParser/OpdsParser.cpp`,
 `src/activities/browser/OpdsBookBrowserActivity.cpp`, `src/activities/home/HomeActivity.cpp`,
 `lib/JpegToBmpConverter/JpegToBmpConverter.cpp`.
+
+## 65. Extend the OPDS inflate-window reclaim to X4 — gate removed, per request — NOT YET DEVICE-CONFIRMED
+
+§64 gated the pre-fetch `InflateReader::releaseWindow()` to `gpio.deviceIsX3()`, excluding X4 because a retest there
+gave "memory error" again — freeing a **mid-session** block fragments the heap rather than handing TLS a pristine
+contiguous span (the §63 lesson). Per request, the gate is removed so the reclaim runs on **both X3 and X4**.
+
+**Change:** drop the `if (gpio.deviceIsX3())` guard in `OpdsBookBrowserActivity::fetchFeed` — `releaseWindow()` now
+unconditional before the contiguous preflight.
+
+**Expected:** X4 `http://` OPDS gains the same +32KB headroom cleanly (no TLS handshake to fragment). X4 `https://`
+OPDS may still regress (30s reads / "memory error") for the §63/§64 reason; the inline comment documents reverting to
+the `gpio.deviceIsX3()` gate if so. X3 unchanged.
+
+**Files:** `src/activities/browser/OpdsBookBrowserActivity.cpp`.

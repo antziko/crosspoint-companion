@@ -416,16 +416,15 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   // and the ERROR paths don't touch the list.
   std::vector<OpdsEntry>().swap(entries);
 
-  // X3 only: hand the 32KB inflate window back to the heap for the feed parse. The
-  // X3 has far less headroom than X4, and a large feed's entry vector + strings OOMs
-  // (crashes) without it. This activity never inflates EPUB content, and onExit()
-  // silent-restarts (re-reserving the window on a fresh heap), so it is never
-  // re-allocated under fragmentation. Idempotent across the feed's repeated fetches.
-  // X4 excluded: there the freed mid-session block fragments rather than helps — the
-  // HTTPS handshake still craters (30s reads) or fails the preflight ("memory error").
-  if (gpio.deviceIsX3()) {
-    InflateReader::releaseWindow();
-  }
+  // Hand the 32KB inflate window back to the heap for the feed parse. A large feed's
+  // entry vector + strings OOMs (crashes) without it on the low-headroom X3. This
+  // activity never inflates EPUB content, and onExit() silent-restarts (re-reserving
+  // the window on a fresh heap), so it is never re-allocated under fragmentation.
+  // Idempotent across the feed's repeated fetches.
+  // NOTE: on X4 the freed mid-session block fragments rather than helps the HTTPS
+  // handshake (30s reads / preflight "memory error"); enabled here per request, revert
+  // to gpio.deviceIsX3() if HTTPS OPDS regresses on X4.
+  InflateReader::releaseWindow();
 
   // Preflight the contiguous heap. If TLS can't get its buffers the connect or an
   // in-flight read fails as an OOM-in-disguise and can hang for minutes; fail fast
