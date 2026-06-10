@@ -37,6 +37,9 @@ constexpr int kHeroTextGap = 14;
 // never wrap past this many lines at the hero column width, so this is a safety
 // ceiling (against pathological/junk metadata), not a practical truncation point.
 constexpr int kHeroTitleMaxLines = 6;
+// Vertical breathing room between the book name and the chapter title in the
+// hero top block, so the two read as distinct lines rather than one run-on.
+constexpr int kHeroChapterGap = 8;
 constexpr int kLineGap = 4;
 constexpr int kNextThumbGap = 6;
 constexpr int kProgressBarHeight = 12;
@@ -262,9 +265,16 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
     detailBlockH += textLineH;                       // last element, no trailing gap
   }
 
-  // Top block: title lines + chapter (1 line). Budget title so both blocks fit.
-  const int chapterLineH = details.chapterTitle.empty() ? 0 : (textLineH + kLineGap);
-  const int availableForTitle = coverH - chapterLineH - detailBlockH;
+  // Top block: title lines + gap + chapter. Title and chapter share the space
+  // above the bottom-anchored detail block. The chapter wraps fully (no 1-line
+  // ellipsis) into whatever height remains after the book name, separated by a
+  // readable gap. One chapter line is reserved up front so a long book name can't
+  // crowd the chapter out entirely.
+  const int topBlockH = coverH - detailBlockH;
+  const bool hasChapter = !details.chapterTitle.empty();
+  const int chapterGap = hasChapter ? kHeroChapterGap : 0;
+  const int minChapterH = hasChapter ? textLineH : 0;
+  const int availableForTitle = topBlockH - chapterGap - minChapterH;
   const int dynamicTitleMaxLines = std::max(1, availableForTitle / titleLineH);
   const int titleMaxLines = std::min(kHeroTitleMaxLines, dynamicTitleMaxLines);
 
@@ -276,11 +286,15 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
     textY += titleLineH;
   }
 
-  // Draw chapter (top-aligned, directly under book name)
-  if (!details.chapterTitle.empty()) {
-    const auto chapterLines = renderer.wrappedText(SMALL_FONT_ID, details.chapterTitle.c_str(), textW, 1);
+  // Gap + chapter (top-aligned, wraps fully into the remaining top-block height)
+  if (hasChapter) {
+    textY += chapterGap;
+    const int remainingH = (coverY + topBlockH) - textY;
+    const int chapterMaxLines = std::max(1, remainingH / textLineH);
+    const auto chapterLines = renderer.wrappedText(SMALL_FONT_ID, details.chapterTitle.c_str(), textW, chapterMaxLines);
     for (const auto& line : chapterLines) {
       renderer.drawText(SMALL_FONT_ID, textX, textY, line.c_str(), true);
+      textY += textLineH;
     }
   }
 

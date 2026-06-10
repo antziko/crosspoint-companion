@@ -2,6 +2,8 @@
 
 #include <I18n.h>
 
+#include <algorithm>
+
 #include "HalDisplay.h"
 #include "components/UITheme.h"
 
@@ -15,19 +17,26 @@ void ConfirmationActivity::onEnter() {
   lineHeight = renderer.getLineHeight(fontId);
   const int maxWidth = renderer.getScreenWidth() - (margin * 2);
 
+  // Wrap heading + body to full text (no 1-line ellipsis). Line budget = screen
+  // height minus top/bottom margins, the heading/body gap, and the bottom button-
+  // hint strip — so the wrapped block can't ride under the Cancel/Confirm hints.
+  const int buttonHintsHeight = UITheme::getInstance().getMetrics().buttonHintsHeight;
+  const int available = renderer.getScreenHeight() - (margin * 2) - buttonHintsHeight - spacing;
+  const int maxLines = std::max(1, available / lineHeight);
+
   if (!heading.empty()) {
-    safeHeading = renderer.truncatedText(fontId, heading.c_str(), maxWidth, EpdFontFamily::BOLD);
+    headingLines = renderer.wrappedText(fontId, heading.c_str(), maxWidth, maxLines, EpdFontFamily::BOLD);
   }
   if (!body.empty()) {
-    safeBody = renderer.truncatedText(fontId, body.c_str(), maxWidth, EpdFontFamily::REGULAR);
+    // Body shares the budget with whatever the heading already consumed.
+    const int bodyBudget = std::max(1, maxLines - static_cast<int>(headingLines.size()));
+    bodyLines = renderer.wrappedText(fontId, body.c_str(), maxWidth, bodyBudget, EpdFontFamily::REGULAR);
   }
 
-  int totalHeight = 0;
-  if (!safeHeading.empty()) totalHeight += lineHeight;
-  if (!safeBody.empty()) totalHeight += lineHeight;
-  if (!safeHeading.empty() && !safeBody.empty()) totalHeight += spacing;
+  int totalHeight = static_cast<int>(headingLines.size() + bodyLines.size()) * lineHeight;
+  if (!headingLines.empty() && !bodyLines.empty()) totalHeight += spacing;
 
-  startY = (renderer.getScreenHeight() - totalHeight) / 2;
+  startY = std::max(margin, (renderer.getScreenHeight() - totalHeight) / 2);
 
   requestUpdate(true);
 }
@@ -36,16 +45,20 @@ void ConfirmationActivity::render(RenderLock&& lock) {
   renderer.clearScreen();
 
   int currentY = startY;
-  LOG_DBG("CONF", "currentY: %d", currentY);
-  // Draw Heading
-  if (!safeHeading.empty()) {
-    renderer.drawCenteredText(fontId, currentY, safeHeading.c_str(), true, EpdFontFamily::BOLD);
-    currentY += lineHeight + spacing;
+
+  // Draw heading (wrapped, centered)
+  for (const auto& line : headingLines) {
+    renderer.drawCenteredText(fontId, currentY, line.c_str(), true, EpdFontFamily::BOLD);
+    currentY += lineHeight;
   }
 
-  // Draw Body
-  if (!safeBody.empty()) {
-    renderer.drawCenteredText(fontId, currentY, safeBody.c_str(), true, EpdFontFamily::REGULAR);
+  // Gap between heading and body
+  if (!headingLines.empty() && !bodyLines.empty()) currentY += spacing;
+
+  // Draw body (wrapped, centered)
+  for (const auto& line : bodyLines) {
+    renderer.drawCenteredText(fontId, currentY, line.c_str(), true, EpdFontFamily::REGULAR);
+    currentY += lineHeight;
   }
 
   // Draw UI Elements
