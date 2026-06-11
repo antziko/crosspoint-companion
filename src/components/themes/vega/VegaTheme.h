@@ -18,19 +18,25 @@ constexpr int kSectionGap = 20;
 // VegaTheme.cpp -- this is a fixed upper-bound margin for the constexpr
 // tile-height calc below; SMALL_FONT_ID is an 8px face, ~10-14px lines).
 constexpr int kNextLabelReserve = 32;
+// The hero cover draws taller than the "next 3" row. The cached thumbnail is
+// generated once at the hero height (homeCoverHeight is the cache key/size,
+// see HomeActivity::loadRecentCovers); the hero draws it at native size and
+// the row tiles vertically crop it down to kNextRowCoverHeight. Cropping
+// (not scaling) keeps GfxRenderer::drawBitmap's fitScale at 1.0 everywhere --
+// any nearest-neighbour downscale visibly darkens the pre-dithered 1-bit
+// cover bitmaps (collapsed source pixels OR-composite toward black: a
+// 2-into-1 collapse of a ~50%-dithered region renders ~75% black).
+constexpr int kHeroExtraHeight = 12;
+constexpr int kNextRowCoverHeight = LyraMetrics::values.homeCoverHeight;
 
 constexpr ThemeMetrics values = [] {
   ThemeMetrics v = LyraMetrics::values;
-  // "Next 3" thumbnails draw at *native* homeCoverHeight -- exactly matching
-  // the cached-thumbnail generation height (UITheme::getCoverThumbPath /
-  // Epub::generateThumbBmp use homeCoverHeight as the cache key/size). That
-  // forces GfxRenderer::drawBitmap's fitScale to land at 1.0 (no nearest-
-  // neighbour downscale), which otherwise visibly darkens the pre-dithered
-  // 1-bit cover bitmaps -- collapsed source pixels OR-composite toward black
-  // (a 2-into-1 collapse of a ~50%-dithered region renders ~75% black).
-  // Tile = hero cover + padding + "next 3" row (same native cover height +
+  // homeCoverHeight doubles as the hero draw height and the thumbnail
+  // generation height; the row crops ~5% off (top+bottom slivers).
+  v.homeCoverHeight = kNextRowCoverHeight + kHeroExtraHeight;
+  // Tile = hero cover + padding + "next 3" row (cropped cover height +
   // title reserve) beneath it, vs. Lyra's single cover-and-title tile.
-  const int nextRowHeight = v.homeCoverHeight + kNextLabelReserve;
+  const int nextRowHeight = kNextRowCoverHeight + kNextLabelReserve;
   v.homeCoverTileHeight = v.homeCoverHeight + 2 * kHeroPadding + kSectionGap + nextRowHeight;
   v.homeRecentBooksCount = 4;
   return v;

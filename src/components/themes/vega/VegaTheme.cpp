@@ -150,14 +150,19 @@ HeroDetails cachedHeroDetails;
 // Shared cover-tile drawing for the hero card and the "next 3" row. Reuses the
 // single cached thumbnail (UITheme::getCoverThumbPath at the theme's configured
 // homeCoverHeight -- the only resolution HomeActivity::loadRecentCovers ever
-// generates) and lets GfxRenderer::drawBitmap scale-to-fit + crop into whatever
-// tile size is requested, so no extra per-size thumbnail generation is needed.
+// generates) and crops it into whatever tile size is requested (no scaling, see
+// crop comment below), so no extra per-size thumbnail generation is needed.
 // Mirrors Lyra3CoversTheme::drawRecentBookCover's load-or-placeholder pattern
 // (Lyra3CoversTheme.cpp:42-81).
 // A tile with a cover shows just the photo; the frame is drawn only for the
 // empty placeholder (no photo).
 void drawCoverTile(const GfxRenderer& renderer, const std::string& coverBmpPath, int sourceHeight, int tileX,
                    int tileY, int tileW, int tileH) {
+  // White-fill the tile first: this redraw happens over a restored cover-buffer
+  // snapshot that may hold the previous pass's placeholder icon, and drawBitmap
+  // composites dark-only (white pixels never overwrite), so without the clear
+  // the icon ghosts through light areas of the cover.
+  renderer.fillRect(tileX, tileY, tileW, tileH, false);
   bool hasCover = false;
   if (!coverBmpPath.empty()) {
     const std::string coverThumbPath = UITheme::getCoverThumbPath(coverBmpPath, sourceHeight);
@@ -167,18 +172,22 @@ void drawCoverTile(const GfxRenderer& renderer, const std::string& coverBmpPath,
       if (bitmap.parseHeaders() == BmpReaderError::Ok) {
         const float coverWidth = static_cast<float>(bitmap.getWidth());
         const float coverHeight = static_cast<float>(bitmap.getHeight());
-        const float ratio = coverWidth / coverHeight;
-        const float tileRatio = static_cast<float>(tileW) / static_cast<float>(tileH);
-        const float cropX = 1.0f - (tileRatio / ratio);
-        // A cover narrower than the tile (cropX < 0, so no horizontal crop) is
-        // height-fitted and would sit flush-left. Center it within the tile.
-        // Thumbnails are generated at the tile height, so getWidth() is the
-        // rendered width.
+        // Crop (never scale) the thumbnail to the tile on both axes so
+        // drawBitmap's fitScale stays at 1.0: the hero tile matches the
+        // thumbnail's generation height (no vertical crop), the "next 3"
+        // tiles are shorter and trim symmetric top/bottom slivers instead of
+        // downscaling (which darkens the pre-dithered 1-bit bitmap). A
+        // negative crop (tile larger than cover on that axis) is clamped to
+        // no-crop by drawBitmap.
+        const float cropX = 1.0f - static_cast<float>(tileW) / coverWidth;
+        const float cropY = 1.0f - static_cast<float>(tileH) / coverHeight;
+        // A cover narrower than the tile (cropX < 0, so no horizontal crop)
+        // would sit flush-left. Center it within the tile.
         int drawX = tileX;
         if (bitmap.getWidth() < tileW) {
           drawX = tileX + (tileW - bitmap.getWidth()) / 2;
         }
-        renderer.drawBitmap(bitmap, drawX, tileY, tileW, tileH, cropX);
+        renderer.drawBitmap(bitmap, drawX, tileY, tileW, tileH, cropX, cropY);
         hasCover = true;
       }
       file.close();
@@ -216,14 +225,15 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
   const int nextRowY = rect.y + heroAreaH + VegaMetrics::kSectionGap;
   const int nextTileW = (rect.width - 2 * padding) / 3;
   const int nextLineH = renderer.getLineHeight(SMALL_FONT_ID);
-  // Draw at *native* coverH (== homeCoverHeight, the cached-thumbnail's
-  // generation height) so GfxRenderer::drawBitmap's fitScale lands at 1.0 --
-  // any scale < 1.0 nearest-neighbour-collapses the pre-dithered 1-bit cover
-  // bitmap and visibly darkens it (OR-only-dark compositing biases toward
-  // black). nextThumbW fills its slot (minus a thin gap so adjacent covers
-  // don't touch); the resulting crop ratio keeps fitScale within ~0.999 of
-  // 1.0 -- no visible collapse.
-  const int nextThumbH = coverH;
+  // Row thumbnails are shorter than the hero: same cached thumbnail (generated
+  // at coverH == homeCoverHeight), drawn with a symmetric vertical crop down to
+  // kNextRowCoverHeight by drawCoverTile. Cropping keeps drawBitmap's fitScale
+  // at 1.0 -- any scale < 1.0 nearest-neighbour-collapses the pre-dithered
+  // 1-bit cover bitmap and visibly darkens it (OR-only-dark compositing biases
+  // toward black). nextThumbW fills its slot (minus a thin gap so adjacent
+  // covers don't touch); the crop ratios keep fitScale within ~0.999 of 1.0 --
+  // no visible collapse.
+  const int nextThumbH = VegaMetrics::kNextRowCoverHeight;
   const int nextThumbW = nextTileW - kNextThumbGap;
   const int nextCount = std::min(static_cast<int>(recentBooks.size()) - 1, 3);
 
