@@ -118,19 +118,9 @@ std::string UITheme::getCoverThumbPath(std::string coverBmpPath, int coverHeight
 }
 
 UIIcon UITheme::getFileIcon(const std::string& filename) {
-  if (filename.back() == '/') {
-    return Folder;
-  }
-  if (FsHelpers::hasEpubExtension(filename) || FsHelpers::hasXtcExtension(filename)) {
-    return Book;
-  }
-  if (FsHelpers::hasTxtExtension(filename) || FsHelpers::hasMarkdownExtension(filename)) {
-    return Text;
-  }
-  if (FsHelpers::hasBmpExtension(filename)) {
-    return Image;
-  }
-  return File;
+  // Only folders get an icon; books and files render without one (None) so the
+  // file browser and recent-books lists show an icon for directories only.
+  return filename.back() == '/' ? Folder : None;
 }
 
 int UITheme::getStatusBarHeight() {

@@ -168,7 +168,15 @@ void drawCoverTile(const GfxRenderer& renderer, const std::string& coverBmpPath,
         const float ratio = coverWidth / coverHeight;
         const float tileRatio = static_cast<float>(tileW) / static_cast<float>(tileH);
         const float cropX = 1.0f - (tileRatio / ratio);
-        renderer.drawBitmap(bitmap, tileX, tileY, tileW, tileH, cropX);
+        // A cover narrower than the tile (cropX < 0, so no horizontal crop) is
+        // height-fitted and would sit flush-left. Center it within the tile.
+        // Thumbnails are generated at the tile height, so getWidth() is the
+        // rendered width.
+        int drawX = tileX;
+        if (bitmap.getWidth() < tileW) {
+          drawX = tileX + (tileW - bitmap.getWidth()) / 2;
+        }
+        renderer.drawBitmap(bitmap, drawX, tileY, tileW, tileH, cropX);
         hasCover = true;
       }
       file.close();
@@ -176,7 +184,6 @@ void drawCoverTile(const GfxRenderer& renderer, const std::string& coverBmpPath,
   }
   renderer.drawRect(tileX, tileY, tileW, tileH, true);
   if (!hasCover) {
-    renderer.fillRect(tileX, tileY + tileH / 3, tileW, 2 * tileH / 3, true);
     renderer.drawIcon(CoverIcon, tileX + (tileW - 32) / 2, tileY + (tileH / 3 - 32) / 2, 32, 32);
   }
 }

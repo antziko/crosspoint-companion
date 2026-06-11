@@ -253,21 +253,21 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
         contentWidth - LyraMetrics::values.contentSidePadding * 2, rowHeight, cornerRadius, Color::LightGray);
   }
 
-  int textX = rect.x + LyraMetrics::values.contentSidePadding + hPaddingInSelection;
-  int textWidth = contentWidth - LyraMetrics::values.contentSidePadding * 2 - hPaddingInSelection * 2;
-  int iconSize;
-  if (rowIcon != nullptr) {
-    iconSize = (rowSubtitle != nullptr) ? mainMenuIconSize : listIconSize;
-    textX += iconSize + hPaddingInSelection;
-    textWidth -= iconSize + hPaddingInSelection;
-  }
+  // Icon column is reserved per-row: a row whose icon is None lets its title use
+  // the full width, while a row with an icon indents past it.
+  const int baseTextX = rect.x + LyraMetrics::values.contentSidePadding + hPaddingInSelection;
+  const int baseTextWidth = contentWidth - LyraMetrics::values.contentSidePadding * 2 - hPaddingInSelection * 2;
+  const int iconSize = (rowIcon != nullptr) ? ((rowSubtitle != nullptr) ? mainMenuIconSize : listIconSize) : 0;
 
   // Draw all items
   const auto pageStartIndex = selectedIndex / pageItems * pageItems;
   int iconY = (rowSubtitle != nullptr) ? 16 : 10;
   for (int i = pageStartIndex; i < itemCount && i < pageStartIndex + pageItems; i++) {
     const int itemY = rect.y + (i % pageItems) * rowHeight;
-    int rowTextWidth = textWidth;
+    const UIIcon rowIconValue = (rowIcon != nullptr) ? rowIcon(i) : None;
+    const int rowIndent = (rowIconValue != None) ? (iconSize + hPaddingInSelection) : 0;
+    const int textX = baseTextX + rowIndent;
+    int rowTextWidth = baseTextWidth - rowIndent;
 
     // Draw name
     int valueWidth = 0;
@@ -292,9 +292,8 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
           if ((px + py) % 2 == 0) renderer.drawPixel(px, py, false);
     }
 
-    if (rowIcon != nullptr) {
-      UIIcon icon = rowIcon(i);
-      const uint8_t* iconBitmap = iconForName(icon, iconSize);
+    if (rowIconValue != None) {
+      const uint8_t* iconBitmap = iconForName(rowIconValue, iconSize);
       if (iconBitmap != nullptr) {
         renderer.drawIcon(iconBitmap, rect.x + LyraMetrics::values.contentSidePadding + hPaddingInSelection,
                           itemY + iconY, iconSize, iconSize);
@@ -459,10 +458,7 @@ void LyraTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
                         LyraMetrics::values.homeCoverHeight, true);
 
       if (!hasCover) {
-        // Render empty cover
-        renderer.fillRect(tileX + hPaddingInSelection,
-                          tileY + hPaddingInSelection + (LyraMetrics::values.homeCoverHeight / 3), coverWidth,
-                          2 * LyraMetrics::values.homeCoverHeight / 3, true);
+        // Render empty cover (border + icon only; no black fill)
         renderer.drawIcon(CoverIcon, tileX + hPaddingInSelection + 24, tileY + hPaddingInSelection + 24, 32, 32);
       }
 

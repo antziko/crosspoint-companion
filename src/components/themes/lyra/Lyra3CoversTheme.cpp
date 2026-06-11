@@ -49,13 +49,19 @@ void Lyra3CoversTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, con
               float coverHeight = static_cast<float>(bitmap.getHeight());
               float coverWidth = static_cast<float>(bitmap.getWidth());
               float ratio = coverWidth / coverHeight;
-              const float tileRatio = static_cast<float>(tileWidth - 2 * hPaddingInSelection) /
-                                      static_cast<float>(Lyra3CoversMetrics::values.homeCoverHeight);
+              const int slotWidth = tileWidth - 2 * hPaddingInSelection;
+              const float tileRatio =
+                  static_cast<float>(slotWidth) / static_cast<float>(Lyra3CoversMetrics::values.homeCoverHeight);
               float cropX = 1.0f - (tileRatio / ratio);
 
-              renderer.drawBitmap(bitmap, tileX + hPaddingInSelection, tileY + hPaddingInSelection,
-                                  tileWidth - 2 * hPaddingInSelection, Lyra3CoversMetrics::values.homeCoverHeight,
-                                  cropX);
+              // A cover narrower than the slot (cropX < 0, no horizontal crop) is
+              // height-fitted and would sit flush-left. Center it in the slot.
+              int drawX = tileX + hPaddingInSelection;
+              if (bitmap.getWidth() < slotWidth) {
+                drawX += (slotWidth - bitmap.getWidth()) / 2;
+              }
+              renderer.drawBitmap(bitmap, drawX, tileY + hPaddingInSelection, slotWidth,
+                                  Lyra3CoversMetrics::values.homeCoverHeight, cropX);
             } else {
               hasCover = false;
             }
@@ -67,11 +73,7 @@ void Lyra3CoversTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, con
                           Lyra3CoversMetrics::values.homeCoverHeight, true);
 
         if (!hasCover) {
-          // Render empty cover
-          renderer.fillRect(tileX + hPaddingInSelection,
-                            tileY + hPaddingInSelection + (Lyra3CoversMetrics::values.homeCoverHeight / 3),
-                            tileWidth - 2 * hPaddingInSelection, 2 * Lyra3CoversMetrics::values.homeCoverHeight / 3,
-                            true);
+          // Render empty cover (border + icon only; no black fill)
           renderer.drawIcon(CoverIcon, tileX + hPaddingInSelection + 24, tileY + hPaddingInSelection + 24, 32, 32);
         }
       }
