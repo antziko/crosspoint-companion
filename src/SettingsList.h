@@ -251,8 +251,14 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                                   {StrId::STR_STATE_OFF, StrId::STR_HOLD_CONFIRM_BOOKMARK,
                                    StrId::STR_HOLD_CONFIRM_DICT},
                                   "holdConfirmAction", StrId::STR_CAT_READER));
-    v.push_back(SettingInfo::Value(StrId::STR_MIN_SESSION_FOR_STATS, &CrossPointSettings::minSessionMinutes,
-                                   {0, 5, 1}, "minSessionMinutes", StrId::STR_CAT_READER));
+    v.push_back(SettingInfo::Enum(StrId::STR_MIN_SESSION_FOR_STATS, &CrossPointSettings::minSessionMinutes,
+                                  {StrId::STR_ALWAYS, StrId::STR_SEC_15, StrId::STR_SEC_30, StrId::STR_MIN_1,
+                                   StrId::STR_MIN_2, StrId::STR_MIN_5},
+                                  "minSessionMinutes", StrId::STR_CAT_READER));
+    v.push_back(SettingInfo::Enum(StrId::STR_IDLE_PAGE_CAP, &CrossPointSettings::pageIdleCapSeconds,
+                                  {StrId::STR_STATE_OFF, StrId::STR_SEC_15, StrId::STR_SEC_30, StrId::STR_SEC_45,
+                                   StrId::STR_SEC_60},
+                                  "pageIdleCapSeconds", StrId::STR_CAT_READER));
 
     // --- Controls ---
     v.push_back(SettingInfo::Enum(StrId::STR_SIDE_BTN_LAYOUT, &CrossPointSettings::sideButtonLayout,

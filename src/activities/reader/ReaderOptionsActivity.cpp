@@ -28,11 +28,24 @@ enum ItemIndex : int {
   MIN_SESSION = 6,
 };
 
-// Ordered cycle of valid per-book min-session values:
-// 0xFF = use global, 0 = always, then fixed minute thresholds.
+// Ordered cycle of valid per-book min-session values: 0xFF = use global, then indices
+// into CrossPointSettings::MIN_SESSION_SECONDS (0 = always, 15s, 30s, 1m, 2m, 5m).
 static constexpr uint8_t MIN_SESSION_CYCLE[] = {
-    CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL, 0, 1, 2, 3, 5};
+    CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL, 0, 1, 2, 3, 4, 5};
 static constexpr int MIN_SESSION_CYCLE_COUNT = static_cast<int>(sizeof(MIN_SESSION_CYCLE));
+
+// Formats a MIN_SESSION_SECONDS index as a short duration label ("Always", "15s", "2 min").
+static void formatMinSession(uint8_t idx, char* buf, size_t len) {
+  constexpr size_t kCount = sizeof(CrossPointSettings::MIN_SESSION_SECONDS) / sizeof(uint16_t);
+  const uint16_t s = (idx < kCount) ? CrossPointSettings::MIN_SESSION_SECONDS[idx] : 0;
+  if (s == 0) {
+    snprintf(buf, len, "%s", tr(STR_ALWAYS));
+  } else if (s < 60) {
+    snprintf(buf, len, "%us", static_cast<unsigned>(s));
+  } else {
+    snprintf(buf, len, "%u min", static_cast<unsigned>(s / 60));
+  }
+}
 
 }  // namespace
 
@@ -211,19 +224,14 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
     case MIN_SESSION: {
       const uint8_t v = localOverride.minSessionMinutes;
       if (v == CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL) {
-        const uint8_t g = SETTINGS.minSessionMinutes;
-        if (g == 0) {
-          char buf[32];
-          snprintf(buf, sizeof(buf), "%s (%s)", tr(STR_DEFAULT_VALUE), tr(STR_ALWAYS));
-          return std::string(buf);
-        }
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%s (%u min)", tr(STR_DEFAULT_VALUE), static_cast<unsigned>(g));
+        char inner[24];
+        formatMinSession(SETTINGS.minSessionMinutes, inner, sizeof(inner));
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%s (%s)", tr(STR_DEFAULT_VALUE), inner);
         return std::string(buf);
       }
-      if (v == 0) return tr(STR_ALWAYS);
-      char buf[16];
-      snprintf(buf, sizeof(buf), "%u min", static_cast<unsigned>(v));
+      char buf[24];
+      formatMinSession(v, buf, sizeof(buf));
       return std::string(buf);
     }
     default:

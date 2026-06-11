@@ -314,6 +314,7 @@ void EpubReaderActivity::onEnter() {
 
   readingStats = BookReadingStats::load(epub->getCachePath());
   sessionStartMs = millis();
+  sessionIdleExcessSecs = 0;
 
   // Trigger first update
   requestUpdate();
@@ -323,18 +324,26 @@ void EpubReaderActivity::onExit() {
   Activity::onExit();
 
   if (epub && sessionStartMs > 0) {
+    // Account the page being viewed at exit (its final dwell) before totalling.
+    if (pageShownAtMs > 0) accountIdleExcess(millis() - pageShownAtMs);
+
     const uint32_t sessionSecs = static_cast<uint32_t>((millis() - sessionStartMs) / 1000UL);
+    // Subtract idle-page excess so leaving the device on a page doesn't inflate reading
+    // time. With the cap Off, sessionIdleExcessSecs is 0 and this equals wall-clock.
+    const uint32_t effectiveSecs = (sessionSecs > sessionIdleExcessSecs) ? (sessionSecs - sessionIdleExcessSecs) : 0;
 
     // Determine effective minimum session threshold: per-book override wins unless
     // it is set to MIN_SESSION_USE_GLOBAL, in which case fall back to global setting.
     const auto& ov = SETTINGS.getReaderOverride();
-    const uint8_t thresholdMins =
+    const uint8_t thresholdIdx =
         (ov.active && ov.minSessionMinutes != CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL)
             ? ov.minSessionMinutes
             : SETTINGS.minSessionMinutes;
-    const uint32_t thresholdSecs = static_cast<uint32_t>(thresholdMins) * 60U;
+    constexpr size_t kMinSessCount = sizeof(CrossPointSettings::MIN_SESSION_SECONDS) / sizeof(uint16_t);
+    const uint32_t thresholdSecs =
+        (thresholdIdx < kMinSessCount) ? CrossPointSettings::MIN_SESSION_SECONDS[thresholdIdx] : 0;
 
-    if (sessionSecs >= thresholdSecs) {
+    if (effectiveSecs >= thresholdSecs) {
       // Use the local calendar day (RTC raw date + SETTINGS.clockUtcOffsetQ), not the
       // RTC's raw date -- a session that starts just after local midnight must be
       // attributed to "today", not the RTC's still-previous UTC-ish day, or the
@@ -343,8 +352,8 @@ void EpubReaderActivity::onExit() {
       uint16_t year = 0;
       const bool dated = halClock.isAvailable() &&
                          halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, dayOfWeek, day, month, year, hour, minute);
-      recordReadingSession(epub->getCachePath(), readingStats, sessionSecs, dated, year, month, day, dayOfWeek, hour,
-                           minute);
+      recordReadingSession(epub->getCachePath(), readingStats, effectiveSecs, dated, year, month, day, dayOfWeek,
+                           hour, minute);
     }
 
     sessionStartMs = 0UL;
@@ -674,6 +683,7 @@ void EpubReaderActivity::openReaderMenu() {
     }
   }
 
+  if (pageShownAtMs > 0) accountIdleExcess(millis() - pageShownAtMs);
   pageShownAtMs = 0UL;
   startActivityForResult(
       std::make_unique<EpubReaderMenuActivity>(
@@ -734,6 +744,7 @@ void EpubReaderActivity::openWordSelect(bool framebufferContainsPage) {
     }
   }
   const std::string bookCachePath = epub->getCachePath();
+  if (pageShownAtMs > 0) accountIdleExcess(millis() - pageShownAtMs);
   pageShownAtMs = 0UL;
   startActivityForResult(std::make_unique<DictionaryWordSelectActivity>(
                              renderer, mappedInput, std::move(pageForLookup), orientedMarginLeft, orientedMarginTop,
@@ -1045,11 +1056,13 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
           sessionStartMs > 0 ? static_cast<uint32_t>((millis() - sessionStartMs) / 1000UL) : 0UL;
       {
         const auto& ov = SETTINGS.getReaderOverride();
-        const uint8_t thresholdMins =
+        const uint8_t thresholdIdx =
             (ov.active && ov.minSessionMinutes != CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL)
                 ? ov.minSessionMinutes
                 : SETTINGS.minSessionMinutes;
-        session.thresholdSecs = static_cast<uint32_t>(thresholdMins) * 60U;
+        constexpr size_t kMinSessCount = sizeof(CrossPointSettings::MIN_SESSION_SECONDS) / sizeof(uint16_t);
+        session.thresholdSecs =
+            (thresholdIdx < kMinSessCount) ? CrossPointSettings::MIN_SESSION_SECONDS[thresholdIdx] : 0;
         uint8_t hour = 0, minute = 0;
         session.dated = halClock.isAvailable() &&
                         halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, session.dayOfWeek, session.day,
@@ -1130,10 +1143,26 @@ void EpubReaderActivity::toggleAutoPageTurn(const uint8_t selectedPageTurnOption
   }
 }
 
+void EpubReaderActivity::accountIdleExcess(unsigned long dwellMs) {
+  const uint8_t idx = SETTINGS.pageIdleCapSeconds;
+  if (idx == 0) return;  // Off — full wall-clock, no idle cap.
+  constexpr size_t kCount = sizeof(CrossPointSettings::PAGE_IDLE_CAP_SECONDS) / sizeof(uint16_t);
+  if (idx >= kCount) return;  // out of range (shouldn't happen) — treat as Off.
+  const uint32_t capSecs = CrossPointSettings::PAGE_IDLE_CAP_SECONDS[idx];
+  const uint32_t dwellSecs = static_cast<uint32_t>(dwellMs / 1000UL);
+  // Only pages held past the idle threshold are capped; cap <= threshold so this can't
+  // underflow.
+  if (dwellSecs > CrossPointSettings::PAGE_IDLE_THRESHOLD_SECONDS) {
+    sessionIdleExcessSecs += dwellSecs - capSecs;
+  }
+}
+
 void EpubReaderActivity::pageTurn(bool isForwardTurn) {
   if (isForwardTurn) {
     if (pageShownAtMs > 0) {
       const unsigned long dwell = millis() - pageShownAtMs;
+      // Idle-cap accounting is independent of the pace-sample outlier rejection below.
+      accountIdleExcess(dwell);
       constexpr unsigned long MIN_DWELL_MS = 2000UL;
       if (dwell >= MIN_DWELL_MS) {
         const uint32_t dwellSecs = static_cast<uint32_t>(dwell / 1000UL);
@@ -1426,6 +1455,11 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   }
   silentIndexNextChapterIfNeeded(viewportWidth, viewportHeight);
   saveProgress(currentSpineIndex, section->currentPage, section->pageCount);
+  // Catch-all: account any still-open page view before starting a new one. The
+  // forward-turn / menu / dictionary / exit paths reset pageShownAtMs to 0 first, so
+  // this only fires for transitions that don't (e.g. a backward page turn) — no
+  // double counting.
+  if (pageShownAtMs > 0) accountIdleExcess(millis() - pageShownAtMs);
   pageShownAtMs = millis();
 
   showPendingSyncSaveError();

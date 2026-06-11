@@ -66,6 +66,11 @@ class EpubReaderActivity final : public Activity {
   // Set to millis() after each full page render; cleared to 0 while a subactivity is active.
   // Forward pageTurn measures elapsed time here for pace estimation.
   unsigned long pageShownAtMs = 0UL;
+  // Accumulated idle-page excess (seconds) for the current session. When the idle-page
+  // cap (SETTINGS.pageIdleCapSeconds) is enabled, a page held longer than
+  // PAGE_IDLE_THRESHOLD_SECONDS contributes only the cap value; the excess is summed here
+  // and subtracted from the wall-clock session total at onExit. Reset in onEnter.
+  uint32_t sessionIdleExcessSecs = 0;
 
   // Set after a page is rendered with the AA grayscale strip passes. Used by
   // lightStatusBarRefresh to skip the panel push on AA image pages: even a
@@ -103,6 +108,10 @@ class EpubReaderActivity final : public Activity {
   void saveOrientation() const;
   void toggleAutoPageTurn(uint8_t selectedPageTurnOption);
   void pageTurn(bool isForwardTurn);
+  // Adds the idle excess of a just-ended page view (dwellMs on screen) to
+  // sessionIdleExcessSecs when the idle-page cap is enabled. No-op when the cap is Off
+  // or the dwell is within PAGE_IDLE_THRESHOLD_SECONDS.
+  void accountIdleExcess(unsigned long dwellMs);
   // returnMark=true drops a session "return here" bookmark (distinct icon) used when
   // jumping to another chapter, so the user can get back to where they were.
   // lightRefresh=true performs a status-bar-only windowed panel update instead of a

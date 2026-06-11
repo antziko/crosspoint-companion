@@ -8,7 +8,9 @@ namespace {
 
 // On-disk layout version for reader_settings.bin. Bump if the field layout below
 // changes so older files are rejected and re-seeded.
-constexpr uint8_t READER_SETTINGS_FILE_VERSION = 3;
+// v4: minSessionMinutes repurposed from a minutes value to a MIN_SESSION_SECONDS index;
+//     bump rejects old per-book overrides so they cleanly re-seed instead of misreading.
+constexpr uint8_t READER_SETTINGS_FILE_VERSION = 4;
 
 // Relative path inside the epub cache dir (epub_<hash>/).
 constexpr char READER_SETTINGS_FILENAME[] = "/reader_settings.bin";

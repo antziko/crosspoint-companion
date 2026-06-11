@@ -185,7 +185,9 @@ class CrossPointSettings {
     uint8_t hyphenationEnabled = 0;
     uint8_t extraParagraphSpacing = 1;
     char sdFontFamilyName[32] = "";
-    // 0xFF = inherit global minSessionMinutes; 0 = always; 1–30 = min N minutes.
+    // Per-book min-session threshold. 0xFF = inherit the global setting; otherwise an
+    // index into CrossPointSettings::MIN_SESSION_SECONDS (0 = always commit). The field
+    // name is kept for the settings/cache key, but it now holds an index, not minutes.
     static constexpr uint8_t MIN_SESSION_USE_GLOBAL = 0xFF;
     uint8_t minSessionMinutes = MIN_SESSION_USE_GLOBAL;
   };
@@ -287,9 +289,23 @@ class CrossPointSettings {
   uint8_t removeReadBooksFromRecents = 0;
   // Move epub to /Read/ folder on SD card when finished (0 = disabled, 1 = enabled)
   uint8_t moveFinishedToReadFolder = 0;
-  // Minimum session duration (minutes) before reading time is committed to stats.
-  // 0 = always commit (default). Sessions shorter than this are discarded.
+  // Minimum session duration before reading time is committed to stats, as an index
+  // into MIN_SESSION_SECONDS (0 = always commit, the default). Sessions whose effective
+  // (idle-capped) time is shorter are discarded. Field name kept for the settings key,
+  // but it holds an index, not minutes.
   uint8_t minSessionMinutes = 0;
+  // Index -> seconds for minSessionMinutes (global) and ReaderOverride::minSessionMinutes.
+  // Index 0 = always (no minimum). Ladder: Off/always, 15s, 30s, 1m, 2m, 5m.
+  static constexpr uint16_t MIN_SESSION_SECONDS[] = {0, 15, 30, 60, 120, 300};
+  // Idle-page cap for reading stats. A page held longer than PAGE_IDLE_THRESHOLD_SECONDS
+  // (60s) is treated as idle/AFK and contributes only the capped seconds to recorded
+  // reading time instead of full wall-clock. Stored as an index into PAGE_IDLE_CAP_SECONDS;
+  // 0 = Off (no cap, full wall-clock — the legacy behaviour).
+  uint8_t pageIdleCapSeconds = 0;
+  // Index -> seconds mapping for pageIdleCapSeconds. Index 0 = Off.
+  static constexpr uint16_t PAGE_IDLE_CAP_SECONDS[] = {0, 15, 30, 45, 60};
+  // A page dwell beyond this is considered idle and gets capped (when the cap is enabled).
+  static constexpr uint32_t PAGE_IDLE_THRESHOLD_SECONDS = 60;
   // Image rendering mode in EPUB reader
   uint8_t imageRendering = IMAGES_DISPLAY;
   // 1-bit halftone dither algorithm for all images (X3): blue noise vs Bayer
