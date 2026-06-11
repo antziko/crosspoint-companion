@@ -2,10 +2,9 @@
 #include <I18n.h>
 
 #include <memory>
-#include <string>
-#include <vector>
 
 #include "GlobalReadingStats.h"
+#include "StatsTimelineView.h"
 #include "activities/Activity.h"
 #include "util/ButtonNavigator.h"
 
@@ -26,26 +25,17 @@ class ReadingStatsActivity final : public Activity {
  private:
   enum class Tab { Timeline, Heatmap };
 
-  struct TimelineRow {
-    bool isSectionHeader;
-    std::string label;
-    std::string value;
-  };
-
   // ~800 bytes (embeds a ReadingTimeHistory) — heap-allocated, never a stack
   // local or by-value member (see GlobalReadingStats.h / ReadingTimeHistory.h).
   std::unique_ptr<GlobalReadingStats> stats;
 
   Tab selectedTab = Tab::Timeline;
-  std::vector<TimelineRow> timelineRows;
-  int scrollOffset = 0;
+  // Shared Timeline/Heatmap presentation (rows, scrolling, section jumps).
+  StatsTimelineView timeline;
 
   ButtonNavigator buttonNavigator;
 
-  void buildTimelineRows();
   // Area below the tab bar shared by both tabs; single source of truth so loop()'s
   // scroll clamping and render()'s drawing always agree on available height.
   Rect contentRect() const;
-  void renderTimeline(const Rect& rect) const;
-  void renderHeatmap(const Rect& rect) const;
 };

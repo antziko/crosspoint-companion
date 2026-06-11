@@ -4,10 +4,10 @@
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <vector>
 
 #include "BookReadingStats.h"
 #include "ReadingTimeHistory.h"
+#include "StatsTimelineView.h"
 #include "activities/Activity.h"
 #include "util/ButtonNavigator.h"
 
@@ -42,12 +42,6 @@ class BookStatsActivity final : public Activity {
  private:
   enum class Tab { Timeline, Heatmap };
 
-  struct TimelineRow {
-    bool isSectionHeader;
-    std::string label;
-    std::string value;
-  };
-
   std::string bookTitle;
   std::string cachePath;
   int progressPercent = 0;
@@ -58,15 +52,13 @@ class BookStatsActivity final : public Activity {
   std::unique_ptr<ReadingTimeHistory> history;
 
   Tab selectedTab = Tab::Timeline;
-  std::vector<TimelineRow> timelineRows;
-  int scrollOffset = 0;
+  // Shared Timeline/Heatmap presentation (rows, scrolling, section jumps).
+  StatsTimelineView timeline;
 
   ButtonNavigator buttonNavigator;
 
-  void buildTimelineRows();
   // Area below the tab bar shared by both tabs; single source of truth so loop()'s
   // scroll clamping and render()'s drawing always agree on available height.
   Rect contentRect() const;
-  void renderTimeline(const Rect& rect) const;
-  void renderHeatmap(const Rect& rect) const;
+  void renderHeatmapTab(const Rect& rect) const;
 };
