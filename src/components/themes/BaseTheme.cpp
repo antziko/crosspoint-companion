@@ -381,7 +381,7 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
                    Rect{batteryX, rect.y + 5, BaseMetrics::values.batteryWidth, BaseMetrics::values.batteryHeight},
                    showBatteryPercentage);
 
-  drawTopBarClockDate(renderer, rect.x + BaseMetrics::values.contentSidePadding, rect.y + 5);
+  drawTopBarClockDate(renderer, rect.y + 5);
 
   if (title) {
     int padding = rect.width - batteryX + BaseMetrics::values.batteryWidth;
@@ -401,7 +401,7 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
   }
 }
 
-void BaseTheme::drawTopBarClockDate(const GfxRenderer& renderer, int x, int y) const {
+void BaseTheme::drawTopBarClockDate(const GfxRenderer& renderer, int y) const {
   if (!halClock.isAvailable() || (!SETTINGS.homeTopBarDate && !SETTINGS.homeTopBarClock)) return;
   char dateBuf[12] = {};
   char timeBuf[9] = {};
@@ -417,7 +417,7 @@ void BaseTheme::drawTopBarClockDate(const GfxRenderer& renderer, int x, int y) c
     snprintf(dtBuf, sizeof(dtBuf), "%s", dateBuf);
   else
     snprintf(dtBuf, sizeof(dtBuf), "%s", timeBuf);
-  renderer.drawText(SMALL_FONT_ID, x, y, dtBuf, true);
+  renderer.drawCenteredText(SMALL_FONT_ID, y, dtBuf, true);
 }
 
 void BaseTheme::drawSubHeader(const GfxRenderer& renderer, Rect rect, const char* label, const char* rightLabel) const {

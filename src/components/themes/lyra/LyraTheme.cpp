@@ -121,7 +121,7 @@ void LyraTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
                    Rect{batteryX, rect.y + 5, LyraMetrics::values.batteryWidth, LyraMetrics::values.batteryHeight},
                    showBatteryPercentage);
 
-  drawTopBarClockDate(renderer, rect.x + LyraMetrics::values.contentSidePadding, rect.y + 5);
+  drawTopBarClockDate(renderer, rect.y + 5);
 
   int maxTitleWidth = title != nullptr ? renderer.getTextWidth(UI_12_FONT_ID, title, EpdFontFamily::BOLD) : 0;
   int maxSubtitleWidth =

@@ -243,7 +243,7 @@ class BaseTheme {
   static void drawWifiBars(const GfxRenderer& renderer, int rightX, int bottomY);
 
  protected:
-  // Draw top-bar clock/date at (x, y) if the user has enabled them and time is available.
-  // Called from drawHeader() overrides in all themes so the feature works universally.
-  void drawTopBarClockDate(const GfxRenderer& renderer, int x, int y) const;
+  // Draw top-bar clock/date centered at vertical position y if the user has enabled
+  // them and time is available. Called from drawHeader() overrides in all themes.
+  void drawTopBarClockDate(const GfxRenderer& renderer, int y) const;
 };
