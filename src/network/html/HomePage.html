@@ -98,7 +98,19 @@
     </style>
   </head>
   <body>
-    <h1>📚 CrossPoint Reader</h1>
+    <h1 id="brandTitle">📚 CrossPoint Reader</h1>
+    <script>
+      // Swap the generic brand for this unit's name (matches the per-device AP SSID)
+      // as early as possible — fires during body parse, before the page's heavier
+      // loads — so the mac-id shows first instead of flashing "CrossPoint Reader".
+      fetch('/api/status').then(r => r.json()).then(d => {
+        if (d && d.name) {
+          const h1 = document.getElementById('brandTitle');
+          if (h1) h1.textContent = '📚 ' + d.name;
+          document.title = d.name;
+        }
+      }).catch(() => {});
+    </script>
 
     <div class="nav-links">
       <a href="/" class="active">Home</a>

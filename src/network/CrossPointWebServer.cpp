@@ -6,6 +6,7 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <WiFi.h>
+#include <esp_mac.h>
 #include <esp_task_wdt.h>
 
 #include <algorithm>
@@ -368,6 +369,16 @@ void CrossPointWebServer::handleStatus() const {
   doc["freeHeap"] = ESP.getFreeHeap();
   doc["uptime"] = millis() / 1000;
   doc["device"] = gpio.deviceIsX3() ? "X3" : "X4";
+  // Per-device name, identical to the AP SSID built in CrossPointWebServerActivity
+  // (last 3 efuse-MAC bytes). Lets the served pages show which unit they're on when
+  // several readers are around, instead of the generic "CrossPoint Reader" branding.
+  // NOTE: format duplicated from CrossPointWebServerActivity::buildApSsid — candidate
+  // for a shared helper if a third caller appears.
+  uint8_t mac[6] = {};
+  esp_efuse_mac_get_default(mac);
+  char nameBuf[32];
+  snprintf(nameBuf, sizeof(nameBuf), "CrossPoint-%02X%02X%02X", mac[3], mac[4], mac[5]);
+  doc["name"] = nameBuf;
 
   String json;
   serializeJson(doc, json);
