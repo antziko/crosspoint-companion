@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "CrossPointSettings.h"
 #include "RecentBooksStore.h"
 #include "activities/reader/BookReadingStats.h"
 #include "activities/reader/EpubReaderUtils.h"
@@ -126,9 +127,13 @@ HeroDetails loadHeroDetails(const RecentBook& book) {
   }
 
   if (halClock.isAvailable()) {
-    uint8_t dow = 0, day = 0, month = 0;
+    uint8_t dow = 0, day = 0, month = 0, hour = 0, minute = 0;
     uint16_t year = 0;
-    if (halClock.getDate(dow, day, month, year)) {
+    // Local calendar day, not raw getDate(): recordReadingSession buckets
+    // heatmapAnchorDay by getLocalDateTime, so the "today" comparison must
+    // use the same basis or the line vanishes whenever UTC and local dates
+    // differ (e.g. local 00:00-08:00 at UTC+8).
+    if (halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, dow, day, month, year, hour, minute)) {
       const uint32_t todayIdx = readingHistoryDayIndex(year, month, day);
       auto history = makeUniqueNoThrow<ReadingTimeHistory>();
       if (history) {
