@@ -123,6 +123,10 @@ void moveFinishedBookToReadFolder(const std::string& srcPath, const std::string&
     return;
   }
 
+  // Bookmark + tombstone files are keyed by crc32 of the epub path, so re-key them too,
+  // otherwise the moved book loses its bookmarks.
+  BookmarkStore::relocateForFilePath(srcPath, dstPath, "epub");
+
   // Cache dir is keyed by hash of the epub path (see Epub ctor), so it must be re-keyed.
   const std::string newCachePath = "/.crosspoint/epub_" + std::to_string(std::hash<std::string>{}(dstPath));
   if (!oldCachePath.empty() && Storage.exists(oldCachePath.c_str())) {

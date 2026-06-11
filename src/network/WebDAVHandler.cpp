@@ -549,6 +549,7 @@ void WebDAVHandler::handleMove(WebServer& s) {
   file.close();
 
   if (success) {
+    relocateBookBookmarks(srcPath.c_str(), dstPath.c_str());
     s.send(dstExists ? 204 : 201);
   } else {
     s.send(500, "text/plain", "Move failed");

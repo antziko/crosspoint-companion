@@ -700,6 +700,28 @@ size_t BookmarkStore::mergeFrom(const std::vector<Bookmark>& remoteBookmarks,
   return added;
 }
 
+void BookmarkStore::relocateForFilePath(const std::string& srcPath, const std::string& dstPath,
+                                        const std::string& bookType) {
+  if (srcPath == dstPath) return;
+  const uint32_t srcCrc =
+      esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(srcPath.data()), static_cast<uint32_t>(srcPath.size()));
+  const uint32_t dstCrc =
+      esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(dstPath.data()), static_cast<uint32_t>(dstPath.size()));
+  const std::string srcBase = std::string(BOOKMARKS_DIR) + "/" + bookType + "_" + std::to_string(srcCrc);
+  const std::string dstBase = std::string(BOOKMARKS_DIR) + "/" + bookType + "_" + std::to_string(dstCrc);
+  // Re-key both the bookmark file and its tombstone sidecar. Non-fatal on failure.
+  for (const char* ext : {".bin", ".tomb"}) {
+    const std::string src = srcBase + ext;
+    if (!Storage.exists(src.c_str())) continue;
+    const std::string dst = dstBase + ext;
+    if (!Storage.rename(src.c_str(), dst.c_str())) {
+      LOG_ERR("BKS", "Failed to relocate %s -> %s (non-fatal)", src.c_str(), dst.c_str());
+    } else {
+      LOG_DBG("BKS", "Relocated %s -> %s", src.c_str(), dst.c_str());
+    }
+  }
+}
+
 void BookmarkStore::deleteForFilePath(const std::string& filePath, const std::string& bookType) {
   const uint32_t crc = esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(filePath.data()), static_cast<uint32_t>(filePath.size()));
   const std::string base = std::string(BOOKMARKS_DIR) + "/" + bookType + "_" + std::to_string(crc);

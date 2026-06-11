@@ -6,6 +6,8 @@
 #include <Txt.h>
 #include <Xtc.h>
 
+#include "BookmarkStore.h"
+
 bool isBookCacheDirectoryName(const char* name) {
   if (!name) {
     return false;
@@ -31,4 +33,14 @@ void clearBookCache(const std::string& path) {
     return;
   }
   LOG_DBG("BookCache", "Done checking metadata cache for: %s", path.c_str());
+}
+
+void relocateBookBookmarks(const std::string& srcPath, const std::string& dstPath) {
+  if (FsHelpers::hasEpubExtension(srcPath)) {
+    BookmarkStore::relocateForFilePath(srcPath, dstPath, "epub");
+  } else if (FsHelpers::hasXtcExtension(srcPath)) {
+    BookmarkStore::relocateForFilePath(srcPath, dstPath, "xtc");
+  } else if (FsHelpers::hasTxtExtension(srcPath)) {
+    BookmarkStore::relocateForFilePath(srcPath, dstPath, "txt");
+  }
 }

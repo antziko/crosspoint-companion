@@ -120,6 +120,12 @@ class BookmarkStore {
   // bookType must be "epub", "xtc", or "txt".
   static void deleteForFilePath(const std::string& filePath, const std::string& bookType);
 
+  // Re-key the bookmark + tombstone files when a book moves/renames (filename is keyed by
+  // crc32 of the path). Without this, a moved book loses its bookmarks. No-op if srcPath ==
+  // dstPath or no files exist. bookType must be "epub", "xtc", or "txt".
+  static void relocateForFilePath(const std::string& srcPath, const std::string& dstPath,
+                                  const std::string& bookType);
+
   // Scan /.crosspoint/bookmarks/ and populate `out` with one entry per book that has bookmarks.
   // Reads only the file header (does not load full bookmark records).
   // Caller should reserve `out` before calling.
