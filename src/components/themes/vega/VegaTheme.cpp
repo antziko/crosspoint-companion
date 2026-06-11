@@ -154,6 +154,8 @@ HeroDetails cachedHeroDetails;
 // tile size is requested, so no extra per-size thumbnail generation is needed.
 // Mirrors Lyra3CoversTheme::drawRecentBookCover's load-or-placeholder pattern
 // (Lyra3CoversTheme.cpp:42-81).
+// A tile with a cover shows just the photo; the frame is drawn only for the
+// empty placeholder (no photo).
 void drawCoverTile(const GfxRenderer& renderer, const std::string& coverBmpPath, int sourceHeight, int tileX,
                    int tileY, int tileW, int tileH) {
   bool hasCover = false;
@@ -182,8 +184,8 @@ void drawCoverTile(const GfxRenderer& renderer, const std::string& coverBmpPath,
       file.close();
     }
   }
-  renderer.drawRect(tileX, tileY, tileW, tileH, true);
   if (!hasCover) {
+    renderer.drawRect(tileX, tileY, tileW, tileH, true);
     renderer.drawIcon(CoverIcon, tileX + (tileW - 32) / 2, tileY + (tileH / 3 - 32) / 2, 32, 32);
   }
 }
