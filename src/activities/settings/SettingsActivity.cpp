@@ -288,7 +288,14 @@ void SettingsActivity::toggleCurrentSetting() {
         startActivityForResult(std::make_unique<OpdsServerListActivity>(renderer, mappedInput), resultHandler);
         break;
       case SettingAction::Network:
-        startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput), resultHandler);
+        // No-op result handler (NOT the shared one that calls SETTINGS.saveToFile()).
+        // WiFi credentials live in WIFI_STORE — persisted by WifiSelectionActivity
+        // itself — so there is nothing in SETTINGS to save here. The shared handler's
+        // saveToFile() builds a JsonDocument, and on X3 the WiFi scan can leave heap
+        // as low as ~10KB, where that allocation throws bad_alloc -> abort() (observed
+        // crash on entering then cancelling the WiFi network picker).
+        startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
+                               [](const ActivityResult&) {});
         break;
       case SettingAction::ClearCache:
         startActivityForResult(std::make_unique<ClearCacheActivity>(renderer, mappedInput), resultHandler);
