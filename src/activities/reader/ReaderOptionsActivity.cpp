@@ -51,10 +51,12 @@ static void formatMinSession(uint8_t idx, char* buf, size_t len) {
 
 ReaderOptionsActivity::ReaderOptionsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                              std::string bookCachePath,
-                                             const CrossPointSettings::ReaderOverride& initialOverride)
+                                             const CrossPointSettings::ReaderOverride& initialOverride,
+                                             bool showMinSession)
     : Activity("ReaderOptions", renderer, mappedInput),
       cachePath(std::move(bookCachePath)),
-      localOverride(initialOverride) {}
+      localOverride(initialOverride),
+      showMinSession(showMinSession) {}
 
 void ReaderOptionsActivity::onEnter() {
   Activity::onEnter();
@@ -83,12 +85,12 @@ void ReaderOptionsActivity::loop() {
   }
 
   buttonNavigator.onNextRelease([this] {
-    selectedIndex = ButtonNavigator::nextIndex(selectedIndex, ITEM_COUNT);
+    selectedIndex = ButtonNavigator::nextIndex(selectedIndex, itemCount());
     requestUpdate();
   });
 
   buttonNavigator.onPreviousRelease([this] {
-    selectedIndex = ButtonNavigator::previousIndex(selectedIndex, ITEM_COUNT);
+    selectedIndex = ButtonNavigator::previousIndex(selectedIndex, itemCount());
     requestUpdate();
   });
 }
@@ -252,7 +254,7 @@ void ReaderOptionsActivity::render(RenderLock&&) {
   const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
 
   GUI.drawList(
-      renderer, Rect{0, contentTop, pageWidth, contentHeight}, ITEM_COUNT, selectedIndex,
+      renderer, Rect{0, contentTop, pageWidth, contentHeight}, itemCount(), selectedIndex,
       [](int index) { return std::string(getItemName(index)); }, nullptr, nullptr,
       [this](int index) -> std::string { return getItemValue(index); }, true);
 

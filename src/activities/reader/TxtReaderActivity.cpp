@@ -8,19 +8,38 @@
 #include <Serialization.h>
 #include <Utf8.h>
 
+#include <cstring>
+
+#include "../../SdCardFontSystem.h"
+#include "../../TxtBookmarkStore.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "EpubReaderPercentSelectionActivity.h"
 #include "MappedInputManager.h"
+#include "QrDisplayActivity.h"
+#include "ReaderOptionsActivity.h"
+#include "ReaderSettingsIO.h"
 #include "ReaderUtils.h"
 #include "RecentBooksStore.h"
+#include "TxtReaderBookmarksActivity.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/ScreenshotUtil.h"
 
 namespace {
 constexpr size_t CHUNK_SIZE = 8 * 1024;  // 8KB chunk for reading
 // Cache file magic and version
 constexpr uint32_t CACHE_MAGIC = 0x54585449;  // "TXTI"
 constexpr uint8_t CACHE_VERSION = 3;          // Increment when cache format changes
+
+// Per-book orientation cache file (.crosspoint/<hash>/orientation.bin).
+// Byte 0 = version, byte 1 = orientation value. Mirrors the EPUB reader.
+constexpr uint8_t ORIENTATION_FILE_VERSION = 1;
+
+// Auto page-turn rates (pages per minute), indexed by the menu option.
+// Index 0 is "off"; the rest mirror EpubReaderActivity's PAGE_TURN_RATES.
+constexpr int PAGE_TURN_RATES[] = {1, 1, 3, 6, 12};
 }  // namespace
 
 void TxtReaderActivity::onEnter() {
@@ -30,12 +49,40 @@ void TxtReaderActivity::onEnter() {
     return;
   }
 
-  // TXT has no per-book orientation; keep the runtime active orientation in
-  // sync with the global default so shared reader swap/tilt logic stays correct.
-  APP_STATE.activeOrientation = SETTINGS.orientation;
-  ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
-
   txt->setupCacheDir();
+
+  // Load this book's saved orientation; fall back to the global default if none.
+  loadOrientation();
+  ReaderUtils::applyOrientation(renderer, APP_STATE.activeOrientation);
+
+  // Cache bookmarked pages for the status-bar indicator.
+  reloadBookmarkPages();
+
+  // Load per-book reader settings; seed from current globals on first open. This
+  // makes Reader Options (font/margin/spacing) override-aware just like EPUB.
+  {
+    CrossPointSettings::ReaderOverride bookOverride;
+    if (!ReaderSettingsIO::load(txt->getCachePath(), bookOverride)) {
+      bookOverride.active = true;
+      bookOverride.fontFamily = SETTINGS.fontFamily;
+      bookOverride.fontSize = SETTINGS.fontSize;
+      bookOverride.lineSpacing = SETTINGS.lineSpacing;
+      bookOverride.paragraphAlignment = SETTINGS.paragraphAlignment;
+      bookOverride.hyphenationEnabled = SETTINGS.hyphenationEnabled;
+      bookOverride.extraParagraphSpacing = SETTINGS.extraParagraphSpacing;
+      static_assert(sizeof(bookOverride.sdFontFamilyName) == sizeof(SETTINGS.sdFontFamilyName),
+                    "sdFontFamilyName size mismatch");
+      strncpy(bookOverride.sdFontFamilyName, SETTINGS.sdFontFamilyName, sizeof(bookOverride.sdFontFamilyName) - 1);
+      bookOverride.sdFontFamilyName[sizeof(bookOverride.sdFontFamilyName) - 1] = '\0';
+      if (!ReaderSettingsIO::write(txt->getCachePath(), bookOverride)) {
+        LOG_ERR("TRS", "Failed to seed per-book reader settings");
+      }
+    }
+    SETTINGS.setReaderOverride(bookOverride);
+  }
+
+  // Reload any SD-card font at this book's (override) size before the first layout.
+  sdFontSystem.ensureLoaded(renderer);
 
   // Save current txt as last opened file and add to recent books
   auto filePath = txt->getPath();
@@ -51,8 +98,13 @@ void TxtReaderActivity::onEnter() {
 void TxtReaderActivity::onExit() {
   Activity::onExit();
 
+  // Drop this book's per-book reader settings override so the rest of the UI
+  // uses the global defaults again.
+  SETTINGS.clearReaderOverride();
+
   // Reset orientation back to portrait for the rest of the UI
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+  APP_STATE.activeOrientation = SETTINGS.orientation;
 
   pageOffsets.clear();
   currentPageLines.clear();
@@ -62,22 +114,85 @@ void TxtReaderActivity::onExit() {
 }
 
 void TxtReaderActivity::loop() {
+  // Suppress Back bleed-through after a sub-activity (menu, options, bookmarks)
+  // exits on Back. Capture the flag BEFORE clearing it so the release frame
+  // itself is gated.
+  const bool suppressBack = ignoreBackUntilRelease;
+  if (ignoreBackUntilRelease && !mappedInput.isPressed(MappedInputManager::Button::Back)) {
+    ignoreBackUntilRelease = false;
+  }
+
   // Long press BACK (1s+) goes to file selection
-  if (mappedInput.isPressed(MappedInputManager::Button::Back) && mappedInput.getHeldTime() >= ReaderUtils::GO_HOME_MS) {
+  if (!suppressBack && mappedInput.isPressed(MappedInputManager::Button::Back) &&
+      mappedInput.getHeldTime() >= ReaderUtils::GO_HOME_MS) {
     activityManager.goToFileBrowser(txt ? txt->getPath() : "");
     return;
   }
 
   // Short press BACK goes directly to home
-  if (mappedInput.wasReleased(MappedInputManager::Button::Back) &&
+  if (!suppressBack && mappedInput.wasReleased(MappedInputManager::Button::Back) &&
       mappedInput.getHeldTime() < ReaderUtils::GO_HOME_MS) {
     onGoHome();
     return;
   }
 
-  [[maybe_unused]] const auto [prevTriggered, nextTriggered, fromTilt, fromSide] =
-      ReaderUtils::detectPageTurn(mappedInput);
+  // Auto page turn: any Confirm/Back press cancels; otherwise advance on the timer.
+  if (automaticPageTurnActive) {
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) ||
+        mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+      automaticPageTurnActive = false;
+      requestUpdate();
+      return;
+    }
+    if (RenderLock::peek()) {
+      lastPageTurnTime = millis();
+      return;
+    }
+    if ((millis() - lastPageTurnTime) >= pageTurnDuration) {
+      lastPageTurnTime = millis();
+      if (currentPage < totalPages - 1) {
+        currentPage++;
+        requestUpdate();
+      } else {
+        automaticPageTurnActive = false;
+        requestUpdate();
+      }
+      return;
+    }
+  }
+
+  // Short Confirm release opens the reader menu.
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    openReaderMenu();
+    return;
+  }
+
+  const auto [prevTriggered, nextTriggered, fromTilt, fromSide] = ReaderUtils::detectPageTurn(mappedInput);
   if (!prevTriggered && !nextTriggered) {
+    return;
+  }
+
+  // Long-press gestures mirror the EPUB reader and honor the same settings:
+  //   - side Up/Down held + sideLongPressButtonBehavior == ORIENTATION_CHANGE -> rotate
+  //   - front Left held    + longPressButtonBehavior     == BOOKMARK_AND_SYNC -> toggle bookmark
+  // (TXT has no chapters or sync, so CHAPTER_SKIP and the hold-right sync are not handled.)
+  const bool longPress = !fromTilt && mappedInput.getHeldTime() > ReaderUtils::SKIP_HOLD_MS;
+  const uint8_t lpBehavior = fromSide ? SETTINGS.sideLongPressButtonBehavior : SETTINGS.longPressButtonBehavior;
+
+  if (longPress && lpBehavior == SETTINGS.ORIENTATION_CHANGE) {
+    const uint8_t newOrientation =
+        nextTriggered ? (APP_STATE.activeOrientation - 1 + SETTINGS.ORIENTATION_COUNT) % SETTINGS.ORIENTATION_COUNT
+                      : (APP_STATE.activeOrientation + 1) % SETTINGS.ORIENTATION_COUNT;
+    applyOrientation(newOrientation);
+    requestUpdate();
+    return;
+  }
+
+  if (longPress && lpBehavior == SETTINGS.BOOKMARK_AND_SYNC) {
+    // Hold left (page-back) = toggle bookmark; hold right has no TXT action.
+    if (prevTriggered) {
+      toggleBookmark();
+    }
     return;
   }
 
@@ -329,6 +444,15 @@ void TxtReaderActivity::render(RenderLock&&) {
     initializeReader();
   }
 
+  // After an orientation-driven re-index, totalPages may have changed; restore
+  // the reading position from the preserved fraction instead of the stale page.
+  if (restorePendingFraction) {
+    restorePendingFraction = false;
+    if (totalPages > 0) {
+      currentPage = static_cast<int>(pendingProgressFraction * (totalPages - 1) + 0.5f);
+    }
+  }
+
   if (pageOffsets.empty()) {
     renderer.clearScreen();
     renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_EMPTY_FILE), true, EpdFontFamily::BOLD);
@@ -351,6 +475,12 @@ void TxtReaderActivity::render(RenderLock&&) {
 
   // Save progress
   saveProgress();
+
+  // Capture screenshot of the rendered page if requested from the menu.
+  if (pendingScreenshot) {
+    pendingScreenshot = false;
+    ScreenshotUtil::takeScreenshot(renderer);
+  }
 }
 
 void TxtReaderActivity::renderPage() {
@@ -421,7 +551,7 @@ void TxtReaderActivity::renderStatusBar() const {
   if (SETTINGS.statusBarTitle != CrossPointSettings::STATUS_BAR_TITLE::HIDE_TITLE) {
     title = txt->getTitle();
   }
-  GUI.drawStatusBar(renderer, progress, currentPage + 1, totalPages, title);
+  GUI.drawStatusBar(renderer, progress, currentPage + 1, totalPages, title, 0, 0, true, isCurrentPageBookmarked());
 }
 
 void TxtReaderActivity::saveProgress() const {
@@ -573,6 +703,214 @@ void TxtReaderActivity::savePageIndexCache() const {
   }
 
   LOG_DBG("TRS", "Saved page index cache: %d pages", totalPages);
+}
+
+void TxtReaderActivity::loadOrientation() {
+  // Default to the global orientation; override with the per-book value if saved.
+  APP_STATE.activeOrientation = SETTINGS.orientation;
+  HalFile f;
+  if (Storage.openFileForRead("TRS", txt->getCachePath() + "/orientation.bin", f)) {
+    uint8_t data[2];
+    if (f.read(data, 2) == 2 && data[0] == ORIENTATION_FILE_VERSION && data[1] < SETTINGS.ORIENTATION_COUNT) {
+      APP_STATE.activeOrientation = data[1];
+    }
+  }
+}
+
+void TxtReaderActivity::saveOrientation() const {
+  HalFile f;
+  if (Storage.openFileForWrite("TRS", txt->getCachePath() + "/orientation.bin", f)) {
+    const uint8_t data[2] = {ORIENTATION_FILE_VERSION, APP_STATE.activeOrientation};
+    f.write(data, 2);
+  } else {
+    LOG_ERR("TRS", "Failed to save per-book orientation");
+  }
+}
+
+void TxtReaderActivity::applyOrientation(const uint8_t orientation) {
+  if (APP_STATE.activeOrientation == orientation) {
+    return;
+  }
+
+  RenderLock lock(*this);
+
+  // Preserve reading position as a fraction; the page index is rebuilt below and
+  // totalPages may change with the new viewport width.
+  pendingProgressFraction = totalPages > 1 ? static_cast<float>(currentPage) / (totalPages - 1) : 0.0f;
+  restorePendingFraction = true;
+
+  // Persist per-book so this book keeps the new orientation on next launch.
+  APP_STATE.activeOrientation = orientation;
+  saveOrientation();
+
+  ReaderUtils::applyOrientation(renderer, APP_STATE.activeOrientation);
+
+  // Force re-index in the new orientation. render() rebuilds via initializeReader().
+  initialized = false;
+  pageOffsets.clear();
+  currentPageLines.clear();
+}
+
+void TxtReaderActivity::openReaderMenu() {
+  const int progressPercent = totalPages > 0 ? static_cast<int>((currentPage + 1) * 100.0f / totalPages + 0.5f) : 0;
+  startActivityForResult(
+      std::make_unique<TxtReaderMenuActivity>(renderer, mappedInput, txt->getTitle(), currentPage + 1, totalPages,
+                                              std::min(progressPercent, 100), APP_STATE.activeOrientation,
+                                              selectedPageTurnOption),
+      [this](const ActivityResult& result) {
+        // Always apply orientation / auto-page-turn changes even if cancelled.
+        const auto& menu = std::get<MenuResult>(result.data);
+        applyOrientation(menu.orientation);
+        toggleAutoPageTurn(menu.pageTurnOption);
+        if (!result.isCancelled) {
+          onReaderMenuConfirm(static_cast<TxtReaderMenuActivity::MenuAction>(menu.action));
+        }
+      });
+}
+
+void TxtReaderActivity::onReaderMenuConfirm(const TxtReaderMenuActivity::MenuAction action) {
+  using MenuAction = TxtReaderMenuActivity::MenuAction;
+  switch (action) {
+    case MenuAction::READER_OPTIONS: {
+      startActivityForResult(std::make_unique<ReaderOptionsActivity>(renderer, mappedInput, txt->getCachePath(),
+                                                                     SETTINGS.getReaderOverride(),
+                                                                     /*showMinSession=*/false),
+                             [this](const ActivityResult&) {
+                               // Reload SD font at the (possibly new) size, then force a
+                               // re-index so the new font/margin/spacing takes effect.
+                               sdFontSystem.ensureLoaded(renderer);
+                               pendingProgressFraction =
+                                   totalPages > 1 ? static_cast<float>(currentPage) / (totalPages - 1) : 0.0f;
+                               restorePendingFraction = true;
+                               initialized = false;
+                               pageOffsets.clear();
+                               currentPageLines.clear();
+                               ignoreBackUntilRelease = true;
+                               requestUpdate();
+                             });
+      break;
+    }
+    case MenuAction::VIEW_BOOKMARKS: {
+      openBookmarks();
+      break;
+    }
+    case MenuAction::GO_TO_PERCENT: {
+      const int initialPercent = totalPages > 0 ? static_cast<int>((currentPage + 1) * 100.0f / totalPages + 0.5f) : 0;
+      startActivityForResult(std::make_unique<EpubReaderPercentSelectionActivity>(renderer, mappedInput,
+                                                                                  std::min(initialPercent, 100)),
+                             [this](const ActivityResult& result) {
+                               if (!result.isCancelled) {
+                                 jumpToPercent(std::get<PercentResult>(result.data).percent);
+                               }
+                             });
+      break;
+    }
+    case MenuAction::DELETE_CACHE: {
+      startActivityForResult(
+          std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_CONFIRM_DELETE_CACHE), ""),
+          [this](const ActivityResult& confirmResult) {
+            if (confirmResult.isCancelled) {
+              return;
+            }
+            txt->clearCache();
+            onGoHome();
+          });
+      break;
+    }
+    case MenuAction::SCREENSHOT: {
+      pendingScreenshot = true;
+      requestUpdate();
+      break;
+    }
+    case MenuAction::DISPLAY_QR: {
+      std::string fullText;
+      for (const auto& line : currentPageLines) {
+        fullText += line;
+        fullText += '\n';
+      }
+      if (!fullText.empty()) {
+        startActivityForResult(std::make_unique<QrDisplayActivity>(renderer, mappedInput, fullText),
+                               [this](const ActivityResult&) { ignoreBackUntilRelease = true; });
+      } else {
+        requestUpdate();
+      }
+      break;
+    }
+    case MenuAction::AUTO_PAGE_TURN:
+      // Applied via the menu-exit callback (toggleAutoPageTurn); never returned
+      // as a confirmed action.
+      break;
+  }
+}
+
+void TxtReaderActivity::jumpToPercent(const int percent) {
+  const int clamped = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
+  if (totalPages > 0) {
+    currentPage = static_cast<int>(clamped / 100.0f * (totalPages - 1) + 0.5f);
+    if (currentPage < 0) currentPage = 0;
+    if (currentPage >= totalPages) currentPage = totalPages - 1;
+  }
+  requestUpdate();
+}
+
+void TxtReaderActivity::toggleAutoPageTurn(const uint8_t option) {
+  selectedPageTurnOption = option;
+  if (option == 0 || option >= std::size(PAGE_TURN_RATES)) {
+    automaticPageTurnActive = false;
+    return;
+  }
+  pageTurnDuration = (1UL * 60 * 1000) / PAGE_TURN_RATES[option];
+  lastPageTurnTime = millis();
+  automaticPageTurnActive = true;
+}
+
+void TxtReaderActivity::toggleBookmark() {
+  // Snippet = first non-empty line on the current page.
+  std::string snippet;
+  for (const auto& line : currentPageLines) {
+    if (!line.empty()) {
+      snippet = line;
+      break;
+    }
+  }
+  TxtBookmarkStore::toggle(txt->getCachePath(), static_cast<uint32_t>(currentPage), snippet.c_str());
+  reloadBookmarkPages();
+  // Re-render so the status-bar bookmark indicator reflects the change.
+  requestUpdate();
+}
+
+void TxtReaderActivity::openBookmarks() {
+  startActivityForResult(
+      std::make_unique<TxtReaderBookmarksActivity>(renderer, mappedInput, txt->getCachePath(), totalPages),
+      [this](const ActivityResult& result) {
+        ignoreBackUntilRelease = true;
+        // The viewer may have deleted entries; refresh the cached indicator set.
+        reloadBookmarkPages();
+        if (!result.isCancelled) {
+          int page = static_cast<int>(std::get<PageResult>(result.data).page);
+          if (page < 0) page = 0;
+          if (page >= totalPages) page = totalPages - 1;
+          currentPage = page;
+        }
+        requestUpdate();
+      });
+}
+
+void TxtReaderActivity::reloadBookmarkPages() {
+  bookmarkPages.clear();
+  if (!txt) {
+    return;
+  }
+  const std::vector<TxtBookmark> stored = TxtBookmarkStore::load(txt->getCachePath());
+  bookmarkPages.reserve(stored.size());
+  for (const auto& bm : stored) {
+    bookmarkPages.push_back(bm.page);
+  }
+}
+
+bool TxtReaderActivity::isCurrentPageBookmarked() const {
+  return std::find(bookmarkPages.begin(), bookmarkPages.end(), static_cast<uint32_t>(currentPage)) !=
+         bookmarkPages.end();
 }
 
 ScreenshotInfo TxtReaderActivity::getScreenshotInfo() const {

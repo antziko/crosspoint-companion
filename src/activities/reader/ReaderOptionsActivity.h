@@ -13,9 +13,11 @@
 // to the SETTINGS override and persisted to reader_settings.bin immediately.
 class ReaderOptionsActivity final : public Activity {
  public:
+  // showMinSession controls the "min read time for stats" item. Readers without
+  // reading-time tracking (e.g. the plain-text reader) pass false to hide it.
   explicit ReaderOptionsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                  std::string bookCachePath,
-                                 const CrossPointSettings::ReaderOverride& initialOverride);
+                                 const CrossPointSettings::ReaderOverride& initialOverride, bool showMinSession = true);
 
   void onEnter() override;
   void onExit() override;
@@ -23,10 +25,13 @@ class ReaderOptionsActivity final : public Activity {
   void render(RenderLock&&) override;
 
  private:
+  // MIN_SESSION is the last item; hiding it just trims the count by one.
   static constexpr int ITEM_COUNT = 7;
+  int itemCount() const { return showMinSession ? ITEM_COUNT : ITEM_COUNT - 1; }
 
   std::string cachePath;
   CrossPointSettings::ReaderOverride localOverride;
+  bool showMinSession = true;
   int selectedIndex = 0;
   ButtonNavigator buttonNavigator;
 
