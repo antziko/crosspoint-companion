@@ -45,10 +45,6 @@ unsigned long wsUploadStartTime = 0;
 bool wsUploadInProgress = false;
 uint8_t wsUploadClientNum = 255;  // 255 = no active upload client
 size_t wsLastProgressSent = 0;
-// DEBUG (upload-perf): per-upload counters to split throughput into network vs SD.
-unsigned long wsUploadWriteMs = 0;  // cumulative ms spent in SD write()
-unsigned long wsUploadFrameCount = 0;
-size_t wsLastPerfLog = 0;
 String wsLastCompleteName;
 size_t wsLastCompleteSize = 0;
 unsigned long wsLastCompleteAt = 0;
@@ -1603,9 +1599,6 @@ void CrossPointWebServer::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* 
           wsUploadReceived = 0;
           wsLastProgressSent = 0;
           wsUploadStartTime = millis();
-          wsUploadWriteMs = 0;
-          wsUploadFrameCount = 0;
-          wsLastPerfLog = 0;
 
           // Ensure path is valid
           if (!wsUploadPath.startsWith("/")) wsUploadPath = "/" + wsUploadPath;
@@ -1675,12 +1668,7 @@ void CrossPointWebServer::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* 
         return;
       }
       esp_task_wdt_reset();
-      // DEBUG (upload-perf): time the SD write so a slow transfer can be split into
-      // network-bound vs SD-bound. Accumulated and logged per interval below.
-      const unsigned long wsWriteStart = millis();
       size_t written = wsUploadFile.write(payload, length);
-      wsUploadWriteMs += millis() - wsWriteStart;
-      wsUploadFrameCount++;
       esp_task_wdt_reset();
 
       if (written != length) {
@@ -1690,19 +1678,6 @@ void CrossPointWebServer::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* 
       }
 
       wsUploadReceived += written;
-
-      // DEBUG (upload-perf): live throughput + SD-write share every 256KB. If
-      // KB/s is low but sdShare is small, the bottleneck is the WS/WiFi link
-      // (chunk size / RTT), not the SD card.
-      if (wsUploadReceived - wsLastPerfLog >= 262144) {
-        const unsigned long elapsed = millis() - wsUploadStartTime;
-        const float kbps = (elapsed > 0) ? (wsUploadReceived / 1024.0f) / (elapsed / 1000.0f) : 0.0f;
-        const int sdPct = (elapsed > 0) ? (int)(wsUploadWriteMs * 100 / elapsed) : 0;
-        LOG_DBG("WS", "[PERF] %u KB, %.1f KB/s, frames=%lu, avgFrame=%uB, sdShare=%d%%",
-                (unsigned)(wsUploadReceived / 1024), kbps, wsUploadFrameCount,
-                (unsigned)(wsUploadFrameCount ? wsUploadReceived / wsUploadFrameCount : 0), sdPct);
-        wsLastPerfLog = wsUploadReceived;
-      }
 
       // Send progress update (every 64KB or at end)
       if (wsUploadReceived - wsLastProgressSent >= 65536 || wsUploadReceived >= wsUploadSize) {

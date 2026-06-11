@@ -4,7 +4,9 @@
 #include <ESPmDNS.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <InflateReader.h>
 #include <WiFi.h>
+#include <esp_mac.h>
 #include <esp_task_wdt.h>
 #include <new>  // std::nothrow
 
@@ -21,7 +23,20 @@
 
 namespace {
 // AP Mode configuration
-constexpr const char* AP_SSID = "CrossPoint-Reader";
+
+// Per-device AP SSID: "CrossPoint-XXXXXX", where XXXXXX is the last 3 bytes of the
+// efuse base MAC (the chip-unique NIC portion — the first 3 bytes are Espressif's
+// shared OUI and would be identical on every unit). Makes the hotspot distinguishable
+// when several readers are in range. Runtime-built (not constexpr: the MAC is read
+// from efuse); 17 chars, within the 32-byte SSID limit.
+std::string buildApSsid() {
+  uint8_t mac[6] = {};
+  esp_efuse_mac_get_default(mac);  // never fails on real silicon; zero-init = safe fallback
+  char buf[32];
+  snprintf(buf, sizeof(buf), "CrossPoint-%02X%02X%02X", mac[3], mac[4], mac[5]);
+  return std::string(buf);
+}
+
 constexpr const char* AP_PASSWORD = nullptr;  // Open network for ease of use
 constexpr const char* AP_HOSTNAME = "crosspoint";
 constexpr uint8_t AP_CHANNEL = 1;
@@ -199,12 +214,13 @@ void CrossPointWebServerActivity::startAccessPoint() {
   delay(100);
 
   // Start soft AP
+  const std::string apSsid = buildApSsid();
   bool apStarted;
   if (AP_PASSWORD && strlen(AP_PASSWORD) >= 8) {
-    apStarted = WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL, false, AP_MAX_CONNECTIONS);
+    apStarted = WiFi.softAP(apSsid.c_str(), AP_PASSWORD, AP_CHANNEL, false, AP_MAX_CONNECTIONS);
   } else {
     // Open network (no password)
-    apStarted = WiFi.softAP(AP_SSID, nullptr, AP_CHANNEL, false, AP_MAX_CONNECTIONS);
+    apStarted = WiFi.softAP(apSsid.c_str(), nullptr, AP_CHANNEL, false, AP_MAX_CONNECTIONS);
   }
 
   if (!apStarted) {
@@ -220,10 +236,10 @@ void CrossPointWebServerActivity::startAccessPoint() {
   char ipStr[16];
   snprintf(ipStr, sizeof(ipStr), "%d.%d.%d.%d", apIP[0], apIP[1], apIP[2], apIP[3]);
   connectedIP = ipStr;
-  connectedSSID = AP_SSID;
+  connectedSSID = apSsid;
 
   LOG_DBG("WEBACT", "Access Point started!");
-  LOG_DBG("WEBACT", "SSID: %s", AP_SSID);
+  LOG_DBG("WEBACT", "SSID: %s", apSsid.c_str());
   LOG_DBG("WEBACT", "IP: %s", connectedIP.c_str());
 
   // Start mDNS for hostname resolution
@@ -249,6 +265,15 @@ void CrossPointWebServerActivity::startAccessPoint() {
 
 void CrossPointWebServerActivity::startWebServer() {
   LOG_DBG("WEBACT", "Starting web server...");
+
+  // Reclaim the boot-reserved 32KB inflate window for the web stack. This activity
+  // never inflates (the device serves files/HTML, it doesn't decompress EPUB/zip
+  // here), and onExit() always reboots (silentRestart) which re-reserves the window
+  // on a fresh heap. Without this the HTTP + WebSocket + WebDAV + DNS stack starts at
+  // only ~10KB free (min-free seen at 212 bytes), which starves the WiFi driver →
+  // disconnect/reconnect flapping and multi-second handleClient stalls. Mirrors
+  // KOReaderSyncActivity / KOReaderAuthActivity.
+  InflateReader::releaseWindow();
 
   // Create the web server instance
   webServer.reset(new CrossPointWebServer());

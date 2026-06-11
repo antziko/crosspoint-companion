@@ -3085,7 +3085,7 @@ let uploadGeneration = 0;       // Incremented each uploadFile() call; guards st
 let currentUploadWs = null;     // Active WebSocket reference for external abort
 let currentUploadXhr = null;    // Active XHR reference for external abort
 const WS_PORT = 81;
-const WS_CHUNK_SIZE = 4096; // 4KB chunks - smaller for ESP32 stability
+const WS_CHUNK_SIZE = 8192; // 8KB chunks (device WEBSOCKETS_MAX_DATA_SIZE=15KB). Safe now that the web server releases the 32KB inflate window at start (~40KB free, min-free ~11KB). Halves frame/SD-write count vs the old 4KB → higher throughput.
 
 // ============================================================================
 // EPUB Image Conversion Functions (from Baseline JPEG Converter)
@@ -4927,8 +4927,9 @@ function uploadFileWebSocket(file, onProgress, onComplete, onError) {
             const chunk = file.slice(offset, offset + chunkSize);
             const buffer = await chunk.arrayBuffer();
 
-            // Wait for buffer to clear - more aggressive backpressure
-            while (ws.bufferedAmount > WS_CHUNK_SIZE * 2 && ws.readyState === WebSocket.OPEN) {
+            // Backpressure: allow several chunks in flight so the link pipelines
+            // instead of stop-and-wait per chunk (RTT was dominating throughput).
+            while (ws.bufferedAmount > WS_CHUNK_SIZE * 8 && ws.readyState === WebSocket.OPEN) {
               await new Promise(r => setTimeout(r, 5));
             }
 
