@@ -22,6 +22,7 @@
 #include "XtcReaderChapterSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/BookCacheUtils.h"
 
 void XtcReaderActivity::onEnter() {
   Activity::onEnter();
@@ -30,7 +31,11 @@ void XtcReaderActivity::onEnter() {
     return;
   }
 
+  // If the book was moved/renamed outside the firmware, re-key its orphaned cache dir
+  // (progress, stats) before setupCacheDir() creates a fresh empty one.
+  tryRecoverBookCache(xtc->getPath());
   xtc->setupCacheDir();
+  ensureCacheContentId(xtc->getPath(), xtc->getCachePath());
 
   // Load saved progress
   loadProgress();

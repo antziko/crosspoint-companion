@@ -25,6 +25,7 @@
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/BookCacheUtils.h"
 #include "util/ScreenshotUtil.h"
 
 namespace {
@@ -49,7 +50,11 @@ void TxtReaderActivity::onEnter() {
     return;
   }
 
+  // If the book was moved/renamed outside the firmware, re-key its orphaned cache dir
+  // (progress, stats) before setupCacheDir() creates a fresh empty one.
+  tryRecoverBookCache(txt->getPath());
   txt->setupCacheDir();
+  ensureCacheContentId(txt->getPath(), txt->getCachePath());
 
   // Load this book's saved orientation; fall back to the global default if none.
   loadOrientation();
@@ -753,19 +758,18 @@ void TxtReaderActivity::applyOrientation(const uint8_t orientation) {
 
 void TxtReaderActivity::openReaderMenu() {
   const int progressPercent = totalPages > 0 ? static_cast<int>((currentPage + 1) * 100.0f / totalPages + 0.5f) : 0;
-  startActivityForResult(
-      std::make_unique<TxtReaderMenuActivity>(renderer, mappedInput, txt->getTitle(), currentPage + 1, totalPages,
-                                              std::min(progressPercent, 100), APP_STATE.activeOrientation,
-                                              selectedPageTurnOption),
-      [this](const ActivityResult& result) {
-        // Always apply orientation / auto-page-turn changes even if cancelled.
-        const auto& menu = std::get<MenuResult>(result.data);
-        applyOrientation(menu.orientation);
-        toggleAutoPageTurn(menu.pageTurnOption);
-        if (!result.isCancelled) {
-          onReaderMenuConfirm(static_cast<TxtReaderMenuActivity::MenuAction>(menu.action));
-        }
-      });
+  startActivityForResult(std::make_unique<TxtReaderMenuActivity>(
+                             renderer, mappedInput, txt->getTitle(), currentPage + 1, totalPages,
+                             std::min(progressPercent, 100), APP_STATE.activeOrientation, selectedPageTurnOption),
+                         [this](const ActivityResult& result) {
+                           // Always apply orientation / auto-page-turn changes even if cancelled.
+                           const auto& menu = std::get<MenuResult>(result.data);
+                           applyOrientation(menu.orientation);
+                           toggleAutoPageTurn(menu.pageTurnOption);
+                           if (!result.isCancelled) {
+                             onReaderMenuConfirm(static_cast<TxtReaderMenuActivity::MenuAction>(menu.action));
+                           }
+                         });
 }
 
 void TxtReaderActivity::onReaderMenuConfirm(const TxtReaderMenuActivity::MenuAction action) {
@@ -796,13 +800,13 @@ void TxtReaderActivity::onReaderMenuConfirm(const TxtReaderMenuActivity::MenuAct
     }
     case MenuAction::GO_TO_PERCENT: {
       const int initialPercent = totalPages > 0 ? static_cast<int>((currentPage + 1) * 100.0f / totalPages + 0.5f) : 0;
-      startActivityForResult(std::make_unique<EpubReaderPercentSelectionActivity>(renderer, mappedInput,
-                                                                                  std::min(initialPercent, 100)),
-                             [this](const ActivityResult& result) {
-                               if (!result.isCancelled) {
-                                 jumpToPercent(std::get<PercentResult>(result.data).percent);
-                               }
-                             });
+      startActivityForResult(
+          std::make_unique<EpubReaderPercentSelectionActivity>(renderer, mappedInput, std::min(initialPercent, 100)),
+          [this](const ActivityResult& result) {
+            if (!result.isCancelled) {
+              jumpToPercent(std::get<PercentResult>(result.data).percent);
+            }
+          });
       break;
     }
     case MenuAction::DELETE_CACHE: {

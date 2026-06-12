@@ -2,11 +2,144 @@
 
 #include <Epub.h>
 #include <FsHelpers.h>
+#include <HalStorage.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
 #include <Txt.h>
 #include <Xtc.h>
 
+#include <cstring>
+#include <vector>
+
 #include "BookmarkStore.h"
+#include "CrossPointState.h"
+#include "KOReaderDocumentId.h"
+#include "RecentBooksStore.h"
+
+namespace {
+constexpr char CACHE_BASE_DIR[] = "/.crosspoint";
+
+// SD-log a relocation event regardless of the SdDebugLog gate: these are rare,
+// one-shot events that must be inspectable untethered on the USB-locked X3 (no
+// serial), and they happen outside the OPDS browser's enable window.
+void sdLogReloc(const char* fmt, const char* a, const char* b) {
+  const bool wasEnabled = SdDebugLog::isEnabled();
+  SdDebugLog::setEnabled(true);
+  SdDebugLog::log("RELOC", fmt, a, b);
+  SdDebugLog::setEnabled(wasEnabled);
+}
+
+// content_id.bin: [0] version, [1..32] partial-MD5 hex of the book's content,
+// [33..34] u16 LE path length, [35..] book path at the time the id was written.
+// Written into each book's cache dir so a cache orphaned by an out-of-firmware
+// move (PC/SD card) can be matched back to its book by content.
+constexpr char CONTENT_ID_FILE[] = "/content_id.bin";
+constexpr uint8_t CONTENT_ID_VERSION = 1;
+constexpr size_t CONTENT_ID_MD5_LEN = 32;
+constexpr uint16_t CONTENT_ID_MAX_PATH = 512;
+
+// Cache dir prefix by book type; nullptr for non-book files.
+const char* cacheDirPrefixForPath(const std::string& path) {
+  if (FsHelpers::hasEpubExtension(path)) {
+    return "epub_";
+  }
+  if (FsHelpers::hasXtcExtension(path)) {
+    return "xtc_";
+  }
+  if (FsHelpers::hasTxtExtension(path)) {
+    return "txt_";
+  }
+  return nullptr;
+}
+
+// Mirrors the cache-key derivation in the Epub/Xtc/Txt constructors.
+std::string cacheDirForPath(const char* prefix, const std::string& path) {
+  return std::string(CACHE_BASE_DIR) + "/" + prefix + std::to_string(std::hash<std::string>{}(path));
+}
+
+// Renames the "<hash-dir>--<title>-by-<author>.txt" label file that sits next to an
+// EPUB cache dir (see BookMetadataCache) so it keeps sorting adjacent to its renamed
+// folder. Scans the listing first and renames after, so the directory handle is
+// closed before the rename touches the same directory.
+void relocateCacheLabel(const std::string& oldDirName, const std::string& newDirName) {
+  const std::string oldPrefix = oldDirName + "--";
+  std::string labelName;
+  {
+    HalFile dir = Storage.open(CACHE_BASE_DIR);
+    if (!dir || !dir.isDirectory()) {
+      return;
+    }
+    while (true) {
+      HalFile f = dir.openNextFile();
+      if (!f) {
+        break;
+      }
+      char name[160];
+      if (f.getName(name, sizeof(name)) == 0) {
+        continue;
+      }
+      if (strncmp(name, oldPrefix.c_str(), oldPrefix.size()) == 0) {
+        labelName = name;
+        break;
+      }
+    }
+  }
+  if (labelName.empty()) {
+    return;
+  }
+  const std::string oldLabel = std::string(CACHE_BASE_DIR) + "/" + labelName;
+  const std::string newLabel = std::string(CACHE_BASE_DIR) + "/" + newDirName + labelName.substr(oldDirName.size());
+  if (!Storage.rename(oldLabel.c_str(), newLabel.c_str())) {
+    LOG_ERR("BookCache", "Failed to rename cache label %s (non-fatal)", oldLabel.c_str());
+  }
+}
+
+bool writeContentId(const std::string& cacheDir, const std::string& md5Hex, const std::string& bookPath) {
+  HalFile f;
+  if (!Storage.openFileForWrite("BookCache", cacheDir + CONTENT_ID_FILE, f)) {
+    return false;
+  }
+  const uint8_t version = CONTENT_ID_VERSION;
+  const uint16_t pathLen = static_cast<uint16_t>(bookPath.size());
+  bool ok = f.write(&version, 1) == 1;
+  ok = ok && f.write(md5Hex.data(), CONTENT_ID_MD5_LEN) == CONTENT_ID_MD5_LEN;
+  ok = ok && f.write(&pathLen, sizeof(pathLen)) == sizeof(pathLen);
+  ok = ok && f.write(bookPath.data(), pathLen) == pathLen;
+  if (!ok) {
+    LOG_ERR("BookCache", "Failed to write %s%s", cacheDir.c_str(), CONTENT_ID_FILE);
+  }
+  return ok;
+}
+
+bool readContentId(const std::string& cacheDir, std::string& outMd5, std::string& outPath) {
+  const std::string idPath = cacheDir + CONTENT_ID_FILE;
+  if (!Storage.exists(idPath.c_str())) {
+    return false;  // pre-check avoids open-failure logging while scanning old cache dirs
+  }
+  HalFile f;
+  if (!Storage.openFileForRead("BookCache", idPath, f)) {
+    return false;
+  }
+  uint8_t version = 0;
+  if (f.read(&version, 1) != 1 || version != CONTENT_ID_VERSION) {
+    return false;
+  }
+  char md5[CONTENT_ID_MD5_LEN];
+  if (f.read(md5, CONTENT_ID_MD5_LEN) != static_cast<int>(CONTENT_ID_MD5_LEN)) {
+    return false;
+  }
+  uint16_t pathLen = 0;
+  if (f.read(&pathLen, sizeof(pathLen)) != sizeof(pathLen) || pathLen == 0 || pathLen > CONTENT_ID_MAX_PATH) {
+    return false;
+  }
+  outPath.resize(pathLen);
+  if (f.read(outPath.data(), pathLen) != static_cast<int>(pathLen)) {
+    return false;
+  }
+  outMd5.assign(md5, CONTENT_ID_MD5_LEN);
+  return true;
+}
+}  // namespace
 
 bool isBookCacheDirectoryName(const char* name) {
   if (!name) {
@@ -43,4 +176,128 @@ void relocateBookBookmarks(const std::string& srcPath, const std::string& dstPat
   } else if (FsHelpers::hasTxtExtension(srcPath)) {
     BookmarkStore::relocateForFilePath(srcPath, dstPath, "txt");
   }
+}
+
+void relocateBookSidecars(const std::string& srcPath, const std::string& dstPath) {
+  if (srcPath == dstPath) {
+    return;
+  }
+
+  relocateBookBookmarks(srcPath, dstPath);
+
+  const char* prefix = cacheDirPrefixForPath(srcPath);
+  if (!prefix) {
+    return;
+  }
+
+  const std::string oldDir = cacheDirForPath(prefix, srcPath);
+  const std::string newDir = cacheDirForPath(prefix, dstPath);
+  if (Storage.exists(oldDir.c_str())) {
+    // A dir already at the new key can only be a stale orphan from a previous file at
+    // dstPath (callers verify no file exists there before renaming) — replace it.
+    if (Storage.exists(newDir.c_str())) {
+      Storage.removeDir(newDir.c_str());
+    }
+    if (Storage.rename(oldDir.c_str(), newDir.c_str())) {
+      LOG_DBG("BookCache", "Relocated cache dir %s -> %s", oldDir.c_str(), newDir.c_str());
+      sdLogReloc("cache dir %s -> %s", oldDir.c_str(), newDir.c_str());
+      if (strcmp(prefix, "epub_") == 0) {
+        relocateCacheLabel(oldDir.substr(oldDir.rfind('/') + 1), newDir.substr(newDir.rfind('/') + 1));
+      }
+    } else {
+      LOG_ERR("BookCache", "Failed to rename cache dir %s -> %s (non-fatal)", oldDir.c_str(), newDir.c_str());
+      sdLogReloc("FAILED cache dir rename %s -> %s", oldDir.c_str(), newDir.c_str());
+    }
+  }
+
+  // Keep the recents entry (and its cover thumb path) and the global resume pointer
+  // pointing at the book's new location. Both are safe no-ops if they don't reference
+  // srcPath.
+  RECENT_BOOKS.updatePath(srcPath, dstPath, oldDir, newDir);
+  if (APP_STATE.openEpubPath == srcPath) {
+    APP_STATE.openEpubPath = dstPath;
+    APP_STATE.saveToFile();
+  }
+}
+
+void ensureCacheContentId(const std::string& bookPath, const std::string& cachePath) {
+  const std::string idPath = cachePath + CONTENT_ID_FILE;
+  if (Storage.exists(idPath.c_str())) {
+    return;
+  }
+  const std::string md5 = KOReaderDocumentId::calculate(bookPath);
+  if (md5.size() != CONTENT_ID_MD5_LEN) {
+    return;
+  }
+  writeContentId(cachePath, md5, bookPath);
+}
+
+bool tryRecoverBookCache(const std::string& bookPath) {
+  const char* prefix = cacheDirPrefixForPath(bookPath);
+  if (!prefix) {
+    return false;
+  }
+  const std::string myDir = cacheDirForPath(prefix, bookPath);
+  if (Storage.exists(myDir.c_str())) {
+    return false;  // cache present under the current path; nothing to recover
+  }
+
+  const std::string myId = KOReaderDocumentId::calculate(bookPath);
+  if (myId.size() != CONTENT_ID_MD5_LEN) {
+    return false;
+  }
+
+  // Collect candidate dir names first so the directory handle is closed before any
+  // rename touches the same directory.
+  std::vector<std::string> candidates;
+  candidates.reserve(16);
+  {
+    HalFile dir = Storage.open(CACHE_BASE_DIR);
+    if (!dir || !dir.isDirectory()) {
+      return false;
+    }
+    while (true) {
+      HalFile f = dir.openNextFile();
+      if (!f) {
+        break;
+      }
+      if (!f.isDirectory()) {
+        continue;
+      }
+      char name[160];
+      if (f.getName(name, sizeof(name)) == 0) {
+        continue;
+      }
+      if (strncmp(name, prefix, strlen(prefix)) == 0) {
+        candidates.emplace_back(name);
+      }
+    }
+  }
+
+  for (const auto& dirName : candidates) {
+    const std::string dirPath = std::string(CACHE_BASE_DIR) + "/" + dirName;
+    std::string id;
+    std::string oldPath;
+    if (!readContentId(dirPath, id, oldPath)) {
+      continue;
+    }
+    if (id != myId) {
+      continue;
+    }
+    if (Storage.exists(oldPath.c_str())) {
+      continue;  // original file still present — a duplicate copy, not a move
+    }
+    if (cacheDirForPath(prefix, oldPath) != dirPath) {
+      continue;  // stale/corrupt id record; dir was not created for that path
+    }
+    LOG_INF("BookCache", "Recovering cache for moved book: %s -> %s", oldPath.c_str(), bookPath.c_str());
+    sdLogReloc("recovering moved book %s -> %s", oldPath.c_str(), bookPath.c_str());
+    relocateBookSidecars(oldPath, bookPath);
+    if (Storage.exists(myDir.c_str())) {
+      writeContentId(myDir, myId, bookPath);  // refresh the recorded path
+      return true;
+    }
+    return false;  // relocation failed; logged inside relocateBookSidecars
+  }
+  return false;
 }

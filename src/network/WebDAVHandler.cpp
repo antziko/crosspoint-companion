@@ -544,12 +544,11 @@ void WebDAVHandler::handleMove(WebServer& s) {
     return;
   }
 
-  clearBookCache(srcPath.c_str());
   bool success = file.rename(dstPath.c_str());
   file.close();
 
   if (success) {
-    relocateBookBookmarks(srcPath.c_str(), dstPath.c_str());
+    relocateBookSidecars(srcPath.c_str(), dstPath.c_str());
     s.send(dstExists ? 204 : 201);
   } else {
     s.send(500, "text/plain", "Move failed");

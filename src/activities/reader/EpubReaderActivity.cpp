@@ -22,9 +22,6 @@
 #include "../settings/DictionarySelectActivity.h"
 #include "BookStatsActivity.h"
 #include "BookmarkStore.h"
-#include "ReaderOptionsActivity.h"
-#include "ReaderSettingsIO.h"
-#include "SdCardFontSystem.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "DictionaryWordSelectActivity.h"
@@ -40,12 +37,16 @@
 #include "MappedInputManager.h"
 #include "ProgressMapper.h"
 #include "QrDisplayActivity.h"
+#include "ReaderOptionsActivity.h"
+#include "ReaderSettingsIO.h"
 #include "ReaderUtils.h"
 #include "ReadingTimeHistory.h"
 #include "RecentBooksStore.h"
+#include "SdCardFontSystem.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
-#include "activities/util/ConfirmationActivity.h"
+#include "util/BookCacheUtils.h"
 #include "util/Dictionary.h"
 #include "util/ScreenshotUtil.h"
 
@@ -112,36 +113,17 @@ std::string buildReadFolderDestination(const std::string& srcPath) {
   return dstPath;
 }
 
-// Relocate a finished book and its cache dir into /read/, keep it in recents by
-// repointing its entry to the new path, and repoint the resume pointer too.
+// Relocate a finished book and all its sidecar state (cache dir, bookmarks, recents
+// entry, resume pointer) into /read/ via relocateBookSidecars().
 // On rename failure: LOG_ERR and leave everything in place (no UI alert subsystem here).
-void moveFinishedBookToReadFolder(const std::string& srcPath, const std::string& dstPath,
-                                  const std::string& oldCachePath) {
+void moveFinishedBookToReadFolder(const std::string& srcPath, const std::string& dstPath) {
   LOG_INF("ERS", "Moving finished epub: %s -> %s", srcPath.c_str(), dstPath.c_str());
   if (!Storage.rename(srcPath.c_str(), dstPath.c_str())) {
     LOG_ERR("ERS", "Failed to move finished book to '/Read' folder");
     return;
   }
 
-  // Bookmark + tombstone files are keyed by crc32 of the epub path, so re-key them too,
-  // otherwise the moved book loses its bookmarks.
-  BookmarkStore::relocateForFilePath(srcPath, dstPath, "epub");
-
-  // Cache dir is keyed by hash of the epub path (see Epub ctor), so it must be re-keyed.
-  const std::string newCachePath = "/.crosspoint/epub_" + std::to_string(std::hash<std::string>{}(dstPath));
-  if (!oldCachePath.empty() && Storage.exists(oldCachePath.c_str())) {
-    if (!Storage.rename(oldCachePath.c_str(), newCachePath.c_str())) {
-      LOG_ERR("ERS", "Failed to rename cache dir %s -> %s (non-fatal)", oldCachePath.c_str(), newCachePath.c_str());
-    }
-  }
-
-  // Keep the book in recents (crossink behavior): repoint the entry to its new
-  // location instead of dropping it. updatePath persists on success.
-  RECENT_BOOKS.updatePath(srcPath, dstPath, oldCachePath, newCachePath);
-  if (APP_STATE.openEpubPath == srcPath) {
-    APP_STATE.openEpubPath = dstPath;
-    APP_STATE.saveToFile();
-  }
+  relocateBookSidecars(srcPath, dstPath);
 }
 
 bool isSnippetWhitespace(const std::string& word) {
@@ -174,17 +156,17 @@ void buildBookmarkSnippet(const Page& page, char* out, const size_t outSize) {
 }
 
 // Persists `sessionSecs` of reading time to both per-book and global stats on exit.
-// `dated` is true when the RTC (X3 only) supplied a calendar date for this session;
-// dated sessions feed the weekly/monthly/yearly/heatmap history, undated ones (X4,
-// no clock) fall back to `unattributedSeconds` — counted in totals but not dated.
-void recordReadingSession(const std::string& cachePath, BookReadingStats& bookStats, uint32_t sessionSecs,
-                          bool dated, uint16_t year, uint8_t month, uint8_t day, uint8_t dayOfWeek,
-                          uint8_t hour, uint8_t minute) {
+// `dated` is true when a clock source (X3 DS3231 RTC, or X4 NTP-synced system clock)
+// supplied a calendar date for this session; dated sessions feed the weekly/monthly/
+// yearly/heatmap history, undated ones (no clock available) fall back to
+// `unattributedSeconds` — counted in totals but not dated.
+void recordReadingSession(const std::string& cachePath, BookReadingStats& bookStats, uint32_t sessionSecs, bool dated,
+                          uint16_t year, uint8_t month, uint8_t day, uint8_t dayOfWeek, uint8_t hour, uint8_t minute) {
   if (sessionSecs > 0) {
     bookStats.totalReadingSeconds += sessionSecs;
     if (dated) {
       // "Last read on ..." stamp for the Vega hero card -- only set on dated
-      // (X3 + RTC) sessions, encoded the same way as ReadingTimeHistory's
+      // (clock-available) sessions, encoded the same way as ReadingTimeHistory's
       // heatmapAnchorDay so the UI can reuse its day-index formatting helpers.
       // An undated session further down leaves this untouched rather than
       // clobbering a known-good stamp with "unknown".
@@ -227,7 +209,11 @@ void EpubReaderActivity::onEnter() {
     return;
   }
 
+  // If the book was moved/renamed outside the firmware, re-key its orphaned cache dir
+  // (progress, stats, sections) before setupCacheDir() creates a fresh empty one.
+  tryRecoverBookCache(epub->getPath());
   epub->setupCacheDir();
+  ensureCacheContentId(epub->getPath(), epub->getCachePath());
 
   // Load this book's saved orientation; fall back to the global default if none.
   APP_STATE.activeOrientation = SETTINGS.orientation;
@@ -260,8 +246,7 @@ void EpubReaderActivity::onEnter() {
       bookOverride.extraParagraphSpacing = SETTINGS.extraParagraphSpacing;
       static_assert(sizeof(bookOverride.sdFontFamilyName) == sizeof(SETTINGS.sdFontFamilyName),
                     "sdFontFamilyName size mismatch");
-      strncpy(bookOverride.sdFontFamilyName, SETTINGS.sdFontFamilyName,
-              sizeof(bookOverride.sdFontFamilyName) - 1);
+      strncpy(bookOverride.sdFontFamilyName, SETTINGS.sdFontFamilyName, sizeof(bookOverride.sdFontFamilyName) - 1);
       bookOverride.sdFontFamilyName[sizeof(bookOverride.sdFontFamilyName) - 1] = '\0';
       if (!ReaderSettingsIO::write(epub->getCachePath(), bookOverride)) {
         LOG_ERR("ERS", "Failed to seed per-book reader settings");
@@ -353,10 +338,9 @@ void EpubReaderActivity::onExit() {
   section.reset();
   if (pendingReadFolderMove && epub) {
     const std::string srcPath = epub->getPath();
-    const std::string oldCachePath = epub->getCachePath();
     const std::string dstPath = buildReadFolderDestination(srcPath);
     epub.reset();  // release the Epub (and any open handles) before renaming on the SD card
-    moveFinishedBookToReadFolder(srcPath, dstPath, oldCachePath);
+    moveFinishedBookToReadFolder(srcPath, dstPath);
   } else {
     epub.reset();
   }
@@ -588,9 +572,8 @@ void EpubReaderActivity::loop() {
 
   if (longPress && lpBehavior == SETTINGS.ORIENTATION_CHANGE) {
     const uint8_t newOrientation =
-        nextTriggered
-            ? (APP_STATE.activeOrientation - 1 + SETTINGS.ORIENTATION_COUNT) % SETTINGS.ORIENTATION_COUNT
-            : (APP_STATE.activeOrientation + 1) % SETTINGS.ORIENTATION_COUNT;
+        nextTriggered ? (APP_STATE.activeOrientation - 1 + SETTINGS.ORIENTATION_COUNT) % SETTINGS.ORIENTATION_COUNT
+                      : (APP_STATE.activeOrientation + 1) % SETTINGS.ORIENTATION_COUNT;
     applyOrientation(newOrientation);
     requestUpdate();
     return;
@@ -710,21 +693,19 @@ void EpubReaderActivity::openReaderMenu() {
 
   if (pageShownAtMs > 0) accountIdleExcess(millis() - pageShownAtMs);
   pageShownAtMs = 0UL;
-  startActivityForResult(
-      std::make_unique<EpubReaderMenuActivity>(
-          renderer, mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent,
-          APP_STATE.activeOrientation,
-          !currentPageFootnotes.empty(),
-          Dictionary::exists(epub->getCachePath().c_str()), std::move(activeDictName)),
-      [this](const ActivityResult& result) {
-        // Always apply orientation change even if the menu was cancelled
-        const auto& menu = std::get<MenuResult>(result.data);
-        applyOrientation(menu.orientation);
-        toggleAutoPageTurn(menu.pageTurnOption);
-        if (!result.isCancelled) {
-          onReaderMenuConfirm(static_cast<EpubReaderMenuActivity::MenuAction>(menu.action));
-        }
-      });
+  startActivityForResult(std::make_unique<EpubReaderMenuActivity>(
+                             renderer, mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent,
+                             APP_STATE.activeOrientation, !currentPageFootnotes.empty(),
+                             Dictionary::exists(epub->getCachePath().c_str()), std::move(activeDictName)),
+                         [this](const ActivityResult& result) {
+                           // Always apply orientation change even if the menu was cancelled
+                           const auto& menu = std::get<MenuResult>(result.data);
+                           applyOrientation(menu.orientation);
+                           toggleAutoPageTurn(menu.pageTurnOption);
+                           if (!result.isCancelled) {
+                             onReaderMenuConfirm(static_cast<EpubReaderMenuActivity::MenuAction>(menu.action));
+                           }
+                         });
 }
 
 void EpubReaderActivity::openWordSelect(bool framebufferContainsPage) {
@@ -830,15 +811,14 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
                     static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
                 if (!BOOKMARKS.hasBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
                                                   section->pageCount)) {
-                  startActivityForResult(
-                      std::make_unique<ConfirmationActivity>(renderer, mappedInput,
-                                                             tr(STR_CONFIRM_ADD_RETURN_MARK), ""),
-                      [this, doNavigate](const ActivityResult& confirmResult) {
-                        if (!confirmResult.isCancelled) {
-                          addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
-                        }
-                        doNavigate();
-                      });
+                  startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput,
+                                                                                tr(STR_CONFIRM_ADD_RETURN_MARK), ""),
+                                         [this, doNavigate](const ActivityResult& confirmResult) {
+                                           if (!confirmResult.isCancelled) {
+                                             addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
+                                           }
+                                           doNavigate();
+                                         });
                   return;
                 }
               }
@@ -878,15 +858,14 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
                     static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
                 if (!BOOKMARKS.hasBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
                                                   section->pageCount)) {
-                  startActivityForResult(
-                      std::make_unique<ConfirmationActivity>(renderer, mappedInput,
-                                                             tr(STR_CONFIRM_ADD_RETURN_MARK), ""),
-                      [this, doNavigate](const ActivityResult& confirmResult) {
-                        if (!confirmResult.isCancelled) {
-                          addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
-                        }
-                        doNavigate();
-                      });
+                  startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput,
+                                                                                tr(STR_CONFIRM_ADD_RETURN_MARK), ""),
+                                         [this, doNavigate](const ActivityResult& confirmResult) {
+                                           if (!confirmResult.isCancelled) {
+                                             addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
+                                           }
+                                           doNavigate();
+                                         });
                   return;
                 }
               }
@@ -1012,21 +991,20 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       break;
     }
     case EpubReaderMenuActivity::MenuAction::READER_OPTIONS: {
-      startActivityForResult(
-          std::make_unique<ReaderOptionsActivity>(renderer, mappedInput, epub->getCachePath(),
-                                                  SETTINGS.getReaderOverride()),
-          [this](const ActivityResult&) {
-            // Re-layout: the per-book settings may have changed, so discard the
-            // cached section and let render() rebuild it with the new parameters.
-            RenderLock lock(*this);
-            // Reload any SD-card font at the new (override) size first; the
-            // size-encoded font ID then forces the section cache to rebuild.
-            sdFontSystem.ensureLoaded(renderer);
-            section.reset();
-            // The options screen exits on a Back press; swallow the matching
-            // release so it doesn't bubble up to the reader's onGoHome().
-            ignoreBackUntilRelease = true;
-          });
+      startActivityForResult(std::make_unique<ReaderOptionsActivity>(renderer, mappedInput, epub->getCachePath(),
+                                                                     SETTINGS.getReaderOverride()),
+                             [this](const ActivityResult&) {
+                               // Re-layout: the per-book settings may have changed, so discard the
+                               // cached section and let render() rebuild it with the new parameters.
+                               RenderLock lock(*this);
+                               // Reload any SD-card font at the new (override) size first; the
+                               // size-encoded font ID then forces the section cache to rebuild.
+                               sdFontSystem.ensureLoaded(renderer);
+                               section.reset();
+                               // The options screen exits on a Back press; swallow the matching
+                               // release so it doesn't bubble up to the reader's onGoHome().
+                               ignoreBackUntilRelease = true;
+                             });
       break;
     }
     case EpubReaderMenuActivity::MenuAction::VIEW_BOOKMARKS: {
@@ -1052,15 +1030,14 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
                     static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
                 if (!BOOKMARKS.hasBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
                                                   section->pageCount)) {
-                  startActivityForResult(
-                      std::make_unique<ConfirmationActivity>(renderer, mappedInput,
-                                                             tr(STR_CONFIRM_ADD_RETURN_MARK), ""),
-                      [this, doNavigate](const ActivityResult& confirmResult) {
-                        if (!confirmResult.isCancelled) {
-                          addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
-                        }
-                        doNavigate();
-                      });
+                  startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput,
+                                                                                tr(STR_CONFIRM_ADD_RETURN_MARK), ""),
+                                         [this, doNavigate](const ActivityResult& confirmResult) {
+                                           if (!confirmResult.isCancelled) {
+                                             addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
+                                           }
+                                           doNavigate();
+                                         });
                   return;
                 }
               }
@@ -1077,8 +1054,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       }
       const int progressPercent = clampPercent(static_cast<int>(bookProgress + 0.5f));
       BookStatsActivity::SessionContext session;
-      session.elapsedSecs =
-          sessionStartMs > 0 ? static_cast<uint32_t>((millis() - sessionStartMs) / 1000UL) : 0UL;
+      session.elapsedSecs = sessionStartMs > 0 ? static_cast<uint32_t>((millis() - sessionStartMs) / 1000UL) : 0UL;
       {
         const auto& ov = SETTINGS.getReaderOverride();
         const uint8_t thresholdIdx =
@@ -1089,17 +1065,16 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
         session.thresholdSecs =
             (thresholdIdx < kMinSessCount) ? CrossPointSettings::MIN_SESSION_SECONDS[thresholdIdx] : 0;
         uint8_t hour = 0, minute = 0;
-        session.dated = halClock.isAvailable() &&
-                        halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, session.dayOfWeek, session.day,
-                                                  session.month, session.year, hour, minute);
+        session.dated =
+            halClock.isAvailable() && halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, session.dayOfWeek,
+                                                                session.day, session.month, session.year, hour, minute);
       }
-      startActivityForResult(
-          std::make_unique<BookStatsActivity>(renderer, mappedInput, epub->getTitle(), epub->getCachePath(),
-                                               progressPercent, session),
-          [this](const ActivityResult&) {
-            ignoreBackUntilRelease = true;
-            requestUpdate();
-          });
+      startActivityForResult(std::make_unique<BookStatsActivity>(renderer, mappedInput, epub->getTitle(),
+                                                                 epub->getCachePath(), progressPercent, session),
+                             [this](const ActivityResult&) {
+                               ignoreBackUntilRelease = true;
+                               requestUpdate();
+                             });
       break;
     }
   }
@@ -1347,7 +1322,8 @@ void EpubReaderActivity::render(RenderLock&& lock) {
           }
           renderer.drawCenteredText(UI_12_FONT_ID, 330, dbg, true);
           char dbg2[64];
-          snprintf(dbg2, sizeof(dbg2), "floor=%u html=%u", (unsigned)buildFailure.floor, (unsigned)buildFailure.htmlSize);
+          snprintf(dbg2, sizeof(dbg2), "floor=%u html=%u", (unsigned)buildFailure.floor,
+                   (unsigned)buildFailure.htmlSize);
           renderer.drawCenteredText(UI_12_FONT_ID, 355, dbg2, true);
         }
         // No renderStatusBar(): section was just reset (null) and it derefs section->.
@@ -1355,7 +1331,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
         showPendingSyncSaveError();
         return;
       }
-      buildFailedSpine = -1;  // built OK; allow this chapter again
+      buildFailedSpine = -1;      // built OK; allow this chapter again
       sectionJustRebuilt = true;  // built fresh this pass; page load must work now
     } else {
       LOG_DBG("ERS", "Cache found, skipping build...");
@@ -1495,9 +1471,9 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   }
 
   if (showBookmarkMessage && !bookmarkMessageLightRefresh) {
-    const StrId msgId = bookmarkMessageRemoved   ? StrId::STR_BOOKMARK_REMOVED
-                        : bookmarkMessageReturn  ? StrId::STR_RETURN_MARK_ADDED
-                                                 : StrId::STR_BOOKMARK_ADDED;
+    const StrId msgId = bookmarkMessageRemoved  ? StrId::STR_BOOKMARK_REMOVED
+                        : bookmarkMessageReturn ? StrId::STR_RETURN_MARK_ADDED
+                                                : StrId::STR_BOOKMARK_ADDED;
     GUI.drawPopup(renderer, I18n::getInstance().get(msgId));
   }
 
@@ -1776,16 +1752,14 @@ void EpubReaderActivity::renderStatusBar() const {
     title = epub->getTitle();
   }
 
-  const float bmPageProgress =
-      (section && section->pageCount > 0)
-          ? static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount)
-          : 0.0f;
+  const float bmPageProgress = (section && section->pageCount > 0)
+                                   ? static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount)
+                                   : 0.0f;
   const bool bookmarked =
       section && section->pageCount > 0 &&
       BOOKMARKS.hasBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmPageProgress, section->pageCount);
-  const bool returnMark =
-      bookmarked &&
-      BOOKMARKS.isReturnMarkForPage(static_cast<uint16_t>(currentSpineIndex), bmPageProgress, section->pageCount);
+  const bool returnMark = bookmarked && BOOKMARKS.isReturnMarkForPage(static_cast<uint16_t>(currentSpineIndex),
+                                                                      bmPageProgress, section->pageCount);
   GUI.drawStatusBar(renderer, bookProgress, currentPage, pageCount, title, 0, textYOffset, true, bookmarked,
                     returnMark);
 }
