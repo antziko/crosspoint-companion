@@ -6,23 +6,28 @@
 #include <cstring>
 
 namespace {
-// Binary layout v3 (19 bytes):
-//   [0]     version (= 3)
-//   [1-4]   totalReadingSeconds       uint32_t LE
+// Binary layout v4 (29 bytes):
+//   [0]     version (= 4)
+//   [1-4]   totalReadingSeconds       uint32_t LE  (this device's time only)
 //   [5-8]   unattributedSeconds       uint32_t LE
 //   [9-10]  avgSecondsPerForwardPage  uint16_t LE
 //   [11-12] paceSampleCount           uint16_t LE
 //   [13-16] lastReadDayIndex          uint32_t LE  (0 = never recorded)
 //   [17]    lastReadHour              uint8_t
 //   [18]    lastReadMinute            uint8_t
+//   [19-22] remoteOtherSeconds        uint32_t LE  (sum of other devices' counters)
+//   [23-26] remoteLastReadDayIndex    uint32_t LE  (0 = none)
+//   [27]    remoteLastReadHour        uint8_t
+//   [28]    remoteLastReadMinute      uint8_t
 //
-// v1 (15 bytes, sessionCount/totalPagesTurned) and v2 (13 bytes, no last-read
-// fields) files are rejected by the version check below and replaced with fresh
-// v3 stats. v1's two counters were dropped entirely; v2's fields all carry over
-// 1:1 into v3's leading layout, but the version bump means existing v2 readers
-// simply start over with sentinel last-read fields -- nothing to migrate.
-constexpr uint8_t STATS_FILE_VERSION = 3;
-constexpr int STATS_FILE_SIZE = 19;
+// v3 (19 bytes) is v4's leading layout exactly; parse() upgrades it losslessly by
+// zeroing the remote-sync fields. The previous hard version-reject would have
+// silently wiped every book's accumulated reading time on firmware upgrade. v1/v2
+// remain rejected (see v3's history in git).
+constexpr uint8_t STATS_FILE_VERSION = 4;
+constexpr uint8_t STATS_FILE_VERSION_V3 = 3;
+constexpr int STATS_FILE_SIZE_V3 = 19;
+constexpr int STATS_FILE_SIZE = 29;
 constexpr uint16_t MAX_PACE_SAMPLE_COUNT = 1000;
 
 uint16_t readLe16(const uint8_t* d, int o) {
@@ -44,6 +49,38 @@ void writeLe32(uint8_t* d, int o, uint32_t v) {
 }
 }  // namespace
 
+bool BookReadingStats::parse(const uint8_t* data, size_t len, BookReadingStats& out) {
+  if (!data || len < 1) {
+    return false;
+  }
+  const uint8_t version = data[0];
+  const bool v4 = (version == STATS_FILE_VERSION && len == static_cast<size_t>(STATS_FILE_SIZE));
+  const bool v3 = (version == STATS_FILE_VERSION_V3 && len == static_cast<size_t>(STATS_FILE_SIZE_V3));
+  if (!v4 && !v3) {
+    return false;
+  }
+  out.totalReadingSeconds = readLe32(data, 1);
+  out.unattributedSeconds = readLe32(data, 5);
+  out.avgSecondsPerForwardPage = readLe16(data, 9);
+  out.paceSampleCount = readLe16(data, 11);
+  out.lastReadDayIndex = readLe32(data, 13);
+  out.lastReadHour = data[17];
+  out.lastReadMinute = data[18];
+  if (v4) {
+    out.remoteOtherSeconds = readLe32(data, 19);
+    out.remoteLastReadDayIndex = readLe32(data, 23);
+    out.remoteLastReadHour = data[27];
+    out.remoteLastReadMinute = data[28];
+  } else {
+    // v3 file: remote-sync fields didn't exist yet — zero, never garbage.
+    out.remoteOtherSeconds = 0;
+    out.remoteLastReadDayIndex = 0;
+    out.remoteLastReadHour = 0;
+    out.remoteLastReadMinute = 0;
+  }
+  return true;
+}
+
 BookReadingStats BookReadingStats::load(const std::string& cachePath) {
   BookReadingStats stats;
   HalFile f;
@@ -53,17 +90,11 @@ BookReadingStats BookReadingStats::load(const std::string& cachePath) {
   uint8_t data[STATS_FILE_SIZE] = {};
   const int n = f.read(data, STATS_FILE_SIZE);
   f.close();
-  if (n != STATS_FILE_SIZE || data[0] != STATS_FILE_VERSION) {
+  if (n <= 0 || !parse(data, static_cast<size_t>(n), stats)) {
+    // parse() validates version+size before writing any field, so stats is still
+    // default-constructed here.
     LOG_DBG("STATS", "Stats missing or version mismatch, starting fresh");
-    return stats;
   }
-  stats.totalReadingSeconds = readLe32(data, 1);
-  stats.unattributedSeconds = readLe32(data, 5);
-  stats.avgSecondsPerForwardPage = readLe16(data, 9);
-  stats.paceSampleCount = readLe16(data, 11);
-  stats.lastReadDayIndex = readLe32(data, 13);
-  stats.lastReadHour = data[17];
-  stats.lastReadMinute = data[18];
   return stats;
 }
 
@@ -83,6 +114,10 @@ void BookReadingStats::save(const std::string& cachePath) const {
   writeLe32(data, 13, lastReadDayIndex);
   data[17] = lastReadHour;
   data[18] = lastReadMinute;
+  writeLe32(data, 19, remoteOtherSeconds);
+  writeLe32(data, 23, remoteLastReadDayIndex);
+  data[27] = remoteLastReadHour;
+  data[28] = remoteLastReadMinute;
   f.write(data, STATS_FILE_SIZE);
   f.close();
 }
