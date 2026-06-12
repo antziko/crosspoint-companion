@@ -464,10 +464,13 @@ void DictionaryDefinitionActivity::loop() {
     if (!cachePath.empty() && !chain_.empty()) {
       pendingBack_ = chain_.pop();
       // Resolve the prior headword from the persisted history by distance-from-newest.
-      const auto hist = LookupHistory::load(cachePath);  // newest-first
-      if (pendingBack_.histIndex < hist.size()) {
+      // Streaming single-word fetch: the reader is still resident underneath us and
+      // the heap is at its most fragmented here -- materializing the whole history
+      // (the old LookupHistory::load call) could OOM-abort.
+      const std::string priorWord = LookupHistory::getWordNewestFirst(cachePath, pendingBack_.histIndex);
+      if (!priorWord.empty()) {
         chainBackNavInProgress = true;
-        controller.startLookup(hist[pendingBack_.histIndex].word, false);
+        controller.startLookup(priorWord, false);
         return;
       }
       // Unresolvable (should not happen under the depth cap) — fall through to exit.
