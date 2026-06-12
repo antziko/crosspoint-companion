@@ -1,5 +1,6 @@
 #include "KOReaderSyncClient.h"
 
+#include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Logging.h>
 #include <SdDebugLog.h>
@@ -16,9 +17,26 @@
 int KOReaderSyncClient::lastHttpCode = 0;
 
 namespace {
+// Server capability tag from the last updateStats response (see statsServerTag()).
+char statsServerTagBuf[32] = {0};
+}  // namespace
+
+const char* KOReaderSyncClient::deviceId() {
+  // Unique, stable per-chip id ("crosspoint-a1b2c3d4e5f6") from the factory eFuse
+  // MAC. Required for per-device stats merging on the sync server: X3 and X4 must
+  // not share an id (the old "crosspoint-reader" constant made every CrossPoint
+  // device indistinguishable). Formatted once into a static buffer.
+  static char id[24] = {0};
+  if (id[0] == '\0') {
+    const uint64_t mac = ESP.getEfuseMac();
+    snprintf(id, sizeof(id), "crosspoint-%012llx", static_cast<unsigned long long>(mac));
+  }
+  return id;
+}
+
+namespace {
 // Device identifier for CrossPoint reader
 constexpr char DEVICE_NAME[] = "CrossPoint";
-constexpr char DEVICE_ID[] = "crosspoint-reader";
 
 // Hold WiFi out of modem-sleep for the duration of a request, then restore the
 // default. At WIFI_PS_MIN_MODEM the radio sleeps between DTIM beacons; on a
@@ -239,7 +257,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
 
   esp_err_t err = esp_http_client_perform(client);
   const int httpCode = esp_http_client_get_status_code(client);
-  lastHttpCode = httpCode;  esp_http_client_cleanup(client);
+  lastHttpCode = httpCode;
+  esp_http_client_cleanup(client);
 
   endTrace(buf, "AUTH", httpCode, err);
   LOG_DBG("KOSync", "Auth response: %d (err: %d)", httpCode, err);
@@ -269,7 +288,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
 
   esp_err_t err = esp_http_client_perform(client);
   const int httpCode = esp_http_client_get_status_code(client);
-  lastHttpCode = httpCode;  esp_http_client_cleanup(client);
+  lastHttpCode = httpCode;
+  esp_http_client_cleanup(client);
 
   endTrace(buf, "PROGRESS_GET", httpCode, err);
   LOG_DBG("KOSync", "Get progress response: %d (err: %d)", httpCode, err);
@@ -317,7 +337,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
   doc["progress"] = progress.progress;
   doc["percentage"] = progress.percentage;
   doc["device"] = DEVICE_NAME;
-  doc["device_id"] = DEVICE_ID;
+  doc["device_id"] = KOReaderSyncClient::deviceId();
 
   std::string body;
   serializeJson(doc, body);
@@ -339,7 +359,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
 
   esp_err_t err = esp_http_client_perform(client);
   const int httpCode = esp_http_client_get_status_code(client);
-  lastHttpCode = httpCode;  esp_http_client_cleanup(client);
+  lastHttpCode = httpCode;
+  esp_http_client_cleanup(client);
 
   endTrace(buf, "PROGRESS_PUT", httpCode, err);
   LOG_DBG("KOSync", "Update progress response: %d (err: %d)", httpCode, err);
@@ -351,7 +372,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
 }
 
 KOReaderSyncClient::Error KOReaderSyncClient::getBookmarks(const std::string& documentHash,
-                                                          std::string& outBookmarksJson) {
+                                                           std::string& outBookmarksJson) {
   lastHttpCode = 0;
   outBookmarksJson.clear();
   if (!KOREADER_STORE.hasCredentials()) {
@@ -370,7 +391,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::getBookmarks(const std::string& do
 
   esp_err_t err = esp_http_client_perform(client);
   const int httpCode = esp_http_client_get_status_code(client);
-  lastHttpCode = httpCode;  esp_http_client_cleanup(client);
+  lastHttpCode = httpCode;
+  esp_http_client_cleanup(client);
 
   endTrace(buf, "BOOKMARKS_GET", httpCode, err);
   LOG_DBG("KOSync", "Get bookmarks response: %d (err: %d)", httpCode, err);
@@ -400,7 +422,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getBookmarks(const std::string& do
 }
 
 KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string& documentHash,
-                                                             const std::string& bookmarksJson) {
+                                                              const std::string& bookmarksJson) {
   lastHttpCode = 0;
   if (!KOREADER_STORE.hasCredentials()) {
     LOG_DBG("KOSync", "No credentials configured");
@@ -464,6 +486,149 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
   if (httpCode == 401) return AUTH_FAILED;
   return SERVER_ERROR;
 }
+
+KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& documentHash, KOReaderStatsEntry* outEntries,
+                                                       size_t& outCount) {
+  lastHttpCode = 0;
+  outCount = 0;
+  if (!KOREADER_STORE.hasCredentials()) {
+    LOG_DBG("KOSync", "No credentials configured");
+    return NO_CREDENTIALS;
+  }
+
+  std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/stats/" + documentHash;
+  if (!heapOkForUrl(url, "STATS_GET")) return LOW_MEMORY;
+
+  const NoWifiSleep noWifiSleep;
+  ResponseBuffer buf;
+  beginTrace(buf, "STATS_GET");
+  esp_http_client_handle_t client = createClient(url.c_str(), &buf);
+  if (!client) return NETWORK_ERROR;
+
+  esp_err_t err = esp_http_client_perform(client);
+  const int httpCode = esp_http_client_get_status_code(client);
+  lastHttpCode = httpCode;
+  esp_http_client_cleanup(client);
+
+  endTrace(buf, "STATS_GET", httpCode, err);
+  LOG_DBG("KOSync", "Get stats response: %d (err: %d)", httpCode, err);
+
+  if (err != ESP_OK) return NETWORK_ERROR;
+
+  if (httpCode == 200 && buf.data) {
+    JsonDocument doc;
+    const DeserializationError error = deserializeJson(doc, buf.data);
+    if (error) {
+      LOG_ERR("KOSync", "JSON parse failed: %s", error.c_str());
+      return JSON_ERROR;
+    }
+
+    // The server returns {} (no "stats" object) when nothing is stored yet.
+    if (!doc["stats"].is<JsonObjectConst>()) {
+      return NOT_FOUND;
+    }
+
+    for (JsonPairConst kv : doc["stats"].as<JsonObjectConst>()) {
+      if (outCount >= MAX_STATS_DEVICES) {
+        LOG_DBG("KOSync", "More than %u stats devices; extras dropped", (unsigned)MAX_STATS_DEVICES);
+        break;
+      }
+      // Each value is a per-device blob stored verbatim by the server: an embedded
+      // JSON string like {"s":300,"lr":9650,"lh":21,"lm":15}.
+      const char* blob = kv.value().as<const char*>();
+      if (!blob) continue;
+      JsonDocument blobDoc;
+      if (deserializeJson(blobDoc, blob)) {
+        LOG_DBG("KOSync", "Skipping malformed stats blob for %s", kv.key().c_str());
+        continue;
+      }
+      KOReaderStatsEntry& e = outEntries[outCount];
+      snprintf(e.deviceId, sizeof(e.deviceId), "%s", kv.key().c_str());
+      e.seconds = blobDoc["s"].as<uint32_t>();
+      e.lastReadDayIndex = blobDoc["lr"].as<uint32_t>();
+      e.lastReadHour = blobDoc["lh"].as<uint8_t>();
+      e.lastReadMinute = blobDoc["lm"].as<uint8_t>();
+      outCount++;
+    }
+    LOG_DBG("KOSync", "Got stats for %u device(s)", (unsigned)outCount);
+    return OK;
+  }
+
+  if (httpCode == 401) return AUTH_FAILED;
+  if (httpCode == 404) return NOT_FOUND;
+  return SERVER_ERROR;
+}
+
+KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& documentHash,
+                                                          const KOReaderStatsEntry& entry) {
+  lastHttpCode = 0;
+  if (!KOREADER_STORE.hasCredentials()) {
+    LOG_DBG("KOSync", "No credentials configured");
+    return NO_CREDENTIALS;
+  }
+
+  statsServerTagBuf[0] = '\0';  // reset; refilled below if the server echoes a tag
+
+  std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/stats";
+  if (!heapOkForUrl(url, "STATS_PUT")) return LOW_MEMORY;
+
+  // The per-device counters are sent as a pre-serialized JSON string field so the
+  // server stores the blob verbatim under this device's hash field (other devices'
+  // blobs are untouched). Worst case ~46 chars, so a 64-byte stack buffer fits.
+  char blob[64];
+  snprintf(blob, sizeof(blob), "{\"s\":%lu,\"lr\":%lu,\"lh\":%u,\"lm\":%u}", static_cast<unsigned long>(entry.seconds),
+           static_cast<unsigned long>(entry.lastReadDayIndex), entry.lastReadHour, entry.lastReadMinute);
+
+  JsonDocument doc;
+  doc["document"] = documentHash;
+  doc["device_id"] = deviceId();
+  doc["stats"] = blob;
+
+  std::string body;
+  serializeJson(doc, body);
+
+  LOG_DBG("KOSync", "Stats request body: %s", body.c_str());
+
+  const NoWifiSleep noWifiSleep;
+  ResponseBuffer buf;
+  beginTrace(buf, "STATS_PUT", body.length());
+  esp_http_client_handle_t client = createClient(url.c_str(), &buf, HTTP_METHOD_PUT);
+  if (!client) return NETWORK_ERROR;
+
+  if (esp_http_client_set_header(client, "Content-Type", "application/json") != ESP_OK ||
+      esp_http_client_set_post_field(client, body.c_str(), body.length()) != ESP_OK) {
+    LOG_ERR("KOSync", "Failed to set request body");
+    esp_http_client_cleanup(client);
+    return NETWORK_ERROR;
+  }
+
+  esp_err_t err = esp_http_client_perform(client);
+  const int httpCode = esp_http_client_get_status_code(client);
+  lastHttpCode = httpCode;
+  esp_http_client_cleanup(client);
+
+  endTrace(buf, "STATS_PUT", httpCode, err);
+  LOG_DBG("KOSync", "Update stats response: %d (err: %d)", httpCode, err);
+
+  // No retry loop (unlike updateBookmarks): the counters are monotonic and re-sent
+  // whole on every sync, so a dropped PUT self-heals next time — nothing diverges.
+  if (err != ESP_OK) return NETWORK_ERROR;
+  if (httpCode == 200 || httpCode == 202) {
+    // The stats-enabled server echoes a capability tag ("server":"stats-v1") in
+    // its response; surface it so the UI can show which server build answered.
+    if (buf.data) {
+      JsonDocument respDoc;
+      if (!deserializeJson(respDoc, buf.data) && respDoc["server"].is<const char*>()) {
+        snprintf(statsServerTagBuf, sizeof(statsServerTagBuf), "%s", respDoc["server"].as<const char*>());
+      }
+    }
+    return OK;
+  }
+  if (httpCode == 401) return AUTH_FAILED;
+  return SERVER_ERROR;
+}
+
+const char* KOReaderSyncClient::statsServerTag() { return statsServerTagBuf; }
 
 const char* KOReaderSyncClient::errorString(Error error) {
   switch (error) {

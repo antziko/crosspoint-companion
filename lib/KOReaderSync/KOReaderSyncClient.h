@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <string>
 
 /**
@@ -11,6 +12,20 @@ struct KOReaderProgress {
   std::string device;    // Device name
   std::string deviceId;  // Device ID
   int64_t timestamp;     // Unix timestamp of last update
+};
+
+/**
+ * One device's reading-stats entry for a document (self-hosted server extension).
+ * The server stores one opaque JSON blob per device id; this is the parsed form.
+ * Counters are per-device and monotonic — the merged total for display is the sum
+ * across devices, never stored back into any single device's counter.
+ */
+struct KOReaderStatsEntry {
+  char deviceId[24] = {0};        // Hash field name on the server
+  uint32_t seconds = 0;           // "s": that device's lifetime reading seconds for the book
+  uint32_t lastReadDayIndex = 0;  // "lr": days-since-2000 of last dated session (0 = none)
+  uint8_t lastReadHour = 0;       // "lh"
+  uint8_t lastReadMinute = 0;     // "lm"
 };
 
 /**
@@ -73,6 +88,41 @@ class KOReaderSyncClient {
    * @return OK on success, error code on failure
    */
   static Error updateBookmarks(const std::string& documentHash, const std::string& bookmarksJson);
+
+  /** Max device entries parsed from a stats response; extras are dropped. */
+  static constexpr size_t MAX_STATS_DEVICES = 8;
+
+  /**
+   * Get per-device reading-stats entries for a document (self-hosted server extension).
+   * @param documentHash The document hash (must match the progress hash for the book)
+   * @param outEntries Caller-provided array of MAX_STATS_DEVICES entries
+   * @param outCount Output: number of entries filled
+   * @return OK on success, NOT_FOUND if no stats exist, error code on failure
+   */
+  static Error getStats(const std::string& documentHash, KOReaderStatsEntry* outEntries, size_t& outCount);
+
+  /**
+   * Replace THIS device's stats blob for a document (self-hosted server extension).
+   * Other devices' blobs are untouched (one hash field per device on the server).
+   * @param documentHash The document hash
+   * @param entry The local device's counters (deviceId field is ignored; deviceId() is sent)
+   * @return OK on success, error code on failure
+   */
+  static Error updateStats(const std::string& documentHash, const KOReaderStatsEntry& entry);
+
+  /**
+   * Unique, stable per-chip device id ("crosspoint-<efuse mac hex>") sent as
+   * device_id in progress and stats uploads.
+   */
+  static const char* deviceId();
+
+  /**
+   * Server capability/version tag (e.g. "stats-v1") echoed by the stats-enabled
+   * self-hosted server in its updateStats response. Empty string when the last
+   * updateStats got no tag — i.e. a server without the stats extension.
+   * Valid after the most recent updateStats() call.
+   */
+  static const char* statsServerTag();
 
   /**
    * Get human-readable error message.

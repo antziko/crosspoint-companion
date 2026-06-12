@@ -131,15 +131,28 @@ void BookStatsActivity::render(RenderLock&&) {
   renderer.drawText(SMALL_FONT_ID, leftX, y, line1.c_str());
   y += lineHeight;
 
+  // Cross-device total (local + last-synced remote counters). Only shown once a
+  // KOReader stats sync has actually brought in time from another device.
+  if (stats.remoteOtherSeconds > 0) {
+    char allBuf[32];
+    BookReadingStats::formatDuration(stats.displayTotalSeconds(), allBuf, sizeof(allBuf));
+    char allLine[96];
+    snprintf(allLine, sizeof(allLine), tr(STR_STATS_ALL_DEVICES_FORMAT), allBuf);
+    renderer.drawText(SMALL_FONT_ID, leftX, y, allLine);
+    y += lineHeight;
+  }
+
   if (stats.totalReadingSeconds > 0 && progressPercent < 100) {
     std::string line2 = std::string(tr(STR_STATS_EST_REMAINING)) + ": ";
     if (progressPercent > 0) {
-      const uint64_t remaining = (static_cast<uint64_t>(stats.totalReadingSeconds) *
-                                  static_cast<uint64_t>(100 - progressPercent)) /
-                                 static_cast<uint64_t>(progressPercent);
+      // Use the cross-device total: time spent on other devices counts toward how
+      // long this book actually takes, so it sharpens the estimate.
+      const uint64_t remaining =
+          (static_cast<uint64_t>(stats.displayTotalSeconds()) * static_cast<uint64_t>(100 - progressPercent)) /
+          static_cast<uint64_t>(progressPercent);
       char estBuf[32];
-      BookReadingStats::formatDuration(
-          static_cast<uint32_t>(std::min<uint64_t>(remaining, UINT32_MAX)), estBuf, sizeof(estBuf));
+      BookReadingStats::formatDuration(static_cast<uint32_t>(std::min<uint64_t>(remaining, UINT32_MAX)), estBuf,
+                                       sizeof(estBuf));
       line2 += estBuf;
     } else {
       line2 += tr(STR_STATS_CALCULATING);
@@ -174,13 +187,12 @@ void BookStatsActivity::renderHeatmapTab(const Rect& rect) const {
   // fold it into an in-memory scratch copy so today's reading is visible without
   // waiting for onExit() to commit to disk.
   std::unique_ptr<ReadingTimeHistory> scratchHistory;
-  if (session.elapsedSecs > 0 && session.elapsedSecs >= session.thresholdSecs &&
-      session.dated && session.year >= 2000) {
+  if (session.elapsedSecs > 0 && session.elapsedSecs >= session.thresholdSecs && session.dated &&
+      session.year >= 2000) {
     scratchHistory = makeUniqueNoThrow<ReadingTimeHistory>();
     if (scratchHistory) {
       if (history) *scratchHistory = *history;
-      scratchHistory->recordDay(session.year, session.month, session.day, session.dayOfWeek,
-                                session.elapsedSecs);
+      scratchHistory->recordDay(session.year, session.month, session.day, session.dayOfWeek, session.elapsedSecs);
     }
   }
   const ReadingTimeHistory* h = scratchHistory ? scratchHistory.get() : history.get();

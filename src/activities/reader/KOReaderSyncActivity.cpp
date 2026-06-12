@@ -5,6 +5,7 @@
 #include <I18n.h>
 #include <InflateReader.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <SdDebugLog.h>
 #include <WiFi.h>
 #include <esp_sntp.h>
@@ -13,9 +14,11 @@
 #include <algorithm>
 #include <cassert>
 
+#include "BookReadingStats.h"
 #include "BookmarkStore.h"
 #include "Epub/Section.h"
 #include "EpubReaderUtils.h"
+#include "GlobalReadingStats.h"
 #include "KOReaderCredentialStore.h"
 #include "KOReaderDocumentId.h"
 #include "MappedInputManager.h"
@@ -156,10 +159,12 @@ void KOReaderSyncActivity::performSync() {
   // Fetch remote progress
   const auto result = KOReaderSyncClient::getProgress(documentHash, remoteProgress);
 
-  // Sync bookmarks alongside progress whenever the server is reachable (OK or NOT_FOUND).
-  // Silent and best-effort: it never changes the progress sync outcome below.
+  // Sync bookmarks and reading stats alongside progress whenever the server is
+  // reachable (OK or NOT_FOUND). Silent and best-effort: neither changes the
+  // progress sync outcome below.
   if (result == KOReaderSyncClient::OK || result == KOReaderSyncClient::NOT_FOUND) {
     syncBookmarks();
+    syncStats();
   }
 
   if (result == KOReaderSyncClient::NOT_FOUND) {
@@ -285,7 +290,8 @@ void KOReaderSyncActivity::syncBookmarks() {
   // so excluding them keeps the summary consistent with what actually syncs.
   const auto countSyncable = [] {
     const auto& bms = BOOKMARKS.getBookmarks();
-    return static_cast<int>(std::count_if(bms.begin(), bms.end(), [](const struct Bookmark& b) { return !b.returnMark; }));
+    return static_cast<int>(
+        std::count_if(bms.begin(), bms.end(), [](const struct Bookmark& b) { return !b.returnMark; }));
   };
   bmLocalCount = countSyncable();
 
@@ -320,6 +326,156 @@ void KOReaderSyncActivity::syncBookmarks() {
     // A failed upload means local deletes/additions never reached the server, so other
     // devices won't converge. Surface this on the result screen rather than hiding it.
     LOG_ERR("KOSync", "Bookmark upload failed: %s", KOReaderSyncClient::errorString(putResult));
+  }
+}
+
+void KOReaderSyncActivity::syncStats() {
+  {
+    RenderLock lock(*this);
+    state = SYNCING;
+    statusMessage = tr(STR_SYNCING_STATS);
+  }
+  requestUpdateAndWait();
+
+  // stats.bin lives in the book's path-hash cache dir (same derivation as the Epub ctor).
+  const std::string cachePath = "/.crosspoint/epub_" + std::to_string(std::hash<std::string>{}(epubPath));
+  BookReadingStats stats = BookReadingStats::load(cachePath);
+  const uint32_t prevLocalSeconds = stats.totalReadingSeconds;
+  const uint32_t prevRemoteSeconds = stats.remoteOtherSeconds;
+
+  // Heap, not stack: 8 entries is ~290 bytes — over the 256-byte stack-local
+  // guideline. Reused below for the global-counter phase.
+  auto entriesBuf = makeUniqueNoThrow<KOReaderStatsEntry[]>(KOReaderSyncClient::MAX_STATS_DEVICES);
+  if (!entriesBuf) {
+    LOG_ERR("KOSync", "OOM: stats entries");
+    return;
+  }
+  KOReaderStatsEntry* entries = entriesBuf.get();
+
+  // Pull every device's counter. NOT_FOUND = server has nothing yet; still upload ours.
+  size_t count = 0;
+  const auto getResult = KOReaderSyncClient::getStats(documentHash, entries, count);
+  statsFetchOk = (getResult == KOReaderSyncClient::OK || getResult == KOReaderSyncClient::NOT_FOUND);
+  if (statsFetchOk) {
+    uint32_t othersSeconds = 0;
+    uint32_t remoteDay = 0;
+    uint8_t remoteHour = 0;
+    uint8_t remoteMinute = 0;
+    for (size_t i = 0; i < count; i++) {
+      const KOReaderStatsEntry& e = entries[i];
+      if (strcmp(e.deviceId, KOReaderSyncClient::deviceId()) == 0) {
+        // Self-heal: if the server's copy of OUR counter is ahead of the local one,
+        // stats.bin was lost (cache wipe, book moved before the relocation fix) —
+        // adopt the server value as a floor so the upload below can't clobber it.
+        if (e.seconds > stats.totalReadingSeconds) {
+          LOG_INF("KOSync", "Stats self-heal: local %lus -> server %lus",
+                  static_cast<unsigned long>(stats.totalReadingSeconds), static_cast<unsigned long>(e.seconds));
+          stats.totalReadingSeconds = e.seconds;
+        }
+        if (e.lastReadDayIndex > stats.lastReadDayIndex) {
+          stats.lastReadDayIndex = e.lastReadDayIndex;
+          stats.lastReadHour = e.lastReadHour;
+          stats.lastReadMinute = e.lastReadMinute;
+        }
+      } else {
+        othersSeconds += e.seconds;
+        if (e.lastReadDayIndex > remoteDay) {
+          remoteDay = e.lastReadDayIndex;
+          remoteHour = e.lastReadHour;
+          remoteMinute = e.lastReadMinute;
+        }
+      }
+    }
+    stats.remoteOtherSeconds = othersSeconds;
+    stats.remoteLastReadDayIndex = remoteDay;
+    stats.remoteLastReadHour = remoteHour;
+    stats.remoteLastReadMinute = remoteMinute;
+  } else {
+    LOG_ERR("KOSync", "Stats fetch failed: %s", KOReaderSyncClient::errorString(getResult));
+  }
+
+  // Push this device's counter (monotonic; replaces only our hash field on the server).
+  KOReaderStatsEntry mine;
+  mine.seconds = stats.totalReadingSeconds;
+  mine.lastReadDayIndex = stats.lastReadDayIndex;
+  mine.lastReadHour = stats.lastReadHour;
+  mine.lastReadMinute = stats.lastReadMinute;
+  const auto putResult = KOReaderSyncClient::updateStats(documentHash, mine);
+  statsUploadOk = (putResult == KOReaderSyncClient::OK);
+  if (!statsUploadOk) {
+    LOG_ERR("KOSync", "Stats upload failed: %s", KOReaderSyncClient::errorString(putResult));
+  }
+
+  // Server build clue for the page header: tag echoed by a stats-enabled server,
+  // "stats" if the PUT succeeded against a tag-less stats build, "no stats" if the
+  // endpoint doesn't exist (404: stock/legacy server). Transport errors leave it
+  // empty — server build unknown.
+  if (statsUploadOk) {
+    const char* tag = KOReaderSyncClient::statsServerTag();
+    snprintf(serverTag, sizeof(serverTag), "%s", tag[0] != '\0' ? tag : "stats");
+  } else if (putResult == KOReaderSyncClient::SERVER_ERROR && KOReaderSyncClient::lastHttpCode == 404) {
+    snprintf(serverTag, sizeof(serverTag), "%s", tr(STR_SYNC_SERVER_NO_STATS));
+  }
+
+  // Persist only on change (SD write throttling): remote sum updated or self-heal fired.
+  if (stats.totalReadingSeconds != prevLocalSeconds || stats.remoteOtherSeconds != prevRemoteSeconds) {
+    stats.save(cachePath);
+  }
+  statsTotalAllDevices = stats.displayTotalSeconds();
+  statsSynced = true;
+  SdDebugLog::log("KOSync", "stats sync: local=%lu others=%lu fetch=%d upload=%d",
+                  static_cast<unsigned long>(stats.totalReadingSeconds),
+                  static_cast<unsigned long>(stats.remoteOtherSeconds), statsFetchOk ? 1 : 0, statsUploadOk ? 1 : 0);
+
+  // --- Global (all-books) counter, same per-device scheme under a reserved
+  // pseudo-document. The name can't collide with real documents: binary-mode
+  // hashes are 32 hex chars and filename-mode hashes are MD5 hex too.
+  if (statsUploadOk) {  // skip the extra round-trips when the server has no stats support
+    const std::string globalDoc = "crosspoint-global-stats";
+    auto global = makeUniqueNoThrow<GlobalReadingStats>();
+    if (!global) {
+      LOG_ERR("KOSync", "OOM: global stats");
+      return;
+    }
+    GlobalReadingStats::load(*global);
+    const uint32_t prevGlobalLocal = global->totalReadingSeconds;
+    const uint32_t prevGlobalRemote = global->remoteOtherSeconds;
+
+    count = 0;
+    const auto gGet = KOReaderSyncClient::getStats(globalDoc, entries, count);
+    if (gGet == KOReaderSyncClient::OK || gGet == KOReaderSyncClient::NOT_FOUND) {
+      uint32_t othersSeconds = 0;
+      for (size_t i = 0; i < count; i++) {
+        if (strcmp(entries[i].deviceId, KOReaderSyncClient::deviceId()) == 0) {
+          // Same self-heal floor as the per-book counter.
+          if (entries[i].seconds > global->totalReadingSeconds) {
+            LOG_INF("KOSync", "Global stats self-heal: local %lus -> server %lus",
+                    static_cast<unsigned long>(global->totalReadingSeconds),
+                    static_cast<unsigned long>(entries[i].seconds));
+            global->totalReadingSeconds = entries[i].seconds;
+          }
+        } else {
+          othersSeconds += entries[i].seconds;
+        }
+      }
+      global->remoteOtherSeconds = othersSeconds;
+    } else {
+      LOG_ERR("KOSync", "Global stats fetch failed: %s", KOReaderSyncClient::errorString(gGet));
+    }
+
+    KOReaderStatsEntry gMine;  // lastRead fields stay 0 — meaningless for the global counter
+    gMine.seconds = global->totalReadingSeconds;
+    const auto gPut = KOReaderSyncClient::updateStats(globalDoc, gMine);
+    if (gPut != KOReaderSyncClient::OK) {
+      LOG_ERR("KOSync", "Global stats upload failed: %s", KOReaderSyncClient::errorString(gPut));
+    }
+
+    if (global->totalReadingSeconds != prevGlobalLocal || global->remoteOtherSeconds != prevGlobalRemote) {
+      global->save();
+    }
+    SdDebugLog::log("KOSync", "global stats sync: local=%lu others=%lu put=%d",
+                    static_cast<unsigned long>(global->totalReadingSeconds),
+                    static_cast<unsigned long>(global->remoteOtherSeconds), gPut == KOReaderSyncClient::OK ? 1 : 0);
   }
 }
 
@@ -376,11 +532,18 @@ void KOReaderSyncActivity::render(RenderLock&&) {
   Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 
   const auto* activeServer = KOREADER_STORE.getServer(static_cast<size_t>(KOREADER_STORE.getActiveIndex()));
-  char syncHeader[72];
+  char syncHeader[96];
   if (activeServer && !activeServer->name.empty()) {
     snprintf(syncHeader, sizeof(syncHeader), "%s - %s", tr(STR_KOREADER_SYNC), activeServer->name.c_str());
   } else {
     snprintf(syncHeader, sizeof(syncHeader), "%s", tr(STR_KOREADER_SYNC));
+  }
+  // Server build clue, learned from the stats PUT during this sync: the tag the
+  // stats-enabled server echoed (e.g. "stats-v1"), or "no stats" when the PUT
+  // 404'd (stock/legacy server without the extension). Empty until known.
+  if (serverTag[0] != '\0') {
+    const size_t len = strlen(syncHeader);
+    snprintf(syncHeader + len, sizeof(syncHeader) - len, " [%s]", serverTag);
   }
   GUI.drawHeader(renderer, Rect{screen.x, screen.y + metrics.topPadding, screen.width, metrics.headerHeight},
                  syncHeader);
@@ -461,6 +624,15 @@ void KOReaderSyncActivity::render(RenderLock&&) {
       renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 284, bmStatusStr);
       optionY = top + 312;
     }
+    if (statsSynced) {
+      // Combined reading time across devices (per-device counters merged on sync).
+      char durBuf[24];
+      BookReadingStats::formatDuration(statsTotalAllDevices, durBuf, sizeof(durBuf));
+      char statsStr[96];
+      snprintf(statsStr, sizeof(statsStr), tr(STR_STATS_ALL_DEVICES_FORMAT), durBuf);
+      renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, optionY - 6, statsStr);
+      optionY += 24;
+    }
     const int optionHeight = 30;
 
     // Apply option
@@ -497,6 +669,13 @@ void KOReaderSyncActivity::render(RenderLock&&) {
                bmFetchOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER),
                bmUploadOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER));
       UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top + 115, bmStatusStr);
+    }
+    if (statsSynced) {
+      char durBuf[24];
+      BookReadingStats::formatDuration(statsTotalAllDevices, durBuf, sizeof(durBuf));
+      char statsStr[96];
+      snprintf(statsStr, sizeof(statsStr), tr(STR_STATS_ALL_DEVICES_FORMAT), durBuf);
+      UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top + 140, statsStr);
     }
 
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_UPLOAD), "", "");

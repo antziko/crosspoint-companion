@@ -76,12 +76,21 @@ class KOReaderSyncActivity final : public Activity {
   SavedProgressPosition localProgress;
 
   // Bookmark sync summary, captured in syncBookmarks() for display on the result screen.
-  bool bmSynced = false;     // True once a bookmark sync attempt completed (counts valid)
-  int bmRemoteCount = 0;     // Bookmarks fetched from the server
-  int bmLocalCount = 0;      // Local bookmarks before merge
-  int bmMergedCount = 0;     // Total after union merge
-  bool bmFetchOk = false;    // GET reached the server (OK or NOT_FOUND) — remote set is trustworthy
-  bool bmUploadOk = false;   // PUT succeeded — local set actually propagated to the server
+  bool bmSynced = false;    // True once a bookmark sync attempt completed (counts valid)
+  int bmRemoteCount = 0;    // Bookmarks fetched from the server
+  int bmLocalCount = 0;     // Local bookmarks before merge
+  int bmMergedCount = 0;    // Total after union merge
+  bool bmFetchOk = false;   // GET reached the server (OK or NOT_FOUND) — remote set is trustworthy
+  bool bmUploadOk = false;  // PUT succeeded — local set actually propagated to the server
+
+  // Reading-stats sync summary, captured in syncStats() for the result screen.
+  bool statsSynced = false;           // True once a stats sync attempt completed
+  bool statsFetchOk = false;          // GET reached the server (OK or NOT_FOUND)
+  bool statsUploadOk = false;         // PUT of this device's counter succeeded
+  uint32_t statsTotalAllDevices = 0;  // local counter + sum of other devices' counters
+  // Server build clue for the page header: tag echoed by the stats PUT
+  // ("stats-v1"), "no stats" when the endpoint 404'd, empty while unknown.
+  char serverTag[32] = {0};
 
   // Selection in result screen (0=Apply, 1=Upload)
   int selectedOption = 0;
@@ -107,6 +116,9 @@ class KOReaderSyncActivity final : public Activity {
   // Pull + union-merge + push bookmarks alongside progress. Silent (logs only);
   // never fails the progress sync. Requires `documentHash` already computed.
   void syncBookmarks();
+  // Pull + merge + push per-device reading-time counters alongside progress.
+  // Same contract as syncBookmarks(): silent, never fails the progress sync.
+  void syncStats();
   void ensureEpubLoaded();
   void saveProgressAndReturn(int spineIndex, int page);
   void returnToReader();

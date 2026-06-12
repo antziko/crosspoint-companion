@@ -104,8 +104,7 @@ HeroDetails loadHeroDetails(const RecentBook& book) {
 
   EpubReaderUtils::Progress progress;
   if (EpubReaderUtils::loadProgress(epub, progress, "VEGA") && progress.hasPageCount && progress.pageCount > 0) {
-    const float chapterProgress =
-        static_cast<float>(progress.pageNumber + 1) / static_cast<float>(progress.pageCount);
+    const float chapterProgress = static_cast<float>(progress.pageNumber + 1) / static_cast<float>(progress.pageCount);
     const float percent = epub.calculateProgress(progress.spineIndex, chapterProgress) * 100.0f;
     details.progressPercent = std::clamp(static_cast<int>(percent + 0.5f), 0, 100);
     details.hasProgress = true;
@@ -116,12 +115,17 @@ HeroDetails loadHeroDetails(const RecentBook& book) {
   }
 
   const BookReadingStats stats = BookReadingStats::load(epub.getCachePath());
-  if (stats.totalReadingSeconds > 0) {
-    BookReadingStats::formatDuration(stats.totalReadingSeconds, details.durationText, sizeof(details.durationText));
+  // Cross-device total (local counter + last-synced remote sum from KOReader stats sync).
+  if (stats.displayTotalSeconds() > 0) {
+    BookReadingStats::formatDuration(stats.displayTotalSeconds(), details.durationText, sizeof(details.durationText));
     details.hasDuration = true;
   }
-  if (stats.lastReadDayIndex != 0) {
-    formatLastRead(stats.lastReadDayIndex, stats.lastReadHour, stats.lastReadMinute, details.lastReadText,
+  // "Last read" shows the most recent dated session across devices.
+  const bool remoteNewer = stats.remoteLastReadDayIndex > stats.lastReadDayIndex;
+  const uint32_t lastDay = remoteNewer ? stats.remoteLastReadDayIndex : stats.lastReadDayIndex;
+  if (lastDay != 0) {
+    formatLastRead(lastDay, remoteNewer ? stats.remoteLastReadHour : stats.lastReadHour,
+                   remoteNewer ? stats.remoteLastReadMinute : stats.lastReadMinute, details.lastReadText,
                    sizeof(details.lastReadText));
     details.hasLastRead = true;
   }
@@ -140,7 +144,7 @@ HeroDetails loadHeroDetails(const RecentBook& book) {
         ReadingTimeHistory::load(epub.getCachePath() + "/book_time_history.bin", *history);
         if (history->heatmapAnchorDay == todayIdx && history->heatmapAnchorSeconds > 0) {
           BookReadingStats::formatDuration(history->heatmapAnchorSeconds, details.todayDurationText,
-                                          sizeof(details.todayDurationText));
+                                           sizeof(details.todayDurationText));
           details.hasTodayDuration = true;
         }
       }
@@ -161,8 +165,8 @@ HeroDetails cachedHeroDetails;
 // (Lyra3CoversTheme.cpp:42-81).
 // A tile with a cover shows just the photo; the frame is drawn only for the
 // empty placeholder (no photo).
-void drawCoverTile(const GfxRenderer& renderer, const std::string& coverBmpPath, int sourceHeight, int tileX,
-                   int tileY, int tileW, int tileH) {
+void drawCoverTile(const GfxRenderer& renderer, const std::string& coverBmpPath, int sourceHeight, int tileX, int tileY,
+                   int tileW, int tileH) {
   // White-fill the tile first: this redraw happens over a restored cover-buffer
   // snapshot that may hold the previous pass's placeholder icon, and drawBitmap
   // composites dark-only (white pixels never overwrite), so without the clear
@@ -277,16 +281,16 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
   // Chapter moves to the top block so is excluded here.
   int detailBlockH = 0;
   if (details.hasProgress) {
-    detailBlockH += textLineH + kLineGap;            // "xx% - duration" label
-    detailBlockH += kProgressBarHeight + kLineGap;   // bar
+    detailBlockH += textLineH + kLineGap;           // "xx% - duration" label
+    detailBlockH += kProgressBarHeight + kLineGap;  // bar
     if (details.hasTodayDuration) {
-      detailBlockH += textLineH + kLineGap;          // "Today: X" line
+      detailBlockH += textLineH + kLineGap;  // "Today: X" line
     }
   } else if (details.hasDuration) {
-    detailBlockH += textLineH + kLineGap;            // duration alone
+    detailBlockH += textLineH + kLineGap;  // duration alone
   }
   if (details.hasLastRead) {
-    detailBlockH += textLineH;                       // last element, no trailing gap
+    detailBlockH += textLineH;  // last element, no trailing gap
   }
 
   // Top block: title lines + gap + chapter. Title and chapter share the space
@@ -464,7 +468,8 @@ void VegaTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
   renderer.fillRect(0, labelY, renderer.getScreenWidth(), labelLineH, false);
   if (selectedIndex >= 0 && selectedIndex < buttonCount && buttonLabel != nullptr) {
     const std::string labelStr = buttonLabel(selectedIndex);
-    const auto centeredLabel = renderer.truncatedText(kMenuLabelFontId, labelStr.c_str(), renderer.getScreenWidth() - 40);
+    const auto centeredLabel =
+        renderer.truncatedText(kMenuLabelFontId, labelStr.c_str(), renderer.getScreenWidth() - 40);
     const int labelW = renderer.getTextWidth(kMenuLabelFontId, centeredLabel.c_str());
     renderer.drawText(kMenuLabelFontId, (renderer.getScreenWidth() - labelW) / 2, labelY + 2, centeredLabel.c_str(),
                       true);
