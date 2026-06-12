@@ -47,7 +47,10 @@ Rect ReadingStatsActivity::contentRect() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int pageWidth = renderer.getScreenWidth();
   const int pageHeight = renderer.getScreenHeight();
-  const int summaryHeight = SUMMARY_LINES * (renderer.getLineHeight(SMALL_FONT_ID) + 2);
+  // Second summary line only when a stats sync has brought in time from another
+  // device (must match the render() condition or tabs and content drift apart).
+  const int summaryLines = (stats && stats->remoteOtherSeconds > 0) ? SUMMARY_LINES + 1 : SUMMARY_LINES;
+  const int summaryHeight = summaryLines * (renderer.getLineHeight(SMALL_FONT_ID) + 2);
 
   const int top = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing + summaryHeight +
                   metrics.verticalSpacing + metrics.tabBarHeight + metrics.verticalSpacing;
@@ -148,7 +151,19 @@ void ReadingStatsActivity::render(RenderLock&&) {
              undatedBuf + ")";
   }
   renderer.drawText(SMALL_FONT_ID, leftX, y, line1.c_str());
-  y += lineHeight + metrics.verticalSpacing;
+  y += lineHeight;
+
+  // Cross-device total (local + last-synced remote counters from KOReader stats
+  // sync). Condition must match contentRect()'s summary-line count.
+  if (stats && stats->remoteOtherSeconds > 0) {
+    char allBuf[32];
+    BookReadingStats::formatDuration(stats->displayTotalSeconds(), allBuf, sizeof(allBuf));
+    char allLine[96];
+    snprintf(allLine, sizeof(allLine), tr(STR_STATS_ALL_DEVICES_FORMAT), allBuf);
+    renderer.drawText(SMALL_FONT_ID, leftX, y, allLine);
+    y += lineHeight;
+  }
+  y += metrics.verticalSpacing;
 
   const std::vector<TabInfo> tabs = {{tr(STR_STATS_TIMELINE), selectedTab == Tab::Timeline},
                                      {tr(STR_STATS_HEATMAP), selectedTab == Tab::Heatmap}};

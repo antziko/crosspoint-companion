@@ -1,11 +1,14 @@
 add_executable(ReadingTimeHistoryTest
   ReadingTimeHistoryTest.cpp
+  GlobalReadingStatsTest.cpp
   ${REPO_ROOT}/src/activities/reader/ReadingTimeHistory.cpp
+  ${REPO_ROOT}/src/activities/reader/GlobalReadingStats.cpp
 )
 
 target_include_directories(ReadingTimeHistoryTest PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/stubs
   ${REPO_ROOT}/lib/Serialization
+  ${REPO_ROOT}/src/activities/reader
 )
 
 target_link_libraries(ReadingTimeHistoryTest PRIVATE
