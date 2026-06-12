@@ -315,6 +315,8 @@ void EpubReaderActivity::onEnter() {
   readingStats = BookReadingStats::load(epub->getCachePath());
   sessionStartMs = millis();
   sessionIdleExcessSecs = 0;
+  sessionCommittedSecs = 0;
+  statsCheckpointPending = false;
 
   // Trigger first update
   requestUpdate();
@@ -327,34 +329,8 @@ void EpubReaderActivity::onExit() {
     // Account the page being viewed at exit (its final dwell) before totalling.
     if (pageShownAtMs > 0) accountIdleExcess(millis() - pageShownAtMs);
 
-    const uint32_t sessionSecs = static_cast<uint32_t>((millis() - sessionStartMs) / 1000UL);
-    // Subtract idle-page excess so leaving the device on a page doesn't inflate reading
-    // time. With the cap Off, sessionIdleExcessSecs is 0 and this equals wall-clock.
-    const uint32_t effectiveSecs = (sessionSecs > sessionIdleExcessSecs) ? (sessionSecs - sessionIdleExcessSecs) : 0;
-
-    // Determine effective minimum session threshold: per-book override wins unless
-    // it is set to MIN_SESSION_USE_GLOBAL, in which case fall back to global setting.
-    const auto& ov = SETTINGS.getReaderOverride();
-    const uint8_t thresholdIdx =
-        (ov.active && ov.minSessionMinutes != CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL)
-            ? ov.minSessionMinutes
-            : SETTINGS.minSessionMinutes;
-    constexpr size_t kMinSessCount = sizeof(CrossPointSettings::MIN_SESSION_SECONDS) / sizeof(uint16_t);
-    const uint32_t thresholdSecs =
-        (thresholdIdx < kMinSessCount) ? CrossPointSettings::MIN_SESSION_SECONDS[thresholdIdx] : 0;
-
-    if (effectiveSecs >= thresholdSecs) {
-      // Use the local calendar day (RTC raw date + SETTINGS.clockUtcOffsetQ), not the
-      // RTC's raw date -- a session that starts just after local midnight must be
-      // attributed to "today", not the RTC's still-previous UTC-ish day, or the
-      // weekly/monthly/yearly/heatmap history buckets it under the wrong date.
-      uint8_t dayOfWeek = 0, day = 0, month = 0, hour = 0, minute = 0;
-      uint16_t year = 0;
-      const bool dated = halClock.isAvailable() &&
-                         halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, dayOfWeek, day, month, year, hour, minute);
-      recordReadingSession(epub->getCachePath(), readingStats, effectiveSecs, dated, year, month, day, dayOfWeek,
-                           hour, minute);
-    }
+    // Final flush of any reading time the periodic checkpoints haven't persisted yet.
+    commitReadingTime(0);
 
     sessionStartMs = 0UL;
     pageShownAtMs = 0UL;
@@ -386,11 +362,60 @@ void EpubReaderActivity::onExit() {
   }
 }
 
+void EpubReaderActivity::commitReadingTime(uint32_t minDeltaSecs) {
+  if (!epub || sessionStartMs == 0) return;
+
+  const uint32_t sessionSecs = static_cast<uint32_t>((millis() - sessionStartMs) / 1000UL);
+  // Subtract idle-page excess so leaving the device on a page doesn't inflate reading
+  // time. With the cap Off, sessionIdleExcessSecs is 0 and this equals wall-clock.
+  const uint32_t effectiveSecs = (sessionSecs > sessionIdleExcessSecs) ? (sessionSecs - sessionIdleExcessSecs) : 0;
+
+  // Determine effective minimum session threshold: per-book override wins unless
+  // it is set to MIN_SESSION_USE_GLOBAL, in which case fall back to global setting.
+  // Nothing is committed (checkpoints included) until the session crosses it, so
+  // sub-threshold sessions still write no stats at all.
+  const auto& ov = SETTINGS.getReaderOverride();
+  const uint8_t thresholdIdx =
+      (ov.active && ov.minSessionMinutes != CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL)
+          ? ov.minSessionMinutes
+          : SETTINGS.minSessionMinutes;
+  constexpr size_t kMinSessCount = sizeof(CrossPointSettings::MIN_SESSION_SECONDS) / sizeof(uint16_t);
+  const uint32_t thresholdSecs =
+      (thresholdIdx < kMinSessCount) ? CrossPointSettings::MIN_SESSION_SECONDS[thresholdIdx] : 0;
+  if (effectiveSecs < thresholdSecs) return;
+
+  if (effectiveSecs <= sessionCommittedSecs) return;
+  const uint32_t deltaSecs = effectiveSecs - sessionCommittedSecs;
+  if (deltaSecs < minDeltaSecs) return;
+
+  // Use the local calendar day (RTC raw date + SETTINGS.clockUtcOffsetQ), not the
+  // RTC's raw date -- a session that starts just after local midnight must be
+  // attributed to "today", not the RTC's still-previous UTC-ish day, or the
+  // weekly/monthly/yearly/heatmap history buckets it under the wrong date.
+  // Evaluated per commit: on X4 a mid-session NTP sync upgrades later deltas
+  // from undated to dated.
+  uint8_t dayOfWeek = 0, day = 0, month = 0, hour = 0, minute = 0;
+  uint16_t year = 0;
+  const bool dated = halClock.isAvailable() &&
+                     halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, dayOfWeek, day, month, year, hour, minute);
+  recordReadingSession(epub->getCachePath(), readingStats, deltaSecs, dated, year, month, day, dayOfWeek, hour, minute);
+  sessionCommittedSecs += deltaSecs;
+}
+
 void EpubReaderActivity::loop() {
   if (!epub) {
     // Should never happen
     finish();
     return;
+  }
+
+  // Periodic reading-time checkpoint, requested by the render task on full-refresh
+  // pages. Handled here on the main task (same context as onExit's final flush) so
+  // the session counters stay single-task. A crash then loses at most the time
+  // since the last full-refresh page instead of the whole session.
+  if (statsCheckpointPending) {
+    statsCheckpointPending = false;
+    commitReadingTime(STATS_CHECKPOINT_MIN_SECS);
   }
 
   // End-of-Book screen reached (currentSpineIndex == spine count) means the book is
@@ -1598,6 +1623,11 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     // regardless of residue.
     pagesUntilFullRefresh = 1;
   } else {
+    // Full-refresh pages double as reading-time checkpoints: the 1-2s HALF_REFRESH
+    // masks the stats SD writes. loop() (main task) performs the actual commit.
+    if (pagesUntilFullRefresh <= 1) {
+      statsCheckpointPending = true;
+    }
     ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
     // X3 halftone image residue: 1-bit halftone dots leave charge that FAST_REFRESH
     // can't fully clear on the next page. Force HALF on the next page to drive every

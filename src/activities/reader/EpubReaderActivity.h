@@ -71,6 +71,18 @@ class EpubReaderActivity final : public Activity {
   // PAGE_IDLE_THRESHOLD_SECONDS contributes only the cap value; the excess is summed here
   // and subtracted from the wall-clock session total at onExit. Reset in onEnter.
   uint32_t sessionIdleExcessSecs = 0;
+  // Reading seconds of this session already persisted by incremental checkpoints
+  // (see commitReadingTime). onExit flushes only the remaining delta, so a crash
+  // mid-session loses at most one checkpoint interval, not the whole session.
+  uint32_t sessionCommittedSecs = 0;
+  // Set by the render task on full-refresh pages (the e-ink ghost-clear cadence,
+  // SETTINGS.refreshFrequency); consumed by loop() on the main task -- the same
+  // context as onExit -- so all session accounting stays single-task.
+  volatile bool statsCheckpointPending = false;
+  // Minimum uncommitted delta for a checkpoint write. Skips per-page writes for
+  // REFRESH_1 users and keeps SD write throttling sane; onExit passes 0 so the
+  // final flush always lands.
+  static constexpr uint32_t STATS_CHECKPOINT_MIN_SECS = 60;
 
   // Set after a page is rendered with the AA grayscale strip passes. Used by
   // lightStatusBarRefresh to skip the panel push on AA image pages: even a
@@ -112,6 +124,10 @@ class EpubReaderActivity final : public Activity {
   // sessionIdleExcessSecs when the idle-page cap is enabled. No-op when the cap is Off
   // or the dwell is within PAGE_IDLE_THRESHOLD_SECONDS.
   void accountIdleExcess(unsigned long dwellMs);
+  // Persist the not-yet-committed reading time of this session (book + global
+  // stats, dated history) if it crosses the min-session threshold and the
+  // uncommitted delta is at least minDeltaSecs. Main-task only.
+  void commitReadingTime(uint32_t minDeltaSecs);
   // returnMark=true drops a session "return here" bookmark (distinct icon) used when
   // jumping to another chapter, so the user can get back to where they were.
   // lightRefresh=true performs a status-bar-only windowed panel update instead of a
