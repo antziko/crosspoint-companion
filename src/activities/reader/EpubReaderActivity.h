@@ -44,8 +44,8 @@ class EpubReaderActivity final : public Activity {
   bool ignoreBackUntilRelease = false;    // Suppress Back bleed-through after dictionary chain exit
   bool ignoreNextConfirmRelease = false;  // Suppress menu open after hold-Confirm gesture fires
   bool showBookmarkMessage = false;
-  bool bookmarkMessageRemoved = false;   // false = "added", true = "removed" text
-  bool bookmarkMessageReturn = false;    // true = "return mark added" (overrides added text)
+  bool bookmarkMessageRemoved = false;  // false = "added", true = "removed" text
+  bool bookmarkMessageReturn = false;   // true = "return mark added" (overrides added text)
   // Set when the bookmark action used a light (windowed) refresh instead of a
   // full re-render. The showBookmarkMessage flag is still set as a debounce timer
   // so hold-Confirm doesn't re-fire every tick; this flag prevents the dismiss

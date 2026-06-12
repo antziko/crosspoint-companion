@@ -3,7 +3,8 @@
 #include <cstdint>
 #include <string>
 
-// Dated (RTC-stamped) reading-time breakdown shared by per-book stats
+// Dated (clock-stamped: X3 DS3231 RTC or X4 NTP-synced system clock) reading-time
+// breakdown shared by per-book stats
 // (cachePath/book_time_history.bin) and global stats (.crosspoint/global_stats.bin).
 //
 // ~880 bytes on disk / in memory — always heap-allocate via makeUniqueNoThrow<>(),
