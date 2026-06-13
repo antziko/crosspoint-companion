@@ -9,15 +9,15 @@
 #include <HalPowerManager.h>
 #include <HalStorage.h>
 #include <HalSystem.h>
-#include <InflateReader.h>
 #include <HalTiltSensor.h>
 #include <I18n.h>
+#include <InflateReader.h>
 #include <Logging.h>
 #include <SPI.h>
 #include <SdDebugLog.h>
 #include <WiFi.h>
-#include <esp_heap_caps.h>
 #include <builtinFonts/all.h>
+#include <esp_heap_caps.h>
 
 #include <cstring>
 
@@ -27,8 +27,8 @@
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
-#include "WifiCredentialStore.h"
 #include "SdCardFontSystem.h"
+#include "WifiCredentialStore.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
@@ -199,7 +199,6 @@ void silentRestartToSettings(int category) {
   ESP.restart();
 }
 
-
 // Verify power button press duration on wake-up from deep sleep
 // Pre-condition: isWakeupByPowerButton() == true
 void verifyPowerButtonDuration() {
@@ -355,8 +354,7 @@ void setupDisplayAndFonts(bool seamless = false) {
 // or when no WiFi network is saved (so non-clock users never power the radio).
 static void maybeStartBackgroundNtpSync() {
   if (halClock.hasHardwareRtc() || halClock.isSystemTimeValid()) return;
-  if (!SETTINGS.homeTopBarClock && !SETTINGS.homeTopBarDate && !SETTINGS.statusBarClock &&
-      !SETTINGS.statusBarDate)
+  if (!SETTINGS.homeTopBarClock && !SETTINGS.homeTopBarDate && !SETTINGS.statusBarClock && !SETTINGS.statusBarDate)
     return;
   WIFI_STORE.loadFromFile();
   const std::string& lastSsid = WIFI_STORE.getLastConnectedSsid();
@@ -724,19 +722,32 @@ void loop() {
     LOG_DBG("MAIN", "Manual screen refresh triggered");
     // Whole-page ghost clear, then re-render (requestUpdate re-runs the active
     // activity's render()). The clear is driven from a blanked framebuffer so it
-    // pushes the whole panel — not just changed pixels — clearing ghosting. The
-    // mode differs by panel because a HALF/FULL clear firms the e-ink particles
-    // too hard for the X4 grayscale LUT to darken back:
-    //   - X4: any grayscale content (EPUB AA pages, BMP grays, sleep wallpaper)
-    //     would wash whitish after a HALF/FULL clear. Use a FAST clear — the
-    //     same grayscale-safe technique as the image-blanking dance — so the
-    //     re-render's grayscale pass can restore the grays cleanly.
-    //   - X3: 1-bit panel, no grayscale image pass, so HALF gives a stronger
-    //     ghost clear with no washing risk.
+    // pushes the whole panel — not just changed pixels — clearing ghosting.
+    //
+    // Mode is user-selectable via SETTINGS.refreshScreenMode (Settings > Display
+    // > Refresh Screen Mode), default FAST. Note the panel tradeoff:
+    //   - FAST: grayscale-safe. A HALF/FULL clear firms the e-ink particles too
+    //     hard for the X4 grayscale LUT to darken back, washing AA/image/sleep
+    //     pages whitish. FAST avoids that (same trick as the image-blanking dance).
+    //   - HALF/FULL: stronger ghost clear. Safe on X3 (1-bit panel, no grayscale
+    //     image pass); on X4 may wash grayscale content whitish.
+    HalDisplay::RefreshMode clearMode = HalDisplay::FAST_REFRESH;
+    switch (SETTINGS.refreshScreenMode) {
+      case CrossPointSettings::RSM_HALF:
+        clearMode = HalDisplay::HALF_REFRESH;
+        break;
+      case CrossPointSettings::RSM_FULL:
+        clearMode = HalDisplay::FULL_REFRESH;
+        break;
+      case CrossPointSettings::RSM_FAST:
+      default:
+        clearMode = HalDisplay::FAST_REFRESH;
+        break;
+    }
     {
       RenderLock lock;
       renderer.clearScreen();
-      renderer.displayBuffer(renderer.isX3() ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
+      renderer.displayBuffer(clearMode);
     }
     activityManager.requestUpdate();
   }

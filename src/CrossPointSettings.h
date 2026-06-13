@@ -136,6 +136,12 @@ class CrossPointSettings {
   // Short power button press actions
   enum SHORT_PWRBTN { IGNORE = 0, SLEEP = 1, PAGE_TURN = 2, FORCE_REFRESH = 3, SHORT_PWRBTN_COUNT };
 
+  // Manual "Refresh Screen" (power-button FORCE_REFRESH) clear mode. Drives the
+  // whole-panel ghost clear in main.cpp. FAST is grayscale-safe (X4 default);
+  // HALF/FULL give a stronger ghost clear but firm the e-ink particles too hard
+  // for the following grayscale pass, washing AA/image pages whitish on X4.
+  enum REFRESH_SCREEN_MODE { RSM_FAST = 0, RSM_HALF = 1, RSM_FULL = 2, REFRESH_SCREEN_MODE_COUNT };
+
   // Hide battery percentage
   enum HIDE_BATTERY_PERCENTAGE { HIDE_NEVER = 0, HIDE_READER = 1, HIDE_ALWAYS = 2, HIDE_BATTERY_PERCENTAGE_COUNT };
 
@@ -259,6 +265,8 @@ class CrossPointSettings {
   uint8_t sleepTimeoutMinutes = 10;
   // E-ink refresh frequency (default 15 pages)
   uint8_t refreshFrequency = REFRESH_15;
+  // Manual "Refresh Screen" clear mode (default FAST: grayscale-safe everywhere)
+  uint8_t refreshScreenMode = RSM_FAST;
   uint8_t hyphenationEnabled = 0;
 
   // Reader screen margin settings
