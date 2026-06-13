@@ -57,6 +57,12 @@ class BookStatsActivity final : public Activity {
 
   ButtonNavigator buttonNavigator;
 
+  // Summary lines above the tab bar: "This session / Est. left" (one row) +
+  // "Time reading", plus a "Read time (all devices)" row only when a sync has
+  // pulled in another device's time. Single source of truth so contentRect() and
+  // render() reserve the same height.
+  int summaryLineCount() const { return 2 + (stats.remoteOtherSeconds > 0 ? 1 : 0); }
+
   // Area below the tab bar shared by both tabs; single source of truth so loop()'s
   // scroll clamping and render()'s drawing always agree on available height.
   Rect contentRect() const;

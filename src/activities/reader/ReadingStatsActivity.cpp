@@ -30,7 +30,15 @@ void ReadingStatsActivity::onEnter() {
   stats = makeUniqueNoThrow<GlobalReadingStats>();
   if (stats) {
     GlobalReadingStats::load(*stats);
-    timeline.build(stats->history);
+    // Fold the synced remote snapshot onto the local history for cross-device
+    // timeline + heatmap. Built once here, reused every frame.
+    displayHist = makeUniqueNoThrow<ReadingTimeHistory>();
+    if (displayHist) {
+      stats->displayHistory(*displayHist);
+      timeline.build(*displayHist);
+    } else {
+      timeline.build(stats->history);  // OOM fallback: local-only view
+    }
   }
 
   requestUpdate();
@@ -135,21 +143,12 @@ void ReadingStatsActivity::render(RenderLock&&) {
   const int lineHeight = renderer.getLineHeight(SMALL_FONT_ID) + 2;
   int y = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
 
+  // Total reading time (dated + undated merged — both X3 RTC and X4 SNTP now
+  // date-stamp sessions, so the split is noise).
   const uint32_t totalSeconds = stats ? stats->totalReadingSeconds : 0;
-  const uint32_t unattributedSeconds = stats ? stats->unattributedSeconds : 0;
-  const uint32_t datedSeconds = totalSeconds - unattributedSeconds;
-
   char totalBuf[32];
   BookReadingStats::formatDuration(totalSeconds, totalBuf, sizeof(totalBuf));
   std::string line1 = std::string(tr(STR_STATS_TIME_READING)) + ": " + totalBuf;
-  if (datedSeconds > 0 && unattributedSeconds > 0) {
-    char datedBuf[32];
-    char undatedBuf[32];
-    BookReadingStats::formatDuration(datedSeconds, datedBuf, sizeof(datedBuf));
-    BookReadingStats::formatDuration(unattributedSeconds, undatedBuf, sizeof(undatedBuf));
-    line1 += "  (" + std::string(tr(STR_STATS_DATED)) + " " + datedBuf + " / " + tr(STR_STATS_UNDATED) + " " +
-             undatedBuf + ")";
-  }
   renderer.drawText(SMALL_FONT_ID, leftX, y, line1.c_str());
   y += lineHeight;
 
@@ -172,6 +171,8 @@ void ReadingStatsActivity::render(RenderLock&&) {
   const Rect content = contentRect();
   if (selectedTab == Tab::Timeline) {
     timeline.renderList(renderer, content);
+  } else if (displayHist) {
+    StatsTimelineView::renderHeatmap(renderer, content, *displayHist);
   } else if (stats) {
     StatsTimelineView::renderHeatmap(renderer, content, stats->history);
   } else {

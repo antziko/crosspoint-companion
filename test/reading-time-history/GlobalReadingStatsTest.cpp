@@ -57,6 +57,67 @@ TEST(GlobalReadingStatsMigration, V2RoundTrip) {
   EXPECT_EQ(loaded->displayTotalSeconds(), 540u);  // 5 min local + 4 min remote = 9 min
 }
 
+TEST(GlobalReadingStatsRemote, RemoteHistoryRoundTripAndDisplayMerge) {
+  const std::string dir = ::testing::TempDir();
+  const std::string statsPath = dir + "g_rh.bin";
+  const std::string historyPath = dir + "g_rh_history.bin";
+  const std::string remotePath = dir + "g_rh_remote.bin";
+  std::remove(historyPath.c_str());
+  std::remove(remotePath.c_str());
+
+  auto dow = [](uint16_t y, uint8_t m, uint8_t d) { return readingHistoryDayOfWeek(readingHistoryDayIndex(y, m, d)); };
+
+  auto stats = std::make_unique<GlobalReadingStats>();
+  stats->totalReadingSeconds = 600;
+  stats->history.recordDay(2024, 3, 4, dow(2024, 3, 4), 600);          // local, wk Mar4
+  stats->remoteHistory.recordDay(2024, 3, 4, dow(2024, 3, 4), 300);    // remote, wk Mar4 (shared)
+  stats->remoteHistory.recordDay(2024, 3, 11, dow(2024, 3, 11), 200);  // remote, wk Mar11 (newer)
+  stats->save(statsPath.c_str(), historyPath.c_str(), remotePath.c_str());
+
+  auto loaded = std::make_unique<GlobalReadingStats>();
+  ASSERT_TRUE(GlobalReadingStats::load(*loaded, statsPath.c_str(), historyPath.c_str(), remotePath.c_str()));
+  // Remote snapshot persisted to its own file, independent of local history.
+  EXPECT_EQ(loaded->remoteHistory.weekly[0].seconds, 200u);  // Mar11
+  EXPECT_EQ(loaded->history.weekly[0].seconds, 600u);        // local untouched
+
+  // displayHistory folds local + remote without mutating either source.
+  auto disp = std::make_unique<ReadingTimeHistory>();
+  loaded->displayHistory(*disp);
+  EXPECT_EQ(disp->weekly[0].seconds, 200u);            // Mar11 (remote-only), newest
+  EXPECT_EQ(disp->weekly[1].seconds, 900u);            // Mar4  (600 local + 300 remote)
+  EXPECT_EQ(loaded->history.weekly[0].seconds, 600u);  // source unchanged by fold
+
+  std::remove(statsPath.c_str());
+  std::remove(historyPath.c_str());
+  std::remove(remotePath.c_str());
+}
+
+TEST(GlobalReadingStatsRemote, AbsentRemoteFileLeavesSnapshotEmpty) {
+  const std::string dir = ::testing::TempDir();
+  const std::string statsPath = dir + "g_nrh.bin";
+  const std::string historyPath = dir + "g_nrh_history.bin";
+  const std::string remotePath = dir + "g_nrh_remote.bin";
+  std::remove(remotePath.c_str());
+
+  auto stats = std::make_unique<GlobalReadingStats>();
+  stats->totalReadingSeconds = 120;
+  stats->history.recordDay(2024, 3, 4, readingHistoryDayOfWeek(readingHistoryDayIndex(2024, 3, 4)), 120);
+  // Save WITHOUT a remote path -> remote file never written.
+  stats->save(statsPath.c_str(), historyPath.c_str());
+
+  auto loaded = std::make_unique<GlobalReadingStats>();
+  ASSERT_TRUE(GlobalReadingStats::load(*loaded, statsPath.c_str(), historyPath.c_str(), remotePath.c_str()));
+  EXPECT_FALSE(loaded->remoteHistory.hasAnyData());
+
+  // With no remote snapshot, the display history equals the local history.
+  auto disp = std::make_unique<ReadingTimeHistory>();
+  loaded->displayHistory(*disp);
+  EXPECT_EQ(disp->weekly[0].seconds, loaded->history.weekly[0].seconds);
+
+  std::remove(statsPath.c_str());
+  std::remove(historyPath.c_str());
+}
+
 TEST(GlobalReadingStatsMigration, UnknownVersionStartsFresh) {
   const std::string dir = ::testing::TempDir();
   const std::string statsPath = dir + "gstats_v9.bin";

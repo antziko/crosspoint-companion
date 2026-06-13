@@ -86,6 +86,31 @@ struct ReadingTimeHistory {
   // history yet", not an error.
   static bool load(const std::string& path, ReadingTimeHistory& out);
   static bool save(const std::string& path, const ReadingTimeHistory& history);
+
+  // Overlays `other`'s dated buckets onto this history. Used to fold a
+  // sync-snapshot of OTHER devices' reading onto the local-origin history for
+  // cross-device display (KOReader stats sync). Weekly/monthly/yearly buckets
+  // are summed by absolute date-key and re-truncated to the newest N; the
+  // heatmap takes the per-day MAX intensity level — it stores only 2-bit levels
+  // (not seconds), so levels cannot be summed, only promoted. heatmapAnchorSeconds
+  // is left untouched (display reads levels only; do not recordDay() onto a merged
+  // copy afterwards — it is a display artifact, not a live history).
+  void mergeFrom(const ReadingTimeHistory& other);
+
+  // Compact, self-versioned binary serialization for cross-device sync. The
+  // transport layer (KOReaderSyncClient) base64-wraps the bytes into the stats
+  // blob's "h" field; this struct stays free of any base64/JSON/mbedtls
+  // dependency so it remains host-unit-testable. heatmapAnchorSeconds is NOT
+  // serialized — only intensity levels travel, since the merge max-promotes
+  // levels rather than summing seconds.
+  static constexpr size_t BLOB_MAX_BYTES = 1 + sizeof(WeekEntry) * WEEKLY_COUNT + sizeof(MonthEntry) * MONTHLY_COUNT +
+                                           sizeof(YearEntry) * YEARLY_COUNT + HEATMAP_BYTES + sizeof(uint32_t);
+  // Writes the blob into `out` (must hold >= BLOB_MAX_BYTES). Returns bytes
+  // written, or 0 if `cap` is too small.
+  size_t serializeBlob(uint8_t* out, size_t cap) const;
+  // Restores from a blob produced by serializeBlob(). Returns false (leaving
+  // *this default-constructed) on a length/version mismatch.
+  bool deserializeBlob(const uint8_t* data, size_t len);
 };
 
 // Calendar helpers used by ReadingTimeHistory's bookkeeping and by stats UI code

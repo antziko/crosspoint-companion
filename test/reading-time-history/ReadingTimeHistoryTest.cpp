@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 #include "src/activities/reader/ReadingTimeHistory.h"
@@ -99,7 +100,7 @@ TEST(ReadingTimeHistoryHeatmap, MultiDayShiftCrossesPackedByteBoundaries) {
   record(h, 2024, 3, 1, 90 * 60);  // > 1h -> Heavy
   ASSERT_EQ(h.getHeatmapLevel(0), HeatmapLevel::Heavy);
 
-  record(h, 2024, 3, 11, 10 * 60);  // 10 days later -> Light
+  record(h, 2024, 3, 11, 10 * 60);                        // 10 days later -> Light
   EXPECT_EQ(h.getHeatmapLevel(10), HeatmapLevel::Heavy);  // shifted intact
   EXPECT_EQ(h.getHeatmapLevel(0), HeatmapLevel::Light);
   // Untouched gap days remain None (never written, not just zeroed-but-set).
@@ -109,8 +110,8 @@ TEST(ReadingTimeHistoryHeatmap, MultiDayShiftCrossesPackedByteBoundaries) {
 
 TEST(ReadingTimeHistoryHeatmap, BackdatedSessionUpgradesButNeverDowngrades) {
   ReadingTimeHistory h;
-  record(h, 2024, 3, 10, 5 * 60);   // anchor = Mar 10, Light
-  record(h, 2024, 3, 12, 5 * 60);   // new anchor = Mar 12; Mar 10 now 2 slots back
+  record(h, 2024, 3, 10, 5 * 60);  // anchor = Mar 10, Light
+  record(h, 2024, 3, 12, 5 * 60);  // new anchor = Mar 12; Mar 10 now 2 slots back
   ASSERT_EQ(h.getHeatmapLevel(2), HeatmapLevel::Light);
 
   // Backdated session lands on the already-finalized Mar 10 with a longer
@@ -150,6 +151,197 @@ TEST(ReadingTimeHistoryPersistence, RoundTripPreservesRunningTotalAcrossReload) 
   EXPECT_EQ(loaded.getHeatmapLevel(0), HeatmapLevel::Moderate);
 
   std::remove(path.c_str());
+}
+
+// --- Cross-device merge (KOReader stats sync, mergeFrom) ----------------------
+
+TEST(ReadingTimeHistoryMerge, WeeklyMonthlyYearlySumByDateKeyNewestFirst) {
+  // Two devices reading the same + different periods. Mondays: 2024-02-26,
+  // 2024-03-04, 2024-03-11 are all Mondays, so each lands in its own weekly bucket.
+  ReadingTimeHistory a;
+  record(a, 2024, 2, 26, 100);  // wk Feb26
+  record(a, 2024, 3, 4, 600);   // wk Mar4   (shared)
+  ReadingTimeHistory b;
+  record(b, 2024, 3, 4, 300);   // wk Mar4   (shared)
+  record(b, 2024, 3, 11, 200);  // wk Mar11
+
+  a.mergeFrom(b);
+
+  // Newest-first: Mar11 (b-only), Mar4 (summed 900), Feb26 (a-only).
+  EXPECT_EQ(a.weekly[0].month, 3);
+  EXPECT_EQ(a.weekly[0].day, 11);
+  EXPECT_EQ(a.weekly[0].seconds, 200u);
+  EXPECT_EQ(a.weekly[1].day, 4);
+  EXPECT_EQ(a.weekly[1].seconds, 900u);  // 600 + 300 summed by key
+  EXPECT_EQ(a.weekly[2].day, 26);
+  EXPECT_EQ(a.weekly[2].seconds, 100u);
+  EXPECT_EQ(a.weekly[3].seconds, 0u);  // nothing older
+
+  // Monthly: a-only Feb (100). March = a's Mar4 (600) + b's Mar4+Mar11 (500) = 1100.
+  EXPECT_EQ(a.monthly[0].year, 2024);
+  EXPECT_EQ(a.monthly[0].month, 3);
+  EXPECT_EQ(a.monthly[0].seconds, 1100u);
+  EXPECT_EQ(a.monthly[1].month, 2);
+  EXPECT_EQ(a.monthly[1].seconds, 100u);
+
+  // Yearly: all 2024 -> 700 (a) + 500 (b) = 1200.
+  EXPECT_EQ(a.yearly[0].year, 2024);
+  EXPECT_EQ(a.yearly[0].seconds, 1200u);
+  EXPECT_EQ(a.yearly[1].seconds, 0u);
+}
+
+TEST(ReadingTimeHistoryMerge, HeatmapTakesPerDayMaxLevelAcrossAnchors) {
+  // Different anchors: a's newest day is Mar 10, b's is Mar 12.
+  ReadingTimeHistory a;
+  record(a, 2024, 3, 10, 5 * 60);  // Light, anchor Mar10
+  ReadingTimeHistory b;
+  record(b, 2024, 3, 12, 90 * 60);  // Heavy, anchor Mar12
+
+  a.mergeFrom(b);
+
+  // Merged anchor = Mar12. b's Heavy at slot 0; a's Light slid back to slot 2.
+  EXPECT_EQ(a.getHeatmapLevel(0), HeatmapLevel::Heavy);
+  EXPECT_EQ(a.getHeatmapLevel(2), HeatmapLevel::Light);
+  EXPECT_EQ(a.getHeatmapLevel(1), HeatmapLevel::None);  // Mar11 untouched by either
+}
+
+TEST(ReadingTimeHistoryMerge, HeatmapSameDayPromotesUpButNeverDown) {
+  // Same calendar day, both directions: max wins, lower never demotes higher.
+  ReadingTimeHistory lightThenModerate;
+  record(lightThenModerate, 2024, 3, 4, 5 * 60);  // Light
+  ReadingTimeHistory moderate;
+  record(moderate, 2024, 3, 4, 40 * 60);  // Moderate (same day)
+  lightThenModerate.mergeFrom(moderate);
+  EXPECT_EQ(lightThenModerate.getHeatmapLevel(0), HeatmapLevel::Moderate);
+
+  ReadingTimeHistory moderateThenLight;
+  record(moderateThenLight, 2024, 3, 4, 40 * 60);  // Moderate
+  ReadingTimeHistory light;
+  record(light, 2024, 3, 4, 5 * 60);  // Light (same day)
+  moderateThenLight.mergeFrom(light);
+  EXPECT_EQ(moderateThenLight.getHeatmapLevel(0), HeatmapLevel::Moderate);  // not demoted
+}
+
+TEST(ReadingTimeHistoryMerge, MergeIntoEmptyAdoptsOther) {
+  ReadingTimeHistory empty;
+  ReadingTimeHistory b;
+  record(b, 2024, 3, 12, 90 * 60);
+  empty.mergeFrom(b);
+  EXPECT_EQ(empty.getHeatmapLevel(0), HeatmapLevel::Heavy);
+  EXPECT_EQ(empty.yearly[0].seconds, 90u * 60u);
+  EXPECT_EQ(empty.weekly[0].seconds, 90u * 60u);
+}
+
+TEST(ReadingTimeHistoryMerge, WeeklyRingOverflowKeepsNewest) {
+  // Fill a with the 52 most recent weeks, b with one even newer week. After merge
+  // the array still holds 52 entries and the newest is b's, oldest a-week dropped.
+  ReadingTimeHistory a;
+  // 52 consecutive Mondays starting 2023-01-02 (a Monday), going forward.
+  // recordDay prepends each newer week; after 52 the array is full.
+  uint16_t y = 2023;
+  uint8_t mo = 1, d = 2;
+  for (size_t i = 0; i < ReadingTimeHistory::WEEKLY_COUNT; i++) {
+    record(a, y, mo, d, 60);
+    // advance 7 days
+    uint32_t idx = readingHistoryDayIndex(y, mo, d) + 7;
+    readingHistoryDateFromDayIndex(idx, y, mo, d);
+  }
+  const uint32_t oldestKeyBefore = readingHistoryDayIndex(a.weekly[ReadingTimeHistory::WEEKLY_COUNT - 1].year,
+                                                          a.weekly[ReadingTimeHistory::WEEKLY_COUNT - 1].month,
+                                                          a.weekly[ReadingTimeHistory::WEEKLY_COUNT - 1].day);
+  ReadingTimeHistory b;
+  record(b, y, mo, d, 60);  // one week newer than a's newest
+
+  a.mergeFrom(b);
+
+  // Still exactly WEEKLY_COUNT active entries, newest is b's week, and the
+  // previously-oldest week was pushed out.
+  EXPECT_GT(a.weekly[ReadingTimeHistory::WEEKLY_COUNT - 1].seconds, 0u);
+  const uint32_t newestKey = readingHistoryDayIndex(a.weekly[0].year, a.weekly[0].month, a.weekly[0].day);
+  EXPECT_EQ(newestKey, readingHistoryDayIndex(y, mo, d));
+  const uint32_t oldestKeyAfter = readingHistoryDayIndex(a.weekly[ReadingTimeHistory::WEEKLY_COUNT - 1].year,
+                                                         a.weekly[ReadingTimeHistory::WEEKLY_COUNT - 1].month,
+                                                         a.weekly[ReadingTimeHistory::WEEKLY_COUNT - 1].day);
+  EXPECT_GT(oldestKeyAfter, oldestKeyBefore);  // oldest advanced -> one dropped
+}
+
+// --- Wire blob (de)serialization ---------------------------------------------
+
+TEST(ReadingTimeHistoryBlob, RoundTripPreservesBucketsAndHeatmapLevels) {
+  ReadingTimeHistory h;
+  record(h, 2024, 3, 4, 40 * 60);    // Moderate
+  record(h, 2024, 3, 5, 90 * 60);    // Heavy, new anchor
+  record(h, 2023, 12, 25, 10 * 60);  // older year/month/week
+
+  uint8_t buf[ReadingTimeHistory::BLOB_MAX_BYTES];
+  const size_t n = h.serializeBlob(buf, sizeof(buf));
+  ASSERT_EQ(n, ReadingTimeHistory::BLOB_MAX_BYTES);
+
+  ReadingTimeHistory r;
+  ASSERT_TRUE(r.deserializeBlob(buf, n));
+
+  // Bucket arrays are byte-identical (POD), heatmap levels + anchor preserved.
+  EXPECT_EQ(0, std::memcmp(r.weekly, h.weekly, sizeof(h.weekly)));
+  EXPECT_EQ(0, std::memcmp(r.monthly, h.monthly, sizeof(h.monthly)));
+  EXPECT_EQ(0, std::memcmp(r.yearly, h.yearly, sizeof(h.yearly)));
+  EXPECT_EQ(r.heatmapAnchorDay, h.heatmapAnchorDay);
+  EXPECT_EQ(r.getHeatmapLevel(0), HeatmapLevel::Heavy);
+  EXPECT_EQ(r.getHeatmapLevel(1), HeatmapLevel::Moderate);
+  // heatmapAnchorSeconds is intentionally not transmitted.
+  EXPECT_EQ(r.heatmapAnchorSeconds, 0u);
+}
+
+TEST(ReadingTimeHistoryBlob, DeserializeRejectsShortOrBadVersion) {
+  ReadingTimeHistory h;
+  record(h, 2024, 3, 4, 40 * 60);
+  uint8_t buf[ReadingTimeHistory::BLOB_MAX_BYTES];
+  const size_t n = h.serializeBlob(buf, sizeof(buf));
+  ASSERT_EQ(n, ReadingTimeHistory::BLOB_MAX_BYTES);
+
+  ReadingTimeHistory r;
+  EXPECT_FALSE(r.deserializeBlob(buf, n - 1));          // too short
+  EXPECT_EQ(r.getHeatmapLevel(0), HeatmapLevel::None);  // left default-constructed
+
+  uint8_t bad[ReadingTimeHistory::BLOB_MAX_BYTES];
+  std::memcpy(bad, buf, n);
+  bad[0] = 0xFF;  // wrong version byte
+  EXPECT_FALSE(r.deserializeBlob(bad, n));
+}
+
+TEST(ReadingTimeHistoryBlob, SerializeFailsWhenBufferTooSmall) {
+  ReadingTimeHistory h;
+  uint8_t small[8];
+  EXPECT_EQ(h.serializeBlob(small, sizeof(small)), 0u);
+}
+
+// A blob round-trip followed by a merge is the real sync path (other device's
+// blob -> deserialize -> fold). Guards that the two compose correctly.
+TEST(ReadingTimeHistoryBlob, RoundTripThenMergeMatchesDirectMerge) {
+  ReadingTimeHistory local;
+  record(local, 2024, 3, 4, 30 * 60);  // Moderate-ish
+  record(local, 2024, 3, 5, 5 * 60);   // Light, anchor Mar5
+
+  ReadingTimeHistory remote;
+  record(remote, 2024, 3, 5, 90 * 60);  // Heavy same anchor day
+  record(remote, 2024, 3, 6, 10 * 60);  // newer day Mar6
+
+  // Path A: direct merge.
+  ReadingTimeHistory direct = local;
+  direct.mergeFrom(remote);
+
+  // Path B: remote through the wire, then merge.
+  uint8_t buf[ReadingTimeHistory::BLOB_MAX_BYTES];
+  const size_t n = remote.serializeBlob(buf, sizeof(buf));
+  ReadingTimeHistory remoteWire;
+  ASSERT_TRUE(remoteWire.deserializeBlob(buf, n));
+  ReadingTimeHistory viaWire = local;
+  viaWire.mergeFrom(remoteWire);
+
+  EXPECT_EQ(0, std::memcmp(direct.weekly, viaWire.weekly, sizeof(direct.weekly)));
+  EXPECT_EQ(0, std::memcmp(direct.monthly, viaWire.monthly, sizeof(direct.monthly)));
+  EXPECT_EQ(0, std::memcmp(direct.yearly, viaWire.yearly, sizeof(direct.yearly)));
+  EXPECT_EQ(0, std::memcmp(direct.heatmapBits, viaWire.heatmapBits, sizeof(direct.heatmapBits)));
+  EXPECT_EQ(direct.heatmapAnchorDay, viaWire.heatmapAnchorDay);
 }
 
 TEST(ReadingTimeHistoryHeatmap, PresenceWrapperAgreesWithLevelAcrossStates) {

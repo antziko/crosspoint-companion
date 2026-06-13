@@ -11,10 +11,6 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 
-namespace {
-constexpr int SUMMARY_LINES = 3;
-}  // namespace
-
 BookStatsActivity::BookStatsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string bookTitle,
                                      std::string cachePath, int progressPercent, SessionContext session)
     : Activity("BookStats", renderer, mappedInput),
@@ -43,7 +39,7 @@ Rect BookStatsActivity::contentRect() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int pageWidth = renderer.getScreenWidth();
   const int pageHeight = renderer.getScreenHeight();
-  const int summaryHeight = SUMMARY_LINES * (renderer.getLineHeight(SMALL_FONT_ID) + 2);
+  const int summaryHeight = summaryLineCount() * (renderer.getLineHeight(SMALL_FONT_ID) + 2);
 
   const int top = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing + summaryHeight +
                   metrics.verticalSpacing + metrics.tabBarHeight + metrics.verticalSpacing;
@@ -105,45 +101,19 @@ void BookStatsActivity::render(RenderLock&&) {
                  bookTitle.c_str());
 
   const int leftX = metrics.contentSidePadding;
+  const int rightEdge = pageWidth - metrics.contentSidePadding;
   const int lineHeight = renderer.getLineHeight(SMALL_FONT_ID) + 2;
   int y = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
 
+  // Line 1: "This session" (left) paired with "Est. left" (right-aligned).
   if (session.elapsedSecs > 0) {
     char sessionBuf[32];
     BookReadingStats::formatDuration(session.elapsedSecs, sessionBuf, sizeof(sessionBuf));
     std::string sessionLine = std::string(tr(STR_STATS_SESSION_TIME)) + ": " + sessionBuf;
     renderer.drawText(SMALL_FONT_ID, leftX, y, sessionLine.c_str());
   }
-  y += lineHeight;
-
-  char totalBuf[32];
-  BookReadingStats::formatDuration(stats.totalReadingSeconds, totalBuf, sizeof(totalBuf));
-  std::string line1 = std::string(tr(STR_STATS_TIME_READING)) + ": " + totalBuf;
-  const uint32_t datedSeconds = stats.totalReadingSeconds - stats.unattributedSeconds;
-  if (datedSeconds > 0 && stats.unattributedSeconds > 0) {
-    char datedBuf[32];
-    char undatedBuf[32];
-    BookReadingStats::formatDuration(datedSeconds, datedBuf, sizeof(datedBuf));
-    BookReadingStats::formatDuration(stats.unattributedSeconds, undatedBuf, sizeof(undatedBuf));
-    line1 += "  (" + std::string(tr(STR_STATS_DATED)) + " " + datedBuf + " / " + tr(STR_STATS_UNDATED) + " " +
-             undatedBuf + ")";
-  }
-  renderer.drawText(SMALL_FONT_ID, leftX, y, line1.c_str());
-  y += lineHeight;
-
-  // Cross-device total (local + last-synced remote counters). Only shown once a
-  // KOReader stats sync has actually brought in time from another device.
-  if (stats.remoteOtherSeconds > 0) {
-    char allBuf[32];
-    BookReadingStats::formatDuration(stats.displayTotalSeconds(), allBuf, sizeof(allBuf));
-    char allLine[96];
-    snprintf(allLine, sizeof(allLine), tr(STR_STATS_ALL_DEVICES_FORMAT), allBuf);
-    renderer.drawText(SMALL_FONT_ID, leftX, y, allLine);
-    y += lineHeight;
-  }
-
   if (stats.totalReadingSeconds > 0 && progressPercent < 100) {
-    std::string line2 = std::string(tr(STR_STATS_EST_REMAINING)) + ": ";
+    std::string estLine = std::string(tr(STR_STATS_EST_REMAINING)) + ": ";
     if (progressPercent > 0) {
       // Use the cross-device total: time spent on other devices counts toward how
       // long this book actually takes, so it sharpens the estimate.
@@ -153,13 +123,36 @@ void BookStatsActivity::render(RenderLock&&) {
       char estBuf[32];
       BookReadingStats::formatDuration(static_cast<uint32_t>(std::min<uint64_t>(remaining, UINT32_MAX)), estBuf,
                                        sizeof(estBuf));
-      line2 += estBuf;
+      estLine += estBuf;
     } else {
-      line2 += tr(STR_STATS_CALCULATING);
+      estLine += tr(STR_STATS_CALCULATING);
     }
-    renderer.drawText(SMALL_FONT_ID, leftX, y, line2.c_str());
+    const int estWidth = renderer.getTextWidth(SMALL_FONT_ID, estLine.c_str());
+    renderer.drawText(SMALL_FONT_ID, rightEdge - estWidth, y, estLine.c_str());
   }
-  y += lineHeight + metrics.verticalSpacing;
+  y += lineHeight;
+
+  // Line 2: total reading time on THIS device (dated + undated merged — clock
+  // sources now date-stamp sessions on both X3 and X4, so the split is noise).
+  char totalBuf[32];
+  BookReadingStats::formatDuration(stats.totalReadingSeconds, totalBuf, sizeof(totalBuf));
+  std::string readingLine = std::string(tr(STR_STATS_TIME_READING)) + ": " + totalBuf;
+  renderer.drawText(SMALL_FONT_ID, leftX, y, readingLine.c_str());
+  y += lineHeight;
+
+  // Line 3: cross-device total (local + last-synced remote). Only shown once a
+  // KOReader stats sync has actually brought in time from another device — on a
+  // solo device it would just duplicate "Time reading".
+  if (stats.remoteOtherSeconds > 0) {
+    char allBuf[32];
+    BookReadingStats::formatDuration(stats.displayTotalSeconds(), allBuf, sizeof(allBuf));
+    char allLine[96];
+    snprintf(allLine, sizeof(allLine), tr(STR_STATS_ALL_DEVICES_FORMAT), allBuf);
+    renderer.drawText(SMALL_FONT_ID, leftX, y, allLine);
+    y += lineHeight;
+  }
+
+  y += metrics.verticalSpacing;
 
   const std::vector<TabInfo> tabs = {{tr(STR_STATS_TIMELINE), selectedTab == Tab::Timeline},
                                      {tr(STR_STATS_HEATMAP), selectedTab == Tab::Heatmap}};

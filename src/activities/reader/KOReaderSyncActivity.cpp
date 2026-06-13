@@ -431,7 +431,11 @@ void KOReaderSyncActivity::syncStats() {
   // pseudo-document. The name can't collide with real documents: binary-mode
   // hashes are 32 hex chars and filename-mode hashes are MD5 hex too.
   if (statsUploadOk) {  // skip the extra round-trips when the server has no stats support
-    const std::string globalDoc = "crosspoint-global-stats";
+    // Underscores, not hyphens: the sync server's gin router compiles the
+    // GET /syncs/stats/:document param to a \w+ pattern, so a hyphenated doc name
+    // 404s on fetch (PUT has no path param and would still store it) — that broke
+    // cross-device global merge entirely. \w allows [A-Za-z0-9_].
+    const std::string globalDoc = "crosspoint_global_stats";
     auto global = makeUniqueNoThrow<GlobalReadingStats>();
     if (!global) {
       LOG_ERR("KOSync", "OOM: global stats");
@@ -441,8 +445,33 @@ void KOReaderSyncActivity::syncStats() {
     const uint32_t prevGlobalLocal = global->totalReadingSeconds;
     const uint32_t prevGlobalRemote = global->remoteOtherSeconds;
 
+    // Cross-device dated-history merge (global only): fold every OTHER device's
+    // dated blob into an accumulator that becomes the remote snapshot. cap+stream
+    // — one reusable scratch per device, freed by the client between folds; here
+    // we hold just the accumulator + one scratch (~880 B each, heap).
+    auto remoteAccum = makeUniqueNoThrow<ReadingTimeHistory>();
+    auto foldScratch = makeUniqueNoThrow<ReadingTimeHistory>();
+    struct FoldCtx {
+      ReadingTimeHistory* accum;
+      ReadingTimeHistory* scratch;
+      bool any;
+    } foldCtx{remoteAccum.get(), foldScratch.get(), false};
+    StatsDatedFold fold;
+    if (remoteAccum && foldScratch) {
+      fold.ctx = &foldCtx;
+      fold.fn = [](void* ctx, const uint8_t* blob, size_t len) {
+        auto* c = static_cast<FoldCtx*>(ctx);
+        if (c->scratch->deserializeBlob(blob, len)) {
+          c->accum->mergeFrom(*c->scratch);
+          c->any = true;
+        }
+      };
+    } else {
+      LOG_ERR("KOSync", "OOM: dated merge buffers");  // scalar still proceeds below
+    }
+
     count = 0;
-    const auto gGet = KOReaderSyncClient::getStats(globalDoc, entries, count);
+    const auto gGet = KOReaderSyncClient::getStats(globalDoc, entries, count, fold.fn ? &fold : nullptr);
     if (gGet == KOReaderSyncClient::OK || gGet == KOReaderSyncClient::NOT_FOUND) {
       uint32_t othersSeconds = 0;
       for (size_t i = 0; i < count; i++) {
@@ -459,23 +488,36 @@ void KOReaderSyncActivity::syncStats() {
         }
       }
       global->remoteOtherSeconds = othersSeconds;
+      // Adopt the folded snapshot of OTHER devices' dated history. On a clean
+      // OK/NOT_FOUND with no other devices this is empty — correct (no remote
+      // data). Skipped on fetch error so the last good snapshot is preserved.
+      if (fold.fn) global->remoteHistory = *remoteAccum;
     } else {
       LOG_ERR("KOSync", "Global stats fetch failed: %s", KOReaderSyncClient::errorString(gGet));
     }
 
+    // Upload OUR local dated history alongside the global counter (base64 "h").
+    auto datedBuf = makeUniqueNoThrow<uint8_t[]>(ReadingTimeHistory::BLOB_MAX_BYTES);
+    size_t datedLen = 0;
+    if (datedBuf) datedLen = global->history.serializeBlob(datedBuf.get(), ReadingTimeHistory::BLOB_MAX_BYTES);
+
     KOReaderStatsEntry gMine;  // lastRead fields stay 0 — meaningless for the global counter
     gMine.seconds = global->totalReadingSeconds;
-    const auto gPut = KOReaderSyncClient::updateStats(globalDoc, gMine);
+    const auto gPut = KOReaderSyncClient::updateStats(globalDoc, gMine, datedBuf ? datedBuf.get() : nullptr, datedLen);
     if (gPut != KOReaderSyncClient::OK) {
       LOG_ERR("KOSync", "Global stats upload failed: %s", KOReaderSyncClient::errorString(gPut));
     }
 
-    if (global->totalReadingSeconds != prevGlobalLocal || global->remoteOtherSeconds != prevGlobalRemote) {
+    // Persist on change. Manual sync is user-initiated (not per-page), so writing
+    // when a remote snapshot was folded is within the SD-throttle policy.
+    if (global->totalReadingSeconds != prevGlobalLocal || global->remoteOtherSeconds != prevGlobalRemote ||
+        foldCtx.any) {
       global->save();
     }
-    SdDebugLog::log("KOSync", "global stats sync: local=%lu others=%lu put=%d",
+    SdDebugLog::log("KOSync", "global stats sync: local=%lu others=%lu dated=%d put=%d",
                     static_cast<unsigned long>(global->totalReadingSeconds),
-                    static_cast<unsigned long>(global->remoteOtherSeconds), gPut == KOReaderSyncClient::OK ? 1 : 0);
+                    static_cast<unsigned long>(global->remoteOtherSeconds), foldCtx.any ? 1 : 0,
+                    gPut == KOReaderSyncClient::OK ? 1 : 0);
   }
 }
 

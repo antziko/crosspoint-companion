@@ -11,9 +11,13 @@ constexpr uint8_t GLOBAL_STATS_FILE_VERSION = 2;
 constexpr uint8_t GLOBAL_STATS_FILE_VERSION_V1 = 1;
 constexpr char GLOBAL_STATS_PATH[] = "/.crosspoint/global_stats.bin";
 constexpr char GLOBAL_HISTORY_PATH[] = "/.crosspoint/global_time_history.bin";
+// Sync-snapshot of other devices' dated history (cross-device stats merge). Its
+// own self-versioned ReadingTimeHistory file — keeps global_stats.bin format frozen.
+constexpr char GLOBAL_REMOTE_HISTORY_PATH[] = "/.crosspoint/global_remote_history.bin";
 }  // namespace
 
-bool GlobalReadingStats::load(GlobalReadingStats& out, const char* statsPath, const char* historyPath) {
+bool GlobalReadingStats::load(GlobalReadingStats& out, const char* statsPath, const char* historyPath,
+                              const char* remoteHistoryPath) {
   out.totalReadingSeconds = 0;
   out.unattributedSeconds = 0;
   out.remoteOtherSeconds = 0;
@@ -40,12 +44,16 @@ bool GlobalReadingStats::load(GlobalReadingStats& out, const char* statsPath, co
   }
 
   ReadingTimeHistory::load(historyPath, out.history);
+  // Remote snapshot is optional and self-versioned; absent file -> default-zeroed.
+  if (remoteHistoryPath) ReadingTimeHistory::load(remoteHistoryPath, out.remoteHistory);
   return ok;
 }
 
-bool GlobalReadingStats::load(GlobalReadingStats& out) { return load(out, GLOBAL_STATS_PATH, GLOBAL_HISTORY_PATH); }
+bool GlobalReadingStats::load(GlobalReadingStats& out) {
+  return load(out, GLOBAL_STATS_PATH, GLOBAL_HISTORY_PATH, GLOBAL_REMOTE_HISTORY_PATH);
+}
 
-void GlobalReadingStats::save(const char* statsPath, const char* historyPath) const {
+void GlobalReadingStats::save(const char* statsPath, const char* historyPath, const char* remoteHistoryPath) const {
   HalFile f;
   if (!Storage.openFileForWrite("GSTATS", statsPath, f)) {
     LOG_ERR("GSTATS", "Could not write global_stats.bin");
@@ -58,6 +66,7 @@ void GlobalReadingStats::save(const char* statsPath, const char* historyPath) co
   f.close();
 
   ReadingTimeHistory::save(historyPath, history);
+  if (remoteHistoryPath) ReadingTimeHistory::save(remoteHistoryPath, remoteHistory);
 }
 
-void GlobalReadingStats::save() const { save(GLOBAL_STATS_PATH, GLOBAL_HISTORY_PATH); }
+void GlobalReadingStats::save() const { save(GLOBAL_STATS_PATH, GLOBAL_HISTORY_PATH, GLOBAL_REMOTE_HISTORY_PATH); }

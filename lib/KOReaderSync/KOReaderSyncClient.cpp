@@ -3,13 +3,16 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <SdDebugLog.h>
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
 #include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <mbedtls/base64.h>
 
+#include <cstring>
 #include <ctime>
 
 #include "KOReaderCredentialStore.h"
@@ -19,6 +22,11 @@ int KOReaderSyncClient::lastHttpCode = 0;
 namespace {
 // Server capability tag from the last updateStats response (see statsServerTag()).
 char statsServerTagBuf[32] = {0};
+
+// Upper bound on a decoded dated-history blob (ReadingTimeHistory::BLOB_MAX_BYTES
+// is 876; round up for headroom). Bounds the single reusable decode buffer in the
+// streaming fold — a malformed/oversized "h" is rejected rather than allocated for.
+constexpr size_t kStatsDatedMaxBytes = 1024;
 }  // namespace
 
 const char* KOReaderSyncClient::deviceId() {
@@ -488,7 +496,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
 }
 
 KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& documentHash, KOReaderStatsEntry* outEntries,
-                                                       size_t& outCount) {
+                                                       size_t& outCount, const StatsDatedFold* fold) {
   lastHttpCode = 0;
   outCount = 0;
   if (!KOREADER_STORE.hasCredentials()) {
@@ -528,13 +536,23 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
       return NOT_FOUND;
     }
 
+    // One reusable decode buffer for the streaming dated-history fold (cap+stream:
+    // decode -> fold -> reuse, so transient heap stays bounded regardless of how
+    // many devices carry an "h" section). Allocated only when a fold is requested.
+    std::unique_ptr<uint8_t[]> datedBuf;
+    if (fold && fold->fn) {
+      datedBuf = makeUniqueNoThrow<uint8_t[]>(kStatsDatedMaxBytes);
+      if (!datedBuf) LOG_ERR("KOSync", "OOM: dated fold buffer (%u)", (unsigned)kStatsDatedMaxBytes);
+    }
+
     for (JsonPairConst kv : doc["stats"].as<JsonObjectConst>()) {
       if (outCount >= MAX_STATS_DEVICES) {
         LOG_DBG("KOSync", "More than %u stats devices; extras dropped", (unsigned)MAX_STATS_DEVICES);
         break;
       }
       // Each value is a per-device blob stored verbatim by the server: an embedded
-      // JSON string like {"s":300,"lr":9650,"lh":21,"lm":15}.
+      // JSON string like {"s":300,"lr":9650,"lh":21,"lm":15} (the global pseudo-doc
+      // also carries an "h":"<base64>" dated-history section).
       const char* blob = kv.value().as<const char*>();
       if (!blob) continue;
       JsonDocument blobDoc;
@@ -549,6 +567,22 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
       e.lastReadHour = blobDoc["lh"].as<uint8_t>();
       e.lastReadMinute = blobDoc["lm"].as<uint8_t>();
       outCount++;
+
+      // Fold this device's dated history (OTHER devices only — local history is the
+      // source of truth and is uploaded, not merged back in).
+      if (datedBuf && strcmp(kv.key().c_str(), deviceId()) != 0) {
+        const char* hb64 = blobDoc["h"].as<const char*>();
+        if (hb64 && hb64[0]) {
+          size_t dlen = 0;
+          const int rc = mbedtls_base64_decode(datedBuf.get(), kStatsDatedMaxBytes, &dlen,
+                                               reinterpret_cast<const unsigned char*>(hb64), strlen(hb64));
+          if (rc == 0 && dlen > 0) {
+            fold->fn(fold->ctx, datedBuf.get(), dlen);
+          } else {
+            LOG_DBG("KOSync", "Skipping bad dated blob for %s (rc=%d)", kv.key().c_str(), rc);
+          }
+        }
+      }
     }
     LOG_DBG("KOSync", "Got stats for %u device(s)", (unsigned)outCount);
     return OK;
@@ -560,7 +594,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
 }
 
 KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& documentHash,
-                                                          const KOReaderStatsEntry& entry) {
+                                                          const KOReaderStatsEntry& entry, const uint8_t* dated,
+                                                          size_t datedLen) {
   lastHttpCode = 0;
   if (!KOREADER_STORE.hasCredentials()) {
     LOG_DBG("KOSync", "No credentials configured");
@@ -582,7 +617,31 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& doc
   JsonDocument doc;
   doc["document"] = documentHash;
   doc["device_id"] = deviceId();
-  doc["stats"] = blob;
+
+  // Without a dated section, store the small scalar blob verbatim (per-book path).
+  // With one, splice an "h":"<base64>" field in before the closing brace (global
+  // pseudo-doc only). base64 uses A-Za-z0-9+/= — none need JSON-string escaping.
+  std::string datedBlob;  // outlives serializeJson below
+  if (dated && datedLen > 0) {
+    size_t encLen = 0;
+    mbedtls_base64_encode(nullptr, 0, &encLen, dated, datedLen);  // query size (incl NUL)
+    auto enc = makeUniqueNoThrow<unsigned char[]>(encLen > 0 ? encLen : 1);
+    size_t written = 0;
+    if (enc && mbedtls_base64_encode(enc.get(), encLen, &written, dated, datedLen) == 0) {
+      const size_t scalarLen = strlen(blob);  // drop trailing '}'
+      datedBlob.reserve(scalarLen + written + 8);
+      datedBlob.assign(blob, scalarLen - 1);
+      datedBlob += ",\"h\":\"";
+      datedBlob.append(reinterpret_cast<const char*>(enc.get()), written);
+      datedBlob += "\"}";
+      doc["stats"] = datedBlob;
+    } else {
+      LOG_ERR("KOSync", "Dated stats base64 encode failed; sending scalar only");
+      doc["stats"] = blob;
+    }
+  } else {
+    doc["stats"] = blob;
+  }
 
   std::string body;
   serializeJson(doc, body);

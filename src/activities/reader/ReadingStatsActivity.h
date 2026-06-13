@@ -25,9 +25,14 @@ class ReadingStatsActivity final : public Activity {
  private:
   enum class Tab { Timeline, Heatmap };
 
-  // ~800 bytes (embeds a ReadingTimeHistory) — heap-allocated, never a stack
-  // local or by-value member (see GlobalReadingStats.h / ReadingTimeHistory.h).
+  // ~1.7 KB (embeds two ReadingTimeHistory: local + remote snapshot) —
+  // heap-allocated, never a stack local or by-value member (see
+  // GlobalReadingStats.h / ReadingTimeHistory.h).
   std::unique_ptr<GlobalReadingStats> stats;
+  // Cross-device display history: local overlaid with the synced remote snapshot,
+  // built once in onEnter() (the heatmap renders every frame — don't re-fold per
+  // frame). Equals the local history when nothing has been synced.
+  std::unique_ptr<ReadingTimeHistory> displayHist;
 
   Tab selectedTab = Tab::Timeline;
   // Shared Timeline/Heatmap presentation (rows, scrolling, section jumps).

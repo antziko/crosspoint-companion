@@ -4,6 +4,7 @@
 #include <Logging.h>
 #include <Serialization.h>
 
+#include <algorithm>
 #include <cstring>
 
 namespace {
@@ -50,6 +51,42 @@ void heatmapShiftOlder(uint8_t* bits, uint32_t days) {
     if (level != 0) heatmapLevelSet(shifted, i + days, level);
   }
   memcpy(bits, shifted, ReadingTimeHistory::HEATMAP_BYTES);
+}
+
+// Bumped only if the wire blob layout changes; independent of the on-disk
+// HISTORY_FILE_VERSION (the blob omits heatmapAnchorSeconds).
+constexpr uint8_t HISTORY_BLOB_VERSION = 1;
+
+// Merges two newest-first, strictly-descending-by-key bucket arrays (the
+// invariant recordDay() maintains: index 0 is the most recent bucket, no
+// duplicate keys, zero-seconds tail), summing seconds where keys match and
+// keeping the newest N. `dst` is overwritten with the result.
+//
+// `merged` is a stack temp (largest case WeekEntry[52] = 416 B). That exceeds
+// the 256-byte stack-local guideline, but mergeFrom runs once per sync on the
+// 4 KB sync task (not a hot/recursive path), and the three instantiations are
+// sequential calls — peak frame is one array, not all three.
+template <typename Entry, size_t N, typename KeyFn>
+void mergeBuckets(Entry (&dst)[N], const Entry (&src)[N], KeyFn key) {
+  Entry merged[N] = {};
+  size_t out = 0, i = 0, j = 0;
+  while (out < N) {
+    const bool ai = i < N && dst[i].seconds > 0;
+    const bool aj = j < N && src[j].seconds > 0;
+    if (!ai && !aj) break;
+    if (ai && (!aj || key(dst[i]) > key(src[j]))) {
+      merged[out++] = dst[i++];
+    } else if (aj && (!ai || key(src[j]) > key(dst[i]))) {
+      merged[out++] = src[j++];
+    } else {  // equal keys: combine into one bucket
+      merged[out] = dst[i];
+      merged[out].seconds += src[j].seconds;
+      out++;
+      i++;
+      j++;
+    }
+  }
+  memcpy(dst, merged, sizeof(merged));
 }
 }  // namespace
 
@@ -203,5 +240,73 @@ bool ReadingTimeHistory::save(const std::string& path, const ReadingTimeHistory&
   serialization::writePod(f, history.heatmapAnchorDay);
   serialization::writePod(f, history.heatmapAnchorSeconds);
   f.close();
+  return true;
+}
+
+void ReadingTimeHistory::mergeFrom(const ReadingTimeHistory& other) {
+  // Weekly/monthly/yearly: sum seconds by absolute date-key, keep newest N.
+  mergeBuckets(weekly, other.weekly, [](const WeekEntry& e) { return readingHistoryDayIndex(e.year, e.month, e.day); });
+  mergeBuckets(monthly, other.monthly,
+               [](const MonthEntry& e) { return static_cast<uint32_t>(e.year) * 12U + e.month; });
+  mergeBuckets(yearly, other.yearly, [](const YearEntry& e) { return static_cast<uint32_t>(e.year); });
+
+  // Heatmap: re-anchor to the newer of the two days, then take the per-day MAX
+  // level. Levels can only be promoted, never summed (no per-day seconds stored).
+  const uint32_t mergedAnchor = std::max(heatmapAnchorDay, other.heatmapAnchorDay);
+  if (mergedAnchor > heatmapAnchorDay) {
+    // Slide our existing levels back so slot 0 lines up with the newer anchor.
+    heatmapShiftOlder(heatmapBits, mergedAnchor - heatmapAnchorDay);
+  }
+  // other's slot s is calendar day (other.heatmapAnchorDay - s); its slot under
+  // the merged anchor is offset further back by (mergedAnchor - other anchor).
+  const uint32_t otherOffset = mergedAnchor - other.heatmapAnchorDay;
+  for (size_t s = 0; s < HEATMAP_DAYS; s++) {
+    const uint8_t lvl = heatmapLevelGet(other.heatmapBits, s);
+    if (lvl == 0) continue;
+    const size_t dstSlot = otherOffset + s;
+    if (dstSlot >= HEATMAP_DAYS) break;  // older than our 730-day window
+    if (lvl > heatmapLevelGet(heatmapBits, dstSlot)) heatmapLevelSet(heatmapBits, dstSlot, lvl);
+  }
+  heatmapAnchorDay = mergedAnchor;
+  // heatmapAnchorSeconds intentionally left as-is: a merged history is a display
+  // artifact and is never recordDay()'d onto, so the running total is moot.
+}
+
+size_t ReadingTimeHistory::serializeBlob(uint8_t* out, size_t cap) const {
+  if (cap < BLOB_MAX_BYTES) return 0;
+  size_t off = 0;
+  out[off++] = HISTORY_BLOB_VERSION;
+  // memcpy (not pointer-cast) for RISC-V alignment safety. Layout is fixed
+  // little-endian; both targets (ESP32-C3) and the host test are LE with
+  // identical 8-byte WeekEntry/MonthEntry/YearEntry packing.
+  auto put = [&](const void* p, size_t n) {
+    memcpy(out + off, p, n);
+    off += n;
+  };
+  put(weekly, sizeof(weekly));
+  put(monthly, sizeof(monthly));
+  put(yearly, sizeof(yearly));
+  put(heatmapBits, sizeof(heatmapBits));
+  put(&heatmapAnchorDay, sizeof(heatmapAnchorDay));
+  return off;
+}
+
+bool ReadingTimeHistory::deserializeBlob(const uint8_t* data, size_t len) {
+  *this = ReadingTimeHistory{};
+  if (len < BLOB_MAX_BYTES || data[0] != HISTORY_BLOB_VERSION) {
+    LOG_DBG("RTH", "Stats history blob missing or version mismatch, ignoring");
+    return false;
+  }
+  size_t off = 1;
+  auto get = [&](void* p, size_t n) {
+    memcpy(p, data + off, n);
+    off += n;
+  };
+  get(weekly, sizeof(weekly));
+  get(monthly, sizeof(monthly));
+  get(yearly, sizeof(yearly));
+  get(heatmapBits, sizeof(heatmapBits));
+  get(&heatmapAnchorDay, sizeof(heatmapAnchorDay));
+  // heatmapAnchorSeconds stays 0 (not transmitted) — fine, merge uses levels.
   return true;
 }
