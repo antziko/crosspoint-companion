@@ -94,6 +94,43 @@ void relocateCacheLabel(const std::string& oldDirName, const std::string& newDir
   }
 }
 
+// Deletes the "<dirName>--<title>-by-<author>.txt" SD-browsing label that sits next
+// to a book cache dir, so it doesn't orphan in /.crosspoint once the cache dir is
+// removed. Mirror of relocateCacheLabel's scan; closes the dir handle before remove.
+void removeCacheLabel(const std::string& dirName) {
+  const std::string prefix = dirName + "--";
+  std::string labelName;
+  {
+    HalFile dir = Storage.open(CACHE_BASE_DIR);
+    if (!dir || !dir.isDirectory()) {
+      return;
+    }
+    while (true) {
+      HalFile f = dir.openNextFile();
+      if (!f) {
+        break;
+      }
+      char name[160];
+      if (f.getName(name, sizeof(name)) == 0) {
+        continue;
+      }
+      if (strncmp(name, prefix.c_str(), prefix.size()) == 0) {
+        labelName = name;
+        break;
+      }
+    }
+  }
+  if (labelName.empty()) {
+    return;
+  }
+  const std::string label = std::string(CACHE_BASE_DIR) + "/" + labelName;
+  if (Storage.remove(label.c_str())) {
+    LOG_DBG("BookCache", "Deleted cache label %s", label.c_str());
+  } else {
+    LOG_ERR("BookCache", "Failed to delete cache label %s (non-fatal)", label.c_str());
+  }
+}
+
 bool writeContentId(const std::string& cacheDir, const std::string& md5Hex, const std::string& bookPath) {
   HalFile f;
   if (!Storage.openFileForWrite("BookCache", cacheDir + CONTENT_ID_FILE, f)) {
@@ -164,6 +201,12 @@ void clearBookCache(const std::string& path) {
     Txt(path, "/.crosspoint").clearCache();
   } else {
     return;
+  }
+  // clearCache() removes the path-hash cache dir but not the sibling
+  // "<dir>--<title>.txt" SD-browsing label — remove it too so it doesn't orphan.
+  // (Label is created for EPUBs; the scan is a cheap no-op for types without one.)
+  if (const char* prefix = cacheDirPrefixForPath(path)) {
+    removeCacheLabel(std::string(prefix) + std::to_string(std::hash<std::string>{}(path)));
   }
   LOG_DBG("BookCache", "Done checking metadata cache for: %s", path.c_str());
 }

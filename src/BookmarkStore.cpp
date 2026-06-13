@@ -15,7 +15,7 @@ constexpr uint8_t LEGACY_VERSION = 2;
 constexpr uint8_t COUNT_U16_VERSION = 3;
 constexpr uint8_t PARAGRAPH_ANCHOR_VERSION = 4;
 constexpr uint8_t SNIPPET_VERSION = 5;
-constexpr uint8_t RETURN_MARK_VERSION = 6;  // adds a per-bookmark "return here" flag byte
+constexpr uint8_t RETURN_MARK_VERSION = 6;    // adds a per-bookmark "return here" flag byte
 constexpr uint8_t CHAPTER_PAGES_VERSION = 7;  // adds chapterCurrentPage + chapterPageCount (two uint16)
 constexpr uint8_t VERSION = 7;
 constexpr bool isKnownVersion(uint8_t v) {
@@ -135,7 +135,8 @@ bool BookmarkStore::loadForBook(const std::string& filePath, const std::string& 
     bookmarks.reserve(INITIAL_BOOKMARK_RESERVE);
   }
 
-  const uint32_t crc = esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(filePath.data()), static_cast<uint32_t>(filePath.size()));
+  const uint32_t crc =
+      esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(filePath.data()), static_cast<uint32_t>(filePath.size()));
   storeFilePath = std::string(BOOKMARKS_DIR) + "/" + bookType + "_" + std::to_string(crc) + ".bin";
 
   // Tombstones live in a parallel file so the bookmark format stays untouched.
@@ -287,8 +288,9 @@ void BookmarkStore::clearAll() {
   for (const auto& bm : bookmarks) {
     if (bm.returnMark) continue;  // device-only return marks were never synced — nothing to propagate
     const uint32_t v = nextVersion();
-    auto it = std::find_if(tombstones.begin(), tombstones.end(),
-                           [&](const Tombstone& e) { return sameTomb(e, Tombstone{bm.spineIndex, bm.paragraphIndex, bm.progress, 0}); });
+    auto it = std::find_if(tombstones.begin(), tombstones.end(), [&](const Tombstone& e) {
+      return sameTomb(e, Tombstone{bm.spineIndex, bm.paragraphIndex, bm.progress, 0});
+    });
     if (it != tombstones.end()) {
       it->version = v;
     } else {
@@ -329,9 +331,9 @@ bool BookmarkStore::readFromFile() {
   // A false return means the length prefix exceeded the bytes left in the file —
   // the file is corrupt. Delete it so a clean store regenerates instead of
   // failing every open. (Closes f first; SdFat requires close before remove.)
-  if (!serialization::readString(f, tmp) ||      // title
-      !serialization::readString(f, tmp) ||      // author
-      !serialization::readString(f, tmp)) {      // stored path
+  if (!serialization::readString(f, tmp) ||  // title
+      !serialization::readString(f, tmp) ||  // author
+      !serialization::readString(f, tmp)) {  // stored path
     LOG_ERR("BKS", "Corrupt bookmark file (bad string length), resetting: %s", storeFilePath.c_str());
     f.close();
     Storage.remove(storeFilePath.c_str());
@@ -346,7 +348,7 @@ bool BookmarkStore::readFromFile() {
     // that fix existed). Self-heal: accept the bookmarks and persist the corrected
     // path on the next save, instead of silently dropping them.
     LOG_ERR("BKS", "Bookmark file has stale embedded path '%s' (expected '%s'), self-healing", storedPath.c_str(),
-           bookFilePath.c_str());
+            bookFilePath.c_str());
     dirty = true;
   }
 
@@ -711,8 +713,8 @@ size_t BookmarkStore::mergeFrom(const std::vector<Bookmark>& remoteBookmarks,
   // Count bookmarks now present that weren't local before (for the return/log).
   size_t added = 0;
   for (const auto& nb : newBookmarks) {
-    const bool wasLocal = std::any_of(bookmarks.begin(), bookmarks.end(),
-                                      [&](const Bookmark& l) { return sameBookmark(l, nb); });
+    const bool wasLocal =
+        std::any_of(bookmarks.begin(), bookmarks.end(), [&](const Bookmark& l) { return sameBookmark(l, nb); });
     if (!wasLocal) ++added;
   }
 
@@ -768,6 +770,10 @@ void BookmarkStore::relocateForFilePath(const std::string& srcPath, const std::s
   const std::string srcTomb = srcBase + ".tomb";
   if (Storage.exists(srcTomb.c_str())) {
     const std::string dstTomb = dstBase + ".tomb";
+    // Overwrite-move (e.g. WebDAV MOVE onto an existing book path): Storage.rename
+    // fails if dst exists, so the moved book's sidecars would be lost. The
+    // destination book is being replaced, so drop its stale sidecar first.
+    if (Storage.exists(dstTomb.c_str())) Storage.remove(dstTomb.c_str());
     if (Storage.rename(srcTomb.c_str(), dstTomb.c_str())) {
       LOG_DBG("BKS", "Relocated %s -> %s", srcTomb.c_str(), dstTomb.c_str());
     } else {
@@ -781,6 +787,7 @@ void BookmarkStore::relocateForFilePath(const std::string& srcPath, const std::s
   const std::string srcBin = srcBase + ".bin";
   if (!Storage.exists(srcBin.c_str())) return;
   const std::string dstBin = dstBase + ".bin";
+  if (Storage.exists(dstBin.c_str())) Storage.remove(dstBin.c_str());  // overwrite-move: see .tomb above
   if (!Storage.rename(srcBin.c_str(), dstBin.c_str())) {
     LOG_ERR("BKS", "Failed to relocate %s -> %s (non-fatal)", srcBin.c_str(), dstBin.c_str());
     return;
@@ -792,7 +799,8 @@ void BookmarkStore::relocateForFilePath(const std::string& srcPath, const std::s
 }
 
 void BookmarkStore::deleteForFilePath(const std::string& filePath, const std::string& bookType) {
-  const uint32_t crc = esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(filePath.data()), static_cast<uint32_t>(filePath.size()));
+  const uint32_t crc =
+      esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(filePath.data()), static_cast<uint32_t>(filePath.size()));
   const std::string base = std::string(BOOKMARKS_DIR) + "/" + bookType + "_" + std::to_string(crc);
   // Remove both the bookmark file and its tombstone sidecar.
   for (const std::string& path : {base + ".bin", base + ".tomb"}) {
