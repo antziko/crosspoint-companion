@@ -6,6 +6,8 @@
 #include <Logging.h>
 #include <Memory.h>
 #include <PNGdec.h>
+#include <SdDebugLog.h>
+#include <esp_heap_caps.h>
 
 #include <cstdlib>
 #include <memory>
@@ -83,6 +85,15 @@ int32_t pngSeekWithHandle(PNGFILE* pFile, int32_t pos) {
 // the ESP32-C3 where total RAM is ~320 KB.
 constexpr size_t PNG_DECODER_APPROX_SIZE = 44 * 1024;                          // ~42 KB + overhead
 constexpr size_t MIN_FREE_HEAP_FOR_PNG = PNG_DECODER_APPROX_SIZE + 16 * 1024;  // decoder + 16 KB headroom
+
+// Mirror heap-related decode failures to SD: on an untethered X3 (no serial) these
+// lines are the only trace of why an image silently failed to render. `largest`
+// distinguishes exhaustion (free low) from fragmentation (free OK but no
+// contiguous ~42 KB block for the decoder).
+void logHeapFailureToSd(const char* what) {
+  SdDebugLog::log("PNG", "%s free=%u largest=%u", what, (unsigned)ESP.getFreeHeap(),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+}
 
 // PNGdec keeps TWO scanlines in its internal ucPixels buffer (current + previous)
 // and each scanline includes a leading filter byte.
@@ -315,12 +326,14 @@ bool PngToFramebufferConverter::getDimensionsStatic(const std::string& imagePath
   size_t freeHeap = ESP.getFreeHeap();
   if (freeHeap < MIN_FREE_HEAP_FOR_PNG) {
     LOG_ERR("PNG", "Not enough heap for PNG decoder (%u free, need %u)", freeHeap, MIN_FREE_HEAP_FOR_PNG);
+    logHeapFailureToSd("dims heap-guard fail");
     return false;
   }
 
   std::unique_ptr<PNG> png(new (std::nothrow) PNG());
   if (!png) {
     LOG_ERR("PNG", "Failed to allocate PNG decoder for dimensions");
+    logHeapFailureToSd("dims decoder OOM");
     return false;
   }
 
@@ -346,6 +359,7 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
   size_t freeHeap = ESP.getFreeHeap();
   if (freeHeap < MIN_FREE_HEAP_FOR_PNG) {
     LOG_ERR("PNG", "Not enough heap for PNG decoder (%u free, need %u)", freeHeap, MIN_FREE_HEAP_FOR_PNG);
+    logHeapFailureToSd("decode heap-guard fail");
     return false;
   }
 
@@ -359,6 +373,7 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
   std::unique_ptr<PNG> png(new (std::nothrow) PNG());
   if (!png) {
     LOG_ERR("PNG", "Failed to allocate PNG decoder");
+    logHeapFailureToSd("decode decoder OOM");
     return false;
   }
 

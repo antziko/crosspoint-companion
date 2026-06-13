@@ -10,8 +10,10 @@
 #include <I18n.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <SdDebugLog.h>
 #include <Serialization.h>
 #include <ZipFile.h>
+#include <esp_heap_caps.h>
 #include <esp_system.h>
 
 #include <algorithm>
@@ -1453,6 +1455,13 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     const auto start = millis();
     renderContents(std::move(p), orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft);
     LOG_DBG("ERS", "Rendered page in %dms", millis() - start);
+    // EPUB steady-state heap profile (post-render, font cache already freed). Watch
+    // `largest` for fragmentation and `minEver` for the worst-case low-water mark.
+    LOG_DBG("MEM", "epub-page free=%u largest=%u minEver=%u", (unsigned)ESP.getFreeHeap(),
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), (unsigned)ESP.getMinFreeHeap());
+    SdDebugLog::setEnabled(true);
+    SdDebugLog::log("MEM", "epub-page free=%u largest=%u minEver=%u", (unsigned)ESP.getFreeHeap(),
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), (unsigned)ESP.getMinFreeHeap());
   }
   silentIndexNextChapterIfNeeded(viewportWidth, viewportHeight);
   saveProgress(currentSpineIndex, section->currentPage, section->pageCount);

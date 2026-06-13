@@ -9,6 +9,7 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <SdDebugLog.h>
 #include <Txt.h>
 #include <Xtc.h>
 
@@ -136,7 +137,11 @@ void SleepActivity::renderCustomSleepScreen() const {
       // allocation here — the pick is done with two counting passes, not a temp list.
       const uint16_t fileCount =
           static_cast<uint16_t>(std::min(numFiles, static_cast<size_t>(CrossPointState::SLEEP_DECK_MAX)));
-      if (APP_STATE.sleepDeckSize != fileCount || APP_STATE.sleepDeckShownCount >= fileCount) {
+      // Snapshot pre-reset deck state for diagnostics (see log below).
+      const uint16_t prevDeckSize = APP_STATE.sleepDeckSize;
+      const uint16_t prevShownCount = APP_STATE.sleepDeckShownCount;
+      const bool didReset = (prevDeckSize != fileCount || prevShownCount >= fileCount);
+      if (didReset) {
         APP_STATE.resetSleepDeck(fileCount);
       }
 
@@ -162,6 +167,15 @@ void SleepActivity::renderCustomSleepScreen() const {
         }
       }
       APP_STATE.markSleepShown(randomFileIndex);
+      // Diagnostic: deck persistence trace. If `shown` climbs across wakes the
+      // shuffle-bag is working; if it stays 0 / reset=1 every wake the deck is
+      // not surviving sleep. Mirrored to SD (/opds_debug.txt) for untethered use.
+      SdDebugLog::setEnabled(true);
+      SdDebugLog::log("SLP", "deck files=%u prevSize=%u prevShown=%u reset=%d eligible=%u pick=%u name=%s", fileCount,
+                      prevDeckSize, prevShownCount, didReset ? 1 : 0, eligible, randomFileIndex,
+                      files[randomFileIndex].c_str());
+      LOG_DBG("SLP", "deck files=%u prevSize=%u prevShown=%u reset=%d eligible=%u pick=%u", fileCount, prevDeckSize,
+              prevShownCount, didReset ? 1 : 0, eligible, randomFileIndex);
       APP_STATE.saveToFile();
       const auto filename = std::string(sleepDir) + "/" + files[randomFileIndex];
       HalFile randFile;

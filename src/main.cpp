@@ -14,7 +14,9 @@
 #include <I18n.h>
 #include <Logging.h>
 #include <SPI.h>
+#include <SdDebugLog.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 #include <builtinFonts/all.h>
 
 #include <cstring>
@@ -385,11 +387,17 @@ static void maybeStartBackgroundNtpSync() {
           vTaskDelay(pdMS_TO_TICKS(100));
         }
         if (WiFi.status() == WL_CONNECTED) {
+          // Heap profiling: radio-up vs radio-off pair below measures the WiFi
+          // stack's true footprint outside any activity lifecycle (boot-time sync).
+          SdDebugLog::log("MEM", "ntp wifi-up free=%u largest=%u", (unsigned)ESP.getFreeHeap(),
+                          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
           // This task owns the connection, so wait out a slow SNTP packet
           // (Problem A) before tearing WiFi down — longer than the 5s UI default.
           halClock.syncFromNTP(20000);
           WiFi.disconnect(true);
           WiFi.mode(WIFI_OFF);
+          SdDebugLog::log("MEM", "ntp wifi-off free=%u largest=%u", (unsigned)ESP.getFreeHeap(),
+                          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
         }
         vTaskDelete(nullptr);
       },
@@ -617,6 +625,13 @@ void setup() {
   // Ensure we're not still holding the power button before leaving setup
   waitForPowerRelease();
   allowSleepAt = millis() + 2000;
+
+  // Heap profiling baseline: free heap once boot is fully done (fonts, SD, first
+  // activity entered). Every later MEM line in the trace diffs against this.
+  SdDebugLog::setEnabled(true);
+  SdDebugLog::log("MEM", "boot-done %s free=%u largest=%u minEver=%u", gpio.deviceIsX3() ? "X3" : "X4",
+                  (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                  (unsigned)ESP.getMinFreeHeap());
 }
 
 void loop() {
@@ -662,7 +677,7 @@ void loop() {
 
   static bool screenshotButtonsReleased = true;
   static bool screenshotComboActive = false;
-  if (gpio.isPressed(HalGPIO::BTN_POWER) && gpio.isPressed(HalGPIO::BTN_DOWN)) {
+  if (gpio.isPressed(HalGPIO::BTN_POWER) && gpio.isPressed(HalGPIO::BTN_BACK)) {
     screenshotComboActive = true;
     if (screenshotButtonsReleased) {
       screenshotButtonsReleased = false;
@@ -695,7 +710,7 @@ void loop() {
   if (millis() >= allowSleepAt && gpio.isPressed(HalGPIO::BTN_POWER) &&
       gpio.getPowerButtonHeldTime() > SETTINGS.getPowerButtonDuration()) {
     // If the screenshot combination is potentially being pressed, don't sleep
-    if (gpio.isPressed(HalGPIO::BTN_DOWN)) {
+    if (gpio.isPressed(HalGPIO::BTN_BACK)) {
       return;
     }
     enterDeepSleep();

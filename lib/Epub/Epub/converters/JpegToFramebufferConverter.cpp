@@ -6,6 +6,8 @@
 #include <JPEGDEC.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <SdDebugLog.h>
+#include <esp_heap_caps.h>
 
 #include <cstdlib>
 #include <memory>
@@ -147,6 +149,15 @@ int32_t jpegSeek(JPEGFILE* pFile, int32_t pos) {
 // Heap-allocate on demand so memory is only used during active decode.
 constexpr size_t JPEG_DECODER_APPROX_SIZE = 20 * 1024;
 constexpr size_t MIN_FREE_HEAP_FOR_JPEG = JPEG_DECODER_APPROX_SIZE + 16 * 1024;
+
+// Mirror heap-related decode failures to SD: on an untethered X3 (no serial) these
+// lines are the only trace of why an image silently failed to render. `largest`
+// distinguishes exhaustion (free low) from fragmentation (free OK but no
+// contiguous ~20 KB block for the decoder).
+void logHeapFailureToSd(const char* what) {
+  SdDebugLog::log("JPG", "%s free=%u largest=%u", what, (unsigned)ESP.getFreeHeap(),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+}
 
 // Choose JPEGDEC's built-in scale factor for coarse downscaling.
 // Returns the scale denominator (1, 2, 4, or 8) and sets jpegScaleOption.
@@ -474,12 +485,14 @@ bool JpegToFramebufferConverter::getDimensionsStatic(const std::string& imagePat
   size_t freeHeap = ESP.getFreeHeap();
   if (freeHeap < MIN_FREE_HEAP_FOR_JPEG) {
     LOG_ERR("JPG", "Not enough heap for JPEG decoder (%u free, need %u)", freeHeap, MIN_FREE_HEAP_FOR_JPEG);
+    logHeapFailureToSd("dims heap-guard fail");
     return false;
   }
 
   std::unique_ptr<JPEGDEC> jpeg(new (std::nothrow) JPEGDEC());
   if (!jpeg) {
     LOG_ERR("JPG", "Failed to allocate JPEG decoder for dimensions");
+    logHeapFailureToSd("dims decoder OOM");
     return false;
   }
 
@@ -504,6 +517,7 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   size_t freeHeap = ESP.getFreeHeap();
   if (freeHeap < MIN_FREE_HEAP_FOR_JPEG) {
     LOG_ERR("JPG", "Not enough heap for JPEG decoder (%u free, need %u)", freeHeap, MIN_FREE_HEAP_FOR_JPEG);
+    logHeapFailureToSd("decode heap-guard fail");
     return false;
   }
 
@@ -519,6 +533,7 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   std::unique_ptr<JPEGDEC> jpeg(new (std::nothrow) JPEGDEC());
   if (!jpeg) {
     LOG_ERR("JPG", "Failed to allocate JPEG decoder");
+    logHeapFailureToSd("decode decoder OOM");
     return false;
   }
 
