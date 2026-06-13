@@ -166,11 +166,17 @@ namespace {
 constexpr int MAX_MCU_HEIGHT = 16;
 constexpr size_t JPEG_DECODER_SIZE = 20 * 1024;
 // Guard on the largest contiguous block, not total free. The real constraint is
-// fitting the single ~20KB JPEGDEC object; the remaining per-row buffers are
-// makeUniqueNoThrow + null-checked, so any further shortfall fails gracefully
-// (placeholder thumbnail) rather than crashing. Total-free guards over-rejected
-// valid covers on a fragmented heap (e.g. 48KB free / 41KB MaxAlloc).
-constexpr size_t MIN_LARGEST_BLOCK = JPEG_DECODER_SIZE + 8 * 1024;
+// fitting the single ~20KB JPEGDEC object (real sizeof ~17.5KB); the remaining
+// per-row buffers are makeUniqueNoThrow + null-checked, so any further shortfall
+// fails gracefully (placeholder thumbnail) rather than crashing. Total-free guards
+// over-rejected valid covers on a fragmented heap (e.g. 48KB free / 41KB MaxAlloc).
+//
+// 6KB headroom (not 8KB): on the X4 the largest contiguous block tops out at ~28660
+// even with ~48KB free (structural fragmentation, see SD "FRAG" trace), and an 8KB
+// margin (28672) rejected the decode by ~12 bytes — leaving every book a blank hero.
+// 6KB (26624) clears that ceiling while still leaving ~6KB over the real ~20.5KB peak
+// (JPEGDEC object + downscaled MCU row buffer).
+constexpr size_t MIN_LARGEST_BLOCK = JPEG_DECODER_SIZE + 6 * 1024;
 
 // Static file pointer for JPEGDEC open callback.
 // Safe in single-threaded embedded context; never accessed concurrently.

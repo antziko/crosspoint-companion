@@ -17,12 +17,20 @@ class HomeActivity final : public Activity {
   bool firstRenderDone = false;
   bool hasOpdsServers = false;
   bool hasReadingStats = false;
-  bool coverRendered = false;      // Track if cover has been rendered once
-  bool coverBufferStored = false;  // Track if cover buffer is stored
-  bool longPressFired = false;     // Swallow Confirm release after a long-press fired
+  bool coverRendered = false;       // Track if cover has been rendered once
+  bool coverBufferStored = false;   // Track if cover buffer is stored
+  bool longPressFired = false;      // Swallow Confirm release after a long-press fired
   bool backLongPressFired = false;  // Swallow Back release after a hold-Back fired
-  uint8_t* coverBuffer = nullptr;  // HomeActivity's own buffer for cover image
-  size_t coverBufferSize = 0;      // Bytes allocated to coverBuffer
+  // Cover snapshot is stored in horizontal-strip chunks, not one contiguous
+  // buffer: returning from the reader fragments the heap (free heap can be 60 KB+
+  // while the largest contiguous block is < the ~33 KB the full region needs), so
+  // a single malloc fails. Splitting into ~12 KB chunks fits the fragmented holes.
+  static constexpr size_t COVER_CHUNK_TARGET_BYTES = 12000;
+  static constexpr int COVER_MAX_CHUNKS = 16;  // 16 * 12KB = 192KB region ceiling, far above need
+  uint8_t* coverChunks[COVER_MAX_CHUNKS] = {nullptr};
+  size_t coverChunkSizes[COVER_MAX_CHUNKS] = {0};
+  int coverChunkCount = 0;
+  int coverChunkStripH = 0;  // logical rows per chunk (last chunk may be shorter)
   // Logical rect last passed to drawRecentBookCover. The cover snapshot only
   // needs to cover this region, not the entire framebuffer, so we cache the
   // tile instead of all 48 KB. Set in render() before the call.

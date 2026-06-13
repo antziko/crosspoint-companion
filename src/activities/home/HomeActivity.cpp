@@ -21,8 +21,8 @@
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
-#include "activities/util/ConfirmationActivity.h"
 #include "activities/reader/GlobalReadingStats.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -74,6 +74,19 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
   // render and the failure is otherwise silent (placeholder shown). Per-book result
   // + heap below shows whether it's low-heap, a decode error, or bad dimensions.
   SdDebugLog::setEnabled(true);
+
+  // B-investigation (heap fragmentation): the cover JPEG decode needs a ~26.6KB
+  // contiguous block, but the X4's largest free block tops out ~28660 even with
+  // ~48KB total free — so covers sit on the edge of the guard. Dump the full
+  // free-block picture once per cover pass (free / largest / block-count / min-ever)
+  // so the cause — which allocation pins max-contiguous — can be traced from SD
+  // (X3 has no serial). Grep "FRAG" in opds_debug.txt.
+  {
+    multi_heap_info_t info;
+    heap_caps_get_info(&info, MALLOC_CAP_8BIT);
+    SdDebugLog::log("FRAG", "cover-pass free=%u largest=%u blocks=%u minFreeEver=%u", (unsigned)info.total_free_bytes,
+                    (unsigned)info.largest_free_block, (unsigned)info.free_blocks, (unsigned)info.minimum_free_bytes);
+  }
 
   int progress = 0;
   for (RecentBook& book : recentBooks) {
@@ -165,34 +178,69 @@ bool HomeActivity::storeCoverBuffer() {
   // cloning the whole framebuffer.
   if (coverRectW <= 0 || coverRectH <= 0) return false;
   freeCoverBuffer();
-  const size_t needed = renderer.getRegionByteSize(coverRectX, coverRectY, coverRectW, coverRectH);
-  if (needed == 0) return false;
-  coverBuffer = static_cast<uint8_t*>(malloc(needed));
-  if (!coverBuffer) {
-    LOG_ERR("HOME", "OOM: cover buffer (%u bytes)", (unsigned)needed);
-    return false;
+
+  const size_t total = renderer.getRegionByteSize(coverRectX, coverRectY, coverRectW, coverRectH);
+  if (total == 0) return false;
+
+  // Split into horizontal strips so each malloc is small enough to fit a
+  // fragmented heap (one big contiguous alloc fails after the reader chops the
+  // heap up). Byte size scales ~linearly with logical height in every
+  // orientation, so equal row-strips give roughly equal-size chunks.
+  int count = static_cast<int>((total + COVER_CHUNK_TARGET_BYTES - 1) / COVER_CHUNK_TARGET_BYTES);
+  if (count < 1) count = 1;
+  if (count > COVER_MAX_CHUNKS) count = COVER_MAX_CHUNKS;
+  const int stripH = (coverRectH + count - 1) / count;  // rows per chunk
+
+  for (int i = 0; i < count; i++) {
+    const int y = coverRectY + i * stripH;
+    const int h = std::min(stripH, coverRectY + coverRectH - y);
+    if (h <= 0) {
+      count = i;  // exact partition consumed the region early
+      break;
+    }
+    const size_t sz = renderer.getRegionByteSize(coverRectX, y, coverRectW, h);
+    auto* chunk = static_cast<uint8_t*>(malloc(sz));
+    if (!chunk) {
+      LOG_ERR("HOME", "OOM: cover chunk %d/%d (%u bytes)", i + 1, count, (unsigned)sz);
+      freeCoverBuffer();
+      return false;
+    }
+    if (!renderer.copyRegionToBuffer(coverRectX, y, coverRectW, h, chunk, sz)) {
+      free(chunk);
+      freeCoverBuffer();
+      return false;
+    }
+    coverChunks[i] = chunk;
+    coverChunkSizes[i] = sz;
   }
-  coverBufferSize = needed;
-  if (!renderer.copyRegionToBuffer(coverRectX, coverRectY, coverRectW, coverRectH, coverBuffer, coverBufferSize)) {
-    free(coverBuffer);
-    coverBuffer = nullptr;
-    coverBufferSize = 0;
-    return false;
+  coverChunkCount = count;
+  coverChunkStripH = stripH;
+  return coverChunkCount > 0;
+}
+
+bool HomeActivity::restoreCoverBuffer() {
+  if (coverChunkCount <= 0 || coverChunkStripH <= 0 || coverRectW <= 0 || coverRectH <= 0) return false;
+  // Recompute the same strip partition store used and blit each chunk back.
+  for (int i = 0; i < coverChunkCount; i++) {
+    const int y = coverRectY + i * coverChunkStripH;
+    const int h = std::min(coverChunkStripH, coverRectY + coverRectH - y);
+    if (h <= 0) break;
+    if (!coverChunks[i]) return false;
+    if (!renderer.copyBufferToRegion(coverRectX, y, coverRectW, h, coverChunks[i], coverChunkSizes[i])) return false;
   }
   return true;
 }
 
-bool HomeActivity::restoreCoverBuffer() {
-  if (!coverBuffer || coverRectW <= 0 || coverRectH <= 0) return false;
-  return renderer.copyBufferToRegion(coverRectX, coverRectY, coverRectW, coverRectH, coverBuffer, coverBufferSize);
-}
-
 void HomeActivity::freeCoverBuffer() {
-  if (coverBuffer) {
-    free(coverBuffer);
-    coverBuffer = nullptr;
+  for (int i = 0; i < COVER_MAX_CHUNKS; i++) {
+    if (coverChunks[i]) {
+      free(coverChunks[i]);
+      coverChunks[i] = nullptr;
+    }
+    coverChunkSizes[i] = 0;
   }
-  coverBufferSize = 0;
+  coverChunkCount = 0;
+  coverChunkStripH = 0;
   coverBufferStored = false;
 }
 
@@ -217,8 +265,7 @@ void HomeActivity::loop() {
   }
 
   // Hold Back on the home screen: move the selector to the first recent book.
-  if (!recentBooks.empty() &&
-      mappedInput.isPressed(MappedInputManager::Button::Back) &&
+  if (!recentBooks.empty() && mappedInput.isPressed(MappedInputManager::Button::Back) &&
       mappedInput.getHeldTime() >= RECENT_LONG_PRESS_MS) {
     backLongPressFired = true;
     if (selectorIndex != 0) {
@@ -230,8 +277,7 @@ void HomeActivity::loop() {
 
   // Long-press Confirm on a recent book: prompt to remove it from the recent list.
   if (selectorIndex < static_cast<int>(recentBooks.size()) &&
-      mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
-      mappedInput.getHeldTime() >= RECENT_LONG_PRESS_MS) {
+      mappedInput.isPressed(MappedInputManager::Button::Confirm) && mappedInput.getHeldTime() >= RECENT_LONG_PRESS_MS) {
     longPressFired = true;
     promptRemoveRecentBook(recentBooks[selectorIndex].path, recentBooks[selectorIndex].title);
     return;

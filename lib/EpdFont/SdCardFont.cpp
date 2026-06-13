@@ -1343,8 +1343,9 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
   self->overflow_[slot].codepoint = codepoint;
   self->overflow_[slot].styleIdx = styleIdx;
 
-  LOG_DBG("SDCF", "Overflow: loaded U+%04X style %u on demand (slot %u/%u)", codepoint, styleIdx, slot,
-          OVERFLOW_CAPACITY);
+  // No per-glyph log here: on-demand overflow loads are normal operation and fire
+  // once per uncached glyph in the render hot path — logging each one floods serial
+  // and adds ~20ms/glyph (serial drain + the SD read it gates).
 
   return &self->overflow_[slot].glyph;
 }
