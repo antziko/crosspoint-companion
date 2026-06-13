@@ -6,7 +6,7 @@
 #include <Logging.h>
 #include <WiFi.h>
 
-#include <map>
+#include <algorithm>
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
@@ -119,38 +119,55 @@ void WifiSelectionActivity::processWifiScanResults() {
     return;
   }
 
-  // Scan complete, process results
-  // Use a map to deduplicate networks by SSID, keeping the strongest signal
-  std::map<std::string, WifiNetworkInfo> uniqueNetworks;
+  // Scan complete. Deduplicate by SSID (keep strongest signal) directly in
+  // `networks` with a linear scan instead of a std::map. This path can run with
+  // a badly fragmented heap (e.g. after the home-screen cover-render churn): the
+  // old std::map + per-entry copy allocated an RB-tree node and a duplicate SSID
+  // string per network, and aborted under OOM during the result processing /
+  // sort (crash: __throw_out_of_range from libstdc++ containers, free heap
+  // minEver ~916 B). A reserved vector with move-construction roughly halves the
+  // allocations, and MAX_NETWORKS bounds the list (and its heap use) in noisy RF.
+  static constexpr size_t MAX_NETWORKS = 40;
+
+  networks.clear();
+  networks.reserve(std::min<size_t>(static_cast<size_t>(std::max<int16_t>(scanResult, 0)), MAX_NETWORKS));
 
   for (int i = 0; i < scanResult; i++) {
     std::string ssid = WiFi.SSID(i).c_str();
-    const int32_t rssi = WiFi.RSSI(i);
-
     // Skip hidden networks (empty SSID)
     if (ssid.empty()) {
       continue;
     }
+    const int32_t rssi = WiFi.RSSI(i);
 
-    // Check if we've already seen this SSID
-    auto it = uniqueNetworks.find(ssid);
-    if (it == uniqueNetworks.end() || rssi > it->second.rssi) {
-      // New network or stronger signal than existing entry
-      WifiNetworkInfo network;
-      network.ssid = ssid;
-      network.rssi = rssi;
-      network.isEncrypted = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
-      network.hasSavedPassword = WIFI_STORE.hasSavedCredential(network.ssid);
-      uniqueNetworks[ssid] = network;
+    // Already seen this SSID? Keep the stronger signal (and its encryption flag).
+    auto existing =
+        std::find_if(networks.begin(), networks.end(), [&ssid](const WifiNetworkInfo& n) { return n.ssid == ssid; });
+    if (existing != networks.end()) {
+      if (rssi > existing->rssi) {
+        existing->rssi = rssi;
+        existing->isEncrypted = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+      }
+      continue;
     }
+
+    // New SSID. Stop adding once the list is full, but keep scanning so existing
+    // entries can still be upgraded to a stronger signal above.
+    if (networks.size() >= MAX_NETWORKS) {
+      continue;
+    }
+
+    WifiNetworkInfo network;
+    network.rssi = rssi;
+    network.isEncrypted = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+    network.hasSavedPassword = WIFI_STORE.hasSavedCredential(ssid);
+    network.ssid = std::move(ssid);
+    networks.push_back(std::move(network));
   }
 
-  // Convert map to vector
-  networks.clear();
-  for (const auto& pair : uniqueNetworks) {
-    // cppcheck-suppress useStlAlgorithm
-    networks.push_back(pair.second);
-  }
+  // Free the driver's scan buffers before sorting to reclaim heap headroom for
+  // the sort (the previous abort site).
+  WiFi.scanDelete();
 
   // Sort: saved-password networks first, then by signal strength (strongest first)
   std::sort(networks.begin(), networks.end(), [](const WifiNetworkInfo& a, const WifiNetworkInfo& b) {
@@ -160,7 +177,6 @@ void WifiSelectionActivity::processWifiScanResults() {
     return a.rssi > b.rssi;
   });
 
-  WiFi.scanDelete();
   state = WifiSelectionState::NETWORK_LIST;
   selectedNetworkIndex = 0;
   requestUpdate();
@@ -254,8 +270,7 @@ void WifiSelectionActivity::checkConnectionStatus() {
     // X3: sync once (DS3231 persists across power cycles; ~2 ppm drift is negligible).
     // X4: sync on every WiFi connect — no hardware RTC, so time is lost on each deep sleep.
     {
-      const bool shouldSync = halClock.hasHardwareRtc() ? !SETTINGS.clockHasBeenSynced
-                                                        : !halClock.isSystemTimeValid();
+      const bool shouldSync = halClock.hasHardwareRtc() ? !SETTINGS.clockHasBeenSynced : !halClock.isSystemTimeValid();
       if (shouldSync && halClock.syncFromNTP()) {
         if (halClock.hasHardwareRtc()) {
           SETTINGS.clockHasBeenSynced = 1;
