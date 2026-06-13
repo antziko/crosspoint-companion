@@ -1,17 +1,13 @@
 #include "SleepActivity.h"
 
-#include <esp_random.h>
-
-#include <vector>
-
 #include <Epub.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
-#include <SdDebugLog.h>
 #include <Txt.h>
 #include <Xtc.h>
+#include <esp_random.h>
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
@@ -71,7 +67,7 @@ void SleepActivity::renderCustomSleepScreen() const {
   HalFile file;
   if (Storage.openFileForRead("SLP", "/sleep.bmp", file)) {
     Bitmap bitmap(file, true);
-    bitmap.setOneBitDither(renderer.isX3());  // X3: 1-bit halftone, avoids wash-out
+    bitmap.setOneBitDither(renderer.isX3());          // X3: 1-bit halftone, avoids wash-out
     bitmap.setImageDitherMode(SETTINGS.imageDither);  // blue/bayer/error-diffusion (X4)
     if (bitmap.parseHeaders() == BmpReaderError::Ok) {
       LOG_DBG("SLP", "Loading: /sleep.bmp");
@@ -93,105 +89,109 @@ void SleepActivity::renderCustomSleepScreen() const {
   }
 
   if (sleepDir) {
-    std::vector<std::string> files;
+    // Pick a wallpaper without materialising the file list — a 1000+ image folder of
+    // hash-named BMPs would exhaust the heap (vector<string>) and abort with bad_alloc
+    // when sleep is entered from a low-memory reader state. Instead, two cheap directory
+    // passes: count candidates, then walk to the chosen index. O(1) heap.
+    //
+    // Index == position in directory iteration order, which is stable for an unchanged
+    // folder. Candidates are filtered by extension only; the single chosen file is the
+    // only one actually opened and BMP-parsed (a corrupt pick falls through to default).
     char name[500];
-    // collect all valid BMP files
+
+    // Pass 1: count BMP candidates.
+    uint16_t numFiles = 0;
     for (auto dirFile = dir.openNextFile(); dirFile; dirFile = dir.openNextFile()) {
       if (dirFile.isDirectory()) {
         dirFile.close();
         continue;
       }
       dirFile.getName(name, sizeof(name));
-      auto filename = std::string(name);
-      if (filename[0] == '.') {
-        dirFile.close();
-        continue;
-      }
-
-      if (!FsHelpers::hasBmpExtension(filename)) {
-        LOG_DBG("SLP", "Skipping non-.bmp file name: %s", name);
-        dirFile.close();
-        continue;
-      }
-      Bitmap bitmap(dirFile);
-      if (bitmap.parseHeaders() != BmpReaderError::Ok) {
-        LOG_DBG("SLP", "Skipping invalid BMP file: %s", name);
-        dirFile.close();
-        continue;
-      }
-      files.emplace_back(filename);
       dirFile.close();
+      if (name[0] == '.' || !FsHelpers::hasBmpExtension(std::string(name))) continue;
+      if (++numFiles == UINT16_MAX) break;  // guard the counter
     }
-    // Sort so a file's index is stable across boots. Directory iteration order is
-    // not guaranteed, and the recent-history buffer below stores indices — without
-    // a stable mapping those indices could point at different files each wake, which
-    // silently defeats the no-repeat logic.
-    FsHelpers::sortFileList(files);
 
-    const auto numFiles = files.size();
     if (numFiles > 0) {
-      // Exhaustive shuffle-bag: show every image once, in random order, before any
-      // repeat. A persistent bitset (saved in state.json on the SD card) records which
-      // images were shown this cycle; when the cycle is exhausted, or the folder size
-      // changed, start a fresh cycle. State is ~68 bytes resident and there is no heap
-      // allocation here — the pick is done with two counting passes, not a temp list.
-      const uint16_t fileCount =
-          static_cast<uint16_t>(std::min(numFiles, static_cast<size_t>(CrossPointState::SLEEP_DECK_MAX)));
-      // Snapshot pre-reset deck state for diagnostics (see log below).
-      const uint16_t prevDeckSize = APP_STATE.sleepDeckSize;
-      const uint16_t prevShownCount = APP_STATE.sleepDeckShownCount;
-      const bool didReset = (prevDeckSize != fileCount || prevShownCount >= fileCount);
-      if (didReset) {
-        APP_STATE.resetSleepDeck(fileCount);
+      // Hybrid selection:
+      //  - Folder fits the shuffle-bag deck (<= SLEEP_DECK_MAX): exhaustive no-repeat
+      //    pick over the persistent bitset — every image shown once before any repeat.
+      //  - Larger: uniform random over ALL files (the fixed 512-bit deck cannot track
+      //    them), accepting occasional repeats to cover every image without RAM cost.
+      uint16_t pickIndex = 0;
+      if (numFiles <= CrossPointState::SLEEP_DECK_MAX) {
+        const uint16_t fileCount = numFiles;
+        const uint16_t prevDeckSize = APP_STATE.sleepDeckSize;
+        const uint16_t prevShownCount = APP_STATE.sleepDeckShownCount;
+        const bool didReset = (prevDeckSize != fileCount || prevShownCount >= fileCount);
+        if (didReset) APP_STATE.resetSleepDeck(fileCount);
+
+        // Count images not yet shown this cycle, then pick the target-th of them.
+        // Hardware TRNG (esp_random); Arduino random() is never seeded here.
+        uint16_t eligible = 0;
+        for (uint16_t i = 0; i < fileCount; i++) {
+          if (!APP_STATE.isSleepShown(i)) eligible++;
+        }
+        if (eligible == 0) {
+          pickIndex = static_cast<uint16_t>(esp_random() % fileCount);  // shouldn't happen; stay safe
+        } else {
+          const uint16_t target = static_cast<uint16_t>(esp_random() % eligible);
+          for (uint16_t i = 0, seen = 0; i < fileCount; i++) {
+            if (APP_STATE.isSleepShown(i)) continue;
+            if (seen == target) {
+              pickIndex = i;
+              break;
+            }
+            seen++;
+          }
+        }
+        APP_STATE.markSleepShown(pickIndex);
+        APP_STATE.saveToFile();
+        LOG_DBG("SLP", "deck files=%u prevSize=%u prevShown=%u reset=%d eligible=%u pick=%u", fileCount, prevDeckSize,
+                prevShownCount, didReset ? 1 : 0, eligible, pickIndex);
+      } else {
+        // Too many for the deck — uniform random over the whole folder.
+        pickIndex = static_cast<uint16_t>(esp_random() % numFiles);
+        LOG_DBG("SLP", "deck bypass (files=%u > %u): uniform pick=%u", numFiles,
+                (unsigned)CrossPointState::SLEEP_DECK_MAX, pickIndex);
       }
 
-      // Count images not yet shown this cycle, then pick the target-th of them.
-      // Use the hardware TRNG (esp_random); Arduino random() is never seeded here.
-      uint16_t eligible = 0;
-      for (uint16_t i = 0; i < fileCount; i++) {
-        if (!APP_STATE.isSleepShown(i)) eligible++;
-      }
-      uint16_t randomFileIndex = 0;
-      if (eligible == 0) {
-        // Shouldn't happen (reset above keeps one eligible), but stay safe.
-        randomFileIndex = static_cast<uint16_t>(esp_random() % fileCount);
-      } else {
-        const uint16_t target = static_cast<uint16_t>(esp_random() % eligible);
-        for (uint16_t i = 0, seen = 0; i < fileCount; i++) {
-          if (APP_STATE.isSleepShown(i)) continue;
-          if (seen == target) {
-            randomFileIndex = i;
-            break;
+      // Pass 2: walk to the chosen candidate and render it.
+      dir.rewindDirectory();
+      uint16_t idx = 0;
+      for (auto dirFile = dir.openNextFile(); dirFile; dirFile = dir.openNextFile()) {
+        if (dirFile.isDirectory()) {
+          dirFile.close();
+          continue;
+        }
+        dirFile.getName(name, sizeof(name));
+        if (name[0] == '.' || !FsHelpers::hasBmpExtension(std::string(name))) {
+          dirFile.close();
+          continue;
+        }
+        if (idx != pickIndex) {
+          idx++;
+          dirFile.close();
+          continue;
+        }
+        // This is the pick. Build the path, then open+parse it specifically.
+        const auto filename = std::string(sleepDir) + "/" + name;
+        dirFile.close();
+        HalFile randFile;
+        if (Storage.openFileForRead("SLP", filename, randFile)) {
+          LOG_DBG("SLP", "Randomly loading: %s", filename.c_str());
+          Bitmap bitmap(randFile, true);
+          bitmap.setOneBitDither(renderer.isX3());          // X3: 1-bit halftone, avoids wash-out
+          bitmap.setImageDitherMode(SETTINGS.imageDither);  // blue/bayer/error-diffusion (X4)
+          if (bitmap.parseHeaders() == BmpReaderError::Ok) {
+            renderBitmapSleepScreen(bitmap);
+            randFile.close();
+            dir.close();
+            return;
           }
-          seen++;
-        }
-      }
-      APP_STATE.markSleepShown(randomFileIndex);
-      // Diagnostic: deck persistence trace. If `shown` climbs across wakes the
-      // shuffle-bag is working; if it stays 0 / reset=1 every wake the deck is
-      // not surviving sleep. Mirrored to SD (/opds_debug.txt) for untethered use.
-      SdDebugLog::setEnabled(true);
-      SdDebugLog::log("SLP", "deck files=%u prevSize=%u prevShown=%u reset=%d eligible=%u pick=%u name=%s", fileCount,
-                      prevDeckSize, prevShownCount, didReset ? 1 : 0, eligible, randomFileIndex,
-                      files[randomFileIndex].c_str());
-      LOG_DBG("SLP", "deck files=%u prevSize=%u prevShown=%u reset=%d eligible=%u pick=%u", fileCount, prevDeckSize,
-              prevShownCount, didReset ? 1 : 0, eligible, randomFileIndex);
-      APP_STATE.saveToFile();
-      const auto filename = std::string(sleepDir) + "/" + files[randomFileIndex];
-      HalFile randFile;
-      if (Storage.openFileForRead("SLP", filename, randFile)) {
-        LOG_DBG("SLP", "Randomly loading: %s/%s", sleepDir, files[randomFileIndex].c_str());
-        delay(100);
-        Bitmap bitmap(randFile, true);
-        bitmap.setOneBitDither(renderer.isX3());  // X3: 1-bit halftone, avoids wash-out
-        bitmap.setImageDitherMode(SETTINGS.imageDither);  // blue/bayer/error-diffusion (X4)
-        if (bitmap.parseHeaders() == BmpReaderError::Ok) {
-          renderBitmapSleepScreen(bitmap);
           randFile.close();
-          dir.close();
-          return;
         }
-        randFile.close();
+        break;  // open/parse failed → fall through to the default screen
       }
     }
   }
