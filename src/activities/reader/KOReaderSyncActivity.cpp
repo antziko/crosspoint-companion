@@ -574,9 +574,11 @@ void KOReaderSyncActivity::render(RenderLock&&) {
   Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 
   const auto* activeServer = KOREADER_STORE.getServer(static_cast<size_t>(KOREADER_STORE.getActiveIndex()));
+  // Header is just the active server name (fall back to the generic title when the
+  // server has no name), plus the optional stats tag below.
   char syncHeader[96];
   if (activeServer && !activeServer->name.empty()) {
-    snprintf(syncHeader, sizeof(syncHeader), "%s - %s", tr(STR_KOREADER_SYNC), activeServer->name.c_str());
+    snprintf(syncHeader, sizeof(syncHeader), "%s", activeServer->name.c_str());
   } else {
     snprintf(syncHeader, sizeof(syncHeader), "%s", tr(STR_KOREADER_SYNC));
   }
@@ -610,86 +612,124 @@ void KOReaderSyncActivity::render(RenderLock&&) {
   }
 
   if (state == SHOWING_RESULT) {
-    // Show comparison
-    top = screen.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-    renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_PROGRESS_FOUND), true, EpdFontFamily::BOLD);
+    const int sideX = screen.x + metrics.contentSidePadding;
+    const int contentW = screen.width - 2 * metrics.contentSidePadding;
 
-    // Remote chapter name requires Epub (loaded lazily in performSync before this state).
+    // Vertical rhythm — one place to tune, no scattered top+NN literals. A running
+    // `y` cursor advances by these named steps instead of hardcoded offsets.
+    const int lhData = renderer.getLineHeight(UI_10_FONT_ID);
+    const int lhLabel = renderer.getLineHeight(UI_12_FONT_ID);
+    const int lhFoot = renderer.getLineHeight(UI_10_FONT_ID);
+    const int DATA_ROW = lhData + 3;   // step between data lines in a card
+    const int LABEL_ROW = lhData + 2;  // card label line (Remote:/Local:, now UI_10 bold)
+    const int OPTION_H = lhData + 10;  // selectable row (highlight bar height)
+    const int CARD_GAP = 10;           // between remote card and local card
+    const int detailX = sideX + 12;    // chapter/page indent under the card label
+    const int SECTION_GAP = 10;        // generic block gap
+    const int TITLE_GAP = 18;          // breathing room under "Progress found!"
+
+    int y = screen.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+
+    // --- Title ---
+    renderer.drawCenteredText(UI_12_FONT_ID, y, tr(STR_PROGRESS_FOUND), true, EpdFontFamily::BOLD);
+    y += lhLabel + TITLE_GAP;
+
+    // Chapter names: remote needs the live Epub (loaded lazily in performSync before
+    // this state); local was pre-computed before the Epub was released.
     const int remoteTocIndex = epub->getTocIndexForSpineIndex(remotePosition.spineIndex);
     const std::string remoteChapter =
         (remoteTocIndex >= 0) ? epub->getTocItem(remoteTocIndex).title
                               : (std::string(tr(STR_SECTION_PREFIX)) + std::to_string(remotePosition.spineIndex + 1));
-    // Local chapter name was pre-computed before Epub was released.
     const std::string localChapter =
         !localChapterName.empty() ? localChapterName
                                   : (std::string(tr(STR_SECTION_PREFIX)) + std::to_string(currentSpineIndex + 1));
 
-    // Remote progress - chapter and page
-    renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 40, tr(STR_REMOTE_LABEL), true);
-    char remoteChapterStr[128];
-    snprintf(remoteChapterStr, sizeof(remoteChapterStr), "  %s", remoteChapter.c_str());
-    renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 65, remoteChapterStr);
-    char remotePageStr[64];
-    snprintf(remotePageStr, sizeof(remotePageStr), tr(STR_PAGE_OVERALL_FORMAT), remotePosition.pageNumber + 1,
+    char buf[128];
+
+    // Choice rows render as buttons so they read as interactive (not body text):
+    // selected = filled black box + inverted text, unselected = outlined box.
+    const auto drawOption = [&](int by, const char* label, bool selected) {
+      constexpr int cr = 6;
+      if (selected) {
+        renderer.fillRoundedRect(sideX, by, contentW, OPTION_H, cr, Color::Black);
+      } else {
+        renderer.drawRoundedRect(sideX, by, contentW, OPTION_H, 1, cr, true);
+      }
+      const int ty = by + (OPTION_H - lhData) / 2;
+      renderer.drawText(UI_10_FONT_ID, detailX, ty, label, !selected);
+    };
+
+    // --- REMOTE card ---
+    // Label + source device on one line. Prefer the unique efuse id (already parsed
+    // into deviceId) so two CrossPoint devices are distinguishable; the generic
+    // "device" name is identical for every CrossPoint upload.
+    char remoteLabel[80];
+    if (!remoteProgress.deviceId.empty()) {
+      const std::string& id = remoteProgress.deviceId;
+      const char* tail = id.size() >= 4 ? id.c_str() + id.size() - 4 : id.c_str();  // short tag
+      snprintf(remoteLabel, sizeof(remoteLabel), "%s  (%s:%s)", tr(STR_REMOTE_LABEL),
+               remoteProgress.device.empty() ? "device" : remoteProgress.device.c_str(), tail);
+    } else if (!remoteProgress.device.empty()) {
+      snprintf(remoteLabel, sizeof(remoteLabel), "%s  (%s)", tr(STR_REMOTE_LABEL), remoteProgress.device.c_str());
+    } else {
+      snprintf(remoteLabel, sizeof(remoteLabel), "%s", tr(STR_REMOTE_LABEL));
+    }
+    renderer.drawText(UI_10_FONT_ID, sideX, y, remoteLabel, true, EpdFontFamily::BOLD);
+    y += LABEL_ROW;
+    renderer.drawText(UI_10_FONT_ID, detailX, y, remoteChapter.c_str());
+    y += DATA_ROW;
+    snprintf(buf, sizeof(buf), tr(STR_PAGE_OVERALL_FORMAT), remotePosition.pageNumber + 1,
              remoteProgress.percentage * 100);
-    renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 90, remotePageStr);
+    renderer.drawText(UI_10_FONT_ID, detailX, y, buf);
+    y += DATA_ROW + 2;
 
-    if (!remoteProgress.device.empty()) {
-      char deviceStr[64];
-      snprintf(deviceStr, sizeof(deviceStr), tr(STR_DEVICE_FROM_FORMAT), remoteProgress.device.c_str());
-      renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 115, deviceStr);
-    }
+    // Choice 0 lives in the card it acts on.
+    drawOption(y, tr(STR_APPLY_REMOTE), selectedOption == 0);
+    y += OPTION_H + CARD_GAP;
 
-    // Local progress - chapter and page
-    renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 150, tr(STR_LOCAL_LABEL), true);
-    char localChapterStr[128];
-    snprintf(localChapterStr, sizeof(localChapterStr), "  %s", localChapter.c_str());
-    renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 175, localChapterStr);
-    char localPageStr[64];
-    snprintf(localPageStr, sizeof(localPageStr), tr(STR_PAGE_TOTAL_OVERALL_FORMAT), currentPage + 1, totalPagesInSpine,
+    // --- LOCAL card ---
+    renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_LOCAL_LABEL), true, EpdFontFamily::BOLD);
+    y += LABEL_ROW;
+    renderer.drawText(UI_10_FONT_ID, detailX, y, localChapter.c_str());
+    y += DATA_ROW;
+    snprintf(buf, sizeof(buf), tr(STR_PAGE_TOTAL_OVERALL_FORMAT), currentPage + 1, totalPagesInSpine,
              localProgress.percentage * 100);
-    renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 200, localPageStr);
+    renderer.drawText(UI_10_FONT_ID, detailX, y, buf);
+    y += DATA_ROW + 2;
 
-    // Bookmark sync summary (merge is automatic; this is informational). Show it whenever a
-    // sync was attempted so the upload status is visible even with no bookmarks to merge.
-    int optionY = top + 230;
-    if (bmSynced) {
-      // Extra gap separates the bookmark block from the local progress above it.
-      char bmStr[96];
-      snprintf(bmStr, sizeof(bmStr), tr(STR_BOOKMARK_DIFF_FORMAT), bmRemoteCount, bmLocalCount, bmMergedCount);
-      char bmStatusStr[96];
-      snprintf(bmStatusStr, sizeof(bmStatusStr), tr(STR_BOOKMARK_SYNC_STATUS_FORMAT),
-               bmFetchOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER),
-               bmUploadOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER));
-      renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 240, tr(STR_BOOKMARKS), true);
-      renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 262, bmStr);
-      renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, top + 284, bmStatusStr);
-      optionY = top + 312;
-    }
-    if (statsSynced) {
-      // Combined reading time across devices (per-device counters merged on sync).
-      char durBuf[24];
-      BookReadingStats::formatDuration(statsTotalAllDevices, durBuf, sizeof(durBuf));
-      char statsStr[96];
-      snprintf(statsStr, sizeof(statsStr), tr(STR_STATS_ALL_DEVICES_FORMAT), durBuf);
-      renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, optionY - 6, statsStr);
-      optionY += 24;
-    }
-    const int optionHeight = 30;
+    drawOption(y, tr(STR_UPLOAD_LOCAL), selectedOption == 1);
+    y += OPTION_H + SECTION_GAP;
 
-    // Apply option
-    if (selectedOption == 0) {
-      renderer.fillRect(screen.x, optionY - 2, screen.width - 1, optionHeight);
+    // --- "Also synced" footer: bookmarks + reading stats always merge, so they are
+    // passive info, not a choice. Extra gap above separates it from the choice buttons.
+    if (bmSynced || statsSynced) {
+      y += SECTION_GAP;
+      renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_ALSO_SYNCED), true, EpdFontFamily::BOLD);
+      y += lhFoot + 2;
+      if (bmSynced) {
+        // Two lines: "Bookmarks" + counts, then indented fetch/upload status. Split
+        // because one combined line overflows the width, worse when "failed" replaces "ok".
+        char bmCounts[96];
+        snprintf(bmCounts, sizeof(bmCounts), tr(STR_BOOKMARK_DIFF_FORMAT), bmRemoteCount, bmLocalCount, bmMergedCount);
+        snprintf(buf, sizeof(buf), "%s  %s", tr(STR_BOOKMARKS), bmCounts);
+        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+        y += lhFoot + 2;
+        char bmStatusStr[64];
+        snprintf(bmStatusStr, sizeof(bmStatusStr), tr(STR_BOOKMARK_SYNC_STATUS_FORMAT),
+                 bmFetchOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER),
+                 bmUploadOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER));
+        snprintf(buf, sizeof(buf), "  %s", bmStatusStr);
+        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+        y += lhFoot + 2;
+      }
+      if (statsSynced) {
+        if (bmSynced) y += 6;  // separate reading time from the bookmark block above
+        char durBuf[24];
+        BookReadingStats::formatDuration(statsTotalAllDevices, durBuf, sizeof(durBuf));
+        snprintf(buf, sizeof(buf), tr(STR_STATS_ALL_DEVICES_FORMAT), durBuf);
+        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+      }
     }
-    renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, optionY, tr(STR_APPLY_REMOTE),
-                      selectedOption != 0);
-
-    // Upload option
-    if (selectedOption == 1) {
-      renderer.fillRect(screen.x, optionY + optionHeight - 2, screen.width - 1, optionHeight);
-    }
-    renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, optionY + optionHeight,
-                      tr(STR_UPLOAD_LOCAL), selectedOption != 1);
 
     // Bottom button hints
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
@@ -699,25 +739,46 @@ void KOReaderSyncActivity::render(RenderLock&&) {
   }
 
   if (state == NO_REMOTE_PROGRESS) {
-    UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top, tr(STR_NO_REMOTE_MSG), true, EpdFontFamily::BOLD);
-    UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top + 40, tr(STR_UPLOAD_PROMPT));
+    const int sideX = screen.x + metrics.contentSidePadding;
+    const int lhFoot = renderer.getLineHeight(UI_10_FONT_ID);
+    const int LABEL_ROW = renderer.getLineHeight(UI_12_FONT_ID) + 2;
+    const int SECTION_GAP = 10;
 
-    if (bmSynced) {
-      char bmStr[96];
-      snprintf(bmStr, sizeof(bmStr), tr(STR_BOOKMARK_DIFF_FORMAT), bmRemoteCount, bmLocalCount, bmMergedCount);
-      UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top + 90, bmStr);
-      char bmStatusStr[96];
-      snprintf(bmStatusStr, sizeof(bmStatusStr), tr(STR_BOOKMARK_SYNC_STATUS_FORMAT),
-               bmFetchOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER),
-               bmUploadOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER));
-      UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top + 115, bmStatusStr);
-    }
-    if (statsSynced) {
-      char durBuf[24];
-      BookReadingStats::formatDuration(statsTotalAllDevices, durBuf, sizeof(durBuf));
-      char statsStr[96];
-      snprintf(statsStr, sizeof(statsStr), tr(STR_STATS_ALL_DEVICES_FORMAT), durBuf);
-      UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top + 140, statsStr);
+    // Centered prompt (UI_12 bold title to match SHOWING_RESULT's hierarchy).
+    int y = top;
+    UITheme::drawCenteredText(renderer, screen, UI_12_FONT_ID, y, tr(STR_NO_REMOTE_MSG), true, EpdFontFamily::BOLD);
+    y += LABEL_ROW;
+    UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, y, tr(STR_UPLOAD_PROMPT));
+    y += renderer.getLineHeight(UI_10_FONT_ID) + SECTION_GAP;
+
+    // Same "Also synced" footer as SHOWING_RESULT: passive info, extra gap above.
+    if (bmSynced || statsSynced) {
+      y += SECTION_GAP;
+      renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_ALSO_SYNCED), true, EpdFontFamily::BOLD);
+      y += lhFoot + 2;
+      char buf[128];
+      if (bmSynced) {
+        // Two lines: "Bookmarks" + counts, then indented fetch/upload status (one line overflows).
+        char bmCounts[96];
+        snprintf(bmCounts, sizeof(bmCounts), tr(STR_BOOKMARK_DIFF_FORMAT), bmRemoteCount, bmLocalCount, bmMergedCount);
+        snprintf(buf, sizeof(buf), "%s  %s", tr(STR_BOOKMARKS), bmCounts);
+        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+        y += lhFoot + 2;
+        char bmStatusStr[64];
+        snprintf(bmStatusStr, sizeof(bmStatusStr), tr(STR_BOOKMARK_SYNC_STATUS_FORMAT),
+                 bmFetchOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER),
+                 bmUploadOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER));
+        snprintf(buf, sizeof(buf), "  %s", bmStatusStr);
+        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+        y += lhFoot + 2;
+      }
+      if (statsSynced) {
+        if (bmSynced) y += 6;  // separate reading time from the bookmark block above
+        char durBuf[24];
+        BookReadingStats::formatDuration(statsTotalAllDevices, durBuf, sizeof(durBuf));
+        snprintf(buf, sizeof(buf), tr(STR_STATS_ALL_DEVICES_FORMAT), durBuf);
+        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+      }
     }
 
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_UPLOAD), "", "");
