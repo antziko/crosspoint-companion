@@ -427,6 +427,13 @@ void FileBrowserActivity::render(RenderLock&&) {
       (mode == Mode::PickFirmware)
           ? std::string(tr(STR_SELECT_FIRMWARE_FILE))
           : ((basepath == "/") ? std::string(tr(STR_SD_CARD)) : basepath.substr(basepath.rfind('/') + 1));
+  // Append count of files (entries that are not directories) in this folder.
+  size_t fileCount = 0;
+  for (const auto& f : files)
+    if (f.name.back() != '/') fileCount++;
+  char countBuf[16];
+  snprintf(countBuf, sizeof(countBuf), " (%u)", static_cast<unsigned>(fileCount));
+  folderName += countBuf;
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, folderName.c_str());
 
   const int pathLineHeight = renderer.getLineHeight(SMALL_FONT_ID);

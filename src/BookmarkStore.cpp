@@ -67,6 +67,53 @@ bool sameTomb(const Tombstone& a, const Tombstone& b) {
 bool tombHits(const Tombstone& t, const Bookmark& b) {
   return keyMatch(t.spineIndex, t.paragraphIndex, t.progress, b.spineIndex, b.paragraphIndex, b.progress);
 }
+
+// Rewrite the book-path string embedded in a relocated bookmark .bin (written at
+// writeToFile() below) to `newPath`. Without this, loadForBook()'s path-sanity
+// check in readFromFile() rejects the renamed file as belonging to a different
+// book (storedPath != bookFilePath) and the bookmarks silently fail to load.
+// Header (version, count) + title/author strings + bookmark records are copied
+// verbatim; only the path string changes, so this works across all file versions.
+bool rewriteEmbeddedPath(const std::string& binPath, const std::string& newPath) {
+  std::string header;  // version byte + count field, copied verbatim
+  std::string title, author, oldPath;
+  std::vector<uint8_t> records;
+
+  {
+    HalFile f;
+    if (!Storage.openFileForRead("BKS", binPath, f)) return false;
+
+    uint8_t version = 0;
+    serialization::readPod(f, version);
+    if (!isKnownVersion(version)) return false;
+
+    const size_t countLen = (version == LEGACY_VERSION) ? sizeof(uint8_t) : sizeof(uint16_t);
+    header.resize(1 + countLen);
+    header[0] = static_cast<char>(version);
+    if (f.read(&header[1], countLen) != static_cast<int>(countLen)) return false;
+
+    if (!serialization::readString(f, title) || !serialization::readString(f, author) ||
+        !serialization::readString(f, oldPath)) {
+      return false;
+    }
+
+    const int remaining = f.available();
+    if (remaining < 0) return false;
+    records.resize(remaining);
+    if (!records.empty() && f.read(records.data(), records.size()) != remaining) return false;
+
+    f.close();  // must close before reopening the same path for write
+  }
+
+  HalFile out;
+  if (!Storage.openFileForWrite("BKS", binPath, out)) return false;
+  out.write(header.data(), header.size());
+  serialization::writeString(out, title);
+  serialization::writeString(out, author);
+  serialization::writeString(out, newPath);
+  if (!records.empty()) out.write(records.data(), records.size());
+  return true;
+}
 }  // namespace
 
 BookmarkStore BookmarkStore::instance;
@@ -292,8 +339,15 @@ bool BookmarkStore::readFromFile() {
   }
   const std::string& storedPath = tmp;
   if (storedPath != bookFilePath) {
-    LOG_ERR("BKS", "Bookmark file path mismatch, file may belong to a different book");
-    return false;
+    // This file was located via crc(bookFilePath) (the current book's path), so it
+    // belongs to this book -- a CRC32 collision with some other path is
+    // astronomically unlikely. A mismatch here means the embedded path is stale
+    // from a relocation done before relocateForFilePath() patched it (or before
+    // that fix existed). Self-heal: accept the bookmarks and persist the corrected
+    // path on the next save, instead of silently dropping them.
+    LOG_ERR("BKS", "Bookmark file has stale embedded path '%s' (expected '%s'), self-healing", storedPath.c_str(),
+           bookFilePath.c_str());
+    dirty = true;
   }
 
   bookmarks.clear();
@@ -709,16 +763,31 @@ void BookmarkStore::relocateForFilePath(const std::string& srcPath, const std::s
       esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(dstPath.data()), static_cast<uint32_t>(dstPath.size()));
   const std::string srcBase = std::string(BOOKMARKS_DIR) + "/" + bookType + "_" + std::to_string(srcCrc);
   const std::string dstBase = std::string(BOOKMARKS_DIR) + "/" + bookType + "_" + std::to_string(dstCrc);
-  // Re-key both the bookmark file and its tombstone sidecar. Non-fatal on failure.
-  for (const char* ext : {".bin", ".tomb"}) {
-    const std::string src = srcBase + ext;
-    if (!Storage.exists(src.c_str())) continue;
-    const std::string dst = dstBase + ext;
-    if (!Storage.rename(src.c_str(), dst.c_str())) {
-      LOG_ERR("BKS", "Failed to relocate %s -> %s (non-fatal)", src.c_str(), dst.c_str());
+
+  // Tombstone sidecar: plain rename, no embedded path to fix.
+  const std::string srcTomb = srcBase + ".tomb";
+  if (Storage.exists(srcTomb.c_str())) {
+    const std::string dstTomb = dstBase + ".tomb";
+    if (Storage.rename(srcTomb.c_str(), dstTomb.c_str())) {
+      LOG_DBG("BKS", "Relocated %s -> %s", srcTomb.c_str(), dstTomb.c_str());
     } else {
-      LOG_DBG("BKS", "Relocated %s -> %s", src.c_str(), dst.c_str());
+      LOG_ERR("BKS", "Failed to relocate %s -> %s (non-fatal)", srcTomb.c_str(), dstTomb.c_str());
     }
+  }
+
+  // Bookmark file: rename, then patch its embedded book path (see writeToFile())
+  // to dstPath so loadForBook()'s path-sanity check doesn't reject the relocated
+  // file as belonging to a different book.
+  const std::string srcBin = srcBase + ".bin";
+  if (!Storage.exists(srcBin.c_str())) return;
+  const std::string dstBin = dstBase + ".bin";
+  if (!Storage.rename(srcBin.c_str(), dstBin.c_str())) {
+    LOG_ERR("BKS", "Failed to relocate %s -> %s (non-fatal)", srcBin.c_str(), dstBin.c_str());
+    return;
+  }
+  LOG_DBG("BKS", "Relocated %s -> %s", srcBin.c_str(), dstBin.c_str());
+  if (!rewriteEmbeddedPath(dstBin, dstPath)) {
+    LOG_ERR("BKS", "Failed to patch embedded path in %s (non-fatal)", dstBin.c_str());
   }
 }
 

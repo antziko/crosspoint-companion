@@ -88,6 +88,8 @@ struct HeroDetails {
   char durationText[24] = {};
   bool hasTodayDuration = false;
   char todayDurationText[24] = {};
+  bool hasEstRemaining = false;
+  char estRemainingText[24] = {};
   bool hasLastRead = false;
   char lastReadText[64] = {};
 };
@@ -120,6 +122,16 @@ HeroDetails loadHeroDetails(const RecentBook& book) {
     BookReadingStats::formatDuration(stats.displayTotalSeconds(), details.durationText, sizeof(details.durationText));
     details.hasDuration = true;
   }
+  // Mirrors BookStatsActivity's "Est. left" estimate (BookStatsActivity.cpp:145-159):
+  // cross-device total time projected across the remaining progress.
+  if (details.hasProgress && details.hasDuration && details.progressPercent > 0 && details.progressPercent < 100) {
+    const uint64_t remaining = (static_cast<uint64_t>(stats.displayTotalSeconds()) *
+                                static_cast<uint64_t>(100 - details.progressPercent)) /
+                               static_cast<uint64_t>(details.progressPercent);
+    BookReadingStats::formatDuration(static_cast<uint32_t>(std::min<uint64_t>(remaining, UINT32_MAX)),
+                                     details.estRemainingText, sizeof(details.estRemainingText));
+    details.hasEstRemaining = true;
+  }
   // "Last read" shows the most recent dated session across devices.
   const bool remoteNewer = stats.remoteLastReadDayIndex > stats.lastReadDayIndex;
   const uint32_t lastDay = remoteNewer ? stats.remoteLastReadDayIndex : stats.lastReadDayIndex;
@@ -130,22 +142,30 @@ HeroDetails loadHeroDetails(const RecentBook& book) {
     details.hasLastRead = true;
   }
 
-  if (halClock.isAvailable()) {
-    uint8_t dow = 0, day = 0, month = 0, hour = 0, minute = 0;
-    uint16_t year = 0;
-    // Local calendar day, not raw getDate(): recordReadingSession buckets
-    // heatmapAnchorDay by getLocalDateTime, so the "today" comparison must
-    // use the same basis or the line vanishes whenever UTC and local dates
-    // differ (e.g. local 00:00-08:00 at UTC+8).
-    if (halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, dow, day, month, year, hour, minute)) {
-      const uint32_t todayIdx = readingHistoryDayIndex(year, month, day);
-      auto history = makeUniqueNoThrow<ReadingTimeHistory>();
-      if (history) {
-        ReadingTimeHistory::load(epub.getCachePath() + "/book_time_history.bin", *history);
-        if (history->heatmapAnchorDay == todayIdx && history->heatmapAnchorSeconds > 0) {
-          BookReadingStats::formatDuration(history->heatmapAnchorSeconds, details.todayDurationText,
-                                           sizeof(details.todayDurationText));
-          details.hasTodayDuration = true;
+  // Today's reading time. Always shown (defaults to 0) once the book has a
+  // reading position, so the hero line stays put across days. The anchor-day
+  // total is adopted only when the clock confirms that anchor day is the local
+  // "today"; without a usable clock (e.g. X3 with no/unset RTC) we can't
+  // attribute a day, so it stays 0 rather than hiding the line.
+  if (details.hasProgress) {
+    snprintf(details.todayDurationText, sizeof(details.todayDurationText), "0s");
+    details.hasTodayDuration = true;
+    if (halClock.isAvailable()) {
+      uint8_t dow = 0, day = 0, month = 0, hour = 0, minute = 0;
+      uint16_t year = 0;
+      // Local calendar day, not raw getDate(): recordReadingSession buckets
+      // heatmapAnchorDay by getLocalDateTime, so the "today" comparison must
+      // use the same basis or the count vanishes whenever UTC and local dates
+      // differ (e.g. local 00:00-08:00 at UTC+8).
+      if (halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, dow, day, month, year, hour, minute)) {
+        const uint32_t todayIdx = readingHistoryDayIndex(year, month, day);
+        auto history = makeUniqueNoThrow<ReadingTimeHistory>();
+        if (history) {
+          ReadingTimeHistory::load(epub.getCachePath() + "/book_time_history.bin", *history);
+          if (history->heatmapAnchorDay == todayIdx && history->heatmapAnchorSeconds > 0) {
+            BookReadingStats::formatDuration(history->heatmapAnchorSeconds, details.todayDurationText,
+                                             sizeof(details.todayDurationText));
+          }
         }
       }
     }
@@ -361,6 +381,10 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
       char todayLine[40];
       snprintf(todayLine, sizeof(todayLine), "%s: %s", tr(STR_STATS_TODAY), details.todayDurationText);
       renderer.drawText(SMALL_FONT_ID, textX, textY, todayLine, true);
+      if (details.hasEstRemaining) {
+        const int estLineW = renderer.getTextWidth(SMALL_FONT_ID, details.estRemainingText);
+        renderer.drawText(SMALL_FONT_ID, textX + textW - estLineW, textY, details.estRemainingText, true);
+      }
       textY += textLineH + kLineGap;
     }
   } else if (details.hasDuration) {
