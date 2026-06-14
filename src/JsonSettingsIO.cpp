@@ -70,6 +70,7 @@ void applyLegacyStatusBarSettings(CrossPointSettings& settings) {
 bool JsonSettingsIO::saveState(const CrossPointState& s, const char* path) {
   JsonDocument doc;
   doc["openEpubPath"] = s.openEpubPath;
+  doc["lastSleepImagePath"] = s.lastSleepImagePath;
   JsonArray deckArr = doc["sleepDeckShown"].to<JsonArray>();
   for (size_t i = 0; i < sizeof(s.sleepDeckShown); i++) deckArr.add(s.sleepDeckShown[i]);
   doc["sleepDeckSize"] = s.sleepDeckSize;
@@ -92,6 +93,7 @@ bool JsonSettingsIO::loadState(CrossPointState& s, const char* json) {
   }
 
   s.openEpubPath = doc["openEpubPath"] | std::string("");
+  s.lastSleepImagePath = doc["lastSleepImagePath"] | std::string("");
   // Sleep shuffle-bag deck. Absent keys (old state.json) leave the deck cleared,
   // so the next wake just starts a fresh cycle — no migration needed.
   memset(s.sleepDeckShown, 0, sizeof(s.sleepDeckShown));

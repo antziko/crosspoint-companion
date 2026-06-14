@@ -1,5 +1,6 @@
 #include "SleepActivity.h"
 
+#include <BitmapRenderUtils.h>
 #include <Epub.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
@@ -19,6 +20,16 @@
 
 void SleepActivity::onEnter() {
   Activity::onEnter();
+
+  // Drop any wallpaper recorded for a previous sleep. Only renderCustomSleepScreen's
+  // random folder pick re-sets it below; every other sleep screen (blank/cover/
+  // quick-resume/fixed /sleep.bmp) leaves it empty so the on-wake review prompt does
+  // not fire for an image that was never shown. Save only when it actually changes —
+  // sleeps are infrequent, but SPIFFS erase cycles are finite.
+  if (!APP_STATE.lastSleepImagePath.empty()) {
+    APP_STATE.lastSleepImagePath.clear();
+    APP_STATE.saveToFile();
+  }
 
   const bool renderQuickResume =
       SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
@@ -184,6 +195,11 @@ void SleepActivity::renderCustomSleepScreen() const {
           bitmap.setOneBitDither(renderer.isX3());          // X3: 1-bit halftone, avoids wash-out
           bitmap.setImageDitherMode(SETTINGS.imageDither);  // blue/bayer/error-diffusion (X4)
           if (bitmap.parseHeaders() == BmpReaderError::Ok) {
+            // Record the shown wallpaper so the on-wake review prompt can offer
+            // keep/remove for it. Skipped implicitly for already-kept images (the
+            // prompt ignores ".keep.bmp" picks on wake).
+            APP_STATE.lastSleepImagePath = filename;
+            APP_STATE.saveToFile();
             renderBitmapSleepScreen(bitmap);
             randFile.close();
             dir.close();
@@ -282,20 +298,7 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap) const {
   renderer.displayBuffer(HalDisplay::HALF_REFRESH);
 
   if (hasGreyscale) {
-    bitmap.rewindToData();
-    renderer.clearScreen(0x00);
-    renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
-    renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, cropX, cropY);
-    renderer.copyGrayscaleLsbBuffers();
-
-    bitmap.rewindToData();
-    renderer.clearScreen(0x00);
-    renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
-    renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, cropX, cropY);
-    renderer.copyGrayscaleMsbBuffers();
-
-    renderer.displayGrayBuffer();
-    renderer.setRenderMode(GfxRenderer::BW);
+    BitmapRenderUtils::applyGrayscaleOverlay(renderer, bitmap, x, y, pageWidth, pageHeight, cropX, cropY);
   }
 }
 

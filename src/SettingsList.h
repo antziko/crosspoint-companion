@@ -162,6 +162,8 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                                   {StrId::STR_DARK, StrId::STR_LIGHT, StrId::STR_CUSTOM, StrId::STR_COVER,
                                    StrId::STR_NONE_OPT, StrId::STR_COVER_CUSTOM, StrId::STR_QUICK_RESUME},
                                   "sleepScreen", StrId::STR_CAT_DISPLAY));
+    v.push_back(SettingInfo::Toggle(StrId::STR_SLEEP_REVIEW_ON_WAKE, &CrossPointSettings::reviewSleepImageOnWake,
+                                    "reviewSleepImageOnWake", StrId::STR_CAT_DISPLAY));
     v.push_back(SettingInfo::Enum(StrId::STR_SLEEP_COVER_MODE, &CrossPointSettings::sleepScreenCoverMode,
                                   {StrId::STR_FIT, StrId::STR_CROP}, "sleepScreenCoverMode", StrId::STR_CAT_DISPLAY));
     v.push_back(SettingInfo::Enum(StrId::STR_SLEEP_COVER_FILTER, &CrossPointSettings::sleepScreenCoverFilter,

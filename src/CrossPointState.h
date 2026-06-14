@@ -15,9 +15,14 @@ class CrossPointState {
   static constexpr uint16_t SLEEP_DECK_MAX = 512;  // max images tracked per cycle
 
   std::string openEpubPath;
+  // Path of the wallpaper shown when entering the last sleep, when it was a random
+  // pick from the /sleep folder. Persisted so the on-wake review prompt knows which
+  // image to offer keep/remove for. Empty for non-folder sleep screens (blank, cover,
+  // quick-resume, /sleep.bmp). Cleared once the prompt has been handled.
+  std::string lastSleepImagePath;
   uint8_t sleepDeckShown[SLEEP_DECK_MAX / 8] = {};  // bit i set => image i shown this cycle (64 bytes)
-  uint16_t sleepDeckSize = 0;                        // folder size the current cycle was built for
-  uint16_t sleepDeckShownCount = 0;                  // images shown so far this cycle
+  uint16_t sleepDeckSize = 0;                       // folder size the current cycle was built for
+  uint16_t sleepDeckShownCount = 0;                 // images shown so far this cycle
   uint8_t readerActivityLoadCount = 0;
   bool lastSleepFromReader = false;
   bool showBootScreen = true;
@@ -27,9 +32,9 @@ class CrossPointState {
   uint8_t activeOrientation = 0;
 
   // Sleep deck helpers (see SLEEP_DECK_MAX above).
-  bool isSleepShown(uint16_t idx) const;   // already shown this cycle?
-  void markSleepShown(uint16_t idx);       // record idx as shown this cycle
-  void resetSleepDeck(uint16_t size);      // begin a fresh cycle for `size` images
+  bool isSleepShown(uint16_t idx) const;  // already shown this cycle?
+  void markSleepShown(uint16_t idx);      // record idx as shown this cycle
+  void resetSleepDeck(uint16_t size);     // begin a fresh cycle for `size` images
   ~CrossPointState() = default;
 
   // Get singleton instance

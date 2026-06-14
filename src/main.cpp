@@ -2,6 +2,7 @@
 #include <Epub.h>
 #include <FontCacheManager.h>
 #include <FontDecompressor.h>
+#include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalClock.h>
 #include <HalDisplay.h>
@@ -31,6 +32,7 @@
 #include "WifiCredentialStore.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/boot_sleep/SleepImageReviewActivity.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -577,6 +579,13 @@ void setup() {
       break;
   }
 
+  // On-wake wallpaper review: a random /sleep-folder image was shown entering the last
+  // sleep, the feature is on, the file still exists, and it is not already kept. Only the
+  // normal home/reader branches below honour this (recovery/panic/silent route earlier).
+  const bool reviewSleepImage = SETTINGS.reviewSleepImageOnWake && !APP_STATE.lastSleepImagePath.empty() &&
+                                !FsHelpers::isKeptSleepImage(APP_STATE.lastSleepImagePath) &&
+                                Storage.exists(APP_STATE.lastSleepImagePath.c_str());
+
   if (recoveryFirmwareMode) {
     // Skip normal home/reader routing: jump straight into the SD firmware picker.
     activityManager.replaceActivity(
@@ -599,14 +608,25 @@ void setup() {
              mappedInputManager.isPressed(MappedInputManager::Button::Back) || APP_STATE.readerActivityLoadCount > 0) {
     // Boot to home screen if no book is open, last sleep was not from reader, back button is held, or reader activity
     // crashed (indicated by readerActivityLoadCount > 0)
-    activityManager.goHome();
+    if (reviewSleepImage) {
+      activityManager.replaceActivity(std::make_unique<SleepImageReviewActivity>(
+          renderer, mappedInputManager, APP_STATE.lastSleepImagePath, /*resumeToReader=*/false, std::string()));
+    } else {
+      activityManager.goHome();
+    }
   } else {
     // Clear app state to avoid getting into a boot loop if the epub doesn't load
     const auto path = APP_STATE.openEpubPath;
     APP_STATE.openEpubPath = "";
     APP_STATE.readerActivityLoadCount++;
     APP_STATE.saveToFile();
-    activityManager.goToReader(path);
+    if (reviewSleepImage) {
+      // Review first, then resume the book (the review activity routes onward).
+      activityManager.replaceActivity(std::make_unique<SleepImageReviewActivity>(
+          renderer, mappedInputManager, APP_STATE.lastSleepImagePath, /*resumeToReader=*/true, path));
+    } else {
+      activityManager.goToReader(path);
+    }
   }
 
   if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_READER) {

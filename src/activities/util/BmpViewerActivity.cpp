@@ -1,6 +1,7 @@
 #include "BmpViewerActivity.h"
 
 #include <Bitmap.h>
+#include <BitmapRenderUtils.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
@@ -93,31 +94,15 @@ void BmpViewerActivity::renderImage() {
   // 1. Open the file
   if (Storage.openFileForRead("BMP", filePath, file)) {
     Bitmap bitmap(file, true);
-    bitmap.setOneBitDither(renderer.isX3());  // X3: 1-bit halftone, full tonal detail
+    bitmap.setOneBitDither(renderer.isX3());          // X3: 1-bit halftone, full tonal detail
     bitmap.setImageDitherMode(SETTINGS.imageDither);  // blue/bayer/error-diffusion (X4)
 
     // 2. Parse headers to get dimensions
     if (bitmap.parseHeaders() == BmpReaderError::Ok) {
-      int x, y;
-
-      if (bitmap.getWidth() > pageWidth || bitmap.getHeight() > pageHeight) {
-        float ratio = static_cast<float>(bitmap.getWidth()) / static_cast<float>(bitmap.getHeight());
-        const float screenRatio = static_cast<float>(pageWidth) / static_cast<float>(pageHeight);
-
-        if (ratio > screenRatio) {
-          // Wider than screen
-          x = 0;
-          y = std::round((static_cast<float>(pageHeight) - static_cast<float>(pageWidth) / ratio) / 2);
-        } else {
-          // Taller than screen
-          x = std::round((static_cast<float>(pageWidth) - static_cast<float>(pageHeight) * ratio) / 2);
-          y = 0;
-        }
-      } else {
-        // Center small images
-        x = (pageWidth - bitmap.getWidth()) / 2;
-        y = (pageHeight - bitmap.getHeight()) / 2;
-      }
+      const auto place =
+          BitmapRenderUtils::centeredPlacement(bitmap.getWidth(), bitmap.getHeight(), pageWidth, pageHeight);
+      const int x = place.x;
+      const int y = place.y;
 
       // 4. Prepare Rendering
       bool hasPrevious = !prevName.empty();
@@ -130,7 +115,6 @@ void BmpViewerActivity::renderImage() {
       const char* confirmLabel = coverExists ? tr(STR_CLEAR_BUTTON) : tr(STR_SET_SLEEP_COVER);
       const auto labels =
           mappedInput.mapLabels(tr(STR_BACK), confirmLabel, (hasPrevious ? "<" : ""), (hasNext ? ">" : ""));
-
 
       // X4 (4-level grayscale) needs the multi-pass grayscale render to actually
       // show grays; X3 produces a 1-bit halftone (0/3) so a single BW pass is
@@ -150,22 +134,9 @@ void BmpViewerActivity::renderImage() {
       renderer.displayBuffer(hasGreyscale ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
 
       if (hasGreyscale) {
-        // Overlay the 4-level grayscale planes (LSB then MSB), then drive the
-        // panel with the combined gray frame — same sequence as the sleep cover.
-        bitmap.rewindToData();
-        renderer.clearScreen(0x00);
-        renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
-        renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, 0, 0);
-        renderer.copyGrayscaleLsbBuffers();
-
-        bitmap.rewindToData();
-        renderer.clearScreen(0x00);
-        renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
-        renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, 0, 0);
-        renderer.copyGrayscaleMsbBuffers();
-
-        renderer.displayGrayBuffer();
-        renderer.setRenderMode(GfxRenderer::BW);
+        // Overlay the 4-level grayscale planes, then drive the panel with the
+        // combined gray frame — same sequence as the sleep cover.
+        BitmapRenderUtils::applyGrayscaleOverlay(renderer, bitmap, x, y, pageWidth, pageHeight);
       }
 
     } else {

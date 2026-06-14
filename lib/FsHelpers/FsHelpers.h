@@ -39,6 +39,11 @@ inline bool hasPngExtension(const String& fileName) {
 // Check for .bmp extension (case-insensitive)
 bool hasBmpExtension(std::string_view fileName);
 
+// True if the path is a "kept" sleep wallpaper, i.e. ends with ".keep.bmp"
+// (case-insensitive). Kept images stay in the sleep rotation but the on-wake
+// review prompt skips them — the user already decided to keep them.
+bool isKeptSleepImage(std::string_view fileName);
+
 // Check for .gif extension (case-insensitive)
 bool hasGifExtension(std::string_view fileName);
 inline bool hasGifExtension(const String& fileName) {

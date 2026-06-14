@@ -200,6 +200,9 @@ class CrossPointSettings {
 
   // Sleep screen settings
   uint8_t sleepScreen = DARK;
+  // When set, after a random /sleep-folder wallpaper was shown, the next wake offers
+  // a keep/remove prompt for that image before landing on Home/Reader. Off by default.
+  uint8_t reviewSleepImageOnWake = 0;
   // Sleep screen cover mode settings
   uint8_t sleepScreenCoverMode = FIT;
   // Sleep screen cover filter

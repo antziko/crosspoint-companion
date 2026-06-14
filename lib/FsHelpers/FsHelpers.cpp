@@ -122,6 +122,8 @@ bool hasPngExtension(std::string_view fileName) { return checkFileExtension(file
 
 bool hasBmpExtension(std::string_view fileName) { return checkFileExtension(fileName, ".bmp"); }
 
+bool isKeptSleepImage(std::string_view fileName) { return checkFileExtension(fileName, ".keep.bmp"); }
+
 bool hasGifExtension(std::string_view fileName) { return checkFileExtension(fileName, ".gif"); }
 
 bool hasEpubExtension(std::string_view fileName) { return checkFileExtension(fileName, ".epub"); }
