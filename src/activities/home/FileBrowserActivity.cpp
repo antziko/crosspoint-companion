@@ -74,7 +74,8 @@ void FileBrowserActivity::loadWindow(filewindow::WindowSelector::Mode mode_, con
   filewindow::WindowSelector sel(mode_, cursor, windowCapacity(), &entryNameLess);
   std::string globalMin, globalMax;
   bool haveBounds = false;
-  size_t lessThanCursor = 0;  // matches sorting strictly before `cursor` (for the global rank)
+  size_t lessThanCursor = 0;       // matches sorting strictly before `cursor` (for the global rank)
+  size_t filesLessThanCursor = 0;  // non-dir matches strictly before `cursor` (for the files-only number)
 
   auto root = Storage.open(basepath.c_str());
   if (!root || !root.isDirectory()) return;
@@ -90,7 +91,10 @@ void FileBrowserActivity::loadWindow(filewindow::WindowSelector::Mode mode_, con
       e.isDir = isDir;
       ++totalMatches;
       if (!isDir) ++totalFiles;
-      if (!cursor.empty() && entryNameLess(e.name, cursor)) ++lessThanCursor;
+      if (!cursor.empty() && entryNameLess(e.name, cursor)) {
+        ++lessThanCursor;
+        if (!isDir) ++filesLessThanCursor;
+      }
       if (!haveBounds) {
         globalMin = globalMax = e.name;
         haveBounds = true;
@@ -109,8 +113,18 @@ void FileBrowserActivity::loadWindow(filewindow::WindowSelector::Mode mode_, con
   for (const auto& e : win) files.push_back({e.name, e.size});
   if (files.empty()) {
     windowStartRank = 0;
+    windowStartFileRank = 0;
     return;
   }
+
+  // Files-only count within the loaded window (dirs carry a trailing '/').
+  size_t filesInWindow = 0;
+  for (const auto& f : files) {
+    if (f.name.empty() || f.name.back() != '/') ++filesInWindow;
+  }
+  // The cursor entry (a real prior window edge for After mode) is a file iff its name
+  // has no trailing '/'. After mode counts it as before the new window's first row.
+  const bool cursorIsFile = !cursor.empty() && cursor.back() != '/';
 
   winFirst = files.front().name;
   winLast = files.back().name;
@@ -123,18 +137,23 @@ void FileBrowserActivity::loadWindow(filewindow::WindowSelector::Mode mode_, con
   switch (mode_) {
     case filewindow::WindowSelector::Mode::First:
       windowStartRank = 0;
+      windowStartFileRank = 0;
       break;
     case filewindow::WindowSelector::Mode::Last:
       windowStartRank = totalMatches - files.size();
+      windowStartFileRank = totalFiles - filesInWindow;
       break;
     case filewindow::WindowSelector::Mode::AtOrAfter:
       windowStartRank = lessThanCursor;
+      windowStartFileRank = filesLessThanCursor;
       break;
     case filewindow::WindowSelector::Mode::After:
       windowStartRank = lessThanCursor + 1;  // skip the cursor entry itself
+      windowStartFileRank = filesLessThanCursor + (cursorIsFile ? 1 : 0);
       break;
     case filewindow::WindowSelector::Mode::Before:
       windowStartRank = (lessThanCursor >= files.size()) ? lessThanCursor - files.size() : 0;
+      windowStartFileRank = (filesLessThanCursor >= filesInWindow) ? filesLessThanCursor - filesInWindow : 0;
       break;
   }
 }
@@ -563,9 +582,16 @@ void FileBrowserActivity::render(RenderLock&&) {
     GUI.drawList(
         renderer, Rect{0, contentTop, pageWidth, contentHeight}, files.size(), selectorIndex,
         [this](int index) {
-          // Continuous global numbering across pages (#1.. over the whole folder).
+          // Number files only (folders are unnumbered), continuous across pages: 1., 2., …
+          // over the whole folder. The files-only rank skips interspersed directories.
+          const bool isDir = !files[index].name.empty() && files[index].name.back() == '/';
+          if (isDir) return getFileName(files[index].name);
+          size_t filesBefore = 0;
+          for (int i = 0; i < index; i++) {
+            if (files[i].name.empty() || files[i].name.back() != '/') ++filesBefore;
+          }
           char prefix[16];
-          snprintf(prefix, sizeof(prefix), "#%u. ", static_cast<unsigned>(windowStartRank + index + 1));
+          snprintf(prefix, sizeof(prefix), "%u. ", static_cast<unsigned>(windowStartFileRank + filesBefore + 1));
           return prefix + getFileName(files[index].name);
         },
         nullptr,
