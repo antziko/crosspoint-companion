@@ -74,6 +74,7 @@ void FileBrowserActivity::loadWindow(filewindow::WindowSelector::Mode mode_, con
   filewindow::WindowSelector sel(mode_, cursor, windowCapacity(), &entryNameLess);
   std::string globalMin, globalMax;
   bool haveBounds = false;
+  size_t lessThanCursor = 0;  // matches sorting strictly before `cursor` (for the global rank)
 
   auto root = Storage.open(basepath.c_str());
   if (!root || !root.isDirectory()) return;
@@ -89,6 +90,7 @@ void FileBrowserActivity::loadWindow(filewindow::WindowSelector::Mode mode_, con
       e.isDir = isDir;
       ++totalMatches;
       if (!isDir) ++totalFiles;
+      if (!cursor.empty() && entryNameLess(e.name, cursor)) ++lessThanCursor;
       if (!haveBounds) {
         globalMin = globalMax = e.name;
         haveBounds = true;
@@ -105,13 +107,36 @@ void FileBrowserActivity::loadWindow(filewindow::WindowSelector::Mode mode_, con
   const auto& win = sel.window();
   files.reserve(win.size());
   for (const auto& e : win) files.push_back({e.name, e.size});
-  if (files.empty()) return;
+  if (files.empty()) {
+    windowStartRank = 0;
+    return;
+  }
 
   winFirst = files.front().name;
   winLast = files.back().name;
   // A page exists in a direction iff the window edge isn't the global edge.
   hasPrev = entryNameLess(globalMin, winFirst);
   hasNext = entryNameLess(winLast, globalMax);
+
+  // 0-based global rank of the window's first row, from the single scan above. `cursor`
+  // for After/Before is a real matching entry (a prior window edge), so it is counted.
+  switch (mode_) {
+    case filewindow::WindowSelector::Mode::First:
+      windowStartRank = 0;
+      break;
+    case filewindow::WindowSelector::Mode::Last:
+      windowStartRank = totalMatches - files.size();
+      break;
+    case filewindow::WindowSelector::Mode::AtOrAfter:
+      windowStartRank = lessThanCursor;
+      break;
+    case filewindow::WindowSelector::Mode::After:
+      windowStartRank = lessThanCursor + 1;  // skip the cursor entry itself
+      break;
+    case filewindow::WindowSelector::Mode::Before:
+      windowStartRank = (lessThanCursor >= files.size()) ? lessThanCursor - files.size() : 0;
+      break;
+  }
 }
 
 void FileBrowserActivity::loadFirstWindow() {
@@ -537,7 +562,13 @@ void FileBrowserActivity::render(RenderLock&&) {
   } else {
     GUI.drawList(
         renderer, Rect{0, contentTop, pageWidth, contentHeight}, files.size(), selectorIndex,
-        [this](int index) { return getFileName(files[index].name); }, nullptr,
+        [this](int index) {
+          // Continuous global numbering across pages (#1.. over the whole folder).
+          char prefix[16];
+          snprintf(prefix, sizeof(prefix), "#%u. ", static_cast<unsigned>(windowStartRank + index + 1));
+          return prefix + getFileName(files[index].name);
+        },
+        nullptr,
         [this](int index) { return UITheme::getFileIcon(files[index].name); },
         // Trailing value: "<ext>  <size>" on one line (directories show nothing).
         [this](int index) {

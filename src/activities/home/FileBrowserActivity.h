@@ -55,6 +55,7 @@ class FileBrowserActivity final : public Activity {
   bool hasNext = false;        // a matching entry exists after winLast
   size_t totalMatches = 0;     // total matching entries in the folder (dirs + files)
   size_t totalFiles = 0;       // total matching non-directory entries (for the title count)
+  size_t windowStartRank = 0;  // 0-based global rank of the window's first row (for the "#N." prefix)
 
   // Window loading. loadWindow() does the single directory scan; the wrappers pick the mode.
   void loadWindow(filewindow::WindowSelector::Mode mode, const std::string& cursor);
