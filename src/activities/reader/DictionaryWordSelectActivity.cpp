@@ -62,6 +62,8 @@ void DictionaryWordSelectActivity::onEnter() {
   // first deliberate tap and force them to press twice.
   const bool consumeInitialConfirm = mappedInput.isPressed(MappedInputManager::Button::Confirm);
   navigator.load(std::move(words), std::move(rows), std::move(textPool), consumeInitialConfirm);
+  // Opened via the reader's hold-Back gesture? Back is still held — swallow its release once.
+  consumeInitialBackRelease_ = mappedInput.isPressed(MappedInputManager::Button::Back);
   requestUpdate();
 }
 
@@ -331,6 +333,16 @@ void DictionaryWordSelectActivity::loop() {
     return;
   }
 
+  // Swallow the Back release that ended the launching hold-Back gesture (see onEnter), so it
+  // doesn't fall through to the cancel handlers below on the first tick.
+  if (consumeInitialBackRelease_) {
+    const bool released = mappedInput.wasReleased(MappedInputManager::Button::Back);
+    if (!mappedInput.isPressed(MappedInputManager::Button::Back)) {
+      consumeInitialBackRelease_ = false;
+      if (released) return;
+    }
+  }
+
   if (navigator.isEmpty()) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
       DictUtils::cancelAndFinish(*this);
@@ -366,6 +378,10 @@ void DictionaryWordSelectActivity::loop() {
     DictUtils::cancelAndFinish(*this);
     return;
   }
+}
+
+const char* DictionaryWordSelectActivity::confirmHintLabel() const {
+  return mode_ == Mode::HighlightRange ? tr(STR_ADD_HIGHLIGHT) : tr(STR_LOOKUP_SHORT);
 }
 
 void DictionaryWordSelectActivity::handleHighlightInput() {
@@ -468,7 +484,7 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
         // on entry.
         navigator.renderHighlight(renderer, lineHeight);
       }
-      const auto labels = mappedInput.mapLabels("", "", "", "");
+      const auto labels = mappedInput.mapLabels("", confirmHintLabel(), "", "");
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
       prevHighlightIdx_ = currIdx;
@@ -518,7 +534,7 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
     navigator.renderHighlight(renderer, lineHeight);
   }
 
-  const auto labels = mappedInput.mapLabels("", "", "", "");
+  const auto labels = mappedInput.mapLabels("", confirmHintLabel(), "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);
 

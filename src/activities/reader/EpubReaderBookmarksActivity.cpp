@@ -162,11 +162,17 @@ void EpubReaderBookmarksActivity::render(RenderLock&&) {
   // Quote rows show 2 lines of the highlight teaser (title = line 1, subtitle = line 2)
   // by wrapping the resident 64-char snippet — no extra RAM, no .qtext read. The chapter/%
   // subtitle is kept only when the snippet fits one line (and for point bookmarks).
-  const int snippetWrapW = std::max(80, contentWidth - 100);
+  //
+  // The wrap MUST use UI_10_FONT_ID — the font drawList draws the title (line 1) in — or a
+  // narrower-font break overflows when re-rendered larger and gets ellipsized mid-first-line.
+  // Width must stay under the row's text column: contentWidth minus the side padding (20×2),
+  // in-selection padding (8×2), the icon (32) + its gap (8), and the scroll-bar gutter (~9).
+  // Budget ~110 conservatively so a full first line never spills into an ellipsis.
+  const int snippetWrapW = std::max(80, contentWidth - 110);
   const auto getBookmarkTitle = [this, snippetWrapW](int index) -> std::string {
     const struct Bookmark& bm = bookmarks.at(static_cast<size_t>(confirmingDelete >= DELETE_MODE_DISPLAY ? selectorIndex : index));
     if (bm.isQuote() && bm.snippet[0] != '\0') {
-      auto lines = renderer.wrappedText(SMALL_FONT_ID, bm.snippet, snippetWrapW, 2);
+      auto lines = renderer.wrappedText(UI_10_FONT_ID, bm.snippet, snippetWrapW, 2);
       return lines.empty() ? std::string(bm.snippet) : lines[0];
     }
     return bm.snippet[0] != '\0' ? std::string(bm.snippet) : std::string(tr(STR_BOOKMARK_INSTRUCTIONS));
@@ -174,7 +180,7 @@ void EpubReaderBookmarksActivity::render(RenderLock&&) {
   const auto getBookmarkSubtitle = [this, snippetWrapW](int index) -> std::string {
     const struct Bookmark& bm = bookmarks.at(static_cast<size_t>(confirmingDelete >= DELETE_MODE_DISPLAY ? selectorIndex : index));
     if (bm.isQuote() && bm.snippet[0] != '\0') {
-      auto lines = renderer.wrappedText(SMALL_FONT_ID, bm.snippet, snippetWrapW, 2);
+      auto lines = renderer.wrappedText(UI_10_FONT_ID, bm.snippet, snippetWrapW, 2);
       if (lines.size() > 1) return lines[1];  // second line of the highlight text
       // snippet fit one line — fall through to show chapter/% instead
     }
@@ -195,6 +201,12 @@ void EpubReaderBookmarksActivity::render(RenderLock&&) {
     if (bm.isQuote()) return UIIcon::Highlight;
     return bm.returnMark ? UIIcon::BookmarkReturn : UIIcon::Bookmark;
   };
+  const auto getBookmarkSubtitleLarge = [this, snippetWrapW](int index) -> bool {
+    const struct Bookmark& bm =
+        bookmarks.at(static_cast<size_t>(confirmingDelete >= DELETE_MODE_DISPLAY ? selectorIndex : index));
+    if (!bm.isQuote() || bm.snippet[0] == '\0') return false;
+    return renderer.wrappedText(UI_10_FONT_ID, bm.snippet, snippetWrapW, 2).size() > 1;
+  };
 
   if (numBookmarks > 0) {
     if (confirmingDelete >= DELETE_MODE_DISPLAY) {
@@ -202,10 +214,11 @@ void EpubReaderBookmarksActivity::render(RenderLock&&) {
                        tr(STR_CONFIRM_DELETE_BOOKMARK));
 
       GUI.drawList(renderer, Rect{contentX, pageHeight / 2, contentWidth, LINE_HEIGHT}, 1, 0, getBookmarkTitle,
-                   getBookmarkSubtitle, getBookmarkIcon);
+                   getBookmarkSubtitle, getBookmarkIcon, nullptr, false, nullptr, false, getBookmarkSubtitleLarge);
     } else {
       GUI.drawList(renderer, Rect{contentX, listY, contentWidth, listHeight}, numBookmarks, selectorIndex,
-                   getBookmarkTitle, getBookmarkSubtitle, getBookmarkIcon);
+                   getBookmarkTitle, getBookmarkSubtitle, getBookmarkIcon, nullptr, false, nullptr, false,
+                   getBookmarkSubtitleLarge);
 
       GUI.drawHelpText(renderer, Rect{contentX, pageHeight - hintGutterBottom, contentWidth, LINE_HEIGHT},
                        tr(STR_HOLD_CONFIRM_TO_DELETE));

@@ -305,7 +305,8 @@ void RoundedRaffTheme::drawList(const GfxRenderer& renderer, Rect rect, int item
                                 const std::function<std::string(int index)>& rowSubtitle,
                                 const std::function<UIIcon(int index)>& rowIcon,
                                 const std::function<std::string(int index)>& rowValue, bool highlightValue,
-                                const std::function<bool(int index)>& rowDimmed, bool valueSmallFont) const {
+                                const std::function<bool(int index)>& rowDimmed, bool valueSmallFont,
+                                const std::function<bool(int index)>& rowSubtitleLarge) const {
   (void)rowIcon;
   (void)highlightValue;
   (void)rowDimmed;
@@ -363,11 +364,11 @@ void RoundedRaffTheme::drawList(const GfxRenderer& renderer, Rect rect, int item
       } else {
         const int titleY = rowY + subtitleTopPadding;
         const int subtitleY = titleY + titleLineHeight + subtitleInterLineGap;
-        auto subtitle =
-            renderer.truncatedText(kSubtitleFontId, subtitleRaw.c_str(), textAreaWidth, EpdFontFamily::REGULAR);
+        const auto subFont = (rowSubtitleLarge && rowSubtitleLarge(i)) ? kTitleFontId : kSubtitleFontId;
+        auto subtitle = renderer.truncatedText(subFont, subtitleRaw.c_str(), textAreaWidth, EpdFontFamily::REGULAR);
         renderer.drawText(kTitleFontId, rowX + kInteractiveInsetX, titleY, title.c_str(), !isSelected,
                           EpdFontFamily::BOLD);
-        renderer.drawText(kSubtitleFontId, rowX + kInteractiveInsetX, subtitleY, subtitle.c_str(), !isSelected,
+        renderer.drawText(subFont, rowX + kInteractiveInsetX, subtitleY, subtitle.c_str(), !isSelected,
                           EpdFontFamily::REGULAR);
       }
     } else {

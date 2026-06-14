@@ -43,6 +43,7 @@ class EpubReaderActivity final : public Activity {
   bool automaticPageTurnActive = false;
   bool ignoreBackUntilRelease = false;    // Suppress Back bleed-through after dictionary chain exit
   bool ignoreNextConfirmRelease = false;  // Suppress menu open after hold-Confirm gesture fires
+  bool highlightHoldFired = false;        // One-shot guard: hold-Back launched highlight, until Back released
   bool showBookmarkMessage = false;
   bool bookmarkMessageRemoved = false;  // false = "added", true = "removed" text
   bool bookmarkMessageReturn = false;   // true = "return mark added" (overrides added text)
@@ -89,6 +90,13 @@ class EpubReaderActivity final : public Activity {
   // windowed FAST_REFRESH applies the LUT to the full panel and gradually
   // darkens grayscale particles. Cleared at the start of each new render.
   bool lastPageUsedGrayscale = false;
+
+  // True when the current page contains an image. No partial/fast refresh can update
+  // the status-bar strip without darkening the grayscale image (any FAST_REFRESH
+  // charges the LUT) or erasing unrecoverable image pixels, so bookmark toggles on
+  // image pages do a full page re-render instead of the windowed light-refresh.
+  // Set in renderContents().
+  bool lastPageHadImages = false;
 
   // Footnote support
   std::vector<FootnoteEntry> currentPageFootnotes;

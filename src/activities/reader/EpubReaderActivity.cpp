@@ -514,11 +514,17 @@ void EpubReaderActivity::loop() {
     ignoreBackUntilRelease = false;
   }
 
-  // Long press BACK (1s+) goes to file selection
-  if (!suppressBack && mappedInput.isPressed(MappedInputManager::Button::Back) &&
-      mappedInput.getHeldTime() >= ReaderUtils::GO_HOME_MS) {
-    activityManager.goToFileBrowser(epub ? epub->getPath() : "");
+  // Long press BACK (1s+) starts a highlight selection on the current page. The child
+  // word-select swallows the release that ends this launching hold (see its onEnter), so
+  // letting go doesn't immediately cancel; ignoreBackUntilRelease is re-armed on return.
+  if (!suppressBack && section && mappedInput.isPressed(MappedInputManager::Button::Back) &&
+      mappedInput.getHeldTime() >= ReaderUtils::GO_HOME_MS && !highlightHoldFired) {
+    highlightHoldFired = true;  // one-shot until Back is released, so we don't relaunch each tick
+    openHighlightSelect();
     return;
+  }
+  if (highlightHoldFired && !mappedInput.isPressed(MappedInputManager::Button::Back)) {
+    highlightHoldFired = false;
   }
 
   // Short press BACK goes directly to home (or restores position if viewing footnote)
@@ -1077,6 +1083,12 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       startActivityForResult(
           std::make_unique<EpubReaderBookmarksActivity>(renderer, mappedInput, epub->getPath()),
           [this](const ActivityResult& result) {
+            // The bookmark list is a full-screen activity. On return the reader repaints via
+            // the normal FAST_REFRESH cadence, which can't clear the full-screen list image —
+            // it ghosts through ("frozen list"). Force the next text-page paint onto the
+            // HALF_REFRESH ghost-cleanup path so the list is wiped cleanly. (Image/grayscale
+            // pages take their own refresh path and are unaffected.)
+            pagesUntilFullRefresh = 1;
             if (!result.isCancelled) {
               const auto& bm = std::get<BookmarkResult>(result.data);
 
@@ -1626,6 +1638,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   // a 1-bit image halftone, so it doesn't need the 4-level gray pass.)
   // 4-level grayscale images only exist when text AA is on (AA off => images are
   // 1-bit, drawn in the BW frame, needing no grayscale pass or blanking dance).
+  lastPageHadImages = page->hasImages();  // gates the bookmark light-refresh (see header)
   const bool grayImages = page->hasImages() && !renderer.isX3() && aaMode != CrossPointSettings::TEXT_AA_OFF;
   // Antialiased always runs the gray pass (text AA, even text-only pages). Sharp runs
   // it only for image pages — pure-text Sharp pages stay single-pass solid black.
@@ -1846,6 +1859,20 @@ void EpubReaderActivity::lightStatusBarRefresh() {
   const int barH = static_cast<int>(UITheme::getInstance().getStatusBarHeight());
   if (barH == 0) return;  // no status bar → no bookmark indicator to update
 
+  if (lastPageHadImages) {
+    // Image page: there is no partial/fast way to update the status-bar strip
+    // without disturbing the image. Any FAST_REFRESH (windowed sub-rect OR full
+    // frame) drives the SSD1677 grayscale LUT and darkens the image a little on
+    // every toggle, and blanking the strip erases image pixels we can't restore.
+    // So re-render the whole page: the normal image path (blank-and-redraw double
+    // refresh, same as a page turn) is stable on repeat and redraws the status bar
+    // with the correct bookmark tab. The bookmark store is already updated by the
+    // caller. Costs one page render (~600ms) per toggle — acceptable for the
+    // far-less-common image page, and the only artifact-free option.
+    requestUpdate();
+    return;
+  }
+
   RenderLock lock(*this);
 
   int orientedTop, orientedRight, orientedBottom, orientedLeft;
@@ -1867,20 +1894,19 @@ void EpubReaderActivity::lightStatusBarRefresh() {
   renderStatusBar();
 
   if (lastPageUsedGrayscale) {
-    // AA/grayscale image page: a windowed FAST_REFRESH scans the full SSD1677
+    // AA text page (no image): a windowed FAST_REFRESH scans the full SSD1677
     // panel and drives grayscale particles even for "no-change" pixels, causing
     // progressive darkening on repeated toggles. Instead push the full BW
-    // framebuffer once — the image reverts from AA to 1-bit (still readable)
-    // until the next page turn re-applies grayscale. Tab appears immediately.
-    // No layout recompute, no image re-decode — just a single FAST push of
-    // already-rendered 1-bit content.
+    // framebuffer once — text reverts from AA to 1-bit (still readable) until the
+    // next page turn re-applies grayscale. Tab appears immediately. No layout
+    // recompute — just a single FAST push of already-rendered 1-bit content.
     renderer.displayBuffer(HalDisplay::FAST_REFRESH);
     // Page no longer shows AA; treat subsequent toggles as non-AA.
     lastPageUsedGrayscale = false;
     return;
   }
 
-  // Non-AA page: windowed sub-rectangle push — image area is pure 1-bit and
+  // Non-AA page: windowed sub-rectangle push — area is pure 1-bit and
   // can tolerate repeated FAST passes without charge accumulation.
   renderer.displayWindowRegion(0, stripY, sw, stripH);
 }

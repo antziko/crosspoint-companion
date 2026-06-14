@@ -80,11 +80,21 @@ class DictionaryWordSelectActivity final : public Activity {
 
   Mode mode_ = Mode::Dictionary;
 
+  // True when opened mid hold-Back (the reader's hold-Back → highlight gesture): swallow that
+  // first Back release so it doesn't immediately cancel the selection. Other entry paths have
+  // already released Back, so this stays false and Back works on the first tap as usual.
+  bool consumeInitialBackRelease_ = false;
+
   // HighlightRange mode input: single Confirm tap = single-word quote; long-press +
   // move + Confirm = ranged quote. Emits a HighlightRangeResult and finishes. No-op
   // in Dictionary mode.
   void handleHighlightInput();
   void emitQuoteResult(int fromFlatIdx, int toFlatIdx, std::string previewText);
+
+  // Confirm-button hint label, shown on the only labeled (full-height) button so the
+  // user can tell the two near-identical selection modes apart: "Highlight" in
+  // HighlightRange mode, "Look Up" in Dictionary mode.
+  const char* confirmHintLabel() const;
 
   bool skipLoopDelay() override { return controller.skipLoopDelay(); }
 

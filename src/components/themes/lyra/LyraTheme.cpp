@@ -226,7 +226,8 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
                          const std::function<std::string(int index)>& rowSubtitle,
                          const std::function<UIIcon(int index)>& rowIcon,
                          const std::function<std::string(int index)>& rowValue, bool highlightValue,
-                         const std::function<bool(int index)>& rowDimmed, bool valueSmallFont) const {
+                         const std::function<bool(int index)>& rowDimmed, bool valueSmallFont,
+                         const std::function<bool(int index)>& rowSubtitleLarge) const {
   const auto valueFont = valueSmallFont ? SMALL_FONT_ID : UI_10_FONT_ID;
   int rowHeight =
       (rowSubtitle != nullptr) ? LyraMetrics::values.listWithSubtitleRowHeight : LyraMetrics::values.listRowHeight;
@@ -306,8 +307,9 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
     if (rowSubtitle != nullptr) {
       // Draw subtitle
       std::string subtitleText = rowSubtitle(i);
-      auto subtitle = renderer.truncatedText(SMALL_FONT_ID, subtitleText.c_str(), rowTextWidth);
-      renderer.drawText(SMALL_FONT_ID, textX, itemY + 30, subtitle.c_str(), true);
+      const auto subFont = (rowSubtitleLarge && rowSubtitleLarge(i)) ? UI_10_FONT_ID : SMALL_FONT_ID;
+      auto subtitle = renderer.truncatedText(subFont, subtitleText.c_str(), rowTextWidth);
+      renderer.drawText(subFont, textX, itemY + 30, subtitle.c_str(), true);
     }
 
     // Draw value

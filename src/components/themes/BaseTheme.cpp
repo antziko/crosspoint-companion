@@ -277,7 +277,8 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
                          const std::function<std::string(int index)>& rowSubtitle,
                          const std::function<UIIcon(int index)>& rowIcon,
                          const std::function<std::string(int index)>& rowValue, bool highlightValue,
-                         const std::function<bool(int index)>& rowDimmed, bool valueSmallFont) const {
+                         const std::function<bool(int index)>& rowDimmed, bool valueSmallFont,
+                         const std::function<bool(int index)>& rowSubtitleLarge) const {
   const auto valueFont = valueSmallFont ? SMALL_FONT_ID : UI_10_FONT_ID;
   int rowHeight =
       (rowSubtitle != nullptr) ? BaseMetrics::values.listWithSubtitleRowHeight : BaseMetrics::values.listRowHeight;
@@ -349,8 +350,9 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
     if (rowSubtitle != nullptr) {
       std::string subtitleText = rowSubtitle(i);
       if (!subtitleText.empty()) {
-        auto subtitle = renderer.truncatedText(SMALL_FONT_ID, subtitleText.c_str(), rowTextWidth);
-        renderer.drawText(SMALL_FONT_ID, rect.x + BaseMetrics::values.contentSidePadding, itemY + 22, subtitle.c_str(),
+        const auto subFont = (rowSubtitleLarge && rowSubtitleLarge(i)) ? UI_10_FONT_ID : SMALL_FONT_ID;
+        auto subtitle = renderer.truncatedText(subFont, subtitleText.c_str(), rowTextWidth);
+        renderer.drawText(subFont, rect.x + BaseMetrics::values.contentSidePadding, itemY + 22, subtitle.c_str(),
                           i != selectedIndex);
       }
     }
