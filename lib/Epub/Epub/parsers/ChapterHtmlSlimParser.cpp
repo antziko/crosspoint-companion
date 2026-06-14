@@ -4,6 +4,7 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
 #include <Utf8.h>
 #include <XmlParserUtils.h>
 #include <expat.h>
@@ -612,13 +613,26 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                 // deferred application at element close, so read it from the stack.
                 int16_t imageMarginTop = 0;
                 int16_t imageMarginBottom = 0;
+                int16_t dbgMarginTopPx = 0;
+                int16_t dbgPaddingTopPx = 0;
                 if (self->currentTextBlock && self->currentTextBlock->isEmpty()) {
                   const auto& bs = self->currentTextBlock->getBlockStyle();
                   imageMarginTop = bs.topInset();
+                  dbgMarginTopPx = bs.marginTop;
+                  dbgPaddingTopPx = bs.paddingTop;
                   if (self->blockStyleStack.size() > 1) {
                     imageMarginBottom = self->blockStyleStack.back().bottomInset();
                   }
                 }
+
+                // Cap figure margins. Some books set a large margin (~3em) on figure
+                // images; on a small e-ink page that wastes ~13% of the height per
+                // image. Clamp to IMAGE_MAX_MARGIN_PX so figures stay visibly
+                // separated from text without the oversized gap. Small inline images
+                // (margin <= cap) are unaffected.
+                static constexpr int16_t IMAGE_MAX_MARGIN_PX = 50;
+                if (imageMarginTop > IMAGE_MAX_MARGIN_PX) imageMarginTop = IMAGE_MAX_MARGIN_PX;
+                if (imageMarginBottom > IMAGE_MAX_MARGIN_PX) imageMarginBottom = IMAGE_MAX_MARGIN_PX;
 
                 // Create page for image - only break if image won't fit remaining space
                 if (self->currentPage && !self->currentPage->elements.empty() &&
@@ -640,6 +654,18 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                     return;
                   }
                   self->currentPageNextY = 0;
+                }
+
+                // When the image is the FIRST element on its page, drop everything
+                // above it: blank leading accumulated from preceding empty blocks
+                // (orphan paragraph spacing) AND the image's own top margin. Both
+                // would otherwise strand the image with a gap above it and, for a
+                // full-height image, force the fit-clamp below to shrink it. A
+                // page-starting image should sit flush at the content top.
+                const bool imageStartsPage = self->currentPage && self->currentPage->elements.empty();
+                if (imageStartsPage) {
+                  self->currentPageNextY = 0;
+                  imageMarginTop = 0;
                 }
 
                 // Apply top margin from container block
@@ -672,6 +698,13 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                   return;
                 }
                 int xPos = (self->viewportWidth - displayWidth) / 2;
+                // X3 untethered: capture the image's page placement so a vertical-gap
+                // complaint can be diagnosed without serial. topY is the image's top
+                // within the page content area (before the page's bezel margin).
+                SdDebugLog::log("EHP", "img place topY=%d mT=%d(mar=%d pad=%d) mB=%d %dx%d firstOnPage=%d vpH=%d",
+                                self->currentPageNextY, (int)imageMarginTop, (int)dbgMarginTopPx, (int)dbgPaddingTopPx,
+                                (int)imageMarginBottom, displayWidth, displayHeight, imageStartsPage ? 1 : 0,
+                                self->viewportHeight);
                 auto pageImage = std::make_shared<PageImage>(imageBlock, xPos, self->currentPageNextY);
                 if (!pageImage) {
                   LOG_ERR("EHP", "Failed to create PageImage");
