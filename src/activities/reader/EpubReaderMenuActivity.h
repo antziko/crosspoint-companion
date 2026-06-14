@@ -28,7 +28,8 @@ class EpubReaderMenuActivity final : public Activity {
     LOOKUP_HISTORY,
     SET_BOOK_DICTIONARY,
     READER_OPTIONS,
-    BOOK_STATS
+    BOOK_STATS,
+    ADD_HIGHLIGHT
   };
 
   explicit EpubReaderMenuActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const std::string& title,

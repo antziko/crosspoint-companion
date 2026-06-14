@@ -8,7 +8,10 @@
 #include <algorithm>
 #include <cmath>
 
+#include <variant>
+
 #include "MappedInputManager.h"
+#include "QuoteViewerActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -75,6 +78,22 @@ void EpubReaderBookmarksActivity::loop() {
       return;
     }
     const struct Bookmark& bm = bookmarks.at(static_cast<size_t>(selectorIndex));
+    // Quote rows open the full-text viewer (which forwards a jump on its own Confirm);
+    // point bookmarks jump straight to their page.
+    if (bm.isQuote()) {
+      startActivityForResult(std::make_unique<QuoteViewerActivity>(renderer, mappedInput, selectorIndex),
+                             [this](const ActivityResult& r) {
+                               if (!r.isCancelled) {
+                                 if (const auto* br = std::get_if<BookmarkResult>(&r.data)) {
+                                   setResult(ActivityResult{*br});
+                                   finish();
+                                   return;
+                                 }
+                               }
+                               requestUpdate();
+                             });
+      return;
+    }
     setResult(BookmarkResult{bm.spineIndex, bm.progress, bm.paragraphIndex});
     finish();
     return;
@@ -160,6 +179,7 @@ void EpubReaderBookmarksActivity::render(RenderLock&&) {
   const auto getBookmarkIcon = [this](int index) {
     const struct Bookmark& bm =
         bookmarks.at(static_cast<size_t>(confirmingDelete >= DELETE_MODE_DISPLAY ? selectorIndex : index));
+    if (bm.isQuote()) return UIIcon::Highlight;
     return bm.returnMark ? UIIcon::BookmarkReturn : UIIcon::Bookmark;
   };
 

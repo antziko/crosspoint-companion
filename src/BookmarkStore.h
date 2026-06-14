@@ -9,6 +9,11 @@
 // This size is part of the on-disk format — do not change without incrementing the file version.
 inline constexpr size_t BOOKMARK_CHAPTER_TITLE_MAX = 48;
 inline constexpr size_t BOOKMARK_SNIPPET_MAX = 64;
+// Quote ("highlight") full preview text cap, stored on disk in the parallel .qtext
+// file and shown in QuoteViewerActivity. NOT held resident per-record (the in-RAM
+// teaser is snippet[BOOKMARK_SNIPPET_MAX]) and NOT synced — only one preview is read
+// into RAM at a time, so this can comfortably exceed the snippet length.
+inline constexpr size_t QUOTE_PREVIEW_MAX = 512;
 
 struct Bookmark {
   uint16_t spineIndex;
@@ -35,17 +40,39 @@ struct Bookmark {
   // NOT serialized to the bookmark file and NOT synced — it is a within-session navigation
   // aid, so it costs no on-disk format change and reverts to a plain bookmark on reload.
   bool returnMark = false;
+
+  // ---- Quote ("highlight") range (v8 additions) ----
+  // A quote is a ranged mark capturing selected text; a point bookmark leaves these at
+  // their defaults. All fixed-size PODs, so the record stays trivially copyable and the
+  // verbatim relocate/serialize paths are unaffected. The full preview text lives in the
+  // parallel .qtext file (see QUOTE_PREVIEW_MAX); snippet[] holds the resident teaser
+  // used by the list and by sync. `quote` is stored explicitly (not inferred from the
+  // range) so a single-word selection at word 0 is not mistaken for a point bookmark.
+  bool quote = false;
+  uint16_t endSpineIndex = 0;
+  float endProgress = 0.0f;
+  uint16_t startWord = 0;  // page-local word index of the selection start
+  uint16_t endWord = 0;    // page-local word index of the selection end (inclusive)
+
+  bool isQuote() const { return quote; }
 };
 
 // Marks a bookmark that was deleted, so sync removes it from the server and other
-// devices. Identity mirrors the merge key: (spineIndex, paragraphIndex) when an anchor
-// exists, else (spineIndex, progress). `version` is the Lamport stamp at deletion time;
+// devices. Identity mirrors the merge key: for a point bookmark, (spineIndex,
+// paragraphIndex) when an anchor exists, else (spineIndex, progress); for a quote,
+// (spineIndex, startWord, endWord). `version` is the Lamport stamp at deletion time;
 // merge keeps whichever of {bookmark, tombstone} for a spot has the higher version.
 struct Tombstone {
   uint16_t spineIndex;
   uint16_t paragraphIndex;  // UINT16_MAX if no anchor
   float progress;
   uint32_t version = 0;
+  // Quote range identity (v3 tombstone additions). `quote` stored explicitly to match
+  // Bookmark; startWord/endWord carry the deleted quote's range key.
+  bool quote = false;
+  uint16_t startWord = 0;
+  uint16_t endWord = 0;
+  bool isQuote() const { return quote; }
 };
 
 struct BookmarkedBookEntry {
@@ -74,6 +101,26 @@ class BookmarkStore {
   AddResult addBookmark(uint16_t spineIndex, float progress, int pageCount, const char* chapterTitle,
                         uint16_t paragraphIndex = UINT16_MAX, const char* snippet = nullptr,
                         bool returnMark = false, int currentPage = 0);
+
+  // Add a ranged quote ("highlight"). The anchor (spineIndex, progress, chapterTitle,
+  // page snapshot) matches how a point bookmark anchors; startWord/endWord are the
+  // page-local selection extent. `preview` is the full selected text (truncated to
+  // QUOTE_PREVIEW_MAX on disk); its first BOOKMARK_SNIPPET_MAX-1 chars are stored in
+  // the resident snippet teaser used by the list and by sync. Shares the same
+  // MAX_BOOKMARKS limit as point bookmarks (one combined budget per book).
+  AddResult addQuote(uint16_t spineIndex, float progress, uint16_t startWord, uint16_t endWord, int pageCount,
+                     const char* chapterTitle, const char* preview, int currentPage = 0);
+
+  // Remove a quote identified by its range key (spineIndex, startWord, endWord). Writes
+  // a tombstone so the delete propagates on sync. No-op (returns false) if not found.
+  bool removeQuoteByRange(uint16_t spineIndex, uint16_t startWord, uint16_t endWord);
+
+  // Read the full preview text for the bookmark at `index` (into the current sorted
+  // vector) from the parallel .qtext file. Returns false (and clears `out`) for a point
+  // bookmark, a missing/!desynced .qtext, or an out-of-range index. Only one preview is
+  // held in RAM at a time — callers must not cache the whole set.
+  bool readPreviewAt(size_t index, std::string& out) const;
+
   void removeBookmarkForPage(uint16_t spineIndex, float pageProgress, int pageCount);
   bool removeBookmarkAt(size_t index);
   // Consume the session "return here" mark at this spot (matched like the merge key):
@@ -82,6 +129,10 @@ class BookmarkStore {
   // false) for a normal bookmark. Tombstones the delete so it also propagates on sync.
   bool removeReturnMarkAt(uint16_t spineIndex, uint16_t paragraphIndex, float progress);
   bool hasBookmarkForPage(uint16_t spineIndex, float pageProgress, int pageCount);
+  // Page-level presence split by mark type, for the reader's status-bar indicators (a page
+  // may hold both — show both icons). "Point" excludes quotes; "Quote" is quotes only.
+  bool hasPointBookmarkForPage(uint16_t spineIndex, float pageProgress, int pageCount);
+  bool hasQuoteForPage(uint16_t spineIndex, float pageProgress, int pageCount);
   // True when the bookmark covering this page is the session "return here" mark.
   bool isReturnMarkForPage(uint16_t spineIndex, float pageProgress, int pageCount);
   const std::vector<Bookmark>& getBookmarks() const { return bookmarks; }
@@ -141,6 +192,10 @@ class BookmarkStore {
   std::string bookAuthor;
   std::string storeFilePath;
   std::string tombFilePath;
+  // Parallel full-preview file: one length-prefixed entry per bookmark, rewritten in
+  // lockstep with the .bin in writeToFile() so positional reads (readPreviewAt) stay in
+  // sync with the (sorted) bookmarks vector. Point bookmarks store a zero-length entry.
+  std::string qtextFilePath;
   bool dirty = false;
   bool tombDirty = false;
 
@@ -156,6 +211,19 @@ class BookmarkStore {
 
   bool readFromFile();
   bool writeToFile() const;
+
+  // ---- Full-preview (.qtext) store ----
+  // Identity-keyed by (spineIndex, startWord, endWord), append-on-add, streamed on read
+  // (one entry in RAM at a time), and stream-compacted on delete/merge so no path ever
+  // holds all previews resident. Decoupled from the .bin's sorted order, so reordering
+  // the bookmarks vector never desyncs it.
+  bool appendPreview(uint16_t spineIndex, uint16_t startWord, uint16_t endWord, const std::string& text) const;
+  bool readPreviewForKey(uint16_t spineIndex, uint16_t startWord, uint16_t endWord, std::string& out) const;
+  // Rewrite .qtext keeping only entries whose key is still a live quote in `bookmarks`,
+  // copying one entry at a time. Deletes the file when no quotes remain.
+  void compactPreviews() const;
+
+  void exportTxt() const;  // best-effort dump of marks to /highlights/<book>.txt
 
   // Keep `bookmarks` ordered by section (spineIndex) then position (progress).
   // The list view deletes by vector index, so this order is what the user sees.

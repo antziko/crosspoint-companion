@@ -349,6 +349,13 @@ void DictionaryWordSelectActivity::loop() {
     return;
   }
 
+  // HighlightRange mode: reuse the same single-word + long-press-range selection gesture,
+  // but emit a quote result instead of a dictionary lookup.
+  if (mode_ == Mode::HighlightRange) {
+    handleHighlightInput();
+    return;
+  }
+
   if (controller.handleMultiSelect(navigator)) return;
 
   if (navigator.isMultiSelecting()) return;
@@ -359,6 +366,43 @@ void DictionaryWordSelectActivity::loop() {
     DictUtils::cancelAndFinish(*this);
     return;
   }
+}
+
+void DictionaryWordSelectActivity::handleHighlightInput() {
+  std::string phrase;
+  const auto act = navigator.handleMultiSelectInput(mappedInput, phrase);
+  if (act != WordSelectNavigator::MultiSelectAction::None) {
+    if (act == WordSelectNavigator::MultiSelectAction::PhraseReady) {
+      emitQuoteResult(navigator.getAnchorFlatIndex(), navigator.getCurrentFlatIndex(), std::move(phrase));
+    } else {
+      // Entered/Exited multi-select, or a consumed long-press carryover — just repaint
+      // so the highlight reflects the new selection state.
+      requestUpdate();
+    }
+    return;
+  }
+
+  // A plain Confirm tap (no long-press, not in multi-select) saves a single-word quote.
+  if (!navigator.isMultiSelecting() && mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    const auto* sel = navigator.getSelected();
+    if (sel) {
+      const int idx = navigator.getCurrentFlatIndex();
+      emitQuoteResult(idx, idx, navigator.getDisplay(*sel));
+    }
+  }
+}
+
+void DictionaryWordSelectActivity::emitQuoteResult(int fromFlatIdx, int toFlatIdx, std::string previewText) {
+  if (fromFlatIdx < 0 || toFlatIdx < 0) {
+    DictUtils::cancelAndFinish(*this);  // selection went stale; treat as cancel
+    return;
+  }
+  HighlightRangeResult result;
+  result.startWordIndex = std::min(fromFlatIdx, toFlatIdx);
+  result.endWordIndex = std::max(fromFlatIdx, toFlatIdx);
+  result.previewText = std::move(previewText);
+  setResult(ActivityResult{std::move(result)});
+  finish();
 }
 
 void DictionaryWordSelectActivity::render(RenderLock&&) {

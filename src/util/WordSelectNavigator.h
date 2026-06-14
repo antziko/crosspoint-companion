@@ -108,6 +108,12 @@ class WordSelectNavigator {
 
   bool isMultiSelecting() const { return inMultiSelectMode; }
 
+  // Anchor (start) flat word index of the in-progress / just-confirmed multi-select range.
+  // Stays valid after handleMultiSelectInput returns PhraseReady (only the mode flag is
+  // cleared there), so a caller can pair it with getCurrentFlatIndex() to recover the
+  // confirmed [anchor, cursor] range. -1 when no range was started.
+  int getAnchorFlatIndex() const { return anchorFlatIndex; }
+
   // Process Confirm/Back for multi-select state machine.
   // Returns PhraseReady when a phrase range is confirmed (raw phrase in outPhrase).
   // Returns EnteredMultiSelect on long-press Confirm that enters multi-select.

@@ -786,7 +786,8 @@ void BaseTheme::fillPopupProgress(const GfxRenderer& renderer, const Rect& layou
 
 void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, const int currentPage,
                               const int pageCount, std::string title, const int paddingBottom, const int textYOffset,
-                              const bool fillMargin, const bool isPageBookmarked, const bool isReturnMark) const {
+                              const bool fillMargin, const bool isPageBookmarked, const bool isReturnMark,
+                              const bool isPageQuoted) const {
   auto metrics = UITheme::getInstance().getMetrics();
   int orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft;
   renderer.getOrientedViewableTRBL(&orientedMarginTop, &orientedMarginRight, &orientedMarginBottom,
@@ -836,13 +837,17 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
     renderer.fillRect(barMarginLeft, progressBarY, barWidth, barHeight, true);
   }
 
-  // Bookmark indicator: small filled tab shape at far left of status bar.
+  // Left-cluster indicators: bookmark tab and/or quote (highlight) glyph. Both can show
+  // when a page holds a point bookmark AND a quote.
   static constexpr int bmIconW = 9;
   static constexpr int bmIconH = 14;
   static constexpr int bmIconGap = 4;
   static constexpr int bmNotchDepth = 5;
+  static constexpr int quoteIconW = 9;
   const int leftClusterX = metrics.statusBarHorizontalMargin + orientedMarginLeft + 1;
-  const int bmTotalWidth = isPageBookmarked ? (bmIconW + bmIconGap) : 0;
+  const int bmPart = isPageBookmarked ? (bmIconW + bmIconGap) : 0;
+  const int quotePart = isPageQuoted ? (quoteIconW + bmIconGap) : 0;
+  const int bmTotalWidth = bmPart + quotePart;  // reserved width for battery/title layout
 
   if (isPageBookmarked) {
     const int bmX = leftClusterX;
@@ -862,6 +867,17 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
       const int yNotch[3] = {bmY + bmIconH, bmY + bmIconH, bmY + bmIconH - bmNotchDepth};
       renderer.fillPolygon(xNotch, yNotch, 3, false);
     }
+  }
+
+  if (isPageQuoted) {
+    // Two short "66"-style quote ticks, drawn after the bookmark tab when present.
+    const int qX = leftClusterX + bmPart;
+    const int qY = textY + (metrics.batteryHeight - bmIconH) / 2 + 5;
+    static constexpr int tickW = 3, tickH = 6, tickGap = 3, tailDrop = 3;
+    renderer.fillRect(qX, qY, tickW, tickH, true);
+    renderer.fillRect(qX + tickW + tickGap, qY, tickW, tickH, true);
+    renderer.drawLine(qX + tickW - 1, qY + tickH, qX, qY + tickH + tailDrop, true);
+    renderer.drawLine(qX + tickW + tickGap + tickW - 1, qY + tickH, qX + tickW + tickGap, qY + tickH + tailDrop, true);
   }
 
   // Draw Battery

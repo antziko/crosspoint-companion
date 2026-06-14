@@ -763,6 +763,66 @@ void EpubReaderActivity::openWordSelect(bool framebufferContainsPage) {
                          });
 }
 
+void EpubReaderActivity::openHighlightSelect() {
+  auto pageForSelect = section ? section->loadPageFromSectionFile() : nullptr;
+  if (!pageForSelect) {
+    requestUpdate();
+    return;
+  }
+
+  int pageCount, currentPage;
+  {
+    RenderLock lock(*this);
+    pageCount = section->pageCount;
+    currentPage = section->currentPage;
+  }
+  if (pageCount == 0) {
+    requestUpdate();
+    return;
+  }
+
+  // Anchor captured at launch = the page being highlighted (same as addBookmark()).
+  const uint16_t spine = static_cast<uint16_t>(currentSpineIndex);
+  const float progress = static_cast<float>(currentPage) / static_cast<float>(pageCount);
+  std::string chapterTitle;
+  const int tocIndex = epub->getTocIndexForSpineIndex(currentSpineIndex);
+  if (tocIndex != -1) chapterTitle = epub->getTocItem(tocIndex).title;
+
+  int orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft;
+  renderer.getOrientedViewableTRBL(&orientedMarginTop, &orientedMarginRight, &orientedMarginBottom,
+                                   &orientedMarginLeft);
+  orientedMarginTop += SETTINGS.screenMargin;
+  orientedMarginLeft += SETTINGS.screenMargin;
+
+  if (pageShownAtMs > 0) accountIdleExcess(millis() - pageShownAtMs);
+  pageShownAtMs = 0UL;
+
+  // Launched from the menu: framebuffer holds the menu, not the page, so a full repaint
+  // (framebufferContainsPage=false, reservedBottomHeight=0) and HighlightRange mode.
+  startActivityForResult(
+      std::make_unique<DictionaryWordSelectActivity>(renderer, mappedInput, std::move(pageForSelect),
+                                                     orientedMarginLeft, orientedMarginTop, epub->getCachePath(), "",
+                                                     false, 0, DictionaryWordSelectActivity::Mode::HighlightRange),
+      [this, spine, progress, pageCount, currentPage, chapterTitle](const ActivityResult& result) {
+        ignoreBackUntilRelease = true;
+        if (!result.isCancelled) {
+          if (const auto* hr = std::get_if<HighlightRangeResult>(&result.data)) {
+            const auto addRes = BOOKMARKS.addQuote(spine, progress, static_cast<uint16_t>(std::max(0, hr->startWordIndex)),
+                                                   static_cast<uint16_t>(std::max(0, hr->endWordIndex)), pageCount,
+                                                   chapterTitle.empty() ? nullptr : chapterTitle.c_str(),
+                                                   hr->previewText.c_str(), currentPage);
+            if (addRes == BookmarkStore::AddResult::LimitReached) {
+              RenderLock lock(*this);
+              GUI.drawPopup(renderer, tr(STR_MARK_LIMIT));
+              renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+              delay(900);
+            }
+          }
+        }
+        requestUpdate();
+      });
+}
+
 void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action) {
   auto progressChangeResultHandler = [this](const ActivityResult& result) {
     if (!result.isCancelled) {
@@ -977,6 +1037,10 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       // Menu activity rendered over the page; the framebuffer no longer
       // matches what DictionaryWordSelectActivity expects.
       openWordSelect(/*framebufferContainsPage=*/false);
+      break;
+    }
+    case EpubReaderMenuActivity::MenuAction::ADD_HIGHLIGHT: {
+      openHighlightSelect();
       break;
     }
     case EpubReaderMenuActivity::MenuAction::LOOKUP_HISTORY: {
@@ -1764,13 +1828,18 @@ void EpubReaderActivity::renderStatusBar() const {
   const float bmPageProgress = (section && section->pageCount > 0)
                                    ? static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount)
                                    : 0.0f;
-  const bool bookmarked =
-      section && section->pageCount > 0 &&
-      BOOKMARKS.hasBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmPageProgress, section->pageCount);
-  const bool returnMark = bookmarked && BOOKMARKS.isReturnMarkForPage(static_cast<uint16_t>(currentSpineIndex),
-                                                                      bmPageProgress, section->pageCount);
-  GUI.drawStatusBar(renderer, bookProgress, currentPage, pageCount, title, 0, textYOffset, true, bookmarked,
-                    returnMark);
+  const bool hasSection = section && section->pageCount > 0;
+  // Split by type so a page can show both the bookmark tab and the quote glyph.
+  const bool pointBookmarked =
+      hasSection &&
+      BOOKMARKS.hasPointBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmPageProgress, section->pageCount);
+  const bool quoted =
+      hasSection &&
+      BOOKMARKS.hasQuoteForPage(static_cast<uint16_t>(currentSpineIndex), bmPageProgress, section->pageCount);
+  const bool returnMark = pointBookmarked && BOOKMARKS.isReturnMarkForPage(static_cast<uint16_t>(currentSpineIndex),
+                                                                           bmPageProgress, section->pageCount);
+  GUI.drawStatusBar(renderer, bookProgress, currentPage, pageCount, title, 0, textYOffset, true, pointBookmarked,
+                    returnMark, quoted);
 }
 
 void EpubReaderActivity::lightStatusBarRefresh() {
@@ -1933,6 +2002,14 @@ void EpubReaderActivity::addBookmark(bool returnMark, bool lightRefresh) {
     }
   } else {
     LOG_ERR("ERS", "Bookmark limit reached");
+    // Tell the user (a deliberate add only — auto-dropped return marks stay silent).
+    if (!returnMark) {
+      RenderLock lock(*this);
+      GUI.drawPopup(renderer, tr(STR_MARK_LIMIT));
+      renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+      delay(900);
+      requestUpdate();
+    }
   }
 }
 

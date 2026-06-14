@@ -112,7 +112,8 @@ enum UIIcon {
   Hotspot,
   Bookmark,
   BookmarkReturn,  // hollow bookmark for the session "return here" mark
-  Chart
+  Chart,
+  Highlight  // quotation-marks glyph for saved quotes (vs the bookmark ribbon)
 };
 
 enum class KeyboardKeyType { Normal, Shift, Mode, Space, Del, Ok, Disabled };
@@ -223,7 +224,7 @@ class BaseTheme {
   void drawStatusBar(GfxRenderer& renderer, const float bookProgress, const int currentPage, const int pageCount,
                      std::string title, const int paddingBottom = 0, const int textYOffset = 0,
                      const bool fillMargin = true, const bool isPageBookmarked = false,
-                     const bool isReturnMark = false) const;
+                     const bool isReturnMark = false, const bool isPageQuoted = false) const;
   void drawHelpText(const GfxRenderer& renderer, Rect rect, const char* label) const;
   virtual void drawTextField(const GfxRenderer& renderer, Rect rect, const int textWidth, bool cursorMode = false,
                              int contentStartX = 0, int contentWidth = 0) const;

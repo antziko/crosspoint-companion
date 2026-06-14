@@ -24,9 +24,10 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(GfxRenderer& renderer, MappedInpu
 std::vector<EpubReaderMenuActivity::MenuItem> EpubReaderMenuActivity::buildMenuItems(bool hasFootnotes,
                                                                                      bool hasDictionary) {
   std::vector<MenuItem> items;
-  items.reserve(13);
+  items.reserve(14);
   items.push_back({MenuAction::READER_OPTIONS, StrId::STR_READER_OPTIONS});
   items.push_back({MenuAction::VIEW_BOOKMARKS, StrId::STR_BOOKMARKS});
+  items.push_back({MenuAction::ADD_HIGHLIGHT, StrId::STR_ADD_HIGHLIGHT});
   items.push_back({MenuAction::SELECT_CHAPTER, StrId::STR_SELECT_CHAPTER});
   items.push_back({MenuAction::GO_TO_PERCENT, StrId::STR_GO_TO_PERCENT});
   if (hasFootnotes) {

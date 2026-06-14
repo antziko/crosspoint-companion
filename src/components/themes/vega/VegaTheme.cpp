@@ -21,9 +21,12 @@
 #include "activities/reader/ReadingTimeHistory.h"
 #include "components/UITheme.h"
 #include "components/icons/book.h"
+#include "components/icons/bookmark.h"
+#include "components/icons/bookmarkReturn.h"
 #include "components/icons/chart.h"
 #include "components/icons/cover.h"
 #include "components/icons/folder.h"
+#include "components/icons/highlight.h"
 #include "components/icons/library.h"
 #include "components/icons/recent.h"
 #include "components/icons/settings2.h"
@@ -451,6 +454,12 @@ const uint8_t* vegaMenuIcon(UIIcon icon) {
       return LibraryIcon;
     case UIIcon::Chart:
       return ChartIcon;
+    case UIIcon::Bookmark:
+      return BookmarkIcon;
+    case UIIcon::BookmarkReturn:
+      return BookmarkReturnIcon;
+    case UIIcon::Highlight:
+      return HighlightIcon;
     default:
       return nullptr;
   }

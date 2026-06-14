@@ -115,6 +115,9 @@ class EpubReaderActivity final : public Activity {
   // the reader-menu → Lookup path must pass false because the menu has
   // overwritten the framebuffer.
   void openWordSelect(bool framebufferContainsPage);
+  // Launch word-select in HighlightRange mode (reader menu → Highlight); saves the
+  // returned range as a quote via BookmarkStore::addQuote.
+  void openHighlightSelect();
   void onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action);
   void applyOrientation(uint8_t orientation);
   void saveOrientation() const;

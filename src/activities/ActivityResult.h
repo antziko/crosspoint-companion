@@ -78,10 +78,20 @@ struct FontSelectionResult {
   std::string sdFamilyName;
 };
 
+// A text range selected in DictionaryWordSelectActivity's HighlightRange mode, to be
+// saved as a quote. Word indices are page-local (flat indices into the page's word list);
+// the spine + progress anchor is supplied by the reader from its current page context.
+// previewText is the joined selected text (the caller caps length when storing).
+struct HighlightRangeResult {
+  int startWordIndex = -1;
+  int endWordIndex = -1;
+  std::string previewText;
+};
+
 using ResultVariant =
     std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, IntervalResult,
                  PageResult, ProgressChangeResult, NetworkModeResult, FootnoteResult, WordResult, FilePathResult,
-                 BookmarkResult, FontSelectionResult>;
+                 BookmarkResult, FontSelectionResult, HighlightRangeResult>;
 
 struct ActivityResult {
   bool isCancelled = false;

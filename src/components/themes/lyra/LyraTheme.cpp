@@ -21,6 +21,7 @@
 #include "components/icons/file24.h"
 #include "components/icons/folder.h"
 #include "components/icons/folder24.h"
+#include "components/icons/highlight.h"
 #include "components/icons/hotspot.h"
 #include "components/icons/image24.h"
 #include "components/icons/library.h"
@@ -82,6 +83,8 @@ const uint8_t* iconForName(UIIcon icon, int size) {
         return BookmarkReturnIcon;
       case UIIcon::Chart:
         return ChartIcon;
+      case UIIcon::Highlight:
+        return HighlightIcon;
       default:
         return nullptr;
     }

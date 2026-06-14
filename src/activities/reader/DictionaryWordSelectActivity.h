@@ -13,6 +13,12 @@
 
 class DictionaryWordSelectActivity final : public Activity {
  public:
+  // Dictionary: Confirm/long-press selects a word/phrase and looks it up (default).
+  // HighlightRange: the same single-word + long-press-range selection gesture, but
+  // Confirm emits a HighlightRangeResult (page-local [start,end] word indices + joined
+  // text) for the caller to save as a quote, with no dictionary lookup.
+  enum class Mode { Dictionary, HighlightRange };
+
   // reservedBottomHeight is the post-bezel reserved space the caller (EpubReader)
   // left below the page text — status-bar height OR auto-page-turn indicator
   // height, per the caller's own layout formula. The skip-initial-render fast
@@ -21,7 +27,8 @@ class DictionaryWordSelectActivity final : public Activity {
   explicit DictionaryWordSelectActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                         std::unique_ptr<Page> page, int marginLeft, int marginTop,
                                         const std::string& cachePath, const std::string& nextPageFirstWord = "",
-                                        bool framebufferContainsPage = false, int reservedBottomHeight = 0)
+                                        bool framebufferContainsPage = false, int reservedBottomHeight = 0,
+                                        Mode mode = Mode::Dictionary)
       : Activity("DictionaryWordSelect", renderer, mappedInput),
         page(std::move(page)),
         marginLeft(marginLeft),
@@ -30,7 +37,8 @@ class DictionaryWordSelectActivity final : public Activity {
         nextPageFirstWord(nextPageFirstWord),
         controller(renderer, mappedInput, *this, cachePath),
         framebufferContainsPage_(framebufferContainsPage),
-        reservedBottomHeight_(reservedBottomHeight) {}
+        reservedBottomHeight_(reservedBottomHeight),
+        mode_(mode) {}
 
   void onEnter() override;
   void onExit() override;
@@ -69,6 +77,14 @@ class DictionaryWordSelectActivity final : public Activity {
   // (status bar OR auto-page-turn indicator). Cleared in the skip-initial
   // fast path so the entry frame matches the menu→lookup visual state.
   int reservedBottomHeight_ = 0;
+
+  Mode mode_ = Mode::Dictionary;
+
+  // HighlightRange mode input: single Confirm tap = single-word quote; long-press +
+  // move + Confirm = ranged quote. Emits a HighlightRangeResult and finishes. No-op
+  // in Dictionary mode.
+  void handleHighlightInput();
+  void emitQuoteResult(int fromFlatIdx, int toFlatIdx, std::string previewText);
 
   bool skipLoopDelay() override { return controller.skipLoopDelay(); }
 
