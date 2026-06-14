@@ -6,6 +6,8 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Memory.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include <algorithm>
 
@@ -16,15 +18,24 @@
 BmpViewerActivity::BmpViewerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string path)
     : Activity("BmpViewer", renderer, mappedInput), filePath(std::move(path)) {}
 
-void BmpViewerActivity::loadSiblingImages() {
-  siblingImages.clear();
-  currentImageIndex = -1;
+namespace {
+// Strict total order over names: natural order with a byte-compare tiebreak (so distinct
+// names are never "equal"). Matches FileBrowser's ordering.
+bool bmpNameLess(const std::string& a, const std::string& b) {
+  if (FsHelpers::naturalFileLess(a, b)) return true;
+  if (FsHelpers::naturalFileLess(b, a)) return false;
+  return a < b;
+}
+}  // namespace
 
+void BmpViewerActivity::computeSiblings() {
+  prevName.clear();
+  nextName.clear();
   if (filePath.empty()) return;
 
-  std::string dirPath = FsHelpers::extractFolderPath(filePath);
-  size_t lastSlash = filePath.find_last_of('/');
-  std::string fileName = (lastSlash != std::string::npos) ? filePath.substr(lastSlash + 1) : filePath;
+  const std::string dirPath = FsHelpers::extractFolderPath(filePath);
+  const size_t lastSlash = filePath.find_last_of('/');
+  const std::string fileName = (lastSlash != std::string::npos) ? filePath.substr(lastSlash + 1) : filePath;
 
   auto dir = Storage.open(dirPath.c_str());
   if (!dir || !dir.isDirectory()) {
@@ -32,36 +43,35 @@ void BmpViewerActivity::loadSiblingImages() {
     return;
   }
 
+  // One pass: track the largest .bmp name strictly before the current file and the
+  // smallest strictly after it. Bounded RAM (two strings) for any folder size.
   char name[500];
+  size_t scanned = 0;
   for (auto file = dir.openNextFile(); file; file = dir.openNextFile()) {
     if (!file.isDirectory()) {
       file.getName(name, sizeof(name));
       if (name[0] != '.') {
-        std::string fname(name);
-        if (fname.length() >= 4 && fname.substr(fname.length() - 4) == ".bmp") {
-          siblingImages.push_back(fname);
+        const std::string fname(name);
+        if (fname.length() >= 4 && fname.substr(fname.length() - 4) == ".bmp" && fname != fileName) {
+          if (bmpNameLess(fname, fileName)) {
+            if (prevName.empty() || bmpNameLess(prevName, fname)) prevName = fname;  // largest below
+          } else if (bmpNameLess(fileName, fname)) {
+            if (nextName.empty() || bmpNameLess(fname, nextName)) nextName = fname;  // smallest above
+          }
         }
       }
     }
     file.close();
+    if ((++scanned % 64) == 0) vTaskDelay(1);  // watchdog guard on huge folders
   }
   dir.close();
-
-  FsHelpers::sortFileList(siblingImages);
-
-  for (size_t i = 0; i < siblingImages.size(); ++i) {
-    if (siblingImages[i] == fileName) {
-      currentImageIndex = static_cast<int>(i);
-      break;
-    }
-  }
 }
 
 void BmpViewerActivity::onEnter() {
   Activity::onEnter();
 
-  if (siblingImages.empty() && !filePath.empty()) {
-    loadSiblingImages();
+  if (!filePath.empty()) {
+    computeSiblings();
   }
 
   renderImage();
@@ -110,9 +120,8 @@ void BmpViewerActivity::renderImage() {
       }
 
       // 4. Prepare Rendering
-      bool hasPrevious = (siblingImages.size() > 1 && currentImageIndex > 0);
-      bool hasNext = (siblingImages.size() > 1 && currentImageIndex != -1 &&
-                      currentImageIndex < static_cast<int>(siblingImages.size()) - 1);
+      bool hasPrevious = !prevName.empty();
+      bool hasNext = !nextName.empty();
 
       // If a sleep cover already exists, the Confirm button clears it (so the
       // sleep screen can resume randomizing from the folder); otherwise it sets
@@ -255,24 +264,21 @@ void BmpViewerActivity::loop() {
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Left) ||
       mappedInput.wasReleased(MappedInputManager::Button::Up)) {
-    if (siblingImages.size() > 1 && currentImageIndex > 0) {
-      currentImageIndex--;
+    if (!prevName.empty()) {
       std::string dirPath = FsHelpers::extractFolderPath(filePath);
       if (dirPath.back() != '/') dirPath += "/";
-      filePath = dirPath + siblingImages[currentImageIndex];
-      onEnter();
+      filePath = dirPath + prevName;
+      onEnter();  // recomputes siblings for the new current image
     }
     return;
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Right) ||
       mappedInput.wasReleased(MappedInputManager::Button::Down)) {
-    if (siblingImages.size() > 1 && currentImageIndex != -1 &&
-        currentImageIndex < static_cast<int>(siblingImages.size()) - 1) {
-      currentImageIndex++;
+    if (!nextName.empty()) {
       std::string dirPath = FsHelpers::extractFolderPath(filePath);
       if (dirPath.back() != '/') dirPath += "/";
-      filePath = dirPath + siblingImages[currentImageIndex];
+      filePath = dirPath + nextName;
       onEnter();
     }
     return;
