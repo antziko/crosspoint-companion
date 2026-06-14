@@ -5,6 +5,8 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Memory.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include <algorithm>
 
@@ -19,52 +21,153 @@
 namespace {
 constexpr unsigned long GO_HOME_MS = 1000;
 constexpr size_t NAME_BUFFER_SIZE = 500;
+// Default window size when the on-screen row count can't be derived yet. The real size
+// comes from windowCapacity() (rows that fit one screen).
+constexpr size_t DEFAULT_WINDOW = 12;
+// Yield to the scheduler every N entries during a directory scan so a folder with tens of
+// thousands of files cannot trip the task watchdog.
+constexpr size_t SCAN_YIELD_EVERY = 64;
+
+// Strict TOTAL order over entry names: natural order, with a raw byte-compare tiebreak so
+// two distinct names are never "equal". Cursor paging relies on this — a non-strict order
+// could skip or duplicate an entry at a page boundary.
+bool entryNameLess(const std::string& a, const std::string& b) {
+  if (FsHelpers::naturalFileLess(a, b)) return true;
+  if (FsHelpers::naturalFileLess(b, a)) return false;
+  return a < b;
+}
 }  // namespace
 
-void FileBrowserActivity::loadFiles() {
-  files.clear();
-
-  auto root = Storage.open(basepath.c_str());
-  if (!root || !root.isDirectory()) {
-    return;
+bool FileBrowserActivity::accepts(const char* name, bool isDir) const {
+  if ((!SETTINGS.showHiddenFiles && name[0] == '.') || strcmp(name, "System Volume Information") == 0) {
+    return false;
   }
+  if (isDir) return true;
+  std::string_view fn{name};
+  if (mode == Mode::PickFirmware) return FsHelpers::checkFileExtension(fn, ".bin");
+  return FsHelpers::hasEpubExtension(fn) || FsHelpers::hasXtcExtension(fn) || FsHelpers::hasTxtExtension(fn) ||
+         FsHelpers::hasMarkdownExtension(fn) || FsHelpers::hasBmpExtension(fn);
+}
 
-  root.rewindDirectory();
+size_t FileBrowserActivity::windowCapacity() const {
+  const int pathReserved = renderer.getLineHeight(SMALL_FONT_ID) + UITheme::getInstance().getMetrics().verticalSpacing;
+  const int items = UITheme::getNumberOfItemsPerPage(renderer, true, false, true, false, pathReserved);
+  return (items > 0) ? static_cast<size_t>(items) : DEFAULT_WINDOW;
+}
 
+// Single directory scan: feed every matching entry to a bounded WindowSelector (RAM ≤ one
+// window) and record the global min/max name so has-prev / has-next are known without a
+// second scan. `files` ends up holding just the selected window, in sorted order.
+void FileBrowserActivity::loadWindow(filewindow::WindowSelector::Mode mode_, const std::string& cursor) {
+  files.clear();
+  winFirst.clear();
+  winLast.clear();
+  hasPrev = false;
+  hasNext = false;
+  totalMatches = 0;
+  totalFiles = 0;
   if (!fileNameBuffer) {
     LOG_ERR("FileBrowser", "fileNameBuffer not allocated");
-    root.close();
     return;
   }
 
+  filewindow::WindowSelector sel(mode_, cursor, windowCapacity(), &entryNameLess);
+  std::string globalMin, globalMax;
+  bool haveBounds = false;
+
+  auto root = Storage.open(basepath.c_str());
+  if (!root || !root.isDirectory()) return;
+  root.rewindDirectory();
+  size_t scanned = 0;
   for (auto file = root.openNextFile(); file; file = root.openNextFile()) {
     file.getName(fileNameBuffer.get(), NAME_BUFFER_SIZE);
-    if ((!SETTINGS.showHiddenFiles && fileNameBuffer[0] == '.') ||
-        strcmp(fileNameBuffer.get(), "System Volume Information") == 0) {
-      continue;
-    }
-
-    if (file.isDirectory()) {
-      files.push_back({std::string(fileNameBuffer.get()) + "/", 0});
-    } else {
-      // Size comes from the already-fetched directory entry; no extra SD read.
-      const uint32_t fileSize = static_cast<uint32_t>(file.size());
-      std::string_view filename{fileNameBuffer.get()};
-      if (mode == Mode::PickFirmware) {
-        // Firmware picker: only show .bin files.
-        if (FsHelpers::checkFileExtension(filename, ".bin")) {
-          files.push_back({std::string(filename), fileSize});
-        }
-      } else if (FsHelpers::hasEpubExtension(filename) || FsHelpers::hasXtcExtension(filename) ||
-                 FsHelpers::hasTxtExtension(filename) || FsHelpers::hasMarkdownExtension(filename) ||
-                 FsHelpers::hasBmpExtension(filename)) {
-        files.push_back({std::string(filename), fileSize});
+    const bool isDir = file.isDirectory();
+    if (accepts(fileNameBuffer.get(), isDir)) {
+      filewindow::Entry e;
+      e.name = isDir ? (std::string(fileNameBuffer.get()) + "/") : std::string(fileNameBuffer.get());
+      e.size = isDir ? 0u : static_cast<uint32_t>(file.size());
+      e.isDir = isDir;
+      ++totalMatches;
+      if (!isDir) ++totalFiles;
+      if (!haveBounds) {
+        globalMin = globalMax = e.name;
+        haveBounds = true;
+      } else {
+        if (entryNameLess(e.name, globalMin)) globalMin = e.name;
+        if (entryNameLess(globalMax, e.name)) globalMax = e.name;
       }
+      sel.consider(e);
     }
+    if ((++scanned % SCAN_YIELD_EVERY) == 0) vTaskDelay(1);
   }
   root.close();
-  std::sort(files.begin(), files.end(),
-            [](const FileEntry& a, const FileEntry& b) { return FsHelpers::naturalFileLess(a.name, b.name); });
+
+  const auto& win = sel.window();
+  files.reserve(win.size());
+  for (const auto& e : win) files.push_back({e.name, e.size});
+  if (files.empty()) return;
+
+  winFirst = files.front().name;
+  winLast = files.back().name;
+  // A page exists in a direction iff the window edge isn't the global edge.
+  hasPrev = entryNameLess(globalMin, winFirst);
+  hasNext = entryNameLess(winLast, globalMax);
+}
+
+void FileBrowserActivity::loadFirstWindow() {
+  loadWindow(filewindow::WindowSelector::Mode::First, "");
+  selectorIndex = 0;
+}
+
+void FileBrowserActivity::loadLastWindow() {
+  loadWindow(filewindow::WindowSelector::Mode::Last, "");
+  selectorIndex = files.empty() ? 0 : files.size() - 1;
+}
+
+void FileBrowserActivity::loadWindowContaining(const std::string& name) {
+  loadWindow(filewindow::WindowSelector::Mode::AtOrAfter, name);
+  // Land the cursor on the requested entry when present (it's the window's first match
+  // for AtOrAfter); otherwise default to the top.
+  selectorIndex = 0;
+  for (size_t i = 0; i < files.size(); i++) {
+    if (files[i].name == name) {
+      selectorIndex = i;
+      break;
+    }
+  }
+}
+
+void FileBrowserActivity::reloadCurrentWindow() {
+  // Re-pull the window that starts at the current top (used after a delete / hidden toggle).
+  const std::string anchor = winFirst;
+  if (anchor.empty()) {
+    loadFirstWindow();
+    return;
+  }
+  loadWindow(filewindow::WindowSelector::Mode::AtOrAfter, anchor);
+  if (files.empty()) {
+    loadLastWindow();  // the whole tail was deleted — fall back to the new last page
+    return;
+  }
+  if (selectorIndex >= files.size()) selectorIndex = files.size() - 1;
+}
+
+void FileBrowserActivity::pageDown() {
+  if (hasNext) {
+    loadWindow(filewindow::WindowSelector::Mode::After, winLast);
+    selectorIndex = 0;
+  } else {
+    loadFirstWindow();  // wrap to the top
+  }
+}
+
+void FileBrowserActivity::pageUp() {
+  if (hasPrev) {
+    loadWindow(filewindow::WindowSelector::Mode::Before, winFirst);
+    selectorIndex = files.empty() ? 0 : files.size() - 1;
+  } else {
+    loadLastWindow();  // wrap to the bottom
+  }
 }
 
 void FileBrowserActivity::onEnter() {
@@ -89,19 +192,17 @@ void FileBrowserActivity::onEnter() {
   auto root = Storage.open(basepath.c_str());
   if (!root) {
     basepath = "/";
-    loadFiles();
+    loadFirstWindow();
   } else if (!root.isDirectory()) {
     lockLongPressBack = mappedInput.isPressed(MappedInputManager::Button::Back);
 
     const std::string oldPath = basepath;
     basepath = FsHelpers::extractFolderPath(basepath);
-    loadFiles();
-
     const auto pos = oldPath.find_last_of('/');
     const std::string fileName = oldPath.substr(pos + 1);
-    selectorIndex = findEntry(fileName);
+    loadWindowContaining(fileName);  // open the window holding the previously-selected file
   } else {
-    loadFiles();
+    loadFirstWindow();
   }
 
   requestUpdate();
@@ -205,12 +306,7 @@ void FileBrowserActivity::loop() {
     hiddenToggleFired = true;
     SETTINGS.showHiddenFiles = !SETTINGS.showHiddenFiles;
     SETTINGS.saveToFile();
-    loadFiles();
-    if (files.empty()) {
-      selectorIndex = 0;
-    } else if (selectorIndex >= files.size()) {
-      selectorIndex = files.size() - 1;
-    }
+    loadFirstWindow();  // the visible set changed; restart from the top
     requestUpdate(true);
     return;
   }
@@ -225,8 +321,7 @@ void FileBrowserActivity::loop() {
   if (mode == Mode::Books && mappedInput.isPressed(MappedInputManager::Button::Back) &&
       mappedInput.getHeldTime() >= GO_HOME_MS && basepath != "/" && !lockLongPressBack) {
     basepath = "/";
-    loadFiles();
-    selectorIndex = 0;
+    loadFirstWindow();
     requestUpdate();
     return;
   }
@@ -235,9 +330,6 @@ void FileBrowserActivity::loop() {
     lockLongPressBack = false;
     return;
   }
-
-  const int pathReserved = renderer.getLineHeight(SMALL_FONT_ID) + UITheme::getInstance().getMetrics().verticalSpacing;
-  const int pageItems = UITheme::getNumberOfItemsPerPage(renderer, true, false, true, false, pathReserved);
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     if (lockNextConfirmRelease) {
@@ -271,14 +363,7 @@ void FileBrowserActivity::loop() {
           LOG_DBG("FileBrowser", "Attempting to delete: %s", fullPath.c_str());
           if (removeDirFile(fullPath)) {
             LOG_DBG("FileBrowser", "Deleted successfully");
-            loadFiles();
-            if (files.empty()) {
-              selectorIndex = 0;
-            } else if (selectorIndex >= files.size()) {
-              // Move selection to the new "last" item
-              selectorIndex = files.size() - 1;
-            }
-
+            reloadCurrentWindow();  // re-pull the window around the current position
             requestUpdate(true);
           } else {
             LOG_ERR("FileBrowser", "Failed to delete: %s", fullPath.c_str());
@@ -298,8 +383,7 @@ void FileBrowserActivity::loop() {
 
       if (isDirectory) {
         basepath += entry.substr(0, entry.length() - 1);
-        loadFiles();
-        selectorIndex = 0;
+        loadFirstWindow();
         requestUpdate();
       } else {
         onSelectBook(basepath + entry);
@@ -316,11 +400,10 @@ void FileBrowserActivity::loop() {
 
         basepath.replace(basepath.find_last_of('/'), std::string::npos, "");
         if (basepath.empty()) basepath = "/";
-        loadFiles();
 
         const auto pos = oldPath.find_last_of('/');
         const std::string dirName = oldPath.substr(pos + 1) + "/";
-        selectorIndex = findEntry(dirName);
+        loadWindowContaining(dirName);  // restore selection onto the folder we came out of
 
         requestUpdate();
       } else if (mode == Mode::PickFirmware) {
@@ -335,26 +418,36 @@ void FileBrowserActivity::loop() {
     }
   }
 
-  int listSize = static_cast<int>(files.size());
-
-  const auto navigateNext = [this, listSize] {
-    selectorIndex = ButtonNavigator::nextIndex(static_cast<int>(selectorIndex), listSize);
+  // Single-step within the window; crossing an edge loads the adjacent window (which wraps
+  // around at the very ends). `files` is one screen, so a step past the edge is a page-turn.
+  const auto navigateNext = [this] {
+    if (files.empty()) return;
+    if (selectorIndex + 1 < files.size()) {
+      selectorIndex++;
+    } else {
+      pageDown();
+    }
     requestUpdate();
   };
-  const auto navigatePrevious = [this, listSize] {
-    selectorIndex = ButtonNavigator::previousIndex(static_cast<int>(selectorIndex), listSize);
+  const auto navigatePrevious = [this] {
+    if (files.empty()) return;
+    if (selectorIndex > 0) {
+      selectorIndex--;
+    } else {
+      pageUp();
+    }
     requestUpdate();
   };
 
-  // Front Left/Right: single-step on release + continuous page-jump while held.
+  // Front Left/Right: single-step on release + continuous page-jump (whole window) while held.
   buttonNavigator.onRelease({MappedInputManager::Button::Right}, navigateNext);
   buttonNavigator.onRelease({MappedInputManager::Button::Left}, navigatePrevious);
-  buttonNavigator.onContinuous({MappedInputManager::Button::Right}, [this, listSize, pageItems] {
-    selectorIndex = ButtonNavigator::nextPageIndex(static_cast<int>(selectorIndex), listSize, pageItems);
+  buttonNavigator.onContinuous({MappedInputManager::Button::Right}, [this] {
+    pageDown();
     requestUpdate();
   });
-  buttonNavigator.onContinuous({MappedInputManager::Button::Left}, [this, listSize, pageItems] {
-    selectorIndex = ButtonNavigator::previousPageIndex(static_cast<int>(selectorIndex), listSize, pageItems);
+  buttonNavigator.onContinuous({MappedInputManager::Button::Left}, [this] {
+    pageUp();
     requestUpdate();
   });
 
@@ -427,12 +520,9 @@ void FileBrowserActivity::render(RenderLock&&) {
       (mode == Mode::PickFirmware)
           ? std::string(tr(STR_SELECT_FIRMWARE_FILE))
           : ((basepath == "/") ? std::string(tr(STR_SD_CARD)) : basepath.substr(basepath.rfind('/') + 1));
-  // Append count of files (entries that are not directories) in this folder.
-  size_t fileCount = 0;
-  for (const auto& f : files)
-    if (f.name.back() != '/') fileCount++;
-  char countBuf[16];
-  snprintf(countBuf, sizeof(countBuf), " (%u)", static_cast<unsigned>(fileCount));
+  // Append the folder's total file count (whole folder, not just the loaded window).
+  char countBuf[24];
+  snprintf(countBuf, sizeof(countBuf), " (%u)", static_cast<unsigned>(totalFiles));
   folderName += countBuf;
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, folderName.c_str());
 
@@ -499,8 +589,3 @@ void FileBrowserActivity::render(RenderLock&&) {
   renderer.displayBuffer();
 }
 
-size_t FileBrowserActivity::findEntry(const std::string& name) const {
-  for (size_t i = 0; i < files.size(); i++)
-    if (files[i].name == name) return i;
-  return 0;
-}
