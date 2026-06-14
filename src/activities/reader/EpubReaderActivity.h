@@ -123,9 +123,13 @@ class EpubReaderActivity final : public Activity {
   // the reader-menu → Lookup path must pass false because the menu has
   // overwritten the framebuffer.
   void openWordSelect(bool framebufferContainsPage);
-  // Launch word-select in HighlightRange mode (reader menu → Highlight); saves the
-  // returned range as a quote via BookmarkStore::addQuote.
+  // Highlight (hold-Back) entry point. If the current page already has a quote, shows a
+  // confirm dialog (existing text + Delete/Add-new/Cancel) and acts on the choice; with
+  // no existing quote, launches the selection directly.
   void openHighlightSelect();
+  // Launch word-select in HighlightRange mode; saves the returned range as a quote via
+  // BookmarkStore::addQuote. Shared by the no-existing-quote path and the "Add new" choice.
+  void launchHighlightWordSelect();
   void onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action);
   void applyOrientation(uint8_t orientation);
   void saveOrientation() const;
