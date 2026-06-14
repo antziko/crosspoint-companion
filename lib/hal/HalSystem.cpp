@@ -15,6 +15,46 @@
 RTC_NOINIT_ATTR char panicMessage[256];
 RTC_NOINIT_ATTR HalSystem::StackFrame panicStack[MAX_PANIC_STACK_DEPTH];
 
+#ifdef TRACE_OOM_ALLOC
+// Diagnostic (dev builds only): with -fno-exceptions a failing throwing `new`
+// calls abort(), so the crash_report backtrace names the *caller* but never the
+// requested size. Replace the global throwing operator new to record the size,
+// caller PC, and heap state at the moment of failure into RTC_NOINIT (survives the
+// panic reboot), surfaced in getPanicInfo(). The happy path is a plain malloc
+// passthrough — identical cost to the default. nothrow new is a separate overload
+// (untouched), so makeUniqueNoThrow keeps its graceful null-return behaviour.
+#include <cstdlib>
+#include <new>
+
+#include "esp_heap_caps.h"
+
+RTC_NOINIT_ATTR uint32_t oomSize;       // bytes requested by the failing allocation
+RTC_NOINIT_ATTR uint32_t oomCallerPC;   // return address of the code doing `new`
+RTC_NOINIT_ATTR uint32_t oomFreeBytes;  // total free heap at failure
+RTC_NOINIT_ATTR uint32_t oomLargest;    // largest contiguous free block at failure
+
+static void recordOom(std::size_t size, uint32_t callerPC) {
+  oomSize = static_cast<uint32_t>(size);
+  oomCallerPC = callerPC;
+  oomFreeBytes = static_cast<uint32_t>(esp_get_free_heap_size());
+  oomLargest = static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+}
+
+void* operator new(std::size_t size) {
+  void* p = malloc(size);
+  if (p) return p;
+  recordOom(size, reinterpret_cast<uint32_t>(__builtin_return_address(0)));
+  abort();  // mirror the -fno-exceptions default (bad_alloc -> terminate -> abort)
+}
+
+void* operator new[](std::size_t size) {
+  void* p = malloc(size);
+  if (p) return p;
+  recordOom(size, reinterpret_cast<uint32_t>(__builtin_return_address(0)));
+  abort();
+}
+#endif  // TRACE_OOM_ALLOC
+
 extern "C" {
 
 void __real_panic_abort(const char* message);
@@ -106,6 +146,9 @@ void clearPanic() {
   for (size_t i = 0; i < MAX_PANIC_STACK_DEPTH; i++) {
     panicStack[i].sp = 0;
   }
+#ifdef TRACE_OOM_ALLOC
+  oomSize = 0;  // clear stale OOM trace on a clean (non-panic) boot
+#endif
   clearLastLogs();
 }
 
@@ -117,6 +160,21 @@ std::string getPanicInfo(bool full) {
 
     info += "CrossPoint version: " CROSSPOINT_VERSION;
     info += "\n\nPanic reason: " + std::string(panicMessage);
+
+#ifdef TRACE_OOM_ALLOC
+    // Only meaningful when the panic was an allocation failure; if the backtrace
+    // below does not run through operator new, treat this as stale (prior OOM).
+    if (oomSize != 0) {
+      char buf[160];
+      snprintf(buf, sizeof(buf),
+               "\n\nLast failed allocation (stale unless panic is OOM):\n  size=%lu bytes  callerPC=0x%08lX  "
+               "freeAtFail=%lu  largestBlock=%lu",
+               (unsigned long)oomSize, (unsigned long)oomCallerPC, (unsigned long)oomFreeBytes,
+               (unsigned long)oomLargest);
+      info += buf;
+    }
+#endif
+
     info += "\n\nLast logs:\n" + getLastLogs();
     info += "\n\nStack memory:\n";
 
