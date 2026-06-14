@@ -389,10 +389,12 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
   const ScopedCleanup cleanup{[&png]() { png->close(); }};
   if (rc != PNG_SUCCESS) {
     LOG_ERR("PNG", "Failed to open PNG: %d", rc);
+    SdDebugLog::log("PNG", "decode open fail rc=%d %s", rc, imagePath.c_str());
     return false;
   }
 
   if (!validateImageDimensions(png->getWidth(), png->getHeight(), "PNG")) {
+    SdDebugLog::log("PNG", "bad dims %dx%d %s", png->getWidth(), png->getHeight(), imagePath.c_str());
     return false;
   }
 
@@ -427,6 +429,8 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
             "PNG row buffer too small: need %d bytes for width=%d type=%d, configured PNG_MAX_BUFFERED_PIXELS=%d",
             requiredInternal, ctx.srcWidth, pixelType, PNG_MAX_BUFFERED_PIXELS);
     LOG_ERR("PNG", "Aborting decode to avoid PNGdec internal buffer overflow");
+    SdDebugLog::log("PNG", "row buf overflow need=%d width=%d type=%d max=%d %s", requiredInternal, ctx.srcWidth,
+                    pixelType, PNG_MAX_BUFFERED_PIXELS, imagePath.c_str());
     return false;
   }
 
@@ -439,6 +443,7 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
   ctx.grayLineBuffer = static_cast<uint8_t*>(malloc(grayBufSize));
   if (!ctx.grayLineBuffer) {
     LOG_ERR("PNG", "Failed to allocate gray line buffer");
+    logHeapFailureToSd("gray line buffer OOM");
     return false;
   }
 
@@ -468,6 +473,8 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
 
   if (rc != PNG_SUCCESS) {
     LOG_ERR("PNG", "Decode failed: %d", rc);
+    SdDebugLog::log("PNG", "decode fail rc=%d %dx%d->%dx%d %s", rc, ctx.srcWidth, ctx.srcHeight, ctx.dstWidth,
+                    ctx.dstHeight, imagePath.c_str());
     return false;
   }
 

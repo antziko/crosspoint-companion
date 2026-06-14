@@ -2,7 +2,9 @@
 
 #include <GfxRenderer.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
 #include <Serialization.h>
+#include <esp_heap_caps.h>
 
 #include "Epub/converters/DirectPixelWriter.h"
 #include "Epub/converters/ImageDecoderFactory.h"
@@ -136,6 +138,8 @@ void ImageBlock::render(GfxRenderer& renderer, const int x, const int y) {
   if (x < 0 || y < 0 || x + width > screenWidth || y + height > screenHeight) {
     LOG_ERR("IMG", "Invalid render position: (%d,%d) size (%dx%d) screen (%dx%d)", x, y, width, height, screenWidth,
             screenHeight);
+    SdDebugLog::log("IMG", "bad pos (%d,%d) %dx%d screen %dx%d %s", x, y, width, height, screenWidth, screenHeight,
+                    imagePath.c_str());
     return;
   }
 
@@ -160,6 +164,7 @@ void ImageBlock::render(GfxRenderer& renderer, const int x, const int y) {
   HalFile file;
   if (!Storage.openFileForRead("IMG", imagePath, file)) {
     LOG_ERR("IMG", "Image file not found: %s", imagePath.c_str());
+    SdDebugLog::log("IMG", "file not found %s", imagePath.c_str());
     return;
   }
   size_t fileSize = file.size();
@@ -167,10 +172,16 @@ void ImageBlock::render(GfxRenderer& renderer, const int x, const int y) {
 
   if (fileSize == 0) {
     LOG_ERR("IMG", "Image file is empty: %s", imagePath.c_str());
+    SdDebugLog::log("IMG", "file empty %s", imagePath.c_str());
     return;
   }
 
   LOG_DBG("IMG", "Decoding and caching: %s", imagePath.c_str());
+  // X3 untethered: capture the decode attempt + heap shape so a silent image
+  // failure leaves a trace. `largest` separates fragmentation from exhaustion.
+  SdDebugLog::log("IMG", "decode start %s %dx%d 1bit=%d size=%u free=%u largest=%u", imagePath.c_str(), width, height,
+                  oneBit ? 1 : 0, (unsigned)fileSize, (unsigned)ESP.getFreeHeap(),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
   RenderConfig config;
   config.x = x;
@@ -188,6 +199,7 @@ void ImageBlock::render(GfxRenderer& renderer, const int x, const int y) {
   ImageToFramebufferDecoder* decoder = ImageDecoderFactory::getDecoder(imagePath);
   if (!decoder) {
     LOG_ERR("IMG", "No decoder found for image: %s", imagePath.c_str());
+    SdDebugLog::log("IMG", "no decoder %s", imagePath.c_str());
     return;
   }
 
@@ -196,11 +208,15 @@ void ImageBlock::render(GfxRenderer& renderer, const int x, const int y) {
   bool success = decoder->decodeToFramebuffer(imagePath, renderer, config);
   if (!success) {
     LOG_ERR("IMG", "Failed to decode image: %s", imagePath.c_str());
+    SdDebugLog::log("IMG", "decode FAILED %s decoder=%s free=%u largest=%u", imagePath.c_str(),
+                    decoder->getFormatName(), (unsigned)ESP.getFreeHeap(),
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     decodeFailed = true;  // don't retry on the remaining render passes for this view
     return;
   }
 
   LOG_DBG("IMG", "Decode successful");
+  SdDebugLog::log("IMG", "decode OK %s", imagePath.c_str());
 }
 
 bool ImageBlock::serialize(HalFile& file) {

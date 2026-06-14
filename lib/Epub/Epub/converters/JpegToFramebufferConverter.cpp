@@ -549,6 +549,7 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   const ScopedCleanup cleanup{[&jpeg]() { jpeg->close(); }};
   if (rc != 1) {
     LOG_ERR("JPG", "Failed to open JPEG (err=%d): %s", jpeg->getLastError(), imagePath.c_str());
+    SdDebugLog::log("JPG", "decode open fail err=%d %s", jpeg->getLastError(), imagePath.c_str());
     return false;
   }
 
@@ -619,6 +620,8 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   if (ctx.scaledSrcWidth * ctx.scaledSrcHeight > MAX_SOURCE_PIXELS) {
     LOG_ERR("JPG", "Scaled decode grid too large (%dx%d = %d px), max %d", ctx.scaledSrcWidth, ctx.scaledSrcHeight,
             ctx.scaledSrcWidth * ctx.scaledSrcHeight, MAX_SOURCE_PIXELS);
+    SdDebugLog::log("JPG", "grid too large %dx%d=%d max=%d %s", ctx.scaledSrcWidth, ctx.scaledSrcHeight,
+                    ctx.scaledSrcWidth * ctx.scaledSrcHeight, MAX_SOURCE_PIXELS, imagePath.c_str());
     return false;
   }
 
@@ -671,6 +674,8 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
 
   if (rc != 1) {
     LOG_ERR("JPG", "Decode failed (rc=%d, lastError=%d)", rc, jpeg->getLastError());
+    SdDebugLog::log("JPG", "decode fail rc=%d lastErr=%d %dx%d->%dx%d %s", rc, jpeg->getLastError(), srcWidth,
+                    srcHeight, destWidth, destHeight, imagePath.c_str());
     if (ctx.stream) {
       streamCache.finish();                     // close the file before removing it
       Storage.remove(config.cachePath.c_str());  // drop the partial cache

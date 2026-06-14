@@ -645,6 +645,26 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                 // Apply top margin from container block
                 self->currentPageNextY += imageMarginTop;
 
+                // Final fit clamp against the ACTUAL remaining page space below the
+                // image's top y. The page-break above only fires when the page
+                // already has elements; a full-height image sized to viewportHeight
+                // but placed at a non-zero currentPageNextY (top margin, or leading
+                // on an otherwise-empty page) still spills past the page bottom. The
+                // EpubReader bounds-check then rejects the WHOLE image (blank page) —
+                // observed on X3 (528x792): a 464x751 image at y=47 hit 798 > 792.
+                // Clamp here, where currentPageNextY is the final image top, so the
+                // image always fits regardless of how it was positioned.
+                const int availHeight = self->viewportHeight - self->currentPageNextY - imageMarginBottom;
+                if (availHeight > 0 && displayHeight > availHeight) {
+                  if (dims.width > 0 && dims.height > 0) {
+                    displayWidth = static_cast<int>(availHeight * (static_cast<float>(dims.width) / dims.height) + 0.5f);
+                    if (displayWidth < 1) displayWidth = 1;
+                    if (displayWidth > self->viewportWidth) displayWidth = self->viewportWidth;
+                  }
+                  displayHeight = availHeight;
+                  LOG_DBG("EHP", "Clamped image to remaining page space: %dx%d", displayWidth, displayHeight);
+                }
+
                 // Create ImageBlock and add to page
                 auto imageBlock = std::make_shared<ImageBlock>(cachedImagePath, displayWidth, displayHeight);
                 if (!imageBlock) {
