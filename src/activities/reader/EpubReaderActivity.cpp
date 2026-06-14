@@ -841,7 +841,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       if (!section || section->pageCount == 0) break;
       const uint16_t spine = static_cast<uint16_t>(currentSpineIndex);
       const float progress = static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
-      if (BOOKMARKS.hasBookmarkForPage(spine, progress, section->pageCount)) {
+      if (BOOKMARKS.hasPointBookmarkForPage(spine, progress, section->pageCount)) {
         // Remove: update only the status-bar strip so the image stays untouched.
         BOOKMARKS.removeBookmarkForPage(spine, progress, section->pageCount);
         lightStatusBarRefresh();
@@ -871,7 +871,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
               if (section && section->pageCount > 0 && chapterResult.spineIndex != currentSpineIndex) {
                 const float bmProgress =
                     static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
-                if (!BOOKMARKS.hasBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
+                if (!BOOKMARKS.hasPointBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
                                                   section->pageCount)) {
                   startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput,
                                                                                 tr(STR_CONFIRM_ADD_RETURN_MARK), ""),
@@ -918,7 +918,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
               if (section && section->pageCount > 0 && targetPercent != initialPercent) {
                 const float bmProgress =
                     static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
-                if (!BOOKMARKS.hasBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
+                if (!BOOKMARKS.hasPointBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
                                                   section->pageCount)) {
                   startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput,
                                                                                 tr(STR_CONFIRM_ADD_RETURN_MARK), ""),
@@ -1094,7 +1094,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
               if (section && section->pageCount > 0) {
                 const float bmProgress =
                     static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
-                if (!BOOKMARKS.hasBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
+                if (!BOOKMARKS.hasPointBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
                                                   section->pageCount)) {
                   startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput,
                                                                                 tr(STR_CONFIRM_ADD_RETURN_MARK), ""),

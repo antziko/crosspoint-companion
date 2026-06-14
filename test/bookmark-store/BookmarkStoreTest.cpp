@@ -206,6 +206,25 @@ TEST_F(BookmarkStoreTest, ExportTxtContainsQuotesOnly) {
   EXPECT_NE(body.find("1 highlight"), std::string::npos);
 }
 
+TEST_F(BookmarkStoreTest, PageBookmarkToggleDoesNotRemoveQuote) {
+  const std::string book = "/books/toggle.epub";
+  auto& store = BookmarkStore::getInstance();
+  ASSERT_TRUE(store.loadForBook(book, "T", "A", "epub"));
+
+  // A quote and a point bookmark on the same page (progress 0.50, 10-page chapter).
+  ASSERT_EQ(store.addQuote(1, 0.50f, 2, 6, 10, "Ch1", "quoted-text", 5), BookmarkStore::AddResult::Added);
+  ASSERT_EQ(store.addBookmark(1, 0.50f, 10, "Ch1"), BookmarkStore::AddResult::Added);
+  ASSERT_EQ(store.getBookmarks().size(), 2u);
+
+  // The page-bookmark toggle (hold-left) must remove only the point bookmark, leaving the quote.
+  store.removeBookmarkForPage(1, 0.50f, 10);
+  ASSERT_EQ(store.getBookmarks().size(), 1u);
+  EXPECT_TRUE(store.getBookmarks()[0].isQuote());
+
+  EXPECT_TRUE(store.hasQuoteForPage(1, 0.50f, 10));
+  EXPECT_FALSE(store.hasPointBookmarkForPage(1, 0.50f, 10));
+}
+
 TEST_F(BookmarkStoreTest, EnforcesCombinedCap) {
   const std::string book = "/books/cap.epub";
   auto& store = BookmarkStore::getInstance();

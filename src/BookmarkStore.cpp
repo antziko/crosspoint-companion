@@ -205,8 +205,10 @@ BookmarkStore::AddResult BookmarkStore::addBookmark(uint16_t spineIndex, float p
     const float pageSlice = 1.0f / static_cast<float>(pageCount);
     const float pageStart = progress;
     const float pageEnd = progress + pageSlice;
+    // Replace only an existing POINT bookmark on this page — quotes share the page but are
+    // independent marks and must not be dropped by adding a page bookmark.
     std::erase_if(bookmarks, [&](const Bookmark& b) {
-      return b.spineIndex == spineIndex && b.progress >= pageStart && b.progress < pageEnd;
+      return !b.quote && b.spineIndex == spineIndex && b.progress >= pageStart && b.progress < pageEnd;
     });
   }
 
@@ -309,8 +311,10 @@ void BookmarkStore::removeBookmarkForPage(uint16_t spineIndex, float pageProgres
   float pageStart = pageProgress;
   float pageEnd = pageProgress + pageSlice;
 
+  // Page bookmark toggle only ever removes a POINT bookmark — never a quote, which is
+  // removed deliberately from the bookmark list, not by the hold-left page toggle.
   auto it = std::find_if(bookmarks.begin(), bookmarks.end(), [&](const Bookmark& b) {
-    return b.spineIndex == spineIndex && b.progress >= pageStart && b.progress < pageEnd;
+    return !b.quote && b.spineIndex == spineIndex && b.progress >= pageStart && b.progress < pageEnd;
   });
   if (it == bookmarks.end()) return;
 
