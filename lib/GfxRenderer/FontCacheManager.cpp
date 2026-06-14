@@ -3,6 +3,7 @@
 #include <FontDecompressor.h>
 #include <Logging.h>
 #include <SdCardFont.h>
+#include <esp_heap_caps.h>
 
 #include <cstring>
 
@@ -77,13 +78,30 @@ void FontCacheManager::recordText(const char* text, int fontId, EpdFontFamily::S
 // --- PrewarmScope implementation ---
 
 FontCacheManager::PrewarmScope::PrewarmScope(FontCacheManager& manager) : manager_(&manager) {
-  manager_->scanMode_ = ScanMode::Scanning;
   manager_->clearCache();
   manager_->resetStats();
   manager_->scanText_.clear();
-  manager_->scanText_.reserve(2048);  // Pre-allocate to avoid heap fragmentation from repeated concat
   memset(manager_->scanStyleCounts_, 0, sizeof(manager_->scanStyleCounts_));
   manager_->scanFontId_ = -1;
+
+  // Prewarm is a fragmentation/perf optimization, not a correctness requirement:
+  // it batches glyph caching for one page. Without it, glyphs still cache lazily
+  // per-draw. The scan buffer below grows via std::string, whose allocation goes
+  // through the global operator new — which abort()s on OOM (no exceptions on
+  // ESP32-C3). On a starved/fragmented heap the reserve() alone has crashed the
+  // device (failed new of 2049B vs largest free block 2036B). Skip scanning when
+  // the largest free block can't safely hold the buffer; the scope then stays
+  // inert because recordText() is gated on isScanning(). largest-free-block, not
+  // free-total, is what the contiguous string allocation actually needs.
+  constexpr size_t kScanReserve = 2048;
+  constexpr size_t kHeadroom = 1024;  // leave room for the rest of the render path
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < kScanReserve + kHeadroom) {
+    manager_->scanMode_ = ScanMode::None;  // inert: no scan, no prewarm allocation
+    LOG_DBG("FCM", "Prewarm skipped: low heap (largest block < %u)", (unsigned)(kScanReserve + kHeadroom));
+    return;
+  }
+  manager_->scanMode_ = ScanMode::Scanning;
+  manager_->scanText_.reserve(kScanReserve);  // Pre-allocate to avoid fragmentation from repeated concat
 }
 
 void FontCacheManager::PrewarmScope::endScanAndPrewarm() {

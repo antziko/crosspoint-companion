@@ -386,7 +386,7 @@ bool HalClock::writeDateToRTC(uint8_t dayOfWeek, uint8_t date, uint8_t month, ui
   return true;
 }
 
-bool HalClock::syncFromNTP(uint32_t maxWaitMs) {
+bool HalClock::syncFromNTP(uint32_t maxWaitMs, const volatile bool* abortFlag) {
   if (WiFi.status() != WL_CONNECTED) {
     LOG_ERR("CLK", "WiFi not connected, cannot sync NTP");
     return false;
@@ -401,6 +401,12 @@ bool HalClock::syncFromNTP(uint32_t maxWaitMs) {
   // Poll for SNTP completion in 100ms steps up to maxWaitMs.
   const int maxAttempts = static_cast<int>(maxWaitMs / 100);
   for (int i = 0; i < maxAttempts; i++) {
+    if (abortFlag && *abortFlag) {
+      // Caller requested teardown (e.g. user is opening a book). _ntpConfigured
+      // stays set, so a late SNTP packet is still adopted by isPosixTimeValid().
+      LOG_INF("CLK", "NTP sync aborted by caller");
+      return false;
+    }
     if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
       time_t now = time(nullptr);
       struct tm timeinfo;

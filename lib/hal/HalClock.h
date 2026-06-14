@@ -64,8 +64,7 @@ class HalClock {
   // dateFormat: 0="30 Jun", 1="Mon, 30 Jun", 2="30/06", 3="Mon, 30/06"
   // Adjusts the displayed date by ±1 day when the offset crosses midnight.
   // Returns false if RTC is not available.
-  bool formatDate(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHoursBiased = 48,
-                  uint8_t dateFormat = 0) const;
+  bool formatDate(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHoursBiased = 48, uint8_t dateFormat = 0) const;
 
   // Get the local calendar date/time: raw RTC reads with utcOffsetQuarterHoursBiased
   // applied and the date/day-of-week rolled by ±1 day when the offset crosses midnight
@@ -84,9 +83,14 @@ class HalClock {
   // so a slow SNTP packet isn't cut off by the caller tearing WiFi down).
   // Returns true if the clock was successfully set.
   //
+  // `abortFlag` (optional) lets a background caller cut a long wait short: when it
+  // becomes true the poll loop returns early (within ~100ms) so the caller can
+  // tear WiFi down promptly — used to free the heap when the user opens a book
+  // mid-sync. A nullptr disables the check (UI callers).
+  //
   // Debouncing (skip if already synced once) is enforced by the caller, not here,
   // so the HAL stays free of any app-layer settings dependency.
-  bool syncFromNTP(uint32_t maxWaitMs = 5000);
+  bool syncFromNTP(uint32_t maxWaitMs = 5000, const volatile bool* abortFlag = nullptr);
 
  private:
   // Returns true if POSIX system clock has a plausible UTC epoch (> Jan 1 2020).

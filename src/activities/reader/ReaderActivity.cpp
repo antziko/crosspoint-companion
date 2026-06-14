@@ -2,6 +2,7 @@
 
 #include <FsHelpers.h>
 #include <HalStorage.h>
+#include <I18n.h>
 
 #include "CrossPointSettings.h"
 #include "Epub.h"
@@ -13,6 +14,40 @@
 #include "XtcReaderActivity.h"
 #include "activities/util/BmpViewerActivity.h"
 #include "activities/util/FullScreenMessageActivity.h"
+#include "fontIds.h"
+#include "network/NtpBgState.h"
+
+namespace {
+// The boot-time background NTP sync (X4 only — gated on no hardware RTC, see
+// maybeStartBackgroundNtpSync()) holds the WiFi stack up for up to ~28s, which
+// fragments the heap below the 32KB contiguous block an EPUB inflate needs.
+// Opening a book during that window OOM-aborts the device. Give a fast sync a
+// short grace to finish on its own, then cancel it and wait for the radio
+// teardown so the book opens on a recovered heap. Back skips the grace at once.
+// No-op (single false check) when no bg sync is running — always the case on X3.
+void waitOutBackgroundNtpSync(GfxRenderer& renderer, MappedInputManager& mappedInput) {
+  if (!NtpBg::active) return;
+
+  const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  const int cy = renderer.getScreenHeight() / 2;
+  renderer.clearScreen();
+  renderer.drawCenteredText(UI_10_FONT_ID, cy - lineHeight, tr(STR_CLOCK_SYNCING));
+  renderer.drawCenteredText(SMALL_FONT_ID, cy + lineHeight, tr(STR_CLOCK_SYNC_SKIP_HINT));
+  renderer.displayBuffer();
+
+  constexpr uint32_t graceMs = 5000;  // let a typical 2-3s sync land before opening
+  const uint32_t start = millis();
+  while (NtpBg::active) {
+    mappedInput.update();
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back) || (millis() - start) >= graceMs) {
+      // Request teardown; the task aborts its SNTP wait (within ~100ms), drops the
+      // radio, and clears NtpBg::active, which ends this loop on a recovered heap.
+      NtpBg::cancel = true;
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+}
+}  // namespace
 
 bool ReaderActivity::isXtcFile(const std::string& path) { return FsHelpers::hasXtcExtension(path); }
 
@@ -103,6 +138,10 @@ void ReaderActivity::onEnter() {
     goToLibrary();  // Start from root when entering via Browse
     return;
   }
+
+  // Don't load a book while boot-time background NTP holds WiFi up — the
+  // fragmented heap can't fit the EPUB inflate window and the open OOM-aborts.
+  waitOutBackgroundNtpSync(renderer, mappedInput);
 
   sdFontSystem.ensureLoaded(renderer);
 

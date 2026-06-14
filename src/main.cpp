@@ -35,6 +35,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "images/LoadingIcon.h"
+#include "network/NtpBgState.h"
 #include "util/ButtonNavigator.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryRegistry.h"
@@ -372,6 +373,12 @@ static void maybeStartBackgroundNtpSync() {
     strncpy(ntpBgCtx.pass, cred->password.c_str(), sizeof(ntpBgCtx.pass) - 1);
     ntpBgCtx.pass[sizeof(ntpBgCtx.pass) - 1] = '\0';
   }
+  // Published for the whole WiFi lifetime (begin .. WIFI_OFF) so the reader-open
+  // path can detect the heap-fragmenting window and wait/cancel before loading a
+  // book. Set before xTaskCreate so there is no gap where WiFi is coming up but
+  // `active` is still false. See src/network/NtpBgState.h.
+  NtpBg::cancel = false;
+  NtpBg::active = true;
   xTaskCreate(
       [](void* arg) {
         const auto* ctx = static_cast<NtpBgCtx*>(arg);
@@ -381,7 +388,7 @@ static void maybeStartBackgroundNtpSync() {
         } else {
           WiFi.begin(ctx->ssid);
         }
-        for (int i = 0; i < 80 && WiFi.status() != WL_CONNECTED; ++i) {
+        for (int i = 0; i < 80 && WiFi.status() != WL_CONNECTED && !NtpBg::cancel; ++i) {
           vTaskDelay(pdMS_TO_TICKS(100));
         }
         if (WiFi.status() == WL_CONNECTED) {
@@ -391,12 +398,19 @@ static void maybeStartBackgroundNtpSync() {
                           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
           // This task owns the connection, so wait out a slow SNTP packet
           // (Problem A) before tearing WiFi down — longer than the 5s UI default.
-          halClock.syncFromNTP(20000);
+          // NtpBg::cancel cuts the wait short when the user opens a book.
+          halClock.syncFromNTP(20000, &NtpBg::cancel);
           WiFi.disconnect(true);
           WiFi.mode(WIFI_OFF);
           SdDebugLog::log("MEM", "ntp wifi-off free=%u largest=%u", (unsigned)ESP.getFreeHeap(),
                           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        } else {
+          // Never connected (or cancelled mid-connect): still drop the radio so the
+          // STA stack's heap is released before we clear `active`.
+          WiFi.disconnect(true);
+          WiFi.mode(WIFI_OFF);
         }
+        NtpBg::active = false;  // heap recovered — reader gate may proceed
         vTaskDelete(nullptr);
       },
       "ntp_bg", 4096, &ntpBgCtx, 1, nullptr);
