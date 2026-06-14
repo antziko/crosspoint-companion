@@ -49,25 +49,28 @@ class FileBrowserActivity final : public Activity {
   std::unique_ptr<char[]> fileNameBuffer;
 
   // Window cursors + paging state (derived each load).
-  std::string winFirst;        // first name in the current window
-  std::string winLast;         // last name in the current window
-  bool hasPrev = false;        // a matching entry exists before winFirst
-  bool hasNext = false;        // a matching entry exists after winLast
-  size_t totalMatches = 0;     // total matching entries in the folder (dirs + files)
-  size_t totalFiles = 0;       // total matching non-directory entries (for the title count)
+  std::string winFirst;            // first name in the current window
+  std::string winLast;             // last name in the current window
+  bool hasPrev = false;            // a matching entry exists before winFirst
+  bool hasNext = false;            // a matching entry exists after winLast
+  size_t totalMatches = 0;         // total matching entries in the folder (dirs + files)
+  size_t totalFiles = 0;           // total matching non-directory entries (for the title count)
   size_t windowStartRank = 0;      // 0-based global rank of the window's first row (all entries)
   size_t windowStartFileRank = 0;  // 0-based files-only rank of the window's first row (for the "N." prefix)
 
   // Window loading. loadWindow() does the single directory scan; the wrappers pick the mode.
-  void loadWindow(filewindow::WindowSelector::Mode mode, const std::string& cursor);
-  void loadFirstWindow();                               // top of the folder
-  void loadLastWindow();                                // bottom of the folder
-  void loadWindowContaining(const std::string& name);   // window starting at `name` (position restore)
-  void reloadCurrentWindow();                           // re-load around the current top (after delete/toggle)
-  void pageDown();                                      // next window (wraps to first)
-  void pageUp();                                        // previous window (wraps to last)
-  size_t windowCapacity() const;                        // on-screen rows = window size
-  bool accepts(const char* name, bool isDir) const;     // shared list filter
+  // NOTE: cursor is taken BY VALUE on purpose. pageDown/pageUp pass the winLast/winFirst members
+  // as the cursor, and loadWindow clears those members at the top — a const-ref param would alias
+  // a string that gets cleared mid-call, collapsing the cursor to "" (stuck-on-page-1 bug).
+  void loadWindow(filewindow::WindowSelector::Mode mode, std::string cursor);
+  void loadFirstWindow();                              // top of the folder
+  void loadLastWindow();                               // bottom of the folder
+  void loadWindowContaining(const std::string& name);  // window starting at `name` (position restore)
+  void reloadCurrentWindow();                          // re-load around the current top (after delete/toggle)
+  void pageDown();                                     // next window (wraps to first)
+  void pageUp();                                       // previous window (wraps to last)
+  size_t windowCapacity() const;                       // on-screen rows = window size
+  bool accepts(const char* name, bool isDir) const;    // shared list filter
 
  public:
   explicit FileBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string initialPath = "/",

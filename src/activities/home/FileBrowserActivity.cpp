@@ -58,7 +58,7 @@ size_t FileBrowserActivity::windowCapacity() const {
 // Single directory scan: feed every matching entry to a bounded WindowSelector (RAM ≤ one
 // window) and record the global min/max name so has-prev / has-next are known without a
 // second scan. `files` ends up holding just the selected window, in sorted order.
-void FileBrowserActivity::loadWindow(filewindow::WindowSelector::Mode mode_, const std::string& cursor) {
+void FileBrowserActivity::loadWindow(filewindow::WindowSelector::Mode mode_, std::string cursor) {
   files.clear();
   winFirst.clear();
   winLast.clear();
@@ -170,8 +170,15 @@ void FileBrowserActivity::loadLastWindow() {
 
 void FileBrowserActivity::loadWindowContaining(const std::string& name) {
   loadWindow(filewindow::WindowSelector::Mode::AtOrAfter, name);
-  // Land the cursor on the requested entry when present (it's the window's first match
-  // for AtOrAfter); otherwise default to the top.
+  // AtOrAfter anchors the window to START at `name`, dropping every sibling that sorts
+  // before it. When `name` actually falls on the first page (rank < one window), that
+  // hides earlier siblings the user expects to still see (e.g. returning from a folder
+  // into a parent whose folders all fit one screen). In that case reload from the top so
+  // the natural first page is shown, then place the cursor on the target.
+  if (windowStartRank < windowCapacity()) {
+    loadWindow(filewindow::WindowSelector::Mode::First, "");
+  }
+  // Land the cursor on the requested entry when present; otherwise default to the top.
   selectorIndex = 0;
   for (size_t i = 0; i < files.size(); i++) {
     if (files[i].name == name) {
@@ -522,6 +529,7 @@ void FileBrowserActivity::loop() {
 }
 
 std::string getFileName(std::string filename) {
+  if (filename.empty()) return filename;
   if (filename.back() == '/') {
     filename.pop_back();
     if (!UITheme::getInstance().getTheme().showsFileIcons()) {
@@ -530,14 +538,16 @@ std::string getFileName(std::string filename) {
     return filename;
   }
   const auto pos = filename.rfind('.');
-  return filename.substr(0, pos);
+  return filename.substr(0, pos);  // pos==npos (no dot) -> whole name, which is correct
 }
 
 std::string getFileExtension(std::string filename) {
-  if (filename.back() == '/') {
+  if (filename.empty() || filename.back() == '/') {
     return "";
   }
   const auto pos = filename.rfind('.');
+  // No dot: substr(npos) would throw out_of_range -> abort under -fno-exceptions. Return no ext.
+  if (pos == std::string::npos) return "";
   return filename.substr(pos);
 }
 
@@ -594,8 +604,7 @@ void FileBrowserActivity::render(RenderLock&&) {
           snprintf(prefix, sizeof(prefix), "%u. ", static_cast<unsigned>(windowStartFileRank + filesBefore + 1));
           return prefix + getFileName(files[index].name);
         },
-        nullptr,
-        [this](int index) { return UITheme::getFileIcon(files[index].name); },
+        nullptr, [this](int index) { return UITheme::getFileIcon(files[index].name); },
         // Trailing value: "<ext>  <size>" on one line (directories show nothing).
         [this](int index) {
           const std::string ext = getFileExtension(files[index].name);
@@ -645,4 +654,3 @@ void FileBrowserActivity::render(RenderLock&&) {
 
   renderer.displayBuffer();
 }
-

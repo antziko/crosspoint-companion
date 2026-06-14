@@ -53,18 +53,23 @@ bool naturalFileLess(const std::string& str1, const std::string& str2) {
   const char* s1 = str1.c_str();
   const char* s2 = str2.c_str();
 
-  // Iterate while both strings have characters
+  // Iterate while both strings have characters.
+  // NOTE: isdigit()/tolower() take an int that must be representable as unsigned char (or EOF).
+  // A raw `char` is signed on this target, so non-ASCII UTF-8 bytes (0x80-0xFE) become negative
+  // and index the newlib _ctype_ table out of bounds -> garbage classification -> a non-transitive
+  // order. That corrupts globalMin/globalMax in FileBrowserActivity::loadWindow and breaks paging.
+  // Always cast through unsigned char first.
   while (*s1 && *s2) {
     // Check if both are at the start of a number
-    if (isdigit(*s1) && isdigit(*s2)) {
+    if (isdigit((unsigned char)*s1) && isdigit((unsigned char)*s2)) {
       // Skip leading zeros and track them
       while (*s1 == '0') s1++;
       while (*s2 == '0') s2++;
 
       // Count digits to compare lengths first
       int len1 = 0, len2 = 0;
-      while (isdigit(s1[len1])) len1++;
-      while (isdigit(s2[len2])) len2++;
+      while (isdigit((unsigned char)s1[len1])) len1++;
+      while (isdigit((unsigned char)s2[len2])) len2++;
 
       // Different length so return smaller integer value
       if (len1 != len2) return len1 < len2;
@@ -79,8 +84,8 @@ bool naturalFileLess(const std::string& str1, const std::string& str2) {
       s2 += len2;
     } else {
       // Regular case-insensitive character comparison
-      char c1 = tolower(*s1);
-      char c2 = tolower(*s2);
+      char c1 = tolower((unsigned char)*s1);
+      char c2 = tolower((unsigned char)*s2);
       if (c1 != c2) return c1 < c2;
       s1++;
       s2++;
@@ -91,9 +96,7 @@ bool naturalFileLess(const std::string& str1, const std::string& str2) {
   return *s1 == '\0' && *s2 != '\0';
 }
 
-void sortFileList(std::vector<std::string>& strs) {
-  std::sort(begin(strs), end(strs), naturalFileLess);
-}
+void sortFileList(std::vector<std::string>& strs) { std::sort(begin(strs), end(strs), naturalFileLess); }
 
 bool checkFileExtension(std::string_view fileName, const char* extension) {
   const size_t extLen = strlen(extension);
