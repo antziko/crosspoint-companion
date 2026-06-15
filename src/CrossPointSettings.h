@@ -325,9 +325,9 @@ class CrossPointSettings {
   // Dwell thresholds, stored as indices into the seconds tables below: dwell <= T1 -> top,
   // dwell <= T2 -> middle, otherwise bottom.
   uint8_t dictMarkerT1Idx = 1;  // default 5s
-  uint8_t dictMarkerT2Idx = 1;  // default 12s
+  uint8_t dictMarkerT2Idx = 2;  // default 12s
   static constexpr uint16_t DICT_MARKER_T1_SECONDS[] = {3, 5, 8, 10};
-  static constexpr uint16_t DICT_MARKER_T2_SECONDS[] = {9, 12, 15, 18};
+  static constexpr uint16_t DICT_MARKER_T2_SECONDS[] = {7, 9, 12, 15};
   // Reading-progress save debounce: write /progress.bin only every N page turns (plus a flush on
   // reader exit / sleep) to cut SD wear. Stored as an index into PROGRESS_SAVE_PAGES. Index 0 = 1
   // (save every turn, the safest legacy behaviour — no progress loss on hard power-off).

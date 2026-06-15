@@ -22,7 +22,7 @@ const StrId menuNames[ITEM_COUNT] = {StrId::STR_DICT_MARKER_DWELL, StrId::STR_DI
 constexpr int T1_ITEMS = 4;
 const StrId t1Names[T1_ITEMS] = {StrId::STR_SEC_3, StrId::STR_SEC_5, StrId::STR_SEC_8, StrId::STR_SEC_10};
 constexpr int T2_ITEMS = 4;
-const StrId t2Names[T2_ITEMS] = {StrId::STR_SEC_9, StrId::STR_SEC_12, StrId::STR_SEC_15, StrId::STR_SEC_18};
+const StrId t2Names[T2_ITEMS] = {StrId::STR_SEC_7, StrId::STR_SEC_9, StrId::STR_SEC_12, StrId::STR_SEC_15};
 }  // namespace
 
 void DictMarkerSettingsActivity::onEnter() {
