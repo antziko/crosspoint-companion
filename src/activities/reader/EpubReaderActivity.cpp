@@ -1700,7 +1700,15 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   // a 1-bit image halftone, so it doesn't need the 4-level gray pass.)
   // 4-level grayscale images only exist when text AA is on (AA off => images are
   // 1-bit, drawn in the BW frame, needing no grayscale pass or blanking dance).
-  lastPageHadImages = page->hasImages();  // gates the bookmark light-refresh (see header)
+  // A "large" image (both dimensions >= this) is a real figure/photo. Small inline
+  // icons, emoji, and thin dividers fall below it and must NOT force the next-page
+  // ghost-clear HALF_REFRESH (their residue is negligible). Rendering still uses the
+  // unconditional hasImages() path so even tiny icons draw correctly; only the
+  // refresh-cadence forcing and the bookmark light-refresh gate on the size check.
+  static constexpr int16_t IMAGE_LARGE_MIN_PX = 64;
+  const bool hasLargeImage = page->hasLargeImages(IMAGE_LARGE_MIN_PX);
+
+  lastPageHadImages = hasLargeImage;  // gates the bookmark light-refresh (see header)
   const bool grayImages = page->hasImages() && !renderer.isX3() && aaMode != CrossPointSettings::TEXT_AA_OFF;
   // Antialiased always runs the gray pass (text AA, even text-only pages). Sharp runs
   // it only for image pages — pure-text Sharp pages stay single-pass solid black.
@@ -1744,8 +1752,11 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     // image region that a plain fast diff on the *next* page can't clear, so
     // text there ghosts gray (#2190). Force the next ordinary page onto the
     // HALF ghost-cleanup path, which drives every pixel to its target
-    // regardless of residue.
-    pagesUntilFullRefresh = 1;
+    // regardless of residue. Only large images leave enough residue to warrant
+    // this — small icons/emoji skip it (no needless refresh on the next page).
+    if (hasLargeImage) {
+      pagesUntilFullRefresh = 1;
+    }
   } else {
     // Full-refresh pages double as reading-time checkpoints: the 1-2s HALF_REFRESH
     // masks the stats SD writes. loop() (main task) performs the actual commit.
@@ -1756,7 +1767,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     // X3 halftone image residue: 1-bit halftone dots leave charge that FAST_REFRESH
     // can't fully clear on the next page. Force HALF on the next page to drive every
     // pixel to its target — same fix as the X4 grayscale residue path above.
-    if (page->hasImages() && renderer.isX3()) {
+    if (hasLargeImage && renderer.isX3()) {
       pagesUntilFullRefresh = 1;
     }
   }

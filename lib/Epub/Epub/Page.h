@@ -97,6 +97,20 @@ class Page {
                        [](const std::shared_ptr<PageElement>& el) { return el->getTag() == TAG_PageImage; });
   }
 
+  // Check if page contains a "large" image: both dimensions >= minPx. Small
+  // inline icons/emoji and thin dividers/rules-as-images fall below the
+  // threshold and are excluded. Used to gate the next-page ghost-clear refresh
+  // (and the bookmark full-page light refresh) so tiny icons don't force a
+  // HALF_REFRESH on the following page.
+  bool hasLargeImages(int16_t minPx) const {
+    return std::any_of(elements.begin(), elements.end(),
+                       [minPx](const std::shared_ptr<PageElement>& el) {
+                         if (el->getTag() != TAG_PageImage) return false;
+                         const auto& img = static_cast<const PageImage&>(*el).getImageBlock();
+                         return img.getWidth() >= minPx && img.getHeight() >= minPx;
+                       });
+  }
+
   // Get bounding box of all images on the page (union of image rects)
   // Returns false if no images. Coordinates are relative to page origin.
   bool getImageBoundingBox(int16_t& outX, int16_t& outY, int16_t& outW, int16_t& outH) const {
