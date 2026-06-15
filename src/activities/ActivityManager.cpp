@@ -93,6 +93,8 @@ void ActivityManager::loop() {
         currentActivity = std::move(stackActivities.back());
         stackActivities.pop_back();
         LOG_DBG("ACT", "Popped from activity stack, new size = %zu", stackActivities.size());
+        // Resume before the handler so a handler that immediately pushes again re-pauses cleanly.
+        currentActivity->onResume();
         // Handle result if necessary
         if (currentActivity->resultHandler) {
           LOG_DBG("ACT", "Handling result for popped activity");
@@ -130,6 +132,7 @@ void ActivityManager::loop() {
       } else if (pendingAction == PendingAction::Push) {
         // Push doesn't need RenderLock - just moves pointers, no rendering.
         // Avoiding the lock prevents blocking on any in-progress e-ink refresh (~1s).
+        currentActivity->onPause();
         stackActivities.push_back(std::move(currentActivity));
         LOG_DBG("ACT", "Pushed to activity stack, new size = %zu", stackActivities.size());
         pendingAction = PendingAction::None;

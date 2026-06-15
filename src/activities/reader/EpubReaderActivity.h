@@ -65,6 +65,10 @@ class EpubReaderActivity final : public Activity {
 
   BookReadingStats readingStats;
   unsigned long sessionStartMs = 0UL;
+  // Wall-clock instant the reader was suspended by a pushed sub-activity (menu, word-select,
+  // chapter select, stats, ...). 0 = not paused. onResume() shifts sessionStartMs forward by
+  // this gap so time spent in sub-screens is not counted as reading. See onPause/onResume.
+  unsigned long sessionPauseStartMs = 0UL;
   // Set to millis() after each full page render; cleared to 0 while a subactivity is active.
   // Forward pageTurn measures elapsed time here for pace estimation.
   unsigned long pageShownAtMs = 0UL;
@@ -194,6 +198,8 @@ class EpubReaderActivity final : public Activity {
       : Activity("EpubReader", renderer, mappedInput), epub(std::move(epub)) {}
   void onEnter() override;
   void onExit() override;
+  void onPause() override;
+  void onResume() override;
   void loop() override;
   void render(RenderLock&& lock) override;
   bool isReaderActivity() const override { return true; }

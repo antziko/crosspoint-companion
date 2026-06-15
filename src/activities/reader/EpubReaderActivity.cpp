@@ -302,6 +302,7 @@ void EpubReaderActivity::onEnter() {
 
   readingStats = BookReadingStats::load(epub->getCachePath());
   sessionStartMs = millis();
+  sessionPauseStartMs = 0UL;
   sessionIdleExcessSecs = 0;
   sessionCommittedSecs = 0;
   statsCheckpointPending = false;
@@ -353,6 +354,21 @@ void EpubReaderActivity::onExit() {
   } else {
     epub.reset();
   }
+}
+
+void EpubReaderActivity::onPause() {
+  // Reader suspended while a sub-activity (menu, word-select, chapter select, stats, ...) is
+  // foreground. Anchor the instant so onResume can exclude the gap from reading time.
+  if (sessionStartMs == 0) return;
+  sessionPauseStartMs = millis();
+}
+
+void EpubReaderActivity::onResume() {
+  // Returning from a sub-activity: shift the session anchor forward by the suspended gap so
+  // every wall-clock delta (commitReadingTime, sync delta) excludes the in-sub-activity time.
+  if (sessionStartMs == 0 || sessionPauseStartMs == 0) return;
+  sessionStartMs += millis() - sessionPauseStartMs;
+  sessionPauseStartMs = 0UL;
 }
 
 void EpubReaderActivity::commitReadingTime(uint32_t minDeltaSecs) {
