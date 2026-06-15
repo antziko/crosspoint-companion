@@ -407,6 +407,12 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   }
 
   std::string url = (path.find("http") == 0) ? path : UrlUtils::buildUrl(server.url, path);
+  // Per-server extra query (e.g. "limit=20"). buildUrl strips query from relative
+  // paths and Readeck hrefs carry no limit, so inject it on every feed fetch.
+  // Guard against duplicating a param the server already echoed into a next/prev link.
+  if (!server.extraQuery.empty() && url.find(server.extraQuery) == std::string::npos) {
+    url += (url.find('?') == std::string::npos ? '?' : '&') + server.extraQuery;
+  }
   LOG_DBG("OPDS", "Fetching: %s", url.c_str());
   SdDebugLog::log("OPDS", "fetch start, heap=%u, url=%s", (unsigned)ESP.getFreeHeap(), url.c_str());
   // Two-phase fetch: download to a temp file first, then parse it AFTER the

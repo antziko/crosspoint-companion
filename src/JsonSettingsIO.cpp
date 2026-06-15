@@ -368,6 +368,7 @@ bool JsonSettingsIO::saveOpds(const OpdsServerStore& store, const char* path) {
     obj["url"] = server.url;
     obj["username"] = server.username;
     obj["password_obf"] = obfuscation::obfuscateToBase64(server.password);
+    obj["extra_query"] = server.extraQuery;
     obj["sort_az"] = server.sortAlphabetical;
   }
 
@@ -393,6 +394,8 @@ bool JsonSettingsIO::loadOpds(OpdsServerStore& store, const char* json, bool* ne
     server.name = obj["name"] | std::string("");
     server.url = obj["url"] | std::string("");
     server.username = obj["username"] | std::string("");
+    // Missing in files written before this field existed -> "" (no-op append).
+    server.extraQuery = obj["extra_query"] | std::string("");
     // Default true so servers saved before this field existed keep sorting A-Z
     // (the old global default).
     server.sortAlphabetical = obj["sort_az"] | true;
