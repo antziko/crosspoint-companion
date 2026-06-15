@@ -24,11 +24,11 @@ class DictionaryWordSelectActivity final : public Activity {
   // height, per the caller's own layout formula. The skip-initial-render fast
   // path clears exactly that strip so the framebuffer matches the menu→lookup
   // path (no status bar, no auto-turn label visible during word-select).
-  explicit DictionaryWordSelectActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                        std::unique_ptr<Page> page, int marginLeft, int marginTop,
-                                        const std::string& cachePath, const std::string& nextPageFirstWord = "",
-                                        bool framebufferContainsPage = false, int reservedBottomHeight = 0,
-                                        Mode mode = Mode::Dictionary)
+  explicit DictionaryWordSelectActivity(
+      GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Page> page, int marginLeft, int marginTop,
+      const std::string& cachePath, const std::string& nextPageFirstWord = "", bool framebufferContainsPage = false,
+      int reservedBottomHeight = 0, Mode mode = Mode::Dictionary,
+      WordSelectNavigator::InitialMarker initialMarker = WordSelectNavigator::InitialMarker::Middle)
       : Activity("DictionaryWordSelect", renderer, mappedInput),
         page(std::move(page)),
         marginLeft(marginLeft),
@@ -38,7 +38,8 @@ class DictionaryWordSelectActivity final : public Activity {
         controller(renderer, mappedInput, *this, cachePath),
         framebufferContainsPage_(framebufferContainsPage),
         reservedBottomHeight_(reservedBottomHeight),
-        mode_(mode) {}
+        mode_(mode),
+        initialMarker_(initialMarker) {}
 
   void onEnter() override;
   void onExit() override;
@@ -79,6 +80,10 @@ class DictionaryWordSelectActivity final : public Activity {
   int reservedBottomHeight_ = 0;
 
   Mode mode_ = Mode::Dictionary;
+
+  // Initial marker band, chosen by the caller from current-page dwell (see CrossPointSettings
+  // dictMarkerDwellEnabled). Defaults to Middle for callers that don't set it.
+  WordSelectNavigator::InitialMarker initialMarker_ = WordSelectNavigator::InitialMarker::Middle;
 
   // True when opened mid hold-Back (the reader's hold-Back → highlight gesture): swallow that
   // first Back release so it doesn't immediately cancel the selection. Other entry paths have

@@ -3,17 +3,32 @@
 #include <GfxRenderer.h>
 #include <Utf8.h>
 
+#include <algorithm>
 #include <cstdlib>
 
 #include "MappedInputManager.h"
 #include "TextPool.h"
 
 void WordSelectNavigator::load(std::vector<WordInfo> w, std::vector<Row> r, std::string pool,
-                               bool consumeInitialConfirm) {
+                               bool consumeInitialConfirm, InitialMarker initialMarker) {
   words = std::move(w);
   rows = std::move(r);
   textPool = std::move(pool);
-  currentRow = static_cast<int>(rows.size()) / 2;
+  const int rowCount = static_cast<int>(rows.size());
+  int targetRow;
+  switch (initialMarker) {
+    case InitialMarker::Top:
+      targetRow = rowCount / 4;
+      break;
+    case InitialMarker::Bottom:
+      targetRow = (rowCount * 3) / 4;
+      break;
+    case InitialMarker::Middle:
+    default:
+      targetRow = rowCount / 2;
+      break;
+  }
+  currentRow = std::clamp(targetRow, 0, rowCount > 0 ? rowCount - 1 : 0);
   currentWordInRow = (!rows.empty() && !rows[currentRow].wordIndices.empty())
                          ? static_cast<int>(rows[currentRow].wordIndices.size()) / 2
                          : 0;

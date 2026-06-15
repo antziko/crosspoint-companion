@@ -338,6 +338,12 @@ void EpubReaderActivity::onExit() {
   APP_STATE.readerActivityLoadCount = 0;
   APP_STATE.saveToFile();
   BOOKMARKS.unload();
+  // Flush any progress the debounce hasn't written yet, so a normal exit/sleep never loses pages
+  // (only a hard power-off between debounced writes can). No-op when already current.
+  if (epub && section &&
+      (currentSpineIndex != lastSavedSpine_ || static_cast<int>(section->currentPage) != lastSavedPage_)) {
+    saveProgress(currentSpineIndex, section->currentPage, section->pageCount);
+  }
   section.reset();
   if (pendingReadFolderMove && epub) {
     const std::string srcPath = epub->getPath();
@@ -515,11 +521,12 @@ void EpubReaderActivity::loop() {
     ignoreBackUntilRelease = false;
   }
 
-  // Long press BACK (1s+) starts a highlight selection on the current page. The child
-  // word-select swallows the release that ends this launching hold (see its onEnter), so
-  // letting go doesn't immediately cancel; ignoreBackUntilRelease is re-armed on return.
+  // Long press BACK (>= Dictionary::LONG_PRESS_MS, matching the confirm-hold dictionary gesture)
+  // starts a highlight selection on the current page. The child word-select swallows the release
+  // that ends this launching hold (see its onEnter), so letting go doesn't immediately cancel;
+  // ignoreBackUntilRelease is re-armed on return.
   if (!suppressBack && section && mappedInput.isPressed(MappedInputManager::Button::Back) &&
-      mappedInput.getHeldTime() >= ReaderUtils::GO_HOME_MS && !highlightHoldFired) {
+      mappedInput.getHeldTime() >= Dictionary::LONG_PRESS_MS && !highlightHoldFired) {
     highlightHoldFired = true;  // one-shot until Back is released, so we don't relaunch each tick
     openHighlightSelect();
     return;
@@ -530,7 +537,7 @@ void EpubReaderActivity::loop() {
 
   // Short press BACK goes directly to home (or restores position if viewing footnote)
   if (!suppressBack && mappedInput.wasReleased(MappedInputManager::Button::Back) &&
-      mappedInput.getHeldTime() < ReaderUtils::GO_HOME_MS) {
+      mappedInput.getHeldTime() < Dictionary::LONG_PRESS_MS) {
     if (footnoteDepth > 0) {
       restoreSavedPosition();
       return;
@@ -759,11 +766,15 @@ void EpubReaderActivity::openWordSelect(bool framebufferContainsPage) {
     }
   }
   const std::string bookCachePath = epub->getCachePath();
+  // Choose the marker band from this page's dwell BEFORE the dwell is consumed/reset below.
+  const WordSelectNavigator::InitialMarker initialMarker = computeWordSelectMarker();
+  pauseMarkerDwell();  // freeze the dwell across this word-select round-trip (excludes in-dict time)
   if (pageShownAtMs > 0) accountIdleExcess(millis() - pageShownAtMs);
   pageShownAtMs = 0UL;
   startActivityForResult(std::make_unique<DictionaryWordSelectActivity>(
                              renderer, mappedInput, std::move(pageForLookup), orientedMarginLeft, orientedMarginTop,
-                             bookCachePath, nextPageFirstWord, framebufferContainsPage, reservedBottomHeight),
+                             bookCachePath, nextPageFirstWord, framebufferContainsPage, reservedBottomHeight,
+                             DictionaryWordSelectActivity::Mode::Dictionary, initialMarker),
                          [this](const ActivityResult&) {
                            ignoreBackUntilRelease = true;
                            requestUpdate();
@@ -862,33 +873,36 @@ void EpubReaderActivity::launchHighlightWordSelect() {
   orientedMarginTop += SETTINGS.screenMargin;
   orientedMarginLeft += SETTINGS.screenMargin;
 
+  // Choose the marker band from this page's dwell BEFORE the dwell is consumed/reset below.
+  const WordSelectNavigator::InitialMarker initialMarker = computeWordSelectMarker();
+  pauseMarkerDwell();  // freeze the dwell across this word-select round-trip (excludes in-dict time)
   if (pageShownAtMs > 0) accountIdleExcess(millis() - pageShownAtMs);
   pageShownAtMs = 0UL;
 
   // Launched from the menu: framebuffer holds the menu, not the page, so a full repaint
   // (framebufferContainsPage=false, reservedBottomHeight=0) and HighlightRange mode.
-  startActivityForResult(std::make_unique<DictionaryWordSelectActivity>(
-                             renderer, mappedInput, std::move(pageForSelect), orientedMarginLeft, orientedMarginTop,
-                             epub->getCachePath(), "", false, 0, DictionaryWordSelectActivity::Mode::HighlightRange),
-                         [this, spine, progress, pageCount, currentPage, chapterTitle](const ActivityResult& result) {
-                           ignoreBackUntilRelease = true;
-                           if (!result.isCancelled) {
-                             if (const auto* hr = std::get_if<HighlightRangeResult>(&result.data)) {
-                               const auto addRes = BOOKMARKS.addQuote(
-                                   spine, progress, static_cast<uint16_t>(std::max(0, hr->startWordIndex)),
-                                   static_cast<uint16_t>(std::max(0, hr->endWordIndex)), pageCount,
-                                   chapterTitle.empty() ? nullptr : chapterTitle.c_str(), hr->previewText.c_str(),
-                                   currentPage);
-                               if (addRes == BookmarkStore::AddResult::LimitReached) {
-                                 RenderLock lock(*this);
-                                 GUI.drawPopup(renderer, tr(STR_MARK_LIMIT));
-                                 renderer.displayBuffer(HalDisplay::FAST_REFRESH);
-                                 delay(900);
-                               }
-                             }
-                           }
-                           requestUpdate();
-                         });
+  startActivityForResult(
+      std::make_unique<DictionaryWordSelectActivity>(
+          renderer, mappedInput, std::move(pageForSelect), orientedMarginLeft, orientedMarginTop, epub->getCachePath(),
+          "", false, 0, DictionaryWordSelectActivity::Mode::HighlightRange, initialMarker),
+      [this, spine, progress, pageCount, currentPage, chapterTitle](const ActivityResult& result) {
+        ignoreBackUntilRelease = true;
+        if (!result.isCancelled) {
+          if (const auto* hr = std::get_if<HighlightRangeResult>(&result.data)) {
+            const auto addRes = BOOKMARKS.addQuote(
+                spine, progress, static_cast<uint16_t>(std::max(0, hr->startWordIndex)),
+                static_cast<uint16_t>(std::max(0, hr->endWordIndex)), pageCount,
+                chapterTitle.empty() ? nullptr : chapterTitle.c_str(), hr->previewText.c_str(), currentPage);
+            if (addRes == BookmarkStore::AddResult::LimitReached) {
+              RenderLock lock(*this);
+              GUI.drawPopup(renderer, tr(STR_MARK_LIMIT));
+              renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+              delay(900);
+            }
+          }
+        }
+        requestUpdate();
+      });
 }
 
 void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action) {
@@ -1283,6 +1297,40 @@ void EpubReaderActivity::toggleAutoPageTurn(const uint8_t selectedPageTurnOption
   }
 }
 
+WordSelectNavigator::InitialMarker EpubReaderActivity::computeWordSelectMarker() const {
+  using Marker = WordSelectNavigator::InitialMarker;
+  // Auto page-turn drives dwell on a timer, not reading; the setting being off keeps the
+  // legacy centred marker. A fresh/unknown page (pageShownAtMs == 0) has no meaningful dwell.
+  if (!SETTINGS.dictMarkerDwellEnabled || automaticPageTurnActive) return Marker::Middle;
+  if (markerDwellStartMs == 0) return Marker::Top;
+  const uint32_t dwellSecs = static_cast<uint32_t>((millis() - markerDwellStartMs) / 1000UL);
+  // Idle guard: when the idle-page cap is enabled, a dwell beyond the selected cap is treated
+  // as idle/AFK rather than reading, so the marker falls back to the neutral middle band instead
+  // of drifting to the bottom. Cap = Off disables the guard (raw dwell, legacy bands).
+  const uint8_t capIdx = SETTINGS.pageIdleCapSeconds;
+  constexpr size_t kCapCount = sizeof(CrossPointSettings::PAGE_IDLE_CAP_SECONDS) / sizeof(uint16_t);
+  if (capIdx != 0 && capIdx < kCapCount && dwellSecs > CrossPointSettings::PAGE_IDLE_CAP_SECONDS[capIdx]) {
+    return Marker::Middle;
+  }
+  constexpr size_t kT1Count = sizeof(CrossPointSettings::DICT_MARKER_T1_SECONDS) / sizeof(uint16_t);
+  constexpr size_t kT2Count = sizeof(CrossPointSettings::DICT_MARKER_T2_SECONDS) / sizeof(uint16_t);
+  const uint8_t t1Idx = SETTINGS.dictMarkerT1Idx < kT1Count ? SETTINGS.dictMarkerT1Idx : 0;
+  const uint8_t t2Idx = SETTINGS.dictMarkerT2Idx < kT2Count ? SETTINGS.dictMarkerT2Idx : 0;
+  const uint32_t t1 = CrossPointSettings::DICT_MARKER_T1_SECONDS[t1Idx];
+  // Guard against a user setting T2 < T1, which would otherwise erase the middle band.
+  const uint32_t t2 = std::max<uint32_t>(t1, CrossPointSettings::DICT_MARKER_T2_SECONDS[t2Idx]);
+  if (dwellSecs <= t1) return Marker::Top;
+  if (dwellSecs <= t2) return Marker::Middle;
+  return Marker::Bottom;
+}
+
+void EpubReaderActivity::pauseMarkerDwell() {
+  // Stash reading ms accrued on this page so the return render can resume from it, excluding the
+  // word-select time. A fresh/unknown page (anchor 0) stashes 0 so it resumes from zero.
+  markerDwellPausedElapsedMs = (markerDwellStartMs != 0) ? (millis() - markerDwellStartMs) : 0UL;
+  preserveMarkerDwell_ = true;
+}
+
 void EpubReaderActivity::accountIdleExcess(unsigned long dwellMs) {
   const uint8_t idx = SETTINGS.pageIdleCapSeconds;
   if (idx == 0) return;  // Off — full wall-clock, no idle cap.
@@ -1602,13 +1650,22 @@ void EpubReaderActivity::render(RenderLock&& lock) {
                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), (unsigned)ESP.getMinFreeHeap());
   }
   silentIndexNextChapterIfNeeded(viewportWidth, viewportHeight);
-  saveProgress(currentSpineIndex, section->currentPage, section->pageCount);
+  maybeSaveProgress(currentSpineIndex, section->currentPage, section->pageCount);
   // Catch-all: account any still-open page view before starting a new one. The
   // forward-turn / menu / dictionary / exit paths reset pageShownAtMs to 0 first, so
   // this only fires for transitions that don't (e.g. a backward page turn) — no
   // double counting.
   if (pageShownAtMs > 0) accountIdleExcess(millis() - pageShownAtMs);
   pageShownAtMs = millis();
+  // Re-anchor the marker dwell on a genuine new page. When returning from word-select, resume
+  // instead: shift the anchor so only the pre-launch reading time counts (the time spent inside
+  // word-select is excluded), giving a paused-then-resumed dwell on the same page.
+  if (preserveMarkerDwell_) {
+    preserveMarkerDwell_ = false;
+    markerDwellStartMs = millis() - markerDwellPausedElapsedMs;
+  } else {
+    markerDwellStartMs = millis();
+  }
 
   showPendingSyncSaveError();
 
@@ -1662,7 +1719,28 @@ void EpubReaderActivity::silentIndexNextChapterIfNeeded(const uint16_t viewportW
 }
 
 bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageCount) {
-  return EpubReaderUtils::saveProgress(*epub, spineIndex, currentPage, pageCount);
+  const bool ok = EpubReaderUtils::saveProgress(*epub, spineIndex, currentPage, pageCount);
+  if (ok) {
+    // Track what is now persisted so the debounce knows when the on-SD position is current.
+    lastSavedSpine_ = spineIndex;
+    lastSavedPage_ = currentPage;
+    turnsSinceProgressSave_ = 0;
+  }
+  return ok;
+}
+
+void EpubReaderActivity::maybeSaveProgress(int spineIndex, int currentPage, int pageCount) {
+  // Unchanged position (e.g. a resume re-render after the position was already saved): nothing to do.
+  if (spineIndex == lastSavedSpine_ && currentPage == lastSavedPage_) return;
+  const uint8_t idx = SETTINGS.progressSaveIntervalIdx;
+  constexpr size_t kCount = sizeof(CrossPointSettings::PROGRESS_SAVE_PAGES) / sizeof(uint16_t);
+  const uint16_t interval = CrossPointSettings::PROGRESS_SAVE_PAGES[idx < kCount ? idx : 0];
+  // ++turns then compare: interval 1 saves every change (legacy behaviour). A resume re-render
+  // while already dirty can over-count by one, which only makes the next save happen sooner —
+  // the safe direction (less potential page loss, marginally more wear).
+  if (++turnsSinceProgressSave_ >= interval) {
+    saveProgress(spineIndex, currentPage, pageCount);  // resets the counter + last-saved tracking
+  }
 }
 void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int orientedMarginTop,
                                         const int orientedMarginRight, const int orientedMarginBottom,

@@ -49,12 +49,18 @@ class WordSelectNavigator {
     int height = 0;
   };
 
+  // Initial vertical placement of the selection marker. Caller (EpubReader) chooses
+  // the band from current-page dwell when the dwell-marker setting is enabled; defaults
+  // to Middle (legacy behaviour) for every other caller.
+  enum class InitialMarker { Top, Middle, Bottom };
+
   // Load pre-populated, pre-organised words, rows, and string pool.
-  // Centres the initial selection on the middle row.
+  // Places the initial selection on the row given by initialMarker (Top = ~1/4 down,
+  // Middle = centre, Bottom = ~3/4 down), clamped to the available rows.
   // When consumeInitialConfirm is true, the first Confirm release is ignored
   // (prevents the long-press that opened word selection from also triggering multi-select).
   void load(std::vector<WordInfo> words, std::vector<Row> rows, std::string textPool,
-            bool consumeInitialConfirm = false);
+            bool consumeInitialConfirm = false, InitialMarker initialMarker = InitialMarker::Middle);
 
   // Access null-terminated display text from the pool.
   const char* getDisplay(const WordInfo& w) const { return textPool.data() + w.textOffset; }

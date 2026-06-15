@@ -9,6 +9,7 @@
 #include "EpubReaderMenuActivity.h"
 #include "ProgressMapper.h"
 #include "activities/Activity.h"
+#include "util/WordSelectNavigator.h"
 
 class EpubReaderActivity final : public Activity {
   std::shared_ptr<Epub> epub;
@@ -67,6 +68,25 @@ class EpubReaderActivity final : public Activity {
   // Set to millis() after each full page render; cleared to 0 while a subactivity is active.
   // Forward pageTurn measures elapsed time here for pace estimation.
   unsigned long pageShownAtMs = 0UL;
+  // Anchor for the dictionary/highlight marker-by-dwell feature: when the current page first
+  // became visible. Unlike pageShownAtMs (reset whenever a subactivity opens), this survives a
+  // word-select round-trip so re-triggering on the same page continues accumulating dwell rather
+  // than restarting. Re-anchored to millis() on every genuine new-page render; preserved across a
+  // word-select launch via preserveMarkerDwell_.
+  unsigned long markerDwellStartMs = 0UL;
+  // One-shot: the next page render is a return from word-select (not a new page), so it must
+  // resume (not re-anchor) the marker dwell. Set via pauseMarkerDwell() at the launch sites.
+  bool preserveMarkerDwell_ = false;
+  // Reading ms accumulated on the current page at the moment word-select opened. On return the
+  // dwell anchor is shifted so the time spent inside word-select (not reading) is excluded.
+  unsigned long markerDwellPausedElapsedMs = 0UL;
+  // Progress-save debounce state. lastSaved{Spine,Page}_ track what is currently persisted in
+  // /progress.bin (-1 = unknown). turnsSinceProgressSave_ counts position changes since the last
+  // write; when it reaches SETTINGS.PROGRESS_SAVE_PAGES[...] a write fires. onExit() flushes any
+  // unsaved position so a normal exit/sleep never loses pages (only a hard power-off can).
+  int lastSavedSpine_ = -1;
+  int lastSavedPage_ = -1;
+  uint16_t turnsSinceProgressSave_ = 0;
   // Accumulated idle-page excess (seconds) for the current session. When the idle-page
   // cap (SETTINGS.pageIdleCapSeconds) is enabled, a page held longer than
   // PAGE_IDLE_THRESHOLD_SECONDS contributes only the cap value; the excess is summed here
@@ -113,6 +133,9 @@ class EpubReaderActivity final : public Activity {
   void renderStatusBar() const;
   void silentIndexNextChapterIfNeeded(uint16_t viewportWidth, uint16_t viewportHeight);
   bool saveProgress(int spineIndex, int currentPage, int pageCount);
+  // Debounced progress save for the per-render path: writes only every PROGRESS_SAVE_PAGES[...]
+  // position changes. Skips when the position is unchanged from the last write.
+  void maybeSaveProgress(int spineIndex, int currentPage, int pageCount);
   // Jump to a percentage of the book (0-100), mapping it to spine and page.
   void jumpToPercent(int percent);
   void openReaderMenu();
@@ -139,6 +162,14 @@ class EpubReaderActivity final : public Activity {
   // sessionIdleExcessSecs when the idle-page cap is enabled. No-op when the cap is Off
   // or the dwell is within PAGE_IDLE_THRESHOLD_SECONDS.
   void accountIdleExcess(unsigned long dwellMs);
+  // Chooses the initial word-select marker band from the current page's dwell when the
+  // dictMarkerDwellEnabled setting is on. Must be called BEFORE pageShownAtMs is reset for
+  // the launch. Returns Middle when the feature is off, during auto page-turn, or when no
+  // dwell is known; longer (idle-adjusted) dwell -> lower band.
+  WordSelectNavigator::InitialMarker computeWordSelectMarker() const;
+  // Freeze the current page's marker dwell across a word-select launch: stash the reading ms
+  // accrued so far and arm preserveMarkerDwell_ so the return render resumes instead of resetting.
+  void pauseMarkerDwell();
   // Persist the not-yet-committed reading time of this session (book + global
   // stats, dated history) if it crosses the min-session threshold and the
   // uncommitted delta is at least minDeltaSecs. Main-task only.

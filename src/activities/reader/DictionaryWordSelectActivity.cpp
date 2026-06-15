@@ -61,7 +61,7 @@ void DictionaryWordSelectActivity::onEnter() {
   // already released Confirm by the time we open, so consuming would swallow the user's
   // first deliberate tap and force them to press twice.
   const bool consumeInitialConfirm = mappedInput.isPressed(MappedInputManager::Button::Confirm);
-  navigator.load(std::move(words), std::move(rows), std::move(textPool), consumeInitialConfirm);
+  navigator.load(std::move(words), std::move(rows), std::move(textPool), consumeInitialConfirm, initialMarker_);
   // Opened via the reader's hold-Back gesture? Back is still held — swallow its release once.
   consumeInitialBackRelease_ = mappedInput.isPressed(MappedInputManager::Button::Back);
   requestUpdate();

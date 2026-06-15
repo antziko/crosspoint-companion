@@ -317,6 +317,22 @@ class CrossPointSettings {
   static constexpr uint16_t PAGE_IDLE_CAP_SECONDS[] = {0, 15, 30, 45, 60};
   // A page dwell beyond this is considered idle and gets capped (when the cap is enabled).
   static constexpr uint32_t PAGE_IDLE_THRESHOLD_SECONDS = 60;
+  // Dictionary/highlight word-select marker placement by current-page dwell. When enabled, the
+  // initial word-select marker starts near the top of the page for a short dwell, the middle for
+  // a medium dwell, and lower for a long dwell (eyes assumed to have moved down the page). Dwell is
+  // idle-adjusted via the pageIdleCapSeconds cap above. 0 = off (always centre, legacy behaviour).
+  uint8_t dictMarkerDwellEnabled = 0;
+  // Dwell thresholds, stored as indices into the seconds tables below: dwell <= T1 -> top,
+  // dwell <= T2 -> middle, otherwise bottom.
+  uint8_t dictMarkerT1Idx = 1;  // default 5s
+  uint8_t dictMarkerT2Idx = 1;  // default 12s
+  static constexpr uint16_t DICT_MARKER_T1_SECONDS[] = {3, 5, 8, 10};
+  static constexpr uint16_t DICT_MARKER_T2_SECONDS[] = {9, 12, 15, 18};
+  // Reading-progress save debounce: write /progress.bin only every N page turns (plus a flush on
+  // reader exit / sleep) to cut SD wear. Stored as an index into PROGRESS_SAVE_PAGES. Index 0 = 1
+  // (save every turn, the safest legacy behaviour — no progress loss on hard power-off).
+  uint8_t progressSaveIntervalIdx = 0;
+  static constexpr uint16_t PROGRESS_SAVE_PAGES[] = {1, 5, 10, 15};
   // Image rendering mode in EPUB reader
   uint8_t imageRendering = IMAGES_DISPLAY;
   // 1-bit halftone dither algorithm for all images (X3): blue noise vs Bayer
