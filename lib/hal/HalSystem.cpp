@@ -21,37 +21,108 @@ RTC_NOINIT_ATTR HalSystem::StackFrame panicStack[MAX_PANIC_STACK_DEPTH];
 // requested size. Replace the global throwing operator new to record the size,
 // caller PC, and heap state at the moment of failure into RTC_NOINIT (survives the
 // panic reboot), surfaced in getPanicInfo(). The happy path is a plain malloc
-// passthrough — identical cost to the default. nothrow new is a separate overload
-// (untouched), so makeUniqueNoThrow keeps its graceful null-return behaviour.
+// passthrough — identical cost to the default.
+//
+// CRITICAL: we MUST also override the *nothrow* operators here. libstdc++'s
+// `operator new(size, nothrow_t)` is implemented by calling the throwing
+// `operator new(size)` inside a try/catch and returning nullptr if it throws.
+// Because the app is built `-fno-exceptions`, that catch is dead — so once we
+// override the throwing version to abort(), the nothrow version inherits the
+// abort() and `new (std::nothrow)` (hence makeUniqueNoThrow) NO LONGER returns
+// null on OOM. That silently defeats every graceful low-heap fallback in the
+// firmware, but ONLY in TRACE_OOM_ALLOC builds — i.e. exactly the diagnostic
+// builds used to hunt OOMs, which then crash where production would not. The
+// nothrow overrides below restore the contract: record the event, return null.
 #include <cstdlib>
 #include <new>
 
 #include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
 
-RTC_NOINIT_ATTR uint32_t oomSize;       // bytes requested by the failing allocation
-RTC_NOINIT_ATTR uint32_t oomCallerPC;   // return address of the code doing `new`
-RTC_NOINIT_ATTR uint32_t oomFreeBytes;  // total free heap at failure
-RTC_NOINIT_ATTR uint32_t oomLargest;    // largest contiguous free block at failure
+// --- Last-failure snapshot (survives the panic reboot, dumped to crash_report) ---
+RTC_NOINIT_ATTR uint32_t oomSize;        // bytes requested by the failing allocation
+RTC_NOINIT_ATTR uint32_t oomCallerPC;    // return address of the code doing `new`
+RTC_NOINIT_ATTR uint32_t oomFreeBytes;   // total free heap at failure
+RTC_NOINIT_ATTR uint32_t oomLargest;     // largest contiguous free block at failure
+RTC_NOINIT_ATTR uint32_t oomWasNothrow;  // 1 if last failure was a (recoverable) nothrow new
+RTC_NOINIT_ATTR uint32_t oomNothrowCount;  // cumulative recoverable nothrow OOMs this session
+RTC_NOINIT_ATTR uint32_t oomThrowCount;    // cumulative fatal throwing-new OOMs this session
 
-static void recordOom(std::size_t size, uint32_t callerPC) {
+// --- DRAM ring of recent OOM events, drained to SD from a safe context ---
+// SD I/O is NOT safe from inside operator new (the SD stack itself allocates ->
+// re-entrant new; HalStorage's mutex may already be held by this task). So the
+// failure path only touches RAM here; HalSystem::drainOomTrace() (called from the
+// main loop) flushes pending events to /oom_trace.txt.
+namespace {
+struct OomEvent {
+  uint32_t atMillis;
+  uint32_t size;
+  uint32_t callerPC;
+  uint32_t freeBytes;
+  uint32_t largest;
+  bool nothrow;
+};
+constexpr uint32_t OOM_RING_N = 16;
+OomEvent g_oomRing[OOM_RING_N];
+uint32_t g_oomRingHead = 0;     // next slot to write
+uint32_t g_oomRingPending = 0;  // unflushed events (capped at OOM_RING_N)
+portMUX_TYPE g_oomMux = portMUX_INITIALIZER_UNLOCKED;
+}  // namespace
+
+static void recordOom(std::size_t size, uint32_t callerPC, bool nothrow) {
+  const uint32_t freeBytes = static_cast<uint32_t>(esp_get_free_heap_size());
+  const uint32_t largest = static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
   oomSize = static_cast<uint32_t>(size);
   oomCallerPC = callerPC;
-  oomFreeBytes = static_cast<uint32_t>(esp_get_free_heap_size());
-  oomLargest = static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  oomFreeBytes = freeBytes;
+  oomLargest = largest;
+  oomWasNothrow = nothrow ? 1u : 0u;
+
+  // Only the rare failure path takes the lock, so the happy alloc path is untouched.
+  portENTER_CRITICAL(&g_oomMux);
+  if (nothrow)
+    oomNothrowCount++;
+  else
+    oomThrowCount++;
+  OomEvent& e = g_oomRing[g_oomRingHead];
+  e.atMillis = static_cast<uint32_t>(millis());
+  e.size = static_cast<uint32_t>(size);
+  e.callerPC = callerPC;
+  e.freeBytes = freeBytes;
+  e.largest = largest;
+  e.nothrow = nothrow;
+  g_oomRingHead = (g_oomRingHead + 1) % OOM_RING_N;
+  if (g_oomRingPending < OOM_RING_N) g_oomRingPending++;
+  portEXIT_CRITICAL(&g_oomMux);
 }
 
 void* operator new(std::size_t size) {
   void* p = malloc(size);
   if (p) return p;
-  recordOom(size, reinterpret_cast<uint32_t>(__builtin_return_address(0)));
+  recordOom(size, reinterpret_cast<uint32_t>(__builtin_return_address(0)), /*nothrow=*/false);
   abort();  // mirror the -fno-exceptions default (bad_alloc -> terminate -> abort)
 }
 
 void* operator new[](std::size_t size) {
   void* p = malloc(size);
   if (p) return p;
-  recordOom(size, reinterpret_cast<uint32_t>(__builtin_return_address(0)));
+  recordOom(size, reinterpret_cast<uint32_t>(__builtin_return_address(0)), /*nothrow=*/false);
   abort();
+}
+
+void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
+  void* p = malloc(size);
+  if (p) return p;
+  recordOom(size, reinterpret_cast<uint32_t>(__builtin_return_address(0)), /*nothrow=*/true);
+  return nullptr;  // graceful: makeUniqueNoThrow callers handle null
+}
+
+void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
+  void* p = malloc(size);
+  if (p) return p;
+  recordOom(size, reinterpret_cast<uint32_t>(__builtin_return_address(0)), /*nothrow=*/true);
+  return nullptr;
 }
 #endif  // TRACE_OOM_ALLOC
 
@@ -148,8 +219,58 @@ void clearPanic() {
   }
 #ifdef TRACE_OOM_ALLOC
   oomSize = 0;  // clear stale OOM trace on a clean (non-panic) boot
+  oomWasNothrow = 0;
+  oomNothrowCount = 0;
+  oomThrowCount = 0;
 #endif
   clearLastLogs();
+}
+
+// Flush any pending OOM events captured by the operator-new trace to SD. MUST be
+// called from a normal task context only (it does SD I/O) — never from inside an
+// allocation path. Cheap no-op when nothing is pending. See the TRACE_OOM_ALLOC
+// block above for why the failure path can't write SD itself.
+void drainOomTrace() {
+#ifdef TRACE_OOM_ALLOC
+  if (g_oomRingPending == 0) return;
+
+  // Snapshot the ring under lock, then release before touching the SD card.
+  OomEvent events[OOM_RING_N];
+  uint32_t count;
+  portENTER_CRITICAL(&g_oomMux);
+  count = g_oomRingPending;
+  const uint32_t start = (g_oomRingHead + OOM_RING_N - count) % OOM_RING_N;
+  for (uint32_t i = 0; i < count; i++) {
+    events[i] = g_oomRing[(start + i) % OOM_RING_N];
+  }
+  g_oomRingPending = 0;
+  portEXIT_CRITICAL(&g_oomMux);
+
+  // .txt so the on-device file browser opens it directly (X3 has no serial). Cap
+  // the size so a chronic-OOM session can't grow it without bound.
+  constexpr const char* OOM_TRACE_PATH = "/oom_trace.txt";
+  constexpr size_t MAX_TRACE_BYTES = 256 * 1024;
+  HalFile probe;
+  if (Storage.openFileForRead("OOMTRACE", OOM_TRACE_PATH, probe)) {
+    const size_t sz = probe.size();
+    probe.close();
+    if (sz > MAX_TRACE_BYTES) Storage.remove(OOM_TRACE_PATH);
+  }
+
+  HalFile file;
+  if (!Storage.openFileForAppend("OOMTRACE", OOM_TRACE_PATH, file)) return;
+  for (uint32_t i = 0; i < count; i++) {
+    const OomEvent& e = events[i];
+    char line[160];
+    const int len = snprintf(line, sizeof(line),
+                             "[%lu] %s OOM size=%lu callerPC=0x%08lX free=%lu largest=%lu\n",
+                             (unsigned long)e.atMillis, e.nothrow ? "nothrow(recovered)" : "throwing(FATAL)",
+                             (unsigned long)e.size, (unsigned long)e.callerPC, (unsigned long)e.freeBytes,
+                             (unsigned long)e.largest);
+    if (len > 0) file.write(line, static_cast<size_t>(len));
+  }
+  file.flush();
+#endif  // TRACE_OOM_ALLOC
 }
 
 std::string getPanicInfo(bool full) {
@@ -165,12 +286,18 @@ std::string getPanicInfo(bool full) {
     // Only meaningful when the panic was an allocation failure; if the backtrace
     // below does not run through operator new, treat this as stale (prior OOM).
     if (oomSize != 0) {
-      char buf[160];
+      char buf[280];
+      // A nothrow failure returns null and the device keeps running, so if the
+      // last recorded OOM was nothrow it is NOT what panicked — flag it as such so
+      // the trace isn't misread as the crash cause.
       snprintf(buf, sizeof(buf),
                "\n\nLast failed allocation (stale unless panic is OOM):\n  size=%lu bytes  callerPC=0x%08lX  "
-               "freeAtFail=%lu  largestBlock=%lu",
+               "freeAtFail=%lu  largestBlock=%lu  kind=%s\n  OOM counts this session: nothrow(recovered)=%lu  "
+               "throwing(fatal)=%lu",
                (unsigned long)oomSize, (unsigned long)oomCallerPC, (unsigned long)oomFreeBytes,
-               (unsigned long)oomLargest);
+               (unsigned long)oomLargest,
+               oomWasNothrow ? "nothrow(recovered, NOT the panic cause)" : "throwing(fatal)",
+               (unsigned long)oomNothrowCount, (unsigned long)oomThrowCount);
       info += buf;
     }
 #endif

@@ -682,6 +682,15 @@ void loop() {
     lastMemPrint = millis();
   }
 
+  // Flush any OOM events captured by the operator-new trace to SD (no-op unless a
+  // TRACE_OOM_ALLOC build recorded one). This is the only safe context to do the
+  // SD write — never from inside the allocation path. Throttled; runs on X3+X4.
+  static unsigned long lastOomDrain = 0;
+  if (millis() - lastOomDrain >= 1000) {
+    HalSystem::drainOomTrace();
+    lastOomDrain = millis();
+  }
+
   // Handle incoming serial commands,
   // nb: we use logSerial from logging to avoid deprecation warnings
   if (logSerial.available() > 0) {
