@@ -157,7 +157,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
     // stack when getSettingsList() is first called during setup (via JsonSettingsIO::loadSettings).
     // push_back constructs one temporary at a time, keeping peak stack usage to ~sizeof(SettingInfo).
     std::vector<SettingInfo> v;
-    v.reserve(59);
+    v.reserve(56);
 
     // --- Display ---
     v.push_back(SettingInfo::Enum(StrId::STR_SLEEP_SCREEN, &CrossPointSettings::sleepScreen,
@@ -265,14 +265,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         StrId::STR_IDLE_PAGE_CAP, &CrossPointSettings::pageIdleCapSeconds,
         {StrId::STR_STATE_OFF, StrId::STR_SEC_15, StrId::STR_SEC_30, StrId::STR_SEC_45, StrId::STR_SEC_60},
         "pageIdleCapSeconds", StrId::STR_CAT_READER));
-    v.push_back(SettingInfo::Toggle(StrId::STR_DICT_MARKER_DWELL, &CrossPointSettings::dictMarkerDwellEnabled,
-                                    "dictMarkerDwellEnabled", StrId::STR_CAT_READER));
-    v.push_back(SettingInfo::Enum(StrId::STR_DICT_MARKER_T1, &CrossPointSettings::dictMarkerT1Idx,
-                                  {StrId::STR_SEC_3, StrId::STR_SEC_5, StrId::STR_SEC_8, StrId::STR_SEC_10},
-                                  "dictMarkerT1Idx", StrId::STR_CAT_READER));
-    v.push_back(SettingInfo::Enum(StrId::STR_DICT_MARKER_T2, &CrossPointSettings::dictMarkerT2Idx,
-                                  {StrId::STR_SEC_9, StrId::STR_SEC_12, StrId::STR_SEC_15, StrId::STR_SEC_18},
-                                  "dictMarkerT2Idx", StrId::STR_CAT_READER));
+    // Dictionary marker-by-dwell settings (enable + T1/T2 thresholds) live in their own device
+    // sub-screen (DictMarkerSettingsActivity), not in this shared registry — they are not exposed
+    // on the web settings page. The Reader list shows a single action entry instead (added in
+    // SettingsActivity::rebuildSettingsLists).
     v.push_back(SettingInfo::Enum(StrId::STR_PROGRESS_SAVE_INTERVAL, &CrossPointSettings::progressSaveIntervalIdx,
                                   {StrId::STR_PAGES_1, StrId::STR_PAGES_5, StrId::STR_PAGES_10, StrId::STR_PAGES_15},
                                   "progressSaveIntervalIdx", StrId::STR_CAT_READER));

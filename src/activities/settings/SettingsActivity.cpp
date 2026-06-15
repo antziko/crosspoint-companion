@@ -10,6 +10,7 @@
 #include "ButtonRemapActivity.h"
 #include "ClearCacheActivity.h"
 #include "CrossPointSettings.h"
+#include "DictMarkerSettingsActivity.h"
 #include "DictionarySelectActivity.h"
 #include "FontDownloadActivity.h"
 #include "FontSelectionActivity.h"
@@ -90,6 +91,8 @@ void SettingsActivity::rebuildSettingsLists() {
   // and hold-confirm settings after it, matching the order the web UI shows them.
   readerSettings.push_back(std::move(histCapSetting));
   readerSettings.push_back(std::move(holdConfirmSetting));
+  // Dictionary marker-by-dwell options live in their own sub-screen (device-only, not on web).
+  readerSettings.push_back(SettingInfo::Action(StrId::STR_DICT_MARKER_SETTINGS, SettingAction::CustomiseDictMarker));
   readerSettings.push_back(SettingInfo::Action(StrId::STR_CUSTOMISE_STATUS_BAR, SettingAction::CustomiseStatusBar));
   displaySettings.push_back(SettingInfo::Action(StrId::STR_CUSTOMISE_TOP_BAR, SettingAction::CustomiseTopBar));
 
@@ -277,6 +280,9 @@ void SettingsActivity::toggleCurrentSetting() {
         break;
       case SettingAction::CustomiseStatusBar:
         startActivityForResult(std::make_unique<StatusBarSettingsActivity>(renderer, mappedInput), resultHandler);
+        break;
+      case SettingAction::CustomiseDictMarker:
+        startActivityForResult(std::make_unique<DictMarkerSettingsActivity>(renderer, mappedInput), resultHandler);
         break;
       case SettingAction::CustomiseTopBar:
         startActivityForResult(std::make_unique<HomeTopBarSettingsActivity>(renderer, mappedInput), resultHandler);
