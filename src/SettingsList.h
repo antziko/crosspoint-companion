@@ -63,7 +63,8 @@ inline SettingInfo buildFontFamilySetting(const SdCardFontRegistry* registry) {
                    [](const SdCardFontFamilyInfo& f) { return f.name; });
   }
 
-  s.valueGetter = [sdFamilyNames]() -> uint8_t {
+  s.dyn = std::make_shared<SettingInfo::DynamicAccessors>();
+  s.dyn->valueGetter = [sdFamilyNames]() -> uint8_t {
     // If an SD card font is selected, find its index
     if (SETTINGS.sdFontFamilyName[0] != '\0') {
       for (int i = 0; i < static_cast<int>(sdFamilyNames.size()); i++) {
@@ -76,7 +77,7 @@ inline SettingInfo buildFontFamilySetting(const SdCardFontRegistry* registry) {
     return SETTINGS.fontFamily < CrossPointSettings::BUILTIN_FONT_COUNT ? SETTINGS.fontFamily : 0;
   };
 
-  s.valueSetter = [sdFamilyNames](uint8_t v) {
+  s.dyn->valueSetter = [sdFamilyNames](uint8_t v) {
     if (v < CrossPointSettings::BUILTIN_FONT_COUNT) {
       SETTINGS.fontFamily = v;
       SETTINGS.sdFontFamilyName[0] = '\0';
@@ -118,7 +119,8 @@ inline SettingInfo buildDictionarySetting(const DictionaryRegistry* registry) {
   s.key = "dictionary";
   s.category = StrId::STR_CAT_READER;
 
-  s.valueGetter = [basePaths]() -> uint8_t {
+  s.dyn = std::make_shared<SettingInfo::DynamicAccessors>();
+  s.dyn->valueGetter = [basePaths]() -> uint8_t {
     const std::string active = Dictionary::readDictPath(nullptr);
     if (active.empty()) return 0;
     for (size_t i = 0; i < basePaths.size(); i++) {
@@ -127,7 +129,7 @@ inline SettingInfo buildDictionarySetting(const DictionaryRegistry* registry) {
     return 0;  // active dictionary no longer installed -> show "None"
   };
 
-  s.valueSetter = [basePaths](uint8_t v) {
+  s.dyn->valueSetter = [basePaths](uint8_t v) {
     if (v == 0 || v > basePaths.size()) {
       Dictionary::saveGlobalDictPath("");  // clear selection
     } else {

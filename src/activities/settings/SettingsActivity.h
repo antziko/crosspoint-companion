@@ -2,6 +2,7 @@
 #include <I18n.h>
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -49,11 +50,20 @@ struct SettingInfo {
   size_t stringOffset = 0;
   size_t stringMaxLen = 0;
 
-  // Dynamic accessors (for settings stored outside CrossPointSettings, e.g. KOReaderCredentialStore)
-  std::function<uint8_t()> valueGetter;
-  std::function<void(uint8_t)> valueSetter;
-  std::function<std::string()> stringGetter;
-  std::function<void(const std::string&)> stringSetter;
+  // Dynamic accessors (for the ~6 settings stored outside CrossPointSettings, e.g.
+  // KOReaderCredentialStore, font-family, dictionary). Held out-of-line so the four
+  // std::function objects (~64-96 B on this 32-bit target) don't bloat all ~59 entries — only
+  // the few dynamic ones allocate a DynamicAccessors; the rest hold a null 8-byte pointer.
+  // shared_ptr (not unique_ptr) because SettingInfo must stay copyable: getSettingsList() returns
+  // the list by value, copying baseList. Copies happen only at boot/settings-open/web, never in
+  // the render loop, so the atomic-refcount cost is negligible here.
+  struct DynamicAccessors {
+    std::function<uint8_t()> valueGetter;
+    std::function<void(uint8_t)> valueSetter;
+    std::function<std::string()> stringGetter;
+    std::function<void(const std::string&)> stringSetter;
+  };
+  std::shared_ptr<DynamicAccessors> dyn;
 
   SettingInfo& withObfuscated() {
     obfuscated = true;
@@ -122,8 +132,9 @@ struct SettingInfo {
     s.nameId = nameId;
     s.type = SettingType::ENUM;
     s.enumValues = std::move(values);
-    s.valueGetter = std::move(getter);
-    s.valueSetter = std::move(setter);
+    s.dyn = std::make_shared<DynamicAccessors>();
+    s.dyn->valueGetter = std::move(getter);
+    s.dyn->valueSetter = std::move(setter);
     s.key = key;
     s.category = category;
     return s;
@@ -135,8 +146,9 @@ struct SettingInfo {
     SettingInfo s;
     s.nameId = nameId;
     s.type = SettingType::STRING;
-    s.stringGetter = std::move(getter);
-    s.stringSetter = std::move(setter);
+    s.dyn = std::make_shared<DynamicAccessors>();
+    s.dyn->stringGetter = std::move(getter);
+    s.dyn->stringSetter = std::move(setter);
     s.key = key;
     s.category = category;
     return s;
@@ -146,7 +158,7 @@ struct SettingInfo {
 class SettingsActivity final : public Activity {
   ButtonNavigator buttonNavigator;
 
-  int initialCategory = 0;         // Category to open on first onEnter()
+  int initialCategory = 0;        // Category to open on first onEnter()
   int selectedCategoryIndex = 0;  // Currently selected category
   int selectedSettingIndex = 0;
   int settingsCount = 0;

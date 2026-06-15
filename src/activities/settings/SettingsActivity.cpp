@@ -8,12 +8,12 @@
 #include <cstring>
 
 #include "ButtonRemapActivity.h"
-#include "HomeTopBarSettingsActivity.h"
 #include "ClearCacheActivity.h"
 #include "CrossPointSettings.h"
 #include "DictionarySelectActivity.h"
 #include "FontDownloadActivity.h"
 #include "FontSelectionActivity.h"
+#include "HomeTopBarSettingsActivity.h"
 #include "KOReaderServerListActivity.h"
 #include "LanguageSelectActivity.h"
 #include "MappedInputManager.h"
@@ -226,26 +226,26 @@ void SettingsActivity::toggleCurrentSetting() {
   } else if (setting.type == SettingType::ENUM && setting.valuePtr != nullptr) {
     const uint8_t currentValue = SETTINGS.*(setting.valuePtr);
     SETTINGS.*(setting.valuePtr) = (currentValue + 1) % static_cast<uint8_t>(setting.enumValues.size());
-  } else if (setting.type == SettingType::ENUM && setting.valueGetter && setting.valueSetter) {
+  } else if (setting.type == SettingType::ENUM && setting.dyn && setting.dyn->valueGetter && setting.dyn->valueSetter) {
     if (setting.nameId == StrId::STR_FONT_FAMILY) {
       // Launch font selection submenu instead of cycling
-      startActivityForResult(
-          std::make_unique<FontSelectionActivity>(renderer, mappedInput, &sdFontSystem.registry(), SETTINGS.fontFamily,
-                                                  SETTINGS.sdFontFamilyName),
-          [this](const ActivityResult& result) {
-            if (!result.isCancelled && std::holds_alternative<FontSelectionResult>(result.data)) {
-              const auto& sel = std::get<FontSelectionResult>(result.data);
-              if (sel.isBuiltin) {
-                SETTINGS.fontFamily = sel.builtinIndex;
-                SETTINGS.sdFontFamilyName[0] = '\0';
-              } else {
-                strncpy(SETTINGS.sdFontFamilyName, sel.sdFamilyName.c_str(), sizeof(SETTINGS.sdFontFamilyName) - 1);
-                SETTINGS.sdFontFamilyName[sizeof(SETTINGS.sdFontFamilyName) - 1] = '\0';
-              }
-              SETTINGS.saveToFile();
-              rebuildSettingsLists();
-            }
-          });
+      startActivityForResult(std::make_unique<FontSelectionActivity>(renderer, mappedInput, &sdFontSystem.registry(),
+                                                                     SETTINGS.fontFamily, SETTINGS.sdFontFamilyName),
+                             [this](const ActivityResult& result) {
+                               if (!result.isCancelled && std::holds_alternative<FontSelectionResult>(result.data)) {
+                                 const auto& sel = std::get<FontSelectionResult>(result.data);
+                                 if (sel.isBuiltin) {
+                                   SETTINGS.fontFamily = sel.builtinIndex;
+                                   SETTINGS.sdFontFamilyName[0] = '\0';
+                                 } else {
+                                   strncpy(SETTINGS.sdFontFamilyName, sel.sdFamilyName.c_str(),
+                                           sizeof(SETTINGS.sdFontFamilyName) - 1);
+                                   SETTINGS.sdFontFamilyName[sizeof(SETTINGS.sdFontFamilyName) - 1] = '\0';
+                                 }
+                                 SETTINGS.saveToFile();
+                                 rebuildSettingsLists();
+                               }
+                             });
       return;
     }
     if (setting.nameId == StrId::STR_DICTIONARY) {
@@ -258,8 +258,8 @@ void SettingsActivity::toggleCurrentSetting() {
     const uint8_t totalValues = setting.enumStringValues.empty()
                                     ? static_cast<uint8_t>(setting.enumValues.size())
                                     : static_cast<uint8_t>(setting.enumStringValues.size());
-    const uint8_t cur = setting.valueGetter();
-    setting.valueSetter((cur + 1) % totalValues);
+    const uint8_t cur = setting.dyn->valueGetter();
+    setting.dyn->valueSetter((cur + 1) % totalValues);
   } else if (setting.type == SettingType::VALUE && setting.valuePtr != nullptr) {
     // uint8_t: int8_t overflows above 127, breaking dictionary history cap rollover
     const uint8_t currentValue = SETTINGS.*(setting.valuePtr);
@@ -404,8 +404,8 @@ void SettingsActivity::render(RenderLock&&) {
         } else if (setting.type == SettingType::ENUM && setting.valuePtr != nullptr) {
           const uint8_t value = SETTINGS.*(setting.valuePtr);
           valueText = I18N.get(setting.enumValues[value]);
-        } else if (setting.type == SettingType::ENUM && setting.valueGetter) {
-          const uint8_t value = setting.valueGetter();
+        } else if (setting.type == SettingType::ENUM && setting.dyn && setting.dyn->valueGetter) {
+          const uint8_t value = setting.dyn->valueGetter();
           if (!setting.enumStringValues.empty() && value < setting.enumStringValues.size()) {
             valueText = setting.enumStringValues[value];
           } else if (value < setting.enumValues.size()) {
@@ -424,8 +424,8 @@ void SettingsActivity::render(RenderLock&&) {
           } else {
             valueText = std::to_string(SETTINGS.*(setting.valuePtr));
           }
-        } else if (setting.type == SettingType::ACTION && setting.stringGetter) {
-          valueText = setting.stringGetter();
+        } else if (setting.type == SettingType::ACTION && setting.dyn && setting.dyn->stringGetter) {
+          valueText = setting.dyn->stringGetter();
         }
         return valueText;
       },
