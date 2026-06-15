@@ -707,6 +707,10 @@ void EpubReaderActivity::openReaderMenu() {
     }
   }
 
+  // Opening the reader menu returns to the same page, so freeze the marker dwell across the
+  // round-trip (excludes the in-menu time) instead of restarting it on return. If the menu
+  // changes layout (font/orientation), the subsequent re-layout re-renders the page anyway.
+  pauseMarkerDwell();
   if (pageShownAtMs > 0) accountIdleExcess(millis() - pageShownAtMs);
   pageShownAtMs = 0UL;
   startActivityForResult(std::make_unique<EpubReaderMenuActivity>(
