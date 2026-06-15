@@ -179,6 +179,11 @@ HeroDetails loadHeroDetails(const RecentBook& book) {
 
 HeroDetails cachedHeroDetails;
 
+// hasCover result for each "next 3" tile, baked alongside the cover bitmaps so
+// the per-frame redraw knows whether the title was drawn inside the placeholder
+// (coverless) -- in which case the title below the tile is suppressed.
+bool cachedNextHasCover[3] = {false, false, false};
+
 // Shared cover-tile drawing for the hero card and the "next 3" row. Reuses the
 // single cached thumbnail (UITheme::getCoverThumbPath at the theme's configured
 // homeCoverHeight -- the only resolution HomeActivity::loadRecentCovers ever
@@ -187,9 +192,13 @@ HeroDetails cachedHeroDetails;
 // Mirrors Lyra3CoversTheme::drawRecentBookCover's load-or-placeholder pattern
 // (Lyra3CoversTheme.cpp:42-81).
 // A tile with a cover shows just the photo; the frame is drawn only for the
-// empty placeholder (no photo).
-void drawCoverTile(const GfxRenderer& renderer, const std::string& coverBmpPath, int sourceHeight, int tileX, int tileY,
-                   int tileW, int tileH) {
+// empty placeholder (no photo). When a title is supplied, the placeholder wraps
+// and centres it inside the frame (UTF-8-safe ellipsis on overflow) so a
+// coverless book is identifiable from the tile itself; the generic cover icon is
+// the fallback when no title is given.
+// Returns true if a real cover bitmap was drawn (false = placeholder).
+bool drawCoverTile(const GfxRenderer& renderer, const std::string& coverBmpPath, int sourceHeight, int tileX, int tileY,
+                   int tileW, int tileH, const std::string& title = "") {
   // White-fill the tile first: this redraw happens over a restored cover-buffer
   // snapshot that may hold the previous pass's placeholder icon, and drawBitmap
   // composites dark-only (white pixels never overwrite), so without the clear
@@ -227,8 +236,25 @@ void drawCoverTile(const GfxRenderer& renderer, const std::string& coverBmpPath,
   }
   if (!hasCover) {
     renderer.drawRect(tileX, tileY, tileW, tileH, true);
-    renderer.drawIcon(CoverIcon, tileX + (tileW - 32) / 2, tileY + (tileH / 3 - 32) / 2, 32, 32);
+    if (!title.empty()) {
+      // Wrap the title into the tile (minus a small inset) and centre the block
+      // vertically. wrappedText UTF-8-safely ellipsizes any overflow.
+      constexpr int kInset = 4;
+      const int innerW = tileW - 2 * kInset;
+      const int lineH = renderer.getLineHeight(SMALL_FONT_ID);
+      const int maxLines = std::max(1, (tileH - 2 * kInset) / lineH);
+      const auto lines = renderer.wrappedText(SMALL_FONT_ID, title.c_str(), innerW, maxLines);
+      int lineY = tileY + (tileH - static_cast<int>(lines.size()) * lineH) / 2;
+      for (const auto& line : lines) {
+        const int lineW = renderer.getTextWidth(SMALL_FONT_ID, line.c_str());
+        renderer.drawText(SMALL_FONT_ID, tileX + (tileW - lineW) / 2, lineY, line.c_str(), true);
+        lineY += lineH;
+      }
+    } else {
+      renderer.drawIcon(CoverIcon, tileX + (tileW - 32) / 2, tileY + (tileH / 3 - 32) / 2, 32, 32);
+    }
   }
+  return hasCover;
 }
 
 }  // namespace
@@ -279,7 +305,9 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
     for (int i = 0; i < nextCount; i++) {
       const int slotX = rect.x + padding + i * nextTileW;
       const int thumbX = slotX + (nextTileW - nextThumbW) / 2;
-      drawCoverTile(renderer, recentBooks[i + 1].coverBmpPath, coverH, thumbX, nextRowY, nextThumbW, nextThumbH);
+      const RecentBook& next = recentBooks[i + 1];
+      cachedNextHasCover[i] = drawCoverTile(renderer, next.coverBmpPath, coverH, thumbX, nextRowY, nextThumbW,
+                                            nextThumbH, next.title.empty() ? next.path : next.title);
     }
 
     coverBufferStored = storeCoverBuffer();
@@ -410,6 +438,11 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
       renderer.drawRoundedRect(thumbX - kSelectionOutlineW, nextRowY - kSelectionOutlineW,
                                nextThumbW + 2 * kSelectionOutlineW, nextThumbH + 2 * kSelectionOutlineW,
                                kSelectionOutlineW, kCornerRadius, true);
+    }
+    // Coverless tiles render the title inside the placeholder, so skip the
+    // duplicate title below the tile.
+    if (!cachedNextHasCover[i]) {
+      continue;
     }
     const std::string& title = recentBooks[i + 1].title.empty() ? recentBooks[i + 1].path : recentBooks[i + 1].title;
     const auto titleLines = renderer.wrappedText(SMALL_FONT_ID, title.c_str(), nextTileW - 4, 2);
