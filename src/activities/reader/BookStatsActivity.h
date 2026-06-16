@@ -23,6 +23,9 @@ class BookStatsActivity final : public Activity {
   // the heatmap can show today's reading without waiting for onExit().
   struct SessionContext {
     uint32_t elapsedSecs = 0;
+    // Live reading pace: average real reading time per forward page (sub-activity time excluded),
+    // snapshotted from the reader's in-progress stats. 0 = no samples yet -> omitted.
+    uint16_t pacePerPageSecs = 0;
     uint32_t thresholdSecs = 0;  // effective gate; 0 = always show
     bool dated = false;
     uint16_t year = 0;

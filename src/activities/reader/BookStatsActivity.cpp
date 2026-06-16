@@ -138,6 +138,20 @@ void BookStatsActivity::render(RenderLock&&) {
   BookReadingStats::formatDuration(stats.totalReadingSeconds, totalBuf, sizeof(totalBuf));
   std::string readingLine = std::string(tr(STR_STATS_TIME_READING)) + ": " + totalBuf;
   renderer.drawText(SMALL_FONT_ID, leftX, y, readingLine.c_str());
+  // Right-aligned on the same row: reading pace (avg real reading time per forward page,
+  // sub-activity time excluded). formatDuration is too coarse here (anything <60s is "< 1 min"),
+  // so render seconds/minutes directly with a "/pg" unit.
+  if (session.pacePerPageSecs > 0) {
+    char paceBuf[24];
+    if (session.pacePerPageSecs < 60) {
+      snprintf(paceBuf, sizeof(paceBuf), "%us/pg", session.pacePerPageSecs);
+    } else {
+      snprintf(paceBuf, sizeof(paceBuf), "%um %us/pg", session.pacePerPageSecs / 60, session.pacePerPageSecs % 60);
+    }
+    std::string paceLine = std::string(tr(STR_STATS_PAGE_PACE)) + ": " + paceBuf;
+    const int paceWidth = renderer.getTextWidth(SMALL_FONT_ID, paceLine.c_str());
+    renderer.drawText(SMALL_FONT_ID, rightEdge - paceWidth, y, paceLine.c_str());
+  }
   y += lineHeight;
 
   // Line 3: cross-device total (local + last-synced remote). Only shown once a

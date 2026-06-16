@@ -190,3 +190,51 @@ TEST(BookReadingStatsIo, SaveLoadRoundTripThroughFile) {
   EXPECT_EQ(r.lastSyncReadingSeconds, 180u);
   EXPECT_EQ(r.displayTotalSeconds(), 540u);
 }
+
+TEST(BookReadingStatsPace, FirstSampleSeedsAverage) {
+  BookReadingStats s;
+  s.recordForwardPageRead(30);
+  EXPECT_EQ(s.avgSecondsPerForwardPage, 30u);
+  EXPECT_EQ(s.paceSampleCount, 1u);
+}
+
+TEST(BookReadingStatsPace, BlendsTowardNewSamples) {
+  BookReadingStats s;
+  s.recordForwardPageRead(30);  // avg 30, count 1
+  s.recordForwardPageRead(30);  // (30*1+30)/2 = 30, count 2
+  EXPECT_EQ(s.avgSecondsPerForwardPage, 30u);
+  s.recordForwardPageRead(60);  // (30*2+60)/3 = 40, count 3
+  EXPECT_EQ(s.avgSecondsPerForwardPage, 40u);
+  EXPECT_EQ(s.paceSampleCount, 3u);
+}
+
+TEST(BookReadingStatsPace, ReseedsStuckLowAverage) {
+  // Simulate the old-trap state: average locked implausibly low with a heavy sample count.
+  BookReadingStats s;
+  s.avgSecondsPerForwardPage = 2;
+  s.paceSampleCount = 300;
+  // A real reading page far exceeds the stuck average -> restart from this sample, not blend.
+  s.recordForwardPageRead(30);
+  EXPECT_EQ(s.avgSecondsPerForwardPage, 30u);
+  EXPECT_EQ(s.paceSampleCount, 1u);
+}
+
+TEST(BookReadingStatsPace, DoesNotReseedPlausibleAverage) {
+  // A fast-but-plausible reader (avg >= 8s): a slower page must blend, never reseed.
+  BookReadingStats s;
+  s.avgSecondsPerForwardPage = 10;
+  s.paceSampleCount = 10;
+  s.recordForwardPageRead(60);  // (10*10+60)/11 = 14, blended (no reseed)
+  EXPECT_EQ(s.avgSecondsPerForwardPage, 14u);
+  EXPECT_EQ(s.paceSampleCount, 11u);
+}
+
+TEST(BookReadingStatsPace, DoesNotReseedSmallIncreaseOnLowAverage) {
+  // Low average but the new sample is within 4x -> normal blend, no reseed.
+  BookReadingStats s;
+  s.avgSecondsPerForwardPage = 3;
+  s.paceSampleCount = 5;
+  s.recordForwardPageRead(10);  // 10 <= 4*3=12 -> blend: (3*5+10)/6 = 4
+  EXPECT_EQ(s.avgSecondsPerForwardPage, 4u);
+  EXPECT_EQ(s.paceSampleCount, 6u);
+}

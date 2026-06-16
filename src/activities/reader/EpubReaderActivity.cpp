@@ -1199,6 +1199,9 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       const unsigned long liveDwellMs = currentPageVisibleMs + (pageShownAtMs > 0 ? millis() - pageShownAtMs : 0UL);
       const uint32_t reducible = sessionIdleExcessSecs + computeIdleExcessSecs(liveDwellMs);
       session.elapsedSecs = sessionSecs > reducible ? sessionSecs - reducible : 0UL;
+      // Live reading pace (avg real reading seconds per forward page) from the in-progress stats,
+      // shown on the Book Stats summary. Fresher than the on-disk copy the activity reloads.
+      session.pacePerPageSecs = readingStats.avgSecondsPerForwardPage;
       {
         const auto& ov = SETTINGS.getReaderOverride();
         const uint8_t thresholdIdx =
@@ -1361,8 +1364,17 @@ void EpubReaderActivity::pageTurn(bool isForwardTurn) {
     constexpr unsigned long MIN_DWELL_MS = 2000UL;
     if (currentPageVisibleMs >= MIN_DWELL_MS) {
       const uint32_t dwellSecs = static_cast<uint32_t>(currentPageVisibleMs / 1000UL);
-      if (readingStats.avgSecondsPerForwardPage == 0 ||
-          dwellSecs <= 2U * static_cast<uint32_t>(readingStats.avgSecondsPerForwardPage)) {
+      // Outlier rejection, but two guards against the old feedback trap where a single fast
+      // page-flip seeded a tiny average that then rejected every real reading sample:
+      //   (1) Warm-up: accept the first PACE_WARMUP_SAMPLES unconditionally so the average forms
+      //       from real reading before any gating.
+      //   (2) Loosened, floored gate: accept up to max(4*avg, idle threshold) instead of 2*avg.
+      //       Genuinely-idle long pages are already handled by the idle-page cap, so the pace
+      //       gate can be generous without re-admitting AFK pages.
+      constexpr uint16_t PACE_WARMUP_SAMPLES = 5;
+      const uint32_t avg = readingStats.avgSecondsPerForwardPage;
+      const uint32_t acceptLimit = std::max<uint32_t>(4U * avg, CrossPointSettings::PAGE_IDLE_THRESHOLD_SECONDS);
+      if (avg == 0 || readingStats.paceSampleCount < PACE_WARMUP_SAMPLES || dwellSecs <= acceptLimit) {
         readingStats.recordForwardPageRead(dwellSecs);
       }
     }

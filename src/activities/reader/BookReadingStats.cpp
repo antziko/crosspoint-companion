@@ -139,6 +139,17 @@ void BookReadingStats::recordForwardPageRead(uint32_t seconds) {
     paceSampleCount = 1;
     return;
   }
+  // Stuck-pace recovery: a stored average below human reading speed that a real sample far
+  // exceeds is corrupt legacy data (e.g. the old per-segment / 2x-gate trap that locked the
+  // average near ~2s and built up a heavy paceSampleCount). Blending can't recover from that in
+  // any reasonable number of pages, so restart the average from this sample. Guarded by the
+  // implausibly-low threshold so it never fires on a genuinely fast reader's normal variation.
+  constexpr uint16_t PACE_IMPLAUSIBLE_SECS = 8;  // no one sustains < 8s per page
+  if (avgSecondsPerForwardPage < PACE_IMPLAUSIBLE_SECS && sample > 4U * avgSecondsPerForwardPage) {
+    avgSecondsPerForwardPage = sample;
+    paceSampleCount = 1;
+    return;
+  }
   const uint16_t weight = paceSampleCount < MAX_PACE_SAMPLE_COUNT ? paceSampleCount : MAX_PACE_SAMPLE_COUNT;
   const uint32_t nextAvg =
       (static_cast<uint32_t>(avgSecondsPerForwardPage) * weight + sample) / (static_cast<uint32_t>(weight) + 1U);
