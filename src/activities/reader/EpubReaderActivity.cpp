@@ -308,6 +308,12 @@ void EpubReaderActivity::onEnter() {
   sessionCommittedSecs = 0;
   statsCheckpointPending = false;
 
+  // Arm the open/wake sync prompt if enough reading has accrued since the last sync. Evaluated
+  // here (session just started, so the count is the prior unsynced reading), but shown only after
+  // the first page render — see loop(). After a sync the marker resets, so resuming via goToReader
+  // from KOReaderSyncActivity won't re-arm. Pointless without credentials.
+  openSyncPromptArmed_ = SETTINGS.syncPromptOnOpen && KOREADER_STORE.hasCredentials() && syncPromptThresholdReached();
+
   // Trigger first update
   requestUpdate();
 }
@@ -429,6 +435,14 @@ void EpubReaderActivity::loop() {
   if (statsCheckpointPending) {
     statsCheckpointPending = false;
     commitReadingTime(STATS_CHECKPOINT_MIN_SECS);
+  }
+
+  // Open/wake sync prompt: fire once, after the first page has actually rendered (pageShownAtMs
+  // is set by renderContents), so the page paints first and a failed book load never prompts.
+  if (openSyncPromptArmed_ && section && pageShownAtMs > 0) {
+    openSyncPromptArmed_ = false;
+    showOpenSyncPrompt();
+    return;  // prompt pushed; resume handling next loop iteration
   }
 
   // End-of-Book screen reached (currentSpineIndex == spine count) means the book is
@@ -563,6 +577,18 @@ void EpubReaderActivity::loop() {
       return;
     }
     onGoHome();
+    return;
+  }
+
+  // After the open sync prompt is dismissed with Skip, the release of the answering Left/Right
+  // button bleeds into the resumed reader as a page turn. Swallow it until all nav buttons are up.
+  if (suppressPageTurnUntilRelease_) {
+    if (!mappedInput.isPressed(MappedInputManager::Button::Left) &&
+        !mappedInput.isPressed(MappedInputManager::Button::Right) &&
+        !mappedInput.isPressed(MappedInputManager::Button::PageBack) &&
+        !mappedInput.isPressed(MappedInputManager::Button::PageForward)) {
+      suppressPageTurnUntilRelease_ = false;
+    }
     return;
   }
 
@@ -1784,18 +1810,12 @@ bool EpubReaderActivity::launchKoSync(bool sleepWhenDone) {
   return true;
 }
 
-bool EpubReaderActivity::onManualSleepRequested() {
-  // Opt-in, reader page only, and pointless without sync credentials.
-  if (!SETTINGS.syncPromptOnSleep || !epub || !KOREADER_STORE.hasCredentials()) {
-    return false;  // let the main loop sleep normally
-  }
-
-  // Reading time accrued since the last successful sync of this book = the book's odometer
-  // (readingStats.totalReadingSeconds, which already includes this session's *committed*
-  // checkpoints) plus only the not-yet-committed effective remainder of the live session.
-  // Mirror commitReadingTime()'s accounting so the count matches the stats odometer: exclude
-  // idle-page excess, and exclude the part already folded into readingStats (avoid double-count).
-  // onPause/onResume keep sessionStartMs free of sub-screen time, so the raw delta is reading-only.
+uint32_t EpubReaderActivity::readingSecondsSinceLastSync() const {
+  // The book's odometer (readingStats.totalReadingSeconds, which already includes this session's
+  // *committed* checkpoints) plus only the not-yet-committed effective remainder of the live
+  // session. Mirror commitReadingTime()'s accounting so the count matches the stats odometer:
+  // exclude idle-page excess, and exclude the part already folded into readingStats (no double-
+  // count). onPause/onResume keep sessionStartMs free of sub-screen time, so the delta is reading.
   uint32_t totalNow = readingStats.totalReadingSeconds;
   if (sessionStartMs > 0) {
     const uint32_t sessionSecs = static_cast<uint32_t>((millis() - sessionStartMs) / 1000UL);
@@ -1804,13 +1824,20 @@ bool EpubReaderActivity::onManualSleepRequested() {
       totalNow += effectiveSecs - sessionCommittedSecs;
     }
   }
-  const uint32_t sinceSync =
-      totalNow > readingStats.lastSyncReadingSeconds ? totalNow - readingStats.lastSyncReadingSeconds : 0;
+  return totalNow > readingStats.lastSyncReadingSeconds ? totalNow - readingStats.lastSyncReadingSeconds : 0;
+}
+
+bool EpubReaderActivity::syncPromptThresholdReached() const {
   constexpr size_t kCount = sizeof(CrossPointSettings::SYNC_PROMPT_MINUTES) / sizeof(uint8_t);
   const uint8_t idx = SETTINGS.syncPromptMinutesIdx < kCount ? SETTINGS.syncPromptMinutesIdx : 0;
   const uint32_t thresholdMinutes = CrossPointSettings::SYNC_PROMPT_MINUTES[idx];
-  if (sinceSync < thresholdMinutes * 60UL) {
-    return false;  // not enough reading since last sync — sleep normally
+  return readingSecondsSinceLastSync() >= thresholdMinutes * 60UL;
+}
+
+bool EpubReaderActivity::onManualSleepRequested() {
+  // Opt-in, reader page only, pointless without credentials, and only past the reading threshold.
+  if (!SETTINGS.syncPromptOnSleep || !epub || !KOREADER_STORE.hasCredentials() || !syncPromptThresholdReached()) {
+    return false;  // let the main loop sleep normally
   }
 
   // Take over the gesture: ask whether to sync before sleeping. The reader stays on the
@@ -1829,6 +1856,23 @@ bool EpubReaderActivity::onManualSleepRequested() {
                            }
                          });
   return true;
+}
+
+void EpubReaderActivity::showOpenSyncPrompt() {
+  // Reader stays on the stack and resumes to run this handler after the prompt is dismissed.
+  startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_SYNC_BEFORE_READING),
+                                                                tr(STR_SYNC_BEFORE_READING_BODY)),
+                         [this](const ActivityResult& res) {
+                           if (res.isCancelled) {
+                             // Skip: keep reading. Swallow the answering button's release so it
+                             // doesn't bleed into a page turn / Back on the resumed reader.
+                             suppressPageTurnUntilRelease_ = true;
+                             ignoreBackUntilRelease = true;
+                             return;
+                           }
+                           // Sync → run the sync flow and return to the reader (no sleep).
+                           launchKoSync(/*sleepWhenDone=*/false);
+                         });
 }
 
 bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageCount) {

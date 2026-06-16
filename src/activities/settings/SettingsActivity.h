@@ -26,6 +26,9 @@ enum class SettingAction {
   Language,
   DownloadFonts,
   CustomiseDictMarker,
+  // Open a nested settings sub-screen listing every setting in SettingInfo::subCategory.
+  // Rendered by a category-scoped SettingsActivity instance — see SettingInfo::SubScreen.
+  OpenSubCategory,
 };
 
 struct SettingInfo {
@@ -46,6 +49,9 @@ struct SettingInfo {
   const char* key = nullptr;             // JSON API key (nullptr for ACTION types)
   StrId category = StrId::STR_NONE_OPT;  // Category for web UI grouping
   bool obfuscated = false;               // Save/load via base64 obfuscation (passwords)
+
+  // For OpenSubCategory actions: the category whose settings the nested sub-screen lists.
+  StrId subCategory = StrId::STR_NONE_OPT;
 
   // Direct char[] string fields (for settings stored in CrossPointSettings)
   size_t stringOffset = 0;
@@ -99,6 +105,17 @@ struct SettingInfo {
     s.nameId = nameId;
     s.type = SettingType::ACTION;
     s.action = action;
+    return s;
+  }
+
+  // A row that opens a nested settings sub-screen listing every setting tagged `category`.
+  // nameId is both the row label and the sub-screen title.
+  static SettingInfo SubScreen(StrId nameId, StrId category) {
+    SettingInfo s;
+    s.nameId = nameId;
+    s.type = SettingType::ACTION;
+    s.action = SettingAction::OpenSubCategory;
+    s.subCategory = category;
     return s;
   }
 
@@ -164,6 +181,16 @@ class SettingsActivity final : public Activity {
   int selectedSettingIndex = 0;
   int settingsCount = 0;
 
+  // Sub-screen mode: when subCategory_ != STR_NONE_OPT this instance renders a single flat list
+  // of every setting tagged with that category (no tab bar, no category switching, Back pops).
+  // subTitle_ is the header/label. Default (STR_NONE_OPT) is the normal 4-tab top-level screen.
+  StrId subCategory_ = StrId::STR_NONE_OPT;
+  StrId subTitle_ = StrId::STR_NONE_OPT;
+  bool isSubScreen() const { return subCategory_ != StrId::STR_NONE_OPT; }
+  // Index offset of the first setting row: 1 in tab mode (row 0 is the category tab bar), 0 in
+  // sub-screen mode (no tab row). Keeps the shared nav/edit/render index math in one place.
+  int settingIndexBase() const { return isSubScreen() ? 0 : 1; }
+
   // Per-category settings derived from shared list + device-only actions
   std::vector<SettingInfo> displaySettings;
   std::vector<SettingInfo> readerSettings;
@@ -186,6 +213,9 @@ class SettingsActivity final : public Activity {
  public:
   explicit SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, int initialCategory = 0)
       : Activity("Settings", renderer, mappedInput), initialCategory(initialCategory) {}
+  // Sub-screen constructor: render only the settings tagged `subCategory`, titled `subTitle`.
+  SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, StrId subCategory, StrId subTitle)
+      : Activity("Settings", renderer, mappedInput), subCategory_(subCategory), subTitle_(subTitle) {}
   void onEnter() override;
   void onExit() override;
   void loop() override;

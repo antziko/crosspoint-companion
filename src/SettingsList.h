@@ -117,7 +117,7 @@ inline SettingInfo buildDictionarySetting(const DictionaryRegistry* registry) {
   s.type = SettingType::ENUM;
   s.enumStringValues = std::move(options);
   s.key = "dictionary";
-  s.category = StrId::STR_CAT_READER;
+  s.category = StrId::STR_READER_DICTIONARY;
 
   s.dyn = std::make_shared<SettingInfo::DynamicAccessors>();
   s.dyn->valueGetter = [basePaths]() -> uint8_t {
@@ -161,41 +161,43 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   v.reserve(60);
 
   // --- Display ---
+  // Appearance basics stay at the Display top level; sleep-screen and e-ink refresh tuning live in
+  // their two sub-screens (categories STR_DISP_SLEEP / STR_DISP_EINK).
   v.push_back(SettingInfo::Enum(StrId::STR_SLEEP_SCREEN, &CrossPointSettings::sleepScreen,
                                 {StrId::STR_DARK, StrId::STR_LIGHT, StrId::STR_CUSTOM, StrId::STR_COVER,
                                  StrId::STR_NONE_OPT, StrId::STR_COVER_CUSTOM, StrId::STR_QUICK_RESUME},
-                                "sleepScreen", StrId::STR_CAT_DISPLAY));
+                                "sleepScreen", StrId::STR_DISP_SLEEP));
   v.push_back(SettingInfo::Toggle(StrId::STR_SLEEP_REVIEW_ON_WAKE, &CrossPointSettings::reviewSleepImageOnWake,
-                                  "reviewSleepImageOnWake", StrId::STR_CAT_DISPLAY));
+                                  "reviewSleepImageOnWake", StrId::STR_DISP_SLEEP));
   v.push_back(SettingInfo::Enum(StrId::STR_SLEEP_COVER_MODE, &CrossPointSettings::sleepScreenCoverMode,
-                                {StrId::STR_FIT, StrId::STR_CROP}, "sleepScreenCoverMode", StrId::STR_CAT_DISPLAY));
+                                {StrId::STR_FIT, StrId::STR_CROP}, "sleepScreenCoverMode", StrId::STR_DISP_SLEEP));
   v.push_back(SettingInfo::Enum(StrId::STR_SLEEP_COVER_FILTER, &CrossPointSettings::sleepScreenCoverFilter,
                                 {StrId::STR_NONE_OPT, StrId::STR_FILTER_CONTRAST, StrId::STR_INVERTED},
-                                "sleepScreenCoverFilter", StrId::STR_CAT_DISPLAY));
+                                "sleepScreenCoverFilter", StrId::STR_DISP_SLEEP));
+  v.push_back(SettingInfo::Enum(StrId::STR_QUICK_RESUME_TIMEOUT, &CrossPointSettings::quickResumeSleepScreen,
+                                {StrId::STR_STATE_OFF, StrId::STR_STATE_ON}, "quickResumeSleepScreen",
+                                StrId::STR_DISP_SLEEP));
   v.push_back(
       SettingInfo::Enum(StrId::STR_IMAGE_DITHER, &CrossPointSettings::imageDither,
                         {StrId::STR_DITHER_BLUE_NOISE, StrId::STR_DITHER_BAYER, StrId::STR_DITHER_ERROR_DIFFUSION},
-                        "imageDither", StrId::STR_CAT_DISPLAY));
-  v.push_back(SettingInfo::Enum(StrId::STR_QUICK_RESUME_TIMEOUT, &CrossPointSettings::quickResumeSleepScreen,
-                                {StrId::STR_STATE_OFF, StrId::STR_STATE_ON}, "quickResumeSleepScreen",
-                                StrId::STR_CAT_DISPLAY));
-  v.push_back(SettingInfo::Enum(StrId::STR_HIDE_BATTERY, &CrossPointSettings::hideBatteryPercentage,
-                                {StrId::STR_NEVER, StrId::STR_IN_READER, StrId::STR_ALWAYS}, "hideBatteryPercentage",
-                                StrId::STR_CAT_DISPLAY));
+                        "imageDither", StrId::STR_DISP_EINK));
   v.push_back(SettingInfo::Enum(
       StrId::STR_REFRESH_FREQ, &CrossPointSettings::refreshFrequency,
       {StrId::STR_PAGES_1, StrId::STR_PAGES_5, StrId::STR_PAGES_10, StrId::STR_PAGES_15, StrId::STR_PAGES_30},
-      "refreshFrequency", StrId::STR_CAT_DISPLAY));
+      "refreshFrequency", StrId::STR_DISP_EINK));
   v.push_back(
       SettingInfo::Enum(StrId::STR_REFRESH_SCREEN_MODE, &CrossPointSettings::refreshScreenMode,
                         {StrId::STR_REFRESH_MODE_FAST, StrId::STR_REFRESH_MODE_HALF, StrId::STR_REFRESH_MODE_FULL},
-                        "refreshScreenMode", StrId::STR_CAT_DISPLAY));
+                        "refreshScreenMode", StrId::STR_DISP_EINK));
+  v.push_back(SettingInfo::Toggle(StrId::STR_SUNLIGHT_FADING_FIX, &CrossPointSettings::fadingFix, "fadingFix",
+                                  StrId::STR_DISP_EINK));
+  v.push_back(SettingInfo::Enum(StrId::STR_HIDE_BATTERY, &CrossPointSettings::hideBatteryPercentage,
+                                {StrId::STR_NEVER, StrId::STR_IN_READER, StrId::STR_ALWAYS}, "hideBatteryPercentage",
+                                StrId::STR_CAT_DISPLAY));
   v.push_back(SettingInfo::Enum(StrId::STR_UI_THEME, &CrossPointSettings::uiTheme,
                                 {StrId::STR_THEME_CLASSIC, StrId::STR_THEME_LYRA, StrId::STR_THEME_LYRA_EXTENDED,
                                  StrId::STR_THEME_ROUNDEDRAFF, StrId::STR_THEME_VEGA},
                                 "uiTheme", StrId::STR_CAT_DISPLAY));
-  v.push_back(SettingInfo::Toggle(StrId::STR_SUNLIGHT_FADING_FIX, &CrossPointSettings::fadingFix, "fadingFix",
-                                  StrId::STR_CAT_DISPLAY));
   v.push_back(
       SettingInfo::Enum(StrId::STR_DISPLAY_ORIENTATION, &CrossPointSettings::displayOrientation,
                         {StrId::STR_PORTRAIT, StrId::STR_LANDSCAPE_CW, StrId::STR_INVERTED, StrId::STR_LANDSCAPE_CCW},
@@ -210,10 +212,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                                 StrId::STR_CAT_READER));
   v.push_back(SettingInfo::Enum(StrId::STR_DICT_FONT_FAMILY, &CrossPointSettings::dictionaryFontFamily,
                                 {StrId::STR_NOTO_SERIF, StrId::STR_NOTO_SANS}, "dictionaryFontFamily",
-                                StrId::STR_CAT_READER));
+                                StrId::STR_READER_DICTIONARY));
   v.push_back(SettingInfo::Enum(StrId::STR_DICT_FONT_SIZE, &CrossPointSettings::dictionaryFontSize,
                                 {StrId::STR_SMALL, StrId::STR_MEDIUM, StrId::STR_LARGE, StrId::STR_X_LARGE},
-                                "dictionaryFontSize", StrId::STR_CAT_READER));
+                                "dictionaryFontSize", StrId::STR_READER_DICTIONARY));
   v.push_back(SettingInfo::Enum(StrId::STR_LINE_SPACING, &CrossPointSettings::lineSpacing,
                                 {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_WIDE}, "lineSpacing",
                                 StrId::STR_CAT_READER));
@@ -224,53 +226,48 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
       {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, StrId::STR_CENTER, StrId::STR_ALIGN_RIGHT, StrId::STR_BOOK_S_STYLE},
       "paragraphAlignment", StrId::STR_CAT_READER));
   v.push_back(SettingInfo::Toggle(StrId::STR_EMBEDDED_STYLE, &CrossPointSettings::embeddedStyle, "embeddedStyle",
-                                  StrId::STR_CAT_READER));
+                                  StrId::STR_READER_TEXT));
   v.push_back(SettingInfo::Toggle(StrId::STR_FOCUS_READING, &CrossPointSettings::focusReadingEnabled,
-                                  "focusReadingEnabled", StrId::STR_CAT_READER));
+                                  "focusReadingEnabled", StrId::STR_READER_TEXT));
   v.push_back(SettingInfo::Toggle(StrId::STR_HYPHENATION, &CrossPointSettings::hyphenationEnabled, "hyphenationEnabled",
-                                  StrId::STR_CAT_READER));
+                                  StrId::STR_READER_TEXT));
   v.push_back(
       SettingInfo::Enum(StrId::STR_ORIENTATION, &CrossPointSettings::orientation,
                         {StrId::STR_PORTRAIT, StrId::STR_LANDSCAPE_CW, StrId::STR_INVERTED, StrId::STR_LANDSCAPE_CCW},
                         "orientation", StrId::STR_CAT_READER));
   v.push_back(SettingInfo::Toggle(StrId::STR_EXTRA_SPACING, &CrossPointSettings::extraParagraphSpacing,
-                                  "extraParagraphSpacing", StrId::STR_CAT_READER));
+                                  "extraParagraphSpacing", StrId::STR_READER_TEXT));
   v.push_back(SettingInfo::Enum(StrId::STR_TEXT_AA, &CrossPointSettings::textAntiAliasing,
                                 {StrId::STR_TEXT_AA_OFF, StrId::STR_TEXT_AA_ANTIALIASED, StrId::STR_TEXT_AA_SHARP},
-                                "textAntiAliasing", StrId::STR_CAT_READER));
+                                "textAntiAliasing", StrId::STR_READER_TEXT));
   v.push_back(SettingInfo::Enum(StrId::STR_IMAGES, &CrossPointSettings::imageRendering,
                                 {StrId::STR_IMAGES_DISPLAY, StrId::STR_IMAGES_PLACEHOLDER, StrId::STR_IMAGES_SUPPRESS},
-                                "imageRendering", StrId::STR_CAT_READER));
-  // Dictionary settings: kept last in the Reader block so the web UI groups them
-  // under Reader in this order. SettingsActivity special-cases the dictionary
-  // selector (opens DictionarySelectActivity) and pulls the history-limit/hold-confirm
-  // entries out of its category loop by nameId, re-adding them in this same order for
-  // correct device ordering — keep these as the final Reader entries here.
-  // Placeholder dictionary entry (no installed dictionaries); replaced per-call with a
-  // registry-aware version in getSettingsList(), mirroring the font-family entry.
+                                "imageRendering", StrId::STR_READER_TEXT));
+  // --- Reader > Dictionary sub-group (category STR_READER_DICTIONARY) ---
+  // The dictionary selector is special-cased on Confirm (opens DictionarySelectActivity); the
+  // marker-by-dwell options are a device-only action row added in SettingsActivity. Placeholder
+  // dictionary entry (no installed dictionaries); replaced per-call with a registry-aware version.
   v.push_back(buildDictionarySetting(nullptr));
   v.push_back(SettingInfo::Value(
       StrId::STR_LOOKUP_HIST_CAP, &CrossPointSettings::lookupHistoryCap,
       {CrossPointSettings::HIST_CAP_MIN, CrossPointSettings::HIST_CAP_MAX, CrossPointSettings::HIST_CAP_STEP},
-      "lookupHistoryCap", StrId::STR_CAT_READER));
+      "lookupHistoryCap", StrId::STR_READER_DICTIONARY));
   v.push_back(SettingInfo::Enum(StrId::STR_HOLD_CONFIRM, &CrossPointSettings::holdConfirmAction,
                                 {StrId::STR_STATE_OFF, StrId::STR_HOLD_CONFIRM_BOOKMARK, StrId::STR_HOLD_CONFIRM_DICT},
-                                "holdConfirmAction", StrId::STR_CAT_READER));
+                                "holdConfirmAction", StrId::STR_READER_DICTIONARY));
+  // --- Reader > Reading Tracking sub-group (category STR_READER_TRACKING) ---
   v.push_back(SettingInfo::Enum(
       StrId::STR_MIN_SESSION_FOR_STATS, &CrossPointSettings::minSessionMinutes,
       {StrId::STR_ALWAYS, StrId::STR_SEC_15, StrId::STR_SEC_30, StrId::STR_MIN_1, StrId::STR_MIN_2, StrId::STR_MIN_5},
-      "minSessionMinutes", StrId::STR_CAT_READER));
+      "minSessionMinutes", StrId::STR_READER_TRACKING));
   v.push_back(SettingInfo::Enum(
       StrId::STR_IDLE_PAGE_CAP, &CrossPointSettings::pageIdleCapSeconds,
       {StrId::STR_STATE_OFF, StrId::STR_SEC_15, StrId::STR_SEC_30, StrId::STR_SEC_45, StrId::STR_SEC_60},
-      "pageIdleCapSeconds", StrId::STR_CAT_READER));
-  // Dictionary marker-by-dwell settings (enable + T1/T2 thresholds) live in their own device
-  // sub-screen (DictMarkerSettingsActivity), not in this shared registry — they are not exposed
-  // on the web settings page. The Reader list shows a single action entry instead (added in
-  // SettingsActivity::rebuildSettingsLists).
-  v.push_back(SettingInfo::Enum(StrId::STR_PROGRESS_SAVE_INTERVAL, &CrossPointSettings::progressSaveIntervalIdx,
-                                {StrId::STR_PAGES_1, StrId::STR_PAGES_5, StrId::STR_PAGES_10, StrId::STR_PAGES_15},
-                                "progressSaveIntervalIdx", StrId::STR_CAT_READER));
+      "pageIdleCapSeconds", StrId::STR_READER_TRACKING));
+  v.push_back(SettingInfo::Enum(
+      StrId::STR_PROGRESS_SAVE_INTERVAL, &CrossPointSettings::progressSaveIntervalIdx,
+      {StrId::STR_PAGES_1, StrId::STR_PAGES_5, StrId::STR_PAGES_10, StrId::STR_PAGES_15, StrId::STR_PAGES_30},
+      "progressSaveIntervalIdx", StrId::STR_READER_TRACKING));
 
   // --- Controls ---
   v.push_back(SettingInfo::Enum(StrId::STR_SIDE_BTN_LAYOUT, &CrossPointSettings::sideButtonLayout,
@@ -298,21 +295,24 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
       StrId::STR_TIME_TO_SLEEP, &CrossPointSettings::sleepTimeoutMinutes,
       {CrossPointSettings::MIN_SLEEP_TIMEOUT_MINUTES, CrossPointSettings::MAX_SLEEP_TIMEOUT_MINUTES, 1},
       "sleepTimeoutMinutes", StrId::STR_CAT_SYSTEM));
-  // KOReader "sync before sleep" prompt: master toggle + reading-minutes-since-last-sync threshold.
-  // Placed next to Time to Sleep since it gates the manual-sleep gesture (System category so it
-  // shows on the device settings screen; the KOReader Sync entry there is only the credentials flow).
+  // --- System > Sync Prompts sub-group (category STR_SYS_SYNC_PROMPTS) ---
+  // KOReader sync-before-sleep / sync-before-reading prompts: master toggles + shared
+  // reading-minutes-since-last-sync threshold.
   v.push_back(SettingInfo::Toggle(StrId::STR_SYNC_PROMPT_ON_SLEEP, &CrossPointSettings::syncPromptOnSleep,
-                                  "syncPromptOnSleep", StrId::STR_CAT_SYSTEM));
+                                  "syncPromptOnSleep", StrId::STR_SYS_SYNC_PROMPTS));
+  v.push_back(SettingInfo::Toggle(StrId::STR_SYNC_PROMPT_ON_OPEN, &CrossPointSettings::syncPromptOnOpen,
+                                  "syncPromptOnOpen", StrId::STR_SYS_SYNC_PROMPTS));
   v.push_back(SettingInfo::Enum(StrId::STR_SYNC_PROMPT_MINUTES, &CrossPointSettings::syncPromptMinutesIdx,
                                 {StrId::STR_MIN_3, StrId::STR_MIN_5, StrId::STR_MIN_10, StrId::STR_MIN_15,
                                  StrId::STR_MIN_20, StrId::STR_MIN_25, StrId::STR_MIN_30},
-                                "syncPromptMinutesIdx", StrId::STR_CAT_SYSTEM));
+                                "syncPromptMinutesIdx", StrId::STR_SYS_SYNC_PROMPTS));
+  // --- System > Library & Storage sub-group (category STR_SYS_LIBRARY; + Clear Cache action) ---
   v.push_back(SettingInfo::Toggle(StrId::STR_SHOW_HIDDEN_FILES, &CrossPointSettings::showHiddenFiles, "showHiddenFiles",
-                                  StrId::STR_CAT_SYSTEM));
+                                  StrId::STR_SYS_LIBRARY));
   v.push_back(SettingInfo::Toggle(StrId::STR_REMOVE_READ_FROM_RECENTS, &CrossPointSettings::removeReadBooksFromRecents,
-                                  "removeReadBooksFromRecents", StrId::STR_CAT_SYSTEM));
+                                  "removeReadBooksFromRecents", StrId::STR_SYS_LIBRARY));
   v.push_back(SettingInfo::Toggle(StrId::STR_MOVE_FINISHED_TO_READ, &CrossPointSettings::moveFinishedToReadFolder,
-                                  "moveFinishedToReadFolder", StrId::STR_CAT_SYSTEM));
+                                  "moveFinishedToReadFolder", StrId::STR_SYS_LIBRARY));
 
   // --- KOReader Sync (web-only, uses KOReaderCredentialStore) ---
   v.push_back(SettingInfo::DynamicString(

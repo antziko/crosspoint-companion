@@ -62,6 +62,13 @@ class EpubReaderActivity final : public Activity {
   // Set when the reader is left at end-of-book and SETTINGS.moveFinishedToReadFolder is on.
   // Consumed in onExit() to relocate the finished book into /Read/.
   bool pendingReadFolderMove = false;
+  // Armed in onEnter() when the "sync prompt on open" gate passes; consumed once in loop() after
+  // the first page renders, to show the open/wake sync prompt without blocking the initial paint.
+  bool openSyncPromptArmed_ = false;
+  // One-shot: after the open sync prompt is dismissed with Skip, swallow the page-turn (and Back)
+  // that the answering button release would otherwise bleed into the resumed reader. Cleared once
+  // all navigation buttons are released.
+  bool suppressPageTurnUntilRelease_ = false;
 
   BookReadingStats readingStats;
   unsigned long sessionStartMs = 0UL;
@@ -170,6 +177,14 @@ class EpubReaderActivity final : public Activity {
   // have confirmed KOREADER_STORE.hasCredentials(). Returns false if the pre-sync progress
   // save failed (sync not launched). Shared by the reader menu and the sleep prompt.
   bool launchKoSync(bool sleepWhenDone);
+  // Reading seconds accrued since this book's last successful sync (odometer + uncommitted live
+  // session, matching commitReadingTime accounting). Shared by the sleep + open sync prompts.
+  uint32_t readingSecondsSinceLastSync() const;
+  // True when readingSecondsSinceLastSync() meets the SYNC_PROMPT_MINUTES[syncPromptMinutesIdx] gate.
+  bool syncPromptThresholdReached() const;
+  // Show the "sync before continuing" prompt on open/wake (Sync runs KOReaderSyncActivity then
+  // returns to the reader; Skip resumes reading). Called once after the first page render.
+  void showOpenSyncPrompt();
   void applyOrientation(uint8_t orientation);
   void saveOrientation() const;
   void toggleAutoPageTurn(uint8_t selectedPageTurnOption);

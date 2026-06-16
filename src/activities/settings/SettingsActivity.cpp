@@ -45,23 +45,44 @@ void SettingsActivity::rebuildSettingsLists() {
   sdFontSystem.refreshIfDirty();
   dictionaryRegistry.refreshIfDirty();
 
-  // The history-limit and hold-confirm settings are Reader-category in the master list
-  // (so the web UI groups them under Reader), but the device places them last. Capture
-  // them by nameId here and re-add below — keeping a single definition in SettingsList.h
-  // instead of re-declaring their range/options. The dictionary selector flows through
-  // the loop normally (last Reader entry) and is special-cased on Confirm to open the picker.
-  SettingInfo histCapSetting{};
-  SettingInfo holdConfirmSetting{};
+  // Sub-screen mode: build a single flat list of every setting tagged subCategory_.
+  // Reuses readerSettings as the backing vector (currentSettings points at it).
+  if (isSubScreen()) {
+    for (auto& setting : getSettingsList(&sdFontSystem.registry(), &dictionaryRegistry)) {
+      if (setting.category == subCategory_) {
+        readerSettings.push_back(setting);
+      }
+    }
+    // Device-only ACTION rows aren't in the shared (web) list, so append them per sub-group here,
+    // mirroring how the top-level screen appends its actions below.
+    if (subCategory_ == StrId::STR_READER_DICTIONARY) {
+      // Marker-by-dwell options inline here (rather than a further nested sub-screen). These are
+      // device-only — JsonSettingsIO persists them via explicit fields, not a SettingInfo key — so
+      // they carry no key and are edited in place via their member pointers.
+      readerSettings.push_back(
+          SettingInfo::Toggle(StrId::STR_DICT_MARKER_DWELL, &CrossPointSettings::dictMarkerDwellEnabled));
+      readerSettings.push_back(
+          SettingInfo::Enum(StrId::STR_DICT_MARKER_T1, &CrossPointSettings::dictMarkerT1Idx,
+                            {StrId::STR_SEC_3, StrId::STR_SEC_5, StrId::STR_SEC_8, StrId::STR_SEC_10}));
+      readerSettings.push_back(
+          SettingInfo::Enum(StrId::STR_DICT_MARKER_T2, &CrossPointSettings::dictMarkerT2Idx,
+                            {StrId::STR_SEC_7, StrId::STR_SEC_9, StrId::STR_SEC_12, StrId::STR_SEC_15}));
+    } else if (subCategory_ == StrId::STR_SYS_LIBRARY) {
+      readerSettings.push_back(SettingInfo::Action(StrId::STR_CLEAR_READING_CACHE, SettingAction::ClearCache));
+    } else if (subCategory_ == StrId::STR_SYS_MAINTENANCE) {
+      readerSettings.push_back(SettingInfo::Action(StrId::STR_CHECK_UPDATES, SettingAction::CheckForUpdates));
+      readerSettings.push_back(SettingInfo::Action(StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate));
+      readerSettings.push_back(SettingInfo::Action(StrId::STR_LANGUAGE, SettingAction::Language));
+    }
+    currentSettings = &readerSettings;
+    settingsCount = static_cast<int>(currentSettings->size());
+    return;
+  }
+
+  // Top-level screen: bucket the four device categories. Settings tagged with a Reader sub-group
+  // category (STR_READER_TEXT / _DICTIONARY / _TRACKING) match none of these and are intentionally
+  // dropped here — they surface only inside their sub-screen, reached via the SubScreen rows below.
   for (auto& setting : getSettingsList(&sdFontSystem.registry(), &dictionaryRegistry)) {
-    if (setting.nameId == StrId::STR_LOOKUP_HIST_CAP) {
-      histCapSetting = setting;
-      continue;
-    }
-    if (setting.nameId == StrId::STR_HOLD_CONFIRM) {
-      holdConfirmSetting = setting;
-      continue;
-    }
-    if (setting.category == StrId::STR_NONE_OPT) continue;  // not shown on device
     if (setting.category == StrId::STR_CAT_DISPLAY) {
       displaySettings.push_back(setting);
     } else if (setting.category == StrId::STR_CAT_READER) {
@@ -76,25 +97,30 @@ void SettingsActivity::rebuildSettingsLists() {
   // Append device-only ACTION items
   controlsSettings.insert(controlsSettings.begin(),
                           SettingInfo::Action(StrId::STR_REMAP_FRONT_BUTTONS, SettingAction::RemapFrontButtons));
-  systemSettings.push_back(SettingInfo::Action(StrId::STR_WIFI_NETWORKS, SettingAction::Network));
+  // System top level: keep the frequently-used Wi-Fi / Time to Sleep / KOReader Sync flat (Time to
+  // Sleep arrives from the category loop as the first systemSettings entry); the rest of the System
+  // items live one level down. OPDS / Clear Cache / Updates / SD Firmware / Language are appended
+  // inside their sub-screen branch above.
+  systemSettings.insert(systemSettings.begin(), SettingInfo::Action(StrId::STR_WIFI_NETWORKS, SettingAction::Network));
   systemSettings.push_back(SettingInfo::Action(StrId::STR_KOREADER_SYNC, SettingAction::KOReaderSync));
   systemSettings.push_back(SettingInfo::Action(StrId::STR_OPDS_SERVERS, SettingAction::OPDSBrowser));
-  systemSettings.push_back(SettingInfo::Action(StrId::STR_CLEAR_READING_CACHE, SettingAction::ClearCache));
-  systemSettings.push_back(SettingInfo::Action(StrId::STR_CHECK_UPDATES, SettingAction::CheckForUpdates));
-  systemSettings.push_back(SettingInfo::Action(StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate));
-  systemSettings.push_back(SettingInfo::Action(StrId::STR_LANGUAGE, SettingAction::Language));
+  systemSettings.push_back(SettingInfo::SubScreen(StrId::STR_SYS_SYNC_PROMPTS, StrId::STR_SYS_SYNC_PROMPTS));
+  systemSettings.push_back(SettingInfo::SubScreen(StrId::STR_SYS_LIBRARY, StrId::STR_SYS_LIBRARY));
+  systemSettings.push_back(SettingInfo::SubScreen(StrId::STR_SYS_MAINTENANCE, StrId::STR_SYS_MAINTENANCE));
   // Insert "Manage Fonts" right after the font family setting so users discover it naturally
   readerSettings.insert(readerSettings.begin() + 1,
                         SettingInfo::Action(StrId::STR_MANAGE_FONTS, SettingAction::DownloadFonts));
-  // The dictionary selector itself flows through the category loop above (it is the
-  // last Reader entry before the captured settings). Re-add the captured history-limit
-  // and hold-confirm settings after it, matching the order the web UI shows them.
-  readerSettings.push_back(std::move(histCapSetting));
-  readerSettings.push_back(std::move(holdConfirmSetting));
-  // Dictionary marker-by-dwell options live in their own sub-screen (device-only, not on web).
-  readerSettings.push_back(SettingInfo::Action(StrId::STR_DICT_MARKER_SETTINGS, SettingAction::CustomiseDictMarker));
+  // Reader sub-screens: advanced text/rendering, dictionary, and reading-tracking settings live one
+  // level down to keep the top-level Reader list short. Each opens a category-scoped SettingsActivity.
+  readerSettings.push_back(SettingInfo::SubScreen(StrId::STR_READER_TEXT, StrId::STR_READER_TEXT));
+  readerSettings.push_back(SettingInfo::SubScreen(StrId::STR_READER_DICTIONARY, StrId::STR_READER_DICTIONARY));
+  readerSettings.push_back(SettingInfo::SubScreen(StrId::STR_READER_TRACKING, StrId::STR_READER_TRACKING));
   readerSettings.push_back(SettingInfo::Action(StrId::STR_CUSTOMISE_STATUS_BAR, SettingAction::CustomiseStatusBar));
   displaySettings.push_back(SettingInfo::Action(StrId::STR_CUSTOMISE_TOP_BAR, SettingAction::CustomiseTopBar));
+  // Display sub-screens: sleep-screen/wallpaper and e-ink refresh tuning live one level down; the
+  // appearance basics (theme, orientation, battery, top bar) stay flat at the Display top level.
+  displaySettings.push_back(SettingInfo::SubScreen(StrId::STR_DISP_SLEEP, StrId::STR_DISP_SLEEP));
+  displaySettings.push_back(SettingInfo::SubScreen(StrId::STR_DISP_EINK, StrId::STR_DISP_EINK));
 
   // Update currentSettings pointer and count for the active category
   switch (selectedCategoryIndex) {
@@ -140,9 +166,12 @@ void SettingsActivity::onExit() {
 void SettingsActivity::loop() {
   bool hasChangedCategory = false;
 
+  // Row count for navigation: settings plus the tab row (top-level only; sub-screens have no tabs).
+  const int rowCount = settingsCount + settingIndexBase();
+
   // Handle actions with early return
   if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
-    if (selectedSettingIndex == 0) {
+    if (!isSubScreen() && selectedSettingIndex == 0) {
       selectedCategoryIndex = (selectedCategoryIndex < categoryCount - 1) ? (selectedCategoryIndex + 1) : 0;
       hasChangedCategory = true;
       requestUpdate();
@@ -154,7 +183,11 @@ void SettingsActivity::loop() {
   }
 
   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-    if (selectedSettingIndex > 0) {
+    if (isSubScreen()) {
+      // No tab row to fall back to — Back returns to the parent settings screen.
+      SETTINGS.saveToFile();
+      finish();
+    } else if (selectedSettingIndex > 0) {
       selectedSettingIndex = 0;
       requestUpdate();
     } else {
@@ -165,27 +198,30 @@ void SettingsActivity::loop() {
   }
 
   // Handle navigation
-  buttonNavigator.onNextRelease([this] {
-    selectedSettingIndex = ButtonNavigator::nextIndex(selectedSettingIndex, settingsCount + 1);
+  buttonNavigator.onNextRelease([this, rowCount] {
+    selectedSettingIndex = ButtonNavigator::nextIndex(selectedSettingIndex, rowCount);
     requestUpdate();
   });
 
-  buttonNavigator.onPreviousRelease([this] {
-    selectedSettingIndex = ButtonNavigator::previousIndex(selectedSettingIndex, settingsCount + 1);
+  buttonNavigator.onPreviousRelease([this, rowCount] {
+    selectedSettingIndex = ButtonNavigator::previousIndex(selectedSettingIndex, rowCount);
     requestUpdate();
   });
 
-  buttonNavigator.onNextContinuous([this, &hasChangedCategory] {
-    hasChangedCategory = true;
-    selectedCategoryIndex = ButtonNavigator::nextIndex(selectedCategoryIndex, categoryCount);
-    requestUpdate();
-  });
+  // Side-button (continuous) category switching is a top-level affordance only.
+  if (!isSubScreen()) {
+    buttonNavigator.onNextContinuous([this, &hasChangedCategory] {
+      hasChangedCategory = true;
+      selectedCategoryIndex = ButtonNavigator::nextIndex(selectedCategoryIndex, categoryCount);
+      requestUpdate();
+    });
 
-  buttonNavigator.onPreviousContinuous([this, &hasChangedCategory] {
-    hasChangedCategory = true;
-    selectedCategoryIndex = ButtonNavigator::previousIndex(selectedCategoryIndex, categoryCount);
-    requestUpdate();
-  });
+    buttonNavigator.onPreviousContinuous([this, &hasChangedCategory] {
+      hasChangedCategory = true;
+      selectedCategoryIndex = ButtonNavigator::previousIndex(selectedCategoryIndex, categoryCount);
+      requestUpdate();
+    });
+  }
 
   if (hasChangedCategory) {
     selectedSettingIndex = (selectedSettingIndex == 0) ? 0 : 1;
@@ -208,7 +244,7 @@ void SettingsActivity::loop() {
 }
 
 void SettingsActivity::toggleCurrentSetting() {
-  int selectedSetting = selectedSettingIndex - 1;
+  int selectedSetting = selectedSettingIndex - settingIndexBase();
   if (selectedSetting < 0 || selectedSetting >= settingsCount) {
     return;
   }
@@ -283,6 +319,12 @@ void SettingsActivity::toggleCurrentSetting() {
         break;
       case SettingAction::CustomiseDictMarker:
         startActivityForResult(std::make_unique<DictMarkerSettingsActivity>(renderer, mappedInput), resultHandler);
+        break;
+      case SettingAction::OpenSubCategory:
+        // Open a nested category-scoped settings screen (reuses this activity in sub-screen mode).
+        startActivityForResult(
+            std::make_unique<SettingsActivity>(renderer, mappedInput, setting.subCategory, setting.nameId),
+            resultHandler);
         break;
       case SettingAction::CustomiseTopBar:
         startActivityForResult(std::make_unique<HomeTopBarSettingsActivity>(renderer, mappedInput), resultHandler);
@@ -382,24 +424,29 @@ void SettingsActivity::render(RenderLock&&) {
 
   const auto& metrics = UITheme::getInstance().getMetrics();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_SETTINGS_TITLE),
-                 CROSSPOINT_VERSION);
+  // Sub-screens show their group name as the title; the top-level screen shows the app title+version.
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
+                 isSubScreen() ? I18N.get(subTitle_) : tr(STR_SETTINGS_TITLE), isSubScreen() ? "" : CROSSPOINT_VERSION);
 
-  std::vector<TabInfo> tabs;
-  tabs.reserve(categoryCount);
-  for (int i = 0; i < categoryCount; i++) {
-    tabs.push_back({I18N.get(categoryNames[i]), selectedCategoryIndex == i});
+  // Tab bar is a top-level affordance only; sub-screens reclaim that vertical space.
+  const int tabBarHeight = isSubScreen() ? 0 : metrics.tabBarHeight;
+  if (!isSubScreen()) {
+    std::vector<TabInfo> tabs;
+    tabs.reserve(categoryCount);
+    for (int i = 0; i < categoryCount; i++) {
+      tabs.push_back({I18N.get(categoryNames[i]), selectedCategoryIndex == i});
+    }
+    GUI.drawTabBar(renderer, Rect{0, metrics.topPadding + metrics.headerHeight, pageWidth, metrics.tabBarHeight}, tabs,
+                   selectedSettingIndex == 0);
   }
-  GUI.drawTabBar(renderer, Rect{0, metrics.topPadding + metrics.headerHeight, pageWidth, metrics.tabBarHeight}, tabs,
-                 selectedSettingIndex == 0);
 
   const auto& settings = *currentSettings;
   GUI.drawList(
       renderer,
-      Rect{0, metrics.topPadding + metrics.headerHeight + metrics.tabBarHeight + metrics.verticalSpacing, pageWidth,
-           pageHeight - (metrics.topPadding + metrics.headerHeight + metrics.tabBarHeight + metrics.buttonHintsHeight +
+      Rect{0, metrics.topPadding + metrics.headerHeight + tabBarHeight + metrics.verticalSpacing, pageWidth,
+           pageHeight - (metrics.topPadding + metrics.headerHeight + tabBarHeight + metrics.buttonHintsHeight +
                          metrics.verticalSpacing * 2)},
-      settingsCount, selectedSettingIndex - 1,
+      settingsCount, selectedSettingIndex - settingIndexBase(),
       [&settings](int index) { return std::string(I18N.get(settings[index].nameId)); }, nullptr, nullptr,
       [&settings](int i) {
         const auto& setting = settings[i];
@@ -437,13 +484,18 @@ void SettingsActivity::render(RenderLock&&) {
       },
       true);
 
-  // Draw help text
-  const auto confirmLabel =
-      (selectedSettingIndex == 0)
-          ? I18N.get(categoryNames[(selectedCategoryIndex + 1) % categoryCount])
-          : (selectedSettingIndex > 0 && (*currentSettings)[selectedSettingIndex - 1].nameId == StrId::STR_TIME_TO_SLEEP
-                 ? tr(STR_SELECT)
-                 : tr(STR_TOGGLE));
+  // Draw help text. Top-level row 0 is the tab switcher (shows the next category name); otherwise
+  // the Confirm label reflects the focused row: "Select" for pickers/actions/sub-screens, else "Toggle".
+  const char* confirmLabel;
+  if (!isSubScreen() && selectedSettingIndex == 0) {
+    confirmLabel = I18N.get(categoryNames[(selectedCategoryIndex + 1) % categoryCount]);
+  } else {
+    const int sel = selectedSettingIndex - settingIndexBase();
+    const bool selectRow = sel >= 0 && sel < settingsCount &&
+                           ((*currentSettings)[sel].nameId == StrId::STR_TIME_TO_SLEEP ||
+                            (*currentSettings)[sel].type == SettingType::ACTION);
+    confirmLabel = selectRow ? tr(STR_SELECT) : tr(STR_TOGGLE);
+  }
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 

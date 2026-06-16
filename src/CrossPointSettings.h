@@ -269,6 +269,9 @@ class CrossPointSettings {
   // When on, a manual power-button sleep from the reader offers to KOReader-sync first
   // (never on auto-sleep timeout). Off by default — opt-in.
   uint8_t syncPromptOnSleep = 0;
+  // When on, opening (or waking into) a book offers to KOReader-sync first if enough reading
+  // has accrued since the last sync. Shares the syncPromptMinutesIdx threshold. Off by default.
+  uint8_t syncPromptOnOpen = 0;
   // Only show that prompt once this much reading time has accrued since the last successful
   // sync of the open book. Stored as an index into SYNC_PROMPT_MINUTES (default index 1 = 5 min).
   uint8_t syncPromptMinutesIdx = 1;
@@ -338,7 +341,7 @@ class CrossPointSettings {
   // reader exit / sleep) to cut SD wear. Stored as an index into PROGRESS_SAVE_PAGES. Index 0 = 1
   // (save every turn, the safest legacy behaviour — no progress loss on hard power-off).
   uint8_t progressSaveIntervalIdx = 0;
-  static constexpr uint16_t PROGRESS_SAVE_PAGES[] = {1, 5, 10, 15};
+  static constexpr uint16_t PROGRESS_SAVE_PAGES[] = {1, 5, 10, 15, 30};
   // Image rendering mode in EPUB reader
   uint8_t imageRendering = IMAGES_DISPLAY;
   // 1-bit halftone dither algorithm for all images (X3): blue noise vs Bayer
