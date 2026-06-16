@@ -1187,7 +1187,12 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       }
       const int progressPercent = clampPercent(static_cast<int>(bookProgress + 0.5f));
       BookStatsActivity::SessionContext session;
-      session.elapsedSecs = sessionStartMs > 0 ? static_cast<uint32_t>((millis() - sessionStartMs) / 1000UL) : 0UL;
+      // Mirror commitReadingTime's effectiveSecs: subtract idle-page excess so "This session"
+      // matches what gets persisted. openReaderMenu() already folded this page's live dwell into
+      // sessionIdleExcessSecs (pageShownAtMs is 0 here), so no extra live-page accounting needed.
+      const uint32_t sessionSecs =
+          sessionStartMs > 0 ? static_cast<uint32_t>((millis() - sessionStartMs) / 1000UL) : 0UL;
+      session.elapsedSecs = sessionSecs > sessionIdleExcessSecs ? sessionSecs - sessionIdleExcessSecs : 0UL;
       {
         const auto& ov = SETTINGS.getReaderOverride();
         const uint8_t thresholdIdx =
