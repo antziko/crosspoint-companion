@@ -303,6 +303,7 @@ void EpubReaderActivity::onEnter() {
   readingStats = BookReadingStats::load(epub->getCachePath());
   sessionStartMs = millis();
   sessionPauseStartMs = 0UL;
+  currentPageVisibleMs = 0UL;
   sessionIdleExcessSecs = 0;
   sessionCommittedSecs = 0;
   statsCheckpointPending = false;
@@ -315,8 +316,11 @@ void EpubReaderActivity::onExit() {
   Activity::onExit();
 
   if (epub && sessionStartMs > 0) {
-    // Account the page being viewed at exit (its final dwell) before totalling.
-    if (pageShownAtMs > 0) accountIdleExcess(millis() - pageShownAtMs);
+    // Account the page being viewed at exit: fold its final visible segment into the page's
+    // accumulated visible time, then apply the idle cap to that total before committing.
+    accumulateVisibleSegment();
+    accountIdleExcess(currentPageVisibleMs);
+    currentPageVisibleMs = 0UL;
 
     // Final flush of any reading time the periodic checkpoints haven't persisted yet.
     commitReadingTime(0);
@@ -727,8 +731,7 @@ void EpubReaderActivity::openReaderMenu() {
   // round-trip (excludes the in-menu time) instead of restarting it on return. If the menu
   // changes layout (font/orientation), the subsequent re-layout re-renders the page anyway.
   pauseMarkerDwell();
-  if (pageShownAtMs > 0) accountIdleExcess(millis() - pageShownAtMs);
-  pageShownAtMs = 0UL;
+  accumulateVisibleSegment();
   startActivityForResult(std::make_unique<EpubReaderMenuActivity>(
                              renderer, mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent,
                              APP_STATE.activeOrientation, !currentPageFootnotes.empty(),
@@ -789,8 +792,7 @@ void EpubReaderActivity::openWordSelect(bool framebufferContainsPage) {
   // Choose the marker band from this page's dwell BEFORE the dwell is consumed/reset below.
   const WordSelectNavigator::InitialMarker initialMarker = computeWordSelectMarker();
   pauseMarkerDwell();  // freeze the dwell across this word-select round-trip (excludes in-dict time)
-  if (pageShownAtMs > 0) accountIdleExcess(millis() - pageShownAtMs);
-  pageShownAtMs = 0UL;
+  accumulateVisibleSegment();
   startActivityForResult(std::make_unique<DictionaryWordSelectActivity>(
                              renderer, mappedInput, std::move(pageForLookup), orientedMarginLeft, orientedMarginTop,
                              bookCachePath, nextPageFirstWord, framebufferContainsPage, reservedBottomHeight,
@@ -896,8 +898,7 @@ void EpubReaderActivity::launchHighlightWordSelect() {
   // Choose the marker band from this page's dwell BEFORE the dwell is consumed/reset below.
   const WordSelectNavigator::InitialMarker initialMarker = computeWordSelectMarker();
   pauseMarkerDwell();  // freeze the dwell across this word-select round-trip (excludes in-dict time)
-  if (pageShownAtMs > 0) accountIdleExcess(millis() - pageShownAtMs);
-  pageShownAtMs = 0UL;
+  accumulateVisibleSegment();
 
   // Launched from the menu: framebuffer holds the menu, not the page, so a full repaint
   // (framebufferContainsPage=false, reservedBottomHeight=0) and HighlightRange mode.
@@ -1188,11 +1189,16 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       const int progressPercent = clampPercent(static_cast<int>(bookProgress + 0.5f));
       BookStatsActivity::SessionContext session;
       // Mirror commitReadingTime's effectiveSecs: subtract idle-page excess so "This session"
-      // matches what gets persisted. openReaderMenu() already folded this page's live dwell into
-      // sessionIdleExcessSecs (pageShownAtMs is 0 here), so no extra live-page accounting needed.
+      // matches what gets persisted. The current page's dwell is accumulated in
+      // currentPageVisibleMs but not yet committed to sessionIdleExcessSecs (that happens when
+      // the page is left), so apply the cap to it live here. openReaderMenu() already folded the
+      // open segment into currentPageVisibleMs (pageShownAtMs is 0 here); the pageShownAtMs term
+      // is defensive for any other caller.
       const uint32_t sessionSecs =
           sessionStartMs > 0 ? static_cast<uint32_t>((millis() - sessionStartMs) / 1000UL) : 0UL;
-      session.elapsedSecs = sessionSecs > sessionIdleExcessSecs ? sessionSecs - sessionIdleExcessSecs : 0UL;
+      const unsigned long liveDwellMs = currentPageVisibleMs + (pageShownAtMs > 0 ? millis() - pageShownAtMs : 0UL);
+      const uint32_t reducible = sessionIdleExcessSecs + computeIdleExcessSecs(liveDwellMs);
+      session.elapsedSecs = sessionSecs > reducible ? sessionSecs - reducible : 0UL;
       {
         const auto& ov = SETTINGS.getReaderOverride();
         const uint8_t thresholdIdx =
@@ -1315,35 +1321,50 @@ void EpubReaderActivity::pauseMarkerDwell() {
   preserveMarkerDwell_ = true;
 }
 
-void EpubReaderActivity::accountIdleExcess(unsigned long dwellMs) {
+uint32_t EpubReaderActivity::computeIdleExcessSecs(unsigned long dwellMs) const {
   const uint8_t idx = SETTINGS.pageIdleCapSeconds;
-  if (idx == 0) return;  // Off — full wall-clock, no idle cap.
+  if (idx == 0) return 0;  // Off — full wall-clock, no idle cap.
   constexpr size_t kCount = sizeof(CrossPointSettings::PAGE_IDLE_CAP_SECONDS) / sizeof(uint16_t);
-  if (idx >= kCount) return;  // out of range (shouldn't happen) — treat as Off.
+  if (idx >= kCount) return 0;  // out of range (shouldn't happen) — treat as Off.
   const uint32_t capSecs = CrossPointSettings::PAGE_IDLE_CAP_SECONDS[idx];
   const uint32_t dwellSecs = static_cast<uint32_t>(dwellMs / 1000UL);
   // Only pages held past the idle threshold are capped; cap <= threshold so this can't
   // underflow.
   if (dwellSecs > CrossPointSettings::PAGE_IDLE_THRESHOLD_SECONDS) {
-    sessionIdleExcessSecs += dwellSecs - capSecs;
+    return dwellSecs - capSecs;
+  }
+  return 0;
+}
+
+void EpubReaderActivity::accountIdleExcess(unsigned long dwellMs) {
+  sessionIdleExcessSecs += computeIdleExcessSecs(dwellMs);
+}
+
+void EpubReaderActivity::accumulateVisibleSegment() {
+  if (pageShownAtMs > 0) {
+    currentPageVisibleMs += millis() - pageShownAtMs;
+    pageShownAtMs = 0UL;
   }
 }
 
 void EpubReaderActivity::pageTurn(bool isForwardTurn) {
   if (isForwardTurn) {
+    // Fold the final visible segment into the page's accumulated reading time (sub-activity
+    // time is already excluded). The idle cap is applied to this total by the new-page render
+    // branch (renderCurrentPage). The pace sample also uses the total, not just the last
+    // segment, so a page interrupted by the menu/dictionary still reflects all the real reading
+    // done on it (excluding the sub-activity time), and the outlier rejection still applies.
     if (pageShownAtMs > 0) {
-      const unsigned long dwell = millis() - pageShownAtMs;
-      // Idle-cap accounting is independent of the pace-sample outlier rejection below.
-      accountIdleExcess(dwell);
-      constexpr unsigned long MIN_DWELL_MS = 2000UL;
-      if (dwell >= MIN_DWELL_MS) {
-        const uint32_t dwellSecs = static_cast<uint32_t>(dwell / 1000UL);
-        if (readingStats.avgSecondsPerForwardPage == 0 ||
-            dwellSecs <= 2U * static_cast<uint32_t>(readingStats.avgSecondsPerForwardPage)) {
-          readingStats.recordForwardPageRead(dwellSecs);
-        }
-      }
+      currentPageVisibleMs += millis() - pageShownAtMs;
       pageShownAtMs = 0UL;
+    }
+    constexpr unsigned long MIN_DWELL_MS = 2000UL;
+    if (currentPageVisibleMs >= MIN_DWELL_MS) {
+      const uint32_t dwellSecs = static_cast<uint32_t>(currentPageVisibleMs / 1000UL);
+      if (readingStats.avgSecondsPerForwardPage == 0 ||
+          dwellSecs <= 2U * static_cast<uint32_t>(readingStats.avgSecondsPerForwardPage)) {
+        readingStats.recordForwardPageRead(dwellSecs);
+      }
     }
 
     if (section->currentPage < section->pageCount - 1) {
@@ -1635,19 +1656,22 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   }
   silentIndexNextChapterIfNeeded(viewportWidth, viewportHeight);
   maybeSaveProgress(currentSpineIndex, section->currentPage, section->pageCount);
-  // Catch-all: account any still-open page view before starting a new one. The
-  // forward-turn / menu / dictionary / exit paths reset pageShownAtMs to 0 first, so
-  // this only fires for transitions that don't (e.g. a backward page turn) — no
-  // double counting.
-  if (pageShownAtMs > 0) accountIdleExcess(millis() - pageShownAtMs);
+  // Fold any still-open visible segment into the page's accumulated dwell. The forward-turn /
+  // menu / dictionary / exit paths reset pageShownAtMs to 0 first; this only fires for
+  // transitions that don't (e.g. a backward page turn) — no double counting.
+  accumulateVisibleSegment();
   pageShownAtMs = millis();
   // Re-anchor the marker dwell on a genuine new page. When returning from word-select, resume
   // instead: shift the anchor so only the pre-launch reading time counts (the time spent inside
-  // word-select is excluded), giving a paused-then-resumed dwell on the same page.
+  // word-select is excluded), giving a paused-then-resumed dwell on the same page. The idle-page
+  // accumulator follows the same rule: on a genuine new page, apply the cap to the page just
+  // left and reset; on a resume, keep accumulating into the same page.
   if (preserveMarkerDwell_) {
     preserveMarkerDwell_ = false;
     markerDwellStartMs = millis() - markerDwellPausedElapsedMs;
   } else {
+    accountIdleExcess(currentPageVisibleMs);
+    currentPageVisibleMs = 0UL;
     markerDwellStartMs = millis();
   }
 

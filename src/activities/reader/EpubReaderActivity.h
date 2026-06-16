@@ -72,6 +72,12 @@ class EpubReaderActivity final : public Activity {
   // Set to millis() after each full page render; cleared to 0 while a subactivity is active.
   // Forward pageTurn measures elapsed time here for pace estimation.
   unsigned long pageShownAtMs = 0UL;
+  // Accumulated VISIBLE time (ms) on the current page, summed across sub-activity round-trips
+  // (menu/dict/highlight). Sub-activity time itself is excluded (handled by onPause/onResume).
+  // The idle-page cap is applied to this total when the page is genuinely left, so an
+  // interrupted long dwell is capped just like a continuous one. Reset on a genuine new page;
+  // preserved on a sub-activity resume (mirrors markerDwellStartMs / preserveMarkerDwell_).
+  unsigned long currentPageVisibleMs = 0UL;
   // Anchor for the dictionary/highlight marker-by-dwell feature: when the current page first
   // became visible. Unlike pageShownAtMs (reset whenever a subactivity opens), this survives a
   // word-select round-trip so re-triggering on the same page continues accumulating dwell rather
@@ -168,10 +174,17 @@ class EpubReaderActivity final : public Activity {
   void saveOrientation() const;
   void toggleAutoPageTurn(uint8_t selectedPageTurnOption);
   void pageTurn(bool isForwardTurn);
-  // Adds the idle excess of a just-ended page view (dwellMs on screen) to
-  // sessionIdleExcessSecs when the idle-page cap is enabled. No-op when the cap is Off
-  // or the dwell is within PAGE_IDLE_THRESHOLD_SECONDS.
+  // Idle-page-cap excess (seconds) for a given visible dwell. Returns 0 when the cap is Off
+  // or the dwell is within PAGE_IDLE_THRESHOLD_SECONDS. Pure — used both to account on page
+  // leave and to compute the live reduction for the "This session" display.
+  uint32_t computeIdleExcessSecs(unsigned long dwellMs) const;
+  // Adds computeIdleExcessSecs(dwellMs) to sessionIdleExcessSecs. Called when a page is
+  // genuinely left (render of a new page, or onExit).
   void accountIdleExcess(unsigned long dwellMs);
+  // Folds the current visible segment (millis() - pageShownAtMs) into currentPageVisibleMs and
+  // clears pageShownAtMs. Called when a sub-activity opens, so the page's dwell accumulates
+  // across the round-trip instead of resetting.
+  void accumulateVisibleSegment();
   // Chooses the initial word-select marker band from the current page's dwell when the
   // dictMarkerDwellEnabled setting is on. Must be called BEFORE pageShownAtMs is reset for
   // the launch. Returns Middle when the feature is off, during auto page-turn, or when no
