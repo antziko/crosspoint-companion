@@ -10,7 +10,6 @@
 #include "ButtonRemapActivity.h"
 #include "ClearCacheActivity.h"
 #include "CrossPointSettings.h"
-#include "DictMarkerSettingsActivity.h"
 #include "DictionarySelectActivity.h"
 #include "FontDownloadActivity.h"
 #include "FontSelectionActivity.h"
@@ -316,9 +315,6 @@ void SettingsActivity::toggleCurrentSetting() {
         break;
       case SettingAction::CustomiseStatusBar:
         startActivityForResult(std::make_unique<StatusBarSettingsActivity>(renderer, mappedInput), resultHandler);
-        break;
-      case SettingAction::CustomiseDictMarker:
-        startActivityForResult(std::make_unique<DictMarkerSettingsActivity>(renderer, mappedInput), resultHandler);
         break;
       case SettingAction::OpenSubCategory:
         // Open a nested category-scoped settings screen (reuses this activity in sub-screen mode).

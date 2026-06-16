@@ -144,7 +144,8 @@ bool JsonSettingsIO::saveSettings(const CrossPointSettings& s, const char* path)
     doc["sdFontFamilyName"] = s.sdFontFamilyName;
   }
 
-  // Dictionary marker-by-dwell — configured via DictMarkerSettingsActivity, not in SettingsList
+  // Dictionary marker-by-dwell — device-only (inline rows in the Reader > Dictionary sub-screen),
+  // persisted here by explicit fields rather than a SettingInfo key
   // (device-only, no web), so the generic loop doesn't see it. Persist manually.
   doc["dictMarkerDwellEnabled"] = s.dictMarkerDwellEnabled;
   doc["dictMarkerT1Idx"] = s.dictMarkerT1Idx;

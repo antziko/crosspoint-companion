@@ -25,7 +25,6 @@ enum class SettingAction {
   SdFirmwareUpdate,
   Language,
   DownloadFonts,
-  CustomiseDictMarker,
   // Open a nested settings sub-screen listing every setting in SettingInfo::subCategory.
   // Rendered by a category-scoped SettingsActivity instance — see SettingInfo::SubScreen.
   OpenSubCategory,
