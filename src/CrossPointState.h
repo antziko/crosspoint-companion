@@ -31,6 +31,11 @@ class CrossPointState {
   // Everywhere else: mirrors SETTINGS.orientation (global default). 0 == PORTRAIT.
   uint8_t activeOrientation = 0;
 
+  // Set by an activity to ask the main loop to enter a *manual* deep sleep (fromTimeout=false)
+  // on its next iteration. Used by the reader's "sync before sleep" flow to defer the sleep
+  // gesture across a confirmation prompt / sync activity. Runtime only — NOT serialized.
+  bool requestManualSleep = false;
+
   // Sleep deck helpers (see SLEEP_DECK_MAX above).
   bool isSleepShown(uint16_t idx) const;  // already shown this cycle?
   void markSleepShown(uint16_t idx);      // record idx as shown this cycle

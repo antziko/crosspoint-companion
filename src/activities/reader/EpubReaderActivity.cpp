@@ -1090,48 +1090,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
     }
     case EpubReaderMenuActivity::MenuAction::SYNC: {
       if (KOREADER_STORE.hasCredentials()) {
-        const int currentPage = section ? section->currentPage : nextPageNumber;
-        const int totalPages = section ? section->pageCount : cachedChapterTotalPageCount;
-        std::optional<uint16_t> paragraphIndex;
-        if (section && currentPage >= 0 && currentPage < section->pageCount) {
-          const uint16_t paragraphPage =
-              currentPage > 0 ? static_cast<uint16_t>(currentPage - 1) : static_cast<uint16_t>(currentPage);
-          if (const auto pIdx = section->getParagraphIndexForPage(paragraphPage)) {
-            paragraphIndex = *pIdx;
-          }
-        }
-
-        // Pre-compute local KO position and chapter name while Epub is still in RAM.
-        CrossPointPosition localPos = getCurrentPosition();
-        SavedProgressPosition localKoPos = ProgressMapper::toSavedProgress(epub, localPos);
-        const int tocIdx = epub->getTocIndexForSpineIndex(currentSpineIndex);
-        std::string localChapterName = (tocIdx >= 0) ? epub->getTocItem(tocIdx).title : "";
-        const std::string savedEpubPath = epub->getPath();
-
-        // Persist current position so the reader resumes at the right page on return.
-        // goToReader() depends on this file, so abort the sync if the write fails.
-        if (!saveProgress(currentSpineIndex, currentPage, totalPages)) {
-          LOG_ERR("KOSync", "Aborting sync because current progress could not be saved");
-          pendingSyncSaveError = true;
-          requestUpdate();
-          return;
-        }
-
-        // Release Epub and Section to free ~65KB RAM for the TLS handshake.
-        LOG_DBG("KOSync", "Releasing epub for sync (heap before: %u)", (unsigned)ESP.getFreeHeap());
-        {
-          RenderLock lock(*this);
-          if (section) {
-            nextPageNumber = section->currentPage;
-          }
-          section.reset();
-          epub.reset();
-        }
-        LOG_DBG("KOSync", "Epub released (heap after: %u)", (unsigned)ESP.getFreeHeap());
-
-        activityManager.replaceActivity(std::make_unique<KOReaderSyncActivity>(
-            renderer, mappedInput, savedEpubPath, currentSpineIndex, currentPage, totalPages, std::move(localKoPos),
-            std::move(localChapterName), paragraphIndex));
+        launchKoSync(/*sleepWhenDone=*/false);
       }
       break;
     }
@@ -1736,6 +1695,99 @@ void EpubReaderActivity::silentIndexNextChapterIfNeeded(const uint16_t viewportW
                                      SETTINGS.embeddedStyle, SETTINGS.imageRendering, SETTINGS.focusReadingEnabled)) {
     LOG_ERR("ERS", "Failed silent indexing for chapter: %d", nextSpineIndex);
   }
+}
+
+bool EpubReaderActivity::launchKoSync(bool sleepWhenDone) {
+  const int currentPage = section ? section->currentPage : nextPageNumber;
+  const int totalPages = section ? section->pageCount : cachedChapterTotalPageCount;
+  std::optional<uint16_t> paragraphIndex;
+  if (section && currentPage >= 0 && currentPage < section->pageCount) {
+    const uint16_t paragraphPage =
+        currentPage > 0 ? static_cast<uint16_t>(currentPage - 1) : static_cast<uint16_t>(currentPage);
+    if (const auto pIdx = section->getParagraphIndexForPage(paragraphPage)) {
+      paragraphIndex = *pIdx;
+    }
+  }
+
+  // Pre-compute local KO position and chapter name while Epub is still in RAM.
+  CrossPointPosition localPos = getCurrentPosition();
+  SavedProgressPosition localKoPos = ProgressMapper::toSavedProgress(epub, localPos);
+  const int tocIdx = epub->getTocIndexForSpineIndex(currentSpineIndex);
+  std::string localChapterName = (tocIdx >= 0) ? epub->getTocItem(tocIdx).title : "";
+  const std::string savedEpubPath = epub->getPath();
+
+  // Persist current position so the reader resumes at the right page on return.
+  // goToReader() depends on this file, so abort the sync if the write fails.
+  if (!saveProgress(currentSpineIndex, currentPage, totalPages)) {
+    LOG_ERR("KOSync", "Aborting sync because current progress could not be saved");
+    pendingSyncSaveError = true;
+    requestUpdate();
+    return false;
+  }
+
+  // Release Epub and Section to free ~65KB RAM for the TLS handshake.
+  LOG_DBG("KOSync", "Releasing epub for sync (heap before: %u)", (unsigned)ESP.getFreeHeap());
+  {
+    RenderLock lock(*this);
+    if (section) {
+      nextPageNumber = section->currentPage;
+    }
+    section.reset();
+    epub.reset();
+  }
+  LOG_DBG("KOSync", "Epub released (heap after: %u)", (unsigned)ESP.getFreeHeap());
+
+  activityManager.replaceActivity(std::make_unique<KOReaderSyncActivity>(
+      renderer, mappedInput, savedEpubPath, currentSpineIndex, currentPage, totalPages, std::move(localKoPos),
+      std::move(localChapterName), paragraphIndex, sleepWhenDone));
+  return true;
+}
+
+bool EpubReaderActivity::onManualSleepRequested() {
+  // Opt-in, reader page only, and pointless without sync credentials.
+  if (!SETTINGS.syncPromptOnSleep || !epub || !KOREADER_STORE.hasCredentials()) {
+    return false;  // let the main loop sleep normally
+  }
+
+  // Reading time accrued since the last successful sync of this book = the book's odometer
+  // (readingStats.totalReadingSeconds, which already includes this session's *committed*
+  // checkpoints) plus only the not-yet-committed effective remainder of the live session.
+  // Mirror commitReadingTime()'s accounting so the count matches the stats odometer: exclude
+  // idle-page excess, and exclude the part already folded into readingStats (avoid double-count).
+  // onPause/onResume keep sessionStartMs free of sub-screen time, so the raw delta is reading-only.
+  uint32_t totalNow = readingStats.totalReadingSeconds;
+  if (sessionStartMs > 0) {
+    const uint32_t sessionSecs = static_cast<uint32_t>((millis() - sessionStartMs) / 1000UL);
+    const uint32_t effectiveSecs = (sessionSecs > sessionIdleExcessSecs) ? (sessionSecs - sessionIdleExcessSecs) : 0;
+    if (effectiveSecs > sessionCommittedSecs) {
+      totalNow += effectiveSecs - sessionCommittedSecs;
+    }
+  }
+  const uint32_t sinceSync =
+      totalNow > readingStats.lastSyncReadingSeconds ? totalNow - readingStats.lastSyncReadingSeconds : 0;
+  constexpr size_t kCount = sizeof(CrossPointSettings::SYNC_PROMPT_MINUTES) / sizeof(uint8_t);
+  const uint8_t idx = SETTINGS.syncPromptMinutesIdx < kCount ? SETTINGS.syncPromptMinutesIdx : 0;
+  const uint32_t thresholdMinutes = CrossPointSettings::SYNC_PROMPT_MINUTES[idx];
+  if (sinceSync < thresholdMinutes * 60UL) {
+    return false;  // not enough reading since last sync — sleep normally
+  }
+
+  // Take over the gesture: ask whether to sync before sleeping. The reader stays on the
+  // stack and resumes to run this result handler after the prompt is dismissed.
+  startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_SYNC_BEFORE_SLEEP),
+                                                                tr(STR_SYNC_BEFORE_SLEEP_BODY)),
+                         [this](const ActivityResult& res) {
+                           if (res.isCancelled) {
+                             APP_STATE.requestManualSleep = true;  // Skip → sleep now
+                             return;
+                           }
+                           // Sync → hand off; KOReaderSyncActivity deep-sleeps on success (sleepWhenDone).
+                           // If the pre-sync save failed, don't strand the user awake — sleep anyway.
+                           if (!launchKoSync(/*sleepWhenDone=*/true)) {
+                             APP_STATE.requestManualSleep = true;
+                           }
+                         });
+  return true;
 }
 
 bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageCount) {

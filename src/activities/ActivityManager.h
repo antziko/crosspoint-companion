@@ -101,6 +101,10 @@ class ActivityManager {
   void popActivity();
 
   bool preventAutoSleep() const;
+  // Offer a *manual* sleep gesture to the active activity. Returns true if the activity
+  // took it over (e.g. the reader showed a "sync before sleep" prompt), meaning the main
+  // loop must NOT deep-sleep this iteration. Default activities return false → sleep proceeds.
+  bool onManualSleepRequested();
   bool isReaderActivity() const;
   bool isInReaderContext() const;
   bool skipLoopDelay() const;

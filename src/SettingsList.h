@@ -158,7 +158,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // SettingInfo temporaries on the stack at once via std::initializer_list, which would overflow
   // the 8 KB loopTask stack; push_back keeps peak stack usage to ~sizeof(SettingInfo).
   std::vector<SettingInfo> v;
-  v.reserve(56);
+  v.reserve(60);
 
   // --- Display ---
   v.push_back(SettingInfo::Enum(StrId::STR_SLEEP_SCREEN, &CrossPointSettings::sleepScreen,
@@ -298,6 +298,15 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
       StrId::STR_TIME_TO_SLEEP, &CrossPointSettings::sleepTimeoutMinutes,
       {CrossPointSettings::MIN_SLEEP_TIMEOUT_MINUTES, CrossPointSettings::MAX_SLEEP_TIMEOUT_MINUTES, 1},
       "sleepTimeoutMinutes", StrId::STR_CAT_SYSTEM));
+  // KOReader "sync before sleep" prompt: master toggle + reading-minutes-since-last-sync threshold.
+  // Placed next to Time to Sleep since it gates the manual-sleep gesture (System category so it
+  // shows on the device settings screen; the KOReader Sync entry there is only the credentials flow).
+  v.push_back(SettingInfo::Toggle(StrId::STR_SYNC_PROMPT_ON_SLEEP, &CrossPointSettings::syncPromptOnSleep,
+                                  "syncPromptOnSleep", StrId::STR_CAT_SYSTEM));
+  v.push_back(SettingInfo::Enum(StrId::STR_SYNC_PROMPT_MINUTES, &CrossPointSettings::syncPromptMinutesIdx,
+                                {StrId::STR_MIN_3, StrId::STR_MIN_5, StrId::STR_MIN_10, StrId::STR_MIN_15,
+                                 StrId::STR_MIN_20, StrId::STR_MIN_25, StrId::STR_MIN_30},
+                                "syncPromptMinutesIdx", StrId::STR_CAT_SYSTEM));
   v.push_back(SettingInfo::Toggle(StrId::STR_SHOW_HIDDEN_FILES, &CrossPointSettings::showHiddenFiles, "showHiddenFiles",
                                   StrId::STR_CAT_SYSTEM));
   v.push_back(SettingInfo::Toggle(StrId::STR_REMOVE_READ_FROM_RECENTS, &CrossPointSettings::removeReadBooksFromRecents,

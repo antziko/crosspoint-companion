@@ -158,6 +158,12 @@ class EpubReaderActivity final : public Activity {
   // BookmarkStore::addQuote. Shared by the no-existing-quote path and the "Add new" choice.
   void launchHighlightWordSelect();
   void onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action);
+  // Persist the current position, release the Epub/Section to free RAM for TLS, and hand off
+  // to KOReaderSyncActivity. sleepWhenDone makes the sync deep-sleep the device on success
+  // instead of returning to the reader (used by the "sync before sleep" flow). Caller must
+  // have confirmed KOREADER_STORE.hasCredentials(). Returns false if the pre-sync progress
+  // save failed (sync not launched). Shared by the reader menu and the sleep prompt.
+  bool launchKoSync(bool sleepWhenDone);
   void applyOrientation(uint8_t orientation);
   void saveOrientation() const;
   void toggleAutoPageTurn(uint8_t selectedPageTurnOption);
@@ -203,6 +209,7 @@ class EpubReaderActivity final : public Activity {
   void loop() override;
   void render(RenderLock&& lock) override;
   bool isReaderActivity() const override { return true; }
+  bool onManualSleepRequested() override;
   ScreenshotInfo getScreenshotInfo() const override;
   CrossPointPosition getCurrentPosition() const;
 };

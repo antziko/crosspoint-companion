@@ -266,6 +266,12 @@ class CrossPointSettings {
   uint8_t dictionaryFontSize = MEDIUM;
   // Auto-sleep timeout setting (default 10 minutes). Legacy sleepTimeout enum values are migration-only.
   uint8_t sleepTimeoutMinutes = 10;
+  // When on, a manual power-button sleep from the reader offers to KOReader-sync first
+  // (never on auto-sleep timeout). Off by default — opt-in.
+  uint8_t syncPromptOnSleep = 0;
+  // Only show that prompt once this much reading time has accrued since the last successful
+  // sync of the open book. Stored as an index into SYNC_PROMPT_MINUTES (default index 1 = 5 min).
+  uint8_t syncPromptMinutesIdx = 1;
   // E-ink refresh frequency (default 15 pages)
   uint8_t refreshFrequency = REFRESH_15;
   // Manual "Refresh Screen" clear mode (default FAST: grayscale-safe everywhere)
@@ -363,6 +369,10 @@ class CrossPointSettings {
   static constexpr uint8_t MIN_SLEEP_TIMEOUT_MINUTES = 1;
   static constexpr uint8_t SLEEP_TIMEOUT_NEVER_MINUTES = 31;
   static constexpr uint8_t MAX_SLEEP_TIMEOUT_MINUTES = SLEEP_TIMEOUT_NEVER_MINUTES;
+
+  // Reading-minutes-since-last-sync thresholds for the "sync before sleep" prompt.
+  // syncPromptMinutesIdx indexes this table; e.g. index 0 = prompt after 3 min of reading.
+  static constexpr uint8_t SYNC_PROMPT_MINUTES[] = {3, 5, 10, 15, 20, 25, 30};
 
   // Callback to resolve SD card font IDs. Set by SdCardFontSystem::begin().
   // Returns font ID or 0 if not found.

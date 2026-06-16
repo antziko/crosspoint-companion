@@ -1,13 +1,12 @@
-#include "BookReadingStats.h"
-
 #include <gtest/gtest.h>
-
 #include <sys/stat.h>
 
 #include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
+
+#include "BookReadingStats.h"
 
 namespace {
 
@@ -25,8 +24,8 @@ void putLe32(std::vector<uint8_t>& d, uint32_t v) {
 
 // Builds a v3 (19-byte) stats.bin image: the on-disk format every device has
 // before the remote-sync fields were added in v4.
-std::vector<uint8_t> makeV3(uint32_t total, uint32_t unattributed, uint16_t pace, uint16_t samples,
-                            uint32_t lastDay, uint8_t lastHour, uint8_t lastMinute) {
+std::vector<uint8_t> makeV3(uint32_t total, uint32_t unattributed, uint16_t pace, uint16_t samples, uint32_t lastDay,
+                            uint8_t lastHour, uint8_t lastMinute) {
   std::vector<uint8_t> d;
   d.reserve(19);
   d.push_back(3);
@@ -40,9 +39,9 @@ std::vector<uint8_t> makeV3(uint32_t total, uint32_t unattributed, uint16_t pace
   return d;
 }
 
-std::vector<uint8_t> makeV4(uint32_t total, uint32_t unattributed, uint16_t pace, uint16_t samples,
-                            uint32_t lastDay, uint8_t lastHour, uint8_t lastMinute, uint32_t remoteSeconds,
-                            uint32_t remoteDay, uint8_t remoteHour, uint8_t remoteMinute) {
+std::vector<uint8_t> makeV4(uint32_t total, uint32_t unattributed, uint16_t pace, uint16_t samples, uint32_t lastDay,
+                            uint8_t lastHour, uint8_t lastMinute, uint32_t remoteSeconds, uint32_t remoteDay,
+                            uint8_t remoteHour, uint8_t remoteMinute) {
   std::vector<uint8_t> d = makeV3(total, unattributed, pace, samples, lastDay, lastHour, lastMinute);
   d[0] = 4;
   d.reserve(29);
@@ -50,6 +49,18 @@ std::vector<uint8_t> makeV4(uint32_t total, uint32_t unattributed, uint16_t pace
   putLe32(d, remoteDay);
   d.push_back(remoteHour);
   d.push_back(remoteMinute);
+  return d;
+}
+
+// Builds a v5 (33-byte) image: v4 layout plus the lastSyncReadingSeconds field.
+std::vector<uint8_t> makeV5(uint32_t total, uint32_t unattributed, uint16_t pace, uint16_t samples, uint32_t lastDay,
+                            uint8_t lastHour, uint8_t lastMinute, uint32_t remoteSeconds, uint32_t remoteDay,
+                            uint8_t remoteHour, uint8_t remoteMinute, uint32_t lastSync) {
+  std::vector<uint8_t> d = makeV4(total, unattributed, pace, samples, lastDay, lastHour, lastMinute, remoteSeconds,
+                                  remoteDay, remoteHour, remoteMinute);
+  d[0] = 5;
+  d.reserve(33);
+  putLe32(d, lastSync);
   return d;
 }
 
@@ -97,6 +108,29 @@ TEST(BookReadingStatsParse, V4RoundTrip) {
   EXPECT_EQ(s.remoteLastReadHour, 22u);
   EXPECT_EQ(s.remoteLastReadMinute, 5u);
   EXPECT_EQ(s.displayTotalSeconds(), 540u);  // 5 min local + 4 min remote = 9 min
+  EXPECT_EQ(s.lastSyncReadingSeconds, 0u);   // absent in v4 → zeroed on upgrade
+}
+
+TEST(BookReadingStatsParse, V5RoundTrip) {
+  const auto img = makeV5(300, 10, 7, 3, 9651, 6, 45, 240, 9650, 22, 5, 250);
+  BookReadingStats s;
+  ASSERT_TRUE(BookReadingStats::parse(img.data(), img.size(), s));
+  EXPECT_EQ(s.totalReadingSeconds, 300u);
+  EXPECT_EQ(s.remoteOtherSeconds, 240u);
+  EXPECT_EQ(s.lastSyncReadingSeconds, 250u);
+}
+
+TEST(BookReadingStatsParse, V4ToV5MigrationDoesNotLeakPriorSyncMarker) {
+  // A reused struct must not keep lastSyncReadingSeconds from a previously parsed
+  // v5 image when a v4 image (no marker field) is parsed into it.
+  const auto v5 = makeV5(100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 777);
+  const auto v4 = makeV4(200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  BookReadingStats s;
+  ASSERT_TRUE(BookReadingStats::parse(v5.data(), v5.size(), s));
+  ASSERT_EQ(s.lastSyncReadingSeconds, 777u);
+  ASSERT_TRUE(BookReadingStats::parse(v4.data(), v4.size(), s));
+  EXPECT_EQ(s.totalReadingSeconds, 200u);
+  EXPECT_EQ(s.lastSyncReadingSeconds, 0u);
 }
 
 TEST(BookReadingStatsParse, RejectsUnknownVersionsAndBadSizes) {
@@ -140,6 +174,7 @@ TEST(BookReadingStatsIo, SaveLoadRoundTripThroughFile) {
   s.remoteLastReadDayIndex = 9650;
   s.remoteLastReadHour = 23;
   s.remoteLastReadMinute = 59;
+  s.lastSyncReadingSeconds = 180;
   s.save(dir);
 
   const BookReadingStats r = BookReadingStats::load(dir);
@@ -152,5 +187,6 @@ TEST(BookReadingStatsIo, SaveLoadRoundTripThroughFile) {
   EXPECT_EQ(r.remoteLastReadDayIndex, 9650u);
   EXPECT_EQ(r.remoteLastReadHour, 23u);
   EXPECT_EQ(r.remoteLastReadMinute, 59u);
+  EXPECT_EQ(r.lastSyncReadingSeconds, 180u);
   EXPECT_EQ(r.displayTotalSeconds(), 540u);
 }

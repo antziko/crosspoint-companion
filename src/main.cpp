@@ -740,6 +740,15 @@ void loop() {
     screenshotComboActive = false;
   }
 
+  // Deferred manual sleep: an activity asked us to sleep on a later iteration (e.g. the
+  // reader's "sync before sleep" flow, after the user chose Skip or the sync completed).
+  if (APP_STATE.requestManualSleep) {
+    APP_STATE.requestManualSleep = false;
+    enterDeepSleep(false);
+    // This should never be hit as `enterDeepSleep` calls esp_deep_sleep_start
+    return;
+  }
+
   const unsigned long sleepTimeoutMs = SETTINGS.getSleepTimeoutMs();
   if (sleepTimeoutMs > 0 && millis() - lastActivityTime >= sleepTimeoutMs) {
     LOG_DBG("SLP", "Auto-sleep triggered after %lu ms of inactivity", sleepTimeoutMs);
@@ -753,6 +762,15 @@ void loop() {
     // If the screenshot combination is potentially being pressed, don't sleep
     if (gpio.isPressed(HalGPIO::BTN_BACK)) {
       return;
+    }
+    // Offer the gesture to the active activity first. The reader may intercept it to show a
+    // "sync before sleep" prompt instead of sleeping immediately. Release the still-held power
+    // button before handing over so the prompt isn't dismissed by the same press, and re-arm
+    // allowSleepAt so the release doesn't immediately re-trigger this branch.
+    waitForPowerRelease();
+    allowSleepAt = millis() + 2000;
+    if (activityManager.onManualSleepRequested()) {
+      return;  // activity took over the gesture; it will request sleep later if appropriate
     }
     enterDeepSleep();
     // This should never be hit as `enterDeepSleep` calls esp_deep_sleep_start

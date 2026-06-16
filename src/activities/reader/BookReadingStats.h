@@ -34,12 +34,19 @@ struct BookReadingStats {
   uint8_t remoteLastReadHour = 0;
   uint8_t remoteLastReadMinute = 0;
 
+  // Value of totalReadingSeconds at the last successful KOReader sync of this book.
+  // Used to gate the "sync before sleep" prompt: prompt only once enough reading
+  // time has accrued since the last sync (totalReadingSeconds - lastSyncReadingSeconds).
+  // 0 = never synced (or pre-v5 stats), so the first sync resets it.
+  uint32_t lastSyncReadingSeconds = 0;
+
   // Total reading time across all devices (local counter + last-synced remote sum).
   uint32_t displayTotalSeconds() const { return totalReadingSeconds + remoteOtherSeconds; }
 
-  // Parses a raw stats.bin image: v4 native, v3 accepted with the remote fields
-  // zeroed (lossless upgrade). Returns false on unknown version or size mismatch.
-  // Split out from load() so host unit tests can cover the migration without SD I/O.
+  // Parses a raw stats.bin image: v5 native; v4 accepted with lastSyncReadingSeconds
+  // zeroed; v3 accepted with the remote fields + lastSyncReadingSeconds zeroed (all
+  // lossless upgrades). Returns false on unknown version or size mismatch. Split out
+  // from load() so host unit tests can cover the migration without SD I/O.
   static bool parse(const uint8_t* data, size_t len, BookReadingStats& out);
 
   // Loads stats from cachePath/stats.bin. Returns default-constructed stats if

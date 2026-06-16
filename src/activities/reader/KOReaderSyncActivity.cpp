@@ -16,6 +16,7 @@
 
 #include "BookReadingStats.h"
 #include "BookmarkStore.h"
+#include "CrossPointState.h"
 #include "Epub/Section.h"
 #include "EpubReaderUtils.h"
 #include "GlobalReadingStats.h"
@@ -85,14 +86,37 @@ void KOReaderSyncActivity::saveProgressAndReturn(int spineIndex, int page) {
     requestUpdate(true);
     return;
   }
+  syncSucceeded = true;  // remote applied: a sleepWhenDone sync may now deep-sleep
   returnToReader();
 }
 
 void KOReaderSyncActivity::returnToReader() {
   // The auto-return check in loop() is level-triggered, so guard against re-entry: fire the
-  // reader switch exactly once.
+  // exit exactly once.
   if (returning) return;
   returning = true;
+
+  // On a successful sync, advance the "last synced" marker (reading seconds at sync time) so the
+  // reader's "sync before sleep" prompt only re-triggers after more reading accrues. Done here at
+  // the single success funnel — not gated on the stats endpoint — so it also covers servers
+  // without reading-stats support, and applies to both menu-initiated and sleep syncs.
+  if (syncSucceeded) {
+    const std::string cachePath = "/.crosspoint/epub_" + std::to_string(std::hash<std::string>{}(epubPath));
+    BookReadingStats stats = BookReadingStats::load(cachePath);
+    if (stats.lastSyncReadingSeconds != stats.totalReadingSeconds) {
+      stats.lastSyncReadingSeconds = stats.totalReadingSeconds;
+      stats.save(cachePath);
+    }
+  }
+
+  // "Sync before sleep" flow: on a successful completion, deep-sleep instead of rebuilding the
+  // reader. Defer to the main loop (it owns enterDeepSleep) and stay the current activity so its
+  // onExit() runs as part of the sleep teardown — which also powers WiFi down and resets the chip,
+  // so no silent restart is needed (see onExit()).
+  if (sleepWhenDone && syncSucceeded) {
+    APP_STATE.requestManualSleep = true;
+    return;
+  }
   activityManager.goToReader(epubPath);
 }
 
@@ -256,6 +280,7 @@ void KOReaderSyncActivity::performUpload() {
     RenderLock lock(*this);
     state = UPLOAD_COMPLETE;
     uploadCompleteAt = millis();  // start the auto-return countdown
+    syncSucceeded = true;         // upload landed: a sleepWhenDone sync may now deep-sleep
   }
   requestUpdate(true);
 }
@@ -418,6 +443,8 @@ void KOReaderSyncActivity::syncStats() {
   }
 
   // Persist only on change (SD write throttling): remote sum updated or self-heal fired.
+  // NB: the "sync before sleep" marker (lastSyncReadingSeconds) is advanced separately in
+  // returnToReader() on overall sync success, so it covers servers without stats support too.
   if (stats.totalReadingSeconds != prevLocalSeconds || stats.remoteOtherSeconds != prevRemoteSeconds) {
     stats.save(cachePath);
   }
@@ -558,6 +585,13 @@ void KOReaderSyncActivity::onExit() {
   Activity::onExit();
 
   SdDebugLog::setEnabled(false);
+
+  // Sleeping after a successful sleepWhenDone sync: skip the silent restart. enterDeepSleep()
+  // (driven by APP_STATE.requestManualSleep in the main loop) tears WiFi down and a deep-sleep
+  // wake is a full chip reset, so the heap-defrag reboot would only fight the sleep gesture.
+  if (sleepWhenDone && syncSucceeded) {
+    return;
+  }
 
   if (wifiActivated) {
     // silentRestartToReader() powers the modem fully down (WIFI_OFF) before the soft

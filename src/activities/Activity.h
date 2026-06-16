@@ -48,6 +48,10 @@ class Activity {
 
   virtual bool skipLoopDelay() { return false; }
   virtual bool preventAutoSleep() { return false; }
+  // Called by the main loop when the user makes a *manual* power-button sleep gesture
+  // (never on auto-sleep timeout). Return true to take over the gesture and abort the
+  // sleep (e.g. show a confirmation prompt); false to let the main loop deep-sleep.
+  virtual bool onManualSleepRequested() { return false; }
   virtual bool isReaderActivity() const { return false; }
   virtual ScreenshotInfo getScreenshotInfo() const { return {}; }
 

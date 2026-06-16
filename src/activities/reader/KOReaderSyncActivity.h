@@ -24,7 +24,8 @@ class KOReaderSyncActivity final : public Activity {
   explicit KOReaderSyncActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const std::string& epubPath,
                                 int currentSpineIndex, int currentPage, int totalPagesInSpine,
                                 SavedProgressPosition localKoPos, std::string localChapterName,
-                                std::optional<uint16_t> currentParagraphIndex = std::nullopt)
+                                std::optional<uint16_t> currentParagraphIndex = std::nullopt,
+                                bool sleepWhenDone = false)
       : Activity("KOReaderSync", renderer, mappedInput),
         epubPath(epubPath),
         currentSpineIndex(currentSpineIndex),
@@ -34,7 +35,8 @@ class KOReaderSyncActivity final : public Activity {
         localChapterName(std::move(localChapterName)),
         remoteProgress{},
         remotePosition{},
-        localProgress(std::move(localKoPos)) {}
+        localProgress(std::move(localKoPos)),
+        sleepWhenDone(sleepWhenDone) {}
 
   void onEnter() override;
   void onExit() override;
@@ -103,6 +105,13 @@ class KOReaderSyncActivity final : public Activity {
 
   // Guards returnToReader() so the level-triggered auto-return fires the reader switch once.
   bool returning = false;
+
+  // When true, this sync was launched from the reader's "sync before sleep" flow: on a
+  // successful completion the device deep-sleeps instead of returning to the reader.
+  bool sleepWhenDone = false;
+  // Set on a successful sync completion (progress uploaded, or remote applied). Gates the
+  // sleepWhenDone behaviour so a failure / Back-out returns to the reader awake as usual.
+  bool syncSucceeded = false;
 
   // Tracks whether this session activated WiFi. Set in onEnter past the credentials
   // check; checked in onExit to decide whether to silent-reboot. Can't rely on
