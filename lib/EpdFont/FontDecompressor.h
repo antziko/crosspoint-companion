@@ -35,12 +35,13 @@ class FontDecompressor {
     uint32_t cacheMisses = 0;
     uint32_t decompressTimeMs = 0;
     uint16_t uniqueGroupsAccessed = 0;
-    uint32_t pageBufferBytes = 0;  // pageBuffer allocation
-    uint32_t pageGlyphsBytes = 0;  // pageGlyphs lookup table allocation
-    uint32_t hotGroupBytes = 0;    // current hot group allocation
-    uint32_t peakTempBytes = 0;    // largest temp buffer in prewarm
-    uint32_t getBitmapTimeUs = 0;  // cumulative getBitmap time (micros)
-    uint32_t getBitmapCalls = 0;   // number of getBitmap calls
+    uint32_t pageBufferBytes = 0;   // pageBuffer allocation
+    uint32_t pageGlyphsBytes = 0;   // pageGlyphs lookup table allocation
+    uint32_t hotGroupBytes = 0;     // current hot group allocation
+    uint32_t peakTempBytes = 0;     // largest temp buffer in prewarm
+    uint32_t getBitmapTimeUs = 0;   // cumulative getBitmap time (micros)
+    uint32_t getBitmapCalls = 0;    // number of getBitmap calls
+    uint32_t hotGroupOomSkips = 0;  // hot-group grow attempts that hit OOM (glyph skipped, cache kept)
   };
   void logStats(const char* label = "FDC");
   void resetStats();

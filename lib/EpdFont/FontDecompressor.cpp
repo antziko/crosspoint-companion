@@ -4,6 +4,7 @@
 #include <Logging.h>
 #include <Memory.h>
 #include <Utf8.h>
+#include <esp_heap_caps.h>
 
 #include <cstdlib>
 
@@ -181,12 +182,19 @@ const uint8_t* FontDecompressor::getBitmap(const EpdFontData* fontData, const Ep
     if (group.uncompressedSize > hotGroupCap) {
       auto buf = makeUniqueNoThrow<uint8_t[]>(group.uncompressedSize);
       if (!buf) {
-        LOG_ERR("FDC", "OOM: %u bytes for hot group %u", group.uncompressedSize, groupIndex);
-        hotGroup.reset();
-        hotGroupCap = 0;
-        hotGroupSize = 0;
-        hotGroupFont = nullptr;
-        hotGroupIndex = UINT16_MAX;
+        // Grow failed. Do NOT drop the existing buffer: it still holds a valid,
+        // correctly-labelled group (hotGroupFont/Index/Size are only advanced on
+        // success below). Resetting here frees a working cache, forces a fresh
+        // alloc for every following glyph that would have fit, and re-rolls the
+        // same failing size per glyph — turning one tight group into a render-wide
+        // cascade. Skip just this glyph; siblings keep rendering from the retained
+        // buffer. Mirrors the hotGlyphBuf OOM path below.
+        stats.hotGroupOomSkips++;
+        // Frag signal for future tuning: requested vs largest contiguous block.
+        // freeAtFail != largest => fragmentation-limited, not absolute OOM.
+        LOG_ERR("FDC", "OOM hot group %u: need=%u keptCap=%u free=%u largest=%u (glyph skipped)", groupIndex,
+                group.uncompressedSize, hotGroupCap, (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
         stats.getBitmapTimeUs += micros() - tStart;
         return nullptr;
       }
@@ -527,6 +535,13 @@ void FontDecompressor::logStats(const char* label) {
   if (stats.getBitmapCalls > 0) {
     LOG_DBG("FDC", "[%s] getBitmap: %lu calls, %luus total, %luus/call avg", label, stats.getBitmapCalls,
             stats.getBitmapTimeUs, stats.getBitmapTimeUs / stats.getBitmapCalls);
+  }
+  // Non-zero => glyphs dropped this render due to a fragmentation-limited hot-group
+  // grow. Recurring hits here flag fonts (e.g. dict) whose group.uncompressedSize is
+  // too large for the steady-state largest free block — candidate for #1 (pre-alloc)
+  // or #2 (smaller groups at prep).
+  if (stats.hotGroupOomSkips > 0) {
+    LOG_ERR("FDC", "[%s] hotGroup OOM skips=%lu (frag-limited; glyphs dropped)", label, stats.hotGroupOomSkips);
   }
   resetStats();
 }
