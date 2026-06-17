@@ -69,7 +69,7 @@ void SleepImageReviewActivity::renderImage() {
 
   renderer.clearScreen();
   renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, 0, 0);
-  renderer.drawCenteredText(UI_10_FONT_ID, 4, tr(STR_SLEEP_REVIEW_PROMPT), true, EpdFontFamily::BOLD);
+  // Button hints (Skip / Keep / Remove) are self-explanatory; no heading prompt needed.
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   renderer.displayBuffer(hasGreyscale ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
 

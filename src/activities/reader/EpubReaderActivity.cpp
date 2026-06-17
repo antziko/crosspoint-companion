@@ -46,6 +46,7 @@
 #include "ReadingTimeHistory.h"
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
+#include "SleepSyncPromptActivity.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -1840,39 +1841,51 @@ bool EpubReaderActivity::onManualSleepRequested() {
     return false;  // let the main loop sleep normally
   }
 
-  // Take over the gesture: ask whether to sync before sleeping. The reader stays on the
+  // Take over the gesture: ask Sync / Skip / Cancel before sleeping. The reader stays on the
   // stack and resumes to run this result handler after the prompt is dismissed.
-  startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_SYNC_BEFORE_SLEEP),
-                                                                tr(STR_SYNC_BEFORE_SLEEP_BODY)),
+  //   Cancel (Back)  -> abort the sleep, stay reading
+  //   Skip   (Left)  -> sleep now, no sync
+  //   Sync   (Right) -> sync then deep-sleep on success
+  startActivityForResult(std::make_unique<SleepSyncPromptActivity>(renderer, mappedInput, tr(STR_SYNC_BEFORE_SLEEP),
+                                                                   tr(STR_SYNC_BEFORE_SLEEP_BODY)),
                          [this](const ActivityResult& res) {
                            if (res.isCancelled) {
-                             APP_STATE.requestManualSleep = true;  // Skip → sleep now
+                             // Cancel: don't sleep. Swallow the answering button's release so it
+                             // doesn't bleed into a page turn / Back on the resumed reader.
+                             suppressPageTurnUntilRelease_ = true;
+                             ignoreBackUntilRelease = true;
                              return;
                            }
-                           // Sync → hand off; KOReaderSyncActivity deep-sleeps on success (sleepWhenDone).
-                           // If the pre-sync save failed, don't strand the user awake — sleep anyway.
-                           if (!launchKoSync(/*sleepWhenDone=*/true)) {
-                             APP_STATE.requestManualSleep = true;
+                           const auto* menu = std::get_if<MenuResult>(&res.data);
+                           if (menu && menu->action == SleepSyncPromptActivity::ACTION_SYNC) {
+                             // Sync -> hand off; KOReaderSyncActivity deep-sleeps on success (sleepWhenDone).
+                             // If the pre-sync save failed, don't strand the user awake — sleep anyway.
+                             if (!launchKoSync(/*sleepWhenDone=*/true)) {
+                               APP_STATE.requestManualSleep = true;
+                             }
+                             return;
                            }
+                           APP_STATE.requestManualSleep = true;  // Skip -> sleep now
                          });
   return true;
 }
 
 void EpubReaderActivity::showOpenSyncPrompt() {
   // Reader stays on the stack and resumes to run this handler after the prompt is dismissed.
-  startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_SYNC_BEFORE_READING),
-                                                                tr(STR_SYNC_BEFORE_READING_BODY)),
-                         [this](const ActivityResult& res) {
-                           if (res.isCancelled) {
-                             // Skip: keep reading. Swallow the answering button's release so it
-                             // doesn't bleed into a page turn / Back on the resumed reader.
-                             suppressPageTurnUntilRelease_ = true;
-                             ignoreBackUntilRelease = true;
-                             return;
-                           }
-                           // Sync → run the sync flow and return to the reader (no sleep).
-                           launchKoSync(/*sleepWhenDone=*/false);
-                         });
+  startActivityForResult(
+      std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_SYNC_BEFORE_READING),
+                                             tr(STR_SYNC_BEFORE_READING_BODY), tr(STR_SKIP), tr(STR_SYNC)),
+      [this](const ActivityResult& res) {
+        if (res.isCancelled) {
+          // Skip: keep reading. Swallow the answering button's release so it
+          // doesn't bleed into a page turn / Back on the resumed reader.
+          suppressPageTurnUntilRelease_ = true;
+          ignoreBackUntilRelease = true;
+          return;
+        }
+        // Sync → run the sync flow and return to the reader (no sleep).
+        launchKoSync(/*sleepWhenDone=*/false);
+      });
 }
 
 bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageCount) {

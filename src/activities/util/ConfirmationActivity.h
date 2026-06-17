@@ -12,6 +12,10 @@ class ConfirmationActivity : public Activity {
   std::string heading;
   std::string body;
 
+  // Optional button-label overrides (empty -> defaults: Cancel / Confirm).
+  std::string cancelLabel;   // Left button
+  std::string confirmLabel;  // Right button
+
   const int margin = 20;
   const int spacing = 30;
   const int fontId = UI_10_FONT_ID;
@@ -23,7 +27,8 @@ class ConfirmationActivity : public Activity {
 
  public:
   ConfirmationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const std::string& heading,
-                       const std::string& body);
+                       const std::string& body, const std::string& cancelLabel = "",
+                       const std::string& confirmLabel = "");
 
   void onEnter() override;
   void loop() override;
