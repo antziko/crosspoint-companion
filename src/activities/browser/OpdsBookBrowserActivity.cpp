@@ -28,7 +28,12 @@
 #include "util/UrlUtils.h"
 
 namespace {
-constexpr int PAGE_ITEMS = 23;
+// List layout: first row baseline and row pitch (px). itemsPerPage() derives the
+// visible row count from these and the current screen height so nothing draws
+// past the bottom of the panel in any orientation.
+constexpr int LIST_TOP_Y = 60;
+constexpr int LIST_ROW_H = 30;
+constexpr int LIST_BOTTOM_RESERVE = 40;     // button-hints strip (buttonHintsHeight)
 constexpr unsigned long GO_HOME_MS = 1000;  // hold BACK this long to jump to home
 // Minimum contiguous heap required before bringing up an HTTPS connection.
 // Sized for the shrunk mbedtls record buffers (custom_sdkconfig: DYNAMIC_BUFFER
@@ -256,11 +261,11 @@ void OpdsBookBrowserActivity::loop() {
       buttonNavigator.onRelease({MappedInputManager::Button::Right}, navigateNext);
       buttonNavigator.onRelease({MappedInputManager::Button::Left}, navigatePrevious);
       buttonNavigator.onContinuous({MappedInputManager::Button::Right}, [this] {
-        selectorIndex = ButtonNavigator::nextPageIndex(selectorIndex, entries.size(), PAGE_ITEMS);
+        selectorIndex = ButtonNavigator::nextPageIndex(selectorIndex, entries.size(), itemsPerPage());
         requestUpdate();
       });
       buttonNavigator.onContinuous({MappedInputManager::Button::Left}, [this] {
-        selectorIndex = ButtonNavigator::previousPageIndex(selectorIndex, entries.size(), PAGE_ITEMS);
+        selectorIndex = ButtonNavigator::previousPageIndex(selectorIndex, entries.size(), itemsPerPage());
         requestUpdate();
       });
 
@@ -372,10 +377,11 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
   if (entries.empty()) {
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_NO_ENTRIES));
   } else {
-    const auto pageStartIndex = selectorIndex / PAGE_ITEMS * PAGE_ITEMS;
-    renderer.fillRect(0, 60 + (selectorIndex % PAGE_ITEMS) * 30 - 2, pageWidth - 1, 30);
+    const int pageItems = itemsPerPage();
+    const auto pageStartIndex = selectorIndex / pageItems * pageItems;
+    renderer.fillRect(0, LIST_TOP_Y + (selectorIndex % pageItems) * LIST_ROW_H - 2, pageWidth - 1, LIST_ROW_H);
 
-    for (size_t i = pageStartIndex; i < entries.size() && i < static_cast<size_t>(pageStartIndex + PAGE_ITEMS); i++) {
+    for (size_t i = pageStartIndex; i < entries.size() && i < static_cast<size_t>(pageStartIndex + pageItems); i++) {
       const auto& entry = entries[i];
       std::string displayText;
       if (entry.type == OpdsEntryType::NAVIGATION) {
@@ -391,11 +397,19 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
         if (!entry.author.empty()) displayText += " - " + entry.author;
       }
       auto item = renderer.truncatedText(UI_10_FONT_ID, displayText.c_str(), pageWidth - 40);
-      renderer.drawText(UI_10_FONT_ID, 20, 60 + (i % PAGE_ITEMS) * 30, item.c_str(),
+      renderer.drawText(UI_10_FONT_ID, 20, LIST_TOP_Y + (i % pageItems) * LIST_ROW_H, item.c_str(),
                         i != static_cast<size_t>(selectorIndex));
     }
   }
   renderer.displayBuffer();
+}
+
+int OpdsBookBrowserActivity::itemsPerPage() const {
+  // Rows that fit between the list top and the button-hints strip in the current
+  // orientation. getScreenHeight() is 800 in portrait, 480 in landscape, so this
+  // is ~23 vs ~12 — preventing off-panel draws that flood the per-pixel LOG_ERR.
+  const int avail = renderer.getScreenHeight() - LIST_TOP_Y - LIST_BOTTOM_RESERVE;
+  return std::max(1, avail / LIST_ROW_H);
 }
 
 void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
