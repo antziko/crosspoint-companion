@@ -156,7 +156,10 @@ void LookedUpWordsActivity::render(RenderLock&&) {
   const int pageHeight = renderer.getScreenHeight();
   const auto& metrics = UITheme::getInstance().getMetrics();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_LOOKUP_HISTORY));
+  char titleBuf[64];
+  snprintf(titleBuf, sizeof(titleBuf), "%s (%u)", tr(STR_LOOKUP_HISTORY),
+           static_cast<unsigned>(entries.size()));
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, titleBuf);
 
   const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
 
