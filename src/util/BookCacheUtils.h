@@ -1,19 +1,46 @@
 #pragma once
 
-#include <KOReaderDocumentId.h>  // stripDeviceTag (pure, <string> only)
+#include <KOReaderDocumentId.h>  // stripDeviceTag / swapAuthorTitle (pure, <string> only)
 
 #include <string>
+#include <vector>
 
-// Returns the untagged sibling path for a device-tagged book path (e.g.
-// "/calibre/book (X3).epub" -> "/calibre/book.epub"), or "" if the name carries
-// no auto-epub-optimizer device tag. Pure — no filesystem access; reuses the same
-// tag normalization as KOReader filename sync. Host-testable.
-inline std::string siblingOriginPath(const std::string& bookPath) {
+// Returns candidate untagged sibling paths for a device-tagged book path, or an
+// empty list if the name carries no auto-epub-optimizer device tag. Candidates,
+// in priority order:
+//   1. the tag-stripped name, same author/title order
+//      ("/calibre/A - B (X3).epub" -> "/calibre/A - B.epub")
+//   2. the tag-stripped name with author/title order literally reversed, when the
+//      name has exactly one " - " ("/calibre/A - B (X3).epub" -> "/calibre/B - A.epub")
+// Candidate 2 is the literal reverse (not the sorted canonical form): the on-disk
+// sibling could be in either order, so we must name the opposite ordering exactly.
+// The same " - " / exactly-one-separator rule as KOReader filename-sync applies.
+// Pure — no filesystem access. Host-testable. The caller picks the first that
+// exists on disk.
+inline std::vector<std::string> siblingOriginPaths(const std::string& bookPath) {
+  std::vector<std::string> out;
   const size_t slash = bookPath.rfind('/');
   const std::string dir = slash == std::string::npos ? std::string() : bookPath.substr(0, slash + 1);
   const std::string name = slash == std::string::npos ? bookPath : bookPath.substr(slash + 1);
-  const std::string origin = KOReaderDocumentId::stripDeviceTag(name);
-  return origin == name ? std::string() : dir + origin;  // unchanged => this IS the origin
+  const std::string untagged = KOReaderDocumentId::stripDeviceTag(name);
+  if (untagged == name) {
+    return out;  // no device tag => this IS the origin, nothing to seed
+  }
+  out.push_back(dir + untagged);  // (1) same-order untagged sibling
+
+  // (2) literal author/title-reversed sibling, only on exactly one " - " separator.
+  const size_t dot = untagged.rfind('.');
+  const std::string stem = (dot == std::string::npos) ? untagged : untagged.substr(0, dot);
+  const std::string ext = (dot == std::string::npos) ? std::string() : untagged.substr(dot);
+  const size_t first = stem.find(" - ");
+  if (first != std::string::npos && stem.find(" - ", first + 3) == std::string::npos) {
+    const std::string a = stem.substr(0, first);
+    const std::string b = stem.substr(first + 3);
+    if (!a.empty() && !b.empty()) {
+      out.push_back(dir + b + " - " + a + ext);  // reversed order
+    }
+  }
+  return out;
 }
 
 // On the first cache create of a device-tagged book (e.g. "book (X3).epub"),

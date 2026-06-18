@@ -15,6 +15,7 @@
 #include "BookmarkStore.h"
 #include "CrossPointState.h"
 #include "KOReaderDocumentId.h"
+#include "LookupHistory.h"
 #include "RecentBooksStore.h"
 #include "activities/reader/BookReadingStats.h"
 #include "activities/reader/ReadingTimeHistory.h"
@@ -151,6 +152,27 @@ bool writeContentId(const std::string& cacheDir, const std::string& md5Hex, cons
   return ok;
 }
 
+// Streaming byte copy through a fixed stack buffer — no heap. Used to seed small
+// sidecar files at reader open, where the in-reader heap is starved.
+bool copySmallFile(const std::string& src, const std::string& dst) {
+  HalFile in;
+  if (!Storage.openFileForRead("BookCache", src, in)) {
+    return false;
+  }
+  HalFile out;
+  if (!Storage.openFileForWrite("BookCache", dst, out)) {
+    return false;
+  }
+  char buf[256];  // matches LookupHistory's fixed line-buffer convention
+  int n;
+  while ((n = in.read(buf, sizeof(buf))) > 0) {
+    if (out.write(buf, static_cast<size_t>(n)) != static_cast<size_t>(n)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool readContentId(const std::string& cacheDir, std::string& outMd5, std::string& outPath) {
   const std::string idPath = cacheDir + CONTENT_ID_FILE;
   if (!Storage.exists(idPath.c_str())) {
@@ -279,9 +301,16 @@ void ensureCacheContentId(const std::string& bookPath, const std::string& cacheP
 }
 
 bool importSiblingStatsIfNew(const std::string& bookPath, const std::string& cachePath) {
-  // Only device-tagged books have an untagged sibling to seed from.
-  const std::string originPath = siblingOriginPath(bookPath);
-  if (originPath.empty() || !Storage.exists(originPath.c_str())) {
+  // Only device-tagged books have an untagged sibling to seed from. Try each
+  // candidate (same-order, then author/title-swapped) and use the first present.
+  std::string originPath;
+  for (const auto& cand : siblingOriginPaths(bookPath)) {
+    if (Storage.exists(cand.c_str())) {
+      originPath = cand;
+      break;
+    }
+  }
+  if (originPath.empty()) {
     return false;
   }
 
@@ -314,6 +343,19 @@ bool importSiblingStatsIfNew(const std::string& bookPath, const std::string& cac
     BookReadingStats::load(originCache).save(cachePath);
     LOG_INF("BookCache", "Imported reading stats from sibling '%s'", originPath.c_str());
     imported = true;
+  }
+
+  // Dictionary lookup history — local-only, never synced. Seed once on first cache
+  // create so a tagged/order-variant copy inherits the sibling's history. Byte copy,
+  // not LookupHistory::load() (that materializes a vector in the heap-starved in-reader
+  // context — see LookupHistory.h).
+  const std::string dstDict = cachePath + "/" + LookupHistory::FILE_NAME;
+  const std::string srcDict = originCache + "/" + LookupHistory::FILE_NAME;
+  if (!Storage.exists(dstDict.c_str()) && Storage.exists(srcDict.c_str())) {
+    if (copySmallFile(srcDict, dstDict)) {
+      LOG_INF("BookCache", "Imported dictionary lookup history from sibling '%s'", originPath.c_str());
+      imported = true;
+    }
   }
 
   return imported;

@@ -17,6 +17,10 @@ class LookupHistory {
  public:
   enum class Status { Direct = 'D', Stem = 'T', AltForm = 'Y', Suggestion = 'S', NotFound = 'X' };
 
+  // Filename of the per-book history file inside a book's cache dir. Exposed so
+  // sibling-seed code (BookCacheUtils) names the same file without a literal copy.
+  static constexpr char FILE_NAME[] = "dictionary_history.txt";
+
   struct Entry {
     std::string word;
     Status status = Status::NotFound;

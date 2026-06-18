@@ -12,7 +12,9 @@
 // Private helpers
 // ---------------------------------------------------------------------------
 
-std::string LookupHistory::filePath(const std::string& cachePath) { return cachePath + "/dictionary_history.txt"; }
+std::string LookupHistory::filePath(const std::string& cachePath) {
+  return cachePath + "/" + FILE_NAME;
+}
 
 std::string LookupHistory::tmpFilePath(const std::string& cachePath) {
   return cachePath + "/dictionary_history.tmp";
