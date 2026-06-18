@@ -68,6 +68,7 @@ void SettingsActivity::rebuildSettingsLists() {
                             {StrId::STR_SEC_7, StrId::STR_SEC_9, StrId::STR_SEC_12, StrId::STR_SEC_15}));
     } else if (subCategory_ == StrId::STR_SYS_LIBRARY) {
       readerSettings.push_back(SettingInfo::Action(StrId::STR_CLEAR_READING_CACHE, SettingAction::ClearCache));
+      readerSettings.push_back(SettingInfo::Action(StrId::STR_REMOVE_ORPHANED_CACHES, SettingAction::PruneCache));
     } else if (subCategory_ == StrId::STR_SYS_MAINTENANCE) {
       readerSettings.push_back(SettingInfo::Action(StrId::STR_CHECK_UPDATES, SettingAction::CheckForUpdates));
       readerSettings.push_back(SettingInfo::Action(StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate));
@@ -343,6 +344,11 @@ void SettingsActivity::toggleCurrentSetting() {
         break;
       case SettingAction::ClearCache:
         startActivityForResult(std::make_unique<ClearCacheActivity>(renderer, mappedInput), resultHandler);
+        break;
+      case SettingAction::PruneCache:
+        startActivityForResult(
+            std::make_unique<ClearCacheActivity>(renderer, mappedInput, ClearCacheActivity::Mode::PruneOrphans),
+            resultHandler);
         break;
       case SettingAction::CheckForUpdates:
         startActivityForResult(std::make_unique<OtaUpdateActivity>(renderer, mappedInput), resultHandler);

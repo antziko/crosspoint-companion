@@ -430,3 +430,85 @@ bool tryRecoverBookCache(const std::string& bookPath) {
   }
   return false;
 }
+
+CachePruneResult scanOrphanCaches(std::vector<std::string>& orphanDirNames) {
+  CachePruneResult res;
+
+  // Snapshot cache dir names with the listing handle open, act after it closes —
+  // mirrors tryRecoverBookCache() (a later removeDir must not run against an open
+  // directory handle).
+  std::vector<std::string> candidates;
+  candidates.reserve(16);
+  {
+    HalFile dir = Storage.open(CACHE_BASE_DIR);
+    if (!dir || !dir.isDirectory()) {
+      return res;
+    }
+    while (true) {
+      HalFile f = dir.openNextFile();
+      if (!f) {
+        break;
+      }
+      if (!f.isDirectory()) {
+        continue;
+      }
+      char name[160];
+      if (f.getName(name, sizeof(name)) == 0) {
+        continue;
+      }
+      if (isBookCacheDirectoryName(name)) {
+        candidates.emplace_back(name);
+      }
+    }
+  }
+
+  for (const auto& dirName : candidates) {
+    const std::string dirPath = std::string(CACHE_BASE_DIR) + "/" + dirName;
+    std::string id;
+    std::string recordedPath;
+    if (!readContentId(dirPath, id, recordedPath)) {
+      res.skipped++;  // no/unreadable fingerprint (legacy) — cannot prove orphan, leave it
+      continue;
+    }
+    const char* prefix = cacheDirPrefixForPath(recordedPath);
+    if (!prefix || cacheDirForPath(prefix, recordedPath) != dirPath) {
+      res.skipped++;  // corrupt/foreign id record — dir was not created for that path
+      continue;
+    }
+    if (Storage.exists(recordedPath.c_str())) {
+      res.kept++;  // book still on the card under its recorded path
+      continue;
+    }
+    // Orphan: recorded book is gone (deleted, or moved out-of-firmware and never
+    // reopened). Record it for the caller to preview/remove.
+    orphanDirNames.push_back(dirName);
+    res.removed++;  // "found" count; not yet removed
+  }
+  return res;
+}
+
+CachePruneResult removeOrphanCaches(const std::vector<std::string>& orphanDirNames) {
+  CachePruneResult res;
+  for (const auto& dirName : orphanDirNames) {
+    const std::string dirPath = std::string(CACHE_BASE_DIR) + "/" + dirName;
+    if (Storage.removeDir(dirPath.c_str())) {
+      removeCacheLabel(dirName);
+      LOG_INF("BookCache", "Pruned orphan cache %s", dirName.c_str());
+      res.removed++;
+    } else {
+      LOG_ERR("BookCache", "Failed to prune orphan cache %s (non-fatal)", dirPath.c_str());
+      res.failed++;
+    }
+  }
+  return res;
+}
+
+CachePruneResult pruneOrphanCaches() {
+  std::vector<std::string> orphans;
+  orphans.reserve(16);
+  CachePruneResult res = scanOrphanCaches(orphans);
+  const CachePruneResult rm = removeOrphanCaches(orphans);
+  res.removed = rm.removed;  // scan set removed=found; replace with actually-removed
+  res.failed = rm.failed;
+  return res;
+}

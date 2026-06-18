@@ -59,6 +59,33 @@ bool importSiblingStatsIfNew(const std::string& bookPath, const std::string& cac
 // (EPUB, XTC, or TXT). Does nothing for other file types.
 void clearBookCache(const std::string& path);
 
+// Tally returned by pruneOrphanCaches().
+struct CachePruneResult {
+  int removed = 0;  // orphan cache dirs deleted (book no longer on the card)
+  int kept = 0;     // cache dirs whose recorded book still exists
+  int skipped = 0;  // dirs left untouched: no/unreadable or corrupt content_id
+  int failed = 0;   // orphans whose removeDir() failed
+};
+
+// Scans /.crosspoint and classifies each book cache dir WITHOUT deleting anything.
+// Appends the dir names (e.g. "epub_12345") of orphan caches — those whose recorded
+// content_id path no longer exists on the SD card — to orphanDirNames. Dirs without a
+// readable content_id.bin, or whose recorded path does not hash back to the dir, are
+// counted as skipped (cannot prove orphan). Returns the tally; res.removed is the count
+// of orphans FOUND (not yet removed), res.failed is always 0. Use to preview before
+// removeOrphanCaches(). Device-only (uses Storage).
+CachePruneResult scanOrphanCaches(std::vector<std::string>& orphanDirNames);
+
+// Removes the given cache dirs (names relative to /.crosspoint, as produced by
+// scanOrphanCaches) and each one's sibling "<dir>--<title>-by-<author>.txt" label.
+// Returns a tally with res.removed / res.failed populated. Device-only (uses Storage).
+CachePruneResult removeOrphanCaches(const std::vector<std::string>& orphanDirNames);
+
+// Convenience: scanOrphanCaches() then removeOrphanCaches() in one call (no preview).
+// Selective alternative to clearing the whole cache: live books keep their progress/
+// stats. Returns the combined tally. Device-only (uses Storage).
+CachePruneResult pruneOrphanCaches();
+
 // Returns true if the directory name matches a book cache entry.
 bool isBookCacheDirectoryName(const char* name);
 

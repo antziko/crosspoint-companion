@@ -1,13 +1,20 @@
 #pragma once
 
 #include <functional>
+#include <string>
+#include <vector>
 
 #include "activities/Activity.h"
+#include "util/BookCacheUtils.h"
 
 class ClearCacheActivity final : public Activity {
  public:
-  explicit ClearCacheActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-      : Activity("ClearCache", renderer, mappedInput) {}
+  // ClearAll wipes every book cache dir (all progress lost). PruneOrphans removes only
+  // caches whose book is no longer on the SD card, keeping live books' progress/stats.
+  enum class Mode { ClearAll, PruneOrphans };
+
+  explicit ClearCacheActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, Mode mode = Mode::ClearAll)
+      : Activity("ClearCache", renderer, mappedInput), mode_(mode) {}
 
   void onEnter() override;
   void onExit() override;
@@ -16,13 +23,20 @@ class ClearCacheActivity final : public Activity {
   void render(RenderLock&&) override;
 
  private:
-  enum State { WARNING, CLEARING, SUCCESS, FAILED };
+  enum State { WARNING, SCANNING, PREVIEW, CLEARING, SUCCESS, FAILED };
 
   State state = WARNING;
+  Mode mode_ = Mode::ClearAll;
 
   void goBack() { finish(); }
 
   int clearedCount = 0;
   int failedCount = 0;
   void clearCache();
+
+  // PruneOrphans flow: scan (preview) -> confirm -> remove.
+  CachePruneResult scanResult_;
+  std::vector<std::string> orphanDirs_;
+  void scanOrphans();
+  void removeScannedOrphans();
 };
