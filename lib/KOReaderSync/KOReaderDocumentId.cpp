@@ -16,7 +16,9 @@ std::string getFilename(const std::string& path) {
 }  // namespace
 
 std::string KOReaderDocumentId::calculateFromFilename(const std::string& filePath) {
-  const std::string filename = getFilename(filePath);
+  // Normalize away the optimizer device tag (e.g. "(X4) " prefix or " (X4)"
+  // suffix) so optimized copies and the original share one sync key.
+  const std::string filename = stripDeviceTag(getFilename(filePath));
   if (filename.empty()) {
     return "";
   }
