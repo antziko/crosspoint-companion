@@ -183,25 +183,25 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
   bool rowPrevPressed, rowNextPressed, wordPrevPressed, wordNextPressed;
 
   if (isLandscapeCw) {
-    rowPrevPressed = input.wasReleased(MappedInputManager::Button::Left);
-    rowNextPressed = input.wasReleased(MappedInputManager::Button::Right);
+    rowPrevPressed = input.wasReleased(MappedInputManager::Button::Left, false);
+    rowNextPressed = input.wasReleased(MappedInputManager::Button::Right, false);
     wordPrevPressed = input.wasReleased(MappedInputManager::Button::Down);
     wordNextPressed = input.wasReleased(MappedInputManager::Button::Up);
   } else if (landscape) {
-    rowPrevPressed = input.wasReleased(MappedInputManager::Button::Right);
-    rowNextPressed = input.wasReleased(MappedInputManager::Button::Left);
+    rowPrevPressed = input.wasReleased(MappedInputManager::Button::Right, false);
+    rowNextPressed = input.wasReleased(MappedInputManager::Button::Left, false);
     wordPrevPressed = input.wasReleased(MappedInputManager::Button::Up);
     wordNextPressed = input.wasReleased(MappedInputManager::Button::Down);
   } else if (isInverted) {
     rowPrevPressed = input.wasReleased(MappedInputManager::Button::Down);
     rowNextPressed = input.wasReleased(MappedInputManager::Button::Up);
-    wordPrevPressed = input.wasReleased(MappedInputManager::Button::Right);
-    wordNextPressed = input.wasReleased(MappedInputManager::Button::Left);
+    wordPrevPressed = input.wasReleased(MappedInputManager::Button::Right, false);
+    wordNextPressed = input.wasReleased(MappedInputManager::Button::Left, false);
   } else {
     rowPrevPressed = input.wasReleased(MappedInputManager::Button::Up);
     rowNextPressed = input.wasReleased(MappedInputManager::Button::Down);
-    wordPrevPressed = input.wasReleased(MappedInputManager::Button::Left);
-    wordNextPressed = input.wasReleased(MappedInputManager::Button::Right);
+    wordPrevPressed = input.wasReleased(MappedInputManager::Button::Left, false);
+    wordNextPressed = input.wasReleased(MappedInputManager::Button::Right, false);
   }
 
   const int rowCount = static_cast<int>(rows.size());

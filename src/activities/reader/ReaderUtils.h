@@ -81,11 +81,10 @@ inline PageTurnResult detectPageTurn(const MappedInputManager& input) {
       SETTINGS.longPressButtonBehavior == SETTINGS.OFF && SETTINGS.sideLongPressButtonBehavior == SETTINGS.OFF;
   const bool tiltNext = SETTINGS.tiltPageTurn && halTiltSensor.wasTiltedForward();
   const bool tiltPrev = SETTINGS.tiltPageTurn && halTiltSensor.wasTiltedBack();
-  const bool swapFront =
-      SETTINGS.frontButtonFollowOrientation && (APP_STATE.activeOrientation == CrossPointSettings::INVERTED ||
-                                                APP_STATE.activeOrientation == CrossPointSettings::LANDSCAPE_CCW);
-  const auto prevButton = swapFront ? MappedInputManager::Button::Right : MappedInputManager::Button::Left;
-  const auto nextButton = swapFront ? MappedInputManager::Button::Left : MappedInputManager::Button::Right;
+  // The orient-front-buttons Left/Right swap is handled centrally in
+  // MappedInputManager::mapButton, so read the logical buttons plainly here.
+  const auto prevButton = MappedInputManager::Button::Left;
+  const auto nextButton = MappedInputManager::Button::Right;
 
   const bool sidePrev = usePress ? input.wasPressed(MappedInputManager::Button::PageBack)
                                  : input.wasReleased(MappedInputManager::Button::PageBack);

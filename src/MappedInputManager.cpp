@@ -1,9 +1,31 @@
 #include "MappedInputManager.h"
 
-#include "CrossPointSettings.h"
-#include "CrossPointState.h"
+#include <GfxRenderer.h>
 
-bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint8_t) const) const {
+#include "CrossPointSettings.h"
+
+// Global renderer (defined in main.cpp). Read the ACTUAL on-screen orientation
+// so the front Left/Right swap follows what the user sees -- this is correct
+// whether a screen rotates via SETTINGS.orientation (reader) or
+// SETTINGS.displayOrientation (non-reader screens). APP_STATE.activeOrientation
+// only tracks the reader's orientation, so it is the wrong source here.
+extern GfxRenderer renderer;
+
+namespace {
+// Front Left/Right swap when the user opted in AND the screen is currently
+// rendered in an orientation whose horizontal axis is flipped vs portrait.
+bool shouldSwapFrontButtons() {
+  if (!SETTINGS.frontButtonFollowOrientation) {
+    return false;
+  }
+  const auto o = renderer.getOrientation();
+  return o == GfxRenderer::Orientation::PortraitInverted ||
+         o == GfxRenderer::Orientation::LandscapeCounterClockwise;
+}
+}  // namespace
+
+bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint8_t) const,
+                                   const bool applySwap) const {
   const auto sideLayout = SETTINGS.sideButtonLayout;
 
   switch (button) {
@@ -14,11 +36,17 @@ bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint
       // Logical Confirm maps to user-configured front button.
       return (gpio.*fn)(SETTINGS.frontButtonConfirm);
     case Button::Left:
-      // Logical Left maps to user-configured front button.
-      return (gpio.*fn)(SETTINGS.frontButtonLeft);
-    case Button::Right:
-      // Logical Right maps to user-configured front button.
-      return (gpio.*fn)(SETTINGS.frontButtonRight);
+    case Button::Right: {
+      // Logical Left/Right map to user-configured front buttons. When orient-
+      // front-buttons is on and the screen is rendered flipped, swap the two so
+      // the physical button under the on-screen label performs that label's
+      // action. applySwap=false lets a caller that does its own orientation
+      // mapping (WordSelectNavigator) read the unswapped logical button.
+      const bool swap = applySwap && shouldSwapFrontButtons();
+      const bool wantLeft = (button == Button::Left);
+      const uint8_t hw = (wantLeft != swap) ? SETTINGS.frontButtonLeft : SETTINGS.frontButtonRight;
+      return (gpio.*fn)(hw);
+    }
     case Button::Up:
       // Side buttons remain fixed for Up/Down.
       return (gpio.*fn)(HalGPIO::BTN_UP);
@@ -55,11 +83,17 @@ bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint
   return false;
 }
 
-bool MappedInputManager::wasPressed(const Button button) const { return mapButton(button, &HalGPIO::wasPressed); }
+bool MappedInputManager::wasPressed(const Button button, const bool applySwap) const {
+  return mapButton(button, &HalGPIO::wasPressed, applySwap);
+}
 
-bool MappedInputManager::wasReleased(const Button button) const { return mapButton(button, &HalGPIO::wasReleased); }
+bool MappedInputManager::wasReleased(const Button button, const bool applySwap) const {
+  return mapButton(button, &HalGPIO::wasReleased, applySwap);
+}
 
-bool MappedInputManager::isPressed(const Button button) const { return mapButton(button, &HalGPIO::isPressed); }
+bool MappedInputManager::isPressed(const Button button, const bool applySwap) const {
+  return mapButton(button, &HalGPIO::isPressed, applySwap);
+}
 
 bool MappedInputManager::wasAnyPressed() const { return gpio.wasAnyPressed(); }
 
@@ -69,10 +103,10 @@ unsigned long MappedInputManager::getHeldTime() const { return gpio.getHeldTime(
 
 MappedInputManager::Labels MappedInputManager::mapLabels(const char* back, const char* confirm, const char* previous,
                                                          const char* next) const {
-  // Swap previous/next labels to match the page turn direction swap in INVERTED and LANDSCAPE_CCW.
-  const bool swapLabels =
-      SETTINGS.frontButtonFollowOrientation && (APP_STATE.activeOrientation == CrossPointSettings::INVERTED ||
-                                                APP_STATE.activeOrientation == CrossPointSettings::LANDSCAPE_CCW);
+  // Swap previous/next labels to match the front-button action swap (see
+  // shouldSwapFrontButtons / mapButton). Same source of truth -- the actual
+  // render orientation -- so label and action always agree on every screen.
+  const bool swapLabels = shouldSwapFrontButtons();
   const char* leftLabel = swapLabels ? next : previous;
   const char* rightLabel = swapLabels ? previous : next;
 

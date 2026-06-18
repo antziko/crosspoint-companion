@@ -16,9 +16,12 @@ class MappedInputManager {
   explicit MappedInputManager(HalGPIO& gpio) : gpio(gpio) {}
 
   void update() const { gpio.update(); }
-  bool wasPressed(Button button) const;
-  bool wasReleased(Button button) const;
-  bool isPressed(Button button) const;
+  // applySwap=false reads the raw logical button without the orient-front-buttons
+  // Left/Right swap, for callers (e.g. WordSelectNavigator) that do their own
+  // orientation mapping.
+  bool wasPressed(Button button, bool applySwap = true) const;
+  bool wasReleased(Button button, bool applySwap = true) const;
+  bool isPressed(Button button, bool applySwap = true) const;
   bool wasAnyPressed() const;
   bool wasAnyReleased() const;
   unsigned long getHeldTime() const;
@@ -29,5 +32,5 @@ class MappedInputManager {
  private:
   HalGPIO& gpio;
 
-  bool mapButton(Button button, bool (HalGPIO::*fn)(uint8_t) const) const;
+  bool mapButton(Button button, bool (HalGPIO::*fn)(uint8_t) const, bool applySwap = true) const;
 };
