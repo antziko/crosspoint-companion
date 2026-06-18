@@ -218,6 +218,11 @@ void EpubReaderActivity::onEnter() {
   tryRecoverBookCache(epub->getPath());
   epub->setupCacheDir();
   ensureCacheContentId(epub->getPath(), epub->getCachePath());
+  // First open of a device-tagged book (e.g. "book (X3).epub"): seed its fresh
+  // cache with reading stats + heatmap/timeline from the untagged sibling. When
+  // an import happens, arm the open sync prompt below (regardless of threshold) so
+  // the freshly seeded book reconciles progress with the server.
+  const bool importedSiblingStats = importSiblingStatsIfNew(epub->getPath(), epub->getCachePath());
 
   // Load this book's saved orientation; fall back to the global default if none.
   APP_STATE.activeOrientation = SETTINGS.orientation;
@@ -313,7 +318,10 @@ void EpubReaderActivity::onEnter() {
   // here (session just started, so the count is the prior unsynced reading), but shown only after
   // the first page render — see loop(). After a sync the marker resets, so resuming via goToReader
   // from KOReaderSyncActivity won't re-arm. Pointless without credentials.
-  openSyncPromptArmed_ = SETTINGS.syncPromptOnOpen && KOREADER_STORE.hasCredentials() && syncPromptThresholdReached();
+  // A first-open sibling-stats import also arms it (one-time event), bypassing the threshold/opt-in
+  // gate so the freshly seeded book reconciles progress with the server immediately.
+  openSyncPromptArmed_ = KOREADER_STORE.hasCredentials() &&
+                         (importedSiblingStats || (SETTINGS.syncPromptOnOpen && syncPromptThresholdReached()));
 
   // Trigger first update
   requestUpdate();

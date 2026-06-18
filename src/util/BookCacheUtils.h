@@ -1,6 +1,32 @@
 #pragma once
 
+#include <KOReaderDocumentId.h>  // stripDeviceTag (pure, <string> only)
+
 #include <string>
+
+// Returns the untagged sibling path for a device-tagged book path (e.g.
+// "/calibre/book (X3).epub" -> "/calibre/book.epub"), or "" if the name carries
+// no auto-epub-optimizer device tag. Pure — no filesystem access; reuses the same
+// tag normalization as KOReader filename sync. Host-testable.
+inline std::string siblingOriginPath(const std::string& bookPath) {
+  const size_t slash = bookPath.rfind('/');
+  const std::string dir = slash == std::string::npos ? std::string() : bookPath.substr(0, slash + 1);
+  const std::string name = slash == std::string::npos ? bookPath : bookPath.substr(slash + 1);
+  const std::string origin = KOReaderDocumentId::stripDeviceTag(name);
+  return origin == name ? std::string() : dir + origin;  // unchanged => this IS the origin
+}
+
+// On the first cache create of a device-tagged book (e.g. "book (X3).epub"),
+// seeds its fresh cache with the reading stats + dated history (heatmap/timeline)
+// from the untagged sibling ("book.epub") in the same folder — if that sibling
+// exists and has stats, and this book has none yet. One-time, local, no network.
+// No-op when: the name has no device tag, the sibling or its cache is absent, or
+// this book already has stats. Progress is NOT copied (left to KOReader sync).
+// Call after the cache dir is created at reader open.
+// Returns true if anything was imported (history and/or stats) — the caller uses
+// this to also prompt a KOReader sync so the freshly seeded book reconciles
+// progress with the server.
+bool importSiblingStatsIfNew(const std::string& bookPath, const std::string& cachePath);
 
 // Clears the reading cache for a book file if its extension is recognised
 // (EPUB, XTC, or TXT). Does nothing for other file types.

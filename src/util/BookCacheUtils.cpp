@@ -4,6 +4,7 @@
 #include <FsHelpers.h>
 #include <HalStorage.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <SdDebugLog.h>
 #include <Txt.h>
 #include <Xtc.h>
@@ -15,6 +16,8 @@
 #include "CrossPointState.h"
 #include "KOReaderDocumentId.h"
 #include "RecentBooksStore.h"
+#include "activities/reader/BookReadingStats.h"
+#include "activities/reader/ReadingTimeHistory.h"
 
 namespace {
 constexpr char CACHE_BASE_DIR[] = "/.crosspoint";
@@ -273,6 +276,47 @@ void ensureCacheContentId(const std::string& bookPath, const std::string& cacheP
     return;
   }
   writeContentId(cachePath, md5, bookPath);
+}
+
+bool importSiblingStatsIfNew(const std::string& bookPath, const std::string& cachePath) {
+  // Only device-tagged books have an untagged sibling to seed from.
+  const std::string originPath = siblingOriginPath(bookPath);
+  if (originPath.empty() || !Storage.exists(originPath.c_str())) {
+    return false;
+  }
+
+  const char* prefix = cacheDirPrefixForPath(originPath);
+  if (!prefix) {
+    return false;
+  }
+  const std::string originCache = cacheDirForPath(prefix, originPath);
+
+  bool imported = false;
+
+  // Dated history (heatmap + timeline) — never synced, so this is the only way it
+  // reaches the tagged copy. Copy only when the target has none yet (first cache
+  // create) and the sibling actually has some, so we never clobber accrued data.
+  const std::string dstHistory = cachePath + "/book_time_history.bin";
+  const std::string srcHistory = originCache + "/book_time_history.bin";
+  if (!Storage.exists(dstHistory.c_str()) && Storage.exists(srcHistory.c_str())) {
+    auto history = makeUniqueNoThrow<ReadingTimeHistory>();
+    if (history && ReadingTimeHistory::load(srcHistory, *history)) {
+      ReadingTimeHistory::save(dstHistory, *history);
+      LOG_INF("BookCache", "Imported reading history from sibling '%s'", originPath.c_str());
+      imported = true;
+    }
+  }
+
+  // Total seconds + last-read. KOReader sync self-heals these too, but copying
+  // makes them correct immediately on first open, before any sync.
+  const std::string srcStats = originCache + "/stats.bin";
+  if (!Storage.exists((cachePath + "/stats.bin").c_str()) && Storage.exists(srcStats.c_str())) {
+    BookReadingStats::load(originCache).save(cachePath);
+    LOG_INF("BookCache", "Imported reading stats from sibling '%s'", originPath.c_str());
+    imported = true;
+  }
+
+  return imported;
 }
 
 bool tryRecoverBookCache(const std::string& bookPath) {
