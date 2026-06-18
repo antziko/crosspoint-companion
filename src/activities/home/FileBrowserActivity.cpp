@@ -49,9 +49,19 @@ bool FileBrowserActivity::accepts(const char* name, bool isDir) const {
          FsHelpers::hasMarkdownExtension(fn) || FsHelpers::hasBmpExtension(fn);
 }
 
+// Rows that fit one screen. Must mirror render()'s content rect exactly so drawList's
+// internal paging (rect.height / rowHeight) yields the same row count as the loaded window
+// — otherwise the window holds rows that spill onto a drawList sub-page. The safe area is
+// orientation-aware: in landscape the front button-hints take screen WIDTH (drawn on a
+// physical side edge), not bottom height, so the list keeps full height there.
 size_t FileBrowserActivity::windowCapacity() const {
-  const int pathReserved = renderer.getLineHeight(SMALL_FONT_ID) + UITheme::getInstance().getMetrics().verticalSpacing;
-  const int items = UITheme::getNumberOfItemsPerPage(renderer, true, false, true, false, pathReserved);
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int pathLineHeight = renderer.getLineHeight(SMALL_FONT_ID);
+  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int pathY = screen.height - metrics.verticalSpacing - pathLineHeight;
+  const int contentHeight = (pathY - metrics.verticalSpacing) - contentTop;
+  const int items = (contentHeight > 0) ? contentHeight / metrics.listRowHeight : 0;
   return (items > 0) ? static_cast<size_t>(items) : DEFAULT_WINDOW;
 }
 
@@ -510,6 +520,7 @@ void FileBrowserActivity::loop() {
       break;
     case ReaderUtils::SideNavAction::ROTATE:
       ReaderUtils::cycleDisplayOrientation(renderer, -1);
+      reloadCurrentWindow();  // window capacity changed with orientation; re-pull from current top
       requestUpdate();
       break;
     case ReaderUtils::SideNavAction::NONE:
@@ -521,6 +532,7 @@ void FileBrowserActivity::loop() {
       break;
     case ReaderUtils::SideNavAction::ROTATE:
       ReaderUtils::cycleDisplayOrientation(renderer, 1);
+      reloadCurrentWindow();  // window capacity changed with orientation; re-pull from current top
       requestUpdate();
       break;
     case ReaderUtils::SideNavAction::NONE:
@@ -566,9 +578,11 @@ std::string formatFileSize(uint32_t bytes) {
 void FileBrowserActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
-  const auto pageWidth = renderer.getScreenWidth();
-  const auto pageHeight = renderer.getScreenHeight();
   const auto& metrics = UITheme::getInstance().getMetrics();
+  // Orientation-aware: in landscape the front button-hints occupy a physical side edge
+  // (drawButtonHints forces portrait internally), so the safe area reserves WIDTH there and
+  // keeps full height — no wasted bottom padding, and the row count matches windowCapacity().
+  const Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 
   std::string folderName =
       (mode == Mode::PickFirmware)
@@ -578,19 +592,19 @@ void FileBrowserActivity::render(RenderLock&&) {
   char countBuf[24];
   snprintf(countBuf, sizeof(countBuf), " (%u)", static_cast<unsigned>(totalFiles));
   folderName += countBuf;
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, folderName.c_str());
+  GUI.drawHeader(renderer, Rect{screen.x, screen.y + metrics.topPadding, screen.width, metrics.headerHeight},
+                 folderName.c_str());
 
   const int pathLineHeight = renderer.getLineHeight(SMALL_FONT_ID);
-  const int pathReserved = pathLineHeight + metrics.verticalSpacing;
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int contentHeight =
-      pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing - pathReserved;
+  const int contentTop = screen.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int pathY = screen.y + screen.height - metrics.verticalSpacing - pathLineHeight;
+  const int contentHeight = (pathY - metrics.verticalSpacing) - contentTop;
   if (files.empty()) {
     const char* emptyMsg = (mode == Mode::PickFirmware) ? tr(STR_NO_BIN_FILES) : tr(STR_NO_FILES_FOUND);
-    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, contentTop + 20, emptyMsg);
+    renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, contentTop + 20, emptyMsg);
   } else {
     GUI.drawList(
-        renderer, Rect{0, contentTop, pageWidth, contentHeight}, files.size(), selectorIndex,
+        renderer, Rect{screen.x, contentTop, screen.width, contentHeight}, files.size(), selectorIndex,
         [this](int index) {
           // Number files only (folders are unnumbered), continuous across pages: 1., 2., …
           // over the whole folder. The files-only rank skips interspersed directories.
@@ -616,10 +630,9 @@ void FileBrowserActivity::render(RenderLock&&) {
 
   // Full path display
   {
-    const int pathY = pageHeight - metrics.buttonHintsHeight - metrics.verticalSpacing - pathLineHeight;
     const int separatorY = pathY - metrics.verticalSpacing / 2;
-    renderer.drawLine(0, separatorY, pageWidth - 1, separatorY, 3, true);
-    const int pathMaxWidth = pageWidth - metrics.contentSidePadding * 2;
+    renderer.drawLine(screen.x, separatorY, screen.x + screen.width - 1, separatorY, 3, true);
+    const int pathMaxWidth = screen.width - metrics.contentSidePadding * 2;
     // Left-truncate so the deepest directory is always visible
     const char* pathStr = basepath.c_str();
     const char* pathDisplay = pathStr;
@@ -638,7 +651,7 @@ void FileBrowserActivity::render(RenderLock&&) {
       snprintf(leftTruncBuf, sizeof(leftTruncBuf), "%s%s", ellipsis, p);
       pathDisplay = leftTruncBuf;
     }
-    renderer.drawText(SMALL_FONT_ID, metrics.contentSidePadding, pathY, pathDisplay);
+    renderer.drawText(SMALL_FONT_ID, screen.x + metrics.contentSidePadding, pathY, pathDisplay);
   }
 
   // Help text
