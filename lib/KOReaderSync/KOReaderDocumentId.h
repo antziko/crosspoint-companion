@@ -1,5 +1,7 @@
 #pragma once
+#include <algorithm>
 #include <string>
+#include <utility>
 
 /**
  * Calculate KOReader document ID (partial MD5 hash).
@@ -34,15 +36,18 @@ class KOReaderDocumentId {
   static std::string calculateFromFilename(const std::string& filePath);
 
   /**
-   * Strip the auto-epub-optimizer device tag "(X<digits>)" so optimized copies
-   * hash to the same key as the original (and across X3/X4 devices). Removes the
-   * tag in either placement:
-   *   - leading prefix  "(X<digits>) " at the very start of the name, or
-   *   - trailing suffix " (X<digits>)" immediately before the final extension.
+   * Strip the auto-epub-optimizer device tag so optimized copies hash to the same
+   * key as the original (and across X3/X4 devices). Restricted to the existing
+   * hardware device set — only "(X3)" and "(X4)" are recognized, so real titles
+   * that happen to end in "(X<n>)" (e.g. "Mac OS X (X11)") are NOT false-stripped.
+   * Removes the tag in either placement:
+   *   - leading prefix  "(X3) "/"(X4) " at the very start of the name, or
+   *   - trailing suffix " (X3)"/" (X4)" immediately before the final extension.
    * Both require the separating space; either or both may be present.
    *
    *   "(X4) Book.epub"  -> "Book.epub"      "Book (X4).epub"   -> "Book.epub"
-   *   "(X12) Book.epub" -> "Book.epub"      "Book.epub"        -> "Book.epub"
+   *   "(X3) Book.epub"  -> "Book.epub"      "Book.epub"        -> "Book.epub"
+   *   "(X12) Book.epub" -> unchanged        "Book (X11).epub"  -> unchanged (not X3/X4)
    *   "(X4)Book.epub"   -> unchanged        "Book(X4).epub"    -> unchanged (no space)
    *   "(X4) Bk (X4).epub" -> "Bk.epub"      "My Bk (A) (X4).ep"-> "My Bk (A).ep"
    *
@@ -55,43 +60,56 @@ class KOReaderDocumentId {
   static inline std::string stripDeviceTag(const std::string& basename) {
     std::string s = basename;
 
-    // --- Leading "(X<digits>) " prefix ---
-    if (s.size() >= 2 && s[0] == '(' && s[1] == 'X') {
-      size_t j = 2;
-      while (j < s.size() && s[j] >= '0' && s[j] <= '9') ++j;
-      if (j > 2 && j + 1 < s.size() && s[j] == ')' && s[j + 1] == ' ') {
-        s.erase(0, j + 2);  // drop "(Xd) "
-      }
+    // --- Leading "(X3) "/"(X4) " prefix (exact 5 chars) ---
+    if (s.size() >= 5 && s[0] == '(' && s[1] == 'X' && (s[2] == '3' || s[2] == '4') &&
+        s[3] == ')' && s[4] == ' ') {
+      s.erase(0, 5);  // drop "(Xn) "
     }
 
-    // --- Trailing " (X<digits>)" immediately before the final extension ---
+    // --- Trailing " (X3)"/" (X4)" (exact 5 chars) before the final extension ---
     const size_t dot = s.rfind('.');
     const size_t stemEnd = (dot == std::string::npos) ? s.size() : dot;
-    size_t p = stemEnd;
-    bool match = (p > 0 && s[p - 1] == ')');
-    if (match) {
-      --p;  // consumed ')'
-      size_t digits = 0;
-      while (p > 0 && s[p - 1] >= '0' && s[p - 1] <= '9') {
-        --p;
-        ++digits;
-      }
-      match = digits > 0 && p > 0 && s[p - 1] == 'X';
-      if (match) {
-        --p;  // consumed 'X'
-        match = p > 0 && s[p - 1] == '(';
-      }
-      if (match) {
-        --p;  // consumed '('
-        match = p > 0 && s[p - 1] == ' ';
-      }
-      if (match) {
-        --p;                                     // consumed ' '
-        s = s.substr(0, p) + s.substr(stemEnd);  // drop " (Xd)", keep extension
+    if (stemEnd >= 5) {
+      const size_t p = stemEnd - 5;
+      if (s[p] == ' ' && s[p + 1] == '(' && s[p + 2] == 'X' &&
+          (s[p + 3] == '3' || s[p + 3] == '4') && s[p + 4] == ')') {
+        s = s.substr(0, p) + s.substr(stemEnd);  // drop " (Xn)", keep extension
       }
     }
 
     return s;
+  }
+
+  /**
+   * Canonicalize "{a} - {b}" / "{b} - {a}" filenames to one ordering so an
+   * author/title swap between devices shares a sync key. Operates on the stem
+   * only; the extension is preserved. Fires ONLY when the stem contains exactly
+   * one " - " separator — multi-dash names (e.g. subtitles "X - Y: A - B") are
+   * left untouched to avoid mis-splitting and false convergence.
+   *
+   *   "Smith - Dune.epub" -> "Dune - Smith.epub"   (both orders -> same output)
+   *   "Dune - Smith.epub" -> "Dune - Smith.epub"
+   *   "Dune.epub"            -> unchanged (no separator)
+   *   "A - B - C.epub"       -> unchanged (>1 separator)
+   *
+   * Pure string logic (defined inline, no Arduino/HAL deps) so host tests can
+   * use it. Apply AFTER stripDeviceTag.
+   *
+   * @param basename A filename with no path component.
+   * @return Normalized filename.
+   */
+  static inline std::string swapAuthorTitle(const std::string& basename) {
+    const size_t dot = basename.rfind('.');
+    const std::string stem = (dot == std::string::npos) ? basename : basename.substr(0, dot);
+    const std::string ext = (dot == std::string::npos) ? "" : basename.substr(dot);
+    const size_t first = stem.find(" - ");
+    if (first == std::string::npos) return basename;                       // no separator
+    if (stem.find(" - ", first + 3) != std::string::npos) return basename;  // >1 separator
+    std::string a = stem.substr(0, first);
+    std::string b = stem.substr(first + 3);
+    if (a.empty() || b.empty()) return basename;  // degenerate
+    if (b < a) std::swap(a, b);                    // canonical (lexicographic) order
+    return a + " - " + b + ext;
   }
 
  private:
