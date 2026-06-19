@@ -46,7 +46,9 @@ void ActivityManager::renderTaskLoop() {
     RenderLock lock;
     if (currentActivity) {
       HalPowerManager::Lock powerLock;  // Ensure we don't go into low-power mode while rendering
+      renderInProgress_ = true;
       currentActivity->render(std::move(lock));
+      renderInProgress_ = false;
     }
     // Notify any task blocked in requestUpdateAndWait() that the render is done.
     TaskHandle_t waiter = nullptr;
@@ -130,13 +132,27 @@ void ActivityManager::loop() {
         lock.unlock();  // onEnter may acquire its own lock
         currentActivity->onEnter();
       } else if (pendingAction == PendingAction::Push) {
-        // Push doesn't need RenderLock - just moves pointers, no rendering.
-        // Avoiding the lock prevents blocking on any in-progress e-ink refresh (~1s).
+        // Push MUST hold RenderLock across the pause/swap. Without it, the
+        // render task can be mid-render() on the outgoing activity while the
+        // main task runs the incoming activity's onEnter() — both touch the
+        // shared GfxRenderer + SdCardFont state (overflow ring, advance table,
+        // fullIntervals) with no mutex, causing a use-after-free in
+        // onGlyphMiss (intermittent blank-panic reboot). render(std::move(lock))
+        // holds this mutex, so acquiring it here blocks until any in-flight
+        // render completes (up to ~1s e-ink refresh) — the correctness cost
+        // of the previous lock-free fast path.
+        RenderLock lock;
+        if (renderInProgress_) {
+          // Tripwire: with the lock held the render task cannot be rendering.
+          // If this ever fires the race window has reopened.
+          LOG_ERR("ACT", "PUSH while renderInProgress=1 task=%p", xTaskGetCurrentTaskHandle());
+        }
         currentActivity->onPause();
         stackActivities.push_back(std::move(currentActivity));
         LOG_DBG("ACT", "Pushed to activity stack, new size = %zu", stackActivities.size());
         pendingAction = PendingAction::None;
         currentActivity = std::move(pendingActivity);
+        lock.unlock();  // onEnter may acquire its own lock / call requestUpdateAndWait
         currentActivity->onEnter();
       }
 

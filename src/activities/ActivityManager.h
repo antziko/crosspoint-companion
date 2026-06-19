@@ -65,6 +65,11 @@ class ActivityManager {
   // This variable must only be set by the main loop, to avoid race conditions
   bool requestedUpdate = false;
 
+  // Set true by the render task only while currentActivity->render() runs.
+  // Read by the Push path as a race tripwire (must be false there now that
+  // Push holds RenderLock). volatile: written by render task, read by main.
+  volatile bool renderInProgress_ = false;
+
  public:
   explicit ActivityManager(GfxRenderer& renderer, MappedInputManager& mappedInput)
       : renderer(renderer), mappedInput(mappedInput), renderingMutex(xSemaphoreCreateMutex()) {

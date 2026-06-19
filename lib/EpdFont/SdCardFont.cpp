@@ -1166,20 +1166,32 @@ int SdCardFont::buildAdvanceTableRange(Iter begin, Iter end, bool includeSpace, 
   // +2 reserved slots for space and hyphen injected after the main scan.
   static constexpr uint32_t MAX_UNIQUE_CODEPOINTS = 4096;
   static constexpr size_t CODEPOINTS_BYTES = (MAX_UNIQUE_CODEPOINTS + 2) * sizeof(uint32_t);  // ~16KB
-  uint32_t* codepoints = new (std::nothrow) uint32_t[MAX_UNIQUE_CODEPOINTS + 2];
+  // Prefer the reserved 32KB inflate window over a heap alloc. Allocating+freeing
+  // this ~16KB buffer on every layout/prewarm pass was itself a primary heap
+  // fragmenter on long reading sessions (largest-free collapses, tripping the
+  // recovered OOMs in fetchAdvancesForCodepoints). The window is free here:
+  // section-build inflate completes before layout/prewarm, and plain render
+  // doesn't inflate; both run on the render task (sequential). Fall back to a
+  // heap alloc only when the window is busy (rare concurrent inflate, e.g. the
+  // web-server task) or released (post-TLS, pre-reboot) — strictly no worse than
+  // the previous heap-first order.
   bool borrowedScratch = false;
-  if (!codepoints) {
-    // Heap too fragmented for the ~16KB buffer (the +32KB inflate-window reservation
-    // tightens the pool). Borrow that reserved window: it's free here — section-build
-    // inflate completes before layout/prewarm, and plain render doesn't inflate. This
-    // recovers the full advance table instead of falling back to mini-kern.
-    codepoints = reinterpret_cast<uint32_t*>(InflateReader::acquireScratch(CODEPOINTS_BYTES));
+  uint32_t* codepoints = reinterpret_cast<uint32_t*>(InflateReader::acquireScratch(CODEPOINTS_BYTES));
+  if (codepoints) {
+    borrowedScratch = true;
+  } else {
+    codepoints = new (std::nothrow) uint32_t[MAX_UNIQUE_CODEPOINTS + 2];
     if (!codepoints) {
-      LOG_ERR("SDCF", "buildAdvanceTable: failed to allocate codepoint buffer (%zu bytes)", CODEPOINTS_BYTES);
+      LOG_ERR("SDCF", "buildAdvanceTable: failed to allocate codepoint buffer (%zu bytes); window busy/released",
+              CODEPOINTS_BYTES);
       return -1;
     }
-    borrowedScratch = true;
   }
+  // Path trace for fragmentation troubleshooting: "scratch" = zero heap churn
+  // (good); repeated "heap" lines indicate window contention/release and signal
+  // returning fragmentation pressure.
+  LOG_DBG("SDCF", "buildAdvanceTable: codepoint buf via %s (%zu B)", borrowedScratch ? "scratch-window" : "heap",
+          CODEPOINTS_BYTES);
   uint32_t cpCount = 0;
   bool hitCap = false;
 
@@ -1271,6 +1283,19 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
   uint8_t styleIdx = oc->styleIdx;
 
   if (!self->loaded_ || styleIdx >= MAX_STYLES || !self->styles_[styleIdx].present) return nullptr;
+
+  // Concurrency tripwire (see inGlyphMiss_ in header). Only logs on detected
+  // reentry from a second task — no per-glyph log spam on the hot path. RAII
+  // guard clears the flag on every return path.
+  if (self->inGlyphMiss_) {
+    LOG_ERR("SDCF", "onGlyphMiss REENTRANT (concurrent font access) cp=U+%04X style=%u", codepoint, styleIdx);
+  }
+  struct MissGuard {
+    volatile bool& flag;
+    ~MissGuard() { flag = false; }
+  } missGuard{self->inGlyphMiss_};
+  self->inGlyphMiss_ = true;
+
   const auto& s = self->styles_[styleIdx];
   if (!s.fullIntervals) return nullptr;
 

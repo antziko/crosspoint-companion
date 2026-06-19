@@ -207,6 +207,13 @@ class SdCardFont {
   uint32_t overflowCount_ = 0;
   uint32_t overflowNext_ = 0;
 
+  // Concurrency tripwire: onGlyphMiss mutates the overflow ring (and frees
+  // bitmaps). It must only ever run on the render task. If a second task
+  // enters while one is in flight, two contexts are mutating this font — the
+  // race that caused the onGlyphMiss use-after-free reboot. Set/cleared by an
+  // RAII guard in onGlyphMiss. volatile: cross-task visibility for the check.
+  volatile bool inGlyphMiss_ = false;
+
   // Compact advance-only table for layout measurement (per-style).
   // Built by buildAdvanceTable(), queried by getAdvance().
   struct AdvanceEntry {
