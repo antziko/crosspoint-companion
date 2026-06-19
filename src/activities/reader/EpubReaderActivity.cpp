@@ -2187,15 +2187,9 @@ void EpubReaderActivity::lightStatusBarRefresh() {
   if (barH == 0) return;  // no status bar → no bookmark indicator to update
 
   if (lastPageHadImages) {
-    // Image page: there is no partial/fast way to update the status-bar strip
-    // without disturbing the image. Any FAST_REFRESH (windowed sub-rect OR full
-    // frame) drives the SSD1677 grayscale LUT and darkens the image a little on
-    // every toggle, and blanking the strip erases image pixels we can't restore.
-    // So re-render the whole page: the normal image path (blank-and-redraw double
-    // refresh, same as a page turn) is stable on repeat and redraws the status bar
-    // with the correct bookmark tab. The bookmark store is already updated by the
-    // caller. Costs one page render (~600ms) per toggle — acceptable for the
-    // far-less-common image page, and the only artifact-free option.
+    // Image page: a full-frame FAST drives the SSD1677 grayscale LUT and darkens the
+    // image on every toggle. Re-render the whole page (its own stable image refresh)
+    // so the status bar / tab updates without disturbing the image.
     requestUpdate();
     return;
   }
@@ -2208,34 +2202,26 @@ void EpubReaderActivity::lightStatusBarRefresh() {
   const int sw = renderer.getScreenWidth();
   const int sh = renderer.getScreenHeight();
 
-  // Cover the full bar height plus the 14px bookmark tab that extends above it,
-  // with a small extra margin. Clamp to screen top.
-  constexpr int BOOKMARK_TAB_EXTRA = 20;
-  int stripY = sh - barH - orientedBottom - BOOKMARK_TAB_EXTRA;
+  // Blank ONLY the status-bar region (from its top edge down). The bookmark icon sits
+  // inside the bar (top edge at bar_top, 14px tall), so blanking the bar clears a
+  // removed tab. We deliberately do NOT extend the blank above the bar (the old
+  // BOOKMARK_TAB_EXTRA=20 did, erasing the page's bottom text line — visible as cut
+  // text, worst in landscape). The only above-bar content is the progress text, which
+  // does not change on a bookmark toggle, so it needs no blank/redraw region here.
+  int stripY = sh - barH - orientedBottom;
   if (stripY < 0) stripY = 0;
   const int stripH = sh - stripY;
-
-  // Blank the strip to white so a removed bookmark tab doesn't ghost, then
-  // redraw the bar (which draws the tab only if still bookmarked).
   renderer.fillRect(0, stripY, sw, stripH, false);
   renderStatusBar();
 
-  if (lastPageUsedGrayscale) {
-    // AA text page (no image): a windowed FAST_REFRESH scans the full SSD1677
-    // panel and drives grayscale particles even for "no-change" pixels, causing
-    // progressive darkening on repeated toggles. Instead push the full BW
-    // framebuffer once — text reverts from AA to 1-bit (still readable) until the
-    // next page turn re-applies grayscale. Tab appears immediately. No layout
-    // recompute — just a single FAST push of already-rendered 1-bit content.
-    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
-    // Page no longer shows AA; treat subsequent toggles as non-AA.
-    lastPageUsedGrayscale = false;
-    return;
-  }
-
-  // Non-AA page: windowed sub-rectangle push — area is pure 1-bit and
-  // can tolerate repeated FAST passes without charge accumulation.
-  renderer.displayWindowRegion(0, stripY, sw, stripH);
+  // Push the WHOLE current framebuffer with a full-frame FAST refresh, NOT a windowed
+  // sub-rect: on this X4 (SSD1677, single-buffer) a windowed FAST exposes stale
+  // RED-RAM in the untouched page area, reverting the panel to the *previous* rendered
+  // page. A full-frame FAST drives the entire current framebuffer (current page + the
+  // updated tab) — correct page, ~0.4s, no page re-render, no 1.5s HALF. AA text
+  // reverts to 1-bit until the next page turn re-applies grayscale.
+  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+  lastPageUsedGrayscale = false;
 }
 
 void EpubReaderActivity::navigateToHref(const std::string& hrefStr, const bool savePosition) {
