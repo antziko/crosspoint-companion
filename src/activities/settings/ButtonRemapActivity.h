@@ -7,8 +7,10 @@
 
 class ButtonRemapActivity final : public Activity {
  public:
-  explicit ButtonRemapActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-      : Activity("ButtonRemap", renderer, mappedInput) {}
+  // cwMode=true remaps the LandscapeCW front-button override set instead of the
+  // base (portrait) set.
+  explicit ButtonRemapActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, bool cwMode = false)
+      : Activity("ButtonRemap", renderer, mappedInput), cwMode(cwMode) {}
 
   void onEnter() override;
   void onExit() override;
@@ -18,6 +20,8 @@ class ButtonRemapActivity final : public Activity {
  private:
   // Rendering task state.
 
+  // When true, remap the LandscapeCW front-button override set.
+  const bool cwMode = false;
   // Index of the logical role currently awaiting input.
   uint8_t currentStep = 0;
   // Temporary mapping from logical role -> hardware button index.

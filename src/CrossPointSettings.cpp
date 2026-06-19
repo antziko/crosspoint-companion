@@ -63,20 +63,29 @@ void applyLegacyFrontButtonLayout(CrossPointSettings& settings) {
 
 }  // namespace
 
-void CrossPointSettings::validateFrontButtonMapping(CrossPointSettings& settings) {
-  const uint8_t mapping[] = {settings.frontButtonBack, settings.frontButtonConfirm, settings.frontButtonLeft,
-                             settings.frontButtonRight};
+namespace {
+// Reset a logical->hardware quad to factory order if any two roles collide.
+void validateFrontButtonQuad(uint8_t& back, uint8_t& confirm, uint8_t& left, uint8_t& right) {
+  const uint8_t mapping[] = {back, confirm, left, right};
   for (size_t i = 0; i < 4; i++) {
     for (size_t j = i + 1; j < 4; j++) {
       if (mapping[i] == mapping[j]) {
-        settings.frontButtonBack = FRONT_HW_BACK;
-        settings.frontButtonConfirm = FRONT_HW_CONFIRM;
-        settings.frontButtonLeft = FRONT_HW_LEFT;
-        settings.frontButtonRight = FRONT_HW_RIGHT;
+        back = CrossPointSettings::FRONT_HW_BACK;
+        confirm = CrossPointSettings::FRONT_HW_CONFIRM;
+        left = CrossPointSettings::FRONT_HW_LEFT;
+        right = CrossPointSettings::FRONT_HW_RIGHT;
         return;
       }
     }
   }
+}
+}  // namespace
+
+void CrossPointSettings::validateFrontButtonMapping(CrossPointSettings& settings) {
+  validateFrontButtonQuad(settings.frontButtonBack, settings.frontButtonConfirm, settings.frontButtonLeft,
+                          settings.frontButtonRight);
+  validateFrontButtonQuad(settings.frontButtonBackCW, settings.frontButtonConfirmCW, settings.frontButtonLeftCW,
+                          settings.frontButtonRightCW);
 }
 
 uint8_t CrossPointSettings::sleepTimeoutEnumToMinutes(const uint8_t legacyValue) {
@@ -284,7 +293,7 @@ bool CrossPointSettings::loadFromBinaryFile() {
 
 // static
 float CrossPointSettings::computeLineCompression(const uint8_t family, const uint8_t lineSpacing,
-                                                  const char* sdFontName) {
+                                                 const char* sdFontName) {
   // SD card fonts use same compression as Bookerly (the most neutral values)
   if (sdFontName && sdFontName[0] != '\0') {
     switch (lineSpacing) {

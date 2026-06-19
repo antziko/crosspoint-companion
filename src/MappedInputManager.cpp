@@ -12,16 +12,32 @@
 extern GfxRenderer renderer;
 
 namespace {
+// True when the screen is currently rendered in LandscapeCW, where the per-
+// orientation front map and side-button swap apply.
+bool isCw() { return renderer.getOrientation() == GfxRenderer::Orientation::LandscapeClockwise; }
+
 // Front Left/Right swap when the user opted in AND the screen is currently
-// rendered in an orientation whose horizontal axis is flipped vs portrait.
+// rendered in an orientation whose horizontal axis is flipped vs portrait
+// (PortraitInverted / LandscapeCounterClockwise). LandscapeCW is intentionally NOT
+// in this set, so the CW front-button override map is used as-is in CW without an
+// additional Left/Right swap on top.
 bool shouldSwapFrontButtons() {
   if (!SETTINGS.frontButtonFollowOrientation) {
     return false;
   }
   const auto o = renderer.getOrientation();
-  return o == GfxRenderer::Orientation::PortraitInverted ||
-         o == GfxRenderer::Orientation::LandscapeCounterClockwise;
+  return o == GfxRenderer::Orientation::PortraitInverted || o == GfxRenderer::Orientation::LandscapeCounterClockwise;
 }
+
+// Resolve the active front-button hardware index for a logical role, honoring the
+// LandscapeCW override set when the screen is rendered in CW.
+uint8_t frontBackHw() { return isCw() ? SETTINGS.frontButtonBackCW : SETTINGS.frontButtonBack; }
+uint8_t frontConfirmHw() { return isCw() ? SETTINGS.frontButtonConfirmCW : SETTINGS.frontButtonConfirm; }
+uint8_t frontLeftHw() { return isCw() ? SETTINGS.frontButtonLeftCW : SETTINGS.frontButtonLeft; }
+uint8_t frontRightHw() { return isCw() ? SETTINGS.frontButtonRightCW : SETTINGS.frontButtonRight; }
+
+// In CW with the side-swap setting on, the two physical side buttons trade roles.
+bool swapSideButtons() { return isCw() && SETTINGS.swapSideButtonsCW; }
 }  // namespace
 
 bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint8_t) const,
@@ -30,54 +46,45 @@ bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint
 
   switch (button) {
     case Button::Back:
-      // Logical Back maps to user-configured front button.
-      return (gpio.*fn)(SETTINGS.frontButtonBack);
+      // Logical Back maps to user-configured front button (CW override in CW).
+      return (gpio.*fn)(frontBackHw());
     case Button::Confirm:
-      // Logical Confirm maps to user-configured front button.
-      return (gpio.*fn)(SETTINGS.frontButtonConfirm);
+      // Logical Confirm maps to user-configured front button (CW override in CW).
+      return (gpio.*fn)(frontConfirmHw());
     case Button::Left:
     case Button::Right: {
-      // Logical Left/Right map to user-configured front buttons. When orient-
-      // front-buttons is on and the screen is rendered flipped, swap the two so
-      // the physical button under the on-screen label performs that label's
-      // action. applySwap=false lets a caller that does its own orientation
-      // mapping (WordSelectNavigator) read the unswapped logical button.
+      // Logical Left/Right map to user-configured front buttons (CW override in
+      // CW). When orient-front-buttons is on and the screen is rendered flipped,
+      // swap the two so the physical button under the on-screen label performs
+      // that label's action. applySwap=false lets a caller that does its own
+      // orientation mapping (WordSelectNavigator) read the unswapped logical button.
       const bool swap = applySwap && shouldSwapFrontButtons();
       const bool wantLeft = (button == Button::Left);
-      const uint8_t hw = (wantLeft != swap) ? SETTINGS.frontButtonLeft : SETTINGS.frontButtonRight;
+      const uint8_t hw = (wantLeft != swap) ? frontLeftHw() : frontRightHw();
       return (gpio.*fn)(hw);
     }
     case Button::Up:
-      // Side buttons remain fixed for Up/Down.
-      return (gpio.*fn)(HalGPIO::BTN_UP);
+      // Side buttons fixed for Up/Down, except the CW side-swap trades the two.
+      return (gpio.*fn)(swapSideButtons() ? HalGPIO::BTN_DOWN : HalGPIO::BTN_UP);
     case Button::Down:
-      // Side buttons remain fixed for Up/Down.
-      return (gpio.*fn)(HalGPIO::BTN_DOWN);
+      // Side buttons fixed for Up/Down, except the CW side-swap trades the two.
+      return (gpio.*fn)(swapSideButtons() ? HalGPIO::BTN_UP : HalGPIO::BTN_DOWN);
     case Button::Power:
       // Power button bypasses remapping.
       return (gpio.*fn)(HalGPIO::BTN_POWER);
     case Button::PageBack:
+    case Button::PageForward: {
       // Reader page navigation uses side buttons and can be swapped via settings.
-      switch (sideLayout) {
-        case CrossPointSettings::PREV_NEXT:
-          return (gpio.*fn)(HalGPIO::BTN_UP);
-        case CrossPointSettings::NEXT_PREV:
-          return (gpio.*fn)(HalGPIO::BTN_DOWN);
-        case CrossPointSettings::SIDE_BUTTONS_DISABLED:
-        default:
-          return false;
+      // The CW side-swap (swapSideButtons) XOR-composes on top of sideButtonLayout.
+      if (sideLayout == CrossPointSettings::SIDE_BUTTONS_DISABLED) {
+        return false;
       }
-    case Button::PageForward:
-      // Reader page navigation uses side buttons and can be swapped via settings.
-      switch (sideLayout) {
-        case CrossPointSettings::PREV_NEXT:
-          return (gpio.*fn)(HalGPIO::BTN_DOWN);
-        case CrossPointSettings::NEXT_PREV:
-          return (gpio.*fn)(HalGPIO::BTN_UP);
-        case CrossPointSettings::SIDE_BUTTONS_DISABLED:
-        default:
-          return false;
-      }
+      const bool wantPageBack = (button == Button::PageBack);
+      // PREV_NEXT: PageBack=UP, PageForward=DOWN. NEXT_PREV inverts that.
+      const bool layoutInvert = (sideLayout == CrossPointSettings::NEXT_PREV);
+      const bool useUp = (wantPageBack != layoutInvert) != swapSideButtons();
+      return (gpio.*fn)(useUp ? HalGPIO::BTN_UP : HalGPIO::BTN_DOWN);
+    }
   }
 
   return false;
@@ -112,17 +119,18 @@ MappedInputManager::Labels MappedInputManager::mapLabels(const char* back, const
 
   // Build the label order based on the configured hardware mapping.
   auto labelForHardware = [&](uint8_t hw) -> const char* {
-    // Compare against configured logical roles and return the matching label.
-    if (hw == SETTINGS.frontButtonBack) {
+    // Compare against configured logical roles (CW override in CW) and return the
+    // matching label. Same source as mapButton so label and action always agree.
+    if (hw == frontBackHw()) {
       return back;
     }
-    if (hw == SETTINGS.frontButtonConfirm) {
+    if (hw == frontConfirmHw()) {
       return confirm;
     }
-    if (hw == SETTINGS.frontButtonLeft) {
+    if (hw == frontLeftHw()) {
       return leftLabel;
     }
-    if (hw == SETTINGS.frontButtonRight) {
+    if (hw == frontRightHw()) {
       return rightLabel;
     }
     return "";

@@ -137,6 +137,11 @@ bool JsonSettingsIO::saveSettings(const CrossPointSettings& s, const char* path)
   doc["frontButtonConfirm"] = s.frontButtonConfirm;
   doc["frontButtonLeft"] = s.frontButtonLeft;
   doc["frontButtonRight"] = s.frontButtonRight;
+  // LandscapeCW front button override — managed by RemapFrontButtonsCW sub-activity.
+  doc["frontButtonBackCW"] = s.frontButtonBackCW;
+  doc["frontButtonConfirmCW"] = s.frontButtonConfirmCW;
+  doc["frontButtonLeftCW"] = s.frontButtonLeftCW;
+  doc["frontButtonRightCW"] = s.frontButtonRightCW;
   // Font family — uses dynamic getter/setter in SettingsList so the generic loop skips it.
   doc["fontFamily"] = s.fontFamily;
   // SD card font family name — not in SettingsList, save manually
@@ -243,6 +248,15 @@ bool JsonSettingsIO::loadSettings(CrossPointSettings& s, const char* json, bool*
       clamp(doc["frontButtonLeft"] | (uint8_t)S::FRONT_HW_LEFT, S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_LEFT);
   s.frontButtonRight =
       clamp(doc["frontButtonRight"] | (uint8_t)S::FRONT_HW_RIGHT, S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_RIGHT);
+  // LandscapeCW front button override — default to factory order when absent (older files).
+  s.frontButtonBackCW =
+      clamp(doc["frontButtonBackCW"] | (uint8_t)S::FRONT_HW_BACK, S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_BACK);
+  s.frontButtonConfirmCW = clamp(doc["frontButtonConfirmCW"] | (uint8_t)S::FRONT_HW_CONFIRM,
+                                  S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_CONFIRM);
+  s.frontButtonLeftCW =
+      clamp(doc["frontButtonLeftCW"] | (uint8_t)S::FRONT_HW_LEFT, S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_LEFT);
+  s.frontButtonRightCW =
+      clamp(doc["frontButtonRightCW"] | (uint8_t)S::FRONT_HW_RIGHT, S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_RIGHT);
   CrossPointSettings::validateFrontButtonMapping(s);
 
   // Font family — uses dynamic getter/setter in SettingsList so the generic loop skips it.

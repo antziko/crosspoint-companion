@@ -270,9 +270,12 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
       "progressSaveIntervalIdx", StrId::STR_READER_TRACKING));
 
   // --- Controls ---
-  v.push_back(SettingInfo::Enum(StrId::STR_SIDE_BTN_LAYOUT, &CrossPointSettings::sideButtonLayout,
-                                {StrId::STR_PREV_NEXT, StrId::STR_NEXT_PREV, StrId::STR_DISABLED}, "sideButtonLayout",
-                                StrId::STR_CAT_CONTROLS));
+  // Grouped by physical button family so related options sit together:
+  //   Front buttons -> Side buttons -> Power -> Tilt.
+  // The RemapFrontButtons / RemapFrontButtonsCW ACTION rows are inserted ahead of
+  // these by SettingsActivity, so the front-button group leads the Controls screen.
+
+  // Front buttons
   v.push_back(SettingInfo::Toggle(StrId::STR_FRONT_BTN_FOLLOW_ORIENTATION,
                                   &CrossPointSettings::frontButtonFollowOrientation, "frontButtonFollowOrientation",
                                   StrId::STR_CAT_CONTROLS));
@@ -281,11 +284,20 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                         {StrId::STR_LONG_PRESS_BEHAVIOR_OFF, StrId::STR_LONG_PRESS_BEHAVIOR_SKIP,
                          StrId::STR_LONG_PRESS_BEHAVIOR_ORIENTATION, StrId::STR_LONG_PRESS_BEHAVIOR_BOOKMARK_SYNC},
                         "longPressButtonBehavior", StrId::STR_CAT_CONTROLS));
+
+  // Side buttons
+  v.push_back(SettingInfo::Enum(StrId::STR_SIDE_BTN_LAYOUT, &CrossPointSettings::sideButtonLayout,
+                                {StrId::STR_PREV_NEXT, StrId::STR_NEXT_PREV, StrId::STR_DISABLED}, "sideButtonLayout",
+                                StrId::STR_CAT_CONTROLS));
+  v.push_back(SettingInfo::Toggle(StrId::STR_SWAP_SIDE_BTN_CW, &CrossPointSettings::swapSideButtonsCW,
+                                  "swapSideButtonsCW", StrId::STR_CAT_CONTROLS));
   v.push_back(
       SettingInfo::Enum(StrId::STR_SIDE_LONG_PRESS_BEHAVIOR, &CrossPointSettings::sideLongPressButtonBehavior,
                         {StrId::STR_LONG_PRESS_BEHAVIOR_OFF, StrId::STR_LONG_PRESS_BEHAVIOR_SKIP,
                          StrId::STR_LONG_PRESS_BEHAVIOR_ORIENTATION, StrId::STR_LONG_PRESS_BEHAVIOR_BOOKMARK_SYNC},
                         "sideLongPressButtonBehavior", StrId::STR_CAT_CONTROLS));
+
+  // Power button (tiltPageTurn is inserted right after this row further below)
   v.push_back(SettingInfo::Enum(StrId::STR_SHORT_PWR_BTN, &CrossPointSettings::shortPwrBtn,
                                 {StrId::STR_IGNORE, StrId::STR_SLEEP, StrId::STR_PAGE_TURN, StrId::STR_FORCE_REFRESH},
                                 "shortPwrBtn", StrId::STR_CAT_CONTROLS));

@@ -97,6 +97,8 @@ void SettingsActivity::rebuildSettingsLists() {
   // Append device-only ACTION items
   controlsSettings.insert(controlsSettings.begin(),
                           SettingInfo::Action(StrId::STR_REMAP_FRONT_BUTTONS, SettingAction::RemapFrontButtons));
+  controlsSettings.insert(controlsSettings.begin() + 1,
+                          SettingInfo::Action(StrId::STR_REMAP_FRONT_BUTTONS_CW, SettingAction::RemapFrontButtonsCW));
   // System top level: keep the frequently-used Wi-Fi / Time to Sleep / KOReader Sync flat (Time to
   // Sleep arrives from the category loop as the first systemSettings entry); the rest of the System
   // items live one level down. OPDS / Clear Cache / Updates / SD Firmware / Language are appended
@@ -313,6 +315,10 @@ void SettingsActivity::toggleCurrentSetting() {
     switch (setting.action) {
       case SettingAction::RemapFrontButtons:
         startActivityForResult(std::make_unique<ButtonRemapActivity>(renderer, mappedInput), resultHandler);
+        break;
+      case SettingAction::RemapFrontButtonsCW:
+        startActivityForResult(std::make_unique<ButtonRemapActivity>(renderer, mappedInput, /*cwMode=*/true),
+                               resultHandler);
         break;
       case SettingAction::CustomiseStatusBar:
         startActivityForResult(std::make_unique<StatusBarSettingsActivity>(renderer, mappedInput), resultHandler);

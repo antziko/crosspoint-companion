@@ -256,6 +256,16 @@ class CrossPointSettings {
   uint8_t frontButtonConfirm = FRONT_HW_CONFIRM;
   uint8_t frontButtonLeft = FRONT_HW_LEFT;
   uint8_t frontButtonRight = FRONT_HW_RIGHT;
+  // LandscapeCW front button override (logical -> hardware). Default = factory
+  // order so behavior is unchanged until the user configures the CW remap. Used
+  // as-is in CW; the "Orient front buttons" swap does not apply in CW (only in
+  // PortraitInverted / LandscapeCounterClockwise).
+  uint8_t frontButtonBackCW = FRONT_HW_BACK;
+  uint8_t frontButtonConfirmCW = FRONT_HW_CONFIRM;
+  uint8_t frontButtonLeftCW = FRONT_HW_LEFT;
+  uint8_t frontButtonRightCW = FRONT_HW_RIGHT;
+  // LandscapeCW: swap the two side buttons (reader page-turn + menu Up/Down). Off by default.
+  uint8_t swapSideButtonsCW = 0;
   // Reader font settings
   uint8_t fontFamily = NOTOSERIF;
   uint8_t fontSize = MEDIUM;
