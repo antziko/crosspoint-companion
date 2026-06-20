@@ -1,15 +1,13 @@
 #include "EpubReaderBookmarksActivity.h"
 
-#include "../../BookmarkStore.h"
-
 #include <GfxRenderer.h>
 #include <I18n.h>
 
 #include <algorithm>
 #include <cmath>
-
 #include <variant>
 
+#include "../../BookmarkStore.h"
 #include "MappedInputManager.h"
 #include "QuoteViewerActivity.h"
 #include "components/UITheme.h"
@@ -170,7 +168,8 @@ void EpubReaderBookmarksActivity::render(RenderLock&&) {
   // Budget ~110 conservatively so a full first line never spills into an ellipsis.
   const int snippetWrapW = std::max(80, contentWidth - 110);
   const auto getBookmarkTitle = [this, snippetWrapW](int index) -> std::string {
-    const struct Bookmark& bm = bookmarks.at(static_cast<size_t>(confirmingDelete >= DELETE_MODE_DISPLAY ? selectorIndex : index));
+    const struct Bookmark& bm =
+        bookmarks.at(static_cast<size_t>(confirmingDelete >= DELETE_MODE_DISPLAY ? selectorIndex : index));
     if (bm.isQuote() && bm.snippet[0] != '\0') {
       auto lines = renderer.wrappedText(UI_10_FONT_ID, bm.snippet, snippetWrapW, 2);
       return lines.empty() ? std::string(bm.snippet) : lines[0];
@@ -178,7 +177,8 @@ void EpubReaderBookmarksActivity::render(RenderLock&&) {
     return bm.snippet[0] != '\0' ? std::string(bm.snippet) : std::string(tr(STR_BOOKMARK_INSTRUCTIONS));
   };
   const auto getBookmarkSubtitle = [this, snippetWrapW](int index) -> std::string {
-    const struct Bookmark& bm = bookmarks.at(static_cast<size_t>(confirmingDelete >= DELETE_MODE_DISPLAY ? selectorIndex : index));
+    const struct Bookmark& bm =
+        bookmarks.at(static_cast<size_t>(confirmingDelete >= DELETE_MODE_DISPLAY ? selectorIndex : index));
     if (bm.isQuote() && bm.snippet[0] != '\0') {
       auto lines = renderer.wrappedText(UI_10_FONT_ID, bm.snippet, snippetWrapW, 2);
       if (lines.size() > 1) return lines[1];  // second line of the highlight text

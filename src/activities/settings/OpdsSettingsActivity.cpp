@@ -180,18 +180,17 @@ void OpdsSettingsActivity::handleSelection() {
     // mis-press on this row can't silently destroy a configured server.
     const int idx = serverIndex;
     const std::string& body = editServer.name.empty() ? editServer.url : editServer.name;
-    startActivityForResult(
-        std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_DELETE_SERVER), body),
-        [this, idx](const ActivityResult& res) {
-          if (res.isCancelled) return;
-          if (!OPDS_STORE.removeServer(static_cast<size_t>(idx))) {
-            LOG_ERR("OPS", "Failed to remove OPDS server at index %d", idx);
-            showSaveError = true;
-            requestUpdate();
-            return;
-          }
-          finish();
-        });
+    startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_DELETE_SERVER), body),
+                           [this, idx](const ActivityResult& res) {
+                             if (res.isCancelled) return;
+                             if (!OPDS_STORE.removeServer(static_cast<size_t>(idx))) {
+                               LOG_ERR("OPS", "Failed to remove OPDS server at index %d", idx);
+                               showSaveError = true;
+                               requestUpdate();
+                               return;
+                             }
+                             finish();
+                           });
   }
 }
 
@@ -212,8 +211,8 @@ void OpdsSettingsActivity::render(RenderLock&&) {
   const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing * 2;
   const int menuItems = getMenuItemCount();
 
-  const StrId fieldNames[] = {StrId::STR_SERVER_NAME, StrId::STR_OPDS_SERVER_URL, StrId::STR_USERNAME,
-                              StrId::STR_PASSWORD, StrId::STR_OPDS_SORT_ALPHABETICAL, StrId::STR_OPDS_EXTRA_QUERY};
+  const StrId fieldNames[] = {StrId::STR_SERVER_NAME, StrId::STR_OPDS_SERVER_URL,        StrId::STR_USERNAME,
+                              StrId::STR_PASSWORD,    StrId::STR_OPDS_SORT_ALPHABETICAL, StrId::STR_OPDS_EXTRA_QUERY};
 
   GUI.drawList(
       renderer, Rect{0, contentTop, pageWidth, contentHeight}, menuItems, static_cast<int>(selectedIndex),

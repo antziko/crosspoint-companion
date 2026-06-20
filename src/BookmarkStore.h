@@ -1,7 +1,8 @@
 #pragma once
+#include <stdint.h>
+
 #include <cstddef>
 #include <cstdint>
-#include <stdint.h>
 #include <string>
 #include <vector>
 
@@ -99,8 +100,8 @@ class BookmarkStore {
   void unload();
 
   AddResult addBookmark(uint16_t spineIndex, float progress, int pageCount, const char* chapterTitle,
-                        uint16_t paragraphIndex = UINT16_MAX, const char* snippet = nullptr,
-                        bool returnMark = false, int currentPage = 0);
+                        uint16_t paragraphIndex = UINT16_MAX, const char* snippet = nullptr, bool returnMark = false,
+                        int currentPage = 0);
 
   // Add a ranged quote ("highlight"). The anchor (spineIndex, progress, chapterTitle,
   // page snapshot) matches how a point bookmark anchors; startWord/endWord are the
@@ -174,8 +175,7 @@ class BookmarkStore {
   // Re-key the bookmark + tombstone files when a book moves/renames (filename is keyed by
   // crc32 of the path). Without this, a moved book loses its bookmarks. No-op if srcPath ==
   // dstPath or no files exist. bookType must be "epub", "xtc", or "txt".
-  static void relocateForFilePath(const std::string& srcPath, const std::string& dstPath,
-                                  const std::string& bookType);
+  static void relocateForFilePath(const std::string& srcPath, const std::string& dstPath, const std::string& bookType);
 
   // Scan /.crosspoint/bookmarks/ and populate `out` with one entry per book that has bookmarks.
   // Reads only the file header (does not load full bookmark records).
@@ -232,7 +232,7 @@ class BookmarkStore {
   // Tombstone persistence (separate .tomb file; bookmark format untouched).
   bool readTombstones();
   bool writeTombstones() const;
-  void saveTombstones();          // flush if dirty; deletes file when empty
+  void saveTombstones();                       // flush if dirty; deletes file when empty
   void addTombstone(const Bookmark& bm);       // record a delete (dedup by key)
   void clearTombstoneFor(const Bookmark& bm);  // un-delete on re-add
 };

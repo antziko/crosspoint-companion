@@ -6,8 +6,8 @@ struct OpdsServer {
   std::string name;
   std::string url;
   std::string username;
-  std::string password;     // Plaintext in memory; obfuscated with hardware key on disk
-  std::string extraQuery;   // Optional query appended to every feed fetch (e.g. "limit=20"), no leading '?'
+  std::string password;          // Plaintext in memory; obfuscated with hardware key on disk
+  std::string extraQuery;        // Optional query appended to every feed fetch (e.g. "limit=20"), no leading '?'
   bool sortAlphabetical = true;  // sort each browse page A-Z (per-server toggle)
 };
 

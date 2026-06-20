@@ -71,8 +71,7 @@ void OpdsServerListActivity::loop() {
   // Hold Confirm on a real server row (settings mode only, room available) -> duplicate.
   if (confirmPressActive && !pickerMode && selectedIndex < serverCount &&
       OPDS_STORE.getCount() < OpdsServerStore::maxServers() &&
-      mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
-      mappedInput.getHeldTime() >= DUPLICATE_HOLD_MS) {
+      mappedInput.isPressed(MappedInputManager::Button::Confirm) && mappedInput.getHeldTime() >= DUPLICATE_HOLD_MS) {
     longPressFired = true;
     confirmPressActive = false;
     duplicateSelectedServer();

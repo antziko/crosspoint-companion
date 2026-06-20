@@ -15,8 +15,7 @@ class ReaderOptionsActivity final : public Activity {
  public:
   // showMinSession controls the "min read time for stats" item. Readers without
   // reading-time tracking (e.g. the plain-text reader) pass false to hide it.
-  explicit ReaderOptionsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                 std::string bookCachePath,
+  explicit ReaderOptionsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string bookCachePath,
                                  const CrossPointSettings::ReaderOverride& initialOverride, bool showMinSession = true);
 
   void onEnter() override;

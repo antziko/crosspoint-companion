@@ -234,7 +234,8 @@ void SdFirmwareUpdateActivity::render(RenderLock&&) {
     // so the do-not-power-off line below stays at the same Y as before.
     y += lineHeight + metrics.verticalSpacing;
     // Wrap the warning over up to 2 lines instead of clipping at the screen edge.
-    const auto warnLines = renderer.wrappedText(UI_10_FONT_ID, tr(STR_FIRMWARE_UPDATE_DO_NOT_POWER_OFF), pageWidth - 40, 2);
+    const auto warnLines =
+        renderer.wrappedText(UI_10_FONT_ID, tr(STR_FIRMWARE_UPDATE_DO_NOT_POWER_OFF), pageWidth - 40, 2);
     for (const auto& line : warnLines) {
       renderer.drawCenteredText(UI_10_FONT_ID, y, line.c_str());
       y += lineHeight;

@@ -59,7 +59,10 @@ const StrId clockFormatNames[CLOCK_FORMAT_ITEMS] = {StrId::STR_CLOCK_FORMAT_24H,
 
 constexpr int DATE_FORMAT_ITEMS = 4;
 const StrId dateFormatNames[DATE_FORMAT_ITEMS] = {
-    StrId::STR_DATE_FMT_0, StrId::STR_DATE_FMT_1, StrId::STR_DATE_FMT_2, StrId::STR_DATE_FMT_3,
+    StrId::STR_DATE_FMT_0,
+    StrId::STR_DATE_FMT_1,
+    StrId::STR_DATE_FMT_2,
+    StrId::STR_DATE_FMT_3,
 };
 
 std::string formatUtcOffset(uint8_t biasedQ) {

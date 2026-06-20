@@ -82,8 +82,8 @@ TxtBookmarkStore::ToggleResult TxtBookmarkStore::toggle(const std::string& cache
                                                         const char* snippet) {
   std::vector<TxtBookmark> bookmarks = load(cachePath);
 
-  const auto it = std::find_if(bookmarks.begin(), bookmarks.end(),
-                               [page](const TxtBookmark& bm) { return bm.page == page; });
+  const auto it =
+      std::find_if(bookmarks.begin(), bookmarks.end(), [page](const TxtBookmark& bm) { return bm.page == page; });
 
   bool added;
   if (it != bookmarks.end()) {

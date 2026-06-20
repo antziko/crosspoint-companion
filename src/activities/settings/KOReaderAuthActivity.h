@@ -15,8 +15,7 @@ class KOReaderAuthActivity final : public Activity {
    *        authenticating, or -1 (default) to authenticate without changing the active server.
    *        On success the target server stays active; on failure the previous active is restored.
    */
-  explicit KOReaderAuthActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                int targetServerIndex = -1)
+  explicit KOReaderAuthActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, int targetServerIndex = -1)
       : Activity("KOReaderAuth", renderer, mappedInput), targetServerIndex(targetServerIndex) {}
 
   void onEnter() override;

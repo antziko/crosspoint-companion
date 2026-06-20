@@ -58,8 +58,7 @@ void KOReaderServerListActivity::loop() {
   // Hold Confirm on a real server row (room available) -> duplicate
   if (confirmPressActive && selectedIndex < serverCount &&
       KOREADER_STORE.getCount() < KOReaderCredentialStore::maxServers() &&
-      mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
-      mappedInput.getHeldTime() >= DUPLICATE_HOLD_MS) {
+      mappedInput.isPressed(MappedInputManager::Button::Confirm) && mappedInput.getHeldTime() >= DUPLICATE_HOLD_MS) {
     longPressFired = true;
     confirmPressActive = false;
     duplicateSelectedServer();
@@ -97,12 +96,11 @@ void KOReaderServerListActivity::handleSelection() {
   };
 
   if (selectedIndex < serverCount) {
-    startActivityForResult(
-        std::make_unique<KOReaderSettingsActivity>(renderer, mappedInput, selectedIndex), resultHandler);
+    startActivityForResult(std::make_unique<KOReaderSettingsActivity>(renderer, mappedInput, selectedIndex),
+                           resultHandler);
   } else {
     // "Add Server" virtual item
-    startActivityForResult(
-        std::make_unique<KOReaderSettingsActivity>(renderer, mappedInput, -1), resultHandler);
+    startActivityForResult(std::make_unique<KOReaderSettingsActivity>(renderer, mappedInput, -1), resultHandler);
   }
 }
 
@@ -138,8 +136,7 @@ void KOReaderServerListActivity::render(RenderLock&&) {
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
-                 tr(STR_KOREADER_SYNC_SERVERS));
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_KOREADER_SYNC_SERVERS));
 
   const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
   const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing * 2;

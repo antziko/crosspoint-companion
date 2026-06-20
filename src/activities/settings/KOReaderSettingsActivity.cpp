@@ -111,60 +111,55 @@ bool KOReaderSettingsActivity::saveServer() {
 
 void KOReaderSettingsActivity::handleSelection() {
   if (selectedIndex == ROW_NAME) {
-    startActivityForResult(
-        std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_SERVER_NAME), editServer.name, 63,
-                                               InputType::Text),
-        [this](const ActivityResult& result) {
-          if (!result.isCancelled) {
-            editServer.name = std::get<KeyboardResult>(result.data).text;
-            saveServer();
-            requestUpdate();
-          }
-        });
+    startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_SERVER_NAME),
+                                                                   editServer.name, 63, InputType::Text),
+                           [this](const ActivityResult& result) {
+                             if (!result.isCancelled) {
+                               editServer.name = std::get<KeyboardResult>(result.data).text;
+                               saveServer();
+                               requestUpdate();
+                             }
+                           });
 
   } else if (selectedIndex == ROW_USERNAME) {
-    startActivityForResult(
-        std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_KOREADER_USERNAME),
-                                               editServer.username, 64, InputType::Text),
-        [this](const ActivityResult& result) {
-          if (!result.isCancelled) {
-            editServer.username = std::get<KeyboardResult>(result.data).text;
-            saveServer();
-            requestUpdate();
-          }
-        });
+    startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_KOREADER_USERNAME),
+                                                                   editServer.username, 64, InputType::Text),
+                           [this](const ActivityResult& result) {
+                             if (!result.isCancelled) {
+                               editServer.username = std::get<KeyboardResult>(result.data).text;
+                               saveServer();
+                               requestUpdate();
+                             }
+                           });
 
   } else if (selectedIndex == ROW_PASSWORD) {
-    startActivityForResult(
-        std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_KOREADER_PASSWORD),
-                                               editServer.password, 64, InputType::Password),
-        [this](const ActivityResult& result) {
-          if (!result.isCancelled) {
-            editServer.password = std::get<KeyboardResult>(result.data).text;
-            saveServer();
-            requestUpdate();
-          }
-        });
+    startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_KOREADER_PASSWORD),
+                                                                   editServer.password, 64, InputType::Password),
+                           [this](const ActivityResult& result) {
+                             if (!result.isCancelled) {
+                               editServer.password = std::get<KeyboardResult>(result.data).text;
+                               saveServer();
+                               requestUpdate();
+                             }
+                           });
 
   } else if (selectedIndex == ROW_URL) {
     const std::string prefillUrl = editServer.serverUrl.empty() ? "https://" : editServer.serverUrl;
-    startActivityForResult(
-        std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_SYNC_SERVER_URL), prefillUrl, 128,
-                                               InputType::Url),
-        [this](const ActivityResult& result) {
-          if (!result.isCancelled) {
-            const auto& text = std::get<KeyboardResult>(result.data).text;
-            editServer.serverUrl = (text == "https://" || text == "http://") ? "" : text;
-            saveServer();
-            requestUpdate();
-          }
-        });
+    startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_SYNC_SERVER_URL),
+                                                                   prefillUrl, 128, InputType::Url),
+                           [this](const ActivityResult& result) {
+                             if (!result.isCancelled) {
+                               const auto& text = std::get<KeyboardResult>(result.data).text;
+                               editServer.serverUrl = (text == "https://" || text == "http://") ? "" : text;
+                               saveServer();
+                               requestUpdate();
+                             }
+                           });
 
   } else if (selectedIndex == ROW_DOC_MATCH) {
     // Toggle between Filename and Binary
-    editServer.matchMethod = (editServer.matchMethod == DocumentMatchMethod::FILENAME)
-                                 ? DocumentMatchMethod::BINARY
-                                 : DocumentMatchMethod::FILENAME;
+    editServer.matchMethod = (editServer.matchMethod == DocumentMatchMethod::FILENAME) ? DocumentMatchMethod::BINARY
+                                                                                       : DocumentMatchMethod::FILENAME;
     saveServer();
     requestUpdate();
 
@@ -191,18 +186,17 @@ void KOReaderSettingsActivity::handleSelection() {
     // Confirm first so a mis-press on this row can't silently destroy a server.
     const int idx = serverIndex;
     const std::string& body = editServer.name.empty() ? editServer.serverUrl : editServer.name;
-    startActivityForResult(
-        std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_DELETE_SERVER), body),
-        [this, idx](const ActivityResult& res) {
-          if (res.isCancelled) return;
-          if (!KOREADER_STORE.removeServer(static_cast<size_t>(idx))) {
-            LOG_ERR("KRS", "Failed to remove KOReader sync server at index %d", idx);
-            showSaveError = true;
-            requestUpdate();
-            return;
-          }
-          finish();
-        });
+    startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_DELETE_SERVER), body),
+                           [this, idx](const ActivityResult& res) {
+                             if (res.isCancelled) return;
+                             if (!KOREADER_STORE.removeServer(static_cast<size_t>(idx))) {
+                               LOG_ERR("KRS", "Failed to remove KOReader sync server at index %d", idx);
+                               showSaveError = true;
+                               requestUpdate();
+                               return;
+                             }
+                             finish();
+                           });
   }
 }
 
@@ -251,7 +245,7 @@ void KOReaderSettingsActivity::render(RenderLock&&) {
           return editServer.serverUrl.empty() ? std::string(tr(STR_DEFAULT_VALUE)) : editServer.serverUrl;
         } else if (index == ROW_DOC_MATCH) {
           return editServer.matchMethod == DocumentMatchMethod::FILENAME ? std::string(tr(STR_FILENAME))
-                                                                        : std::string(tr(STR_BINARY));
+                                                                         : std::string(tr(STR_BINARY));
         } else if (index == ROW_SET_ACTIVE) {
           return (serverIndex == activeIdx) ? std::string("\xE2\x80\xA2") : std::string("");
         } else if (index == ROW_AUTHENTICATE) {

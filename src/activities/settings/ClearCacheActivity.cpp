@@ -60,8 +60,8 @@ void ClearCacheActivity::render(RenderLock&&) {
       renderer.displayBuffer();
       return;
     }
-    std::string foundText = std::to_string(static_cast<int>(orphanDirs_.size())) + " " +
-                            std::string(tr(STR_ORPHANED_CACHES_FOUND));
+    std::string foundText =
+        std::to_string(static_cast<int>(orphanDirs_.size())) + " " + std::string(tr(STR_ORPHANED_CACHES_FOUND));
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 15, foundText.c_str(), true, EpdFontFamily::BOLD);
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 20, tr(STR_PRUNE_CACHE_WARNING_3), true);
 
@@ -78,8 +78,8 @@ void ClearCacheActivity::render(RenderLock&&) {
   }
 
   if (state == SUCCESS) {
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 20, prune ? tr(STR_ORPHANS_REMOVED) : tr(STR_CACHE_CLEARED),
-                              true, EpdFontFamily::BOLD);
+    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 20,
+                              prune ? tr(STR_ORPHANS_REMOVED) : tr(STR_CACHE_CLEARED), true, EpdFontFamily::BOLD);
     std::string resultText = std::to_string(clearedCount) + " " + std::string(tr(STR_ITEMS_REMOVED));
     if (failedCount > 0) {
       resultText += ", " + std::to_string(failedCount) + " " + std::string(tr(STR_FAILED_LOWER));

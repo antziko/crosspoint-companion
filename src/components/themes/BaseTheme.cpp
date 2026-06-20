@@ -2,10 +2,10 @@
 
 #include <GfxRenderer.h>
 #include <HalClock.h>
-#include <WiFi.h>
 #include <HalPowerManager.h>
 #include <HalStorage.h>
 #include <Logging.h>
+#include <WiFi.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -407,9 +407,11 @@ void BaseTheme::drawTopBarClockDate(const GfxRenderer& renderer, int y) const {
   if (!halClock.isAvailable() || (!SETTINGS.homeTopBarDate && !SETTINGS.homeTopBarClock)) return;
   char dateBuf[12] = {};
   char timeBuf[9] = {};
-  const bool hasDate = SETTINGS.homeTopBarDate &&
+  const bool hasDate =
+      SETTINGS.homeTopBarDate &&
       halClock.formatDate(dateBuf, sizeof(dateBuf), SETTINGS.clockUtcOffsetQ, SETTINGS.homeTopBarDateFormat);
-  const bool hasTime = SETTINGS.homeTopBarClock &&
+  const bool hasTime =
+      SETTINGS.homeTopBarClock &&
       halClock.formatTime(timeBuf, sizeof(timeBuf), SETTINGS.clockUtcOffsetQ, SETTINGS.clockFormat == 1);
   if (!hasDate && !hasTime) return;
   char dtBuf[24] = {};
@@ -886,8 +888,7 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
   const bool showBatteryPercentage =
       SETTINGS.hideBatteryPercentage == CrossPointSettings::HIDE_BATTERY_PERCENTAGE::HIDE_NEVER;
   if (SETTINGS.statusBarBattery) {
-    GUI.drawBatteryLeft(renderer,
-                        Rect{leftClusterX + bmTotalWidth, textY, metrics.batteryWidth, metrics.batteryHeight},
+    GUI.drawBatteryLeft(renderer, Rect{leftClusterX + bmTotalWidth, textY, metrics.batteryWidth, metrics.batteryHeight},
                         showBatteryPercentage);
   }
 

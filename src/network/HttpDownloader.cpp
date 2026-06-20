@@ -206,9 +206,8 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   // fragmentation grows over the life of the connection.
   {
     const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
-    SdDebugLog::log("CONNECT", "heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d total=%zu url=%s",
-                    snap.heapFree, snap.largest8Bit, snap.internalFree, snap.internalLargest, (int)snap.rssi,
-                    sink.total, url.c_str());
+    SdDebugLog::log("CONNECT", "heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d total=%zu url=%s", snap.heapFree,
+                    snap.largest8Bit, snap.internalFree, snap.internalLargest, (int)snap.rssi, sink.total, url.c_str());
   }
   const uint32_t transferStartMs = millis();
   uint32_t lastChunkMs = transferStartMs;
@@ -259,8 +258,8 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
       lastXferLogBytes = sink.downloaded;
       const uint32_t elapsedMs = now - transferStartMs;
       const unsigned bytesPerSec = elapsedMs > 0 ? (unsigned)(sink.downloaded * 1000UL / elapsedMs) : 0;
-      SdDebugLog::log("XFER", "bytes=%zu elapsed=%lums rate=%uB/s heap=%u", sink.downloaded,
-                      (unsigned long)elapsedMs, bytesPerSec, (unsigned)ESP.getFreeHeap());
+      SdDebugLog::log("XFER", "bytes=%zu elapsed=%lums rate=%uB/s heap=%u", sink.downloaded, (unsigned long)elapsedMs,
+                      bytesPerSec, (unsigned)ESP.getFreeHeap());
     }
   }
 

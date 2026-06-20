@@ -99,8 +99,8 @@ void ReaderOptionsActivity::openFontFamilyPicker() {
   // Reuse the global font picker; it returns a FontSelectionResult that we apply
   // to this book's override (the reader reloads the SD font + reflows on exit).
   startActivityForResult(
-      std::make_unique<FontSelectionActivity>(renderer, mappedInput, &sdFontSystem.registry(),
-                                              localOverride.fontFamily, std::string(localOverride.sdFontFamilyName)),
+      std::make_unique<FontSelectionActivity>(renderer, mappedInput, &sdFontSystem.registry(), localOverride.fontFamily,
+                                              std::string(localOverride.sdFontFamilyName)),
       [this](const ActivityResult& result) {
         if (std::holds_alternative<FontSelectionResult>(result.data)) {
           const auto& sel = std::get<FontSelectionResult>(result.data);
@@ -121,8 +121,7 @@ void ReaderOptionsActivity::openFontFamilyPicker() {
 void ReaderOptionsActivity::cycleCurrentItem() {
   switch (selectedIndex) {
     case FONT_SIZE:
-      localOverride.fontSize =
-          (localOverride.fontSize + 1) % static_cast<uint8_t>(CrossPointSettings::FONT_SIZE_COUNT);
+      localOverride.fontSize = (localOverride.fontSize + 1) % static_cast<uint8_t>(CrossPointSettings::FONT_SIZE_COUNT);
       break;
     case LINE_SPACING:
       localOverride.lineSpacing =
@@ -130,8 +129,7 @@ void ReaderOptionsActivity::cycleCurrentItem() {
       break;
     case PARA_ALIGNMENT:
       localOverride.paragraphAlignment =
-          (localOverride.paragraphAlignment + 1) %
-          static_cast<uint8_t>(CrossPointSettings::PARAGRAPH_ALIGNMENT_COUNT);
+          (localOverride.paragraphAlignment + 1) % static_cast<uint8_t>(CrossPointSettings::PARAGRAPH_ALIGNMENT_COUNT);
       break;
     case HYPHENATION:
       localOverride.hyphenationEnabled = localOverride.hyphenationEnabled ? 0 : 1;
@@ -194,15 +192,13 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
         return std::string(localOverride.sdFontFamilyName);
       }
       const StrId labels[] = {StrId::STR_NOTO_SERIF, StrId::STR_NOTO_SANS};
-      const uint8_t family = localOverride.fontFamily < CrossPointSettings::BUILTIN_FONT_COUNT
-                                 ? localOverride.fontFamily
-                                 : 0;
+      const uint8_t family =
+          localOverride.fontFamily < CrossPointSettings::BUILTIN_FONT_COUNT ? localOverride.fontFamily : 0;
       return I18N.get(labels[family]);
     }
     case FONT_SIZE: {
       const StrId labels[] = {StrId::STR_SMALL, StrId::STR_MEDIUM, StrId::STR_LARGE, StrId::STR_X_LARGE};
-      const uint8_t sz =
-          localOverride.fontSize < CrossPointSettings::FONT_SIZE_COUNT ? localOverride.fontSize : 0;
+      const uint8_t sz = localOverride.fontSize < CrossPointSettings::FONT_SIZE_COUNT ? localOverride.fontSize : 0;
       return I18N.get(labels[sz]);
     }
     case LINE_SPACING: {
@@ -212,8 +208,8 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
       return I18N.get(labels[sp]);
     }
     case PARA_ALIGNMENT: {
-      const StrId labels[] = {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, StrId::STR_CENTER,
-                               StrId::STR_ALIGN_RIGHT, StrId::STR_BOOK_S_STYLE};
+      const StrId labels[] = {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, StrId::STR_CENTER, StrId::STR_ALIGN_RIGHT,
+                              StrId::STR_BOOK_S_STYLE};
       const uint8_t al = localOverride.paragraphAlignment < CrossPointSettings::PARAGRAPH_ALIGNMENT_COUNT
                              ? localOverride.paragraphAlignment
                              : 0;

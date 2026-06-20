@@ -137,8 +137,7 @@ void StatsTimelineView::renderList(GfxRenderer& renderer, const Rect& rect) cons
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int rowHeight = timelineRowHeight(renderer);
   int rowY = rect.y;
-  for (size_t i = static_cast<size_t>(scrollOffset); i < rows.size() && rowY + rowHeight <= rect.y + rect.height;
-       ++i) {
+  for (size_t i = static_cast<size_t>(scrollOffset); i < rows.size() && rowY + rowHeight <= rect.y + rect.height; ++i) {
     const auto& row = rows[i];
     if (row.isSectionHeader) {
       renderer.drawText(UI_10_FONT_ID, rect.x + metrics.contentSidePadding, rowY + 5, row.label.c_str(), true,
@@ -162,8 +161,7 @@ void StatsTimelineView::renderEmptyState(GfxRenderer& renderer, const Rect& rect
   }
 }
 
-void StatsTimelineView::renderHeatmap(GfxRenderer& renderer, const Rect& rect,
-                                      const ReadingTimeHistory& history) {
+void StatsTimelineView::renderHeatmap(GfxRenderer& renderer, const Rect& rect, const ReadingTimeHistory& history) {
   if (!history.hasAnyData()) {
     renderEmptyState(renderer, rect);
     return;
@@ -216,9 +214,8 @@ void StatsTimelineView::renderHeatmap(GfxRenderer& renderer, const Rect& rect,
   const uint32_t anchorDay = history.heatmapAnchorDay;
   const uint32_t anchorRow = (static_cast<uint32_t>(readingHistoryDayOfWeek(anchorDay)) + 5U) % 7U;
   const uint32_t anchorWeekMonday = anchorDay - anchorRow;
-  const uint32_t oldestTrackedDay = anchorDay >= ReadingTimeHistory::HEATMAP_DAYS - 1
-                                        ? anchorDay - (ReadingTimeHistory::HEATMAP_DAYS - 1)
-                                        : 0;
+  const uint32_t oldestTrackedDay =
+      anchorDay >= ReadingTimeHistory::HEATMAP_DAYS - 1 ? anchorDay - (ReadingTimeHistory::HEATMAP_DAYS - 1) : 0;
 
   // Monday day-index of the week drawn in column `col` (0 = oldest/leftmost).
   const auto weekMonday = [&](int col) -> uint32_t {

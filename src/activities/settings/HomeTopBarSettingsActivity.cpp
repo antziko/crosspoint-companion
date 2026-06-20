@@ -10,12 +10,7 @@
 
 namespace {
 
-enum MenuItem {
-  ITEM_CLOCK = 0,
-  ITEM_DATE,
-  ITEM_DATE_FORMAT,
-  ITEM_COUNT
-};
+enum MenuItem { ITEM_CLOCK = 0, ITEM_DATE, ITEM_DATE_FORMAT, ITEM_COUNT };
 
 const StrId menuNames[ITEM_COUNT] = {
     StrId::STR_CLOCK,
@@ -25,7 +20,10 @@ const StrId menuNames[ITEM_COUNT] = {
 
 constexpr int DATE_FORMAT_ITEMS = 4;
 const StrId dateFormatNames[DATE_FORMAT_ITEMS] = {
-    StrId::STR_DATE_FMT_0, StrId::STR_DATE_FMT_1, StrId::STR_DATE_FMT_2, StrId::STR_DATE_FMT_3,
+    StrId::STR_DATE_FMT_0,
+    StrId::STR_DATE_FMT_1,
+    StrId::STR_DATE_FMT_2,
+    StrId::STR_DATE_FMT_3,
 };
 
 }  // namespace
@@ -98,8 +96,7 @@ void HomeTopBarSettingsActivity::render(RenderLock&&) {
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
-                 tr(STR_CUSTOMISE_TOP_BAR));
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_CUSTOMISE_TOP_BAR));
 
   const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
   const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;

@@ -8,9 +8,9 @@
 #include <WiFi.h>
 #include <esp_mac.h>
 #include <esp_task_wdt.h>
-#include <new>  // std::nothrow
 
 #include <cstddef>
+#include <new>  // std::nothrow
 
 #include "MappedInputManager.h"
 #include "NetworkModeSelectionActivity.h"

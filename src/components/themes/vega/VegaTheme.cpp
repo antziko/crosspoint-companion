@@ -128,9 +128,9 @@ HeroDetails loadHeroDetails(const RecentBook& book) {
   // Mirrors BookStatsActivity's "Est. left" estimate (BookStatsActivity.cpp:145-159):
   // cross-device total time projected across the remaining progress.
   if (details.hasProgress && details.hasDuration && details.progressPercent > 0 && details.progressPercent < 100) {
-    const uint64_t remaining = (static_cast<uint64_t>(stats.displayTotalSeconds()) *
-                                static_cast<uint64_t>(100 - details.progressPercent)) /
-                               static_cast<uint64_t>(details.progressPercent);
+    const uint64_t remaining =
+        (static_cast<uint64_t>(stats.displayTotalSeconds()) * static_cast<uint64_t>(100 - details.progressPercent)) /
+        static_cast<uint64_t>(details.progressPercent);
     BookReadingStats::formatDuration(static_cast<uint32_t>(std::min<uint64_t>(remaining, UINT32_MAX)),
                                      details.estRemainingText, sizeof(details.estRemainingText));
     details.hasEstRemaining = true;

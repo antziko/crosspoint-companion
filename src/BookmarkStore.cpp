@@ -82,16 +82,16 @@ bool keyMatchFull(bool aQuote, uint16_t aSpine, uint16_t aPara, float aProg, uin
 }
 
 bool sameBookmark(const Bookmark& a, const Bookmark& b) {
-  return keyMatchFull(a.quote, a.spineIndex, a.paragraphIndex, a.progress, a.startWord, a.endWord, b.quote, b.spineIndex,
-                      b.paragraphIndex, b.progress, b.startWord, b.endWord);
+  return keyMatchFull(a.quote, a.spineIndex, a.paragraphIndex, a.progress, a.startWord, a.endWord, b.quote,
+                      b.spineIndex, b.paragraphIndex, b.progress, b.startWord, b.endWord);
 }
 bool sameTomb(const Tombstone& a, const Tombstone& b) {
-  return keyMatchFull(a.quote, a.spineIndex, a.paragraphIndex, a.progress, a.startWord, a.endWord, b.quote, b.spineIndex,
-                      b.paragraphIndex, b.progress, b.startWord, b.endWord);
+  return keyMatchFull(a.quote, a.spineIndex, a.paragraphIndex, a.progress, a.startWord, a.endWord, b.quote,
+                      b.spineIndex, b.paragraphIndex, b.progress, b.startWord, b.endWord);
 }
 bool tombHits(const Tombstone& t, const Bookmark& b) {
-  return keyMatchFull(t.quote, t.spineIndex, t.paragraphIndex, t.progress, t.startWord, t.endWord, b.quote, b.spineIndex,
-                      b.paragraphIndex, b.progress, b.startWord, b.endWord);
+  return keyMatchFull(t.quote, t.spineIndex, t.paragraphIndex, t.progress, t.startWord, t.endWord, b.quote,
+                      b.spineIndex, b.paragraphIndex, b.progress, b.startWord, b.endWord);
 }
 
 // Rewrite the book-path string embedded in a relocated bookmark .bin (written at
@@ -257,7 +257,7 @@ BookmarkStore::AddResult BookmarkStore::addQuote(uint16_t spineIndex, float prog
   bm.progress = progress;
   bm.version = nextVersion();
   snprintf(bm.chapterTitle, sizeof(bm.chapterTitle), "%s", chapterTitle ? chapterTitle : "");
-  bm.paragraphIndex = UINT16_MAX;  // quotes are keyed by word range, not paragraph anchor
+  bm.paragraphIndex = UINT16_MAX;                                // quotes are keyed by word range, not paragraph anchor
   snprintf(bm.snippet, sizeof(bm.snippet), "%s", full.c_str());  // teaser for list + sync
   bm.returnMark = false;
   bm.chapterCurrentPage = static_cast<uint16_t>(currentPage < 0 ? 0 : currentPage);
@@ -1210,7 +1210,7 @@ void BookmarkStore::compactPreviews() const {
         if (len) out.write(buf.get(), len);
       }
     }
-    in.close();   // must close both before remove/rename on the same paths
+    in.close();  // must close both before remove/rename on the same paths
     out.close();
     ok = true;
   }

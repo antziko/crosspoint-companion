@@ -1,10 +1,9 @@
 #pragma once
-#include "../../BookmarkStore.h"
-
 #include <Epub.h>
 
 #include <memory>
 
+#include "../../BookmarkStore.h"
 #include "../Activity.h"
 #include "util/ButtonNavigator.h"
 

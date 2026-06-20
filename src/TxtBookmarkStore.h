@@ -18,7 +18,7 @@
 inline constexpr size_t TXT_BOOKMARK_SNIPPET_MAX = 64;
 
 struct TxtBookmark {
-  uint32_t page = 0;                          // 0-based page index
+  uint32_t page = 0;                            // 0-based page index
   char snippet[TXT_BOOKMARK_SNIPPET_MAX] = {};  // NUL-terminated display text
 };
 

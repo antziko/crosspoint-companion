@@ -21,7 +21,7 @@ class KOReaderServerListActivity final : public Activity {
  private:
   ButtonNavigator buttonNavigator;
   int selectedIndex = 0;
-  bool longPressFired = false;    // Swallow Confirm release after a hold-duplicate fires
+  bool longPressFired = false;      // Swallow Confirm release after a hold-duplicate fires
   bool confirmPressActive = false;  // True only when a Confirm press originated inside this activity
 
   int getItemCount() const;

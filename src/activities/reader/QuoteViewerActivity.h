@@ -34,10 +34,10 @@ class QuoteViewerActivity final : public Activity {
 
   // Absolute indices (into BOOKMARKS.getBookmarks()) of the quote rows, in list order.
   std::vector<size_t> quoteIndices_;
-  int currentPos_ = 0;   // position within quoteIndices_
-  int pageOffset_ = 0;   // first visible wrapped-line index
+  int currentPos_ = 0;  // position within quoteIndices_
+  int pageOffset_ = 0;  // first visible wrapped-line index
 
-  std::string previewText_;              // current quote's full text (only one resident)
+  std::string previewText_;  // current quote's full text (only one resident)
   std::vector<std::string> wrappedLines_;
   int lineHeight_ = 0;
   int linesPerPage_ = 0;
