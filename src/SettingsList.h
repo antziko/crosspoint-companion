@@ -250,7 +250,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   v.push_back(buildDictionarySetting(nullptr));
   v.push_back(SettingInfo::Value(
       StrId::STR_LOOKUP_HIST_CAP, &CrossPointSettings::lookupHistoryCap,
-      {CrossPointSettings::HIST_CAP_MIN, CrossPointSettings::HIST_CAP_MAX, CrossPointSettings::HIST_CAP_STEP},
+      {CrossPointSettings::HIST_CAP_MIN, CrossPointSettings::HIST_CAP_UNLIMITED, CrossPointSettings::HIST_CAP_STEP},
       "lookupHistoryCap", StrId::STR_READER_DICTIONARY));
   v.push_back(SettingInfo::Enum(StrId::STR_HOLD_CONFIRM, &CrossPointSettings::holdConfirmAction,
                                 {StrId::STR_STATE_OFF, StrId::STR_HOLD_CONFIRM_BOOKMARK, StrId::STR_HOLD_CONFIRM_DICT},

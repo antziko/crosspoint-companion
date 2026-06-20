@@ -57,6 +57,7 @@ class FileBrowserActivity final : public Activity {
   size_t totalFiles = 0;           // total matching non-directory entries (for the title count)
   size_t windowStartRank = 0;      // 0-based global rank of the window's first row (all entries)
   size_t windowStartFileRank = 0;  // 0-based files-only rank of the window's first row (for the "N." prefix)
+  int pagesUntilFullRefresh = 0;   // landscape ghost-scrub cadence counter (0 = scrub next render)
 
   // Window loading. loadWindow() does the single directory scan; the wrappers pick the mode.
   // NOTE: cursor is taken BY VALUE on purpose. pageDown/pageUp pass the winLast/winFirst members

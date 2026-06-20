@@ -482,6 +482,9 @@ void SettingsActivity::render(RenderLock&&) {
                        static_cast<unsigned int>(SETTINGS.*(setting.valuePtr)));
               valueText = valueBuffer;
             }
+          } else if (setting.nameId == StrId::STR_LOOKUP_HIST_CAP &&
+                     SETTINGS.*(setting.valuePtr) >= CrossPointSettings::HIST_CAP_UNLIMITED) {
+            valueText = tr(STR_UNLIMITED);
           } else {
             valueText = std::to_string(SETTINGS.*(setting.valuePtr));
           }

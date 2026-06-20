@@ -5,13 +5,16 @@
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
+#include <I18n.h>
 #include <Logging.h>
 
 #include <cstring>
 #include <string>
 
 #include "Bitmap.h"  // Required for BmpHeader struct definition
+#include "MappedInputManager.h"
 #include "activities/Activity.h"
+#include "components/UITheme.h"
 
 void ScreenshotUtil::buildFilename(const ScreenshotInfo& info, char* buf, size_t bufSize) {
   const unsigned long ts = millis();
@@ -99,6 +102,47 @@ void ScreenshotUtil::takeScreenshot(GfxRenderer& renderer) {
     renderer.restoreBwBuffer();
     renderer.displayBuffer(HalDisplay::RefreshMode::HALF_REFRESH);
   }
+}
+
+bool ScreenshotUtil::confirmScreenshot(GfxRenderer& renderer, MappedInputManager& input) {
+  // Need a scratch buffer to overlay the prompt and restore the screen afterwards.
+  // If unavailable (OOM), don't disable the feature — fall back to taking it directly.
+  if (!renderer.storeBwBuffer()) {
+    return true;
+  }
+
+  GUI.drawPopup(renderer, tr(STR_SCREENSHOT_CONFIRM));
+  const auto labels = input.mapLabels(tr(STR_CANCEL), tr(STR_SCREENSHOT_SAVE), "", "");
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  renderer.displayBuffer();
+
+  // Wait for the trigger combo (Power+Back) to fully release so its own buttons
+  // aren't read as the user's answer, then drain the release edges.
+  const uint32_t guardStart = millis();
+  while ((input.isPressed(MappedInputManager::Button::Power) || input.isPressed(MappedInputManager::Button::Back)) &&
+         millis() - guardStart < 5000) {
+    input.update();
+    delay(10);
+  }
+  input.update();  // consume combo-release edges so they aren't seen as Cancel
+
+  bool confirmed = false;
+  const uint32_t start = millis();
+  while (millis() - start < 15000) {  // timeout -> Cancel (nothing saved)
+    input.update();
+    if (input.wasReleased(MappedInputManager::Button::Confirm)) {
+      confirmed = true;
+      break;
+    }
+    if (input.wasReleased(MappedInputManager::Button::Back) || input.wasReleased(MappedInputManager::Button::Power)) {
+      break;
+    }
+    delay(10);
+  }
+
+  renderer.restoreBwBuffer();
+  renderer.displayBuffer(HalDisplay::RefreshMode::HALF_REFRESH);
+  return confirmed;
 }
 
 bool ScreenshotUtil::saveFramebufferAsBmp(const char* filename, const uint8_t* framebuffer, int width, int height) {

@@ -482,9 +482,10 @@ void setup() {
   // this per-book; non-reader UI keeps it mirroring the global setting.
   APP_STATE.activeOrientation = SETTINGS.orientation;
 
-  // Clamp lookup history cap to valid range
+  // Clamp lookup history cap to a valid step in [MIN, UNLIMITED] (UNLIMITED is the
+  // top sentinel = no eviction).
   if (SETTINGS.lookupHistoryCap < CrossPointSettings::HIST_CAP_MIN ||
-      SETTINGS.lookupHistoryCap > CrossPointSettings::HIST_CAP_MAX ||
+      SETTINGS.lookupHistoryCap > CrossPointSettings::HIST_CAP_UNLIMITED ||
       SETTINGS.lookupHistoryCap % CrossPointSettings::HIST_CAP_STEP != 0) {
     SETTINGS.lookupHistoryCap = CrossPointSettings::HIST_CAP_DEFAULT;
   }
@@ -724,7 +725,12 @@ void loop() {
       screenshotButtonsReleased = false;
       {
         RenderLock lock;
-        ScreenshotUtil::takeScreenshot(renderer);
+        // Confirm first so a mistaken Power+Back doesn't silently save a screenshot.
+        // The modal waits for the combo to release, so on return the buttons are up;
+        // the post-combo handler below resets the latch on the next iteration.
+        if (ScreenshotUtil::confirmScreenshot(renderer, mappedInputManager)) {
+          ScreenshotUtil::takeScreenshot(renderer);
+        }
       }
     }
     return;

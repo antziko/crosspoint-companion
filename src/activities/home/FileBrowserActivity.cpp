@@ -665,5 +665,20 @@ void FileBrowserActivity::render(RenderLock&&) {
                                             files.empty() ? "" : tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
-  renderer.displayBuffer();
+  // FAST_REFRESH is a differential waveform that resolves cleanly only in the
+  // panel's native portrait scan direction; in landscape repeated up/down
+  // accumulates DC bias into progressive whitening. Keep FAST (snappy) and scrub
+  // with one HALF every N moves (N = the user's Refresh Frequency) instead of
+  // paying HALF on every move. Portrait stays pure FAST (no washout there).
+  const auto orient = renderer.getOrientation();
+  const bool landscape = orient == GfxRenderer::Orientation::LandscapeClockwise ||
+                         orient == GfxRenderer::Orientation::LandscapeCounterClockwise;
+  // Entry render scrubs (counter starts at 0) for a clean baseline, then FAST until
+  // the next periodic HALF (insurance for the X3 turbo path; X4 FAST self-resyncs).
+  HalDisplay::RefreshMode mode = HalDisplay::FAST_REFRESH;
+  if (landscape && --pagesUntilFullRefresh <= 0) {
+    mode = HalDisplay::HALF_REFRESH;
+    pagesUntilFullRefresh = std::max(1, SETTINGS.getRefreshFrequency());
+  }
+  renderer.displayBuffer(mode);
 }

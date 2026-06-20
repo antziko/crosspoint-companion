@@ -29,6 +29,7 @@
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/LookupHistory.h"
 
 namespace {
 void syncTimeWithNTP() {
@@ -368,6 +369,40 @@ void KOReaderSyncActivity::syncStats() {
   const uint32_t prevLocalSeconds = stats.totalReadingSeconds;
   const uint32_t prevRemoteSeconds = stats.remoteOtherSeconds;
 
+  // Per-book dictionary-history cross-device merge (Lamport-versioned). Serialize
+  // OUR history pre-merge for upload; the fold below merges every OTHER device's
+  // "dh" blob into the local history during the stats GET. Gated on free heap as a
+  // backstop only: the serialize/decode buffers are nothrow (null -> skipped) and
+  // the response buffer is hard-capped, so this just avoids attempting when heap is
+  // genuinely too low. Kept well below the typical reader-context free heap so it
+  // doesn't spuriously skip on the constrained X3/X4.
+  constexpr uint32_t kDictSyncMinHeap = 48 * 1024;
+  constexpr size_t kDictBlobCap = 4096;
+  const bool doDictSync = ESP.getFreeHeap() > kDictSyncMinHeap;
+  std::unique_ptr<uint8_t[]> dictUp;
+  size_t dictUpLen = 0;
+  struct DictMergeCtx {
+    const std::string* cachePath;
+    int merged;   // remote adds applied
+    int deleted;  // remote deletes applied
+  } dictMergeCtx{&cachePath, 0, 0};
+  StatsDatedFold dictFold;
+  if (doDictSync) {
+    dictUp = makeUniqueNoThrow<uint8_t[]>(kDictBlobCap);
+    if (dictUp)
+      dictUpLen =
+          LookupHistory::serializeBlob(cachePath, dictUp.get(), kDictBlobCap, &dictUploadedWords, &dictUploadedDeletes);
+    dictFold.ctx = &dictMergeCtx;
+    dictFold.fn = [](void* ctx, const uint8_t* blob, size_t len) {
+      auto* c = static_cast<DictMergeCtx*>(ctx);
+      int del = 0;
+      c->merged += LookupHistory::mergeBlob(*c->cachePath, blob, len, &del);
+      c->deleted += del;
+    };
+  } else {
+    LOG_DBG("KOSync", "Low heap (%u); skipping dict history sync", (unsigned)ESP.getFreeHeap());
+  }
+
   // Heap, not stack: 8 entries is ~290 bytes — over the 256-byte stack-local
   // guideline. Reused below for the global-counter phase.
   auto entriesBuf = makeUniqueNoThrow<KOReaderStatsEntry[]>(KOReaderSyncClient::MAX_STATS_DEVICES);
@@ -378,8 +413,10 @@ void KOReaderSyncActivity::syncStats() {
   KOReaderStatsEntry* entries = entriesBuf.get();
 
   // Pull every device's counter. NOT_FOUND = server has nothing yet; still upload ours.
+  // The dict fold (when enabled) merges other devices' lookup history during this GET.
   size_t count = 0;
-  const auto getResult = KOReaderSyncClient::getStats(documentHash, entries, count);
+  const auto getResult =
+      KOReaderSyncClient::getStats(documentHash, entries, count, nullptr, doDictSync ? &dictFold : nullptr);
   statsFetchOk = (getResult == KOReaderSyncClient::OK || getResult == KOReaderSyncClient::NOT_FOUND);
   if (statsFetchOk) {
     uint32_t othersSeconds = 0;
@@ -425,7 +462,9 @@ void KOReaderSyncActivity::syncStats() {
   mine.lastReadDayIndex = stats.lastReadDayIndex;
   mine.lastReadHour = stats.lastReadHour;
   mine.lastReadMinute = stats.lastReadMinute;
-  const auto putResult = KOReaderSyncClient::updateStats(documentHash, mine);
+  // Upload our scalar counters + our (pre-merge) dictionary-history blob in "dh".
+  const auto putResult =
+      KOReaderSyncClient::updateStats(documentHash, mine, nullptr, 0, dictUp ? dictUp.get() : nullptr, dictUpLen);
   statsUploadOk = (putResult == KOReaderSyncClient::OK);
   if (!statsUploadOk) {
     LOG_ERR("KOSync", "Stats upload failed: %s", KOReaderSyncClient::errorString(putResult));
@@ -450,9 +489,19 @@ void KOReaderSyncActivity::syncStats() {
   }
   statsTotalAllDevices = stats.displayTotalSeconds();
   statsSynced = true;
-  SdDebugLog::log("KOSync", "stats sync: local=%lu others=%lu fetch=%d upload=%d",
+
+  // Dictionary-history merge result (surfaced in the "Also synced" footer). Report
+  // whenever we attempted it (even +0, so there's confirmation it ran); flag the
+  // low-heap skip distinctly so a missing line is never silent.
+  dictSynced = doDictSync;
+  dictSkippedLowHeap = !doDictSync;
+  dictMergedWords = dictMergeCtx.merged;
+  dictDeletedWords = dictMergeCtx.deleted;
+
+  SdDebugLog::log("KOSync", "stats sync: local=%lu others=%lu fetch=%d upload=%d dictUp=%d/%d dictMerged=%d dictDel=%d",
                   static_cast<unsigned long>(stats.totalReadingSeconds),
-                  static_cast<unsigned long>(stats.remoteOtherSeconds), statsFetchOk ? 1 : 0, statsUploadOk ? 1 : 0);
+                  static_cast<unsigned long>(stats.remoteOtherSeconds), statsFetchOk ? 1 : 0, statsUploadOk ? 1 : 0,
+                  dictUploadedWords, dictUploadedDeletes, dictMergedWords, dictDeletedWords);
 
   // --- Global (all-books) counter, same per-device scheme under a reserved
   // pseudo-document. The name can't collide with real documents: binary-mode
@@ -652,7 +701,6 @@ void KOReaderSyncActivity::render(RenderLock&&) {
     // Vertical rhythm — one place to tune, no scattered top+NN literals. A running
     // `y` cursor advances by these named steps instead of hardcoded offsets.
     const int lhData = renderer.getLineHeight(UI_10_FONT_ID);
-    const int lhLabel = renderer.getLineHeight(UI_12_FONT_ID);
     const int lhFoot = renderer.getLineHeight(UI_10_FONT_ID);
     const int DATA_ROW = lhData + 3;   // step between data lines in a card
     const int LABEL_ROW = lhData + 2;  // card label line (Remote:/Local:, now UI_10 bold)
@@ -660,13 +708,8 @@ void KOReaderSyncActivity::render(RenderLock&&) {
     const int CARD_GAP = 10;           // between remote card and local card
     const int detailX = sideX + 12;    // chapter/page indent under the card label
     const int SECTION_GAP = 10;        // generic block gap
-    const int TITLE_GAP = 18;          // breathing room under "Progress found!"
 
     int y = screen.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-
-    // --- Title ---
-    renderer.drawCenteredText(UI_12_FONT_ID, y, tr(STR_PROGRESS_FOUND), true, EpdFontFamily::BOLD);
-    y += lhLabel + TITLE_GAP;
 
     // Chapter names: remote needs the live Epub (loaded lazily in performSync before
     // this state); local was pre-computed before the Epub was released.
@@ -736,7 +779,7 @@ void KOReaderSyncActivity::render(RenderLock&&) {
 
     // --- "Also synced" footer: bookmarks + reading stats always merge, so they are
     // passive info, not a choice. Extra gap above separates it from the choice buttons.
-    if (bmSynced || statsSynced) {
+    if (bmSynced || statsSynced || dictSynced || dictSkippedLowHeap) {
       y += SECTION_GAP;
       renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_ALSO_SYNCED), true, EpdFontFamily::BOLD);
       y += lhFoot + 2;
@@ -756,8 +799,27 @@ void KOReaderSyncActivity::render(RenderLock&&) {
         renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
         y += lhFoot + 2;
       }
+      if (dictSynced) {
+        if (bmSynced) y += 6;  // separate from the bookmark block above
+        snprintf(buf, sizeof(buf), tr(STR_SYNC_DICT_FORMAT), dictUploadedWords, dictUploadedDeletes, dictMergedWords,
+                 dictDeletedWords);
+        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+        y += lhFoot + 2;
+        // Dict rides the stats GET/PUT, so its fetch/upload status is the stats one.
+        char dStatus[64];
+        snprintf(dStatus, sizeof(dStatus), tr(STR_BOOKMARK_SYNC_STATUS_FORMAT),
+                 statsFetchOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER),
+                 statsUploadOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER));
+        snprintf(buf, sizeof(buf), "  %s", dStatus);
+        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+        y += lhFoot + 2;
+      } else if (dictSkippedLowHeap) {
+        if (bmSynced) y += 6;
+        renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_SYNC_DICT_SKIPPED));
+        y += lhFoot + 2;
+      }
       if (statsSynced) {
-        if (bmSynced) y += 6;  // separate reading time from the bookmark block above
+        if (bmSynced || dictSynced || dictSkippedLowHeap) y += 6;  // reading time sits at the bottom
         char durBuf[24];
         BookReadingStats::formatDuration(statsTotalAllDevices, durBuf, sizeof(durBuf));
         snprintf(buf, sizeof(buf), tr(STR_STATS_ALL_DEVICES_FORMAT), durBuf);
@@ -786,7 +848,7 @@ void KOReaderSyncActivity::render(RenderLock&&) {
     y += renderer.getLineHeight(UI_10_FONT_ID) + SECTION_GAP;
 
     // Same "Also synced" footer as SHOWING_RESULT: passive info, extra gap above.
-    if (bmSynced || statsSynced) {
+    if (bmSynced || statsSynced || dictSynced || dictSkippedLowHeap) {
       y += SECTION_GAP;
       renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_ALSO_SYNCED), true, EpdFontFamily::BOLD);
       y += lhFoot + 2;
@@ -806,8 +868,26 @@ void KOReaderSyncActivity::render(RenderLock&&) {
         renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
         y += lhFoot + 2;
       }
+      if (dictSynced) {
+        if (bmSynced) y += 6;  // separate from the bookmark block above
+        snprintf(buf, sizeof(buf), tr(STR_SYNC_DICT_FORMAT), dictUploadedWords, dictUploadedDeletes, dictMergedWords,
+                 dictDeletedWords);
+        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+        y += lhFoot + 2;
+        char dStatus[64];
+        snprintf(dStatus, sizeof(dStatus), tr(STR_BOOKMARK_SYNC_STATUS_FORMAT),
+                 statsFetchOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER),
+                 statsUploadOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER));
+        snprintf(buf, sizeof(buf), "  %s", dStatus);
+        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+        y += lhFoot + 2;
+      } else if (dictSkippedLowHeap) {
+        if (bmSynced) y += 6;
+        renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_SYNC_DICT_SKIPPED));
+        y += lhFoot + 2;
+      }
       if (statsSynced) {
-        if (bmSynced) y += 6;  // separate reading time from the bookmark block above
+        if (bmSynced || dictSynced || dictSkippedLowHeap) y += 6;  // reading time sits at the bottom
         char durBuf[24];
         BookReadingStats::formatDuration(statsTotalAllDevices, durBuf, sizeof(durBuf));
         snprintf(buf, sizeof(buf), tr(STR_STATS_ALL_DEVICES_FORMAT), durBuf);

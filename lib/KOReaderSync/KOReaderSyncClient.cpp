@@ -27,6 +27,16 @@ char statsServerTagBuf[32] = {0};
 // is 876; round up for headroom). Bounds the single reusable decode buffer in the
 // streaming fold — a malformed/oversized "h" is rejected rather than allocated for.
 constexpr size_t kStatsDatedMaxBytes = 1024;
+
+// Upper bound on a decoded per-book dictionary-history blob ("dh"). Matches the
+// 4 KB serializeBlob cap on the sender; bounds the reusable decode buffer.
+constexpr size_t kStatsDictMaxBytes = 4096;
+
+// Hard ceiling on a single HTTP response body. The stats GET aggregates every
+// device's blob (each may carry a base64 "dh" up to ~5.5 KB), so the body scales
+// with device count; cap the unbounded realloc so a pathological response fails
+// clean instead of exhausting the heap. 64 KB covers the realistic device range.
+constexpr int kMaxResponseBytes = 64 * 1024;
 }  // namespace
 
 const char* KOReaderSyncClient::deviceId() {
@@ -111,6 +121,7 @@ struct ResponseBuffer {
 
   bool ensure(int size) {
     if (size <= capacity) return true;
+    if (size > kMaxResponseBytes) return false;  // reject pathological responses, don't grow unbounded
     char* newData = (char*)realloc(data, size);
     if (!newData) return false;
     data = newData;
@@ -496,7 +507,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
 }
 
 KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& documentHash, KOReaderStatsEntry* outEntries,
-                                                       size_t& outCount, const StatsDatedFold* fold) {
+                                                       size_t& outCount, const StatsDatedFold* fold,
+                                                       const StatsDatedFold* dictFold) {
   lastHttpCode = 0;
   outCount = 0;
   if (!KOREADER_STORE.hasCredentials()) {
@@ -544,6 +556,12 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
       datedBuf = makeUniqueNoThrow<uint8_t[]>(kStatsDatedMaxBytes);
       if (!datedBuf) LOG_ERR("KOSync", "OOM: dated fold buffer (%u)", (unsigned)kStatsDatedMaxBytes);
     }
+    // Separate reusable decode buffer for the per-book dictionary-history "dh" fold.
+    std::unique_ptr<uint8_t[]> dictBuf;
+    if (dictFold && dictFold->fn) {
+      dictBuf = makeUniqueNoThrow<uint8_t[]>(kStatsDictMaxBytes);
+      if (!dictBuf) LOG_ERR("KOSync", "OOM: dict fold buffer (%u)", (unsigned)kStatsDictMaxBytes);
+    }
 
     for (JsonPairConst kv : doc["stats"].as<JsonObjectConst>()) {
       if (outCount >= MAX_STATS_DEVICES) {
@@ -570,7 +588,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
 
       // Fold this device's dated history (OTHER devices only — local history is the
       // source of truth and is uploaded, not merged back in).
-      if (datedBuf && strcmp(kv.key().c_str(), deviceId()) != 0) {
+      const bool isOther = strcmp(kv.key().c_str(), deviceId()) != 0;
+      if (datedBuf && isOther) {
         const char* hb64 = blobDoc["h"].as<const char*>();
         if (hb64 && hb64[0]) {
           size_t dlen = 0;
@@ -580,6 +599,20 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
             fold->fn(fold->ctx, datedBuf.get(), dlen);
           } else {
             LOG_DBG("KOSync", "Skipping bad dated blob for %s (rc=%d)", kv.key().c_str(), rc);
+          }
+        }
+      }
+      // Fold this device's dictionary history ("dh", OTHER devices only).
+      if (dictBuf && isOther) {
+        const char* dhb64 = blobDoc["dh"].as<const char*>();
+        if (dhb64 && dhb64[0]) {
+          size_t dlen = 0;
+          const int rc = mbedtls_base64_decode(dictBuf.get(), kStatsDictMaxBytes, &dlen,
+                                               reinterpret_cast<const unsigned char*>(dhb64), strlen(dhb64));
+          if (rc == 0 && dlen > 0) {
+            dictFold->fn(dictFold->ctx, dictBuf.get(), dlen);
+          } else {
+            LOG_DBG("KOSync", "Skipping bad dict blob for %s (rc=%d)", kv.key().c_str(), rc);
           }
         }
       }
@@ -595,7 +628,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
 
 KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& documentHash,
                                                           const KOReaderStatsEntry& entry, const uint8_t* dated,
-                                                          size_t datedLen) {
+                                                          size_t datedLen, const uint8_t* dict, size_t dictLen) {
   lastHttpCode = 0;
   if (!KOREADER_STORE.hasCredentials()) {
     LOG_DBG("KOSync", "No credentials configured");
@@ -609,39 +642,43 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& doc
 
   // The per-device counters are sent as a pre-serialized JSON string field so the
   // server stores the blob verbatim under this device's hash field (other devices'
-  // blobs are untouched). Worst case ~46 chars, so a 64-byte stack buffer fits.
-  char blob[64];
-  snprintf(blob, sizeof(blob), "{\"s\":%lu,\"lr\":%lu,\"lh\":%u,\"lm\":%u}", static_cast<unsigned long>(entry.seconds),
-           static_cast<unsigned long>(entry.lastReadDayIndex), entry.lastReadHour, entry.lastReadMinute);
+  // blobs are untouched). Optional base64 "h" (dated reading-history) and "dh"
+  // (per-book dictionary-history) sections are spliced in before the closing brace.
+  // base64 uses A-Za-z0-9+/= — none need JSON-string escaping.
+  std::string statsBlob;  // outlives serializeJson below
+  statsBlob.reserve(64);
+  {
+    char scalar[64];
+    const int sn = snprintf(
+        scalar, sizeof(scalar), "{\"s\":%lu,\"lr\":%lu,\"lh\":%u,\"lm\":%u}", static_cast<unsigned long>(entry.seconds),
+        static_cast<unsigned long>(entry.lastReadDayIndex), entry.lastReadHour, entry.lastReadMinute);
+    statsBlob.assign(scalar, sn - 1);  // drop trailing '}'; re-added after the optional fields
+  }
+
+  auto appendB64Field = [&statsBlob](const char* name, const uint8_t* data, size_t dataLen) {
+    if (!data || dataLen == 0) return;
+    size_t encLen = 0;
+    mbedtls_base64_encode(nullptr, 0, &encLen, data, dataLen);  // query size (incl NUL)
+    auto enc = makeUniqueNoThrow<unsigned char[]>(encLen > 0 ? encLen : 1);
+    size_t written = 0;
+    if (enc && mbedtls_base64_encode(enc.get(), encLen, &written, data, dataLen) == 0) {
+      statsBlob += ",\"";
+      statsBlob += name;
+      statsBlob += "\":\"";
+      statsBlob.append(reinterpret_cast<const char*>(enc.get()), written);
+      statsBlob += "\"";
+    } else {
+      LOG_ERR("KOSync", "Stats base64 encode failed for \"%s\"; field omitted", name);
+    }
+  };
+  appendB64Field("h", dated, datedLen);
+  appendB64Field("dh", dict, dictLen);
+  statsBlob += "}";
 
   JsonDocument doc;
   doc["document"] = documentHash;
   doc["device_id"] = deviceId();
-
-  // Without a dated section, store the small scalar blob verbatim (per-book path).
-  // With one, splice an "h":"<base64>" field in before the closing brace (global
-  // pseudo-doc only). base64 uses A-Za-z0-9+/= — none need JSON-string escaping.
-  std::string datedBlob;  // outlives serializeJson below
-  if (dated && datedLen > 0) {
-    size_t encLen = 0;
-    mbedtls_base64_encode(nullptr, 0, &encLen, dated, datedLen);  // query size (incl NUL)
-    auto enc = makeUniqueNoThrow<unsigned char[]>(encLen > 0 ? encLen : 1);
-    size_t written = 0;
-    if (enc && mbedtls_base64_encode(enc.get(), encLen, &written, dated, datedLen) == 0) {
-      const size_t scalarLen = strlen(blob);  // drop trailing '}'
-      datedBlob.reserve(scalarLen + written + 8);
-      datedBlob.assign(blob, scalarLen - 1);
-      datedBlob += ",\"h\":\"";
-      datedBlob.append(reinterpret_cast<const char*>(enc.get()), written);
-      datedBlob += "\"}";
-      doc["stats"] = datedBlob;
-    } else {
-      LOG_ERR("KOSync", "Dated stats base64 encode failed; sending scalar only");
-      doc["stats"] = blob;
-    }
-  } else {
-    doc["stats"] = blob;
-  }
+  doc["stats"] = statsBlob;
 
   std::string body;
   serializeJson(doc, body);

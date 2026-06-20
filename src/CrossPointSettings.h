@@ -358,9 +358,13 @@ class CrossPointSettings {
   uint8_t imageDither = DITHER_BLUE_NOISE;
   // Lookup history entry cap (direct value)
   static constexpr uint8_t HIST_CAP_MIN = 25;
-  static constexpr uint8_t HIST_CAP_MAX = 225;
+  static constexpr uint8_t HIST_CAP_MAX = 225;  // highest finite cap
   static constexpr uint8_t HIST_CAP_STEP = 25;
   static constexpr uint8_t HIST_CAP_DEFAULT = 100;
+  // Sentinel one step above HIST_CAP_MAX: history grows without eviction. Only
+  // RAM-safe because the history-list UI pages a fixed window (never materializes
+  // the whole file). See LookupHistory / LookedUpWordsActivity.
+  static constexpr uint8_t HIST_CAP_UNLIMITED = HIST_CAP_MAX + HIST_CAP_STEP;  // 250
   uint8_t lookupHistoryCap = HIST_CAP_DEFAULT;
   // Action triggered by holding Confirm in the reader.
   // OFF: no action (default). BOOKMARK: add bookmark @ BOOKMARK_HOLD_MS (400ms).
@@ -405,6 +409,7 @@ class CrossPointSettings {
   int getDefinitionFontId() const;
   float getDefinitionLineCompression() const;
   int getLookupHistoryCapValue() const { return lookupHistoryCap; }
+  bool isLookupHistoryUnlimited() const { return lookupHistoryCap >= HIST_CAP_UNLIMITED; }
 
   // Per-book override control.
   void setReaderOverride(const ReaderOverride& ov);

@@ -90,6 +90,12 @@ class KOReaderSyncActivity final : public Activity {
   bool statsFetchOk = false;          // GET reached the server (OK or NOT_FOUND)
   bool statsUploadOk = false;         // PUT of this device's counter succeeded
   uint32_t statsTotalAllDevices = 0;  // local counter + sum of other devices' counters
+  bool dictSynced = false;            // True once a dictionary-history merge attempt ran
+  bool dictSkippedLowHeap = false;    // True if dict sync was skipped for low free heap
+  int dictMergedWords = 0;            // remote adds merged in from other devices
+  int dictDeletedWords = 0;           // remote deletes applied from other devices
+  int dictUploadedWords = 0;          // our own history entries uploaded in "dh"
+  int dictUploadedDeletes = 0;        // our own tombstones (deletes) uploaded in "dh"
   // Server build clue for the page header: tag echoed by the stats PUT
   // ("stats-v1"), "no stats" when the endpoint 404'd, empty while unknown.
   char serverTag[32] = {0};

@@ -116,10 +116,13 @@ class KOReaderSyncClient {
    *   device's base64-decoded "h" section is passed to fold->fn for the caller to
    *   merge (cross-device dated history). Self entry and entries without "h" are
    *   skipped. Used only for the global pseudo-document.
+   * @param dictFold Optional dictionary-history fold callback. Same contract as
+   *   `fold` but for each OTHER device's base64-decoded "dh" section (per-book
+   *   lookup-history merge). Self entry and entries without "dh" are skipped.
    * @return OK on success, NOT_FOUND if no stats exist, error code on failure
    */
   static Error getStats(const std::string& documentHash, KOReaderStatsEntry* outEntries, size_t& outCount,
-                        const StatsDatedFold* fold = nullptr);
+                        const StatsDatedFold* fold = nullptr, const StatsDatedFold* dictFold = nullptr);
 
   /**
    * Replace THIS device's stats blob for a document (self-hosted server extension).
@@ -130,10 +133,14 @@ class KOReaderSyncClient {
    *   they are base64-encoded into an "h" field appended to the stats blob (global
    *   pseudo-document only — per-book PUTs pass nullptr and keep the small blob).
    * @param datedLen Length of `dated` in bytes (ignored when dated is null).
+   * @param dict Optional per-book dictionary-history blob (LookupHistory::serializeBlob);
+   *   when non-null it is base64-encoded into a "dh" field appended to the stats blob.
+   * @param dictLen Length of `dict` in bytes (ignored when dict is null).
    * @return OK on success, error code on failure
    */
   static Error updateStats(const std::string& documentHash, const KOReaderStatsEntry& entry,
-                           const uint8_t* dated = nullptr, size_t datedLen = 0);
+                           const uint8_t* dated = nullptr, size_t datedLen = 0, const uint8_t* dict = nullptr,
+                           size_t dictLen = 0);
 
   /**
    * Unique, stable per-chip device id ("crosspoint-<efuse mac hex>") sent as

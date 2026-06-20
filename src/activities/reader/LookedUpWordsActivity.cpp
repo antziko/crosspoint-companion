@@ -5,6 +5,7 @@
 
 #include <algorithm>
 
+#include "CrossPointSettings.h"
 #include "DictionaryDefinitionActivity.h"
 #include "MappedInputManager.h"
 #include "components/UITheme.h"
@@ -32,8 +33,25 @@ const char* LookedUpWordsActivity::glyphFor(LookupHistory::Status s) {
 
 void LookedUpWordsActivity::onEnter() {
   Activity::onEnter();
-  entries = LookupHistory::load(cachePath);
+  refreshCount();
   requestUpdate();
+}
+
+void LookedUpWordsActivity::refreshCount() {
+  totalCount = LookupHistory::count(cachePath);
+  windowStart = -1;  // invalidate cached page
+  windowLen = 0;
+}
+
+const LookupHistory::Entry* LookedUpWordsActivity::entryAt(int uiIndex) {
+  if (uiIndex < 0 || uiIndex >= totalCount) return nullptr;
+  if (windowStart < 0 || uiIndex < windowStart || uiIndex >= windowStart + windowLen) {
+    windowStart = uiIndex;  // drawList enters each page at its first index
+    windowLen = LookupHistory::loadWindow(cachePath, windowStart, WINDOW_CAP, window);
+  }
+  const int off = uiIndex - windowStart;
+  if (off < 0 || off >= windowLen) return nullptr;
+  return &window[off];
 }
 
 void LookedUpWordsActivity::onExit() {
@@ -50,7 +68,7 @@ void LookedUpWordsActivity::loop() {
                                    true, cachePath, controller.getRecordHistory(), controller.getLookupWord(),
                                    DictionaryLookupController::toHistStatus(controller.getFoundStatus())),
                                [this](const ActivityResult& result) {
-                                 entries = LookupHistory::load(cachePath);
+                                 refreshCount();
                                  if (!result.isCancelled) {
                                    setResult(ActivityResult{});
                                    finish();
@@ -61,7 +79,7 @@ void LookedUpWordsActivity::loop() {
         break;
       }
       case DictionaryLookupController::LookupEvent::NotFoundDismissedBack:
-        entries = LookupHistory::load(cachePath);
+        refreshCount();
         requestUpdate();
         break;
       case DictionaryLookupController::LookupEvent::NotFoundDismissedDone:
@@ -77,7 +95,7 @@ void LookedUpWordsActivity::loop() {
     return;
   }
 
-  if (entries.empty()) {
+  if (totalCount == 0) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
       DictUtils::cancelAndFinish(*this);
     }
@@ -101,10 +119,10 @@ void LookedUpWordsActivity::loop() {
     }
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       LookupHistory::removeAt(cachePath, fileIndexOf(selectedIndex));
-      entries = LookupHistory::load(cachePath);
+      refreshCount();
       deleteConfirmMode = false;
-      if (selectedIndex >= static_cast<int>(entries.size())) {
-        selectedIndex = std::max(0, static_cast<int>(entries.size()) - 1);
+      if (selectedIndex >= totalCount) {
+        selectedIndex = std::max(0, totalCount - 1);
       }
       requestUpdate();
       return;
@@ -117,7 +135,7 @@ void LookedUpWordsActivity::loop() {
     return;
   }
 
-  const int totalItems = static_cast<int>(entries.size());
+  const int totalItems = totalCount;
   const int pageItems = UITheme::getNumberOfItemsPerPage(renderer, true, false, true, false);
 
   buttonNavigator.onNextRelease([this, totalItems] {
@@ -138,7 +156,7 @@ void LookedUpWordsActivity::loop() {
   });
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    controller.startLookup(entries[selectedIndex].word);
+    if (const auto* e = entryAt(selectedIndex)) controller.startLookup(e->word);
     return;
   }
 
@@ -146,6 +164,27 @@ void LookedUpWordsActivity::loop() {
     DictUtils::cancelAndFinish(*this);
     return;
   }
+}
+
+void LookedUpWordsActivity::displayList() {
+  // FAST_REFRESH is a differential (turbo) waveform that resolves cleanly only in
+  // the panel's native portrait scan direction; in landscape repeated up/down
+  // accumulates DC bias into progressive whitening. Rather than pay the slow
+  // HALF_REFRESH on every move, keep FAST and scrub with one HALF every N moves
+  // (N = the user's Refresh Frequency) — the same fast/periodic-clean cadence the
+  // reader uses for page turns. Portrait stays pure FAST (no washout there).
+  const auto o = renderer.getOrientation();
+  const bool landscape =
+      o == GfxRenderer::Orientation::LandscapeClockwise || o == GfxRenderer::Orientation::LandscapeCounterClockwise;
+  // Entry render scrubs (counter starts at 0) for a clean baseline, then FAST until
+  // the next periodic HALF. On X4, FAST re-syncs the reference plane every frame so
+  // it stays clean regardless; the scrub matters for the X3 turbo path.
+  HalDisplay::RefreshMode mode = HalDisplay::FAST_REFRESH;
+  if (landscape && --pagesUntilFullRefresh <= 0) {
+    mode = HalDisplay::HALF_REFRESH;
+    pagesUntilFullRefresh = std::max(1, SETTINGS.getRefreshFrequency());
+  }
+  renderer.displayBuffer(mode);
 }
 
 void LookedUpWordsActivity::render(RenderLock&&) {
@@ -156,32 +195,47 @@ void LookedUpWordsActivity::render(RenderLock&&) {
   const int pageHeight = renderer.getScreenHeight();
   const auto& metrics = UITheme::getInstance().getMetrics();
 
+  // Same row count the nav uses (orientation-aware: drops the bottom button-hints
+  // reservation in landscape). Drives both the page indicator and the list height,
+  // so render and navigation always agree on rows-per-page.
+  const int pageItems = std::max(1, UITheme::getNumberOfItemsPerPage(renderer, true, false, true, false));
+  const int curPage = selectedIndex / pageItems + 1;
+  const int totalPages = std::max(1, (totalCount + pageItems - 1) / pageItems);
+
   char titleBuf[64];
-  snprintf(titleBuf, sizeof(titleBuf), "%s (%u)", tr(STR_LOOKUP_HISTORY),
-           static_cast<unsigned>(entries.size()));
+  snprintf(titleBuf, sizeof(titleBuf), tr(STR_LOOKUP_HIST_HEADER_FORMAT), tr(STR_LOOKUP_HISTORY),
+           static_cast<int>(totalCount), curPage, totalPages);
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, titleBuf);
 
   const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
 
-  if (entries.empty()) {
+  if (totalCount == 0) {
     const int midY = contentTop + (pageHeight - contentTop - metrics.buttonHintsHeight) / 2;
     renderer.drawCenteredText(UI_10_FONT_ID, midY, tr(STR_LOOKUP_HISTORY_EMPTY));
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    displayList();
     return;
   }
 
-  const int contentHeight = pageHeight - metrics.buttonHintsHeight - contentTop - metrics.verticalSpacing;
+  // Size the list to exactly `pageItems` rows so drawList renders every row that
+  // fits (the old manual height under-filled by ~1 row, worse in landscape where
+  // the bottom button-hints band doesn't apply).
+  const int contentHeight = pageItems * metrics.listRowHeight;
 
   GUI.drawList(
-      renderer, Rect{0, contentTop, pageWidth, contentHeight}, static_cast<int>(entries.size()), selectedIndex,
-      [this](int i) { return std::string(glyphFor(entries[i].status)) + " " + entries[i].word; }, nullptr, nullptr,
-      nullptr, false);
+      renderer, Rect{0, contentTop, pageWidth, contentHeight}, totalCount, selectedIndex,
+      [this](int i) {
+        const auto* e = entryAt(i);
+        if (!e) return std::string();
+        return std::string(glyphFor(e->status)) + " " + e->word;
+      },
+      nullptr, nullptr, nullptr, false);
 
   if (deleteConfirmMode) {
     char buf[128];
-    snprintf(buf, sizeof(buf), "%s: %s?", tr(STR_DELETE), entries[selectedIndex].word.c_str());
+    const auto* sel = entryAt(selectedIndex);
+    snprintf(buf, sizeof(buf), "%s: %s?", tr(STR_DELETE), sel ? sel->word.c_str() : "");
     GUI.drawPopup(renderer, buf);
     const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), tr(STR_DELETE), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
@@ -190,5 +244,5 @@ void LookedUpWordsActivity::render(RenderLock&&) {
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   }
 
-  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+  displayList();
 }
