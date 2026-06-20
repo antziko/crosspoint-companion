@@ -350,16 +350,19 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
   std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/progress";
   if (!heapOkForUrl(url, "PROGRESS_PUT")) return LOW_MEMORY;
 
-  // Build JSON body
-  JsonDocument doc;
-  doc["document"] = progress.document;
-  doc["progress"] = progress.progress;
-  doc["percentage"] = progress.percentage;
-  doc["device"] = DEVICE_NAME;
-  doc["device_id"] = KOReaderSyncClient::deviceId();
-
+  // Build JSON body. Scope the JsonDocument so its elastic pool is freed before the
+  // TLS handshake — the mbedTLS arena needs two ~16KB *contiguous* buffers, and a live
+  // doc fragments the largest block below that, causing ESP_ERR_HTTP_CONNECT on PUT.
   std::string body;
-  serializeJson(doc, body);
+  {
+    JsonDocument doc;
+    doc["document"] = progress.document;
+    doc["progress"] = progress.progress;
+    doc["percentage"] = progress.percentage;
+    doc["device"] = DEVICE_NAME;
+    doc["device_id"] = KOReaderSyncClient::deviceId();
+    serializeJson(doc, body);
+  }
 
   LOG_DBG("KOSync", "Request body: %s", body.c_str());
 
@@ -453,12 +456,17 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
 
   // The bookmarks array is sent as a single pre-serialized JSON string field so the
   // server stores it as an opaque blob (it never parses bookmark contents).
-  JsonDocument doc;
-  doc["document"] = documentHash;
-  doc["bookmarks"] = bookmarksJson;
-
+  // Scope the JsonDocument so its pool frees before the TLS handshake: the mbedTLS arena
+  // needs two ~16KB *contiguous* buffers, and a live doc (plus this multi-KB body) drops
+  // the largest free block below that, causing the back-to-back PUT to fail with
+  // ESP_ERR_HTTP_CONNECT (no handshake) — see updateProgress for the same pattern.
   std::string body;
-  serializeJson(doc, body);
+  {
+    JsonDocument doc;
+    doc["document"] = documentHash;
+    doc["bookmarks"] = bookmarksJson;
+    serializeJson(doc, body);
+  }
 
   // The bookmark PUT is the last of several TLS handshakes in a sync, and on some devices the
   // fresh handshake opened right after the bookmark GET's teardown fails to connect
@@ -675,13 +683,19 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& doc
   appendB64Field("dh", dict, dictLen);
   statsBlob += "}";
 
-  JsonDocument doc;
-  doc["document"] = documentHash;
-  doc["device_id"] = deviceId();
-  doc["stats"] = statsBlob;
-
+  // Scope the JsonDocument (and release statsBlob, which can hold a ~5.5KB base64 "dh"
+  // blob) before the TLS handshake. mbedTLS needs two ~16KB *contiguous* buffers; leaving
+  // the doc and blob live fragments the largest free block below that and the PUT fails
+  // with ESP_ERR_HTTP_CONNECT — see updateProgress for the same pattern.
   std::string body;
-  serializeJson(doc, body);
+  {
+    JsonDocument doc;
+    doc["document"] = documentHash;
+    doc["device_id"] = deviceId();
+    doc["stats"] = statsBlob;
+    serializeJson(doc, body);
+  }
+  std::string().swap(statsBlob);  // free the base64 blob's heap before the handshake
 
   LOG_DBG("KOSync", "Stats request body: %s", body.c_str());
 
