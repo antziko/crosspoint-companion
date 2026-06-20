@@ -1,6 +1,6 @@
 # CJK Support — Feasibility Study
 
-Date: 2026-06-03
+Date: 2026-06-03 — **Re-verified 2026-06-17 (see "Re-verification" section at end)**
 Target branch: `mcrosson-crosspoint-reader @ feat-dictionary`
 Source of CJK work: `leecming82/crosspoint-reader @ feature/japanese-support`
 
@@ -116,3 +116,57 @@ git diff --stat $MB origin/feature/japanese-support
 # cross-fork base divergence:
 git -C leecming82/crosspoint-reader show $MB:<file> | diff - mcrosson-crosspoint-reader/<file>
 ```
+
+---
+
+## Re-verification (2026-06-17)
+
+Re-derived current state of both repos. Original 4-workstream structure holds. One material delta: **mcrosson's SD-font subsystem evolved past leecming's base**, pushing the font workstreams up in risk.
+
+### Confirmed unchanged
+- mcrosson `feat-dictionary`: `src/util/StringUtils.cpp` still **46 lines, zero CJK**. Clean slate.
+- leecming `feature/japanese-support`: still 22 commits over merge-base `20fee843`. Core commits intact.
+- GfxRenderer render hooks still match (`mcrosson GfxRenderer.cpp` now 1978 lines) → synthetic-bold port stays LOW risk.
+- `ParsedText.cpp` = 969 lines (base for kinsoku port).
+- Target hardware confirmed `esp32-c3-devkitm-1` = **ESP32-C3, 380KB RAM, NO PSRAM, single 48KB framebuffer.** Runtime OOM remains the dominant (non-code) risk.
+
+### `m4-japanese-port` branch — NOT relevant
+leecming has a `m4-japanese-port` branch (also `japanese-dictionary-fusion`). `m4-japanese-port` = leecming's own port to a *different* "M4" hardware (external RTC, SD_MMC backend, +4K Arduino stack), stacked on `japanese-dictionary-fusion` (japanese-support + JP dictionary). **Not** mcrosson's fork — do not cherry-pick from it. Value = proof CJK + JP-dict run together on a real e-reader device.
+
+### Delta: font subsystem diverged (risk UP)
+mcrosson now ships a rewritten SD-font stack:
+```
+SdCardFont + SdCardFontManager + SdCardFontRegistry + EpdFontFamily + FontDecompressor(hot-group on-demand decompress)
+```
+leecming's CJK font-fallback patch (`+75 lines`) was written against the **older** `SdCardFont`; `SdCardFontManager`/`Registry`/`FontDecompressor` did NOT exist at leecming base. Consequence:
+- **Font-fallback workstream: LOW-MED → MED.** Cannot cherry-pick clean; must re-implement fallback face-resolve against mcrosson's manager/registry API.
+- `lib/EpdFont/scripts/fontconvert_sdcard.py` (the `"cjk"` charset script the original doc referenced) is **gone** from mcrosson. mcrosson uses different font tooling → CJK glyph-asset generation must be ported to mcrosson's format. Asset workstream +½ day, MED.
+
+### Delta: good news
+mcrosson's `FontDecompressor` already does **on-demand glyph decompression from SD** (hot-group + fallback path). That is exactly the mechanism needed to fit CJK without flashing 20k glyphs — infra already present, currently wired for Latin only.
+
+### Revised effort
+| Workstream | Effort | Risk |
+|---|---|---|
+| StringUtils CJK helpers | ½ d | LOW |
+| ParsedText kinsoku layout + heap guards | 1-2 d | LOW-MED |
+| Font fallback (re-impl vs new SdCardFontManager API) | **1-1.5 d** ↑ | **MED** ↑ |
+| GfxRenderer synthetic-bold | ½ d | LOW |
+| CJK font asset (port to mcrosson font tooling) | **1 d** ↑ | MED |
+| Ruby/furigana | 1 d | MED (skip v1) |
+| Wiring + themes | 1 d | LOW-MED |
+
+**Core text-display total: ~6-8 days** (was 5-7; font-subsystem drift +1d).
+
+### Revised odds
+- JP text displays + wraps (kinsoku): **~85%** (render/layout path low-risk, hooks match)
+- Stable on ESP32-C3 device: **~70%** (380KB RAM / no PSRAM ceiling; mitigable via JP subset + heap guards)
+- Font asset fits flash/heap: **~80%** (JP subset required: Joyo + kana ≈ 2-3k glyphs vs 20k+ full CJK)
+
+### Biggest difficulty
+Not the layout/render code (surgical, hooks match). It is **(1)** re-fitting leecming's font fallback onto mcrosson's newer `SdCardFontManager` API, and **(2)** keeping the CJK glyph working set under the 380KB RAM ceiling on a no-PSRAM C3.
+
+### Open decisions before committing days
+1. JP glyph subset size (= device flash/heap budget).
+2. Furigana (ruby) at launch? Skip → save 1d + a MED-risk workstream.
+3. JP dictionary later? Separate project (fuse `feature/japanese-dictionary`).
