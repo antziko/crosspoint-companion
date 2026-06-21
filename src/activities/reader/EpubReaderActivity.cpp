@@ -32,6 +32,7 @@
 #include "EpubReaderFootnotesActivity.h"
 #include "EpubReaderPercentSelectionActivity.h"
 #include "EpubReaderUtils.h"
+#include "FlashcardReviewActivity.h"
 #include "GlobalReadingStats.h"
 #include "HighlightActionActivity.h"
 #include "KOReaderCredentialStore.h"
@@ -47,6 +48,7 @@
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
 #include "SleepSyncPromptActivity.h"
+#include "SyncScopeSelectionActivity.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -824,6 +826,11 @@ void EpubReaderActivity::openWordSelect(bool framebufferContainsPage) {
     }
   }
   const std::string bookCachePath = epub->getCachePath();
+  // TOC chapter title for the current page, stored on any flashcard enrolled
+  // from this lookup (same lookup as addBookmark / openHighlightSelect).
+  std::string chapterTitle;
+  const int tocIndex = epub->getTocIndexForSpineIndex(currentSpineIndex);
+  if (tocIndex != -1) chapterTitle = epub->getTocItem(tocIndex).title;
   // Choose the marker band from this page's dwell BEFORE the dwell is consumed/reset below.
   const WordSelectNavigator::InitialMarker initialMarker = computeWordSelectMarker();
   pauseMarkerDwell();  // freeze the dwell across this word-select round-trip (excludes in-dict time)
@@ -831,7 +838,7 @@ void EpubReaderActivity::openWordSelect(bool framebufferContainsPage) {
   startActivityForResult(std::make_unique<DictionaryWordSelectActivity>(
                              renderer, mappedInput, std::move(pageForLookup), orientedMarginLeft, orientedMarginTop,
                              bookCachePath, nextPageFirstWord, framebufferContainsPage, reservedBottomHeight,
-                             DictionaryWordSelectActivity::Mode::Dictionary, initialMarker),
+                             DictionaryWordSelectActivity::Mode::Dictionary, initialMarker, chapterTitle),
                          [this](const ActivityResult&) {
                            ignoreBackUntilRelease = true;
                            requestUpdate();
@@ -1126,7 +1133,15 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
     }
     case EpubReaderMenuActivity::MenuAction::SYNC: {
       if (KOREADER_STORE.hasCredentials()) {
-        launchKoSync(/*sleepWhenDone=*/false);
+        // Let the user pick what to sync (everything, or one feature). On a real
+        // choice, launch the matching scope; on Back, do nothing.
+        startActivityForResult(std::make_unique<SyncScopeSelectionActivity>(renderer, mappedInput),
+                               [this](const ActivityResult& result) {
+                                 if (result.isCancelled) return;
+                                 if (const auto* scopeResult = std::get_if<SyncScopeResult>(&result.data)) {
+                                   launchKoSync(/*sleepWhenDone=*/false, scopeResult->scope);
+                                 }
+                               });
       }
       break;
     }
@@ -1142,6 +1157,14 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
     }
     case EpubReaderMenuActivity::MenuAction::LOOKUP_HISTORY: {
       startActivityForResult(std::make_unique<LookedUpWordsActivity>(renderer, mappedInput, epub->getCachePath()),
+                             [this](const ActivityResult&) {
+                               ignoreBackUntilRelease = true;
+                               requestUpdate();
+                             });
+      break;
+    }
+    case EpubReaderMenuActivity::MenuAction::REVIEW_FLASHCARDS: {
+      startActivityForResult(std::make_unique<FlashcardReviewActivity>(renderer, mappedInput, epub->getCachePath()),
                              [this](const ActivityResult&) {
                                ignoreBackUntilRelease = true;
                                requestUpdate();
@@ -1773,7 +1796,7 @@ void EpubReaderActivity::silentIndexNextChapterIfNeeded(const uint16_t viewportW
   }
 }
 
-bool EpubReaderActivity::launchKoSync(bool sleepWhenDone) {
+bool EpubReaderActivity::launchKoSync(bool sleepWhenDone, SyncScope scope) {
   const int currentPage = section ? section->currentPage : nextPageNumber;
   const int totalPages = section ? section->pageCount : cachedChapterTotalPageCount;
   std::optional<uint16_t> paragraphIndex;
@@ -1815,7 +1838,7 @@ bool EpubReaderActivity::launchKoSync(bool sleepWhenDone) {
 
   activityManager.replaceActivity(std::make_unique<KOReaderSyncActivity>(
       renderer, mappedInput, savedEpubPath, currentSpineIndex, currentPage, totalPages, std::move(localKoPos),
-      std::move(localChapterName), paragraphIndex, sleepWhenDone));
+      std::move(localChapterName), paragraphIndex, sleepWhenDone, scope));
   return true;
 }
 
@@ -1891,8 +1914,16 @@ void EpubReaderActivity::showOpenSyncPrompt() {
           ignoreBackUntilRelease = true;
           return;
         }
-        // Sync → run the sync flow and return to the reader (no sleep).
-        launchKoSync(/*sleepWhenDone=*/false);
+        // Sync → let the user pick what to sync first (same as the reader-menu Sync
+        // path), then launch the matching scope and return to the reader (no sleep).
+        // On Back at the scope picker, stay reading without launching.
+        startActivityForResult(std::make_unique<SyncScopeSelectionActivity>(renderer, mappedInput),
+                               [this](const ActivityResult& scopeRes) {
+                                 if (scopeRes.isCancelled) return;
+                                 if (const auto* scopeResult = std::get_if<SyncScopeResult>(&scopeRes.data)) {
+                                   launchKoSync(/*sleepWhenDone=*/false, scopeResult->scope);
+                                 }
+                               });
       });
 }
 

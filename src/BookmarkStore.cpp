@@ -626,45 +626,82 @@ bool BookmarkStore::writeToFile() const {
   return true;
 }
 
-std::string BookmarkStore::serializeToJson(const std::vector<Bookmark>& bms, const std::vector<Tombstone>& tombs) {
+// Sync blob key map. The wire format uses short keys to cut body size (~half of the
+// old body was repeated long key names) — this directly raises how many bookmarks fit
+// under the TLS PUT's contiguous-buffer ceiling. parseFromJson reads BOTH the short keys
+// and the legacy long keys, so a peer on older firmware (long keys) still merges; once
+// every device is updated only short keys travel.
+//
+//   wrapper:  b=bookmarks   t=tombstones
+//   bookmark: s=spineIndex  p=progress  v=version  ct=chapterTitle  pi=paragraphIndex
+//             sn=snippet    cp=chapterCurrentPage  pc=chapterPageCount
+//             q=quote  es=endSpineIndex  ep=endProgress  sw=startWord  ew=endWord
+//   tombstone:s=spineIndex  pi=paragraphIndex  p=progress  v=version
+//             q=quote  sw=startWord  ew=endWord
+std::string BookmarkStore::serializeToJson(const std::vector<Bookmark>& bms, const std::vector<Tombstone>& tombs,
+                                           size_t maxBodyBytes) {
   JsonDocument doc;
-  JsonArray arr = doc["bookmarks"].to<JsonArray>();
+  JsonArray arr = doc["b"].to<JsonArray>();
   for (const auto& bm : bms) {
     if (bm.returnMark) continue;  // session "return here" mark is device-only — never synced
     JsonObject obj = arr.add<JsonObject>();
-    obj["spineIndex"] = bm.spineIndex;
-    obj["progress"] = bm.progress;
-    obj["version"] = bm.version;  // Lamport version (formerly the always-0 "timestamp")
-    obj["chapterTitle"] = bm.chapterTitle;
-    obj["paragraphIndex"] = bm.paragraphIndex;
-    obj["snippet"] = bm.snippet;
-    obj["chapterCurrentPage"] = bm.chapterCurrentPage;
-    obj["chapterPageCount"] = bm.chapterPageCount;
+    obj["s"] = bm.spineIndex;
+    obj["p"] = bm.progress;
+    obj["v"] = bm.version;  // Lamport version (formerly the always-0 "timestamp")
+    obj["ct"] = bm.chapterTitle;
+    obj["pi"] = bm.paragraphIndex;
+    obj["sn"] = bm.snippet;
+    obj["cp"] = bm.chapterCurrentPage;
+    obj["pc"] = bm.chapterPageCount;
     // Quote range. Only the 64-char snippet teaser crosses the wire (above); the full
     // preview text stays device-local in .qtext and is never synced. Omitted for point
-    // bookmarks to keep their blob unchanged from prior firmware.
+    // bookmarks to keep their blob minimal.
     if (bm.quote) {
-      obj["quote"] = true;
-      obj["endSpineIndex"] = bm.endSpineIndex;
-      obj["endProgress"] = bm.endProgress;
-      obj["startWord"] = bm.startWord;
-      obj["endWord"] = bm.endWord;
+      obj["q"] = true;
+      obj["es"] = bm.endSpineIndex;
+      obj["ep"] = bm.endProgress;
+      obj["sw"] = bm.startWord;
+      obj["ew"] = bm.endWord;
     }
   }
-  JsonArray tarr = doc["tombstones"].to<JsonArray>();
+  JsonArray tarr = doc["t"].to<JsonArray>();
   for (const auto& t : tombs) {
     JsonObject obj = tarr.add<JsonObject>();
-    obj["spineIndex"] = t.spineIndex;
-    obj["paragraphIndex"] = t.paragraphIndex;
-    obj["progress"] = t.progress;
-    obj["version"] = t.version;
+    obj["s"] = t.spineIndex;
+    obj["pi"] = t.paragraphIndex;
+    obj["p"] = t.progress;
+    obj["v"] = t.version;
     if (t.quote) {
-      obj["quote"] = true;
-      obj["startWord"] = t.startWord;
-      obj["endWord"] = t.endWord;
+      obj["q"] = true;
+      obj["sw"] = t.startWord;
+      obj["ew"] = t.endWord;
     }
   }
+  // If building the tree exhausted the (nothrow) ArduinoJson allocator, the doc is
+  // truncated — emit nothing rather than a malformed/partial blob the server would
+  // store. Caller treats an empty result as "skip upload".
+  if (doc.overflowed()) {
+    LOG_ERR("BKS", "Bookmark serialize: JsonDocument overflow (low heap) — skipping upload");
+    return std::string();
+  }
+  // Abort-safety: measureJson() allocates nothing, so the exact body length is known
+  // before any allocation. out.reserve() OOM-aborts under -fno-exceptions, and this
+  // path now runs inside a keep-alive sync session (the bookmark GET's mbedTLS arena is
+  // still held), so the caller passes the live largest-contiguous-block budget. Over
+  // budget -> emit nothing; the caller treats empty as "skip upload" rather than wiping
+  // the server set, and nothing aborts.
+  const size_t bodyLen = measureJson(doc) + 1;
+  if (bodyLen > maxBodyBytes) {
+    LOG_ERR("BKS", "Bookmark serialize: body %u > budget %u (low heap) — skipping upload", (unsigned)bodyLen,
+            (unsigned)maxBodyBytes);
+    return std::string();
+  }
   std::string out;
+  // Reserve the exact serialized length up front. Without this, std::string grows by
+  // doubling-realloc (alloc new, copy, free old) several times for a multi-KB blob —
+  // three heap ops per growth that fragment DRAM right before the TLS PUT needs a
+  // contiguous send buffer. One sized allocation instead.
+  out.reserve(bodyLen);
   serializeJson(doc, out);
   return out;
 }
@@ -681,43 +718,50 @@ bool BookmarkStore::parseFromJson(const char* json, std::vector<Bookmark>& outBm
     return false;
   }
 
-  // Legacy bare-array form is just the bookmark list; new form nests it under "bookmarks".
-  JsonArray arr = doc.is<JsonArray>() ? doc.as<JsonArray>() : doc["bookmarks"].as<JsonArray>();
-  outBms.reserve(arr.size());
+  // Accepts three shapes for back-compat: the short-key form ("b"), the older long-key
+  // form ("bookmarks"), and the legacy bare-array (just the bookmark list). Each field is
+  // read short-key-first with a long-key fallback, so a peer still on long-key firmware
+  // merges correctly.
+  JsonArray arr = doc.is<JsonArray>()        ? doc.as<JsonArray>()
+                  : doc["b"].is<JsonArray>() ? doc["b"].as<JsonArray>()
+                                             : doc["bookmarks"].as<JsonArray>();
+  // Bound the reserve to the cap actually accepted below. A hostile/oversized remote blob
+  // could otherwise reserve a huge vector and, under -fno-exceptions, abort() on bad_alloc.
+  outBms.reserve(std::min<size_t>(arr.size(), MAX_BOOKMARKS));
   for (JsonObject obj : arr) {
     if (outBms.size() >= MAX_BOOKMARKS) break;
     Bookmark bm{};
-    bm.spineIndex = obj["spineIndex"] | static_cast<uint16_t>(0);
-    bm.progress = obj["progress"] | 0.0f;
-    // New key is "version"; fall back to the legacy "timestamp" key (older blobs).
-    bm.version = obj["version"] | (obj["timestamp"] | static_cast<uint32_t>(0));
-    bm.paragraphIndex = obj["paragraphIndex"] | static_cast<uint16_t>(UINT16_MAX);
-    snprintf(bm.chapterTitle, sizeof(bm.chapterTitle), "%s", obj["chapterTitle"] | "");
-    snprintf(bm.snippet, sizeof(bm.snippet), "%s", obj["snippet"] | "");
+    bm.spineIndex = obj["s"] | (obj["spineIndex"] | static_cast<uint16_t>(0));
+    bm.progress = obj["p"] | (obj["progress"] | 0.0f);
+    // Short "v" / long "version"; fall back to the legacy "timestamp" key (oldest blobs).
+    bm.version = obj["v"] | (obj["version"] | (obj["timestamp"] | static_cast<uint32_t>(0)));
+    bm.paragraphIndex = obj["pi"] | (obj["paragraphIndex"] | static_cast<uint16_t>(UINT16_MAX));
+    snprintf(bm.chapterTitle, sizeof(bm.chapterTitle), "%s", obj["ct"] | (obj["chapterTitle"] | ""));
+    snprintf(bm.snippet, sizeof(bm.snippet), "%s", obj["sn"] | (obj["snippet"] | ""));
     // Display-only page snapshot; absent from older/other-firmware blobs → 0 (unknown).
-    bm.chapterCurrentPage = obj["chapterCurrentPage"] | static_cast<uint16_t>(0);
-    bm.chapterPageCount = obj["chapterPageCount"] | static_cast<uint16_t>(0);
+    bm.chapterCurrentPage = obj["cp"] | (obj["chapterCurrentPage"] | static_cast<uint16_t>(0));
+    bm.chapterPageCount = obj["pc"] | (obj["chapterPageCount"] | static_cast<uint16_t>(0));
     // Quote range (absent for point bookmarks and pre-v8 peers → defaults to a point).
-    bm.quote = obj["quote"] | false;
-    bm.endSpineIndex = obj["endSpineIndex"] | bm.spineIndex;
-    bm.endProgress = obj["endProgress"] | bm.progress;
-    bm.startWord = obj["startWord"] | static_cast<uint16_t>(0);
-    bm.endWord = obj["endWord"] | static_cast<uint16_t>(0);
+    bm.quote = obj["q"] | (obj["quote"] | false);
+    bm.endSpineIndex = obj["es"] | (obj["endSpineIndex"] | bm.spineIndex);
+    bm.endProgress = obj["ep"] | (obj["endProgress"] | bm.progress);
+    bm.startWord = obj["sw"] | (obj["startWord"] | static_cast<uint16_t>(0));
+    bm.endWord = obj["ew"] | (obj["endWord"] | static_cast<uint16_t>(0));
     outBms.push_back(bm);
   }
 
-  JsonArray tarr = doc["tombstones"].as<JsonArray>();
-  outTombs.reserve(tarr.size());
+  JsonArray tarr = doc["t"].is<JsonArray>() ? doc["t"].as<JsonArray>() : doc["tombstones"].as<JsonArray>();
+  outTombs.reserve(std::min<size_t>(tarr.size(), MAX_BOOKMARKS));
   for (JsonObject obj : tarr) {
     if (outTombs.size() >= MAX_BOOKMARKS) break;
     Tombstone t{};
-    t.spineIndex = obj["spineIndex"] | static_cast<uint16_t>(0);
-    t.paragraphIndex = obj["paragraphIndex"] | static_cast<uint16_t>(UINT16_MAX);
-    t.progress = obj["progress"] | 0.0f;
-    t.version = obj["version"] | static_cast<uint32_t>(0);
-    t.quote = obj["quote"] | false;
-    t.startWord = obj["startWord"] | static_cast<uint16_t>(0);
-    t.endWord = obj["endWord"] | static_cast<uint16_t>(0);
+    t.spineIndex = obj["s"] | (obj["spineIndex"] | static_cast<uint16_t>(0));
+    t.paragraphIndex = obj["pi"] | (obj["paragraphIndex"] | static_cast<uint16_t>(UINT16_MAX));
+    t.progress = obj["p"] | (obj["progress"] | 0.0f);
+    t.version = obj["v"] | (obj["version"] | static_cast<uint32_t>(0));
+    t.quote = obj["q"] | (obj["quote"] | false);
+    t.startWord = obj["sw"] | (obj["startWord"] | static_cast<uint16_t>(0));
+    t.endWord = obj["ew"] | (obj["endWord"] | static_cast<uint16_t>(0));
     outTombs.push_back(t);
   }
   return true;

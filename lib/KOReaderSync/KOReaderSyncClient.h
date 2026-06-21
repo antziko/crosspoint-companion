@@ -64,6 +64,24 @@ class KOReaderSyncClient {
   enum Error { OK = 0, NO_CREDENTIALS, NETWORK_ERROR, AUTH_FAILED, SERVER_ERROR, JSON_ERROR, NOT_FOUND, LOW_MEMORY };
 
   /**
+   * RAII guard for a keep-alive connection session.
+   *
+   * While an instance is alive, every sync request reuses ONE keep-alive TLS
+   * connection (a single handshake) instead of opening a fresh connection per
+   * leg. This avoids the ESP32-C3 LWIP TIME_WAIT / socket churn that makes rapid
+   * back-to-back reconnects (e.g. a PUT immediately after a GET) fail with
+   * sock<0 and ~16s connect timeouts. Construct one around a full sync sequence;
+   * the underlying connection is closed when the guard is destroyed.
+   */
+  class SyncSession {
+   public:
+    SyncSession();
+    ~SyncSession();
+    SyncSession(const SyncSession&) = delete;
+    SyncSession& operator=(const SyncSession&) = delete;
+  };
+
+  /**
    * Authenticate with the sync server (validate credentials).
    * @return OK on success, error code on failure
    */

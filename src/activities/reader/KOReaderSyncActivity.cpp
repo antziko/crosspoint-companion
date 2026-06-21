@@ -8,6 +8,7 @@
 #include <Memory.h>
 #include <SdDebugLog.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 #include <esp_sntp.h>
 #include <esp_wifi.h>
 
@@ -175,21 +176,80 @@ void KOReaderSyncActivity::performSync() {
 
   LOG_DBG("KOSync", "Document hash: %s", documentHash.c_str());
 
+  // Connection strategy. A keep-alive session wraps the small-body legs (progress + bookmarks):
+  // they reuse ONE connection = ONE handshake, instead of each paying a fresh cold handshake
+  // that needs a clean ~33KB contiguous block (only reliably present on a pristine heap — when
+  // the heap is settled the largest block sits at ~32756, ~644 B short, so a second fresh
+  // handshake -0x7F00s). The asymmetric TLS build shrinks OUT to 2KB so the held arena is small
+  // and reuse no longer starves the write. Stats runs OUTSIDE the session at recovered heap —
+  // its dict-history/global bodies and its own handshake want maximum room. See syncBookmarks /
+  // syncStats.
+
+  // Single-feature scopes skip the progress comparison entirely: run just the one
+  // feature, then show the FEATURE_DONE summary. Stats and Dictionary share the
+  // stats endpoint — Stats syncs counters (+ global), Dictionary syncs only the
+  // per-book "dh" history and skips the extra global round-trips.
+  if (syncScope != SyncScope::All && syncScope != SyncScope::Progress) {
+    switch (syncScope) {
+      case SyncScope::Bookmarks: {
+        KOReaderSyncClient::SyncSession session;  // GET + PUT reuse one keep-alive connection
+        syncBookmarks();
+        break;
+      }
+      case SyncScope::Stats:
+        syncStats(/*includeDict=*/false, /*includeGlobal=*/true);  // no session: full heap for global body
+        break;
+      case SyncScope::Dict:
+        syncStats(/*includeDict=*/true, /*includeGlobal=*/false);  // no session: full heap for the dh body
+        break;
+      default:
+        break;
+    }
+    {
+      RenderLock lock(*this);
+      state = FEATURE_DONE;
+      featureDoneAt = millis();
+    }
+    requestUpdate(true);
+    return;
+  }
+
   {
     RenderLock lock(*this);
     statusMessage = tr(STR_FETCH_PROGRESS);
   }
   requestUpdateAndWait();
 
-  // Fetch remote progress
-  const auto result = KOReaderSyncClient::getProgress(documentHash, remoteProgress);
+  // Progress + (for ALL) bookmarks share ONE keep-alive connection: the progress GET pays the
+  // single handshake and bookmarks reuse it — no second cold handshake to -0x7F00. The session
+  // CLOSES at the end of this block so stats below runs at recovered heap.
+  KOReaderSyncClient::Error result;
+  {
+    KOReaderSyncClient::SyncSession session;
+    result = KOReaderSyncClient::getProgress(documentHash, remoteProgress);
+    // Full sync (ALL) also merges bookmarks whenever the server is reachable (OK or NOT_FOUND).
+    // Silent and best-effort: it does not change the progress sync outcome below.
+    if (syncScope == SyncScope::All &&
+        (result == KOReaderSyncClient::OK || result == KOReaderSyncClient::NOT_FOUND)) {
+      syncBookmarks();
+    }
+  }  // session closed: arena freed, heap recovers for stats' fresh handshake + large body
 
-  // Sync bookmarks and reading stats alongside progress whenever the server is
-  // reachable (OK or NOT_FOUND). Silent and best-effort: neither changes the
-  // progress sync outcome below.
-  if (result == KOReaderSyncClient::OK || result == KOReaderSyncClient::NOT_FOUND) {
-    syncBookmarks();
-    syncStats();
+  // PROBE: heap state right before stats' cold handshake (needs ~33.4KB contiguous = two
+  // ~16.7KB record buffers). If `largest` here stays well below ~33KB across runs, the prior
+  // legs fragmented the heap and smaller TLS record buffers are the only real fix; ~33KB+ means
+  // recovery works and stats handshakes.
+  {
+    const unsigned freeAfter = (unsigned)ESP.getFreeHeap();
+    const unsigned largestAfter = (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    LOG_INF("KOSync", "Pre-stats heap: free=%u largest=%u (stats handshake needs ~33KB contig)", freeAfter,
+            largestAfter);
+    SdDebugLog::log("KOSYNC", "pre-stats heap free=%u largest=%u (stats needs ~33KB contig)", freeAfter, largestAfter);
+  }
+
+  // Reading stats (ALL only), sessionless at recovered heap. PROGRESS scope skips it.
+  if (syncScope == SyncScope::All && (result == KOReaderSyncClient::OK || result == KOReaderSyncClient::NOT_FOUND)) {
+    syncStats(/*includeDict=*/true, /*includeGlobal=*/true);
   }
 
   if (result == KOReaderSyncClient::NOT_FOUND) {
@@ -287,6 +347,11 @@ void KOReaderSyncActivity::performUpload() {
 }
 
 void KOReaderSyncActivity::syncBookmarks() {
+  // Runs inside the caller's keep-alive session: the GET and PUT reuse one open connection, so
+  // there is NO second handshake here (a fresh PUT handshake needs a clean ~33KB block, which a
+  // settled heap can't provide — that was the -0x7F00). The body is still serialized BEFORE the
+  // GET so the JsonDocument churn doesn't fragment the heap right when the write needs scratch;
+  // it re-serializes only if the GET's merge mutated the local set.
   {
     RenderLock lock(*this);
     state = SYNCING;
@@ -321,7 +386,38 @@ void KOReaderSyncActivity::syncBookmarks() {
   };
   bmLocalCount = countSyncable();
 
-  // Pull remote, reconcile with local (union bookmarks, propagate tombstoned deletes).
+  // Serialize the upload body BEFORE the GET, while the heap is settled. Doing the
+  // JsonDocument build/teardown here (not right before the PUT) keeps the heap from being
+  // fragmented at the moment mbedtls_ssl_write needs its scratch — hardware-confirmed: the
+  // in-session post-merge serialize stalled the write (EAGAIN even at good RSSI), pre-serialize
+  // did not. Budget-cap so out.reserve() can't OOM-abort (in "sync all" the progress GET's
+  // arena is already held, so heap may be low). A signature over the local set detects the
+  // rare case where the merge below actually mutates it.
+  const auto setSignature = [] {
+    const auto& bms = BOOKMARKS.getBookmarks();
+    const auto& tombs = BOOKMARKS.getTombstones();
+    uint64_t sig = static_cast<uint64_t>(bms.size()) * 0x9E3779B1u + static_cast<uint64_t>(tombs.size());
+    for (const struct Bookmark& b : bms) sig += static_cast<uint64_t>(b.version) + b.spineIndex + b.paragraphIndex;
+    for (const Tombstone& t : tombs) sig += static_cast<uint64_t>(t.version) + t.spineIndex + t.paragraphIndex;
+    return sig;
+  };
+  const uint64_t preMergeSig = setSignature();
+  const auto serializeBudgeted = [] {
+    const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    const size_t bodyBudget = largestBlock > 1024 ? largestBlock - 1024 : 0;
+    return BookmarkStore::serializeToJson(BOOKMARKS.getBookmarks(), BOOKMARKS.getTombstones(), bodyBudget);
+  };
+  std::string localJson = serializeBudgeted();
+  if (localJson.empty()) {
+    // Empty = JsonDocument overflow or body over budget. An empty body would wipe the server
+    // set, so skip the PUT.
+    LOG_ERR("KOSync", "Bookmark upload skipped: serialize produced empty body");
+    bmUploadOk = false;
+    return;
+  }
+
+  // Pull remote, reconcile with local (union bookmarks, propagate tombstoned deletes). Reuses
+  // the caller's keep-alive connection; the PUT below reuses it too.
   std::string remoteJson;
   const auto getResult = KOReaderSyncClient::getBookmarks(documentHash, remoteJson);
   if (getResult == KOReaderSyncClient::OK) {
@@ -331,6 +427,9 @@ void KOReaderSyncActivity::syncBookmarks() {
     std::vector<Tombstone> remoteTombs;
     if (BookmarkStore::parseFromJson(remoteJson.c_str(), remoteBms, remoteTombs)) {
       bmRemoteCount = static_cast<int>(remoteBms.size());
+      // Free the remote blob before the merge — parseFromJson already copied it into the
+      // vectors, so holding it alongside the merge's allocations needlessly fragments the heap.
+      std::string().swap(remoteJson);
       const size_t added = BOOKMARKS.mergeFrom(remoteBms, remoteTombs);  // self-persists
       LOG_DBG("KOSync", "Merged %u remote bookmark(s)", (unsigned)added);
     }
@@ -338,14 +437,25 @@ void KOReaderSyncActivity::syncBookmarks() {
     // Fetch failed, but still upload local set so the server learns our bookmarks.
     LOG_ERR("KOSync", "Bookmark fetch failed: %s", KOReaderSyncClient::errorString(getResult));
   }
+  std::string().swap(remoteJson);  // no-op if freed above; covers the NOT_FOUND / error paths
   // NOT_FOUND just means the server has nothing stored yet — the fetch itself succeeded.
   bmFetchOk = (getResult == KOReaderSyncClient::OK || getResult == KOReaderSyncClient::NOT_FOUND);
 
   bmMergedCount = countSyncable();
   bmSynced = true;
 
-  // Push the reconciled set + tombstones so other devices converge on next sync.
-  const std::string localJson = BookmarkStore::serializeToJson(BOOKMARKS.getBookmarks(), BOOKMARKS.getTombstones());
+  // If the merge mutated the local set, the body built above is stale (missing merged-in
+  // remote items). Re-serialize; if it won't fit the (now lower) heap, SKIP rather than push a
+  // stale subset that would delete the server's remote items.
+  if (setSignature() != preMergeSig) {
+    std::string merged = serializeBudgeted();
+    if (merged.empty()) {
+      LOG_ERR("KOSync", "Bookmark upload skipped: merge changed set but re-serialize won't fit low heap");
+      bmUploadOk = false;
+      return;
+    }
+    localJson.swap(merged);
+  }
   const auto putResult = KOReaderSyncClient::updateBookmarks(documentHash, localJson);
   bmUploadOk = (putResult == KOReaderSyncClient::OK);
   if (!bmUploadOk) {
@@ -355,7 +465,16 @@ void KOReaderSyncActivity::syncBookmarks() {
   }
 }
 
-void KOReaderSyncActivity::syncStats() {
+void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal) {
+  // Sessionless, deliberately — and the caller (performSync) closes the progress+bookmarks
+  // session BEFORE calling this so heap has recovered. The stats PUTs can carry LARGE bodies:
+  // a base64 "dh" dictionary-history blob (per-book, up to ~5.5KB) and a base64 "h" dated-
+  // history blob (global). Those builds use throwing allocations and are gated on full heap
+  // (kDictSyncMinHeap 48KB / kGlobalStatsMinHeap 32KB). Inside a held-arena session only ~18KB
+  // is free, which would force both to skip every time (and risk an abort if they didn't).
+  // A fresh connection at recovered heap gives each PUT room for its body and re-arms the
+  // contigOkForPut gate, so an oversized body skips cleanly instead of crashing.
+
   {
     RenderLock lock(*this);
     state = SYNCING;
@@ -378,7 +497,8 @@ void KOReaderSyncActivity::syncStats() {
   // doesn't spuriously skip on the constrained X3/X4.
   constexpr uint32_t kDictSyncMinHeap = 48 * 1024;
   constexpr size_t kDictBlobCap = 4096;
-  const bool doDictSync = ESP.getFreeHeap() > kDictSyncMinHeap;
+  // includeDict gates dict by scope; the heap check is the OOM backstop on top.
+  const bool doDictSync = includeDict && ESP.getFreeHeap() > kDictSyncMinHeap;
   std::unique_ptr<uint8_t[]> dictUp;
   size_t dictUpLen = 0;
   struct DictMergeCtx {
@@ -388,10 +508,28 @@ void KOReaderSyncActivity::syncStats() {
   } dictMergeCtx{&cachePath, 0, 0};
   StatsDatedFold dictFold;
   if (doDictSync) {
-    dictUp = makeUniqueNoThrow<uint8_t[]>(kDictBlobCap);
-    if (dictUp)
-      dictUpLen =
-          LookupHistory::serializeBlob(cachePath, dictUp.get(), kDictBlobCap, &dictUploadedWords, &dictUploadedDeletes);
+    // Right-size the upload blob so the 4KB serialize scratch does NOT straddle the stats GET
+    // handshake. The handshake needs ~33.4KB contiguous (two ~16.7KB record buffers); a
+    // persistent 4KB blob fragments the largest free block below that and fast-fails ssl_setup
+    // (-0x7F00) even as the first TLS op — hardware-confirmed: individual stats GET at
+    // largest=32756 (~630 B short). So serialize pre-merge into a 4KB scratch, copy the actual
+    // bytes into a tight buffer, and free the scratch BEFORE the GET. The real blob is small (a
+    // few hundred bytes), so what persists across the handshake is tiny and the block stays
+    // intact. Pre-merge upload semantics are unchanged.
+    auto dictScratch = makeUniqueNoThrow<uint8_t[]>(kDictBlobCap);
+    if (dictScratch) {
+      const size_t n = LookupHistory::serializeBlob(cachePath, dictScratch.get(), kDictBlobCap, &dictUploadedWords,
+                                                    &dictUploadedDeletes);
+      if (n > 0) {
+        dictUp = makeUniqueNoThrow<uint8_t[]>(n);
+        if (dictUp) {
+          std::copy_n(dictScratch.get(), n, dictUp.get());
+          dictUpLen = n;
+        }
+      }
+    }
+    // dictScratch frees at this block's end (before getStats): its 4KB returns to the heap so
+    // the handshake gets a clean contiguous block.
     dictFold.ctx = &dictMergeCtx;
     dictFold.fn = [](void* ctx, const uint8_t* blob, size_t len) {
       auto* c = static_cast<DictMergeCtx*>(ctx);
@@ -494,7 +632,9 @@ void KOReaderSyncActivity::syncStats() {
   // whenever we attempted it (even +0, so there's confirmation it ran); flag the
   // low-heap skip distinctly so a missing line is never silent.
   dictSynced = doDictSync;
-  dictSkippedLowHeap = !doDictSync;
+  // Only a heap-forced skip counts as "skipped (low memory)". When dict was excluded
+  // by scope (Stats-only sync), neither flag is set so the footer omits it entirely.
+  dictSkippedLowHeap = includeDict && !doDictSync;
   dictMergedWords = dictMergeCtx.merged;
   dictDeletedWords = dictMergeCtx.deleted;
 
@@ -506,7 +646,20 @@ void KOReaderSyncActivity::syncStats() {
   // --- Global (all-books) counter, same per-device scheme under a reserved
   // pseudo-document. The name can't collide with real documents: binary-mode
   // hashes are 32 hex chars and filename-mode hashes are MD5 hex too.
-  if (statsUploadOk) {  // skip the extra round-trips when the server has no stats support
+  // Skipped for the Dictionary-only scope (includeGlobal=false): those extra
+  // round-trips aren't dictionary data and just add connection cost.
+  if (includeGlobal && statsUploadOk) {  // skip the extra round-trips when the server has no stats support
+    // Heap backstop for the global phase: the dated-history fold allocates accumulators
+    // and the PUT grows a base64 "h" body (throwing allocations). The per-PUT contig gate
+    // already guards the upload, but skip the whole phase if heap is degraded (e.g. a large
+    // per-book dict merge left it low) rather than risk the fold's allocations. The global
+    // counter is monotonic and re-syncs next time. (No session: each leg is a fresh conn.)
+    constexpr uint32_t kGlobalStatsMinHeap = 32 * 1024;
+    const uint32_t freeHeap = ESP.getFreeHeap();
+    if (freeHeap < kGlobalStatsMinHeap) {
+      LOG_ERR("KOSync", "Global stats skipped: low heap %u < %u", (unsigned)freeHeap, (unsigned)kGlobalStatsMinHeap);
+      return;  // global is the last phase of syncStats — nothing after it
+    }
     // Underscores, not hyphens: the sync server's gin router compiles the
     // GET /syncs/stats/:document param to a \w+ pattern, so a hyphenated doc name
     // 404s on fetch (PUT has no path param and would still store it) — that broke
@@ -650,6 +803,58 @@ void KOReaderSyncActivity::onExit() {
   }
 }
 
+int KOReaderSyncActivity::drawAlsoSyncedFooter(int sideX, int y, int lhFoot) {
+  if (!(bmSynced || statsSynced || dictSynced || dictSkippedLowHeap)) return y;
+  constexpr int SECTION_GAP = 10;
+  char buf[128];
+  y += SECTION_GAP;
+  renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_ALSO_SYNCED), true, EpdFontFamily::BOLD);
+  y += lhFoot + 2;
+  if (bmSynced) {
+    // Two lines: "Bookmarks" + counts, then indented fetch/upload status (one line overflows).
+    char bmCounts[96];
+    snprintf(bmCounts, sizeof(bmCounts), tr(STR_BOOKMARK_DIFF_FORMAT), bmRemoteCount, bmLocalCount, bmMergedCount);
+    snprintf(buf, sizeof(buf), "%s  %s", tr(STR_BOOKMARKS), bmCounts);
+    renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+    y += lhFoot + 2;
+    char bmStatusStr[64];
+    snprintf(bmStatusStr, sizeof(bmStatusStr), tr(STR_BOOKMARK_SYNC_STATUS_FORMAT),
+             bmFetchOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER),
+             bmUploadOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER));
+    snprintf(buf, sizeof(buf), "  %s", bmStatusStr);
+    renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+    y += lhFoot + 2;
+  }
+  if (dictSynced) {
+    if (bmSynced) y += 6;  // separate from the bookmark block above
+    snprintf(buf, sizeof(buf), tr(STR_SYNC_DICT_FORMAT), dictUploadedWords, dictUploadedDeletes, dictMergedWords,
+             dictDeletedWords);
+    renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+    y += lhFoot + 2;
+    // Dict rides the stats GET/PUT, so its fetch/upload status is the stats one.
+    char dStatus[64];
+    snprintf(dStatus, sizeof(dStatus), tr(STR_BOOKMARK_SYNC_STATUS_FORMAT),
+             statsFetchOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER),
+             statsUploadOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER));
+    snprintf(buf, sizeof(buf), "  %s", dStatus);
+    renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+    y += lhFoot + 2;
+  } else if (dictSkippedLowHeap) {
+    if (bmSynced) y += 6;
+    renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_SYNC_DICT_SKIPPED));
+    y += lhFoot + 2;
+  }
+  if (statsSynced) {
+    if (bmSynced || dictSynced || dictSkippedLowHeap) y += 6;  // reading time sits at the bottom
+    char durBuf[24];
+    BookReadingStats::formatDuration(statsTotalAllDevices, durBuf, sizeof(durBuf));
+    snprintf(buf, sizeof(buf), tr(STR_STATS_ALL_DEVICES_FORMAT), durBuf);
+    renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+    y += lhFoot + 2;
+  }
+  return y;
+}
+
 void KOReaderSyncActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
@@ -779,53 +984,7 @@ void KOReaderSyncActivity::render(RenderLock&&) {
 
     // --- "Also synced" footer: bookmarks + reading stats always merge, so they are
     // passive info, not a choice. Extra gap above separates it from the choice buttons.
-    if (bmSynced || statsSynced || dictSynced || dictSkippedLowHeap) {
-      y += SECTION_GAP;
-      renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_ALSO_SYNCED), true, EpdFontFamily::BOLD);
-      y += lhFoot + 2;
-      if (bmSynced) {
-        // Two lines: "Bookmarks" + counts, then indented fetch/upload status. Split
-        // because one combined line overflows the width, worse when "failed" replaces "ok".
-        char bmCounts[96];
-        snprintf(bmCounts, sizeof(bmCounts), tr(STR_BOOKMARK_DIFF_FORMAT), bmRemoteCount, bmLocalCount, bmMergedCount);
-        snprintf(buf, sizeof(buf), "%s  %s", tr(STR_BOOKMARKS), bmCounts);
-        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-        y += lhFoot + 2;
-        char bmStatusStr[64];
-        snprintf(bmStatusStr, sizeof(bmStatusStr), tr(STR_BOOKMARK_SYNC_STATUS_FORMAT),
-                 bmFetchOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER),
-                 bmUploadOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER));
-        snprintf(buf, sizeof(buf), "  %s", bmStatusStr);
-        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-        y += lhFoot + 2;
-      }
-      if (dictSynced) {
-        if (bmSynced) y += 6;  // separate from the bookmark block above
-        snprintf(buf, sizeof(buf), tr(STR_SYNC_DICT_FORMAT), dictUploadedWords, dictUploadedDeletes, dictMergedWords,
-                 dictDeletedWords);
-        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-        y += lhFoot + 2;
-        // Dict rides the stats GET/PUT, so its fetch/upload status is the stats one.
-        char dStatus[64];
-        snprintf(dStatus, sizeof(dStatus), tr(STR_BOOKMARK_SYNC_STATUS_FORMAT),
-                 statsFetchOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER),
-                 statsUploadOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER));
-        snprintf(buf, sizeof(buf), "  %s", dStatus);
-        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-        y += lhFoot + 2;
-      } else if (dictSkippedLowHeap) {
-        if (bmSynced) y += 6;
-        renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_SYNC_DICT_SKIPPED));
-        y += lhFoot + 2;
-      }
-      if (statsSynced) {
-        if (bmSynced || dictSynced || dictSkippedLowHeap) y += 6;  // reading time sits at the bottom
-        char durBuf[24];
-        BookReadingStats::formatDuration(statsTotalAllDevices, durBuf, sizeof(durBuf));
-        snprintf(buf, sizeof(buf), tr(STR_STATS_ALL_DEVICES_FORMAT), durBuf);
-        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-      }
-    }
+    y = drawAlsoSyncedFooter(sideX, y, lhFoot);
 
     // Bottom button hints
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
@@ -848,54 +1007,26 @@ void KOReaderSyncActivity::render(RenderLock&&) {
     y += renderer.getLineHeight(UI_10_FONT_ID) + SECTION_GAP;
 
     // Same "Also synced" footer as SHOWING_RESULT: passive info, extra gap above.
-    if (bmSynced || statsSynced || dictSynced || dictSkippedLowHeap) {
-      y += SECTION_GAP;
-      renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_ALSO_SYNCED), true, EpdFontFamily::BOLD);
-      y += lhFoot + 2;
-      char buf[128];
-      if (bmSynced) {
-        // Two lines: "Bookmarks" + counts, then indented fetch/upload status (one line overflows).
-        char bmCounts[96];
-        snprintf(bmCounts, sizeof(bmCounts), tr(STR_BOOKMARK_DIFF_FORMAT), bmRemoteCount, bmLocalCount, bmMergedCount);
-        snprintf(buf, sizeof(buf), "%s  %s", tr(STR_BOOKMARKS), bmCounts);
-        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-        y += lhFoot + 2;
-        char bmStatusStr[64];
-        snprintf(bmStatusStr, sizeof(bmStatusStr), tr(STR_BOOKMARK_SYNC_STATUS_FORMAT),
-                 bmFetchOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER),
-                 bmUploadOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER));
-        snprintf(buf, sizeof(buf), "  %s", bmStatusStr);
-        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-        y += lhFoot + 2;
-      }
-      if (dictSynced) {
-        if (bmSynced) y += 6;  // separate from the bookmark block above
-        snprintf(buf, sizeof(buf), tr(STR_SYNC_DICT_FORMAT), dictUploadedWords, dictUploadedDeletes, dictMergedWords,
-                 dictDeletedWords);
-        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-        y += lhFoot + 2;
-        char dStatus[64];
-        snprintf(dStatus, sizeof(dStatus), tr(STR_BOOKMARK_SYNC_STATUS_FORMAT),
-                 statsFetchOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER),
-                 statsUploadOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER));
-        snprintf(buf, sizeof(buf), "  %s", dStatus);
-        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-        y += lhFoot + 2;
-      } else if (dictSkippedLowHeap) {
-        if (bmSynced) y += 6;
-        renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_SYNC_DICT_SKIPPED));
-        y += lhFoot + 2;
-      }
-      if (statsSynced) {
-        if (bmSynced || dictSynced || dictSkippedLowHeap) y += 6;  // reading time sits at the bottom
-        char durBuf[24];
-        BookReadingStats::formatDuration(statsTotalAllDevices, durBuf, sizeof(durBuf));
-        snprintf(buf, sizeof(buf), tr(STR_STATS_ALL_DEVICES_FORMAT), durBuf);
-        renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-      }
-    }
+    y = drawAlsoSyncedFooter(sideX, y, lhFoot);
 
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_UPLOAD), "", "");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    renderer.displayBuffer();
+    return;
+  }
+
+  if (state == FEATURE_DONE) {
+    // Single-feature sync summary: a "Sync complete" title plus the shared
+    // "Also synced" footer (which holds whichever feature actually ran). No progress
+    // comparison, no Epub needed. Auto-returns to the reader from loop().
+    const int sideX = screen.x + metrics.contentSidePadding;
+    const int lhFoot = renderer.getLineHeight(UI_10_FONT_ID);
+    int y = screen.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+    renderer.drawText(UI_12_FONT_ID, sideX, y, tr(STR_SYNC_FEATURE_DONE), true, EpdFontFamily::BOLD);
+    y += renderer.getLineHeight(UI_12_FONT_ID) + 4;
+    drawAlsoSyncedFooter(sideX, y, lhFoot);
+
+    const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer();
     return;
@@ -931,10 +1062,14 @@ void KOReaderSyncActivity::render(RenderLock&&) {
 }
 
 void KOReaderSyncActivity::loop() {
-  if (state == NO_CREDENTIALS || state == SYNC_FAILED || state == UPLOAD_COMPLETE) {
-    // After a successful upload, return to the reader on its own once the user has
-    // had a moment to read the confirmation — no manual Back needed.
+  if (state == NO_CREDENTIALS || state == SYNC_FAILED || state == UPLOAD_COMPLETE || state == FEATURE_DONE) {
+    // After a successful upload / single-feature sync, return to the reader on its own
+    // once the user has had a moment to read the confirmation — no manual Back needed.
     if (state == UPLOAD_COMPLETE && millis() - uploadCompleteAt >= UPLOAD_COMPLETE_AUTO_RETURN_MS) {
+      returnToReader();
+      return;
+    }
+    if (state == FEATURE_DONE && millis() - featureDoneAt >= FEATURE_DONE_AUTO_RETURN_MS) {
       returnToReader();
       return;
     }

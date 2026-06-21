@@ -28,7 +28,8 @@ class DictionaryWordSelectActivity final : public Activity {
       GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Page> page, int marginLeft, int marginTop,
       const std::string& cachePath, const std::string& nextPageFirstWord = "", bool framebufferContainsPage = false,
       int reservedBottomHeight = 0, Mode mode = Mode::Dictionary,
-      WordSelectNavigator::InitialMarker initialMarker = WordSelectNavigator::InitialMarker::Middle)
+      WordSelectNavigator::InitialMarker initialMarker = WordSelectNavigator::InitialMarker::Middle,
+      const std::string& chapterTitle = "")
       : Activity("DictionaryWordSelect", renderer, mappedInput),
         page(std::move(page)),
         marginLeft(marginLeft),
@@ -39,7 +40,8 @@ class DictionaryWordSelectActivity final : public Activity {
         framebufferContainsPage_(framebufferContainsPage),
         reservedBottomHeight_(reservedBottomHeight),
         mode_(mode),
-        initialMarker_(initialMarker) {}
+        initialMarker_(initialMarker),
+        chapterTitle_(chapterTitle) {}
 
   void onEnter() override;
   void onExit() override;
@@ -52,6 +54,8 @@ class DictionaryWordSelectActivity final : public Activity {
   int marginTop;
   std::string cachePath;
   std::string nextPageFirstWord;
+  // TOC chapter title for the looked-up page, stored on enrolled flashcards.
+  std::string chapterTitle_;
 
   WordSelectNavigator navigator;
   DictionaryLookupController controller;
@@ -100,6 +104,10 @@ class DictionaryWordSelectActivity final : public Activity {
   // user can tell the two near-identical selection modes apart: "Highlight" in
   // HighlightRange mode, "Look Up" in Dictionary mode.
   const char* confirmHintLabel() const;
+
+  // Page-local sentence around the current selection, captured at lookup time to
+  // store as the flashcard front-face context. "" if there is no selection.
+  std::string buildLookupExcerpt() const;
 
   bool skipLoopDelay() override { return controller.skipLoopDelay(); }
 

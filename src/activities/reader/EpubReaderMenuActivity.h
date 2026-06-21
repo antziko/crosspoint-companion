@@ -26,6 +26,7 @@ class EpubReaderMenuActivity final : public Activity {
     DELETE_CACHE,
     LOOKUP,
     LOOKUP_HISTORY,
+    REVIEW_FLASHCARDS,
     SET_BOOK_DICTIONARY,
     READER_OPTIONS,
     BOOK_STATS,

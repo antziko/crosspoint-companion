@@ -5,7 +5,7 @@
 #include <Logging.h>
 #include <Memory.h>
 #include <SdDebugLog.h>
-#include <esp_crt_bundle.h>
+#include <esp_heap_caps.h>
 #include <esp_http_client.h>
 #include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
@@ -16,6 +16,7 @@
 #include <ctime>
 
 #include "KOReaderCredentialStore.h"
+#include "KOReaderSyncCA.h"
 
 int KOReaderSyncClient::lastHttpCode = 0;
 
@@ -97,6 +98,22 @@ constexpr uint32_t MIN_HEAP_FOR_TLS = 55000;
 // struct, and a small JSON doc — a few KB. Gate HTTP requests on this far lower
 // bar so a local http:// sync server isn't rejected by the TLS-sized guard.
 constexpr uint32_t MIN_HEAP_FOR_HTTP = 12000;
+
+// Coarse contiguous backstop for HTTPS PUTs (see the two-16KB-slab note above). Evaluated
+// AFTER the body is serialized: ssl_setup carves a second ~16KB record slab, and a
+// multi-KB request body competing for it tips ssl_setup into -0x7F00. We can observe only
+// the *largest* free block, not the second, so this is a coarse guard.
+//
+// RECALIBRATED for the pinned-CA handshake (KOReaderSyncCA.h): swapping the full ~16 KB
+// Mozilla bundle for two pinned roots (~2.7 KB) frees ~13 KB of contiguous heap during the
+// handshake. The old base (31000) was tuned to the heavy-bundle boundary and now FALSE-SKIPS
+// PUTs that succeed — hardware evidence: BOOKMARKS_GET's ssl_setup completed at largest=31732,
+// but the 31000+body gate rejected the very next PUT at that same largest. Drop the base by the
+// CA saving so a PUT attempts whenever the largest block clears the record IN buffer (~16 KB)
+// plus body plus margin. A still-fragmented arena that lacks the second slab fails ssl_setup
+// (-0x7F00) and the PUT skips gracefully (no crash, fresh-connection path) — better than never
+// attempting.
+constexpr uint32_t TLS_PUT_CONTIG_BASE = 18000;
 
 // X3 HTTPS troubleshooting instrumentation (SdDebugLog "STALL"): a gap between
 // esp_http_client event-callback fires longer than this is logged with a
@@ -196,18 +213,73 @@ void endTrace(const ResponseBuffer& buf, const char* tag, int httpCode, esp_err_
                   snap.heapFree, snap.largest8Bit, snap.internalFree, snap.internalLargest);
 }
 
+// --- Connection reuse (keep-alive) session ---
+// The ESP32-C3 cannot do rapid back-to-back NEW TLS connections to the same host:
+// LWIP TIME_WAIT / socket churn yields sock<0 and ~16s connect timeouts (the server
+// is fine — verified with 8 parallel curls at ~70ms each). Within a session, ONE
+// keep-alive connection is reused across every leg of a sync (set_url/set_method per
+// request), so there is a single TLS handshake instead of ~7 reconnects.
+esp_http_client_handle_t s_sessionClient = nullptr;
+bool s_sessionActive = false;
+
+void beginSession() {
+  s_sessionActive = true;  // the handle is lazily created on the first createClient()
+}
+
+void endSession() {
+  if (s_sessionClient) {
+    esp_http_client_cleanup(s_sessionClient);
+    s_sessionClient = nullptr;
+  }
+  s_sessionActive = false;
+}
+
+// Cleanup unless this is the live session connection (freed once by endSession()).
+void releaseClient(esp_http_client_handle_t client) {
+  if (s_sessionActive && client == s_sessionClient) return;  // keep the connection alive
+  esp_http_client_cleanup(client);
+}
+
 // Create configured esp_http_client with small TLS buffers
 esp_http_client_handle_t createClient(const char* url, ResponseBuffer* buf,
                                       esp_http_client_method_t method = HTTP_METHOD_GET) {
+  // Reuse the live session connection if one is established: just retarget it at the
+  // new URL/method/response-buffer. No new TCP/TLS handshake -> no reconnect churn.
+  if (s_sessionActive && s_sessionClient) {
+    if (esp_http_client_set_url(s_sessionClient, url) != ESP_OK ||
+        esp_http_client_set_method(s_sessionClient, method) != ESP_OK ||
+        esp_http_client_set_user_data(s_sessionClient, buf) != ESP_OK) {
+      LOG_ERR("KOSync", "Failed to retarget keep-alive client");
+      return nullptr;
+    }
+    // Clear per-request state from the previous leg so it can't leak forward
+    // (e.g. a PUT's body or Content-Type carrying into the next GET).
+    esp_http_client_set_post_field(s_sessionClient, nullptr, 0);
+    esp_http_client_delete_header(s_sessionClient, "Content-Type");
+    return s_sessionClient;
+  }
+
   esp_http_client_config_t config = {};
   config.url = url;
   config.event_handler = httpEventHandler;
   config.user_data = buf;
   config.method = method;
-  config.timeout_ms = 15000;
+  config.timeout_ms = 10000;
+  // Keep-alive ONLY inside a session, where the held connection is genuinely reused
+  // across legs. For a one-shot request (no session: progress GET, bookmark GET/PUT)
+  // negotiating keep-alive makes the server hold the socket open; our immediate
+  // esp_http_client_cleanup() then leaves it lingering (TIME_WAIT / half-open), and the
+  // next one-shot connect() to the same host collides with it -> "Failed to open a new
+  // connection", sock<0, ~11s SYN timeout (the bookmark PUT regression). A one-shot with
+  // keep_alive disabled sends Connection: close and releases the socket cleanly.
+  config.keep_alive_enable = s_sessionActive;
   config.buffer_size = HTTP_BUF_SIZE;
   config.buffer_size_tx = HTTP_BUF_SIZE;
-  config.crt_bundle_attach = esp_crt_bundle_attach;
+  // Pin the sync-server roots instead of attaching the full ~16 KB Mozilla bundle.
+  // The bundle's contiguous handshake allocation was collapsing the largest free
+  // block to ~5 KB on the X4 and failing the bookmark PUT (EAGAIN / ssl_setup
+  // -0x7F00). See KOReaderSyncCA.h for the pinned roots and the trade-off.
+  config.cert_pem = KOSYNC_CA_ROOTS_PEM;
 
   // HTTP Basic Auth for Calibre-Web-Automated compatibility
   config.username = KOREADER_STORE.getUsername().c_str();
@@ -226,6 +298,7 @@ esp_http_client_handle_t createClient(const char* url, ResponseBuffer* buf,
     return nullptr;
   }
 
+  if (s_sessionActive) s_sessionClient = client;  // adopt as the reusable session connection
   return client;
 }
 
@@ -234,6 +307,14 @@ esp_http_client_handle_t createClient(const char* url, ResponseBuffer* buf,
 // there is enough free heap, otherwise logs and returns false. The caller maps
 // false to LOW_MEMORY. `url` carries the scheme (from getBaseUrl()).
 bool heapOkForUrl(const std::string& url, const char* tag) {
+  // In-session reuse: a live keep-alive client already holds the mbedTLS arena,
+  // so this request retargets it with NO new handshake and needs no fresh heap.
+  // The gate's 55KB threshold is for a cold handshake and would wrongly REJECT
+  // every leg after the first (the held arena leaves only ~24KB free).
+  if (s_sessionActive && s_sessionClient) {
+    LOG_DBG("KOSync", "%s: %s (reuse, gate bypassed)", tag, url.c_str());
+    return true;
+  }
   const bool https = url.rfind("https://", 0) == 0;
   const uint32_t need = https ? MIN_HEAP_FOR_TLS : MIN_HEAP_FOR_HTTP;
   const uint32_t freeHeap = ESP.getFreeHeap();
@@ -256,7 +337,35 @@ bool heapOkForUrl(const std::string& url, const char* tag) {
   }
   return true;
 }
+
+// Body-aware contiguous backstop for an HTTPS PUT, evaluated AFTER the body is serialized
+// (so bodyLen and the real pre-handshake heap topology are known). Returns false ->
+// caller maps to LOW_MEMORY and skips, avoiding a guaranteed handshake fast-fail cascade.
+// Always emits a rich SD line — free_blocks + total_free vs largest expose whether a
+// SECOND large slab exists for out_buf, which the largest8 line alone cannot show.
+bool contigOkForPut(const std::string& url, const char* tag, size_t bodyLen) {
+  if (url.rfind("https://", 0) != 0) return true;  // plain HTTP: no mbedTLS arena
+  // In-session reuse: no fresh handshake -> the out_buf contiguous backstop
+  // (sized for a cold handshake) does not apply; the live arena is already up.
+  if (s_sessionActive && s_sessionClient) return true;
+  multi_heap_info_t info;
+  heap_caps_get_info(&info, MALLOC_CAP_8BIT);
+  const uint32_t need = TLS_PUT_CONTIG_BASE + static_cast<uint32_t>(bodyLen);
+  const bool ok = info.largest_free_block >= need;
+  SdDebugLog::log("KOSYNC", "%s contig: largest=%u total_free=%u free_blocks=%u min_free=%u body=%u need=%u -> %s", tag,
+                  (unsigned)info.largest_free_block, (unsigned)info.total_free_bytes, (unsigned)info.free_blocks,
+                  (unsigned)info.minimum_free_bytes, (unsigned)bodyLen, (unsigned)need, ok ? "ok" : "SKIP");
+  if (!ok)
+    LOG_ERR("KOSync", "%s: largest block %u < %u needed (body %u) - skip to avoid handshake cascade", tag,
+            (unsigned)info.largest_free_block, (unsigned)need, (unsigned)bodyLen);
+  return ok;
+}
 }  // namespace
+
+// RAII guard (declared in the header): open a keep-alive session for its lifetime.
+// Anonymous-namespace helpers above remain visible at file scope in this TU.
+KOReaderSyncClient::SyncSession::SyncSession() { beginSession(); }
+KOReaderSyncClient::SyncSession::~SyncSession() { endSession(); }
 
 KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
   lastHttpCode = 0;
@@ -277,7 +386,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
   esp_err_t err = esp_http_client_perform(client);
   const int httpCode = esp_http_client_get_status_code(client);
   lastHttpCode = httpCode;
-  esp_http_client_cleanup(client);
+  releaseClient(client);
 
   endTrace(buf, "AUTH", httpCode, err);
   LOG_DBG("KOSync", "Auth response: %d (err: %d)", httpCode, err);
@@ -308,7 +417,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
   esp_err_t err = esp_http_client_perform(client);
   const int httpCode = esp_http_client_get_status_code(client);
   lastHttpCode = httpCode;
-  esp_http_client_cleanup(client);
+  releaseClient(client);
 
   endTrace(buf, "PROGRESS_GET", httpCode, err);
   LOG_DBG("KOSync", "Get progress response: %d (err: %d)", httpCode, err);
@@ -366,6 +475,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
 
   LOG_DBG("KOSync", "Request body: %s", body.c_str());
 
+  if (!contigOkForPut(url, "PROGRESS_PUT", body.length())) return LOW_MEMORY;
+
   const NoWifiSleep noWifiSleep;
   ResponseBuffer buf;
   beginTrace(buf, "PROGRESS_PUT", body.length());
@@ -375,14 +486,14 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
   if (esp_http_client_set_header(client, "Content-Type", "application/json") != ESP_OK ||
       esp_http_client_set_post_field(client, body.c_str(), body.length()) != ESP_OK) {
     LOG_ERR("KOSync", "Failed to set request body");
-    esp_http_client_cleanup(client);
+    releaseClient(client);
     return NETWORK_ERROR;
   }
 
   esp_err_t err = esp_http_client_perform(client);
   const int httpCode = esp_http_client_get_status_code(client);
   lastHttpCode = httpCode;
-  esp_http_client_cleanup(client);
+  releaseClient(client);
 
   endTrace(buf, "PROGRESS_PUT", httpCode, err);
   LOG_DBG("KOSync", "Update progress response: %d (err: %d)", httpCode, err);
@@ -414,7 +525,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getBookmarks(const std::string& do
   esp_err_t err = esp_http_client_perform(client);
   const int httpCode = esp_http_client_get_status_code(client);
   lastHttpCode = httpCode;
-  esp_http_client_cleanup(client);
+  releaseClient(client);
 
   endTrace(buf, "BOOKMARKS_GET", httpCode, err);
   LOG_DBG("KOSync", "Get bookmarks response: %d (err: %d)", httpCode, err);
@@ -474,6 +585,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
   // Retry the whole request a few times with a settle delay so the transport can recover. This
   // matters because a dropped PUT means a local delete never reaches the server, so other
   // devices never converge.
+  if (!contigOkForPut(url, "BOOKMARKS_PUT", body.length())) return LOW_MEMORY;
+
   const NoWifiSleep noWifiSleep;  // keep the radio awake across all retry attempts
   constexpr int kMaxAttempts = 3;
   esp_err_t err = ESP_FAIL;
@@ -494,14 +607,14 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
     if (esp_http_client_set_header(client, "Content-Type", "application/json") != ESP_OK ||
         esp_http_client_set_post_field(client, body.c_str(), body.length()) != ESP_OK) {
       LOG_ERR("KOSync", "Failed to set request body");
-      esp_http_client_cleanup(client);
+      releaseClient(client);
       err = ESP_FAIL;
       continue;
     }
 
     err = esp_http_client_perform(client);
     httpCode = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
+    releaseClient(client);
     endTrace(buf, "BOOKMARKS_PUT", httpCode, err);
     LOG_DBG("KOSync", "Update bookmarks response: %d (err: %d, attempt %d)", httpCode, err, attempt + 1);
 
@@ -536,7 +649,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
   esp_err_t err = esp_http_client_perform(client);
   const int httpCode = esp_http_client_get_status_code(client);
   lastHttpCode = httpCode;
-  esp_http_client_cleanup(client);
+  releaseClient(client);
 
   endTrace(buf, "STATS_GET", httpCode, err);
   LOG_DBG("KOSync", "Get stats response: %d (err: %d)", httpCode, err);
@@ -699,6 +812,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& doc
 
   LOG_DBG("KOSync", "Stats request body: %s", body.c_str());
 
+  if (!contigOkForPut(url, "STATS_PUT", body.length())) return LOW_MEMORY;
+
   const NoWifiSleep noWifiSleep;
   ResponseBuffer buf;
   beginTrace(buf, "STATS_PUT", body.length());
@@ -708,14 +823,14 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& doc
   if (esp_http_client_set_header(client, "Content-Type", "application/json") != ESP_OK ||
       esp_http_client_set_post_field(client, body.c_str(), body.length()) != ESP_OK) {
     LOG_ERR("KOSync", "Failed to set request body");
-    esp_http_client_cleanup(client);
+    releaseClient(client);
     return NETWORK_ERROR;
   }
 
   esp_err_t err = esp_http_client_perform(client);
   const int httpCode = esp_http_client_get_status_code(client);
   lastHttpCode = httpCode;
-  esp_http_client_cleanup(client);
+  releaseClient(client);
 
   endTrace(buf, "STATS_PUT", httpCode, err);
   LOG_DBG("KOSync", "Update stats response: %d (err: %d)", httpCode, err);

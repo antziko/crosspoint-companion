@@ -8,6 +8,7 @@
 #include <freertos/task.h>
 
 #include <algorithm>
+#include <cstring>
 
 #include "CrossPointSettings.h"
 #include "DictionaryDefinitionActivity.h"
@@ -16,8 +17,19 @@
 #include "fontIds.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
+#include "util/FlashcardDeck.h"
 
 namespace {
+
+// A display token ends a sentence if its last byte is ASCII '.', '!' or '?'.
+// Multibyte UTF-8 characters end with a continuation byte (>= 0x80), so a raw
+// last-byte test never false-matches them.
+bool endsSentence(const char* s) {
+  if (!s || !*s) return false;
+  const size_t n = strlen(s);
+  const char c = s[n - 1];
+  return c == '.' || c == '!' || c == '?';
+}
 
 // Soft-hyphen U+00AD encoded as 2 UTF-8 bytes. Layout (ParsedText.cpp:19)
 // strips these before measurement, so we mirror that here — otherwise
@@ -296,10 +308,60 @@ void DictionaryWordSelectActivity::mergeHyphenatedWords(std::vector<WordSelectNa
       rows.end());
 }
 
+// Page-local sentence the current selection sits in, for the flashcard front
+// face. Walks outward from the selected word (or the anchor..cursor span for a
+// phrase) to the nearest sentence-ending token or page edge, bounded by word
+// count, then joins via the existing buildPhrase primitive. Page-clipped
+// sentences are accepted (the navigator only holds the current page). Returns
+// "" if there is no selection.
+std::string DictionaryWordSelectActivity::buildLookupExcerpt() const {
+  const int sel = navigator.getCurrentFlatIndex();
+  if (sel < 0) return "";
+
+  // Phrase lookups span anchor..cursor; single lookups are just the cursor word.
+  const int anchor = navigator.getAnchorFlatIndex();
+  int lo = sel, hi = sel;
+  if (anchor >= 0) {
+    lo = std::min(anchor, sel);
+    hi = std::max(anchor, sel);
+  }
+
+  static constexpr int MAX_EXCERPT_WORDS = 40;  // bounds the joined string length
+  // Extend left until the previous token ends a sentence (or page start).
+  while (lo > 0 && (hi - lo + 1) < MAX_EXCERPT_WORDS) {
+    const auto* prev = navigator.getWordAt(lo - 1);
+    if (!prev || endsSentence(navigator.getDisplay(*prev))) break;
+    lo--;
+  }
+  // Extend right until the current token ends a sentence (or page end).
+  while ((hi - lo + 1) < MAX_EXCERPT_WORDS) {
+    const auto* cur = navigator.getWordAt(hi);
+    if (!cur || endsSentence(navigator.getDisplay(*cur))) break;
+    if (!navigator.getWordAt(hi + 1)) break;  // page edge
+    hi++;
+  }
+
+  std::string excerpt = navigator.buildPhrase(lo, hi);
+  // Trim to the deck's cap on a word boundary where possible (the deck also
+  // hard-caps, but this avoids storing a mid-word fragment).
+  if (static_cast<int>(excerpt.size()) > FlashcardDeck::EXCERPT_MAX) {
+    excerpt.resize(FlashcardDeck::EXCERPT_MAX);
+    const size_t sp = excerpt.find_last_of(' ');
+    if (sp != std::string::npos && sp > 0) excerpt.resize(sp);
+  }
+  return excerpt;
+}
+
 void DictionaryWordSelectActivity::loop() {
   if (controller.isActive()) {
     switch (controller.handleInput()) {
       case DictionaryLookupController::LookupEvent::FoundDefinition: {
+        // Auto-enroll the looked-up word as a flashcard. This is the sole site
+        // with live page context for the excerpt; the navigator still holds the
+        // page words + current selection here (it is reset on activity exit).
+        if (!cachePath.empty()) {
+          FlashcardDeck::enroll(cachePath, controller.getLookupWord(), buildLookupExcerpt(), chapterTitle_);
+        }
         startActivityForResult(std::make_unique<DictionaryDefinitionActivity>(
                                    renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(),
                                    true, cachePath, controller.getRecordHistory(), controller.getLookupWord(),

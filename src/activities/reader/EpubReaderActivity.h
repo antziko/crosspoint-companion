@@ -8,6 +8,7 @@
 #include "BookReadingStats.h"
 #include "EpubReaderMenuActivity.h"
 #include "ProgressMapper.h"
+#include "SyncScope.h"
 #include "activities/Activity.h"
 #include "util/WordSelectNavigator.h"
 
@@ -176,7 +177,7 @@ class EpubReaderActivity final : public Activity {
   // instead of returning to the reader (used by the "sync before sleep" flow). Caller must
   // have confirmed KOREADER_STORE.hasCredentials(). Returns false if the pre-sync progress
   // save failed (sync not launched). Shared by the reader menu and the sleep prompt.
-  bool launchKoSync(bool sleepWhenDone);
+  bool launchKoSync(bool sleepWhenDone, SyncScope scope = SyncScope::All);
   // Reading seconds accrued since this book's last successful sync (odometer + uncommitted live
   // session, matching commitReadingTime accounting). Shared by the sleep + open sync prompts.
   uint32_t readingSecondsSinceLastSync() const;

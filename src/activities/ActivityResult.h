@@ -52,6 +52,12 @@ struct NetworkModeResult {
   NetworkMode mode;
 };
 
+enum class SyncScope;
+
+struct SyncScopeResult {
+  SyncScope scope;
+};
+
 struct FootnoteResult {
   std::string href;
 };
@@ -91,7 +97,7 @@ struct HighlightRangeResult {
 using ResultVariant =
     std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, IntervalResult,
                  PageResult, ProgressChangeResult, NetworkModeResult, FootnoteResult, WordResult, FilePathResult,
-                 BookmarkResult, FontSelectionResult, HighlightRangeResult>;
+                 BookmarkResult, FontSelectionResult, HighlightRangeResult, SyncScopeResult>;
 
 struct ActivityResult {
   bool isCancelled = false;

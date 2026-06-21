@@ -144,7 +144,14 @@ class BookmarkStore {
 
   // Serialize bookmarks + tombstones to the sync blob:
   //   {"bookmarks":[...],"tombstones":[...]}
-  static std::string serializeToJson(const std::vector<Bookmark>& bms, const std::vector<Tombstone>& tombs);
+  // maxBodyBytes caps the serialized length the internal reserve() may request. The
+  // sync PUT now runs inside a keep-alive session (the GET's mbedTLS arena is still
+  // held, leaving little free heap), and out.reserve() OOM-aborts under -fno-exceptions;
+  // the caller passes the live largest contiguous block so an oversized body returns
+  // empty ("skip upload") instead of crashing. Default = no cap (host tests / callers
+  // at full heap).
+  static std::string serializeToJson(const std::vector<Bookmark>& bms, const std::vector<Tombstone>& tombs,
+                                     size_t maxBodyBytes = SIZE_MAX);
 
   // Parse the sync blob into bookmarks + tombstones. Accepts both the object form
   // above and the legacy bare-array form (tombstones empty). Both outputs cleared

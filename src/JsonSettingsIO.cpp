@@ -156,6 +156,10 @@ bool JsonSettingsIO::saveSettings(const CrossPointSettings& s, const char* path)
   doc["dictMarkerT1Idx"] = s.dictMarkerT1Idx;
   doc["dictMarkerT2Idx"] = s.dictMarkerT2Idx;
 
+  // Flashcard style + session scope — chosen on the review overview, not in SettingsList.
+  doc["flashcardCardStyle"] = s.flashcardCardStyle;
+  doc["flashcardSessionScope"] = s.flashcardSessionScope;
+
   // Language -- managed by LanguageSelectActivity, not in SettingsList.
   // Stored as ISO code string ("EN", "DE", ...) for stability across enum reorders.
   doc["language"] = (s.language < getLanguageCount()) ? LANGUAGE_CODES[s.language] : "EN";
@@ -282,6 +286,12 @@ bool JsonSettingsIO::loadSettings(CrossPointSettings& s, const char* json, bool*
       clamp(doc["dictMarkerDwellEnabled"] | s.dictMarkerDwellEnabled, 2, s.dictMarkerDwellEnabled);
   s.dictMarkerT1Idx = clamp(doc["dictMarkerT1Idx"] | s.dictMarkerT1Idx, kDictMarkerT1Count, s.dictMarkerT1Idx);
   s.dictMarkerT2Idx = clamp(doc["dictMarkerT2Idx"] | s.dictMarkerT2Idx, kDictMarkerT2Count, s.dictMarkerT2Idx);
+
+  // Flashcard style + session scope — chosen on the review overview, not in SettingsList.
+  s.flashcardCardStyle =
+      clamp(doc["flashcardCardStyle"] | s.flashcardCardStyle, S::FLASHCARD_CARD_STYLE_COUNT, s.flashcardCardStyle);
+  s.flashcardSessionScope = clamp(doc["flashcardSessionScope"] | s.flashcardSessionScope,
+                                  S::FLASHCARD_SESSION_SCOPE_COUNT, s.flashcardSessionScope);
 
   // Language -- stored as code string for stability across enum reorders.
   if (doc["language"].is<const char*>()) {

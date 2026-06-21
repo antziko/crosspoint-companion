@@ -252,6 +252,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
       StrId::STR_LOOKUP_HIST_CAP, &CrossPointSettings::lookupHistoryCap,
       {CrossPointSettings::HIST_CAP_MIN, CrossPointSettings::HIST_CAP_UNLIMITED, CrossPointSettings::HIST_CAP_STEP},
       "lookupHistoryCap", StrId::STR_READER_DICTIONARY));
+  // flashcardCardStyle + flashcardSessionScope are NOT registered here: both are
+  // chosen per-session on the FlashcardReviewActivity overview (Up/Down = card
+  // style, Left/Right = due-first / shuffled) and the picks are persisted as the
+  // defaults. Hand-persisted in JsonSettingsIO (like dictMarker).
   v.push_back(SettingInfo::Enum(StrId::STR_HOLD_CONFIRM, &CrossPointSettings::holdConfirmAction,
                                 {StrId::STR_STATE_OFF, StrId::STR_HOLD_CONFIRM_BOOKMARK, StrId::STR_HOLD_CONFIRM_DICT},
                                 "holdConfirmAction", StrId::STR_READER_DICTIONARY));

@@ -7,6 +7,7 @@
 
 #include "KOReaderSyncClient.h"
 #include "ProgressMapper.h"
+#include "SyncScope.h"
 #include "activities/Activity.h"
 
 /**
@@ -25,7 +26,7 @@ class KOReaderSyncActivity final : public Activity {
                                 int currentSpineIndex, int currentPage, int totalPagesInSpine,
                                 SavedProgressPosition localKoPos, std::string localChapterName,
                                 std::optional<uint16_t> currentParagraphIndex = std::nullopt,
-                                bool sleepWhenDone = false)
+                                bool sleepWhenDone = false, SyncScope scope = SyncScope::All)
       : Activity("KOReaderSync", renderer, mappedInput),
         epubPath(epubPath),
         currentSpineIndex(currentSpineIndex),
@@ -36,7 +37,8 @@ class KOReaderSyncActivity final : public Activity {
         remoteProgress{},
         remotePosition{},
         localProgress(std::move(localKoPos)),
-        sleepWhenDone(sleepWhenDone) {}
+        sleepWhenDone(sleepWhenDone),
+        syncScope(scope) {}
 
   void onEnter() override;
   void onExit() override;
@@ -53,9 +55,14 @@ class KOReaderSyncActivity final : public Activity {
     UPLOADING,
     UPLOAD_COMPLETE,
     NO_REMOTE_PROGRESS,
+    FEATURE_DONE,  // single-feature scope finished: show summary, auto-return
     SYNC_FAILED,
     NO_CREDENTIALS
   };
+
+  // Which feature(s) this run syncs. ALL keeps the full progress-comparison flow;
+  // the single-feature scopes skip progress and end on the FEATURE_DONE summary.
+  SyncScope syncScope = SyncScope::All;
 
   std::shared_ptr<Epub> epub;  // null until lazy-loaded after TLS in performSync()
   std::string epubPath;
@@ -109,6 +116,11 @@ class KOReaderSyncActivity final : public Activity {
   static constexpr unsigned long UPLOAD_COMPLETE_AUTO_RETURN_MS = 3000;
   unsigned long uploadCompleteAt = 0;
 
+  // millis() when FEATURE_DONE was entered, for the same auto-return-to-reader
+  // behaviour as UPLOAD_COMPLETE on a single-feature sync. Back returns immediately.
+  static constexpr unsigned long FEATURE_DONE_AUTO_RETURN_MS = 4000;
+  unsigned long featureDoneAt = 0;
+
   // Guards returnToReader() so the level-triggered auto-return fires the reader switch once.
   bool returning = false;
 
@@ -130,10 +142,20 @@ class KOReaderSyncActivity final : public Activity {
   void performUpload();
   // Pull + union-merge + push bookmarks alongside progress. Silent (logs only);
   // never fails the progress sync. Requires `documentHash` already computed.
+  // Uses NO keep-alive session: the ~2.7KB upload body needs an unfragmented arena,
+  // so GET and PUT run as separate fresh connections (see the .cpp for the why).
   void syncBookmarks();
   // Pull + merge + push per-device reading-time counters alongside progress.
   // Same contract as syncBookmarks(): silent, never fails the progress sync.
-  void syncStats();
+  // `includeDict` folds/uploads the per-book dictionary history ("dh"); `includeGlobal`
+  // runs the all-books global-counter round-trips. The per-book counter merge always
+  // runs (it shares the same GET/PUT). For DICT scope, pass includeGlobal=false to skip
+  // the extra global legs. Opens its own keep-alive connection.
+  void syncStats(bool includeDict, bool includeGlobal);
+  // Render the shared "Also synced" footer (bookmarks/dict/stats summary) starting at
+  // `y`, advancing and returning the new cursor. Used by SHOWING_RESULT, NO_REMOTE_PROGRESS
+  // and FEATURE_DONE so the summary layout lives in one place.
+  int drawAlsoSyncedFooter(int sideX, int y, int lhFoot);
   void ensureEpubLoaded();
   void saveProgressAndReturn(int spineIndex, int page);
   void returnToReader();

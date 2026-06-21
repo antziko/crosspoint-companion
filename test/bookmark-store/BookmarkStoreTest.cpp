@@ -1,5 +1,3 @@
-#include "BookmarkStore.h"
-
 #include <esp_rom_crc.h>
 #include <gtest/gtest.h>
 
@@ -9,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "BookmarkStore.h"
 #include "HalStorage.h"
 
 namespace {
@@ -52,11 +51,11 @@ class BookmarkStoreTest : public ::testing::Test {
       pod(len);
       f.write(s.data(), len);
     };
-    pod(static_cast<uint8_t>(7));                       // VERSION 7
-    pod(static_cast<uint16_t>(pts.size()));             // count
+    pod(static_cast<uint8_t>(7));            // VERSION 7
+    pod(static_cast<uint16_t>(pts.size()));  // count
     str("Title");
     str("Author");
-    str(bookPath);                                      // embedded path (must match for load)
+    str(bookPath);  // embedded path (must match for load)
     for (const auto& pt : pts) {
       pod(pt.spine);
       pod(pt.progress);
@@ -64,12 +63,12 @@ class BookmarkStoreTest : public ::testing::Test {
       char chapter[48] = {};
       snprintf(chapter, sizeof(chapter), "%s", pt.chapter.c_str());
       f.write(chapter, sizeof(chapter));
-      pod(static_cast<uint16_t>(UINT16_MAX));           // paragraphIndex
+      pod(static_cast<uint16_t>(UINT16_MAX));  // paragraphIndex
       char snippet[64] = {};
       f.write(snippet, sizeof(snippet));
-      pod(static_cast<uint8_t>(0));                     // returnFlag
-      pod(static_cast<uint16_t>(0));                    // chapterCurrentPage
-      pod(static_cast<uint16_t>(0));                    // chapterPageCount
+      pod(static_cast<uint8_t>(0));   // returnFlag
+      pod(static_cast<uint16_t>(0));  // chapterCurrentPage
+      pod(static_cast<uint16_t>(0));  // chapterPageCount
     }
   }
 
@@ -143,12 +142,52 @@ TEST_F(BookmarkStoreTest, JsonCarriesRangeAndSnippetNotFullPreview) {
   ASSERT_EQ(store.addQuote(1, 0.1f, 2, 7, 15, "Ch1", longText.c_str(), 0), BookmarkStore::AddResult::Added);
 
   const std::string blob = BookmarkStore::serializeToJson(store.getBookmarks(), store.getTombstones());
-  EXPECT_NE(blob.find("\"quote\":true"), std::string::npos);
-  EXPECT_NE(blob.find("\"startWord\":2"), std::string::npos);
-  EXPECT_NE(blob.find("\"endWord\":7"), std::string::npos);
+  // Short-key wire format (see the key map in BookmarkStore::serializeToJson).
+  EXPECT_NE(blob.find("\"q\":true"), std::string::npos);
+  EXPECT_NE(blob.find("\"sw\":2"), std::string::npos);
+  EXPECT_NE(blob.find("\"ew\":7"), std::string::npos);
   // The full 400-char preview must NOT cross the wire (snippet teaser only).
   EXPECT_EQ(blob.find(longText), std::string::npos);
   EXPECT_LT(blob.size(), longText.size());
+}
+
+TEST_F(BookmarkStoreTest, ParsesLegacyLongKeyBlob) {
+  // A blob from older firmware (verbose long keys) must still parse — during a mixed-version
+  // window a peer may upload long keys before it is updated. parseFromJson reads both.
+  const char* legacy =
+      "{\"bookmarks\":[{\"spineIndex\":5,\"progress\":0.5,\"version\":3,\"chapterTitle\":\"Ch5\","
+      "\"paragraphIndex\":12,\"snippet\":\"hello\",\"chapterCurrentPage\":2,\"chapterPageCount\":10,"
+      "\"quote\":true,\"endSpineIndex\":5,\"endProgress\":0.6,\"startWord\":4,\"endWord\":9}],"
+      "\"tombstones\":[{\"spineIndex\":7,\"paragraphIndex\":3,\"progress\":0.7,\"version\":2}]}";
+  std::vector<Bookmark> bms;
+  std::vector<Tombstone> tombs;
+  ASSERT_TRUE(BookmarkStore::parseFromJson(legacy, bms, tombs));
+  ASSERT_EQ(bms.size(), 1u);
+  EXPECT_EQ(bms[0].spineIndex, 5);
+  EXPECT_FLOAT_EQ(bms[0].progress, 0.5f);
+  EXPECT_EQ(bms[0].version, 3u);
+  EXPECT_STREQ(bms[0].chapterTitle, "Ch5");
+  EXPECT_EQ(bms[0].paragraphIndex, 12);
+  EXPECT_STREQ(bms[0].snippet, "hello");
+  EXPECT_EQ(bms[0].chapterCurrentPage, 2);
+  EXPECT_EQ(bms[0].chapterPageCount, 10);
+  EXPECT_TRUE(bms[0].isQuote());
+  EXPECT_EQ(bms[0].startWord, 4);
+  EXPECT_EQ(bms[0].endWord, 9);
+  ASSERT_EQ(tombs.size(), 1u);
+  EXPECT_EQ(tombs[0].spineIndex, 7);
+  EXPECT_EQ(tombs[0].paragraphIndex, 3);
+  EXPECT_EQ(tombs[0].version, 2u);
+}
+
+TEST_F(BookmarkStoreTest, LegacyTimestampKeyMapsToVersion) {
+  // Oldest blobs used "timestamp" for what is now "version"; the triple fallback keeps it.
+  const char* oldest = "[{\"spineIndex\":1,\"progress\":0.2,\"timestamp\":42,\"chapterTitle\":\"X\"}]";
+  std::vector<Bookmark> bms;
+  std::vector<Tombstone> tombs;
+  ASSERT_TRUE(BookmarkStore::parseFromJson(oldest, bms, tombs));
+  ASSERT_EQ(bms.size(), 1u);
+  EXPECT_EQ(bms[0].version, 42u);
 }
 
 TEST_F(BookmarkStoreTest, RemoveQuoteCompactsPreview) {
@@ -232,8 +271,8 @@ TEST_F(BookmarkStoreTest, EnforcesCombinedCap) {
   // Fill with quotes up to the cap, then expect refusal.
   int added = 0;
   for (int i = 0; i < 200; i++) {
-    const auto r = store.addQuote(1, 0.01f * i, static_cast<uint16_t>(i * 2), static_cast<uint16_t>(i * 2 + 1), 250,
-                                  "Ch", "t", 0);
+    const auto r =
+        store.addQuote(1, 0.01f * i, static_cast<uint16_t>(i * 2), static_cast<uint16_t>(i * 2 + 1), 250, "Ch", "t", 0);
     if (r == BookmarkStore::AddResult::Added) {
       added++;
     } else {

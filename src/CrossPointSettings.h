@@ -178,6 +178,16 @@ class CrossPointSettings {
     QUICK_RESUME_SLEEP_SCREEN_COUNT
   };
 
+  // Dictionary-lookup flashcards (FlashcardReviewActivity). Card front style and
+  // review-session card selection order. Values map to FlashcardDeck render /
+  // FlashcardDeck::SessionScope.
+  enum FLASHCARD_CARD_STYLE { FLASHCARD_STYLE_CLOZE = 0, FLASHCARD_STYLE_WORD_CONTEXT = 1, FLASHCARD_CARD_STYLE_COUNT };
+  enum FLASHCARD_SESSION_SCOPE {
+    FLASHCARD_SCOPE_DUE_FIRST = 0,
+    FLASHCARD_SCOPE_ALL_SHUFFLED = 1,
+    FLASHCARD_SESSION_SCOPE_COUNT
+  };
+
   // Per-book reader settings override.
   // When active, SETTINGS.getReaderFontId(), getReaderLineCompression(), and the
   // three getReader*() accessors below return values from this struct instead of
@@ -274,6 +284,11 @@ class CrossPointSettings {
   // Definition viewer font (built-in fonts only).
   uint8_t dictionaryFontFamily = NOTOSERIF;
   uint8_t dictionaryFontSize = MEDIUM;
+  // Dictionary-lookup flashcards: card front style + review session card order.
+  // Both are chosen on the FlashcardReviewActivity overview (not in SettingsList)
+  // and persisted here as the remembered defaults. Default style = word+context.
+  uint8_t flashcardCardStyle = FLASHCARD_STYLE_WORD_CONTEXT;
+  uint8_t flashcardSessionScope = FLASHCARD_SCOPE_DUE_FIRST;
   // Auto-sleep timeout setting (default 10 minutes). Legacy sleepTimeout enum values are migration-only.
   uint8_t sleepTimeoutMinutes = 10;
   // When on, a manual power-button sleep from the reader offers to KOReader-sync first
