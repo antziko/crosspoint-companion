@@ -188,9 +188,62 @@ esp_err_t httpEventHandler(esp_http_client_event_t* evt) {
   return ESP_OK;
 }
 
+// --- Failed-allocation instrumentation (dev diagnostic, 2026-06-21) ---
+// The HTTPS handshake fast-fails (ESP_ERR_HTTP_CONNECT in ~64ms, no "TLS connected") when the
+// largest free block is ~31-32K but succeeds (~1589ms real handshake) at ~34K — implying ONE
+// large contiguous malloc in esp_tls/mbedtls setup is failing. The shipped prebuilt mbedtls is
+// already IN=8192/OUT=2048 asymmetric (record buffers ~10K total), so the ~33K culprit is NOT the
+// OUT content buffer and lib-building OUT=2048 would be pointless. This hook records the size of
+// the failing alloc so the real culprit can be identified BEFORE committing to a lib-builder
+// rebuild. The callback runs in the failing allocator's task context (esp_tls task here): it does
+// only scalar writes to DRAM statics — NO allocation, NO SD I/O — so it is reentrancy-safe. The
+// captured values are flushed to SD from endTrace (task context, safe).
+struct FailedAllocCapture {
+  volatile uint32_t count;
+  volatile uint32_t maxSize;
+  volatile uint32_t lastSize;
+  volatile uint32_t caps;
+};
+FailedAllocCapture s_failAlloc = {0, 0, 0, 0};
+
+void allocFailHook(size_t size, uint32_t caps, const char* /*function_name*/) {
+  s_failAlloc.count++;
+  s_failAlloc.lastSize = static_cast<uint32_t>(size);
+  if (size > s_failAlloc.maxSize) s_failAlloc.maxSize = static_cast<uint32_t>(size);
+  s_failAlloc.caps = caps;
+}
+
+// Register the global failed-alloc hook once. Only fires on a FAILED allocation, so the
+// steady-state overhead is zero. No public unregister API; left installed for the session.
+void ensureAllocHook() {
+  static bool registered = false;
+  if (registered) return;
+  if (heap_caps_register_failed_alloc_callback(allocFailHook) == ESP_OK) registered = true;
+}
+
+void resetFailAlloc() {
+  s_failAlloc.count = 0;
+  s_failAlloc.maxSize = 0;
+  s_failAlloc.lastSize = 0;
+  s_failAlloc.caps = 0;
+}
+
+// Flush the per-request failed-alloc capture. caps bit0=MALLOC_CAP_EXEC, and for our purpose
+// the key signal is maxSize: a single ~33K maxSize confirms one large contiguous alloc is the
+// wall (lib-builder DYNAMIC_BUFFER is then the lever); many small fails would mean fragmentation.
+void dumpFailAlloc(const char* tag) {
+  if (s_failAlloc.count == 0) return;
+  SdDebugLog::log("FAILALLOC", "%s fails=%u maxSize=%u lastSize=%u caps=0x%x", tag, (unsigned)s_failAlloc.count,
+                  (unsigned)s_failAlloc.maxSize, (unsigned)s_failAlloc.lastSize, (unsigned)s_failAlloc.caps);
+  LOG_ERR("KOSync", "%s: %u failed alloc(s), max=%u bytes - see FAILALLOC line", tag, (unsigned)s_failAlloc.count,
+          (unsigned)s_failAlloc.maxSize);
+}
+
 // Logs a pre-request heap+RSSI snapshot (see SdDebugLog::NetSnapshot) and arms
 // `buf` so httpEventHandler logs connect/stall events under the same tag.
 void beginTrace(ResponseBuffer& buf, const char* tag, size_t bodyLen = 0) {
+  ensureAllocHook();
+  resetFailAlloc();
   buf.traceTag = tag;
   buf.requestStartMs = millis();
   buf.lastEventMs = buf.requestStartMs;
@@ -211,6 +264,9 @@ void endTrace(const ResponseBuffer& buf, const char* tag, int httpCode, esp_err_
                   "%s resp code=%d err=%d(%s) elapsed=%lums bytes=%d heap=%u largest8=%u intFree=%u intLargest=%u", tag,
                   httpCode, (int)err, esp_err_to_name(err), (unsigned long)(millis() - buf.requestStartMs), buf.len,
                   snap.heapFree, snap.largest8Bit, snap.internalFree, snap.internalLargest);
+  // If any allocation failed during this request (e.g. the esp_tls/mbedtls handshake setup that
+  // turns ESP_ERR_HTTP_CONNECT), emit its size so the ~33K contiguous wall can be pinned.
+  dumpFailAlloc(tag);
 }
 
 // --- Connection reuse (keep-alive) session ---
@@ -564,6 +620,29 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
 
   std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/bookmarks";
   if (!heapOkForUrl(url, "BOOKMARKS_PUT")) return LOW_MEMORY;
+
+  // Body-build contiguous guard — applies EVEN on a reused session. heapOkForUrl above and
+  // contigOkForPut below both BYPASS on reuse because the held mbedTLS arena already covers the
+  // handshake. But building the request body still needs contiguous heap NOW: the JsonDocument
+  // copies the pre-serialized bookmarks blob into its pool (~blobLen) and serializeJson grows
+  // `body` to ~blobLen via doubling reallocs (peak a single ~2*blobLen block at the final grow).
+  // After an in-session bookmark GET the mbedTLS arena has crushed the largest free block, so this
+  // build aborts under -fno-exceptions instead of failing gracefully. HW log 2026-06-21: the GET
+  // left largest8=3060, then the PUT body build abort()ed mid-serialize ("document":"bd...").
+  // Convert that into a clean LOW_MEMORY skip; the session closes after, heap recovers, retry works.
+  {
+    const size_t blobLen = bookmarksJson.length();
+    const size_t needContig = blobLen * 2 + 512;
+    multi_heap_info_t info;
+    heap_caps_get_info(&info, MALLOC_CAP_8BIT);
+    if (info.largest_free_block < needContig) {
+      SdDebugLog::log("KOSYNC", "BOOKMARKS_PUT body-build: largest=%u < need=%u (blob=%u) -> SKIP",
+                      (unsigned)info.largest_free_block, (unsigned)needContig, (unsigned)blobLen);
+      LOG_ERR("KOSync", "BOOKMARKS_PUT: largest block %u < %u for body build - skip to avoid abort",
+              (unsigned)info.largest_free_block, (unsigned)needContig);
+      return LOW_MEMORY;
+    }
+  }
 
   // The bookmarks array is sent as a single pre-serialized JSON string field so the
   // server stores it as an opaque blob (it never parses bookmark contents).
