@@ -18,6 +18,7 @@
 #include "ReaderUtils.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/DictStopwords.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
 #include "util/IpaUtils.h"
@@ -43,9 +44,11 @@ void DictionaryDefinitionActivity::onEnter() {
   LookupHistory::addWordIf(cachePath, historyWord, historyStatus, recordHistory);
 
   // Seed the back-nav chain. The initial word is the newest history entry iff it
-  // was just logged (same condition addWordIf applies internally).
+  // was just logged (same condition addWordIf applies internally, including the
+  // stopword filter — a filtered word is NOT recorded, so it has no history slot).
   chain_.reset(SETTINGS.getLookupHistoryCapValue());
-  const bool initialLogged = recordHistory && !historyWord.empty() && !cachePath.empty();
+  const bool initialLogged =
+      recordHistory && !historyWord.empty() && !cachePath.empty() && !DictStopwords::isStopword(historyWord);
   chain_.setCurrentHistIndex(initialLogged ? 0 : -1);
 }
 
@@ -360,7 +363,10 @@ void DictionaryDefinitionActivity::loop() {
     switch (controller.handleInput()) {
       case DictionaryLookupController::LookupEvent::FoundDefinition: {
         const bool wasBackNav = chainBackNavInProgress;
-        const bool willLog = !wasBackNav && controller.getRecordHistory();
+        // Must match addWordIf exactly (incl. stopword filter) so the chain's
+        // back-nav indices stay in lockstep with what actually lands in history.
+        const bool willLog =
+            !wasBackNav && controller.getRecordHistory() && !DictStopwords::isStopword(controller.getLookupWord());
         if (!wasBackNav) {
           // Forward: push a back-entry for the word being left (current headword,
           // on currentPage), referencing its history position.

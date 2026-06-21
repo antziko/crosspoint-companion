@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "CrossPointSettings.h"
+#include "DictStopwords.h"
 
 // ---------------------------------------------------------------------------
 // Private helpers
@@ -328,6 +329,7 @@ int LookupHistory::addWordVer(const std::string& cachePath, const std::string& w
 
 void LookupHistory::addWordIf(const std::string& cachePath, const std::string& word, Status status, bool enabled) {
   if (!enabled || word.empty() || cachePath.empty()) return;
+  if (DictStopwords::isStopword(word)) return;  // skip common closed-class words (see DictStopwords.h)
   addWord(cachePath, word, status);
 }
 
