@@ -64,30 +64,45 @@ bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint
       return (gpio.*fn)(hw);
     }
     case Button::Up:
-      // Side buttons fixed for Up/Down, except the CW side-swap trades the two.
-      return (gpio.*fn)(swapSideButtons() ? HalGPIO::BTN_DOWN : HalGPIO::BTN_UP);
     case Button::Down:
       // Side buttons fixed for Up/Down, except the CW side-swap trades the two.
-      return (gpio.*fn)(swapSideButtons() ? HalGPIO::BTN_UP : HalGPIO::BTN_DOWN);
+      return (gpio.*fn)(usesUpButton(button) ? HalGPIO::BTN_UP : HalGPIO::BTN_DOWN);
     case Button::Power:
       // Power button bypasses remapping.
       return (gpio.*fn)(HalGPIO::BTN_POWER);
     case Button::PageBack:
-    case Button::PageForward: {
+    case Button::PageForward:
       // Reader page navigation uses side buttons and can be swapped via settings.
-      // The CW side-swap (swapSideButtons) XOR-composes on top of sideButtonLayout.
       if (sideLayout == CrossPointSettings::SIDE_BUTTONS_DISABLED) {
         return false;
       }
-      const bool wantPageBack = (button == Button::PageBack);
-      // PREV_NEXT: PageBack=UP, PageForward=DOWN. NEXT_PREV inverts that.
-      const bool layoutInvert = (sideLayout == CrossPointSettings::NEXT_PREV);
-      const bool useUp = (wantPageBack != layoutInvert) != swapSideButtons();
-      return (gpio.*fn)(useUp ? HalGPIO::BTN_UP : HalGPIO::BTN_DOWN);
-    }
+      return (gpio.*fn)(usesUpButton(button) ? HalGPIO::BTN_UP : HalGPIO::BTN_DOWN);
   }
 
   return false;
+}
+
+bool MappedInputManager::usesUpButton(const Button button) const {
+  switch (button) {
+    case Button::Up:
+      return !swapSideButtons();
+    case Button::Down:
+      return swapSideButtons();
+    case Button::PageBack:
+    case Button::PageForward: {
+      // PREV_NEXT: PageBack=UP, PageForward=DOWN. NEXT_PREV inverts that. The CW
+      // side-swap (swapSideButtons) XOR-composes on top. Disabled side buttons map
+      // to nothing -- report the lower (non-up) button rather than crashing callers.
+      if (SETTINGS.sideButtonLayout == CrossPointSettings::SIDE_BUTTONS_DISABLED) {
+        return false;
+      }
+      const bool wantPageBack = (button == Button::PageBack);
+      const bool layoutInvert = (SETTINGS.sideButtonLayout == CrossPointSettings::NEXT_PREV);
+      return (wantPageBack != layoutInvert) != swapSideButtons();
+    }
+    default:
+      return false;
+  }
 }
 
 bool MappedInputManager::wasPressed(const Button button, const bool applySwap) const {

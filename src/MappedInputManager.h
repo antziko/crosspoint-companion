@@ -29,6 +29,14 @@ class MappedInputManager {
   // Returns the raw front button index that was pressed this frame (or -1 if none).
   int getPressedFrontButton() const;
 
+  // True when the given logical button currently resolves to the physical UP side
+  // button (BTN_UP). Meaningful for Up / Down / PageBack / PageForward (it folds in
+  // the Side Button Layout and the CW side-swap); false for any other button.
+  // Callers that draw side-button clues by physical position use this to pick the
+  // corner each label sits in. Returns false for PageBack/PageForward when the side
+  // buttons are disabled.
+  bool usesUpButton(Button button) const;
+
  private:
   HalGPIO& gpio;
 

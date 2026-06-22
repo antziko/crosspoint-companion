@@ -130,6 +130,20 @@ void FlashcardReviewActivity::navigateCard(int delta) {
   requestUpdate();
 }
 
+void FlashcardReviewActivity::returnToOverview() {
+  // Abandon the in-progress session and return to the deck overview. Reset the
+  // session vector + cursor + tallies so a fresh session can be started, and
+  // recompute deck stats so any grading/suspending done this session is reflected.
+  // cardStyle is kept (it is the overview's picker state).
+  session.clear();
+  cursor = 0;
+  reviewed = correct = mastered = suspended = 0;
+  suspendedMode = false;
+  stats = FlashcardDeck::computeStats(cachePath, today);
+  phase = Phase::Overview;
+  requestUpdate();
+}
+
 void FlashcardReviewActivity::promptSuspendToggle() {
   // Capture the word now -- `card` is overwritten as soon as we advance.
   const std::string word = card.word;
@@ -189,7 +203,14 @@ void FlashcardReviewActivity::loop() {
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-    DictUtils::cancelAndFinish(*this);
+    // Back from a card abandons the in-progress session and returns to the deck
+    // overview (the flashcard "home" page) rather than exiting to the reader; from
+    // the overview/summary Back exits the activity.
+    if (phase == Phase::Front || phase == Phase::Revealed || phase == Phase::AwaitingGrade) {
+      returnToOverview();
+    } else {
+      DictUtils::cancelAndFinish(*this);
+    }
     return;
   }
 
@@ -218,9 +239,10 @@ void FlashcardReviewActivity::loop() {
       }
       break;
     case Phase::Front:
-      // Up sets the card aside (or restores it, in a suspended-review session),
-      // after a confirmation prompt. Available on every card face.
-      if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
+      // The "prev" side button (PageBack -- follows Side Button Layout + CW swap)
+      // sets the card aside (or restores it, in a suspended-review session), after
+      // a confirmation prompt. Available on every card face.
+      if (mappedInput.wasReleased(MappedInputManager::Button::PageBack)) {
         promptSuspendToggle();
       } else if (suspendedMode) {
         // Suspended review: no grading. Left/Right page through the set-aside
@@ -258,10 +280,15 @@ void FlashcardReviewActivity::loop() {
       }
       break;
     case Phase::Revealed:
-      // Answer is visible: Left/Right re-pick the grade, Confirm commits + advances.
+      // Answer is visible. Confirm is reserved for flip (back-face definition). The
+      // two side buttons follow the Side Button Layout + CW swap: "prev" (PageBack)
+      // suspends, "next" (PageForward) commits the picked grade and advances.
+      // Left/Right re-pick the grade.
       // (suspendedMode never reaches this phase -- it skips the cloze reveal.)
-      if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
+      if (mappedInput.wasReleased(MappedInputManager::Button::PageBack)) {
         promptSuspendToggle();
+      } else if (mappedInput.wasReleased(MappedInputManager::Button::PageForward)) {
+        gradeAndAdvance(pendingCorrect);  // "next": commit the grade + advance
       } else if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
         pendingCorrect = true;
         requestUpdate();
@@ -269,13 +296,14 @@ void FlashcardReviewActivity::loop() {
         pendingCorrect = false;
         requestUpdate();
       } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-        gradeAndAdvance(pendingCorrect);
+        controller.startLookup(card.word, /*recordHistory=*/false);  // flip -> back face
       }
       break;
     case Phase::AwaitingGrade:
-      // Back face viewed. Up suspends/unsuspends; Confirm re-flips to the
-      // definition. In suspendedMode grading is disabled (Left/Right ignored).
-      if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
+      // Back face viewed. The "prev" side button (PageBack) suspends/unsuspends;
+      // Confirm re-flips to the definition. In suspendedMode grading is disabled
+      // (Left/Right ignored).
+      if (mappedInput.wasReleased(MappedInputManager::Button::PageBack)) {
         promptSuspendToggle();
       } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
         controller.startLookup(card.word, /*recordHistory=*/false);  // flip -> back face
@@ -484,23 +512,61 @@ void FlashcardReviewActivity::renderOverview(int contentTop, int contentBottom, 
   drawHalf(opt1, left + halfW, !clozeSel);
   y += rowH + metrics.verticalSpacing * 2;
 
-  // Three at-a-glance counts: Due (review now) / New (box 0) / Mastered (retired).
-  // Same font (UI_10) as the mastery row below for a consistent stat block.
-  char stat[80];
-  snprintf(stat, sizeof(stat), "%s %d     %s %d     %s %d", tr(STR_FLASHCARD_STAT_DUE_SHORT), stats.due,
-           tr(STR_FLASHCARD_STAT_NEW), stats.boxHist[0], tr(STR_FLASHCARD_SUMMARY_MASTERED), stats.mastered);
+  // Cards due for review right now -- the only "do this now" number; New/Mastered
+  // are conveyed by the box ladder below. Same font (UI_10) as the progress row.
+  char stat[48];
+  snprintf(stat, sizeof(stat), "%s %d", tr(STR_FLASHCARD_STAT_DUE), stats.due);
   renderer.drawCenteredText(UI_10_FONT_ID, y, stat);
   y += rowH + metrics.verticalSpacing * 2;
 
-  // Mastery progress bar: mastered / total. Label left, bar centre, percent right --
-  // the bar is vertically centred against the text line so all three align.
-  const int pct = stats.total > 0 ? stats.mastered * 100 / stats.total : 0;
-  renderer.drawText(UI_10_FONT_ID, left, y, tr(STR_FLASHCARD_MASTERY));
+  // Box-distribution ladder: one cell per Leitner stage -- New (box 0), boxes 1..5,
+  // then Mastered -- each showing how many cards currently sit there. Cards march
+  // rightward as they are promoted, so the distribution visibly shifts session to
+  // session: progress you can see long before anything graduates. Counts come
+  // straight from boxHist[] + mastered, no new storage.
+  constexpr int LADDER_CELLS = 7;  // New, box1..box5, Mastered
+  const int counts[LADDER_CELLS] = {stats.boxHist[0], stats.boxHist[1], stats.boxHist[2], stats.boxHist[3],
+                                    stats.boxHist[4], stats.boxHist[5], stats.mastered};
+  const int cellW = (countRight - left) / LADDER_CELLS;
+  const int cellH = lh + 2;
+  for (int i = 0; i < LADDER_CELLS; i++) {
+    const int cx = left + i * cellW;
+    const bool fill = (i == LADDER_CELLS - 1) && counts[i] > 0;  // Mastered cell filled solid
+    if (fill) {
+      renderer.fillRect(cx, y - 1, cellW, cellH, true);
+    } else {
+      renderer.drawRect(cx, y - 1, cellW, cellH, true);
+    }
+    char c[8];
+    snprintf(c, sizeof(c), "%d", counts[i]);
+    const int cw = renderer.getTextWidth(sf, c);
+    renderer.drawText(sf, cx + (cellW - cw) / 2, y, c, !fill);  // white digit when filled
+  }
+  // Caption row under the ladder: New / Mastered at the ends only (the middle cells
+  // are the intermediate Leitner boxes -- left to right = least to most learned).
+  const int capY = y + cellH;
+  renderer.drawText(SMALL_FONT_ID, left, capY, tr(STR_FLASHCARD_STAT_NEW), true);
+  const char* mLabel = tr(STR_FLASHCARD_SUMMARY_MASTERED);
+  renderer.drawText(SMALL_FONT_ID, countRight - renderer.getTextWidth(SMALL_FONT_ID, mLabel), capY, mLabel, true);
+  y += cellH + renderer.getLineHeight(SMALL_FONT_ID) + metrics.verticalSpacing * 2;
+
+  // Weighted learning-progress bar: every card contributes its box position toward
+  // the bar (box b of 6, Mastered = 6/6), so it advances on each promotion rather
+  // than only when a card graduates -- far more responsive than mastered/total. The
+  // denominator is the active deck (suspended cards excluded).
+  int active = stats.mastered;
+  long weighted = stats.mastered * 6L;
+  for (int b = 0; b < 6; b++) {
+    active += stats.boxHist[b];
+    weighted += static_cast<long>(stats.boxHist[b]) * b;
+  }
+  const int pct = active > 0 ? static_cast<int>(weighted * 100 / (active * 6L)) : 0;
+  renderer.drawText(UI_10_FONT_ID, left, y, tr(STR_FLASHCARD_PROGRESS));
   char pctBuf[8];
   snprintf(pctBuf, sizeof(pctBuf), "%d%%", pct);
   const int pctW = renderer.getTextWidth(UI_10_FONT_ID, pctBuf);
   renderer.drawText(UI_10_FONT_ID, countRight - pctW, y, pctBuf);
-  const int barX = left + renderer.getTextWidth(UI_10_FONT_ID, tr(STR_FLASHCARD_MASTERY)) + 12;
+  const int barX = left + renderer.getTextWidth(UI_10_FONT_ID, tr(STR_FLASHCARD_PROGRESS)) + 12;
   const int barMaxW = std::max(1, (countRight - pctW - 12) - barX);
   const int barH = std::max(6, lh - 4);       // a little shorter than the text line
   const int barY = y + (lh - barH) / 2;        // vertically centred with the label/percent
@@ -562,7 +628,7 @@ void FlashcardReviewActivity::renderFront(int contentTop, int contentBottom, int
   // Suspended review always shows the word (recall isn't being tested).
   const bool showWord = suspendedMode || cardStyle != CrossPointSettings::FLASHCARD_STYLE_CLOZE;
   renderCardFace(contentTop, contentBottom, pageWidth, showWord);
-  drawSuspendHint(contentTop);
+  drawSuspendHint(contentTop, contentBottom);
 
   // Suspended review: flip (read definition) + Prev/Next browsing + resume (Up).
   // Normal review: flip on Confirm; pass/fail always available without flipping.
@@ -580,7 +646,7 @@ void FlashcardReviewActivity::renderRevealed(int contentTop, int contentBottom, 
   // header + filled, underlined in the excerpt) -- the only change is the blank
   // resolving, no vertical jump.
   renderCardFace(contentTop, contentBottom, pageWidth, /*showWord=*/true);
-  drawSuspendHint(contentTop);
+  drawSuspendHint(contentTop, contentBottom, /*showNextHint=*/true);
 
   // Live grade pick as a small footer line (above the chapter footer / hints) so it
   // never displaces the excerpt.
@@ -589,19 +655,46 @@ void FlashcardReviewActivity::renderRevealed(int contentTop, int contentBottom, 
   renderer.drawCenteredText(UI_10_FONT_ID, contentBottom - metrics.listRowHeight * 2, pick, true,
                             EpdFontFamily::ITALIC);
 
-  // Left/Right re-pick the grade; Confirm commits it and advances.
+  // Left/Right re-pick the grade; Confirm flips to the definition. "Next" (commit +
+  // advance) is the Down side button, clued top-right by drawSuspendHint above.
   const auto labels =
-      mappedInput.mapLabels(tr(STR_BACK), tr(STR_NEXT_FIELD), tr(STR_FLASHCARD_PASS), tr(STR_FLASHCARD_FAIL));
+      mappedInput.mapLabels(tr(STR_BACK), tr(STR_FLASHCARD_FLIP), tr(STR_FLASHCARD_PASS), tr(STR_FLASHCARD_FAIL));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
 
-void FlashcardReviewActivity::drawSuspendHint(int contentTop) {
-  // Tuck a small, plain hint into the top-right corner -- visible but unobtrusive,
-  // so it never competes with the card word/excerpt in the centre.
-  const char* hint = suspendedMode ? tr(STR_FLASHCARD_UNSUSPEND_HINT) : tr(STR_FLASHCARD_SUSPEND_HINT);
+void FlashcardReviewActivity::drawSuspendHint(int contentTop, int contentBottom, bool showNextHint) {
+  // Small, plain side-button clues placed at the physical position of the button
+  // they label, so each clue sits next to the button that triggers it. Suspend is
+  // the "prev" (PageBack) button, Next the "next" (PageForward) button; which
+  // physical button is which folds in the Side Button Layout + CW swap via
+  // usesUpButton(). The two devices arrange their side buttons differently:
+  //   X3: side-by-side along the top edge  -> UP=top-left,  DOWN=top-right
+  //   X4: stacked on the right edge        -> UP=top-right, DOWN=bottom-right
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const int x = renderer.getScreenWidth() - metrics.contentSidePadding - renderer.getTextWidth(SMALL_FONT_ID, hint);
-  renderer.drawText(SMALL_FONT_ID, x, contentTop, hint, true);
+  const int leftX = metrics.contentSidePadding;
+  const bool x4 = gpio.deviceIsX4();
+  // On X4 the DOWN-button clue sits at the bottom-right, aligned to the centered
+  // "Missed / Got it" grade line (renderRevealed draws it at this same row). That
+  // row is one above the chapter footer (contentBottom - listRowHeight), so the clue
+  // never overlaps / cuts the chapter title.
+  const int bottomY = contentBottom - metrics.listRowHeight * 2;
+  auto place = [&](const char* text, bool isUpButton) {
+    int x, ypos;
+    if (x4) {
+      x = renderer.getScreenWidth() - metrics.contentSidePadding - renderer.getTextWidth(SMALL_FONT_ID, text);
+      ypos = isUpButton ? contentTop : bottomY;
+    } else {
+      ypos = contentTop;
+      x = isUpButton ? leftX
+                     : renderer.getScreenWidth() - metrics.contentSidePadding - renderer.getTextWidth(SMALL_FONT_ID, text);
+    }
+    renderer.drawText(SMALL_FONT_ID, x, ypos, text, true);
+  };
+  const char* hint = suspendedMode ? tr(STR_FLASHCARD_UNSUSPEND_HINT) : tr(STR_FLASHCARD_SUSPEND_HINT);
+  place(hint, mappedInput.usesUpButton(MappedInputManager::Button::PageBack));
+  if (showNextHint) {
+    place(tr(STR_FLASHCARD_NEXT_HINT), mappedInput.usesUpButton(MappedInputManager::Button::PageForward));
+  }
 }
 
 void FlashcardReviewActivity::drawChapterFooter(int contentBottom) {
@@ -614,7 +707,7 @@ void FlashcardReviewActivity::drawChapterFooter(int contentBottom) {
 void FlashcardReviewActivity::renderAwaitingGrade(int contentTop, int contentBottom, int pageWidth) {
   // Back face viewed: same revealed card face (word shown, underlined in context).
   renderCardFace(contentTop, contentBottom, pageWidth, /*showWord=*/true);
-  drawSuspendHint(contentTop);
+  drawSuspendHint(contentTop, contentBottom);
 
   // Left = pass, Right = fail; Confirm re-flips. Suspended review swaps grading
   // for Prev/Next browsing.

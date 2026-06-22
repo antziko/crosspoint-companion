@@ -35,8 +35,10 @@ class FlashcardReviewActivity final : public Activity {
   // Overview = pre-session deck stats (box-ladder); Confirm starts the session.
   // Front = card context shown, word hidden (cloze) or shown (word+context).
   // Revealed = cloze answer shown after a front grade; the grade is re-pickable
-  //   (Left/Right) and committed on Confirm (the "now that I see it, grade
-  //   honestly" step — only reached from a cloze front, never word+context).
+  //   (Left/Right), Confirm flips to the definition, the "prev" side button
+  //   (PageBack) suspends and the "next" side button (PageForward) commits the
+  //   grade + advances -- the "now that I see it, grade honestly" step, only
+  //   reached from a cloze front, never word+context.
   // AwaitingGrade = the definition (back face) has been viewed; pass/fail prompt.
   // Summary = session finished; show the tally.
   enum class Phase { Overview, Front, Revealed, AwaitingGrade, Summary };
@@ -84,6 +86,10 @@ class FlashcardReviewActivity final : public Activity {
   // bounds, without mutating any card. Used by the suspended-review pass so the
   // user can page through set-aside cards before deciding to resume one.
   void navigateCard(int delta);
+  // Abandon the in-progress session and return to the deck overview (the flashcard
+  // "home" page). Resets the session + tallies and recomputes deck stats. Used by
+  // Back from a card face, so the user lands on the overview instead of the reader.
+  void returnToOverview();
   // Prompt to suspend (active session) or unsuspend (suspendedMode) the resident
   // card via ConfirmationActivity; on confirm, mutate the deck and advance.
   void promptSuspendToggle();
@@ -111,8 +117,14 @@ class FlashcardReviewActivity final : public Activity {
   // Draw the card's chapter title (if any) as a small footer just above the
   // button hints. No-op when the card has no chapter.
   void drawChapterFooter(int contentBottom);
-  // Draw the side-button (Up) suspend/unsuspend hint at the top of the content
-  // area -- the side buttons are not part of the front-button hints row, so they
-  // need an explicit on-screen label. Text reflects suspendedMode.
-  void drawSuspendHint(int contentTop);
+  // Draw the side-button suspend/unsuspend clue at the top of the content area --
+  // the side buttons are not part of the front-button hints row, so they need an
+  // explicit on-screen label. Text reflects suspendedMode. The suspend clue ("prev"
+  // / PageBack button) and, when showNextHint is true (cloze reveal), the "Next"
+  // clue ("next" / PageForward button) are placed at the physical position of the
+  // side button that triggers them, folding in the Side Button Layout + CW swap (via
+  // usesUpButton) and the per-device button geometry: X3 side-by-side along the top
+  // (Up=top-left, Down=top-right); X4 stacked on the right (Up=top-right,
+  // Down=bottom-right -- hence contentBottom is needed).
+  void drawSuspendHint(int contentTop, int contentBottom, bool showNextHint = false);
 };
