@@ -181,6 +181,58 @@ bool FlashcardDeck::forEachLine(const std::string& path, bool (*fn)(void* ctx, c
 }
 
 // ---------------------------------------------------------------------------
+// rewriteDeck (shared atomic temp-file -> rename scaffold)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Bridges a (ctx, out, line, len) transform to forEachLine's signature, carrying
+// the output file and a sticky ok flag so a single I/O failure stops the stream.
+struct RewriteAdapter {
+  bool (*lineFn)(void* ctx, HalFile& out, const char* line, int len);
+  void* ctx;
+  HalFile* out;
+  bool ok;
+};
+
+bool rewriteAdapterLine(void* a, const char* line, int len) {
+  auto* r = static_cast<RewriteAdapter*>(a);
+  r->ok = r->lineFn(r->ctx, *r->out, line, len);
+  return r->ok;  // false -> forEachLine stops early on I/O failure
+}
+
+}  // namespace
+
+bool FlashcardDeck::rewriteDeck(const std::string& cachePath, void* ctx,
+                                bool (*lineFn)(void* ctx, HalFile& out, const char* line, int len),
+                                bool (*tailFn)(void* ctx, HalFile& out)) {
+  const std::string path = filePath(cachePath);
+  const std::string tmpPath = tmpFilePath(cachePath);
+
+  HalFile out;
+  if (!Storage.openFileForWrite("FCD", tmpPath, out)) {
+    LOG_ERR("FCD", "Failed to open temp for write: %s", tmpPath.c_str());
+    return false;
+  }
+  RewriteAdapter ad{lineFn, ctx, &out, true};
+  forEachLine(path, rewriteAdapterLine, &ad);
+  if (ad.ok && tailFn) ad.ok = tailFn(ctx, out);
+  out.close();
+
+  if (!ad.ok) {
+    LOG_ERR("FCD", "Deck rewrite failed: %s", tmpPath.c_str());
+    Storage.remove(tmpPath.c_str());
+    return false;
+  }
+  Storage.remove(path.c_str());
+  if (!Storage.rename(tmpPath.c_str(), path.c_str())) {
+    LOG_ERR("FCD", "Deck rewrite rename failed: %s", path.c_str());
+    return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Leitner core
 // ---------------------------------------------------------------------------
 
@@ -197,7 +249,7 @@ void FlashcardDeck::applyGrade(uint8_t& box, uint32_t& dueDay, bool correct, uin
 }
 
 bool FlashcardDeck::isDue(uint8_t box, uint32_t dueDay, uint32_t today) {
-  return box != RETIRED && (dueDay == 0 || dueDay <= today);
+  return box != RETIRED && box != SUSPENDED && (dueDay == 0 || dueDay <= today);
 }
 
 // ---------------------------------------------------------------------------
@@ -245,43 +297,27 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
     return ok;
   }
 
-  // Dedup path: rewrite survivors to a temp file (dropping the old copy), then
-  // append the refreshed card as newest. The original is replaced only after a
-  // clean write so a mid-write failure cannot lose the deck.
-  const std::string tmpPath = tmpFilePath(cachePath);
-  HalFile out;
-  if (!Storage.openFileForWrite("FCD", tmpPath, out)) {
-    LOG_ERR("FCD", "Failed to open temp for write: %s", tmpPath.c_str());
-    return false;
-  }
-  struct CopyCtx {
+  // Dedup path: drop the old copy while copying survivors, then append the
+  // refreshed card as newest -- via the shared atomic rewrite.
+  struct EnrollCtx {
     const std::string* word;
-    HalFile* out;
-    bool ok;
-  } wc{&word, &out, true};
-  forEachLine(
-      path,
-      [](void* ctx, const char* line, int len) {
-        auto* c = static_cast<CopyCtx*>(ctx);
+    const char* chapter;
+    int chapLen;
+    const char* excerpt;
+    int excerptLen;
+  } ec{&word, useChapter, chapLen, useExcerpt, newLen};
+  return rewriteDeck(
+      cachePath, &ec,
+      [](void* ctx, HalFile& out, const char* line, int len) {
+        auto* c = static_cast<EnrollCtx*>(ctx);
         if (lineWordEquals(line, len, *c->word)) return true;  // drop old copy
-        c->ok = writeRaw(*c->out, line, len) && c->out->write("\n", 1) == 1;
-        return c->ok;
+        return writeRaw(out, line, len) && out.write("\n", 1) == 1;
       },
-      &wc);
-  wc.ok = wc.ok && writeCard(out, word.c_str(), word.size(), 0, 0, useChapter, chapLen, useExcerpt, newLen);
-  out.close();
-
-  if (!wc.ok) {
-    LOG_ERR("FCD", "Enroll write failed: %s", tmpPath.c_str());
-    Storage.remove(tmpPath.c_str());
-    return false;
-  }
-  Storage.remove(path.c_str());
-  if (!Storage.rename(tmpPath.c_str(), path.c_str())) {
-    LOG_ERR("FCD", "Enroll rename failed: %s", path.c_str());
-    return false;
-  }
-  return true;
+      [](void* ctx, HalFile& out) {
+        auto* c = static_cast<EnrollCtx*>(ctx);
+        return writeCard(out, c->word->c_str(), c->word->size(), 0, 0, c->chapter, c->chapLen, c->excerpt,
+                         c->excerptLen);
+      });
 }
 
 // ---------------------------------------------------------------------------
@@ -307,6 +343,8 @@ FlashcardDeck::Stats FlashcardDeck::computeStats(const std::string& cachePath, u
         c->s.total++;
         if (p.box == RETIRED) {
           c->s.mastered++;
+        } else if (p.box == SUSPENDED) {
+          c->s.suspended++;
         } else {
           c->s.boxHist[p.box <= TOP_BOX ? p.box : TOP_BOX]++;
           if (isDue(p.box, p.dueDay, c->today)) {
@@ -366,41 +404,20 @@ int FlashcardDeck::loadWindow(const std::string& cachePath, int startNewest, int
 bool FlashcardDeck::removeAt(const std::string& cachePath, int index) {
   if (index < 0) return false;
   const std::string path = filePath(cachePath);
-  const std::string tmpPath = tmpFilePath(cachePath);
 
   CountCtx cc{nullptr, 0, false, {}, 0, {}, 0};
   if (!forEachLine(path, countLine, &cc)) return false;
   if (index >= cc.count) return false;
 
-  HalFile out;
-  if (!Storage.openFileForWrite("FCD", tmpPath, out)) {
-    LOG_ERR("FCD", "Failed to open temp for write: %s", tmpPath.c_str());
-    return false;
-  }
-  struct CopyCtx {
-    HalFile* out;
+  struct RemoveCtx {
     int seen;
     int skipIdx;
-    bool ok;
-  } wc{&out, 0, index, true};
-  forEachLine(
-      path,
-      [](void* ctx, const char* line, int len) {
-        auto* c = static_cast<CopyCtx*>(ctx);
-        if (c->seen++ == c->skipIdx) return true;  // drop this row
-        c->ok = writeRaw(*c->out, line, len) && c->out->write("\n", 1) == 1;
-        return c->ok;
-      },
-      &wc);
-  out.close();
-
-  if (!wc.ok) {
-    LOG_ERR("FCD", "Remove write failed: %s", tmpPath.c_str());
-    Storage.remove(tmpPath.c_str());
-    return false;
-  }
-  Storage.remove(path.c_str());
-  return Storage.rename(tmpPath.c_str(), path.c_str());
+  } rc{0, index};
+  return rewriteDeck(cachePath, &rc, [](void* ctx, HalFile& out, const char* line, int len) {
+    auto* c = static_cast<RemoveCtx*>(ctx);
+    if (c->seen++ == c->skipIdx) return true;  // drop this row
+    return writeRaw(out, line, len) && out.write("\n", 1) == 1;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -415,45 +432,60 @@ bool FlashcardDeck::grade(const std::string& cachePath, const std::string& word,
   CountCtx cc{&word, 0, false, {}, 0, {}, 0};
   if (!forEachLine(path, countLine, &cc) || !cc.dupSeen) return false;
 
-  const std::string tmpPath = tmpFilePath(cachePath);
-  HalFile out;
-  if (!Storage.openFileForWrite("FCD", tmpPath, out)) {
-    LOG_ERR("FCD", "Failed to open temp for write: %s", tmpPath.c_str());
-    return false;
-  }
   struct GradeCtx {
     const std::string* word;
-    HalFile* out;
     bool correct;
     uint32_t today;
-    bool ok;
-  } gc{&word, &out, correct, today, true};
-  forEachLine(
-      path,
-      [](void* ctx, const char* line, int len) {
-        auto* c = static_cast<GradeCtx*>(ctx);
-        const Parsed p = parseLine(line, len);
-        if (static_cast<size_t>(p.wordLen) != c->word->size() || memcmp(line, c->word->c_str(), p.wordLen) != 0) {
-          c->ok = writeRaw(*c->out, line, len) && c->out->write("\n", 1) == 1;  // copy verbatim
-          return c->ok;
-        }
-        uint8_t box = p.box;
-        uint32_t dueDay = p.dueDay;
-        applyGrade(box, dueDay, c->correct, c->today);
-        c->ok = writeCard(*c->out, line, static_cast<size_t>(p.wordLen), box, dueDay, p.chapter, p.chapterLen,
-                          p.excerpt, p.excerptLen);
-        return c->ok;
-      },
-      &gc);
-  out.close();
+  } gc{&word, correct, today};
+  return rewriteDeck(cachePath, &gc, [](void* ctx, HalFile& out, const char* line, int len) {
+    auto* c = static_cast<GradeCtx*>(ctx);
+    const Parsed p = parseLine(line, len);
+    if (static_cast<size_t>(p.wordLen) != c->word->size() || memcmp(line, c->word->c_str(), p.wordLen) != 0)
+      return writeRaw(out, line, len) && out.write("\n", 1) == 1;  // copy verbatim
+    uint8_t box = p.box;
+    uint32_t dueDay = p.dueDay;
+    applyGrade(box, dueDay, c->correct, c->today);
+    return writeCard(out, line, static_cast<size_t>(p.wordLen), box, dueDay, p.chapter, p.chapterLen, p.excerpt,
+                     p.excerptLen);
+  });
+}
 
-  if (!gc.ok) {
-    LOG_ERR("FCD", "Grade write failed: %s", tmpPath.c_str());
-    Storage.remove(tmpPath.c_str());
-    return false;
-  }
-  Storage.remove(path.c_str());
-  return Storage.rename(tmpPath.c_str(), path.c_str());
+// ---------------------------------------------------------------------------
+// suspend / unsuspend  (fixed-value row rewrite over the shared rewriteDeck
+// scaffold; no deck materialization, no new heap)
+// ---------------------------------------------------------------------------
+
+bool FlashcardDeck::suspend(const std::string& cachePath, const std::string& word) {
+  return setBoxForWord(cachePath, word, SUSPENDED, 0);
+}
+
+bool FlashcardDeck::unsuspend(const std::string& cachePath, const std::string& word) {
+  return setBoxForWord(cachePath, word, 0, 0);
+}
+
+bool FlashcardDeck::setBoxForWord(const std::string& cachePath, const std::string& word, uint8_t box,
+                                  uint32_t dueDay) {
+  if (word.empty() || cachePath.empty()) return false;
+  const std::string path = filePath(cachePath);
+
+  // Scan first: skip the rewrite entirely if the word is absent.
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0};
+  if (!forEachLine(path, countLine, &cc) || !cc.dupSeen) return false;
+
+  // Force the matched row's box/dueDay, copying every other line verbatim.
+  struct SetCtx {
+    const std::string* word;
+    uint8_t box;
+    uint32_t dueDay;
+  } sc{&word, box, dueDay};
+  return rewriteDeck(cachePath, &sc, [](void* ctx, HalFile& out, const char* line, int len) {
+    auto* c = static_cast<SetCtx*>(ctx);
+    const Parsed p = parseLine(line, len);
+    if (static_cast<size_t>(p.wordLen) != c->word->size() || memcmp(line, c->word->c_str(), p.wordLen) != 0)
+      return writeRaw(out, line, len) && out.write("\n", 1) == 1;  // copy verbatim
+    return writeCard(out, line, static_cast<size_t>(p.wordLen), c->box, c->dueDay, p.chapter, p.chapterLen,
+                     p.excerpt, p.excerptLen);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -462,10 +494,13 @@ bool FlashcardDeck::grade(const std::string& cachePath, const std::string& word,
 
 namespace {
 
-enum class Tier { ScheduledDue, New, NonRetired };
+enum class Tier { ScheduledDue, New, NonRetired, Suspended };
 
 bool qualifies(Tier t, uint8_t box, uint32_t dueDay, uint32_t today) {
-  if (box == FlashcardDeck::RETIRED) return false;
+  // The Suspended tier deliberately selects only suspended cards; every other
+  // tier excludes both retired and suspended cards.
+  if (t == Tier::Suspended) return box == FlashcardDeck::SUSPENDED;
+  if (box == FlashcardDeck::RETIRED || box == FlashcardDeck::SUSPENDED) return false;
   switch (t) {
     case Tier::ScheduledDue:
       return dueDay != 0 && dueDay <= today;
@@ -473,6 +508,8 @@ bool qualifies(Tier t, uint8_t box, uint32_t dueDay, uint32_t today) {
       return dueDay == 0;
     case Tier::NonRetired:
       return true;
+    case Tier::Suspended:
+      return false;  // handled above
   }
   return false;
 }
@@ -533,6 +570,11 @@ int FlashcardDeck::buildSession(const std::string& cachePath, SessionScope scope
 
   const int total = count(cachePath);
   if (total == 0) return 0;
+
+  // Suspended scope: a single pass over set-aside cards (no due ordering).
+  if (scope == SessionScope::Suspended) {
+    return selectTier(path, Tier::Suspended, today, total, out, 0, cap);
+  }
 
   // Clock unavailable -> due ordering is meaningless; fall back to all-shuffled.
   const bool dueFirst = (scope == SessionScope::DueFirst) && today > 0;

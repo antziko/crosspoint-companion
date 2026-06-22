@@ -15,6 +15,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/DictionaryActivityUtils.h"
+#include "activities/util/ConfirmationActivity.h"
 
 namespace {
 
@@ -47,13 +48,19 @@ void FlashcardReviewActivity::onEnter() {
 }
 
 void FlashcardReviewActivity::startSession(FlashcardDeck::SessionScope scope) {
+  // A suspended-review pass is a transient mode, never the remembered default.
+  suspendedMode = (scope == FlashcardDeck::SessionScope::Suspended);
+
   // Persist the picked style + scope as the new defaults (value-change guarded so
   // a single SPIFFS write happens only when something actually changed -- rule 8).
-  const uint8_t scopeV = static_cast<uint8_t>(scope);
-  if (SETTINGS.flashcardSessionScope != scopeV || SETTINGS.flashcardCardStyle != cardStyle) {
-    SETTINGS.flashcardSessionScope = scopeV;
-    SETTINGS.flashcardCardStyle = cardStyle;
-    SETTINGS.saveToFile();
+  // The Suspended scope is excluded -- it must not become the startup default.
+  if (!suspendedMode) {
+    const uint8_t scopeV = static_cast<uint8_t>(scope);
+    if (SETTINGS.flashcardSessionScope != scopeV || SETTINGS.flashcardCardStyle != cardStyle) {
+      SETTINGS.flashcardSessionScope = scopeV;
+      SETTINGS.flashcardCardStyle = cardStyle;
+      SETTINGS.saveToFile();
+    }
   }
   buildAndShuffleSession(scope);
   if (!session.empty() && loadCurrentCard()) {
@@ -101,6 +108,10 @@ void FlashcardReviewActivity::gradeAndAdvance(bool correctRecall) {
     session.push_back(session[cursor]);
   }
 
+  advanceCard();
+}
+
+void FlashcardReviewActivity::advanceCard() {
   cursor++;
   if (cursor >= session.size() || !loadCurrentCard()) {
     phase = Phase::Summary;
@@ -108,6 +119,38 @@ void FlashcardReviewActivity::gradeAndAdvance(bool correctRecall) {
     phase = Phase::Front;
   }
   requestUpdate();
+}
+
+void FlashcardReviewActivity::navigateCard(int delta) {
+  const int next = static_cast<int>(cursor) + delta;
+  if (next < 0 || next >= static_cast<int>(session.size())) return;  // clamp at the ends
+  cursor = static_cast<size_t>(next);
+  if (!loadCurrentCard()) return;
+  phase = Phase::Front;  // always return to the front context when browsing
+  requestUpdate();
+}
+
+void FlashcardReviewActivity::promptSuspendToggle() {
+  // Capture the word now -- `card` is overwritten as soon as we advance.
+  const std::string word = card.word;
+  const bool unsuspending = suspendedMode;
+  startActivityForResult(
+      std::make_unique<ConfirmationActivity>(
+          renderer, mappedInput,
+          unsuspending ? tr(STR_FLASHCARD_UNSUSPEND_TITLE) : tr(STR_FLASHCARD_SUSPEND_TITLE), word),
+      [this, word, unsuspending](const ActivityResult& res) {
+        if (res.isCancelled) {
+          requestUpdate();  // back to the card, unchanged
+          return;
+        }
+        if (unsuspending) {
+          FlashcardDeck::unsuspend(cachePath, word);
+        } else {
+          FlashcardDeck::suspend(cachePath, word);
+        }
+        suspended++;
+        advanceCard();
+      });
 }
 
 void FlashcardReviewActivity::onExit() {
@@ -164,6 +207,8 @@ void FlashcardReviewActivity::loop() {
         startSession(FlashcardDeck::SessionScope::DueFirst);
       } else if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
         startSession(FlashcardDeck::SessionScope::AllShuffled);
+      } else if (stats.suspended > 0 && mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+        startSession(FlashcardDeck::SessionScope::Suspended);  // review/unsuspend set-aside cards
       }
       break;
     case Phase::Summary:
@@ -173,7 +218,21 @@ void FlashcardReviewActivity::loop() {
       }
       break;
     case Phase::Front:
-      if (cardStyle == CrossPointSettings::FLASHCARD_STYLE_CLOZE) {
+      // Up sets the card aside (or restores it, in a suspended-review session),
+      // after a confirmation prompt. Available on every card face.
+      if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
+        promptSuspendToggle();
+      } else if (suspendedMode) {
+        // Suspended review: no grading. Left/Right page through the set-aside
+        // cards, Confirm flips to the definition, Up (handled above) resumes.
+        if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+          navigateCard(-1);
+        } else if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+          navigateCard(+1);
+        } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+          controller.startLookup(card.word, /*recordHistory=*/false);  // flip -> back face
+        }
+      } else if (cardStyle == CrossPointSettings::FLASHCARD_STYLE_CLOZE) {
         // Cloze hides the word: a front grade first REVEALS the answer (word
         // filled into the excerpt) where the grade can still be re-picked.
         if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
@@ -200,7 +259,10 @@ void FlashcardReviewActivity::loop() {
       break;
     case Phase::Revealed:
       // Answer is visible: Left/Right re-pick the grade, Confirm commits + advances.
-      if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+      // (suspendedMode never reaches this phase -- it skips the cloze reveal.)
+      if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
+        promptSuspendToggle();
+      } else if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
         pendingCorrect = true;
         requestUpdate();
       } else if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
@@ -211,13 +273,23 @@ void FlashcardReviewActivity::loop() {
       }
       break;
     case Phase::AwaitingGrade:
-      // Back face viewed: grade is available; Confirm re-flips to the definition.
-      if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+      // Back face viewed. Up suspends/unsuspends; Confirm re-flips to the
+      // definition. In suspendedMode grading is disabled (Left/Right ignored).
+      if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
+        promptSuspendToggle();
+      } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+        controller.startLookup(card.word, /*recordHistory=*/false);  // flip -> back face
+      } else if (suspendedMode) {
+        // Suspended review: Left/Right page through cards instead of grading.
+        if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+          navigateCard(-1);
+        } else if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+          navigateCard(+1);
+        }
+      } else if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
         gradeAndAdvance(/*correctRecall=*/true);
       } else if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
         gradeAndAdvance(/*correctRecall=*/false);
-      } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-        controller.startLookup(card.word, /*recordHistory=*/false);  // flip -> back face
       }
       break;
   }
@@ -345,7 +417,8 @@ void FlashcardReviewActivity::render(RenderLock&&) {
   if (phase == Phase::Front || phase == Phase::Revealed || phase == Phase::AwaitingGrade) {
     snprintf(titleBuf, sizeof(titleBuf), "%s  %d/%d", tr(STR_FLASHCARDS_REVIEW), pos, sessionTotal);
   } else {
-    snprintf(titleBuf, sizeof(titleBuf), "%s", tr(STR_FLASHCARDS_REVIEW));
+    // Overview / summary: show the whole-deck card count alongside the title.
+    snprintf(titleBuf, sizeof(titleBuf), "%s (%d)", tr(STR_FLASHCARDS_REVIEW), stats.total);
   }
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, titleBuf);
 
@@ -382,7 +455,6 @@ void FlashcardReviewActivity::render(RenderLock&&) {
 }
 
 void FlashcardReviewActivity::renderOverview(int contentTop, int contentBottom, int pageWidth) {
-  (void)contentBottom;  // seven rungs + subline fit the content area by construction
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int left = metrics.contentSidePadding;
   const int rowH = metrics.listRowHeight;
@@ -390,76 +462,75 @@ void FlashcardReviewActivity::renderOverview(int contentTop, int contentBottom, 
 
   int y = contentTop;
 
-  // Summary subline: due-now count, else days until the next card is due.
-  char sub[64];
-  if (stats.due > 0) {
-    snprintf(sub, sizeof(sub), "%s: %d", tr(STR_FLASHCARD_STAT_DUE), stats.due);
-  } else if (stats.nextDueDay > 0 && today > 0) {
-    snprintf(sub, sizeof(sub), "%s: %u", tr(STR_FLASHCARD_STAT_NEXT_DUE), stats.nextDueDay - today);
-  } else {
-    snprintf(sub, sizeof(sub), "%s: %d", tr(STR_FLASHCARD_STAT_TOTAL), stats.total);
-  }
-  renderer.drawCenteredText(UI_10_FONT_ID, y, sub);
-  y += rowH;
-
-  // Card-style selector: show BOTH options; the active one is drawn as a filled
-  // (inverted) pill so the selection is obvious on e-ink. Up/Down toggles it.
+  // Card-style selector: two equal half-width buttons spanning the content width.
+  // The active one is filled (inverted), the other outlined. Up/Down toggles it.
   const bool clozeSel = cardStyle == CrossPointSettings::FLASHCARD_STYLE_CLOZE;
   const int sf = UI_10_FONT_ID;
   const int lh = renderer.getLineHeight(sf);
   const char* opt0 = tr(STR_FLASHCARD_STYLE_CLOZE);
   const char* opt1 = tr(STR_FLASHCARD_STYLE_WORD_CONTEXT);
-  constexpr int pad = 6;
-  constexpr int gap = 18;
-  const int box0 = renderer.getTextWidth(sf, opt0) + 2 * pad;
-  const int box1 = renderer.getTextWidth(sf, opt1) + 2 * pad;
-  int x = (pageWidth - (box0 + gap + box1)) / 2;
+  const int halfW = (pageWidth - 2 * left) / 2;
 
-  auto drawOpt = [&](const char* t, int bw, bool sel) {
+  auto drawHalf = [&](const char* t, int boxX, bool sel) {
     if (sel) {
-      renderer.fillRect(x, y - 1, bw, lh + 2, true);  // inverted pill
-      renderer.drawText(sf, x + pad, y, t, false);    // white text on black
+      renderer.fillRect(boxX, y - 1, halfW, lh + 2, true);  // inverted (filled)
     } else {
-      renderer.drawText(sf, x + pad, y, t, true);
+      renderer.drawRect(boxX, y - 1, halfW, lh + 2, true);  // outlined
     }
-    x += bw;
+    const int tw = renderer.getTextWidth(sf, t);
+    renderer.drawText(sf, boxX + (halfW - tw) / 2, y, t, !sel);  // white text when filled
   };
-  drawOpt(opt0, box0, clozeSel);
-  x += gap;
-  drawOpt(opt1, box1, !clozeSel);
+  drawHalf(opt0, left, clozeSel);
+  drawHalf(opt1, left + halfW, !clozeSel);
+  y += rowH + metrics.verticalSpacing * 2;
+
+  // Three at-a-glance counts: Due (review now) / New (box 0) / Mastered (retired).
+  // Same font (UI_10) as the mastery row below for a consistent stat block.
+  char stat[80];
+  snprintf(stat, sizeof(stat), "%s %d     %s %d     %s %d", tr(STR_FLASHCARD_STAT_DUE_SHORT), stats.due,
+           tr(STR_FLASHCARD_STAT_NEW), stats.boxHist[0], tr(STR_FLASHCARD_SUMMARY_MASTERED), stats.mastered);
+  renderer.drawCenteredText(UI_10_FONT_ID, y, stat);
+  y += rowH + metrics.verticalSpacing * 2;
+
+  // Mastery progress bar: mastered / total. Label left, bar centre, percent right --
+  // the bar is vertically centred against the text line so all three align.
+  const int pct = stats.total > 0 ? stats.mastered * 100 / stats.total : 0;
+  renderer.drawText(UI_10_FONT_ID, left, y, tr(STR_FLASHCARD_MASTERY));
+  char pctBuf[8];
+  snprintf(pctBuf, sizeof(pctBuf), "%d%%", pct);
+  const int pctW = renderer.getTextWidth(UI_10_FONT_ID, pctBuf);
+  renderer.drawText(UI_10_FONT_ID, countRight - pctW, y, pctBuf);
+  const int barX = left + renderer.getTextWidth(UI_10_FONT_ID, tr(STR_FLASHCARD_MASTERY)) + 12;
+  const int barMaxW = std::max(1, (countRight - pctW - 12) - barX);
+  const int barH = std::max(6, lh - 4);       // a little shorter than the text line
+  const int barY = y + (lh - barH) / 2;        // vertically centred with the label/percent
+  renderer.drawRect(barX, barY, barMaxW, barH, true);  // outline
+  if (pct > 0) renderer.fillRect(barX, barY, barMaxW * pct / 100, barH, true);
   y += rowH + metrics.verticalSpacing;
 
-  // The seven Leitner rungs: New (box 0), B1..B5, Done (retired/mastered).
-  int counts[7];
-  counts[0] = stats.boxHist[0];
-  for (int b = 1; b <= 5; b++) counts[b] = stats.boxHist[b];
-  counts[6] = stats.mastered;
-  int maxCount = 1;
-  for (int i = 0; i < 7; i++) maxCount = std::max(maxCount, counts[i]);
-
-  const int barX = left + 56;                                 // fixed column so all bars align
-  const int barMaxW = std::max(1, (countRight - 48) - barX);  // leave ~48px for the count
-
-  for (int i = 0; i < 7; i++) {
-    // B0 = new, B1..B5 = Leitner boxes, B6 = mastered/retired (uniform width so
-    // the labels and bars align).
-    char label[8];
-    snprintf(label, sizeof(label), "B%d", i);
-    renderer.drawText(UI_10_FONT_ID, left, y, label);
-
-    const int barW = counts[i] > 0 ? std::max(3, barMaxW * counts[i] / maxCount) : 0;
-    if (barW > 0) renderer.fillRect(barX, y + 3, barW, rowH - 8, true);
-
-    char cbuf[8];
-    snprintf(cbuf, sizeof(cbuf), "%d", counts[i]);
-    renderer.drawText(UI_10_FONT_ID, countRight - renderer.getTextWidth(UI_10_FONT_ID, cbuf), y, cbuf);
-
-    y += rowH;
+  // When cards are set aside, centre a compact "(N)" directly above the Suspend
+  // button. The Suspend label (Confirm) is right-aligned inside the left hint
+  // group; mirror the hint-row geometry (guide font == SMALL_FONT_ID) to find its
+  // centre. Constants track RoundedRaffTheme::drawButtonHints.
+  if (stats.suspended > 0) {
+    constexpr int sidePadding = 20;
+    constexpr int groupGap = 10;
+    constexpr int innerEdgePadding = 16;
+    const int groupWidth = (pageWidth - sidePadding * 2 - groupGap) / 2;
+    const int selectW = renderer.getTextWidth(SMALL_FONT_ID, tr(STR_FLASHCARD_SCOPE_SUSPENDED));
+    const int buttonCenter = sidePadding + groupWidth - innerEdgePadding - selectW / 2;
+    char badge[12];
+    snprintf(badge, sizeof(badge), "(%d)", stats.suspended);
+    const int bw = renderer.getTextWidth(SMALL_FONT_ID, badge);
+    renderer.drawText(SMALL_FONT_ID, buttonCenter - bw / 2, contentBottom - renderer.getLineHeight(SMALL_FONT_ID) - 2,
+                      badge, true);
   }
 
-  // Pick the session order here: Left = due-first, Right = shuffled.
+  // Pick the session order here: Left = due-first, Right = shuffled. When cards
+  // are set aside, Confirm enters the suspended-review (unsuspend) pass.
   const auto labels =
-      mappedInput.mapLabels(tr(STR_BACK), "", tr(STR_FLASHCARD_SCOPE_DUE_FIRST), tr(STR_FLASHCARD_SCOPE_ALL_SHUFFLED));
+      mappedInput.mapLabels(tr(STR_BACK), stats.suspended > 0 ? tr(STR_FLASHCARD_SCOPE_SUSPENDED) : "",
+                            tr(STR_FLASHCARD_SCOPE_DUE_FIRST), tr(STR_FLASHCARD_SCOPE_ALL_SHUFFLED));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
 
@@ -488,12 +559,17 @@ void FlashcardReviewActivity::renderCardFace(int contentTop, int contentBottom, 
 
 void FlashcardReviewActivity::renderFront(int contentTop, int contentBottom, int pageWidth) {
   // Word+context shows the word; cloze hides it (masked excerpt + blank header).
-  const bool showWord = cardStyle != CrossPointSettings::FLASHCARD_STYLE_CLOZE;
+  // Suspended review always shows the word (recall isn't being tested).
+  const bool showWord = suspendedMode || cardStyle != CrossPointSettings::FLASHCARD_STYLE_CLOZE;
   renderCardFace(contentTop, contentBottom, pageWidth, showWord);
+  drawSuspendHint(contentTop);
 
-  // Flip on Confirm; pass/fail always available without flipping first.
+  // Suspended review: flip (read definition) + Prev/Next browsing + resume (Up).
+  // Normal review: flip on Confirm; pass/fail always available without flipping.
   const auto labels =
-      mappedInput.mapLabels(tr(STR_BACK), tr(STR_FLASHCARD_FLIP), tr(STR_FLASHCARD_PASS), tr(STR_FLASHCARD_FAIL));
+      suspendedMode
+          ? mappedInput.mapLabels(tr(STR_BACK), tr(STR_FLASHCARD_FLIP), tr(STR_FLASHCARD_PREV), tr(STR_FLASHCARD_NEXT))
+          : mappedInput.mapLabels(tr(STR_BACK), tr(STR_FLASHCARD_FLIP), tr(STR_FLASHCARD_PASS), tr(STR_FLASHCARD_FAIL));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
 
@@ -504,6 +580,7 @@ void FlashcardReviewActivity::renderRevealed(int contentTop, int contentBottom, 
   // header + filled, underlined in the excerpt) -- the only change is the blank
   // resolving, no vertical jump.
   renderCardFace(contentTop, contentBottom, pageWidth, /*showWord=*/true);
+  drawSuspendHint(contentTop);
 
   // Live grade pick as a small footer line (above the chapter footer / hints) so it
   // never displaces the excerpt.
@@ -518,6 +595,15 @@ void FlashcardReviewActivity::renderRevealed(int contentTop, int contentBottom, 
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
 
+void FlashcardReviewActivity::drawSuspendHint(int contentTop) {
+  // Tuck a small, plain hint into the top-right corner -- visible but unobtrusive,
+  // so it never competes with the card word/excerpt in the centre.
+  const char* hint = suspendedMode ? tr(STR_FLASHCARD_UNSUSPEND_HINT) : tr(STR_FLASHCARD_SUSPEND_HINT);
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int x = renderer.getScreenWidth() - metrics.contentSidePadding - renderer.getTextWidth(SMALL_FONT_ID, hint);
+  renderer.drawText(SMALL_FONT_ID, x, contentTop, hint, true);
+}
+
 void FlashcardReviewActivity::drawChapterFooter(int contentBottom) {
   if (card.chapter.empty()) return;
   const auto& metrics = UITheme::getInstance().getMetrics();
@@ -528,10 +614,14 @@ void FlashcardReviewActivity::drawChapterFooter(int contentBottom) {
 void FlashcardReviewActivity::renderAwaitingGrade(int contentTop, int contentBottom, int pageWidth) {
   // Back face viewed: same revealed card face (word shown, underlined in context).
   renderCardFace(contentTop, contentBottom, pageWidth, /*showWord=*/true);
+  drawSuspendHint(contentTop);
 
-  // Left = pass, Right = fail; Confirm re-flips. Consistent with the front face.
+  // Left = pass, Right = fail; Confirm re-flips. Suspended review swaps grading
+  // for Prev/Next browsing.
   const auto labels =
-      mappedInput.mapLabels(tr(STR_BACK), tr(STR_FLASHCARD_FLIP), tr(STR_FLASHCARD_PASS), tr(STR_FLASHCARD_FAIL));
+      suspendedMode
+          ? mappedInput.mapLabels(tr(STR_BACK), tr(STR_FLASHCARD_FLIP), tr(STR_FLASHCARD_PREV), tr(STR_FLASHCARD_NEXT))
+          : mappedInput.mapLabels(tr(STR_BACK), tr(STR_FLASHCARD_FLIP), tr(STR_FLASHCARD_PASS), tr(STR_FLASHCARD_FAIL));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
 
@@ -543,14 +633,25 @@ void FlashcardReviewActivity::renderSummary(int contentTop, int contentBottom, i
   renderer.drawCenteredText(NOTOSERIF_16_FONT_ID, y, tr(STR_FLASHCARD_SUMMARY_TITLE), true, EpdFontFamily::BOLD);
   y += metrics.listRowHeight * 2;
 
-  snprintf(buf, sizeof(buf), "%s: %d", tr(STR_FLASHCARD_SUMMARY_REVIEWED), reviewed);
-  renderer.drawCenteredText(UI_12_FONT_ID, y, buf);
-  y += metrics.listRowHeight;
-  snprintf(buf, sizeof(buf), "%s: %d", tr(STR_FLASHCARD_SUMMARY_CORRECT), correct);
-  renderer.drawCenteredText(UI_12_FONT_ID, y, buf);
-  y += metrics.listRowHeight;
-  snprintf(buf, sizeof(buf), "%s: %d", tr(STR_FLASHCARD_SUMMARY_MASTERED), mastered);
-  renderer.drawCenteredText(UI_12_FONT_ID, y, buf);
+  if (suspendedMode) {
+    // Suspended review has no grading tally -- only the restored count is meaningful.
+    snprintf(buf, sizeof(buf), "%s: %d", tr(STR_FLASHCARD_SUMMARY_UNSUSPENDED), suspended);
+    renderer.drawCenteredText(UI_12_FONT_ID, y, buf);
+  } else {
+    snprintf(buf, sizeof(buf), "%s: %d", tr(STR_FLASHCARD_SUMMARY_REVIEWED), reviewed);
+    renderer.drawCenteredText(UI_12_FONT_ID, y, buf);
+    y += metrics.listRowHeight;
+    snprintf(buf, sizeof(buf), "%s: %d", tr(STR_FLASHCARD_SUMMARY_CORRECT), correct);
+    renderer.drawCenteredText(UI_12_FONT_ID, y, buf);
+    y += metrics.listRowHeight;
+    snprintf(buf, sizeof(buf), "%s: %d", tr(STR_FLASHCARD_SUMMARY_MASTERED), mastered);
+    renderer.drawCenteredText(UI_12_FONT_ID, y, buf);
+    if (suspended > 0) {
+      y += metrics.listRowHeight;
+      snprintf(buf, sizeof(buf), "%s: %d", tr(STR_FLASHCARD_SUMMARY_SUSPENDED), suspended);
+      renderer.drawCenteredText(UI_12_FONT_ID, y, buf);
+    }
+  }
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_DONE), "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

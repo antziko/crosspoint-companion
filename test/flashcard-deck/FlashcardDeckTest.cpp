@@ -327,4 +327,88 @@ TEST_F(FlashcardDeckTest, BuildSessionEmptyDeck) {
   EXPECT_EQ(FlashcardDeck::buildSession(cachePath, SessionScope::DueFirst, 10, 8, out), 0);
 }
 
+// --------------------------------------------------------------------------
+// suspend / unsuspend
+// --------------------------------------------------------------------------
+
+TEST_F(FlashcardDeckTest, SuspendSetsSentinelAndPreservesContext) {
+  FlashcardDeck::enroll(cachePath, "alpha", "the alpha wolf", "Chapter 3");
+  FlashcardDeck::grade(cachePath, "alpha", true, 5);  // box1, dueDay set
+  EXPECT_TRUE(FlashcardDeck::suspend(cachePath, "alpha"));
+
+  const FlashcardDeck::Entry e = at(0);
+  EXPECT_EQ(e.box, FlashcardDeck::SUSPENDED);
+  EXPECT_TRUE(FlashcardDeck::isSuspended(e.box));
+  EXPECT_EQ(e.dueDay, 0u);
+  EXPECT_EQ(e.excerpt, "the alpha wolf");  // context preserved
+  EXPECT_EQ(e.chapter, "Chapter 3");
+}
+
+TEST_F(FlashcardDeckTest, SuspendPreservesOrder) {
+  for (const char* w : {"a", "b", "c"}) FlashcardDeck::enroll(cachePath, w, "");
+  EXPECT_TRUE(FlashcardDeck::suspend(cachePath, "b"));  // middle card
+  EXPECT_EQ(at(0).word, "c");
+  EXPECT_EQ(at(1).word, "b");  // still in place, just suspended
+  EXPECT_EQ(at(1).box, FlashcardDeck::SUSPENDED);
+  EXPECT_EQ(at(2).word, "a");
+}
+
+TEST_F(FlashcardDeckTest, SuspendAbsentWordIsNoOp) {
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx");
+  EXPECT_FALSE(FlashcardDeck::suspend(cachePath, "ghost"));
+  EXPECT_EQ(at(0).box, 0);
+}
+
+TEST_F(FlashcardDeckTest, UnsuspendRestoresAsNewCard) {
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx", "Ch1");
+  FlashcardDeck::grade(cachePath, "alpha", true, 5);  // box1
+  FlashcardDeck::suspend(cachePath, "alpha");
+  EXPECT_TRUE(FlashcardDeck::unsuspend(cachePath, "alpha"));
+
+  const FlashcardDeck::Entry e = at(0);
+  EXPECT_EQ(e.box, 0u);       // back in the new pool
+  EXPECT_EQ(e.dueDay, 0u);
+  EXPECT_EQ(e.excerpt, "ctx");  // context still preserved
+  EXPECT_EQ(e.chapter, "Ch1");
+}
+
+TEST_F(FlashcardDeckTest, SuspendedCardIsNotDue) {
+  EXPECT_FALSE(FlashcardDeck::isDue(FlashcardDeck::SUSPENDED, 0, 100));
+  EXPECT_FALSE(FlashcardDeck::isDue(FlashcardDeck::SUSPENDED, 50, 100));
+}
+
+TEST_F(FlashcardDeckTest, ComputeStatsCountsSuspendedSeparately) {
+  for (const char* w : {"a", "b", "c"}) FlashcardDeck::enroll(cachePath, w, "");
+  FlashcardDeck::suspend(cachePath, "b");
+
+  const FlashcardDeck::Stats s = FlashcardDeck::computeStats(cachePath, /*today=*/10);
+  EXPECT_EQ(s.total, 3);
+  EXPECT_EQ(s.suspended, 1);
+  EXPECT_EQ(s.mastered, 0);
+  EXPECT_EQ(s.boxHist[0], 2);  // a, c -- suspended b not in the histogram
+  EXPECT_EQ(s.due, 2);         // only a, c are due
+}
+
+TEST_F(FlashcardDeckTest, BuildSessionExcludesSuspended) {
+  for (const char* w : {"a", "b", "c"}) FlashcardDeck::enroll(cachePath, w, "");
+  FlashcardDeck::suspend(cachePath, "b");
+  uint16_t out[8];
+  // newest-first: c=0, b=1, a=2. Suspended b is dropped from normal scopes.
+  const int n = FlashcardDeck::buildSession(cachePath, SessionScope::AllShuffled, 0, 8, out);
+  EXPECT_EQ(n, 2);
+  EXPECT_EQ(out[0], 0);  // c
+  EXPECT_EQ(out[1], 2);  // a
+}
+
+TEST_F(FlashcardDeckTest, BuildSessionSuspendedScopeSelectsOnlySuspended) {
+  for (const char* w : {"a", "b", "c", "d"}) FlashcardDeck::enroll(cachePath, w, "");
+  FlashcardDeck::suspend(cachePath, "b");
+  FlashcardDeck::suspend(cachePath, "d");  // newest-first: d=0, c=1, b=2, a=3
+  uint16_t out[8];
+  const int n = FlashcardDeck::buildSession(cachePath, SessionScope::Suspended, /*today=*/10, 8, out);
+  EXPECT_EQ(n, 2);
+  EXPECT_EQ(out[0], 0);  // d (newest suspended)
+  EXPECT_EQ(out[1], 2);  // b
+}
+
 }  // namespace

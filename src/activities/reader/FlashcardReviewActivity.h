@@ -56,11 +56,16 @@ class FlashcardReviewActivity final : public Activity {
   Phase phase = Phase::Overview;
   uint8_t cardStyle = 0;     // FLASHCARD_STYLE_* chosen on the overview (Up/Down)
   bool pendingCorrect = false;  // grade picked on a cloze front, committed on Revealed-confirm
+  // A suspended-review session (entered from the overview when cards are set
+  // aside): cards are always shown word+context, Pass/Fail are disabled, and the
+  // Up button unsuspends instead of suspending.
+  bool suspendedMode = false;
 
   // Session tally (rendered on the summary screen).
   int reviewed = 0;
   int correct = 0;
   int mastered = 0;
+  int suspended = 0;  // cards set aside (or restored, in suspendedMode) this session
 
   int pagesUntilFullRefresh = 0;  // landscape ghost-scrub cadence (0 = scrub next render)
 
@@ -72,6 +77,16 @@ class FlashcardReviewActivity final : public Activity {
   void startSession(FlashcardDeck::SessionScope scope);
   bool loadCurrentCard();  // fills `card` from session[cursor]; false if exhausted
   void gradeAndAdvance(bool correctRecall);
+  // Advance to the next session card (or the summary if exhausted). Shared by
+  // grading and the suspend/unsuspend flows; performs no grading or re-queue.
+  void advanceCard();
+  // Browse the session by `delta` (-1 prev, +1 next), clamped to the session
+  // bounds, without mutating any card. Used by the suspended-review pass so the
+  // user can page through set-aside cards before deciding to resume one.
+  void navigateCard(int delta);
+  // Prompt to suspend (active session) or unsuspend (suspendedMode) the resident
+  // card via ConfirmationActivity; on confirm, mutate the deck and advance.
+  void promptSuspendToggle();
   void displayList();  // push with the list refresh policy (FAST + landscape scrub)
 
   // Render helpers.
@@ -96,4 +111,8 @@ class FlashcardReviewActivity final : public Activity {
   // Draw the card's chapter title (if any) as a small footer just above the
   // button hints. No-op when the card has no chapter.
   void drawChapterFooter(int contentBottom);
+  // Draw the side-button (Up) suspend/unsuspend hint at the top of the content
+  // area -- the side buttons are not part of the front-button hints row, so they
+  // need an explicit on-screen label. Text reflects suspendedMode.
+  void drawSuspendHint(int contentTop);
 };

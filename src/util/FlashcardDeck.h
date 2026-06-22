@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <string>
 
+class HalFile;  // fwd-decl: rewriteDeck's callbacks take a HalFile& (defined in <HalStorage.h>)
+
 // Per-book spaced-repetition flashcard deck. Stored as
 // <cachePath>/dictionary_flashcards.txt, one card per line:
 //
@@ -44,14 +46,20 @@ class FlashcardDeck {
   // before graduation. constexpr -> flash (CLAUDE.md rule 6), integer-only.
   static constexpr uint16_t BOX_INTERVAL_DAYS[6] = {1, 2, 4, 8, 16, 16};
   static constexpr uint8_t TOP_BOX = 5;
-  static constexpr uint8_t RETIRED = 255;  // graduated; never scheduled again.
+  static constexpr uint8_t RETIRED = 255;    // graduated; never scheduled again.
+  static constexpr uint8_t SUSPENDED = 254;  // set aside by the user; never
+                                             // scheduled until explicitly
+                                             // unsuspended (or cleared on PC).
 
   // Excerpt is capped so a line fits the 512-byte streaming buffer with room to
   // spare for the word + the box/dueDay/chapter fields.
   static constexpr int EXCERPT_MAX = 160;
   static constexpr int CHAPTER_MAX = 80;
 
-  enum class SessionScope : uint8_t { DueFirst = 0, AllShuffled = 1 };
+  // DueFirst/AllShuffled are the two normal review orders. Suspended is a
+  // dedicated pass over set-aside cards (box==SUSPENDED) for unsuspending them;
+  // it is never persisted as the default scope.
+  enum class SessionScope : uint8_t { DueFirst = 0, AllShuffled = 1, Suspended = 2 };
 
   struct Entry {
     std::string word;
@@ -63,12 +71,14 @@ class FlashcardDeck {
 
   // Deck-wide review stats, computed in one streaming pass (no materialization).
   // `boxHist[b]` counts cards currently in box b (0..5); retired cards are in
-  // `mastered`, not the histogram. `due` counts isDue() cards; `nextDueDay` is
-  // the soonest future scheduled day (> today, non-retired), 0 if none.
+  // `mastered`, suspended cards in `suspended` -- neither is in the histogram.
+  // `due` counts isDue() cards; `nextDueDay` is the soonest future scheduled day
+  // (> today, non-retired), 0 if none.
   struct Stats {
     int total = 0;
     int due = 0;
     int mastered = 0;
+    int suspended = 0;
     int boxHist[6] = {0, 0, 0, 0, 0, 0};
     uint32_t nextDueDay = 0;
   };
@@ -84,6 +94,7 @@ class FlashcardDeck {
   // or its due day has arrived.
   static bool isDue(uint8_t box, uint32_t dueDay, uint32_t today);
   static bool isMastered(uint8_t box) { return box == RETIRED; }
+  static bool isSuspended(uint8_t box) { return box == SUSPENDED; }
 
   // --- Deck store -----------------------------------------------------------
 
@@ -117,6 +128,18 @@ class FlashcardDeck {
   // absent. Returns false on I/O failure.
   static bool grade(const std::string& cachePath, const std::string& word, bool correct, uint32_t today);
 
+  // Set `word` aside: rewrite its row with box=SUSPENDED and dueDay=0 (excerpt,
+  // chapter and order preserved). A suspended card is skipped by every normal
+  // review session (isDue / buildSession exclude it) until unsuspend(). No-op if
+  // the word is absent. Returns false on I/O failure.
+  static bool suspend(const std::string& cachePath, const std::string& word);
+
+  // Reverse suspend(): rewrite `word`'s row back to a fresh card (box=0,
+  // dueDay=0). The card re-enters the new-card pool -- its pre-suspend box is not
+  // recoverable (it was overwritten by SUSPENDED). No-op if the word is absent.
+  // Returns false on I/O failure.
+  static bool unsuspend(const std::string& cachePath, const std::string& word);
+
   // Select up to `cap` cards for a review session, writing their newest-first
   // indices into out[0..cap). Returns the count selected. Pure SELECTION (no
   // shuffle): the caller shuffles the returned window for presentation -- this
@@ -136,4 +159,18 @@ class FlashcardDeck {
  private:
   static std::string filePath(const std::string& cachePath);
   static std::string tmpFilePath(const std::string& cachePath);
+  // Shared fixed-value row rewrite backing suspend()/unsuspend(): force `word`'s
+  // box/dueDay, copying all other rows verbatim. No-op if the word is absent.
+  static bool setBoxForWord(const std::string& cachePath, const std::string& word, uint8_t box, uint32_t dueDay);
+
+  // Atomic streaming deck rewrite shared by enroll(dedup)/removeAt/grade/setBox.
+  // Opens a temp file, streams every existing line through `lineFn` (which writes
+  // its output to `out` -- write nothing to drop the row, return false on I/O
+  // failure to abort), optionally appends rows via `tailFn`, then replaces the
+  // original only after a clean write so a mid-write failure cannot lose the
+  // deck. Callers must pre-verify the work is needed (the file exists / the
+  // target row is present). Returns false on any I/O failure.
+  static bool rewriteDeck(const std::string& cachePath, void* ctx,
+                          bool (*lineFn)(void* ctx, HalFile& out, const char* line, int len),
+                          bool (*tailFn)(void* ctx, HalFile& out) = nullptr);
 };
