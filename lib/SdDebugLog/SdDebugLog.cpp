@@ -13,6 +13,12 @@
 namespace SdDebugLog {
 namespace {
 bool g_enabled = false;
+// Master switch from the user setting. Defaults true so boot logging (before
+// settings load) and TRACE_HEAP builds emit; set to SETTINGS.sdCardLogging once
+// settings load. Plain bool: written from UI/web task, read in log() from network/
+// render tasks — single-byte store, atomic on RISC-V, no barrier needed (it is a
+// write-enable, not shared buffer state).
+bool g_masterEnabled = true;
 // Rotate (truncate) once the log passes this size so it can't grow unbounded.
 // Sized for an extended X3 HTTPS troubleshooting collection run (many transfer
 // attempts over "some time") rather than a single-session trace — SD card space
@@ -23,11 +29,12 @@ constexpr size_t MAX_LOG_BYTES = 4 * 1024 * 1024;
 
 void setEnabled(bool enabled) { g_enabled = enabled; }
 bool isEnabled() { return g_enabled; }
+void setMasterEnabled(bool enabled) { g_masterEnabled = enabled; }
 
 void clear() { Storage.remove(PATH); }
 
 void log(const char* tag, const char* fmt, ...) {
-  if (!g_enabled) return;
+  if (!g_masterEnabled || !g_enabled) return;
 
   // Format the message body into a stack buffer (keep stack use < 256 B/line).
   char msg[200];

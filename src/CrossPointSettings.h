@@ -334,6 +334,9 @@ class CrossPointSettings {
   uint8_t removeReadBooksFromRecents = 0;
   // Move epub to /Read/ folder on SD card when finished (0 = disabled, 1 = enabled)
   uint8_t moveFinishedToReadFolder = 0;
+  // Write diagnostic logs to /opds_debug.txt on the SD card (0 = off, 1 = on). Off by
+  // default: a diagnostic, and avoids SD wear. Drives SdDebugLog's master switch.
+  uint8_t sdCardLogging = 0;
   // Minimum session duration before reading time is committed to stats, as an index
   // into MIN_SESSION_SECONDS (0 = always commit, the default). Sessions whose effective
   // (idle-capped) time is shorter are discarded. Field name kept for the settings key,

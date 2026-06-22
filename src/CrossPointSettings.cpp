@@ -3,6 +3,7 @@
 #include <HalStorage.h>
 #include <JsonSettingsIO.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
 #include <Serialization.h>
 
 #include <cstring>
@@ -105,6 +106,9 @@ uint8_t CrossPointSettings::sleepTimeoutEnumToMinutes(const uint8_t legacyValue)
 }
 
 bool CrossPointSettings::saveToFile() const {
+  // Apply the logging toggle live: every settings persist (device toggle, web API)
+  // routes through here, so the master switch tracks the setting without a reboot.
+  SdDebugLog::setMasterEnabled(sdCardLogging != 0);
   Storage.mkdir("/.crosspoint");
   return JsonSettingsIO::saveSettings(*this, SETTINGS_FILE_JSON);
 }

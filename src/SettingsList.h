@@ -329,6 +329,8 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                                   "removeReadBooksFromRecents", StrId::STR_SYS_LIBRARY));
   v.push_back(SettingInfo::Toggle(StrId::STR_MOVE_FINISHED_TO_READ, &CrossPointSettings::moveFinishedToReadFolder,
                                   "moveFinishedToReadFolder", StrId::STR_SYS_LIBRARY));
+  v.push_back(SettingInfo::Toggle(StrId::STR_SD_LOGGING, &CrossPointSettings::sdCardLogging, "sdCardLogging",
+                                  StrId::STR_SYS_LIBRARY));
 
   // --- KOReader Sync (web-only, uses KOReaderCredentialStore) ---
   v.push_back(SettingInfo::DynamicString(

@@ -14,9 +14,17 @@ namespace SdDebugLog {
 // browser opens it directly on both X3 and X4 without a cable.
 inline constexpr const char* PATH = "/opds_debug.txt";
 
-// Enable/disable logging globally. When disabled, log() is a cheap no-op.
+// Enable/disable logging for the current context (set by activities/network code
+// while they are active). When disabled, log() is a cheap no-op.
 void setEnabled(bool enabled);
 bool isEnabled();
+
+// Master kill switch, driven by the user setting (SETTINGS.sdCardLogging). log()
+// writes only when BOTH the master switch and the per-context flag are enabled.
+// Pushed in from src (lib cannot read CrossPointSettings — layering). Defaults to
+// true so pre-settings-load boot logging and TRACE_HEAP builds still emit; once
+// settings load it is set to the user's choice (default off).
+void setMasterEnabled(bool enabled);
 
 // Delete the existing log (call when opening the browser to start a fresh trace).
 void clear();

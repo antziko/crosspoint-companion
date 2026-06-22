@@ -475,6 +475,9 @@ void setup() {
   HalSystem::checkPanic();
 
   SETTINGS.loadFromFile();
+  // Apply the SD-logging toggle now that settings are loaded (default off). Governs
+  // the boot-done MEM line below and all later SdDebugLog::log() calls.
+  SdDebugLog::setMasterEnabled(SETTINGS.sdCardLogging != 0);
   APP_STATE.loadFromFile();
   RECENT_BOOKS.loadFromFile();
 
