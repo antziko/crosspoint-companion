@@ -23,6 +23,11 @@ class HalFile {
     fp_ = std::fopen(path.c_str(), "wb");
     return fp_ != nullptr;
   }
+  bool openForAppend(const std::string& path) {
+    close();
+    fp_ = std::fopen(path.c_str(), "ab");
+    return fp_ != nullptr;
+  }
   int read() {
     if (!fp_) return -1;
     return std::fgetc(fp_);
@@ -67,6 +72,9 @@ class HalStorage {
   }
   bool openFileForWrite(const char* /*moduleName*/, const std::string& path, HalFile& file) {
     return file.openForWrite(path);
+  }
+  bool openFileForAppend(const char* /*moduleName*/, const std::string& path, HalFile& file) {
+    return file.openForAppend(path);
   }
   bool remove(const char* path) { return std::remove(path) == 0; }
   bool rename(const char* oldPath, const char* newPath) { return std::rename(oldPath, newPath) == 0; }

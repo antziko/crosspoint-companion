@@ -9,6 +9,7 @@ class CrossPointSettings {
   }
   int lookupHistoryCap = 100;
   int getLookupHistoryCapValue() const { return lookupHistoryCap; }
+  bool isLookupHistoryUnlimited() const { return lookupHistoryCap <= 0; }
 };
 
 #define SETTINGS CrossPointSettings::getInstance()

@@ -23,11 +23,17 @@ class LookupHistoryTest : public ::testing::Test {
     // TempDir is shared across runs; start from a clean slate.
     std::remove(historyFile().c_str());
     std::remove(tmpFile().c_str());
+    std::remove(tombFile().c_str());
+    std::remove(verFile().c_str());
+    std::remove(syncFile().c_str());
     SETTINGS.lookupHistoryCap = 100;
   }
 
   std::string historyFile() const { return cachePath + "/dictionary_history.txt"; }
   std::string tmpFile() const { return cachePath + "/dictionary_history.tmp"; }
+  std::string tombFile() const { return cachePath + "/dictionary_history.tomb"; }
+  std::string verFile() const { return cachePath + "/dictionary_history.ver"; }
+  std::string syncFile() const { return cachePath + "/dictionary_history.sync"; }
 
   std::string rawFileContents() const {
     std::ifstream in(historyFile(), std::ios::binary);
@@ -37,6 +43,26 @@ class LookupHistoryTest : public ::testing::Test {
   void writeRawFile(const std::string& contents) const {
     std::ofstream out(historyFile(), std::ios::binary);
     out << contents;
+  }
+
+  std::string syncFileContents() const {
+    std::ifstream in(syncFile(), std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  }
+
+  void writeSyncFile(const std::string& contents) const {
+    std::ofstream out(syncFile(), std::ios::binary);
+    out << contents;
+  }
+
+  // Decode a serialized blob into a printable string for assertions.
+  static std::string blobStr(const uint8_t* b, size_t n) { return std::string(reinterpret_cast<const char*>(b), n); }
+
+  // Count occurrences of `needle` in `hay` (non-overlapping).
+  static int countOccurrences(const std::string& hay, const std::string& needle) {
+    int c = 0;
+    for (size_t pos = hay.find(needle); pos != std::string::npos; pos = hay.find(needle, pos + needle.size())) c++;
+    return c;
   }
 
   std::string cachePath;
@@ -52,7 +78,7 @@ TEST_F(LookupHistoryTest, AddWordCreatesFileWithSingleEntry) {
   ASSERT_EQ(entries.size(), 1u);
   EXPECT_EQ(entries[0].word, "alpha");
   EXPECT_EQ(entries[0].status, Status::Direct);
-  EXPECT_EQ(rawFileContents(), "alpha|D\n");
+  EXPECT_EQ(rawFileContents(), "alpha|D|1\n");  // word|STATUS|VER (Lamport-versioned)
 }
 
 TEST_F(LookupHistoryTest, LoadReturnsNewestFirst) {
@@ -203,6 +229,223 @@ TEST_F(LookupHistoryTest, ManyEntriesRoundTrip) {
   EXPECT_EQ(LookupHistory::addWord(cachePath, "overflow", Status::Direct), 225);
   EXPECT_EQ(LookupHistory::getWordNewestFirst(cachePath, 0), "overflow");
   EXPECT_EQ(LookupHistory::getWordNewestFirst(cachePath, 224), "word001");
+}
+
+// --- Cross-device delta sync ------------------------------------------------
+
+TEST_F(LookupHistoryTest, SerializeFullEmitsAllHistory) {
+  LookupHistory::addWord(cachePath, "a", Status::Direct);  // v1
+  LookupHistory::addWord(cachePath, "b", Status::Direct);  // v2
+  LookupHistory::addWord(cachePath, "c", Status::Direct);  // v3
+  uint8_t buf[256];
+  LookupHistory::BlobStats st;
+  const size_t n = LookupHistory::serializeBlob(cachePath, buf, sizeof(buf), 0, &st);
+  const std::string s = blobStr(buf, n);
+  EXPECT_EQ(countOccurrences(s, "H"), 3);
+  EXPECT_NE(s.find("a|D|1"), std::string::npos);
+  EXPECT_NE(s.find("b|D|2"), std::string::npos);
+  EXPECT_NE(s.find("c|D|3"), std::string::npos);
+  EXPECT_EQ(st.histCount, 3);
+  EXPECT_EQ(st.tombCount, 0);
+  EXPECT_EQ(st.maxVer, 3u);
+  EXPECT_FALSE(st.truncated);
+}
+
+TEST_F(LookupHistoryTest, SerializeDeltaSkipsAtOrBelowWatermark) {
+  LookupHistory::addWord(cachePath, "a", Status::Direct);  // v1
+  LookupHistory::addWord(cachePath, "b", Status::Direct);  // v2
+  LookupHistory::addWord(cachePath, "c", Status::Direct);  // v3
+  uint8_t buf[256];
+  LookupHistory::BlobStats st;
+  const size_t n = LookupHistory::serializeBlob(cachePath, buf, sizeof(buf), 2 /*since*/, &st);
+  const std::string s = blobStr(buf, n);
+  EXPECT_EQ(st.histCount, 1);  // only v3 > 2
+  EXPECT_EQ(st.maxVer, 3u);
+  EXPECT_NE(s.find("c|D|3"), std::string::npos);
+  EXPECT_EQ(s.find("a|D|1"), std::string::npos);
+  EXPECT_EQ(s.find("b|D|2"), std::string::npos);
+}
+
+TEST_F(LookupHistoryTest, DeltaIncludesNewTombstoneOnly) {
+  LookupHistory::addWord(cachePath, "a", Status::Direct);  // v1
+  LookupHistory::addWord(cachePath, "b", Status::Direct);  // v2
+  LookupHistory::addWord(cachePath, "c", Status::Direct);  // v3
+  EXPECT_TRUE(LookupHistory::removeAt(cachePath, 1));       // delete "b" -> tombstone v4
+  uint8_t buf[256];
+  LookupHistory::BlobStats st;
+  const size_t n = LookupHistory::serializeBlob(cachePath, buf, sizeof(buf), 3 /*since*/, &st);
+  const std::string s = blobStr(buf, n);
+  EXPECT_EQ(st.tombCount, 1);
+  EXPECT_EQ(st.histCount, 0);  // a(v1), c(v3) are <= 3
+  EXPECT_EQ(st.maxVer, 4u);
+  EXPECT_NE(s.find("Tb|4"), std::string::npos);
+}
+
+TEST_F(LookupHistoryTest, FirstUploadIsKeyframe) {
+  LookupHistory::addWord(cachePath, "a", Status::Direct);
+  LookupHistory::addWord(cachePath, "b", Status::Direct);
+  uint8_t buf[256];
+  LookupHistory::BlobStats st;
+  bool kf = false;
+  LookupHistory::serializeForUpload(cachePath, buf, sizeof(buf), &st, &kf);
+  EXPECT_TRUE(kf);
+  EXPECT_EQ(st.histCount, 2);
+  EXPECT_TRUE(syncFileContents().empty());  // no commit yet -> watermark unwritten
+}
+
+TEST_F(LookupHistoryTest, CommitThenSubsequentUploadIsDelta) {
+  LookupHistory::addWord(cachePath, "a", Status::Direct);  // v1
+  LookupHistory::addWord(cachePath, "b", Status::Direct);  // v2
+  uint8_t buf[256];
+  LookupHistory::BlobStats st;
+  bool kf = false;
+  LookupHistory::serializeForUpload(cachePath, buf, sizeof(buf), &st, &kf);
+  ASSERT_TRUE(kf);
+  LookupHistory::commitUpload(cachePath, st, kf);
+  EXPECT_EQ(syncFileContents(), "2 0");  // lastVer=2, uploadsSinceKeyframe=0
+
+  LookupHistory::addWord(cachePath, "c", Status::Direct);  // v3
+  const size_t n = LookupHistory::serializeForUpload(cachePath, buf, sizeof(buf), &st, &kf);
+  EXPECT_FALSE(kf);
+  EXPECT_EQ(st.histCount, 1);  // only c
+  EXPECT_NE(blobStr(buf, n).find("c|D|3"), std::string::npos);
+}
+
+TEST_F(LookupHistoryTest, WatermarkAdvancesOnlyOnCommit) {
+  LookupHistory::addWord(cachePath, "a", Status::Direct);
+  LookupHistory::addWord(cachePath, "b", Status::Direct);
+  uint8_t buf[256];
+  LookupHistory::BlobStats st;
+  bool kf = false;
+  // No commit between the two calls: both stay keyframe (watermark never moved).
+  LookupHistory::serializeForUpload(cachePath, buf, sizeof(buf), &st, &kf);
+  EXPECT_TRUE(kf);
+  LookupHistory::serializeForUpload(cachePath, buf, sizeof(buf), &st, &kf);
+  EXPECT_TRUE(kf);
+  // Commit -> now a delta.
+  LookupHistory::commitUpload(cachePath, st, kf);
+  LookupHistory::serializeForUpload(cachePath, buf, sizeof(buf), &st, &kf);
+  EXPECT_FALSE(kf);
+}
+
+TEST_F(LookupHistoryTest, KeyframeEveryNForcesPeriodicKeyframe) {
+  LookupHistory::addWord(cachePath, "seed", Status::Direct);
+  uint8_t buf[256];
+  LookupHistory::BlobStats st;
+  bool kf = false;
+  // Initial keyframe + commit (uploadsSinceKeyframe -> 0).
+  LookupHistory::serializeForUpload(cachePath, buf, sizeof(buf), &st, &kf);
+  ASSERT_TRUE(kf);
+  LookupHistory::commitUpload(cachePath, st, kf);
+
+  // KEYFRAME_EVERY delta uploads stay deltas.
+  for (uint32_t i = 0; i < LookupHistory::KEYFRAME_EVERY; i++) {
+    char w[16];
+    std::snprintf(w, sizeof(w), "w%u", i);
+    LookupHistory::addWord(cachePath, w, Status::Direct);
+    LookupHistory::serializeForUpload(cachePath, buf, sizeof(buf), &st, &kf);
+    EXPECT_FALSE(kf) << "iteration " << i << " should be a delta";
+    LookupHistory::commitUpload(cachePath, st, kf);
+  }
+  // The next upload is forced back to a keyframe.
+  LookupHistory::addWord(cachePath, "last", Status::Direct);
+  LookupHistory::serializeForUpload(cachePath, buf, sizeof(buf), &st, &kf);
+  EXPECT_TRUE(kf);
+}
+
+TEST_F(LookupHistoryTest, VersionRegressionForcesKeyframe) {
+  LookupHistory::addWord(cachePath, "a", Status::Direct);  // v1
+  LookupHistory::addWord(cachePath, "b", Status::Direct);  // v2
+  LookupHistory::addWord(cachePath, "c", Status::Direct);  // v3 -> clock=3
+  // Watermark ahead of the clock (e.g. cache rebuilt, counter lost) -> keyframe.
+  writeSyncFile("99 0");
+  uint8_t buf[256];
+  LookupHistory::BlobStats st;
+  bool kf = false;
+  LookupHistory::serializeForUpload(cachePath, buf, sizeof(buf), &st, &kf);
+  EXPECT_TRUE(kf);
+  EXPECT_EQ(st.histCount, 3);  // full snapshot, not a (broken) delta
+}
+
+TEST_F(LookupHistoryTest, DeltaTruncationFallsBackToKeyframe) {
+  LookupHistory::addWord(cachePath, "a", Status::Direct);  // v1
+  LookupHistory::addWord(cachePath, "b", Status::Direct);  // v2
+  uint8_t big[256];
+  LookupHistory::BlobStats st;
+  bool kf = false;
+  LookupHistory::serializeForUpload(cachePath, big, sizeof(big), &st, &kf);
+  ASSERT_TRUE(kf);
+  LookupHistory::commitUpload(cachePath, st, kf);  // watermark -> v2
+
+  // Two long entries form a delta that cannot fit a tiny cap -> truncation ->
+  // serializeForUpload must fall back to a keyframe rather than silently drop a line.
+  LookupHistory::addWord(cachePath, "longwordone", Status::Direct);  // v3
+  LookupHistory::addWord(cachePath, "longwordtwo", Status::Direct);  // v4
+  uint8_t small[20];
+  LookupHistory::serializeForUpload(cachePath, small, sizeof(small), &st, &kf);
+  EXPECT_TRUE(kf);
+}
+
+TEST_F(LookupHistoryTest, DeltaRoundTripPropagatesAddUpdateDelete) {
+  const std::string pathB = cachePath + "_B";
+  std::filesystem::create_directories(pathB);
+  for (const char* suff : {"/dictionary_history.txt", "/dictionary_history.tomb", "/dictionary_history.ver",
+                           "/dictionary_history.sync"})
+    std::remove((pathB + suff).c_str());
+
+  uint8_t buf[1024];
+  LookupHistory::BlobStats st;
+  bool kf = false;
+
+  // A adds alpha -> keyframe; merge into B.
+  LookupHistory::addWord(cachePath, "alpha", Status::Direct);  // v1
+  size_t n = LookupHistory::serializeForUpload(cachePath, buf, sizeof(buf), &st, &kf);
+  EXPECT_TRUE(kf);
+  LookupHistory::mergeBlob(pathB, buf, n);
+  LookupHistory::commitUpload(cachePath, st, kf);
+  {
+    const auto e = LookupHistory::load(pathB);
+    ASSERT_EQ(e.size(), 1u);
+    EXPECT_EQ(e[0].word, "alpha");
+  }
+
+  // A adds beta -> delta carries just beta.
+  LookupHistory::addWord(cachePath, "beta", Status::Stem);  // v2
+  n = LookupHistory::serializeForUpload(cachePath, buf, sizeof(buf), &st, &kf);
+  EXPECT_FALSE(kf);
+  EXPECT_EQ(st.histCount, 1);
+  LookupHistory::mergeBlob(pathB, buf, n);
+  LookupHistory::commitUpload(cachePath, st, kf);
+  EXPECT_EQ(LookupHistory::load(pathB).size(), 2u);
+
+  // A updates alpha (re-lookup) -> delta carries the higher version.
+  LookupHistory::addWord(cachePath, "alpha", Status::Suggestion);  // v3
+  n = LookupHistory::serializeForUpload(cachePath, buf, sizeof(buf), &st, &kf);
+  EXPECT_FALSE(kf);
+  LookupHistory::mergeBlob(pathB, buf, n);
+  LookupHistory::commitUpload(cachePath, st, kf);
+  {
+    const auto e = LookupHistory::load(pathB);
+    bool found = false;
+    for (const auto& x : e)
+      if (x.word == "alpha") {
+        EXPECT_EQ(x.status, Status::Suggestion);
+        found = true;
+      }
+    EXPECT_TRUE(found);
+  }
+
+  // A deletes beta -> delta carries the tombstone -> B drops beta.
+  EXPECT_TRUE(LookupHistory::removeAt(cachePath, 0));  // oldest=beta -> tombstone v4
+  n = LookupHistory::serializeForUpload(cachePath, buf, sizeof(buf), &st, &kf);
+  EXPECT_FALSE(kf);
+  EXPECT_GE(st.tombCount, 1);
+  LookupHistory::mergeBlob(pathB, buf, n);
+  LookupHistory::commitUpload(cachePath, st, kf);
+  {
+    const auto e = LookupHistory::load(pathB);
+    for (const auto& x : e) EXPECT_NE(x.word, "beta");
+  }
 }
 
 }  // namespace

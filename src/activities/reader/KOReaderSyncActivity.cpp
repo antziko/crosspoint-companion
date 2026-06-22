@@ -501,6 +501,12 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal) {
   const bool doDictSync = includeDict && ESP.getFreeHeap() > kDictSyncMinHeap;
   std::unique_ptr<uint8_t[]> dictUp;
   size_t dictUpLen = 0;
+  // Delta-vs-keyframe upload bookkeeping: serializeForUpload picks the blob and
+  // reports what it covered; the watermark is advanced (commitUpload) only after a
+  // confirmed PUT, so a failed upload re-sends the same range next time.
+  bool dictSerialized = false;
+  bool dictWasKeyframe = false;
+  LookupHistory::BlobStats dictUpStats;
   struct DictMergeCtx {
     const std::string* cachePath;
     int merged;   // remote adds applied
@@ -518,8 +524,11 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal) {
     // intact. Pre-merge upload semantics are unchanged.
     auto dictScratch = makeUniqueNoThrow<uint8_t[]>(kDictBlobCap);
     if (dictScratch) {
-      const size_t n = LookupHistory::serializeBlob(cachePath, dictScratch.get(), kDictBlobCap, &dictUploadedWords,
-                                                    &dictUploadedDeletes);
+      const size_t n =
+          LookupHistory::serializeForUpload(cachePath, dictScratch.get(), kDictBlobCap, &dictUpStats, &dictWasKeyframe);
+      dictSerialized = true;
+      dictUploadedWords = dictUpStats.histCount;
+      dictUploadedDeletes = dictUpStats.tombCount;
       if (n > 0) {
         dictUp = makeUniqueNoThrow<uint8_t[]>(n);
         if (dictUp) {
@@ -606,6 +615,10 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal) {
   statsUploadOk = (putResult == KOReaderSyncClient::OK);
   if (!statsUploadOk) {
     LOG_ERR("KOSync", "Stats upload failed: %s", KOReaderSyncClient::errorString(putResult));
+  } else if (dictSerialized) {
+    // PUT confirmed: advance the dict-history upload watermark so the next sync
+    // ships only newer changes (or a periodic keyframe). Done only on success.
+    LookupHistory::commitUpload(cachePath, dictUpStats, dictWasKeyframe);
   }
 
   // Server build clue for the page header: tag echoed by a stats-enabled server,

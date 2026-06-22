@@ -22,6 +22,10 @@ std::string LookupHistory::tombFilePath(const std::string& cachePath) { return c
 
 std::string LookupHistory::verFilePath(const std::string& cachePath) { return cachePath + "/dictionary_history.ver"; }
 
+std::string LookupHistory::syncFilePath(const std::string& cachePath) {
+  return cachePath + "/dictionary_history.sync";
+}
+
 namespace {
 
 bool isAllDigits(const char* p, int n) {
@@ -653,62 +657,81 @@ void LookupHistory::removeWord(const std::string& cachePath, const std::string& 
   Storage.rename(tmpPath.c_str(), path.c_str());
 }
 
-size_t LookupHistory::serializeBlob(const std::string& cachePath, uint8_t* out, size_t cap, int* outHistCount,
-                                    int* outTombCount) {
-  if (outHistCount) *outHistCount = 0;
-  if (outTombCount) *outTombCount = 0;
+size_t LookupHistory::serializeBlob(const std::string& cachePath, uint8_t* out, size_t cap, uint32_t sinceVersion,
+                                    BlobStats* outStats) {
+  if (outStats) *outStats = BlobStats{};
   if (!out || cap == 0) return 0;
 
-  // Tombstones first ("T" + "word|VER") so deletions always propagate.
+  // Tombstones first ("T" + "word|VER") so deletions always propagate. With
+  // sinceVersion > 0, only tombstones newer than the watermark are emitted (delta).
   struct TCtx {
     uint8_t* out;
     size_t cap;
     size_t used;
     int count;
-  } tw{out, cap, 0, 0};
+    uint32_t since;
+    uint32_t maxVer;
+    bool truncated;
+  } tw{out, cap, 0, 0, sinceVersion, 0, false};
   forEachLine(
       tombFilePath(cachePath),
       [](void* ctx, const char* line, int len) {
         auto* c = static_cast<TCtx*>(ctx);
+        const uint32_t v = verOf(line, len);
+        if (v <= c->since) return true;  // delta filter: already uploaded
         const size_t need = 1 + static_cast<size_t>(len) + 1;
-        if (c->used + need > c->cap) return false;  // budget full
+        if (c->used + need > c->cap) {  // budget full -> drop an in-range line
+          c->truncated = true;
+          return false;
+        }
         c->out[c->used++] = 'T';
         memcpy(c->out + c->used, line, static_cast<size_t>(len));
         c->used += static_cast<size_t>(len);
         c->out[c->used++] = '\n';
         c->count++;
+        if (v > c->maxVer) c->maxVer = v;
         return true;
       },
       &tw);
-  if (outTombCount) *outTombCount = tw.count;
 
-  // History newest-first into the remaining budget. Pass A: total blob cost.
+  // History newest-first into the remaining budget. Pass A: total cost of the
+  // in-range (> sinceVersion) lines, so Pass B knows how many oldest to trim.
   struct SumCtx {
     size_t total;
-  } sc{0};
+    uint32_t since;
+  } sc{0, sinceVersion};
   forEachLine(
       filePath(cachePath),
       [](void* ctx, const char* line, int len) {
-        static_cast<SumCtx*>(ctx)->total += static_cast<size_t>(len) + 2;  // 'H' + line + '\n'
+        auto* c = static_cast<SumCtx*>(ctx);
+        if (verOf(line, len) <= c->since) return true;  // delta filter
+        c->total += static_cast<size_t>(len) + 2;        // 'H' + line + '\n'
         return true;
       },
       &sc);
 
-  // Pass B: skip oldest until the remaining suffix fits the budget, emit the rest.
+  // Pass B: skip the oldest in-range lines until the remaining suffix fits the
+  // budget, emit the rest. Out-of-range lines are ignored (never counted/emitted).
   struct HCtx {
     uint8_t* out;
     size_t used;
     size_t remaining;
     size_t budget;
     int histCount;
-  } hc{out, tw.used, sc.total, cap - tw.used, 0};
+    uint32_t since;
+    uint32_t maxVer;
+    bool truncated;
+  } hc{out, tw.used, sc.total, cap - tw.used, 0, sinceVersion, tw.maxVer, false};
   forEachLine(
       filePath(cachePath),
       [](void* ctx, const char* line, int len) {
         auto* c = static_cast<HCtx*>(ctx);
+        const uint32_t v = verOf(line, len);
+        if (v <= c->since) return true;  // delta filter
         const size_t cost = static_cast<size_t>(len) + 2;
-        if (c->remaining > c->budget) {  // still trimming the oldest
+        if (c->remaining > c->budget) {  // still trimming the oldest in-range line
           c->remaining -= cost;
+          c->truncated = true;
           return true;
         }
         c->out[c->used++] = 'H';
@@ -716,11 +739,100 @@ size_t LookupHistory::serializeBlob(const std::string& cachePath, uint8_t* out, 
         c->used += static_cast<size_t>(len);
         c->out[c->used++] = '\n';
         c->histCount++;
+        if (v > c->maxVer) c->maxVer = v;
         return true;
       },
       &hc);
-  if (outHistCount) *outHistCount = hc.histCount;
+
+  if (outStats) {
+    outStats->histCount = hc.histCount;
+    outStats->tombCount = tw.count;
+    outStats->maxVer = hc.maxVer;  // seeded with tombstone max, raised by history
+    outStats->truncated = tw.truncated || hc.truncated;
+  }
   return hc.used;
+}
+
+// ---------------------------------------------------------------------------
+// Delta-vs-keyframe upload selection (dictionary_history.sync watermark)
+// ---------------------------------------------------------------------------
+
+LookupHistory::SyncWatermark LookupHistory::loadWatermark(const std::string& cachePath) {
+  SyncWatermark wm;
+  HalFile f;
+  if (!Storage.openFileForRead("LH", syncFilePath(cachePath), f)) return wm;  // unset -> {0,0}
+  // Two decimal fields separated by a non-digit; trailing junk ignored.
+  uint32_t* field[2] = {&wm.lastVer, &wm.uploadsSinceKeyframe};
+  int fi = 0;
+  char buf[16];
+  int n = 0;
+  bool inNum = false;
+  while (f.available() && fi < 2) {
+    const int b = f.read();
+    if (b >= '0' && b <= '9') {
+      if (n < 15) buf[n++] = static_cast<char>(b);
+      inNum = true;
+    } else if (inNum) {
+      *field[fi++] = parseU32(buf, n);
+      n = 0;
+      inNum = false;
+    }
+  }
+  if (inNum && fi < 2) *field[fi] = parseU32(buf, n);
+  return wm;
+}
+
+void LookupHistory::storeWatermark(const std::string& cachePath, const SyncWatermark& wm) {
+  HalFile f;
+  if (!Storage.openFileForWrite("LH", syncFilePath(cachePath), f)) {
+    LOG_ERR("LH", "Failed to write sync watermark: %s", syncFilePath(cachePath).c_str());
+    return;
+  }
+  char buf[40];
+  const int n = snprintf(buf, sizeof(buf), "%lu %lu", static_cast<unsigned long>(wm.lastVer),
+                         static_cast<unsigned long>(wm.uploadsSinceKeyframe));
+  f.write(buf, static_cast<size_t>(n));
+  f.close();
+}
+
+size_t LookupHistory::serializeForUpload(const std::string& cachePath, uint8_t* out, size_t cap, BlobStats* outStats,
+                                         bool* outIsKeyframe) {
+  if (outStats) *outStats = BlobStats{};
+  if (outIsKeyframe) *outIsKeyframe = false;
+  if (!out || cap == 0) return 0;
+
+  const SyncWatermark wm = loadWatermark(cachePath);
+  const uint32_t clock = loadCounter(cachePath);
+
+  // Force a full keyframe when: first upload (watermark unset), the watermark is
+  // ahead of the clock (clock regressed, e.g. cache rebuilt -> delta would be
+  // wrong), or KEYFRAME_EVERY deltas have elapsed since the last keyframe.
+  bool keyframe = (wm.lastVer == 0) || (wm.lastVer > clock) || (wm.uploadsSinceKeyframe >= KEYFRAME_EVERY);
+
+  BlobStats stats;
+  size_t n = 0;
+  if (!keyframe) {
+    n = serializeBlob(cachePath, out, cap, wm.lastVer, &stats);
+    if (stats.truncated) {
+      // A delta that doesn't fit would silently drop an in-range line; send the
+      // full state instead so the next keyframe-grade snapshot covers everything.
+      keyframe = true;
+    }
+  }
+  if (keyframe) {
+    n = serializeBlob(cachePath, out, cap, 0, &stats);
+  }
+
+  if (outStats) *outStats = stats;
+  if (outIsKeyframe) *outIsKeyframe = keyframe;
+  return n;
+}
+
+void LookupHistory::commitUpload(const std::string& cachePath, const BlobStats& uploaded, bool wasKeyframe) {
+  SyncWatermark wm = loadWatermark(cachePath);
+  if (uploaded.maxVer > wm.lastVer) wm.lastVer = uploaded.maxVer;  // never regress
+  wm.uploadsSinceKeyframe = wasKeyframe ? 0 : wm.uploadsSinceKeyframe + 1;
+  storeWatermark(cachePath, wm);
 }
 
 int LookupHistory::mergeBlob(const std::string& cachePath, const uint8_t* blob, size_t len, int* outDeleted) {
