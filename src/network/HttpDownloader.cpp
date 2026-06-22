@@ -220,8 +220,24 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
     }
     const int read = esp_http_client_read(client, buf.get(), READ_CHUNK);
     if (read < 0) {
-      LOG_ERR("HTTP", "read error after %zu bytes", sink.downloaded);
-      SdDebugLog::log("HTTP", "read error after %zu bytes, heap=%u", sink.downloaded, (unsigned)ESP.getFreeHeap());
+      // Surface the real cause. esp_http_client_read collapses every failure to
+      // <0, so pull the socket errno, the last esp-tls/mbedtls codes, AND the
+      // contiguous-heap snapshot. X3 and X4 run the same 8192-IN lib, so a record
+      // > IN would fail both — yet only X3 fails, which points at heap headroom,
+      // not record size. Distinguish: -0x7f00 (ALLOC_FAILED) or ENOMEM with a low
+      // largest8 == out-of-contiguous-heap; -0x7200 (INVALID_RECORD) == record
+      // overflow; a bare errno == socket timeout/reset.
+      const int sockErrno = esp_http_client_get_errno(client);
+      int tlsCode = 0, tlsFlags = 0;
+      esp_http_client_get_and_clear_last_tls_error(client, &tlsCode, &tlsFlags);
+      const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
+      LOG_ERR("HTTP", "read error after %zu bytes (ret=%d errno=%d mbedtls=-0x%04x flags=0x%x)", sink.downloaded, read,
+              sockErrno, -tlsCode, tlsFlags);
+      SdDebugLog::log("HTTP",
+                      "read error after %zu bytes, ret=%d errno=%d mbedtls=-0x%04x flags=0x%x heap=%u largest8=%u "
+                      "intFree=%u intLargest=%u",
+                      sink.downloaded, read, sockErrno, -tlsCode, tlsFlags, snap.heapFree, snap.largest8Bit,
+                      snap.internalFree, snap.internalLargest);
       setDetail(sink.detail, "read error after %zu bytes", sink.downloaded);
       esp_http_client_cleanup(client);
       return HttpDownloader::HTTP_ERROR;

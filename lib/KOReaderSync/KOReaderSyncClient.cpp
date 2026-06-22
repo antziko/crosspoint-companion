@@ -623,29 +623,6 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
   std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/bookmarks";
   if (!heapOkForUrl(url, "BOOKMARKS_PUT")) return LOW_MEMORY;
 
-  // Body-build contiguous guard — applies EVEN on a reused session. heapOkForUrl above and
-  // contigOkForPut below both BYPASS on reuse because the held mbedTLS arena already covers the
-  // handshake. But building the request body still needs contiguous heap NOW: the JsonDocument
-  // copies the pre-serialized bookmarks blob into its pool (~blobLen) and serializeJson grows
-  // `body` to ~blobLen via doubling reallocs (peak a single ~2*blobLen block at the final grow).
-  // After an in-session bookmark GET the mbedTLS arena has crushed the largest free block, so this
-  // build aborts under -fno-exceptions instead of failing gracefully. HW log 2026-06-21: the GET
-  // left largest8=3060, then the PUT body build abort()ed mid-serialize ("document":"bd...").
-  // Convert that into a clean LOW_MEMORY skip; the session closes after, heap recovers, retry works.
-  {
-    const size_t blobLen = bookmarksJson.length();
-    const size_t needContig = blobLen * 2 + 512;
-    multi_heap_info_t info;
-    heap_caps_get_info(&info, MALLOC_CAP_8BIT);
-    if (info.largest_free_block < needContig) {
-      SdDebugLog::log("KOSYNC", "BOOKMARKS_PUT body-build: largest=%u < need=%u (blob=%u) -> SKIP",
-                      (unsigned)info.largest_free_block, (unsigned)needContig, (unsigned)blobLen);
-      LOG_ERR("KOSync", "BOOKMARKS_PUT: largest block %u < %u for body build - skip to avoid abort",
-              (unsigned)info.largest_free_block, (unsigned)needContig);
-      return LOW_MEMORY;
-    }
-  }
-
   // The bookmarks array is sent as a single pre-serialized JSON string field so the
   // server stores it as an opaque blob (it never parses bookmark contents).
   // Scope the JsonDocument so its pool frees before the TLS handshake: the mbedTLS arena
@@ -657,6 +634,26 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
     JsonDocument doc;
     doc["document"] = documentHash;
     doc["bookmarks"] = bookmarksJson;
+
+    // Abort-safety: build the body in ONE pre-sized alloc instead of letting serializeJson
+    // grow `body` by doubling reallocs. measureJson() allocates nothing, so the exact body
+    // length is known; the largest-free-block check runs AFTER `doc` is built (its pool is
+    // already resident), so it reflects the contiguous heap the reserve() will actually need.
+    // On a reused session the mbedTLS arena has crushed the largest free block, so a doubling
+    // grow would abort() under -fno-exceptions; this converts that into a clean LOW_MEMORY skip
+    // (session closes after, heap recovers, retry works). Was the broken `2*blob` guard that
+    // ignored the live doc pool — HW crash 2026-06-22: blob=1984, abort on the 3841 realloc.
+    const size_t bodyLen = measureJson(doc) + 1;
+    multi_heap_info_t info;
+    heap_caps_get_info(&info, MALLOC_CAP_8BIT);
+    if (info.largest_free_block < bodyLen) {
+      SdDebugLog::log("KOSYNC", "BOOKMARKS_PUT body-build: largest=%u < need=%u -> SKIP",
+                      (unsigned)info.largest_free_block, (unsigned)bodyLen);
+      LOG_ERR("KOSync", "BOOKMARKS_PUT: largest block %u < %u for body build - skip to avoid abort",
+              (unsigned)info.largest_free_block, (unsigned)bodyLen);
+      return LOW_MEMORY;
+    }
+    body.reserve(bodyLen);
     serializeJson(doc, body);
   }
 
@@ -887,6 +884,24 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& doc
     doc["document"] = documentHash;
     doc["device_id"] = deviceId();
     doc["stats"] = statsBlob;
+
+    // Abort-safety: same pre-sized build as updateBookmarks. The stats body is the LARGER
+    // crash risk — statsBlob can hold a ~5.5KB base64 "dh" dict-history blob, so the doubling
+    // grow peaks well above the bookmark case and there was previously no body-build guard
+    // here at all. measureJson() allocates nothing; check contiguous heap AFTER doc is built,
+    // then reserve once. Starved -> clean LOW_MEMORY skip instead of abort().
+    const size_t bodyLen = measureJson(doc) + 1;
+    multi_heap_info_t info;
+    heap_caps_get_info(&info, MALLOC_CAP_8BIT);
+    if (info.largest_free_block < bodyLen) {
+      SdDebugLog::log("KOSYNC", "STATS_PUT body-build: largest=%u < need=%u -> SKIP",
+                      (unsigned)info.largest_free_block, (unsigned)bodyLen);
+      LOG_ERR("KOSync", "STATS_PUT: largest block %u < %u for body build - skip to avoid abort",
+              (unsigned)info.largest_free_block, (unsigned)bodyLen);
+      std::string().swap(statsBlob);
+      return LOW_MEMORY;
+    }
+    body.reserve(bodyLen);
     serializeJson(doc, body);
   }
   std::string().swap(statsBlob);  // free the base64 blob's heap before the handshake

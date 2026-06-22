@@ -191,11 +191,9 @@ void KOReaderSyncActivity::performSync() {
   // per-book "dh" history and skips the extra global round-trips.
   if (syncScope != SyncScope::All && syncScope != SyncScope::Progress) {
     switch (syncScope) {
-      case SyncScope::Bookmarks: {
-        KOReaderSyncClient::SyncSession session;  // GET + PUT reuse one keep-alive connection
-        syncBookmarks();
+      case SyncScope::Bookmarks:
+        syncBookmarks();  // sessionless: GET/merge/PUT each at recovered heap (see syncBookmarks)
         break;
-      }
       case SyncScope::Stats:
         syncStats(/*includeDict=*/false, /*includeGlobal=*/true);  // no session: full heap for global body
         break;
@@ -220,20 +218,27 @@ void KOReaderSyncActivity::performSync() {
   }
   requestUpdateAndWait();
 
-  // Progress + (for ALL) bookmarks share ONE keep-alive connection: the progress GET pays the
-  // single handshake and bookmarks reuse it — no second cold handshake to -0x7F00. The session
-  // CLOSES at the end of this block so stats below runs at recovered heap.
+  // Progress runs in a short keep-alive session (just the GET here). The session CLOSES at the
+  // end of this block so bookmarks AND stats below run at recovered heap. Bookmarks USED to run
+  // inside this session to share the handshake, but their merge (parseFromJson + mergeFrom build
+  // several throwing std::vector reserves) needs free heap the held ~55KB arena denies — that
+  // abort()ed mid-merge in "sync all" (HW 2026-06-22: mergeFrom reserve 4752B, largest 4596).
+  // So bookmarks are now sessionless like stats: their GET/merge/PUT each run at recovered heap,
+  // where the merge has room and a fresh handshake has its contiguous block (proven by stats'
+  // sessionless GET+PUT both succeeding here).
   KOReaderSyncClient::Error result;
   {
     KOReaderSyncClient::SyncSession session;
     result = KOReaderSyncClient::getProgress(documentHash, remoteProgress);
-    // Full sync (ALL) also merges bookmarks whenever the server is reachable (OK or NOT_FOUND).
-    // Silent and best-effort: it does not change the progress sync outcome below.
-    if (syncScope == SyncScope::All &&
-        (result == KOReaderSyncClient::OK || result == KOReaderSyncClient::NOT_FOUND)) {
-      syncBookmarks();
-    }
-  }  // session closed: arena freed, heap recovers for stats' fresh handshake + large body
+  }  // session closed: arena freed, heap recovers for bookmarks + stats' fresh handshakes
+
+  // Full sync (ALL) also merges bookmarks whenever the server is reachable (OK or NOT_FOUND).
+  // Silent and best-effort: it does not change the progress sync outcome below. Sessionless, at
+  // recovered heap — see syncBookmarks.
+  if (syncScope == SyncScope::All &&
+      (result == KOReaderSyncClient::OK || result == KOReaderSyncClient::NOT_FOUND)) {
+    syncBookmarks();
+  }
 
   // PROBE: heap state right before stats' cold handshake (needs ~33.4KB contiguous = two
   // ~16.7KB record buffers). If `largest` here stays well below ~33KB across runs, the prior
@@ -347,11 +352,12 @@ void KOReaderSyncActivity::performUpload() {
 }
 
 void KOReaderSyncActivity::syncBookmarks() {
-  // Runs inside the caller's keep-alive session: the GET and PUT reuse one open connection, so
-  // there is NO second handshake here (a fresh PUT handshake needs a clean ~33KB block, which a
-  // settled heap can't provide — that was the -0x7F00). The body is still serialized BEFORE the
-  // GET so the JsonDocument churn doesn't fragment the heap right when the write needs scratch;
-  // it re-serializes only if the GET's merge mutated the local set.
+  // Sessionless: the GET, the merge (parseFromJson + mergeFrom), and the PUT each run at recovered
+  // heap (the caller closed the progress session before calling this). The merge builds several
+  // throwing std::vector reserves, so it MUST NOT run under a held keep-alive arena (~16KB free) —
+  // that abort()ed mid-merge. Each leg opens a fresh connection; the fresh handshakes have their
+  // contiguous block at recovered heap (same place stats handshakes). The body is still serialized
+  // BEFORE the GET (budget-capped) and re-serialized only if the merge mutated the local set.
   {
     RenderLock lock(*this);
     state = SYNCING;
@@ -416,8 +422,8 @@ void KOReaderSyncActivity::syncBookmarks() {
     return;
   }
 
-  // Pull remote, reconcile with local (union bookmarks, propagate tombstoned deletes). Reuses
-  // the caller's keep-alive connection; the PUT below reuses it too.
+  // Pull remote, reconcile with local (union bookmarks, propagate tombstoned deletes). Fresh
+  // connection at recovered heap; its arena frees before the merge so mergeFrom has room.
   std::string remoteJson;
   const auto getResult = KOReaderSyncClient::getBookmarks(documentHash, remoteJson);
   if (getResult == KOReaderSyncClient::OK) {
