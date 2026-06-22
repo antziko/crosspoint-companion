@@ -104,16 +104,18 @@ constexpr uint32_t MIN_HEAP_FOR_HTTP = 12000;
 // multi-KB request body competing for it tips ssl_setup into -0x7F00. We can observe only
 // the *largest* free block, not the second, so this is a coarse guard.
 //
-// RECALIBRATED for the pinned-CA handshake (KOReaderSyncCA.h): swapping the full ~16 KB
-// Mozilla bundle for two pinned roots (~2.7 KB) frees ~13 KB of contiguous heap during the
-// handshake. The old base (31000) was tuned to the heavy-bundle boundary and now FALSE-SKIPS
-// PUTs that succeed — hardware evidence: BOOKMARKS_GET's ssl_setup completed at largest=31732,
-// but the 31000+body gate rejected the very next PUT at that same largest. Drop the base by the
-// CA saving so a PUT attempts whenever the largest block clears the record IN buffer (~16 KB)
-// plus body plus margin. A still-fragmented arena that lacks the second slab fails ssl_setup
-// (-0x7F00) and the PUT skips gracefully (no crash, fresh-connection path) — better than never
-// attempting.
-constexpr uint32_t TLS_PUT_CONTIG_BASE = 18000;
+// RECALIBRATED 2026-06-22 for the SHRUNK mbedTLS record buffers. The custom libmbedtls_2.a
+// (esp32-arduino-lib-builder, ASYMMETRIC_CONTENT_LEN=y, IN=8192/OUT=4096 — see
+// docs/kosync-https-libbuilder.md) drops the handshake record buffers from ~16.7 KB to
+// in_buf ~8.5 KB + out_buf ~4.4 KB. The binding contiguous constraint is now the IN buffer
+// (~8.5 KB); the OUT buffer is a separate, smaller alloc that takes any of the dozens of free
+// blocks. The old base (18000, sized for the 16 KB IN slab) FALSE-SKIPS PUTs that now succeed —
+// hardware evidence 2026-06-22: a sync-all STATS_PUT (body 5299) was rejected at largest=15348
+// with need=23299, yet the handshake needs only ~8.5 KB contiguous and would have completed.
+// Set the base to IN buffer (~8.5 KB) + margin. A still-fragmented arena that can't place the
+// IN slab fails ssl_setup (-0x7F00) and the PUT skips gracefully (no crash) — better than never
+// attempting. If the buffers are resized in the lib build, retune this.
+constexpr uint32_t TLS_PUT_CONTIG_BASE = 10000;
 
 // X3 HTTPS troubleshooting instrumentation (SdDebugLog "STALL"): a gap between
 // esp_http_client event-callback fires longer than this is logged with a
