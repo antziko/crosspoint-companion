@@ -34,9 +34,12 @@ class FlashcardReviewActivity final : public Activity {
  private:
   // Overview = pre-session deck stats (box-ladder); Confirm starts the session.
   // Front = card context shown, word hidden (cloze) or shown (word+context).
+  // Revealed = cloze answer shown after a front grade; the grade is re-pickable
+  //   (Left/Right) and committed on Confirm (the "now that I see it, grade
+  //   honestly" step — only reached from a cloze front, never word+context).
   // AwaitingGrade = the definition (back face) has been viewed; pass/fail prompt.
   // Summary = session finished; show the tally.
-  enum class Phase { Overview, Front, AwaitingGrade, Summary };
+  enum class Phase { Overview, Front, Revealed, AwaitingGrade, Summary };
 
   static constexpr int SESSION_CAP = 30;  // bounded session; reserve()'d once
 
@@ -51,7 +54,8 @@ class FlashcardReviewActivity final : public Activity {
   FlashcardDeck::Entry card;   // the one resident card
   FlashcardDeck::Stats stats;  // deck-wide stats for the overview screen
   Phase phase = Phase::Overview;
-  uint8_t cardStyle = 0;  // FLASHCARD_STYLE_* chosen on the overview (Up/Down)
+  uint8_t cardStyle = 0;     // FLASHCARD_STYLE_* chosen on the overview (Up/Down)
+  bool pendingCorrect = false;  // grade picked on a cloze front, committed on Revealed-confirm
 
   // Session tally (rendered on the summary screen).
   int reviewed = 0;
@@ -73,11 +77,22 @@ class FlashcardReviewActivity final : public Activity {
   // Render helpers.
   void renderOverview(int contentTop, int contentBottom, int pageWidth);
   void renderFront(int contentTop, int contentBottom, int pageWidth);
+  void renderRevealed(int contentTop, int contentBottom, int pageWidth);
   void renderAwaitingGrade(int contentTop, int contentBottom, int pageWidth);
   void renderSummary(int contentTop, int contentBottom, int pageWidth);
+  // Shared card face for every word-showing/hiding state: bold word header (drawn
+  // only when showWord) + the excerpt with the word underlined in context. When
+  // showWord is false (cloze front) the header is omitted and the word is masked
+  // (white-boxed) in the excerpt, leaving only its underline — so front and reveal
+  // share one layout and the answer just fills into place with no vertical jump.
+  void renderCardFace(int contentTop, int contentBottom, int pageWidth, bool showWord);
   // Word-wrap `text` centered within [contentTop, contentBottom); returns the y
-  // after the last line. Bounded by the excerpt cap, no heap beyond one line.
-  int drawWrappedCentered(int fontId, int contentTop, int contentBottom, int pageWidth, const char* text);
+  // after the last line. Bounded by the excerpt cap, no heap beyond one line. When
+  // `highlightWord` is non-null, each case-insensitive occurrence is underlined;
+  // when `maskHighlight` is also true the occurrence is white-boxed first (the
+  // cloze blank), leaving just the underline.
+  int drawWrappedCentered(int fontId, int contentTop, int contentBottom, int pageWidth, const char* text,
+                          const char* highlightWord = nullptr, bool maskHighlight = false);
   // Draw the card's chapter title (if any) as a small footer just above the
   // button hints. No-op when the card has no chapter.
   void drawChapterFooter(int contentBottom);

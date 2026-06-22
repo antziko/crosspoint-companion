@@ -446,6 +446,36 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
   return w;
 }
 
+int GfxRenderer::getTextAdvanceWidth(const int fontId, const char* text, const EpdFontFamily::Style style) const {
+  if (text == nullptr || *text == '\0') {
+    return 0;
+  }
+
+  const auto fontIt = fontMap.find(fontId);
+  if (fontIt == fontMap.end()) {
+    LOG_ERR("GFX", "Font %d not found", fontId);
+    return 0;
+  }
+
+  // No BiDi reshaping: callers pass byte offsets into the logical string (LTR).
+  return fontIt->second.getAdvanceWidth(text, style);
+}
+
+void GfxRenderer::getTextInkBounds(const int fontId, const char* text, int* minX, int* maxX,
+                                   const EpdFontFamily::Style style) const {
+  *minX = 0;
+  *maxX = 0;
+  if (text == nullptr || *text == '\0') {
+    return;
+  }
+  const auto fontIt = fontMap.find(fontId);
+  if (fontIt == fontMap.end()) {
+    LOG_ERR("GFX", "Font %d not found", fontId);
+    return;
+  }
+  fontIt->second.getInkExtents(text, minX, maxX, style);
+}
+
 void GfxRenderer::drawCenteredText(const int fontId, const int y, const char* text, const bool black,
                                    const EpdFontFamily::Style style, const BidiUtils::BidiBaseDir baseDir) const {
   const int x = (getScreenWidth() - getTextWidth(fontId, text, style, baseDir)) / 2;

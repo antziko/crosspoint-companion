@@ -236,6 +236,16 @@ class GfxRenderer {
   // Text
   int getTextWidth(int fontId, const char* text, EpdFontFamily::Style style = EpdFontFamily::REGULAR,
                    BidiUtils::BidiBaseDir baseDir = BidiUtils::BidiBaseDir::AUTO) const;
+  // Pen advance width (cursor end position), NOT the ink bounding box getTextWidth
+  // returns. Use for caret/sub-span placement under centered/left-drawn text (e.g.
+  // underlining a word). Operates on the raw bytes (no BiDi reshaping) so a byte
+  // offset into `text` maps to a stable advance for LTR runs.
+  int getTextAdvanceWidth(int fontId, const char* text, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
+  // Ink extents (relative to pen origin 0): *minX = first glyph left side bearing,
+  // *maxX = rightmost inked pixel. Place a sub-span at penOrigin + minX, width
+  // maxX - minX. No BiDi reshaping (LTR byte offsets).
+  void getTextInkBounds(int fontId, const char* text, int* minX, int* maxX,
+                        EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   void drawCenteredText(int fontId, int y, const char* text, bool black = true,
                         EpdFontFamily::Style style = EpdFontFamily::REGULAR,
                         BidiUtils::BidiBaseDir baseDir = BidiUtils::BidiBaseDir::AUTO) const;

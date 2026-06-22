@@ -26,36 +26,6 @@ uint32_t xorshift32(uint32_t& s) {
   return s;
 }
 
-// Case-insensitive ASCII substring search for cloze blanking.
-bool iEqualAt(const std::string& hay, size_t pos, const std::string& needle) {
-  if (pos + needle.size() > hay.size()) return false;
-  for (size_t i = 0; i < needle.size(); i++) {
-    if (std::tolower(static_cast<unsigned char>(hay[pos + i])) != std::tolower(static_cast<unsigned char>(needle[i])))
-      return false;
-  }
-  return true;
-}
-
-// Replace every (case-insensitive) occurrence of `word` in `excerpt` with a run
-// of underscores, so the front cloze hides the target. Falls back to "____" if
-// the excerpt is empty or the word does not appear.
-std::string buildClozeText(const std::string& excerpt, const std::string& word) {
-  if (excerpt.empty() || word.empty()) return "____";
-  std::string out;
-  out.reserve(excerpt.size() + 4);
-  bool replaced = false;
-  for (size_t i = 0; i < excerpt.size();) {
-    if (iEqualAt(excerpt, i, word)) {
-      out.append(std::max<size_t>(4, word.size()), '_');
-      i += word.size();
-      replaced = true;
-    } else {
-      out.push_back(excerpt[i++]);
-    }
-  }
-  return replaced ? out : "____";
-}
-
 }  // namespace
 
 void FlashcardReviewActivity::onEnter() {
@@ -203,9 +173,45 @@ void FlashcardReviewActivity::loop() {
       }
       break;
     case Phase::Front:
+      if (cardStyle == CrossPointSettings::FLASHCARD_STYLE_CLOZE) {
+        // Cloze hides the word: a front grade first REVEALS the answer (word
+        // filled into the excerpt) where the grade can still be re-picked.
+        if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+          pendingCorrect = true;
+          phase = Phase::Revealed;
+          requestUpdate();
+        } else if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+          pendingCorrect = false;
+          phase = Phase::Revealed;
+          requestUpdate();
+        } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+          controller.startLookup(card.word, /*recordHistory=*/false);  // flip -> back face
+        }
+      } else {
+        // Word+context already shows the word: grade directly, no reveal step.
+        if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+          gradeAndAdvance(/*correctRecall=*/true);
+        } else if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+          gradeAndAdvance(/*correctRecall=*/false);
+        } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+          controller.startLookup(card.word, /*recordHistory=*/false);  // flip -> back face
+        }
+      }
+      break;
+    case Phase::Revealed:
+      // Answer is visible: Left/Right re-pick the grade, Confirm commits + advances.
+      if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+        pendingCorrect = true;
+        requestUpdate();
+      } else if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+        pendingCorrect = false;
+        requestUpdate();
+      } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+        gradeAndAdvance(pendingCorrect);
+      }
+      break;
     case Phase::AwaitingGrade:
-      // Grade is always available (pass/fail without requiring a flip first);
-      // Confirm still flips to the definition back face.
+      // Back face viewed: grade is available; Confirm re-flips to the definition.
       if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
         gradeAndAdvance(/*correctRecall=*/true);
       } else if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
@@ -230,20 +236,66 @@ void FlashcardReviewActivity::displayList() {
 }
 
 int FlashcardReviewActivity::drawWrappedCentered(int fontId, int contentTop, int contentBottom, int pageWidth,
-                                                 const char* text) {
+                                                 const char* text, const char* highlightWord, bool maskHighlight) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int lineHeight = metrics.listRowHeight;
   const int maxWidth = pageWidth - 2 * metrics.contentSidePadding;
+  const int hlLen = highlightWord ? static_cast<int>(strlen(highlightWord)) : 0;
 
   // Greedy word wrap into a fixed line buffer (excerpt is capped, so bounded).
   char line[FlashcardDeck::EXCERPT_MAX + 1];
   int lineLen = 0;
   int y = contentTop;
 
+  // Underline each case-insensitive occurrence of highlightWord in the just-drawn,
+  // centered line. Both span endpoints are measured as cumulative prefixes from the
+  // line start (null-terminating in place, no extra buffer) so they match drawText's
+  // own left-to-right glyph layout (differential rounding + kerning); measuring the
+  // matched word in isolation would drop the boundary kern and drift by ~a char.
+  auto underline = [&](int top) {
+    if (hlLen == 0) return;
+    // Pen origin of the centered line = drawCenteredText's x = (W - inkWidth)/2.
+    const int startX = (pageWidth - renderer.getTextWidth(fontId, line)) / 2;
+    for (int i = 0; i + hlLen <= lineLen;) {
+      bool match = true;
+      for (int k = 0; k < hlLen; k++)
+        if (std::tolower(static_cast<unsigned char>(line[i + k])) !=
+            std::tolower(static_cast<unsigned char>(highlightWord[k]))) {
+          match = false;
+          break;
+        }
+      if (!match) {
+        i++;
+        continue;
+      }
+      // Pen origin of the match = advance cursor of the prefix (NOT ink width, which
+      // loses side bearings/spaces). Then place the underline at the word's actual
+      // ink extents from that origin, so it spans exactly the visible glyphs.
+      const char saveStart = line[i];
+      line[i] = '\0';
+      const int penX = startX + renderer.getTextAdvanceWidth(fontId, line);
+      line[i] = saveStart;
+      const char saveEnd = line[i + hlLen];
+      line[i + hlLen] = '\0';
+      int inkMinX = 0, inkMaxX = 0;
+      renderer.getTextInkBounds(fontId, line + i, &inkMinX, &inkMaxX);
+      line[i + hlLen] = saveEnd;
+      const int ulX = penX + inkMinX;       // visible left edge of the word
+      const int ulW = inkMaxX - inkMinX;    // ink width of the word
+      // Cloze front: white-box the word glyphs (small pad), leaving just the underline.
+      if (maskHighlight) renderer.fillRect(ulX - 2, top, ulW + 4, lineHeight, false);
+      renderer.fillRect(ulX, top + lineHeight - 3, ulW, 2, true);
+      i += hlLen;
+    }
+  };
+
   auto flush = [&]() {
     if (lineLen == 0) return;
     line[lineLen] = '\0';
-    if (y + lineHeight <= contentBottom) renderer.drawCenteredText(fontId, y, line);
+    if (y + lineHeight <= contentBottom) {
+      renderer.drawCenteredText(fontId, y, line);
+      underline(y);
+    }
     y += lineHeight;
     lineLen = 0;
   };
@@ -290,7 +342,7 @@ void FlashcardReviewActivity::render(RenderLock&&) {
   const int sessionTotal = static_cast<int>(session.size());
   const int pos = std::min(static_cast<int>(cursor) + 1, std::max(1, sessionTotal));
   char titleBuf[64];
-  if (phase == Phase::Front || phase == Phase::AwaitingGrade) {
+  if (phase == Phase::Front || phase == Phase::Revealed || phase == Phase::AwaitingGrade) {
     snprintf(titleBuf, sizeof(titleBuf), "%s  %d/%d", tr(STR_FLASHCARDS_REVIEW), pos, sessionTotal);
   } else {
     snprintf(titleBuf, sizeof(titleBuf), "%s", tr(STR_FLASHCARDS_REVIEW));
@@ -315,6 +367,9 @@ void FlashcardReviewActivity::render(RenderLock&&) {
       break;
     case Phase::Front:
       renderFront(contentTop, contentBottom, pageWidth);
+      break;
+    case Phase::Revealed:
+      renderRevealed(contentTop, contentBottom, pageWidth);
       break;
     case Phase::AwaitingGrade:
       renderAwaitingGrade(contentTop, contentBottom, pageWidth);
@@ -408,28 +463,58 @@ void FlashcardReviewActivity::renderOverview(int contentTop, int contentBottom, 
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
 
-void FlashcardReviewActivity::renderFront(int contentTop, int contentBottom, int pageWidth) {
+void FlashcardReviewActivity::renderCardFace(int contentTop, int contentBottom, int pageWidth, bool showWord) {
   const int bodyFont = SETTINGS.getDefinitionFontId();
   const auto& metrics = UITheme::getInstance().getMetrics();
 
-  if (cardStyle == CrossPointSettings::FLASHCARD_STYLE_CLOZE) {
-    const std::string cloze = buildClozeText(card.excerpt, card.word);
-    const int mid = contentTop + (contentBottom - contentTop) / 2 - metrics.listRowHeight;
-    drawWrappedCentered(bodyFont, mid, contentBottom, pageWidth, cloze.c_str());
-  } else {  // WORD_CONTEXT: word on top, excerpt below
+  // Bold word header — drawn only when the answer is shown. Cloze front omits it
+  // (the row stays blank) so the excerpt below keeps the same position either way.
+  if (showWord) {
     renderer.drawCenteredText(NOTOSERIF_18_FONT_ID, contentTop + metrics.listRowHeight, card.word.c_str(), true,
                               EpdFontFamily::BOLD);
-    if (!card.excerpt.empty()) {
-      drawWrappedCentered(bodyFont, contentTop + metrics.listRowHeight * 3, contentBottom, pageWidth,
-                          card.excerpt.c_str());
-    }
+  }
+
+  if (!card.excerpt.empty()) {
+    // Excerpt with the word underlined in context; masked (white-boxed) when hidden.
+    drawWrappedCentered(bodyFont, contentTop + metrics.listRowHeight * 3, contentBottom, pageWidth,
+                        card.excerpt.c_str(), card.word.c_str(), /*maskHighlight=*/!showWord);
+  } else if (!showWord) {
+    // No excerpt to blank into: fall back to a centered "____" placeholder.
+    renderer.drawCenteredText(bodyFont, contentTop + metrics.listRowHeight * 3, "____");
   }
 
   drawChapterFooter(contentBottom);
+}
+
+void FlashcardReviewActivity::renderFront(int contentTop, int contentBottom, int pageWidth) {
+  // Word+context shows the word; cloze hides it (masked excerpt + blank header).
+  const bool showWord = cardStyle != CrossPointSettings::FLASHCARD_STYLE_CLOZE;
+  renderCardFace(contentTop, contentBottom, pageWidth, showWord);
 
   // Flip on Confirm; pass/fail always available without flipping first.
   const auto labels =
       mappedInput.mapLabels(tr(STR_BACK), tr(STR_FLASHCARD_FLIP), tr(STR_FLASHCARD_PASS), tr(STR_FLASHCARD_FAIL));
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+}
+
+void FlashcardReviewActivity::renderRevealed(int contentTop, int contentBottom, int pageWidth) {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+
+  // Reveal in place: same layout as the cloze front, but the word now shows (bold
+  // header + filled, underlined in the excerpt) -- the only change is the blank
+  // resolving, no vertical jump.
+  renderCardFace(contentTop, contentBottom, pageWidth, /*showWord=*/true);
+
+  // Live grade pick as a small footer line (above the chapter footer / hints) so it
+  // never displaces the excerpt.
+  char pick[48];
+  snprintf(pick, sizeof(pick), "%s", pendingCorrect ? tr(STR_FLASHCARD_PASS) : tr(STR_FLASHCARD_FAIL));
+  renderer.drawCenteredText(UI_10_FONT_ID, contentBottom - metrics.listRowHeight * 2, pick, true,
+                            EpdFontFamily::ITALIC);
+
+  // Left/Right re-pick the grade; Confirm commits it and advances.
+  const auto labels =
+      mappedInput.mapLabels(tr(STR_BACK), tr(STR_NEXT_FIELD), tr(STR_FLASHCARD_PASS), tr(STR_FLASHCARD_FAIL));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
 
@@ -441,18 +526,8 @@ void FlashcardReviewActivity::drawChapterFooter(int contentBottom) {
 }
 
 void FlashcardReviewActivity::renderAwaitingGrade(int contentTop, int contentBottom, int pageWidth) {
-  const int bodyFont = SETTINGS.getDefinitionFontId();
-  const auto& metrics = UITheme::getInstance().getMetrics();
-
-  // Reveal the word; show the excerpt below for context.
-  renderer.drawCenteredText(NOTOSERIF_18_FONT_ID, contentTop + metrics.listRowHeight, card.word.c_str(), true,
-                            EpdFontFamily::BOLD);
-  if (!card.excerpt.empty()) {
-    drawWrappedCentered(bodyFont, contentTop + metrics.listRowHeight * 3, contentBottom, pageWidth,
-                        card.excerpt.c_str());
-  }
-
-  drawChapterFooter(contentBottom);
+  // Back face viewed: same revealed card face (word shown, underlined in context).
+  renderCardFace(contentTop, contentBottom, pageWidth, /*showWord=*/true);
 
   // Left = pass, Right = fail; Confirm re-flips. Consistent with the front face.
   const auto labels =

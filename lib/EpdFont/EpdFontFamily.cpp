@@ -22,6 +22,14 @@ void EpdFontFamily::getTextDimensions(const char* string, int* w, int* h, const 
   getFont(style)->getTextDimensions(string, w, h);
 }
 
+int EpdFontFamily::getAdvanceWidth(const char* string, const Style style) const {
+  return getFont(style)->getAdvanceWidth(string);
+}
+
+void EpdFontFamily::getInkExtents(const char* string, int* minX, int* maxX, const Style style) const {
+  getFont(style)->getInkExtents(string, minX, maxX);
+}
+
 const EpdFontData* EpdFontFamily::getData(const Style style) const { return getFont(style)->data; }
 
 const EpdGlyph* EpdFontFamily::getGlyph(const uint32_t cp, const Style style) const {

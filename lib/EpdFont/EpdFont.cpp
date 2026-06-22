@@ -80,6 +80,44 @@ void EpdFont::getTextDimensions(const char* string, int* w, int* h) const {
   *h = maxY - minY;
 }
 
+int EpdFont::getAdvanceWidth(const char* string) const {
+  if (string == nullptr || *string == '\0') return 0;
+
+  // Mirror getTextBounds' pen advance exactly (same fp4 snapping + kerning), but
+  // track only the cursor -- the position drawText would place each glyph's origin.
+  int cursor = 0;
+  int32_t prevAdvanceFP = 0;  // 12.4 fixed-point
+  uint32_t prevCp = 0;
+  uint32_t cp;
+  while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&string)))) {
+    if (utf8IsCombiningMark(cp)) continue;  // combining marks don't advance the pen
+
+    cp = applyLigatures(cp, string);
+    const EpdGlyph* glyph = getGlyph(cp);
+    if (!glyph) {
+      cursor += fp4::toPixel(prevAdvanceFP);  // flush pending advance, reset pair state
+      prevCp = 0;
+      prevAdvanceFP = 0;
+      continue;
+    }
+    if (prevCp != 0) {
+      const auto kernFP = getKerning(prevCp, cp);  // 4.4 fixed-point kern
+      cursor += fp4::toPixel(prevAdvanceFP + kernFP);
+    }
+    prevAdvanceFP = glyph->advanceX;  // 12.4 fixed-point
+    prevCp = cp;
+  }
+  cursor += fp4::toPixel(prevAdvanceFP);  // flush the final glyph's advance
+  return cursor;
+}
+
+void EpdFont::getInkExtents(const char* string, int* minX, int* maxX) const {
+  int mnX = 0, mnY = 0, mxX = 0, mxY = 0;
+  getTextBounds(string, 0, 0, &mnX, &mnY, &mxX, &mxY);
+  *minX = mnX;
+  *maxX = mxX;
+}
+
 static uint8_t lookupKernClass(const EpdKernClassEntry* entries, const uint16_t count, const uint32_t cp) {
   if (!entries || count == 0 || cp > 0xFFFF) {
     return 0;

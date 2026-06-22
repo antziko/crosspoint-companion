@@ -10,6 +10,18 @@ class EpdFont {
   ~EpdFont() = default;
   void getTextDimensions(const char* string, int* w, int* h) const;
 
+  /// Returns the pen advance width (in pixels) of the string: the cursor position
+  /// drawText leaves the pen at, using the same fp4 advance + kerning snapping as
+  /// getTextBounds. Unlike getTextDimensions (which returns the INK bounding box),
+  /// this is suitable for caret/sub-span positioning (e.g. underlining a word).
+  int getAdvanceWidth(const char* string) const;
+
+  /// Ink bounding-box horizontal extents relative to a pen origin of 0: minX is the
+  /// first glyph's left side bearing, maxX is the rightmost inked pixel. Combine with
+  /// getAdvanceWidth(prefix) to place a sub-span (e.g. underline a word at
+  /// penOrigin + minX for width maxX - minX).
+  void getInkExtents(const char* string, int* minX, int* maxX) const;
+
   const EpdGlyph* getGlyph(uint32_t cp) const;
 
   /// Returns the kerning adjustment (4.4 fixed-point in pixels) between two codepoints.
