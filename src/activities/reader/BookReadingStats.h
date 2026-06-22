@@ -40,12 +40,22 @@ struct BookReadingStats {
   // 0 = never synced (or pre-v5 stats), so the first sync resets it.
   uint32_t lastSyncReadingSeconds = 0;
 
+  // Value of totalReadingSeconds the last time the user dismissed a sync prompt
+  // (sleep or open/wake) with "Skip". Gates re-prompting: after a Skip, the next
+  // prompt waits until another SYNC_PROMPT_MINUTES of reading has accrued past
+  // this point instead of re-firing immediately while still over the sync gate.
+  // The prompt gate measures reading since max(lastSyncReadingSeconds, this).
+  // Persisted so the deferral survives a Skip-then-sleep, then a later open.
+  // 0 = never skipped (or pre-v6 stats). A real sync supersedes it via the max().
+  uint32_t lastSyncPromptSkipSeconds = 0;
+
   // Total reading time across all devices (local counter + last-synced remote sum).
   uint32_t displayTotalSeconds() const { return totalReadingSeconds + remoteOtherSeconds; }
 
-  // Parses a raw stats.bin image: v5 native; v4 accepted with lastSyncReadingSeconds
-  // zeroed; v3 accepted with the remote fields + lastSyncReadingSeconds zeroed (all
-  // lossless upgrades). Returns false on unknown version or size mismatch. Split out
+  // Parses a raw stats.bin image: v6 native; v5 accepted with lastSyncPromptSkipSeconds
+  // zeroed; v4 accepted with that + lastSyncReadingSeconds zeroed; v3 accepted with the
+  // remote fields zeroed too (all lossless upgrades). Returns false on unknown version
+  // or size mismatch. Split out
   // from load() so host unit tests can cover the migration without SD I/O.
   static bool parse(const uint8_t* data, size_t len, BookReadingStats& out);
 

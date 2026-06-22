@@ -178,11 +178,19 @@ class EpubReaderActivity final : public Activity {
   // have confirmed KOREADER_STORE.hasCredentials(). Returns false if the pre-sync progress
   // save failed (sync not launched). Shared by the reader menu and the sleep prompt.
   bool launchKoSync(bool sleepWhenDone, SyncScope scope = SyncScope::All);
-  // Reading seconds accrued since this book's last successful sync (odometer + uncommitted live
-  // session, matching commitReadingTime accounting). Shared by the sleep + open sync prompts.
+  // This book's live reading odometer: persisted totalReadingSeconds plus the uncommitted
+  // effective remainder of the current session (matching commitReadingTime accounting).
+  uint32_t readingTotalSeconds() const;
+  // Reading seconds accrued since this book's last successful sync (odometer minus the
+  // last-sync marker). Shared by the sleep + open sync prompts.
   uint32_t readingSecondsSinceLastSync() const;
-  // True when readingSecondsSinceLastSync() meets the SYNC_PROMPT_MINUTES[syncPromptMinutesIdx] gate.
+  // True when reading accrued since the later of the last sync and the last prompt-Skip
+  // meets the SYNC_PROMPT_MINUTES[syncPromptMinutesIdx] gate. The Skip baseline defers the
+  // next prompt by one full interval instead of re-firing while still over the sync gate.
   bool syncPromptThresholdReached() const;
+  // Record a "Skip" of a sync prompt: stamp lastSyncPromptSkipSeconds at the current
+  // odometer and persist, so the next prompt waits a full interval. Shared by both prompts.
+  void recordSyncPromptSkip();
   // Show the "sync before continuing" prompt on open/wake (Sync runs KOReaderSyncActivity then
   // returns to the reader; Skip resumes reading). Called once after the first page render.
   void showOpenSyncPrompt();

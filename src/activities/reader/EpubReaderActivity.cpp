@@ -1842,7 +1842,7 @@ bool EpubReaderActivity::launchKoSync(bool sleepWhenDone, SyncScope scope) {
   return true;
 }
 
-uint32_t EpubReaderActivity::readingSecondsSinceLastSync() const {
+uint32_t EpubReaderActivity::readingTotalSeconds() const {
   // The book's odometer (readingStats.totalReadingSeconds, which already includes this session's
   // *committed* checkpoints) plus only the not-yet-committed effective remainder of the live
   // session. Mirror commitReadingTime()'s accounting so the count matches the stats odometer:
@@ -1856,6 +1856,11 @@ uint32_t EpubReaderActivity::readingSecondsSinceLastSync() const {
       totalNow += effectiveSecs - sessionCommittedSecs;
     }
   }
+  return totalNow;
+}
+
+uint32_t EpubReaderActivity::readingSecondsSinceLastSync() const {
+  const uint32_t totalNow = readingTotalSeconds();
   return totalNow > readingStats.lastSyncReadingSeconds ? totalNow - readingStats.lastSyncReadingSeconds : 0;
 }
 
@@ -1863,7 +1868,22 @@ bool EpubReaderActivity::syncPromptThresholdReached() const {
   constexpr size_t kCount = sizeof(CrossPointSettings::SYNC_PROMPT_MINUTES) / sizeof(uint8_t);
   const uint8_t idx = SETTINGS.syncPromptMinutesIdx < kCount ? SETTINGS.syncPromptMinutesIdx : 0;
   const uint32_t thresholdMinutes = CrossPointSettings::SYNC_PROMPT_MINUTES[idx];
-  return readingSecondsSinceLastSync() >= thresholdMinutes * 60UL;
+  // Gate on reading since the LATER of the last successful sync and the last prompt-Skip, so a
+  // Skip defers the next prompt by a full interval rather than re-firing while still over the
+  // sync gate. A real sync (lastSyncReadingSeconds) supersedes a stale skip via the max().
+  const uint32_t totalNow = readingTotalSeconds();
+  const uint32_t ref = std::max(readingStats.lastSyncReadingSeconds, readingStats.lastSyncPromptSkipSeconds);
+  const uint32_t sinceRef = totalNow > ref ? totalNow - ref : 0;
+  return sinceRef >= thresholdMinutes * 60UL;
+}
+
+void EpubReaderActivity::recordSyncPromptSkip() {
+  // Stamp the odometer at the moment of Skip and persist, so the deferral survives a
+  // Skip-then-sleep then a later open (the open prompt reloads stats from SD).
+  readingStats.lastSyncPromptSkipSeconds = readingTotalSeconds();
+  if (epub) {
+    readingStats.save(epub->getCachePath());
+  }
 }
 
 bool EpubReaderActivity::onManualSleepRequested() {
@@ -1896,7 +1916,10 @@ bool EpubReaderActivity::onManualSleepRequested() {
                              }
                              return;
                            }
-                           APP_STATE.requestManualSleep = true;  // Skip -> sleep now
+                           // Skip -> sleep now, no sync. Defer the next prompt by a full
+                           // interval (survives this sleep + the next open).
+                           recordSyncPromptSkip();
+                           APP_STATE.requestManualSleep = true;
                          });
   return true;
 }
@@ -1908,8 +1931,11 @@ void EpubReaderActivity::showOpenSyncPrompt() {
                                              tr(STR_SYNC_BEFORE_READING_BODY), tr(STR_SKIP), tr(STR_SYNC)),
       [this](const ActivityResult& res) {
         if (res.isCancelled) {
-          // Skip: keep reading. Swallow the answering button's release so it
-          // doesn't bleed into a page turn / Back on the resumed reader.
+          // Skip: keep reading. Defer the next prompt by a full interval so it doesn't
+          // re-fire on the next open while still over the sync gate.
+          recordSyncPromptSkip();
+          // Swallow the answering button's release so it doesn't bleed into a page turn /
+          // Back on the resumed reader.
           suppressPageTurnUntilRelease_ = true;
           ignoreBackUntilRelease = true;
           return;

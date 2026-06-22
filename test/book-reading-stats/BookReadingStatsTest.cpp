@@ -64,6 +64,18 @@ std::vector<uint8_t> makeV5(uint32_t total, uint32_t unattributed, uint16_t pace
   return d;
 }
 
+// Builds a v6 (37-byte) image: v5 layout plus the lastSyncPromptSkipSeconds field.
+std::vector<uint8_t> makeV6(uint32_t total, uint32_t unattributed, uint16_t pace, uint16_t samples, uint32_t lastDay,
+                            uint8_t lastHour, uint8_t lastMinute, uint32_t remoteSeconds, uint32_t remoteDay,
+                            uint8_t remoteHour, uint8_t remoteMinute, uint32_t lastSync, uint32_t lastSkip) {
+  std::vector<uint8_t> d = makeV5(total, unattributed, pace, samples, lastDay, lastHour, lastMinute, remoteSeconds,
+                                  remoteDay, remoteHour, remoteMinute, lastSync);
+  d[0] = 6;
+  d.reserve(37);
+  putLe32(d, lastSkip);
+  return d;
+}
+
 }  // namespace
 
 TEST(BookReadingStatsParse, V3MigratesLosslesslyWithRemoteFieldsZeroed) {
@@ -118,6 +130,30 @@ TEST(BookReadingStatsParse, V5RoundTrip) {
   EXPECT_EQ(s.totalReadingSeconds, 300u);
   EXPECT_EQ(s.remoteOtherSeconds, 240u);
   EXPECT_EQ(s.lastSyncReadingSeconds, 250u);
+  EXPECT_EQ(s.lastSyncPromptSkipSeconds, 0u);  // absent in v5 → zeroed on upgrade
+}
+
+TEST(BookReadingStatsParse, V6RoundTrip) {
+  const auto img = makeV6(300, 10, 7, 3, 9651, 6, 45, 240, 9650, 22, 5, 250, 280);
+  BookReadingStats s;
+  ASSERT_TRUE(BookReadingStats::parse(img.data(), img.size(), s));
+  EXPECT_EQ(s.totalReadingSeconds, 300u);
+  EXPECT_EQ(s.remoteOtherSeconds, 240u);
+  EXPECT_EQ(s.lastSyncReadingSeconds, 250u);
+  EXPECT_EQ(s.lastSyncPromptSkipSeconds, 280u);
+}
+
+TEST(BookReadingStatsParse, V5ToV6MigrationDoesNotLeakPriorSkipMarker) {
+  // A reused struct must not keep lastSyncPromptSkipSeconds from a previously parsed
+  // v6 image when a v5 image (no skip field) is parsed into it.
+  const auto v6 = makeV6(100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 888);
+  const auto v5 = makeV5(200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  BookReadingStats s;
+  ASSERT_TRUE(BookReadingStats::parse(v6.data(), v6.size(), s));
+  ASSERT_EQ(s.lastSyncPromptSkipSeconds, 888u);
+  ASSERT_TRUE(BookReadingStats::parse(v5.data(), v5.size(), s));
+  EXPECT_EQ(s.totalReadingSeconds, 200u);
+  EXPECT_EQ(s.lastSyncPromptSkipSeconds, 0u);
 }
 
 TEST(BookReadingStatsParse, V4ToV5MigrationDoesNotLeakPriorSyncMarker) {
@@ -175,6 +211,7 @@ TEST(BookReadingStatsIo, SaveLoadRoundTripThroughFile) {
   s.remoteLastReadHour = 23;
   s.remoteLastReadMinute = 59;
   s.lastSyncReadingSeconds = 180;
+  s.lastSyncPromptSkipSeconds = 210;
   s.save(dir);
 
   const BookReadingStats r = BookReadingStats::load(dir);
@@ -188,6 +225,7 @@ TEST(BookReadingStatsIo, SaveLoadRoundTripThroughFile) {
   EXPECT_EQ(r.remoteLastReadHour, 23u);
   EXPECT_EQ(r.remoteLastReadMinute, 59u);
   EXPECT_EQ(r.lastSyncReadingSeconds, 180u);
+  EXPECT_EQ(r.lastSyncPromptSkipSeconds, 210u);
   EXPECT_EQ(r.displayTotalSeconds(), 540u);
 }
 
