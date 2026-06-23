@@ -196,6 +196,29 @@ TEST_F(FlashcardDeckTest, LoadWindowNewestFirst) {
   EXPECT_EQ(FlashcardDeck::loadWindow(cachePath, 4, 3, win), 0);  // past end
 }
 
+TEST_F(FlashcardDeckTest, LoadWindowWordsOnlySkipsExcerptAndChapter) {
+  FlashcardDeck::enroll(cachePath, "alpha", "an alpha sentence", "Chapter 1");
+  FlashcardDeck::enroll(cachePath, "beta", "a beta sentence", "Chapter 2");
+
+  // Full load populates every field.
+  FlashcardDeck::Entry full[2];
+  EXPECT_EQ(FlashcardDeck::loadWindow(cachePath, 0, 2, full, /*wordsOnly=*/false), 2);
+  EXPECT_EQ(full[0].word, "beta");
+  EXPECT_EQ(full[0].excerpt, "a beta sentence");
+  EXPECT_EQ(full[0].chapter, "Chapter 2");
+
+  // Word-only load fills word/box/dueDay but leaves excerpt/chapter empty (the
+  // list-view fast path that avoids two string allocations per row).
+  FlashcardDeck::Entry words[2];
+  EXPECT_EQ(FlashcardDeck::loadWindow(cachePath, 0, 2, words, /*wordsOnly=*/true), 2);
+  EXPECT_EQ(words[0].word, "beta");
+  EXPECT_EQ(words[1].word, "alpha");
+  EXPECT_TRUE(words[0].excerpt.empty());
+  EXPECT_TRUE(words[0].chapter.empty());
+  EXPECT_TRUE(words[1].excerpt.empty());
+  EXPECT_TRUE(words[1].chapter.empty());
+}
+
 TEST_F(FlashcardDeckTest, RemoveAtByFileIndex) {
   for (const char* w : {"a", "b", "c"}) FlashcardDeck::enroll(cachePath, w, "");
   EXPECT_TRUE(FlashcardDeck::removeAt(cachePath, 1));  // oldest=0 -> removes "b"
@@ -203,6 +226,21 @@ TEST_F(FlashcardDeckTest, RemoveAtByFileIndex) {
   EXPECT_EQ(at(0).word, "c");
   EXPECT_EQ(at(1).word, "a");
   EXPECT_FALSE(FlashcardDeck::removeAt(cachePath, 5));  // out of range
+}
+
+TEST_F(FlashcardDeckTest, RemoveByWordDropsMatchingRowPreservesOrder) {
+  for (const char* w : {"a", "b", "c"}) FlashcardDeck::enroll(cachePath, w, "");
+  EXPECT_TRUE(FlashcardDeck::remove(cachePath, "b"));
+  EXPECT_EQ(FlashcardDeck::count(cachePath), 2);
+  EXPECT_EQ(at(0).word, "c");  // newest-first order otherwise unchanged
+  EXPECT_EQ(at(1).word, "a");
+}
+
+TEST_F(FlashcardDeckTest, RemoveAbsentWordIsNoOp) {
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx");
+  EXPECT_FALSE(FlashcardDeck::remove(cachePath, "ghost"));
+  EXPECT_EQ(FlashcardDeck::count(cachePath), 1);
+  EXPECT_EQ(at(0).word, "alpha");
 }
 
 // --------------------------------------------------------------------------
@@ -366,7 +404,7 @@ TEST_F(FlashcardDeckTest, UnsuspendRestoresAsNewCard) {
   EXPECT_TRUE(FlashcardDeck::unsuspend(cachePath, "alpha"));
 
   const FlashcardDeck::Entry e = at(0);
-  EXPECT_EQ(e.box, 0u);       // back in the new pool
+  EXPECT_EQ(e.box, 0u);  // back in the new pool
   EXPECT_EQ(e.dueDay, 0u);
   EXPECT_EQ(e.excerpt, "ctx");  // context still preserved
   EXPECT_EQ(e.chapter, "Ch1");

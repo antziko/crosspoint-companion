@@ -359,7 +359,7 @@ FlashcardDeck::Stats FlashcardDeck::computeStats(const std::string& cachePath, u
   return sc.s;
 }
 
-int FlashcardDeck::loadWindow(const std::string& cachePath, int startNewest, int n, Entry* out) {
+int FlashcardDeck::loadWindow(const std::string& cachePath, int startNewest, int n, Entry* out, bool wordsOnly) {
   if (startNewest < 0 || n <= 0 || !out) return 0;
   const std::string path = filePath(cachePath);
 
@@ -377,7 +377,8 @@ int FlashcardDeck::loadWindow(const std::string& cachePath, int startNewest, int
     int lo;
     int hi;
     Entry* out;
-  } wc{0, lo, hi, out};
+    bool wordsOnly;
+  } wc{0, lo, hi, out, wordsOnly};
   forEachLine(
       path,
       [](void* ctx, const char* line, int len) {
@@ -389,8 +390,14 @@ int FlashcardDeck::loadWindow(const std::string& cachePath, int startNewest, int
         e.word.assign(line, static_cast<size_t>(p.wordLen));
         e.box = p.box;
         e.dueDay = p.dueDay;
-        e.chapter.assign(p.chapter, static_cast<size_t>(p.chapterLen));
-        e.excerpt.assign(p.excerpt, static_cast<size_t>(p.excerptLen));
+        if (c->wordsOnly) {
+          // List view shows word + box glyph only; skip the two string allocs.
+          e.chapter.clear();
+          e.excerpt.clear();
+        } else {
+          e.chapter.assign(p.chapter, static_cast<size_t>(p.chapterLen));
+          e.excerpt.assign(p.excerpt, static_cast<size_t>(p.excerptLen));
+        }
         return c->fileIdx <= c->hi;  // stop once past the window
       },
       &wc);
@@ -418,6 +425,22 @@ bool FlashcardDeck::removeAt(const std::string& cachePath, int index) {
     if (c->seen++ == c->skipIdx) return true;  // drop this row
     return writeRaw(out, line, len) && out.write("\n", 1) == 1;
   });
+}
+
+bool FlashcardDeck::remove(const std::string& cachePath, const std::string& word) {
+  if (word.empty() || cachePath.empty()) return false;
+  const std::string path = filePath(cachePath);
+
+  // Scan first: skip the rewrite entirely if the word is absent.
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0};
+  if (!forEachLine(path, countLine, &cc) || !cc.dupSeen) return false;
+
+  return rewriteDeck(cachePath, const_cast<std::string*>(&word),
+                     [](void* ctx, HalFile& out, const char* line, int len) {
+                       const auto* w = static_cast<const std::string*>(ctx);
+                       if (lineWordEquals(line, len, *w)) return true;  // drop the matching row
+                       return writeRaw(out, line, len) && out.write("\n", 1) == 1;
+                     });
 }
 
 // ---------------------------------------------------------------------------
@@ -463,8 +486,7 @@ bool FlashcardDeck::unsuspend(const std::string& cachePath, const std::string& w
   return setBoxForWord(cachePath, word, 0, 0);
 }
 
-bool FlashcardDeck::setBoxForWord(const std::string& cachePath, const std::string& word, uint8_t box,
-                                  uint32_t dueDay) {
+bool FlashcardDeck::setBoxForWord(const std::string& cachePath, const std::string& word, uint8_t box, uint32_t dueDay) {
   if (word.empty() || cachePath.empty()) return false;
   const std::string path = filePath(cachePath);
 
@@ -483,8 +505,8 @@ bool FlashcardDeck::setBoxForWord(const std::string& cachePath, const std::strin
     const Parsed p = parseLine(line, len);
     if (static_cast<size_t>(p.wordLen) != c->word->size() || memcmp(line, c->word->c_str(), p.wordLen) != 0)
       return writeRaw(out, line, len) && out.write("\n", 1) == 1;  // copy verbatim
-    return writeCard(out, line, static_cast<size_t>(p.wordLen), c->box, c->dueDay, p.chapter, p.chapterLen,
-                     p.excerpt, p.excerptLen);
+    return writeCard(out, line, static_cast<size_t>(p.wordLen), c->box, c->dueDay, p.chapter, p.chapterLen, p.excerpt,
+                     p.excerptLen);
   });
 }
 

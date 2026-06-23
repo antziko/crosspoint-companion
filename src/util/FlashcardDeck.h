@@ -117,11 +117,20 @@ class FlashcardDeck {
 
   // Fill out[0..n) with up to `n` cards newest-first starting at newest-first
   // index `startNewest` (0 = most recently enrolled). One streaming pass.
-  // Returns the number actually filled.
-  static int loadWindow(const std::string& cachePath, int startNewest, int n, Entry* out);
+  // Returns the number actually filled. When `wordsOnly` is true, only
+  // word/box/dueDay are populated (chapter/excerpt left empty) -- the list view
+  // shows word + box glyph only, so skipping the two excerpt/chapter string
+  // assignments per row keeps the window's heap at one allocation per row.
+  static int loadWindow(const std::string& cachePath, int startNewest, int n, Entry* out, bool wordsOnly = false);
 
   // Remove the card at 0-based file index (oldest=0). Local-only, no tombstone.
   static bool removeAt(const std::string& cachePath, int index);
+
+  // Remove the card matching `word` (the by-word analogue of removeAt, matching
+  // grade/suspend/unsuspend which all key on the word). Drops the matching row;
+  // local-only, no tombstone. No-op if the word is absent. Returns false on I/O
+  // failure.
+  static bool remove(const std::string& cachePath, const std::string& word);
 
   // Grade the card for `word`: load its box/dueDay, apply applyGrade(), rewrite
   // the row in place (excerpt preserved, order unchanged). No-op if the word is

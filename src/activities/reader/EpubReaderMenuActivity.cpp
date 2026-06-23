@@ -41,6 +41,7 @@ std::vector<EpubReaderMenuActivity::MenuItem> EpubReaderMenuActivity::buildMenuI
   if (hasDictionary) {
     items.push_back({MenuAction::LOOKUP_HISTORY, StrId::STR_LOOKUP_HISTORY});
     items.push_back({MenuAction::REVIEW_FLASHCARDS, StrId::STR_FLASHCARDS_REVIEW});
+    items.push_back({MenuAction::FLASHCARDS_LIST, StrId::STR_FLASHCARDS_LIST});
   }
   items.push_back({MenuAction::BOOK_STATS, StrId::STR_BOOK_STATS});
   return items;

@@ -32,6 +32,7 @@
 #include "EpubReaderFootnotesActivity.h"
 #include "EpubReaderPercentSelectionActivity.h"
 #include "EpubReaderUtils.h"
+#include "FlashcardListActivity.h"
 #include "FlashcardReviewActivity.h"
 #include "GlobalReadingStats.h"
 #include "HighlightActionActivity.h"
@@ -831,6 +832,14 @@ void EpubReaderActivity::openWordSelect(bool framebufferContainsPage) {
   std::string chapterTitle;
   const int tocIndex = epub->getTocIndexForSpineIndex(currentSpineIndex);
   if (tocIndex != -1) chapterTitle = epub->getTocItem(tocIndex).title;
+  // Append in-chapter page position (X/Y) so an enrolled flashcard shows where in
+  // the chapter the lookup happened. Stored inside the chapter field (deck format
+  // unchanged); FlashcardReviewActivity's chapter footer renders it as-is.
+  if (section && section->pageCount > 0) {
+    char pos[24];
+    snprintf(pos, sizeof(pos), " %d/%d", section->currentPage + 1, section->pageCount);
+    chapterTitle += pos;  // enroll() caps the chapter field to CHAPTER_MAX (80)
+  }
   // Choose the marker band from this page's dwell BEFORE the dwell is consumed/reset below.
   const WordSelectNavigator::InitialMarker initialMarker = computeWordSelectMarker();
   pauseMarkerDwell();  // freeze the dwell across this word-select round-trip (excludes in-dict time)
@@ -1165,6 +1174,14 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
     }
     case EpubReaderMenuActivity::MenuAction::REVIEW_FLASHCARDS: {
       startActivityForResult(std::make_unique<FlashcardReviewActivity>(renderer, mappedInput, epub->getCachePath()),
+                             [this](const ActivityResult&) {
+                               ignoreBackUntilRelease = true;
+                               requestUpdate();
+                             });
+      break;
+    }
+    case EpubReaderMenuActivity::MenuAction::FLASHCARDS_LIST: {
+      startActivityForResult(std::make_unique<FlashcardListActivity>(renderer, mappedInput, epub->getCachePath()),
                              [this](const ActivityResult&) {
                                ignoreBackUntilRelease = true;
                                requestUpdate();

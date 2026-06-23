@@ -198,6 +198,11 @@ class BaseTheme {
   virtual void fillBatteryIcon(const GfxRenderer& renderer, Rect rect, uint16_t percentage) const;
   virtual void drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
                                const char* btn4) const;
+  // X-center (portrait coords) of button-hint slot `slot` (0=btn1 .. 3=btn4) for a
+  // hint group labelled `label`. Mirrors drawButtonHints geometry so callers can
+  // place a decoration (e.g. a count badge) above a specific hint. Forces Portrait
+  // and restores, exactly like drawButtonHints.
+  virtual int getButtonHintSlotCenterX(GfxRenderer& renderer, int slot, const char* label) const;
   virtual void drawSideButtonHints(const GfxRenderer& renderer, const char* topBtn, const char* bottomBtn) const;
   virtual int getListPageItems(int contentHeight, bool hasSubtitle) const;
   virtual void drawList(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,

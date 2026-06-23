@@ -12,10 +12,11 @@
 #include "DictionaryDefinitionActivity.h"
 #include "MappedInputManager.h"
 #include "ReadingTimeHistory.h"  // readingHistoryDayIndex
+#include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/DictionaryActivityUtils.h"
-#include "activities/util/ConfirmationActivity.h"
+#include "util/FlashcardCardFace.h"
 
 namespace {
 
@@ -148,22 +149,56 @@ void FlashcardReviewActivity::promptSuspendToggle() {
   // Capture the word now -- `card` is overwritten as soon as we advance.
   const std::string word = card.word;
   const bool unsuspending = suspendedMode;
+  startActivityForResult(std::make_unique<ConfirmationActivity>(
+                             renderer, mappedInput,
+                             unsuspending ? tr(STR_FLASHCARD_UNSUSPEND_TITLE) : tr(STR_FLASHCARD_SUSPEND_TITLE), word),
+                         [this, word, unsuspending](const ActivityResult& res) {
+                           if (res.isCancelled) {
+                             requestUpdate();  // back to the card, unchanged
+                             return;
+                           }
+                           if (unsuspending) {
+                             FlashcardDeck::unsuspend(cachePath, word);
+                           } else {
+                             FlashcardDeck::suspend(cachePath, word);
+                           }
+                           suspended++;
+                           advanceCard();
+                         });
+}
+
+void FlashcardReviewActivity::promptDelete() {
+  // Capture the word now -- `card` is overwritten as soon as we advance. Delete is
+  // irreversible (the deck has no tombstone), so it is gated by a confirmation,
+  // matching promptSuspendToggle.
+  const std::string word = card.word;
   startActivityForResult(
-      std::make_unique<ConfirmationActivity>(
-          renderer, mappedInput,
-          unsuspending ? tr(STR_FLASHCARD_UNSUSPEND_TITLE) : tr(STR_FLASHCARD_SUSPEND_TITLE), word),
-      [this, word, unsuspending](const ActivityResult& res) {
+      std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_FLASHCARD_DELETE_TITLE), word),
+      [this, word](const ActivityResult& res) {
         if (res.isCancelled) {
           requestUpdate();  // back to the card, unchanged
           return;
         }
-        if (unsuspending) {
-          FlashcardDeck::unsuspend(cachePath, word);
-        } else {
-          FlashcardDeck::suspend(cachePath, word);
+        if (cursor < session.size()) {
+          // The deck row is gone, which renumbers the newest-first
+          // indices held in `session`: every card OLDER than the
+          // removed one (a larger newest-first index) shifts down by
+          // one. Drop the current entry and fix the survivors so the
+          // header count (session.size()) and subsequent loads stay
+          // correct -- do NOT advance the cursor; the next card slides
+          // into this slot.
+          const uint16_t removed = session[cursor];
+          FlashcardDeck::remove(cachePath, word);
+          session.erase(session.begin() + cursor);
+          for (uint16_t& idx : session)
+            if (idx > removed) idx--;
         }
-        suspended++;
-        advanceCard();
+        if (cursor >= session.size() || !loadCurrentCard()) {
+          phase = Phase::Summary;
+        } else {
+          phase = Phase::Front;
+        }
+        requestUpdate();
       });
 }
 
@@ -245,9 +280,12 @@ void FlashcardReviewActivity::loop() {
       if (mappedInput.wasReleased(MappedInputManager::Button::PageBack)) {
         promptSuspendToggle();
       } else if (suspendedMode) {
-        // Suspended review: no grading. Left/Right page through the set-aside
-        // cards, Confirm flips to the definition, Up (handled above) resumes.
-        if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+        // Suspended review: no grading. "next" side button (PageForward) deletes
+        // the card, Left/Right page through the set-aside cards, Confirm flips to
+        // the definition, "prev" (PageBack, handled above) resumes.
+        if (mappedInput.wasReleased(MappedInputManager::Button::PageForward)) {
+          promptDelete();
+        } else if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
           navigateCard(-1);
         } else if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
           navigateCard(+1);
@@ -308,8 +346,11 @@ void FlashcardReviewActivity::loop() {
       } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
         controller.startLookup(card.word, /*recordHistory=*/false);  // flip -> back face
       } else if (suspendedMode) {
-        // Suspended review: Left/Right page through cards instead of grading.
-        if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+        // Suspended review: "next" (PageForward) deletes; Left/Right page through
+        // cards instead of grading.
+        if (mappedInput.wasReleased(MappedInputManager::Button::PageForward)) {
+          promptDelete();
+        } else if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
           navigateCard(-1);
         } else if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
           navigateCard(+1);
@@ -333,102 +374,6 @@ void FlashcardReviewActivity::displayList() {
     pagesUntilFullRefresh = std::max(1, SETTINGS.getRefreshFrequency());
   }
   renderer.displayBuffer(mode);
-}
-
-int FlashcardReviewActivity::drawWrappedCentered(int fontId, int contentTop, int contentBottom, int pageWidth,
-                                                 const char* text, const char* highlightWord, bool maskHighlight) {
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const int lineHeight = metrics.listRowHeight;
-  const int maxWidth = pageWidth - 2 * metrics.contentSidePadding;
-  const int hlLen = highlightWord ? static_cast<int>(strlen(highlightWord)) : 0;
-
-  // Greedy word wrap into a fixed line buffer (excerpt is capped, so bounded).
-  char line[FlashcardDeck::EXCERPT_MAX + 1];
-  int lineLen = 0;
-  int y = contentTop;
-
-  // Underline each case-insensitive occurrence of highlightWord in the just-drawn,
-  // centered line. Both span endpoints are measured as cumulative prefixes from the
-  // line start (null-terminating in place, no extra buffer) so they match drawText's
-  // own left-to-right glyph layout (differential rounding + kerning); measuring the
-  // matched word in isolation would drop the boundary kern and drift by ~a char.
-  auto underline = [&](int top) {
-    if (hlLen == 0) return;
-    // Pen origin of the centered line = drawCenteredText's x = (W - inkWidth)/2.
-    const int startX = (pageWidth - renderer.getTextWidth(fontId, line)) / 2;
-    for (int i = 0; i + hlLen <= lineLen;) {
-      bool match = true;
-      for (int k = 0; k < hlLen; k++)
-        if (std::tolower(static_cast<unsigned char>(line[i + k])) !=
-            std::tolower(static_cast<unsigned char>(highlightWord[k]))) {
-          match = false;
-          break;
-        }
-      if (!match) {
-        i++;
-        continue;
-      }
-      // Pen origin of the match = advance cursor of the prefix (NOT ink width, which
-      // loses side bearings/spaces). Then place the underline at the word's actual
-      // ink extents from that origin, so it spans exactly the visible glyphs.
-      const char saveStart = line[i];
-      line[i] = '\0';
-      const int penX = startX + renderer.getTextAdvanceWidth(fontId, line);
-      line[i] = saveStart;
-      const char saveEnd = line[i + hlLen];
-      line[i + hlLen] = '\0';
-      int inkMinX = 0, inkMaxX = 0;
-      renderer.getTextInkBounds(fontId, line + i, &inkMinX, &inkMaxX);
-      line[i + hlLen] = saveEnd;
-      const int ulX = penX + inkMinX;       // visible left edge of the word
-      const int ulW = inkMaxX - inkMinX;    // ink width of the word
-      // Cloze front: white-box the word glyphs (small pad), leaving just the underline.
-      if (maskHighlight) renderer.fillRect(ulX - 2, top, ulW + 4, lineHeight, false);
-      renderer.fillRect(ulX, top + lineHeight - 3, ulW, 2, true);
-      i += hlLen;
-    }
-  };
-
-  auto flush = [&]() {
-    if (lineLen == 0) return;
-    line[lineLen] = '\0';
-    if (y + lineHeight <= contentBottom) {
-      renderer.drawCenteredText(fontId, y, line);
-      underline(y);
-    }
-    y += lineHeight;
-    lineLen = 0;
-  };
-
-  const char* p = text;
-  while (*p) {
-    const char* wordStart = p;
-    while (*p && *p != ' ') p++;
-    const int wordLen = static_cast<int>(p - wordStart);
-    while (*p == ' ') p++;  // skip spaces
-
-    // Candidate line = current + (space) + word.
-    char cand[FlashcardDeck::EXCERPT_MAX + 1];
-    int candLen = lineLen;
-    memcpy(cand, line, lineLen);
-    if (candLen > 0 && candLen < FlashcardDeck::EXCERPT_MAX) cand[candLen++] = ' ';
-    const int copy = std::min(wordLen, FlashcardDeck::EXCERPT_MAX - candLen);
-    memcpy(cand + candLen, wordStart, copy);
-    candLen += copy;
-    cand[candLen] = '\0';
-
-    if (lineLen > 0 && renderer.getTextWidth(fontId, cand) > maxWidth) {
-      flush();
-      const int c2 = std::min(wordLen, FlashcardDeck::EXCERPT_MAX);
-      memcpy(line, wordStart, c2);
-      lineLen = c2;
-    } else {
-      memcpy(line, cand, candLen);
-      lineLen = candLen;
-    }
-  }
-  flush();
-  return y;
 }
 
 void FlashcardReviewActivity::render(RenderLock&&) {
@@ -568,23 +513,17 @@ void FlashcardReviewActivity::renderOverview(int contentTop, int contentBottom, 
   renderer.drawText(UI_10_FONT_ID, countRight - pctW, y, pctBuf);
   const int barX = left + renderer.getTextWidth(UI_10_FONT_ID, tr(STR_FLASHCARD_PROGRESS)) + 12;
   const int barMaxW = std::max(1, (countRight - pctW - 12) - barX);
-  const int barH = std::max(6, lh - 4);       // a little shorter than the text line
-  const int barY = y + (lh - barH) / 2;        // vertically centred with the label/percent
+  const int barH = std::max(6, lh - 4);                // a little shorter than the text line
+  const int barY = y + (lh - barH) / 2;                // vertically centred with the label/percent
   renderer.drawRect(barX, barY, barMaxW, barH, true);  // outline
   if (pct > 0) renderer.fillRect(barX, barY, barMaxW * pct / 100, barH, true);
   y += rowH + metrics.verticalSpacing;
 
   // When cards are set aside, centre a compact "(N)" directly above the Suspend
-  // button. The Suspend label (Confirm) is right-aligned inside the left hint
-  // group; mirror the hint-row geometry (guide font == SMALL_FONT_ID) to find its
-  // centre. Constants track RoundedRaffTheme::drawButtonHints.
+  // button (hint slot 1 == btn2). Ask the active theme for that slot's centre so
+  // the badge lands correctly across themes and on both X3/X4 layouts.
   if (stats.suspended > 0) {
-    constexpr int sidePadding = 20;
-    constexpr int groupGap = 10;
-    constexpr int innerEdgePadding = 16;
-    const int groupWidth = (pageWidth - sidePadding * 2 - groupGap) / 2;
-    const int selectW = renderer.getTextWidth(SMALL_FONT_ID, tr(STR_FLASHCARD_SCOPE_SUSPENDED));
-    const int buttonCenter = sidePadding + groupWidth - innerEdgePadding - selectW / 2;
+    const int buttonCenter = GUI.getButtonHintSlotCenterX(renderer, 1, tr(STR_FLASHCARD_SCOPE_SUSPENDED));
     char badge[12];
     snprintf(badge, sizeof(badge), "(%d)", stats.suspended);
     const int bw = renderer.getTextWidth(SMALL_FONT_ID, badge);
@@ -594,40 +533,17 @@ void FlashcardReviewActivity::renderOverview(int contentTop, int contentBottom, 
 
   // Pick the session order here: Left = due-first, Right = shuffled. When cards
   // are set aside, Confirm enters the suspended-review (unsuspend) pass.
-  const auto labels =
-      mappedInput.mapLabels(tr(STR_BACK), stats.suspended > 0 ? tr(STR_FLASHCARD_SCOPE_SUSPENDED) : "",
-                            tr(STR_FLASHCARD_SCOPE_DUE_FIRST), tr(STR_FLASHCARD_SCOPE_ALL_SHUFFLED));
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), stats.suspended > 0 ? tr(STR_FLASHCARD_SCOPE_SUSPENDED) : "",
+                                            tr(STR_FLASHCARD_SCOPE_DUE_FIRST), tr(STR_FLASHCARD_SCOPE_ALL_SHUFFLED));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-}
-
-void FlashcardReviewActivity::renderCardFace(int contentTop, int contentBottom, int pageWidth, bool showWord) {
-  const int bodyFont = SETTINGS.getDefinitionFontId();
-  const auto& metrics = UITheme::getInstance().getMetrics();
-
-  // Bold word header — drawn only when the answer is shown. Cloze front omits it
-  // (the row stays blank) so the excerpt below keeps the same position either way.
-  if (showWord) {
-    renderer.drawCenteredText(NOTOSERIF_18_FONT_ID, contentTop + metrics.listRowHeight, card.word.c_str(), true,
-                              EpdFontFamily::BOLD);
-  }
-
-  if (!card.excerpt.empty()) {
-    // Excerpt with the word underlined in context; masked (white-boxed) when hidden.
-    drawWrappedCentered(bodyFont, contentTop + metrics.listRowHeight * 3, contentBottom, pageWidth,
-                        card.excerpt.c_str(), card.word.c_str(), /*maskHighlight=*/!showWord);
-  } else if (!showWord) {
-    // No excerpt to blank into: fall back to a centered "____" placeholder.
-    renderer.drawCenteredText(bodyFont, contentTop + metrics.listRowHeight * 3, "____");
-  }
-
-  drawChapterFooter(contentBottom);
 }
 
 void FlashcardReviewActivity::renderFront(int contentTop, int contentBottom, int pageWidth) {
   // Word+context shows the word; cloze hides it (masked excerpt + blank header).
   // Suspended review always shows the word (recall isn't being tested).
   const bool showWord = suspendedMode || cardStyle != CrossPointSettings::FLASHCARD_STYLE_CLOZE;
-  renderCardFace(contentTop, contentBottom, pageWidth, showWord);
+  FlashcardCardFace::render(renderer, contentTop, contentBottom, pageWidth, card.word, card.excerpt, card.chapter,
+                            showWord);
   drawSuspendHint(contentTop, contentBottom);
 
   // Suspended review: flip (read definition) + Prev/Next browsing + resume (Up).
@@ -645,14 +561,16 @@ void FlashcardReviewActivity::renderRevealed(int contentTop, int contentBottom, 
   // Reveal in place: same layout as the cloze front, but the word now shows (bold
   // header + filled, underlined in the excerpt) -- the only change is the blank
   // resolving, no vertical jump.
-  renderCardFace(contentTop, contentBottom, pageWidth, /*showWord=*/true);
+  FlashcardCardFace::render(renderer, contentTop, contentBottom, pageWidth, card.word, card.excerpt, card.chapter,
+                            /*showWord=*/true);
   drawSuspendHint(contentTop, contentBottom, /*showNextHint=*/true);
 
   // Live grade pick as a small footer line (above the chapter footer / hints) so it
   // never displaces the excerpt.
   char pick[48];
   snprintf(pick, sizeof(pick), "%s", pendingCorrect ? tr(STR_FLASHCARD_PASS) : tr(STR_FLASHCARD_FAIL));
-  renderer.drawCenteredText(UI_10_FONT_ID, contentBottom - metrics.listRowHeight * 2, pick, true,
+  // Same size as the "next" side-button clue (SMALL_FONT_ID) drawn by drawSuspendHint.
+  renderer.drawCenteredText(SMALL_FONT_ID, contentBottom - metrics.listRowHeight * 2, pick, true,
                             EpdFontFamily::ITALIC);
 
   // Left/Right re-pick the grade; Confirm flips to the definition. "Next" (commit +
@@ -685,28 +603,26 @@ void FlashcardReviewActivity::drawSuspendHint(int contentTop, int contentBottom,
       ypos = isUpButton ? contentTop : bottomY;
     } else {
       ypos = contentTop;
-      x = isUpButton ? leftX
-                     : renderer.getScreenWidth() - metrics.contentSidePadding - renderer.getTextWidth(SMALL_FONT_ID, text);
+      x = isUpButton
+              ? leftX
+              : renderer.getScreenWidth() - metrics.contentSidePadding - renderer.getTextWidth(SMALL_FONT_ID, text);
     }
     renderer.drawText(SMALL_FONT_ID, x, ypos, text, true);
   };
   const char* hint = suspendedMode ? tr(STR_FLASHCARD_UNSUSPEND_HINT) : tr(STR_FLASHCARD_SUSPEND_HINT);
   place(hint, mappedInput.usesUpButton(MappedInputManager::Button::PageBack));
-  if (showNextHint) {
+  if (suspendedMode) {
+    // "next" side button deletes in suspended review (it never advances/grades).
+    place(tr(STR_FLASHCARD_DELETE_HINT), mappedInput.usesUpButton(MappedInputManager::Button::PageForward));
+  } else if (showNextHint) {
     place(tr(STR_FLASHCARD_NEXT_HINT), mappedInput.usesUpButton(MappedInputManager::Button::PageForward));
   }
 }
 
-void FlashcardReviewActivity::drawChapterFooter(int contentBottom) {
-  if (card.chapter.empty()) return;
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  renderer.drawCenteredText(UI_10_FONT_ID, contentBottom - metrics.listRowHeight, card.chapter.c_str(), true,
-                            EpdFontFamily::ITALIC);
-}
-
 void FlashcardReviewActivity::renderAwaitingGrade(int contentTop, int contentBottom, int pageWidth) {
   // Back face viewed: same revealed card face (word shown, underlined in context).
-  renderCardFace(contentTop, contentBottom, pageWidth, /*showWord=*/true);
+  FlashcardCardFace::render(renderer, contentTop, contentBottom, pageWidth, card.word, card.excerpt, card.chapter,
+                            /*showWord=*/true);
   drawSuspendHint(contentTop, contentBottom);
 
   // Left = pass, Right = fail; Confirm re-flips. Suspended review swaps grading

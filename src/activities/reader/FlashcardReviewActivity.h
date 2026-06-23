@@ -56,7 +56,7 @@ class FlashcardReviewActivity final : public Activity {
   FlashcardDeck::Entry card;   // the one resident card
   FlashcardDeck::Stats stats;  // deck-wide stats for the overview screen
   Phase phase = Phase::Overview;
-  uint8_t cardStyle = 0;     // FLASHCARD_STYLE_* chosen on the overview (Up/Down)
+  uint8_t cardStyle = 0;        // FLASHCARD_STYLE_* chosen on the overview (Up/Down)
   bool pendingCorrect = false;  // grade picked on a cloze front, committed on Revealed-confirm
   // A suspended-review session (entered from the overview when cards are set
   // aside): cards are always shown word+context, Pass/Fail are disabled, and the
@@ -93,6 +93,8 @@ class FlashcardReviewActivity final : public Activity {
   // Prompt to suspend (active session) or unsuspend (suspendedMode) the resident
   // card via ConfirmationActivity; on confirm, mutate the deck and advance.
   void promptSuspendToggle();
+  // Suspended-review only: confirm + permanently delete the current set-aside card.
+  void promptDelete();
   void displayList();  // push with the list refresh policy (FAST + landscape scrub)
 
   // Render helpers.
@@ -101,22 +103,9 @@ class FlashcardReviewActivity final : public Activity {
   void renderRevealed(int contentTop, int contentBottom, int pageWidth);
   void renderAwaitingGrade(int contentTop, int contentBottom, int pageWidth);
   void renderSummary(int contentTop, int contentBottom, int pageWidth);
-  // Shared card face for every word-showing/hiding state: bold word header (drawn
-  // only when showWord) + the excerpt with the word underlined in context. When
-  // showWord is false (cloze front) the header is omitted and the word is masked
-  // (white-boxed) in the excerpt, leaving only its underline — so front and reveal
-  // share one layout and the answer just fills into place with no vertical jump.
-  void renderCardFace(int contentTop, int contentBottom, int pageWidth, bool showWord);
-  // Word-wrap `text` centered within [contentTop, contentBottom); returns the y
-  // after the last line. Bounded by the excerpt cap, no heap beyond one line. When
-  // `highlightWord` is non-null, each case-insensitive occurrence is underlined;
-  // when `maskHighlight` is also true the occurrence is white-boxed first (the
-  // cloze blank), leaving just the underline.
-  int drawWrappedCentered(int fontId, int contentTop, int contentBottom, int pageWidth, const char* text,
-                          const char* highlightWord = nullptr, bool maskHighlight = false);
-  // Draw the card's chapter title (if any) as a small footer just above the
-  // button hints. No-op when the card has no chapter.
-  void drawChapterFooter(int contentBottom);
+  // The card face (bold word header + underlined-in-context excerpt + chapter
+  // footer) is rendered by the shared FlashcardCardFace::render helper, reused by
+  // the deck-browser detail view. This activity passes its resident `card` fields.
   // Draw the side-button suspend/unsuspend clue at the top of the content area --
   // the side buttons are not part of the front-button hints row, so they need an
   // explicit on-screen label. Text reflects suspendedMode. The suspend clue ("prev"

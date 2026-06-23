@@ -432,3 +432,30 @@ void RoundedRaffTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, 
 
   renderer.setOrientation(origOrientation);
 }
+
+int RoundedRaffTheme::getButtonHintSlotCenterX(GfxRenderer& renderer, int slot, const char* label) const {
+  const GfxRenderer::Orientation origOrientation = renderer.getOrientation();
+  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+  // Mirror drawButtonHints group geometry. Two groups of two labels each: slots
+  // 0/1 in the left group, 2/3 in the right. Slots 0,2 are left-aligned at the
+  // group's inner edge; slots 1,3 are right-aligned, so their center depends on
+  // the drawn label width (same font as drawButtonHints).
+  const int pageWidth = renderer.getScreenWidth();
+  constexpr int sidePadding = 20;
+  constexpr int groupGap = 10;
+  constexpr int innerEdgePadding = 16;
+  const int groupWidth = (pageWidth - sidePadding * 2 - groupGap) / 2;
+  const int leftGroupX = sidePadding;
+  const int rightGroupX = leftGroupX + groupWidth + groupGap;
+  const int s = (slot < 0) ? 0 : (slot > 3) ? 3 : slot;
+  const int groupX = (s < 2) ? leftGroupX : rightGroupX;
+  const int labelW = renderer.getTextWidth(kGuideFontId, label ? label : "", EpdFontFamily::REGULAR);
+  int center;
+  if (s == 0 || s == 2) {  // left-aligned at inner edge
+    center = groupX + innerEdgePadding + labelW / 2;
+  } else {  // right-aligned at far inner edge
+    center = groupX + groupWidth - innerEdgePadding - labelW / 2;
+  }
+  renderer.setOrientation(origOrientation);
+  return center;
+}

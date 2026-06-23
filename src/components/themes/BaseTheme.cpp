@@ -202,6 +202,20 @@ void BaseTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
   renderer.setOrientation(orig_orientation);
 }
 
+int BaseTheme::getButtonHintSlotCenterX(GfxRenderer& renderer, int slot, const char* /*label*/) const {
+  const GfxRenderer::Orientation orig_orientation = renderer.getOrientation();
+  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+  // Fixed boxes (see drawButtonHints above); center is independent of label.
+  constexpr int buttonWidth = 106;
+  constexpr int x4ButtonPositions[] = {25, 130, 245, 350};
+  constexpr int x3ButtonPositions[] = {38, 154, 268, 384};
+  const int* buttonPositions = gpio.deviceIsX3() ? x3ButtonPositions : x4ButtonPositions;
+  const int s = (slot < 0) ? 0 : (slot > 3) ? 3 : slot;
+  const int center = buttonPositions[s] + buttonWidth / 2;
+  renderer.setOrientation(orig_orientation);
+  return center;
+}
+
 void BaseTheme::drawSideButtonHints(const GfxRenderer& renderer, const char* topBtn, const char* bottomBtn) const {
   const int screenWidth = renderer.getScreenWidth();
   constexpr int buttonWidth = BaseMetrics::values.sideButtonHintsWidth;  // Width on screen (height when rotated)

@@ -27,6 +27,7 @@ class EpubReaderMenuActivity final : public Activity {
     LOOKUP,
     LOOKUP_HISTORY,
     REVIEW_FLASHCARDS,
+    FLASHCARDS_LIST,
     SET_BOOK_DICTIONARY,
     READER_OPTIONS,
     BOOK_STATS,
