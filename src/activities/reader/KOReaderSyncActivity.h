@@ -76,6 +76,13 @@ class KOReaderSyncActivity final : public Activity {
   std::string statusMessage;
   std::string documentHash;
 
+  // Phased status display: feature index ([n/total]) + a sub-phase label, so a long
+  // leg shows motion instead of one frozen "Syncing X" string. syncStepTotal is set
+  // once in performSync (3 for ALL, 1 for single-feature); the prefix is omitted when
+  // total <= 1. See setSyncPhase().
+  int syncStepIndex = 0;
+  int syncStepTotal = 0;
+
   // Remote progress data
   bool hasRemoteProgress = false;
   KOReaderProgress remoteProgress;
@@ -103,6 +110,15 @@ class KOReaderSyncActivity final : public Activity {
   int dictDeletedWords = 0;           // remote deletes applied from other devices
   int dictUploadedWords = 0;          // our own history entries uploaded in "dh"
   int dictUploadedDeletes = 0;        // our own tombstones (deletes) uploaded in "dh"
+  bool fcSynced = false;              // True once a flashcard merge attempt ran
+  bool fcSkippedLowHeap = false;      // True if flashcard sync was skipped for low free heap
+  int fcMergedCards = 0;              // remote cards merged in from other devices
+  int fcDeletedCards = 0;             // remote deletes applied from other devices
+  int fcUploadedCards = 0;            // phase-2 delta cards uploaded in "fc" (new/changed)
+  int fcHealCards = 0;                // phase-3 rolling-slice cards uploaded (re-broadcast heal)
+  int fcUploadedDeletes = 0;          // our own tombstones (deletes) uploaded in "fc"
+  int fcDeckCount = 0;                // local deck size (backfill denominator)
+  int fcCursor = 0;                   // rolling-cursor position after this sync (backfill numerator)
   // Server build clue for the page header: tag echoed by the stats PUT
   // ("stats-v1"), "no stats" when the endpoint 404'd, empty while unknown.
   char serverTag[32] = {0};
@@ -115,11 +131,6 @@ class KOReaderSyncActivity final : public Activity {
   // Back still returns immediately.
   static constexpr unsigned long UPLOAD_COMPLETE_AUTO_RETURN_MS = 3000;
   unsigned long uploadCompleteAt = 0;
-
-  // millis() when FEATURE_DONE was entered, for the same auto-return-to-reader
-  // behaviour as UPLOAD_COMPLETE on a single-feature sync. Back returns immediately.
-  static constexpr unsigned long FEATURE_DONE_AUTO_RETURN_MS = 4000;
-  unsigned long featureDoneAt = 0;
 
   // Guards returnToReader() so the level-triggered auto-return fires the reader switch once.
   bool returning = false;
@@ -147,15 +158,21 @@ class KOReaderSyncActivity final : public Activity {
   void syncBookmarks();
   // Pull + merge + push per-device reading-time counters alongside progress.
   // Same contract as syncBookmarks(): silent, never fails the progress sync.
-  // `includeDict` folds/uploads the per-book dictionary history ("dh"); `includeGlobal`
-  // runs the all-books global-counter round-trips. The per-book counter merge always
-  // runs (it shares the same GET/PUT). For DICT scope, pass includeGlobal=false to skip
-  // the extra global legs. Opens its own keep-alive connection.
-  void syncStats(bool includeDict, bool includeGlobal);
+  // `includeDict` folds/uploads the per-book dictionary history ("dh");
+  // `includeFlashcards` folds/uploads the per-book flashcard deck ("fc");
+  // `includeGlobal` runs the all-books global-counter round-trips. The per-book
+  // counter merge always runs (it shares the same GET/PUT). For DICT/FLASHCARDS
+  // scope, pass includeGlobal=false to skip the extra global legs. Opens its own
+  // keep-alive connection.
+  void syncStats(bool includeDict, bool includeGlobal, bool includeFlashcards);
   // Render the shared "Also synced" footer (bookmarks/dict/stats summary) starting at
   // `y`, advancing and returning the new cursor. Used by SHOWING_RESULT, NO_REMOTE_PROGRESS
   // and FEATURE_DONE so the summary layout lives in one place.
-  int drawAlsoSyncedFooter(int sideX, int y, int lhFoot);
+  int drawAlsoSyncedFooter(int sideX, int y, int lhFoot, bool showAlsoLabel = true);
+  // Render "[i/total] phase" into statusMessage (prefix omitted when total <= 1) and
+  // block until the paint completes, so the message is visible during the blocking
+  // network leg that follows. Sets state = SYNCING.
+  void setSyncPhase(const char* phase);
   void ensureEpubLoaded();
   void saveProgressAndReturn(int spineIndex, int page);
   void returnToReader();

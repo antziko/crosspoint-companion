@@ -20,6 +20,18 @@
 
 int KOReaderSyncClient::lastHttpCode = 0;
 
+// Cumulative GET/PUT byte counters for the sync summary. File-scope so every leg
+// (member function) below can add to them; reset once per sync via resetByteCounters().
+static uint32_t s_bytesDown = 0;
+static uint32_t s_bytesUp = 0;
+
+void KOReaderSyncClient::resetByteCounters() {
+  s_bytesDown = 0;
+  s_bytesUp = 0;
+}
+uint32_t KOReaderSyncClient::bytesDown() { return s_bytesDown; }
+uint32_t KOReaderSyncClient::bytesUp() { return s_bytesUp; }
+
 namespace {
 // Server capability tag from the last updateStats response (see statsServerTag()).
 char statsServerTagBuf[32] = {0};
@@ -32,6 +44,10 @@ constexpr size_t kStatsDatedMaxBytes = 1024;
 // Upper bound on a decoded per-book dictionary-history blob ("dh"). Matches the
 // 4 KB serializeBlob cap on the sender; bounds the reusable decode buffer.
 constexpr size_t kStatsDictMaxBytes = 4096;
+
+// Upper bound on a decoded per-book flashcard blob ("fc"). Matches the sender's
+// FlashcardDeck::FC_SLICE_CEIL adaptive cap; bounds the reusable decode buffer.
+constexpr size_t kStatsFcMaxBytes = 6144;
 
 // Hard ceiling on a single HTTP response body. The stats GET aggregates every
 // device's blob (each may carry a base64 "dh" up to ~5.5 KB), so the body scales
@@ -477,6 +493,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
   lastHttpCode = httpCode;
   releaseClient(client);
 
+  s_bytesDown += static_cast<uint32_t>(buf.len);
   endTrace(buf, "PROGRESS_GET", httpCode, err);
   LOG_DBG("KOSync", "Get progress response: %d (err: %d)", httpCode, err);
 
@@ -553,6 +570,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
   lastHttpCode = httpCode;
   releaseClient(client);
 
+  s_bytesUp += static_cast<uint32_t>(body.length());
   endTrace(buf, "PROGRESS_PUT", httpCode, err);
   LOG_DBG("KOSync", "Update progress response: %d (err: %d)", httpCode, err);
 
@@ -585,6 +603,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getBookmarks(const std::string& do
   lastHttpCode = httpCode;
   releaseClient(client);
 
+  s_bytesDown += static_cast<uint32_t>(buf.len);
   endTrace(buf, "BOOKMARKS_GET", httpCode, err);
   LOG_DBG("KOSync", "Get bookmarks response: %d (err: %d)", httpCode, err);
 
@@ -699,6 +718,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
     if (err == ESP_OK) break;  // got an HTTP response — no point retrying the transport
   }
   lastHttpCode = httpCode;
+  if (err == ESP_OK) s_bytesUp += static_cast<uint32_t>(body.length());
   if (err != ESP_OK) return NETWORK_ERROR;
   if (httpCode == 200 || httpCode == 202) return OK;
   if (httpCode == 401) return AUTH_FAILED;
@@ -707,7 +727,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
 
 KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& documentHash, KOReaderStatsEntry* outEntries,
                                                        size_t& outCount, const StatsDatedFold* fold,
-                                                       const StatsDatedFold* dictFold) {
+                                                       const StatsDatedFold* dictFold, const StatsDatedFold* fcFold) {
   lastHttpCode = 0;
   outCount = 0;
   if (!KOREADER_STORE.hasCredentials()) {
@@ -729,6 +749,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
   lastHttpCode = httpCode;
   releaseClient(client);
 
+  s_bytesDown += static_cast<uint32_t>(buf.len);
   endTrace(buf, "STATS_GET", httpCode, err);
   LOG_DBG("KOSync", "Get stats response: %d (err: %d)", httpCode, err);
 
@@ -760,6 +781,12 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
     if (dictFold && dictFold->fn) {
       dictBuf = makeUniqueNoThrow<uint8_t[]>(kStatsDictMaxBytes);
       if (!dictBuf) LOG_ERR("KOSync", "OOM: dict fold buffer (%u)", (unsigned)kStatsDictMaxBytes);
+    }
+    // Separate reusable decode buffer for the per-book flashcard "fc" fold.
+    std::unique_ptr<uint8_t[]> fcBuf;
+    if (fcFold && fcFold->fn) {
+      fcBuf = makeUniqueNoThrow<uint8_t[]>(kStatsFcMaxBytes);
+      if (!fcBuf) LOG_ERR("KOSync", "OOM: fc fold buffer (%u)", (unsigned)kStatsFcMaxBytes);
     }
 
     for (JsonPairConst kv : doc["stats"].as<JsonObjectConst>()) {
@@ -815,6 +842,20 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
           }
         }
       }
+      // Fold this device's flashcard deck ("fc", OTHER devices only).
+      if (fcBuf && isOther) {
+        const char* fcb64 = blobDoc["fc"].as<const char*>();
+        if (fcb64 && fcb64[0]) {
+          size_t dlen = 0;
+          const int rc = mbedtls_base64_decode(fcBuf.get(), kStatsFcMaxBytes, &dlen,
+                                               reinterpret_cast<const unsigned char*>(fcb64), strlen(fcb64));
+          if (rc == 0 && dlen > 0) {
+            fcFold->fn(fcFold->ctx, fcBuf.get(), dlen);
+          } else {
+            LOG_DBG("KOSync", "Skipping bad fc blob for %s (rc=%d)", kv.key().c_str(), rc);
+          }
+        }
+      }
     }
     LOG_DBG("KOSync", "Got stats for %u device(s)", (unsigned)outCount);
     return OK;
@@ -827,7 +868,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
 
 KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& documentHash,
                                                           const KOReaderStatsEntry& entry, const uint8_t* dated,
-                                                          size_t datedLen, const uint8_t* dict, size_t dictLen) {
+                                                          size_t datedLen, const uint8_t* dict, size_t dictLen,
+                                                          const uint8_t* fc, size_t fcLen) {
   lastHttpCode = 0;
   if (!KOREADER_STORE.hasCredentials()) {
     LOG_DBG("KOSync", "No credentials configured");
@@ -841,9 +883,9 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& doc
 
   // The per-device counters are sent as a pre-serialized JSON string field so the
   // server stores the blob verbatim under this device's hash field (other devices'
-  // blobs are untouched). Optional base64 "h" (dated reading-history) and "dh"
-  // (per-book dictionary-history) sections are spliced in before the closing brace.
-  // base64 uses A-Za-z0-9+/= — none need JSON-string escaping.
+  // blobs are untouched). Optional base64 "h" (dated reading-history), "dh" (per-book
+  // dictionary-history) and "fc" (per-book flashcards) sections are spliced in before
+  // the closing brace. base64 uses A-Za-z0-9+/= — none need JSON-string escaping.
   std::string statsBlob;  // outlives serializeJson below
   statsBlob.reserve(64);
   {
@@ -872,6 +914,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& doc
   };
   appendB64Field("h", dated, datedLen);
   appendB64Field("dh", dict, dictLen);
+  appendB64Field("fc", fc, fcLen);
   statsBlob += "}";
 
   // Scope the JsonDocument (and release statsBlob, which can hold a ~5.5KB base64 "dh"
@@ -894,8 +937,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& doc
     multi_heap_info_t info;
     heap_caps_get_info(&info, MALLOC_CAP_8BIT);
     if (info.largest_free_block < bodyLen) {
-      SdDebugLog::log("KOSYNC", "STATS_PUT body-build: largest=%u < need=%u -> SKIP",
-                      (unsigned)info.largest_free_block, (unsigned)bodyLen);
+      SdDebugLog::log("KOSYNC", "STATS_PUT body-build: largest=%u < need=%u -> SKIP", (unsigned)info.largest_free_block,
+                      (unsigned)bodyLen);
       LOG_ERR("KOSync", "STATS_PUT: largest block %u < %u for body build - skip to avoid abort",
               (unsigned)info.largest_free_block, (unsigned)bodyLen);
       std::string().swap(statsBlob);
@@ -928,6 +971,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& doc
   lastHttpCode = httpCode;
   releaseClient(client);
 
+  s_bytesUp += static_cast<uint32_t>(body.length());
   endTrace(buf, "STATS_PUT", httpCode, err);
   LOG_DBG("KOSync", "Update stats response: %d (err: %d)", httpCode, err);
 

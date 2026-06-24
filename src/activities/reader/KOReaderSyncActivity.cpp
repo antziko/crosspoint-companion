@@ -30,6 +30,7 @@
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/FlashcardDeck.h"
 #include "util/LookupHistory.h"
 
 namespace {
@@ -56,6 +57,16 @@ void syncTimeWithNTP() {
     LOG_DBG("KOSync", "NTP time synced");
   } else {
     LOG_DBG("KOSync", "NTP sync timeout, using fallback");
+  }
+}
+
+// Format a transfer byte count for the summary: < 1 MB shows 2-decimal KB,
+// otherwise 2-decimal MB (1024 base). Writes into the caller's fixed buffer.
+void formatXferBytes(uint32_t bytes, char* out, size_t outLen) {
+  if (bytes < 1024u * 1024u) {
+    snprintf(out, outLen, "%.2f KB", static_cast<double>(bytes) / 1024.0);
+  } else {
+    snprintf(out, outLen, "%.2f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
   }
 }
 }  // namespace
@@ -158,6 +169,9 @@ void KOReaderSyncActivity::onWifiSelectionComplete(const bool success) {
 }
 
 void KOReaderSyncActivity::performSync() {
+  // Zero the cumulative GET/PUT transfer counters so the summary reflects only this sync.
+  KOReaderSyncClient::resetByteCounters();
+
   // Calculate document hash based on user's preferred method
   if (KOREADER_STORE.getMatchMethod() == DocumentMatchMethod::FILENAME) {
     documentHash = KOReaderDocumentId::calculateFromFilename(epubPath);
@@ -176,6 +190,11 @@ void KOReaderSyncActivity::performSync() {
 
   LOG_DBG("KOSync", "Document hash: %s", documentHash.c_str());
 
+  // Phased-status step counter: ALL runs three network legs (progress, bookmarks,
+  // stats); single-feature scopes run one (prefix is then hidden — see setSyncPhase).
+  syncStepTotal = (syncScope == SyncScope::All) ? 3 : 1;
+  syncStepIndex = 0;
+
   // Connection strategy. A keep-alive session wraps the small-body legs (progress + bookmarks):
   // they reuse ONE connection = ONE handshake, instead of each paying a fresh cold handshake
   // that needs a clean ~33KB contiguous block (only reliably present on a pristine heap — when
@@ -186,37 +205,40 @@ void KOReaderSyncActivity::performSync() {
   // syncStats.
 
   // Single-feature scopes skip the progress comparison entirely: run just the one
-  // feature, then show the FEATURE_DONE summary. Stats and Dictionary share the
-  // stats endpoint — Stats syncs counters (+ global), Dictionary syncs only the
-  // per-book "dh" history and skips the extra global round-trips.
+  // feature, then show the FEATURE_DONE summary. Stats, Dictionary and Flashcards
+  // share the stats endpoint but gate independently — Stats syncs counters (+ global),
+  // Dictionary syncs only the per-book "dh" history, Flashcards only the per-book "fc"
+  // deck; the single-feature scopes skip the extra global round-trips.
   if (syncScope != SyncScope::All && syncScope != SyncScope::Progress) {
     switch (syncScope) {
       case SyncScope::Bookmarks:
         syncBookmarks();  // sessionless: GET/merge/PUT each at recovered heap (see syncBookmarks)
         break;
       case SyncScope::Stats:
-        syncStats(/*includeDict=*/false, /*includeGlobal=*/true);  // no session: full heap for global body
+        // no session: full heap for global body
+        syncStats(/*includeDict=*/false, /*includeGlobal=*/true, /*includeFlashcards=*/false);
         break;
       case SyncScope::Dict:
-        syncStats(/*includeDict=*/true, /*includeGlobal=*/false);  // no session: full heap for the dh body
+        // no session: full heap for the dh body
+        syncStats(/*includeDict=*/true, /*includeGlobal=*/false, /*includeFlashcards=*/false);
+        break;
+      case SyncScope::Flashcards:
+        // no session: full heap for the fc body
+        syncStats(/*includeDict=*/false, /*includeGlobal=*/false, /*includeFlashcards=*/true);
         break;
       default:
         break;
     }
     {
       RenderLock lock(*this);
-      state = FEATURE_DONE;
-      featureDoneAt = millis();
+      state = FEATURE_DONE;  // stays until the user presses Back (no auto-return)
     }
     requestUpdate(true);
     return;
   }
 
-  {
-    RenderLock lock(*this);
-    statusMessage = tr(STR_FETCH_PROGRESS);
-  }
-  requestUpdateAndWait();
+  syncStepIndex = 1;  // progress leg
+  setSyncPhase(tr(STR_FETCH_PROGRESS));
 
   // Progress runs in a short keep-alive session (just the GET here). The session CLOSES at the
   // end of this block so bookmarks AND stats below run at recovered heap. Bookmarks USED to run
@@ -235,8 +257,8 @@ void KOReaderSyncActivity::performSync() {
   // Full sync (ALL) also merges bookmarks whenever the server is reachable (OK or NOT_FOUND).
   // Silent and best-effort: it does not change the progress sync outcome below. Sessionless, at
   // recovered heap — see syncBookmarks.
-  if (syncScope == SyncScope::All &&
-      (result == KOReaderSyncClient::OK || result == KOReaderSyncClient::NOT_FOUND)) {
+  if (syncScope == SyncScope::All && (result == KOReaderSyncClient::OK || result == KOReaderSyncClient::NOT_FOUND)) {
+    syncStepIndex = 2;  // bookmarks leg
     syncBookmarks();
   }
 
@@ -254,7 +276,8 @@ void KOReaderSyncActivity::performSync() {
 
   // Reading stats (ALL only), sessionless at recovered heap. PROGRESS scope skips it.
   if (syncScope == SyncScope::All && (result == KOReaderSyncClient::OK || result == KOReaderSyncClient::NOT_FOUND)) {
-    syncStats(/*includeDict=*/true, /*includeGlobal=*/true);
+    syncStepIndex = 3;  // stats leg
+    syncStats(/*includeDict=*/true, /*includeGlobal=*/true, /*includeFlashcards=*/true);
   }
 
   if (result == KOReaderSyncClient::NOT_FOUND) {
@@ -351,6 +374,23 @@ void KOReaderSyncActivity::performUpload() {
   requestUpdate(true);
 }
 
+void KOReaderSyncActivity::setSyncPhase(const char* phase) {
+  char buf[96];
+  if (syncStepTotal > 1) {
+    snprintf(buf, sizeof(buf), tr(STR_SYNC_STEP_FORMAT), syncStepIndex, syncStepTotal, phase);
+  } else {
+    snprintf(buf, sizeof(buf), "%s", phase);
+  }
+  {
+    RenderLock lock(*this);
+    state = SYNCING;
+    statusMessage = buf;
+  }
+  // Block until painted: the caller proceeds into a multi-second blocking network
+  // leg next, and the message must be on screen before that stall begins.
+  requestUpdateAndWait();
+}
+
 void KOReaderSyncActivity::syncBookmarks() {
   // Sessionless: the GET, the merge (parseFromJson + mergeFrom), and the PUT each run at recovered
   // heap (the caller closed the progress session before calling this). The merge builds several
@@ -358,12 +398,7 @@ void KOReaderSyncActivity::syncBookmarks() {
   // that abort()ed mid-merge. Each leg opens a fresh connection; the fresh handshakes have their
   // contiguous block at recovered heap (same place stats handshakes). The body is still serialized
   // BEFORE the GET (budget-capped) and re-serialized only if the merge mutated the local set.
-  {
-    RenderLock lock(*this);
-    state = SYNCING;
-    statusMessage = tr(STR_SYNCING_BOOKMARKS);
-  }
-  requestUpdateAndWait();
+  setSyncPhase(tr(STR_SYNC_PH_BM_FETCH));
 
   // Get title/author from epub, then release it before TLS calls to free ~30KB RAM
   // for the handshake. epubPath is already a member so loadForBook doesn't need epub live.
@@ -426,6 +461,7 @@ void KOReaderSyncActivity::syncBookmarks() {
   // connection at recovered heap; its arena frees before the merge so mergeFrom has room.
   std::string remoteJson;
   const auto getResult = KOReaderSyncClient::getBookmarks(documentHash, remoteJson);
+  setSyncPhase(tr(STR_SYNC_PH_BM_MERGE));
   if (getResult == KOReaderSyncClient::OK) {
     // Elaborated type: BaseTheme.h's UIIcon enum has a 'Bookmark' enumerator that
     // otherwise hides the struct in this translation unit.
@@ -462,6 +498,7 @@ void KOReaderSyncActivity::syncBookmarks() {
     }
     localJson.swap(merged);
   }
+  setSyncPhase(tr(STR_SYNC_PH_BM_UPLOAD));
   const auto putResult = KOReaderSyncClient::updateBookmarks(documentHash, localJson);
   bmUploadOk = (putResult == KOReaderSyncClient::OK);
   if (!bmUploadOk) {
@@ -471,7 +508,7 @@ void KOReaderSyncActivity::syncBookmarks() {
   }
 }
 
-void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal) {
+void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool includeFlashcards) {
   // Sessionless, deliberately — and the caller (performSync) closes the progress+bookmarks
   // session BEFORE calling this so heap has recovered. The stats PUTs can carry LARGE bodies:
   // a base64 "dh" dictionary-history blob (per-book, up to ~5.5KB) and a base64 "h" dated-
@@ -481,12 +518,7 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal) {
   // A fresh connection at recovered heap gives each PUT room for its body and re-arms the
   // contigOkForPut gate, so an oversized body skips cleanly instead of crashing.
 
-  {
-    RenderLock lock(*this);
-    state = SYNCING;
-    statusMessage = tr(STR_SYNCING_STATS);
-  }
-  requestUpdateAndWait();
+  setSyncPhase(tr(STR_SYNC_PH_STATS_FETCH));
 
   // stats.bin lives in the book's path-hash cache dir (same derivation as the Epub ctor).
   const std::string cachePath = "/.crosspoint/epub_" + std::to_string(std::hash<std::string>{}(epubPath));
@@ -556,6 +588,55 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal) {
     LOG_DBG("KOSync", "Low heap (%u); skipping dict history sync", (unsigned)ESP.getFreeHeap());
   }
 
+  // Per-book flashcard cross-device merge (Lamport-versioned, rolling cursor).
+  // Same shape as the dict block: serialize OUR pre-merge slice for upload (a
+  // bounded rolling slice, sized adaptively from free heap + the last-seen device
+  // count), free the scratch BEFORE the GET handshake, and merge every OTHER
+  // device's "fc" blob during the GET. Gated on its OWN scope flag (independent of
+  // dict) + the same heap backstop.
+  const bool doFcSync = includeFlashcards && ESP.getFreeHeap() > kDictSyncMinHeap;
+  std::unique_ptr<uint8_t[]> fcUp;
+  size_t fcUpLen = 0;
+  bool fcSerialized = false;
+  FlashcardDeck::BlobStats fcUpStats;
+  struct FcMergeCtx {
+    const std::string* cachePath;
+    int merged;   // remote cards added
+    int deleted;  // remote deletes applied
+  } fcMergeCtx{&cachePath, 0, 0};
+  StatsDatedFold fcFold;
+  if (doFcSync) {
+    // Adaptive slice cap: grows with heap / shrinks with device count, clamped
+    // under the 64 KB GET aggregate (see FlashcardDeck::adaptiveSliceCap).
+    const FlashcardDeck::SyncWatermark fcWm = FlashcardDeck::loadWatermark(cachePath);
+    const size_t fcCap = FlashcardDeck::adaptiveSliceCap(ESP.getFreeHeap(), fcWm.lastDeviceCount);
+    auto fcScratch = makeUniqueNoThrow<uint8_t[]>(fcCap);
+    if (fcScratch) {
+      const size_t n = FlashcardDeck::serializeForUpload(cachePath, fcScratch.get(), fcCap, &fcUpStats);
+      fcSerialized = true;
+      fcUploadedCards = fcUpStats.histCount;
+      fcHealCards = fcUpStats.rollCount;
+      fcUploadedDeletes = fcUpStats.tombCount;
+      if (n > 0) {
+        fcUp = makeUniqueNoThrow<uint8_t[]>(n);
+        if (fcUp) {
+          std::copy_n(fcScratch.get(), n, fcUp.get());
+          fcUpLen = n;
+        }
+      }
+    }
+    // fcScratch frees here (before getStats) so the handshake gets a clean block.
+    fcFold.ctx = &fcMergeCtx;
+    fcFold.fn = [](void* ctx, const uint8_t* blob, size_t len) {
+      auto* c = static_cast<FcMergeCtx*>(ctx);
+      int del = 0;
+      c->merged += FlashcardDeck::mergeBlob(*c->cachePath, blob, len, &del);
+      c->deleted += del;
+    };
+  } else {
+    LOG_DBG("KOSync", "Low heap (%u); skipping flashcard sync", (unsigned)ESP.getFreeHeap());
+  }
+
   // Heap, not stack: 8 entries is ~290 bytes — over the 256-byte stack-local
   // guideline. Reused below for the global-counter phase.
   auto entriesBuf = makeUniqueNoThrow<KOReaderStatsEntry[]>(KOReaderSyncClient::MAX_STATS_DEVICES);
@@ -568,8 +649,8 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal) {
   // Pull every device's counter. NOT_FOUND = server has nothing yet; still upload ours.
   // The dict fold (when enabled) merges other devices' lookup history during this GET.
   size_t count = 0;
-  const auto getResult =
-      KOReaderSyncClient::getStats(documentHash, entries, count, nullptr, doDictSync ? &dictFold : nullptr);
+  const auto getResult = KOReaderSyncClient::getStats(documentHash, entries, count, nullptr,
+                                                      doDictSync ? &dictFold : nullptr, doFcSync ? &fcFold : nullptr);
   statsFetchOk = (getResult == KOReaderSyncClient::OK || getResult == KOReaderSyncClient::NOT_FOUND);
   if (statsFetchOk) {
     uint32_t othersSeconds = 0;
@@ -615,16 +696,20 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal) {
   mine.lastReadDayIndex = stats.lastReadDayIndex;
   mine.lastReadHour = stats.lastReadHour;
   mine.lastReadMinute = stats.lastReadMinute;
-  // Upload our scalar counters + our (pre-merge) dictionary-history blob in "dh".
-  const auto putResult =
-      KOReaderSyncClient::updateStats(documentHash, mine, nullptr, 0, dictUp ? dictUp.get() : nullptr, dictUpLen);
+  setSyncPhase(tr(STR_SYNC_PH_STATS_UPLOAD));
+  // Upload our scalar counters + our (pre-merge) "dh" dictionary-history and "fc"
+  // flashcard blobs.
+  const auto putResult = KOReaderSyncClient::updateStats(
+      documentHash, mine, nullptr, 0, dictUp ? dictUp.get() : nullptr, dictUpLen, fcUp ? fcUp.get() : nullptr, fcUpLen);
   statsUploadOk = (putResult == KOReaderSyncClient::OK);
   if (!statsUploadOk) {
     LOG_ERR("KOSync", "Stats upload failed: %s", KOReaderSyncClient::errorString(putResult));
-  } else if (dictSerialized) {
-    // PUT confirmed: advance the dict-history upload watermark so the next sync
-    // ships only newer changes (or a periodic keyframe). Done only on success.
-    LookupHistory::commitUpload(cachePath, dictUpStats, dictWasKeyframe);
+  } else {
+    // PUT confirmed: advance the upload watermarks so the next sync ships only
+    // newer changes (dict) / the next rolling slice (flashcards). Done only on
+    // success, so a failed upload re-sends the same range/slice next time.
+    if (dictSerialized) LookupHistory::commitUpload(cachePath, dictUpStats, dictWasKeyframe);
+    if (fcSerialized) FlashcardDeck::commitUpload(cachePath, fcUpStats, static_cast<uint32_t>(count));
   }
 
   // Server build clue for the page header: tag echoed by a stats-enabled server,
@@ -633,6 +718,10 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal) {
   // empty — server build unknown.
   if (statsUploadOk) {
     const char* tag = KOReaderSyncClient::statsServerTag();
+    // Drop the redundant "stats-" prefix the server echoes (e.g. "stats-v1" -> "v1");
+    // the header context already implies stats. Bare "stats" / empty -> "stats".
+    // Display-only: the tag never feeds the doc-id or any request, so this is cosmetic.
+    if (strncmp(tag, "stats-", 6) == 0 && tag[6] != '\0') tag += 6;
     snprintf(serverTag, sizeof(serverTag), "%s", tag[0] != '\0' ? tag : "stats");
   } else if (putResult == KOReaderSyncClient::SERVER_ERROR && KOReaderSyncClient::lastHttpCode == 404) {
     snprintf(serverTag, sizeof(serverTag), "%s", tr(STR_SYNC_SERVER_NO_STATS));
@@ -657,10 +746,30 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal) {
   dictMergedWords = dictMergeCtx.merged;
   dictDeletedWords = dictMergeCtx.deleted;
 
-  SdDebugLog::log("KOSync", "stats sync: local=%lu others=%lu fetch=%d upload=%d dictUp=%d/%d dictMerged=%d dictDel=%d",
-                  static_cast<unsigned long>(stats.totalReadingSeconds),
+  // Flashcard merge result (same footer treatment as dict). fcSynced when attempted;
+  // fcSkippedLowHeap only when excluded by heap, not by scope, so a missing line is
+  // never silent on a Flashcards-scope run.
+  fcSynced = doFcSync;
+  fcSkippedLowHeap = includeFlashcards && !doFcSync;
+  fcMergedCards = fcMergeCtx.merged;
+  fcDeletedCards = fcMergeCtx.deleted;
+  // Backfill progress: deck size (denominator) + the rolling-cursor position the
+  // upload commit just advanced to (numerator). Read post-commit so it reflects the
+  // stored watermark; on a failed PUT the cursor didn't advance and this shows the
+  // unchanged position. Cursor wraps for continuous healing, so deck==cursor only
+  // marks one full broadcast pass, not "nothing left ever".
+  if (doFcSync) {
+    fcDeckCount = FlashcardDeck::count(cachePath);
+    fcCursor = static_cast<int>(FlashcardDeck::loadWatermark(cachePath).cursorIndex);
+  }
+
+  SdDebugLog::log("KOSync",
+                  "stats sync: doc=%s local=%lu others=%lu fetch=%d upload=%d dictUp=%d/%d dictMerged=%d dictDel=%d "
+                  "fcOn=%d fcUp=%d/%d fcMerged=%d fcDel=%d fcBytes=%u",
+                  documentHash.c_str(), static_cast<unsigned long>(stats.totalReadingSeconds),
                   static_cast<unsigned long>(stats.remoteOtherSeconds), statsFetchOk ? 1 : 0, statsUploadOk ? 1 : 0,
-                  dictUploadedWords, dictUploadedDeletes, dictMergedWords, dictDeletedWords);
+                  dictUploadedWords, dictUploadedDeletes, dictMergedWords, dictDeletedWords, doFcSync ? 1 : 0,
+                  fcUploadedCards, fcUploadedDeletes, fcMergedCards, fcDeletedCards, (unsigned)fcUpLen);
 
   // --- Global (all-books) counter, same per-device scheme under a reserved
   // pseudo-document. The name can't collide with real documents: binary-mode
@@ -822,54 +931,101 @@ void KOReaderSyncActivity::onExit() {
   }
 }
 
-int KOReaderSyncActivity::drawAlsoSyncedFooter(int sideX, int y, int lhFoot) {
-  if (!(bmSynced || statsSynced || dictSynced || dictSkippedLowHeap)) return y;
-  constexpr int SECTION_GAP = 10;
-  char buf[128];
-  y += SECTION_GAP;
-  renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_ALSO_SYNCED), true, EpdFontFamily::BOLD);
-  y += lhFoot + 2;
+int KOReaderSyncActivity::drawAlsoSyncedFooter(int sideX, int y, int lhFoot, bool showAlsoLabel) {
+  // One line per feature, with generous spacing for legibility. A feature with no real
+  // change collapses to "<name>  up to date"; full counts show only when something moved.
+  // Per-feature fetch/upload status is a compact "ok/fail" suffix on the same line (no
+  // separate indented status row). The doc-id probe lives in the SD debug log, not here.
+  const uint32_t xferDown = KOReaderSyncClient::bytesDown();
+  const uint32_t xferUp = KOReaderSyncClient::bytesUp();
+  const bool anyFeature = bmSynced || statsSynced || dictSynced || dictSkippedLowHeap || fcSynced || fcSkippedLowHeap;
+  if (!anyFeature && xferDown == 0 && xferUp == 0) return y;
+
+  const int ROW = lhFoot + 6;  // breathing room between rows
+  char buf[160];
+  auto st = [&](bool ok) { return ok ? tr(STR_SYNC_STAT_OK) : tr(STR_SYNC_STAT_FAIL); };
+
+  y += 10;  // SECTION_GAP above the block
+  // "Also synced:" framing only fits the full sync, where progress is the main event and
+  // these ride along. On a single-feature sync the feature IS the event, so the caller
+  // passes showAlsoLabel=false and the rows render with no "Also" header.
+  if (showAlsoLabel) {
+    renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_ALSO_SYNCED), true, EpdFontFamily::BOLD);
+    y += ROW;
+  }
+
   if (bmSynced) {
-    // Two lines: "Bookmarks" + counts, then indented fetch/upload status (one line overflows).
-    char bmCounts[96];
-    snprintf(bmCounts, sizeof(bmCounts), tr(STR_BOOKMARK_DIFF_FORMAT), bmRemoteCount, bmLocalCount, bmMergedCount);
-    snprintf(buf, sizeof(buf), "%s  %s", tr(STR_BOOKMARKS), bmCounts);
+    char counts[96];
+    snprintf(counts, sizeof(counts), tr(STR_BOOKMARK_DIFF_FORMAT), bmRemoteCount, bmLocalCount, bmMergedCount);
+    snprintf(buf, sizeof(buf), "%s  %s  %s/%s", tr(STR_BOOKMARKS), counts, st(bmFetchOk), st(bmUploadOk));
     renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-    y += lhFoot + 2;
-    char bmStatusStr[64];
-    snprintf(bmStatusStr, sizeof(bmStatusStr), tr(STR_BOOKMARK_SYNC_STATUS_FORMAT),
-             bmFetchOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER),
-             bmUploadOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER));
-    snprintf(buf, sizeof(buf), "  %s", bmStatusStr);
-    renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-    y += lhFoot + 2;
+    y += ROW;
   }
+
   if (dictSynced) {
-    if (bmSynced) y += 6;  // separate from the bookmark block above
-    snprintf(buf, sizeof(buf), tr(STR_SYNC_DICT_FORMAT), dictUploadedWords, dictUploadedDeletes, dictMergedWords,
-             dictDeletedWords);
+    const bool idle = !dictUploadedWords && !dictUploadedDeletes && !dictMergedWords && !dictDeletedWords;
+    if (idle) {
+      snprintf(buf, sizeof(buf), "%s  %s", tr(STR_SYNC_SCOPE_DICT), tr(STR_SYNC_UPTODATE));
+    } else {
+      char counts[96];
+      snprintf(counts, sizeof(counts), tr(STR_SYNC_DICT_FORMAT), dictUploadedWords, dictUploadedDeletes,
+               dictMergedWords, dictDeletedWords);
+      // STR_SYNC_DICT_FORMAT already carries the "Dictionary" label; append the status.
+      snprintf(buf, sizeof(buf), "%s  %s/%s", counts, st(statsFetchOk), st(statsUploadOk));
+    }
     renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-    y += lhFoot + 2;
-    // Dict rides the stats GET/PUT, so its fetch/upload status is the stats one.
-    char dStatus[64];
-    snprintf(dStatus, sizeof(dStatus), tr(STR_BOOKMARK_SYNC_STATUS_FORMAT),
-             statsFetchOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER),
-             statsUploadOk ? tr(STR_OK_BUTTON) : tr(STR_FAILED_LOWER));
-    snprintf(buf, sizeof(buf), "  %s", dStatus);
-    renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-    y += lhFoot + 2;
+    y += ROW;
   } else if (dictSkippedLowHeap) {
-    if (bmSynced) y += 6;
     renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_SYNC_DICT_SKIPPED));
-    y += lhFoot + 2;
+    y += ROW;
   }
+
+  if (fcSynced) {
+    const bool idle = !fcUploadedCards && !fcUploadedDeletes && !fcMergedCards && !fcDeletedCards;
+    if (idle) {
+      snprintf(buf, sizeof(buf), "%s  %s", tr(STR_SYNC_SCOPE_FLASHCARDS), tr(STR_SYNC_UPTODATE));
+    } else {
+      char counts[96];
+      // new = real new/changed cards; in = merged from peers. heal (rolling re-broadcast)
+      // is intentionally not shown as a count — its meaningful view is the backfill line.
+      snprintf(counts, sizeof(counts), tr(STR_SYNC_FC_FORMAT), fcUploadedCards, fcUploadedDeletes, fcMergedCards,
+               fcDeletedCards);
+      snprintf(buf, sizeof(buf), "%s  %s/%s", counts, st(statsFetchOk), st(statsUploadOk));
+    }
+    renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+    y += ROW;
+    // Backfill sub-line ONLY while a broadcast pass is incomplete (cursor < deck). Once the
+    // deck has been fully re-offered the heal keeps cycling silently — no line needed.
+    if (fcDeckCount > 0 && fcCursor < fcDeckCount) {
+      const int remaining = fcDeckCount - fcCursor;
+      const int perSlice = (fcHealCards > 0) ? fcHealCards : 1;  // cursor advances by the heal slice
+      const int roundsLeft = (remaining + perSlice - 1) / perSlice;
+      snprintf(buf, sizeof(buf), tr(STR_SYNC_FC_BACKFILL), fcCursor, fcDeckCount, roundsLeft);
+      renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+      y += ROW;
+    }
+  } else if (fcSkippedLowHeap) {
+    renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_SYNC_FC_SKIPPED));
+    y += ROW;
+  }
+
   if (statsSynced) {
-    if (bmSynced || dictSynced || dictSkippedLowHeap) y += 6;  // reading time sits at the bottom
     char durBuf[24];
     BookReadingStats::formatDuration(statsTotalAllDevices, durBuf, sizeof(durBuf));
     snprintf(buf, sizeof(buf), tr(STR_STATS_ALL_DEVICES_FORMAT), durBuf);
     renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-    y += lhFoot + 2;
+    y += ROW;
+  }
+
+  // Transfer totals last (network summary). Shows even on a progress-only sync.
+  if (xferDown > 0 || xferUp > 0) {
+    char downBuf[24];
+    char upBuf[24];
+    formatXferBytes(xferDown, downBuf, sizeof(downBuf));
+    formatXferBytes(xferUp, upBuf, sizeof(upBuf));
+    snprintf(buf, sizeof(buf), tr(STR_SYNC_XFER_FORMAT), downBuf, upBuf);
+    renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+    y += ROW;
   }
   return y;
 }
@@ -889,9 +1045,18 @@ void KOReaderSyncActivity::render(RenderLock&&) {
   } else {
     snprintf(syncHeader, sizeof(syncHeader), "%s", tr(STR_KOREADER_SYNC));
   }
-  // Server build clue, learned from the stats PUT during this sync: the tag the
-  // stats-enabled server echoed (e.g. "stats-v1"), or "no stats" when the PUT
-  // 404'd (stock/legacy server without the extension). Empty until known.
+  // Match method (Filename/Binary) — device-side config that keys the doc-id both
+  // devices must share. Surfaced first so a mismatched method is visible at a glance —
+  // Binary keys on file content, so device-optimized copies never converge (the
+  // flashcard/dh/stats cross-device bug). See KOReaderDocumentId::calculateFromFilename.
+  {
+    const size_t len = strlen(syncHeader);
+    const bool filename = KOREADER_STORE.getMatchMethod() == DocumentMatchMethod::FILENAME;
+    snprintf(syncHeader + len, sizeof(syncHeader) - len, " (%s)", filename ? tr(STR_FILENAME) : tr(STR_BINARY));
+  }
+  // Server build clue last (it's server-supplied): the tag the stats-enabled server
+  // echoed (e.g. "v1"), or "no stats" when the PUT 404'd (stock/legacy server without
+  // the extension). Empty until known.
   if (serverTag[0] != '\0') {
     const size_t len = strlen(syncHeader);
     snprintf(syncHeader + len, sizeof(syncHeader) - len, " [%s]", serverTag);
@@ -1043,7 +1208,8 @@ void KOReaderSyncActivity::render(RenderLock&&) {
     int y = screen.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
     renderer.drawText(UI_12_FONT_ID, sideX, y, tr(STR_SYNC_FEATURE_DONE), true, EpdFontFamily::BOLD);
     y += renderer.getLineHeight(UI_12_FONT_ID) + 4;
-    drawAlsoSyncedFooter(sideX, y, lhFoot);
+    // Single-feature sync: the feature is the main event, so skip the "Also synced:" header.
+    drawAlsoSyncedFooter(sideX, y, lhFoot, /*showAlsoLabel=*/false);
 
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
@@ -1082,13 +1248,11 @@ void KOReaderSyncActivity::render(RenderLock&&) {
 
 void KOReaderSyncActivity::loop() {
   if (state == NO_CREDENTIALS || state == SYNC_FAILED || state == UPLOAD_COMPLETE || state == FEATURE_DONE) {
-    // After a successful upload / single-feature sync, return to the reader on its own
-    // once the user has had a moment to read the confirmation — no manual Back needed.
+    // Full-sync progress upload auto-returns to the reader once the user has had a moment
+    // to read the confirmation — no manual Back needed. Single-feature syncs (FEATURE_DONE)
+    // deliberately do NOT auto-return: the user stays on the result summary until they press
+    // Back, so an individual Bookmarks/Stats/Dict/Flashcards sync doesn't snap away on its own.
     if (state == UPLOAD_COMPLETE && millis() - uploadCompleteAt >= UPLOAD_COMPLETE_AUTO_RETURN_MS) {
-      returnToReader();
-      return;
-    }
-    if (state == FEATURE_DONE && millis() - featureDoneAt >= FEATURE_DONE_AUTO_RETURN_MS) {
       returnToReader();
       return;
     }

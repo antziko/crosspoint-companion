@@ -22,11 +22,57 @@ class FlashcardDeckTest : public ::testing::Test {
     cachePath = d;
   }
   void TearDown() override {
-    // Remove the deck + any temp files, then the dir.
-    for (const char* f : {"dictionary_flashcards.txt", "dictionary_flashcards.tmp"}) {
-      std::remove((cachePath + "/" + f).c_str());
-    }
+    cleanupDir(cachePath);
     std::remove(cachePath.c_str());
+    for (const auto& d : extraDirs) {
+      cleanupDir(d);
+      std::remove(d.c_str());
+    }
+  }
+
+  // Create a second device's cache dir (cleaned up in TearDown).
+  std::string makeDevice() {
+    char tmpl[] = "/tmp/fcdeck_XXXXXX";
+    char* d = mkdtemp(tmpl);
+    EXPECT_NE(d, nullptr);
+    extraDirs.emplace_back(d);
+    return extraDirs.back();
+  }
+
+  // Find a card by word in `dir` (whole-deck scan). Returns false if absent.
+  static bool findCard(const std::string& dir, const std::string& word, FlashcardDeck::Entry& out) {
+    const int n = FlashcardDeck::count(dir);
+    if (n == 0) return false;
+    std::vector<FlashcardDeck::Entry> v(static_cast<size_t>(n));
+    FlashcardDeck::loadWindow(dir, 0, n, v.data());
+    for (auto& e : v)
+      if (e.word == word) {
+        out = e;
+        return true;
+      }
+    return false;
+  }
+
+  // One A->B sync round: serialize A's upload blob, merge it into B, commit A.
+  // Returns the merge result (cards added). `cap` bounds the per-sync slice.
+  static int syncRound(const std::string& A, const std::string& B, size_t cap = 4096, uint32_t devices = 1,
+                       int* outDeleted = nullptr) {
+    std::vector<uint8_t> buf(cap);
+    FlashcardDeck::BlobStats st;
+    const size_t n = FlashcardDeck::serializeForUpload(A, buf.data(), cap, &st);
+    int added = 0;
+    if (n) added = FlashcardDeck::mergeBlob(B, buf.data(), n, outDeleted);
+    FlashcardDeck::commitUpload(A, st, devices);
+    return added;
+  }
+
+  // Remove the deck + all sync sidecars + temp files from a cache dir.
+  static void cleanupDir(const std::string& dir) {
+    for (const char* f :
+         {"dictionary_flashcards.txt", "dictionary_flashcards.tmp", "dictionary_flashcards.ver",
+          "dictionary_flashcards.tomb", "dictionary_flashcards.tomb.tmp", "dictionary_flashcards.sync"}) {
+      std::remove((dir + "/" + f).c_str());
+    }
   }
 
   // Read the card for a newest-first index (helper around loadWindow).
@@ -37,6 +83,7 @@ class FlashcardDeckTest : public ::testing::Test {
   }
 
   std::string cachePath;
+  std::vector<std::string> extraDirs;
 };
 
 // --------------------------------------------------------------------------
@@ -447,6 +494,218 @@ TEST_F(FlashcardDeckTest, BuildSessionSuspendedScopeSelectsOnlySuspended) {
   EXPECT_EQ(n, 2);
   EXPECT_EQ(out[0], 0);  // d (newest suspended)
   EXPECT_EQ(out[1], 2);  // b
+}
+
+// --------------------------------------------------------------------------
+// Cross-device sync ("fc" blob)
+// --------------------------------------------------------------------------
+
+// enroll bumps the per-word version; grade/suspend preserve it (schedule-local).
+TEST_F(FlashcardDeckTest, EnrollBumpsVersionScheduleChangesPreserveIt) {
+  FlashcardDeck::enroll(cachePath, "cat", "the cat sat", "Ch1");
+  const uint32_t catV = at(0).version;
+  EXPECT_GT(catV, 0u);
+
+  FlashcardDeck::enroll(cachePath, "dog", "a dog ran", "Ch1");
+  EXPECT_GT(at(0).version, catV);  // newest enroll bumped past cat
+
+  // Grading "cat" is a local schedule change -- version unchanged.
+  FlashcardDeck::grade(cachePath, "cat", /*correct=*/true, /*today=*/10);
+  FlashcardDeck::Entry cat;
+  ASSERT_TRUE(findCard(cachePath, "cat", cat));
+  EXPECT_EQ(cat.version, catV);
+  EXPECT_EQ(cat.box, 1);
+
+  // Suspend likewise preserves the version.
+  FlashcardDeck::suspend(cachePath, "cat");
+  ASSERT_TRUE(findCard(cachePath, "cat", cat));
+  EXPECT_EQ(cat.version, catV);
+}
+
+// A enrolled card appears on B as a fresh box-0 card with its content + version.
+TEST_F(FlashcardDeckTest, RoundTripCardContent) {
+  const std::string B = makeDevice();
+  FlashcardDeck::enroll(cachePath, "cat", "the cat sat", "Ch1");
+
+  EXPECT_EQ(syncRound(cachePath, B), 1);  // one card added on B
+
+  FlashcardDeck::Entry e;
+  ASSERT_TRUE(findCard(B, "cat", e));
+  EXPECT_EQ(e.chapter, "Ch1");
+  EXPECT_EQ(e.excerpt, "the cat sat");
+  EXPECT_EQ(e.box, 0);  // received card is always new
+  EXPECT_EQ(e.dueDay, 0u);
+  EXPECT_EQ(e.version, at(0).version);  // same Lamport version as the source
+}
+
+// A newer enroll (higher version) updates B's copy in place.
+TEST_F(FlashcardDeckTest, VersionWinsNewerEnroll) {
+  const std::string B = makeDevice();
+  FlashcardDeck::enroll(cachePath, "cat", "old sentence", "Ch1");
+  syncRound(cachePath, B);
+
+  FlashcardDeck::enroll(cachePath, "cat", "new sentence", "Ch2");  // re-enroll -> higher version
+  syncRound(cachePath, B);
+
+  FlashcardDeck::Entry e;
+  ASSERT_TRUE(findCard(B, "cat", e));
+  EXPECT_EQ(e.excerpt, "new sentence");
+  EXPECT_EQ(e.chapter, "Ch2");
+  EXPECT_EQ(e.version, at(0).version);
+  EXPECT_EQ(FlashcardDeck::count(B), 1);  // updated in place, not duplicated
+}
+
+// A delete on A propagates to B and removes its card.
+TEST_F(FlashcardDeckTest, TombstonePropagation) {
+  const std::string B = makeDevice();
+  FlashcardDeck::enroll(cachePath, "cat", "x", "Ch1");
+  FlashcardDeck::enroll(cachePath, "dog", "y", "Ch1");
+  syncRound(cachePath, B);
+  EXPECT_EQ(FlashcardDeck::count(B), 2);
+
+  FlashcardDeck::remove(cachePath, "cat");  // writes a tombstone
+  int deleted = 0;
+  syncRound(cachePath, B, 4096, 1, &deleted);
+
+  EXPECT_EQ(deleted, 1);
+  FlashcardDeck::Entry e;
+  EXPECT_FALSE(findCard(B, "cat", e));
+  EXPECT_TRUE(findCard(B, "dog", e));
+}
+
+// Re-enrolling a deleted word (higher version) beats the tombstone on merge.
+TEST_F(FlashcardDeckTest, ReEnrollAfterDeleteWins) {
+  const std::string B = makeDevice();
+  FlashcardDeck::enroll(cachePath, "cat", "first", "Ch1");
+  syncRound(cachePath, B);
+  FlashcardDeck::remove(cachePath, "cat");
+  syncRound(cachePath, B);
+  FlashcardDeck::Entry e;
+  ASSERT_FALSE(findCard(B, "cat", e));
+
+  FlashcardDeck::enroll(cachePath, "cat", "reborn", "Ch3");  // version > tombstone
+  syncRound(cachePath, B);
+
+  ASSERT_TRUE(findCard(B, "cat", e));
+  EXPECT_EQ(e.excerpt, "reborn");
+}
+
+// A remote content update must NOT reset B's local Leitner schedule.
+TEST_F(FlashcardDeckTest, FieldLevelMergePreservesSchedule) {
+  const std::string B = makeDevice();
+  FlashcardDeck::enroll(cachePath, "cat", "ctx", "Ch1");
+  syncRound(cachePath, B);
+
+  // B grades "cat" up to box 4 (its own schedule).
+  for (int i = 0; i < 4; i++) FlashcardDeck::grade(B, "cat", /*correct=*/true, /*today=*/10);
+  FlashcardDeck::Entry e;
+  ASSERT_TRUE(findCard(B, "cat", e));
+  ASSERT_EQ(e.box, 4);
+  const uint32_t dueBefore = e.dueDay;
+
+  // A re-enrolls "cat" with new content (higher version) and syncs to B.
+  FlashcardDeck::enroll(cachePath, "cat", "updated ctx", "Ch9");
+  syncRound(cachePath, B);
+
+  ASSERT_TRUE(findCard(B, "cat", e));
+  EXPECT_EQ(e.box, 4);                  // schedule preserved
+  EXPECT_EQ(e.dueDay, dueBefore);       // schedule preserved
+  EXPECT_EQ(e.excerpt, "updated ctx");  // content updated
+  EXPECT_EQ(e.chapter, "Ch9");
+}
+
+// A suspended card on B stays suspended through a remote content update.
+TEST_F(FlashcardDeckTest, SuspendSurvivesRemoteUpdate) {
+  const std::string B = makeDevice();
+  FlashcardDeck::enroll(cachePath, "cat", "ctx", "Ch1");
+  syncRound(cachePath, B);
+  FlashcardDeck::suspend(B, "cat");
+
+  FlashcardDeck::enroll(cachePath, "cat", "updated", "Ch2");
+  syncRound(cachePath, B);
+
+  FlashcardDeck::Entry e;
+  ASSERT_TRUE(findCard(B, "cat", e));
+  EXPECT_EQ(e.box, FlashcardDeck::SUSPENDED);
+  EXPECT_EQ(e.excerpt, "updated");
+}
+
+// A deck larger than one slice fully propagates over repeated bounded syncs,
+// with no lost or duplicated cards (rolling cursor + delta coverage).
+TEST_F(FlashcardDeckTest, RollingCursorCoversLargeDeck) {
+  const std::string B = makeDevice();
+  const int N = 50;
+  const std::string longExcerpt(100, 'x');  // fat cards so a 512B slice holds only a few
+  for (int i = 0; i < N; i++) {
+    char w[16];
+    std::snprintf(w, sizeof(w), "word%02d", i);
+    FlashcardDeck::enroll(cachePath, w, longExcerpt, "Ch");
+  }
+
+  int rounds = 0;
+  while (FlashcardDeck::count(B) < N && rounds < 400) {
+    syncRound(cachePath, B, /*cap=*/512);
+    rounds++;
+  }
+  EXPECT_LT(rounds, 400);                 // converged
+  EXPECT_EQ(FlashcardDeck::count(B), N);  // every card arrived, none duplicated
+
+  // Every source word is present exactly once on B.
+  for (int i = 0; i < N; i++) {
+    char w[16];
+    std::snprintf(w, sizeof(w), "word%02d", i);
+    FlashcardDeck::Entry e;
+    EXPECT_TRUE(findCard(B, w, e)) << "missing " << w;
+  }
+  // Extra rounds are idempotent -- count stays N (rolling re-sends are no-ops).
+  for (int k = 0; k < 5; k++) syncRound(cachePath, B, 512);
+  EXPECT_EQ(FlashcardDeck::count(B), N);
+}
+
+// Adaptive slice cap: floor when constrained, grows with heap, clamped under the
+// 64 KB GET aggregate regardless of inputs.
+TEST_F(FlashcardDeckTest, AdaptiveSliceCapSizing) {
+  // Low heap -> floor.
+  EXPECT_EQ(FlashcardDeck::adaptiveSliceCap(/*freeHeap=*/40 * 1024, /*devices=*/1), FlashcardDeck::FC_SLICE_FLOOR);
+  // High heap, few devices -> ceiling.
+  EXPECT_EQ(FlashcardDeck::adaptiveSliceCap(/*freeHeap=*/100 * 1024, /*devices=*/2), FlashcardDeck::FC_SLICE_CEIL);
+  // Never below the floor even with many devices.
+  EXPECT_GE(FlashcardDeck::adaptiveSliceCap(80 * 1024, 8), FlashcardDeck::FC_SLICE_FLOOR);
+  // Aggregate stays under the 64 KB GET cap for the worst case (8 devices, each
+  // a maxed dh blob + counters + this slice).
+  constexpr size_t kReserve = 4 * 1024 + 256;
+  for (uint32_t devs : {1u, 2u, 4u, 8u}) {
+    for (uint32_t heap : {40u, 56u, 72u, 120u}) {
+      const size_t cap = FlashcardDeck::adaptiveSliceCap(heap * 1024, devs);
+      EXPECT_LE(devs * (kReserve + cap), 64u * 1024u) << "devs=" << devs << " heap=" << heap;
+    }
+  }
+}
+
+// Legacy deck lines (no inline version) parse as version 0 with content intact.
+TEST_F(FlashcardDeckTest, LegacyLinesParseAsVersionZero) {
+  // Hand-write a legacy 5-field line (word|box|dueDay|chapter|excerpt) and a
+  // legacy 4-field line (word|box|dueDay|excerpt) -- neither has a version field.
+  const std::string path = cachePath + "/dictionary_flashcards.txt";
+  std::FILE* f = std::fopen(path.c_str(), "wb");
+  ASSERT_NE(f, nullptr);
+  const char* lines = "old5|2|40|ChA|five field excerpt\nold4|1|0|four field excerpt\n";
+  std::fwrite(lines, 1, std::strlen(lines), f);
+  std::fclose(f);
+
+  FlashcardDeck::Entry e;
+  ASSERT_TRUE(findCard(cachePath, "old5", e));
+  EXPECT_EQ(e.box, 2);
+  EXPECT_EQ(e.dueDay, 40u);
+  EXPECT_EQ(e.chapter, "ChA");
+  EXPECT_EQ(e.excerpt, "five field excerpt");
+  EXPECT_EQ(e.version, 0u);
+
+  ASSERT_TRUE(findCard(cachePath, "old4", e));
+  EXPECT_EQ(e.box, 1);
+  EXPECT_EQ(e.chapter, "");
+  EXPECT_EQ(e.excerpt, "four field excerpt");
+  EXPECT_EQ(e.version, 0u);
 }
 
 }  // namespace

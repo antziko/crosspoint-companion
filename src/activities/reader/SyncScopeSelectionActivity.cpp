@@ -9,18 +9,18 @@
 #include "fontIds.h"
 
 namespace {
-constexpr int MENU_ITEM_COUNT = 5;
+constexpr int MENU_ITEM_COUNT = 6;
 
-constexpr SyncScope kScopes[MENU_ITEM_COUNT] = {SyncScope::All, SyncScope::Progress, SyncScope::Bookmarks,
-                                                SyncScope::Stats, SyncScope::Dict};
-constexpr StrId kLabels[MENU_ITEM_COUNT] = {StrId::STR_SYNC_SCOPE_ALL, StrId::STR_SYNC_SCOPE_PROGRESS,
+constexpr SyncScope kScopes[MENU_ITEM_COUNT] = {SyncScope::All,   SyncScope::Progress, SyncScope::Bookmarks,
+                                                SyncScope::Stats, SyncScope::Dict,     SyncScope::Flashcards};
+constexpr StrId kLabels[MENU_ITEM_COUNT] = {StrId::STR_SYNC_SCOPE_ALL,       StrId::STR_SYNC_SCOPE_PROGRESS,
                                             StrId::STR_SYNC_SCOPE_BOOKMARKS, StrId::STR_SYNC_SCOPE_STATS,
-                                            StrId::STR_SYNC_SCOPE_DICT};
-constexpr StrId kDescs[MENU_ITEM_COUNT] = {StrId::STR_SYNC_SCOPE_ALL_DESC, StrId::STR_SYNC_SCOPE_PROGRESS_DESC,
+                                            StrId::STR_SYNC_SCOPE_DICT,      StrId::STR_SYNC_SCOPE_FLASHCARDS};
+constexpr StrId kDescs[MENU_ITEM_COUNT] = {StrId::STR_SYNC_SCOPE_ALL_DESC,       StrId::STR_SYNC_SCOPE_PROGRESS_DESC,
                                            StrId::STR_SYNC_SCOPE_BOOKMARKS_DESC, StrId::STR_SYNC_SCOPE_STATS_DESC,
-                                           StrId::STR_SYNC_SCOPE_DICT_DESC};
-constexpr UIIcon kIcons[MENU_ITEM_COUNT] = {UIIcon::Transfer, UIIcon::Book, UIIcon::Bookmark, UIIcon::Chart,
-                                            UIIcon::Text};
+                                           StrId::STR_SYNC_SCOPE_DICT_DESC,      StrId::STR_SYNC_SCOPE_FLASHCARDS_DESC};
+constexpr UIIcon kIcons[MENU_ITEM_COUNT] = {UIIcon::Transfer, UIIcon::Book,    UIIcon::Bookmark,
+                                            UIIcon::Chart,    UIIcon::Library, UIIcon::Recent};
 }  // namespace
 
 void SyncScopeSelectionActivity::onEnter() {

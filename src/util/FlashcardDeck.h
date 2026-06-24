@@ -8,27 +8,38 @@ class HalFile;  // fwd-decl: rewriteDeck's callbacks take a HalFile& (defined in
 // Per-book spaced-repetition flashcard deck. Stored as
 // <cachePath>/dictionary_flashcards.txt, one card per line:
 //
-//     word|box|dueDay|chapter|excerpt
+//     word|box|dueDay|chapter|version|excerpt
 //
 // - word    : headword/phrase (the dictionary lookup word).
 // - box     : Leitner box 0..5, or 255 (RETIRED) once graduated.
 // - dueDay  : days-since-2000 (readingHistoryDayIndex); 0 = new/never scheduled.
 // - chapter : TOC chapter title the word was looked up in (pipe-stripped, may be
-//             empty). Field 4, never the remainder, so it must not contain '|'.
+//             empty). Delimited field, never the remainder, so it must not '|'.
+// - version : per-word Lamport version for cross-device sync (0 = legacy/unset).
+//             Bumped on enroll; preserved by grade/suspend (schedule is local).
 // - excerpt : page-local sentence the word was looked up from (may be empty).
 //             The remainder of the line, so an embedded '|' here is harmless.
 //
-// Legacy 4-field lines (word|box|dueDay|excerpt, no chapter) parse with an empty
-// chapter and the excerpt intact, so an older deck upgrades cleanly.
+// Legacy lines upgrade cleanly: a 5-field "word|box|dueDay|chapter|excerpt" (no
+// version) parses with version 0 (the field between chapter and excerpt is read
+// as a version only when it is all-digits), and a 4-field "word|box|dueDay|
+// excerpt" (no chapter) parses with empty chapter + version 0.
 //
 // The card BACK face is never stored: it is the live dictionary definition,
 // re-rendered on demand by DictionaryLookupController. Only the front context
-// (word + excerpt) and the Leitner schedule live here.
+// (word + chapter + excerpt) and the Leitner schedule live here.
 //
 // Cards are enrolled at the in-book lookup gesture (the sole site with page
-// context for the excerpt) and graded during a review session. The deck is
-// LOCAL-ONLY: unlike LookupHistory it is never synced, so there is no Lamport
-// clock and no tombstone machinery -- a delete is just a row removal.
+// context for the excerpt) and graded during a review session.
+//
+// Cross-device sync: card CONTENT (word + chapter + excerpt) is synced via the
+// KOSync stats "fc" blob, Lamport-versioned exactly like LookupHistory's "dh".
+// The SRS SCHEDULE (box/dueDay) is never synced -- a received card is box-0/new
+// and studied on each device's own clock. Sidecars hold the sync state:
+//   dictionary_flashcards.ver   Lamport clock (one int)
+//   dictionary_flashcards.tomb  deleted "word|VER" tombstones
+//   dictionary_flashcards.sync  "lastVer cursorIndex lastDeviceCount" watermark
+// The deck file stays the single source of per-word versions (inline, above).
 //
 // Every mutator streams the file line-by-line through a fixed stack buffer and
 // never materializes the deck in RAM (the same OOM discipline as LookupHistory:
@@ -56,6 +67,15 @@ class FlashcardDeck {
   static constexpr int EXCERPT_MAX = 160;
   static constexpr int CHAPTER_MAX = 80;
 
+  // Cross-device sync ("fc" blob): adaptive per-sync slice cap bounds, in bytes.
+  // The blob is bounded by a card *count* (it stops when the next card would
+  // overflow the cap), so a large deck propagates over several syncs instead of
+  // one huge blob. The floor keeps the upload contig-safe and the GET aggregate
+  // small when heap is low / many devices share the GET; the ceiling speeds
+  // backfill when heap is high / few devices. See adaptiveSliceCap().
+  static constexpr size_t FC_SLICE_FLOOR = 2048;
+  static constexpr size_t FC_SLICE_CEIL = 6144;
+
   // DueFirst/AllShuffled are the two normal review orders. Suspended is a
   // dedicated pass over set-aside cards (box==SUSPENDED) for unsuspending them;
   // it is never persisted as the default scope.
@@ -67,6 +87,7 @@ class FlashcardDeck {
     uint32_t dueDay = 0;
     std::string chapter;
     std::string excerpt;
+    uint32_t version = 0;  // per-word Lamport version (sync); 0 for legacy lines
   };
 
   // Deck-wide review stats, computed in one streaming pass (no materialization).
@@ -123,13 +144,14 @@ class FlashcardDeck {
   // assignments per row keeps the window's heap at one allocation per row.
   static int loadWindow(const std::string& cachePath, int startNewest, int n, Entry* out, bool wordsOnly = false);
 
-  // Remove the card at 0-based file index (oldest=0). Local-only, no tombstone.
+  // Remove the card at 0-based file index (oldest=0). Drops the row and writes a
+  // version-stamped tombstone so the delete propagates on sync.
   static bool removeAt(const std::string& cachePath, int index);
 
   // Remove the card matching `word` (the by-word analogue of removeAt, matching
-  // grade/suspend/unsuspend which all key on the word). Drops the matching row;
-  // local-only, no tombstone. No-op if the word is absent. Returns false on I/O
-  // failure.
+  // grade/suspend/unsuspend which all key on the word). Drops the matching row
+  // and writes a version-stamped tombstone (delete propagates on sync). No-op if
+  // the word is absent. Returns false on I/O failure.
   static bool remove(const std::string& cachePath, const std::string& word);
 
   // Grade the card for `word`: load its box/dueDay, apply applyGrade(), rewrite
@@ -165,9 +187,90 @@ class FlashcardDeck {
   // reuse the streaming primitive.
   static bool forEachLine(const std::string& path, bool (*fn)(void* ctx, const char* line, int len), void* ctx);
 
+  // --- Cross-device sync ("fc" blob; mirrors LookupHistory's "dh") -----------
+  //
+  // Wire format (one line each, '\n'-terminated):
+  //   H<word>|<chapter>|<version>|<excerpt>   a card (content only, no schedule)
+  //   T<word>|<version>                       a tombstone (delete)
+  // Box/dueDay never go on the wire: a merged card is always box-0 / dueDay-0.
+
+  // Outcome of a serialize pass (for upload bookkeeping + tests).
+  struct BlobStats {
+    int histCount = 0;        // phase-2 delta cards (new/changed since last upload)
+    int rollCount = 0;        // phase-3 rolling-slice cards (re-broadcast heal)
+    int tombCount = 0;        // tombstones written
+    uint32_t maxVer = 0;      // highest version emitted (advances the watermark)
+    uint32_t nextCursor = 0;  // deck file index to resume the rolling slice next time
+    bool truncated = false;   // a line did not fit the cap (rolling slice stopped)
+  };
+
+  // Upload watermark persisted in dictionary_flashcards.sync as three decimals
+  // "lastVer cursorIndex lastDeviceCount". lastVer = highest version known to be
+  // accepted by the server (delta filter). cursorIndex = where the rolling heal
+  // slice resumes. lastDeviceCount = devices seen on the last GET (caps sizing).
+  struct SyncWatermark {
+    uint32_t lastVer = 0;
+    uint32_t cursorIndex = 0;
+    uint32_t lastDeviceCount = 0;
+  };
+
+  // Adaptive per-sync slice cap from free heap + the last-seen device count.
+  // Pure (no I/O) so it is directly unit-testable. Grows toward FC_SLICE_CEIL
+  // when heap is high and few devices share the GET; clamps to FC_SLICE_FLOOR
+  // otherwise; never lets deviceCount*(reserve+cap) approach the GET ceiling.
+  static size_t adaptiveSliceCap(uint32_t freeHeap, uint32_t deviceCount);
+
+  // Serialize the upload blob into out[0..cap): all tombstones first (delete
+  // propagation), then changed cards (version > watermark, newest-first, low
+  // latency for new enrollments), then a rolling slice of older cards from the
+  // persisted cursor (heals a fresh device over successive syncs). Stops when a
+  // card would overflow the cap. Returns bytes written; fills outStats.
+  static size_t serializeForUpload(const std::string& cachePath, uint8_t* out, size_t cap, BlobStats* outStats);
+
+  // Advance the watermark to the max version sent, persist the rolling cursor
+  // and the device count -- ONLY after a confirmed PUT (a failed PUT re-sends
+  // the same slice next time).
+  static void commitUpload(const std::string& cachePath, const BlobStats& uploaded, uint32_t deviceCount);
+
+  // Merge a remote "fc" blob, field-level + version-wins. A new word is appended
+  // box-0/dueDay-0 with the wire content; an existing word newer on the wire has
+  // its chapter/excerpt/version updated in place (box/dueDay/order preserved); a
+  // tombstone newer than what we know removes the card + records the delete.
+  // Raises the local Lamport clock past every version seen. Returns cards added;
+  // *outDeleted (if non-null) gets the deletes applied.
+  static int mergeBlob(const std::string& cachePath, const uint8_t* blob, size_t len, int* outDeleted = nullptr);
+
+  // Read the upload watermark (exposed for the activity + tests).
+  static SyncWatermark loadWatermark(const std::string& cachePath);
+
  private:
   static std::string filePath(const std::string& cachePath);
   static std::string tmpFilePath(const std::string& cachePath);
+
+  // --- Sync sidecar paths + Lamport/tombstone helpers (clone LookupHistory) --
+  static std::string verFilePath(const std::string& cachePath);
+  static std::string tombFilePath(const std::string& cachePath);
+  static std::string syncFilePath(const std::string& cachePath);
+  // Lamport clock (dictionary_flashcards.ver). loadCounter reconstructs from the
+  // max version across deck + tombstones if the .ver file is missing (legacy).
+  static uint32_t loadCounter(const std::string& cachePath);
+  static uint32_t nextVersion(const std::string& cachePath);
+  static void observeVersion(const std::string& cachePath, uint32_t v);
+  static void storeWatermark(const std::string& cachePath, const SyncWatermark& wm);
+  // Word's inline deck version, or -1 if the word is not in the deck.
+  static int cardVersionOf(const std::string& cachePath, const std::string& word);
+  // Word's tombstone version, or 0 if not tombstoned.
+  static uint32_t tombstoneVersionOf(const std::string& cachePath, const std::string& word);
+  static void setTombstone(const std::string& cachePath, const std::string& word, uint32_t version);
+  static void clearTombstone(const std::string& cachePath, const std::string& word);
+  // Merge primitives (no version bump -- the wire version is authoritative):
+  // append a brand-new card, update an existing card's content in place, or drop
+  // a card row (tombstone is written separately by mergeBlob).
+  static bool appendRemoteCard(const std::string& cachePath, const std::string& word, const char* chapter,
+                               int chapterLen, const char* excerpt, int excerptLen, uint32_t version);
+  static bool updateRemoteCard(const std::string& cachePath, const std::string& word, const char* chapter,
+                               int chapterLen, const char* excerpt, int excerptLen, uint32_t version);
+  static void removeCardRow(const std::string& cachePath, const std::string& word);
   // Shared fixed-value row rewrite backing suspend()/unsuspend(): force `word`'s
   // box/dueDay, copying all other rows verbatim. No-op if the word is absent.
   static bool setBoxForWord(const std::string& cachePath, const std::string& word, uint8_t box, uint32_t dueDay);

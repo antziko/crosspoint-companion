@@ -17,6 +17,18 @@ std::string FlashcardDeck::tmpFilePath(const std::string& cachePath) {
   return cachePath + "/dictionary_flashcards.tmp";
 }
 
+std::string FlashcardDeck::verFilePath(const std::string& cachePath) {
+  return cachePath + "/dictionary_flashcards.ver";
+}
+
+std::string FlashcardDeck::tombFilePath(const std::string& cachePath) {
+  return cachePath + "/dictionary_flashcards.tomb";
+}
+
+std::string FlashcardDeck::syncFilePath(const std::string& cachePath) {
+  return cachePath + "/dictionary_flashcards.sync";
+}
+
 // ---------------------------------------------------------------------------
 // Line parsing / writing
 // ---------------------------------------------------------------------------
@@ -32,24 +44,38 @@ uint32_t parseU32(const char* p, int n) {
   return v;
 }
 
-// Parsed fields of a "word|box|dueDay|chapter|excerpt" line. The excerpt is the
-// remainder after the fourth '|', so an embedded '|' in the excerpt is harmless.
-// Legacy 4-field lines ("word|box|dueDay|excerpt", three '|') parse with an
-// empty chapter and the excerpt intact. Malformed lines (fewer than three '|')
-// degrade to box 0 / dueDay 0 / no chapter / no excerpt, whole line = word.
+// True iff [p, p+n) is a non-empty run of decimal digits. Used to tell a new
+// inline version field apart from a legacy excerpt's leading token.
+bool isAllDigits(const char* p, int n) {
+  if (n <= 0) return false;
+  for (int i = 0; i < n; i++)
+    if (p[i] < '0' || p[i] > '9') return false;
+  return true;
+}
+
+// Parsed fields of a "word|box|dueDay|chapter|version|excerpt" line. The excerpt
+// is the remainder after the fifth '|', so an embedded '|' in the excerpt is
+// harmless. The version field (between chapter and excerpt) is recognised only
+// when it is all-digits; otherwise the line is read as a legacy
+// "word|box|dueDay|chapter|excerpt" (version 0) -- the field is then the start of
+// a pipe-containing excerpt. Legacy 4-field lines ("word|box|dueDay|excerpt",
+// three '|') parse with an empty chapter, version 0, and the excerpt intact.
+// Malformed lines (fewer than three '|') degrade to box 0 / dueDay 0 / no
+// chapter / version 0 / no excerpt, whole line = word.
 struct Parsed {
   int wordLen;
   uint8_t box;
   uint32_t dueDay;
   const char* chapter;
   int chapterLen;
+  uint32_t version;
   const char* excerpt;
   int excerptLen;
 };
 
 Parsed parseLine(const char* line, int len) {
-  Parsed r{len, 0, 0, line + len, 0, line + len, 0};
-  int p0 = -1, p1 = -1, p2 = -1, p3 = -1;
+  Parsed r{len, 0, 0, line + len, 0, 0, line + len, 0};
+  int p0 = -1, p1 = -1, p2 = -1, p3 = -1, p4 = -1;
   for (int i = 0; i < len; i++) {
     if (line[i] != '|') continue;
     if (p0 < 0)
@@ -58,8 +84,10 @@ Parsed parseLine(const char* line, int len) {
       p1 = i;
     else if (p2 < 0)
       p2 = i;
-    else {
+    else if (p3 < 0)
       p3 = i;
+    else {
+      p4 = i;
       break;
     }
   }
@@ -71,9 +99,18 @@ Parsed parseLine(const char* line, int len) {
     // Legacy 4-field line: no chapter, excerpt is the remainder after dueDay.
     r.excerpt = line + p2 + 1;
     r.excerptLen = len - (p2 + 1);
+    return r;
+  }
+  r.chapter = line + p2 + 1;
+  r.chapterLen = p3 - (p2 + 1);
+  if (p4 >= 0 && isAllDigits(line + p3 + 1, p4 - (p3 + 1))) {
+    // New 6-field line: chapter|version|excerpt.
+    r.version = parseU32(line + p3 + 1, p4 - (p3 + 1));
+    r.excerpt = line + p4 + 1;
+    r.excerptLen = len - (p4 + 1);
   } else {
-    r.chapter = line + p2 + 1;
-    r.chapterLen = p3 - (p2 + 1);
+    // Legacy 5-field line (or excerpt with a leading non-numeric token): the
+    // remainder after chapter is the excerpt, version stays 0.
     r.excerpt = line + p3 + 1;
     r.excerptLen = len - (p3 + 1);
   }
@@ -89,15 +126,17 @@ bool writeRaw(HalFile& out, const char* p, int n) {
   return out.write(p, static_cast<size_t>(n)) == static_cast<size_t>(n);
 }
 
-// Write a full "word|box|dueDay|chapter|excerpt\n" card line.
+// Write a full "word|box|dueDay|chapter|version|excerpt\n" card line.
 bool writeCard(HalFile& out, const char* word, size_t wordLen, uint8_t box, uint32_t dueDay, const char* chapter,
-               int chapterLen, const char* excerpt, int excerptLen) {
+               int chapterLen, uint32_t version, const char* excerpt, int excerptLen) {
   char mid[24];
   const int m = snprintf(mid, sizeof(mid), "|%u|%lu|", static_cast<unsigned>(box), static_cast<unsigned long>(dueDay));
   bool ok = writeRaw(out, word, static_cast<int>(wordLen)) && writeRaw(out, mid, m);
   if (ok && chapterLen > 0) ok = writeRaw(out, chapter, chapterLen);
-  const char bar = '|';
-  if (ok) ok = out.write(&bar, 1) == 1;
+  // |version| (delimits chapter from the remainder excerpt).
+  char vtail[16];
+  const int v = snprintf(vtail, sizeof(vtail), "|%lu|", static_cast<unsigned long>(version));
+  if (ok) ok = writeRaw(out, vtail, v);
   if (ok && excerptLen > 0) ok = writeRaw(out, excerpt, excerptLen);
   const char nl = '\n';
   return ok && out.write(&nl, 1) == 1;
@@ -284,6 +323,12 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
     chapLen = cc.savedChapterLen;
   }
 
+  // Enroll is new content to propagate: stamp a fresh Lamport version and drop
+  // any tombstone for this word so a stale remote delete can't resurrect over
+  // this newer add on merge (mirrors LookupHistory::addWordVer).
+  const uint32_t version = nextVersion(cachePath);
+  clearTombstone(cachePath, word);
+
   // Fast path: brand-new word -> a single append. Prior cards are untouched.
   if (!cc.dupSeen) {
     HalFile out;
@@ -291,7 +336,7 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
       LOG_ERR("FCD", "Failed to open for append: %s", path.c_str());
       return false;
     }
-    const bool ok = writeCard(out, word.c_str(), word.size(), 0, 0, useChapter, chapLen, useExcerpt, newLen);
+    const bool ok = writeCard(out, word.c_str(), word.size(), 0, 0, useChapter, chapLen, version, useExcerpt, newLen);
     out.close();
     if (!ok) LOG_ERR("FCD", "Enroll append failed: %s", path.c_str());
     return ok;
@@ -305,7 +350,8 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
     int chapLen;
     const char* excerpt;
     int excerptLen;
-  } ec{&word, useChapter, chapLen, useExcerpt, newLen};
+    uint32_t version;
+  } ec{&word, useChapter, chapLen, useExcerpt, newLen, version};
   return rewriteDeck(
       cachePath, &ec,
       [](void* ctx, HalFile& out, const char* line, int len) {
@@ -315,7 +361,7 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
       },
       [](void* ctx, HalFile& out) {
         auto* c = static_cast<EnrollCtx*>(ctx);
-        return writeCard(out, c->word->c_str(), c->word->size(), 0, 0, c->chapter, c->chapLen, c->excerpt,
+        return writeCard(out, c->word->c_str(), c->word->size(), 0, 0, c->chapter, c->chapLen, c->version, c->excerpt,
                          c->excerptLen);
       });
 }
@@ -390,6 +436,7 @@ int FlashcardDeck::loadWindow(const std::string& cachePath, int startNewest, int
         e.word.assign(line, static_cast<size_t>(p.wordLen));
         e.box = p.box;
         e.dueDay = p.dueDay;
+        e.version = p.version;
         if (c->wordsOnly) {
           // List view shows word + box glyph only; skip the two string allocs.
           e.chapter.clear();
@@ -419,12 +466,20 @@ bool FlashcardDeck::removeAt(const std::string& cachePath, int index) {
   struct RemoveCtx {
     int seen;
     int skipIdx;
-  } rc{0, index};
-  return rewriteDeck(cachePath, &rc, [](void* ctx, HalFile& out, const char* line, int len) {
+    std::string word;  // captured word of the dropped row (for the tombstone)
+  } rc{0, index, {}};
+  const bool ok = rewriteDeck(cachePath, &rc, [](void* ctx, HalFile& out, const char* line, int len) {
     auto* c = static_cast<RemoveCtx*>(ctx);
-    if (c->seen++ == c->skipIdx) return true;  // drop this row
+    if (c->seen++ == c->skipIdx) {
+      const Parsed p = parseLine(line, len);
+      c->word.assign(line, static_cast<size_t>(p.wordLen));
+      return true;  // drop this row
+    }
     return writeRaw(out, line, len) && out.write("\n", 1) == 1;
   });
+  // Tombstone the dropped word so the delete propagates on sync.
+  if (ok && !rc.word.empty()) setTombstone(cachePath, rc.word, nextVersion(cachePath));
+  return ok;
 }
 
 bool FlashcardDeck::remove(const std::string& cachePath, const std::string& word) {
@@ -435,12 +490,15 @@ bool FlashcardDeck::remove(const std::string& cachePath, const std::string& word
   CountCtx cc{&word, 0, false, {}, 0, {}, 0};
   if (!forEachLine(path, countLine, &cc) || !cc.dupSeen) return false;
 
-  return rewriteDeck(cachePath, const_cast<std::string*>(&word),
-                     [](void* ctx, HalFile& out, const char* line, int len) {
-                       const auto* w = static_cast<const std::string*>(ctx);
-                       if (lineWordEquals(line, len, *w)) return true;  // drop the matching row
-                       return writeRaw(out, line, len) && out.write("\n", 1) == 1;
-                     });
+  const bool ok =
+      rewriteDeck(cachePath, const_cast<std::string*>(&word), [](void* ctx, HalFile& out, const char* line, int len) {
+        const auto* w = static_cast<const std::string*>(ctx);
+        if (lineWordEquals(line, len, *w)) return true;  // drop the matching row
+        return writeRaw(out, line, len) && out.write("\n", 1) == 1;
+      });
+  // Tombstone the dropped word so the delete propagates on sync.
+  if (ok) setTombstone(cachePath, word, nextVersion(cachePath));
+  return ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -468,8 +526,9 @@ bool FlashcardDeck::grade(const std::string& cachePath, const std::string& word,
     uint8_t box = p.box;
     uint32_t dueDay = p.dueDay;
     applyGrade(box, dueDay, c->correct, c->today);
-    return writeCard(out, line, static_cast<size_t>(p.wordLen), box, dueDay, p.chapter, p.chapterLen, p.excerpt,
-                     p.excerptLen);
+    // Grading is a local schedule change -- preserve the wire version (no bump).
+    return writeCard(out, line, static_cast<size_t>(p.wordLen), box, dueDay, p.chapter, p.chapterLen, p.version,
+                     p.excerpt, p.excerptLen);
   });
 }
 
@@ -505,8 +564,9 @@ bool FlashcardDeck::setBoxForWord(const std::string& cachePath, const std::strin
     const Parsed p = parseLine(line, len);
     if (static_cast<size_t>(p.wordLen) != c->word->size() || memcmp(line, c->word->c_str(), p.wordLen) != 0)
       return writeRaw(out, line, len) && out.write("\n", 1) == 1;  // copy verbatim
-    return writeCard(out, line, static_cast<size_t>(p.wordLen), c->box, c->dueDay, p.chapter, p.chapterLen, p.excerpt,
-                     p.excerptLen);
+    // suspend/unsuspend are local schedule changes -- preserve the version.
+    return writeCard(out, line, static_cast<size_t>(p.wordLen), c->box, c->dueDay, p.chapter, p.chapterLen, p.version,
+                     p.excerpt, p.excerptLen);
   });
 }
 
@@ -609,4 +669,566 @@ int FlashcardDeck::buildSession(const std::string& cachePath, SessionScope scope
     written = selectTier(path, Tier::NonRetired, today, total, out, written, cap);
   }
   return written;
+}
+
+// ===========================================================================
+// Cross-device sync ("fc" blob) -- mirrors LookupHistory's Lamport-versioned
+// delta sync, with the all-at-once keyframe replaced by a rolling cursor so the
+// per-sync blob is bounded by a card count, not deck size.
+// ===========================================================================
+
+namespace {
+
+// Parse a tombstone line "word|VER": returns the version, sets *wordLen to the
+// word length (the bytes before the last '|'). A line with no '|' is treated as
+// a bare word at version 0.
+uint32_t parseTomb(const char* line, int len, int* wordLen) {
+  int p = -1;
+  for (int i = len - 1; i >= 0; i--)
+    if (line[i] == '|') {
+      p = i;
+      break;
+    }
+  if (p < 0) {
+    *wordLen = len;
+    return 0;
+  }
+  *wordLen = p;
+  return parseU32(line + p + 1, len - (p + 1));
+}
+
+bool tombLineWordEquals(const char* line, int len, const std::string& word) {
+  int wl = 0;
+  parseTomb(line, len, &wl);
+  return static_cast<size_t>(wl) == word.size() && memcmp(line, word.c_str(), static_cast<size_t>(wl)) == 0;
+}
+
+// Single-number Lamport counter file IO (dictionary_flashcards.ver).
+uint32_t readCounterFile(const std::string& path) {
+  HalFile f;
+  if (!Storage.openFileForRead("FCD", path, f)) return 0;
+  char buf[16];
+  int n = 0;
+  while (f.available() && n < 15) {
+    const int b = f.read();
+    if (b < '0' || b > '9') break;
+    buf[n++] = static_cast<char>(b);
+  }
+  return n ? parseU32(buf, n) : 0;
+}
+
+bool writeCounterFile(const std::string& path, uint32_t v) {
+  HalFile f;
+  if (!Storage.openFileForWrite("FCD", path, f)) return false;
+  char buf[16];
+  const int n = snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(v));
+  const bool ok = f.write(buf, static_cast<size_t>(n)) == static_cast<size_t>(n);
+  f.close();
+  return ok;
+}
+
+// Build the wire card payload "word|chapter|version|excerpt" (no box/dueDay)
+// from a parsed deck line into buf. Returns the length, or -1 if it would not
+// fit (defensive; a payload is always shorter than its source deck line).
+int buildCardPayload(char* buf, int cap, const char* line, const Parsed& p) {
+  char ver[12];
+  const int vlen = snprintf(ver, sizeof(ver), "%lu", static_cast<unsigned long>(p.version));
+  const int total = p.wordLen + 1 + p.chapterLen + 1 + vlen + 1 + p.excerptLen;
+  if (total > cap) return -1;
+  int n = 0;
+  memcpy(buf + n, line, static_cast<size_t>(p.wordLen));
+  n += p.wordLen;
+  buf[n++] = '|';
+  if (p.chapterLen > 0) memcpy(buf + n, p.chapter, static_cast<size_t>(p.chapterLen));
+  n += p.chapterLen;
+  buf[n++] = '|';
+  memcpy(buf + n, ver, static_cast<size_t>(vlen));
+  n += vlen;
+  buf[n++] = '|';
+  if (p.excerptLen > 0) memcpy(buf + n, p.excerpt, static_cast<size_t>(p.excerptLen));
+  n += p.excerptLen;
+  return n;
+}
+
+// Serialize accumulator shared by the tombstone / delta / rolling passes.
+struct FcUploadCtx {
+  uint8_t* out;
+  size_t used;
+  size_t cap;
+  uint32_t lastVer;  // delta filter: emit cards with version > lastVer as deltas
+  uint32_t maxVer;   // highest version emitted (advances the watermark)
+  int tombCount;
+  int histCount;  // phase-2 delta cards (version > lastVer): genuinely new/changed
+  int rollCount;  // phase-3 rolling-slice cards (version <= lastVer): re-broadcast heal
+  bool truncated;
+  int fileIdx;           // running deck index for the rolling passes
+  uint32_t cursorStart;  // rolling resume index (deck file index)
+  int nextCursor;        // index after the last rolling card emitted
+  int phase;             // rolling sub-pass: 1 = [cursorStart, N), 2 = [0, cursorStart)
+};
+
+// Append "tag<payload>\n" if it fits; set truncated + return false otherwise.
+bool fcEmit(FcUploadCtx* c, char tag, const char* payload, int plen) {
+  const size_t need = 1 + static_cast<size_t>(plen) + 1;
+  if (c->used + need > c->cap) {
+    c->truncated = true;
+    return false;
+  }
+  c->out[c->used++] = static_cast<uint8_t>(tag);
+  memcpy(c->out + c->used, payload, static_cast<size_t>(plen));
+  c->used += static_cast<size_t>(plen);
+  c->out[c->used++] = static_cast<uint8_t>('\n');
+  return true;
+}
+
+}  // namespace
+
+// --- Lamport clock ---------------------------------------------------------
+
+uint32_t FlashcardDeck::loadCounter(const std::string& cachePath) {
+  const std::string verPath = verFilePath(cachePath);
+  uint32_t cur = readCounterFile(verPath);
+  if (cur == 0) {
+    // .ver missing/zero: reconstruct as the max version across deck + tombstones
+    // (covers upgrade from unversioned decks and a lost counter), then persist.
+    uint32_t mx = 0;
+    forEachLine(
+        filePath(cachePath),
+        [](void* ctx, const char* line, int len) {
+          auto* m = static_cast<uint32_t*>(ctx);
+          const uint32_t v = parseLine(line, len).version;
+          if (v > *m) *m = v;
+          return true;
+        },
+        &mx);
+    forEachLine(
+        tombFilePath(cachePath),
+        [](void* ctx, const char* line, int len) {
+          auto* m = static_cast<uint32_t*>(ctx);
+          int wl = 0;
+          const uint32_t v = parseTomb(line, len, &wl);
+          if (v > *m) *m = v;
+          return true;
+        },
+        &mx);
+    cur = mx;
+    if (cur > 0) writeCounterFile(verPath, cur);
+  }
+  return cur;
+}
+
+uint32_t FlashcardDeck::nextVersion(const std::string& cachePath) {
+  const uint32_t v = loadCounter(cachePath) + 1;
+  writeCounterFile(verFilePath(cachePath), v);
+  return v;
+}
+
+void FlashcardDeck::observeVersion(const std::string& cachePath, uint32_t v) {
+  if (v > loadCounter(cachePath)) writeCounterFile(verFilePath(cachePath), v);
+}
+
+// --- Per-word version lookups ----------------------------------------------
+
+int FlashcardDeck::cardVersionOf(const std::string& cachePath, const std::string& word) {
+  struct C {
+    const std::string* word;
+    int ver;  // -1 = absent
+  } c{&word, -1};
+  forEachLine(
+      filePath(cachePath),
+      [](void* ctx, const char* line, int len) {
+        auto* c = static_cast<C*>(ctx);
+        if (lineWordEquals(line, len, *c->word)) {
+          const int v = static_cast<int>(parseLine(line, len).version);
+          if (v > c->ver) c->ver = v;
+        }
+        return true;
+      },
+      &c);
+  return c.ver;
+}
+
+uint32_t FlashcardDeck::tombstoneVersionOf(const std::string& cachePath, const std::string& word) {
+  struct C {
+    const std::string* word;
+    uint32_t ver;
+  } c{&word, 0};
+  forEachLine(
+      tombFilePath(cachePath),
+      [](void* ctx, const char* line, int len) {
+        auto* c = static_cast<C*>(ctx);
+        if (tombLineWordEquals(line, len, *c->word)) {
+          int wl = 0;
+          const uint32_t v = parseTomb(line, len, &wl);
+          if (v > c->ver) c->ver = v;
+        }
+        return true;
+      },
+      &c);
+  return c.ver;
+}
+
+// --- Tombstone file (dictionary_flashcards.tomb) ---------------------------
+
+void FlashcardDeck::setTombstone(const std::string& cachePath, const std::string& word, uint32_t version) {
+  const std::string tomb = tombFilePath(cachePath);
+  const std::string tmp = cachePath + "/dictionary_flashcards.tomb.tmp";
+  HalFile out;
+  if (!Storage.openFileForWrite("FCD", tmp, out)) {
+    LOG_ERR("FCD", "Failed to open tomb temp: %s", tmp.c_str());
+    return;
+  }
+  struct C {
+    const std::string* word;
+    HalFile* out;
+    bool ok;
+  } wc{&word, &out, true};
+  forEachLine(
+      tomb,
+      [](void* ctx, const char* line, int len) {
+        auto* c = static_cast<C*>(ctx);
+        if (!tombLineWordEquals(line, len, *c->word))
+          c->ok = c->ok && writeRaw(*c->out, line, len) && c->out->write("\n", 1) == 1;
+        return c->ok;
+      },
+      &wc);
+  char tail[16];
+  const int n = snprintf(tail, sizeof(tail), "|%lu\n", static_cast<unsigned long>(version));
+  wc.ok = wc.ok && out.write(word.c_str(), word.size()) == word.size() && writeRaw(out, tail, n);
+  out.close();
+  if (!wc.ok) {
+    LOG_ERR("FCD", "Tombstone write failed: %s", tmp.c_str());
+    Storage.remove(tmp.c_str());
+    return;
+  }
+  Storage.remove(tomb.c_str());
+  Storage.rename(tmp.c_str(), tomb.c_str());
+}
+
+void FlashcardDeck::clearTombstone(const std::string& cachePath, const std::string& word) {
+  const std::string tomb = tombFilePath(cachePath);
+  // Scan first: skip the rewrite when there's no tombstone (the common case).
+  struct P {
+    const std::string* word;
+    bool found;
+  } pc{&word, false};
+  forEachLine(
+      tomb,
+      [](void* ctx, const char* line, int len) {
+        auto* c = static_cast<P*>(ctx);
+        if (tombLineWordEquals(line, len, *c->word)) {
+          c->found = true;
+          return false;
+        }
+        return true;
+      },
+      &pc);
+  if (!pc.found) return;
+
+  const std::string tmp = cachePath + "/dictionary_flashcards.tomb.tmp";
+  HalFile out;
+  if (!Storage.openFileForWrite("FCD", tmp, out)) return;
+  struct C {
+    const std::string* word;
+    HalFile* out;
+    bool ok;
+  } wc{&word, &out, true};
+  forEachLine(
+      tomb,
+      [](void* ctx, const char* line, int len) {
+        auto* c = static_cast<C*>(ctx);
+        if (!tombLineWordEquals(line, len, *c->word))
+          c->ok = c->ok && writeRaw(*c->out, line, len) && c->out->write("\n", 1) == 1;
+        return c->ok;
+      },
+      &wc);
+  out.close();
+  if (!wc.ok) {
+    Storage.remove(tmp.c_str());
+    return;
+  }
+  Storage.remove(tomb.c_str());
+  Storage.rename(tmp.c_str(), tomb.c_str());
+}
+
+// --- Merge primitives (no version bump; the wire version is authoritative) --
+
+void FlashcardDeck::removeCardRow(const std::string& cachePath, const std::string& word) {
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0};
+  if (!forEachLine(filePath(cachePath), countLine, &cc) || !cc.dupSeen) return;
+  rewriteDeck(cachePath, const_cast<std::string*>(&word), [](void* ctx, HalFile& out, const char* line, int len) {
+    const auto* w = static_cast<const std::string*>(ctx);
+    if (lineWordEquals(line, len, *w)) return true;  // drop the matching row
+    return writeRaw(out, line, len) && out.write("\n", 1) == 1;
+  });
+}
+
+bool FlashcardDeck::appendRemoteCard(const std::string& cachePath, const std::string& word, const char* chapter,
+                                     int chapterLen, const char* excerpt, int excerptLen, uint32_t version) {
+  clearTombstone(cachePath, word);  // a newer add beats an old tombstone
+  HalFile out;
+  const std::string path = filePath(cachePath);
+  if (!Storage.openFileForAppend("FCD", path.c_str(), out)) {
+    LOG_ERR("FCD", "Failed to append remote card: %s", path.c_str());
+    return false;
+  }
+  const bool ok = writeCard(out, word.c_str(), word.size(), 0, 0, chapter, chapterLen, version, excerpt, excerptLen);
+  out.close();
+  return ok;
+}
+
+bool FlashcardDeck::updateRemoteCard(const std::string& cachePath, const std::string& word, const char* chapter,
+                                     int chapterLen, const char* excerpt, int excerptLen, uint32_t version) {
+  struct U {
+    const std::string* word;
+    const char* chapter;
+    int chapterLen;
+    const char* excerpt;
+    int excerptLen;
+    uint32_t version;
+  } u{&word, chapter, chapterLen, excerpt, excerptLen, version};
+  return rewriteDeck(cachePath, &u, [](void* ctx, HalFile& out, const char* line, int len) {
+    auto* c = static_cast<U*>(ctx);
+    const Parsed p = parseLine(line, len);
+    if (static_cast<size_t>(p.wordLen) != c->word->size() || memcmp(line, c->word->c_str(), p.wordLen) != 0)
+      return writeRaw(out, line, len) && out.write("\n", 1) == 1;  // copy verbatim
+    // Field-level: keep the local schedule (box/dueDay), take the wire content.
+    return writeCard(out, line, static_cast<size_t>(p.wordLen), p.box, p.dueDay, c->chapter, c->chapterLen, c->version,
+                     c->excerpt, c->excerptLen);
+  });
+}
+
+// --- Watermark (dictionary_flashcards.sync) --------------------------------
+
+FlashcardDeck::SyncWatermark FlashcardDeck::loadWatermark(const std::string& cachePath) {
+  SyncWatermark wm;
+  HalFile f;
+  if (!Storage.openFileForRead("FCD", syncFilePath(cachePath), f)) return wm;  // unset -> {0,0,0}
+  uint32_t* field[3] = {&wm.lastVer, &wm.cursorIndex, &wm.lastDeviceCount};
+  int fi = 0;
+  char buf[16];
+  int n = 0;
+  bool inNum = false;
+  while (f.available() && fi < 3) {
+    const int b = f.read();
+    if (b >= '0' && b <= '9') {
+      if (n < 15) buf[n++] = static_cast<char>(b);
+      inNum = true;
+    } else if (inNum) {
+      *field[fi++] = parseU32(buf, n);
+      n = 0;
+      inNum = false;
+    }
+  }
+  if (inNum && fi < 3) *field[fi] = parseU32(buf, n);
+  return wm;
+}
+
+void FlashcardDeck::storeWatermark(const std::string& cachePath, const SyncWatermark& wm) {
+  HalFile f;
+  if (!Storage.openFileForWrite("FCD", syncFilePath(cachePath), f)) {
+    LOG_ERR("FCD", "Failed to write sync watermark: %s", syncFilePath(cachePath).c_str());
+    return;
+  }
+  char buf[56];
+  const int n = snprintf(buf, sizeof(buf), "%lu %lu %lu", static_cast<unsigned long>(wm.lastVer),
+                         static_cast<unsigned long>(wm.cursorIndex), static_cast<unsigned long>(wm.lastDeviceCount));
+  f.write(buf, static_cast<size_t>(n));
+  f.close();
+}
+
+// --- Adaptive slice cap ----------------------------------------------------
+
+size_t FlashcardDeck::adaptiveSliceCap(uint32_t freeHeap, uint32_t deviceCount) {
+  // Grow toward the ceiling only when heap is comfortable. Thresholds are
+  // heuristic; the clamp below is the actual safety guarantee.
+  size_t cap = FC_SLICE_FLOOR;
+  if (freeHeap >= 72 * 1024)
+    cap = FC_SLICE_CEIL;
+  else if (freeHeap >= 56 * 1024)
+    cap = (FC_SLICE_FLOOR + FC_SLICE_CEIL) / 2;
+
+  // Clamp so deviceCount * (per-device reserve + cap) stays under half the 64 KB
+  // GET response cap -- the aggregate every peer double-buffers. Reserve covers a
+  // maxed "dh" blob (4 KB) plus counters that may ride the same GET.
+  constexpr size_t kGetHalfCap = 32 * 1024;
+  constexpr size_t kPerDeviceReserve = 4 * 1024 + 256;
+  const uint32_t devs = deviceCount > 0 ? deviceCount : 1;
+  const size_t budget = kGetHalfCap / devs;
+  const size_t maxCap = budget > kPerDeviceReserve ? budget - kPerDeviceReserve : 0;
+  if (cap > maxCap) cap = maxCap;
+  // The floor is always safe (8 * (2048 + 4352) = 51200 < 64 KB), so never go
+  // below it even if the half-cap clamp would -- a sub-floor blob stalls backfill.
+  if (cap < FC_SLICE_FLOOR) cap = FC_SLICE_FLOOR;
+  return cap;
+}
+
+// --- Serialize (tombstones + delta cards + rolling slice) ------------------
+
+size_t FlashcardDeck::serializeForUpload(const std::string& cachePath, uint8_t* out, size_t cap, BlobStats* outStats) {
+  if (outStats) *outStats = BlobStats{};
+  if (!out || cap == 0) return 0;
+
+  const SyncWatermark wm = loadWatermark(cachePath);
+  const std::string deckPath = filePath(cachePath);
+
+  FcUploadCtx c{out, 0, cap, wm.lastVer, 0, 0, 0, 0, false, 0, wm.cursorIndex, static_cast<int>(wm.cursorIndex), 0};
+
+  // 1) Tombstones (all) -- deletions must propagate reliably; they are tiny.
+  forEachLine(
+      tombFilePath(cachePath),
+      [](void* ctx, const char* line, int len) {
+        auto* c = static_cast<FcUploadCtx*>(ctx);
+        if (!fcEmit(c, 'T', line, len)) return false;  // budget full -> stop
+        c->tombCount++;
+        int wl = 0;
+        const uint32_t v = parseTomb(line, len, &wl);
+        if (v > c->maxVer) c->maxVer = v;
+        return true;
+      },
+      &c);
+
+  // 2) Changed cards (version > watermark) -- low-latency new-enrollment push.
+  forEachLine(
+      deckPath,
+      [](void* ctx, const char* line, int len) {
+        auto* c = static_cast<FcUploadCtx*>(ctx);
+        const Parsed p = parseLine(line, len);
+        if (p.version <= c->lastVer) return true;  // not new since last upload
+        char buf[512];
+        const int n = buildCardPayload(buf, sizeof(buf), line, p);
+        if (n < 0) return true;  // pathological oversize; skip
+        if (!fcEmit(c, 'H', buf, n)) return false;
+        c->histCount++;
+        if (p.version > c->maxVer) c->maxVer = p.version;
+        return true;
+      },
+      &c);
+
+  // 3) Rolling slice: older cards (version <= watermark) from the cursor,
+  //    wrapping, to heal a fresh device over successive syncs. Two sub-passes
+  //    over the deck file: [cursorStart, N) then [0, cursorStart).
+  for (int phase = 1; phase <= 2; phase++) {
+    c.fileIdx = 0;
+    c.phase = phase;
+    forEachLine(
+        deckPath,
+        [](void* ctx, const char* line, int len) {
+          auto* c = static_cast<FcUploadCtx*>(ctx);
+          const int idx = c->fileIdx++;
+          if (c->phase == 1 && idx < static_cast<int>(c->cursorStart)) return true;    // before the window
+          if (c->phase == 2 && idx >= static_cast<int>(c->cursorStart)) return false;  // past the wrap region
+          const Parsed p = parseLine(line, len);
+          if (p.version > c->lastVer) return true;  // a delta card already covered it
+          char buf[512];
+          const int n = buildCardPayload(buf, sizeof(buf), line, p);
+          if (n < 0) return true;
+          if (!fcEmit(c, 'H', buf, n)) return false;  // budget full -> stop rolling
+          c->rollCount++;                             // re-broadcast heal, not a new delta
+          c->nextCursor = idx + 1;                    // resume after this card next sync
+          return true;
+        },
+        &c);
+    if (c.truncated) break;  // no budget left for the wrap pass
+  }
+
+  if (outStats) {
+    outStats->histCount = c.histCount;
+    outStats->rollCount = c.rollCount;
+    outStats->tombCount = c.tombCount;
+    outStats->maxVer = c.maxVer;
+    outStats->nextCursor = static_cast<uint32_t>(c.nextCursor);
+    outStats->truncated = c.truncated;
+  }
+  return c.used;
+}
+
+void FlashcardDeck::commitUpload(const std::string& cachePath, const BlobStats& uploaded, uint32_t deviceCount) {
+  SyncWatermark wm = loadWatermark(cachePath);
+  if (uploaded.maxVer > wm.lastVer) wm.lastVer = uploaded.maxVer;  // never regress
+  wm.cursorIndex = uploaded.nextCursor;
+  wm.lastDeviceCount = deviceCount;
+  storeWatermark(cachePath, wm);
+}
+
+// --- Merge -----------------------------------------------------------------
+
+int FlashcardDeck::mergeBlob(const std::string& cachePath, const uint8_t* blob, size_t len, int* outDeleted) {
+  if (outDeleted) *outDeleted = 0;
+  if (!blob || len == 0) return 0;
+  loadCounter(cachePath);  // materialize the Lamport clock before observeVersion calls
+
+  int added = 0;
+  int deleted = 0;
+
+  // Two passes: tombstones first, then cards, so a re-enroll (higher version)
+  // correctly beats a delete for the same word.
+  for (int pass = 0; pass < 2; pass++) {
+    const char want = (pass == 0) ? 'T' : 'H';
+    size_t i = 0;
+    while (i < len) {
+      size_t j = i;
+      while (j < len && blob[j] != '\n') j++;
+      const char* lineStart = reinterpret_cast<const char*>(blob + i);
+      const int lineLen = static_cast<int>(j - i);
+      i = j + 1;
+      if (lineLen < 2 || lineStart[0] != want) continue;
+      const char* payload = lineStart + 1;
+      const int plen = lineLen - 1;
+
+      if (want == 'T') {
+        int wl = 0;
+        const uint32_t ver = parseTomb(payload, plen, &wl);
+        if (wl <= 0) continue;
+        // Brace-init, NOT word(...): Arduino.h defines a function-like macro word(...)
+        // plus a `word` typedef, so `std::string word(payload, n)` expands the macro and
+        // `word` never becomes a variable. Braces avoid the macro (no `word(`).
+        std::string word{payload, static_cast<size_t>(wl)};
+        observeVersion(cachePath, ver);
+        const int cardVer = cardVersionOf(cachePath, word);
+        const uint32_t tombVer = tombstoneVersionOf(cachePath, word);
+        const uint32_t localVer = std::max(cardVer >= 0 ? static_cast<uint32_t>(cardVer) : 0u, tombVer);
+        if (ver <= localVer) continue;  // our copy is newer-or-equal
+        removeCardRow(cachePath, word);
+        setTombstone(cachePath, word, ver);
+        deleted++;
+      } else {
+        // payload = "word|chapter|version|excerpt" (chapter has no '|'; excerpt
+        // is the remainder and may).
+        int p0 = -1, p1 = -1, p2 = -1;
+        for (int k = 0; k < plen; k++)
+          if (payload[k] == '|') {
+            if (p0 < 0)
+              p0 = k;
+            else if (p1 < 0)
+              p1 = k;
+            else {
+              p2 = k;
+              break;
+            }
+          }
+        if (p0 < 0 || p1 < 0 || p2 < 0) continue;
+        // Brace-init: avoids the Arduino word(...) macro — see the 'T' branch above.
+        std::string word{payload, static_cast<size_t>(p0)};
+        const char* chapter = payload + p0 + 1;
+        const int chapterLen = p1 - p0 - 1;
+        const uint32_t ver = parseU32(payload + p1 + 1, p2 - p1 - 1);
+        const char* excerpt = payload + p2 + 1;
+        const int excerptLen = plen - (p2 + 1);
+        observeVersion(cachePath, ver);
+        const int cardVer = cardVersionOf(cachePath, word);
+        if (cardVer >= 0) {
+          if (ver <= static_cast<uint32_t>(cardVer)) continue;  // have it, not newer
+          updateRemoteCard(cachePath, word, chapter, chapterLen, excerpt, excerptLen, ver);
+        } else {
+          const uint32_t tombVer = tombstoneVersionOf(cachePath, word);
+          if (tombVer > 0 && ver <= tombVer) continue;  // a newer/equal delete still wins
+          appendRemoteCard(cachePath, word, chapter, chapterLen, excerpt, excerptLen, ver);
+          added++;
+        }
+      }
+    }
+  }
+  if (outDeleted) *outDeleted = deleted;
+  return added;
 }

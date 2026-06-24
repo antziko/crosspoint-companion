@@ -137,10 +137,14 @@ class KOReaderSyncClient {
    * @param dictFold Optional dictionary-history fold callback. Same contract as
    *   `fold` but for each OTHER device's base64-decoded "dh" section (per-book
    *   lookup-history merge). Self entry and entries without "dh" are skipped.
+   * @param fcFold Optional flashcard fold callback. Same contract as `fold` but
+   *   for each OTHER device's base64-decoded "fc" section (per-book flashcard
+   *   deck merge). Self entry and entries without "fc" are skipped.
    * @return OK on success, NOT_FOUND if no stats exist, error code on failure
    */
   static Error getStats(const std::string& documentHash, KOReaderStatsEntry* outEntries, size_t& outCount,
-                        const StatsDatedFold* fold = nullptr, const StatsDatedFold* dictFold = nullptr);
+                        const StatsDatedFold* fold = nullptr, const StatsDatedFold* dictFold = nullptr,
+                        const StatsDatedFold* fcFold = nullptr);
 
   /**
    * Replace THIS device's stats blob for a document (self-hosted server extension).
@@ -154,11 +158,14 @@ class KOReaderSyncClient {
    * @param dict Optional per-book dictionary-history blob (LookupHistory::serializeBlob);
    *   when non-null it is base64-encoded into a "dh" field appended to the stats blob.
    * @param dictLen Length of `dict` in bytes (ignored when dict is null).
+   * @param fc Optional per-book flashcard blob (FlashcardDeck::serializeForUpload);
+   *   when non-null it is base64-encoded into an "fc" field appended to the stats blob.
+   * @param fcLen Length of `fc` in bytes (ignored when fc is null).
    * @return OK on success, error code on failure
    */
   static Error updateStats(const std::string& documentHash, const KOReaderStatsEntry& entry,
                            const uint8_t* dated = nullptr, size_t datedLen = 0, const uint8_t* dict = nullptr,
-                           size_t dictLen = 0);
+                           size_t dictLen = 0, const uint8_t* fc = nullptr, size_t fcLen = 0);
 
   /**
    * Unique, stable per-chip device id ("crosspoint-<efuse mac hex>") sent as
@@ -181,4 +188,13 @@ class KOReaderSyncClient {
 
   /** HTTP status code from the last request (for diagnostics). */
   static int lastHttpCode;
+
+  /**
+   * Cumulative transfer counters for the sync summary. resetByteCounters() zeroes
+   * both at the start of a sync; bytesDown() sums GET response-body bytes, bytesUp()
+   * sums PUT request-body bytes, across every leg run since the reset.
+   */
+  static void resetByteCounters();
+  static uint32_t bytesDown();
+  static uint32_t bytesUp();
 };
