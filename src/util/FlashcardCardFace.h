@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <string>
 
 class GfxRenderer;
@@ -15,7 +16,9 @@ class GfxRenderer;
 namespace FlashcardCardFace {
 
 // Render the card face into [contentTop, contentBottom) across `pageWidth`.
+// `lookupCount` draws a small "xN" beside the word when > 1 (and the word is shown);
+// pass 1 (or 0) to omit it.
 void render(GfxRenderer& renderer, int contentTop, int contentBottom, int pageWidth, const std::string& word,
-            const std::string& excerpt, const std::string& chapter, bool showWord);
+            const std::string& excerpt, const std::string& chapter, bool showWord, uint32_t lookupCount = 1);
 
 }  // namespace FlashcardCardFace

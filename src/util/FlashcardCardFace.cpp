@@ -161,15 +161,15 @@ void drawChapterFooter(GfxRenderer& renderer, int contentBottom, const std::stri
   titleBuf[titleLen] = '\0';
   const char* pageBuf = ch + sp + 1;  // null-terminated tail of chapter
 
-  const int wTitle = titleLen > 0 ? renderer.getTextWidth(UI_10_FONT_ID, titleBuf, EpdFontFamily::ITALIC) : 0;
-  const int sepW = titleLen > 0 ? renderer.getSpaceWidth(UI_10_FONT_ID, EpdFontFamily::ITALIC) : 0;
+  // Chapter title flush-left, page token flush-right at the screen margin, so the two
+  // don't crowd each other (book-style footer). Bottom-align the smaller page font to
+  // the title baseline-ish.
+  const int margin = metrics.contentSidePadding;
   const int wPage = renderer.getTextWidth(SMALL_FONT_ID, pageBuf);
-  const int x0 = (renderer.getScreenWidth() - (wTitle + sepW + wPage)) / 2;
-  // Bottom-align the shorter page font to the title baseline-ish.
   const int dy = renderer.getLineHeight(UI_10_FONT_ID) - renderer.getLineHeight(SMALL_FONT_ID);
 
-  if (titleLen > 0) renderer.drawText(UI_10_FONT_ID, x0, y, titleBuf, true, EpdFontFamily::ITALIC);
-  renderer.drawText(SMALL_FONT_ID, x0 + wTitle + sepW, y + dy, pageBuf, true);
+  if (titleLen > 0) renderer.drawText(UI_10_FONT_ID, margin, y, titleBuf, true, EpdFontFamily::ITALIC);
+  renderer.drawText(SMALL_FONT_ID, renderer.getScreenWidth() - margin - wPage, y + dy, pageBuf, true);
 }
 
 }  // namespace
@@ -177,15 +177,26 @@ void drawChapterFooter(GfxRenderer& renderer, int contentBottom, const std::stri
 namespace FlashcardCardFace {
 
 void render(GfxRenderer& renderer, int contentTop, int contentBottom, int pageWidth, const std::string& word,
-            const std::string& excerpt, const std::string& chapter, bool showWord) {
+            const std::string& excerpt, const std::string& chapter, bool showWord, uint32_t lookupCount) {
   const int bodyFont = CrossPointSettings::getInstance().getDefinitionFontId();
   const auto& metrics = UITheme::getInstance().getMetrics();
 
   // Bold word header — drawn only when the answer is shown. Cloze front omits it
   // (the row stays blank) so the excerpt below keeps the same position either way.
   if (showWord) {
-    renderer.drawCenteredText(NOTOSERIF_18_FONT_ID, contentTop + metrics.listRowHeight, word.c_str(), true,
-                              EpdFontFamily::BOLD);
+    const int wordY = contentTop + metrics.listRowHeight;
+    renderer.drawCenteredText(NOTOSERIF_18_FONT_ID, wordY, word.c_str(), true, EpdFontFamily::BOLD);
+    // Small "xN" lookup-count badge just right of the centered word, only when > 1.
+    // Small font + bottom-aligned so it reads as a subtle annotation, not a second word.
+    if (lookupCount > 1) {
+      char cbuf[12];
+      snprintf(cbuf, sizeof(cbuf), "x%lu", static_cast<unsigned long>(lookupCount));
+      const int wWord = renderer.getTextWidth(NOTOSERIF_18_FONT_ID, word.c_str(), EpdFontFamily::BOLD);
+      const int gap = renderer.getTextWidth(NOTOSERIF_18_FONT_ID, "  ", EpdFontFamily::BOLD);  // ~2 word-spaces
+      const int x = (pageWidth + wWord) / 2 + gap;  // right edge of the centered word + the gap
+      const int dy = renderer.getLineHeight(NOTOSERIF_18_FONT_ID) - renderer.getLineHeight(SMALL_FONT_ID);
+      renderer.drawText(SMALL_FONT_ID, x, wordY + dy, cbuf, true);
+    }
   }
 
   if (!excerpt.empty()) {

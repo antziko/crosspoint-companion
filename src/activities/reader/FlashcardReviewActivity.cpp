@@ -543,7 +543,7 @@ void FlashcardReviewActivity::renderFront(int contentTop, int contentBottom, int
   // Suspended review always shows the word (recall isn't being tested).
   const bool showWord = suspendedMode || cardStyle != CrossPointSettings::FLASHCARD_STYLE_CLOZE;
   FlashcardCardFace::render(renderer, contentTop, contentBottom, pageWidth, card.word, card.excerpt, card.chapter,
-                            showWord);
+                            showWord, card.count);
   drawSuspendHint(contentTop, contentBottom);
 
   // Suspended review: flip (read definition) + Prev/Next browsing + resume (Up).
@@ -562,7 +562,7 @@ void FlashcardReviewActivity::renderRevealed(int contentTop, int contentBottom, 
   // header + filled, underlined in the excerpt) -- the only change is the blank
   // resolving, no vertical jump.
   FlashcardCardFace::render(renderer, contentTop, contentBottom, pageWidth, card.word, card.excerpt, card.chapter,
-                            /*showWord=*/true);
+                            /*showWord=*/true, card.count);
   drawSuspendHint(contentTop, contentBottom, /*showNextHint=*/true);
 
   // Live grade pick as a small footer line (above the chapter footer / hints) so it
@@ -622,7 +622,7 @@ void FlashcardReviewActivity::drawSuspendHint(int contentTop, int contentBottom,
 void FlashcardReviewActivity::renderAwaitingGrade(int contentTop, int contentBottom, int pageWidth) {
   // Back face viewed: same revealed card face (word shown, underlined in context).
   FlashcardCardFace::render(renderer, contentTop, contentBottom, pageWidth, card.word, card.excerpt, card.chapter,
-                            /*showWord=*/true);
+                            /*showWord=*/true, card.count);
   drawSuspendHint(contentTop, contentBottom);
 
   // Left = pass, Right = fail; Confirm re-flips. Suspended review swaps grading

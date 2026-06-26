@@ -88,6 +88,7 @@ class FlashcardDeck {
     std::string chapter;
     std::string excerpt;
     uint32_t version = 0;  // per-word Lamport version (sync); 0 for legacy lines
+    uint32_t count = 1;    // local lookup count (times re-enrolled); 1 for legacy lines
   };
 
   // Deck-wide review stats, computed in one streaming pass (no materialization).

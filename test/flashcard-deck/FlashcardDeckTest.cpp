@@ -161,6 +161,45 @@ TEST_F(FlashcardDeckTest, ReEnrollEmptyExcerptPreservesOriginal) {
   EXPECT_EQ(at(0).excerpt, "original sentence");
 }
 
+TEST_F(FlashcardDeckTest, LookupCountIncrementsOnReEnroll) {
+  FlashcardDeck::enroll(cachePath, "alpha", "first ctx");
+  EXPECT_EQ(at(0).count, 1u);  // brand new
+  FlashcardDeck::enroll(cachePath, "alpha", "second ctx");
+  EXPECT_EQ(at(0).count, 2u);                     // re-lookup bumps
+  FlashcardDeck::enroll(cachePath, "alpha", "");  // empty re-lookup still counts
+  EXPECT_EQ(at(0).count, 3u);
+  EXPECT_EQ(at(0).excerpt, "second ctx");  // empty excerpt preserved old, count still bumped
+}
+
+TEST_F(FlashcardDeckTest, LookupCountSurvivesGradeAndSuspend) {
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx");
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx2");  // count -> 2
+  FlashcardDeck::grade(cachePath, "alpha", /*correct=*/true, /*today=*/100);
+  EXPECT_EQ(at(0).count, 2u);  // schedule change preserves count
+  FlashcardDeck::suspend(cachePath, "alpha");
+  EXPECT_EQ(at(0).count, 2u);
+}
+
+TEST_F(FlashcardDeckTest, LookupCountIsLocalNotSynced) {
+  // A re-enrolled (count=3) card uploaded and merged onto a fresh peer arrives at
+  // count 1: the lookup tally is per-device, never on the wire.
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx", "Ch1");
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx", "Ch1");
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx", "Ch1");
+  EXPECT_EQ(at(0).count, 3u);
+
+  uint8_t blob[2048];
+  FlashcardDeck::BlobStats st;
+  const size_t n = FlashcardDeck::serializeForUpload(cachePath, blob, sizeof(blob), &st);
+  ASSERT_GT(n, 0u);
+
+  const std::string peer = makeDevice();
+  FlashcardDeck::mergeBlob(peer, blob, n, nullptr);
+  FlashcardDeck::Entry e;
+  ASSERT_TRUE(findCard(peer, "alpha", e));
+  EXPECT_EQ(e.count, 1u);  // peer starts its own tally
+}
+
 TEST_F(FlashcardDeckTest, ExcerptWithEmbeddedPipesRoundTrips) {
   FlashcardDeck::enroll(cachePath, "alpha", "ctx|with|pipes|inside");
   EXPECT_EQ(at(0).excerpt, "ctx|with|pipes|inside");

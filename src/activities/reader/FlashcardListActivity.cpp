@@ -253,7 +253,13 @@ void FlashcardListActivity::renderList() {
       [this, todayLocal](int i) {
         const auto* e = entryAt(i);
         if (!e) return std::string();
-        return std::string(glyphFor(*e, todayLocal)) + " " + e->word;
+        std::string row = std::string(glyphFor(*e, todayLocal)) + " " + e->word;
+        if (e->count > 1) {
+          char tag[12];
+          snprintf(tag, sizeof(tag), "  x%lu", static_cast<unsigned long>(e->count));
+          row += tag;
+        }
+        return row;
       },
       nullptr, nullptr, nullptr, false);
 
@@ -287,7 +293,7 @@ void FlashcardListActivity::renderDetail() {
 
   // Shared card face: bold word + excerpt (word underlined in context) + chapter.
   FlashcardCardFace::render(renderer, contentTop, contentBottom, pageWidth, detail.word, detail.excerpt, detail.chapter,
-                            /*showWord=*/true);
+                            /*showWord=*/true, detail.count);
 
   // Leitner status line, in the gap between the word header and the excerpt.
   char statusBuf[64];

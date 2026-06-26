@@ -69,13 +69,14 @@ struct Parsed {
   const char* chapter;
   int chapterLen;
   uint32_t version;
+  uint32_t count;  // local lookup count; defaults to 1 when the field is absent (legacy)
   const char* excerpt;
   int excerptLen;
 };
 
 Parsed parseLine(const char* line, int len) {
-  Parsed r{len, 0, 0, line + len, 0, 0, line + len, 0};
-  int p0 = -1, p1 = -1, p2 = -1, p3 = -1, p4 = -1;
+  Parsed r{len, 0, 0, line + len, 0, 0, 1, line + len, 0};
+  int p0 = -1, p1 = -1, p2 = -1, p3 = -1, p4 = -1, p5 = -1;
   for (int i = 0; i < len; i++) {
     if (line[i] != '|') continue;
     if (p0 < 0)
@@ -86,8 +87,10 @@ Parsed parseLine(const char* line, int len) {
       p2 = i;
     else if (p3 < 0)
       p3 = i;
-    else {
+    else if (p4 < 0)
       p4 = i;
+    else {
+      p5 = i;
       break;
     }
   }
@@ -104,13 +107,21 @@ Parsed parseLine(const char* line, int len) {
   r.chapter = line + p2 + 1;
   r.chapterLen = p3 - (p2 + 1);
   if (p4 >= 0 && isAllDigits(line + p3 + 1, p4 - (p3 + 1))) {
-    // New 6-field line: chapter|version|excerpt.
+    // chapter|version|... : version present.
     r.version = parseU32(line + p3 + 1, p4 - (p3 + 1));
-    r.excerpt = line + p4 + 1;
-    r.excerptLen = len - (p4 + 1);
+    if (p5 >= 0 && isAllDigits(line + p4 + 1, p5 - (p4 + 1))) {
+      // New 7-field line: chapter|version|count|excerpt.
+      r.count = parseU32(line + p4 + 1, p5 - (p4 + 1));
+      r.excerpt = line + p5 + 1;
+      r.excerptLen = len - (p5 + 1);
+    } else {
+      // 6-field line: chapter|version|excerpt (count absent -> default 1).
+      r.excerpt = line + p4 + 1;
+      r.excerptLen = len - (p4 + 1);
+    }
   } else {
     // Legacy 5-field line (or excerpt with a leading non-numeric token): the
-    // remainder after chapter is the excerpt, version stays 0.
+    // remainder after chapter is the excerpt, version stays 0 and count 1.
     r.excerpt = line + p3 + 1;
     r.excerptLen = len - (p3 + 1);
   }
@@ -126,16 +137,18 @@ bool writeRaw(HalFile& out, const char* p, int n) {
   return out.write(p, static_cast<size_t>(n)) == static_cast<size_t>(n);
 }
 
-// Write a full "word|box|dueDay|chapter|version|excerpt\n" card line.
+// Write a full "word|box|dueDay|chapter|version|count|excerpt\n" card line.
 bool writeCard(HalFile& out, const char* word, size_t wordLen, uint8_t box, uint32_t dueDay, const char* chapter,
-               int chapterLen, uint32_t version, const char* excerpt, int excerptLen) {
+               int chapterLen, uint32_t version, uint32_t count, const char* excerpt, int excerptLen) {
   char mid[24];
   const int m = snprintf(mid, sizeof(mid), "|%u|%lu|", static_cast<unsigned>(box), static_cast<unsigned long>(dueDay));
   bool ok = writeRaw(out, word, static_cast<int>(wordLen)) && writeRaw(out, mid, m);
   if (ok && chapterLen > 0) ok = writeRaw(out, chapter, chapterLen);
-  // |version| (delimits chapter from the remainder excerpt).
-  char vtail[16];
-  const int v = snprintf(vtail, sizeof(vtail), "|%lu|", static_cast<unsigned long>(version));
+  // |version|count| (delimits chapter from the remainder excerpt). count is local-only
+  // (lookup tally), never sent on the sync wire — buildCardPayload omits it.
+  char vtail[24];
+  const int v = snprintf(vtail, sizeof(vtail), "|%lu|%lu|", static_cast<unsigned long>(version),
+                         static_cast<unsigned long>(count));
   if (ok) ok = writeRaw(out, vtail, v);
   if (ok && excerptLen > 0) ok = writeRaw(out, excerpt, excerptLen);
   const char nl = '\n';
@@ -166,6 +179,7 @@ struct CountCtx {
   int savedExcerptLen;
   char savedChapter[FlashcardDeck::CHAPTER_MAX];  // chapter of the matched dropWord line
   int savedChapterLen;
+  uint32_t savedCount;  // lookup count of the matched dropWord line (for the re-enroll bump)
 };
 
 bool countLine(void* ctx, const char* line, int len) {
@@ -177,6 +191,7 @@ bool countLine(void* ctx, const char* line, int len) {
     if (c->savedExcerptLen > 0) memcpy(c->savedExcerpt, p.excerpt, static_cast<size_t>(c->savedExcerptLen));
     c->savedChapterLen = std::min(p.chapterLen, FlashcardDeck::CHAPTER_MAX);
     if (c->savedChapterLen > 0) memcpy(c->savedChapter, p.chapter, static_cast<size_t>(c->savedChapterLen));
+    c->savedCount = p.count;
   } else {
     c->count++;
   }
@@ -303,7 +318,7 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
 
   // Pass 1: count survivors and, if the word is already present, capture its
   // existing excerpt + chapter so we can preserve them when the new ones are empty.
-  CountCtx cc{&word, 0, false, {}, 0, {}, 0};
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0};
   forEachLine(path, countLine, &cc);
 
   char newExcerpt[EXCERPT_MAX];
@@ -329,6 +344,10 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
   const uint32_t version = nextVersion(cachePath);
   clearTombstone(cachePath, word);
 
+  // Lookup count: a brand-new card is 1; a re-enroll bumps the saved count. Local
+  // only -- never synced (a received card starts at 1 on the peer).
+  const uint32_t newCount = cc.dupSeen ? cc.savedCount + 1 : 1;
+
   // Fast path: brand-new word -> a single append. Prior cards are untouched.
   if (!cc.dupSeen) {
     HalFile out;
@@ -336,7 +355,8 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
       LOG_ERR("FCD", "Failed to open for append: %s", path.c_str());
       return false;
     }
-    const bool ok = writeCard(out, word.c_str(), word.size(), 0, 0, useChapter, chapLen, version, useExcerpt, newLen);
+    const bool ok =
+        writeCard(out, word.c_str(), word.size(), 0, 0, useChapter, chapLen, version, newCount, useExcerpt, newLen);
     out.close();
     if (!ok) LOG_ERR("FCD", "Enroll append failed: %s", path.c_str());
     return ok;
@@ -351,7 +371,8 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
     const char* excerpt;
     int excerptLen;
     uint32_t version;
-  } ec{&word, useChapter, chapLen, useExcerpt, newLen, version};
+    uint32_t count;
+  } ec{&word, useChapter, chapLen, useExcerpt, newLen, version, newCount};
   return rewriteDeck(
       cachePath, &ec,
       [](void* ctx, HalFile& out, const char* line, int len) {
@@ -361,8 +382,8 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
       },
       [](void* ctx, HalFile& out) {
         auto* c = static_cast<EnrollCtx*>(ctx);
-        return writeCard(out, c->word->c_str(), c->word->size(), 0, 0, c->chapter, c->chapLen, c->version, c->excerpt,
-                         c->excerptLen);
+        return writeCard(out, c->word->c_str(), c->word->size(), 0, 0, c->chapter, c->chapLen, c->version, c->count,
+                         c->excerpt, c->excerptLen);
       });
 }
 
@@ -371,7 +392,7 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
 // ---------------------------------------------------------------------------
 
 int FlashcardDeck::count(const std::string& cachePath) {
-  CountCtx cc{nullptr, 0, false, {}, 0, {}, 0};
+  CountCtx cc{nullptr, 0, false, {}, 0, {}, 0, 0};
   forEachLine(filePath(cachePath), countLine, &cc);
   return cc.count;
 }
@@ -409,7 +430,7 @@ int FlashcardDeck::loadWindow(const std::string& cachePath, int startNewest, int
   if (startNewest < 0 || n <= 0 || !out) return 0;
   const std::string path = filePath(cachePath);
 
-  CountCtx cc{nullptr, 0, false, {}, 0, {}, 0};
+  CountCtx cc{nullptr, 0, false, {}, 0, {}, 0, 0};
   if (!forEachLine(path, countLine, &cc) || cc.count == 0) return 0;
   const int total = cc.count;
   if (startNewest >= total) return 0;
@@ -437,6 +458,7 @@ int FlashcardDeck::loadWindow(const std::string& cachePath, int startNewest, int
         e.box = p.box;
         e.dueDay = p.dueDay;
         e.version = p.version;
+        e.count = p.count;  // kept even in wordsOnly mode so the list row can show "xN"
         if (c->wordsOnly) {
           // List view shows word + box glyph only; skip the two string allocs.
           e.chapter.clear();
@@ -459,7 +481,7 @@ bool FlashcardDeck::removeAt(const std::string& cachePath, int index) {
   if (index < 0) return false;
   const std::string path = filePath(cachePath);
 
-  CountCtx cc{nullptr, 0, false, {}, 0, {}, 0};
+  CountCtx cc{nullptr, 0, false, {}, 0, {}, 0, 0};
   if (!forEachLine(path, countLine, &cc)) return false;
   if (index >= cc.count) return false;
 
@@ -487,7 +509,7 @@ bool FlashcardDeck::remove(const std::string& cachePath, const std::string& word
   const std::string path = filePath(cachePath);
 
   // Scan first: skip the rewrite entirely if the word is absent.
-  CountCtx cc{&word, 0, false, {}, 0, {}, 0};
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0};
   if (!forEachLine(path, countLine, &cc) || !cc.dupSeen) return false;
 
   const bool ok =
@@ -510,7 +532,7 @@ bool FlashcardDeck::grade(const std::string& cachePath, const std::string& word,
   const std::string path = filePath(cachePath);
 
   // Scan first: skip the rewrite entirely if the word is absent.
-  CountCtx cc{&word, 0, false, {}, 0, {}, 0};
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0};
   if (!forEachLine(path, countLine, &cc) || !cc.dupSeen) return false;
 
   struct GradeCtx {
@@ -526,9 +548,9 @@ bool FlashcardDeck::grade(const std::string& cachePath, const std::string& word,
     uint8_t box = p.box;
     uint32_t dueDay = p.dueDay;
     applyGrade(box, dueDay, c->correct, c->today);
-    // Grading is a local schedule change -- preserve the wire version (no bump).
+    // Grading is a local schedule change -- preserve the wire version and lookup count.
     return writeCard(out, line, static_cast<size_t>(p.wordLen), box, dueDay, p.chapter, p.chapterLen, p.version,
-                     p.excerpt, p.excerptLen);
+                     p.count, p.excerpt, p.excerptLen);
   });
 }
 
@@ -550,7 +572,7 @@ bool FlashcardDeck::setBoxForWord(const std::string& cachePath, const std::strin
   const std::string path = filePath(cachePath);
 
   // Scan first: skip the rewrite entirely if the word is absent.
-  CountCtx cc{&word, 0, false, {}, 0, {}, 0};
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0};
   if (!forEachLine(path, countLine, &cc) || !cc.dupSeen) return false;
 
   // Force the matched row's box/dueDay, copying every other line verbatim.
@@ -564,9 +586,9 @@ bool FlashcardDeck::setBoxForWord(const std::string& cachePath, const std::strin
     const Parsed p = parseLine(line, len);
     if (static_cast<size_t>(p.wordLen) != c->word->size() || memcmp(line, c->word->c_str(), p.wordLen) != 0)
       return writeRaw(out, line, len) && out.write("\n", 1) == 1;  // copy verbatim
-    // suspend/unsuspend are local schedule changes -- preserve the version.
+    // suspend/unsuspend are local schedule changes -- preserve the version and count.
     return writeCard(out, line, static_cast<size_t>(p.wordLen), c->box, c->dueDay, p.chapter, p.chapterLen, p.version,
-                     p.excerpt, p.excerptLen);
+                     p.count, p.excerpt, p.excerptLen);
   });
 }
 
@@ -954,7 +976,7 @@ void FlashcardDeck::clearTombstone(const std::string& cachePath, const std::stri
 // --- Merge primitives (no version bump; the wire version is authoritative) --
 
 void FlashcardDeck::removeCardRow(const std::string& cachePath, const std::string& word) {
-  CountCtx cc{&word, 0, false, {}, 0, {}, 0};
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0};
   if (!forEachLine(filePath(cachePath), countLine, &cc) || !cc.dupSeen) return;
   rewriteDeck(cachePath, const_cast<std::string*>(&word), [](void* ctx, HalFile& out, const char* line, int len) {
     const auto* w = static_cast<const std::string*>(ctx);
@@ -972,7 +994,8 @@ bool FlashcardDeck::appendRemoteCard(const std::string& cachePath, const std::st
     LOG_ERR("FCD", "Failed to append remote card: %s", path.c_str());
     return false;
   }
-  const bool ok = writeCard(out, word.c_str(), word.size(), 0, 0, chapter, chapterLen, version, excerpt, excerptLen);
+  // Remote-received card: local lookup count starts at 1 (count is not synced).
+  const bool ok = writeCard(out, word.c_str(), word.size(), 0, 0, chapter, chapterLen, version, 1, excerpt, excerptLen);
   out.close();
   return ok;
 }
@@ -992,9 +1015,10 @@ bool FlashcardDeck::updateRemoteCard(const std::string& cachePath, const std::st
     const Parsed p = parseLine(line, len);
     if (static_cast<size_t>(p.wordLen) != c->word->size() || memcmp(line, c->word->c_str(), p.wordLen) != 0)
       return writeRaw(out, line, len) && out.write("\n", 1) == 1;  // copy verbatim
-    // Field-level: keep the local schedule (box/dueDay), take the wire content.
+    // Field-level: keep the local schedule (box/dueDay) and local lookup count, take
+    // the wire content (chapter/version/excerpt).
     return writeCard(out, line, static_cast<size_t>(p.wordLen), p.box, p.dueDay, c->chapter, c->chapterLen, c->version,
-                     c->excerpt, c->excerptLen);
+                     p.count, c->excerpt, c->excerptLen);
   });
 }
 
