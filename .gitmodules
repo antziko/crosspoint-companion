@@ -1,4 +1,4 @@
-[submodule "open-x4-sdk"]
-	path = open-x4-sdk
-	url = https://github.com/antziko/community-sdk.git
-	branch = companion
+[submodule "freeink-sdk"]
+	path = freeink-sdk
+	url = https://github.com/Free-Ink/freeink-sdk.git
+	branch = main
