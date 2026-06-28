@@ -367,6 +367,15 @@ void EpubReaderActivity::onExit() {
       (currentSpineIndex != lastSavedSpine_ || static_cast<int>(section->currentPage) != lastSavedPage_)) {
     saveProgress(currentSpineIndex, section->currentPage, section->pageCount);
   }
+
+  // Leaving mid-footnote loses the in-RAM return stack on deep sleep; persist the
+  // pre-footnote position so the book reopens at the link origin, not the footnote.
+  // Runs after the flush above so it overrides the (footnote) current position.
+  if (footnoteDepth > 0 && epub) {
+    const SavedPosition& origin = savedPositions[0];
+    saveProgress(origin.spineIndex, origin.pageNumber, 0);
+  }
+
   section.reset();
   if (pendingReadFolderMove && epub) {
     const std::string srcPath = epub->getPath();
