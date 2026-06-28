@@ -21,7 +21,7 @@ Welcome to the **CrossPoint** firmware. This guide outlines the hardware control
       - [3.6.3 Controls](#363-controls)
       - [3.6.4 System](#364-system)
       - [3.6.5 OPDS Servers (Multiple Libraries)](#365-opds-servers-multiple-libraries)
-      - [3.6.6 Web Settings (WiFi + OPDS)](#366-web-settings-wifi--opds)
+      - [3.6.6 Web Settings (Wi-Fi + OPDS)](#366-web-settings-wi-fi--opds)
       - [3.6.7 KOReader Sync Quick Setup](#367-koreader-sync-quick-setup)
     - [3.7 Sleep Screen](#37-sleep-screen)
     - [3.8 Custom Fonts (SD Card)](#38-custom-fonts-sd-card)
@@ -103,18 +103,18 @@ The Recent Books screen lists the most recently opened books in a chronological 
 
 ### 3.5 File Transfer Screen
 
-The File Transfer screen allows you to upload new e-books to the device. When you enter the screen, you'll be prompted with a WiFi selection dialog and then your X4 will start hosting a web server.
+The File Transfer screen allows you to upload and manage files on the device. When you enter the screen, choose **Join a Network**, **Calibre Wireless**, or **Create Hotspot**. The reader then starts the web server for the selected mode.
 
-See the [webserver docs](./docs/webserver.md) for more information on how to connect to the web server and upload files.
+See the [web server docs](./docs/webserver.md) for more information on how to connect to the web server and upload files.
 
 The web interface also supports **WebDAV**, allowing you to mount the device as a network drive and manage files directly from your computer's file manager.
 
-Download links for files already on the device are available in the web interface, so you can retrieve books or screenshots over WiFi without connecting a cable.
+Download links for files already on the device are available in the web interface, so you can retrieve books or screenshots over Wi-Fi without connecting a cable.
 
-A **WiFi signal strength indicator** (dBm) is displayed on-screen during web server sessions.
+A **Wi-Fi signal strength indicator** (dBm) is displayed on-screen during joined-network web server sessions.
 
 > [!TIP]
-> Advanced users can also manage files programmatically or via the command line using `curl`. See the [webserver docs](./docs/webserver.md) for details.
+> Advanced users can also manage files programmatically or via the command line using `curl`. See the [web server docs](./docs/webserver.md) for details.
 > [!TIP]
 > If your EPUBs have compatibility issues, you can run the built-in **EPUB Optimizer** directly from the device to clean up and reprocess books for better rendering.
 
@@ -122,19 +122,43 @@ A **WiFi signal strength indicator** (dBm) is displayed on-screen during web ser
 
 CrossPoint supports sending books from Calibre using the CrossPoint Reader device plugin.
 
-1. Install the plugin in Calibre:
-   
-   - Head to https://github.com/crosspoint-reader/calibre-plugins/releases to download the latest version of the crosspoint_reader plugin.
-   
-   - Download the zip file.
-   
-   - Open Calibre → Preferences → Plugins → Load plugin from file → Select the zip file.
+#### Installing the Plugin in Calibre
 
-2. On the device: File Transfer → Connect to Calibre → Join a network.
+If you don't already have the plugin installed:
 
-3. Make sure your computer is on the same WiFi network.
+1. Head to https://github.com/crosspoint-reader/calibre-plugins/releases to download the latest version of the crosspoint_reader plugin.
+2. Download the zip file.
+3. Open Calibre → Preferences → Plugins → Load plugin from file → Select the zip file.
+4. Restart Calibre.
 
-4. In Calibre, click "Send to device" to transfer books.
+#### Configuring the CrossPoint Plugin in Calibre
+1. In Calibre select Preferences.
+2. In the Preferences dialog select Plugins.
+3. In Plugins search for "crosspoint".
+4. Click on "Customize plugin".
+5. Update the value for "Host" to match the IP for your device.
+6. Leave the other settings as they are.
+7. [optional] Modify the "Upload path" to point to a subfolder other than the root "/" folder. Enter this as a path relative to the root folder. Example: `/mybooks`
+8. Restart Calibre.
+
+<img width="420" height="385" alt="Image" src="https://github.com/user-attachments/assets/01fc7e33-a9a7-48ba-9e26-2e68d1f9daec" />
+
+#### Uploading Books
+
+To upload a book using the CrossPoint plugin in Calibre:
+
+1. On the device: File Transfer -> Calibre Wireless, then join a network.
+2. Select one or more books.
+3. Right-click on that selection.
+4. Select "Send to Device" > "Send to main memory"
+
+The CrossPoint plugin will connect to your device, create a folder for the book's author in the root folder (or the folder you configured for the plugin), then copy the book into that folder.
+
+<img width="783" height="310" alt="Image" src="https://github.com/user-attachments/assets/741b0909-2e1d-4f16-8af0-2c43fbda5ce6" />
+
+#### Removing a Book
+
+Books cannot be removed from your device through Calibre. Use the web interface instead.
 
 ### 3.6 Settings
 
@@ -241,19 +265,25 @@ The Settings screen allows you to configure the device's behavior. There are a f
   
   - "Chapter Skip" (default) - Long-pressing skips to next/previous chapter
   - "Page Scroll" - Long-pressing scrolls a page up/down
+- **Long-press Menu**: Selects the function bound to holding the menu button (Confirm) while reading an EPUB. **Cycles through the available functions** each time the setting is selected — additional functions may be added in future releases, so this is not a binary on/off toggle. A short press of Confirm always opens the reader menu as normal:
+  - "Bookmark" (default) - Hold Confirm (~0.4 second) to drop a bookmark at the current page.
+  - "KOSync" - Hold Confirm (~1 second) to launch KOReader sync directly.
+  - "Disabled" - Long-press is ignored; only short-press opens the reader menu.
 
 - **Short Power Button Click**: Controls the effect of a short click of the power button:
   
   - "Ignore" (default) - Require a long press to turn off the device
   - "Sleep" - A short press puts the device into sleep mode
   - "Page Turn" - A short press in reading mode turns to the next page; a long press turns the device off
+  - "Footnotes" - A short press in reading mode opens the footnotes submenu; if only one footnote is present on the page, the referenced page is opened directly. The short press on the power button can be used to select the footnote in the submenu, and to go back to the original page after finish reading the footnote (like the back button).
   - "Refresh" - A short press triggers a manual full-screen refresh, useful for clearing ghosting
+- **Quick-return from footnotes**: Toggles on and off the quick return functionality from the footnotes. When the functionality it's active, a short press of the power button will act as the back button from the footnotes page.
 
 #### 3.6.4 System
 
 - **Time to Sleep**: Set the duration of inactivity before the device automatically goes to sleep; options are 1, 3, 5, 10 (default), 15 or 30 minutes.
 
-- **WiFi Networks**: Connect to WiFi networks for file transfers and firmware updates.
+- **Wi-Fi Networks**: Connect to Wi-Fi networks for file transfers and firmware updates.
 
 - **KOReader Sync**: Options for setting up KOReader for syncing book progress.
 
@@ -261,9 +291,9 @@ The Settings screen allows you to configure the device's behavior. There are a f
 
 - **Clear Reading Cache**: Clear the internal SD card cache.
 
-- **Check for updates**: Check for Crosspoint firmware updates over WiFi. Firmware can also be updated without a USB connection by placing a `firmware.bin` file on the SD card.
+- **Check for updates**: Check for Crosspoint firmware updates over Wi-Fi. Firmware can also be updated without a USB connection by placing a `firmware.bin` file on the SD card.
 
-- **Language**: Set the UI language. CrossPoint supports 22 languages including English, Spanish, French, German, Czech, Portuguese, Russian, Swedish, Turkish, Danish, Finnish, Polish, Dutch, Belarusian, Italian, Ukrainian, Romanian, Catalan, Vietnamese, Kazakh, Slovenian, and more.
+- **Language**: Set the UI language. CrossPoint supports 24 languages: English, Spanish, French, German, Czech, Brazilian Portuguese, Russian, Swedish, Romanian, Catalan, Ukrainian, Belarusian, Italian, Polish, Finnish, Danish, Dutch, Turkish, Kazakh, Hungarian, Lithuanian, Slovenian, Valencian, and Hebrew.
 
 - **Manage Fonts**: Browse, download, and manage custom font families installed from the SD card. See [Custom Fonts (SD Card)](#38-custom-fonts-sd-card) for more information.
 
@@ -296,22 +326,22 @@ You can also manage OPDS servers from the web interface while in File Transfer m
 2. Open `http://<device-ip>/settings`.
 3. Use the **OPDS Servers** card to add, edit, or delete entries.
 
-For web-based WiFi network management, see [Web Settings (WiFi + OPDS)](#366-web-settings-wifi--opds).
+For web-based Wi-Fi network management, see [Web Settings (Wi-Fi + OPDS)](#366-web-settings-wi-fi--opds).
 
-#### 3.6.6 Web Settings (WiFi + OPDS)
+#### 3.6.6 Web Settings (Wi-Fi + OPDS)
 
-While in **File Transfer** mode, the web settings page includes management cards for both **WiFi Networks** and **OPDS Servers**.
+While in **File Transfer** mode, the web settings page includes management cards for both **Wi-Fi Networks** and **OPDS Servers**.
 
-1. On device: open **File Transfer** and connect to WiFi.
+1. On device: open **File Transfer** and connect through **Join a Network** or **Create Hotspot**.
 2. In a browser, open `http://<device-ip>/settings` or `http://crosspoint.local`.
-3. In **WiFi Networks**, add, edit, or delete saved network entries (SSID + optional password).
+3. In **Wi-Fi Networks**, add, edit, or delete saved network entries (SSID + optional password).
 4. In **OPDS Servers**, add, edit, or delete OPDS catalogs.
 
 Behavior notes:
 
 - Passwords are never shown back in the web UI after saving.
 - Leaving Password blank while editing keeps the existing saved password unchanged.
-- The web UI can save hidden-network SSIDs, but connecting to hidden networks still depends on device-side WiFi connection flow.
+- The web UI can save hidden-network SSIDs, but connecting to hidden networks still depends on the device-side Wi-Fi connection flow.
 
 #### 3.6.7 KOReader Sync Quick Setup
 
@@ -477,7 +507,7 @@ CrossPoint supports loading additional fonts from the SD card, extending beyond 
 
 There are three ways to install fonts:
 
-1. **Download from device (recommended):** Go to **Settings → System → Manage Fonts**, browse the available font families, and select one to download over WiFi.
+1. **Download from device (recommended):** Go to **Settings -> System -> Manage Fonts**, browse the available font families, and select one to download over Wi-Fi.
 2. **Upload via web interface:** While in **File Transfer** mode, open the web UI in a browser and navigate to the **Fonts** tab to upload `.cpfont` files.
 3. **Manual SD card copy:** Download font files from the [crosspoint-fonts repository](https://github.com/crosspoint-reader/crosspoint-fonts) and copy them to `/.fonts/` (preferred) or `/fonts/` on your SD card.
 
@@ -521,11 +551,14 @@ On the **Xteink X3**, the gyroscope can be used to turn pages by tilting the dev
 
 When reading an EPUB that contains footnotes, you can navigate to the footnote text by selecting the footnote reference in the book. From the footnote, you can return to your original reading position.
 
+If the device goes to sleep or you close the book while viewing a footnote, the book reopens to your original reading position, not the footnote.
+
 ### System Navigation
 
 * **Return to Home:** Press the **Back** button to close the book and return to the **[Home](#31-home-screen)** screen.
 * **Return to Browse Files:** Press and hold the **Back** button to close the book and return to the **[Browse Files](#33-browse-files-screen)** screen.
 * **Reader Menu:** Press **Confirm** to open the **[Reader Menu](#5-reader-menu)**, which includes chapter navigation, reading options, and more.
+* **Long-press Confirm (configurable):** Holding **Confirm** runs the function chosen by the **Long-press Menu** setting in **[Controls Settings](#363-controls)** — "Bookmark" (default) drops a bookmark, "KOSync" launches KOReader Sync, "Disabled" does nothing. A short press always opens the Reader Menu.
 
 ### Supported Languages
 
@@ -533,9 +566,9 @@ CrossPoint renders text using the following Unicode character blocks, enabling s
 
 * **Latin Script (Basic, Supplement, Extended-A/B):** Covers English, German, French, Spanish, Portuguese, Italian, Dutch, Swedish, Norwegian, Danish, Finnish, Polish, Czech, Hungarian, Romanian, Slovak, Slovenian, Turkish, Catalan, and others.
 * **Cyrillic Script (Standard and Extended):** Covers Russian, Ukrainian, Belarusian, Bulgarian, Serbian, Macedonian, Kazakh, Kyrgyz, Mongolian, and others.
-* **Vietnamese:** Supported via extended Latin glyph coverage in the built-in fonts.
+* **Vietnamese:** Supported via extended Latin glyph coverage in the built-in reader fonts.
 
-What is not supported with built-in fonts: Chinese, Japanese, Korean, Hebrew, Arabic, Greek, and Farsi. However, **CJK and other extended scripts can be enabled by installing custom SD card fonts** — see [Custom Fonts (SD Card)](#38-custom-fonts-sd-card).
+What is not supported with built-in reader fonts: Chinese, Japanese, Korean, Arabic, Greek, Hebrew, and Farsi. However, **CJK, Hebrew, Greek, and other extended scripts can be enabled by installing custom SD card fonts** — see [Custom Fonts (SD Card)](#38-custom-fonts-sd-card).
 
 ---
 
@@ -572,9 +605,9 @@ Accessible by selecting **Chapters** from the Reader Menu.
 
 Bookmarks can be created to quickly save and restore your place in a book.
 
-To create a bookmark, hold **Confirm** for 1 second while inside a book. A popup will appear letting you know a bookmark was created. The popup message will automatically disappear in a couple of seconds.
+To create a bookmark, hold **Confirm** for about half a second while inside a book. A popup will appear letting you know a bookmark was created. The popup message will automatically disappear in a couple of seconds.
 
-To open bookmarks, press **Confirm** while inside a book. Then navigate to the **Bookmarks** menu. Bookmarks can be opened by navigating to them and pressing **Confirm**, which will redirect you to that place in the book. You can delete bookmarks by holding **Confirm** for 1 second, and then pressing **Confirm** again to confirm deletion, or **Back** to cancel.
+To open bookmarks, press **Confirm** while inside a book. Then navigate to the **Bookmarks** menu. Bookmarks can be opened by navigating to them and pressing **Confirm**, which will redirect you to that place in the book. You can delete bookmarks by holding **Confirm** for about 0.7 seconds, and then pressing **Confirm** again to confirm deletion, or **Back** to cancel.
 
 Bookmarks are stored in the `.crosspoint/bookmarks` folder in the JSON format.
 
@@ -638,4 +671,4 @@ Press **Ctrl-C** or close the graph window to exit.
 
 If the device is stuck in a bootloop, press and release the Reset button. Then, press and hold on to the configured Back button and the Power Button to boot to the Home Screen.
 
-There can be issues with broken cache or config. In this case, delete the `.crosspoint` directory on your SD card (or consider deleting only `settings.bin`, `state.bin`, or `epub_*` cache directories in the `.crosspoint/` folder).
+There can be issues with broken cache or config. In this case, delete the `.crosspoint` directory on your SD card (or consider deleting only `settings.json`, `state.json`, or `epub_*` cache directories in the `.crosspoint/` folder).

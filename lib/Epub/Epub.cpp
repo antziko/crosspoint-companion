@@ -7,6 +7,7 @@
 #include <SdDebugLog.h>
 #include <esp_heap_caps.h>
 #include <PngToBmpConverter.h>
+#include <Utf8.h>
 #include <ZipFile.h>
 
 #include <set>
@@ -77,8 +78,9 @@ bool Epub::parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata, const 
     return false;
   }
 
-  // Grab data from opfParser into epub
-  bookMetadata.title = opfParser.title;
+  // Grab data from opfParser into epub. Normalize titles to NFC so NFD (combining
+  // mark) text renders correctly — the device fonts have no mark positioning.
+  bookMetadata.title = utf8ComposeNfc(opfParser.title);
   bookMetadata.author = opfParser.author;
   bookMetadata.language = opfParser.language;
   bookMetadata.coverItemHref = opfParser.coverItemHref;
@@ -122,7 +124,7 @@ bool Epub::parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata, const 
       }
 
       if (!imageRef.empty()) {
-        bookMetadata.coverItemHref = FsHelpers::normalisePath(coverPageBase + imageRef);
+        bookMetadata.coverItemHref = FsHelpers::normalisePath(FsHelpers::decodeUriEscapes(coverPageBase + imageRef));
         LOG_DBG("EBP", "Found cover image from guide: %s", bookMetadata.coverItemHref.c_str());
       }
     }
@@ -930,10 +932,10 @@ float Epub::calculateProgress(const int currentSpineIndex, const float currentSp
 int Epub::resolveHrefToSpineIndex(const std::string& href) const {
   if (!bookMetadataCache || !bookMetadataCache->isLoaded()) return -1;
 
-  // Extract filename (remove #anchor)
-  std::string target = href;
-  size_t hashPos = target.find('#');
-  if (hashPos != std::string::npos) target = target.substr(0, hashPos);
+  // Split before decoding so escaped '#' characters in filenames stay part of the path.
+  const size_t hashPos = href.find('#');
+  const std::string rawTarget = hashPos != std::string::npos ? href.substr(0, hashPos) : href;
+  const std::string target = FsHelpers::normalisePath(FsHelpers::decodeUriEscapes(rawTarget));
 
   // Same-file reference (anchor-only)
   if (target.empty()) return -1;

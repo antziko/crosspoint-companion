@@ -11,6 +11,8 @@
 #include "parsers/ChapterHtmlSlimParser.h"
 
 namespace {
+// Words are NFC-composed at layout time (ParsedText.cpp utf8ComposeNfc),
+// superseding upstream's v27 NFC bump.
 constexpr uint8_t SECTION_FILE_VERSION = 32;  // 32: cap figure image margins at 50px
 constexpr uint32_t HEADER_SIZE = sizeof(uint8_t) + sizeof(int) + sizeof(float) + sizeof(bool) + sizeof(uint8_t) +
                                  sizeof(uint16_t) + sizeof(uint16_t) + sizeof(uint16_t) + sizeof(bool) + sizeof(bool) +

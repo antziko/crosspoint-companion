@@ -920,8 +920,8 @@ rm -rf /path/to/sd/.crosspoint/epub_<hash>/sections/
 **Source**: `lib/Epub/Epub/Section.cpp`, `lib/Epub/Epub/BookMetadataCache.cpp`
 
 **Current Versions** (source of truth is the code constants, not docs):
-- `book.bin`: **Version 6** — `BOOK_CACHE_VERSION` in `lib/Epub/Epub/BookMetadataCache.cpp`
-- `section.bin`: **Version 25** — `SECTION_FILE_VERSION` in `lib/Epub/Epub/Section.cpp`
+- `book.bin`: **Version 8** — `BOOK_CACHE_VERSION` in `lib/Epub/Epub/BookMetadataCache.cpp`
+- `section.bin`: **Version 32** — `SECTION_FILE_VERSION` in `lib/Epub/Epub/Section.cpp`
 
 Note: `docs/file-formats.md` may lag the code; trust the constants above.
 
@@ -933,7 +933,7 @@ Note: `docs/file-formats.md` may lag the code; trust the constants above.
 **Example** (incrementing section format version):
 ```cpp
 // lib/Epub/Epub/Section.cpp
-static constexpr uint8_t SECTION_FILE_VERSION = 25;  // Was 24, now 25
+static constexpr uint8_t SECTION_FILE_VERSION = 26;  // Was 25, now 26
 
 // Add new field to structure
 struct PageLine {

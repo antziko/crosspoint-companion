@@ -7,6 +7,8 @@
 
 namespace FsHelpers {
 
+std::string decodeUriEscapes(const std::string& path);
+
 std::string normalisePath(const std::string& path);
 
 // Natural, case-insensitive ordering with directories ("name/") first. Exposed so
