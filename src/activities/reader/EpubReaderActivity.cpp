@@ -2061,6 +2061,18 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   // out to near-white. So gate this on grayImages, not on text AA.
   bool imagePageWithAA = grayImages;
 
+  // Grayscale-pass content selector (perf; upstream #2393's Page::renderImages()).
+  // Antialiased: text contributes grey, so render the whole page each strip.
+  // Sharp / images-only: text is already solid-black in the BW frame, so the
+  // grayscale strips only need the images — skip the redundant text render.
+  auto renderGrayscalePass = [&]() {
+    if (aaMode == CrossPointSettings::TEXT_AA_ANTIALIASED) {
+      page->render(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);
+    } else {
+      page->renderImages(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);
+    }
+  };
+
   // No automatic ghost-clear flash on image page turns — the power-button manual
   // refresh (HALF clear + re-render) is the ghost-clear tool when the user wants it.
 
@@ -2139,7 +2151,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
         const int rows = (gh - y < STRIP_ROWS) ? (gh - y) : STRIP_ROWS;
         renderer.beginStripTarget(scratch.get(), y, rows);
         renderer.clearScreen(0x00);
-        page->render(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);
+        renderGrayscalePass();
         renderer.endStripTarget();
         renderer.writeGrayscalePlaneStrip(true, scratch.get(), y, rows);
       }
@@ -2151,7 +2163,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
         const int rows = (gh - y < STRIP_ROWS) ? (gh - y) : STRIP_ROWS;
         renderer.beginStripTarget(scratch.get(), y, rows);
         renderer.clearScreen(0x00);
-        page->render(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);
+        renderGrayscalePass();
         renderer.endStripTarget();
         renderer.writeGrayscalePlaneStrip(false, scratch.get(), y, rows);
       }
@@ -2185,14 +2197,14 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
 
       renderer.clearScreen(0x00);
       renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
-      page->render(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);
+      renderGrayscalePass();
       renderer.copyGrayscaleLsbBuffers();
       const auto tGrayLsb = millis();
 
       // Render and copy to MSB buffer
       renderer.clearScreen(0x00);
       renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
-      page->render(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);
+      renderGrayscalePass();
       renderer.copyGrayscaleMsbBuffers();
       const auto tGrayMsb = millis();
 
