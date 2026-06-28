@@ -604,6 +604,30 @@ void EpubReaderActivity::loop() {
     return;
   }
 
+  // Short power-button press = quick footnote access (#1658), when the user has
+  // mapped the power button to FOOTNOTES. Down-press combo is excluded so the
+  // power+down gesture (handled elsewhere) isn't swallowed. In a footnote, the
+  // same press returns to the saved reading position.
+  if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::FOOTNOTES &&
+      mappedInput.wasReleased(MappedInputManager::Button::Power) &&
+      !mappedInput.wasReleased(MappedInputManager::Button::Down)) {
+    if (footnoteDepth > 0) {
+      restoreSavedPosition();
+    } else if (currentPageFootnotes.size() == 1) {
+      navigateToHref(currentPageFootnotes[0].href, true);
+    } else if (currentPageFootnotes.size() > 1) {
+      startActivityForResult(std::make_unique<EpubReaderFootnotesActivity>(renderer, mappedInput, currentPageFootnotes),
+                             [this](const ActivityResult& result) {
+                               if (!result.isCancelled) {
+                                 const auto& footnoteResult = std::get<FootnoteResult>(result.data);
+                                 navigateToHref(footnoteResult.href, true);
+                               }
+                               requestUpdate();
+                             });
+    }
+    return;
+  }
+
   const auto [prevTriggered, nextTriggered, fromTilt, fromSide] = ReaderUtils::detectPageTurn(mappedInput);
   if (!prevTriggered && !nextTriggered) {
     return;
