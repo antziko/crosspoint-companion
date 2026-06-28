@@ -461,10 +461,12 @@ class CrossPointSettings {
   ReaderOverride readerOverride;
 
   // Shared computation helpers used by both global and override code paths.
-  static int computeBuiltinFontId(uint8_t family, uint8_t size);
   static float computeLineCompression(uint8_t family, uint8_t lineSpacing, const char* sdFontName);
 
  public:
+  // Pure helper: built-in family + size enum -> fontId. Public so the font
+  // picker can resolve a preview fontId without mutating the active setting.
+  static int computeBuiltinFontId(uint8_t family, uint8_t size);
   float getReaderLineCompression() const;
   unsigned long getSleepTimeoutMs() const;
   int getRefreshFrequency() const;

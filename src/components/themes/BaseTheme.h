@@ -95,6 +95,11 @@ struct ThemeMetrics {
   int textFieldNormalThickness;
   int textFieldCursorThickness;
   int textFieldLineEndOffset;
+
+  // Font-selection live preview pane (#2349): inner padding and the share of the
+  // content area the pane occupies. previewHeightPercent == 0 disables the pane.
+  int previewPadding;
+  int previewHeightPercent;
 };
 
 enum UIIcon {
@@ -182,7 +187,9 @@ constexpr ThemeMetrics values = {.batteryWidth = 15,
                                  .textFieldHorizontalPadding = 6,
                                  .textFieldNormalThickness = 1,
                                  .textFieldCursorThickness = 3,
-                                 .textFieldLineEndOffset = 0};
+                                 .textFieldLineEndOffset = 0,
+                                 .previewPadding = 12,
+                                 .previewHeightPercent = 30};
 }
 
 class BaseTheme {
