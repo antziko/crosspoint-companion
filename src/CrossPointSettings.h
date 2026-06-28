@@ -138,17 +138,6 @@ class CrossPointSettings {
   // Short power button press actions
   enum SHORT_PWRBTN { IGNORE = 0, SLEEP = 1, PAGE_TURN = 2, FORCE_REFRESH = 3, FOOTNOTES = 4, SHORT_PWRBTN_COUNT };
 
-  // Long-press Confirm action while reading an EPUB. The setting cycles through these values.
-  // Persisted in settings.json by index: any new function (e.g. dictionary, bookmark) MUST use a
-  // value >= 2 and be appended at the END of the enumValues array in SettingsList.h, otherwise the
-  // stored indices shift and existing saves are silently misinterpreted.
-  enum LONG_PRESS_MENU_FUNCTION {
-    LP_MENU_KOSYNC = 0,
-    LP_MENU_DISABLED = 1,
-    LP_MENU_BOOKMARK = 2,
-    LONG_PRESS_MENU_FUNCTION_COUNT
-  };
-
   // Manual "Refresh Screen" (power-button FORCE_REFRESH) clear mode. Drives the
   // whole-panel ghost clear in main.cpp. FAST is grayscale-safe (X4 default);
   // HALF/FULL give a stronger ghost clear but firm the e-ink particles too hard
@@ -331,9 +320,6 @@ class CrossPointSettings {
   uint8_t longPressButtonBehavior = OFF;
   // Long-press behavior for SIDE page-turn buttons (PageBack/PageForward)
   uint8_t sideLongPressButtonBehavior = OFF;
-  // Long-press Confirm function in EPUB reader (cycles through LONG_PRESS_MENU_FUNCTION values).
-  // Defaults to Disabled so shortcut-based bookmark toggling remains opt-in.
-  uint8_t longPressMenuFunction = LP_MENU_DISABLED;
   // UI Theme
   uint8_t uiTheme = LYRA;
   // Sunlight fading compensation
