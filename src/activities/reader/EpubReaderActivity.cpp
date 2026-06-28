@@ -633,11 +633,23 @@ void EpubReaderActivity::loop() {
   }
 
   if (longPress && lpBehavior == SETTINGS.CHAPTER_SKIP) {
+    // Long-press back mid-chapter jumps to the chapter start first; only at the
+    // chapter start does it cross into the previous chapter.
+    if (!nextTriggered && section && section->currentPage > 0) {
+      section->currentPage = 0;
+      requestUpdate();
+      return;
+    }
+
     // We don't want to delete the section mid-render, so grab the semaphore
     {
       RenderLock lock(*this);
       nextPageNumber = 0;
-      currentSpineIndex = nextTriggered ? currentSpineIndex + 1 : currentSpineIndex - 1;
+      if (nextTriggered) {
+        currentSpineIndex++;
+      } else if (currentSpineIndex > 0) {
+        currentSpineIndex--;
+      }
       section.reset();
     }
     requestUpdate();
