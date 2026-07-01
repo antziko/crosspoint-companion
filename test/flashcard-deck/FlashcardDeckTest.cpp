@@ -701,6 +701,77 @@ TEST_F(FlashcardDeckTest, RollingCursorCoversLargeDeck) {
   EXPECT_EQ(FlashcardDeck::count(B), N);
 }
 
+// A new tombstone is pushed once as a delta delete, then only heals silently -- it is
+// NOT re-counted as a "new" delete every sync. This lets the on-screen "new:-N" tomb
+// count converge to 0 instead of perpetually re-broadcasting the whole tomb pile.
+TEST_F(FlashcardDeckTest, NewTombPushedOnceThenHealsSilently) {
+  const std::string B = makeDevice();
+  FlashcardDeck::enroll(cachePath, "cat", "x", "Ch1");
+  FlashcardDeck::enroll(cachePath, "dog", "y", "Ch1");
+  syncRound(cachePath, B);  // both cards to B; A's lastVer advances past the enrolls
+
+  FlashcardDeck::remove(cachePath, "cat");  // new tombstone, version > lastVer
+
+  std::vector<uint8_t> buf(4096);
+  FlashcardDeck::BlobStats st;
+  FlashcardDeck::serializeForUpload(cachePath, buf.data(), buf.size(), &st);
+  EXPECT_EQ(st.tombCount, 1);                     // counts as a NEW delete this once
+  EXPECT_EQ(st.tombRollCount, 0);                 // not yet healing
+  FlashcardDeck::commitUpload(cachePath, st, 1);  // lastVer catches up to the tomb
+
+  // Next serialize: the tomb is now OLD (version <= lastVer). It must not re-count as
+  // a new delete -- it only re-broadcasts via the rolling heal (hidden from "-N").
+  st = FlashcardDeck::BlobStats{};
+  FlashcardDeck::serializeForUpload(cachePath, buf.data(), buf.size(), &st);
+  EXPECT_EQ(st.tombCount, 0);      // converged: no "new" delete
+  EXPECT_GE(st.tombRollCount, 1);  // still healed in the background
+}
+
+// An OLD tombstone (already below the watermark) still reaches a brand-new peer via
+// the rolling tomb heal, so a late-joining device can't resurrect a deleted word.
+// Proven by the merge deleting the peer's own copy of the word.
+TEST_F(FlashcardDeckTest, OldTombHealsToFreshPeer) {
+  const std::string B = makeDevice();
+  FlashcardDeck::enroll(cachePath, "cat", "x", "Ch1");
+  FlashcardDeck::enroll(cachePath, "dog", "y", "Ch1");
+  syncRound(cachePath, B);
+  FlashcardDeck::remove(cachePath, "cat");
+  // Sync several times so the cat-tomb falls below A's watermark (becomes "old").
+  for (int i = 0; i < 3; i++) syncRound(cachePath, B);
+
+  // Fresh device C with its own (lower-version) copy of "cat". A's old tomb must still
+  // propagate and delete it.
+  const std::string C = makeDevice();
+  FlashcardDeck::enroll(C, "cat", "localcopy", "Ch");
+  int totalDeleted = 0;
+  for (int i = 0; i < 10; i++) {
+    int d = 0;
+    syncRound(cachePath, C, 4096, 1, &d);
+    totalDeleted += d;
+  }
+  EXPECT_GE(totalDeleted, 1);  // the old cat-tomb reached C and removed its card
+  FlashcardDeck::Entry e;
+  EXPECT_FALSE(findCard(C, "cat", e));  // not resurrected
+  EXPECT_TRUE(findCard(C, "dog", e));   // the live card also arrived
+}
+
+// A legacy 3-field watermark file (written before tombCursorIndex existed) loads
+// cleanly: the first three fields parse and the new field defaults to 0. No format
+// version bump -- the file is whitespace-delimited and forward/backward tolerant.
+TEST_F(FlashcardDeckTest, LegacyThreeFieldWatermarkLoadsTombCursorZero) {
+  const std::string path = cachePath + "/dictionary_flashcards.sync";
+  std::FILE* f = std::fopen(path.c_str(), "wb");
+  ASSERT_NE(f, nullptr);
+  std::fputs("7 3 2", f);  // lastVer cursorIndex lastDeviceCount, no 4th field
+  std::fclose(f);
+
+  const FlashcardDeck::SyncWatermark wm = FlashcardDeck::loadWatermark(cachePath);
+  EXPECT_EQ(wm.lastVer, 7u);
+  EXPECT_EQ(wm.cursorIndex, 3u);
+  EXPECT_EQ(wm.lastDeviceCount, 2u);
+  EXPECT_EQ(wm.tombCursorIndex, 0u);  // defaulted, not garbage
+}
+
 // Adaptive slice cap: floor when constrained, grows with heap, clamped under the
 // 64 KB GET aggregate regardless of inputs.
 TEST_F(FlashcardDeckTest, AdaptiveSliceCapSizing) {

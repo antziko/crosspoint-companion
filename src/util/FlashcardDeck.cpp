@@ -2,6 +2,7 @@
 
 #include <HalStorage.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -774,19 +775,23 @@ int buildCardPayload(char* buf, int cap, const char* line, const Parsed& p) {
 
 // Serialize accumulator shared by the tombstone / delta / rolling passes.
 struct FcUploadCtx {
-  uint8_t* out;
-  size_t used;
-  size_t cap;
-  uint32_t lastVer;  // delta filter: emit cards with version > lastVer as deltas
-  uint32_t maxVer;   // highest version emitted (advances the watermark)
-  int tombCount;
-  int histCount;  // phase-2 delta cards (version > lastVer): genuinely new/changed
-  int rollCount;  // phase-3 rolling-slice cards (version <= lastVer): re-broadcast heal
-  bool truncated;
-  int fileIdx;           // running deck index for the rolling passes
-  uint32_t cursorStart;  // rolling resume index (deck file index)
-  int nextCursor;        // index after the last rolling card emitted
-  int phase;             // rolling sub-pass: 1 = [cursorStart, N), 2 = [0, cursorStart)
+  uint8_t* out = nullptr;
+  size_t used = 0;
+  size_t cap = 0;
+  uint32_t lastVer = 0;   // delta filter: emit cards/tombs with version > lastVer as deltas
+  uint32_t maxVer = 0;    // highest version emitted (advances the watermark)
+  int tombCount = 0;      // phase-1 NEW tombstones (version > lastVer)
+  int histCount = 0;      // phase-2 delta cards (version > lastVer): genuinely new/changed
+  int rollCount = 0;      // phase-4 rolling-slice cards (version <= lastVer): re-broadcast heal
+  int tombRollCount = 0;  // phase-3 rolling-slice tombstones (version <= lastVer): re-broadcast heal
+  bool truncated = false;
+  int fileIdx = 0;               // running deck index for the card rolling passes
+  uint32_t cursorStart = 0;      // card rolling resume index (deck file index)
+  int nextCursor = 0;            // index after the last rolling card emitted
+  int tombFileIdx = 0;           // running tomb index for the tomb rolling passes
+  uint32_t tombCursorStart = 0;  // tomb rolling resume index (tomb file index)
+  int nextTombCursor = 0;        // index after the last rolling tomb emitted
+  int phase = 0;                 // rolling sub-pass: 1 = [cursorStart, N), 2 = [0, cursorStart)
 };
 
 // Append "tag<payload>\n" if it fits; set truncated + return false otherwise.
@@ -1027,13 +1032,14 @@ bool FlashcardDeck::updateRemoteCard(const std::string& cachePath, const std::st
 FlashcardDeck::SyncWatermark FlashcardDeck::loadWatermark(const std::string& cachePath) {
   SyncWatermark wm;
   HalFile f;
-  if (!Storage.openFileForRead("FCD", syncFilePath(cachePath), f)) return wm;  // unset -> {0,0,0}
-  uint32_t* field[3] = {&wm.lastVer, &wm.cursorIndex, &wm.lastDeviceCount};
+  if (!Storage.openFileForRead("FCD", syncFilePath(cachePath), f)) return wm;  // unset -> {0,0,0,0}
+  // 4th field (tombCursorIndex) is optional: legacy 3-field files leave it 0.
+  uint32_t* field[4] = {&wm.lastVer, &wm.cursorIndex, &wm.lastDeviceCount, &wm.tombCursorIndex};
   int fi = 0;
   char buf[16];
   int n = 0;
   bool inNum = false;
-  while (f.available() && fi < 3) {
+  while (f.available() && fi < 4) {
     const int b = f.read();
     if (b >= '0' && b <= '9') {
       if (n < 15) buf[n++] = static_cast<char>(b);
@@ -1044,7 +1050,7 @@ FlashcardDeck::SyncWatermark FlashcardDeck::loadWatermark(const std::string& cac
       inNum = false;
     }
   }
-  if (inNum && fi < 3) *field[fi] = parseU32(buf, n);
+  if (inNum && fi < 4) *field[fi] = parseU32(buf, n);
   return wm;
 }
 
@@ -1052,11 +1058,15 @@ void FlashcardDeck::storeWatermark(const std::string& cachePath, const SyncWater
   HalFile f;
   if (!Storage.openFileForWrite("FCD", syncFilePath(cachePath), f)) {
     LOG_ERR("FCD", "Failed to write sync watermark: %s", syncFilePath(cachePath).c_str());
+    // Serial is unreachable on a USB-locked X3; mirror to SD so a stuck watermark
+    // (which keeps re-uploading the same "new:+N" cards) is diagnosable from the card.
+    SdDebugLog::log("FCD", "WATERMARK write FAILED: %s", syncFilePath(cachePath).c_str());
     return;
   }
   char buf[56];
-  const int n = snprintf(buf, sizeof(buf), "%lu %lu %lu", static_cast<unsigned long>(wm.lastVer),
-                         static_cast<unsigned long>(wm.cursorIndex), static_cast<unsigned long>(wm.lastDeviceCount));
+  const int n = snprintf(buf, sizeof(buf), "%lu %lu %lu %lu", static_cast<unsigned long>(wm.lastVer),
+                         static_cast<unsigned long>(wm.cursorIndex), static_cast<unsigned long>(wm.lastDeviceCount),
+                         static_cast<unsigned long>(wm.tombCursorIndex));
   f.write(buf, static_cast<size_t>(n));
   f.close();
 }
@@ -1095,18 +1105,38 @@ size_t FlashcardDeck::serializeForUpload(const std::string& cachePath, uint8_t* 
 
   const SyncWatermark wm = loadWatermark(cachePath);
   const std::string deckPath = filePath(cachePath);
+  // SD-only (USB-locked X3): logs what the watermark READ BACK at the start of this
+  // sync. Compare against the previous sync's "commitUpload: lastVer ...->B": if this
+  // read shows a lastVer LOWER than the last committed B, the watermark write isn't
+  // persisting (the cards keep looking "new" -> perpetual "new:+N").
+  SdDebugLog::log("FCD", "serializeForUpload: read lastVer=%lu cursor=%lu tombCursor=%lu",
+                  static_cast<unsigned long>(wm.lastVer), static_cast<unsigned long>(wm.cursorIndex),
+                  static_cast<unsigned long>(wm.tombCursorIndex));
 
-  FcUploadCtx c{out, 0, cap, wm.lastVer, 0, 0, 0, 0, false, 0, wm.cursorIndex, static_cast<int>(wm.cursorIndex), 0};
+  FcUploadCtx c;
+  c.out = out;
+  c.cap = cap;
+  c.lastVer = wm.lastVer;
+  c.cursorStart = wm.cursorIndex;
+  c.nextCursor = static_cast<int>(wm.cursorIndex);
+  c.tombCursorStart = wm.tombCursorIndex;
+  c.nextTombCursor = static_cast<int>(wm.tombCursorIndex);
 
-  // 1) Tombstones (all) -- deletions must propagate reliably; they are tiny.
+  const std::string tombPath = tombFilePath(cachePath);
+
+  // 1) NEW tombstones (version > watermark) -- low-latency delete push, mirroring the
+  //    delta-card pass. Older tombs are NOT re-sent here (they would re-broadcast the
+  //    entire pile every sync); they heal via the rolling pass below. Emitted first so
+  //    a delete still beats a concurrent re-add on the receiver (mergeBlob's T-before-H).
   forEachLine(
-      tombFilePath(cachePath),
+      tombPath,
       [](void* ctx, const char* line, int len) {
         auto* c = static_cast<FcUploadCtx*>(ctx);
-        if (!fcEmit(c, 'T', line, len)) return false;  // budget full -> stop
-        c->tombCount++;
         int wl = 0;
         const uint32_t v = parseTomb(line, len, &wl);
+        if (v <= c->lastVer) return true;              // old delete -> handled by the rolling pass
+        if (!fcEmit(c, 'T', line, len)) return false;  // budget full -> stop
+        c->tombCount++;
         if (v > c->maxVer) c->maxVer = v;
         return true;
       },
@@ -1129,9 +1159,37 @@ size_t FlashcardDeck::serializeForUpload(const std::string& cachePath, uint8_t* 
       },
       &c);
 
-  // 3) Rolling slice: older cards (version <= watermark) from the cursor,
-  //    wrapping, to heal a fresh device over successive syncs. Two sub-passes
-  //    over the deck file: [cursorStart, N) then [0, cursorStart).
+  // 3) Rolling tomb slice: older tombstones (version <= watermark) from the tomb cursor,
+  //    wrapping, to heal a fresh device's delete set over successive syncs. Bounds the
+  //    per-sync tomb cost to the budget instead of re-sending all tombs every time.
+  //    Runs BEFORE the card heal so a large deck can't starve delete propagation (the
+  //    tomb set is small, so it completes a full pass quickly). Two sub-passes over the
+  //    tomb file: [tombCursorStart, M) then [0, tombCursorStart).
+  for (int phase = 1; phase <= 2; phase++) {
+    c.tombFileIdx = 0;
+    c.phase = phase;
+    forEachLine(
+        tombPath,
+        [](void* ctx, const char* line, int len) {
+          auto* c = static_cast<FcUploadCtx*>(ctx);
+          const int idx = c->tombFileIdx++;
+          if (c->phase == 1 && idx < static_cast<int>(c->tombCursorStart)) return true;    // before the window
+          if (c->phase == 2 && idx >= static_cast<int>(c->tombCursorStart)) return false;  // past the wrap region
+          int wl = 0;
+          const uint32_t v = parseTomb(line, len, &wl);
+          if (v > c->lastVer) return true;               // a new tomb already covered it (phase 1)
+          if (!fcEmit(c, 'T', line, len)) return false;  // budget full -> stop rolling
+          c->tombRollCount++;                            // re-broadcast heal, not a new delete
+          c->nextTombCursor = idx + 1;                   // resume after this tomb next sync
+          return true;
+        },
+        &c);
+    if (c.truncated) break;  // no budget left for the wrap pass
+  }
+
+  // 4) Rolling card slice: older cards (version <= watermark) from the card cursor,
+  //    wrapping, to heal a fresh device over successive syncs. Two sub-passes over the
+  //    deck file: [cursorStart, N) then [0, cursorStart).
   for (int phase = 1; phase <= 2; phase++) {
     c.fileIdx = 0;
     c.phase = phase;
@@ -1160,8 +1218,10 @@ size_t FlashcardDeck::serializeForUpload(const std::string& cachePath, uint8_t* 
     outStats->histCount = c.histCount;
     outStats->rollCount = c.rollCount;
     outStats->tombCount = c.tombCount;
+    outStats->tombRollCount = c.tombRollCount;
     outStats->maxVer = c.maxVer;
     outStats->nextCursor = static_cast<uint32_t>(c.nextCursor);
+    outStats->nextTombCursor = static_cast<uint32_t>(c.nextTombCursor);
     outStats->truncated = c.truncated;
   }
   return c.used;
@@ -1169,10 +1229,20 @@ size_t FlashcardDeck::serializeForUpload(const std::string& cachePath, uint8_t* 
 
 void FlashcardDeck::commitUpload(const std::string& cachePath, const BlobStats& uploaded, uint32_t deviceCount) {
   SyncWatermark wm = loadWatermark(cachePath);
+  const uint32_t prevVer = wm.lastVer;
   if (uploaded.maxVer > wm.lastVer) wm.lastVer = uploaded.maxVer;  // never regress
   wm.cursorIndex = uploaded.nextCursor;
+  wm.tombCursorIndex = uploaded.nextTombCursor;
   wm.lastDeviceCount = deviceCount;
   storeWatermark(cachePath, wm);
+  // SD-only (USB-locked X3 has no serial): records that the upload watermark moved.
+  // If "new:+N" persists across syncs while lastVer stops advancing here, the cards
+  // keep re-uploading because this commit was skipped (failed PUT) or didn't progress.
+  SdDebugLog::log("FCD",
+                  "commitUpload: lastVer %lu->%lu cursor->%lu tombCursor->%lu hist=%d tomb=%d roll=%d tombRoll=%d",
+                  static_cast<unsigned long>(prevVer), static_cast<unsigned long>(wm.lastVer),
+                  static_cast<unsigned long>(wm.cursorIndex), static_cast<unsigned long>(wm.tombCursorIndex),
+                  uploaded.histCount, uploaded.tombCount, uploaded.rollCount, uploaded.tombRollCount);
 }
 
 // --- Merge -----------------------------------------------------------------

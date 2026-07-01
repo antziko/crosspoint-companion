@@ -38,7 +38,7 @@ class HalFile;  // fwd-decl: rewriteDeck's callbacks take a HalFile& (defined in
 // and studied on each device's own clock. Sidecars hold the sync state:
 //   dictionary_flashcards.ver   Lamport clock (one int)
 //   dictionary_flashcards.tomb  deleted "word|VER" tombstones
-//   dictionary_flashcards.sync  "lastVer cursorIndex lastDeviceCount" watermark
+//   dictionary_flashcards.sync  "lastVer cursorIndex lastDeviceCount tombCursorIndex" watermark
 // The deck file stays the single source of per-word versions (inline, above).
 //
 // Every mutator streams the file line-by-line through a fixed stack buffer and
@@ -197,22 +197,28 @@ class FlashcardDeck {
 
   // Outcome of a serialize pass (for upload bookkeeping + tests).
   struct BlobStats {
-    int histCount = 0;        // phase-2 delta cards (new/changed since last upload)
-    int rollCount = 0;        // phase-3 rolling-slice cards (re-broadcast heal)
-    int tombCount = 0;        // tombstones written
-    uint32_t maxVer = 0;      // highest version emitted (advances the watermark)
-    uint32_t nextCursor = 0;  // deck file index to resume the rolling slice next time
-    bool truncated = false;   // a line did not fit the cap (rolling slice stopped)
+    int histCount = 0;            // phase-2 delta cards (new/changed since last upload)
+    int rollCount = 0;            // phase-4 rolling-slice cards (re-broadcast heal)
+    int tombCount = 0;            // phase-1 NEW tombstones (version > lastVer)
+    int tombRollCount = 0;        // phase-3 rolling-slice tombstones (re-broadcast heal)
+    uint32_t maxVer = 0;          // highest version emitted (advances the watermark)
+    uint32_t nextCursor = 0;      // deck file index to resume the card rolling slice next time
+    uint32_t nextTombCursor = 0;  // tomb file index to resume the tomb rolling slice next time
+    bool truncated = false;       // a line did not fit the cap (rolling slice stopped)
   };
 
-  // Upload watermark persisted in dictionary_flashcards.sync as three decimals
-  // "lastVer cursorIndex lastDeviceCount". lastVer = highest version known to be
-  // accepted by the server (delta filter). cursorIndex = where the rolling heal
-  // slice resumes. lastDeviceCount = devices seen on the last GET (caps sizing).
+  // Upload watermark persisted in dictionary_flashcards.sync as four decimals
+  // "lastVer cursorIndex lastDeviceCount tombCursorIndex". lastVer = highest version
+  // known to be accepted by the server (delta filter). cursorIndex = where the rolling
+  // card heal slice resumes. lastDeviceCount = devices seen on the last GET (caps
+  // sizing). tombCursorIndex = where the rolling tomb heal slice resumes. The 4th field
+  // is optional on read: a legacy 3-field file loads tombCursorIndex = 0 (no version
+  // bump needed -- the format is whitespace-delimited and forward/backward tolerant).
   struct SyncWatermark {
     uint32_t lastVer = 0;
     uint32_t cursorIndex = 0;
     uint32_t lastDeviceCount = 0;
+    uint32_t tombCursorIndex = 0;
   };
 
   // Adaptive per-sync slice cap from free heap + the last-seen device count.

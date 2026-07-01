@@ -122,9 +122,9 @@ void drawChapterFooter(GfxRenderer& renderer, int contentBottom, const std::stri
   const int y = contentBottom - metrics.listRowHeight;
 
   // The chapter field may carry a trailing in-chapter page token "X/Y" (appended
-  // at enroll in EpubReaderActivity::openWordSelect). Render the title at UI_10
-  // italic and that page token one size smaller (SMALL_FONT_ID), centered as one
-  // group. Detect the token as the last space-delimited run of digits-and-'/'.
+  // at enroll in EpubReaderActivity::openWordSelect). Detect the token as the last
+  // space-delimited run of digits-and-'/'; when present the title goes flush-left
+  // and the token flush-right, otherwise the title is centered.
   const char* ch = chapter.c_str();
   const int len = static_cast<int>(chapter.size());
   int sp = -1;
@@ -148,8 +148,18 @@ void drawChapterFooter(GfxRenderer& renderer, int contentBottom, const std::stri
     hasPage = slash && digitsOnly;
   }
 
-  if (!hasPage) {  // legacy / no page token: original single-font centered footer
-    renderer.drawCenteredText(UI_10_FONT_ID, y, ch, true, EpdFontFamily::ITALIC);
+  // Rendered to match the reader's status-bar chapter title: SMALL_FONT_ID,
+  // ellipsis-truncated, then dimmed to a grey checkerboard stipple so the footer
+  // recedes from the card body (see BaseTheme::drawStatusBar).
+  const int margin = metrics.contentSidePadding;
+  const int sw = renderer.getScreenWidth();
+  const int lineH = renderer.getLineHeight(SMALL_FONT_ID);
+
+  if (!hasPage) {  // legacy / no page token: centered title, full-width budget
+    const std::string trunc = renderer.truncatedText(SMALL_FONT_ID, ch, sw - 2 * margin);
+    const int w = renderer.getTextWidth(SMALL_FONT_ID, trunc.c_str());
+    renderer.drawCenteredText(SMALL_FONT_ID, y, trunc.c_str(), true);
+    renderer.dimRegionCheckerboard((sw - w) / 2, y, w, lineH);
     return;
   }
 
@@ -161,15 +171,22 @@ void drawChapterFooter(GfxRenderer& renderer, int contentBottom, const std::stri
   titleBuf[titleLen] = '\0';
   const char* pageBuf = ch + sp + 1;  // null-terminated tail of chapter
 
-  // Chapter title flush-left, page token flush-right at the screen margin, so the two
-  // don't crowd each other (book-style footer). Bottom-align the smaller page font to
-  // the title baseline-ish.
-  const int margin = metrics.contentSidePadding;
+  // Chapter title flush-left, page token flush-right at the screen margin. The
+  // title is truncated to the gap before the page token so the two never overlap
+  // (book-style footer). Both use SMALL_FONT_ID so they share a baseline.
+  constexpr int kGap = 10;  // min clearance between title and page token
   const int wPage = renderer.getTextWidth(SMALL_FONT_ID, pageBuf);
-  const int dy = renderer.getLineHeight(UI_10_FONT_ID) - renderer.getLineHeight(SMALL_FONT_ID);
 
-  if (titleLen > 0) renderer.drawText(UI_10_FONT_ID, margin, y, titleBuf, true, EpdFontFamily::ITALIC);
-  renderer.drawText(SMALL_FONT_ID, renderer.getScreenWidth() - margin - wPage, y + dy, pageBuf, true);
+  if (titleLen > 0) {
+    const int titleMax = sw - 2 * margin - wPage - kGap;
+    if (titleMax > 0) {
+      const std::string trunc = renderer.truncatedText(SMALL_FONT_ID, titleBuf, titleMax);
+      const int w = renderer.getTextWidth(SMALL_FONT_ID, trunc.c_str());
+      renderer.drawText(SMALL_FONT_ID, margin, y, trunc.c_str(), true);
+      renderer.dimRegionCheckerboard(margin, y, w, lineH);
+    }
+  }
+  renderer.drawText(SMALL_FONT_ID, sw - margin - wPage, y, pageBuf, true);
 }
 
 }  // namespace
