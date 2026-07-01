@@ -217,6 +217,11 @@ class GfxRenderer {
                        bool roundTopRight, bool roundBottomLeft, bool roundBottomRight, bool state) const;
   void maskRoundedRectOutsideCorners(int x, int y, int width, int height, int radius, Color color = Color::White) const;
   void fillRect(int x, int y, int width, int height, bool state = true) const;
+  // Dim an already-drawn region to a grey checkerboard stipple: clears every
+  // pixel on the (x+y) even diagonal, thinning glyphs/ink so the region recedes
+  // (used for dimmed list rows and chapter/status footers). Surrounding pixels
+  // should already be white for the stipple to read as grey.
+  void dimRegionCheckerboard(int x, int y, int width, int height) const;
   // Fast clear-to-white over a rectangle. Equivalent in effect to
   // fillRect(x, y, w, h, false) but uses byte-aligned memset for the
   // middle of each panel-memory row, with bit-mask OR only at the byte

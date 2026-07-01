@@ -765,6 +765,12 @@ void GfxRenderer::fillRect(const int x, const int y, const int width, const int 
   }
 }
 
+void GfxRenderer::dimRegionCheckerboard(const int x, const int y, const int width, const int height) const {
+  for (int py = y; py < y + height; py++)
+    for (int px = x; px < x + width; px++)
+      if ((px + py) % 2 == 0) drawPixel(px, py, false);
+}
+
 // Bit layout reminder (matches drawPixel at top of file): for a physical
 // panel pixel at column phyX in a byte, bitPosition = 7 - (phyX % 8), MSB
 // first. State=true in drawPixel CLEARS the bit (renders black). White
