@@ -7,10 +7,15 @@
 #include <base64.h>
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
+#include <esp_log.h>
+#include <esp_tls.h>
 #include <esp_wifi.h>
 
+#include <cctype>   // tolower
 #include <cstdarg>
+#include <cstdlib>  // atoi
 #include <cstring>
+#include <strings.h>  // strcasecmp (case-insensitive Location header match)
 #include <functional>
 #include <string>
 
@@ -68,6 +73,176 @@ bool isRedirect(int status) {
   return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
 }
 
+// Capture the redirect Location header into a caller-owned std::string (config.user_data)
+// as fetch_headers parses it. Used only by the font per-host-CA path so it can tear the
+// (heap-heavy) origin TLS connection down BEFORE building the long CDN redirect URL —
+// esp_http_client's own set_redirection/get_url reallocs that string while the origin
+// arena is still live, which OOMs on the X4 (~10KB free after the github handshake) and
+// asserts in http_utils_append_string. Capturing here sidesteps that entirely.
+esp_err_t captureLocationHandler(esp_http_client_event_t* evt) {
+  if (evt->event_id == HTTP_EVENT_ON_HEADER && evt->user_data && evt->header_key &&
+      strcasecmp(evt->header_key, "Location") == 0) {
+    static_cast<std::string*>(evt->user_data)->assign(evt->header_value ? evt->header_value : "");
+  }
+  return ESP_OK;
+}
+
+// Resolve ONE redirect hop over raw esp-tls, returning the response status and Location
+// without ever buffering the other response headers.
+//
+// WHY raw esp-tls and not esp_http_client: github's release-download 302 carries a
+// 3586-byte content-security-policy header. esp_http_client accumulates every header
+// value into a single realloc'd string, and after the TLS handshake the heap's largest
+// free block is structurally pinned at ~4.8KB by the mbedtls arena (freeing total heap
+// does not enlarge it). Growing a ~3.5KB string there fragments that block and OOM-asserts
+// in http_utils_append_string. Here we stream the response through a 512-byte window and a
+// byte-state-machine that keeps ONLY the status code and the Location value — every other
+// header (the CSP included) is scanned and discarded, so nothing large is ever allocated.
+//
+// Used only by the font path's origin hop (caPemRedirect set). The CDN target it points to
+// sends normal-sized headers, so that hop goes back through esp_http_client.
+HttpDownloader::DownloadError resolveRedirectViaTls(const std::string& url, const char* ca, std::string& outLocation,
+                                                    int& outStatus, std::string* detail) {
+  outLocation.clear();
+  outStatus = 0;
+
+  // Parse https://host/path (release URLs are always https, default port 443).
+  static const char kScheme[] = "https://";
+  if (url.compare(0, sizeof(kScheme) - 1, kScheme) != 0) {
+    setDetail(detail, "non-https origin");
+    return HttpDownloader::HTTP_ERROR;
+  }
+  const size_t hostStart = sizeof(kScheme) - 1;
+  const size_t slash = url.find('/', hostStart);
+  const std::string host = url.substr(hostStart, slash == std::string::npos ? std::string::npos : slash - hostStart);
+  const std::string path = (slash == std::string::npos) ? "/" : url.substr(slash);
+
+  esp_tls_cfg_t cfg = {};
+  cfg.cacert_buf = reinterpret_cast<const unsigned char*>(ca);
+  cfg.cacert_bytes = ca ? static_cast<unsigned int>(strlen(ca) + 1) : 0;  // PEM: include the NUL
+  cfg.timeout_ms = HTTP_TIMEOUT_MS;
+  // No alpn_protos -> no "h2" offer -> github replies HTTP/1.1 (plain-text headers we can
+  // scan). Offering h2 would give HPACK-binary headers.
+
+  {
+    const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
+    SdDebugLog::log("HTTP", "tls-resolve pre-open: heap=%u largest8=%u host=%s", s.heapFree, s.largest8Bit,
+                    host.c_str());
+  }
+
+  esp_tls_t* tls = esp_tls_init();
+  if (!tls) {
+    setDetail(detail, "esp_tls_init failed");
+    return HttpDownloader::HTTP_ERROR;
+  }
+
+  const uint32_t startMs = millis();
+  const int conn = esp_tls_conn_new_sync(host.c_str(), static_cast<int>(host.size()), 443, &cfg, tls);
+  if (conn != 1) {
+    const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
+    LOG_ERR("HTTP", "tls-resolve handshake failed: %d", conn);
+    SdDebugLog::log("HTTP", "tls-resolve open failed ret=%d after %lums heap=%u largest8=%u", conn,
+                    (unsigned long)(millis() - startMs), s.heapFree, s.largest8Bit);
+    setDetail(detail, "tls connect failed (%d)", conn);
+    esp_tls_conn_destroy(tls);
+    return HttpDownloader::HTTP_ERROR;
+  }
+  {
+    const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
+    SdDebugLog::log("HTTP", "tls-resolve post-open: handshake=%lums heap=%u largest8=%u",
+                    (unsigned long)(millis() - startMs), s.heapFree, s.largest8Bit);
+  }
+
+  std::string req;
+  req.reserve(path.size() + host.size() + 96);
+  req += "GET ";
+  req += path;
+  req += " HTTP/1.1\r\nHost: ";
+  req += host;
+  req += "\r\nUser-Agent: CrossPoint-ESP32-" CROSSPOINT_VERSION "\r\nAccept: */*\r\nConnection: close\r\n\r\n";
+
+  for (size_t written = 0; written < req.size();) {
+    const ssize_t w = esp_tls_conn_write(tls, req.data() + written, req.size() - written);
+    if (w == ESP_TLS_ERR_SSL_WANT_READ || w == ESP_TLS_ERR_SSL_WANT_WRITE) continue;
+    if (w < 0) {
+      LOG_ERR("HTTP", "tls-resolve write failed: %d", (int)w);
+      setDetail(detail, "tls write failed (%d)", (int)w);
+      esp_tls_conn_destroy(tls);
+      return HttpDownloader::HTTP_ERROR;
+    }
+    written += static_cast<size_t>(w);
+  }
+
+  // Byte state machine over the response. Keeps the status code and the Location value;
+  // every other header line (incl. the 3.5KB CSP) is matched-and-discarded char by char,
+  // so the only growing allocation is the ~900-byte Location string.
+  enum class St { Status, HdrStart, MatchLoc, SkipEol, LocVal, Done };
+  St st = St::Status;
+  char statusBuf[40];
+  int statusLen = 0;
+  static const char kLoc[] = "location:";  // lowercase incl. colon
+  int locMatch = 0;
+
+  char rbuf[512];
+  while (st != St::Done) {
+    const ssize_t n = esp_tls_conn_read(tls, rbuf, sizeof(rbuf));
+    if (n == ESP_TLS_ERR_SSL_WANT_READ || n == ESP_TLS_ERR_SSL_WANT_WRITE) continue;
+    if (n < 0) {
+      LOG_ERR("HTTP", "tls-resolve read failed: %d", (int)n);
+      setDetail(detail, "tls read failed (%d)", (int)n);
+      esp_tls_conn_destroy(tls);
+      return HttpDownloader::HTTP_ERROR;
+    }
+    if (n == 0) break;  // peer closed before headers ended
+    for (int i = 0; i < n && st != St::Done; ++i) {
+      const char c = rbuf[i];
+      switch (st) {
+        case St::Status:
+          if (c == '\n') {
+            st = St::HdrStart;
+            locMatch = 0;
+          } else if (c != '\r' && statusLen < static_cast<int>(sizeof(statusBuf) - 1)) {
+            statusBuf[statusLen++] = c;
+          }
+          break;
+        case St::HdrStart:
+          if (c == '\n') {  // blank line (\r already ignored) -> headers complete
+            st = St::Done;
+          } else if (c == '\r') {
+            // ignore; wait for the \n
+          } else if (static_cast<char>(tolower(c)) == kLoc[locMatch]) {
+            if (kLoc[++locMatch] == '\0') st = St::LocVal;  // matched "location:"
+          } else {
+            st = St::SkipEol;  // some other header (e.g. CSP) -> discard to EOL
+          }
+          break;
+        case St::SkipEol:
+          if (c == '\n') {
+            st = St::HdrStart;
+            locMatch = 0;
+          }
+          break;
+        case St::LocVal:
+          if (c == '\n') {
+            st = St::HdrStart;
+            locMatch = 0;
+          } else if (c != '\r' && !(outLocation.empty() && c == ' ')) {
+            outLocation.push_back(c);
+          }
+          break;
+        case St::Done:
+          break;
+      }
+    }
+  }
+  esp_tls_conn_destroy(tls);
+
+  statusBuf[statusLen] = '\0';
+  const char* sp = strchr(statusBuf, ' ');  // "HTTP/1.1 302 Found" -> code after first space
+  outStatus = sp ? atoi(sp + 1) : 0;
+  return HttpDownloader::OK;
+}
+
 // Disable WiFi modem power-save for the duration of a transfer, then restore the
 // default. At the default WIFI_PS_MIN_MODEM the radio sleeps between DTIM beacons;
 // on a marginal link (observed on the X3, fine on the X4 at the same AP) that
@@ -87,7 +262,8 @@ struct NoWifiSleep {
 // that ends early as ESP_ERR_HTTP_INCOMPLETE_DATA, whereas the read loop streams
 // large/slow files and surfaces a short read directly.
 HttpDownloader::DownloadError runGet(const std::string& url, const std::string& username, const std::string& password,
-                                     Sink& sink) {
+                                     Sink& sink, const char* caPemOverride = nullptr,
+                                     const char* caPemRedirect = nullptr) {
   // Hold WiFi out of modem-sleep for the whole transfer (see NoWifiSleep). Scoped
   // to runGet so it covers the handshake, body read loop, and every early return.
   const NoWifiSleep noWifiSleep;
@@ -105,88 +281,194 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   // mbedtls connection holds ~65KB and fragments the heap; allocating this 2KB
   // buffer afterwards fails on the X3 (only ~6KB, non-contiguous, left). Carving
   // it now — while 70KB+ is free and contiguous — guarantees it.
-  auto buf = makeUniqueNoThrow<char[]>(READ_CHUNK);
-  if (!buf) {
-    LOG_ERR("HTTP", "OOM: %u byte read buffer", (unsigned)READ_CHUNK);
-    SdDebugLog::log("HTTP", "OOM: %u byte read buffer, free heap=%u", (unsigned)READ_CHUNK,
-                    (unsigned)ESP.getFreeHeap());
-    setDetail(sink.detail, "out of memory (heap=%u)", (unsigned)ESP.getFreeHeap());
-    return HttpDownloader::HTTP_ERROR;
-  }
-
-  esp_http_client_config_t config = {};
-  config.url = url.c_str();
-  config.buffer_size = HTTP_RX_BUF;
-  config.buffer_size_tx = HTTP_TX_BUF;
-  config.timeout_ms = HTTP_TIMEOUT_MS;
-  // Verify HTTPS against the bundled CA roots. This build has esp-tls
-  // CONFIG_ESP_TLS_INSECURE off, so an unverified TLS handshake can't be set
-  // up at all; the model is public servers over verified https and local
-  // servers over plain http (esp_http_client picks the transport from the URL
-  // scheme, so http:// needs no cert config). The prior setInsecure() worked
-  // only because Arduino's ssl_client drives mbedtls directly.
-  config.crt_bundle_attach = esp_crt_bundle_attach;
-  config.keep_alive_enable = true;
-
-  esp_http_client_handle_t client = esp_http_client_init(&config);
-  if (!client) {
-    LOG_ERR("HTTP", "client init failed");
-    setDetail(sink.detail, "client init failed");
-    return HttpDownloader::HTTP_ERROR;
-  }
-
-  esp_http_client_set_header(client, "User-Agent", "CrossPoint-ESP32-" CROSSPOINT_VERSION);
-  if (!username.empty() && !password.empty()) {
-    // Preemptive Basic auth, like the prior addHeader; don't wait for a 401.
-    const std::string credentials = username + ":" + password;
-    const String header = "Basic " + base64::encode(credentials.c_str());
-    esp_http_client_set_header(client, "Authorization", header.c_str());
-  }
-
-  // open()/read() does not auto-follow redirects (only perform() does), so step
-  // 30x responses manually. OPDS download endpoints and the GitHub release CDN
-  // both redirect.
-  // Snapshot immediately before the (blocking) connect+TLS handshake, then again
-  // after, with the handshake duration. The before/after heap delta is the
-  // mbedTLS arena cost — the bulk of the HTTPS pressure on the X3/X4 — and a
-  // failed open here on https:// is almost always that arena OOMing, surfaced as
-  // ESP_ERR_HTTP_CONNECT.
-  {
-    const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
-    SdDebugLog::log("HTTP", "pre-open (handshake): heap=%u largest8=%u intFree=%u intLargest=%u", s.heapFree,
-                    s.largest8Bit, s.internalFree, s.internalLargest);
-  }
-  const uint32_t openStartMs = millis();
-  esp_err_t err = esp_http_client_open(client, 0);
-  if (err != ESP_OK) {
-    const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
-    LOG_ERR("HTTP", "open failed: %s", esp_err_to_name(err));
-    SdDebugLog::log("HTTP", "open failed: %s after %lums, heap=%u largest8=%u intFree=%u intLargest=%u",
-                    esp_err_to_name(err), (unsigned long)(millis() - openStartMs), s.heapFree, s.largest8Bit,
-                    s.internalFree, s.internalLargest);
-    setDetail(sink.detail, "connect failed: %s", esp_err_to_name(err));
-    esp_http_client_cleanup(client);
-    return HttpDownloader::HTTP_ERROR;
-  }
-  {
-    const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
-    SdDebugLog::log("HTTP", "post-open: handshake=%lums heap=%u largest8=%u intFree=%u intLargest=%u",
-                    (unsigned long)(millis() - openStartMs), s.heapFree, s.largest8Bit, s.internalFree,
-                    s.internalLargest);
-  }
-  int64_t contentLength = esp_http_client_fetch_headers(client);
-  int status = esp_http_client_get_status_code(client);
-  for (int hop = 0; isRedirect(status) && hop < 5; ++hop) {
-    if (esp_http_client_set_redirection(client) != ESP_OK) break;
-    err = esp_http_client_open(client, 0);
-    if (err != ESP_OK) {
-      LOG_ERR("HTTP", "redirect open failed: %s", esp_err_to_name(err));
-      setDetail(sink.detail, "redirect failed: %s", esp_err_to_name(err));
-      esp_http_client_cleanup(client);
+  //
+  // EXCEPTION: the font path (caPemOverride) handshakes to github's all-ECDSA chain,
+  // whose verify-time MPI scratch on the X4 exhausts the heap to <1KB. There this 2KB
+  // sitting idle through the handshake is the difference between the cert verify
+  // allocating or OOMing (-0x2700), so defer it to just before the body read instead.
+  // X3 fonts already can't clear this wall, so deferring costs them nothing.
+  std::unique_ptr<char[]> buf;
+  if (!caPemOverride) {
+    buf = makeUniqueNoThrow<char[]>(READ_CHUNK);
+    if (!buf) {
+      LOG_ERR("HTTP", "OOM: %u byte read buffer", (unsigned)READ_CHUNK);
+      SdDebugLog::log("HTTP", "OOM: %u byte read buffer, free heap=%u", (unsigned)READ_CHUNK,
+                      (unsigned)ESP.getFreeHeap());
+      setDetail(sink.detail, "out of memory (heap=%u)", (unsigned)ESP.getFreeHeap());
       return HttpDownloader::HTTP_ERROR;
     }
-    contentLength = esp_http_client_fetch_headers(client);
-    status = esp_http_client_get_status_code(client);
+  }
+
+  // DIAGNOSTIC (font CA path only): force the esp-tls / mbedtls verify chatter to
+  // VERBOSE so a failed github handshake prints the *reason* (e.g. "Failed to verify
+  // peer certificate! ... not correctly signed by the trusted CA" for a real CA
+  // mismatch, vs "mbedtls_mpi ... alloc" for OOM-in-verify). Remove once the font
+  // wall is settled. OPDS/KOSync (caPemOverride==null) never set this.
+  if (caPemOverride) {
+    esp_log_level_set("esp-tls", ESP_LOG_VERBOSE);
+    esp_log_level_set("esp-tls-mbedtls", ESP_LOG_VERBOSE);
+    esp_log_level_set("mbedtls", ESP_LOG_VERBOSE);
+  }
+
+  // Build + open one HTTP(S) hop to `hopUrl`, verifying against `ca` (a pinned root
+  // PEM) or the full bundle when `ca` is null. On success, returns OK with `outClient`
+  // open and `outStatus`/`outLen` populated; on any failure it cleans up its own client
+  // and returns the error (outClient left null). Used for the initial request and, on
+  // the font per-host-CA path, for each redirect hop with a different pinned root.
+  auto openHop = [&](const std::string& hopUrl, const char* ca, int rxSize, int txSize,
+                     esp_http_client_handle_t& outClient, int& outStatus, int64_t& outLen,
+                     std::string* outLocation) -> HttpDownloader::DownloadError {
+    outClient = nullptr;
+    esp_http_client_config_t config = {};
+    config.url = hopUrl.c_str();
+    // Capture the redirect Location ourselves (see captureLocationHandler) instead of
+    // esp_http_client's set_redirection, which reallocs the URL while the TLS arena is
+    // live and OOMs. Used by the font CDN hops; null for OPDS/KOSync.
+    if (outLocation) {
+      outLocation->clear();
+      config.event_handler = captureLocationHandler;
+      config.user_data = outLocation;
+    }
+    // buffer_size (HTTP RX) / buffer_size_tx are allocated at init and held through the
+    // whole handshake, so the caller tunes them per hop. (The font ORIGIN hop — github,
+    // with its 3.5KB CSP header that esp_http_client can't parse under the arena-fragmented
+    // heap — does NOT use this lambda; it goes through resolveRedirectViaTls. This lambda
+    // serves the font CDN hops, which send small headers, plus the unchanged OPDS path.)
+    config.buffer_size = rxSize;
+    config.buffer_size_tx = txSize;
+    config.timeout_ms = HTTP_TIMEOUT_MS;
+    // Verify HTTPS against the pinned root (ca) or the bundled CA roots. This build has
+    // esp-tls CONFIG_ESP_TLS_INSECURE off, so an unverified handshake can't be set up;
+    // the model is public servers over verified https and local servers over plain http
+    // (esp_http_client picks the transport from the URL scheme, so http:// needs no cert
+    // config). caPemOverride pins specific roots instead of the bundle for callers whose
+    // chain the prebuilt bundle mis-verifies (FontDownloadActivity — see FontDownloadCA.h).
+    if (ca) {
+      config.cert_pem = ca;
+    } else {
+      config.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+    config.keep_alive_enable = true;
+
+    esp_http_client_handle_t c = esp_http_client_init(&config);
+    if (!c) {
+      LOG_ERR("HTTP", "client init failed");
+      setDetail(sink.detail, "client init failed");
+      return HttpDownloader::HTTP_ERROR;
+    }
+    esp_http_client_set_header(c, "User-Agent", "CrossPoint-ESP32-" CROSSPOINT_VERSION);
+    if (!username.empty() && !password.empty()) {
+      // Preemptive Basic auth, like the prior addHeader; don't wait for a 401.
+      const std::string credentials = username + ":" + password;
+      const String header = "Basic " + base64::encode(credentials.c_str());
+      esp_http_client_set_header(c, "Authorization", header.c_str());
+    }
+
+    // Snapshot immediately before the (blocking) connect+TLS handshake, then again after,
+    // with the handshake duration. The before/after heap delta is the mbedTLS arena cost —
+    // the bulk of the HTTPS pressure on the X3/X4 — and a failed open on https:// is almost
+    // always that arena OOMing, surfaced as ESP_ERR_HTTP_CONNECT.
+    {
+      const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
+      SdDebugLog::log("HTTP", "pre-open (handshake): heap=%u largest8=%u intFree=%u intLargest=%u", s.heapFree,
+                      s.largest8Bit, s.internalFree, s.internalLargest);
+    }
+    const uint32_t openStartMs = millis();
+    const esp_err_t err = esp_http_client_open(c, 0);
+    if (err != ESP_OK) {
+      const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
+      LOG_ERR("HTTP", "open failed: %s", esp_err_to_name(err));
+      SdDebugLog::log("HTTP", "open failed: %s after %lums, heap=%u largest8=%u intFree=%u intLargest=%u",
+                      esp_err_to_name(err), (unsigned long)(millis() - openStartMs), s.heapFree, s.largest8Bit,
+                      s.internalFree, s.internalLargest);
+      setDetail(sink.detail, "connect failed: %s", esp_err_to_name(err));
+      esp_http_client_cleanup(c);
+      return HttpDownloader::HTTP_ERROR;
+    }
+    {
+      const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
+      SdDebugLog::log("HTTP", "post-open: handshake=%lums heap=%u largest8=%u intFree=%u intLargest=%u",
+                      (unsigned long)(millis() - openStartMs), s.heapFree, s.largest8Bit, s.internalFree,
+                      s.internalLargest);
+    }
+    outLen = esp_http_client_fetch_headers(c);
+    outStatus = esp_http_client_get_status_code(c);
+    outClient = c;
+    return HttpDownloader::OK;
+  };
+
+  // open()/read() does not auto-follow redirects (only perform() does), so step 30x
+  // responses manually.
+  esp_http_client_handle_t client = nullptr;
+  int status = 0;
+  int64_t contentLength = 0;
+
+  if (caPemRedirect) {
+    // FONT PATH. The github origin returns a 302 with a 3586-byte content-security-policy
+    // header that esp_http_client cannot parse under the arena-fragmented heap (see
+    // resolveRedirectViaTls). Resolve that hop over raw esp-tls, keeping ONLY the Location,
+    // then fetch the CDN target with the normal client — its headers are small. Per-host CA:
+    // caPemOverride pins the origin (github) root, caPemRedirect pins the CDN (release-assets)
+    // root, so each handshake's mbedTLS arena holds a single root.
+    std::string target;
+    {
+      std::string loc;
+      int rstatus = 0;
+      const HttpDownloader::DownloadError e = resolveRedirectViaTls(url, caPemOverride, loc, rstatus, sink.detail);
+      if (e != HttpDownloader::OK) return e;
+      SdDebugLog::log("HTTP", "tls-resolve: status=%d loc=%zu", rstatus, loc.size());
+      if (!isRedirect(rstatus) || loc.empty()) {
+        LOG_ERR("HTTP", "origin resolve failed: status=%d loc=%zu", rstatus, loc.size());
+        setDetail(sink.detail, "redirect resolve failed (%d)", rstatus);
+        return HttpDownloader::HTTP_ERROR;
+      }
+      target = loc;
+    }
+    // CDN hop buffers. The release-assets chain is all-RSA (leaf <- YR2 <- Root YR <- ISRG
+    // Root X1, our anchor), and the RSA-4096 verify at the top rides the heap ceiling
+    // (min-free hit 424). Keep these tight: RX 1KB holds the CDN's modest response headers
+    // (no github-style CSP here), TX 1.25KB fits the ~870-byte signed-URL GET line plus its
+    // Host/UA headers. Trimming from 4KB to ~2.25KB frees the contiguous heap the RSA verify
+    // needs. CONNECT cost only; the deferred body read buffer is still not allocated here.
+    constexpr int kCdnRx = 1024;
+    constexpr int kCdnTx = 1280;
+    std::string location;
+    const HttpDownloader::DownloadError e =
+        openHop(target, caPemRedirect, kCdnRx, kCdnTx, client, status, contentLength, &location);
+    if (e != HttpDownloader::OK) return e;
+    for (int hop = 0; isRedirect(status) && hop < 4; ++hop) {
+      if (location.empty()) {
+        LOG_ERR("HTTP", "CDN redirect %d without Location", status);
+        setDetail(sink.detail, "redirect %d: no Location", status);
+        esp_http_client_cleanup(client);
+        return HttpDownloader::HTTP_ERROR;
+      }
+      const std::string next = location;
+      esp_http_client_cleanup(client);
+      client = nullptr;
+      const HttpDownloader::DownloadError e2 =
+          openHop(next, caPemRedirect, kCdnRx, kCdnTx, client, status, contentLength, &location);
+      if (e2 != HttpDownloader::OK) return e2;
+    }
+  } else {
+    // Default path (OPDS/KOSync/OTA and bundle callers): single client, follow redirects on
+    // the SAME connection/cert, exactly as before. Unchanged to avoid any TLS regression.
+    const HttpDownloader::DownloadError e =
+        openHop(url, caPemOverride, caPemOverride ? 2048 : HTTP_RX_BUF, caPemOverride ? 512 : HTTP_TX_BUF, client,
+                status, contentLength, nullptr);
+    if (e != HttpDownloader::OK) return e;
+    for (int hop = 0; isRedirect(status) && hop < 5; ++hop) {
+      if (esp_http_client_set_redirection(client) != ESP_OK) break;
+      const esp_err_t err = esp_http_client_open(client, 0);
+      if (err != ESP_OK) {
+        LOG_ERR("HTTP", "redirect open failed: %s", esp_err_to_name(err));
+        setDetail(sink.detail, "redirect failed: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        return HttpDownloader::HTTP_ERROR;
+      }
+      contentLength = esp_http_client_fetch_headers(client);
+      status = esp_http_client_get_status_code(client);
+    }
   }
 
   if (status != 200) {
@@ -209,6 +491,21 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
     SdDebugLog::log("CONNECT", "heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d total=%zu url=%s", snap.heapFree,
                     snap.largest8Bit, snap.internalFree, snap.internalLargest, (int)snap.rssi, sink.total, url.c_str());
   }
+  // Deferred read-buffer alloc for the font path (see the early-alloc comment). The
+  // handshake is done and the TLS record buffers have settled, so the 2KB is available
+  // again now without having starved the cert verify.
+  if (!buf) {
+    buf = makeUniqueNoThrow<char[]>(READ_CHUNK);
+    if (!buf) {
+      LOG_ERR("HTTP", "OOM: %u byte read buffer (post-handshake)", (unsigned)READ_CHUNK);
+      SdDebugLog::log("HTTP", "OOM: %u byte read buffer post-handshake, free heap=%u", (unsigned)READ_CHUNK,
+                      (unsigned)ESP.getFreeHeap());
+      setDetail(sink.detail, "out of memory (heap=%u)", (unsigned)ESP.getFreeHeap());
+      esp_http_client_cleanup(client);
+      return HttpDownloader::HTTP_ERROR;
+    }
+  }
+
   const uint32_t transferStartMs = millis();
   uint32_t lastChunkMs = transferStartMs;
   size_t lastXferLogBytes = 0;
@@ -330,7 +627,8 @@ bool HttpDownloader::fetchUrl(const std::string& url, const DataCallback& onData
 HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& url, const std::string& destPath,
                                                              ProgressCallback progress, bool* cancelFlag,
                                                              const std::string& username, const std::string& password,
-                                                             std::string* errorDetail) {
+                                                             std::string* errorDetail, const char* caPemOverride,
+                                                             const char* caPemRedirect) {
   LOG_DBG("HTTP", "Downloading: %s -> %s", url.c_str(), destPath.c_str());
 
   if (Storage.exists(destPath.c_str())) {
@@ -349,7 +647,7 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
   sink.detail = errorDetail;
   sink.write = [&file](const uint8_t* data, size_t len) { return file.write(data, len) == len; };
 
-  const DownloadError result = runGet(url, username, password, sink);
+  const DownloadError result = runGet(url, username, password, sink, caPemOverride, caPemRedirect);
   // Close before any remove() on the same path; DESTRUCTOR_CLOSES_FILE would
   // otherwise close only after the remove.
   file.close();

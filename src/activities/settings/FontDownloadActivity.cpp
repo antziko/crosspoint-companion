@@ -1,10 +1,14 @@
 #include "FontDownloadActivity.h"
 
+#include "FontDownloadCA.h"
+
 #include <ArduinoJson.h>
+#include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
 #include <WiFi.h>
 #include <esp_rom_crc.h>
 
@@ -73,9 +77,36 @@ bool FontDownloadActivity::fetchAndParseManifest() {
   // TLS buffers and the full JSON string in RAM simultaneously.
   static constexpr const char* MANIFEST_TMP = "/fonts_manifest.tmp";
 
-  auto result = HttpDownloader::downloadToFile(FONT_MANIFEST_URL, MANIFEST_TMP, nullptr);
+  // Capture the real failure reason (HTTP code / connect error) so a USB-locked X3 —
+  // which can't see the LOG_ERR serial output — can still diagnose "Manage Fonts" from
+  // the SD debug log. The GitHub release URL 302-redirects to a CDN host; a second TLS
+  // handshake there is the prime X3 failure suspect.
+  // Reclaim the decompressed-glyph cache before the TLS handshake. The settings menus
+  // populate it heavily with malloc'd glyph-page buffers; the github HTTPS handshake
+  // needs a large *contiguous* block for the mbedtls record buffers (in ~8.5K + out
+  // ~4.4K), and on the heap-tight X3/X4 the font path reaches it with the largest free
+  // block already down at ~20K — below what the two allocs plus the pinned-cert parse
+  // need, so ssl_setup OOMs (-0x7F00). Freeing the cache lifts the largest free block
+  // back over the line; it repopulates lazily on the next render. The GET-start heap
+  // line in HttpDownloader (SD log) shows the recovered largest8 for verification.
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    fcm->clearCache();
+  }
+  // Also unload the resident SD font family's interval/kern/glyph-metadata tables (~10KB+).
+  // github's 302 carries a 3.5KB content-security-policy header that esp_http_client
+  // accumulates while the ~26KB mbedtls arena is still live; without this reclaim the
+  // largest free block (~5.8KB) can't take it and it OOM-asserts in http_utils. A reboot
+  // (silentRestartToSettings on exit) restores the font, so unloading here is free.
+  sdFontSystem.unloadFonts(renderer);
+
+  std::string errorDetail;
+  auto result =
+      HttpDownloader::downloadToFile(FONT_MANIFEST_URL, MANIFEST_TMP, nullptr, nullptr, "", "", &errorDetail,
+                                     FONT_CA_GITHUB_PEM, FONT_CA_ASSETS_PEM);
   if (result != HttpDownloader::OK) {
     LOG_ERR("FONT", "Failed to fetch manifest from %s", FONT_MANIFEST_URL);
+    SdDebugLog::log("FONT", "MANIFEST fetch FAILED: err=%d detail=\"%s\" url=%s", static_cast<int>(result),
+                    errorDetail.c_str(), FONT_MANIFEST_URL);
     errorMessage_ = "Failed to fetch font list";
     Storage.remove(MANIFEST_TMP);
     return false;
@@ -85,11 +116,13 @@ bool FontDownloadActivity::fetchAndParseManifest() {
   HalFile manifestFile;
   if (!Storage.openFileForRead("FONT", MANIFEST_TMP, manifestFile)) {
     LOG_ERR("FONT", "Failed to open temp manifest");
+    SdDebugLog::log("FONT", "MANIFEST open FAILED: %s", MANIFEST_TMP);
     Storage.remove(MANIFEST_TMP);
     errorMessage_ = "Failed to read font list";
     return false;
   }
 
+  const size_t manifestBytes = manifestFile.fileSize();
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, manifestFile);
   manifestFile.close();
@@ -97,6 +130,8 @@ bool FontDownloadActivity::fetchAndParseManifest() {
 
   if (err) {
     LOG_ERR("FONT", "Manifest parse error: %s", err.c_str());
+    SdDebugLog::log("FONT", "MANIFEST parse FAILED: %s (downloaded %u bytes)", err.c_str(),
+                    static_cast<unsigned>(manifestBytes));
     errorMessage_ = "Invalid font manifest";
     return false;
   }
@@ -104,6 +139,7 @@ bool FontDownloadActivity::fetchAndParseManifest() {
   int version = doc["version"] | 0;
   if (version != FONTS_MANIFEST_VERSION) {
     LOG_ERR("FONT", "Unsupported manifest version: %d", version);
+    SdDebugLog::log("FONT", "MANIFEST version mismatch: got=%d want=%d", version, FONTS_MANIFEST_VERSION);
     errorMessage_ = "Unsupported manifest version";
     return false;
   }
@@ -132,6 +168,7 @@ bool FontDownloadActivity::fetchAndParseManifest() {
 
       if (!fileObj["crc32"].is<uint32_t>()) {
         LOG_ERR("FONT", "Malformed manifest file entry: missing or invalid crc32 for %s", file.name.c_str());
+        SdDebugLog::log("FONT", "MANIFEST malformed: missing crc32 for %s", file.name.c_str());
         errorMessage_ = "Invalid font manifest";
         return false;
       }
@@ -297,6 +334,15 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
 
     std::string url = baseUrl_ + file.name;
 
+    // Same heap reclaim as the manifest fetch: free the glyph cache AND the resident SD
+    // font tables so the per-file TLS handshake + redirect header parse have a large enough
+    // contiguous block (the list render before this loop repopulated the cache). See
+    // fetchAndParseManifest for the full rationale (github's 3.5KB CSP header).
+    if (auto* fcm = renderer.getFontCacheManager()) {
+      fcm->clearCache();
+    }
+    sdFontSystem.unloadFonts(renderer);
+
     auto result = HttpDownloader::downloadToFile(
         url, destPath,
         [this](size_t downloaded, size_t total) {
@@ -311,7 +357,7 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
           }
           requestUpdate(true);
         },
-        &cancelRequested_);
+        &cancelRequested_, "", "", nullptr, FONT_CA_GITHUB_PEM, FONT_CA_ASSETS_PEM);
 
     if (result == HttpDownloader::ABORTED) {
       fontInstaller_.deleteFamily(family.name.c_str());

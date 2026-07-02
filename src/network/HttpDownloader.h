@@ -45,9 +45,22 @@ class HttpDownloader {
    * reason (e.g. "HTTP 401", "connect failed: ESP_ERR_...", "out of memory")
    * on any non-OK return, so callers can show the real cause on screen instead
    * of a generic message.
+   *
+   * caPemOverride (default null) pins specific root CAs (concatenated PEM) for this
+   * request instead of the full CA bundle. Null = verify against the bundle (the
+   * behaviour every existing caller relies on). Used by font downloads, whose GitHub
+   * chain the prebuilt bundle mis-verifies (see FontDownloadCA.h).
+   *
+   * caPemRedirect (default null) pins a SECOND, different root for the host a 30x
+   * redirect points to, so each TLS handshake parses only the single root that host
+   * chains to. This halves the CA the mbedTLS arena holds during the heap-critical
+   * verify on the X4 (github.com -> USERTrust ECC, then release-assets CDN -> ISRG
+   * Root X1). Only honoured when caPemOverride is also set; when null, redirects are
+   * followed on the same connection/cert exactly as before (OPDS/KOSync path).
    */
   static DownloadError downloadToFile(const std::string& url, const std::string& destPath,
                                       ProgressCallback progress = nullptr, bool* cancelFlag = nullptr,
                                       const std::string& username = "", const std::string& password = "",
-                                      std::string* errorDetail = nullptr);
+                                      std::string* errorDetail = nullptr, const char* caPemOverride = nullptr,
+                                      const char* caPemRedirect = nullptr);
 };
