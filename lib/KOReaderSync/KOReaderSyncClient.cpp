@@ -917,36 +917,49 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& doc
   appendB64Field("fc", fc, fcLen);
   statsBlob += "}";
 
-  // Scope the JsonDocument (and release statsBlob, which can hold a ~5.5KB base64 "dh"
-  // blob) before the TLS handshake. mbedTLS needs two ~16KB *contiguous* buffers; leaving
-  // the doc and blob live fragments the largest free block below that and the PUT fails
-  // with ESP_ERR_HTTP_CONNECT — see updateProgress for the same pattern.
-  std::string body;
-  {
-    JsonDocument doc;
-    doc["document"] = documentHash;
-    doc["device_id"] = deviceId();
-    doc["stats"] = statsBlob;
+  // Build the request body by hand instead of via a JsonDocument, which would add a
+  // doubling-growth pool that *copies* statsBlob (a ~5.5KB base64 "dh" blob) — the
+  // unguarded throwing-new that aborted on the fragmented X3 heap. Manual concat needs
+  // one exact-sized reserve and no large transient.
+  //
+  // CRITICAL wire format: "stats" is a quoted JSON *string* field (the server stores the
+  // blob verbatim — see the comment above where statsBlob is built), NOT a nested object.
+  // statsBlob is itself serialized JSON, so it must be JSON-escaped here. base64 + the
+  // scalar JSON only ever contain '"' (never '\'), but escape both for safety. documentHash
+  // (hex) and deviceId() ("crosspoint-<12 hex>") are JSON-safe and need no escaping.
+  const char* devId = deviceId();
+  const size_t devLen = strlen(devId);
+  size_t statsEsc = 0;  // one scan, no allocation -> the reserve below stays exact
+  for (char ch : statsBlob)
+    if (ch == '"' || ch == '\\') statsEsc++;
+  // Fixed punctuation: {"document":"  ","device_id":"  ","stats":"  "} = 42 bytes.
+  const size_t bodyLen = 42 + documentHash.size() + devLen + statsBlob.size() + statsEsc + 1;  // +1 NUL headroom
 
-    // Abort-safety: same pre-sized build as updateBookmarks. The stats body is the LARGER
-    // crash risk — statsBlob can hold a ~5.5KB base64 "dh" dict-history blob, so the doubling
-    // grow peaks well above the bookmark case and there was previously no body-build guard
-    // here at all. measureJson() allocates nothing; check contiguous heap AFTER doc is built,
-    // then reserve once. Starved -> clean LOW_MEMORY skip instead of abort().
-    const size_t bodyLen = measureJson(doc) + 1;
-    multi_heap_info_t info;
-    heap_caps_get_info(&info, MALLOC_CAP_8BIT);
-    if (info.largest_free_block < bodyLen) {
-      SdDebugLog::log("KOSYNC", "STATS_PUT body-build: largest=%u < need=%u -> SKIP", (unsigned)info.largest_free_block,
-                      (unsigned)bodyLen);
-      LOG_ERR("KOSync", "STATS_PUT: largest block %u < %u for body build - skip to avoid abort",
-              (unsigned)info.largest_free_block, (unsigned)bodyLen);
-      std::string().swap(statsBlob);
-      return LOW_MEMORY;
-    }
-    body.reserve(bodyLen);
-    serializeJson(doc, body);
+  // Abort-safety: the reserve below is the only sizable alloc. Check contiguous heap
+  // first; starved -> clean LOW_MEMORY skip instead of throwing-new abort().
+  multi_heap_info_t info;
+  heap_caps_get_info(&info, MALLOC_CAP_8BIT);
+  if (info.largest_free_block < bodyLen) {
+    SdDebugLog::log("KOSYNC", "STATS_PUT body-build: largest=%u < need=%u -> SKIP", (unsigned)info.largest_free_block,
+                    (unsigned)bodyLen);
+    LOG_ERR("KOSync", "STATS_PUT: largest block %u < %u for body build - skip to avoid abort",
+            (unsigned)info.largest_free_block, (unsigned)bodyLen);
+    std::string().swap(statsBlob);
+    return LOW_MEMORY;
   }
+
+  std::string body;
+  body.reserve(bodyLen);
+  body = "{\"document\":\"";
+  body += documentHash;
+  body += "\",\"device_id\":\"";
+  body += devId;
+  body += "\",\"stats\":\"";  // stats is a quoted, JSON-escaped string field
+  for (char ch : statsBlob) {
+    if (ch == '"' || ch == '\\') body += '\\';
+    body += ch;
+  }
+  body += "\"}";
   std::string().swap(statsBlob);  // free the base64 blob's heap before the handshake
 
   LOG_DBG("KOSync", "Stats request body: %s", body.c_str());

@@ -704,6 +704,11 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool 
   statsUploadOk = (putResult == KOReaderSyncClient::OK);
   if (!statsUploadOk) {
     LOG_ERR("KOSync", "Stats upload failed: %s", KOReaderSyncClient::errorString(putResult));
+    // SD-only (USB-locked X3 has no serial): PUT failed -> commitUpload below is
+    // skipped, so flashcard/dict watermarks don't advance and the same blob re-uploads
+    // next sync (the persistent "new:+N" symptom). Records the actual failure reason.
+    SdDebugLog::log("KOSYNC", "STATS_PUT FAILED (%s) -> watermarks NOT advanced; fc/dict will re-upload",
+                    KOReaderSyncClient::errorString(putResult));
   } else {
     // PUT confirmed: advance the upload watermarks so the next sync ships only
     // newer changes (dict) / the next rolling slice (flashcards). Done only on
