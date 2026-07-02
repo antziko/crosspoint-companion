@@ -332,6 +332,10 @@ class CrossPointSettings {
   uint8_t focusReadingEnabled = 0;
   // SD card font family name (empty = use built-in fontFamily)
   char sdFontFamilyName[32] = "";
+  // Pinned fonts in the Font Family picker: newline-separated set of font keys
+  // (built-in = "@b<index>", SD = "@s<familyName>"). Pinned fonts sort first.
+  // 256 bytes covers ~8 typical SD names; appends are bounds-checked.
+  char pinnedFonts[256] = "";
   // Show hidden files/directories (starting with '.') in the file browser (0 = hidden, 1 = show)
   uint8_t showHiddenFiles = 0;
   // Remove a book from the Recent Books list when its End-of-Book screen is reached (0 = off, 1 = on)
@@ -430,6 +434,12 @@ class CrossPointSettings {
   const char* getReaderSdFontFamilyName() const;
   int getDefinitionFontId() const;
   float getDefinitionLineCompression() const;
+
+  // Pinned-font set helpers (see pinnedFonts). `key` is "@b<index>" / "@s<name>".
+  bool isFontPinned(const char* key) const;
+  // Add/remove `key` from the pinned set in place. Caller persists via saveToFile().
+  // No-op if already in the desired state or (on add) the buffer is full.
+  void setFontPinned(const char* key, bool pinned);
   int getLookupHistoryCapValue() const { return lookupHistoryCap; }
   bool isLookupHistoryUnlimited() const { return lookupHistoryCap >= HIST_CAP_UNLIMITED; }
 

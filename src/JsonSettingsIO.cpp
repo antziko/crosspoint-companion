@@ -148,6 +148,10 @@ bool JsonSettingsIO::saveSettings(const CrossPointSettings& s, const char* path)
   if (s.sdFontFamilyName[0] != '\0') {
     doc["sdFontFamilyName"] = s.sdFontFamilyName;
   }
+  // Pinned-font set (Font Family picker) — newline-separated keys, save manually
+  if (s.pinnedFonts[0] != '\0') {
+    doc["pinnedFonts"] = s.pinnedFonts;
+  }
 
   // Dictionary marker-by-dwell — device-only (inline rows in the Reader > Dictionary sub-screen),
   // persisted here by explicit fields rather than a SettingInfo key
@@ -270,6 +274,10 @@ bool JsonSettingsIO::loadSettings(CrossPointSettings& s, const char* json, bool*
   const char* sfn = doc["sdFontFamilyName"] | "";
   strncpy(s.sdFontFamilyName, sfn, sizeof(s.sdFontFamilyName) - 1);
   s.sdFontFamilyName[sizeof(s.sdFontFamilyName) - 1] = '\0';
+  // Pinned-font set — newline-separated keys, load manually
+  const char* pf = doc["pinnedFonts"] | "";
+  strncpy(s.pinnedFonts, pf, sizeof(s.pinnedFonts) - 1);
+  s.pinnedFonts[sizeof(s.pinnedFonts) - 1] = '\0';
   if (storedFontFamily == CrossPointSettings::LEGACY_OPENDYSLEXIC && s.sdFontFamilyName[0] == '\0') {
     s.fontFamily = CrossPointSettings::NOTOSERIF;
     strncpy(s.sdFontFamilyName, "OpenDyslexic", sizeof(s.sdFontFamilyName) - 1);

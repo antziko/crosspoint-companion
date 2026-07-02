@@ -120,3 +120,22 @@ int SdCardFontSystem::resolveFontId(const char* familyName, uint8_t /*fontSizeEn
   // ensureLoaded() must have been called with the current settings before this.
   return manager_.getFontId(familyName);
 }
+
+int SdCardFontSystem::loadFamilyForPreview(const char* familyName, uint8_t fontSizeEnum, GfxRenderer& renderer) {
+  if (!familyName || !*familyName) return 0;
+  // Already resident (e.g. it IS the current selection)? Reuse — no SD read.
+  const int existing = manager_.getFontId(familyName);
+  if (existing != 0) return existing;
+
+  const auto* family = registry_.findFamily(familyName);
+  if (!family) {
+    LOG_DBG("SDFS", "Preview family not found: %s", familyName);
+    return 0;
+  }
+  manager_.unloadAll(renderer);  // one family resident at a time
+  if (!manager_.loadFamily(*family, renderer, fontSizeEnum)) {
+    LOG_ERR("SDFS", "Preview load failed: %s", familyName);
+    return 0;
+  }
+  return manager_.getFontId(familyName);
+}

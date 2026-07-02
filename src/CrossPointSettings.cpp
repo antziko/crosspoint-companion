@@ -344,6 +344,58 @@ float CrossPointSettings::getReaderLineCompression() const {
   return computeLineCompression(fontFamily, lineSpacing, sdFontFamilyName);
 }
 
+bool CrossPointSettings::isFontPinned(const char* key) const {
+  if (!key || key[0] == '\0') return false;
+  const size_t keyLen = strlen(key);
+  // pinnedFonts is newline-separated; match a full line (between separators).
+  const char* p = pinnedFonts;
+  while (*p) {
+    const char* nl = strchr(p, '\n');
+    const size_t lineLen = nl ? static_cast<size_t>(nl - p) : strlen(p);
+    if (lineLen == keyLen && strncmp(p, key, keyLen) == 0) return true;
+    if (!nl) break;
+    p = nl + 1;
+  }
+  return false;
+}
+
+void CrossPointSettings::setFontPinned(const char* key, const bool pinned) {
+  if (!key || key[0] == '\0') return;
+  const bool already = isFontPinned(key);
+  if (pinned == already) return;
+
+  if (pinned) {
+    // Append "key\n". Bounds-check against the fixed buffer; silently skip if full.
+    const size_t cur = strlen(pinnedFonts);
+    const size_t keyLen = strlen(key);
+    if (cur + keyLen + 2 > sizeof(pinnedFonts)) return;  // +1 '\n' +1 '\0'
+    memcpy(pinnedFonts + cur, key, keyLen);
+    pinnedFonts[cur + keyLen] = '\n';
+    pinnedFonts[cur + keyLen + 1] = '\0';
+    return;
+  }
+
+  // Remove: rebuild the buffer omitting the matching line.
+  const size_t keyLen = strlen(key);
+  char rebuilt[sizeof(pinnedFonts)];
+  size_t w = 0;
+  const char* p = pinnedFonts;
+  while (*p) {
+    const char* nl = strchr(p, '\n');
+    const size_t lineLen = nl ? static_cast<size_t>(nl - p) : strlen(p);
+    const bool isMatch = (lineLen == keyLen && strncmp(p, key, keyLen) == 0);
+    if (!isMatch && lineLen > 0) {
+      memcpy(rebuilt + w, p, lineLen);
+      w += lineLen;
+      rebuilt[w++] = '\n';
+    }
+    if (!nl) break;
+    p = nl + 1;
+  }
+  rebuilt[w] = '\0';
+  memcpy(pinnedFonts, rebuilt, w + 1);
+}
+
 unsigned long CrossPointSettings::getSleepTimeoutMs() const {
   if (sleepTimeoutMinutes >= SLEEP_TIMEOUT_NEVER_MINUTES) return 0UL;
   const uint8_t minutes =
