@@ -251,7 +251,7 @@ bool drawCoverTile(const GfxRenderer& renderer, const std::string& coverBmpPath,
         lineY += lineH;
       }
     } else {
-      renderer.drawIcon(CoverIcon, tileX + (tileW - 32) / 2, tileY + (tileH / 3 - 32) / 2, 32, 32);
+      renderer.drawIcon(CoverIcon, tileX + (tileW - 32) / 2, tileY + (tileH / 3 - 32) / 2, 32);
     }
   }
   return hasCover;
@@ -487,7 +487,7 @@ const uint8_t* vegaMenuIcon(UIIcon icon) {
       return LibraryIcon;
     case UIIcon::Chart:
       return ChartIcon;
-    case UIIcon::Bookmark:
+    case UIIcon::BookmarkRibbon:
       return BookmarkIcon;
     case UIIcon::BookmarkReturn:
       return BookmarkReturnIcon;
@@ -526,7 +526,7 @@ void VegaTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
     if (rowIcon != nullptr) {
       const uint8_t* bmp = vegaMenuIcon(rowIcon(i));
       if (bmp != nullptr) {
-        renderer.drawIcon(bmp, iconX, iconY, kMenuIconSize, kMenuIconSize);
+        renderer.drawIcon(bmp, iconX, iconY, kMenuIconSize);
       }
     }
   }

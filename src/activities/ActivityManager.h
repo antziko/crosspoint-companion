@@ -4,6 +4,7 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
+#include <atomic>
 #include <cassert>
 #include <memory>
 #include <string>
@@ -63,7 +64,7 @@ class ActivityManager {
 
   // Whether to trigger a render after the current loop()
   // This variable must only be set by the main loop, to avoid race conditions
-  bool requestedUpdate = false;
+  std::atomic<bool> requestedUpdate{false};
 
   // Set true by the render task only while currentActivity->render() runs.
   // Read by the Push path as a race tripwire (must be false there now that

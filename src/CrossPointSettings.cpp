@@ -7,6 +7,7 @@
 #include <Serialization.h>
 
 #include <cstring>
+#include <mutex>
 #include <string>
 
 #include "I18nKeys.h"
@@ -106,6 +107,7 @@ uint8_t CrossPointSettings::sleepTimeoutEnumToMinutes(const uint8_t legacyValue)
 }
 
 bool CrossPointSettings::saveToFile() const {
+  std::lock_guard<std::mutex> lock(_mutex);
   // Apply the logging toggle live: every settings persist (device toggle, web API)
   // routes through here, so the master switch tracks the setting without a reboot.
   SdDebugLog::setMasterEnabled(sdCardLogging != 0);
@@ -119,7 +121,11 @@ bool CrossPointSettings::loadFromFile() {
     String json = Storage.readFile(SETTINGS_FILE_JSON);
     if (!json.isEmpty()) {
       bool resave = false;
-      bool result = JsonSettingsIO::loadSettings(*this, json.c_str(), &resave);
+      bool result;
+      {
+        std::lock_guard<std::mutex> lock(_mutex);
+        result = JsonSettingsIO::loadSettings(*this, json.c_str(), &resave);
+      }
       if (result && resave) {
         if (saveToFile()) {
           LOG_DBG("CPS", "Resaved settings to update format");
@@ -179,6 +185,7 @@ bool CrossPointSettings::loadFromBinaryFile() {
   if (!Storage.openFileForRead("CPS", SETTINGS_FILE_BIN, inputFile)) {
     return false;
   }
+  std::lock_guard<std::mutex> lock(_mutex);
 
   uint8_t version;
   serialization::readPod(inputFile, version);

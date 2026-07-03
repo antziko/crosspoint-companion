@@ -144,7 +144,7 @@ void TxtReaderBookmarksActivity::render(RenderLock&&) {
     snprintf(buf, sizeof(buf), "%d%% - %u/%d", pct, bm.page + 1, totalPages);
     return std::string(buf);
   };
-  const auto getBookmarkIcon = [](int) { return UIIcon::Bookmark; };
+  const auto getBookmarkIcon = [](int) { return UIIcon::BookmarkRibbon; };
 
   if (numBookmarks > 0) {
     if (confirmingDelete >= DELETE_MODE_DISPLAY) {

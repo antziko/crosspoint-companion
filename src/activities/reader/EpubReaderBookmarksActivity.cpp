@@ -199,7 +199,7 @@ void EpubReaderBookmarksActivity::render(RenderLock&&) {
     const struct Bookmark& bm =
         bookmarks.at(static_cast<size_t>(confirmingDelete >= DELETE_MODE_DISPLAY ? selectorIndex : index));
     if (bm.isQuote()) return UIIcon::Highlight;
-    return bm.returnMark ? UIIcon::BookmarkReturn : UIIcon::Bookmark;
+    return bm.returnMark ? UIIcon::BookmarkReturn : UIIcon::BookmarkRibbon;
   };
   const auto getBookmarkSubtitleLarge = [this, snippetWrapW](int index) -> bool {
     const struct Bookmark& bm =

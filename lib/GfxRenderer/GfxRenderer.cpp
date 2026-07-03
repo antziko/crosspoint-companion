@@ -1221,87 +1221,23 @@ void GfxRenderer::drawImage(const uint8_t bitmap[], const int x, const int y, co
   display.drawImage(bitmap, rotatedX, rotatedY, width, height);
 }
 
-namespace {
-// Rotate a square 1bpp bitmap (MSB-first within each byte, size/8 bytes per row) clockwise by
-// `quarter` * 90 degrees into `dst`. Transparent pixels are 1-bits (drawImageTransparent ANDs the
-// data into the framebuffer, so 1 leaves the pixel untouched, 0 paints black). `size` must be a
-// multiple of 8. Used to make icons read upright in every orientation, since drawImageTransparent
-// blits straight into the panel-native framebuffer without rotating.
-void rotateSquareBitmapCW(const uint8_t* src, uint8_t* dst, const int size, const int quarter) {
-  const int rowBytes = size / 8;
-  const auto getBit = [&](int px, int py) -> int { return (src[py * rowBytes + (px >> 3)] >> (7 - (px & 7))) & 1; };
-  const auto setBit = [&](int px, int py, int v) {
-    const uint8_t mask = static_cast<uint8_t>(1u << (7 - (px & 7)));
-    uint8_t& b = dst[py * rowBytes + (px >> 3)];
-    if (v) {
-      b |= mask;
-    } else {
-      b = static_cast<uint8_t>(b & ~mask);
-    }
-  };
-  for (int py = 0; py < size; ++py) {
-    for (int px = 0; px < size; ++px) {
-      int sx, sy;
-      switch (quarter) {
-        case 1:  // 90 CW
-          sx = py;
-          sy = size - 1 - px;
-          break;
-        case 2:  // 180
-          sx = size - 1 - px;
-          sy = size - 1 - py;
-          break;
-        case 3:  // 270 CW
-          sx = size - 1 - py;
-          sy = px;
-          break;
-        default:
-          sx = px;
-          sy = py;
-          break;
+void GfxRenderer::drawIcon(const uint8_t bitmap[], const int x, const int y, const int size) const {
+  // Plot the icon pixel-by-pixel through drawPixel (which applies the orientation
+  // transform) instead of the byte-aligned framebuffer blit. The blit snaps the
+  // icon's position to 8px (one byte) along the rotated axis, which prevents it
+  // from aligning with adjacent text; per-pixel plotting is pixel-precise.
+  // Icons are square and 1bpp (MSB-first, bit==0 = ink). The (size-1-row, col)
+  // mapping reproduces the Portrait orientation the blit produced; drawIcon is
+  // only called by the UI themes, which all render in forced Portrait.
+  const int rowBytes = (size + 7) / 8;
+  for (int row = 0; row < size; row++) {
+    for (int col = 0; col < size; col++) {
+      const uint8_t byte = bitmap[row * rowBytes + (col >> 3)];
+      const bool ink = ((byte >> (7 - (col & 7))) & 1) == 0;
+      if (ink) {
+        drawPixel(x + (size - 1 - row), y + col, true);
       }
-      setBit(px, py, getBit(sx, sy));
     }
-  }
-}
-}  // namespace
-
-void GfxRenderer::drawIcon(const uint8_t bitmap[], const int x, const int y, const int width, const int height) const {
-  // Mirror drawImage()'s orientation handling so icons position correctly in every orientation, and
-  // rotate the bitmap bits so the glyph reads upright (not sideways) in landscape / inverted. The
-  // old implementation hardcoded the Portrait transform, so icons vanished off-screen elsewhere.
-  int rotatedX = 0;
-  int rotatedY = 0;
-  rotateCoordinates(orientation, x, y, &rotatedX, &rotatedY, panelWidth, panelHeight);
-  int quarter = 0;  // clockwise quarter-turns to apply to the bitmap to keep it upright
-  switch (orientation) {
-    case Portrait:
-      rotatedY = rotatedY - height;
-      quarter = 0;
-      break;
-    case PortraitInverted:
-      rotatedX = rotatedX - width;
-      quarter = 2;
-      break;
-    case LandscapeClockwise:
-      rotatedY = rotatedY - height;
-      rotatedX = rotatedX - width;
-      quarter = 3;
-      break;
-    case LandscapeCounterClockwise:
-      quarter = 1;
-      break;
-  }
-
-  // Icons are square and small (<=32px, multiple of 8). Rotate into a stack buffer when needed;
-  // fall back to an unrotated blit for anything outside those bounds.
-  constexpr int kMaxRotateSize = 32;
-  if (quarter != 0 && width == height && width <= kMaxRotateSize && width % 8 == 0) {
-    uint8_t rotated[kMaxRotateSize * kMaxRotateSize / 8];
-    rotateSquareBitmapCW(bitmap, rotated, width, quarter);
-    display.drawImageTransparent(rotated, rotatedX, rotatedY, width, height);
-  } else {
-    display.drawImageTransparent(bitmap, rotatedX, rotatedY, width, height);
   }
 }
 

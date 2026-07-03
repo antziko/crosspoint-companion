@@ -212,11 +212,17 @@ CssFontWeight CssParser::interpretFontWeight(const std::string& val) {
 CssTextDecoration CssParser::interpretDecoration(const std::string& val) {
   const std::string v = normalized(val);
 
-  // text-decoration can have multiple space-separated values
+  // text-decoration can have multiple space-separated values. Detect underline and
+  // line-through independently (upstream #2397 added line-through); "none" wins nothing
+  // to combine, so an absent keyword simply leaves that bit clear.
+  CssTextDecoration result = CssTextDecoration::None;
   if (v.find("underline") != std::string::npos) {
-    return CssTextDecoration::Underline;
+    result = result | CssTextDecoration::Underline;
   }
-  return CssTextDecoration::None;
+  if (v.find("line-through") != std::string::npos) {
+    result = result | CssTextDecoration::LineThrough;
+  }
+  return result;
 }
 
 CssLength CssParser::interpretLength(const std::string& val) {
@@ -921,7 +927,7 @@ bool CssParser::loadFromCache() {
       rulesBySelector_.clear();
       return false;
     }
-    style.textDecoration = static_cast<CssTextDecoration>(enumVal);
+    style.textDecoration = static_cast<CssTextDecoration>(enumVal & CSS_TEXT_DECORATION_MASK);
 
     if (file.read(&enumVal, 1) != 1) {
       rulesBySelector_.clear();

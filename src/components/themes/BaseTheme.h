@@ -91,6 +91,19 @@ struct ThemeMetrics {
   bool popupProgressFillInverted;
   bool popupProgressOutlineInverted;
 
+  int optionPopupItemSpacing;
+  int optionPopupInnerPadding;
+  int optionPopupSelectionHPadding;
+  int optionPopupSelectionVPadding;
+  int optionPopupTitleGap;
+  bool optionPopupUseSmallFont;
+  bool optionPopupOptionFontBold;
+  int optionPopupSelectionRadius;
+  bool optionPopupSelectionLight;
+  bool optionPopupDrawAllRows;
+  int optionPopupDialogSideMargin;
+  bool optionPopupTitleSeparator;
+
   int textFieldHorizontalPadding;
   int textFieldNormalThickness;
   int textFieldCursorThickness;
@@ -115,7 +128,9 @@ enum UIIcon {
   Library,
   Wifi,
   Hotspot,
-  Bookmark,
+  BookmarkRibbon,  // renamed from Bookmark to avoid colliding with struct Bookmark (BookmarkStore.h)
+                   // when this unscoped enum is pulled into a TU alongside it (e.g. via OptionPopup.h).
+                   // Not "BookmarkIcon" — that name is the icon bitmap array in icons/bookmark.h.
   BookmarkReturn,  // hollow bookmark for the session "return here" mark
   Chart,
   Highlight  // quotation-marks glyph for saved quotes (vs the bookmark ribbon)
@@ -184,6 +199,18 @@ constexpr ThemeMetrics values = {.batteryWidth = 15,
                                  .popupProgressClampPercent = false,
                                  .popupProgressFillInverted = true,
                                  .popupProgressOutlineInverted = true,
+                                 .optionPopupItemSpacing = 6,
+                                 .optionPopupInnerPadding = 16,
+                                 .optionPopupSelectionHPadding = 8,
+                                 .optionPopupSelectionVPadding = 4,
+                                 .optionPopupTitleGap = 10,
+                                 .optionPopupUseSmallFont = true,
+                                 .optionPopupOptionFontBold = true,
+                                 .optionPopupSelectionRadius = 0,
+                                 .optionPopupSelectionLight = false,
+                                 .optionPopupDrawAllRows = false,
+                                 .optionPopupDialogSideMargin = 20,
+                                 .optionPopupTitleSeparator = true,
                                  .textFieldHorizontalPadding = 6,
                                  .textFieldNormalThickness = 1,
                                  .textFieldCursorThickness = 3,
@@ -232,6 +259,8 @@ class BaseTheme {
                               const std::function<std::string(int index)>& buttonLabel,
                               const std::function<UIIcon(int index)>& rowIcon) const;
   virtual Rect drawPopup(const GfxRenderer& renderer, const char* message) const;
+  virtual void drawOptionPopup(const GfxRenderer& renderer, const char* title, const std::vector<std::string>& options,
+                               int selectedIndex) const;
   virtual void fillPopupProgress(const GfxRenderer& renderer, const Rect& layout, const int progress) const;
   void drawStatusBar(GfxRenderer& renderer, const float bookProgress, const int currentPage, const int pageCount,
                      std::string title, const int paddingBottom = 0, const int textYOffset = 0,

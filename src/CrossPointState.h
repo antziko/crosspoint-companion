@@ -1,8 +1,11 @@
 #pragma once
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 class CrossPointState {
+  mutable std::mutex _mutex;
+
   // Static instance
   static CrossPointState instance;
 
@@ -12,7 +15,11 @@ class CrossPointState {
   // shown in the current cycle; when the cycle is exhausted (or the folder size
   // changes) a fresh cycle starts. Bounded so the state stays small: images beyond
   // SLEEP_DECK_MAX in a single folder are simply never picked.
+  // (Supersedes upstream's SLEEP_RECENT_COUNT recent-list approach, now unused.)
   static constexpr uint16_t SLEEP_DECK_MAX = 512;  // max images tracked per cycle
+
+  // Access the state mutex for protecting multi-field reads/writes from other cores.
+  std::mutex& getMutex() const { return _mutex; }
 
   std::string openEpubPath;
   // Path of the wallpaper shown when entering the last sleep, when it was a random

@@ -19,7 +19,7 @@ constexpr StrId kLabels[MENU_ITEM_COUNT] = {StrId::STR_SYNC_SCOPE_ALL,       Str
 constexpr StrId kDescs[MENU_ITEM_COUNT] = {StrId::STR_SYNC_SCOPE_ALL_DESC,       StrId::STR_SYNC_SCOPE_PROGRESS_DESC,
                                            StrId::STR_SYNC_SCOPE_BOOKMARKS_DESC, StrId::STR_SYNC_SCOPE_STATS_DESC,
                                            StrId::STR_SYNC_SCOPE_DICT_DESC,      StrId::STR_SYNC_SCOPE_FLASHCARDS_DESC};
-constexpr UIIcon kIcons[MENU_ITEM_COUNT] = {UIIcon::Transfer, UIIcon::Book,    UIIcon::Bookmark,
+constexpr UIIcon kIcons[MENU_ITEM_COUNT] = {UIIcon::Transfer, UIIcon::Book,    UIIcon::BookmarkRibbon,
                                             UIIcon::Chart,    UIIcon::Library, UIIcon::Recent};
 }  // namespace
 

@@ -13,7 +13,9 @@
 namespace {
 // Words are NFC-composed at layout time (ParsedText.cpp utf8ComposeNfc),
 // superseding upstream's v27 NFC bump.
-constexpr uint8_t SECTION_FILE_VERSION = 32;  // 32: cap figure image margins at 50px
+// 33: interpretDecoration now emits line-through (upstream #2397); force re-render so the
+//     serialized wordStyle decoration bits pick it up on already-cached books.
+constexpr uint8_t SECTION_FILE_VERSION = 33;  // 32: cap figure image margins at 50px
 constexpr uint32_t HEADER_SIZE = sizeof(uint8_t) + sizeof(int) + sizeof(float) + sizeof(bool) + sizeof(uint8_t) +
                                  sizeof(uint16_t) + sizeof(uint16_t) + sizeof(uint16_t) + sizeof(bool) + sizeof(bool) +
                                  sizeof(uint8_t) + sizeof(bool) + sizeof(uint32_t) + sizeof(uint32_t) +

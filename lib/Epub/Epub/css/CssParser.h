@@ -31,7 +31,8 @@ class CssParser {
  public:
   // Bump when CSS cache format or rules change; section caches are invalidated when this changes
   // v7: drop rules whose style sets no e-ink-relevant property (heap saving on CSS-heavy books)
-  static constexpr uint8_t CSS_CACHE_VERSION = 7;
+  // v8: interpretDecoration also detects line-through (upstream #2397 text-decoration)
+  static constexpr uint8_t CSS_CACHE_VERSION = 8;
 
   explicit CssParser(std::string cachePath) : cachePath(std::move(cachePath)) {}
   ~CssParser() = default;

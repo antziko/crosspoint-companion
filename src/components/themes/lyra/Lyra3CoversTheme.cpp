@@ -73,8 +73,12 @@ void Lyra3CoversTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, con
                           Lyra3CoversMetrics::values.homeCoverHeight, true);
 
         if (!hasCover) {
-          // Render empty cover (border + icon only; no black fill)
-          renderer.drawIcon(CoverIcon, tileX + hPaddingInSelection + 24, tileY + hPaddingInSelection + 24, 32, 32);
+          // Render empty cover
+          renderer.fillRect(tileX + hPaddingInSelection,
+                            tileY + hPaddingInSelection + (Lyra3CoversMetrics::values.homeCoverHeight / 3),
+                            tileWidth - 2 * hPaddingInSelection, 2 * Lyra3CoversMetrics::values.homeCoverHeight / 3,
+                            true);
+          renderer.drawIcon(CoverIcon, tileX + hPaddingInSelection + 24, tileY + hPaddingInSelection + 24, 32);
         }
       }
 
