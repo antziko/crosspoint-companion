@@ -127,8 +127,13 @@ bool HalStorage::openFileForWrite(const char* moduleName, const std::string& pat
 
 bool HalStorage::openFileForAppend(const char* moduleName, const char* path, HalFile& file) {
   StorageLock lock;  // ensure thread safety for the duration of this function
-  FsFile fsFile;
-  bool ok = SDCard.openFileForAppend(moduleName, path, fsFile);
+  // freeink's SDCardManager has no openFileForAppend() (openFileForWrite truncates
+  // with O_TRUNC); open with append flags via the generic open() instead.
+  FsFile fsFile = SDCard.open(path, O_RDWR | O_CREAT | O_APPEND);
+  bool ok = static_cast<bool>(fsFile);
+  if (!ok) {
+    LOG_ERR(moduleName, "Failed to open file for append: %s", path);
+  }
   file = HalFile(std::make_unique<HalFile::Impl>(std::move(fsFile)));
   return ok;
 }

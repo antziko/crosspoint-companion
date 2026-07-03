@@ -121,7 +121,10 @@ void HalDisplay::writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* rows, ui
 
 bool HalDisplay::supportsStripGrayscale() const { return einkDisplay.supportsStripGrayscale(); }
 
-bool HalDisplay::isX3Mode() const { return einkDisplay.isX3Mode(); }
+// freeink's FreeInkDisplay exposes no isX3Mode() getter; use the firmware's own
+// authoritative panel detection (HalGPIO), which is also what drives
+// einkDisplay.setDisplayX3() in begin() above.
+bool HalDisplay::isX3Mode() const { return gpio.deviceIsX3(); }
 
 uint16_t HalDisplay::getDisplayWidth() const { return einkDisplay.getDisplayWidth(); }
 
