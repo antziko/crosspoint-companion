@@ -36,10 +36,12 @@ void SdCardFontSystem::begin(GfxRenderer& renderer) {
       } else {
         LOG_ERR("SDFS", "Failed to load SD font family: %s (clearing)", SETTINGS.sdFontFamilyName);
         SETTINGS.sdFontFamilyName[0] = '\0';
+        SETTINGS.saveToFile();
       }
     } else {
       LOG_DBG("SDFS", "SD font family not found on card: %s (clearing)", SETTINGS.sdFontFamilyName);
       SETTINGS.sdFontFamilyName[0] = '\0';
+      SETTINGS.saveToFile();
     }
   }
 
@@ -67,7 +69,10 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
   // so a missing per-book font can't wipe the user's global font choice.
   const bool overrideActive = SETTINGS.getReaderOverride().active;
   const auto clearWantedFamily = [overrideActive]() {
-    if (!overrideActive) SETTINGS.sdFontFamilyName[0] = '\0';
+    if (!overrideActive) {
+      SETTINGS.sdFontFamilyName[0] = '\0';
+      SETTINGS.saveToFile();  // persist the clear so a missing font isn't re-loaded next boot (#2519)
+    }
   };
 
   if (wantedFamily[0] == '\0') {

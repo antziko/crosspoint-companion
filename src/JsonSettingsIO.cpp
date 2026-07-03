@@ -5,6 +5,7 @@
 #include <Logging.h>
 #include <ObfuscationUtils.h>
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 
@@ -163,10 +164,6 @@ bool JsonSettingsIO::saveSettings(const CrossPointSettings& s, const char* path)
   // Flashcard style + session scope — chosen on the review overview, not in SettingsList.
   doc["flashcardCardStyle"] = s.flashcardCardStyle;
   doc["flashcardSessionScope"] = s.flashcardSessionScope;
-
-  // Language -- managed by LanguageSelectActivity, not in SettingsList.
-  // Stored as ISO code string ("EN", "DE", ...) for stability across enum reorders.
-  doc["language"] = (s.language < getLanguageCount()) ? LANGUAGE_CODES[s.language] : "EN";
 
   // Language -- managed by LanguageSelectActivity, not in SettingsList.
   // Stored as ISO code string ("EN", "DE", ...) for stability across enum reorders.
@@ -387,6 +384,7 @@ bool JsonSettingsIO::loadRecentBooks(RecentBooksStore& store, const char* json) 
 
   store.recentBooks.clear();
   JsonArray arr = doc["books"].as<JsonArray>();
+  store.recentBooks.reserve(std::min(arr.size(), (size_t)10));
   for (JsonObject obj : arr) {
     if (store.getCount() >= 10) break;
     RecentBook book;

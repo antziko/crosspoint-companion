@@ -553,7 +553,7 @@ std::string getFileName(std::string filename) {
   return filename.substr(0, pos);  // pos==npos (no dot) -> whole name, which is correct
 }
 
-std::string getFileExtension(std::string filename) {
+std::string getFileExtension(const std::string& filename) {
   if (filename.empty() || filename.back() == '/') {
     return "";
   }
