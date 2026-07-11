@@ -104,14 +104,11 @@ void DictionaryWordSelectActivity::prebuildAdvanceTable() {
     const auto* line = static_cast<const PageLine*>(element.get());
     const auto& block = line->getBlock();
     if (!block) continue;
-    const auto& blockWords = block->getWords();
-    const auto& blockStyles = block->getWordStyles();
-    for (size_t i = 0; i < blockWords.size(); i++) {
-      pageText.append(blockWords[i]);
+    const uint16_t n = block->wordCount();
+    for (uint16_t i = 0; i < n; i++) {
+      pageText.append(block->wordText(i), block->wordTextLen(i));
       pageText.push_back(' ');
-      if (i < blockStyles.size()) {
-        pageStyleMask |= styleToBitMask(blockStyles[i]);
-      }
+      pageStyleMask |= styleToBitMask(block->wordStyle(i));
     }
   }
   if (pageStyleMask == 0) pageStyleMask = styleToBitMask(EpdFontFamily::REGULAR);
@@ -143,18 +140,20 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
     const auto& block = line->getBlock();
     if (!block) continue;
 
-    const auto& wordList = block->getWords();
-    const auto& xPosList = block->getWordXpos();
-    const auto& styleList = block->getWordStyles();
+    // Flat per-word storage (TextBlock stores words back-to-back in a single
+    // NUL-terminated arena; wordText(i) is a stable const char*, wordTextLen(i)
+    // its byte length excluding the NUL).
+    const uint16_t blockWordCount = block->wordCount();
 
     // Per-line gap = xPos[1] - xPos[0] - firstWordWidth. Justified blocks
     // stretch the gap (ParsedText.cpp:514-553 adds justifyExtra), so a
     // global space-width can't be reused — we measure per-block.
     int16_t lineGapWidth = naturalSpaceWidth;
-    if (wordList.size() >= 2 && xPosList.size() >= 2 && !wordList[0].empty()) {
-      const EpdFontFamily::Style firstStyle = (!styleList.empty()) ? styleList[0] : EpdFontFamily::REGULAR;
-      const int16_t firstWidth = measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), wordList[0], firstStyle);
-      const int16_t derivedGap = static_cast<int16_t>(xPosList[1] - xPosList[0] - firstWidth);
+    if (blockWordCount >= 2 && block->wordTextLen(0) > 0) {
+      const EpdFontFamily::Style firstStyle = block->wordStyle(0);
+      const std::string firstWord(block->wordText(0), block->wordTextLen(0));
+      const int16_t firstWidth = measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), firstWord, firstStyle);
+      const int16_t derivedGap = static_cast<int16_t>(block->wordXpos(1) - block->wordXpos(0) - firstWidth);
       // When wordList[1] is a continuation (attached punctuation etc., ParsedText.cpp:537-544)
       // the layout inserts no inter-word gap, so derivedGap collapses to the kerning offset
       // (~1-3 px). Real gaps are always >= getSpaceAdvance(...), so a half-space threshold
@@ -165,21 +164,14 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
       if (derivedGap > naturalSpaceWidth / 2) lineGapWidth = derivedGap;
     }
 
-    auto wordIt = wordList.begin();
-    auto xIt = xPosList.begin();
-    auto styleIt = styleList.begin();
-
-    while (wordIt != wordList.end() && xIt != xPosList.end()) {
-      int16_t screenX = line->xPos + static_cast<int16_t>(*xIt) + marginLeft;
+    for (uint16_t wIdx = 0; wIdx < blockWordCount; wIdx++) {
+      int16_t screenX = line->xPos + block->wordXpos(wIdx) + marginLeft;
       int16_t screenY = line->yPos + marginTop;
-      const std::string& wordText = *wordIt;
-      const EpdFontFamily::Style wordStyle = (styleIt != styleList.end()) ? *styleIt : EpdFontFamily::REGULAR;
+      const std::string wordText(block->wordText(wIdx), block->wordTextLen(wIdx));
+      const EpdFontFamily::Style wordStyle = block->wordStyle(wIdx);
 
       // Skip tokens with no alphanumeric characters (bullets, punctuation, etc.)
       if (!std::any_of(wordText.begin(), wordText.end(), [](unsigned char c) { return std::isalnum(c); })) {
-        ++wordIt;
-        ++xIt;
-        if (styleIt != styleList.end()) ++styleIt;
         continue;
       }
 
@@ -210,9 +202,8 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
         // negative kerning, short words where the entire xpos diff is the
         // gap).
         int16_t wordWidth;
-        const auto nextXIt = xIt + 1;
-        if (nextXIt != xPosList.end()) {
-          const int16_t raw = static_cast<int16_t>(*nextXIt - *xIt);
+        if (wIdx + 1 < blockWordCount) {
+          const int16_t raw = static_cast<int16_t>(block->wordXpos(wIdx + 1) - block->wordXpos(wIdx));
           wordWidth = std::max(static_cast<int16_t>(1), static_cast<int16_t>(raw - lineGapWidth));
         } else {
           wordWidth = measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), wordText, wordStyle);
@@ -272,10 +263,6 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
           }
         }
       }
-
-      ++wordIt;
-      ++xIt;
-      if (styleIt != styleList.end()) ++styleIt;
     }
   }
 

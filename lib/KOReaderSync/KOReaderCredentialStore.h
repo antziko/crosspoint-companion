@@ -1,4 +1,7 @@
 #pragma once
+#include <ArduinoJson.h>
+#include <PersistableStore.h>
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -15,18 +18,11 @@ enum class DocumentMatchMethod : uint8_t {
  */
 struct KOReaderSyncServer {
   std::string name;
-  std::string serverUrl;   // empty = use default sync.koreader.rocks
+  std::string serverUrl;  // empty = use default sync.koreader.rocks
   std::string username;
   std::string password;
   DocumentMatchMethod matchMethod = DocumentMatchMethod::FILENAME;
 };
-
-class KOReaderCredentialStore;
-
-namespace KOReaderJsonIO {
-bool save(const KOReaderCredentialStore& store, const char* path);
-bool load(KOReaderCredentialStore& store, const char* json, bool* needsResave);
-}  // namespace KOReaderJsonIO
 
 /**
  * Singleton class for storing KOReader sync server configurations on the SD card.
@@ -38,9 +34,8 @@ bool load(KOReaderCredentialStore& store, const char* json, bool* needsResave);
  * Invariant: activeIndex is always valid (0..count-1) whenever count >= 1.
  * The last remaining server cannot be deleted.
  */
-class KOReaderCredentialStore {
+class KOReaderCredentialStore : public PersistableStore<KOReaderCredentialStore> {
  private:
-  static KOReaderCredentialStore instance;
   std::vector<KOReaderSyncServer> servers;
   int activeIndex = -1;  // -1 only when count == 0
 
@@ -48,23 +43,21 @@ class KOReaderCredentialStore {
 
   // Private constructor for singleton
   KOReaderCredentialStore() = default;
+  ~KOReaderCredentialStore() = default;
 
+  friend class PersistableStore<KOReaderCredentialStore>;
+
+  // One-time migration of the legacy koreader.bin binary format into `servers`.
   bool loadFromBinaryFile();
 
-  friend bool KOReaderJsonIO::save(const KOReaderCredentialStore&, const char*);
-  friend bool KOReaderJsonIO::load(KOReaderCredentialStore&, const char*, bool*);
-
  public:
-  // Delete copy constructor and assignment
-  KOReaderCredentialStore(const KOReaderCredentialStore&) = delete;
-  KOReaderCredentialStore& operator=(const KOReaderCredentialStore&) = delete;
-
-  // Get singleton instance
-  static KOReaderCredentialStore& getInstance() { return instance; }
+  static const char* getFilePath() { return "/.crosspoint/koreader.json"; }
+  void toJson(JsonDocument& doc) const;
+  bool fromJson(JsonVariantConst doc);
   static constexpr size_t maxServers() { return MAX_SERVERS; }
 
-  // Save/load from SD card
-  bool saveToFile() const;
+  // Overrides PersistableStore::loadFromFile to add a one-time migration from the
+  // legacy koreader.bin binary format when no koreader.json exists yet.
   bool loadFromFile();
 
   // --- Multi-server CRUD ---

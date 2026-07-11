@@ -6,22 +6,14 @@
 #include <ObfuscationUtils.h>
 #include <Serialization.h>
 
-#include "KOReaderJsonIO.h"
-
-// Initialize the static instance
-KOReaderCredentialStore KOReaderCredentialStore::instance;
-
 namespace {
-// File format version (for binary migration)
-constexpr uint8_t KOREADER_FILE_VERSION = 1;
-
-// File paths
-constexpr char KOREADER_FILE_BIN[] = "/.crosspoint/koreader.bin";
-constexpr char KOREADER_FILE_JSON[] = "/.crosspoint/koreader.json";
-constexpr char KOREADER_FILE_BAK[] = "/.crosspoint/koreader.bin.bak";
-
 // Default sync server URL
 constexpr char DEFAULT_SERVER_URL[] = "https://sync.koreader.rocks:443";
+
+// Legacy binary file (pre-JSON) — read once for migration, then renamed to .bak.
+constexpr uint8_t KOREADER_FILE_VERSION = 1;
+constexpr char KOREADER_FILE_BIN[] = "/.crosspoint/koreader.bin";
+constexpr char KOREADER_FILE_BAK[] = "/.crosspoint/koreader.bin.bak";
 
 // Legacy obfuscation key - "KOReader" in ASCII (only used for binary migration)
 constexpr uint8_t LEGACY_OBFUSCATION_KEY[] = {0x4B, 0x4F, 0x52, 0x65, 0x61, 0x64, 0x65, 0x72};
@@ -35,40 +27,110 @@ void legacyDeobfuscate(std::string& data) {
     data[i] ^= LEGACY_OBFUSCATION_KEY[i % LEGACY_KEY_LENGTH];
   }
 }
+
+// Derive a readable server name from a URL host (used when migrating the old
+// single-record format that had no name field).
+std::string nameFromUrl(const std::string& serverUrl) {
+  if (serverUrl.empty()) return "KOReader Sync";
+  std::string host = serverUrl;
+  size_t protoEnd = host.find("://");
+  if (protoEnd != std::string::npos) host = host.substr(protoEnd + 3);
+  size_t slashPos = host.find('/');
+  if (slashPos != std::string::npos) host = host.substr(0, slashPos);
+  size_t colonPos = host.find(':');
+  if (colonPos != std::string::npos) host = host.substr(0, colonPos);
+  return host.empty() ? "KOReader Sync" : host;
+}
+
+// Clamp a raw matchMethod byte to a valid enum value (defaults to FILENAME).
+DocumentMatchMethod clampMatchMethod(uint8_t method) {
+  if (method > static_cast<uint8_t>(DocumentMatchMethod::BINARY)) {
+    LOG_DBG("KRS", "Invalid matchMethod %u in JSON, resetting to FILENAME", method);
+    return DocumentMatchMethod::FILENAME;
+  }
+  return static_cast<DocumentMatchMethod>(method);
+}
 }  // namespace
 
-bool KOReaderCredentialStore::saveToFile() const {
-  Storage.mkdir("/.crosspoint");
-  return KOReaderJsonIO::save(*this, KOREADER_FILE_JSON);
+void KOReaderCredentialStore::toJson(JsonDocument& doc) const {
+  doc["activeIndex"] = activeIndex;
+
+  JsonArray arr = doc["servers"].to<JsonArray>();
+  for (const auto& server : servers) {
+    JsonObject obj = arr.add<JsonObject>();
+    obj["name"] = server.name;
+    obj["serverUrl"] = server.serverUrl;
+    obj["username"] = server.username;
+    obj["password_obf"] = obfuscation::obfuscateToBase64(server.password);
+    obj["matchMethod"] = static_cast<uint8_t>(server.matchMethod);
+  }
+}
+
+bool KOReaderCredentialStore::fromJson(JsonVariantConst doc) {
+  servers.clear();
+  servers.reserve(MAX_SERVERS);
+  bool needsResave = false;
+
+  JsonArrayConst arr = doc["servers"].as<JsonArrayConst>();
+  if (!arr.isNull()) {
+    // New multi-server format
+    for (JsonObjectConst obj : arr) {
+      if (servers.size() >= MAX_SERVERS) break;
+      KOReaderSyncServer server;
+      server.name = obj["name"] | "";
+      server.serverUrl = obj["serverUrl"] | "";
+      server.username = obj["username"] | "";
+      server.password = extractPassword(obj, needsResave);
+      server.matchMethod = clampMatchMethod(obj["matchMethod"] | static_cast<uint8_t>(0));
+      servers.push_back(std::move(server));
+    }
+
+    int loadedActive = doc["activeIndex"] | 0;
+    if (servers.empty()) {
+      activeIndex = -1;
+    } else if (loadedActive < 0 || static_cast<size_t>(loadedActive) >= servers.size()) {
+      activeIndex = 0;
+    } else {
+      activeIndex = loadedActive;
+    }
+  } else {
+    // Migration: old single-record format (top-level username / serverUrl / matchMethod fields).
+    KOReaderSyncServer server;
+    server.username = doc["username"] | "";
+    server.password = extractPassword(doc, needsResave);
+    server.serverUrl = doc["serverUrl"] | "";
+    server.matchMethod = clampMatchMethod(doc["matchMethod"] | static_cast<uint8_t>(0));
+    server.name = nameFromUrl(server.serverUrl);
+    servers.push_back(std::move(server));
+    activeIndex = 0;
+    needsResave = true;  // force rewrite in the new multi-server format
+  }
+
+  LOG_DBG("KRS", "Loaded %zu KOReader sync servers, active=%d", servers.size(), activeIndex);
+
+  if (needsResave) {
+    LOG_DBG("KRS", "Resaving KOReader credentials to update format");
+    saveToFile();
+  }
+  return true;
 }
 
 bool KOReaderCredentialStore::loadFromFile() {
-  // Try JSON first
-  if (Storage.exists(KOREADER_FILE_JSON)) {
-    String json = Storage.readFile(KOREADER_FILE_JSON);
-    if (!json.isEmpty()) {
-      bool resave = false;
-      bool result = KOReaderJsonIO::load(*this, json.c_str(), &resave);
-      if (result && resave) {
-        saveToFile();
-        LOG_DBG("KRS", "Resaved KOReader credentials to update format");
-      }
-      return result;
-    }
+  // JSON first (PersistableStore base). Returns false when koreader.json is absent
+  // -> fall back to the one-time binary migration below.
+  if (PersistableStore<KOReaderCredentialStore>::loadFromFile()) {
+    return true;
   }
 
-  // Fall back to binary migration
-  if (Storage.exists(KOREADER_FILE_BIN)) {
-    if (loadFromBinaryFile()) {
-      if (saveToFile()) {
-        Storage.rename(KOREADER_FILE_BIN, KOREADER_FILE_BAK);
-        LOG_DBG("KRS", "Migrated koreader.bin to koreader.json");
-        return true;
-      } else {
-        LOG_ERR("KRS", "Failed to save KOReader credentials during migration");
-        return false;
-      }
+  // Legacy koreader.bin migration: read it, resave as JSON, then rename the .bin.
+  if (loadFromBinaryFile()) {
+    if (saveToFile()) {
+      Storage.rename(KOREADER_FILE_BIN, KOREADER_FILE_BAK);
+      LOG_DBG("KRS", "Migrated koreader.bin to koreader.json");
+      return true;
     }
+    LOG_ERR("KRS", "Failed to save KOReader credentials during migration");
+    return false;
   }
 
   LOG_DBG("KRS", "No credentials file found");

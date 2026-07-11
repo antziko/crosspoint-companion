@@ -77,6 +77,17 @@ bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint
         return false;
       }
       return (gpio.*fn)(usesUpButton(button) ? HalGPIO::BTN_UP : HalGPIO::BTN_DOWN);
+    case Button::NavNext:
+      // Logical "next item": side Down + front Right, with the control axis flipped in
+      // INVERTED / LANDSCAPE_CCW (shouldSwapFrontButtons) so it matches the rotated hint labels.
+      return shouldSwapFrontButtons()
+                 ? (mapButton(Button::Up, fn, applySwap) || mapButton(Button::Left, fn, applySwap))
+                 : (mapButton(Button::Down, fn, applySwap) || mapButton(Button::Right, fn, applySwap));
+    case Button::NavPrevious:
+      // Logical "previous item": side Up + front Left, axis-flipped in the same orientations.
+      return shouldSwapFrontButtons()
+                 ? (mapButton(Button::Down, fn, applySwap) || mapButton(Button::Right, fn, applySwap))
+                 : (mapButton(Button::Up, fn, applySwap) || mapButton(Button::Left, fn, applySwap));
   }
 
   return false;

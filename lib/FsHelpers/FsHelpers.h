@@ -11,8 +11,12 @@ std::string decodeUriEscapes(const std::string& path);
 
 std::string normalisePath(const std::string& path);
 
-// Natural, case-insensitive ordering with directories ("name/") first. Exposed so
-// callers holding richer entries (name + metadata) can sort by name without
+// Numeric-aware, case-insensitive comparison ("2" < "10"). Returns true when str1 orders
+// before str2. Same ordering sortFileList applies within the file/directory groups.
+bool naturalLess(const std::string& str1, const std::string& str2);
+
+// Natural, case-insensitive ordering with directories ("name/") first, then naturalLess.
+// Exposed so callers holding richer entries (name + metadata) can sort by name without
 // duplicating this logic.
 bool naturalFileLess(const std::string& str1, const std::string& str2);
 
