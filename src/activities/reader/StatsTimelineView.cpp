@@ -179,7 +179,7 @@ void StatsTimelineView::renderHeatmap(GfxRenderer& renderer, const Rect& rect, c
   constexpr int MAX_COLUMNS = static_cast<int>((ReadingTimeHistory::HEATMAP_DAYS + 2 * ROWS - 1) / ROWS);
   constexpr int MIN_CELL_SIZE = 8;
   constexpr int MARGIN = 4;
-  constexpr int CELL_GAP = 1;
+  constexpr int CELL_GAP = 2;
   // Fixed Mon..Sun row order (ISO week) — the legend never rotates with "today",
   // unlike a most-recent-day-relative layout whose labels would cycle through the
   // week and stop matching whichever weekday lands in row 0.
@@ -270,8 +270,8 @@ void StatsTimelineView::renderHeatmap(GfxRenderer& renderer, const Rect& rect, c
 
   // Grid: shade each tracked day by reading-intensity level — light gray for
   // <=30min, dark gray for <=1h, solid black for >1h. Each cell's footprint is
-  // cellSize - CELL_GAP, leaving a 1px white strip on its right and bottom, so
-  // every neighbour (horizontal and vertical) is separated by 1px of white and
+  // cellSize - CELL_GAP, leaving a CELL_GAP-px white strip on its right and bottom, so
+  // every neighbour (horizontal and vertical) is separated by CELL_GAP px of white and
   // no two cells ever share or double a border. Untracked days and tracked days
   // with no reading both render as plain white (None), so "no data yet" and "no
   // reading that day" are visually indistinguishable by design.
@@ -282,15 +282,16 @@ void StatsTimelineView::renderHeatmap(GfxRenderer& renderer, const Rect& rect, c
       if (dayIdx > anchorDay || dayIdx < oldestTrackedDay) continue;
       const int cx = gridX + col * cellSize;
       const int cy = gridY + static_cast<int>(row) * cellSize;
+      const int cellFootprint = cellSize - CELL_GAP;
       switch (history.getHeatmapLevel(anchorDay - dayIdx)) {
         case ReadingTimeHistory::HeatmapLevel::Heavy:
-          renderer.fillRect(cx, cy, cellSize - CELL_GAP, cellSize - CELL_GAP, true);
+          renderer.fillRect(cx, cy, cellFootprint, cellFootprint, true);
           break;
         case ReadingTimeHistory::HeatmapLevel::Moderate:
-          renderer.fillRectDither(cx, cy, cellSize - CELL_GAP, cellSize - CELL_GAP, Color::DarkGray);
+          renderer.fillRectDither(cx, cy, cellFootprint, cellFootprint, Color::DarkGray);
           break;
         case ReadingTimeHistory::HeatmapLevel::Light:
-          renderer.fillRectDither(cx, cy, cellSize - CELL_GAP, cellSize - CELL_GAP, Color::LightGray);
+          renderer.fillRectDither(cx, cy, cellFootprint, cellFootprint, Color::LightGray);
           break;
         case ReadingTimeHistory::HeatmapLevel::None:
           break;
