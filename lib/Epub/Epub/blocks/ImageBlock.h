@@ -16,6 +16,14 @@ class ImageBlock final : public Block {
   int16_t getHeight() const { return height; }
 
   bool imageExists() const;
+  // Cache validity is render-mode specific: the cache filename encodes oneBit/blueNoise
+  // (dither variant), so these take the renderer to check the exact file the next render
+  // would use. Without it, needsDecode() could miss a mode-specific cache and always
+  // draw a placeholder, or skip one that won't match.
+  bool hasValidCache(const GfxRenderer& renderer) const;
+  bool needsDecode(const GfxRenderer& renderer) const;
+  void renderPlaceholder(GfxRenderer& renderer, int x, int y) const;
+  static void clearSessionRenderFailures();
 
   BlockType getType() override { return IMAGE_BLOCK; }
   bool isEmpty() override { return false; }

@@ -221,6 +221,10 @@ void EpubReaderActivity::onEnter() {
   // If the book was moved/renamed outside the firmware, re-key its orphaned cache dir
   // (progress, stats, sections) before setupCacheDir() creates a fresh empty one.
   tryRecoverBookCache(epub->getPath());
+
+  // Reset the per-session image render-failure memory (upstream #1003 placeholders).
+  // Orientation is applied below from the book's saved value (APP_STATE.activeOrientation).
+  ImageBlock::clearSessionRenderFailures();
   epub->setupCacheDir();
   ensureCacheContentId(epub->getPath(), epub->getCachePath());
   // First open of a device-tagged book (e.g. "book (X3).epub"): seed its fresh
@@ -2396,6 +2400,11 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   // out to near-white. So gate this on grayImages, not on text AA.
   bool imagePageWithAA = grayImages;
 
+  // Whether any image on this page still needs decoding — gates the placeholder
+  // pre-pass below (upstream #1003). Grayscale/refresh cadence still keys off
+  // grayImages / hasLargeImage above.
+  const bool pageHasImagesNeedingDecode = page->hasImages() && page->hasImagesNeedingDecode(renderer);
+
   // Grayscale-pass content selector (perf; upstream #2393's Page::renderImages()).
   // Antialiased: text contributes grey, so render the whole page each strip.
   // Sharp / images-only: text is already solid-black in the BW frame, so the
@@ -2410,6 +2419,16 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
 
   // No automatic ghost-clear flash on image page turns — the power-button manual
   // refresh (HALF clear + re-render) is the ghost-clear tool when the user wants it.
+
+  // Placeholder pre-pass (upstream #1003): show text + image-placeholder boxes with a
+  // FAST_REFRESH immediately so the reader isn't blank while images decode. clearScreen()
+  // wipes the framebuffer; the normal render/grayscale flow below then repaints for real.
+  if (pageHasImagesNeedingDecode) {
+    page->renderWithImagePlaceholders(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);
+    renderStatusBar();
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    renderer.clearScreen();
+  }
 
   page->render(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);
   renderStatusBar();
