@@ -22,6 +22,7 @@ struct KOReaderSyncServer {
   std::string username;
   std::string password;
   DocumentMatchMethod matchMethod = DocumentMatchMethod::FILENAME;
+  bool sendMetadata = false;  // Send document metadata (filename/title/authors) with progress sync (#1820)
 };
 
 /**
@@ -97,6 +98,10 @@ class KOReaderCredentialStore : public PersistableStore<KOReaderCredentialStore>
 
   void setMatchMethod(DocumentMatchMethod method);
   DocumentMatchMethod getMatchMethod() const;
+
+  // sendMetadata operates on the active server (mirrors setMatchMethod/getMatchMethod).
+  void setSendMetadata(bool enabled);
+  bool getSendMetadata() const;
 };
 
 // Helper macro to access credential store

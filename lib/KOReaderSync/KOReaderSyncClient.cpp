@@ -541,6 +541,13 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
   {
     JsonDocument doc;
     doc["document"] = progress.document;
+    // Optional document metadata (KOReader PR #15306; gated by per-server sendMetadata).
+    if (progress.metadata.has_value()) {
+      auto meta = doc["metadata"].to<JsonObject>();
+      meta["filename"] = progress.metadata->filename;
+      meta["title"] = progress.metadata->title;
+      meta["authors"] = progress.metadata->authors;
+    }
     doc["progress"] = progress.progress;
     doc["percentage"] = progress.percentage;
     doc["device"] = DEVICE_NAME;

@@ -63,6 +63,7 @@ void KOReaderCredentialStore::toJson(JsonDocument& doc) const {
     obj["username"] = server.username;
     obj["password_obf"] = obfuscation::obfuscateToBase64(server.password);
     obj["matchMethod"] = static_cast<uint8_t>(server.matchMethod);
+    obj["sendMetadata"] = server.sendMetadata;
   }
 }
 
@@ -82,6 +83,7 @@ bool KOReaderCredentialStore::fromJson(JsonVariantConst doc) {
       server.username = obj["username"] | "";
       server.password = extractPassword(obj, needsResave);
       server.matchMethod = clampMatchMethod(obj["matchMethod"] | static_cast<uint8_t>(0));
+      server.sendMetadata = obj["sendMetadata"] | false;
       servers.push_back(std::move(server));
     }
 
@@ -100,6 +102,7 @@ bool KOReaderCredentialStore::fromJson(JsonVariantConst doc) {
     server.password = extractPassword(doc, needsResave);
     server.serverUrl = doc["serverUrl"] | "";
     server.matchMethod = clampMatchMethod(doc["matchMethod"] | static_cast<uint8_t>(0));
+    server.sendMetadata = doc["sendMetadata"] | false;
     server.name = nameFromUrl(server.serverUrl);
     servers.push_back(std::move(server));
     activeIndex = 0;
@@ -339,4 +342,15 @@ void KOReaderCredentialStore::setMatchMethod(DocumentMatchMethod method) {
 DocumentMatchMethod KOReaderCredentialStore::getMatchMethod() const {
   if (activeIndex < 0 || static_cast<size_t>(activeIndex) >= servers.size()) return DocumentMatchMethod::FILENAME;
   return servers[activeIndex].matchMethod;
+}
+
+void KOReaderCredentialStore::setSendMetadata(bool enabled) {
+  if (activeIndex < 0 || static_cast<size_t>(activeIndex) >= servers.size()) return;
+  servers[activeIndex].sendMetadata = enabled;
+  LOG_DBG("KRS", "Set sendMetadata for active server: %s", enabled ? "on" : "off");
+}
+
+bool KOReaderCredentialStore::getSendMetadata() const {
+  if (activeIndex < 0 || static_cast<size_t>(activeIndex) >= servers.size()) return false;
+  return servers[activeIndex].sendMetadata;
 }

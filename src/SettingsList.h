@@ -365,6 +365,15 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         KOREADER_STORE.saveToFile();
       },
       "koMatchMethod", StrId::STR_KOREADER_SYNC));
+  // Send document metadata with progress sync (#1820); per-server, applies to the active server.
+  v.push_back(SettingInfo::DynamicEnum(
+      StrId::STR_SEND_METADATA, {StrId::STR_STATE_OFF, StrId::STR_STATE_ON},
+      [] { return static_cast<uint8_t>(KOREADER_STORE.getSendMetadata()); },
+      [](uint8_t v) {
+        KOREADER_STORE.setSendMetadata(v != 0);
+        KOREADER_STORE.saveToFile();
+      },
+      "koSendMetadata", StrId::STR_KOREADER_SYNC));
 
   // --- Status Bar Settings (web-only, uses StatusBarSettingsActivity) ---
   v.push_back(SettingInfo::Toggle(StrId::STR_CHAPTER_PAGE_COUNT, &CrossPointSettings::statusBarChapterPageCount,
