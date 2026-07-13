@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(crosspoint_reader_tests CXX)
+project(crosspoint_reader_tests C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -52,3 +52,5 @@ add_subdirectory(koreader-document-id)
 add_subdirectory(book-cache-utils)
 add_subdirectory(flashcard-deck)
 add_subdirectory(utf8_compose)
+add_subdirectory(minibidi_arabic)
+add_subdirectory(combining_marks)

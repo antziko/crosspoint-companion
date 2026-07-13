@@ -12,12 +12,15 @@
 #include "parsers/ChapterHtmlSlimParser.h"
 
 namespace {
+// v28: text decoration bits now include line-through in serialized wordStyles.
 // v29: TextBlock word data stored as one flat arena (offset table + NUL-terminated
 // text blob) instead of length-prefixed strings and per-field arrays.
-// v34: merge bump. Combines upstream's v29 flat-arena layout with feat-dictionary's
-// serialized wordStyle decoration semantics (line-through, #2397; NFC-composed words).
-// Bumped past both lineages (upstream 29, feat-dictionary 33) so every pre-merge .bin
-// auto-invalidates and regenerates cleanly.
+// v34: merge bump. Combines upstream's v29 flat-arena layout, upstream's v30 Arabic
+// shaping (getTextAdvanceX now measures the shaped visual text, so v29 word positions
+// no longer match what drawText renders — #2541), and feat-dictionary's serialized
+// wordStyle decoration semantics (line-through, #2397; NFC-composed words). Bumped past
+// every lineage (upstream 30, feat-dictionary 33) so all pre-merge .bin auto-invalidate
+// and regenerate cleanly.
 constexpr uint8_t SECTION_FILE_VERSION = 34;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
