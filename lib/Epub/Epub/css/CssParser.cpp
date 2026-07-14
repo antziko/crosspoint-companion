@@ -409,6 +409,13 @@ void CssParser::processRuleBlockWithStyle(const std::string& selectorGroup, cons
     return;
   }
 
+  // Skip rules that define no supported property before splitting selectors (upstream #2604).
+  // Mirrors the anySet() guard at the insert site; applyOver(emptyStyle) is a no-op, so
+  // bailing here changes nothing but avoids the selector-split/normalize churn.
+  if (!style.defined.anySet()) {
+    return;
+  }
+
   // Check if we've reached the rule limit before processing
   if (rulesBySelector_.size() >= MAX_RULES) {
     LOG_DBG("CSS", "Reached max rules limit (%zu), stopping CSS parsing", MAX_RULES);
