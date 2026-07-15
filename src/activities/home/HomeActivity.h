@@ -21,6 +21,9 @@ class HomeActivity final : public Activity {
   bool coverBufferStored = false;   // Track if cover buffer is stored
   bool longPressFired = false;      // Swallow Confirm release after a long-press fired
   bool backLongPressFired = false;  // Swallow Back release after a hold-Back fired
+  // Home can be entered while Back is still held (leaving Settings with Back):
+  // ignore that stale release until a fresh Back press is seen (upstream #2619).
+  bool backPressSeen = false;
   // Cover snapshot is stored in horizontal-strip chunks, not one contiguous
   // buffer: returning from the reader fragments the heap (free heap can be 60 KB+
   // while the largest contiguous block is < the ~33 KB the full region needs), so
