@@ -218,6 +218,8 @@ void ChapterHtmlSlimParser::flushPendingAnchor() {
 
 // flush the contents of partWordBuffer to currentTextBlock
 void ChapterHtmlSlimParser::flushPartWordBuffer() {
+  flushLongTextBlockIfNeeded();
+
   // Determine font style from depth-based tracking and CSS effective style
   const bool isBold = boldUntilDepth < depth || effectiveBold;
   const bool isItalic = italicUntilDepth < depth || effectiveItalic;
@@ -243,6 +245,29 @@ void ChapterHtmlSlimParser::flushPartWordBuffer() {
   partWordBufferIndex = 0;
   nextWordContinues = false;
   listItemBulletOnly = false;
+}
+
+void ChapterHtmlSlimParser::flushLongTextBlockIfNeeded() {
+  if (!currentTextBlock) {
+    return;
+  }
+  // Keep token growth bounded: CSS-heavy spans can fragment text into many tiny words, so flush
+  // earlier when embedded CSS is active. The "exclude last line" behavior preserves paragraph flow
+  // across chunks. Thresholds match upstream develop (750 / 320); #2256's structural change (calling
+  // this from flushPartWordBuffer too + std::deque anchors) is what curbs the contiguous heap growth.
+  const size_t blockWordCount = currentTextBlock->size();
+  const size_t softFlushThreshold = embeddedStyle ? TEXT_BLOCK_SOFT_FLUSH_WORDS_WITH_CSS : TEXT_BLOCK_SOFT_FLUSH_WORDS;
+  if (blockWordCount <= softFlushThreshold) {
+    return;
+  }
+
+  LOG_DBG("EHP", "Text block soft flush (%u words)", static_cast<unsigned>(blockWordCount));
+  const int horizontalInset = currentTextBlock->getBlockStyle().totalHorizontalInset();
+  const uint16_t effectiveWidth =
+      (horizontalInset < viewportWidth) ? static_cast<uint16_t>(viewportWidth - horizontalInset) : viewportWidth;
+  currentTextBlock->layoutAndExtractLines(
+      renderer, fontId, effectiveWidth,
+      [this](const std::shared_ptr<TextBlock>& textBlock) { this->addLineToPage(textBlock); }, false);
 }
 
 // start a new text block if needed
@@ -1244,22 +1269,9 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
     self->partWordBuffer[self->partWordBufferIndex++] = s[i];
   }
 
-  // Keep token growth bounded: CSS-heavy spans can fragment text into many tiny
-  // words, so flush earlier when embedded CSS is active. We still keep the
-  // "exclude last line" behavior to preserve paragraph flow across chunks.
-  const size_t blockWordCount = self->currentTextBlock->size();
-  const size_t softFlushThreshold =
-      self->embeddedStyle ? TEXT_BLOCK_SOFT_FLUSH_WORDS_WITH_CSS : TEXT_BLOCK_SOFT_FLUSH_WORDS;
-  if (blockWordCount > softFlushThreshold) {
-    LOG_DBG("EHP", "Text block soft flush (%u words)", static_cast<unsigned>(blockWordCount));
-    const int horizontalInset = self->currentTextBlock->getBlockStyle().totalHorizontalInset();
-    const uint16_t effectiveWidth = (horizontalInset < self->viewportWidth)
-                                        ? static_cast<uint16_t>(self->viewportWidth - horizontalInset)
-                                        : self->viewportWidth;
-    self->currentTextBlock->layoutAndExtractLines(
-        self->renderer, self->fontId, effectiveWidth,
-        [self](const std::shared_ptr<TextBlock>& textBlock) { self->addLineToPage(textBlock); }, false);
-  }
+  // If we have a large number of words buffered up, perform the layout and consume out all but the last line.
+  // Spotted when reading Intermezzo, there are some really long text blocks in there.
+  self->flushLongTextBlockIfNeeded();
 }
 
 void XMLCALL ChapterHtmlSlimParser::defaultHandlerExpand(void* userData, const XML_Char* s, const int len) {
