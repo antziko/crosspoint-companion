@@ -340,10 +340,6 @@ void KOReaderSyncActivity::performUpload() {
   }
   requestUpdateAndWait();
 
-  // Release epub before the TLS handshake to free ~30KB RAM. localProgress was
-  // pre-computed before the Epub was released, so this is safe.
-  epub.reset();
-
   // localProgress was pre-computed in EpubReaderActivity before the Epub was released.
   KOReaderProgress progress;
   progress.document = documentHash;
@@ -352,14 +348,24 @@ void KOReaderSyncActivity::performUpload() {
 
   // Optionally include document metadata (KOReader PR #15306)
   if (KOREADER_STORE.getSendMetadata()) {
+    // The Epub is released before the sync network calls (and may already be null on
+    // entry). Reload it here to read title/author, and guard against a failed reload.
+    // Filename is derived from the path and is always safe. (#2608)
+    ensureEpubLoaded();
     KOReaderMetadata meta;
-    // Extract filename from path
     const auto lastSlash = epubPath.rfind('/');
     meta.filename = (lastSlash != std::string::npos) ? epubPath.substr(lastSlash + 1) : epubPath;
-    meta.title = epub->getTitle();
-    meta.authors = epub->getAuthor();
+    if (epub) {
+      meta.title = epub->getTitle();
+      meta.authors = epub->getAuthor();
+    } else {
+      LOG_ERR("KOSync", "Epub unavailable for metadata; sending filename only");
+    }
     progress.metadata = std::move(meta);
   }
+
+  // Release epub before the TLS handshake to free ~30KB RAM. Nothing below needs it.
+  epub.reset();
 
   const auto result = KOReaderSyncClient::updateProgress(progress);
 
