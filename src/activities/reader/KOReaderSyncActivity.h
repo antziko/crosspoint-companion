@@ -44,7 +44,7 @@ class KOReaderSyncActivity final : public Activity {
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
-  bool preventAutoSleep() override { return state == CONNECTING || state == SYNCING; }
+  bool preventAutoSleep() override { return state == CONNECTING || state == SYNCING || state == UPLOADING; }
 
  private:
   enum State {
@@ -54,6 +54,7 @@ class KOReaderSyncActivity final : public Activity {
     SHOWING_RESULT,
     UPLOADING,
     UPLOAD_COMPLETE,
+    SYNC_COMPLETE,  // smart sync: already in sync ("Already synced"), auto-return
     NO_REMOTE_PROGRESS,
     FEATURE_DONE,  // single-feature scope finished: show summary, auto-return
     SYNC_FAILED,
@@ -151,6 +152,8 @@ class KOReaderSyncActivity final : public Activity {
   void onWifiSelectionComplete(bool success);
   void performSync();
   void performUpload();
+  bool smartSyncEnabled() const;  // active server's syncBehavior == SMART (#2192)
+  void completeAlreadySynced();   // enter SYNC_COMPLETE + start the existing auto-return countdown
   // Pull + union-merge + push bookmarks alongside progress. Silent (logs only);
   // never fails the progress sync. Requires `documentHash` already computed.
   // Uses NO keep-alive session: the ~2.7KB upload body needs an unfragmented arena,

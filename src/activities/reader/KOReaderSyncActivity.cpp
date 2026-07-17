@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 
 #include "BookReadingStats.h"
 #include "BookmarkStore.h"
@@ -101,6 +102,19 @@ void KOReaderSyncActivity::saveProgressAndReturn(int spineIndex, int page) {
   }
   syncSucceeded = true;  // remote applied: a sleepWhenDone sync may now deep-sleep
   returnToReader();
+}
+
+bool KOReaderSyncActivity::smartSyncEnabled() const {
+  return KOREADER_STORE.getSyncBehavior() == KOReaderSyncBehavior::SMART;
+}
+
+void KOReaderSyncActivity::completeAlreadySynced() {
+  {
+    RenderLock lock(*this);
+    state = SYNC_COMPLETE;
+  }
+  uploadCompleteAt = millis();  // reuse the UPLOAD_COMPLETE auto-return countdown
+  requestUpdate(true);
 }
 
 void KOReaderSyncActivity::returnToReader() {
@@ -281,6 +295,13 @@ void KOReaderSyncActivity::performSync() {
   }
 
   if (result == KOReaderSyncClient::NOT_FOUND) {
+    if (smartSyncEnabled()) {
+      // Smart sync: no remote record for this document — upload local progress without prompting.
+      LOG_DBG("KOSync", "Smart sync: no remote progress; uploading local %.6f", localProgress.percentage);
+      hasRemoteProgress = false;
+      performUpload();
+      return;
+    }
     // No remote progress - offer to upload
     {
       RenderLock lock(*this);
@@ -318,6 +339,26 @@ void KOReaderSyncActivity::performSync() {
   remotePosition = ProgressMapper::toCrossPoint(epub, koPos, renderer, currentSpineIndex, totalPagesInSpine);
 
   // localProgress was pre-computed in EpubReaderActivity before the Epub was released.
+  if (smartSyncEnabled()) {
+    // Smart sync: auto-resolve on the furthest-progress-wins rule (CrossPoint has no local
+    // progress timestamps to do true LWW). No alternate-hash probe here — uploads/reads stay on
+    // the user's configured match method, keeping the progress leg to a single handshake.
+    static constexpr float SAME_PROGRESS_EPSILON = 0.001f;  // 0.1 percentage points
+    const float delta = localProgress.percentage - remoteProgress.percentage;
+    LOG_DBG("KOSync", "Smart decision: local=%.6f remote=%.6f delta=%.6f mapped=%d/%d", localProgress.percentage,
+            remoteProgress.percentage, delta, remotePosition.spineIndex, remotePosition.pageNumber);
+    if (std::fabs(delta) <= SAME_PROGRESS_EPSILON) {
+      completeAlreadySynced();
+      return;
+    }
+    if (delta > 0) {
+      performUpload();  // local ahead: push it up
+      return;
+    }
+    saveProgressAndReturn(remotePosition.spineIndex, remotePosition.pageNumber);  // remote ahead: apply it
+    return;
+  }
+
   {
     RenderLock lock(*this);
     state = SHOWING_RESULT;
@@ -1239,10 +1280,12 @@ void KOReaderSyncActivity::render(RenderLock&&) {
     return;
   }
 
-  if (state == UPLOAD_COMPLETE) {
-    UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top, tr(STR_UPLOAD_SUCCESS), true, EpdFontFamily::BOLD);
+  if (state == UPLOAD_COMPLETE || state == SYNC_COMPLETE) {
+    UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top,
+                              state == UPLOAD_COMPLETE ? tr(STR_UPLOAD_SUCCESS) : tr(STR_ALREADY_SYNCED), true,
+                              EpdFontFamily::BOLD);
 
-    const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+    const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_DONE), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer();
     return;
@@ -1269,16 +1312,20 @@ void KOReaderSyncActivity::render(RenderLock&&) {
 }
 
 void KOReaderSyncActivity::loop() {
-  if (state == NO_CREDENTIALS || state == SYNC_FAILED || state == UPLOAD_COMPLETE || state == FEATURE_DONE) {
-    // Full-sync progress upload auto-returns to the reader once the user has had a moment
-    // to read the confirmation — no manual Back needed. Single-feature syncs (FEATURE_DONE)
-    // deliberately do NOT auto-return: the user stays on the result summary until they press
-    // Back, so an individual Bookmarks/Stats/Dict/Flashcards sync doesn't snap away on its own.
-    if (state == UPLOAD_COMPLETE && millis() - uploadCompleteAt >= UPLOAD_COMPLETE_AUTO_RETURN_MS) {
+  if (state == NO_CREDENTIALS || state == SYNC_FAILED || state == UPLOAD_COMPLETE || state == SYNC_COMPLETE ||
+      state == FEATURE_DONE) {
+    // Full-sync progress upload and the smart "already synced" outcome auto-return to the reader
+    // once the user has had a moment to read the confirmation — no manual Back needed. Single-feature
+    // syncs (FEATURE_DONE) deliberately do NOT auto-return: the user stays on the result summary until
+    // they press Back, so an individual Bookmarks/Stats/Dict/Flashcards sync doesn't snap away on its own.
+    if ((state == UPLOAD_COMPLETE || state == SYNC_COMPLETE) &&
+        millis() - uploadCompleteAt >= UPLOAD_COMPLETE_AUTO_RETURN_MS) {
       returnToReader();
       return;
     }
-    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    if (mappedInput.wasReleased(MappedInputManager::Button::Back) ||
+        ((state == UPLOAD_COMPLETE || state == SYNC_COMPLETE) &&
+         mappedInput.wasReleased(MappedInputManager::Button::Confirm))) {
       returnToReader();
     }
     return;

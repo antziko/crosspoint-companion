@@ -50,6 +50,17 @@ DocumentMatchMethod clampMatchMethod(uint8_t method) {
   }
   return static_cast<DocumentMatchMethod>(method);
 }
+
+// Clamp a raw syncBehavior byte to a valid enum value (defaults to ASK_EVERY_TIME). A missing
+// key also lands here via the `| ASK_EVERY_TIME` default, preserving the always-prompt flow for
+// credential files that predate this setting.
+KOReaderSyncBehavior clampSyncBehavior(uint8_t behavior) {
+  if (behavior > static_cast<uint8_t>(KOReaderSyncBehavior::SMART)) {
+    LOG_DBG("KRS", "Invalid syncBehavior %u in JSON, resetting to ASK_EVERY_TIME", behavior);
+    return KOReaderSyncBehavior::ASK_EVERY_TIME;
+  }
+  return static_cast<KOReaderSyncBehavior>(behavior);
+}
 }  // namespace
 
 void KOReaderCredentialStore::toJson(JsonDocument& doc) const {
@@ -64,6 +75,7 @@ void KOReaderCredentialStore::toJson(JsonDocument& doc) const {
     obj["password_obf"] = obfuscation::obfuscateToBase64(server.password);
     obj["matchMethod"] = static_cast<uint8_t>(server.matchMethod);
     obj["sendMetadata"] = server.sendMetadata;
+    obj["syncBehavior"] = static_cast<uint8_t>(server.syncBehavior);
   }
 }
 
@@ -84,6 +96,8 @@ bool KOReaderCredentialStore::fromJson(JsonVariantConst doc) {
       server.password = extractPassword(obj, needsResave);
       server.matchMethod = clampMatchMethod(obj["matchMethod"] | static_cast<uint8_t>(0));
       server.sendMetadata = obj["sendMetadata"] | false;
+      server.syncBehavior =
+          clampSyncBehavior(obj["syncBehavior"] | static_cast<uint8_t>(KOReaderSyncBehavior::ASK_EVERY_TIME));
       servers.push_back(std::move(server));
     }
 
@@ -103,6 +117,8 @@ bool KOReaderCredentialStore::fromJson(JsonVariantConst doc) {
     server.serverUrl = doc["serverUrl"] | "";
     server.matchMethod = clampMatchMethod(doc["matchMethod"] | static_cast<uint8_t>(0));
     server.sendMetadata = doc["sendMetadata"] | false;
+    server.syncBehavior =
+        clampSyncBehavior(doc["syncBehavior"] | static_cast<uint8_t>(KOReaderSyncBehavior::ASK_EVERY_TIME));
     server.name = nameFromUrl(server.serverUrl);
     servers.push_back(std::move(server));
     activeIndex = 0;
@@ -353,4 +369,19 @@ void KOReaderCredentialStore::setSendMetadata(bool enabled) {
 bool KOReaderCredentialStore::getSendMetadata() const {
   if (activeIndex < 0 || static_cast<size_t>(activeIndex) >= servers.size()) return false;
   return servers[activeIndex].sendMetadata;
+}
+
+void KOReaderCredentialStore::setSyncBehavior(KOReaderSyncBehavior behavior) {
+  if (activeIndex < 0 || static_cast<size_t>(activeIndex) >= servers.size()) return;
+  if (static_cast<uint8_t>(behavior) > static_cast<uint8_t>(KOReaderSyncBehavior::SMART)) {
+    behavior = KOReaderSyncBehavior::ASK_EVERY_TIME;
+  }
+  servers[activeIndex].syncBehavior = behavior;
+  LOG_DBG("KRS", "Set syncBehavior for active server: %s", behavior == KOReaderSyncBehavior::SMART ? "Smart" : "Ask");
+}
+
+KOReaderSyncBehavior KOReaderCredentialStore::getSyncBehavior() const {
+  if (activeIndex < 0 || static_cast<size_t>(activeIndex) >= servers.size())
+    return KOReaderSyncBehavior::ASK_EVERY_TIME;
+  return servers[activeIndex].syncBehavior;
 }

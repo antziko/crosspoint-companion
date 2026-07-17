@@ -17,8 +17,9 @@
 namespace {
 // Rows always present for an existing server.
 // New servers only show the first BASE_ITEMS_NEW rows (no Set Active, Authenticate, or Delete).
-constexpr int BASE_ITEMS_NEW = 6;       // Name, Username, Password, Sync Server URL, Doc Matching, Send Metadata
-constexpr int BASE_ITEMS_EXISTING = 8;  // + Set as Active + Authenticate
+constexpr int BASE_ITEMS_NEW =
+    7;  // Name, Username, Password, Sync Server URL, Doc Matching, Send Metadata, Sync Behavior
+constexpr int BASE_ITEMS_EXISTING = 9;  // + Set as Active + Authenticate
 
 // Row indices (shared between getMenuItemCount, handleSelection, render)
 constexpr int ROW_NAME = 0;
@@ -27,9 +28,10 @@ constexpr int ROW_PASSWORD = 2;
 constexpr int ROW_URL = 3;
 constexpr int ROW_DOC_MATCH = 4;
 constexpr int ROW_SEND_METADATA = 5;
-constexpr int ROW_SET_ACTIVE = 6;
-constexpr int ROW_AUTHENTICATE = 7;
-constexpr int ROW_DELETE = 8;
+constexpr int ROW_SYNC_BEHAVIOR = 6;
+constexpr int ROW_SET_ACTIVE = 7;
+constexpr int ROW_AUTHENTICATE = 8;
+constexpr int ROW_DELETE = 9;
 }  // namespace
 
 int KOReaderSettingsActivity::getMenuItemCount() const {
@@ -170,6 +172,14 @@ void KOReaderSettingsActivity::handleSelection() {
     saveServer();
     requestUpdate();
 
+  } else if (selectedIndex == ROW_SYNC_BEHAVIOR) {
+    // Toggle between Ask-every-time and Smart auto-resolve for this server (#2192)
+    editServer.syncBehavior = (editServer.syncBehavior == KOReaderSyncBehavior::SMART)
+                                  ? KOReaderSyncBehavior::ASK_EVERY_TIME
+                                  : KOReaderSyncBehavior::SMART;
+    saveServer();
+    requestUpdate();
+
   } else if (selectedIndex == ROW_SET_ACTIVE && !isNewServer) {
     if (serverIndex != KOREADER_STORE.getActiveIndex()) {
       KOREADER_STORE.setActiveIndex(serverIndex);
@@ -229,8 +239,9 @@ void KOReaderSettingsActivity::render(RenderLock&&) {
       StrId::STR_SYNC_SERVER_URL,    // 3 Sync Server URL
       StrId::STR_DOCUMENT_MATCHING,  // 4 Document Matching
       StrId::STR_SEND_METADATA,      // 5 Send Metadata
-      StrId::STR_SET_AS_ACTIVE,      // 6 Set as Active
-      StrId::STR_AUTHENTICATE,       // 7 Authenticate
+      StrId::STR_SYNC_BEHAVIOR,      // 6 Sync Behavior
+      StrId::STR_SET_AS_ACTIVE,      // 7 Set as Active
+      StrId::STR_AUTHENTICATE,       // 8 Authenticate
   };
 
   GUI.drawList(
@@ -256,6 +267,9 @@ void KOReaderSettingsActivity::render(RenderLock&&) {
                                                                          : std::string(tr(STR_BINARY));
         } else if (index == ROW_SEND_METADATA) {
           return editServer.sendMetadata ? std::string(tr(STR_STATE_ON)) : std::string(tr(STR_STATE_OFF));
+        } else if (index == ROW_SYNC_BEHAVIOR) {
+          return editServer.syncBehavior == KOReaderSyncBehavior::SMART ? std::string(tr(STR_SMART_SYNC))
+                                                                        : std::string(tr(STR_ASK_EVERY_TIME));
         } else if (index == ROW_SET_ACTIVE) {
           return (serverIndex == activeIdx) ? std::string("\xE2\x80\xA2") : std::string("");
         } else if (index == ROW_AUTHENTICATE) {

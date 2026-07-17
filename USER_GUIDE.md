@@ -297,7 +297,7 @@ The Settings screen allows you to configure the device's behavior. There are a f
 
 - **Wi-Fi Networks**: Connect to Wi-Fi networks for file transfers and firmware updates.
 
-- **KOReader Sync**: Options for setting up KOReader for syncing book progress.
+- **KOReader Sync**: Options for setting up KOReader for syncing book progress. Each server has a **Sync Behavior** setting: **Ask every time** (the default) always shows the Apply/Upload choice, while **Smart sync** auto-resolves simple push/pull decisions. Switch it per server at any time.
 
 - **OPDS Servers**: Manage one or more OPDS [(Open Publication Distribution System)](https://en.wikipedia.org/wiki/Open_Publication_Distribution_System) libraries for browsing and downloading books. See [OPDS Servers (Multiple Libraries)](#365-opds-servers-multiple-libraries) below.
 
@@ -391,9 +391,9 @@ When this returns `HTTP 402` with `{"code":2002,"message":"Username is already r
 
 3. While reading, press **Confirm** to open the reader menu, then select **Sync Progress**.
    
-   - Choose **Apply Remote** to jump to remote progress.
-   
-   - Choose **Upload Local** to push current progress.
+   - With **Sync Behavior** set to **Ask every time** (the default), choose **Apply Remote** to jump to remote progress, or **Upload Local** to push current progress.
+
+   - With **Sync Behavior** set to **Smart sync**, CrossPoint auto-resolves simple cases: upload when no remote progress exists, show a brief "Already synced" when local and remote match, upload when local is further ahead, or apply remote when remote is further ahead.
 
 ##### Option B: Self-Hosted Server (Docker Compose)
 
@@ -470,9 +470,9 @@ If you use the HTTPS listener, use `https://<server-ip>:7200` (`curl -k` only fo
 
 5. While reading, press **Confirm** to open the reader menu, then select **Sync Progress**.
    
-   - Choose **Apply Remote** to jump to remote progress.
-   
-   - Choose **Upload Local** to push current progress.
+   - With **Sync Behavior** set to **Ask every time** (the default), choose **Apply Remote** to jump to remote progress, or **Upload Local** to push current progress.
+
+   - With **Sync Behavior** set to **Smart sync**, CrossPoint auto-resolves simple cases: upload when no remote progress exists, show a brief "Already synced" when local and remote match, upload when local is further ahead, or apply remote when remote is further ahead.
 
 ### 3.7 Sleep Screen
 

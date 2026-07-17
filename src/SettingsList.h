@@ -380,6 +380,16 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         KOREADER_STORE.saveToFile();
       },
       "koSendMetadata", StrId::STR_KOREADER_SYNC));
+  // Sync behavior (#2192); per-server, applies to the active server. Order matches the enum:
+  // 0 = Ask every time, 1 = Smart sync.
+  v.push_back(SettingInfo::DynamicEnum(
+      StrId::STR_SYNC_BEHAVIOR, {StrId::STR_ASK_EVERY_TIME, StrId::STR_SMART_SYNC},
+      [] { return static_cast<uint8_t>(KOREADER_STORE.getSyncBehavior()); },
+      [](uint8_t v) {
+        KOREADER_STORE.setSyncBehavior(static_cast<KOReaderSyncBehavior>(v));
+        KOREADER_STORE.saveToFile();
+      },
+      "koSyncBehavior", StrId::STR_KOREADER_SYNC));
 
   // --- Status Bar Settings (web-only, uses StatusBarSettingsActivity) ---
   v.push_back(SettingInfo::Toggle(StrId::STR_CHAPTER_PAGE_COUNT, &CrossPointSettings::statusBarChapterPageCount,

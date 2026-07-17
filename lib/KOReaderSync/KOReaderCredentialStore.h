@@ -12,6 +12,12 @@ enum class DocumentMatchMethod : uint8_t {
   BINARY = 1,    // Match by partial MD5 of file content (more accurate, but files must be identical)
 };
 
+// How manual "Sync Progress" resolves differences after fetching remote progress (#2192).
+enum class KOReaderSyncBehavior : uint8_t {
+  ASK_EVERY_TIME = 0,  // Always show the Apply/Upload choice (this branch's default).
+  SMART = 1,           // Auto-resolve simple cases using the furthest progress.
+};
+
 /**
  * Per-server configuration for a KOReader sync server.
  * Password is kept plaintext in RAM; XOR-obfuscated with device MAC on disk.
@@ -23,6 +29,8 @@ struct KOReaderSyncServer {
   std::string password;
   DocumentMatchMethod matchMethod = DocumentMatchMethod::FILENAME;
   bool sendMetadata = false;  // Send document metadata (filename/title/authors) with progress sync (#1820)
+  // Default ASK_EVERY_TIME preserves this branch's always-prompt sync flow; Smart is opt-in (#2192).
+  KOReaderSyncBehavior syncBehavior = KOReaderSyncBehavior::ASK_EVERY_TIME;
 };
 
 /**
@@ -102,6 +110,10 @@ class KOReaderCredentialStore : public PersistableStore<KOReaderCredentialStore>
   // sendMetadata operates on the active server (mirrors setMatchMethod/getMatchMethod).
   void setSendMetadata(bool enabled);
   bool getSendMetadata() const;
+
+  // syncBehavior operates on the active server (mirrors setSendMetadata/getSendMetadata).
+  void setSyncBehavior(KOReaderSyncBehavior behavior);
+  KOReaderSyncBehavior getSyncBehavior() const;
 };
 
 // Helper macro to access credential store
