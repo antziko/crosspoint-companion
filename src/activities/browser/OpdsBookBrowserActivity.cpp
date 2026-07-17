@@ -24,6 +24,7 @@
 #include "fontIds.h"
 #include "network/HttpDownloader.h"
 #include "util/BookCacheUtils.h"
+#include "util/OpdsFilename.h"
 #include "util/StringUtils.h"
 #include "util/UrlUtils.h"
 
@@ -67,10 +68,12 @@ inline size_t minContiguousForUrl(const std::string& url) {
 // On-SD filename for a book entry (no directory). Single source of truth so the
 // downloader and the "already downloaded" indicator never diverge.
 std::string bookFileName(const OpdsEntry& book) {
-  // "Title - Author.epub" (or "Title.epub" when no author). This order is the
-  // long-standing download convention — books already on the card use it, so the
-  // downloader and the "already downloaded" marker must match it exactly.
-  return StringUtils::sanitizeFilename(book.title + (book.author.empty() ? "" : " - " + book.author)) + ".epub";
+  // Filename order is user-configurable (#2571). Default is Title-Author, this
+  // branch's long-standing download convention. bookFileNameCandidates() below
+  // matches every order, so the "already downloaded" marker stays correct
+  // regardless of the chosen format.
+  return opdsBookFilename(book.author, book.title,
+                          static_cast<OpdsFilenameFormat>(SETTINGS.opdsFilenameFormat));
 }
 
 // Per-server download folder, named after the OPDS server: "/<sanitized name>".

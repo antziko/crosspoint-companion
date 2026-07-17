@@ -12,18 +12,33 @@
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/OpdsFilename.h"
 
 namespace {
 // Hold threshold for long-press duplicate gesture (matches RECENT_LONG_PRESS_MS on home screen).
 constexpr unsigned long DUPLICATE_HOLD_MS = 1000;
+
+// Label shown for the current OPDS filename format in the list subtitle.
+StrId opdsFormatLabel(uint8_t format) {
+  switch (format) {
+    case static_cast<uint8_t>(OpdsFilenameFormat::TitleAuthor):
+      return StrId::STR_FMT_TITLE_AUTHOR;
+    case static_cast<uint8_t>(OpdsFilenameFormat::TitleOnly):
+      return StrId::STR_FMT_TITLE;
+    default:
+      return StrId::STR_FMT_AUTHOR_TITLE;
+  }
+}
 }  // namespace
 
 int OpdsServerListActivity::getItemCount() const {
   int count = static_cast<int>(OPDS_STORE.getCount());
-  // In settings mode, append one virtual item: "Add Server". (A-Z sort is now a
-  // per-server toggle inside the server editor.) In picker mode, only real servers.
+  // In settings mode, append two virtual items: "Add Server" and "Filename format".
+  // (A-Z sort is a per-server toggle inside the server editor; the download folder is
+  // derived per-server from the server name, so there is no global folder item.) In
+  // picker mode, only real servers.
   if (!pickerMode) {
-    count += 1;
+    count += 2;
   }
   return count;
 }
@@ -127,6 +142,12 @@ void OpdsServerListActivity::handleSelection() {
   } else if (selectedIndex == serverCount) {
     // "Add Server" virtual item
     startActivityForResult(std::make_unique<OpdsSettingsActivity>(renderer, mappedInput, -1), resultHandler);
+  } else if (selectedIndex == serverCount + 1) {
+    // "Filename format" virtual item: tap cycles through the available formats.
+    SETTINGS.opdsFilenameFormat =
+        static_cast<uint8_t>((SETTINGS.opdsFilenameFormat + 1) % static_cast<uint8_t>(OpdsFilenameFormat::Count));
+    SETTINGS.saveToFile();
+    requestUpdate();
   }
 }
 
@@ -178,16 +199,22 @@ void OpdsServerListActivity::render(RenderLock&&) {
     // Secondary label: server URL (shown as subtitle when name is set).
     GUI.drawList(
         renderer, Rect{0, contentTop, pageWidth, contentHeight}, itemCount, selectedIndex,
-        [&servers, serverCount](int index) {
+        [&servers, serverCount](int index) -> std::string {
           if (index < serverCount) {
             const auto& server = servers[index];
             return server.name.empty() ? server.url : server.name;
           }
-          return std::string(I18n::getInstance().get(StrId::STR_ADD_SERVER));
+          if (index == serverCount) {
+            return std::string(I18n::getInstance().get(StrId::STR_ADD_SERVER));
+          }
+          return std::string(I18n::getInstance().get(StrId::STR_OPDS_FILENAME_FORMAT));
         },
-        [&servers, serverCount](int index) {
+        [&servers, serverCount](int index) -> std::string {
           if (index < serverCount) {
             return servers[index].name.empty() ? std::string("") : servers[index].url;
+          }
+          if (index == serverCount + 1) {
+            return std::string(I18n::getInstance().get(opdsFormatLabel(SETTINGS.opdsFilenameFormat)));
           }
           return std::string("");
         });

@@ -345,6 +345,11 @@ class CrossPointSettings {
   uint8_t removeReadBooksFromRecents = 0;
   // Move epub to /Read/ folder on SD card when finished (0 = disabled, 1 = enabled)
   uint8_t moveFinishedToReadFolder = 0;
+  // On-disk filename format for OPDS downloads. See OpdsFilenameFormat in util/OpdsFilename.h
+  // (0=Author-Title, 1=Title-Author, 2=Title). Default 1 preserves this branch's long-standing
+  // "Title - Author.epub" download convention. Edited from the OPDS server list + web UI;
+  // category-less SettingInfo::Enum keeps it off the on-device Settings screen.
+  uint8_t opdsFilenameFormat = 1;
   // Write diagnostic logs to /opds_debug.txt on the SD card (0 = off, 1 = on). Off by
   // default: a diagnostic, and avoids SD wear. Drives SdDebugLog's master switch.
   uint8_t sdCardLogging = 0;
