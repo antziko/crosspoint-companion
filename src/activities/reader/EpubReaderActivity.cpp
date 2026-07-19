@@ -682,14 +682,21 @@ void EpubReaderActivity::loop() {
     highlightHoldFired = false;
   }
 
-  // Short press BACK goes directly to home (or restores position if viewing footnote)
+  // Short press BACK: restore footnote position first, else navigate. When
+  // backShortToFileBrowser is set, a short Back goes to the file browser instead of home.
+  // (Long-press Back is owned by the highlight-select gesture above, so ReaderUtils::
+  // handleBackNavigation's long/short split is not used for the Epub reader.)
   if (!suppressBack && mappedInput.wasReleased(MappedInputManager::Button::Back) &&
       mappedInput.getHeldTime() < Dictionary::LONG_PRESS_MS) {
     if (footnoteDepth > 0) {
       restoreSavedPosition();
       return;
     }
-    onGoHome();
+    if (SETTINGS.backShortToFileBrowser) {
+      activityManager.goToFileBrowser(epub ? epub->getPath() : "");
+    } else {
+      onGoHome();
+    }
     return;
   }
 

@@ -127,17 +127,9 @@ void TxtReaderActivity::loop() {
     ignoreBackUntilRelease = false;
   }
 
-  // Long press BACK (1s+) goes to file selection
-  if (!suppressBack && mappedInput.isPressed(MappedInputManager::Button::Back) &&
-      mappedInput.getHeldTime() >= ReaderUtils::GO_HOME_MS) {
-    activityManager.goToFileBrowser(txt ? txt->getPath() : "");
-    return;
-  }
-
-  // Short press BACK goes directly to home
-  if (!suppressBack && mappedInput.wasReleased(MappedInputManager::Button::Back) &&
-      mappedInput.getHeldTime() < ReaderUtils::GO_HOME_MS) {
-    onGoHome();
+  if (!suppressBack &&
+      ReaderUtils::handleBackNavigation(mappedInput, activityManager, txt ? txt->getPath().c_str() : "",
+                                        {this, [](void* ctx) { static_cast<TxtReaderActivity*>(ctx)->onGoHome(); }})) {
     return;
   }
 

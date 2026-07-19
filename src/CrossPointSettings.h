@@ -386,6 +386,8 @@ class CrossPointSettings {
   // (save every turn, the safest legacy behaviour — no progress loss on hard power-off).
   uint8_t progressSaveIntervalIdx = 0;
   static constexpr uint16_t PROGRESS_SAVE_PAGES[] = {1, 5, 10, 15, 30};
+  // Short press Back goes to file browser instead of home (0 = disabled, 1 = enabled)
+  uint8_t backShortToFileBrowser = 0;
   // Image rendering mode in EPUB reader
   uint8_t imageRendering = IMAGES_DISPLAY;
   // 1-bit halftone dither algorithm for all images (X3): blue noise vs Bayer
