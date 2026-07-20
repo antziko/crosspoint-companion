@@ -1,7 +1,5 @@
 #include "FontDownloadActivity.h"
 
-#include "FontDownloadCA.h"
-
 #include <ArduinoJson.h>
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
@@ -12,6 +10,7 @@
 #include <WiFi.h>
 #include <esp_rom_crc.h>
 
+#include "FontDownloadCA.h"
 #include "MappedInputManager.h"
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
@@ -100,9 +99,8 @@ bool FontDownloadActivity::fetchAndParseManifest() {
   sdFontSystem.unloadFonts(renderer);
 
   std::string errorDetail;
-  auto result =
-      HttpDownloader::downloadToFile(FONT_MANIFEST_URL, MANIFEST_TMP, nullptr, nullptr, "", "", &errorDetail,
-                                     FONT_CA_GITHUB_PEM, FONT_CA_ASSETS_PEM);
+  auto result = HttpDownloader::downloadToFile(FONT_MANIFEST_URL, MANIFEST_TMP, nullptr, nullptr, "", "", &errorDetail,
+                                               FONT_CA_GITHUB_PEM, FONT_CA_ASSETS_PEM);
   if (result != HttpDownloader::OK) {
     LOG_ERR("FONT", "Failed to fetch manifest from %s", FONT_MANIFEST_URL);
     SdDebugLog::log("FONT", "MANIFEST fetch FAILED: err=%d detail=\"%s\" url=%s", static_cast<int>(result),
@@ -472,6 +470,36 @@ bool FontDownloadActivity::isSelectedFamilyDeletable() const {
 
 void FontDownloadActivity::loop() {
   if (state_ == FAMILY_LIST) {
+    auto activateSelected = [this] {
+      if (families_.empty()) return;
+      if (isDownloadAllRow(selectedIndex_)) {
+        currentFileIndex_ = 0;
+        currentFileTotal_ = 0;
+        for (const auto& f : families_) {
+          if (!f.installed) currentFileTotal_ += f.files.size();
+        }
+        downloadAll();
+      } else if (isUpdateAllRow(selectedIndex_)) {
+        currentFileIndex_ = 0;
+        currentFileTotal_ = 0;
+        for (const auto& f : families_) {
+          if (f.hasUpdate) currentFileTotal_ += f.files.size();
+        }
+        updateAll();
+      } else {
+        auto& family = families_[familyIndexFromList(selectedIndex_)];
+        if (!family.installed || family.hasUpdate) {
+          currentFileIndex_ = 0;
+          currentFileTotal_ = family.files.size();
+          downloadFamily(family);
+        } else {
+          promptDeleteSelectedFamily();
+          return;
+        }
+      }
+      requestUpdateAndWait();
+    };
+
     if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
       finish();
       return;
@@ -479,6 +507,34 @@ void FontDownloadActivity::loop() {
 
     const int listSize = listItemCount();
     const int pageItems = UITheme::getNumberOfItemsPerPage(renderer, true, false, true, false);
+
+    if (!families_.empty()) {
+      const auto& metrics = UITheme::getInstance().getMetrics();
+      const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+      const int contentHeight =
+          renderer.getScreenHeight() - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
+      switch (handleListTouch(selectedIndex_, listSize, contentTop, contentHeight, true)) {
+        case ListTouchResult::Activated:
+          activateSelected();
+          return;
+        case ListTouchResult::Consumed:
+          return;
+        case ListTouchResult::None:
+          break;
+      }
+
+      const auto swipe = mappedInput.wasSwipe();
+      if (swipe == MappedInputManager::SwipeDir::Up) {
+        selectedIndex_ = ButtonNavigator::nextPageIndex(selectedIndex_, listSize, pageItems);
+        requestUpdate();
+        return;
+      }
+      if (swipe == MappedInputManager::SwipeDir::Down) {
+        selectedIndex_ = ButtonNavigator::previousPageIndex(selectedIndex_, listSize, pageItems);
+        requestUpdate();
+        return;
+      }
+    }
 
     buttonNavigator_.onNextRelease([this, listSize] {
       selectedIndex_ = ButtonNavigator::nextIndex(selectedIndex_, listSize);
@@ -501,40 +557,14 @@ void FontDownloadActivity::loop() {
     });
 
     if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
-      if (!families_.empty()) {
-        if (isDownloadAllRow(selectedIndex_)) {
-          currentFileIndex_ = 0;
-          currentFileTotal_ = 0;
-          for (const auto& f : families_) {
-            if (!f.installed) currentFileTotal_ += f.files.size();
-          }
-
-          downloadAll();
-        } else if (isUpdateAllRow(selectedIndex_)) {
-          currentFileIndex_ = 0;
-          currentFileTotal_ = 0;
-          for (const auto& f : families_) {
-            if (f.hasUpdate) currentFileTotal_ += f.files.size();
-          }
-          updateAll();
-        } else {
-          auto& family = families_[familyIndexFromList(selectedIndex_)];
-          if (!family.installed || family.hasUpdate) {
-            currentFileIndex_ = 0;
-            currentFileTotal_ = family.files.size();
-            downloadFamily(family);
-          } else {
-            promptDeleteSelectedFamily();
-            return;
-          }
-        }
-        requestUpdateAndWait();
-        return;
-      }
+      activateSelected();
+      return;
     }
   } else if (state_ == COMPLETE) {
+    int x = 0;
+    int y = 0;
     if (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
-        mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+        mappedInput.wasPressed(MappedInputManager::Button::Confirm) || mappedInput.wasScreenTapped(x, y)) {
       {
         RenderLock lock(*this);
         state_ = FAMILY_LIST;
@@ -554,6 +584,21 @@ void FontDownloadActivity::loop() {
         requestUpdateAndWait();
         return;
       } else {
+        {
+          RenderLock lock(*this);
+          state_ = FAMILY_LIST;
+        }
+        requestUpdate();
+      }
+    } else {
+      int x = 0;
+      int y = 0;
+      if (mappedInput.wasScreenTapped(x, y)) {
+        if (downloadingFamilyIndex_ >= 0 && downloadingFamilyIndex_ < static_cast<int>(families_.size())) {
+          downloadFamily(families_[downloadingFamilyIndex_]);
+          requestUpdateAndWait();
+          return;
+        }
         {
           RenderLock lock(*this);
           state_ = FAMILY_LIST;

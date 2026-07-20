@@ -450,6 +450,24 @@ void DictionaryDefinitionActivity::loop() {
     requestUpdate();
   }
 
+  // Touch page-turn (view mode): tap left third = previous page, the rest = next.
+  int tx = 0;
+  int ty = 0;
+  if (mappedInput.wasScreenTapped(tx, ty)) {
+    if (tx < renderer.getScreenWidth() / 3) {
+      if (currentPage > 0) {
+        currentPage--;
+        loadPage(currentPage);
+        requestUpdate();
+      }
+    } else if (currentPage < totalPages - 1) {
+      currentPage++;
+      loadPage(currentPage);
+      requestUpdate();
+    }
+    return;
+  }
+
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     if (showLookupButton) {
       extractWordsFromLayout();

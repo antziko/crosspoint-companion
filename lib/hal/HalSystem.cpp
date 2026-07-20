@@ -40,11 +40,11 @@ RTC_NOINIT_ATTR HalSystem::StackFrame panicStack[MAX_PANIC_STACK_DEPTH];
 #include "freertos/FreeRTOS.h"
 
 // --- Last-failure snapshot (survives the panic reboot, dumped to crash_report) ---
-RTC_NOINIT_ATTR uint32_t oomSize;        // bytes requested by the failing allocation
-RTC_NOINIT_ATTR uint32_t oomCallerPC;    // return address of the code doing `new`
-RTC_NOINIT_ATTR uint32_t oomFreeBytes;   // total free heap at failure
-RTC_NOINIT_ATTR uint32_t oomLargest;     // largest contiguous free block at failure
-RTC_NOINIT_ATTR uint32_t oomWasNothrow;  // 1 if last failure was a (recoverable) nothrow new
+RTC_NOINIT_ATTR uint32_t oomSize;          // bytes requested by the failing allocation
+RTC_NOINIT_ATTR uint32_t oomCallerPC;      // return address of the code doing `new`
+RTC_NOINIT_ATTR uint32_t oomFreeBytes;     // total free heap at failure
+RTC_NOINIT_ATTR uint32_t oomLargest;       // largest contiguous free block at failure
+RTC_NOINIT_ATTR uint32_t oomWasNothrow;    // 1 if last failure was a (recoverable) nothrow new
 RTC_NOINIT_ATTR uint32_t oomNothrowCount;  // cumulative recoverable nothrow OOMs this session
 RTC_NOINIT_ATTR uint32_t oomThrowCount;    // cumulative fatal throwing-new OOMs this session
 
@@ -149,6 +149,11 @@ void IRAM_ATTR __wrap_panic_print_backtrace(const void* frame, int core) {
     __real_panic_print_backtrace(frame, core);
     return;
   }
+
+#if !__riscv
+  __real_panic_print_backtrace(frame, core);
+  return;
+#else
   for (size_t i = 0; i < MAX_PANIC_STACK_DEPTH; i++) {
     panicStack[i].sp = 0;
   }
@@ -176,6 +181,7 @@ void IRAM_ATTR __wrap_panic_print_backtrace(const void* frame, int core) {
   }
 
   __real_panic_print_backtrace(frame, core);
+#endif
 }
 }
 
@@ -262,11 +268,10 @@ void drainOomTrace() {
   for (uint32_t i = 0; i < count; i++) {
     const OomEvent& e = events[i];
     char line[160];
-    const int len = snprintf(line, sizeof(line),
-                             "[%lu] %s OOM size=%lu callerPC=0x%08lX free=%lu largest=%lu\n",
-                             (unsigned long)e.atMillis, e.nothrow ? "nothrow(recovered)" : "throwing(FATAL)",
-                             (unsigned long)e.size, (unsigned long)e.callerPC, (unsigned long)e.freeBytes,
-                             (unsigned long)e.largest);
+    const int len =
+        snprintf(line, sizeof(line), "[%lu] %s OOM size=%lu callerPC=0x%08lX free=%lu largest=%lu\n",
+                 (unsigned long)e.atMillis, e.nothrow ? "nothrow(recovered)" : "throwing(FATAL)", (unsigned long)e.size,
+                 (unsigned long)e.callerPC, (unsigned long)e.freeBytes, (unsigned long)e.largest);
     if (len > 0) file.write(line, static_cast<size_t>(len));
   }
   file.flush();
@@ -295,8 +300,7 @@ std::string getPanicInfo(bool full) {
                "freeAtFail=%lu  largestBlock=%lu  kind=%s\n  OOM counts this session: nothrow(recovered)=%lu  "
                "throwing(fatal)=%lu",
                (unsigned long)oomSize, (unsigned long)oomCallerPC, (unsigned long)oomFreeBytes,
-               (unsigned long)oomLargest,
-               oomWasNothrow ? "nothrow(recovered, NOT the panic cause)" : "throwing(fatal)",
+               (unsigned long)oomLargest, oomWasNothrow ? "nothrow(recovered, NOT the panic cause)" : "throwing(fatal)",
                (unsigned long)oomNothrowCount, (unsigned long)oomThrowCount);
       info += buf;
     }

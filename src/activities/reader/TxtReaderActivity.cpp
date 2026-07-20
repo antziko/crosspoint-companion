@@ -164,7 +164,10 @@ void TxtReaderActivity::loop() {
     return;
   }
 
-  const auto [prevTriggered, nextTriggered, fromTilt, fromSide] = ReaderUtils::detectPageTurn(mappedInput);
+  const auto touch = ReaderUtils::detectTouchPageTurn(renderer, mappedInput);
+  auto [prevTriggered, nextTriggered, fromTilt, fromSide] = ReaderUtils::detectPageTurn(mappedInput);
+  prevTriggered = prevTriggered || touch.prev;
+  nextTriggered = nextTriggered || touch.next;
   if (!prevTriggered && !nextTriggered) {
     return;
   }

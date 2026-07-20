@@ -1,5 +1,6 @@
 #pragma once
 
+#include <BoardConfig.h>
 #include <HalClock.h>
 #include <HalTiltSensor.h>
 #include <I18n.h>
@@ -306,6 +307,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   v.push_back(SettingInfo::Enum(StrId::STR_SIDE_BTN_LAYOUT, &CrossPointSettings::sideButtonLayout,
                                 {StrId::STR_PREV_NEXT, StrId::STR_NEXT_PREV, StrId::STR_DISABLED}, "sideButtonLayout",
                                 StrId::STR_CAT_CONTROLS));
+  // Touch reader controls (#2481). Filtered out below on non-touch boards.
+  v.push_back(SettingInfo::Enum(StrId::STR_TOUCH_READER_CONTROLS, &CrossPointSettings::touchReaderControls,
+                                {StrId::STR_STATE_OFF, StrId::STR_STATE_ON}, "touchReaderControls",
+                                StrId::STR_CAT_CONTROLS));
   v.push_back(SettingInfo::Toggle(StrId::STR_SWAP_SIDE_BTN_CW, &CrossPointSettings::swapSideButtonsCW,
                                   "swapSideButtonsCW", StrId::STR_CAT_CONTROLS));
   v.push_back(
@@ -480,6 +485,22 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
     if (it != v.end()) {
       *it = buildFontFamilySetting(registry);
     }
+  }
+
+  // Touch-vs-button setting visibility (#2481, corrected per #2689). Non-touch
+  // boards (X3/X4) hide the touch-only control; touch boards hide the front-
+  // button orientation follow and the sunlight fading fix (frontlight devices).
+  if (!BoardConfig::hasTouch()) {
+    v.erase(std::remove_if(v.begin(), v.end(),
+                           [](const SettingInfo& s) { return s.nameId == StrId::STR_TOUCH_READER_CONTROLS; }),
+            v.end());
+  } else {
+    v.erase(std::remove_if(v.begin(), v.end(),
+                           [](const SettingInfo& s) {
+                             return s.nameId == StrId::STR_FRONT_BTN_FOLLOW_ORIENTATION ||
+                                    s.nameId == StrId::STR_SUNLIGHT_FADING_FIX;
+                           }),
+            v.end());
   }
   return v;
 }

@@ -749,7 +749,11 @@ void EpubReaderActivity::loop() {
     return;
   }
 
-  const auto [prevTriggered, nextTriggered, fromTilt, fromSide] = ReaderUtils::detectPageTurn(mappedInput);
+  // Touch page-turn (#2481): left third = previous, rest = next; OR'd with the button/tilt result.
+  const auto touch = ReaderUtils::detectTouchPageTurn(renderer, mappedInput);
+  auto [prevTriggered, nextTriggered, fromTilt, fromSide] = ReaderUtils::detectPageTurn(mappedInput);
+  prevTriggered = prevTriggered || touch.prev;
+  nextTriggered = nextTriggered || touch.next;
   if (!prevTriggered && !nextTriggered) {
     return;
   }

@@ -84,8 +84,10 @@ void ClockSyncActivity::loop() {
   // Here we only wait for the user to dismiss the result screen.
   if (state == PICKING_WIFI || state == SYNCING) return;
 
+  int x = 0;
+  int y = 0;
   if (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
-      mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+      mappedInput.wasPressed(MappedInputManager::Button::Confirm) || mappedInput.wasScreenTapped(x, y)) {
     finish();
   }
 }

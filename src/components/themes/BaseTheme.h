@@ -58,24 +58,12 @@ struct ThemeMetrics {
   int progressBarMarginTop;
   int statusBarHorizontalMargin;
   int statusBarVerticalMargin;
-
-  int keyboardKeyWidth;
   int keyboardKeyHeight;
   int keyboardKeySpacing;
-  int keyboardBottomKeyHeight;
-  int keyboardBottomKeySpacing;
-  bool keyboardBottomAligned;
   bool keyboardCenteredText;
   int keyboardVerticalOffset;
   int keyboardTextFieldWidthPercent;
   int keyboardWidthPercent;
-  int keyboardKeyCornerRadius;
-  bool keyboardFillUnselected;
-  bool keyboardOutlineAllUnselected;
-  bool keyboardDrawSpecialOutlineWhenUnselected;
-  int keyboardSecondaryLabelRightPadding;
-  int keyboardSecondaryLabelTopPadding;
-  int keyboardMinArrowHeadSize;
 
   float popupTopOffsetRatio;
   int popupMarginX;
@@ -136,8 +124,6 @@ enum UIIcon {
   Highlight  // quotation-marks glyph for saved quotes (vs the bookmark ribbon)
 };
 
-enum class KeyboardKeyType { Normal, Shift, Mode, Space, Del, Ok, Disabled };
-
 // Default theme implementation (Classic Theme)
 // Additional themes can inherit from this and override methods as needed
 
@@ -169,23 +155,12 @@ constexpr ThemeMetrics values = {.batteryWidth = 15,
                                  .progressBarMarginTop = 1,
                                  .statusBarHorizontalMargin = 5,
                                  .statusBarVerticalMargin = 19,
-                                 .keyboardKeyWidth = 22,
-                                 .keyboardKeyHeight = 40,
+                                 .keyboardKeyHeight = 48,
                                  .keyboardKeySpacing = 0,
-                                 .keyboardBottomKeyHeight = 35,
-                                 .keyboardBottomKeySpacing = 5,
-                                 .keyboardBottomAligned = true,
                                  .keyboardCenteredText = false,
                                  .keyboardVerticalOffset = -13,
                                  .keyboardTextFieldWidthPercent = 85,
-                                 .keyboardWidthPercent = 90,
-                                 .keyboardKeyCornerRadius = 0,
-                                 .keyboardFillUnselected = false,
-                                 .keyboardOutlineAllUnselected = false,
-                                 .keyboardDrawSpecialOutlineWhenUnselected = true,
-                                 .keyboardSecondaryLabelRightPadding = 1,
-                                 .keyboardSecondaryLabelTopPadding = 0,
-                                 .keyboardMinArrowHeadSize = 0,
+                                 .keyboardWidthPercent = 94,
                                  .popupTopOffsetRatio = 0.075f,
                                  .popupMarginX = 15,
                                  .popupMarginY = 15,
@@ -238,6 +213,7 @@ class BaseTheme {
   // and restores, exactly like drawButtonHints.
   virtual int getButtonHintSlotCenterX(GfxRenderer& renderer, int slot, const char* label) const;
   virtual void drawSideButtonHints(const GfxRenderer& renderer, const char* topBtn, const char* bottomBtn) const;
+  virtual int getListRowStep(bool hasSubtitle) const;
   virtual int getListPageItems(int contentHeight, bool hasSubtitle) const;
   virtual void drawList(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,
                         const std::function<std::string(int index)>& rowTitle,
@@ -252,6 +228,8 @@ class BaseTheme {
                              const char* rightLabel = nullptr) const;
   virtual void drawTabBar(const GfxRenderer& renderer, Rect rect, const std::vector<TabInfo>& tabs,
                           bool selected) const;
+  virtual bool tabIndexFromPoint(const GfxRenderer& renderer, Rect rect, const std::vector<TabInfo>& tabs, int x, int y,
+                                 int& index) const;
   virtual void drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std::vector<RecentBook>& recentBooks,
                                    const int selectorIndex, bool& coverRendered, bool& coverBufferStored,
                                    bool& bufferRestored, std::function<bool()> storeCoverBuffer) const;
@@ -269,9 +247,6 @@ class BaseTheme {
   void drawHelpText(const GfxRenderer& renderer, Rect rect, const char* label) const;
   virtual void drawTextField(const GfxRenderer& renderer, Rect rect, const int textWidth, bool cursorMode = false,
                              int contentStartX = 0, int contentWidth = 0) const;
-  virtual void drawKeyboardKey(const GfxRenderer& renderer, Rect rect, const char* label, const bool isSelected,
-                               const char* secondaryLabel = nullptr, KeyboardKeyType keyType = KeyboardKeyType::Normal,
-                               bool inactiveSelection = false) const;
   virtual bool showsFileIcons() const { return false; }
 
   // Shared constants and helpers for battery drawing (used by all themes)
