@@ -809,7 +809,8 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                 const int availHeight = self->viewportHeight - self->currentPageNextY - imageMarginBottom;
                 if (availHeight > 0 && displayHeight > availHeight) {
                   if (dims.width > 0 && dims.height > 0) {
-                    displayWidth = static_cast<int>(availHeight * (static_cast<float>(dims.width) / dims.height) + 0.5f);
+                    displayWidth =
+                        static_cast<int>(availHeight * (static_cast<float>(dims.width) / dims.height) + 0.5f);
                     if (displayWidth < 1) displayWidth = 1;
                     if (displayWidth > self->viewportWidth) displayWidth = self->viewportWidth;
                   }
@@ -1257,12 +1258,14 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
         }
         self->partWordBufferIndex = safeLen;
         self->flushPartWordBuffer();
+        self->nextWordContinues = true;
         for (int j = 0; j < overflow; j++) {
           self->partWordBuffer[j] = saved[j];
         }
         self->partWordBufferIndex = overflow;
       } else {
         self->flushPartWordBuffer();
+        self->nextWordContinues = true;
       }
     }
 

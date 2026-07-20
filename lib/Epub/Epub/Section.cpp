@@ -21,7 +21,9 @@ namespace {
 // wordStyle decoration semantics (line-through, #2397; NFC-composed words). Bumped past
 // every lineage (upstream 30, feat-dictionary 33) so all pre-merge .bin auto-invalidate
 // and regenerate cleanly.
-constexpr uint8_t SECTION_FILE_VERSION = 34;
+// v35: CJK words split on MAX_WORD_SIZE now set nextWordContinues so the tail
+// re-attaches to the head; cached word positions from v34 no longer match (#2652).
+constexpr uint8_t SECTION_FILE_VERSION = 35;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
