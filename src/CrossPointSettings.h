@@ -1,29 +1,19 @@
 #pragma once
+#include <ArduinoJson.h>
 #include <HalStorage.h>
+#include <PersistableStore.h>
 
 #include <cstdint>
 #include <iosfwd>
-#include <mutex>
 
-class CrossPointSettings {
+class CrossPointSettings : public PersistableStore<CrossPointSettings> {
  private:
-  mutable std::mutex _mutex;
-
-  // Private constructor for singleton
+  // Private constructor for singleton (PersistableStore provides getInstance()).
   CrossPointSettings() = default;
 
-  // Static instance
-  static CrossPointSettings instance;
+  friend class PersistableStore<CrossPointSettings>;
 
  public:
-  // Delete copy constructor and assignment
-  CrossPointSettings(const CrossPointSettings&) = delete;
-  CrossPointSettings& operator=(const CrossPointSettings&) = delete;
-
-  // Access the settings mutex for protecting multi-field reads/writes from other cores.
-  // Callers must not re-enter SETTINGS methods that lock _mutex while holding it.
-  std::mutex& getMutex() const { return _mutex; }
-
   enum SLEEP_SCREEN_MODE {
     DARK = 0,
     LIGHT = 1,
@@ -421,11 +411,6 @@ class CrossPointSettings {
   // Quick Resume: keep current content visible with moon icon instead of showing a static sleep screen.
   uint8_t quickResumeSleepScreen = QUICK_RESUME_NEVER;
 
-  ~CrossPointSettings() = default;
-
-  // Get singleton instance
-  static CrossPointSettings& getInstance() { return instance; }
-
   static constexpr uint8_t MIN_SLEEP_TIMEOUT_MINUTES = 1;
   static constexpr uint8_t SLEEP_TIMEOUT_NEVER_MINUTES = 31;
   static constexpr uint8_t MAX_SLEEP_TIMEOUT_MINUTES = SLEEP_TIMEOUT_NEVER_MINUTES;
@@ -471,19 +456,18 @@ class CrossPointSettings {
   uint8_t getReaderHyphenationEnabled() const;
   uint8_t getReaderExtraParagraphSpacing() const;
 
-  // If count_only is true, returns the number of settings items that would be written.
-  uint8_t writeSettings(HalFile& file, bool count_only = false) const;
-
+  // PersistableStore hooks (getInstance/loadFromFile come from the CRTP base).
+  static const char* getFilePath() { return "/.crosspoint/settings.json"; }
+  void toJson(JsonDocument& doc) const;
+  bool fromJson(JsonVariantConst doc);
+  // Shadows PersistableStore::saveToFile() to apply the SD-debug logging toggle
+  // live on every persist before delegating to the base save.
   bool saveToFile() const;
-  bool loadFromFile();
 
   static void validateFrontButtonMapping(CrossPointSettings& settings);
   static uint8_t sleepTimeoutEnumToMinutes(uint8_t legacyValue);
 
  private:
-  bool loadFromBinaryFile();
-  bool migrateLanguageBinaryFile();
-
   // In-memory per-book override. Never persisted to settings.json.
   ReaderOverride readerOverride;
 

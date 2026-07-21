@@ -129,7 +129,10 @@ bool KOReaderCredentialStore::fromJson(JsonVariantConst doc) {
 
   if (needsResave) {
     LOG_DBG("KRS", "Resaving KOReader credentials to update format");
-    saveToFile();
+    // requestResave() (not saveToFile()) — fromJson runs under storeMutex inside
+    // the base loadFromFile(); saveToFile() would relock it and deadlock. The base
+    // performs the deferred save after releasing the lock. (#2647)
+    requestResave();
   }
   return true;
 }

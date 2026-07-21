@@ -98,7 +98,7 @@ inline SettingInfo buildFontFamilySetting(const SdCardFontRegistry* registry) {
 // Build the dictionary selector setting dynamically, mirroring buildFontFamilySetting.
 // Options are "None" (index 0) plus each installed dictionary's folder name. The choice
 // is persisted in dictionary.bin (not the settings file) via Dictionary, so this entry
-// uses a getter/setter and no valuePtr — JsonSettingsIO skips it. On device the entry is
+// uses a getter/setter and no valuePtr — the generic toJson/fromJson loop skips it. On device the entry is
 // special-cased to open DictionarySelectActivity; on web it renders as a dropdown.
 inline SettingInfo buildDictionarySetting(const DictionaryRegistry* registry) {
   std::vector<std::string> options;
@@ -269,7 +269,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // flashcardCardStyle + flashcardSessionScope are NOT registered here: both are
   // chosen per-session on the FlashcardReviewActivity overview (Up/Down = card
   // style, Left/Right = due-first / shuffled) and the picks are persisted as the
-  // defaults. Hand-persisted in JsonSettingsIO (like dictMarker).
+  // defaults. Hand-persisted in CrossPointSettings::toJson/fromJson (like dictMarker).
   v.push_back(SettingInfo::Enum(StrId::STR_HOLD_CONFIRM, &CrossPointSettings::holdConfirmAction,
                                 {StrId::STR_STATE_OFF, StrId::STR_HOLD_CONFIRM_BOOKMARK, StrId::STR_HOLD_CONFIRM_DICT},
                                 "holdConfirmAction", StrId::STR_READER_DICTIONARY));

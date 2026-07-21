@@ -1,64 +1,66 @@
 #include "CrossPointSettings.h"
 
-#include <HalStorage.h>
-#include <JsonSettingsIO.h>
+#include <I18n.h>
 #include <Logging.h>
+#include <ObfuscationUtils.h>
 #include <SdDebugLog.h>
-#include <Serialization.h>
 
 #include <cstring>
-#include <mutex>
 #include <string>
 
 #include "I18nKeys.h"
+#include "SettingsList.h"
 #include "fontIds.h"
 
-// Initialize the static instance
-CrossPointSettings CrossPointSettings::instance;
-
-void readAndValidate(HalFile& file, uint8_t& member, const uint8_t maxValue) {
-  uint8_t tempValue;
-  serialization::readPod(file, tempValue);
-  if (tempValue < maxValue) {
-    member = tempValue;
-  }
-}
-
 namespace {
-constexpr uint8_t SETTINGS_FILE_VERSION = 2;
-constexpr char SETTINGS_FILE_BIN[] = "/.crosspoint/settings.bin";
-constexpr char SETTINGS_FILE_JSON[] = "/.crosspoint/settings.json";
-constexpr char SETTINGS_FILE_BAK[] = "/.crosspoint/settings.bin.bak";
-constexpr char LANG_FILE_BIN[] = "/.crosspoint/language.bin";
-constexpr char LANG_FILE_BAK[] = "/.crosspoint/language.bin.bak";
 
-// Convert legacy front button layout into explicit logical->hardware mapping.
-void applyLegacyFrontButtonLayout(CrossPointSettings& settings) {
-  switch (static_cast<CrossPointSettings::FRONT_BUTTON_LAYOUT>(settings.frontButtonLayout)) {
-    case CrossPointSettings::LEFT_RIGHT_BACK_CONFIRM:
-      settings.frontButtonBack = CrossPointSettings::FRONT_HW_LEFT;
-      settings.frontButtonConfirm = CrossPointSettings::FRONT_HW_RIGHT;
-      settings.frontButtonLeft = CrossPointSettings::FRONT_HW_BACK;
-      settings.frontButtonRight = CrossPointSettings::FRONT_HW_CONFIRM;
+// Migrate a pre-refactor settings file that used the single combined `statusBar`
+// enum into the current per-element status bar fields. Runs when the new
+// statusBarChapterPageCount key is absent (see fromJson()).
+void applyLegacyStatusBarSettings(CrossPointSettings& settings) {
+  switch (static_cast<CrossPointSettings::STATUS_BAR_MODE>(settings.statusBar)) {
+    case CrossPointSettings::NONE:
+      settings.statusBarChapterPageCount = 0;
+      settings.statusBarBookProgressPercentage = 0;
+      settings.statusBarProgressBar = CrossPointSettings::HIDE_PROGRESS;
+      settings.statusBarTitle = CrossPointSettings::HIDE_TITLE;
+      settings.statusBarBattery = 0;
       break;
-    case CrossPointSettings::LEFT_BACK_CONFIRM_RIGHT:
-      settings.frontButtonBack = CrossPointSettings::FRONT_HW_CONFIRM;
-      settings.frontButtonConfirm = CrossPointSettings::FRONT_HW_LEFT;
-      settings.frontButtonLeft = CrossPointSettings::FRONT_HW_BACK;
-      settings.frontButtonRight = CrossPointSettings::FRONT_HW_RIGHT;
+    case CrossPointSettings::NO_PROGRESS:
+      settings.statusBarChapterPageCount = 0;
+      settings.statusBarBookProgressPercentage = 0;
+      settings.statusBarProgressBar = CrossPointSettings::HIDE_PROGRESS;
+      settings.statusBarTitle = CrossPointSettings::CHAPTER_TITLE;
+      settings.statusBarBattery = 1;
       break;
-    case CrossPointSettings::BACK_CONFIRM_RIGHT_LEFT:
-      settings.frontButtonBack = CrossPointSettings::FRONT_HW_BACK;
-      settings.frontButtonConfirm = CrossPointSettings::FRONT_HW_CONFIRM;
-      settings.frontButtonLeft = CrossPointSettings::FRONT_HW_RIGHT;
-      settings.frontButtonRight = CrossPointSettings::FRONT_HW_LEFT;
+    case CrossPointSettings::BOOK_PROGRESS_BAR:
+      settings.statusBarChapterPageCount = 1;
+      settings.statusBarBookProgressPercentage = 0;
+      settings.statusBarProgressBar = CrossPointSettings::BOOK_PROGRESS;
+      settings.statusBarTitle = CrossPointSettings::CHAPTER_TITLE;
+      settings.statusBarBattery = 1;
       break;
-    case CrossPointSettings::BACK_CONFIRM_LEFT_RIGHT:
+    case CrossPointSettings::ONLY_BOOK_PROGRESS_BAR:
+      settings.statusBarChapterPageCount = 1;
+      settings.statusBarBookProgressPercentage = 0;
+      settings.statusBarProgressBar = CrossPointSettings::BOOK_PROGRESS;
+      settings.statusBarTitle = CrossPointSettings::HIDE_TITLE;
+      settings.statusBarBattery = 0;
+      break;
+    case CrossPointSettings::CHAPTER_PROGRESS_BAR:
+      settings.statusBarChapterPageCount = 0;
+      settings.statusBarBookProgressPercentage = 1;
+      settings.statusBarProgressBar = CrossPointSettings::CHAPTER_PROGRESS;
+      settings.statusBarTitle = CrossPointSettings::CHAPTER_TITLE;
+      settings.statusBarBattery = 1;
+      break;
+    case CrossPointSettings::FULL:
     default:
-      settings.frontButtonBack = CrossPointSettings::FRONT_HW_BACK;
-      settings.frontButtonConfirm = CrossPointSettings::FRONT_HW_CONFIRM;
-      settings.frontButtonLeft = CrossPointSettings::FRONT_HW_LEFT;
-      settings.frontButtonRight = CrossPointSettings::FRONT_HW_RIGHT;
+      settings.statusBarChapterPageCount = 1;
+      settings.statusBarBookProgressPercentage = 1;
+      settings.statusBarProgressBar = CrossPointSettings::HIDE_PROGRESS;
+      settings.statusBarTitle = CrossPointSettings::CHAPTER_TITLE;
+      settings.statusBarBattery = 1;
       break;
   }
 }
@@ -107,177 +109,201 @@ uint8_t CrossPointSettings::sleepTimeoutEnumToMinutes(const uint8_t legacyValue)
 }
 
 bool CrossPointSettings::saveToFile() const {
-  std::lock_guard<std::mutex> lock(_mutex);
-  // Apply the logging toggle live: every settings persist (device toggle, web API)
-  // routes through here, so the master switch tracks the setting without a reboot.
+  // Apply the logging toggle live on every persist (device toggle, web API) so the
+  // SD-debug master switch tracks the setting without a reboot, then delegate the
+  // actual JSON write (and /.crosspoint creation) to the PersistableStore base.
   SdDebugLog::setMasterEnabled(sdCardLogging != 0);
-  Storage.mkdir("/.crosspoint");
-  return JsonSettingsIO::saveSettings(*this, SETTINGS_FILE_JSON);
+  return PersistableStore<CrossPointSettings>::saveToFile();
 }
 
-bool CrossPointSettings::loadFromFile() {
-  // Try JSON first
-  if (Storage.exists(SETTINGS_FILE_JSON)) {
-    String json = Storage.readFile(SETTINGS_FILE_JSON);
-    if (!json.isEmpty()) {
-      bool resave = false;
-      bool result;
-      {
-        std::lock_guard<std::mutex> lock(_mutex);
-        result = JsonSettingsIO::loadSettings(*this, json.c_str(), &resave);
-      }
-      if (result && resave) {
-        if (saveToFile()) {
-          LOG_DBG("CPS", "Resaved settings to update format");
-        } else {
-          LOG_ERR("CPS", "Failed to resave settings after format update");
-        }
-      }
-      migrateLanguageBinaryFile();
-      return result;
-    }
-  }
+void CrossPointSettings::toJson(JsonDocument& doc) const {
+  const CrossPointSettings& s = *this;
 
-  // Fall back to binary migration
-  if (Storage.exists(SETTINGS_FILE_BIN)) {
-    if (loadFromBinaryFile()) {
-      migrateLanguageBinaryFile();
-      if (saveToFile()) {
-        Storage.rename(SETTINGS_FILE_BIN, SETTINGS_FILE_BAK);
-        LOG_DBG("CPS", "Migrated settings.bin to settings.json");
-        return true;
+  for (const auto& info : getSettingsList()) {
+    if (!info.key) continue;
+    // Dynamic entries (KOReader etc.) are stored in their own files — skip.
+    if (!info.valuePtr && !info.stringOffset) continue;
+
+    if (info.stringOffset) {
+      const char* strPtr = (const char*)&s + info.stringOffset;
+      if (info.obfuscated) {
+        doc[std::string(info.key) + "_obf"] = obfuscation::obfuscateToBase64(strPtr);
       } else {
-        LOG_ERR("CPS", "Failed to save migrated settings to JSON");
-        return false;
+        doc[info.key] = strPtr;
       }
+    } else {
+      doc[info.key] = s.*(info.valuePtr);
     }
   }
 
-  // No settings files at all -- check for standalone language.bin
-  return migrateLanguageBinaryFile();
+  // Front button remap — managed by RemapFrontButtons sub-activity, not in SettingsList.
+  doc["frontButtonBack"] = s.frontButtonBack;
+  doc["frontButtonConfirm"] = s.frontButtonConfirm;
+  doc["frontButtonLeft"] = s.frontButtonLeft;
+  doc["frontButtonRight"] = s.frontButtonRight;
+  // LandscapeCW front button override — managed by RemapFrontButtonsCW sub-activity.
+  doc["frontButtonBackCW"] = s.frontButtonBackCW;
+  doc["frontButtonConfirmCW"] = s.frontButtonConfirmCW;
+  doc["frontButtonLeftCW"] = s.frontButtonLeftCW;
+  doc["frontButtonRightCW"] = s.frontButtonRightCW;
+  // Font family — uses dynamic getter/setter in SettingsList so the generic loop skips it.
+  doc["fontFamily"] = s.fontFamily;
+  // SD card font family name — not in SettingsList, save manually.
+  if (s.sdFontFamilyName[0] != '\0') {
+    doc["sdFontFamilyName"] = s.sdFontFamilyName;
+  }
+  // Pinned-font set (Font Family picker) — newline-separated keys, save manually.
+  if (s.pinnedFonts[0] != '\0') {
+    doc["pinnedFonts"] = s.pinnedFonts;
+  }
+
+  // Dictionary marker-by-dwell — device-only (inline rows in the Reader > Dictionary
+  // sub-screen), persisted here by explicit fields rather than a SettingInfo key, so the
+  // generic loop doesn't see it. Persist manually.
+  doc["dictMarkerDwellEnabled"] = s.dictMarkerDwellEnabled;
+  doc["dictMarkerT1Idx"] = s.dictMarkerT1Idx;
+  doc["dictMarkerT2Idx"] = s.dictMarkerT2Idx;
+
+  // Flashcard style + session scope — chosen on the review overview, not in SettingsList.
+  doc["flashcardCardStyle"] = s.flashcardCardStyle;
+  doc["flashcardSessionScope"] = s.flashcardSessionScope;
+
+  // Language — managed by LanguageSelectActivity, not in SettingsList. Stored as ISO code
+  // string ("EN", "DE", ...) for stability across enum reorders.
+  doc["language"] = (s.language < getLanguageCount()) ? LANGUAGE_CODES[s.language] : "EN";
 }
 
-bool CrossPointSettings::migrateLanguageBinaryFile() {
-  // V1_LANGUAGES / V1_LANGUAGE_COUNT are emitted by gen_i18n.py with the
-  // frozen enum order from 2f969a9.
-  if (!Storage.exists(LANG_FILE_BIN)) return false;
+bool CrossPointSettings::fromJson(JsonVariantConst doc) {
+  CrossPointSettings& s = *this;
+  bool needsResave = false;
 
-  HalFile f;
-  if (Storage.openFileForRead("CPS", LANG_FILE_BIN, f)) {
-    uint8_t version;
-    serialization::readPod(f, version);
-    if (version == 1) {
-      uint8_t oldIndex;
-      serialization::readPod(f, oldIndex);
-      if (oldIndex < V1_LANGUAGE_COUNT) {
-        language = static_cast<uint8_t>(V1_LANGUAGES[oldIndex]);
+  auto clamp = [](uint8_t val, uint8_t maxVal, uint8_t def) -> uint8_t { return val < maxVal ? val : def; };
+
+  // Legacy migration: if statusBarChapterPageCount is absent this is a pre-refactor settings
+  // file. Populate s with migrated values now so the generic loop below picks them up as
+  // defaults and clamps them.
+  if (doc["statusBarChapterPageCount"].isNull()) {
+    applyLegacyStatusBarSettings(s);
+  }
+
+  for (const auto& info : getSettingsList()) {
+    if (!info.key) continue;
+    // Dynamic entries (KOReader etc.) are stored in their own files — skip.
+    if (!info.valuePtr && !info.stringOffset) continue;
+
+    if (info.stringOffset) {
+      const char* strPtr = (const char*)&s + info.stringOffset;
+      const std::string fieldDefault = strPtr;  // current buffer = struct-initializer default
+      std::string val;
+      if (info.obfuscated) {
+        bool ok = false;
+        val = obfuscation::deobfuscateFromBase64(doc[std::string(info.key) + "_obf"] | "", &ok);
+        if (!ok || val.empty()) {
+          val = doc[info.key] | fieldDefault;
+          if (val != fieldDefault) needsResave = true;
+        }
+      } else {
+        val = doc[info.key] | fieldDefault;
       }
+      char* destPtr = (char*)&s + info.stringOffset;
+      if (info.stringMaxLen == 0) {
+        LOG_ERR("CPS", "Misconfigured SettingInfo: stringMaxLen is 0 for key '%s'", info.key);
+        destPtr[0] = '\0';
+        needsResave = true;
+        continue;
+      }
+      strncpy(destPtr, val.c_str(), info.stringMaxLen - 1);
+      destPtr[info.stringMaxLen - 1] = '\0';
+    } else {
+      const uint8_t fieldDefault = s.*(info.valuePtr);  // struct-initializer default, read before overwrite
+      uint8_t v = doc[info.key] | fieldDefault;
+      if (info.type == SettingType::ENUM) {
+        v = clamp(v, (uint8_t)info.enumValues.size(), fieldDefault);
+      } else if (info.type == SettingType::TOGGLE) {
+        v = clamp(v, (uint8_t)2, fieldDefault);
+      } else if (info.type == SettingType::VALUE) {
+        if (v < info.valueRange.min)
+          v = info.valueRange.min;
+        else if (v > info.valueRange.max)
+          v = info.valueRange.max;
+      }
+      s.*(info.valuePtr) = v;
     }
   }
-  Storage.rename(LANG_FILE_BIN, LANG_FILE_BAK);
-  saveToFile();
-  LOG_DBG("CPS", "Migrated language.bin into settings.json");
-  return true;
-}
 
-bool CrossPointSettings::loadFromBinaryFile() {
-  HalFile inputFile;
-  if (!Storage.openFileForRead("CPS", SETTINGS_FILE_BIN, inputFile)) {
-    return false;
-  }
-  std::lock_guard<std::mutex> lock(_mutex);
-
-  uint8_t version;
-  serialization::readPod(inputFile, version);
-  if (version != SETTINGS_FILE_VERSION) {
-    LOG_ERR("CPS", "Deserialization failed: Unknown version %u", version);
-    return false;
+  if (doc["sleepTimeoutMinutes"].isNull() && !doc["sleepTimeout"].isNull()) {
+    const uint8_t legacyValue =
+        clamp(doc["sleepTimeout"] | (uint8_t)SLEEP_10_MIN, SLEEP_TIMEOUT_COUNT, (uint8_t)SLEEP_10_MIN);
+    s.sleepTimeoutMinutes = sleepTimeoutEnumToMinutes(legacyValue);
+    needsResave = true;
   }
 
-  uint8_t fileSettingsCount = 0;
-  serialization::readPod(inputFile, fileSettingsCount);
+  // Front button remap — managed by RemapFrontButtons sub-activity, not in SettingsList.
+  using S = CrossPointSettings;
+  s.frontButtonBack =
+      clamp(doc["frontButtonBack"] | (uint8_t)S::FRONT_HW_BACK, S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_BACK);
+  s.frontButtonConfirm = clamp(doc["frontButtonConfirm"] | (uint8_t)S::FRONT_HW_CONFIRM, S::FRONT_BUTTON_HARDWARE_COUNT,
+                               S::FRONT_HW_CONFIRM);
+  s.frontButtonLeft =
+      clamp(doc["frontButtonLeft"] | (uint8_t)S::FRONT_HW_LEFT, S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_LEFT);
+  s.frontButtonRight =
+      clamp(doc["frontButtonRight"] | (uint8_t)S::FRONT_HW_RIGHT, S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_RIGHT);
+  // LandscapeCW front button override — default to factory order when absent (older files).
+  s.frontButtonBackCW =
+      clamp(doc["frontButtonBackCW"] | (uint8_t)S::FRONT_HW_BACK, S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_BACK);
+  s.frontButtonConfirmCW = clamp(doc["frontButtonConfirmCW"] | (uint8_t)S::FRONT_HW_CONFIRM,
+                                 S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_CONFIRM);
+  s.frontButtonLeftCW =
+      clamp(doc["frontButtonLeftCW"] | (uint8_t)S::FRONT_HW_LEFT, S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_LEFT);
+  s.frontButtonRightCW =
+      clamp(doc["frontButtonRightCW"] | (uint8_t)S::FRONT_HW_RIGHT, S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_RIGHT);
+  validateFrontButtonMapping(s);
 
-  uint8_t settingsRead = 0;
-  bool frontButtonMappingRead = false;
-  do {
-    readAndValidate(inputFile, sleepScreen, SLEEP_SCREEN_MODE_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-    serialization::readPod(inputFile, extraParagraphSpacing);
-    if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, shortPwrBtn, SHORT_PWRBTN_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, statusBar, STATUS_BAR_MODE_COUNT);  // legacy
-    if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, orientation, ORIENTATION_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, frontButtonLayout, FRONT_BUTTON_LAYOUT_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, sideButtonLayout, SIDE_BUTTON_LAYOUT_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-    {
-      uint8_t legacyFontFamily;
-      serialization::readPod(inputFile, legacyFontFamily);
-      if (legacyFontFamily < BUILTIN_FONT_COUNT) {
-        fontFamily = legacyFontFamily;
-      } else if (legacyFontFamily == LEGACY_OPENDYSLEXIC) {
-        fontFamily = NOTOSERIF;
-        strncpy(sdFontFamilyName, "OpenDyslexic", sizeof(sdFontFamilyName) - 1);
-        sdFontFamilyName[sizeof(sdFontFamilyName) - 1] = '\0';
-      }
-    }
-    if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, fontSize, FONT_SIZE_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, lineSpacing, LINE_COMPRESSION_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, paragraphAlignment, PARAGRAPH_ALIGNMENT_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-    uint8_t legacySleepTimeout = SLEEP_10_MIN;
-    readAndValidate(inputFile, legacySleepTimeout, SLEEP_TIMEOUT_COUNT);
-    sleepTimeoutMinutes = sleepTimeoutEnumToMinutes(legacySleepTimeout);
-    if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, refreshFrequency, REFRESH_FREQUENCY_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-    serialization::readPod(inputFile, screenMargin);
-    if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, sleepScreenCoverMode, SLEEP_SCREEN_COVER_MODE_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-    serialization::readPod(inputFile, textAntiAliasing);
-    if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, hideBatteryPercentage, HIDE_BATTERY_PERCENTAGE_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, longPressButtonBehavior, LONG_PRESS_BUTTON_BEHAVIOR_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-    serialization::readPod(inputFile, hyphenationEnabled);
-    if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, sleepScreenCoverFilter, SLEEP_SCREEN_COVER_FILTER_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-    serialization::readPod(inputFile, uiTheme);
-    if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, frontButtonBack, FRONT_BUTTON_HARDWARE_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, frontButtonConfirm, FRONT_BUTTON_HARDWARE_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, frontButtonLeft, FRONT_BUTTON_HARDWARE_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, frontButtonRight, FRONT_BUTTON_HARDWARE_COUNT);
-    frontButtonMappingRead = true;
-    if (++settingsRead >= fileSettingsCount) break;
-    serialization::readPod(inputFile, fadingFix);
-    if (++settingsRead >= fileSettingsCount) break;
-    serialization::readPod(inputFile, embeddedStyle);
-    if (++settingsRead >= fileSettingsCount) break;
-    serialization::readPod(inputFile, frontButtonFollowOrientation);
-    if (++settingsRead >= fileSettingsCount) break;
-  } while (false);
-
-  if (frontButtonMappingRead) {
-    CrossPointSettings::validateFrontButtonMapping(*this);
-  } else {
-    applyLegacyFrontButtonLayout(*this);
+  // Font family — uses dynamic getter/setter in SettingsList so the generic loop skips it.
+  const uint8_t storedFontFamily = doc["fontFamily"] | (uint8_t)0;
+  s.fontFamily = clamp(storedFontFamily, BUILTIN_FONT_COUNT, 0);
+  // SD card font family name — not in SettingsList, load manually.
+  const char* sfn = doc["sdFontFamilyName"] | "";
+  strncpy(s.sdFontFamilyName, sfn, sizeof(s.sdFontFamilyName) - 1);
+  s.sdFontFamilyName[sizeof(s.sdFontFamilyName) - 1] = '\0';
+  // Pinned-font set — newline-separated keys, load manually.
+  const char* pf = doc["pinnedFonts"] | "";
+  strncpy(s.pinnedFonts, pf, sizeof(s.pinnedFonts) - 1);
+  s.pinnedFonts[sizeof(s.pinnedFonts) - 1] = '\0';
+  if (storedFontFamily == LEGACY_OPENDYSLEXIC && s.sdFontFamilyName[0] == '\0') {
+    s.fontFamily = NOTOSERIF;
+    strncpy(s.sdFontFamilyName, "OpenDyslexic", sizeof(s.sdFontFamilyName) - 1);
+    s.sdFontFamilyName[sizeof(s.sdFontFamilyName) - 1] = '\0';
+    needsResave = true;
+  } else if (storedFontFamily >= BUILTIN_FONT_COUNT) {
+    needsResave = true;
   }
 
-  LOG_DBG("CPS", "Settings loaded from binary file");
+  // Dictionary marker-by-dwell — not in SettingsList (device-only sub-screen), load manually.
+  constexpr uint8_t kDictMarkerT1Count = sizeof(S::DICT_MARKER_T1_SECONDS) / sizeof(uint16_t);
+  constexpr uint8_t kDictMarkerT2Count = sizeof(S::DICT_MARKER_T2_SECONDS) / sizeof(uint16_t);
+  s.dictMarkerDwellEnabled =
+      clamp(doc["dictMarkerDwellEnabled"] | s.dictMarkerDwellEnabled, 2, s.dictMarkerDwellEnabled);
+  s.dictMarkerT1Idx = clamp(doc["dictMarkerT1Idx"] | s.dictMarkerT1Idx, kDictMarkerT1Count, s.dictMarkerT1Idx);
+  s.dictMarkerT2Idx = clamp(doc["dictMarkerT2Idx"] | s.dictMarkerT2Idx, kDictMarkerT2Count, s.dictMarkerT2Idx);
+
+  // Flashcard style + session scope — chosen on the review overview, not in SettingsList.
+  s.flashcardCardStyle =
+      clamp(doc["flashcardCardStyle"] | s.flashcardCardStyle, S::FLASHCARD_CARD_STYLE_COUNT, s.flashcardCardStyle);
+  s.flashcardSessionScope = clamp(doc["flashcardSessionScope"] | s.flashcardSessionScope,
+                                  S::FLASHCARD_SESSION_SCOPE_COUNT, s.flashcardSessionScope);
+
+  // Language — stored as code string for stability across enum reorders.
+  if (doc["language"].is<const char*>()) {
+    s.language = static_cast<uint8_t>(I18n::languageFromCode(doc["language"].as<const char*>()));
+  }
+
+  if (needsResave) {
+    LOG_DBG("CPS", "Resaving settings to update format");
+    requestResave();
+  }
+
+  LOG_DBG("CPS", "Settings loaded from file");
   return true;
 }
 

@@ -59,7 +59,7 @@ void SettingsActivity::rebuildSettingsLists() {
     // mirroring how the top-level screen appends its actions below.
     if (subCategory_ == StrId::STR_READER_DICTIONARY) {
       // Marker-by-dwell options inline here (rather than a further nested sub-screen). These are
-      // device-only — JsonSettingsIO persists them via explicit fields, not a SettingInfo key — so
+      // device-only — CrossPointSettings::toJson/fromJson persists them via explicit fields, not a SettingInfo key — so
       // they carry no key and are edited in place via their member pointers.
       readerSettings.push_back(
           SettingInfo::Toggle(StrId::STR_DICT_MARKER_DWELL, &CrossPointSettings::dictMarkerDwellEnabled));

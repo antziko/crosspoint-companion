@@ -1,13 +1,15 @@
 #pragma once
+#include <ArduinoJson.h>
+#include <PersistableStore.h>
+
 #include <cstdint>
-#include <mutex>
 #include <string>
 
-class CrossPointState {
-  mutable std::mutex _mutex;
+class CrossPointState : public PersistableStore<CrossPointState> {
+  // Private constructor for singleton (PersistableStore provides getInstance()).
+  CrossPointState() = default;
 
-  // Static instance
-  static CrossPointState instance;
+  friend class PersistableStore<CrossPointState>;
 
  public:
   // Sleep-wallpaper shuffle-bag ("deck"): every image is shown once, in random
@@ -17,9 +19,6 @@ class CrossPointState {
   // SLEEP_DECK_MAX in a single folder are simply never picked.
   // (Supersedes upstream's SLEEP_RECENT_COUNT recent-list approach, now unused.)
   static constexpr uint16_t SLEEP_DECK_MAX = 512;  // max images tracked per cycle
-
-  // Access the state mutex for protecting multi-field reads/writes from other cores.
-  std::mutex& getMutex() const { return _mutex; }
 
   std::string openEpubPath;
   // Path of the wallpaper shown when entering the last sleep, when it was a random
@@ -47,18 +46,12 @@ class CrossPointState {
   bool isSleepShown(uint16_t idx) const;  // already shown this cycle?
   void markSleepShown(uint16_t idx);      // record idx as shown this cycle
   void resetSleepDeck(uint16_t size);     // begin a fresh cycle for `size` images
-  ~CrossPointState() = default;
 
-  // Get singleton instance
-  static CrossPointState& getInstance() { return instance; }
-
-  bool saveToFile() const;
-
-  bool loadFromFile();
-
- private:
-  bool loadFromBinaryFile();
+  // PersistableStore hooks (getInstance/saveToFile/loadFromFile come from the CRTP base).
+  static const char* getFilePath() { return "/.crosspoint/state.json"; }
+  void toJson(JsonDocument& doc) const;
+  bool fromJson(JsonVariantConst doc);
 };
 
-// Helper macro to access settings
+// Helper macro to access state
 #define APP_STATE CrossPointState::getInstance()
