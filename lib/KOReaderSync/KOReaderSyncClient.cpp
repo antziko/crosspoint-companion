@@ -471,6 +471,54 @@ KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
   return SERVER_ERROR;
 }
 
+KOReaderSyncClient::Error KOReaderSyncClient::createUser() {
+  lastHttpCode = 0;
+  if (!KOREADER_STORE.hasCredentials()) {
+    LOG_DBG("KOSync", "No credentials configured");
+    return NO_CREDENTIALS;
+  }
+
+  const std::string url = KOREADER_STORE.getBaseUrl() + "/users/create";
+
+  std::string body;
+  {
+    JsonDocument doc;
+    doc["username"] = KOREADER_STORE.getUsername();
+    doc["password"] = KOREADER_STORE.getMd5Password();
+    serializeJson(doc, body);
+  }
+
+  if (!contigOkForPut(url, "CREATE_USER", body.length())) return LOW_MEMORY;
+
+  const NoWifiSleep noWifiSleep;
+  ResponseBuffer buf;
+  beginTrace(buf, "CREATE_USER", body.length());
+  esp_http_client_handle_t client = createClient(url.c_str(), &buf, HTTP_METHOD_POST);
+  if (!client) return NETWORK_ERROR;
+
+  if (esp_http_client_set_header(client, "Accept", "application/vnd.koreader.v1+json") != ESP_OK ||
+      esp_http_client_set_header(client, "Content-Type", "application/json") != ESP_OK ||
+      esp_http_client_set_post_field(client, body.c_str(), body.length()) != ESP_OK) {
+    LOG_ERR("KOSync", "Failed to set request body");
+    releaseClient(client);
+    return NETWORK_ERROR;
+  }
+
+  esp_err_t err = esp_http_client_perform(client);
+  const int httpCode = esp_http_client_get_status_code(client);
+  lastHttpCode = httpCode;
+  releaseClient(client);
+
+  s_bytesUp += static_cast<uint32_t>(body.length());
+  endTrace(buf, "CREATE_USER", httpCode, err);
+  LOG_DBG("KOSync", "Create user response: %d (err: %d)", httpCode, err);
+
+  if (err != ESP_OK) return NETWORK_ERROR;
+  if (httpCode == 200 || httpCode == 201) return OK;
+  if (httpCode == 402) return USER_EXISTS;
+  return SERVER_ERROR;
+}
+
 KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& documentHash,
                                                           KOReaderProgress& outProgress) {
   lastHttpCode = 0;

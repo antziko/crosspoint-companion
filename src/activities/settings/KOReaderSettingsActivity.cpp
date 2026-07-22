@@ -19,7 +19,7 @@ namespace {
 // New servers only show the first BASE_ITEMS_NEW rows (no Set Active, Authenticate, or Delete).
 constexpr int BASE_ITEMS_NEW =
     7;  // Name, Username, Password, Sync Server URL, Doc Matching, Send Metadata, Sync Behavior
-constexpr int BASE_ITEMS_EXISTING = 9;  // + Set as Active + Authenticate
+constexpr int BASE_ITEMS_EXISTING = 10;  // + Set as Active + Sign Up + Authenticate
 
 // Row indices (shared between getMenuItemCount, handleSelection, render)
 constexpr int ROW_NAME = 0;
@@ -30,8 +30,9 @@ constexpr int ROW_DOC_MATCH = 4;
 constexpr int ROW_SEND_METADATA = 5;
 constexpr int ROW_SYNC_BEHAVIOR = 6;
 constexpr int ROW_SET_ACTIVE = 7;
-constexpr int ROW_AUTHENTICATE = 8;
-constexpr int ROW_DELETE = 9;
+constexpr int ROW_SIGN_UP = 8;
+constexpr int ROW_AUTHENTICATE = 9;
+constexpr int ROW_DELETE = 10;
 }  // namespace
 
 int KOReaderSettingsActivity::getMenuItemCount() const {
@@ -187,6 +188,17 @@ void KOReaderSettingsActivity::handleSelection() {
       requestUpdate();
     }
 
+  } else if (selectedIndex == ROW_SIGN_UP && !isNewServer) {
+    // Sign Up: register a new account on this server with the entered credentials.
+    if (editServer.username.empty() || editServer.password.empty()) {
+      return;
+    }
+    // Pass serverIndex so the auth activity makes this server active (its creds + URL)
+    // before registering; SIGN_UP mode calls createUser() instead of authenticate().
+    startActivityForResult(
+        std::make_unique<KOReaderAuthActivity>(renderer, mappedInput, serverIndex, KOReaderAuthActivity::Mode::SIGN_UP),
+        [](const ActivityResult&) {});
+
   } else if (selectedIndex == ROW_AUTHENTICATE && !isNewServer) {
     // Credentials must be set before authenticating
     if (editServer.username.empty() || editServer.password.empty()) {
@@ -241,7 +253,8 @@ void KOReaderSettingsActivity::render(RenderLock&&) {
       StrId::STR_SEND_METADATA,      // 5 Send Metadata
       StrId::STR_SYNC_BEHAVIOR,      // 6 Sync Behavior
       StrId::STR_SET_AS_ACTIVE,      // 7 Set as Active
-      StrId::STR_AUTHENTICATE,       // 8 Authenticate
+      StrId::STR_SIGN_UP,            // 8 Sign Up
+      StrId::STR_AUTHENTICATE,       // 9 Authenticate
   };
 
   GUI.drawList(
@@ -272,7 +285,7 @@ void KOReaderSettingsActivity::render(RenderLock&&) {
                                                                         : std::string(tr(STR_ASK_EVERY_TIME));
         } else if (index == ROW_SET_ACTIVE) {
           return (serverIndex == activeIdx) ? std::string("\xE2\x80\xA2") : std::string("");
-        } else if (index == ROW_AUTHENTICATE) {
+        } else if (index == ROW_SIGN_UP || index == ROW_AUTHENTICATE) {
           if (editServer.username.empty() || editServer.password.empty()) {
             return std::string("[") + tr(STR_SET_CREDENTIALS_FIRST) + "]";
           }

@@ -90,7 +90,17 @@ struct StatsDatedFold {
  */
 class KOReaderSyncClient {
  public:
-  enum Error { OK = 0, NO_CREDENTIALS, NETWORK_ERROR, AUTH_FAILED, SERVER_ERROR, JSON_ERROR, NOT_FOUND, LOW_MEMORY };
+  enum Error {
+    OK = 0,
+    NO_CREDENTIALS,
+    NETWORK_ERROR,
+    AUTH_FAILED,
+    SERVER_ERROR,
+    JSON_ERROR,
+    NOT_FOUND,
+    LOW_MEMORY,
+    USER_EXISTS
+  };
 
   /**
    * RAII guard for a keep-alive connection session.
@@ -115,6 +125,13 @@ class KOReaderSyncClient {
    * @return OK on success, error code on failure
    */
   static Error authenticate();
+
+  /**
+   * Register a new account on the sync server (KOSync /users/create).
+   * Uses the configured username + MD5 password.
+   * @return OK on success, USER_EXISTS if the username is taken, error code otherwise
+   */
+  static Error createUser();
 
   /**
    * Get reading progress for a document.
