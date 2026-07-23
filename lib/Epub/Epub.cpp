@@ -557,7 +557,15 @@ bool Epub::generateCoverBmp(bool cropped) const {
     if (!Storage.openFileForWrite("EBP", coverJpgTempPath, coverJpg)) {
       return false;
     }
-    readItemContentsToStream(coverImageHref, coverJpg, 1024);
+    // DIAG (latent, mirrors generateThumbBmp): this path has no FrameBufferLoan,
+    // so its inflate window and JPEGDEC alloc still ride the fragmented normal
+    // heap. Not observed failing yet; trace the otherwise-discarded extraction
+    // result so a sleep-cover failure is attributable from opds_debug.txt.
+    uint8_t extractReason = 0;
+    const bool extractOk = readItemContentsToStream(coverImageHref, coverJpg, 1024, &extractReason);
+    SdDebugLog::log("EBP", "cover jpg extract %s reason=%s free=%u largest=%u", extractOk ? "ok" : "FAIL",
+                    ZipFile::streamResultTag(static_cast<ZipFile::StreamResult>(extractReason)),
+                    (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     // Explicitly close() file before reopening for reading
     coverJpg.close();
 
@@ -591,7 +599,13 @@ bool Epub::generateCoverBmp(bool cropped) const {
     if (!Storage.openFileForWrite("EBP", coverPngTempPath, coverPng)) {
       return false;
     }
-    readItemContentsToStream(coverImageHref, coverPng, 1024);
+    // DIAG: see note in the JPG branch above. Same discarded return value; trace
+    // the PNG sleep-cover extraction result + reason + heap.
+    uint8_t extractReason = 0;
+    const bool extractOk = readItemContentsToStream(coverImageHref, coverPng, 1024, &extractReason);
+    SdDebugLog::log("EBP", "cover png extract %s reason=%s free=%u largest=%u", extractOk ? "ok" : "FAIL",
+                    ZipFile::streamResultTag(static_cast<ZipFile::StreamResult>(extractReason)),
+                    (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     // Explicitly close() file before reopening for reading
     coverPng.close();
 
