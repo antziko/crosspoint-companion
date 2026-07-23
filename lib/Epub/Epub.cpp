@@ -4,11 +4,11 @@
 #include <HalStorage.h>
 #include <JpegToBmpConverter.h>
 #include <Logging.h>
-#include <SdDebugLog.h>
-#include <esp_heap_caps.h>
 #include <PngToBmpConverter.h>
+#include <SdDebugLog.h>
 #include <Utf8.h>
 #include <ZipFile.h>
+#include <esp_heap_caps.h>
 
 #include <set>
 
@@ -660,7 +660,17 @@ bool Epub::generateThumbBmp(int height) const {
     if (!Storage.openFileForWrite("EBP", coverJpgTempPath, coverJpg)) {
       return false;
     }
-    readItemContentsToStream(coverImageHref, coverJpg, 1024);
+    // DIAG (X3 cover regression): the return value of this inflate-to-temp was
+    // previously discarded, so a failed cover extraction produced an empty
+    // .cover.jpg and surfaced only as JPEGDEC "open failed err=4" downstream.
+    // Trace the extraction result + reason + heap so the failure is attributable
+    // (expect reason=INFLATEINIT when the 32KB streaming window can't malloc on a
+    // fragmented home heap). Enabled via SdDebugLog by HomeActivity::loadRecentCovers.
+    uint8_t extractReason = 0;
+    const bool extractOk = readItemContentsToStream(coverImageHref, coverJpg, 1024, &extractReason);
+    SdDebugLog::log("EBP", "thumb jpg extract %s reason=%s free=%u largest=%u", extractOk ? "ok" : "FAIL",
+                    ZipFile::streamResultTag(static_cast<ZipFile::StreamResult>(extractReason)),
+                    (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     // Explicitly close() file before reopening for reading
     coverJpg.close();
 
@@ -698,7 +708,13 @@ bool Epub::generateThumbBmp(int height) const {
     if (!Storage.openFileForWrite("EBP", coverPngTempPath, coverPng)) {
       return false;
     }
-    readItemContentsToStream(coverImageHref, coverPng, 1024);
+    // DIAG (X3 cover regression): see note in the JPG branch above. Same discarded
+    // return value; trace the PNG cover extraction result + reason + heap.
+    uint8_t extractReason = 0;
+    const bool extractOk = readItemContentsToStream(coverImageHref, coverPng, 1024, &extractReason);
+    SdDebugLog::log("EBP", "thumb png extract %s reason=%s free=%u largest=%u", extractOk ? "ok" : "FAIL",
+                    ZipFile::streamResultTag(static_cast<ZipFile::StreamResult>(extractReason)),
+                    (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     // Explicitly close() file before reopening for reading
     coverPng.close();
 

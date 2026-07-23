@@ -1,5 +1,6 @@
 #include "JpegToBmpConverter.h"
 
+#include <BuildScratch.h>
 #include <HalDisplay.h>
 #include <HalStorage.h>
 #include <JPEGDEC.h>
@@ -10,6 +11,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <new>
 
 #include "BitmapHelpers.h"
 
@@ -497,22 +499,46 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(HalFile& jpegFile, Print& b
                                                      int targetHeight, bool oneBit, bool crop) {
   LOG_DBG("JPG", "Converting JPEG to %s BMP (target: %dx%d)", oneBit ? "1-bit" : "2-bit", targetWidth, targetHeight);
 
-  const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  if (largestBlock < MIN_LARGEST_BLOCK) {
-    LOG_ERR("JPG", "Not enough contiguous heap for JPEG decoder (%u largest block, need %u)", largestBlock,
-            MIN_LARGEST_BLOCK);
-    SdDebugLog::log("JPG", "cover bail: low-heap largest=%u need=%u free=%u target=%dx%d", (unsigned)largestBlock,
-                    (unsigned)MIN_LARGEST_BLOCK, (unsigned)ESP.getFreeHeap(), targetWidth, targetHeight);
-    return false;
+  // Prefer the lent framebuffer scratch (a single unfragmented ~48KB block) for
+  // the ~20KB JPEGDEC object. During the home-screen cover loan the inflate that
+  // extracted the JPEG has already released the scratch, so the decode can reuse
+  // it instead of competing with a normal heap fragmented by prior reading -- that
+  // fragmentation otherwise trips the MIN_LARGEST_BLOCK guard below and leaves a
+  // blank cover even though extraction succeeded. When no framebuffer is lent (any
+  // non-loan caller) claim() returns null and we fall back to the heap allocation
+  // plus the contiguous-block guard, exactly as before.
+  uint8_t* jpegArena = buildscratch::claim(sizeof(JPEGDEC));
+  std::unique_ptr<JPEGDEC> jpegHeap;  // owns the object only on the heap-fallback path
+  JPEGDEC* jpeg;
+  if (jpegArena) {
+    jpeg = new (jpegArena) JPEGDEC();  // placement new; ctor cannot throw (-fno-exceptions)
+  } else {
+    const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (largestBlock < MIN_LARGEST_BLOCK) {
+      LOG_ERR("JPG", "Not enough contiguous heap for JPEG decoder (%u largest block, need %u)", largestBlock,
+              MIN_LARGEST_BLOCK);
+      SdDebugLog::log("JPG", "cover bail: low-heap largest=%u need=%u free=%u target=%dx%d", (unsigned)largestBlock,
+                      (unsigned)MIN_LARGEST_BLOCK, (unsigned)ESP.getFreeHeap(), targetWidth, targetHeight);
+      return false;
+    }
+    jpegHeap = makeUniqueNoThrow<JPEGDEC>();
+    if (!jpegHeap) {
+      LOG_ERR("JPG", "OOM: JPEG decoder");
+      return false;
+    }
+    jpeg = jpegHeap.get();
   }
+  // Destroy the placement-new object and return the scratch on every exit path.
+  // Declared BEFORE the open/close cleanup below so close() runs first (cleanups
+  // fire in reverse construction order), and no-ops on the heap-fallback path.
+  const ScopedCleanup arenaCleanup{[&]() {
+    if (jpegArena) {
+      jpeg->~JPEGDEC();
+      buildscratch::release(jpegArena);
+    }
+  }};
 
   s_jpegFile = &jpegFile;
-
-  const auto jpeg = makeUniqueNoThrow<JPEGDEC>();
-  if (!jpeg) {
-    LOG_ERR("JPG", "OOM: JPEG decoder");
-    return false;
-  }
 
   int rc = jpeg->open("", bmpJpegOpen, bmpJpegClose, bmpJpegRead, bmpJpegSeek, bmpDrawCallback);
   if (rc != 1) {

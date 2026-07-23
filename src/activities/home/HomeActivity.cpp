@@ -109,7 +109,18 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
         // transiently (heap fragmentation), and clearing it would blank the cover
         // until the book is reopened. drawCoverTile falls back to a placeholder when
         // the thumb file is absent; a later attempt (fresh heap) regenerates it.
-        const bool ok = epub.generateThumbBmp(coverHeight);
+        // Lend the 48KB framebuffer for the duration of the thumb build so the
+        // cover's zip-inflate window (32KB) claims build-scratch instead of a
+        // malloc(32768) that fails on a home heap fragmented below 32KB (X3:
+        // largest ~31732). The progress popup above is already flushed to the
+        // persistent e-ink panel and generateThumbBmp does no rendering, so
+        // lending is safe (mirrors the section-build loan in EpubReaderActivity).
+        // Nesting-safe: an already-lent framebuffer yields an inert loan.
+        bool ok;
+        {
+          GfxRenderer::FrameBufferLoan loan(renderer);
+          ok = epub.generateThumbBmp(coverHeight);
+        }
         SdDebugLog::log("COVER", "epub thumb %s: free=%u largest=%u path=%s", ok ? "ok" : "FAILED",
                         (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
                         book.path.c_str());
@@ -126,7 +137,13 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
           }
           GUI.fillPopupProgress(renderer, popupRect, 10 + progress * (90 / recentBooks.size()));
           // See note above: don't wipe the cover path on a (possibly transient) failure.
-          const bool ok = xtc.generateThumbBmp(coverHeight);
+          // See note in the epub branch above: lend the framebuffer so the cover
+          // inflate window uses build-scratch instead of a failing malloc(32768).
+          bool ok;
+          {
+            GfxRenderer::FrameBufferLoan loan(renderer);
+            ok = xtc.generateThumbBmp(coverHeight);
+          }
           SdDebugLog::log("COVER", "xtc thumb %s: free=%u largest=%u path=%s", ok ? "ok" : "FAILED",
                           (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
                           book.path.c_str());
