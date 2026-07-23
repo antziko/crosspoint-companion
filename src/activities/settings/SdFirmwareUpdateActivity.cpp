@@ -246,12 +246,11 @@ void SdFirmwareUpdateActivity::render(RenderLock&&) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_COMPLETE), true, EpdFontFamily::BOLD);
     // Wrap the restart hint ("...hold the power for a few seconds...") over up to 3
     // lines instead of a single centered line that runs off both edges (X3 narrower).
-    const auto hintLines = renderer.wrappedText(UI_10_FONT_ID, tr(STR_RESTARTING_HINT), pageWidth - 40, 3);
-    int hintY = top + lineHeight + metrics.verticalSpacing;
-    for (const auto& line : hintLines) {
-      renderer.drawCenteredText(UI_10_FONT_ID, hintY, line.c_str());
-      hintY += lineHeight;
-    }
+    const int hintY = top + lineHeight + metrics.verticalSpacing;
+    const Rect hintBounds{metrics.contentSidePadding, hintY, pageWidth - metrics.contentSidePadding * 2,
+                          pageHeight - hintY};
+    UITheme::drawCenteredWrappedText(renderer, hintBounds, UI_10_FONT_ID, tr(STR_RESTARTING_HINT), 3, true,
+                                     EpdFontFamily::REGULAR, UITheme::TextVerticalAlignment::TOP);
   } else if (state == State::FAILED) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_FAILED), true, EpdFontFamily::BOLD);
     if (!errorMessage.empty()) {
