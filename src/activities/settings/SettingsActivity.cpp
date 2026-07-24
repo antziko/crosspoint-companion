@@ -12,7 +12,6 @@
 #include "CrossPointSettings.h"
 #include "DictionarySelectActivity.h"
 #include "FontDownloadActivity.h"
-#include "FontSelectionActivity.h"
 #include "HomeTopBarSettingsActivity.h"
 #include "KOReaderServerListActivity.h"
 #include "LanguageSelectActivity.h"
@@ -23,6 +22,7 @@
 #include "SdFirmwareUpdateActivity.h"
 #include "SettingsList.h"
 #include "StatusBarSettingsActivity.h"
+#include "TextSettingsActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/util/IntervalSelectionActivity.h"
 #include "components/UITheme.h"
@@ -49,6 +49,9 @@ void SettingsActivity::rebuildSettingsLists() {
   if (isSubScreen()) {
     for (auto& setting : getSettingsList(&sdFontSystem.registry(), &dictionaryRegistry)) {
       if (setting.category == subCategory_) {
+        // LOCAL(feat-dictionary): settings consolidated into the Text Settings screen (#2605) are
+        // hidden from their sub-screen too (e.g. STR_READER_TEXT), staying only in the web list.
+        if (setting.inTextSettings) continue;
         readerSettings.push_back(setting);
       }
     }
@@ -86,6 +89,9 @@ void SettingsActivity::rebuildSettingsLists() {
     if (setting.category == StrId::STR_CAT_DISPLAY) {
       displaySettings.push_back(setting);
     } else if (setting.category == StrId::STR_CAT_READER) {
+      // Settings merged into "Text Settings"
+      // (they stay in the shared list for the web settings API)
+      if (setting.inTextSettings) continue;
       readerSettings.push_back(setting);
     } else if (setting.category == StrId::STR_CAT_CONTROLS) {
       if (setting.valuePtr == &CrossPointSettings::pwrBtnFootnoteBack &&
@@ -113,7 +119,10 @@ void SettingsActivity::rebuildSettingsLists() {
   systemSettings.push_back(SettingInfo::SubScreen(StrId::STR_SYS_SYNC_PROMPTS, StrId::STR_SYS_SYNC_PROMPTS));
   systemSettings.push_back(SettingInfo::SubScreen(StrId::STR_SYS_LIBRARY, StrId::STR_SYS_LIBRARY));
   systemSettings.push_back(SettingInfo::SubScreen(StrId::STR_SYS_MAINTENANCE, StrId::STR_SYS_MAINTENANCE));
-  // Insert "Manage Fonts" right after the font family setting so users discover it naturally
+  // LOCAL(feat-dictionary): #2605 — "Text Settings" opens the unified font/size/layout/style
+  // screen; the font-family flat row is now hidden (inTextSettings), so this is the top Reader entry.
+  readerSettings.insert(readerSettings.begin(),
+                        SettingInfo::Action(StrId::STR_TEXT_SETTINGS, SettingAction::TextSettings));
   readerSettings.insert(readerSettings.begin() + 1,
                         SettingInfo::Action(StrId::STR_MANAGE_FONTS, SettingAction::DownloadFonts));
   // Reader sub-screens: advanced text/rendering, dictionary, and reading-tracking settings live one
@@ -286,27 +295,8 @@ void SettingsActivity::toggleCurrentSetting() {
     }
     SETTINGS.*(setting.valuePtr) = (currentValue + 1) % static_cast<uint8_t>(setting.enumValues.size());
   } else if (setting.type == SettingType::ENUM && setting.dyn && setting.dyn->valueGetter && setting.dyn->valueSetter) {
-    if (setting.nameId == StrId::STR_FONT_FAMILY) {
-      // Launch font selection submenu instead of cycling
-      startActivityForResult(std::make_unique<FontSelectionActivity>(renderer, mappedInput, &sdFontSystem.registry(),
-                                                                     SETTINGS.fontFamily, SETTINGS.sdFontFamilyName),
-                             [this](const ActivityResult& result) {
-                               if (!result.isCancelled && std::holds_alternative<FontSelectionResult>(result.data)) {
-                                 const auto& sel = std::get<FontSelectionResult>(result.data);
-                                 if (sel.isBuiltin) {
-                                   SETTINGS.fontFamily = sel.builtinIndex;
-                                   SETTINGS.sdFontFamilyName[0] = '\0';
-                                 } else {
-                                   strncpy(SETTINGS.sdFontFamilyName, sel.sdFamilyName.c_str(),
-                                           sizeof(SETTINGS.sdFontFamilyName) - 1);
-                                   SETTINGS.sdFontFamilyName[sizeof(SETTINGS.sdFontFamilyName) - 1] = '\0';
-                                 }
-                                 SETTINGS.saveToFile();
-                                 rebuildSettingsLists();
-                               }
-                             });
-      return;
-    }
+    // LOCAL(feat-dictionary): font-family no longer launches FontSelectionActivity from here — it is
+    // hidden from the flat Reader list (inTextSettings) and now lives in the Text Settings Font tab (#2605).
     if (setting.nameId == StrId::STR_DICTIONARY) {
       // Launch the dictionary picker (rich metadata/preparation flow) instead of cycling.
       // The picker writes the selection to dictionary.bin itself; just refresh on return.
@@ -402,6 +392,14 @@ void SettingsActivity::toggleCurrentSetting() {
         break;
       case SettingAction::DownloadFonts:
         startActivityForResult(std::make_unique<FontDownloadActivity>(renderer, mappedInput),
+                               [this](const ActivityResult&) {
+                                 SETTINGS.saveToFile();
+                                 rebuildSettingsLists();
+                               });
+        break;
+      case SettingAction::TextSettings:
+        startActivityForResult(std::make_unique<TextSettingsActivity>(renderer, mappedInput, &sdFontSystem.registry(),
+                                                                      TextSettingsActivity::Tab::Family),
                                [this](const ActivityResult&) {
                                  SETTINGS.saveToFile();
                                  rebuildSettingsLists();

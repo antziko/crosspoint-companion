@@ -53,6 +53,7 @@ inline SettingInfo buildFontFamilySetting(const SdCardFontRegistry* registry) {
   s.enumStringValues = std::move(allStringValues);
   s.key = "fontFamily";
   s.category = StrId::STR_CAT_READER;
+  s.inTextSettings = true;  // LOCAL(feat-dictionary): registry-aware font-family lives in Text Settings (#2605)
 
   // Capture registry families by copy for the lambdas
   std::vector<std::string> sdFamilyNames;
@@ -206,10 +207,12 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // --- Reader ---
   // Built-in font-family entry. Replaced per-call with a registry-aware version when SD fonts installed.
   v.push_back(SettingInfo::Enum(StrId::STR_FONT_FAMILY, &CrossPointSettings::fontFamily,
-                                {StrId::STR_NOTO_SERIF, StrId::STR_NOTO_SANS}, "fontFamily", StrId::STR_CAT_READER));
+                                {StrId::STR_NOTO_SERIF, StrId::STR_NOTO_SANS}, "fontFamily", StrId::STR_CAT_READER)
+                  .withTextSettings());
   v.push_back(SettingInfo::Enum(StrId::STR_FONT_SIZE, &CrossPointSettings::fontSize,
                                 {StrId::STR_SMALL, StrId::STR_MEDIUM, StrId::STR_LARGE, StrId::STR_X_LARGE}, "fontSize",
-                                StrId::STR_CAT_READER));
+                                StrId::STR_CAT_READER)
+                  .withTextSettings());
   v.push_back(SettingInfo::Enum(StrId::STR_DICT_FONT_FAMILY, &CrossPointSettings::dictionaryFontFamily,
                                 {StrId::STR_NOTO_SERIF, StrId::STR_NOTO_SANS}, "dictionaryFontFamily",
                                 StrId::STR_READER_DICTIONARY));
@@ -218,28 +221,38 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                                 "dictionaryFontSize", StrId::STR_READER_DICTIONARY));
   v.push_back(SettingInfo::Enum(StrId::STR_LINE_SPACING, &CrossPointSettings::lineSpacing,
                                 {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_WIDE}, "lineSpacing",
-                                StrId::STR_CAT_READER));
-  v.push_back(SettingInfo::Value(StrId::STR_SCREEN_MARGIN, &CrossPointSettings::screenMargin, {5, 40, 5},
-                                 "screenMargin", StrId::STR_CAT_READER));
-  v.push_back(SettingInfo::Enum(
-      StrId::STR_PARA_ALIGNMENT, &CrossPointSettings::paragraphAlignment,
-      {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, StrId::STR_CENTER, StrId::STR_ALIGN_RIGHT, StrId::STR_BOOK_S_STYLE},
-      "paragraphAlignment", StrId::STR_CAT_READER));
+                                StrId::STR_CAT_READER)
+                  .withTextSettings());
+  v.push_back(SettingInfo::Value(StrId::STR_SCREEN_MARGIN, &CrossPointSettings::screenMargin,
+                                 {CrossPointSettings::SCREEN_MARGIN_MIN, CrossPointSettings::SCREEN_MARGIN_MAX,
+                                  CrossPointSettings::SCREEN_MARGIN_STEP},
+                                 "screenMargin", StrId::STR_CAT_READER)
+                  .withTextSettings());
+  v.push_back(SettingInfo::Enum(StrId::STR_PARA_ALIGNMENT, &CrossPointSettings::paragraphAlignment,
+                                {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, StrId::STR_CENTER, StrId::STR_ALIGN_RIGHT,
+                                 StrId::STR_BOOK_S_STYLE},
+                                "paragraphAlignment", StrId::STR_CAT_READER)
+                  .withTextSettings());
   v.push_back(SettingInfo::Toggle(StrId::STR_EMBEDDED_STYLE, &CrossPointSettings::embeddedStyle, "embeddedStyle",
-                                  StrId::STR_READER_TEXT));
+                                  StrId::STR_READER_TEXT)
+                  .withTextSettings());
   v.push_back(SettingInfo::Toggle(StrId::STR_FOCUS_READING, &CrossPointSettings::focusReadingEnabled,
-                                  "focusReadingEnabled", StrId::STR_READER_TEXT));
+                                  "focusReadingEnabled", StrId::STR_READER_TEXT)
+                  .withTextSettings());
   v.push_back(SettingInfo::Toggle(StrId::STR_HYPHENATION, &CrossPointSettings::hyphenationEnabled, "hyphenationEnabled",
-                                  StrId::STR_READER_TEXT));
+                                  StrId::STR_READER_TEXT)
+                  .withTextSettings());
   v.push_back(
       SettingInfo::Enum(StrId::STR_ORIENTATION, &CrossPointSettings::orientation,
                         {StrId::STR_PORTRAIT, StrId::STR_LANDSCAPE_CW, StrId::STR_INVERTED, StrId::STR_LANDSCAPE_CCW},
                         "orientation", StrId::STR_CAT_READER));
   v.push_back(SettingInfo::Toggle(StrId::STR_EXTRA_SPACING, &CrossPointSettings::extraParagraphSpacing,
-                                  "extraParagraphSpacing", StrId::STR_READER_TEXT));
+                                  "extraParagraphSpacing", StrId::STR_READER_TEXT)
+                  .withTextSettings());
   v.push_back(SettingInfo::Enum(StrId::STR_TEXT_AA, &CrossPointSettings::textAntiAliasing,
                                 {StrId::STR_TEXT_AA_OFF, StrId::STR_TEXT_AA_ANTIALIASED, StrId::STR_TEXT_AA_SHARP},
-                                "textAntiAliasing", StrId::STR_READER_TEXT));
+                                "textAntiAliasing", StrId::STR_READER_TEXT)
+                  .withTextSettings());
   v.push_back(SettingInfo::Enum(StrId::STR_IMAGES, &CrossPointSettings::imageRendering,
                                 {StrId::STR_IMAGES_DISPLAY, StrId::STR_IMAGES_PLACEHOLDER, StrId::STR_IMAGES_SUPPRESS},
                                 "imageRendering", StrId::STR_READER_TEXT));

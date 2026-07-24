@@ -31,6 +31,7 @@ enum class SettingAction {
   // Open a nested settings sub-screen listing every setting in SettingInfo::subCategory.
   // Rendered by a category-scoped SettingsActivity instance — see SettingInfo::SubScreen.
   OpenSubCategory,
+  TextSettings,  // LOCAL(feat-dictionary): #2605 Text Settings screen
 };
 
 struct SettingInfo {
@@ -51,6 +52,7 @@ struct SettingInfo {
   const char* key = nullptr;             // JSON API key (nullptr for ACTION types)
   StrId category = StrId::STR_NONE_OPT;  // Category for web UI grouping
   bool obfuscated = false;               // Save/load via base64 obfuscation (passwords)
+  bool inTextSettings = false;           // Surfaced in the Text Settings screen; hidden from the flat Reader list
 
   // For OpenSubCategory actions: the category whose settings the nested sub-screen lists.
   StrId subCategory = StrId::STR_NONE_OPT;
@@ -76,6 +78,11 @@ struct SettingInfo {
 
   SettingInfo& withObfuscated() {
     obfuscated = true;
+    return *this;
+  }
+
+  SettingInfo& withTextSettings() {
+    inTextSettings = true;
     return *this;
   }
 
