@@ -13,17 +13,17 @@ class ZipFile {
   // out so the [E2/STREAM:<tag>] overlay says WHICH one fired for a given spine.
   enum class StreamResult : uint8_t {
     Ok = 0,
-    OpenFail,       // zip could not be opened
-    NotFound,       // entry name not in central dir (href ↔ zip-name mismatch)
-    BadOffset,      // bad/corrupt local header offset
-    Oom,            // chunk buffer allocation failed
-    ShortRead,      // STORED entry: read returned 0 before end
-    WriteFail,      // output stream (temp HTML) write failed
-    InflateInit,    // inflate window allocation/init failed
-    DeflateError,   // corrupt/truncated deflate stream
-    SizeMismatch,   // inflated size != central-dir uncompressed size
-    Oversize,       // produced more than expected (corrupt)
-    Unsupported,    // compression method neither STORED nor DEFLATED
+    OpenFail,      // zip could not be opened
+    NotFound,      // entry name not in central dir (href ↔ zip-name mismatch)
+    BadOffset,     // bad/corrupt local header offset
+    Oom,           // chunk buffer allocation failed
+    ShortRead,     // STORED entry: read returned 0 before end
+    WriteFail,     // output stream (temp HTML) write failed
+    InflateInit,   // inflate window allocation/init failed
+    DeflateError,  // corrupt/truncated deflate stream
+    SizeMismatch,  // inflated size != central-dir uncompressed size
+    Oversize,      // produced more than expected (corrupt)
+    Unsupported,   // compression method neither STORED nor DEFLATED
   };
   // Short tag for overlays/logs, e.g. "NOTFOUND". Never null.
   static const char* streamResultTag(StreamResult r);
@@ -89,7 +89,12 @@ class ZipFile {
   // Due to the memory required to run each of these, it is recommended to not preopen the zip file for multiple
   // These functions will open and close the zip as needed
   uint8_t* readFileToMemory(const char* filename, size_t* size = nullptr, bool trailingNullByte = false);
-  bool readFileToStream(const char* filename, Print& out, size_t chunkSize, StreamResult* outResult = nullptr);
+  // allowEarlyStop: a short write from `out` is treated as the sink asking to
+  // stop (returns true) instead of a write failure — used by header probes
+  // that only need the first bytes of an entry (#2611).
+  // outResult (optional) receives the granular StreamResult sub-status.
+  bool readFileToStream(const char* filename, Print& out, size_t chunkSize, bool allowEarlyStop = false,
+                        StreamResult* outResult = nullptr);
 
   template <typename F>
   bool enumerateFilePaths(F&& callback) {
@@ -100,6 +105,14 @@ class ZipFile {
       return true;
     }
 
+    return enumerateFileEntries([&callback](std::string_view path, uint32_t, uint32_t) { callback(path); });
+  }
+
+  // Callback receives (path, crc32, compressedSize) for each central-directory
+  // entry. Always scans the central directory: the slim-stat cache does not
+  // hold CRCs.
+  template <typename F>
+  bool enumerateFileEntries(F&& callback) {
     const bool wasOpen = isOpen();
     if (!wasOpen && !open()) {
       return false;
@@ -123,7 +136,11 @@ class ZipFile {
         break;
       }
 
-      file.seekCur(24);
+      file.seekCur(12);
+      uint32_t crc32, compressedSize;
+      file.read(&crc32, 4);
+      file.read(&compressedSize, 4);
+      file.seekCur(4);
       uint16_t nameLen, m, k;
       file.read(&nameLen, 2);
       file.read(&m, 2);
@@ -133,7 +150,7 @@ class ZipFile {
       if (nameLen < sizeof(itemName)) {
         file.read(itemName, nameLen);
         itemName[nameLen] = '\0';
-        callback(std::string_view{itemName, nameLen});
+        callback(std::string_view{itemName, nameLen}, crc32, compressedSize);
       } else {
         file.seekCur(nameLen);
       }

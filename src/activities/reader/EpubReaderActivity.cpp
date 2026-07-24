@@ -225,6 +225,15 @@ void EpubReaderActivity::onEnter() {
   // Reset the per-session image render-failure memory (upstream #1003 placeholders).
   // Orientation is applied below from the book's saved value (APP_STATE.activeOrientation).
   ImageBlock::clearSessionRenderFailures();
+
+  // Lazy image extraction (#2611): section builds only header-probe images for
+  // their dimensions; the first render of an image page pulls the file out of the
+  // EPUB through this hook. Function pointer + context (not std::function) — this
+  // feeds render-loop code. Cleared in onExit before the epub shared_ptr drops.
+  ImageBlock::setExtractor(epub.get(), [](void* ctx, const char* src, const char* dest) {
+    return static_cast<Epub*>(ctx)->extractItemToFile(src, dest);
+  });
+
   epub->setupCacheDir();
   ensureCacheContentId(epub->getPath(), epub->getCachePath());
   // First open of a device-tagged book (e.g. "book (X3).epub"): seed its fresh
@@ -338,6 +347,10 @@ void EpubReaderActivity::onEnter() {
 
 void EpubReaderActivity::onExit() {
   Activity::onExit();
+
+  // The lazy-image extractor holds a raw pointer to this activity's epub; drop it
+  // before the activity (and the shared_ptr) goes away (#2611).
+  ImageBlock::setExtractor(nullptr, nullptr);
 
   if (epub && sessionStartMs > 0) {
     // Account the page being viewed at exit: fold its final visible segment into the page's
@@ -2431,6 +2444,13 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
                                         const int orientedMarginLeft) {
   const auto t0 = millis();
   lastPageUsedGrayscale = false;  // cleared here; set below if grayscale pass runs
+
+  // The image pixel-cache RAM slot (#2611) lives for exactly one page render (it
+  // feeds the BW double-refresh and every grayscale band pass); release it on
+  // every exit path so nothing stays resident across page turns.
+  struct PxcSlotGuard {
+    ~PxcSlotGuard() { ImageBlock::releaseRenderCache(); }
+  } pxcSlotGuard;
 
   // Propagate the image-dither choice (Display > Image Dither) to the renderer
   // so ImageBlock picks the dither field. EPUB images decode in JPEG blocks, so

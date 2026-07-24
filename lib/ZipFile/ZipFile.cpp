@@ -467,7 +467,8 @@ const char* ZipFile::streamResultTag(StreamResult r) {
   return "?";
 }
 
-bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t chunkSize, StreamResult* outResult) {
+bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t chunkSize, const bool allowEarlyStop,
+                               StreamResult* outResult) {
   // Default to Ok; overwritten at each failure exit below.
   const auto setResult = [outResult](StreamResult r) {
     if (outResult) *outResult = r;
@@ -516,9 +517,10 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
       }
 
       if (out.write(buffer, dataRead) != dataRead) {
+        free(buffer);
+        if (allowEarlyStop) return true;  // sink has what it needs
         LOG_ERR("ZIP", "Failed to write all output bytes to stream");
         setResult(StreamResult::WriteFail);
-        free(buffer);
         return false;
       }
       remaining -= dataRead;
@@ -577,8 +579,12 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
 
       if (produced > 0) {
         if (out.write(outputBuffer, produced) != produced) {
-          LOG_ERR("ZIP", "Failed to write all output bytes to stream");
-          setResult(StreamResult::WriteFail);
+          if (allowEarlyStop) {
+            success = true;  // sink has what it needs
+          } else {
+            LOG_ERR("ZIP", "Failed to write all output bytes to stream");
+            setResult(StreamResult::WriteFail);
+          }
           break;
         }
       }

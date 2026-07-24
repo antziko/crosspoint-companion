@@ -264,7 +264,45 @@ void Epub::parseCssFiles() const {
   // (no serial) can exhaust the heap mid-parse and abort in the rule store — the
   // per-file snapshot below shows the depletion leading up to it.
   SdDebugLog::setEnabled(true);
-  for (const auto& cssPath : cssFiles) {
+
+  // Some converters emit one byte-identical stylesheet per chapter (100+ .css
+  // entries), and each parse costs a zip locate plus an SD extract round-trip.
+  // Map every CSS path to its central-directory (CRC32, compressed size) in a
+  // single scan and parse only the first of each identical pair. Rules merge
+  // into one global set, so dropping exact duplicates cannot lose styles. A
+  // path that never matches a directory entry keeps key 0 and always parses.
+  std::vector<uint64_t> dedupKeys(cssFiles.size(), 0);
+  if (cssFiles.size() > 1) {
+    std::unordered_map<std::string, size_t> pathToIndex;
+    pathToIndex.reserve(cssFiles.size());
+    for (size_t i = 0; i < cssFiles.size(); i++) {
+      pathToIndex.emplace(FsHelpers::normalisePath(cssFiles[i]), i);
+    }
+    ZipFile(filepath).enumerateFileEntries([&](std::string_view entryPath, uint32_t crc32, uint32_t compressedSize) {
+      if (!FsHelpers::hasCssExtension(entryPath)) {
+        return;
+      }
+      const auto it = pathToIndex.find(std::string{entryPath});
+      if (it != pathToIndex.end()) {
+        dedupKeys[it->second] = (static_cast<uint64_t>(crc32) << 32) | compressedSize;
+      }
+    });
+  }
+  std::vector<uint64_t> seenKeys;
+  seenKeys.reserve(cssFiles.size());
+  size_t skippedDuplicates = 0;
+
+  // No cache yet - parse CSS files
+  for (size_t cssIndex = 0; cssIndex < cssFiles.size(); cssIndex++) {
+    const auto& cssPath = cssFiles[cssIndex];
+    const uint64_t dedupKey = dedupKeys[cssIndex];
+    if (dedupKey != 0) {
+      if (std::find(seenKeys.begin(), seenKeys.end(), dedupKey) != seenKeys.end()) {
+        skippedDuplicates++;
+        continue;
+      }
+      seenKeys.push_back(dedupKey);
+    }
     LOG_DBG("EBP", "Parsing CSS file: %s", cssPath.c_str());
 
     // Check heap before parsing - CSS parsing allocates heavily
@@ -321,7 +359,8 @@ void Epub::parseCssFiles() const {
     LOG_ERR("EBP", "Failed to save CSS rules to cache");
   }
 
-  LOG_DBG("EBP", "Loaded %zu CSS style rules from %zu files", cssParser->ruleCount(), cssFiles.size());
+  LOG_DBG("EBP", "Loaded %zu CSS style rules from %zu files (%zu identical duplicates skipped)", cssParser->ruleCount(),
+          cssFiles.size(), skippedDuplicates);
   cssParser->clear();
 }
 
@@ -562,7 +601,7 @@ bool Epub::generateCoverBmp(bool cropped) const {
     // heap. Not observed failing yet; trace the otherwise-discarded extraction
     // result so a sleep-cover failure is attributable from opds_debug.txt.
     uint8_t extractReason = 0;
-    const bool extractOk = readItemContentsToStream(coverImageHref, coverJpg, 1024, &extractReason);
+    const bool extractOk = readItemContentsToStream(coverImageHref, coverJpg, 1024, false, &extractReason);
     SdDebugLog::log("EBP", "cover jpg extract %s reason=%s free=%u largest=%u", extractOk ? "ok" : "FAIL",
                     ZipFile::streamResultTag(static_cast<ZipFile::StreamResult>(extractReason)),
                     (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
@@ -602,7 +641,7 @@ bool Epub::generateCoverBmp(bool cropped) const {
     // DIAG: see note in the JPG branch above. Same discarded return value; trace
     // the PNG sleep-cover extraction result + reason + heap.
     uint8_t extractReason = 0;
-    const bool extractOk = readItemContentsToStream(coverImageHref, coverPng, 1024, &extractReason);
+    const bool extractOk = readItemContentsToStream(coverImageHref, coverPng, 1024, false, &extractReason);
     SdDebugLog::log("EBP", "cover png extract %s reason=%s free=%u largest=%u", extractOk ? "ok" : "FAIL",
                     ZipFile::streamResultTag(static_cast<ZipFile::StreamResult>(extractReason)),
                     (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
@@ -681,7 +720,7 @@ bool Epub::generateThumbBmp(int height) const {
     // (expect reason=INFLATEINIT when the 32KB streaming window can't malloc on a
     // fragmented home heap). Enabled via SdDebugLog by HomeActivity::loadRecentCovers.
     uint8_t extractReason = 0;
-    const bool extractOk = readItemContentsToStream(coverImageHref, coverJpg, 1024, &extractReason);
+    const bool extractOk = readItemContentsToStream(coverImageHref, coverJpg, 1024, false, &extractReason);
     SdDebugLog::log("EBP", "thumb jpg extract %s reason=%s free=%u largest=%u", extractOk ? "ok" : "FAIL",
                     ZipFile::streamResultTag(static_cast<ZipFile::StreamResult>(extractReason)),
                     (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
@@ -725,7 +764,7 @@ bool Epub::generateThumbBmp(int height) const {
     // DIAG (X3 cover regression): see note in the JPG branch above. Same discarded
     // return value; trace the PNG cover extraction result + reason + heap.
     uint8_t extractReason = 0;
-    const bool extractOk = readItemContentsToStream(coverImageHref, coverPng, 1024, &extractReason);
+    const bool extractOk = readItemContentsToStream(coverImageHref, coverPng, 1024, false, &extractReason);
     SdDebugLog::log("EBP", "thumb png extract %s reason=%s free=%u largest=%u", extractOk ? "ok" : "FAIL",
                     ZipFile::streamResultTag(static_cast<ZipFile::StreamResult>(extractReason)),
                     (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
@@ -784,7 +823,7 @@ uint8_t* Epub::readItemContentsToBytes(const std::string& itemHref, size_t* size
 }
 
 bool Epub::readItemContentsToStream(const std::string& itemHref, Print& out, const size_t chunkSize,
-                                    uint8_t* outStreamReason) const {
+                                    const bool allowEarlyStop, uint8_t* outStreamReason) const {
   if (itemHref.empty()) {
     LOG_DBG("EBP", "Failed to read item, empty href");
     if (outStreamReason) *outStreamReason = static_cast<uint8_t>(ZipFile::StreamResult::NotFound);
@@ -793,8 +832,22 @@ bool Epub::readItemContentsToStream(const std::string& itemHref, Print& out, con
 
   const std::string path = FsHelpers::normalisePath(itemHref);
   ZipFile::StreamResult res = ZipFile::StreamResult::Ok;
-  const bool ok = ZipFile(filepath).readFileToStream(path.c_str(), out, chunkSize, &res);
+  const bool ok = ZipFile(filepath).readFileToStream(path.c_str(), out, chunkSize, allowEarlyStop, &res);
   if (outStreamReason) *outStreamReason = static_cast<uint8_t>(res);
+  return ok;
+}
+
+bool Epub::extractItemToFile(const std::string& itemHref, const std::string& destPath) const {
+  HalFile out;
+  if (!Storage.openFileForWrite("EBP", destPath, out)) {
+    return false;
+  }
+  const bool ok = readItemContentsToStream(itemHref, out, 4096);
+  out.flush();
+  out.close();
+  if (!ok) {
+    Storage.remove(destPath.c_str());
+  }
   return ok;
 }
 

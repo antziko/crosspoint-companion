@@ -23,7 +23,10 @@ namespace {
 // and regenerate cleanly.
 // v35: CJK words split on MAX_WORD_SIZE now set nextWordContinues so the tail
 // re-attaches to the head; cached word positions from v34 no longer match (#2652).
-constexpr uint8_t SECTION_FILE_VERSION = 35;
+// v36: ImageBlock serializes the book-internal source href after the cache path
+//      (lazy extraction: images are header-probed at build time and extracted on
+//      first render — #2611).
+constexpr uint8_t SECTION_FILE_VERSION = 36;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
@@ -341,7 +344,7 @@ bool Section::startBuild(const int fontId, const float lineCompression, const bo
       // Larger chunks mean far fewer SD writes inflating the HTML; a 1KB chunk turned a 584KB
       // single-spine novel into ~570 tiny writes (multi-second). 8KB keeps the transient buffers
       // small while cutting the write count 8x.
-      streamed = epub->readItemContentsToStream(localPath, tmpHtml, 8192, &streamReason);
+      streamed = epub->readItemContentsToStream(localPath, tmpHtml, 8192, /*allowEarlyStop=*/false, &streamReason);
       fileSize = tmpHtml.size();
       // Explicitly close() file before calling Storage.remove()
       tmpHtml.close();
