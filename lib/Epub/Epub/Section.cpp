@@ -28,7 +28,10 @@ namespace {
 //      first render — #2611).
 // v37: TextBlock serializes a per-word ruby-annotation string; parser handles
 //      <ruby>/<rt> (skips <rp>) for Chinese/Japanese furigana/pinyin (#2665).
-constexpr uint8_t SECTION_FILE_VERSION = 37;
+// v38: parser starts a fresh text block with the parent style when a block-level
+//      element closes, so bare text after it no longer inherits the closed block's
+//      alignment/margins (#2679).
+constexpr uint8_t SECTION_FILE_VERSION = 38;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
