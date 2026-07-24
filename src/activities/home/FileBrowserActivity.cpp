@@ -12,6 +12,7 @@
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "RecentBooksStore.h"
 #include "activities/reader/ReaderUtils.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
@@ -424,6 +425,12 @@ void FileBrowserActivity::loop() {
           LOG_DBG("FileBrowser", "Attempting to delete: %s", fullPath.c_str());
           if (removeDirFile(fullPath)) {
             LOG_DBG("FileBrowser", "Deleted successfully");
+            // Drop any recent-books entry whose backing file is now gone -- the
+            // deleted book, or every book under a deleted folder. Same prune the
+            // Recent Books screen uses (RecentBooksActivity).
+            if (RECENT_BOOKS.pruneMissing()) {
+              RECENT_BOOKS.saveToFile();
+            }
             reloadCurrentWindow();  // re-pull the window around the current position
             requestUpdate(true);
           } else {
