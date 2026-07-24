@@ -39,6 +39,7 @@ void ReadingStatsActivity::onEnter() {
     } else {
       timeline.build(stats->history);  // OOM fallback: local-only view
     }
+    timeline.scrollToSelection(renderer, contentRect());
   }
 
   requestUpdate();
@@ -67,58 +68,62 @@ Rect ReadingStatsActivity::contentRect() const {
 }
 
 void ReadingStatsActivity::loop() {
+  const ReadingTimeHistory* h = displayHist ? displayHist.get() : (stats ? &stats->history : nullptr);
+
+  // Left/Right: at the tab bar (focus None) switch Timeline/Heatmap; inside a
+  // focused section move the year/month selection.
   if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
-    if (selectedTab != Tab::Timeline) {
-      selectedTab = Tab::Timeline;
+    if (timeline.focus() == StatsTimelineView::Focus::None) {
+      if (selectedTab != Tab::Timeline) {
+        selectedTab = Tab::Timeline;
+        requestUpdate();
+      }
+    } else if (h && timeline.selectPrev(*h)) {
+      timeline.scrollToSelection(renderer, contentRect());
       requestUpdate();
     }
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
-    if (selectedTab != Tab::Heatmap) {
-      selectedTab = Tab::Heatmap;
-      requestUpdate();
-    }
-    return;
-  }
-
-  // Scroll and section jumps only apply on the Timeline tab; the Heatmap tab
-  // has nothing to scroll. The rotate gesture, however, must fire on BOTH tabs
-  // -- so the resolveSideNavAction calls below stay outside this tab check.
-  const bool canScrollTimeline = selectedTab == Tab::Timeline && !timeline.empty();
-
-  // Confirm: jump to the next section header (Weekly -> Monthly -> Yearly),
-  // wrapping back to the top once past the last one (Timeline only).
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    if (canScrollTimeline && timeline.jumpToNextSection(renderer, contentRect())) {
-      requestUpdate();
-    }
-    return;
-  }
-
-  // Physical side Up/Down: page-step scroll (Timeline only) -- holding them
-  // is reserved for the display-orientation-cycle gesture (both tabs).
-  switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Up)) {
-    case ReaderUtils::SideNavAction::STEP:
-      if (canScrollTimeline && timeline.pageUp(renderer, contentRect())) {
+    if (timeline.focus() == StatsTimelineView::Focus::None) {
+      if (selectedTab != Tab::Heatmap) {
+        selectedTab = Tab::Heatmap;
+        timeline.resetFocus();
         requestUpdate();
       }
-      break;
-    case ReaderUtils::SideNavAction::ROTATE:
-      ReaderUtils::cycleDisplayOrientation(renderer, 1);
+    } else if (h && timeline.selectNext(*h)) {
+      timeline.scrollToSelection(renderer, contentRect());
       requestUpdate();
-      break;
-    case ReaderUtils::SideNavAction::NONE:
-      break;
+    }
+    return;
   }
+
+  // Physical side Up/Down: move the focus down/up the levels (tab -> Yearly ->
+  // Monthly) on the Timeline tab -- holding them is reserved for the
+  // display-orientation-cycle gesture (both tabs).
   switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Down)) {
     case ReaderUtils::SideNavAction::STEP:
-      if (canScrollTimeline && timeline.pageDown(renderer, contentRect())) {
+      if (selectedTab == Tab::Timeline && h && timeline.focusIn()) {
+        timeline.scrollToSelection(renderer, contentRect());
         requestUpdate();
       }
       break;
     case ReaderUtils::SideNavAction::ROTATE:
       ReaderUtils::cycleDisplayOrientation(renderer, -1);
+      requestUpdate();
+      break;
+    case ReaderUtils::SideNavAction::NONE:
+      break;
+  }
+  switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Up)) {
+    case ReaderUtils::SideNavAction::STEP:
+      if (selectedTab == Tab::Timeline && timeline.focusOut()) {
+        timeline.scrollToSelection(renderer, contentRect());
+        requestUpdate();
+      }
+      break;
+    case ReaderUtils::SideNavAction::ROTATE:
+      ReaderUtils::cycleDisplayOrientation(renderer, 1);
       requestUpdate();
       break;
     case ReaderUtils::SideNavAction::NONE:
@@ -179,11 +184,7 @@ void ReadingStatsActivity::render(RenderLock&&) {
     StatsTimelineView::renderEmptyState(renderer, content);
   }
 
-  // Only advertise Confirm when it can actually move the list — a list that fits
-  // on one screen has nowhere to jump.
-  const bool showSectionHint = selectedTab == Tab::Timeline && timeline.overflows(renderer, content);
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), showSectionHint ? tr(STR_STATS_NEXT_SECTION) : "",
-                                            tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT));
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);

@@ -28,6 +28,7 @@ void BookStatsActivity::onEnter() {
   if (history) {
     ReadingTimeHistory::load(cachePath + "/book_time_history.bin", *history);
     timeline.build(*history);
+    timeline.scrollToSelection(renderer, contentRect());
   }
 
   requestUpdate();
@@ -48,42 +49,47 @@ Rect BookStatsActivity::contentRect() const {
 }
 
 void BookStatsActivity::loop() {
+  // Left/Right: at the tab bar (focus None) switch Timeline/Heatmap; inside a
+  // focused section move the year/month selection.
   if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
-    if (selectedTab != Tab::Timeline) {
-      selectedTab = Tab::Timeline;
+    if (timeline.focus() == StatsTimelineView::Focus::None) {
+      if (selectedTab != Tab::Timeline) {
+        selectedTab = Tab::Timeline;
+        requestUpdate();
+      }
+    } else if (history && timeline.selectPrev(*history)) {
+      timeline.scrollToSelection(renderer, contentRect());
       requestUpdate();
     }
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
-    if (selectedTab != Tab::Heatmap) {
-      selectedTab = Tab::Heatmap;
+    if (timeline.focus() == StatsTimelineView::Focus::None) {
+      if (selectedTab != Tab::Heatmap) {
+        selectedTab = Tab::Heatmap;
+        timeline.resetFocus();
+        requestUpdate();
+      }
+    } else if (history && timeline.selectNext(*history)) {
+      timeline.scrollToSelection(renderer, contentRect());
       requestUpdate();
     }
     return;
   }
 
-  if (selectedTab == Tab::Timeline && !timeline.empty()) {
-    // Confirm: jump to the next section header (Weekly -> Monthly -> Yearly),
-    // wrapping back to the top once past the last one.
-    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-      if (timeline.jumpToNextSection(renderer, contentRect())) {
-        requestUpdate();
-      }
-      return;
+  // Side Down/Up: move the focus down/up the levels (tab -> Yearly -> Monthly).
+  buttonNavigator.onRelease({MappedInputManager::Button::Down}, [this] {
+    if (selectedTab == Tab::Timeline && history && timeline.focusIn()) {
+      timeline.scrollToSelection(renderer, contentRect());
+      requestUpdate();
     }
-
-    buttonNavigator.onRelease({MappedInputManager::Button::Up}, [this] {
-      if (timeline.pageUp(renderer, contentRect())) {
-        requestUpdate();
-      }
-    });
-    buttonNavigator.onRelease({MappedInputManager::Button::Down}, [this] {
-      if (timeline.pageDown(renderer, contentRect())) {
-        requestUpdate();
-      }
-    });
-  }
+  });
+  buttonNavigator.onRelease({MappedInputManager::Button::Up}, [this] {
+    if (selectedTab == Tab::Timeline && timeline.focusOut()) {
+      timeline.scrollToSelection(renderer, contentRect());
+      requestUpdate();
+    }
+  });
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     finish();
@@ -179,11 +185,7 @@ void BookStatsActivity::render(RenderLock&&) {
     renderHeatmapTab(content);
   }
 
-  // Only advertise Confirm when it can actually move the list — a list that fits
-  // on one screen has nowhere to jump.
-  const bool showSectionHint = selectedTab == Tab::Timeline && timeline.overflows(renderer, content);
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), showSectionHint ? tr(STR_STATS_NEXT_SECTION) : "",
-                                            tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT));
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);

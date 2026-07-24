@@ -55,7 +55,7 @@ class BookStatsActivity final : public Activity {
   std::unique_ptr<ReadingTimeHistory> history;
 
   Tab selectedTab = Tab::Timeline;
-  // Shared Timeline/Heatmap presentation (rows, scrolling, section jumps).
+  // Shared Timeline/Heatmap presentation (stacked Yearly/Monthly/Weekly + scroll).
   StatsTimelineView timeline;
 
   ButtonNavigator buttonNavigator;

@@ -8,7 +8,6 @@
 #include <cstdint>
 #include <cstdio>
 
-#include "BookReadingStats.h"
 #include "ReadingTimeHistory.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -23,64 +22,234 @@ constexpr const char* MONTH_ABBR[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun"
 const char* monthAbbr(uint8_t month) { return (month >= 1 && month <= 12) ? MONTH_ABBR[month - 1] : "?"; }
 
 int timelineRowHeight(GfxRenderer& renderer) { return renderer.getLineHeight(UI_10_FONT_ID) + 10; }
+
+// Compact H'MM reading-duration for the timeline cells (e.g. 19'02, 99'15) —
+// hours, an apostrophe, then zero-padded minutes, so a grid of them stays narrow.
+// Distinct from BookReadingStats::formatDuration()'s "1h 44m" long form, which
+// the totals/ETA lines keep.
+void formatDurationCompact(uint32_t seconds, char* buf, size_t len) {
+  const uint32_t hours = seconds / 3600;
+  const uint32_t minutes = (seconds % 3600) / 60;
+  snprintf(buf, len, "%lu'%02lu", static_cast<unsigned long>(hours), static_cast<unsigned long>(minutes));
+}
+
+// Columns in the Yearly/Monthly grid sections.
+constexpr int GRID_COLUMNS = 3;
 }  // namespace
 
+void StatsTimelineView::initSelection(const ReadingTimeHistory& history) {
+  selYear_ = 0;
+  selMonth_ = 0;
+  // Latest recorded month (monthly[0] is newest); fall back to the latest year
+  // when there's no monthly data at all.
+  if (history.monthly[0].year != 0) {
+    selYear_ = history.monthly[0].year;
+    selMonth_ = history.monthly[0].month;
+  } else if (history.yearly[0].year != 0) {
+    selYear_ = history.yearly[0].year;
+  }
+}
+
 void StatsTimelineView::build(const ReadingTimeHistory& history) {
+  if (!selectionInit) {
+    initSelection(history);
+    selectionInit = true;
+  }
+  rebuild(history);
+}
+
+bool StatsTimelineView::focusIn() {
+  if (focus_ == Focus::None) {
+    focus_ = Focus::Yearly;
+    return true;
+  }
+  if (focus_ == Focus::Yearly) {
+    focus_ = Focus::Monthly;
+    return true;
+  }
+  return false;  // already at the deepest focusable level (Monthly)
+}
+
+bool StatsTimelineView::focusOut() {
+  if (focus_ == Focus::Monthly) {
+    focus_ = Focus::Yearly;
+    return true;
+  }
+  if (focus_ == Focus::Yearly) {
+    focus_ = Focus::None;  // back up to the tab bar
+    return true;
+  }
+  return false;
+}
+
+bool StatsTimelineView::selectNext(const ReadingTimeHistory& history) {
+  if (focus_ == Focus::Yearly) return moveYear(history, +1);
+  if (focus_ == Focus::Monthly) return moveMonth(history, +1);
+  return false;
+}
+
+bool StatsTimelineView::selectPrev(const ReadingTimeHistory& history) {
+  if (focus_ == Focus::Yearly) return moveYear(history, -1);
+  if (focus_ == Focus::Monthly) return moveMonth(history, -1);
+  return false;
+}
+
+bool StatsTimelineView::moveYear(const ReadingTimeHistory& history, int delta) {
+  // All recorded years, newest-first (yearly[] is already ordered).
+  uint16_t years[ReadingTimeHistory::YEARLY_COUNT];
+  int n = 0;
+  for (size_t i = 0; i < ReadingTimeHistory::YEARLY_COUNT; ++i)
+    if (history.yearly[i].year != 0) years[n++] = history.yearly[i].year;
+  if (n <= 1) return false;
+
+  int pos = 0;
+  for (int p = 0; p < n; ++p)
+    if (years[p] == selYear_) {
+      pos = p;
+      break;
+    }
+  const int np = ((pos + delta) % n + n) % n;  // wrap
+  if (np == pos) return false;
+  selYear_ = years[np];
+
+  // Re-point the month to the newest month of the newly-selected year (monthly[]
+  // is newest-first, so the first match is the newest).
+  selMonth_ = 0;
+  for (size_t i = 0; i < ReadingTimeHistory::MONTHLY_COUNT; ++i)
+    if (history.monthly[i].year == selYear_) {
+      selMonth_ = history.monthly[i].month;
+      break;
+    }
+  rebuild(history);
+  return true;
+}
+
+bool StatsTimelineView::moveMonth(const ReadingTimeHistory& history, int delta) {
+  // The selected year's months, newest-first.
+  uint8_t months[ReadingTimeHistory::MONTHLY_COUNT];
+  int n = 0;
+  for (size_t i = 0; i < ReadingTimeHistory::MONTHLY_COUNT; ++i)
+    if (history.monthly[i].year == selYear_) months[n++] = history.monthly[i].month;
+  if (n <= 1) return false;
+
+  int pos = 0;
+  for (int p = 0; p < n; ++p)
+    if (months[p] == selMonth_) {
+      pos = p;
+      break;
+    }
+  const int np = ((pos + delta) % n + n) % n;  // wrap
+  if (np == pos) return false;
+  selMonth_ = months[np];
+  rebuild(history);
+  return true;
+}
+
+void StatsTimelineView::rebuild(const ReadingTimeHistory& history) {
   rows.clear();
   scrollOffset = 0;
+  selectedMonthRow_ = 0;
   if (!history.hasAnyData()) return;
 
-  // Exact-size reserve (plus up to 3 section headers) — the buckets are small
-  // fixed arrays, so the counting pass is cheap and avoids vector regrowth.
-  size_t entryCount = 0;
-  for (size_t i = 0; i < ReadingTimeHistory::WEEKLY_COUNT; ++i)
-    if (history.weekly[i].year != 0) ++entryCount;
-  for (size_t i = 0; i < ReadingTimeHistory::MONTHLY_COUNT; ++i)
-    if (history.monthly[i].year != 0) ++entryCount;
+  // Count for an exact reserve: all years, the selected year's months, and the
+  // selected month's weeks. Yearly/Monthly pack GRID_COLUMNS cells per row.
+  size_t yearlyEntries = 0, monthlyInSel = 0, weeklyInSel = 0;
   for (size_t i = 0; i < ReadingTimeHistory::YEARLY_COUNT; ++i)
-    if (history.yearly[i].year != 0) ++entryCount;
-  rows.reserve(entryCount + 3);
+    if (history.yearly[i].year != 0) ++yearlyEntries;
+  for (size_t i = 0; i < ReadingTimeHistory::MONTHLY_COUNT; ++i)
+    if (history.monthly[i].year == selYear_) ++monthlyInSel;
+  for (size_t i = 0; i < ReadingTimeHistory::WEEKLY_COUNT; ++i)
+    if (history.weekly[i].year == selYear_ && history.weekly[i].month == selMonth_) ++weeklyInSel;
+  const size_t gridRows =
+      (yearlyEntries + GRID_COLUMNS - 1) / GRID_COLUMNS + (monthlyInSel + GRID_COLUMNS - 1) / GRID_COLUMNS;
+  rows.reserve(gridRows + weeklyInSel + 3);
 
-  char label[24];
-  char duration[32];
+  char cell[24];
+  char dur[16];
 
+  auto pushHeader = [&](const char* text) {
+    Row header;
+    header.kind = Row::Kind::Header;
+    header.text[0] = text;
+    rows.push_back(std::move(header));
+  };
+
+  // Grid accumulator shared by the Yearly and Monthly sections: buffers up to
+  // GRID_COLUMNS dash-joined cells, then emits one row. `highlight` marks the
+  // selected cell (drawn inverted); gridSectionTag tags the row's section so
+  // renderList knows whether to frame it as the cursor.
+  Row gridRow;
+  int gridCol = 0;
+  uint8_t gridSectionTag = 0;  // 1 = Yearly, 2 = Monthly
+  auto flushGrid = [&]() {
+    if (gridCol == 0) return;
+    gridRow.kind = Row::Kind::Grid;
+    gridRow.count = static_cast<uint8_t>(gridCol);
+    rows.push_back(std::move(gridRow));
+    gridRow = Row{};
+    gridCol = 0;
+  };
+  auto pushGridCell = [&](const char* text, bool highlight) {
+    gridRow.gridSection = gridSectionTag;
+    if (highlight) gridRow.highlightCell = static_cast<int8_t>(gridCol);
+    gridRow.text[gridCol] = text;
+    ++gridCol;
+    if (gridCol == GRID_COLUMNS) flushGrid();
+  };
+
+  // Yearly: all years, the selected year boxed. Label and value grouped ("2026
+  // 99'15") so each cell reads as a unit; fixed-width labels keep them aligned.
+  gridSectionTag = 1;
   bool sectionStarted = false;
-  for (size_t i = 0; i < ReadingTimeHistory::WEEKLY_COUNT; ++i) {
-    const auto& w = history.weekly[i];
-    if (w.year == 0) continue;
-    if (!sectionStarted) {
-      rows.push_back({true, tr(STR_STATS_WEEKLY), ""});
-      sectionStarted = true;
-    }
-    snprintf(label, sizeof(label), "%s %u", monthAbbr(w.month), static_cast<unsigned>(w.day));
-    BookReadingStats::formatDuration(w.seconds, duration, sizeof(duration));
-    rows.push_back({false, label, duration});
-  }
-
-  sectionStarted = false;
-  for (size_t i = 0; i < ReadingTimeHistory::MONTHLY_COUNT; ++i) {
-    const auto& m = history.monthly[i];
-    if (m.year == 0) continue;
-    if (!sectionStarted) {
-      rows.push_back({true, tr(STR_STATS_MONTHLY), ""});
-      sectionStarted = true;
-    }
-    snprintf(label, sizeof(label), "%s %u", monthAbbr(m.month), static_cast<unsigned>(m.year));
-    BookReadingStats::formatDuration(m.seconds, duration, sizeof(duration));
-    rows.push_back({false, label, duration});
-  }
-
-  sectionStarted = false;
   for (size_t i = 0; i < ReadingTimeHistory::YEARLY_COUNT; ++i) {
     const auto& y = history.yearly[i];
     if (y.year == 0) continue;
     if (!sectionStarted) {
-      rows.push_back({true, tr(STR_STATS_YEARLY), ""});
+      pushHeader(tr(STR_STATS_YEARLY));
       sectionStarted = true;
     }
-    snprintf(label, sizeof(label), "%u", static_cast<unsigned>(y.year));
-    BookReadingStats::formatDuration(y.seconds, duration, sizeof(duration));
-    rows.push_back({false, label, duration});
+    formatDurationCompact(y.seconds, dur, sizeof(dur));
+    snprintf(cell, sizeof(cell), "%u  %s", static_cast<unsigned>(y.year), dur);
+    pushGridCell(cell, y.year == selYear_);
+  }
+  flushGrid();
+
+  // Monthly: only the selected year's months, the selected month boxed ("Jul 8'14").
+  gridSectionTag = 2;
+  sectionStarted = false;
+  for (size_t i = 0; i < ReadingTimeHistory::MONTHLY_COUNT; ++i) {
+    const auto& m = history.monthly[i];
+    if (m.year != selYear_) continue;
+    if (!sectionStarted) {
+      pushHeader(tr(STR_STATS_MONTHLY));
+      sectionStarted = true;
+    }
+    formatDurationCompact(m.seconds, dur, sizeof(dur));
+    snprintf(cell, sizeof(cell), "%s  %s", monthAbbr(m.month), dur);
+    const bool selected = m.month == selMonth_;
+    // The in-progress grid row is inserted at rows.size() on its next flush, and
+    // nothing else is pushed in between — so record that as the selected row now.
+    if (selected) selectedMonthRow_ = static_cast<int>(rows.size());
+    pushGridCell(cell, selected);
+  }
+  flushGrid();
+
+  // Weekly: the selected month's weeks.
+  sectionStarted = false;
+  for (size_t i = 0; i < ReadingTimeHistory::WEEKLY_COUNT; ++i) {
+    const auto& w = history.weekly[i];
+    if (w.year != selYear_ || w.month != selMonth_) continue;
+    if (!sectionStarted) {
+      pushHeader(tr(STR_STATS_WEEKLY));
+      sectionStarted = true;
+    }
+    Row row;
+    row.kind = Row::Kind::Week;
+    snprintf(cell, sizeof(cell), "%s %u", monthAbbr(w.month), static_cast<unsigned>(w.day));
+    row.text[0] = cell;
+    formatDurationCompact(w.seconds, dur, sizeof(dur));
+    row.text[1] = dur;
+    rows.push_back(std::move(row));
   }
 }
 
@@ -92,40 +261,14 @@ int StatsTimelineView::maxOffset(GfxRenderer& renderer, const Rect& rect) const 
   return std::max(0, static_cast<int>(rows.size()) - visibleRows(renderer, rect));
 }
 
-bool StatsTimelineView::overflows(GfxRenderer& renderer, const Rect& rect) const {
-  return static_cast<int>(rows.size()) > visibleRows(renderer, rect);
-}
-
-bool StatsTimelineView::pageUp(GfxRenderer& renderer, const Rect& rect) {
-  const int newOffset = std::max(0, scrollOffset - visibleRows(renderer, rect));
-  if (newOffset == scrollOffset) return false;
-  scrollOffset = newOffset;
-  return true;
-}
-
-bool StatsTimelineView::pageDown(GfxRenderer& renderer, const Rect& rect) {
-  const int newOffset = std::min(maxOffset(renderer, rect), scrollOffset + visibleRows(renderer, rect));
-  if (newOffset == scrollOffset) return false;
-  scrollOffset = newOffset;
-  return true;
-}
-
-bool StatsTimelineView::jumpToNextSection(GfxRenderer& renderer, const Rect& rect) {
-  if (rows.empty()) return false;
-  int target = 0;  // default: wrap to top
-  for (size_t i = 0; i < rows.size(); ++i) {
-    if (rows[i].isSectionHeader && static_cast<int>(i) > scrollOffset) {
-      target = static_cast<int>(i);
-      break;
-    }
+void StatsTimelineView::scrollToSelection(GfxRenderer& renderer, const Rect& rect) {
+  if (static_cast<int>(rows.size()) <= visibleRows(renderer, rect) || focus_ != Focus::Monthly) {
+    scrollOffset = 0;  // fits, or focus is up top (Yearly/tab) — show from the top
+    return;
   }
-  int newOffset = std::min(target, maxOffset(renderer, rect));
-  // Next header is below maxOffset (already fully visible) — wrap to top
-  // instead of staying put, so repeated presses keep cycling.
-  if (newOffset == scrollOffset) newOffset = 0;
-  if (newOffset == scrollOffset) return false;
-  scrollOffset = newOffset;
-  return true;
+  // Monthly focus, overflow: keep the selected month (and the Weekly rows below
+  // it) on screen by parking the selected row a line from the top.
+  scrollOffset = std::max(0, std::min(selectedMonthRow_ - 1, maxOffset(renderer, rect)));
 }
 
 void StatsTimelineView::renderList(GfxRenderer& renderer, const Rect& rect) const {
@@ -136,17 +279,56 @@ void StatsTimelineView::renderList(GfxRenderer& renderer, const Rect& rect) cons
 
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int rowHeight = timelineRowHeight(renderer);
+  const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  const int gridLeft = rect.x + metrics.contentSidePadding;
+  const int gridRight = rect.x + rect.width - metrics.contentSidePadding;
+  // Fixed GRID_COLUMNS so cells line up vertically even on a partially-filled row.
+  const int colWidth = std::max(1, (gridRight - gridLeft) / GRID_COLUMNS);
+
   int rowY = rect.y;
   for (size_t i = static_cast<size_t>(scrollOffset); i < rows.size() && rowY + rowHeight <= rect.y + rect.height; ++i) {
     const auto& row = rows[i];
-    if (row.isSectionHeader) {
-      renderer.drawText(UI_10_FONT_ID, rect.x + metrics.contentSidePadding, rowY + 5, row.label.c_str(), true,
-                        EpdFontFamily::BOLD);
-    } else {
-      renderer.drawText(UI_10_FONT_ID, rect.x + metrics.contentSidePadding + 14, rowY + 5, row.label.c_str());
-      const int valueWidth = renderer.getTextWidth(UI_10_FONT_ID, row.value.c_str());
-      renderer.drawText(UI_10_FONT_ID, rect.x + rect.width - metrics.contentSidePadding - valueWidth, rowY + 5,
-                        row.value.c_str());
+    switch (row.kind) {
+      case Row::Kind::Header:
+        renderer.drawText(UI_10_FONT_ID, gridLeft, rowY + 5, row.text[0].c_str(), true, EpdFontFamily::BOLD);
+        break;
+      case Row::Kind::Grid: {
+        // Yearly/Monthly: up to GRID_COLUMNS grouped "label  value" cells. The
+        // selection highlight matches the selected tab (Lyra drawTabBar): a
+        // rounded rect at cornerRadius 6 with 8px horizontal padding. The FOCUSED
+        // section's selected cell is filled + white text (the cursor, only one on
+        // screen); a selected cell in a non-focused section gets the same shape as
+        // an outline. CELL_GAP leaves space before the box within the column.
+        constexpr int CELL_GAP = 6;       // gap before the box within the column
+        constexpr int BOX_PAD_X = 8;      // horizontal padding inside the box (matches the tab)
+        constexpr int CORNER_RADIUS = 6;  // matches the tab's cornerRadius
+        const bool sectionFocused =
+            (row.gridSection == 1 && focus_ == Focus::Yearly) || (row.gridSection == 2 && focus_ == Focus::Monthly);
+        for (int c = 0; c < row.count; ++c) {
+          const int boxX = gridLeft + c * colWidth + CELL_GAP;
+          const int textX = boxX + BOX_PAD_X;
+          const int textW = renderer.getTextWidth(UI_10_FONT_ID, row.text[c].c_str());
+          const int boxY = rowY + 2;
+          const int boxW = textW + 2 * BOX_PAD_X;
+          const int boxH = lineHeight + 6;
+          const bool selected = c == row.highlightCell;
+          const bool cursor = selected && sectionFocused;
+          if (cursor) {
+            renderer.fillRoundedRect(boxX, boxY, boxW, boxH, CORNER_RADIUS, Color::Black);
+          } else if (selected) {
+            renderer.drawRoundedRect(boxX, boxY, boxW, boxH, 1, CORNER_RADIUS, true);
+          }
+          renderer.drawText(UI_10_FONT_ID, textX, rowY + 5, row.text[c].c_str(), !cursor);
+        }
+        break;
+      }
+      case Row::Kind::Week: {
+        // Weekly: full-width entry, value right-aligned to the content edge.
+        renderer.drawText(UI_10_FONT_ID, gridLeft + 14, rowY + 5, row.text[0].c_str());
+        const int valueWidth = renderer.getTextWidth(UI_10_FONT_ID, row.text[1].c_str());
+        renderer.drawText(UI_10_FONT_ID, gridRight - valueWidth, rowY + 5, row.text[1].c_str());
+        break;
+      }
     }
     rowY += rowHeight;
   }
