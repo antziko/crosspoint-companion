@@ -51,7 +51,14 @@ class EpubReaderActivity final : public Activity {
   bool automaticPageTurnActive = false;
   bool ignoreBackUntilRelease = false;    // Suppress Back bleed-through after dictionary chain exit
   bool ignoreNextConfirmRelease = false;  // Suppress menu open after hold-Confirm gesture fires
-  bool highlightHoldFired = false;        // One-shot guard: hold-Back launched highlight, until Back released
+  // Idle-time glyph prewarm: after a page settles, scan the LIKELY next page
+  // (scan mode draws nothing) and load its missing glyphs from SD during idle,
+  // so the next turn's in-render prewarm is a cache hit instead of ~100 ms of
+  // SD reads on the page-turn critical path. One attempt per position.
+  int idlePrewarmSpine = -1;
+  int idlePrewarmPage = -1;
+  unsigned long lastRenderCompleteMs = 0;
+  bool highlightHoldFired = false;  // One-shot guard: hold-Back launched highlight, until Back released
   bool showBookmarkMessage = false;
   bool bookmarkMessageRemoved = false;  // false = "added", true = "removed" text
   bool bookmarkMessageReturn = false;   // true = "return mark added" (overrides added text)
@@ -201,6 +208,10 @@ class EpubReaderActivity final : public Activity {
   // true the whole time, and without this the loop would spin at full CPU speed doing
   // no build work — indefinitely, if the build context itself keeps the heap low.
   bool buildHeapPaused = false;
+  // Heap floor for optional render-adjacent work (idle prewarm). Page
+  // deserialization (TextBlock word vectors/strings) and glyph caching allocate
+  // through throwing paths that abort() on OOM; skip deferrable work below it.
+  static constexpr size_t RENDER_MIN_FREE_HEAP = 24 * 1024;
   // How many pages to keep laid out ahead of the reader for a still-building section. A page
   // turn is ~1s on e-ink and a page builds in ~30ms, so the reader can't out-click the builder
   // -- a tiny buffer is enough. The background build stops once the watermark is this far

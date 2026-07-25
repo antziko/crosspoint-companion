@@ -497,6 +497,40 @@ void EpubReaderActivity::loop() {
     return;  // prompt pushed; resume handling next loop iteration
   }
 
+  // Idle glyph prewarm for the likely next page (currentPage + 1). The scan
+  // pass draws nothing (FCM scan mode suppresses pixels), so the displayed
+  // framebuffer is untouched; endScanAndPrewarm loads only glyphs not already
+  // cached. Debounced past rapid page-flipping, one attempt per position, and
+  // deferred while a render/build owns the CPU or the heap is at the render
+  // floor. Cross-chapter prewarm is deliberately out of scope (next spine's
+  // section isn't loaded).
+  constexpr unsigned long IDLE_PREWARM_DEBOUNCE_MS = 400;
+  if (section && !section->isBuilding() && !RenderLock::peek() && renderer.hasFrameBuffer() &&
+      lastRenderCompleteMs != 0 && millis() - lastRenderCompleteMs > IDLE_PREWARM_DEBOUNCE_MS &&
+      ESP.getFreeHeap() > RENDER_MIN_FREE_HEAP && ESP.getMaxAllocHeap() > BACKGROUND_BUILD_MIN_MAX_ALLOC &&
+      (idlePrewarmSpine != currentSpineIndex || idlePrewarmPage != section->currentPage)) {
+    RenderLock lock;  // the page table must not change under the scan
+    // Re-check under the lock: peek() and acquisition are not atomic, so the render
+    // task may have reset/replaced the section or moved the page in between.
+    if (section && !section->isBuilding() &&
+        (idlePrewarmSpine != currentSpineIndex || idlePrewarmPage != section->currentPage)) {
+      idlePrewarmSpine = currentSpineIndex;
+      idlePrewarmPage = section->currentPage;
+      const int nextPage = section->currentPage + 1;
+      if (nextPage < static_cast<int>(section->pageCount)) {
+        if (const auto p = section->loadPage(nextPage)) {
+          if (auto* fcm = renderer.getFontCacheManager()) {
+            const auto t0 = millis();
+            auto scope = fcm->createPrewarmScope();
+            p->render(renderer, SETTINGS.getReaderFontId(), 0, 0);  // scan only, no pixels
+            scope.endScanAndPrewarm();
+            LOG_DBG("ERS", "Idle prewarm: page %d in %lums", nextPage, millis() - t0);
+          }
+        }
+      }
+    }
+  }
+
   // Lazily resume a partial's extension build once the reader nears its watermark. Far from
   // it the rebuild is all cost (whole-chapter re-layout from page 0) and no benefit this
   // session, so reopening a partial deliberately does NOT start it (see the deferral in
@@ -2170,6 +2204,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     const auto start = millis();
     renderContents(std::move(p), orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft);
     LOG_DBG("ERS", "Rendered page in %dms", millis() - start);
+    lastRenderCompleteMs = millis();
     // EPUB steady-state heap profile (post-render, font cache already freed). Watch
     // `largest` for fragmentation and `minEver` for the worst-case low-water mark.
     LOG_DBG("MEM", "epub-page free=%u largest=%u minEver=%u", (unsigned)ESP.getFreeHeap(),
