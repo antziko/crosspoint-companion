@@ -473,6 +473,18 @@ bool EpubReaderActivity::buildTickHeapGate() {
   return !buildHeapPaused;
 }
 
+void EpubReaderActivity::showBuildPopup() {
+  // Mid-build indexing popup: only during render()'s blocking build-to-target phase
+  // (buildPopupPending), at most once, and only when the framebuffer isn't on loan.
+  // If it were called while the loan is active the draw would be lost, so pending
+  // stays set and the deadline check retries on the next chunk after the loan ends.
+  if (!buildPopupPending || !renderer.hasFrameBuffer()) return;
+  GUI.drawPopup(renderer, tr(STR_INDEXING));
+  // HALF-clear the popup when the page replaces it, else "INDEXING" ghosts.
+  pagesUntilFullRefresh = 1;
+  buildPopupPending = false;
+}
+
 void EpubReaderActivity::loop() {
   if (!epub) {
     // Should never happen
@@ -2002,17 +2014,28 @@ void EpubReaderActivity::render(RenderLock&& lock) {
             // HALF-clear the popup when the page replaces it, else "INDEXING" ghosts under the page.
             pagesUntilFullRefresh = 1;
           }
-          // Lend the framebuffer's 48 KB to the blocking pre-render burst
-          // (startBuild inflates the whole spine HTML — the memory peak). The
-          // background buildSomeMore chunks in loop() do NOT get the loan: they
-          // deliberately interleave with page renders. Restored before render.
-          GfxRenderer::FrameBufferLoan loan(renderer);
-          if (!section->startBuild(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
-                                   SETTINGS.getReaderExtraParagraphSpacing(), SETTINGS.getReaderParagraphAlignment(),
-                                   viewportWidth, viewportHeight, SETTINGS.getReaderHyphenationEnabled(),
-                                   SETTINGS.embeddedStyle, SETTINGS.imageRendering, SETTINGS.focusReadingEnabled)) {
+          // Mid-build popup surfacing for slow builds the up-front prediction can't
+          // see (image extraction/probing per page, or the chunk loop overrunning
+          // the deadline). buildPopupPending gates it to this blocking phase so a
+          // background build in loop() can never draw over a displayed page.
+          buildPopupPending = !showPopup;
+          const unsigned long buildStartMs = millis();
+          bool started;
+          {
+            // Lend the framebuffer's 48 KB to startBuild only (the spine HTML
+            // inflation peak). The chunk loop below runs without it so the popup can
+            // draw mid-build; the background buildSomeMore chunks in loop() never had
+            // the loan either, so per-chunk layout is already known to fit.
+            GfxRenderer::FrameBufferLoan loan(renderer);
+            started =
+                section->startBuild(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
+                                    SETTINGS.getReaderExtraParagraphSpacing(), SETTINGS.getReaderParagraphAlignment(),
+                                    viewportWidth, viewportHeight, SETTINGS.getReaderHyphenationEnabled(),
+                                    SETTINGS.embeddedStyle, SETTINGS.imageRendering, SETTINGS.focusReadingEnabled);
+          }
+          if (!started) {
             LOG_ERR("ERS", "Failed to start section build");
-            loan.end();  // restore before failBuild() draws the error overlay
+            buildPopupPending = false;
             failBuild();
             return;
           }
@@ -2021,14 +2044,18 @@ void EpubReaderActivity::render(RenderLock&& lock) {
             // Anchor jump: build until the anchor's page is laid out (usually page 0), checking a
             // partial's on-disk anchor map too so an already-indexed anchor resolves immediately.
             // Otherwise: build until the target page exists. loop() builds the rest behind it.
+            if (buildPopupPending && millis() - buildStartMs >= BUILD_POPUP_DEADLINE_MS) {
+              // The up-front prediction guessed fast but the build blew the silent budget.
+              showBuildPopup();
+            }
             if (!section->buildSomeMore(BUILD_PAGES_PER_CHUNK)) {
               LOG_ERR("ERS", "Failed during incremental section build");
-              loan.end();  // restore before failBuild() draws the error overlay
+              buildPopupPending = false;
               failBuild();
               return;
             }
           }
-          loan.end();
+          buildPopupPending = false;
         }
       }
       buildFailedSpine = -1;      // built OK; allow this chapter again
