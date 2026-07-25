@@ -164,9 +164,14 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
       if (derivedGap > naturalSpaceWidth / 2) lineGapWidth = derivedGap;
     }
 
+    // Ruby-annotated lines shift their base text down by half an ascender (see
+    // TextBlock::getRubyShift). Move the tap targets in lockstep so the selection
+    // boxes stay aligned with the rendered word positions.
+    const int rubyShift = block->getRubyShift(renderer.getFontAscenderSize(SETTINGS.getReaderFontId()));
+
     for (uint16_t wIdx = 0; wIdx < blockWordCount; wIdx++) {
       int16_t screenX = line->xPos + block->wordXpos(wIdx) + marginLeft;
-      int16_t screenY = line->yPos + marginTop;
+      int16_t screenY = line->yPos + marginTop + rubyShift;
       const std::string wordText(block->wordText(wIdx), block->wordTextLen(wIdx));
       const EpdFontFamily::Style wordStyle = block->wordStyle(wIdx);
 
