@@ -435,12 +435,23 @@ std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {
     }
   }
 
-  // Ruby text data
+  // Ruby text data. The on-disk format always stores one string per word (mostly empty), but
+  // ruby is rare (CJK furigana/pinyin only). For the overwhelming majority of blocks that carry
+  // no ruby, drop the vector entirely so it costs zero DRAM instead of wc empty std::strings plus
+  // their backing allocation. On-disk format is unchanged (still wc strings), so this stays
+  // cache-compatible.
   std::vector<std::string> rubyTexts(wc);
+  bool anyRuby = false;
   for (auto& rt : rubyTexts) {
     serialization::readString(file, rt);
+    if (!rt.empty()) {
+      anyRuby = true;
+    }
   }
-  block->rubyTexts = std::move(rubyTexts);
+  if (anyRuby) {
+    block->rubyTexts = std::move(rubyTexts);
+  }
+  // else: leave block->rubyTexts empty; hasRuby()/getRubyShift() already treat that as "no ruby".
 
   // Style (alignment + margins/padding/indent)
   BlockStyle& blockStyle = block->blockStyle;
