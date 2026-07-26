@@ -75,7 +75,7 @@ class StatsTimelineView {
   std::vector<Row> rows;
   int scrollOffset = 0;
 
-  Focus focus_ = Focus::Yearly;  // opens focused on the Yearly row
+  Focus focus_ = Focus::None;  // opens on the tab bar; no year/month is selected until the user drills in
   uint16_t selYear_ = 0;
   uint8_t selMonth_ = 0;
   bool selectionInit = false;  // initSelection() runs once, on the first build()

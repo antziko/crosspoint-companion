@@ -311,7 +311,9 @@ void StatsTimelineView::renderList(GfxRenderer& renderer, const Rect& rect) cons
           const int boxY = rowY + 2;
           const int boxW = textW + 2 * BOX_PAD_X;
           const int boxH = lineHeight + 6;
-          const bool selected = c == row.highlightCell;
+          // Only surface the year/month selection once the user has drilled in from
+          // the tab bar; on open (focus None) the timeline shows no boxed cell.
+          const bool selected = focus_ != Focus::None && c == row.highlightCell;
           const bool cursor = selected && sectionFocused;
           if (cursor) {
             renderer.fillRoundedRect(boxX, boxY, boxW, boxH, CORNER_RADIUS, Color::Black);
