@@ -1,6 +1,5 @@
 #include "ImageBlock.h"
 
-#include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <Logging.h>
 #include <Memory.h>
@@ -453,25 +452,6 @@ void ImageBlock::render(GfxRenderer& renderer, const int x, const int y) {
   LOG_DBG("IMG", "Using %s decoder", decoder->getFormatName());
 
   bool success = decoder->decodeToFramebuffer(imagePath, renderer, config);
-  if (!success) {
-    // A decode failure here is almost always the ~32KB inflate window (or the decoder's
-    // scratch) failing to find a contiguous block on a fragmented heap -- see `largest`
-    // in the FAILED log below. This path can't borrow the framebuffer (it's the decode
-    // target), so the only lever is to reclaim resident heap: drop the font caches
-    // (SD-card font retained mini-data from the keep-if-fits path + the glyph
-    // decompressor scratch) and retry once. They repopulate on the next text page via
-    // the prewarm path, so the cost is a one-time re-warm, not a permanent loss. No-op
-    // when a built-in font is in use and the decompressor cache is empty -- in which
-    // case `largest` won't move and the retry just fails again into the placeholder.
-    if (auto* fcm = renderer.getFontCacheManager()) {
-      const unsigned largestBefore = (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-      fcm->clearCache();
-      const unsigned largestAfter = (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-      SdDebugLog::log("IMG", "decode retry after font-cache reclaim %s largest %u->%u", imagePath.c_str(),
-                      largestBefore, largestAfter);
-      success = decoder->decodeToFramebuffer(imagePath, renderer, config);
-    }
-  }
   if (!success) {
     LOG_ERR("IMG", "Failed to decode image: %s", imagePath.c_str());
     SdDebugLog::log("IMG", "decode FAILED %s decoder=%s free=%u largest=%u", imagePath.c_str(),
