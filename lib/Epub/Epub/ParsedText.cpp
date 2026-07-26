@@ -259,7 +259,17 @@ bool isWordCharacter(uint32_t cp) {
 bool canGrowWordVectors(size_t newCapacity) {
   constexpr size_t HEADROOM_BYTES = 8 * 1024;
   const size_t needed = newCapacity * sizeof(std::string) + HEADROOM_BYTES;
-  return heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) >= needed;
+  const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (largest < needed) {
+    // Diagnostic for LOWHEAP build failures: `cap` is how many words this one text
+    // block tried to hold, `need` the contiguous bytes required (cap*24 + 8KB), `largest`
+    // the biggest free block available, `free` total free. A high `cap` means a very long
+    // paragraph; a low `largest` with ample `free` means fragmentation, not exhaustion.
+    LOG_ERR("PT", "word-vector grow blocked: cap=%u need=%u largest=%u free=%u", (unsigned)newCapacity,
+            (unsigned)needed, (unsigned)largest, (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
+    return false;
+  }
+  return true;
 }
 
 }  // namespace
