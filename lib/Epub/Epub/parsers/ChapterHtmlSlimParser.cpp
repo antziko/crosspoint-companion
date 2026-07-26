@@ -1,8 +1,10 @@
 #include "ChapterHtmlSlimParser.h"
 
+#include <FontCacheManager.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
+#include <esp_heap_caps.h>
 #include <Logging.h>
 #include <SdDebugLog.h>
 #include <Utf8.h>
@@ -609,6 +611,24 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
 
       if (!src.empty() && self->imageRendering != 1) {
         LOG_DBG("EHP", "Found image: src=%s", src.c_str());
+
+        // Extracting/probing an image needs a ~32KB contiguous inflate window (plus ~11KB
+        // tinfl state) from the heap: this build path runs loan-free -- the reading page
+        // owns the framebuffer, so it can't borrow the 48KB build scratch. The SD-card font
+        // layout that runs right before this fragments the heap, so on a tight device the
+        // window alloc fails (ZIP "Failed to init inflate stream") and the image is dropped
+        // to a placeholder even with plenty of total free heap. Reclaim the font caches
+        // (SD-font mini-data + glyph decompressor page/hot buffers) when the largest block
+        // can't cover the window with headroom; they repopulate via prewarm on next render.
+        constexpr size_t IMAGE_INFLATE_MIN_MAX_ALLOC = 46 * 1024;
+        if (auto* fcm = self->renderer.getFontCacheManager()) {
+          const unsigned largestBefore = (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+          if (largestBefore < IMAGE_INFLATE_MIN_MAX_ALLOC) {
+            fcm->clearCache();
+            LOG_DBG("EHP", "Reclaimed font caches for image inflate: largest %u->%u", largestBefore,
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+          }
+        }
 
         {
           // Resolve the image path relative to the HTML file
