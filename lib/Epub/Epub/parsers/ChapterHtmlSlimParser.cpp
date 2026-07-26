@@ -275,6 +275,14 @@ void ChapterHtmlSlimParser::flushPartWordBuffer() {
   partWordBufferIndex = 0;
   nextWordContinues = false;
   listItemBulletOnly = false;
+
+  // The block stopped accepting words because the heap can't grow its vectors — halt
+  // the parse now (from inside this expat handler) so parseStep() reports Error and the
+  // build is abandoned gracefully instead of aborting on the next reallocation.
+  if (currentTextBlock->heapExhausted()) {
+    outOfMemory_ = true;
+    XML_StopParser(xmlParser_, XML_FALSE);
+  }
 }
 
 void ChapterHtmlSlimParser::flushLongTextBlockIfNeeded() {

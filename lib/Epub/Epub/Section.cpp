@@ -500,8 +500,16 @@ bool Section::buildSomeMore(const int maxPages) {
   for (;;) {
     const auto status = build_->parser->parseStep();
     if (status == ChapterHtmlSlimParser::ParseStatus::Error) {
-      recordBuildFailure(BuildFailure::Reason::Parse, 0, buildHtmlSize_);
-      LOG_ERR("SCT", "Parse error during incremental build");
+      // Distinguish a graceful out-of-contiguous-heap stop (word vectors could not grow)
+      // from a genuine markup parse error, so the reader shows the low-memory overlay
+      // rather than a misleading "parse error" — and neither aborts the firmware.
+      if (build_->parser->outOfMemory()) {
+        recordBuildFailure(BuildFailure::Reason::LowHeap, 0, buildHtmlSize_);
+        LOG_ERR("SCT", "Out of contiguous heap during layout — abandoning build");
+      } else {
+        recordBuildFailure(BuildFailure::Reason::Parse, 0, buildHtmlSize_);
+        LOG_ERR("SCT", "Parse error during incremental build");
+      }
       abandonBuild();
       return false;
     }

@@ -4,6 +4,7 @@
 #include <GfxRenderer.h>
 #include <Logging.h>
 #include <Utf8.h>
+#include <esp_heap_caps.h>
 
 #include <algorithm>
 #include <cmath>
@@ -249,11 +250,27 @@ bool isWordCharacter(uint32_t cp) {
   return true;
 }
 
+// True when the heap can grow the parallel word vectors to `newCapacity` elements
+// without risking the -fno-exceptions abort(). The word vector is std::vector<std::string>
+// (the largest, ~24 B/elem here) and reallocation needs ONE contiguous block, so this
+// gates on the largest free block (total free is irrelevant to a contiguous ask). A
+// headroom margin leaves room for the per-word string bodies and layout that follow, so
+// we never grab the last big block and strand the rest of the build.
+bool canGrowWordVectors(size_t newCapacity) {
+  constexpr size_t HEADROOM_BYTES = 8 * 1024;
+  const size_t needed = newCapacity * sizeof(std::string) + HEADROOM_BYTES;
+  return heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) >= needed;
+}
+
 }  // namespace
 
 void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle, const bool underline,
                          const bool attachToPrevious) {
   if (word.empty()) return;
+  // Once the heap can't grow the word vectors, stop cold: any further push_back would
+  // reallocate and abort() under -fno-exceptions. The block is left truncated and the
+  // parser abandons the build (see ChapterHtmlSlimParser::flushPartWordBuffer).
+  if (heapExhausted_) return;
 
   // The device fonts carry no combining-mark positioning, so EPUB text stored in NFD
   // (a base letter followed by separate combining accents -- common for Vietnamese,
@@ -272,6 +289,16 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle,
 
   const auto pushToken = [&](std::string token, const bool continues, const bool noSpaceBefore,
                              const bool isFocusSuffix) {
+    if (heapExhausted_) return;
+    // Guard the reallocation before it happens: a push_back at capacity doubles the
+    // backing store, which on a fragmented heap is the throwing alloc that aborts.
+    if (words.size() == words.capacity()) {
+      const size_t newCap = words.capacity() < 16 ? 16 : words.capacity() * 2;
+      if (!canGrowWordVectors(newCap)) {
+        heapExhausted_ = true;
+        return;
+      }
+    }
     words.push_back(std::move(token));
     wordStyles.push_back(baseStyle);
     wordContinues.push_back(continues);
@@ -300,6 +327,13 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle,
     }
     while (newCapacity < requiredSize) {
       newCapacity *= 2;
+    }
+
+    // Bail before the throwing reserve if the contiguous block isn't there; pushToken
+    // (also guarded) then no-ops, leaving the block truncated for the parser to catch.
+    if (!canGrowWordVectors(newCapacity)) {
+      heapExhausted_ = true;
+      return;
     }
 
     words.reserve(newCapacity);

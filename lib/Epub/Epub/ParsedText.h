@@ -25,6 +25,11 @@ class ParsedText {
   bool focusReadingEnabled;
   bool isNaturalAlign;
   bool hasRtlWord;
+  // Set when addWord() had to stop because growing the word vectors would need a
+  // contiguous block the fragmented heap can't supply. Without this the throwing
+  // std::vector reallocation calls abort() under -fno-exceptions (a hard reboot).
+  // The parser polls heapExhausted() after each word and fails the build gracefully.
+  bool heapExhausted_ = false;
   std::vector<std::string> reorderedWordsScratch;
   std::vector<EpdFontFamily::Style> reorderedStylesScratch;
   std::vector<uint16_t> reorderedWidthsScratch;
@@ -72,6 +77,10 @@ class ParsedText {
   BlockStyle& getBlockStyle() { return blockStyle; }
   size_t size() const { return words.size(); }
   bool isEmpty() const { return words.empty(); }
+  // True once addWord() stopped accepting words because the heap can no longer
+  // supply a contiguous block for the word vectors. The block is left truncated;
+  // the caller must abandon the build rather than render partial content.
+  bool heapExhausted() const { return heapExhausted_; }
   void layoutAndExtractLines(const GfxRenderer& renderer, int fontId, uint16_t viewportWidth,
                              const std::function<void(std::shared_ptr<TextBlock>)>& processLine,
                              bool includeLastLine = true);

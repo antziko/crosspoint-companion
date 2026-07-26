@@ -112,6 +112,10 @@ class ChapterHtmlSlimParser {
   // for the lifetime of the parse so it can be paused and resumed at buffer
   // boundaries.
   XML_Parser xmlParser_ = nullptr;
+  // Latched when a text block ran out of contiguous heap and the parse was stopped
+  // (flushPartWordBuffer). Fresh per build (a new parser is created for each Section
+  // build), so it needs no explicit reset. Read via outOfMemory().
+  bool outOfMemory_ = false;
   HalFile parseFile_;
   uint32_t parseStartTime_ = 0;
 
@@ -177,6 +181,10 @@ class ChapterHtmlSlimParser {
   enum class ParseStatus { More, Done, Error };
   bool beginParse();
   ParseStatus parseStep();
+  // True when the last Error was a graceful stop after the heap could no longer grow a
+  // text block's word vectors (see flushPartWordBuffer), not a malformed-markup error.
+  // The caller reports it as a low-heap build failure rather than a parse failure.
+  bool outOfMemory() const { return outOfMemory_; }
   bool finishParse();  // flush the trailing page and tear down; returns true
   void abortParse();   // tear down without flushing (error / abandon)
 
