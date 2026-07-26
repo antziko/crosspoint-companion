@@ -76,6 +76,7 @@ class InflateStream {
   tinfl_decompressor_tag* state = nullptr;  // ~11KB: heap, or inside the claimed build scratch
   uint8_t* window = nullptr;                // 32KB ring, streaming mode only
   uint8_t* arenaBase = nullptr;             // non-null when state/window live in lent framebuffer bytes
+  bool windowFromReader = false;            // window borrowed from InflateReader's reserved 32KB scratch
   size_t windowPos = 0;                     // ring write cursor
   // Decompressed-but-undelivered region of the window (tinfl can overshoot the
   // caller's requested length; the overshoot waits here for the next read).

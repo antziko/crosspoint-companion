@@ -1,6 +1,7 @@
 #include "InflateStream.h"
 
 #include <BuildScratch.h>
+#include <InflateReader.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -36,8 +37,22 @@ bool InflateStream::init(const bool streaming) {
     state = static_cast<tinfl_decompressor*>(malloc(sizeof(tinfl_decompressor)));
     if (!state) return false;
     if (streaming) {
-      window = static_cast<uint8_t*>(malloc(WINDOW_SIZE));
-      if (!window) return false;  // state kept; deinit()/next init reclaims it
+      // No FrameBufferLoan: before a bare malloc(32KB) -- which fails once a
+      // reading-session build fragments the heap so its largest free block dips
+      // below 32KB (the reserved InflateReader window itself pins the ceiling
+      // there) -- borrow that same boot-reserved 32KB window. It is free at this
+      // point on the build task: the SD-font advance-table borrower acquires and
+      // releases it synchronously between parser callbacks, so an image/zip
+      // extraction gets a guaranteed contiguous window while only the ~11KB state
+      // rides the fragmented heap. Falls back to malloc if the window is held by
+      // another task or was released for a TLS handshake. Freed in deinit().
+      window = InflateReader::acquireScratch(WINDOW_SIZE);
+      if (window) {
+        windowFromReader = true;
+      } else {
+        window = static_cast<uint8_t*>(malloc(WINDOW_SIZE));
+        if (!window) return false;  // state kept; deinit()/next init reclaims it
+      }
     }
   }
 
@@ -62,7 +77,12 @@ void InflateStream::deinit() {
     arenaBase = nullptr;
   } else {
     free(state);
-    free(window);
+    if (windowFromReader) {
+      InflateReader::releaseScratch();
+      windowFromReader = false;
+    } else {
+      free(window);
+    }
   }
   state = nullptr;
   window = nullptr;
