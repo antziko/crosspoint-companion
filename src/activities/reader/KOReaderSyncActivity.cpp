@@ -491,25 +491,72 @@ void KOReaderSyncActivity::setSyncPhase(const char* phase) {
 }
 
 void KOReaderSyncActivity::syncBookmarks() {
-  // Sessionless: the GET, the merge (parseFromJson + mergeFrom), and the PUT each run at recovered
-  // heap (the caller closed the progress session before calling this). The merge builds several
-  // throwing std::vector reserves, so it MUST NOT run under a held keep-alive arena (~16KB free) —
-  // that abort()ed mid-merge. Each leg opens a fresh connection; the fresh handshakes have their
-  // contiguous block at recovered heap (same place stats handshakes). The body is still serialized
-  // BEFORE the GET (budget-capped) and re-serialized only if the merge mutated the local set.
+  // Sessionless: the GET, the merge (parseFromJson + mergeFrom), and the PUT each run on their own
+  // fresh connection at recovered heap (the caller closed the progress session before calling
+  // this). The merge builds several throwing std::vector reserves, so it MUST NOT run under a held
+  // keep-alive arena (~16KB free) — that abort()ed mid-merge.
+  //
+  // ORDER IS HEAP-CRITICAL. Both handshakes must clear MIN_HEAP_FOR_TLS (55000), and the post-WiFi
+  // ceiling is only ~56KB — a razor-thin margin. The GET needs NEITHER the epub NOR the local
+  // bookmark set (those only feed the upload body), so it now runs FIRST, at the post-WiFi
+  // high-water. The old order loaded the epub metadata + local bookmarks BEFORE the GET, spending
+  // ~3KB resident and dropping the pre-handshake heap under the gate — the GET was rejected at
+  // ~52.6KB even though the fetch needs none of that RAM (HW 2026-07-26: free=52620 -> REJECT).
+  // Symmetric on the PUT: the ~KBs of in-memory bookmark/tombstone vectors are freed
+  // (BOOKMARKS.unload() — non-destructive, flushes then clears) once the small upload body is
+  // serialized, so the PUT handshake also runs at recovered heap. The upload JsonDocument is built
+  // and torn down BEFORE the PUT (only the result string persists), so mbedtls_ssl_write's scratch
+  // isn't fragmented at write time — the fragmentation concern behind the old pre-GET serialize.
   setSyncPhase(tr(STR_SYNC_PH_BM_FETCH));
 
-  // Get title/author from epub, then release it before TLS calls to free ~30KB RAM
-  // for the handshake. epubPath is already a member so loadForBook doesn't need epub live.
-  // If epub fails to load, proceed with empty strings — the bookmark file is keyed by
-  // the path CRC, not by title/author (those are display metadata only).
+  // Heap probe for the thin-margin troubleshooting: emit free + largest-contiguous to both serial
+  // and the SD trace at each handshake boundary so a future rejection shows exactly which leg fell
+  // short and by how much (the gate checks total free; largest exposes fragmentation separately).
+  const auto logHeap = [](const char* where) {
+    multi_heap_info_t info;
+    heap_caps_get_info(&info, MALLOC_CAP_8BIT);
+    LOG_DBG("KOSync", "BM heap @%s: free=%u largest=%u", where, (unsigned)ESP.getFreeHeap(),
+            (unsigned)info.largest_free_block);
+    SdDebugLog::log("KOSYNC", "BM heap @%s free=%u largest=%u", where, (unsigned)ESP.getFreeHeap(),
+                    (unsigned)info.largest_free_block);
+  };
+
+  // --- GET first, at the post-WiFi high-water heap (before any epub / local load) ---
+  logHeap("pre-get");
+  std::string remoteJson;
+  const auto getResult = KOReaderSyncClient::getBookmarks(documentHash, remoteJson);
+  // NOT_FOUND just means the server has nothing stored yet — the fetch itself succeeded.
+  bmFetchOk = (getResult == KOReaderSyncClient::OK || getResult == KOReaderSyncClient::NOT_FOUND);
+  if (!bmFetchOk) {
+    // Fetch failed, but still upload the local set below so the server learns our bookmarks.
+    LOG_ERR("KOSync", "Bookmark fetch failed: %s", KOReaderSyncClient::errorString(getResult));
+  }
+
+  // Parse the remote blob into (small) vectors now so remoteJson can be freed before the local
+  // set is loaded — holding both alongside the merge needlessly fragments the heap. Elaborated
+  // type: BaseTheme.h's UIIcon enum has a 'Bookmark' enumerator that otherwise hides the struct.
+  std::vector<struct Bookmark> remoteBms;
+  std::vector<Tombstone> remoteTombs;
+  bool haveRemote = false;
+  if (getResult == KOReaderSyncClient::OK && BookmarkStore::parseFromJson(remoteJson.c_str(), remoteBms, remoteTombs)) {
+    bmRemoteCount = static_cast<int>(remoteBms.size());
+    haveRemote = true;
+  }
+  std::string().swap(remoteJson);
+
+  // --- Load the local set + merge ---
+  setSyncPhase(tr(STR_SYNC_PH_BM_MERGE));
+
+  // Epub title/author are display metadata only (the bookmark file is keyed by the path CRC), so
+  // a failed load is fine — proceed with empty strings. Release it before the PUT to free RAM;
+  // performSync reloads it after syncBookmarks returns (progress mapping).
   ensureEpubLoaded();
   std::string bookTitle;
   std::string bookAuthor;
   if (epub) {
     bookTitle = epub->getTitle();
     bookAuthor = epub->getAuthor();
-    epub.reset();  // Release before TLS calls; performSync reloads after syncBookmarks returns
+    epub.reset();
   }
 
   // The reader unloaded its bookmarks when it exited; reload from disk for this book.
@@ -526,77 +573,37 @@ void KOReaderSyncActivity::syncBookmarks() {
   };
   bmLocalCount = countSyncable();
 
-  // Serialize the upload body BEFORE the GET, while the heap is settled. Doing the
-  // JsonDocument build/teardown here (not right before the PUT) keeps the heap from being
-  // fragmented at the moment mbedtls_ssl_write needs its scratch — hardware-confirmed: the
-  // in-session post-merge serialize stalled the write (EAGAIN even at good RSSI), pre-serialize
-  // did not. Budget-cap so out.reserve() can't OOM-abort (in "sync all" the progress GET's
-  // arena is already held, so heap may be low). A signature over the local set detects the
-  // rare case where the merge below actually mutates it.
-  const auto setSignature = [] {
-    const auto& bms = BOOKMARKS.getBookmarks();
-    const auto& tombs = BOOKMARKS.getTombstones();
-    uint64_t sig = static_cast<uint64_t>(bms.size()) * 0x9E3779B1u + static_cast<uint64_t>(tombs.size());
-    for (const struct Bookmark& b : bms) sig += static_cast<uint64_t>(b.version) + b.spineIndex + b.paragraphIndex;
-    for (const Tombstone& t : tombs) sig += static_cast<uint64_t>(t.version) + t.spineIndex + t.paragraphIndex;
-    return sig;
-  };
-  const uint64_t preMergeSig = setSignature();
-  const auto serializeBudgeted = [] {
-    const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-    const size_t bodyBudget = largestBlock > 1024 ? largestBlock - 1024 : 0;
-    return BookmarkStore::serializeToJson(BOOKMARKS.getBookmarks(), BOOKMARKS.getTombstones(), bodyBudget);
-  };
-  std::string localJson = serializeBudgeted();
+  if (haveRemote) {
+    const size_t added = BOOKMARKS.mergeFrom(remoteBms, remoteTombs);  // self-persists
+    LOG_DBG("KOSync", "Merged %u remote bookmark(s)", (unsigned)added);
+  }
+  // Remote vectors are consumed — free them before the upload serialize.
+  std::vector<struct Bookmark>().swap(remoteBms);
+  std::vector<Tombstone>().swap(remoteTombs);
+  bmMergedCount = countSyncable();
+  bmSynced = true;
+
+  // --- Serialize the final (merged) upload body, then free the in-memory set for the PUT ---
+  // Budget-cap so out.reserve() can't OOM-abort. An empty body would wipe the server set, so skip
+  // the PUT if serialize fails/overflows — serializing the post-merge state directly means there
+  // is no stale-subset risk (no pre-merge body to fall back to).
+  const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  const size_t bodyBudget = largestBlock > 1024 ? largestBlock - 1024 : 0;
+  std::string localJson =
+      BookmarkStore::serializeToJson(BOOKMARKS.getBookmarks(), BOOKMARKS.getTombstones(), bodyBudget);
+
+  // Drop the in-memory bookmark/tombstone vectors now: the PUT needs only the serialized string
+  // above. unload() flushes any dirty state to disk first, so this is non-destructive. This
+  // recovers the margin the GET reorder alone can't, so the PUT also clears MIN_HEAP_FOR_TLS.
+  BOOKMARKS.unload();
+
   if (localJson.empty()) {
-    // Empty = JsonDocument overflow or body over budget. An empty body would wipe the server
-    // set, so skip the PUT.
     LOG_ERR("KOSync", "Bookmark upload skipped: serialize produced empty body");
     bmUploadOk = false;
     return;
   }
 
-  // Pull remote, reconcile with local (union bookmarks, propagate tombstoned deletes). Fresh
-  // connection at recovered heap; its arena frees before the merge so mergeFrom has room.
-  std::string remoteJson;
-  const auto getResult = KOReaderSyncClient::getBookmarks(documentHash, remoteJson);
-  setSyncPhase(tr(STR_SYNC_PH_BM_MERGE));
-  if (getResult == KOReaderSyncClient::OK) {
-    // Elaborated type: BaseTheme.h's UIIcon enum has a 'Bookmark' enumerator that
-    // otherwise hides the struct in this translation unit.
-    std::vector<struct Bookmark> remoteBms;
-    std::vector<Tombstone> remoteTombs;
-    if (BookmarkStore::parseFromJson(remoteJson.c_str(), remoteBms, remoteTombs)) {
-      bmRemoteCount = static_cast<int>(remoteBms.size());
-      // Free the remote blob before the merge — parseFromJson already copied it into the
-      // vectors, so holding it alongside the merge's allocations needlessly fragments the heap.
-      std::string().swap(remoteJson);
-      const size_t added = BOOKMARKS.mergeFrom(remoteBms, remoteTombs);  // self-persists
-      LOG_DBG("KOSync", "Merged %u remote bookmark(s)", (unsigned)added);
-    }
-  } else if (getResult != KOReaderSyncClient::NOT_FOUND) {
-    // Fetch failed, but still upload local set so the server learns our bookmarks.
-    LOG_ERR("KOSync", "Bookmark fetch failed: %s", KOReaderSyncClient::errorString(getResult));
-  }
-  std::string().swap(remoteJson);  // no-op if freed above; covers the NOT_FOUND / error paths
-  // NOT_FOUND just means the server has nothing stored yet — the fetch itself succeeded.
-  bmFetchOk = (getResult == KOReaderSyncClient::OK || getResult == KOReaderSyncClient::NOT_FOUND);
-
-  bmMergedCount = countSyncable();
-  bmSynced = true;
-
-  // If the merge mutated the local set, the body built above is stale (missing merged-in
-  // remote items). Re-serialize; if it won't fit the (now lower) heap, SKIP rather than push a
-  // stale subset that would delete the server's remote items.
-  if (setSignature() != preMergeSig) {
-    std::string merged = serializeBudgeted();
-    if (merged.empty()) {
-      LOG_ERR("KOSync", "Bookmark upload skipped: merge changed set but re-serialize won't fit low heap");
-      bmUploadOk = false;
-      return;
-    }
-    localJson.swap(merged);
-  }
+  logHeap("pre-put");
   setSyncPhase(tr(STR_SYNC_PH_BM_UPLOAD));
   const auto putResult = KOReaderSyncClient::updateBookmarks(documentHash, localJson);
   bmUploadOk = (putResult == KOReaderSyncClient::OK);
