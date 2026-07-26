@@ -5,8 +5,8 @@
 #include <Logging.h>
 #include <Memory.h>
 #include <SdDebugLog.h>
+#include <SecureHttpClient.h>
 #include <esp_heap_caps.h>
-#include <esp_http_client.h>
 #include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -14,6 +14,7 @@
 
 #include <cstring>
 #include <ctime>
+#include <memory>
 
 #include "KOReaderCredentialStore.h"
 #include "KOReaderSyncCA.h"
@@ -76,363 +77,128 @@ constexpr char DEVICE_NAME[] = "CrossPoint";
 // Hold WiFi out of modem-sleep for the duration of a request, then restore the
 // default. At WIFI_PS_MIN_MODEM the radio sleeps between DTIM beacons; on a
 // marginal link that drops handshake packets and the TLS handshake stalls to a
-// timeout (ESP_ERR_HTTP_CONNECT) — observed on the X3, where even the first
-// KOSync GET never connected while the X4 (more headroom) merely ran slow.
-// HttpDownloader already does this for OPDS/downloads (HttpDownloader.cpp:79);
-// KOSync went through the default and paid for it. RAII so every return path
-// restores power-save. See HttpDownloader's NoWifiSleep.
+// timeout — observed on the X3, where even the first KOSync GET never connected
+// while the X4 (more headroom) merely ran slow. HttpDownloader already does this
+// for OPDS/downloads. RAII so every return path restores power-save.
 struct NoWifiSleep {
   NoWifiSleep() { esp_wifi_set_ps(WIFI_PS_NONE); }
   ~NoWifiSleep() { esp_wifi_set_ps(WIFI_PS_MIN_MODEM); }
 };
 
-// Small TLS buffers to fit in ESP32-C3's limited heap (~46KB free after WiFi).
-// KOSync payloads are tiny JSON (<1KB), so 2KB buffers are sufficient.
-// Default 16KB buffers cause OOM during TLS handshake.
-constexpr int HTTP_BUF_SIZE = 2048;
-
-// Cloudflare tunnels send a 3-cert Google Trust Services chain. During the TLS handshake
-// mbedTLS makes many small allocations that collectively consume ~48KB of heap. With only
-// ~50KB free after WiFi connects, the session drove min-free-ever down to 2600 bytes before
-// failing with MBEDTLS_ERR_X509_ALLOC_FAILED (-0x2880). Check total free heap (not max
-// contiguous block) because the failure mode is aggregate exhaustion, not one large alloc.
-//
-// On X3 in settings context after WiFi, only ~53KB is free — below this threshold.
-// Auth-from-settings will show LOW_MEMORY on X3 with HTTPS servers. The workaround is
-// to sync from within the reader, which releases the epub first and frees enough RAM.
-// Tested down to 50000 (X4, settings-context, kosync.yapaa.org Cloudflare tunnel): even with
-// ~50.9KB free after the inflate-window release, mbedtls_ssl_setup failed with SSL_ALLOC_FAILED
-// (-0x7F00). The killer is contiguous space, not total free: the SSL in_buf + out_buf each need
-// ~16KB contiguous, and after the first carves the lone 32KB block the second can't fit. So the
-// real bar is two 16KB slabs, which settings-context (no epub to release) can't supply. Keep the
-// guard high enough to fail fast with a clean LOW_MEMORY ("sync from the reader") message instead
-// of an mbedTLS connect error. Reader-context sync frees ~65KB epub and handshakes fine.
-constexpr uint32_t MIN_HEAP_FOR_TLS = 55000;
-
-// Plain HTTP does no TLS handshake, so it never allocates the mbedTLS arena. It
-// needs only the fixed rx/tx buffers (HTTP_BUF_SIZE each), the esp_http_client
-// struct, and a small JSON doc — a few KB. Gate HTTP requests on this far lower
-// bar so a local http:// sync server isn't rejected by the TLS-sized guard.
-constexpr uint32_t MIN_HEAP_FOR_HTTP = 12000;
-
-// Coarse contiguous backstop for HTTPS PUTs (see the two-16KB-slab note above). Evaluated
-// AFTER the body is serialized: ssl_setup carves a second ~16KB record slab, and a
-// multi-KB request body competing for it tips ssl_setup into -0x7F00. We can observe only
-// the *largest* free block, not the second, so this is a coarse guard.
-//
-// RECALIBRATED 2026-06-22 for the SHRUNK mbedTLS record buffers. The custom libmbedtls_2.a
-// (esp32-arduino-lib-builder, ASYMMETRIC_CONTENT_LEN=y, IN=8192/OUT=4096 — see
-// docs/kosync-https-libbuilder.md) drops the handshake record buffers from ~16.7 KB to
-// in_buf ~8.5 KB + out_buf ~4.4 KB. The binding contiguous constraint is now the IN buffer
-// (~8.5 KB); the OUT buffer is a separate, smaller alloc that takes any of the dozens of free
-// blocks. The old base (18000, sized for the 16 KB IN slab) FALSE-SKIPS PUTs that now succeed —
-// hardware evidence 2026-06-22: a sync-all STATS_PUT (body 5299) was rejected at largest=15348
-// with need=23299, yet the handshake needs only ~8.5 KB contiguous and would have completed.
-// Set the base to IN buffer (~8.5 KB) + margin. A still-fragmented arena that can't place the
-// IN slab fails ssl_setup (-0x7F00) and the PUT skips gracefully (no crash) — better than never
-// attempting. If the buffers are resized in the lib build, retune this.
-constexpr uint32_t TLS_PUT_CONTIG_BASE = 10000;
-
-// X3 HTTPS troubleshooting instrumentation (SdDebugLog "STALL"): a gap between
-// esp_http_client event-callback fires longer than this is logged with a
-// heap+RSSI snapshot. Mirrors HttpDownloader::runGet's per-chunk-read probe so
-// the perform()-based GET/PUT path here produces directly comparable evidence
-// to the streaming-GET path. See SUMMARY.md Part B Appendix.
-constexpr uint32_t STALL_LOG_THRESHOLD_MS = 1000;
-
-// Response buffer for reading HTTP body
-struct ResponseBuffer {
-  char* data = nullptr;
-  int len = 0;
-  int capacity = 0;
-
-  // Set by beginTrace() before perform(); read by httpEventHandler to log
-  // connect-time and stall events to SD. Null traceTag = no tracing (cheap).
-  const char* traceTag = nullptr;
-  uint32_t requestStartMs = 0;
-  uint32_t lastEventMs = 0;
-
-  ~ResponseBuffer() { free(data); }
-
-  bool ensure(int size) {
-    if (size <= capacity) return true;
-    if (size > kMaxResponseBytes) return false;  // reject pathological responses, don't grow unbounded
-    char* newData = (char*)realloc(data, size);
-    if (!newData) return false;
-    data = newData;
-    capacity = size;
-    return true;
-  }
-};
-
-// HTTP event handler: collects the response body, and (when traceTag is set)
-// logs TLS-connect duration and any stall between successive data events.
-esp_err_t httpEventHandler(esp_http_client_event_t* evt) {
-  auto* buf = static_cast<ResponseBuffer*>(evt->user_data);
-  if (!buf) return ESP_OK;
-
-  if (buf->traceTag) {
-    const uint32_t now = millis();
-    if (evt->event_id == HTTP_EVENT_ON_CONNECTED) {
-      // Snapshot right after the TLS handshake: this is where the mbedTLS arena
-      // (CA bundle parse + record buffers) has just been carved out of the heap,
-      // so it shows the post-handshake headroom the body read has to live in.
-      const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
-      SdDebugLog::log("KOSYNC", "%s TLS connected after %lums heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d",
-                      buf->traceTag, (unsigned long)(now - buf->requestStartMs), snap.heapFree, snap.largest8Bit,
-                      snap.internalFree, snap.internalLargest, (int)snap.rssi);
-      buf->lastEventMs = now;
-    } else if (evt->event_id == HTTP_EVENT_ON_DATA) {
-      const uint32_t gapMs = now - buf->lastEventMs;
-      if (gapMs > STALL_LOG_THRESHOLD_MS) {
-        const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
-        SdDebugLog::log("STALL", "%s gap=%lums bytes=%d heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d",
-                        buf->traceTag, (unsigned long)gapMs, buf->len, snap.heapFree, snap.largest8Bit,
-                        snap.internalFree, snap.internalLargest, (int)snap.rssi);
-      }
-      buf->lastEventMs = now;
-    }
-  }
-
-  if (evt->event_id == HTTP_EVENT_ON_DATA) {
-    if (buf->ensure(buf->len + evt->data_len + 1)) {
-      memcpy(buf->data + buf->len, evt->data, evt->data_len);
-      buf->len += evt->data_len;
-      buf->data[buf->len] = '\0';
-    } else {
-      LOG_ERR("KOSync", "Response buffer allocation failed (%d bytes)", evt->data_len);
-    }
-  }
-  return ESP_OK;
-}
-
-// --- Failed-allocation instrumentation (dev diagnostic, 2026-06-21) ---
-// The HTTPS handshake fast-fails (ESP_ERR_HTTP_CONNECT in ~64ms, no "TLS connected") when the
-// largest free block is ~31-32K but succeeds (~1589ms real handshake) at ~34K — implying ONE
-// large contiguous malloc in esp_tls/mbedtls setup is failing. The shipped prebuilt mbedtls is
-// already IN=8192/OUT=2048 asymmetric (record buffers ~10K total), so the ~33K culprit is NOT the
-// OUT content buffer and lib-building OUT=2048 would be pointless. This hook records the size of
-// the failing alloc so the real culprit can be identified BEFORE committing to a lib-builder
-// rebuild. The callback runs in the failing allocator's task context (esp_tls task here): it does
-// only scalar writes to DRAM statics — NO allocation, NO SD I/O — so it is reentrancy-safe. The
-// captured values are flushed to SD from endTrace (task context, safe).
-struct FailedAllocCapture {
-  volatile uint32_t count;
-  volatile uint32_t maxSize;
-  volatile uint32_t lastSize;
-  volatile uint32_t caps;
-};
-FailedAllocCapture s_failAlloc = {0, 0, 0, 0};
-
-void allocFailHook(size_t size, uint32_t caps, const char* /*function_name*/) {
-  s_failAlloc.count++;
-  s_failAlloc.lastSize = static_cast<uint32_t>(size);
-  if (size > s_failAlloc.maxSize) s_failAlloc.maxSize = static_cast<uint32_t>(size);
-  s_failAlloc.caps = caps;
-}
-
-// Register the global failed-alloc hook once. Only fires on a FAILED allocation, so the
-// steady-state overhead is zero. No public unregister API; left installed for the session.
-void ensureAllocHook() {
-  static bool registered = false;
-  if (registered) return;
-  if (heap_caps_register_failed_alloc_callback(allocFailHook) == ESP_OK) registered = true;
-}
-
-void resetFailAlloc() {
-  s_failAlloc.count = 0;
-  s_failAlloc.maxSize = 0;
-  s_failAlloc.lastSize = 0;
-  s_failAlloc.caps = 0;
-}
-
-// Flush the per-request failed-alloc capture. caps bit0=MALLOC_CAP_EXEC, and for our purpose
-// the key signal is maxSize: a single ~33K maxSize confirms one large contiguous alloc is the
-// wall (lib-builder DYNAMIC_BUFFER is then the lever); many small fails would mean fragmentation.
-void dumpFailAlloc(const char* tag) {
-  if (s_failAlloc.count == 0) return;
-  SdDebugLog::log("FAILALLOC", "%s fails=%u maxSize=%u lastSize=%u caps=0x%x", tag, (unsigned)s_failAlloc.count,
-                  (unsigned)s_failAlloc.maxSize, (unsigned)s_failAlloc.lastSize, (unsigned)s_failAlloc.caps);
-  LOG_ERR("KOSync", "%s: %u failed alloc(s), max=%u bytes - see FAILALLOC line", tag, (unsigned)s_failAlloc.count,
-          (unsigned)s_failAlloc.maxSize);
-}
-
-// Logs a pre-request heap+RSSI snapshot (see SdDebugLog::NetSnapshot) and arms
-// `buf` so httpEventHandler logs connect/stall events under the same tag.
-void beginTrace(ResponseBuffer& buf, const char* tag, size_t bodyLen = 0) {
-  ensureAllocHook();
-  resetFailAlloc();
-  buf.traceTag = tag;
-  buf.requestStartMs = millis();
-  buf.lastEventMs = buf.requestStartMs;
-  const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
-  SdDebugLog::log("KOSYNC", "%s req body=%u heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d", tag,
-                  (unsigned)bodyLen, snap.heapFree, snap.largest8Bit, snap.internalFree, snap.internalLargest,
-                  (int)snap.rssi);
-}
-
-// Logs the outcome + total elapsed time, in the same {bytes, elapsed, rate}
-// shape HttpDownloader's DONE line uses so GET/PUT traces read consistently.
-void endTrace(const ResponseBuffer& buf, const char* tag, int httpCode, esp_err_t err) {
-  // Include the esp_err name (ESP_ERR_HTTP_CONNECT vs a TLS/alloc error tells
-  // transport-fail from handshake-OOM apart) and a post-op heap snapshot taken
-  // after cleanup so a leak or non-reclaimed arena across a sync shows up.
-  const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
-  SdDebugLog::log("KOSYNC",
-                  "%s resp code=%d err=%d(%s) elapsed=%lums bytes=%d heap=%u largest8=%u intFree=%u intLargest=%u", tag,
-                  httpCode, (int)err, esp_err_to_name(err), (unsigned long)(millis() - buf.requestStartMs), buf.len,
-                  snap.heapFree, snap.largest8Bit, snap.internalFree, snap.internalLargest);
-  // If any allocation failed during this request (e.g. the esp_tls/mbedtls handshake setup that
-  // turns ESP_ERR_HTTP_CONNECT), emit its size so the ~33K contiguous wall can be pinned.
-  dumpFailAlloc(tag);
-}
-
 // --- Connection reuse (keep-alive) session ---
-// The ESP32-C3 cannot do rapid back-to-back NEW TLS connections to the same host:
-// LWIP TIME_WAIT / socket churn yields sock<0 and ~16s connect timeouts (the server
-// is fine — verified with 8 parallel curls at ~70ms each). Within a session, ONE
-// keep-alive connection is reused across every leg of a sync (set_url/set_method per
-// request), so there is a single TLS handshake instead of ~7 reconnects.
-esp_http_client_handle_t s_sessionClient = nullptr;
+// One reused SecureHttpClient across every leg of a sync, so a sync pays a single
+// wolfSSL handshake instead of one per leg — and avoids the ESP32-C3 rapid-
+// reconnect churn (LWIP TIME_WAIT / sock<0 / ~16s connect timeouts) that made a
+// PUT immediately after a GET fail. Non-null only between beginSession() and
+// endSession(); one-shot requests (no session) use a local client that sends
+// Connection: close and releases the socket cleanly after the request.
+//
+// wolfSSL (SecureNet) replaces the old mbedTLS/esp_http_client path: a handshake
+// to the Cloudflare 3-cert chain now fits in ~35-43 KB of *small* allocations
+// (SP-ECC, FP_MAX_BITS=8192) instead of needing ~55 KB free + two ~16 KB
+// contiguous record slabs. That dissolves the heap-gate machinery this file used
+// to carry (MIN_HEAP_FOR_TLS / contigOkForPut / failed-alloc probing): both a
+// cold handshake and back-to-back GET+PUT fit the post-WiFi heap now.
+std::unique_ptr<freeink::SecureHttpClient> s_sessionClient;
 bool s_sessionActive = false;
 
-void beginSession() {
-  s_sessionActive = true;  // the handle is lazily created on the first createClient()
-}
-
+void beginSession() { s_sessionActive = true; }  // client lazily created on first request
 void endSession() {
-  if (s_sessionClient) {
-    esp_http_client_cleanup(s_sessionClient);
-    s_sessionClient = nullptr;
-  }
+  s_sessionClient.reset();  // closes the kept-alive connection
   s_sessionActive = false;
 }
 
-// Cleanup unless this is the live session connection (freed once by endSession()).
-void releaseClient(esp_http_client_handle_t client) {
-  if (s_sessionActive && client == s_sessionClient) return;  // keep the connection alive
-  esp_http_client_cleanup(client);
+// SD trace: pre-request heap+RSSI snapshot under `tag` (mirrors HttpDownloader's
+// per-request trace). Returns the request start time for the paired resp line.
+uint32_t koTraceReq(const char* tag, size_t bodyLen) {
+  const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
+  SdDebugLog::log("KOSYNC", "%s req body=%u heap=%u largest8=%u intFree=%u rssi=%d", tag, (unsigned)bodyLen,
+                  snap.heapFree, snap.largest8Bit, snap.internalFree, (int)snap.rssi);
+  return millis();
+}
+void koTraceResp(const char* tag, int status, size_t bytes, uint32_t startMs) {
+  const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
+  SdDebugLog::log("KOSYNC", "%s resp code=%d elapsed=%lums bytes=%u heap=%u largest8=%u", tag, status,
+                  (unsigned long)(millis() - startMs), (unsigned)bytes, snap.heapFree, snap.largest8Bit);
 }
 
-// Create configured esp_http_client with small TLS buffers
-esp_http_client_handle_t createClient(const char* url, ResponseBuffer* buf,
-                                      esp_http_client_method_t method = HTTP_METHOD_GET) {
-  // Reuse the live session connection if one is established: just retarget it at the
-  // new URL/method/response-buffer. No new TCP/TLS handshake -> no reconnect churn.
-  if (s_sessionActive && s_sessionClient) {
-    if (esp_http_client_set_url(s_sessionClient, url) != ESP_OK ||
-        esp_http_client_set_method(s_sessionClient, method) != ESP_OK ||
-        esp_http_client_set_user_data(s_sessionClient, buf) != ESP_OK) {
-      LOG_ERR("KOSync", "Failed to retarget keep-alive client");
-      return nullptr;
+// Outcome of a KOSync request: HTTP status + response body.
+struct KoResponse {
+  int status = 0;            // HTTP status code; <=0 => transport failure (no response)
+  bool transportOk = false;  // true once a status line was read
+  std::string body;          // response body (capped at kMaxResponseBytes)
+};
+
+// Perform one KOSync request over wolfSSL (SecureHttpClient). `method` is
+// "GET"/"PUT"/"POST"; `body` is null for GET. Attaches the KOSync auth headers +
+// pinned-root CA, streams the response into a 64 KB-capped buffer, updates the
+// byte counters + lastHttpCode, and reuses the session connection when one is
+// active (otherwise a one-shot local client that closes after).
+KoResponse koPerform(const char* method, const std::string& url, const std::string* body, const char* tag) {
+  KoResponse r;
+  const NoWifiSleep noWifiSleep;
+  const uint32_t startMs = koTraceReq(tag, body ? body->size() : 0);
+
+  freeink::SecureHttpClient local;
+  freeink::SecureHttpClient* http = &local;
+  if (s_sessionActive) {
+    if (!s_sessionClient) {
+      s_sessionClient = makeUniqueNoThrow<freeink::SecureHttpClient>();
+      if (!s_sessionClient) {
+        LOG_ERR("KOSync", "%s: OOM allocating HTTP client", tag);
+        return r;
+      }
     }
-    // Clear per-request state from the previous leg so it can't leak forward
-    // (e.g. a PUT's body or Content-Type carrying into the next GET).
-    esp_http_client_set_post_field(s_sessionClient, nullptr, 0);
-    esp_http_client_delete_header(s_sessionClient, "Content-Type");
-    return s_sessionClient;
+    http = s_sessionClient.get();
   }
 
-  esp_http_client_config_t config = {};
-  config.url = url;
-  config.event_handler = httpEventHandler;
-  config.user_data = buf;
-  config.method = method;
-  config.timeout_ms = 10000;
-  // Keep-alive ONLY inside a session, where the held connection is genuinely reused
-  // across legs. For a one-shot request (no session: progress GET, bookmark GET/PUT)
-  // negotiating keep-alive makes the server hold the socket open; our immediate
-  // esp_http_client_cleanup() then leaves it lingering (TIME_WAIT / half-open), and the
-  // next one-shot connect() to the same host collides with it -> "Failed to open a new
-  // connection", sock<0, ~11s SYN timeout (the bookmark PUT regression). A one-shot with
-  // keep_alive disabled sends Connection: close and releases the socket cleanly.
-  config.keep_alive_enable = s_sessionActive;
-  config.buffer_size = HTTP_BUF_SIZE;
-  config.buffer_size_tx = HTTP_BUF_SIZE;
-  // Pin the sync-server roots instead of attaching the full ~16 KB Mozilla bundle.
-  // The bundle's contiguous handshake allocation was collapsing the largest free
-  // block to ~5 KB on the X4 and failing the bookmark PUT (EAGAIN / ssl_setup
-  // -0x7F00). See KOReaderSyncCA.h for the pinned roots and the trade-off.
-  config.cert_pem = KOSYNC_CA_ROOTS_PEM;
+  // Pin the sync-server roots (KOSYNC_CA_ROOTS_PEM) — certificate verification is
+  // preserved (not setInsecure). wolfSSL builds root->intermediate->leaf from the
+  // server-sent chain, matching the old mbedtls cert_pem posture.
+  http->setReuse(s_sessionActive);
+  http->setCACert(KOSYNC_CA_ROOTS_PEM);
+  http->setTimeout(10000);
+  http->setUserAgent(std::string(DEVICE_NAME) + "-ESP32");
+  // HTTP Basic Auth for Calibre-Web-Automated compatibility.
+  http->setBasicAuth(KOREADER_STORE.getUsername(), KOREADER_STORE.getPassword());
 
-  // HTTP Basic Auth for Calibre-Web-Automated compatibility
-  config.username = KOREADER_STORE.getUsername().c_str();
-  config.password = KOREADER_STORE.getPassword().c_str();
-  config.auth_type = HTTP_AUTH_TYPE_BASIC;
-
-  esp_http_client_handle_t client = esp_http_client_init(&config);
-  if (!client) return nullptr;
-
-  // KOSync auth headers
-  if (esp_http_client_set_header(client, "Accept", "application/vnd.koreader.v1+json") != ESP_OK ||
-      esp_http_client_set_header(client, "x-auth-user", KOREADER_STORE.getUsername().c_str()) != ESP_OK ||
-      esp_http_client_set_header(client, "x-auth-key", KOREADER_STORE.getMd5Password().c_str()) != ESP_OK) {
-    LOG_ERR("KOSync", "Failed to set auth headers");
-    esp_http_client_cleanup(client);
-    return nullptr;
+  if (!http->begin(url)) {
+    LOG_ERR("KOSync", "%s: malformed URL %s", tag, url.c_str());
+    koTraceResp(tag, -1, 0, startMs);
+    return r;
   }
+  // KOSync auth headers (re-added per request: begin() clears the header list).
+  http->addHeader("Accept", "application/vnd.koreader.v1+json");
+  http->addHeader("x-auth-user", KOREADER_STORE.getUsername());
+  http->addHeader("x-auth-key", KOREADER_STORE.getMd5Password());
+  if (body) http->addHeader("Content-Type", "application/json");
 
-  if (s_sessionActive) s_sessionClient = client;  // adopt as the reusable session connection
-  return client;
-}
-
-// Pre-flight the heap for an HTTP(S) request. HTTPS needs the full mbedTLS
-// handshake arena; plain HTTP needs only the small fixed buffers. Returns true if
-// there is enough free heap, otherwise logs and returns false. The caller maps
-// false to LOW_MEMORY. `url` carries the scheme (from getBaseUrl()).
-bool heapOkForUrl(const std::string& url, const char* tag) {
-  // In-session reuse: a live keep-alive client already holds the mbedTLS arena,
-  // so this request retargets it with NO new handshake and needs no fresh heap.
-  // The gate's 55KB threshold is for a cold handshake and would wrongly REJECT
-  // every leg after the first (the held arena leaves only ~24KB free).
-  if (s_sessionActive && s_sessionClient) {
-    LOG_DBG("KOSync", "%s: %s (reuse, gate bypassed)", tag, url.c_str());
+  // Cap the response at kMaxResponseBytes: the stats GET aggregates every device's
+  // blob, so the body scales with device count — reject a pathological response
+  // instead of growing the string unbounded (the old ResponseBuffer::ensure cap).
+  bool overCap = false;
+  const auto sink = [&r, &overCap](const uint8_t* data, size_t len) {
+    if (r.body.size() + len > static_cast<size_t>(kMaxResponseBytes)) {
+      overCap = true;
+      return false;
+    }
+    r.body.append(reinterpret_cast<const char*>(data), len);
     return true;
-  }
-  const bool https = url.rfind("https://", 0) == 0;
-  const uint32_t need = https ? MIN_HEAP_FOR_TLS : MIN_HEAP_FOR_HTTP;
-  const uint32_t freeHeap = ESP.getFreeHeap();
-  LOG_DBG("KOSync", "%s: %s (free=%u, need=%u, %s)", tag, url.c_str(), (unsigned)freeHeap, (unsigned)need,
-          https ? "https" : "http");
-  // Record the preflight decision to SD: an AUTH/PUT that fails here returns
-  // LOW_MEMORY *before* any TLS attempt, so the on-device error ("not enough
-  // memory") looks identical to a real handshake failure. This line disambiguates
-  // — REJECT means the gate blocked it, not the network.
-  {
-    const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
-    SdDebugLog::log("KOSYNC", "%s gate: free=%u need=%u %s largest8=%u intFree=%u intLargest=%u -> %s", tag,
-                    (unsigned)freeHeap, (unsigned)need, https ? "https" : "http", snap.largest8Bit, snap.internalFree,
-                    snap.internalLargest, (freeHeap < need) ? "REJECT" : "ok");
-  }
-  if (freeHeap < need) {
-    LOG_ERR("KOSync", "Insufficient heap: %u bytes free (need %u for %s)", freeHeap, need,
-            https ? "TLS handshake" : "HTTP");
-    return false;
-  }
-  return true;
-}
+  };
 
-// Body-aware contiguous backstop for an HTTPS PUT, evaluated AFTER the body is serialized
-// (so bodyLen and the real pre-handshake heap topology are known). Returns false ->
-// caller maps to LOW_MEMORY and skips, avoiding a guaranteed handshake fast-fail cascade.
-// Always emits a rich SD line — free_blocks + total_free vs largest expose whether a
-// SECOND large slab exists for out_buf, which the largest8 line alone cannot show.
-bool contigOkForPut(const std::string& url, const char* tag, size_t bodyLen) {
-  if (url.rfind("https://", 0) != 0) return true;  // plain HTTP: no mbedTLS arena
-  // In-session reuse: no fresh handshake -> the out_buf contiguous backstop
-  // (sized for a cold handshake) does not apply; the live arena is already up.
-  if (s_sessionActive && s_sessionClient) return true;
-  multi_heap_info_t info;
-  heap_caps_get_info(&info, MALLOC_CAP_8BIT);
-  const uint32_t need = TLS_PUT_CONTIG_BASE + static_cast<uint32_t>(bodyLen);
-  const bool ok = info.largest_free_block >= need;
-  SdDebugLog::log("KOSYNC", "%s contig: largest=%u total_free=%u free_blocks=%u min_free=%u body=%u need=%u -> %s", tag,
-                  (unsigned)info.largest_free_block, (unsigned)info.total_free_bytes, (unsigned)info.free_blocks,
-                  (unsigned)info.minimum_free_bytes, (unsigned)bodyLen, (unsigned)need, ok ? "ok" : "SKIP");
-  if (!ok)
-    LOG_ERR("KOSync", "%s: largest block %u < %u needed (body %u) - skip to avoid handshake cascade", tag,
-            (unsigned)info.largest_free_block, (unsigned)need, (unsigned)bodyLen);
-  return ok;
+  if (body) {
+    r.status = http->sendRequest(method, reinterpret_cast<const uint8_t*>(body->data()), body->size(), sink);
+  } else {
+    r.status = http->GET(sink);
+  }
+  r.transportOk = r.status > 0;
+  KOReaderSyncClient::lastHttpCode = r.transportOk ? r.status : 0;
+  if (overCap) LOG_ERR("KOSync", "%s: response exceeded %d bytes; rejected", tag, kMaxResponseBytes);
+
+  if (body) s_bytesUp += static_cast<uint32_t>(body->size());
+  s_bytesDown += static_cast<uint32_t>(r.body.size());
+  koTraceResp(tag, r.status, r.body.size(), startMs);
+  return r;
 }
 }  // namespace
 
@@ -448,26 +214,13 @@ KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
     return NO_CREDENTIALS;
   }
 
-  std::string url = KOREADER_STORE.getBaseUrl() + "/users/auth";
-  if (!heapOkForUrl(url, "AUTH")) return LOW_MEMORY;
+  const std::string url = KOREADER_STORE.getBaseUrl() + "/users/auth";
+  const KoResponse resp = koPerform("GET", url, nullptr, "AUTH");
+  LOG_DBG("KOSync", "Auth response: %d", resp.status);
 
-  const NoWifiSleep noWifiSleep;
-  ResponseBuffer buf;
-  beginTrace(buf, "AUTH");
-  esp_http_client_handle_t client = createClient(url.c_str(), &buf);
-  if (!client) return NETWORK_ERROR;
-
-  esp_err_t err = esp_http_client_perform(client);
-  const int httpCode = esp_http_client_get_status_code(client);
-  lastHttpCode = httpCode;
-  releaseClient(client);
-
-  endTrace(buf, "AUTH", httpCode, err);
-  LOG_DBG("KOSync", "Auth response: %d (err: %d)", httpCode, err);
-
-  if (err != ESP_OK) return NETWORK_ERROR;
-  if (httpCode == 200) return OK;
-  if (httpCode == 401) return AUTH_FAILED;
+  if (!resp.transportOk) return NETWORK_ERROR;
+  if (resp.status == 200) return OK;
+  if (resp.status == 401) return AUTH_FAILED;
   return SERVER_ERROR;
 }
 
@@ -488,34 +241,12 @@ KOReaderSyncClient::Error KOReaderSyncClient::createUser() {
     serializeJson(doc, body);
   }
 
-  if (!contigOkForPut(url, "CREATE_USER", body.length())) return LOW_MEMORY;
+  const KoResponse resp = koPerform("POST", url, &body, "CREATE_USER");
+  LOG_DBG("KOSync", "Create user response: %d", resp.status);
 
-  const NoWifiSleep noWifiSleep;
-  ResponseBuffer buf;
-  beginTrace(buf, "CREATE_USER", body.length());
-  esp_http_client_handle_t client = createClient(url.c_str(), &buf, HTTP_METHOD_POST);
-  if (!client) return NETWORK_ERROR;
-
-  if (esp_http_client_set_header(client, "Accept", "application/vnd.koreader.v1+json") != ESP_OK ||
-      esp_http_client_set_header(client, "Content-Type", "application/json") != ESP_OK ||
-      esp_http_client_set_post_field(client, body.c_str(), body.length()) != ESP_OK) {
-    LOG_ERR("KOSync", "Failed to set request body");
-    releaseClient(client);
-    return NETWORK_ERROR;
-  }
-
-  esp_err_t err = esp_http_client_perform(client);
-  const int httpCode = esp_http_client_get_status_code(client);
-  lastHttpCode = httpCode;
-  releaseClient(client);
-
-  s_bytesUp += static_cast<uint32_t>(body.length());
-  endTrace(buf, "CREATE_USER", httpCode, err);
-  LOG_DBG("KOSync", "Create user response: %d (err: %d)", httpCode, err);
-
-  if (err != ESP_OK) return NETWORK_ERROR;
-  if (httpCode == 200 || httpCode == 201) return OK;
-  if (httpCode == 402) return USER_EXISTS;
+  if (!resp.transportOk) return NETWORK_ERROR;
+  if (resp.status == 200 || resp.status == 201) return OK;
+  if (resp.status == 402) return USER_EXISTS;
   return SERVER_ERROR;
 }
 
@@ -527,29 +258,15 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
     return NO_CREDENTIALS;
   }
 
-  std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/progress/" + documentHash;
-  if (!heapOkForUrl(url, "PROGRESS_GET")) return LOW_MEMORY;
+  const std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/progress/" + documentHash;
+  const KoResponse resp = koPerform("GET", url, nullptr, "PROGRESS_GET");
+  LOG_DBG("KOSync", "Get progress response: %d", resp.status);
 
-  const NoWifiSleep noWifiSleep;
-  ResponseBuffer buf;
-  beginTrace(buf, "PROGRESS_GET");
-  esp_http_client_handle_t client = createClient(url.c_str(), &buf);
-  if (!client) return NETWORK_ERROR;
+  if (!resp.transportOk) return NETWORK_ERROR;
 
-  esp_err_t err = esp_http_client_perform(client);
-  const int httpCode = esp_http_client_get_status_code(client);
-  lastHttpCode = httpCode;
-  releaseClient(client);
-
-  s_bytesDown += static_cast<uint32_t>(buf.len);
-  endTrace(buf, "PROGRESS_GET", httpCode, err);
-  LOG_DBG("KOSync", "Get progress response: %d (err: %d)", httpCode, err);
-
-  if (err != ESP_OK) return NETWORK_ERROR;
-
-  if (httpCode == 200 && buf.data) {
+  if (resp.status == 200 && !resp.body.empty()) {
     JsonDocument doc;
-    const DeserializationError error = deserializeJson(doc, buf.data);
+    const DeserializationError error = deserializeJson(doc, resp.body.c_str());
 
     if (error) {
       LOG_ERR("KOSync", "JSON parse failed: %s", error.c_str());
@@ -585,8 +302,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
     return OK;
   }
 
-  if (httpCode == 401) return AUTH_FAILED;
-  if (httpCode == 404) return NOT_FOUND;
+  if (resp.status == 401) return AUTH_FAILED;
+  if (resp.status == 404) return NOT_FOUND;
   return SERVER_ERROR;
 }
 
@@ -597,12 +314,11 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
     return NO_CREDENTIALS;
   }
 
-  std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/progress";
-  if (!heapOkForUrl(url, "PROGRESS_PUT")) return LOW_MEMORY;
+  const std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/progress";
 
   // Build JSON body. Scope the JsonDocument so its elastic pool is freed before the
-  // TLS handshake — the mbedTLS arena needs two ~16KB *contiguous* buffers, and a live
-  // doc fragments the largest block below that, causing ESP_ERR_HTTP_CONNECT on PUT.
+  // request (keeps the transient heap tight; harmless with wolfSSL and matches the
+  // rest of the file).
   std::string body;
   {
     JsonDocument doc;
@@ -635,33 +351,12 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
 
   LOG_DBG("KOSync", "Request body: %s", body.c_str());
 
-  if (!contigOkForPut(url, "PROGRESS_PUT", body.length())) return LOW_MEMORY;
+  const KoResponse resp = koPerform("PUT", url, &body, "PROGRESS_PUT");
+  LOG_DBG("KOSync", "Update progress response: %d", resp.status);
 
-  const NoWifiSleep noWifiSleep;
-  ResponseBuffer buf;
-  beginTrace(buf, "PROGRESS_PUT", body.length());
-  esp_http_client_handle_t client = createClient(url.c_str(), &buf, HTTP_METHOD_PUT);
-  if (!client) return NETWORK_ERROR;
-
-  if (esp_http_client_set_header(client, "Content-Type", "application/json") != ESP_OK ||
-      esp_http_client_set_post_field(client, body.c_str(), body.length()) != ESP_OK) {
-    LOG_ERR("KOSync", "Failed to set request body");
-    releaseClient(client);
-    return NETWORK_ERROR;
-  }
-
-  esp_err_t err = esp_http_client_perform(client);
-  const int httpCode = esp_http_client_get_status_code(client);
-  lastHttpCode = httpCode;
-  releaseClient(client);
-
-  s_bytesUp += static_cast<uint32_t>(body.length());
-  endTrace(buf, "PROGRESS_PUT", httpCode, err);
-  LOG_DBG("KOSync", "Update progress response: %d (err: %d)", httpCode, err);
-
-  if (err != ESP_OK) return NETWORK_ERROR;
-  if (httpCode == 200 || httpCode == 202) return OK;
-  if (httpCode == 401) return AUTH_FAILED;
+  if (!resp.transportOk) return NETWORK_ERROR;
+  if (resp.status == 200 || resp.status == 202) return OK;
+  if (resp.status == 401) return AUTH_FAILED;
   return SERVER_ERROR;
 }
 
@@ -674,29 +369,15 @@ KOReaderSyncClient::Error KOReaderSyncClient::getBookmarks(const std::string& do
     return NO_CREDENTIALS;
   }
 
-  std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/bookmarks/" + documentHash;
-  if (!heapOkForUrl(url, "BOOKMARKS_GET")) return LOW_MEMORY;
+  const std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/bookmarks/" + documentHash;
+  const KoResponse resp = koPerform("GET", url, nullptr, "BOOKMARKS_GET");
+  LOG_DBG("KOSync", "Get bookmarks response: %d", resp.status);
 
-  const NoWifiSleep noWifiSleep;
-  ResponseBuffer buf;
-  beginTrace(buf, "BOOKMARKS_GET");
-  esp_http_client_handle_t client = createClient(url.c_str(), &buf);
-  if (!client) return NETWORK_ERROR;
+  if (!resp.transportOk) return NETWORK_ERROR;
 
-  esp_err_t err = esp_http_client_perform(client);
-  const int httpCode = esp_http_client_get_status_code(client);
-  lastHttpCode = httpCode;
-  releaseClient(client);
-
-  s_bytesDown += static_cast<uint32_t>(buf.len);
-  endTrace(buf, "BOOKMARKS_GET", httpCode, err);
-  LOG_DBG("KOSync", "Get bookmarks response: %d (err: %d)", httpCode, err);
-
-  if (err != ESP_OK) return NETWORK_ERROR;
-
-  if (httpCode == 200 && buf.data) {
+  if (resp.status == 200 && !resp.body.empty()) {
     JsonDocument doc;
-    const DeserializationError error = deserializeJson(doc, buf.data);
+    const DeserializationError error = deserializeJson(doc, resp.body.c_str());
     if (error) {
       LOG_ERR("KOSync", "JSON parse failed: %s", error.c_str());
       return JSON_ERROR;
@@ -711,8 +392,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::getBookmarks(const std::string& do
     return OK;
   }
 
-  if (httpCode == 401) return AUTH_FAILED;
-  if (httpCode == 404) return NOT_FOUND;
+  if (resp.status == 401) return AUTH_FAILED;
+  if (resp.status == 404) return NOT_FOUND;
   return SERVER_ERROR;
 }
 
@@ -724,29 +405,21 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
     return NO_CREDENTIALS;
   }
 
-  std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/bookmarks";
-  if (!heapOkForUrl(url, "BOOKMARKS_PUT")) return LOW_MEMORY;
+  const std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/bookmarks";
 
   // The bookmarks array is sent as a single pre-serialized JSON string field so the
   // server stores it as an opaque blob (it never parses bookmark contents).
-  // Scope the JsonDocument so its pool frees before the TLS handshake: the mbedTLS arena
-  // needs two ~16KB *contiguous* buffers, and a live doc (plus this multi-KB body) drops
-  // the largest free block below that, causing the back-to-back PUT to fail with
-  // ESP_ERR_HTTP_CONNECT (no handshake) — see updateProgress for the same pattern.
   std::string body;
   {
     JsonDocument doc;
     doc["document"] = documentHash;
     doc["bookmarks"] = bookmarksJson;
 
-    // Abort-safety: build the body in ONE pre-sized alloc instead of letting serializeJson
-    // grow `body` by doubling reallocs. measureJson() allocates nothing, so the exact body
-    // length is known; the largest-free-block check runs AFTER `doc` is built (its pool is
-    // already resident), so it reflects the contiguous heap the reserve() will actually need.
-    // On a reused session the mbedTLS arena has crushed the largest free block, so a doubling
-    // grow would abort() under -fno-exceptions; this converts that into a clean LOW_MEMORY skip
-    // (session closes after, heap recovers, retry works). Was the broken `2*blob` guard that
-    // ignored the live doc pool — HW crash 2026-06-22: blob=1984, abort on the 3841 realloc.
+    // Abort-safety (TLS-independent): build the body in ONE pre-sized alloc instead of
+    // letting serializeJson grow `body` by doubling reallocs. measureJson() allocates
+    // nothing, so the exact length is known; a fragmented heap that can't place the
+    // reserve would abort() under -fno-exceptions, so convert that into a clean
+    // LOW_MEMORY skip instead.
     const size_t bodyLen = measureJson(doc) + 1;
     multi_heap_info_t info;
     heap_caps_get_info(&info, MALLOC_CAP_8BIT);
@@ -761,52 +434,27 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
     serializeJson(doc, body);
   }
 
-  // The bookmark PUT is the last of several TLS handshakes in a sync, and on some devices the
-  // fresh handshake opened right after the bookmark GET's teardown fails to connect
-  // (ESP_ERR_HTTP_CONNECT) — a transient back-to-back reconnect issue, not a heap/auth fault.
-  // Retry the whole request a few times with a settle delay so the transport can recover. This
-  // matters because a dropped PUT means a local delete never reaches the server, so other
-  // devices never converge.
-  if (!contigOkForPut(url, "BOOKMARKS_PUT", body.length())) return LOW_MEMORY;
-
-  const NoWifiSleep noWifiSleep;  // keep the radio awake across all retry attempts
+  // A dropped bookmark PUT means a local delete never reaches the server, so other
+  // devices never converge. Retry the whole request a few times with a settle delay
+  // so a transient connect failure can recover.
   constexpr int kMaxAttempts = 3;
-  esp_err_t err = ESP_FAIL;
-  int httpCode = 0;
+  int status = 0;
+  bool transportOk = false;
   for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
     if (attempt > 0) {
       LOG_DBG("KOSync", "Retrying bookmark upload (attempt %d/%d)", attempt + 1, kMaxAttempts);
       vTaskDelay(pdMS_TO_TICKS(800));
     }
-
-    ResponseBuffer buf;
-    beginTrace(buf, "BOOKMARKS_PUT", body.length());
-    esp_http_client_handle_t client = createClient(url.c_str(), &buf, HTTP_METHOD_PUT);
-    if (!client) {
-      err = ESP_FAIL;
-      continue;
-    }
-    if (esp_http_client_set_header(client, "Content-Type", "application/json") != ESP_OK ||
-        esp_http_client_set_post_field(client, body.c_str(), body.length()) != ESP_OK) {
-      LOG_ERR("KOSync", "Failed to set request body");
-      releaseClient(client);
-      err = ESP_FAIL;
-      continue;
-    }
-
-    err = esp_http_client_perform(client);
-    httpCode = esp_http_client_get_status_code(client);
-    releaseClient(client);
-    endTrace(buf, "BOOKMARKS_PUT", httpCode, err);
-    LOG_DBG("KOSync", "Update bookmarks response: %d (err: %d, attempt %d)", httpCode, err, attempt + 1);
-
-    if (err == ESP_OK) break;  // got an HTTP response — no point retrying the transport
+    const KoResponse resp = koPerform("PUT", url, &body, "BOOKMARKS_PUT");
+    status = resp.status;
+    transportOk = resp.transportOk;
+    LOG_DBG("KOSync", "Update bookmarks response: %d (attempt %d)", status, attempt + 1);
+    if (transportOk) break;  // got an HTTP response — no point retrying the transport
   }
-  lastHttpCode = httpCode;
-  if (err == ESP_OK) s_bytesUp += static_cast<uint32_t>(body.length());
-  if (err != ESP_OK) return NETWORK_ERROR;
-  if (httpCode == 200 || httpCode == 202) return OK;
-  if (httpCode == 401) return AUTH_FAILED;
+
+  if (!transportOk) return NETWORK_ERROR;
+  if (status == 200 || status == 202) return OK;
+  if (status == 401) return AUTH_FAILED;
   return SERVER_ERROR;
 }
 
@@ -820,29 +468,15 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
     return NO_CREDENTIALS;
   }
 
-  std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/stats/" + documentHash;
-  if (!heapOkForUrl(url, "STATS_GET")) return LOW_MEMORY;
+  const std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/stats/" + documentHash;
+  const KoResponse resp = koPerform("GET", url, nullptr, "STATS_GET");
+  LOG_DBG("KOSync", "Get stats response: %d", resp.status);
 
-  const NoWifiSleep noWifiSleep;
-  ResponseBuffer buf;
-  beginTrace(buf, "STATS_GET");
-  esp_http_client_handle_t client = createClient(url.c_str(), &buf);
-  if (!client) return NETWORK_ERROR;
+  if (!resp.transportOk) return NETWORK_ERROR;
 
-  esp_err_t err = esp_http_client_perform(client);
-  const int httpCode = esp_http_client_get_status_code(client);
-  lastHttpCode = httpCode;
-  releaseClient(client);
-
-  s_bytesDown += static_cast<uint32_t>(buf.len);
-  endTrace(buf, "STATS_GET", httpCode, err);
-  LOG_DBG("KOSync", "Get stats response: %d (err: %d)", httpCode, err);
-
-  if (err != ESP_OK) return NETWORK_ERROR;
-
-  if (httpCode == 200 && buf.data) {
+  if (resp.status == 200 && !resp.body.empty()) {
     JsonDocument doc;
-    const DeserializationError error = deserializeJson(doc, buf.data);
+    const DeserializationError error = deserializeJson(doc, resp.body.c_str());
     if (error) {
       LOG_ERR("KOSync", "JSON parse failed: %s", error.c_str());
       return JSON_ERROR;
@@ -946,8 +580,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
     return OK;
   }
 
-  if (httpCode == 401) return AUTH_FAILED;
-  if (httpCode == 404) return NOT_FOUND;
+  if (resp.status == 401) return AUTH_FAILED;
+  if (resp.status == 404) return NOT_FOUND;
   return SERVER_ERROR;
 }
 
@@ -963,8 +597,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& doc
 
   statsServerTagBuf[0] = '\0';  // reset; refilled below if the server echoes a tag
 
-  std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/stats";
-  if (!heapOkForUrl(url, "STATS_PUT")) return LOW_MEMORY;
+  const std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/stats";
 
   // The per-device counters are sent as a pre-serialized JSON string field so the
   // server stores the blob verbatim under this device's hash field (other devices'
@@ -1004,7 +637,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& doc
 
   // Build the request body by hand instead of via a JsonDocument, which would add a
   // doubling-growth pool that *copies* statsBlob (a ~5.5KB base64 "dh" blob) — the
-  // unguarded throwing-new that aborted on the fragmented X3 heap. Manual concat needs
+  // unguarded throwing-new that aborted on a fragmented heap. Manual concat needs
   // one exact-sized reserve and no large transient.
   //
   // CRITICAL wire format: "stats" is a quoted JSON *string* field (the server stores the
@@ -1020,8 +653,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& doc
   // Fixed punctuation: {"document":"  ","device_id":"  ","stats":"  "} = 42 bytes.
   const size_t bodyLen = 42 + documentHash.size() + devLen + statsBlob.size() + statsEsc + 1;  // +1 NUL headroom
 
-  // Abort-safety: the reserve below is the only sizable alloc. Check contiguous heap
-  // first; starved -> clean LOW_MEMORY skip instead of throwing-new abort().
+  // Abort-safety (TLS-independent): the reserve below is the only sizable alloc. Check
+  // contiguous heap first; starved -> clean LOW_MEMORY skip instead of throwing-new abort().
   multi_heap_info_t info;
   heap_caps_get_info(&info, MALLOC_CAP_8BIT);
   if (info.largest_free_block < bodyLen) {
@@ -1045,49 +678,28 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& doc
     body += ch;
   }
   body += "\"}";
-  std::string().swap(statsBlob);  // free the base64 blob's heap before the handshake
+  std::string().swap(statsBlob);  // free the base64 blob's heap before the request
 
   LOG_DBG("KOSync", "Stats request body: %s", body.c_str());
 
-  if (!contigOkForPut(url, "STATS_PUT", body.length())) return LOW_MEMORY;
-
-  const NoWifiSleep noWifiSleep;
-  ResponseBuffer buf;
-  beginTrace(buf, "STATS_PUT", body.length());
-  esp_http_client_handle_t client = createClient(url.c_str(), &buf, HTTP_METHOD_PUT);
-  if (!client) return NETWORK_ERROR;
-
-  if (esp_http_client_set_header(client, "Content-Type", "application/json") != ESP_OK ||
-      esp_http_client_set_post_field(client, body.c_str(), body.length()) != ESP_OK) {
-    LOG_ERR("KOSync", "Failed to set request body");
-    releaseClient(client);
-    return NETWORK_ERROR;
-  }
-
-  esp_err_t err = esp_http_client_perform(client);
-  const int httpCode = esp_http_client_get_status_code(client);
-  lastHttpCode = httpCode;
-  releaseClient(client);
-
-  s_bytesUp += static_cast<uint32_t>(body.length());
-  endTrace(buf, "STATS_PUT", httpCode, err);
-  LOG_DBG("KOSync", "Update stats response: %d (err: %d)", httpCode, err);
+  const KoResponse resp = koPerform("PUT", url, &body, "STATS_PUT");
+  LOG_DBG("KOSync", "Update stats response: %d", resp.status);
 
   // No retry loop (unlike updateBookmarks): the counters are monotonic and re-sent
   // whole on every sync, so a dropped PUT self-heals next time — nothing diverges.
-  if (err != ESP_OK) return NETWORK_ERROR;
-  if (httpCode == 200 || httpCode == 202) {
+  if (!resp.transportOk) return NETWORK_ERROR;
+  if (resp.status == 200 || resp.status == 202) {
     // The stats-enabled server echoes a capability tag ("server":"stats-v1") in
     // its response; surface it so the UI can show which server build answered.
-    if (buf.data) {
+    if (!resp.body.empty()) {
       JsonDocument respDoc;
-      if (!deserializeJson(respDoc, buf.data) && respDoc["server"].is<const char*>()) {
+      if (!deserializeJson(respDoc, resp.body.c_str()) && respDoc["server"].is<const char*>()) {
         snprintf(statsServerTagBuf, sizeof(statsServerTagBuf), "%s", respDoc["server"].as<const char*>());
       }
     }
     return OK;
   }
-  if (httpCode == 401) return AUTH_FAILED;
+  if (resp.status == 401) return AUTH_FAILED;
   return SERVER_ERROR;
 }
 
