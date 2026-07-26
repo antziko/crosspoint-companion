@@ -36,7 +36,12 @@ namespace {
 //      probe failed on a fragmented heap under older firmware had the image
 //      dropped from the serialized layout (shown as its alt text); those .bin
 //      files must regenerate to re-probe the image with the reclaim in place.
-constexpr uint8_t SECTION_FILE_VERSION = 39;
+// v40: no structural change -- forces stale caches to rebuild so the lowered
+//      MIN_FREE_HEAP_FOR_CSS gate (48KB -> 16KB) takes effect. Chapters built at
+//      v39 while mid-build free heap grazed just under 48KB had resolveStyle()
+//      return an empty style, baking CSS-less layout (missing alignment/margins)
+//      into the .bin; those files must regenerate to re-apply local CSS.
+constexpr uint8_t SECTION_FILE_VERSION = 40;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects

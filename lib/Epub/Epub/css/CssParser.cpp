@@ -49,9 +49,18 @@ constexpr size_t MAX_RULES = 1500;
 // aborting on a failed `new` (X3, fragmented heap). See processRuleBlockWithStyle.
 constexpr size_t CSS_GROWTH_HEAP_MARGIN = 6 * 1024;
 
-// Minimum free heap required to apply CSS during rendering
-// If below this threshold, we skip CSS to avoid display artifacts.
-constexpr size_t MIN_FREE_HEAP_FOR_CSS = 48 * 1024;
+// Minimum free heap required to apply CSS during rendering.
+// resolveStyle() is allocation-light: CssStyle is a pure POD (enums + CssLength),
+// so applyOver() and every copy touch zero heap. The only transient allocations are
+// a couple of short (SSO-eligible) std::strings plus a small splitWhitespace() vector
+// when the element carries a class attribute -- well under 1KB in practice. This gate
+// exists solely to skip that work before a genuine OOM-abort of those small strings
+// (bare `new` aborts under -fno-exceptions), NOT as a general low-heap proxy. Sized at
+// 16KB: 8-30x the real transient, same spirit as CSS_GROWTH_HEAP_MARGIN above, and low
+// enough to clear normal chapter builds (mid-build free heap now sits ~41-48KB once
+// resident RAM -- ruby, SD-font mini-data, dictionaries -- is loaded). A higher gate
+// silently dropped ALL local CSS whenever a build grazed just under it.
+constexpr size_t MIN_FREE_HEAP_FOR_CSS = 16 * 1024;
 
 // Maximum length for a single selector string
 // Prevents parsing of extremely long or malformed selectors
