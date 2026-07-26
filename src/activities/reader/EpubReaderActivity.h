@@ -212,6 +212,16 @@ class EpubReaderActivity final : public Activity {
   // deserialization (TextBlock word vectors/strings) and glyph caching allocate
   // through throwing paths that abort() on OOM; skip deferrable work below it.
   static constexpr size_t RENDER_MIN_FREE_HEAP = 24 * 1024;
+  // Silent (background) next-chapter pre-index runs createSectionFile WITHOUT a
+  // FrameBufferLoan -- the on-screen reading page still owns the framebuffer, so
+  // this path's ZIP inflate window (a fixed 32 KB tinfl dictionary) must come
+  // from the fragmented heap instead of the lent 48 KB scratch. When the largest
+  // free block can't supply it the inflate init fails, thrashes 3 SD retries, and
+  // logs an error for a chapter that will build fine on open (with the loan
+  // active). Gate the optional pre-index on a largest-block floor above the 32 KB
+  // window so it skips cleanly rather than failing loudly. Pure optimization: a
+  // skipped pre-index just means the chapter lays out when the reader opens it.
+  static constexpr size_t SILENT_INDEX_MIN_MAX_ALLOC = 36 * 1024;
   // How many pages to keep laid out ahead of the reader for a still-building section. A page
   // turn is ~1s on e-ink and a page builds in ~30ms, so the reader can't out-click the builder
   // -- a tiny buffer is enough. The background build stops once the watermark is this far

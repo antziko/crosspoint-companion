@@ -2322,6 +2322,16 @@ void EpubReaderActivity::silentIndexNextChapterIfNeeded(const uint16_t viewportW
     return;
   }
 
+  // This path has no FrameBufferLoan (the reading page owns the framebuffer), so the
+  // chapter's ZIP inflate window rides the heap. Skip the pre-index when the largest
+  // free block can't fit the 32 KB window -- it would only fail init, retry 3x, and log
+  // an error for a chapter that builds fine on open with the loan available.
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < SILENT_INDEX_MIN_MAX_ALLOC) {
+    LOG_DBG("ERS", "Skipping silent index of chapter %d: heap too fragmented (largest=%u)", nextSpineIndex,
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    return;
+  }
+
   Section nextSection(epub, nextSpineIndex, renderer);
   if (nextSection.loadSectionFile(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
                                   SETTINGS.getReaderExtraParagraphSpacing(), SETTINGS.getReaderParagraphAlignment(),
