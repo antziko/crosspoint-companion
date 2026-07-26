@@ -1,5 +1,6 @@
 #include "KOReaderSyncActivity.h"
 
+#include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
@@ -162,6 +163,19 @@ void KOReaderSyncActivity::onWifiSelectionComplete(const bool success) {
   // re-reserves the window on a fresh heap — so it is never re-allocated here.
   InflateReader::releaseWindow();
   LOG_DBG("KOSync", "Released inflate window for TLS (heap: %u)", (unsigned)ESP.getFreeHeap());
+
+  // The renderer's FontCacheManager is a global that outlives EpubReaderActivity (whose
+  // onExit() clears neither), so an SD-card font's retained mini-data (#2611-E keep-if-fits)
+  // plus the FontDecompressor page slots stay resident straight into this sync. That few-KB
+  // creep is now enough to drop the post-WiFi heap under MIN_HEAP_FOR_TLS (55000) and reject
+  // the bookmark/progress TLS handshake. This activity never renders book text, and onExit()
+  // always reboots, so the cache is rebuilt fresh on the next reader open -- free it here for
+  // the handshake, symmetric with the inflate-window release above.
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    const uint32_t before = ESP.getFreeHeap();
+    fcm->clearCache();
+    LOG_DBG("KOSync", "Cleared font caches for TLS (heap: %u -> %u)", (unsigned)before, (unsigned)ESP.getFreeHeap());
+  }
 
   {
     RenderLock lock(*this);
