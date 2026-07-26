@@ -31,7 +31,12 @@ namespace {
 // v38: parser starts a fresh text block with the parent style when a block-level
 //      element closes, so bare text after it no longer inherits the closed block's
 //      alignment/margins (#2679).
-constexpr uint8_t SECTION_FILE_VERSION = 38;
+// v39: no structural change -- forces stale caches to rebuild so the build-time
+//      image-inflate heap reclaim takes effect. Chapters whose image dimension
+//      probe failed on a fragmented heap under older firmware had the image
+//      dropped from the serialized layout (shown as its alt text); those .bin
+//      files must regenerate to re-probe the image with the reclaim in place.
+constexpr uint8_t SECTION_FILE_VERSION = 39;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
