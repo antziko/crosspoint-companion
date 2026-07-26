@@ -100,8 +100,15 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   enum FONT_FAMILY { NOTOSERIF = 0, NOTOSANS = 1, FONT_FAMILY_COUNT };
   static constexpr uint8_t LEGACY_OPENDYSLEXIC = 2;
   static constexpr uint8_t BUILTIN_FONT_COUNT = FONT_FAMILY_COUNT;
-  // Font size options
+  // The reader font size is a point size (see fontPointSize), NOT an enum slot.
+  // This enum survives only for the dictionary/definition viewer font size
+  // (dictionaryFontSize), which still uses discrete Small/Medium/Large/XL slots.
   enum FONT_SIZE { SMALL = 0, MEDIUM = 1, LARGE = 2, EXTRA_LARGE = 3, FONT_SIZE_COUNT };
+  // Legacy 1.4-and-earlier files stored the reader size as a 0..3 SMALL/MEDIUM/
+  // LARGE/EXTRA_LARGE slot; fromJson()/ReaderSettingsIO fold that range up to the
+  // point size it meant (see LEGACY_FONT_SIZE_MAX).
+  static constexpr uint8_t LEGACY_FONT_SIZE_MAX = 3;
+  static constexpr uint8_t DEFAULT_FONT_POINT_SIZE = 14;
   enum LINE_COMPRESSION { TIGHT = 0, NORMAL = 1, WIDE = 2, LINE_COMPRESSION_COUNT };
   enum PARAGRAPH_ALIGNMENT {
     JUSTIFIED = 0,
@@ -195,7 +202,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   struct ReaderOverride {
     bool active = false;
     uint8_t fontFamily = NOTOSERIF;
-    uint8_t fontSize = MEDIUM;
+    // Per-book reader font size, an actual point size (matches CrossPointSettings::
+    // fontPointSize). Persisted per-book by ReaderSettingsIO, which folds the legacy
+    // 0..3 slot up on read.
+    uint8_t fontPointSize = DEFAULT_FONT_POINT_SIZE;
     uint8_t lineSpacing = NORMAL;
     uint8_t paragraphAlignment = JUSTIFIED;
     uint8_t hyphenationEnabled = 0;
@@ -278,7 +288,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t swapSideButtonsCW = 0;
   // Reader font settings
   uint8_t fontFamily = NOTOSERIF;
-  uint8_t fontSize = MEDIUM;
+  // Point size of the reader font. Only sizes the active family actually ships
+  // are selectable; SdCardFontSystem::ensureLoaded() snaps this to the nearest
+  // available size (and persists the snap) whenever the family changes.
+  uint8_t fontPointSize = DEFAULT_FONT_POINT_SIZE;
   uint8_t lineSpacing = NORMAL;
   uint8_t paragraphAlignment = JUSTIFIED;
   // Definition viewer font (built-in fonts only).
@@ -429,7 +442,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     return (shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP) ? 10 : 400;
   }
   int getReaderFontId() const;
-  // Font-size enum (SMALL..EXTRA_LARGE) honoring the per-book override when active.
+  // Reader font point size, honoring the per-book override when active.
   uint8_t getReaderFontSize() const;
   // SD-card font family name honoring the per-book override when active (empty
   // string means "use a built-in font"). Returned pointer is owned by settings.
@@ -444,6 +457,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   void setFontPinned(const char* key, bool pinned);
   int getLookupHistoryCapValue() const { return lookupHistoryCap; }
   bool isLookupHistoryUnlimited() const { return lookupHistoryCap >= HIST_CAP_UNLIMITED; }
+
+  // Drop the SD font selection and fall back to the built-in family. The reader
+  // point size comes back into BUILTIN_READER_POINT_SIZES with it, since that is
+  // the only set a built-in family ships — otherwise the settings UI would keep
+  // offering a size nothing renders at. Both fields are persisted in one write.
+  void clearSdFontFamily();
 
   // Per-book override control.
   void setReaderOverride(const ReaderOverride& ov);

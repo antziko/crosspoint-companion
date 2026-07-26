@@ -4,6 +4,7 @@
 #include <I18n.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <iterator>
 #include <string>
@@ -11,6 +12,7 @@
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "ReaderFontSizes.h"
 #include "SdCardFontSystem.h"
 #include "TextSettingsPreview.h"
 #include "components/UITheme.h"
@@ -22,10 +24,6 @@ constexpr StrId TAB_NAME_IDS[] = {StrId::STR_FONT, StrId::STR_SIZE, StrId::STR_L
 
 // LOCAL(feat-dictionary): Hold Confirm this long on a Font-tab row to pin/unpin (vs a tap = commit).
 constexpr unsigned long kPinHoldMs = 600;
-
-int findCurrentFontSizeIndex(uint8_t fontSize, size_t listSize) {
-  return fontSize < listSize ? fontSize : 1;  // default MEDIUM
-}
 
 constexpr StrId LINE_SPACING_IDS[] = {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_WIDE};
 constexpr StrId ALIGNMENT_IDS[] = {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, StrId::STR_CENTER, StrId::STR_ALIGN_RIGHT,
@@ -51,14 +49,8 @@ void TextSettingsActivity::onEnter() {
   // LOCAL(feat-dictionary): the shared compare pane owns the font list (built-in + SD, pinned-first).
   fontPane_.build(registry_, SETTINGS.fontFamily, SETTINGS.sdFontFamilyName);
 
-  sizes_.clear();
-  sizes_.reserve(CrossPointSettings::FONT_SIZE_COUNT);
-  sizes_.push_back({I18N.get(StrId::STR_SMALL), static_cast<uint8_t>(CrossPointSettings::SMALL)});
-  sizes_.push_back({I18N.get(StrId::STR_MEDIUM), static_cast<uint8_t>(CrossPointSettings::MEDIUM)});
-  sizes_.push_back({I18N.get(StrId::STR_LARGE), static_cast<uint8_t>(CrossPointSettings::LARGE)});
-  sizes_.push_back({I18N.get(StrId::STR_X_LARGE), static_cast<uint8_t>(CrossPointSettings::EXTRA_LARGE)});
+  rebuildSizeList();  // populates sizes_ and currentSizeIndex_ from the active family's point sizes
 
-  currentSizeIndex_ = findCurrentFontSizeIndex(SETTINGS.fontSize, sizes_.size());
   std::fill(std::begin(selectedIndex_), std::end(selectedIndex_), 1);  // default to the first list row
   // Family/Size open on the current selection.
   selectedIndex_[static_cast<int>(Tab::Family)] = fontPane_.highlightedIndex() + 1;
@@ -71,6 +63,31 @@ void TextSettingsActivity::onExit() {
   // LOCAL(feat-dictionary): restore the user's resident SD font if a Font-tab preview swapped it out.
   fontPane_.restore(renderer);
   Activity::onExit();
+}
+
+// The selectable sizes belong to the active family, so this runs on entry and
+// again after every family change. A family change goes through ensureLoaded(),
+// which snaps SETTINGS.fontPointSize into the new family's set — but entry does
+// not, so the highlight is resolved by snapping rather than by exact match.
+void TextSettingsActivity::rebuildSizeList() {
+  const std::vector<uint8_t> points = readerFontPointSizes(registry_, SETTINGS.sdFontFamilyName);
+
+  // The stored size can still sit outside this family's set — e.g. the family
+  // was deleted while selected, or the card was swapped. Highlight the size the
+  // reader actually renders, which getReaderFontId() resolves the same way.
+  const uint8_t selectedPt = snapToNearestPointSize(points, SETTINGS.fontPointSize);
+
+  sizes_.clear();
+  sizes_.reserve(points.size());
+  currentSizeIndex_ = 0;
+  for (const uint8_t pt : points) {
+    // "pt" is deliberately not translated: it is the typographic unit symbol,
+    // written the same way in every language CrossPoint ships.
+    char label[12];
+    snprintf(label, sizeof(label), "%u pt", pt);
+    if (pt == selectedPt) currentSizeIndex_ = static_cast<int>(sizes_.size());
+    sizes_.push_back({label, pt});
+  }
 }
 
 TextSettingsActivity::PaneGeometry TextSettingsActivity::paneGeometry() const {
@@ -269,6 +286,12 @@ void TextSettingsActivity::applyFamily() {
     return;
   }
   fontPane_.commitHighlighted();  // move the top (committed) pane onto the applied font
+
+  // The new family ships its own set of point sizes, and ensureLoaded() may have
+  // snapped the selection into it, so the Size tab's list and its nav position
+  // both have to be rebuilt.
+  rebuildSizeList();
+  selectedIndex_[static_cast<int>(Tab::Size)] = currentSizeIndex_ + 1;
 }
 
 void TextSettingsActivity::activateRow(int row) {
@@ -301,7 +324,7 @@ void TextSettingsActivity::applySize(int listIndex) {
   RenderLock lock;
 
   currentSizeIndex_ = listIndex;
-  SETTINGS.fontSize = sizes_[listIndex].settingIndex;
+  SETTINGS.fontPointSize = sizes_[listIndex].pointSize;
   sdFontSystem.ensureLoaded(renderer);
 }
 

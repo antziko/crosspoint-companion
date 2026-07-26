@@ -70,7 +70,7 @@ void TxtReaderActivity::onEnter() {
     if (!ReaderSettingsIO::load(txt->getCachePath(), bookOverride)) {
       bookOverride.active = true;
       bookOverride.fontFamily = SETTINGS.fontFamily;
-      bookOverride.fontSize = SETTINGS.fontSize;
+      bookOverride.fontPointSize = SETTINGS.fontPointSize;
       bookOverride.lineSpacing = SETTINGS.lineSpacing;
       bookOverride.paragraphAlignment = SETTINGS.paragraphAlignment;
       bookOverride.hyphenationEnabled = SETTINGS.hyphenationEnabled;

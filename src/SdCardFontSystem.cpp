@@ -3,17 +3,25 @@
 #include <GfxRenderer.h>
 #include <Logging.h>
 
+#include <iterator>
+
 #include "CrossPointSettings.h"
+#include "ReaderFontSizes.h"
 #include "fontIds.h"
 
 namespace {
 
-static uint8_t fontSizeEnumFromSettings() {
-  // Honor the per-book reader override when active (epub reading); falls back to
-  // the global size at boot and in non-epub readers.
-  uint8_t e = SETTINGS.getReaderFontSize();
-  if (e >= CrossPointSettings::FONT_SIZE_COUNT) e = 1;  // default to MEDIUM
-  return e;
+// Point the GLOBAL reader font size at a size the active family actually ships,
+// and persist it so the settings UI and the loaded font never disagree. Guarded
+// by the value-change check (a no-op snap must not write SPIFFS) AND by the
+// per-book override: while an override is active the loaded size is the override's,
+// so persisting it would corrupt the user's global size — skip in that case.
+void snapFontPointSizeTo(const uint8_t availablePointSize) {
+  if (availablePointSize == 0 || availablePointSize == SETTINGS.fontPointSize) return;
+  if (SETTINGS.getReaderOverride().active) return;
+  LOG_DBG("SDFS", "Font size %u unavailable, snapping to %u", SETTINGS.fontPointSize, availablePointSize);
+  SETTINGS.fontPointSize = availablePointSize;
+  SETTINGS.saveToFile();
 }
 
 // Built-in UI fonts and their physical point sizes (at 150 DPI, matching the
@@ -36,8 +44,8 @@ void SdCardFontSystem::begin(GfxRenderer& renderer) {
 
   // Register this system as the SD font ID resolver in settings.
   // Uses a static trampoline since CrossPointSettings stores a plain function pointer.
-  SETTINGS.sdFontIdResolver = [](void* ctx, const char* familyName, uint8_t fontSizeEnum) -> int {
-    return static_cast<SdCardFontSystem*>(ctx)->resolveFontId(familyName, fontSizeEnum);
+  SETTINGS.sdFontIdResolver = [](void* ctx, const char* familyName, uint8_t pointSize) -> int {
+    return static_cast<SdCardFontSystem*>(ctx)->resolveFontId(familyName, pointSize);
   };
   SETTINGS.sdFontResolverCtx = this;
 
@@ -45,18 +53,17 @@ void SdCardFontSystem::begin(GfxRenderer& renderer) {
   if (SETTINGS.sdFontFamilyName[0] != '\0') {
     const auto* family = registry_.findFamily(SETTINGS.sdFontFamilyName);
     if (family) {
-      if (manager_.loadFamily(*family, renderer, fontSizeEnumFromSettings())) {
+      if (manager_.loadFamily(*family, renderer, SETTINGS.fontPointSize)) {
+        snapFontPointSizeTo(manager_.currentPointSize());
         setupUiFallbacks(renderer);
         LOG_DBG("SDFS", "Loaded SD card font family: %s", SETTINGS.sdFontFamilyName);
       } else {
         LOG_ERR("SDFS", "Failed to load SD font family: %s (clearing)", SETTINGS.sdFontFamilyName);
-        SETTINGS.sdFontFamilyName[0] = '\0';
-        SETTINGS.saveToFile();
+        SETTINGS.clearSdFontFamily();
       }
     } else {
       LOG_DBG("SDFS", "SD font family not found on card: %s (clearing)", SETTINGS.sdFontFamilyName);
-      SETTINGS.sdFontFamilyName[0] = '\0';
-      SETTINGS.saveToFile();
+      SETTINGS.clearSdFontFamily();
     }
   }
 
@@ -74,10 +81,12 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
     registry_.discover();
   }
 
-  // Honor the per-book reader override's family when active; otherwise the global.
+  // Honor the per-book reader override's family AND size when active; otherwise the
+  // global. The manager loads exactly one size, so the loaded size must track the
+  // effective (override-aware) reader point size.
   const char* wantedFamily = SETTINGS.getReaderSdFontFamilyName();
+  const uint8_t wantedPointSize = SETTINGS.getReaderFontSize();
   const std::string& currentFamily = manager_.currentFamilyName();
-  const uint8_t sizeEnum = fontSizeEnumFromSettings();
 
   // On load failure we only clear the *global* selection; when a per-book override
   // font fails we leave settings untouched (render falls back to a built-in font)
@@ -85,8 +94,10 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
   const bool overrideActive = SETTINGS.getReaderOverride().active;
   const auto clearWantedFamily = [overrideActive]() {
     if (!overrideActive) {
-      SETTINGS.sdFontFamilyName[0] = '\0';
-      SETTINGS.saveToFile();  // persist the clear so a missing font isn't re-loaded next boot (#2519)
+      // Clears the global family, snaps the size back into the built-in set, and
+      // persists both — so a missing font isn't re-loaded next boot (#2519) and the
+      // size UI never offers a size nothing renders at.
+      SETTINGS.clearSdFontFamily();
     }
   };
 
@@ -94,6 +105,10 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
     if (!currentFamily.empty()) {
       manager_.unloadAll(renderer);
     }
+    // Back on a built-in family, which exists only at BUILTIN_READER_POINT_SIZES:
+    // a size inherited from an SD family has to come back into that set.
+    snapFontPointSizeTo(snapToNearestPointSize(BUILTIN_READER_POINT_SIZES, std::size(BUILTIN_READER_POINT_SIZES),
+                                               SETTINGS.fontPointSize));
     return;
   }
 
@@ -109,11 +124,14 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
       clearWantedFamily();
       return;
     }
-    const auto* selected = family->findClosestReaderSize(sizeEnum);
+    const auto* selected = family->findNearestSize(wantedPointSize);
     const uint8_t wantedPt = selected ? selected->pointSize : 0;
+    // Snap before the early return: the wanted size can already be loaded while
+    // the setting still names a size this family does not ship.
+    snapFontPointSizeTo(wantedPt);
     if (!registryWasDirty && wantedPt == manager_.currentPointSize()) return;
-    LOG_DBG("SDFS", "Reloading %s: size %u -> %u (enum %u)%s", wantedFamily, manager_.currentPointSize(), wantedPt,
-            sizeEnum, registryWasDirty ? " [registry dirty]" : "");
+    LOG_DBG("SDFS", "Reloading %s: size %u -> %u%s", wantedFamily, manager_.currentPointSize(), wantedPt,
+            registryWasDirty ? " [registry dirty]" : "");
   }
 
   if (!currentFamily.empty()) {
@@ -122,7 +140,8 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
 
   const auto* family = registry_.findFamily(wantedFamily);
   if (family) {
-    if (manager_.loadFamily(*family, renderer, sizeEnum)) {
+    if (manager_.loadFamily(*family, renderer, wantedPointSize)) {
+      snapFontPointSizeTo(manager_.currentPointSize());
       setupUiFallbacks(renderer);
       LOG_DBG("SDFS", "Loaded SD font family: %s", wantedFamily);
     } else {
@@ -171,14 +190,14 @@ void SdCardFontSystem::setupUiFallbacks(GfxRenderer& renderer) {
   }
 }
 
-int SdCardFontSystem::resolveFontId(const char* familyName, uint8_t /*fontSizeEnum*/) const {
-  // The manager loads exactly one size (closest to SETTINGS.fontSize), so the
-  // enum is implicit — always return the single loaded font ID for this family.
-  // ensureLoaded() must have been called with the current settings before this.
+int SdCardFontSystem::resolveFontId(const char* familyName, uint8_t /*pointSize*/) const {
+  // The manager holds exactly one reader-size font, already selected for
+  // SETTINGS.fontPointSize, so the size argument is implicit — always return
+  // that font's ID. ensureLoaded() must have run for the current settings first.
   return manager_.getFontId(familyName);
 }
 
-int SdCardFontSystem::loadFamilyForPreview(const char* familyName, uint8_t fontSizeEnum, GfxRenderer& renderer) {
+int SdCardFontSystem::loadFamilyForPreview(const char* familyName, uint8_t pointSize, GfxRenderer& renderer) {
   if (!familyName || !*familyName) return 0;
   // Already resident (e.g. it IS the current selection)? Reuse — no SD read.
   const int existing = manager_.getFontId(familyName);
@@ -190,7 +209,7 @@ int SdCardFontSystem::loadFamilyForPreview(const char* familyName, uint8_t fontS
     return 0;
   }
   manager_.unloadAll(renderer);  // one family resident at a time
-  if (!manager_.loadFamily(*family, renderer, fontSizeEnum)) {
+  if (!manager_.loadFamily(*family, renderer, pointSize)) {
     LOG_ERR("SDFS", "Preview load failed: %s", familyName);
     return 0;
   }

@@ -266,7 +266,7 @@ void EpubReaderActivity::onEnter() {
       // First open — snapshot the current global render defaults for this book.
       bookOverride.active = true;
       bookOverride.fontFamily = SETTINGS.fontFamily;
-      bookOverride.fontSize = SETTINGS.fontSize;
+      bookOverride.fontPointSize = SETTINGS.fontPointSize;
       bookOverride.lineSpacing = SETTINGS.lineSpacing;
       bookOverride.paragraphAlignment = SETTINGS.paragraphAlignment;
       bookOverride.hyphenationEnabled = SETTINGS.hyphenationEnabled;

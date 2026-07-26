@@ -4,12 +4,14 @@
 #include <I18n.h>
 #include <Logging.h>
 
+#include <cstdio>
 #include <cstring>
 #include <variant>
 
 #include "../settings/FontSelectionActivity.h"
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "ReaderFontSizes.h"
 #include "ReaderSettingsIO.h"
 #include "SdCardFontSystem.h"
 #include "components/UITheme.h"
@@ -120,9 +122,21 @@ void ReaderOptionsActivity::openFontFamilyPicker() {
 
 void ReaderOptionsActivity::cycleCurrentItem() {
   switch (selectedIndex) {
-    case FONT_SIZE:
-      localOverride.fontSize = (localOverride.fontSize + 1) % static_cast<uint8_t>(CrossPointSettings::FONT_SIZE_COUNT);
+    case FONT_SIZE: {
+      // Cycle through the point sizes the active (per-book) family actually ships.
+      // readerFontPointSizes() never returns empty, so the modulo is safe.
+      const std::vector<uint8_t> sizes = readerFontPointSizes(&sdFontSystem.registry(), localOverride.sdFontFamilyName);
+      const uint8_t current = snapToNearestPointSize(sizes, localOverride.fontPointSize);
+      int idx = 0;
+      for (int i = 0; i < static_cast<int>(sizes.size()); i++) {
+        if (sizes[i] == current) {
+          idx = i;
+          break;
+        }
+      }
+      localOverride.fontPointSize = sizes[(idx + 1) % sizes.size()];
       break;
+    }
     case LINE_SPACING:
       localOverride.lineSpacing =
           (localOverride.lineSpacing + 1) % static_cast<uint8_t>(CrossPointSettings::LINE_COMPRESSION_COUNT);
@@ -197,9 +211,11 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
       return I18N.get(labels[family]);
     }
     case FONT_SIZE: {
-      const StrId labels[] = {StrId::STR_SMALL, StrId::STR_MEDIUM, StrId::STR_LARGE, StrId::STR_X_LARGE};
-      const uint8_t sz = localOverride.fontSize < CrossPointSettings::FONT_SIZE_COUNT ? localOverride.fontSize : 0;
-      return I18N.get(labels[sz]);
+      // "pt" is the typographic unit symbol — deliberately not translated (matches
+      // the reader Text Settings size list).
+      char buf[12];
+      snprintf(buf, sizeof(buf), "%u pt", localOverride.fontPointSize);
+      return std::string(buf);
     }
     case LINE_SPACING: {
       const StrId labels[] = {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_WIDE};

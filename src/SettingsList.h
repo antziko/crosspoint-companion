@@ -9,13 +9,58 @@
 #include <algorithm>
 #include <cstring>
 #include <iterator>
+#include <string>
 #include <vector>
 
 #include "CrossPointSettings.h"
 #include "KOReaderCredentialStore.h"
+#include "ReaderFontSizes.h"
 #include "activities/settings/SettingsActivity.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryRegistry.h"
+
+// Build the font size setting dynamically: the options are the point sizes the
+// active family actually ships, so an SD family built at 10/12/14 offers three
+// sizes and a family built at 8..18 offers six. The selected point size persists
+// in SETTINGS.fontPointSize (saved/loaded manually in CrossPointSettings::toJson/
+// fromJson — the generic loop skips dynamic entries), while the ENUM contract
+// shared with the web UI stays index-based. Mirrors buildFontFamilySetting's
+// s.dyn getter/setter pattern.
+inline SettingInfo buildFontSizeSetting(const SdCardFontRegistry* registry) {
+  // Captured by copy: getSettingsList() returns by value and the lambdas outlive
+  // this call, so they must not reference the registry.
+  const std::vector<uint8_t> sizes = readerFontPointSizes(registry, SETTINGS.sdFontFamilyName);
+
+  // "pt" is deliberately not translated — see the matching note in
+  // TextSettingsActivity::rebuildSizeList().
+  std::vector<std::string> labels;
+  labels.reserve(sizes.size());
+  for (const uint8_t pt : sizes) {
+    labels.push_back(std::to_string(pt) + " pt");
+  }
+
+  SettingInfo s;
+  s.nameId = StrId::STR_FONT_SIZE;
+  s.type = SettingType::ENUM;
+  s.enumStringValues = std::move(labels);
+  s.key = "fontSize";
+  s.category = StrId::STR_CAT_READER;
+  s.inTextSettings = true;  // matches the static font-size entry it replaces
+
+  s.dyn = std::make_shared<SettingInfo::DynamicAccessors>();
+  s.dyn->valueGetter = [sizes]() -> uint8_t {
+    const uint8_t pt = snapToNearestPointSize(sizes, SETTINGS.fontPointSize);
+    for (int i = 0; i < static_cast<int>(sizes.size()); i++) {
+      if (sizes[i] == pt) return static_cast<uint8_t>(i);
+    }
+    return 0;
+  };
+  s.dyn->valueSetter = [sizes](uint8_t v) {
+    if (v < sizes.size()) SETTINGS.fontPointSize = sizes[v];
+  };
+
+  return s;
+}
 
 // Build the font family setting dynamically. When registry is non-null, SD card fonts
 // are appended after the built-in fonts. Otherwise only built-in fonts are listed.
@@ -210,10 +255,11 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   v.push_back(SettingInfo::Enum(StrId::STR_FONT_FAMILY, &CrossPointSettings::fontFamily,
                                 {StrId::STR_NOTO_SERIF, StrId::STR_NOTO_SANS}, "fontFamily", StrId::STR_CAT_READER)
                   .withTextSettings());
-  v.push_back(SettingInfo::Enum(StrId::STR_FONT_SIZE, &CrossPointSettings::fontSize,
-                                {StrId::STR_SMALL, StrId::STR_MEDIUM, StrId::STR_LARGE, StrId::STR_X_LARGE}, "fontSize",
-                                StrId::STR_CAT_READER)
-                  .withTextSettings());
+  // Placeholder: the selectable sizes depend on the active font family, so this
+  // entry is always replaced by buildFontSizeSetting() below. It only fixes the
+  // setting's position in the Reader category.
+  v.push_back(
+      SettingInfo::Enum(StrId::STR_FONT_SIZE, nullptr, {}, "fontSize", StrId::STR_CAT_READER).withTextSettings());
   v.push_back(SettingInfo::Enum(StrId::STR_DICT_FONT_FAMILY, &CrossPointSettings::dictionaryFontFamily,
                                 {StrId::STR_NOTO_SERIF, StrId::STR_NOTO_SANS}, "dictionaryFontFamily",
                                 StrId::STR_READER_DICTIONARY));
@@ -484,6 +530,14 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
     auto it = std::find_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_FONT_FAMILY; });
     if (it != v.end()) {
       *it = buildFontFamilySetting(registry);
+    }
+  }
+  {
+    // Unconditional: even with no SD fonts installed the sizes come from the
+    // built-in family rather than a fixed Small/Medium/Large/XL enum.
+    auto it = std::find_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_FONT_SIZE; });
+    if (it != v.end()) {
+      *it = buildFontSizeSetting(registry);
     }
   }
 

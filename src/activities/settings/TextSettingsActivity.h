@@ -39,6 +39,9 @@ class TextSettingsActivity final : public Activity {
   // LOCAL(feat-dictionary): Family tab applies the compare pane's highlighted font live.
   void applyFamily();
   void applySize(int listIndex);
+  // Repopulates sizes_ (and currentSizeIndex_) from the active family's
+  // installed point sizes. Call after any family change.
+  void rebuildSizeList();
   void confirmLayoutRow(int row);
   void confirmStyleRow(int row);
   // Applies the row at the given list index for the active tab (Confirm shares this).
@@ -66,8 +69,8 @@ class TextSettingsActivity final : public Activity {
   int selectedIndex() const;
 
   struct SizeEntry {
-    std::string name;
-    uint8_t settingIndex;
+    std::string name;  // the point size, rendered for display ("14 pt")
+    uint8_t pointSize;
   };
 
   const SdCardFontRegistry* registry_;
