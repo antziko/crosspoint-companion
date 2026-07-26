@@ -5,34 +5,34 @@
 #include <Memory.h>
 #include <SdDebugLog.h>
 #include <base64.h>
+#include <esp_wifi.h>
+
+#include <cstdarg>
+#include <functional>
+#include <string>
+
+#if defined(FREEINK_NET_WOLFSSL)
+#include <SecureHttpClient.h>
+// wolfSSL_Arduino_Serial_Print is defined once in src/network/WolfsslArduinoShim.cpp
+// (linking it here too would duplicate the symbol).
+#else
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
 #include <esp_log.h>
 #include <esp_tls.h>
-#include <esp_wifi.h>
+#include <strings.h>  // strcasecmp (case-insensitive Location header match)
 
 #include <cctype>   // tolower
-#include <cstdarg>
 #include <cstdlib>  // atoi
 #include <cstring>
-#include <strings.h>  // strcasecmp (case-insensitive Location header match)
-#include <functional>
-#include <string>
+#endif
 
 namespace {
-// RX holds the response headers. 4096 fits real OPDS servers; GitHub's release
-// CDN sends more and logs HTTP_HEADER "Buffer length is small", but that's
-// non-fatal: the headers we read (Location, Content-Length) come first and
-// survive. Smaller keeps contiguous heap free while WiFi and TLS are up. TX
-// only carries our GET; the body streams in READ_CHUNK pieces.
-constexpr int HTTP_RX_BUF = 4096;
-constexpr int HTTP_TX_BUF = 1024;
 // Per-socket-op timeout. Some OPDS download endpoints are slow to send headers
 // (>15s) and chunked catalogs stall mid-body, so 15s killed them. 60s gives
-// slow servers room. esp_http_client's timeout_ms is uint32, so unlike Arduino
-// HTTPClient's uint16 setTimeout it doesn't silently truncate.
+// slow servers room.
 constexpr int HTTP_TIMEOUT_MS = 60000;
-constexpr size_t READ_CHUNK = 2048;
+constexpr int MAX_REDIRECTS = 5;
 
 // X3 HTTPS troubleshooting instrumentation (SdDebugLog "STALL"/"XFER"): a
 // per-chunk read taking longer than this is logged with a heap+RSSI snapshot —
@@ -42,7 +42,7 @@ constexpr size_t READ_CHUNK = 2048;
 constexpr uint32_t STALL_LOG_THRESHOLD_MS = 1000;
 // Periodic transfer-progress summary cadence. Coarse on purpose: each
 // SdDebugLog::log() does two SD opens + a mutex lock, so logging every
-// 2KB chunk would itself perturb the transfer being measured.
+// chunk would itself perturb the transfer being measured.
 constexpr size_t XFER_LOG_BYTES = 32 * 1024;
 
 struct Sink {
@@ -72,6 +72,192 @@ void setDetail(std::string* out, const char* fmt, ...) {
 bool isRedirect(int status) {
   return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
 }
+
+// Disable WiFi modem power-save for the duration of a transfer, then restore the
+// default. At the default WIFI_PS_MIN_MODEM the radio sleeps between DTIM beacons;
+// on a marginal link (observed on the X3, fine on the X4 at the same AP) that
+// stalls the TCP window and makes a <1MB feed take minutes, with wild run-to-run
+// variance. RAII so every early return in runGet restores power-save. Costs extra
+// radio power only while a transfer is in flight.
+struct NoWifiSleep {
+  NoWifiSleep() { esp_wifi_set_ps(WIFI_PS_NONE); }
+  ~NoWifiSleep() { esp_wifi_set_ps(WIFI_PS_MIN_MODEM); }
+};
+
+#if defined(FREEINK_NET_WOLFSSL)
+// ---------------------------------------------------------------------------
+// wolfSSL (SecureHttpClient) path — the active TLS stack for app HTTPS.
+// ---------------------------------------------------------------------------
+// Streams a GET body through sink.write. wolfSSL (TLS 1.3, SP-ECC) fits a
+// handshake in ~35-43KB of small allocations, so the mbedTLS arena-fragmentation
+// workarounds the esp_http_client path needed (raw-esp-tls redirect resolve,
+// per-host CA splitting, deferred read-buffer alloc) are unnecessary here. A
+// fresh client per redirect hop keeps state simple; the caller's pinned roots
+// verify every hop.
+//
+// caPemOverride/caPemRedirect: when either is set (font downloads), the roots are
+// concatenated into ONE PEM buffer and pinned via setCACert — wolfSSL loads every
+// PEM block in the buffer as a trust anchor, so the origin hop and the CDN redirect
+// hop each verify against whichever root matches. With no arena wall there is no
+// reason to split them per host any more. When neither is set (OPDS/KOSync/OTA),
+// wolfSSL has no CA bundle wired up, so the request runs unverified (setInsecure) —
+// OPDS targets are arbitrary user-configured hosts with no single root to pin.
+HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::string& username,
+                                     const std::string& password, Sink& sink, const char* caPemOverride = nullptr,
+                                     const char* caPemRedirect = nullptr) {
+  // Hold WiFi out of modem-sleep for the whole transfer (see NoWifiSleep).
+  const NoWifiSleep noWifiSleep;
+
+  // Concatenate any pinned roots ONCE, at function scope: setCACert stores the
+  // pointer and wolfSSL_CTX_load_verify_buffer reads it at connect() time on
+  // every hop, so the buffer must outlive the redirect loop below.
+  std::string caBuf;
+  if (caPemOverride) caBuf += caPemOverride;
+  if (caPemRedirect) caBuf += caPemRedirect;
+  const bool pinRoots = !caBuf.empty();
+
+  {
+    const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
+    SdDebugLog::log("HTTP", "GET start: heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d url=%s", s.heapFree,
+                    s.largest8Bit, s.internalFree, s.internalLargest, (int)s.rssi, startUrl.c_str());
+  }
+
+  std::string url = startUrl;
+  for (int hop = 0; hop <= MAX_REDIRECTS; ++hop) {
+    freeink::SecureHttpClient http;
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    if (pinRoots) {
+      http.setCACert(caBuf.c_str());
+    } else {
+      http.setInsecure();
+    }
+    if (!http.begin(url)) {
+      LOG_ERR("HTTP", "wolfSSL bad URL: %s", url.c_str());
+      setDetail(sink.detail, "bad URL");
+      return HttpDownloader::HTTP_ERROR;
+    }
+    // setUserAgent replaces SecureHttpClient's built-in UA; addHeader would append
+    // a second User-Agent header, which strict servers reject.
+    http.setUserAgent("CrossPoint-ESP32-" CROSSPOINT_VERSION);
+    if (!username.empty() && !password.empty()) http.setBasicAuth(username, password);
+
+    const uint32_t openStartMs = millis();
+    uint32_t transferStartMs = openStartMs;
+    uint32_t lastChunkMs = openStartMs;
+    size_t lastXferLogBytes = 0;
+    bool loggedConnect = false;
+
+    LOG_DBG("HTTP", "wolfSSL GET: %s", url.c_str());
+    const int status = http.GET(
+        [&](const uint8_t* data, size_t len) {
+          // Header parsing is done by the time the first body chunk arrives; skip
+          // any body on a non-200 (a 30x body is drained by the caller loop below).
+          if (http.getStatus() != 200) return true;
+          if (!loggedConnect) {
+            loggedConnect = true;
+            transferStartMs = millis();
+            lastChunkMs = transferStartMs;
+            if (sink.total == 0 && http.hasContentLength()) sink.total = http.getContentLength();
+            const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
+            SdDebugLog::log("CONNECT",
+                            "handshake=%lums heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d total=%zu url=%s",
+                            (unsigned long)(transferStartMs - openStartMs), snap.heapFree, snap.largest8Bit,
+                            snap.internalFree, snap.internalLargest, (int)snap.rssi, sink.total, url.c_str());
+          }
+
+          // Flag any single read that blocked unusually long (network stall, not SD).
+          const uint32_t now = millis();
+          const uint32_t gapMs = now - lastChunkMs;
+          lastChunkMs = now;
+          if (gapMs > STALL_LOG_THRESHOLD_MS) {
+            const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
+            SdDebugLog::log("STALL", "gap=%lums bytes=%zu heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d",
+                            (unsigned long)gapMs, sink.downloaded, snap.heapFree, snap.largest8Bit, snap.internalFree,
+                            snap.internalLargest, (int)snap.rssi);
+          }
+
+          if (!sink.write(data, len)) return false;  // caller abort (e.g. SD write failed)
+          sink.downloaded += len;
+          // Report progress even when total is unknown (chunked / no Content-Length):
+          // callers can show a byte count instead of a percentage bar.
+          if (sink.progress) sink.progress(sink.downloaded, sink.total);
+
+          if (sink.downloaded - lastXferLogBytes >= XFER_LOG_BYTES) {
+            lastXferLogBytes = sink.downloaded;
+            const uint32_t elapsedMs = now - transferStartMs;
+            const unsigned bytesPerSec = elapsedMs > 0 ? (unsigned)(sink.downloaded * 1000UL / elapsedMs) : 0;
+            SdDebugLog::log("XFER", "bytes=%zu elapsed=%lums rate=%uB/s heap=%u", sink.downloaded,
+                            (unsigned long)elapsedMs, bytesPerSec, (unsigned)ESP.getFreeHeap());
+          }
+          return true;
+        },
+        [&sink]() { return sink.cancelFlag && *sink.cancelFlag; });
+
+    if (http.aborted()) return HttpDownloader::ABORTED;
+    if (status < 0) {
+      const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
+      LOG_ERR("HTTP", "wolfSSL request failed: %s", url.c_str());
+      SdDebugLog::log("HTTP", "wolfSSL request failed after %lums heap=%u largest8=%u url=%s",
+                      (unsigned long)(millis() - openStartMs), s.heapFree, s.largest8Bit, url.c_str());
+      setDetail(sink.detail, "connect/read failed");
+      return HttpDownloader::HTTP_ERROR;
+    }
+    if (isRedirect(status)) {
+      const std::string location = http.getHeader("location");
+      if (location.empty() || !freeink::SecureHttpClient::resolveUrl(url, location, url)) {
+        LOG_ERR("HTTP", "wolfSSL bad redirect: %d", status);
+        setDetail(sink.detail, "redirect %d: no Location", status);
+        return HttpDownloader::HTTP_ERROR;
+      }
+      SdDebugLog::log("HTTP", "redirect %d -> %s", status, url.c_str());
+      continue;
+    }
+    if (status != 200) {
+      LOG_ERR("HTTP", "wolfSSL unexpected status: %d", status);
+      SdDebugLog::log("HTTP", "unexpected status: %d", status);
+      setDetail(sink.detail, "HTTP %d", status);
+      return HttpDownloader::HTTP_ERROR;
+    }
+    // A false sink.write return set _callbackAborted; surface it as the SD/parser error.
+    if (http.callbackAborted()) {
+      SdDebugLog::log("HTTP", "sink write failed after %zu bytes, heap=%u", sink.downloaded,
+                      (unsigned)ESP.getFreeHeap());
+      setDetail(sink.detail, "SD write failed after %zu bytes", sink.downloaded);
+      return HttpDownloader::FILE_ERROR;
+    }
+    if (!http.responseComplete()) {
+      const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
+      LOG_ERR("HTTP", "wolfSSL incomplete: got %zu of %zu bytes", sink.downloaded, sink.total);
+      SdDebugLog::log("HTTP", "incomplete: got %zu of %zu bytes heap=%u largest8=%u", sink.downloaded, sink.total,
+                      s.heapFree, s.largest8Bit);
+      setDetail(sink.detail, "incomplete: %zu/%zu bytes", sink.downloaded, sink.total);
+      return HttpDownloader::HTTP_ERROR;
+    }
+    {
+      const uint32_t totalElapsedMs = millis() - transferStartMs;
+      const unsigned bytesPerSec = totalElapsedMs > 0 ? (unsigned)(sink.downloaded * 1000UL / totalElapsedMs) : 0;
+      SdDebugLog::log("DONE", "bytes=%zu elapsed=%lums rate=%uB/s", sink.downloaded, (unsigned long)totalElapsedMs,
+                      bytesPerSec);
+    }
+    return HttpDownloader::OK;
+  }
+  LOG_ERR("HTTP", "too many redirects");
+  setDetail(sink.detail, "too many redirects");
+  return HttpDownloader::HTTP_ERROR;
+}
+
+#else   // !FREEINK_NET_WOLFSSL
+// ---------------------------------------------------------------------------
+// esp_http_client / mbedTLS path — retained fallback for FREEINK_NET_WOLFSSL=0.
+// ---------------------------------------------------------------------------
+// RX holds the response headers. 4096 fits real OPDS servers; GitHub's release
+// CDN sends more and logs HTTP_HEADER "Buffer length is small", but that's
+// non-fatal: the headers we read (Location, Content-Length) come first and
+// survive. Smaller keeps contiguous heap free while WiFi and TLS are up. TX
+// only carries our GET; the body streams in READ_CHUNK pieces.
+constexpr int HTTP_RX_BUF = 4096;
+constexpr int HTTP_TX_BUF = 1024;
+constexpr size_t READ_CHUNK = 2048;
 
 // Capture the redirect Location header into a caller-owned std::string (config.user_data)
 // as fetch_headers parses it. Used only by the font per-host-CA path so it can tear the
@@ -242,19 +428,6 @@ HttpDownloader::DownloadError resolveRedirectViaTls(const std::string& url, cons
   outStatus = sp ? atoi(sp + 1) : 0;
   return HttpDownloader::OK;
 }
-
-// Disable WiFi modem power-save for the duration of a transfer, then restore the
-// default. At the default WIFI_PS_MIN_MODEM the radio sleeps between DTIM beacons;
-// on a marginal link (observed on the X3, fine on the X4 at the same AP) that
-// stalls the TCP window and makes a <1MB feed take minutes, with wild run-to-run
-// variance. OtaUpdater already does this around esp_https_ota (OtaUpdater.cpp:141);
-// OPDS fetch/download went through the default and paid for it. RAII so every
-// early return in runGet restores power-save. Costs extra radio power only while
-// a transfer is in flight.
-struct NoWifiSleep {
-  NoWifiSleep() { esp_wifi_set_ps(WIFI_PS_NONE); }
-  ~NoWifiSleep() { esp_wifi_set_ps(WIFI_PS_MIN_MODEM); }
-};
 
 // Streams a GET body through sink.write in READ_CHUNK pieces. Uses the manual
 // open/fetch_headers/read path rather than esp_http_client_perform(): perform()
@@ -457,7 +630,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
         openHop(url, caPemOverride, caPemOverride ? 2048 : HTTP_RX_BUF, caPemOverride ? 512 : HTTP_TX_BUF, client,
                 status, contentLength, nullptr);
     if (e != HttpDownloader::OK) return e;
-    for (int hop = 0; isRedirect(status) && hop < 5; ++hop) {
+    for (int hop = 0; isRedirect(status) && hop < MAX_REDIRECTS; ++hop) {
       if (esp_http_client_set_redirection(client) != ESP_OK) break;
       const esp_err_t err = esp_http_client_open(client, 0);
       if (err != ESP_OK) {
@@ -594,6 +767,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   }
   return HttpDownloader::OK;
 }
+#endif  // FREEINK_NET_WOLFSSL
 }  // namespace
 
 bool HttpDownloader::fetchUrl(const std::string& url, Stream& outContent, const std::string& username,
