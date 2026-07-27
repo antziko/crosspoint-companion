@@ -54,6 +54,10 @@ constexpr size_t kStatsFcMaxBytes = 6144;
 // with device count; cap the unbounded realloc so a pathological response fails
 // clean instead of exhausting the heap. 64 KB covers the realistic device range.
 constexpr int kMaxResponseBytes = 64 * 1024;
+// Contiguous-heap headroom kept free while the response string grows. The append
+// happens with the TLS connection live (wolfSSL record buffers resident), so leave
+// room rather than consuming the very last block.
+constexpr size_t kResponseHeapMargin = 8 * 1024;
 }  // namespace
 
 const char* KOReaderSyncClient::deviceId() {
@@ -176,14 +180,52 @@ KoResponse koPerform(const char* method, const std::string& url, const std::stri
   http->addHeader("x-auth-key", KOREADER_STORE.getMd5Password());
   if (body) http->addHeader("Content-Type", "application/json");
 
-  // Cap the response at kMaxResponseBytes: the stats GET aggregates every device's
-  // blob, so the body scales with device count — reject a pathological response
-  // instead of growing the string unbounded (the old ResponseBuffer::ensure cap).
+  // Response sink with two guards. The stats GET aggregates every device's blob, so
+  // the body scales with device count:
+  //  - overCap: reject once past kMaxResponseBytes (the old ResponseBuffer cap).
+  //  - lowHeap: std::string::append reallocates through the throwing global
+  //    operator new, which under -fno-exceptions calls abort() (reboot) when the
+  //    grown capacity has no contiguous block — exactly the STATS_GET crash the
+  //    removed heapOkForUrl gate used to prevent. Reserve once to Content-Length
+  //    when known (a single alloc, no doubling), and refuse any growth the heap
+  //    can't supply — a clean transport abort (getStats -> NETWORK_ERROR, the leg
+  //    is skipped) instead of a crash.
   bool overCap = false;
-  const auto sink = [&r, &overCap](const uint8_t* data, size_t len) {
+  bool lowHeap = false;
+  bool reserved = false;
+  const auto sink = [&r, &overCap, &lowHeap, &reserved, http](const uint8_t* data, size_t len) {
     if (r.body.size() + len > static_cast<size_t>(kMaxResponseBytes)) {
       overCap = true;
       return false;
+    }
+    // First chunk: reserve the whole body at once when Content-Length is known and
+    // the block exists, so later appends never reallocate.
+    if (!reserved) {
+      reserved = true;
+      const size_t cl = http->hasContentLength() ? http->getContentLength() : 0;
+      size_t want = cl < static_cast<size_t>(kMaxResponseBytes) ? cl : static_cast<size_t>(kMaxResponseBytes);
+      if (want > r.body.capacity()) {
+        multi_heap_info_t info;
+        heap_caps_get_info(&info, MALLOC_CAP_8BIT);
+        if (info.largest_free_block < want + kResponseHeapMargin) {
+          lowHeap = true;
+          return false;
+        }
+        r.body.reserve(want);
+      }
+    }
+    // Chunked / unknown-length: guard each reallocation. libstdc++ grows to
+    // max(needed, 2*capacity), so require that block before letting append run.
+    if (r.body.size() + len > r.body.capacity()) {
+      const size_t needed = r.body.size() + len;
+      const size_t dbl = r.body.capacity() * 2;
+      const size_t growTo = needed > dbl ? needed : dbl;
+      multi_heap_info_t info;
+      heap_caps_get_info(&info, MALLOC_CAP_8BIT);
+      if (info.largest_free_block < growTo + kResponseHeapMargin) {
+        lowHeap = true;
+        return false;
+      }
     }
     r.body.append(reinterpret_cast<const char*>(data), len);
     return true;
@@ -194,9 +236,18 @@ KoResponse koPerform(const char* method, const std::string& url, const std::stri
   } else {
     r.status = http->GET(sink);
   }
+  // A guard-tripped transfer is a failure, not a partial success: force a transport
+  // error so callers (getStats/getBookmarks) fall to their NETWORK_ERROR path rather
+  // than parse a truncated body.
+  if (overCap || lowHeap) {
+    SdDebugLog::log("KOSYNC", "%s: response %s -> abort clean (bytes=%u)", tag, overCap ? "over-cap" : "low-heap",
+                    (unsigned)r.body.size());
+    LOG_ERR("KOSync", "%s: %s response, aborting to avoid OOM", tag, overCap ? "over-cap" : "low-heap");
+    r.status = -1;
+    std::string().swap(r.body);
+  }
   r.transportOk = r.status > 0;
   KOReaderSyncClient::lastHttpCode = r.transportOk ? r.status : 0;
-  if (overCap) LOG_ERR("KOSync", "%s: response exceeded %d bytes; rejected", tag, kMaxResponseBytes);
 
   if (body) s_bytesUp += static_cast<uint32_t>(body->size());
   s_bytesDown += static_cast<uint32_t>(r.body.size());

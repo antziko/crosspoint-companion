@@ -12,6 +12,7 @@
 #include <esp_heap_caps.h>
 #include <esp_sntp.h>
 #include <esp_wifi.h>
+#include <lwip/tcpip.h>  // LOCK_TCPIP_CORE/UNLOCK_TCPIP_CORE: framework enables CONFIG_LWIP_TCPIP_CORE_LOCKING
 
 #include <algorithm>
 #include <cassert>
@@ -37,6 +38,13 @@
 
 namespace {
 void syncTimeWithNTP() {
+  // The Arduino prebuilt framework enables CONFIG_LWIP_TCPIP_CORE_LOCKING, so any lwip timer
+  // manipulation must hold the TCPIP core lock or it asserts at runtime ("Required to lock TCPIP
+  // core functionality!", timeouts.c). esp_sntp_stop()/esp_sntp_init() call sys_untimeout()/
+  // sys_timeout() internally and the esp_sntp_* wrappers do NOT take the lock themselves, so wrap
+  // the (re)configuration here. Keep the lock OFF during the poll-wait below — holding it would
+  // block the tcpip thread that advances the sync.
+  LOCK_TCPIP_CORE();
   // Stop SNTP if already running (can't reconfigure while running)
   if (esp_sntp_enabled()) {
     esp_sntp_stop();
@@ -46,6 +54,7 @@ void syncTimeWithNTP() {
   esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
   esp_sntp_setservername(0, "pool.ntp.org");
   esp_sntp_init();
+  UNLOCK_TCPIP_CORE();
 
   // Wait for time to sync (with timeout)
   int retry = 0;
