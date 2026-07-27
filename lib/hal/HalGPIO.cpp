@@ -301,7 +301,10 @@ void HalGPIO::setSharedConfirmPowerShortPressEmitsPower(const bool enabled) {
 }
 
 bool HalGPIO::isXteinkDevice() const {
+  // XteinkX3Uc8279 is the same board as XteinkX3 with a UC8279 panel controller
+  // (see BoardConfig XTEINK_X3_UC8279) — it must count as an Xteink device too.
   return BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX3 ||
+         BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX3Uc8279 ||
          BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX4;
 }
 

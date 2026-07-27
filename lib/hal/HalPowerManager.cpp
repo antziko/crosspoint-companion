@@ -4,6 +4,7 @@
 #include <Logging.h>
 #include <PowerManager.h>
 #include <WiFi.h>
+#include <Wire.h>
 #include <esp_sleep.h>
 #include <soc/soc_caps.h>
 
@@ -16,6 +17,18 @@ HalPowerManager powerManager;  // Singleton instance
 void HalPowerManager::begin() {
   if (BoardConfig::ACTIVE.batteryAdc >= 0) {
     pinMode(BoardConfig::ACTIVE.batteryAdc, INPUT);
+  }
+  // X3 (all variants, incl. the UC8279 run) hangs every peripheral — DS3231 RTC,
+  // QMI8658 tilt sensor, BQ27220 fuel gauge — off a single I2C bus that nothing
+  // else brings up: InputManager only inits I2C for a touch controller, and X3 is
+  // NO_TOUCH. This persistent Wire.begin() was dropped in the #2481 touch
+  // adaptation (which assumed the SDK Rtc/Imu libs would own I2C, but feat kept
+  // the direct-I2C HalClock/HalTiltSensor). Without it the home top-bar clock/date
+  // vanish and tilt/battery reads fail. Must run after gpio.begin() so the
+  // boot-time device/EPD fingerprint probes have released the bus.
+  if (gpio.deviceIsX3()) {
+    Wire.begin(X3_I2C_SDA, X3_I2C_SCL, X3_I2C_FREQ);
+    Wire.setTimeOut(4);
   }
   normalFreq = getCpuFrequencyMhz();
   modeMutex = xSemaphoreCreateMutex();

@@ -55,7 +55,9 @@ void HalClock::begin() {
     return;
   }
 
-  // I2C is already initialised by HalPowerManager::begin() for X3.
+  // I2C is already initialised by HalPowerManager::begin() for X3 (Wire.begin on
+  // SDA20/SCL0) — the shared bus for the DS3231, QMI8658 and BQ27220. begin()
+  // runs before halClock.begin() in main.cpp, so the bus is up here.
   // Probe the DS3231 by reading the seconds register.
   Wire.beginTransmission(I2C_ADDR_DS3231);
   Wire.write(DS3231_SEC_REG);
@@ -216,9 +218,9 @@ bool HalClock::getDate(uint8_t& dayOfWeek, uint8_t& date, uint8_t& month, uint16
   const unsigned long now = millis();
   if (_hasCachedDate && _lastDatePollMs != 0 && (now - _lastDatePollMs) < CLOCK_POLL_MS) {
     dayOfWeek = _cachedDayOfWeek;
-    date      = _cachedDate;
-    month     = _cachedMonth;
-    year      = _cachedYear;
+    date = _cachedDate;
+    month = _cachedMonth;
+    year = _cachedYear;
     return true;
   }
 
@@ -228,37 +230,37 @@ bool HalClock::getDate(uint8_t& dayOfWeek, uint8_t& date, uint8_t& month, uint16
   if (Wire.endTransmission(false) != 0) {
     if (!_hasCachedDate) return false;
     dayOfWeek = _cachedDayOfWeek;
-    date      = _cachedDate;
-    month     = _cachedMonth;
-    year      = _cachedYear;
+    date = _cachedDate;
+    month = _cachedMonth;
+    year = _cachedYear;
     return true;
   }
   Wire.requestFrom(I2C_ADDR_DS3231, (uint8_t)4);
   if (Wire.available() < 4) {
     if (!_hasCachedDate) return false;
     dayOfWeek = _cachedDayOfWeek;
-    date      = _cachedDate;
-    month     = _cachedMonth;
-    year      = _cachedYear;
+    date = _cachedDate;
+    month = _cachedMonth;
+    year = _cachedYear;
     return true;
   }
 
-  const uint8_t rawDow  = Wire.read();  // 0x03: day-of-week
+  const uint8_t rawDow = Wire.read();   // 0x03: day-of-week
   const uint8_t rawDate = Wire.read();  // 0x04: date
-  const uint8_t rawMon  = Wire.read();  // 0x05: month (bit 7 = century)
+  const uint8_t rawMon = Wire.read();   // 0x05: month (bit 7 = century)
   const uint8_t rawYear = Wire.read();  // 0x06: year (0-99)
 
   _cachedDayOfWeek = bcdToDec(rawDow & 0x07);
-  _cachedDate      = bcdToDec(rawDate & 0x3F);
-  _cachedMonth     = bcdToDec(rawMon & 0x1F);
-  _cachedYear      = 2000 + bcdToDec(rawYear);
-  _hasCachedDate   = true;
-  _lastDatePollMs  = now;
+  _cachedDate = bcdToDec(rawDate & 0x3F);
+  _cachedMonth = bcdToDec(rawMon & 0x1F);
+  _cachedYear = 2000 + bcdToDec(rawYear);
+  _hasCachedDate = true;
+  _lastDatePollMs = now;
 
   dayOfWeek = _cachedDayOfWeek;
-  date      = _cachedDate;
-  month     = _cachedMonth;
-  year      = _cachedYear;
+  date = _cachedDate;
+  month = _cachedMonth;
+  year = _cachedYear;
   return true;
 }
 
@@ -270,8 +272,8 @@ static uint8_t daysInMonth(uint8_t month, uint16_t year) {
   return d;
 }
 
-bool HalClock::getLocalDateTime(uint8_t utcOffsetQuarterHoursBiased, uint8_t& dayOfWeek, uint8_t& date,
-                                uint8_t& month, uint16_t& year, uint8_t& hour, uint8_t& minute) const {
+bool HalClock::getLocalDateTime(uint8_t utcOffsetQuarterHoursBiased, uint8_t& dayOfWeek, uint8_t& date, uint8_t& month,
+                                uint16_t& year, uint8_t& hour, uint8_t& minute) const {
   uint8_t dow, rawDate, mo, h, m;
   uint16_t yr;
   if (!getDate(dow, rawDate, mo, yr)) return false;
@@ -291,7 +293,10 @@ bool HalClock::getLocalDateTime(uint8_t utcOffsetQuarterHoursBiased, uint8_t& da
   if (localMins < 0) {
     localMins += 1440;
     if (--d < 1) {
-      if (--mo < 1) { mo = 12; yr--; }
+      if (--mo < 1) {
+        mo = 12;
+        yr--;
+      }
       d = daysInMonth(mo, yr);
     }
     wd = static_cast<uint8_t>(((static_cast<int>(wd) - 2 + 7) % 7) + 1);
@@ -299,7 +304,10 @@ bool HalClock::getLocalDateTime(uint8_t utcOffsetQuarterHoursBiased, uint8_t& da
     localMins -= 1440;
     if (++d > daysInMonth(mo, yr)) {
       d = 1;
-      if (++mo > 12) { mo = 1; yr++; }
+      if (++mo > 12) {
+        mo = 1;
+        yr++;
+      }
     }
     wd = static_cast<uint8_t>((wd % 7) + 1);
   }
@@ -313,8 +321,7 @@ bool HalClock::getLocalDateTime(uint8_t utcOffsetQuarterHoursBiased, uint8_t& da
   return true;
 }
 
-bool HalClock::formatDate(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHoursBiased,
-                          uint8_t dateFormat) const {
+bool HalClock::formatDate(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHoursBiased, uint8_t dateFormat) const {
   if (!buf || bufSize < 4) return false;
   uint8_t dow, rawDate, month;
   uint16_t year;
@@ -334,21 +341,26 @@ bool HalClock::formatDate(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHou
 
   if (localMins < 0) {
     if (--d < 1) {
-      if (--mo < 1) { mo = 12; yr--; }
+      if (--mo < 1) {
+        mo = 12;
+        yr--;
+      }
       d = daysInMonth(mo, yr);
     }
     wd = static_cast<uint8_t>(((static_cast<int>(wd) - 2 + 7) % 7) + 1);
   } else if (localMins >= 1440) {
     if (++d > daysInMonth(mo, yr)) {
       d = 1;
-      if (++mo > 12) { mo = 1; yr++; }
+      if (++mo > 12) {
+        mo = 1;
+        yr++;
+      }
     }
     wd = static_cast<uint8_t>((wd % 7) + 1);
   }
 
-  static const char* const kMonthNames[12] = {
-      "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  static const char* const kMonthNames[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
   static const char* const kDowNames[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 
   const char* mon = kMonthNames[mo - 1];
@@ -358,10 +370,18 @@ bool HalClock::formatDate(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHou
 
   switch (dateFormat) {
     default:
-    case 0: snprintf(buf, bufSize, "%u %s", ud, mon); break;                    // 30 Jun
-    case 1: snprintf(buf, bufSize, "%s, %u %s", dow3, ud, mon); break;          // Mon, 30 Jun
-    case 2: snprintf(buf, bufSize, "%02u/%02u", ud, umo); break;                // 30/06
-    case 3: snprintf(buf, bufSize, "%s, %02u/%02u", dow3, ud, umo); break;      // Mon, 30/06
+    case 0:
+      snprintf(buf, bufSize, "%u %s", ud, mon);
+      break;  // 30 Jun
+    case 1:
+      snprintf(buf, bufSize, "%s, %u %s", dow3, ud, mon);
+      break;  // Mon, 30 Jun
+    case 2:
+      snprintf(buf, bufSize, "%02u/%02u", ud, umo);
+      break;  // 30/06
+    case 3:
+      snprintf(buf, bufSize, "%s, %02u/%02u", dow3, ud, umo);
+      break;  // Mon, 30/06
   }
   return true;
 }
@@ -377,12 +397,12 @@ bool HalClock::writeDateToRTC(uint8_t dayOfWeek, uint8_t date, uint8_t month, ui
     LOG_ERR("CLK", "Failed to write date to DS3231");
     return false;
   }
-  _lastDatePollMs  = 0;  // Invalidate date poll timer so next getDate() reads fresh
+  _lastDatePollMs = 0;  // Invalidate date poll timer so next getDate() reads fresh
   _cachedDayOfWeek = dayOfWeek;
-  _cachedDate      = date;
-  _cachedMonth     = month;
-  _cachedYear      = year;
-  _hasCachedDate   = true;
+  _cachedDate = date;
+  _cachedMonth = month;
+  _cachedYear = year;
+  _hasCachedDate = true;
   return true;
 }
 
