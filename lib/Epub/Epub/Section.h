@@ -133,6 +133,10 @@ class Section {
   // estimate (pages so far scaled by totalBytes/bytesConsumed, damped by an EMA) while a giant spine
   // is still building, so "page X of Y" / progress don't read off the small build watermark.
   uint16_t estimatedTotalPages() const;
+  // Byte-based build progress (0-100) for the indexing popup's progress bar, or -1 when no build is
+  // active or its total size isn't yet known. Uses the same bytesConsumed/totalBytes the page-count
+  // estimate does, so it advances monotonically regardless of which page/anchor the build targets.
+  int buildProgressPercent() const;
   void abandonBuild();
   // Persist an in-progress build as a partial section file (version sentinel + LUTs +
   // watermark trailer) instead of discarding it, so the next open of this spine can show

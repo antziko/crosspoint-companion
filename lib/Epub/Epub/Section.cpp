@@ -3,8 +3,10 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <SdDebugLog.h>  // build-time heap trajectory diagnostics (free + largest block)
 #include <Serialization.h>
-#include <esp_system.h>  // esp_get_free_heap_size() for the pre-parse heap-floor guard
+#include <esp_heap_caps.h>  // heap_caps_get_largest_free_block for the contiguous-block trace
+#include <esp_system.h>     // esp_get_free_heap_size() for the pre-parse heap-floor guard
 
 #include "Epub/css/CssParser.h"
 #include "Page.h"
@@ -399,26 +401,40 @@ bool Section::startBuild(const int fontId, const float lineCompression, const bo
   // Remember the inflated HTML size so Parse/Lut failures in later build phases can report it.
   buildHtmlSize_ = inflatedHtmlSize;
 
-  // Heap-floor guard. The parser builds many small transient std::strings; if free heap is
-  // already critically low one of those aborts the firmware (-fno-exceptions makes bad_alloc
-  // fatal). Bail gracefully so the caller shows the [E2 ... heap=N] overlay instead of rebooting.
-  // Floor scales with the inflated HTML (peak working set grows with markup chewed): a low base
-  // for tiny front-matter, up to the original 48KB cap for big chapters.
+  // Heap-floor guard. This is now only a "don't bother starting" heuristic, NOT crash protection:
+  // the layout allocations are nothrow-hardened (ChapterHtmlSlimParser::signalOutOfMemory), so a
+  // mid-build shortfall fails gracefully into the [E2 ... heap=N] overlay rather than aborting the
+  // firmware. Because the finish path is safe, the floor is deliberately LENIENT — a build that runs
+  // out mid-way costs only the abandoned attempt, whereas a too-high floor pre-rejects chapters that
+  // would have built fine (observed: X4 spine 61 rejected at 46KB free though it could layout). The
+  // floor was 36-48KB when it had to guarantee a crash-free finish; lowered to 18-28KB now that it
+  // doesn't. It still scales mildly with inflated HTML as a proxy for transient density. NOTE: pages
+  // stream to SD as they complete (onPageComplete), so the working set does NOT grow with total
+  // chapter size — the real ceiling is the fragmented largest block, traced as largest8 below.
   {
-    constexpr size_t PARSE_FLOOR_MIN = 36 * 1024;
-    constexpr size_t PARSE_FLOOR_MAX = 48 * 1024;
+    constexpr size_t PARSE_FLOOR_MIN = 18 * 1024;
+    constexpr size_t PARSE_FLOOR_MAX = 28 * 1024;
     size_t requiredHeap = PARSE_FLOOR_MIN + inflatedHtmlSize;
     if (requiredHeap > PARSE_FLOOR_MAX) requiredHeap = PARSE_FLOOR_MAX;
     const size_t freeHeap = esp_get_free_heap_size();
+    // DIAG: capture BOTH free and largest-contiguous at the gate. The floor tests free heap,
+    // but on X3 the binding limit is often the largest block. Comparing the gate's largest8
+    // against successful builds' largest8 (BUILD-START/DONE below) tells us whether lowering
+    // the *free* floor would actually help this spine, without having to run the parse blind.
+    const size_t largest8 = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
     if (freeHeap < requiredHeap) {
       LOG_ERR("SCT", "Low heap (%u < %u, html=%u) before parse — skip to avoid OOM crash", (unsigned)freeHeap,
               (unsigned)requiredHeap, (unsigned)inflatedHtmlSize);
+      SdDebugLog::log("SCT", "BUILD-GATE REJECT spine=%d free=%u largest8=%u required=%u html=%u", spineIndex,
+                      (unsigned)freeHeap, (unsigned)largest8, (unsigned)requiredHeap, (unsigned)inflatedHtmlSize);
       recordBuildFailure(BuildFailure::Reason::LowHeap, requiredHeap, inflatedHtmlSize);
       file.close();
       Storage.remove(binTmpPath().c_str());
       if (!reusedHtml) Storage.remove(tmpHtmlPath.c_str());
       return false;
     }
+    SdDebugLog::log("SCT", "BUILD-START spine=%d free=%u largest8=%u required=%u html=%u", spineIndex,
+                    (unsigned)freeHeap, (unsigned)largest8, (unsigned)requiredHeap, (unsigned)inflatedHtmlSize);
   }
   // Header is written with the incomplete-version sentinel; finalizeBuild() commits it.
   writeSectionFileHeader(fontId, lineCompression, extraParagraphSpacing, paragraphAlignment, viewportWidth,
@@ -516,6 +532,9 @@ bool Section::buildSomeMore(const int maxPages) {
       if (build_->parser->outOfMemory()) {
         recordBuildFailure(BuildFailure::Reason::LowHeap, 0, buildHtmlSize_);
         LOG_ERR("SCT", "Out of contiguous heap during layout — abandoning build");
+        SdDebugLog::log("SCT", "BUILD-OOM spine=%d pages=%d free=%u largest8=%u html=%u", spineIndex, builtPageCount_,
+                        (unsigned)esp_get_free_heap_size(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                        (unsigned)buildHtmlSize_);
       } else {
         recordBuildFailure(BuildFailure::Reason::Parse, 0, buildHtmlSize_);
         LOG_ERR("SCT", "Parse error during incremental build");
@@ -596,6 +615,14 @@ uint16_t Section::estimatedTotalPages() const {
   const uint64_t est = static_cast<uint64_t>(build_->smoothedEstimate + 0.5f);
   if (est <= pageCount) return pageCount;  // never fewer than the pages already available
   return est > 60000 ? 60000 : static_cast<uint16_t>(est);
+}
+
+int Section::buildProgressPercent() const {
+  if (!build_ || build_->totalBytes == 0) return -1;
+  const uint32_t consumed = build_->bytesConsumed;
+  const uint32_t total = build_->totalBytes;
+  if (consumed >= total) return 100;
+  return static_cast<int>((static_cast<uint64_t>(consumed) * 100) / total);
 }
 
 // Write the LUTs and anchor map into the open tmp .bin, patch the header with the built
@@ -711,6 +738,8 @@ bool Section::finalizeBuild() {
   partial_ = false;
   partialPageCount_ = 0;
   pageCount = builtPageCount_;
+  SdDebugLog::log("SCT", "BUILD-DONE spine=%d pages=%d free=%u largest8=%u", spineIndex, (int)pageCount,
+                  (unsigned)esp_get_free_heap_size(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   return true;
 }
 

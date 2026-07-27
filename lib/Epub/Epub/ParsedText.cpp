@@ -250,29 +250,51 @@ bool isWordCharacter(uint32_t cp) {
   return true;
 }
 
-// True when the heap can grow the parallel word vectors to `newCapacity` elements
-// without risking the -fno-exceptions abort(). The word vector is std::vector<std::string>
-// (the largest, ~24 B/elem here) and reallocation needs ONE contiguous block, so this
-// gates on the largest free block (total free is irrelevant to a contiguous ask). A
-// headroom margin leaves room for the per-word string bodies and layout that follow, so
-// we never grab the last big block and strand the rest of the build.
+// Contiguous bytes a grow to `newCapacity` elements needs. The word vector is
+// std::vector<std::string> (the largest, ~24 B/elem here) and reallocation needs ONE
+// contiguous block. A headroom margin leaves room for the per-word string bodies and the
+// layout scratch that follow, so a successful grow never grabs the last big block and
+// strands the rest of the build.
+constexpr size_t WORD_VECTOR_GROW_HEADROOM_BYTES = 8 * 1024;
+size_t wordVectorGrowBytes(size_t newCapacity) {
+  return newCapacity * sizeof(std::string) + WORD_VECTOR_GROW_HEADROOM_BYTES;
+}
+
+// Silent: true when the largest free block can supply a grow to `newCapacity`. Used by the
+// parser's proactive soft-flush (atGrowthWall) which polls this per word near the wall, so
+// it must not log. total free is irrelevant to a contiguous ask, hence largest-block.
+bool contiguousFitsWordVectors(size_t newCapacity) {
+  return heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) >= wordVectorGrowBytes(newCapacity);
+}
+
+// Logging wrapper for the hard-stop path in addWord: when this returns false the block is
+// abandoned, so we emit the diagnostic once here.
 bool canGrowWordVectors(size_t newCapacity) {
-  constexpr size_t HEADROOM_BYTES = 8 * 1024;
-  const size_t needed = newCapacity * sizeof(std::string) + HEADROOM_BYTES;
-  const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  if (largest < needed) {
-    // Diagnostic for LOWHEAP build failures: `cap` is how many words this one text
-    // block tried to hold, `need` the contiguous bytes required (cap*24 + 8KB), `largest`
-    // the biggest free block available, `free` total free. A high `cap` means a very long
-    // paragraph; a low `largest` with ample `free` means fragmentation, not exhaustion.
-    LOG_ERR("PT", "word-vector grow blocked: cap=%u need=%u largest=%u free=%u", (unsigned)newCapacity,
-            (unsigned)needed, (unsigned)largest, (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
-    return false;
-  }
-  return true;
+  if (contiguousFitsWordVectors(newCapacity)) return true;
+  // Diagnostic for LOWHEAP build failures: `cap` is how many words this one text
+  // block tried to hold, `need` the contiguous bytes required (cap*24 + 8KB), `largest`
+  // the biggest free block available, `free` total free. A high `cap` means a very long
+  // paragraph; a low `largest` with ample `free` means fragmentation, not exhaustion.
+  LOG_ERR("PT", "word-vector grow blocked: cap=%u need=%u largest=%u free=%u", (unsigned)newCapacity,
+          (unsigned)wordVectorGrowBytes(newCapacity),
+          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+          (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
+  return false;
 }
 
 }  // namespace
+
+bool ParsedText::atGrowthWall() const {
+  // Already latched — the caller handles the abandoned block, nothing to flush around.
+  if (heapExhausted_) return false;
+  // Room to add at least one more word without reallocating: no wall.
+  if (words.size() < words.capacity()) return false;
+  // Full: the next add doubles the vector. Report whether that doubling can't be met, so
+  // the parser can soft-flush (which erases laid-out words, dropping size below capacity)
+  // instead of letting addWord latch heapExhausted_ and abandon the whole build.
+  const size_t nextCapacity = words.capacity() < 16 ? 16 : words.capacity() * 2;
+  return !contiguousFitsWordVectors(nextCapacity);
+}
 
 void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle, const bool underline,
                          const bool attachToPrevious) {

@@ -119,6 +119,12 @@ class ChapterHtmlSlimParser {
   HalFile parseFile_;
   uint32_t parseStartTime_ = 0;
 
+  // Latch the OOM flag and, if the parse is still live, halt expat from inside the
+  // handler so parseStep() returns Error and the build is abandoned gracefully — instead
+  // of the next allocation calling abort() under -fno-exceptions. Safe to call after
+  // finishParse() has torn the parser down (xmlParser_ == nullptr): it just sets the flag.
+  void signalOutOfMemory(const char* where);
+
   void updateEffectiveInlineStyle();
   void startNewTextBlock(const BlockStyle& blockStyle);
   void flushPendingAnchor();

@@ -7,6 +7,8 @@
 #include <SdDebugLog.h>
 #include <Utf8.h>
 #include <XmlParserUtils.h>
+#include <esp_heap_caps.h>  // heap_caps_get_largest_free_block: contiguous-block trace for LAYOUT-OOM
+#include <esp_system.h>     // esp_get_free_heap_size: free-heap trace for LAYOUT-OOM/soft-flush logs
 #include <expat.h>
 
 #include <algorithm>
@@ -31,15 +33,20 @@ constexpr size_t PARSE_BUFFER_SIZE = 1024;
 // its natural size.
 constexpr float LARGE_IMAGE_WIDTH_FRAC = 0.4f;
 // This number comes from PR #73
-// If we have > 750 words buffered up, perform the layout and consume out all but the last line
-// There should be enough here to build out 1-2 full pages and doing this will free up a lot of
-// memory.
-// Spotted when reading Intermezzo, there are some really long text blocks in there.
-constexpr size_t TEXT_BLOCK_SOFT_FLUSH_WORDS = 750;
+// If we have this many words buffered, lay them out and consume all but the last line, freeing a
+// lot of memory. A buffered text block holds ~7 parallel std::vectors (words/styles/ruby) plus the
+// reorder scratch copies allocated during line-breaking — the single biggest transient in a build,
+// and each vector is a separate contiguous allocation. On a fragmented heap (largest free block can
+// collapse to ~17KB mid-session on X3/X4) a high threshold makes that transient overflow the largest
+// block and the build fails (graceful LAYOUT-OOM now, a hard reboot historically). Lowered from the
+// upstream 750/320 to shrink the peak under the fragmentation wall so big chapters actually build.
+// Output is identical: page boundaries come from viewport height, not the flush point, and the
+// "exclude last line" logic preserves paragraph flow across flushes. (Was 750; upstream develop=750.)
+constexpr size_t TEXT_BLOCK_SOFT_FLUSH_WORDS = 384;
 
-// When CSS is enabled, flush earlier to save RAM. 320 is still more than enough to build a CJK
-// page at font size 14
-constexpr size_t TEXT_BLOCK_SOFT_FLUSH_WORDS_WITH_CSS = 320;
+// When CSS is enabled, flush even earlier — CSS fragments text into many tiny words, inflating the
+// per-word vector overhead. 160 still lays out a full CJK page at font size 14. (Was 320; upstream=320.)
+constexpr size_t TEXT_BLOCK_SOFT_FLUSH_WORDS_WITH_CSS = 160;
 
 // Hard cap on the number of anchor IDs recorded per chapter. Legitimate navigation
 // anchors (TOC entries, footnotes, cross-references) rarely exceed a few hundred per
@@ -236,7 +243,11 @@ void ChapterHtmlSlimParser::flushPendingAnchor() {
     if (currentPage && !currentPage->elements.empty()) {
       completePageFn(std::move(currentPage), xpathParagraphIndex, xpathListItemIndex);
       completedPageCount++;
-      currentPage.reset(new Page());
+      currentPage.reset(new (std::nothrow) Page());
+      if (!currentPage) {
+        signalOutOfMemory("flushPendingAnchor: TOC page break");
+        return;
+      }
       currentPageNextY = 0;
     }
   }
@@ -291,15 +302,32 @@ void ChapterHtmlSlimParser::flushLongTextBlockIfNeeded() {
   }
   // Keep token growth bounded: CSS-heavy spans can fragment text into many tiny words, so flush
   // earlier when embedded CSS is active. The "exclude last line" behavior preserves paragraph flow
-  // across chunks. Thresholds match upstream develop (750 / 320); #2256's structural change (calling
-  // this from flushPartWordBuffer too + std::deque anchors) is what curbs the contiguous heap growth.
+  // across chunks. Thresholds lowered from upstream (750 / 320) to keep the buffered block's parallel
+  // vectors under the fragmented largest-block wall; #2256's structural change (calling this from
+  // flushPartWordBuffer too + std::deque anchors) is what curbs the contiguous heap growth.
   const size_t blockWordCount = currentTextBlock->size();
   const size_t softFlushThreshold = embeddedStyle ? TEXT_BLOCK_SOFT_FLUSH_WORDS_WITH_CSS : TEXT_BLOCK_SOFT_FLUSH_WORDS;
-  if (blockWordCount <= softFlushThreshold) {
+  // Flush on either trigger:
+  //  - word count over the threshold (bounds the layout transient on long paragraphs), or
+  //  - the word vectors are at the contiguous-heap growth wall: the next word can't double
+  //    the vector on this fragmented heap. This fires *below* the word-count threshold on a
+  //    tight heap (e.g. the 128->256 doubling failing while the count is still 128), which
+  //    is exactly the case that used to abandon the build. Flushing erases the laid-out
+  //    words, dropping size below capacity so the block keeps accepting words without a grow.
+  // Skip the wall trigger while collecting ruby: erasing words here would invalidate the
+  // absolute rubyStartWordIndex. Ruby groups are short, so they never approach the wall in
+  // practice; if one somehow does, addWord's heapExhausted_ backstop still fails gracefully.
+  const bool atGrowthWall = !inRuby && currentTextBlock->atGrowthWall();
+  if (blockWordCount <= softFlushThreshold && !atGrowthWall) {
     return;
   }
 
   LOG_DBG("EHP", "Text block soft flush (%u words)", static_cast<unsigned>(blockWordCount));
+  // Untethered: log the layout peak (word count at flush) against the current largest block. This is
+  // the transient that overflows the heap wall on big chapters; watching words vs largest8 across
+  // builds shows how much headroom the soft-flush cap is buying.
+  SdDebugLog::log("EHP", "soft-flush words=%u free=%u largest8=%u", (unsigned)blockWordCount,
+                  (unsigned)esp_get_free_heap_size(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   const int horizontalInset = currentTextBlock->getBlockStyle().totalHorizontalInset();
   const uint16_t effectiveWidth =
       (horizontalInset < viewportWidth) ? static_cast<uint16_t>(viewportWidth - horizontalInset) : viewportWidth;
@@ -351,7 +379,12 @@ void ChapterHtmlSlimParser::startNewTextBlock(const BlockStyle& blockStyle) {
   // If the pending anchor is a TOC chapter boundary, force a page break after the previous
   // block is flushed so the chapter starts on a fresh page.
   flushPendingAnchor();
-  currentTextBlock.reset(new ParsedText(extraParagraphSpacing, hyphenationEnabled, focusReadingEnabled, blockStyle));
+  currentTextBlock.reset(new (std::nothrow)
+                             ParsedText(extraParagraphSpacing, hyphenationEnabled, focusReadingEnabled, blockStyle));
+  if (!currentTextBlock) {
+    signalOutOfMemory("startNewTextBlock: ParsedText");
+    return;
+  }
   wordsExtractedInBlock = 0;
   listItemBulletOnly = false;
 }
@@ -824,16 +857,16 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                   self->completePageFn(std::move(self->currentPage), self->xpathParagraphIndex,
                                        self->xpathListItemIndex);
                   self->completedPageCount++;
-                  self->currentPage.reset(new Page());
+                  self->currentPage.reset(new (std::nothrow) Page());
                   if (!self->currentPage) {
-                    LOG_ERR("EHP", "Failed to create new page");
+                    self->signalOutOfMemory("image: page break");
                     return;
                   }
                   self->currentPageNextY = 0;
                 } else if (!self->currentPage) {
-                  self->currentPage.reset(new Page());
+                  self->currentPage.reset(new (std::nothrow) Page());
                   if (!self->currentPage) {
-                    LOG_ERR("EHP", "Failed to create initial page");
+                    self->signalOutOfMemory("image: initial page");
                     return;
                   }
                   self->currentPageNextY = 0;
@@ -1665,19 +1698,40 @@ bool ChapterHtmlSlimParser::parseAndBuildPages() {
   return finishParse();
 }
 
+void ChapterHtmlSlimParser::signalOutOfMemory(const char* where) {
+  LOG_ERR("EHP", "OOM during layout: %s", where);
+  // Untethered diagnostics: record WHICH allocation site could not be satisfied and the heap state
+  // at that instant. Comparing free vs largest8 tells us whether the wall was total heap or (the
+  // usual case) a fragmented largest-block — the actionable signal for tuning the soft-flush cap.
+  SdDebugLog::log("EHP", "LAYOUT-OOM at=%s free=%u largest8=%u", where, (unsigned)esp_get_free_heap_size(),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  outOfMemory_ = true;
+  if (xmlParser_) {
+    XML_StopParser(xmlParser_, XML_FALSE);
+  }
+}
+
 void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line) {
   const int lineHeight =
       renderer.getLineHeight(fontId, lineCompression) + line->getRubyShift(renderer.getFontAscenderSize(fontId));
 
   if (!currentPage) {
-    currentPage.reset(new Page());
+    currentPage.reset(new (std::nothrow) Page());
+    if (!currentPage) {
+      signalOutOfMemory("addLineToPage: initial page");
+      return;
+    }
     currentPageNextY = 0;
   }
 
   if (currentPageNextY + lineHeight > viewportHeight) {
     completePageFn(std::move(currentPage), xpathParagraphIndex, xpathListItemIndex);
     completedPageCount++;
-    currentPage.reset(new Page());
+    currentPage.reset(new (std::nothrow) Page());
+    if (!currentPage) {
+      signalOutOfMemory("addLineToPage: page break");
+      return;
+    }
     currentPageNextY = 0;
   }
 
@@ -1692,7 +1746,14 @@ void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line) {
 
   // Apply horizontal left inset (margin + padding) as x position offset
   const int16_t xOffset = line->getBlockStyle().leftInset();
-  currentPage->elements.push_back(std::make_shared<PageLine>(line, xOffset, currentPageNextY));
+  // nothrow: make_shared uses bare new, which aborts on OOM under -fno-exceptions. Lines
+  // arrive mid-parse when the heap is most loaded, so fail soft into a graceful stop.
+  auto pageLine = std::shared_ptr<PageLine>(new (std::nothrow) PageLine(line, xOffset, currentPageNextY));
+  if (!pageLine) {
+    signalOutOfMemory("addLineToPage: PageLine");
+    return;
+  }
+  currentPage->elements.push_back(pageLine);
   currentPageNextY += lineHeight;
 }
 
@@ -1703,7 +1764,11 @@ void ChapterHtmlSlimParser::makePages() {
   }
 
   if (!currentPage) {
-    currentPage.reset(new Page());
+    currentPage.reset(new (std::nothrow) Page());
+    if (!currentPage) {
+      signalOutOfMemory("makePages: initial page");
+      return;
+    }
     currentPageNextY = 0;
   }
 

@@ -12,6 +12,7 @@
 #include "ProgressMapper.h"
 #include "SyncScope.h"
 #include "activities/Activity.h"
+#include "components/themes/BaseTheme.h"  // Rect (indexing popup progress bar)
 #include "util/WordSelectNavigator.h"
 
 class EpubReaderActivity final : public Activity {
@@ -253,6 +254,20 @@ class EpubReaderActivity final : public Activity {
   // drawn. Gates showBuildPopup() so a background buildSomeMore in loop() can never draw
   // over a displayed page.
   bool buildPopupPending = false;
+  // While the indexing popup is on screen for the current render() pass, its layout rect
+  // (width > 0) and the last progress percent painted into its bar. Both reset at the top of
+  // render(); the build-to-target chunk loops advance the bar via updateIndexingProgress() as the
+  // build consumes HTML. lastIndexingPct_ throttles the (full-panel FAST) e-ink refresh so the bar
+  // repaints at most once every INDEXING_PROGRESS_STEP percent instead of on every chunk.
+  Rect indexingPopupRect_{};
+  int lastIndexingPct_ = -1;
+  static constexpr int INDEXING_PROGRESS_STEP = 10;
+  // Draw the indexing popup and arm its progress bar: records the popup rect, resets the throttle,
+  // and forces the replacing page onto the HALF ghost-cleanup path. Centralizes the popup draw sites.
+  void drawIndexingPopup();
+  // Advance the indexing popup's progress bar from the active build's byte progress (throttled).
+  // No-op when the popup isn't showing, the framebuffer is on loan, or the build has no progress yet.
+  void updateIndexingProgress();
   // Draw the indexing popup mid-build (deadline backstop in render()'s build-to-target loop).
   void showBuildPopup();
   // Remap the cached relative reading position once the section's real page count is known

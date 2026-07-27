@@ -81,6 +81,11 @@ class ParsedText {
   // supply a contiguous block for the word vectors. The block is left truncated;
   // the caller must abandon the build rather than render partial content.
   bool heapExhausted() const { return heapExhausted_; }
+  // True when the word vectors are full and the next word would need a heap grow the
+  // fragmented heap can't supply. The parser polls this to soft-flush the block early
+  // (shedding laid-out words) so a heavy chapter keeps paginating instead of hitting the
+  // hard heapExhausted_ stop below the soft-flush word-count threshold. Silent (no log).
+  bool atGrowthWall() const;
   void layoutAndExtractLines(const GfxRenderer& renderer, int fontId, uint16_t viewportWidth,
                              const std::function<void(std::shared_ptr<TextBlock>)>& processLine,
                              bool includeLastLine = true);

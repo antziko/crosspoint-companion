@@ -2,6 +2,7 @@
 
 #include <HalStorage.h>
 
+#include <deque>
 #include <string>
 #include <utility>
 #include <vector>
@@ -106,18 +107,21 @@ class CssParser {
 
  private:
   // Storage: normalized selector -> style properties, kept sorted by selector.
-  // A flat vector (one contiguous allocation) instead of std::unordered_map
-  // (one separate heap node per rule). CSS-heavy EPUBs hold 200+ rules; the
-  // per-node allocations fragmented the heap and pushed big books past the
-  // section parser's heap floor (reader "out of bounds"). Lookups use
-  // binary search via findRule(); inserts keep the vector ordered.
-  std::vector<std::pair<std::string, CssStyle>> rulesBySelector_;
+  // std::deque, NOT std::vector: CssStyle is a large by-value struct (~250 B/entry), so a
+  // CSS-heavy EPUB's 200-256 rules made a flat vector reallocate to a single ~64 KB contiguous
+  // block. On X3/X4 that one allocation (and its 2x doubling churn) collapsed the largest free
+  // block from ~61 KB to ~17 KB for the entire reading session — starving the JPEG decoder
+  // (a 17.9 KB contiguous JPEGDEC object) and text-layout vectors, so image/CSS-heavy chapters
+  // failed to render. A deque stores entries in small (~0.5 KB) chunks: no giant block, no
+  // doubling copy, largest free block stays high. It still supports the sorted-vector algorithm
+  // unchanged — random-access iterators for findRule()'s std::lower_bound binary search and the
+  // cache-load std::sort; ordered std::deque::insert for stream parsing.
+  std::deque<std::pair<std::string, CssStyle>> rulesBySelector_;
 
-  // Set when a rule insert was skipped because growing the vector would need a
-  // contiguous block the (X3) heap can't supply — a bare-`new` there would abort()
-  // under -fno-exceptions. Once set, the rest of the parse stops storing rules so
-  // the book renders with partial CSS instead of crashing. Persists across the
-  // book's CSS files (heap stays tight once exhausted).
+  // Set when a rule insert was skipped because free heap ran genuinely low (a deque node's
+  // bare-`new` would abort() under -fno-exceptions). Once set, the rest of the parse stops storing
+  // rules so the book renders with partial CSS instead of crashing. Persists across the book's CSS
+  // files (heap stays tight once exhausted).
   bool cssHeapBail_ = false;
 
   // Binary-search lookup into the sorted rules vector. Returns nullptr if absent.

@@ -43,10 +43,11 @@ constexpr size_t READ_BUFFER_SIZE = 512;
 // Prevents unbounded memory growth from pathological CSS files
 constexpr size_t MAX_RULES = 1500;
 
-// Headroom (bytes) required beyond the rule-vector's next-growth allocation before
-// we let it reallocate. Covers the transient where the old block is still held plus
-// the inserted entry's string copy. Below this, parsing stops gracefully instead of
-// aborting on a failed `new` (X3, fragmented heap). See processRuleBlockWithStyle.
+// Largest-free-block floor (bytes) required before storing another rule into the deque. A deque
+// insert allocates at most one small chunk plus the entry's string copy, so this is generous
+// headroom; below it, parsing stops gracefully instead of aborting on a failed `new` (X3, fragmented
+// heap). See processRuleBlockWithStyle. (Was a vector-growth pre-check; the deque removed the large
+// contiguous reallocation that used to be the fragmentation source.)
 constexpr size_t CSS_GROWTH_HEAP_MARGIN = 6 * 1024;
 
 // Minimum free heap required to apply CSS during rendering.
@@ -61,6 +62,29 @@ constexpr size_t CSS_GROWTH_HEAP_MARGIN = 6 * 1024;
 // resident RAM -- ruby, SD-font mini-data, dictionaries -- is loaded). A higher gate
 // silently dropped ALL local CSS whenever a build grazed just under it.
 constexpr size_t MIN_FREE_HEAP_FOR_CSS = 16 * 1024;
+
+// Free-heap floor kept in reserve while loadFromCache() populates the rule store. A CSS-heavy book's
+// stylesheet is 200+ large CssStyle entries (~60KB), and loadFromCache() runs INSIDE a section build
+// (Section::startBuild -> getCssParser()->loadFromCache()), AFTER the build's pre-parse floor gate.
+// Without a cap the full stylesheet loads, consumes the heap the layout needs, and the section builds
+// 0 pages -- the reader then shows "Out of bounds" (no page to display). Layout itself is cheap (pages
+// stream to SD as they complete), so reserving this much free heap lets the build finish; rules past
+// the cap are dropped (partial CSS -- still readable). Mirrors the section parser's PARSE_FLOOR_MAX so
+// the two agree on how much heap a build needs. Applied only on the cache path, which runs during
+// builds -- NOT the stream path, which can run standalone during initial metadata caching and must be
+// free to store the full stylesheet into the cache.
+constexpr size_t CSS_CACHE_LAYOUT_RESERVE = 28 * 1024;
+
+// Largest *contiguous* block to keep free while loadFromCache() populates the rule store.
+// This — not the free-heap floor above — is the binding gate on a fragmented heap: the deque's
+// scattered ~0.5KB nodes collapse the largest block long before total free looks low, so a
+// CSS-heavy book loads its whole stylesheet with free still ~28KB while `largest` has already
+// fallen to ~8KB, leaving no contiguous block for the layout that follows (word vectors up to
+// ~14KB, JPEG decode ~18KB). Device logs showed exactly this: free bottomed at 28.7KB (just
+// above CSS_CACHE_LAYOUT_RESERVE, so that gate never tripped) while largest collapsed to 8180
+// and the build made 0-1 pages. Bailing while a >=24KB block remains preserves room for a full
+// text block's word vectors; rules past the cap are dropped (partial CSS -- still readable).
+constexpr size_t CSS_CACHE_LARGEST_RESERVE = 24 * 1024;
 
 // Maximum length for a single selector string
 // Prevents parsing of extremely long or malformed selectors
@@ -509,31 +533,27 @@ void CssParser::processRuleBlockWithStyle(const std::string& selectorGroup, cons
     // color / font-family / text-transform (all unsupported) — storing each
     // wasted ~130 B of heap and could push a CSS-heavy book past the parser's
     // heap floor, leaving the reader stuck on the "out of bounds" screen.
-    auto it = std::lower_bound(
-        rulesBySelector_.begin(), rulesBySelector_.end(), key,
-        [](const std::pair<std::string, CssStyle>& e, const std::string& k) { return e.first < k; });
+    auto it =
+        std::lower_bound(rulesBySelector_.begin(), rulesBySelector_.end(), key,
+                         [](const std::pair<std::string, CssStyle>& e, const std::string& k) { return e.first < k; });
     if (it != rulesBySelector_.end() && it->first == key) {
       it->second.applyOver(style);
     } else if (style.defined.anySet()) {
-      // Growing the vector reallocates to ~2x: it needs that many bytes in ONE
-      // contiguous block while the old block is still held. On a tight/fragmented
-      // heap (X3, CSS-heavy book) that bare-`new` aborts() under -fno-exceptions
-      // (root cause of the CssParser.cpp OOM crash). Pre-check the largest free
-      // block and stop gracefully instead — the book renders with partial CSS.
-      using RuleEntry = std::pair<std::string, CssStyle>;
-      if (rulesBySelector_.size() == rulesBySelector_.capacity()) {
-        const size_t newCap = rulesBySelector_.capacity() ? rulesBySelector_.capacity() * 2 : 8;
-        const size_t needBytes = newCap * sizeof(RuleEntry) + CSS_GROWTH_HEAP_MARGIN;
-        const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-        if (largest < needBytes) {
-          SdDebugLog::log("CSS", "rule-store growth bailed: rules=%u cap=%u need=%u largest=%u free=%u",
-                          (unsigned)rulesBySelector_.size(), (unsigned)rulesBySelector_.capacity(),
-                          (unsigned)needBytes, (unsigned)largest, (unsigned)ESP.getFreeHeap());
-          LOG_ERR("CSS", "Low contiguous heap, stopping CSS parse at %u rules (need %u, largest %u)",
-                  (unsigned)rulesBySelector_.size(), (unsigned)needBytes, (unsigned)largest);
-          cssHeapBail_ = true;
-          return;
-        }
+      // rulesBySelector_ is a std::deque, so inserting a rule allocates at most one small (~0.5 KB)
+      // chunk — never the large contiguous block the old vector needed (whose ~64 KB 2x realloc was
+      // the session-wide heap-fragmentation source). We still bail gracefully if free heap runs
+      // genuinely low, so a pathological stylesheet can't exhaust it (a deque node's bare `new`
+      // aborts under -fno-exceptions); the book then renders with partial CSS instead of crashing.
+      // Guarding on the largest free block (not total free) keeps the check meaningful once the
+      // heap is fragmented.
+      const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+      if (largest < CSS_GROWTH_HEAP_MARGIN) {
+        SdDebugLog::log("CSS", "rule-store bail: rules=%u largest=%u free=%u", (unsigned)rulesBySelector_.size(),
+                        (unsigned)largest, (unsigned)ESP.getFreeHeap());
+        LOG_ERR("CSS", "Low heap, stopping CSS parse at %u rules (largest %u)", (unsigned)rulesBySelector_.size(),
+                (unsigned)largest);
+        cssHeapBail_ = true;
+        return;
       }
       rulesBySelector_.insert(it, std::make_pair(key, style));
     }
@@ -691,9 +711,9 @@ bool CssParser::loadFromStream(HalFile& source) {
 // Style resolution
 
 const CssStyle* CssParser::findRule(const std::string& key) const {
-  const auto it = std::lower_bound(
-      rulesBySelector_.begin(), rulesBySelector_.end(), key,
-      [](const std::pair<std::string, CssStyle>& e, const std::string& k) { return e.first < k; });
+  const auto it =
+      std::lower_bound(rulesBySelector_.begin(), rulesBySelector_.end(), key,
+                       [](const std::pair<std::string, CssStyle>& e, const std::string& k) { return e.first < k; });
   if (it != rulesBySelector_.end() && it->first == key) {
     return &it->second;
   }
@@ -873,8 +893,9 @@ bool CssParser::loadFromCache() {
     return false;
   }
 
-  // One contiguous allocation for all rules instead of per-node growth reallocs.
-  rulesBySelector_.reserve(ruleCount);
+  // rulesBySelector_ is a std::deque (chunked storage); no reserve() and, deliberately, no single
+  // contiguous block for all rules — that block was the heap-fragmentation source this container
+  // change fixes. emplace_back below grows it one small chunk at a time.
 
   auto hasRemainingBytes = [&file](const size_t neededBytes) -> bool {
     return static_cast<size_t>(file.available()) >= neededBytes;
@@ -887,6 +908,23 @@ bool CssParser::loadFromCache() {
 
   // Read each rule
   for (uint16_t i = 0; i < ruleCount; ++i) {
+    // Reserve heap for the section layout that runs with these rules resident. loadFromCache() is
+    // called mid-build, so loading the whole (large) stylesheet here would starve the build and it
+    // would produce 0-1 pages ("Out of bounds" / early BUILD-OOM). Stop once free heap nears the
+    // reserve OR the largest contiguous block falls below the layout reserve -- on a fragmented heap
+    // the largest-block gate is the one that actually fires (see CSS_CACHE_LARGEST_RESERVE). Keep the
+    // rules loaded so far -- partial CSS renders fine.
+    if (ESP.getFreeHeap() < CSS_CACHE_LAYOUT_RESERVE ||
+        heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < CSS_CACHE_LARGEST_RESERVE) {
+      SdDebugLog::log("CSS", "cache-load reserve bail: rules=%u/%u free=%u largest=%u",
+                      (unsigned)rulesBySelector_.size(), (unsigned)ruleCount, (unsigned)ESP.getFreeHeap(),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+      LOG_ERR("CSS", "Low heap during cache load, stopping at %u/%u rules to reserve layout heap",
+              (unsigned)rulesBySelector_.size(), (unsigned)ruleCount);
+      cssHeapBail_ = true;
+      break;
+    }
+
     // Read selector string
     uint16_t selectorLen = 0;
     if (!hasRemainingBytes(sizeof(selectorLen))) {
@@ -1027,6 +1065,7 @@ bool CssParser::loadFromCache() {
               return a.first < b.first;
             });
 
-  LOG_DBG("CSS", "Loaded %u rules from cache", ruleCount);
+  LOG_DBG("CSS", "Loaded %u/%u rules from cache%s", (unsigned)rulesBySelector_.size(), ruleCount,
+          cssHeapBail_ ? " (heap-capped)" : "");
   return true;
 }

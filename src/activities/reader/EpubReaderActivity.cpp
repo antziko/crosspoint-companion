@@ -473,15 +473,34 @@ bool EpubReaderActivity::buildTickHeapGate() {
   return !buildHeapPaused;
 }
 
+void EpubReaderActivity::drawIndexingPopup() {
+  // Draw (or redraw) the indexing popup and arm its progress bar. Records the returned rect so the
+  // build loops can fill the bar, and resets the throttle so the first fill repaints. The popup's own
+  // refresh is a plain FAST, so force the page that replaces it onto the HALF ghost-cleanup path --
+  // otherwise the "INDEXING" text and its bar ghost under the rendered page.
+  indexingPopupRect_ = GUI.drawPopup(renderer, tr(STR_INDEXING));
+  lastIndexingPct_ = -1;
+  pagesUntilFullRefresh = 1;
+}
+
+void EpubReaderActivity::updateIndexingProgress() {
+  // Only while the popup is actually on screen this pass and the framebuffer is ours to draw into.
+  if (indexingPopupRect_.width <= 0 || !renderer.hasFrameBuffer() || !section) return;
+  const int pct = section->buildProgressPercent();
+  // -1 => build not reporting yet. Throttle to at most one repaint per INDEXING_PROGRESS_STEP percent
+  // so a long index doesn't pay a full-panel FAST refresh on every chunk.
+  if (pct < 0 || pct < lastIndexingPct_ + INDEXING_PROGRESS_STEP) return;
+  lastIndexingPct_ = pct;
+  GUI.fillPopupProgress(renderer, indexingPopupRect_, pct);
+}
+
 void EpubReaderActivity::showBuildPopup() {
   // Mid-build indexing popup: only during render()'s blocking build-to-target phase
   // (buildPopupPending), at most once, and only when the framebuffer isn't on loan.
   // If it were called while the loan is active the draw would be lost, so pending
   // stays set and the deadline check retries on the next chunk after the loan ends.
   if (!buildPopupPending || !renderer.hasFrameBuffer()) return;
-  GUI.drawPopup(renderer, tr(STR_INDEXING));
-  // HALF-clear the popup when the page replaces it, else "INDEXING" ghosts.
-  pagesUntilFullRefresh = 1;
+  drawIndexingPopup();
   buildPopupPending = false;
 }
 
@@ -1789,6 +1808,10 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     return;
   }
 
+  // No indexing popup carried over from a previous pass; the build sites below re-arm it as needed.
+  indexingPopupRect_ = Rect{};
+  lastIndexingPct_ = -1;
+
   const auto showPendingSyncSaveError = [this]() {
     if (!pendingSyncSaveError) return;
     pendingSyncSaveError = false;
@@ -1946,10 +1969,10 @@ void EpubReaderActivity::render(RenderLock&& lock) {
       // without indexing the whole chapter.
       const bool needsFullBuild = pendingPercentJump;
       if (needsFullBuild) {
-        GUI.drawPopup(renderer, tr(STR_INDEXING));
-        // The popup's own refresh is a plain FAST, so force the page that replaces it onto the HALF
-        // ghost-cleanup path -- otherwise the "INDEXING" text ghosts under the rendered page.
-        pagesUntilFullRefresh = 1;
+        drawIndexingPopup();
+        // No progress bar on this path: createSectionFile() runs the whole build under the
+        // framebuffer loan (below), so mid-build repaints would be lost. Only the incremental
+        // build-to-target path (the common first-open/deep-jump case) shows the animated bar.
         // No popup redraws while the framebuffer is lent to the build below;
         // the panel holds the popup displayed above (e-ink is persistent).
         const auto popupFn = [this]() {
@@ -2010,9 +2033,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
                                              target > BUILD_POPUP_PAGE_THRESHOLD);
           }
           if (showPopup) {
-            GUI.drawPopup(renderer, tr(STR_INDEXING));
-            // HALF-clear the popup when the page replaces it, else "INDEXING" ghosts under the page.
-            pagesUntilFullRefresh = 1;
+            drawIndexingPopup();
           }
           // Mid-build popup surfacing for slow builds the up-front prediction can't
           // see (image extraction/probing per page, or the chunk loop overrunning
@@ -2054,6 +2075,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
               failBuild();
               return;
             }
+            updateIndexingProgress();
           }
           buildPopupPending = false;
         }
@@ -2109,8 +2131,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   // (the page that replaces it takes the HALF ghost-cleanup path). Ordinary window
   // catch-ups on a non-partial build are a page or two and stay popup-free.
   if (section->isPartial() && section->currentPage >= static_cast<int>(section->pageCount)) {
-    GUI.drawPopup(renderer, tr(STR_INDEXING));
-    pagesUntilFullRefresh = 1;
+    drawIndexingPopup();
   }
   while (section->isPartial() && section->currentPage >= static_cast<int>(section->pageCount)) {
     // Start a build to extend a partial toward the requested page.
@@ -2132,6 +2153,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
         showBuildError();
         return;
       }
+      updateIndexingProgress();
     }
   }
   // For an in-progress incremental build, make sure the page we're about to show has been laid out.
@@ -2143,6 +2165,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
         showBuildError();
         return;
       }
+      updateIndexingProgress();
     }
   }
 
