@@ -17,7 +17,6 @@
 #include <memory>
 
 #include "KOReaderCredentialStore.h"
-#include "KOReaderSyncCA.h"
 
 int KOReaderSyncClient::lastHttpCode = 0;
 
@@ -152,11 +151,15 @@ KoResponse koPerform(const char* method, const std::string& url, const std::stri
     http = s_sessionClient.get();
   }
 
-  // Pin the sync-server roots (KOSYNC_CA_ROOTS_PEM) — certificate verification is
-  // preserved (not setInsecure). wolfSSL builds root->intermediate->leaf from the
-  // server-sent chain, matching the old mbedtls cert_pem posture.
+  // No peer verification (setInsecure), matching upstream. The traffic is still
+  // TLS-encrypted, but the server cert is not checked against a pinned root.
+  // Pinning KOSYNC_CA_ROOTS_PEM via setCACert was tried first (to keep the old
+  // mbedtls cert_pem posture) but wolfSSL rejected the handshake with
+  // ASN_NO_SIGNER_E (-188): unlike mbedTLS, wolfSSL's path builder would not
+  // trace the server chain to those pinned roots. setInsecure is the working
+  // convergence with upstream; revisit only if the sync host must be verified.
   http->setReuse(s_sessionActive);
-  http->setCACert(KOSYNC_CA_ROOTS_PEM);
+  http->setInsecure();
   http->setTimeout(10000);
   http->setUserAgent(std::string(DEVICE_NAME) + "-ESP32");
   // HTTP Basic Auth for Calibre-Web-Automated compatibility.

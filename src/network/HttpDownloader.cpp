@@ -95,26 +95,20 @@ struct NoWifiSleep {
 // fresh client per redirect hop keeps state simple; the caller's pinned roots
 // verify every hop.
 //
-// caPemOverride/caPemRedirect: when either is set (font downloads), the roots are
-// concatenated into ONE PEM buffer and pinned via setCACert — wolfSSL loads every
-// PEM block in the buffer as a trust anchor, so the origin hop and the CDN redirect
-// hop each verify against whichever root matches. With no arena wall there is no
-// reason to split them per host any more. When neither is set (OPDS/KOSync/OTA),
-// wolfSSL has no CA bundle wired up, so the request runs unverified (setInsecure) —
-// OPDS targets are arbitrary user-configured hosts with no single root to pin.
+// No peer verification (setInsecure) on any hop, matching upstream. The traffic
+// stays TLS-encrypted but the server cert is not checked. The caPemOverride/
+// caPemRedirect roots (font downloads) are ignored on the wolfSSL path: pinning
+// them via setCACert was tried but wolfSSL rejected the handshake with
+// ASN_NO_SIGNER_E (-188) — its path builder would not trace the GitHub/CDN chain
+// to those roots the way mbedTLS did. The params are retained in the signature
+// for the esp_http_client fallback below, which still verifies against them.
 HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::string& username,
                                      const std::string& password, Sink& sink, const char* caPemOverride = nullptr,
                                      const char* caPemRedirect = nullptr) {
   // Hold WiFi out of modem-sleep for the whole transfer (see NoWifiSleep).
   const NoWifiSleep noWifiSleep;
-
-  // Concatenate any pinned roots ONCE, at function scope: setCACert stores the
-  // pointer and wolfSSL_CTX_load_verify_buffer reads it at connect() time on
-  // every hop, so the buffer must outlive the redirect loop below.
-  std::string caBuf;
-  if (caPemOverride) caBuf += caPemOverride;
-  if (caPemRedirect) caBuf += caPemRedirect;
-  const bool pinRoots = !caBuf.empty();
+  (void)caPemOverride;
+  (void)caPemRedirect;
 
   {
     const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
@@ -126,11 +120,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
   for (int hop = 0; hop <= MAX_REDIRECTS; ++hop) {
     freeink::SecureHttpClient http;
     http.setTimeout(HTTP_TIMEOUT_MS);
-    if (pinRoots) {
-      http.setCACert(caBuf.c_str());
-    } else {
-      http.setInsecure();
-    }
+    http.setInsecure();
     if (!http.begin(url)) {
       LOG_ERR("HTTP", "wolfSSL bad URL: %s", url.c_str());
       setDetail(sink.detail, "bad URL");
