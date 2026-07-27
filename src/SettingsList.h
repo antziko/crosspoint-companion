@@ -210,9 +210,19 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // --- Display ---
   // Appearance basics stay at the Display top level; sleep-screen and e-ink refresh tuning live in
   // their two sub-screens (categories STR_DISP_SLEEP / STR_DISP_EINK).
-  v.push_back(SettingInfo::Enum(StrId::STR_SLEEP_SCREEN, &CrossPointSettings::sleepScreen,
-                                {StrId::STR_DARK, StrId::STR_LIGHT, StrId::STR_CUSTOM, StrId::STR_COVER,
-                                 StrId::STR_NONE_OPT, StrId::STR_COVER_CUSTOM, StrId::STR_QUICK_RESUME},
+  // Enum settings are persisted as their numeric value, and SettingInfo::Enum maps the picker index
+  // straight to that value — so a label list must be ordered by enum value, not by menu preference.
+  // Bind each label to its SLEEP_SCREEN_MODE value explicitly so an enum reorder (as #2635 did to
+  // COVER_CUSTOM/BLANK) can never again silently swap two modes' labels. (#2644)
+  std::vector<StrId> sleepScreenValues(CrossPointSettings::SLEEP_SCREEN_MODE_COUNT);
+  sleepScreenValues[CrossPointSettings::DARK] = StrId::STR_DARK;
+  sleepScreenValues[CrossPointSettings::LIGHT] = StrId::STR_LIGHT;
+  sleepScreenValues[CrossPointSettings::CUSTOM] = StrId::STR_CUSTOM;
+  sleepScreenValues[CrossPointSettings::COVER] = StrId::STR_COVER;
+  sleepScreenValues[CrossPointSettings::COVER_CUSTOM] = StrId::STR_COVER_CUSTOM;
+  sleepScreenValues[CrossPointSettings::BLANK] = StrId::STR_NONE_OPT;
+  sleepScreenValues[CrossPointSettings::QUICK_RESUME] = StrId::STR_QUICK_RESUME;
+  v.push_back(SettingInfo::Enum(StrId::STR_SLEEP_SCREEN, &CrossPointSettings::sleepScreen, std::move(sleepScreenValues),
                                 "sleepScreen", StrId::STR_DISP_SLEEP));
   v.push_back(SettingInfo::Toggle(StrId::STR_SLEEP_REVIEW_ON_WAKE, &CrossPointSettings::reviewSleepImageOnWake,
                                   "reviewSleepImageOnWake", StrId::STR_DISP_SLEEP));
