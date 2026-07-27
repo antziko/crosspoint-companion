@@ -1079,9 +1079,6 @@ bool CssParser::loadFromCache() {
               return a.first < b.first;
             });
 
-  // Only a complete (non-capped) load is "fully loaded"; a heap-capped partial load leaves
-  // loaded_ false so the section builder retries on a later build when the heap has recovered.
-  loaded_ = !cssHeapBail_;
   LOG_DBG("CSS", "Loaded %u/%u rules from cache%s (%u distinct styles)", (unsigned)rulesBySelector_.size(), ruleCount,
           cssHeapBail_ ? " (heap-capped)" : "", (unsigned)stylePool_.size());
   return true;

@@ -462,11 +462,12 @@ bool Section::startBuild(const int fontId, const float lineCompression, const bo
 
   if (embeddedStyle) {
     ctx->cssParser = epub->getCssParser();
-    // Load the book's CSS once and keep it resident across chapter builds. Reloading + clearing
-    // per build churned the heap (deque nodes don't fully coalesce after clear(), so largest8
-    // stayed degraded for the whole reading session). isFullyLoaded() is false after a
-    // heap-capped partial load, so a later build retries when the heap has recovered.
-    if (ctx->cssParser && !ctx->cssParser->isFullyLoaded() && !ctx->cssParser->loadFromCache()) {
+    // Load the book's CSS for this build, and clear it when the build finishes (finalize/suspend/
+    // abandon). Keeping it resident across chapter builds pins the rule deque's scattered nodes for
+    // the whole reading session, which caps the largest free block (~8KB observed) and starves every
+    // subsequent build — so it is loaded per build and freed after, letting the heap recover between
+    // chapters. The rules are pooled/deduplicated in RAM (CssParser) to keep this load small.
+    if (ctx->cssParser && !ctx->cssParser->loadFromCache()) {
       LOG_ERR("SCT", "Failed to load CSS from cache");
     }
   }
@@ -499,7 +500,7 @@ bool Section::startBuild(const int fontId, const float lineCompression, const bo
       ctxPtr->cssParser);
   if (!ctx->parser) {
     LOG_ERR("SCT", "OOM: ChapterHtmlSlimParser");
-    // CSS stays resident (loaded once per book, see above); don't clear on this error path.
+    if (ctx->cssParser) ctx->cssParser->clear();
     file.close();
     Storage.remove(binTmpPath().c_str());
     if (!reusedHtml) Storage.remove(tmpHtmlPath.c_str());
@@ -728,7 +729,7 @@ bool Section::finalizeBuild() {
   }
 
   const bool committed = commitBuildFile(SECTION_FILE_VERSION, 0, 0);
-  // CSS is loaded once per book and kept resident (see startBuild) — not cleared per build.
+  if (build_->cssParser) build_->cssParser->clear();
   build_.reset();
   if (!committed) {
     // commitBuildFile removed filePath before the failed swap, so nothing valid remains.
@@ -771,7 +772,7 @@ void Section::suspendBuild() {
   }
 
   if (build_->parser) build_->parser->abortParse();
-  // CSS is loaded once per book and kept resident (see startBuild) — not cleared per build.
+  if (build_->cssParser) build_->cssParser->clear();
   if (!committed && file) {
     // Explicit close() required before remove (member variable, O_RDWR handle).
     file.close();
@@ -789,7 +790,7 @@ void Section::suspendBuild() {
 void Section::abandonBuild() {
   if (!build_) return;
   if (build_->parser) build_->parser->abortParse();
-  // CSS is loaded once per book and kept resident (see startBuild) — not cleared per build.
+  if (build_->cssParser) build_->cssParser->clear();
   if (file) {
     // Explicit close() required before remove (member variable, O_RDWR handle).
     file.close();

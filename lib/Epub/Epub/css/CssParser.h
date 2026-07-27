@@ -83,16 +83,7 @@ class CssParser {
   void clear() {
     rulesBySelector_.clear();
     stylePool_.clear();
-    loaded_ = false;
   }
-
-  /**
-   * True when a full (not heap-capped) rule set is resident. The section builder loads the
-   * book's CSS once and keeps it across chapter builds instead of reloading/clearing per build
-   * (which churned the heap); a heap-capped partial load stays "not fully loaded" so a later
-   * build retries once the heap has recovered.
-   */
-  [[nodiscard]] bool isFullyLoaded() const { return loaded_ && !cssHeapBail_; }
 
   /**
    * Check if CSS rules cache file exists
@@ -134,10 +125,6 @@ class CssParser {
   // block, no doubling copy. It still supports the sorted-vector algorithm — random-access
   // iterators for findRule()'s std::lower_bound binary search and the cache-load std::sort.
   std::deque<std::pair<std::string, uint16_t>> rulesBySelector_;
-
-  // Set true when a full (non-capped) loadFromCache() completes; drives isFullyLoaded() so the
-  // section builder reloads at most once per book. Reset by clear().
-  bool loaded_ = false;
 
   // Find-or-append `style` in stylePool_, returning its index. Linear scan (the pool is small:
   // bounded by the count of DISTINCT styles). Never mutates an existing entry, so indices already
