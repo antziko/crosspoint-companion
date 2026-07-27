@@ -44,6 +44,12 @@ struct CssLength {
   [[nodiscard]] int16_t toPixelsInt16(const float emSize, const float containerWidth = 0) const {
     return static_cast<int16_t>(toPixels(emSize, containerWidth));
   }
+
+  // Exact equality, used to pool identical styles (CssParser dedup). Comparing floats with ==
+  // is safe here: both operands were produced by the same parse routine from the same textual
+  // input (e.g. "2em" always yields 2.0f), so equal source text yields bit-identical values.
+  bool operator==(const CssLength& o) const { return value == o.value && unit == o.unit; }
+  bool operator!=(const CssLength& o) const { return !(*this == o); }
 };
 
 // Font style options matching CSS font-style property
@@ -124,6 +130,17 @@ struct CssPropertyFlags {
     marginTop = marginBottom = marginLeft = marginRight = 0;
     paddingTop = paddingBottom = paddingLeft = paddingRight = 0;
     imageHeight = imageWidth = display = direction = verticalAlign = 0;
+  }
+
+  // Field-by-field equality (NOT memcmp: the bitfield has unused padding bits that the
+  // constructor leaves indeterminate, so a raw byte compare would be unreliable).
+  bool operator==(const CssPropertyFlags& o) const {
+    return textAlign == o.textAlign && fontStyle == o.fontStyle && fontWeight == o.fontWeight &&
+           textDecoration == o.textDecoration && textIndent == o.textIndent && marginTop == o.marginTop &&
+           marginBottom == o.marginBottom && marginLeft == o.marginLeft && marginRight == o.marginRight &&
+           paddingTop == o.paddingTop && paddingBottom == o.paddingBottom && paddingLeft == o.paddingLeft &&
+           paddingRight == o.paddingRight && imageHeight == o.imageHeight && imageWidth == o.imageWidth &&
+           display == o.display && direction == o.direction && verticalAlign == o.verticalAlign;
   }
 };
 
@@ -266,5 +283,18 @@ struct CssStyle {
     display = CssDisplay::Block;
     verticalAlign = CssVerticalAlign::Baseline;
     defined.clearAll();
+  }
+
+  // Exact equality over every field including the `defined` mask, so two styles that carry the
+  // same values but declare different properties are NOT pooled together. Used by CssParser to
+  // deduplicate identical rule styles into a shared pool (big heap saving on CSS-heavy books).
+  bool operator==(const CssStyle& o) const {
+    return textAlign == o.textAlign && fontStyle == o.fontStyle && fontWeight == o.fontWeight &&
+           textDecoration == o.textDecoration && direction == o.direction && textIndent == o.textIndent &&
+           marginTop == o.marginTop && marginBottom == o.marginBottom && marginLeft == o.marginLeft &&
+           marginRight == o.marginRight && paddingTop == o.paddingTop && paddingBottom == o.paddingBottom &&
+           paddingLeft == o.paddingLeft && paddingRight == o.paddingRight && imageHeight == o.imageHeight &&
+           imageWidth == o.imageWidth && display == o.display && verticalAlign == o.verticalAlign &&
+           defined == o.defined;
   }
 };

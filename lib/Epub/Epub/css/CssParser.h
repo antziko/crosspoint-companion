@@ -80,7 +80,19 @@ class CssParser {
   /**
    * Clear all loaded rules
    */
-  void clear() { rulesBySelector_.clear(); }
+  void clear() {
+    rulesBySelector_.clear();
+    stylePool_.clear();
+    loaded_ = false;
+  }
+
+  /**
+   * True when a full (not heap-capped) rule set is resident. The section builder loads the
+   * book's CSS once and keeps it across chapter builds instead of reloading/clearing per build
+   * (which churned the heap); a heap-capped partial load stays "not fully loaded" so a later
+   * build retries once the heap has recovered.
+   */
+  [[nodiscard]] bool isFullyLoaded() const { return loaded_ && !cssHeapBail_; }
 
   /**
    * Check if CSS rules cache file exists
@@ -106,17 +118,31 @@ class CssParser {
   bool loadFromCache();
 
  private:
-  // Storage: normalized selector -> style properties, kept sorted by selector.
-  // std::deque, NOT std::vector: CssStyle is a large by-value struct (~250 B/entry), so a
-  // CSS-heavy EPUB's 200-256 rules made a flat vector reallocate to a single ~64 KB contiguous
-  // block. On X3/X4 that one allocation (and its 2x doubling churn) collapsed the largest free
-  // block from ~61 KB to ~17 KB for the entire reading session — starving the JPEG decoder
-  // (a 17.9 KB contiguous JPEGDEC object) and text-layout vectors, so image/CSS-heavy chapters
-  // failed to render. A deque stores entries in small (~0.5 KB) chunks: no giant block, no
-  // doubling copy, largest free block stays high. It still supports the sorted-vector algorithm
-  // unchanged — random-access iterators for findRule()'s std::lower_bound binary search and the
-  // cache-load std::sort; ordered std::deque::insert for stream parsing.
-  std::deque<std::pair<std::string, CssStyle>> rulesBySelector_;
+  // Distinct style values, referenced by index from rulesBySelector_. Real stylesheets have many
+  // selectors that resolve to identical property sets (calibre emits hundreds of class rules
+  // sharing a handful of styles), so pooling the CssStyle (104 B each) and keeping only a 2-byte
+  // index per selector cuts the resident CSS heap ~2-4x — the peak that starved layout on
+  // CSS-heavy books. Deduplicated in-RAM only; the on-disk cache format is unchanged (no version
+  // bump, no re-parse). std::deque: element references stay valid across push_back, so the
+  // indices findRule() dereferences are stable, and no single large contiguous block is needed.
+  std::deque<CssStyle> stylePool_;
+
+  // Storage: normalized selector -> index into stylePool_, kept sorted by selector.
+  // std::deque, NOT std::vector: a CSS-heavy EPUB's 200-256 rules made a flat vector reallocate
+  // to a single large contiguous block whose 2x doubling churn collapsed the largest free block
+  // for the whole reading session. A deque stores entries in small (~0.5 KB) chunks: no giant
+  // block, no doubling copy. It still supports the sorted-vector algorithm — random-access
+  // iterators for findRule()'s std::lower_bound binary search and the cache-load std::sort.
+  std::deque<std::pair<std::string, uint16_t>> rulesBySelector_;
+
+  // Set true when a full (non-capped) loadFromCache() completes; drives isFullyLoaded() so the
+  // section builder reloads at most once per book. Reset by clear().
+  bool loaded_ = false;
+
+  // Find-or-append `style` in stylePool_, returning its index. Linear scan (the pool is small:
+  // bounded by the count of DISTINCT styles). Never mutates an existing entry, so indices already
+  // handed out stay valid (copy-on-write for the stream path's applyOver merges).
+  uint16_t internStyle(const CssStyle& style);
 
   // Set when a rule insert was skipped because free heap ran genuinely low (a deque node's
   // bare-`new` would abort() under -fno-exceptions). Once set, the rest of the parse stops storing

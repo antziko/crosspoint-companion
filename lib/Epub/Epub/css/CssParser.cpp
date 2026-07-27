@@ -535,27 +535,30 @@ void CssParser::processRuleBlockWithStyle(const std::string& selectorGroup, cons
     // heap floor, leaving the reader stuck on the "out of bounds" screen.
     auto it =
         std::lower_bound(rulesBySelector_.begin(), rulesBySelector_.end(), key,
-                         [](const std::pair<std::string, CssStyle>& e, const std::string& k) { return e.first < k; });
+                         [](const std::pair<std::string, uint16_t>& e, const std::string& k) { return e.first < k; });
+    // Both branches below grow the deque (a pool entry and/or a rule node) by at most one small
+    // (~0.5 KB) chunk — never the large contiguous block the old flat vector needed. Bail
+    // gracefully if the largest free block runs genuinely low, so a pathological stylesheet can't
+    // exhaust it (a deque node's bare `new` aborts under -fno-exceptions); the book then renders
+    // with partial CSS instead of crashing. Guarding on the largest block (not total free) keeps
+    // the check meaningful once the heap is fragmented.
+    const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (largest < CSS_GROWTH_HEAP_MARGIN) {
+      SdDebugLog::log("CSS", "rule-store bail: rules=%u largest=%u free=%u", (unsigned)rulesBySelector_.size(),
+                      (unsigned)largest, (unsigned)ESP.getFreeHeap());
+      LOG_ERR("CSS", "Low heap, stopping CSS parse at %u rules (largest %u)", (unsigned)rulesBySelector_.size(),
+              (unsigned)largest);
+      cssHeapBail_ = true;
+      return;
+    }
     if (it != rulesBySelector_.end() && it->first == key) {
-      it->second.applyOver(style);
+      // Merge onto the existing selector's style. Copy-on-write: never mutate the shared pool
+      // entry (other selectors may reference the same index) — merge a copy and re-intern it.
+      CssStyle merged = (it->second < stylePool_.size()) ? stylePool_[it->second] : CssStyle{};
+      merged.applyOver(style);
+      it->second = internStyle(merged);
     } else if (style.defined.anySet()) {
-      // rulesBySelector_ is a std::deque, so inserting a rule allocates at most one small (~0.5 KB)
-      // chunk — never the large contiguous block the old vector needed (whose ~64 KB 2x realloc was
-      // the session-wide heap-fragmentation source). We still bail gracefully if free heap runs
-      // genuinely low, so a pathological stylesheet can't exhaust it (a deque node's bare `new`
-      // aborts under -fno-exceptions); the book then renders with partial CSS instead of crashing.
-      // Guarding on the largest free block (not total free) keeps the check meaningful once the
-      // heap is fragmented.
-      const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-      if (largest < CSS_GROWTH_HEAP_MARGIN) {
-        SdDebugLog::log("CSS", "rule-store bail: rules=%u largest=%u free=%u", (unsigned)rulesBySelector_.size(),
-                        (unsigned)largest, (unsigned)ESP.getFreeHeap());
-        LOG_ERR("CSS", "Low heap, stopping CSS parse at %u rules (largest %u)", (unsigned)rulesBySelector_.size(),
-                (unsigned)largest);
-        cssHeapBail_ = true;
-        return;
-      }
-      rulesBySelector_.insert(it, std::make_pair(key, style));
+      rulesBySelector_.insert(it, std::make_pair(key, internStyle(style)));
     }
   }
 }
@@ -710,12 +713,20 @@ bool CssParser::loadFromStream(HalFile& source) {
 
 // Style resolution
 
+uint16_t CssParser::internStyle(const CssStyle& style) {
+  for (size_t i = 0; i < stylePool_.size(); ++i) {
+    if (stylePool_[i] == style) return static_cast<uint16_t>(i);
+  }
+  stylePool_.push_back(style);
+  return static_cast<uint16_t>(stylePool_.size() - 1);
+}
+
 const CssStyle* CssParser::findRule(const std::string& key) const {
   const auto it =
       std::lower_bound(rulesBySelector_.begin(), rulesBySelector_.end(), key,
-                       [](const std::pair<std::string, CssStyle>& e, const std::string& k) { return e.first < k; });
-  if (it != rulesBySelector_.end() && it->first == key) {
-    return &it->second;
+                       [](const std::pair<std::string, uint16_t>& e, const std::string& k) { return e.first < k; });
+  if (it != rulesBySelector_.end() && it->first == key && it->second < stylePool_.size()) {
+    return &stylePool_[it->second];
   }
   return nullptr;
 }
@@ -797,13 +808,15 @@ bool CssParser::saveToCache() const {
 
   // Write each rule: selector string + CssStyle fields
   for (const auto& pair : rulesBySelector_) {
+    if (pair.second >= stylePool_.size()) continue;  // defensive: skip a dangling index
     // Write selector string (length-prefixed)
     const auto selectorLen = static_cast<uint16_t>(pair.first.size());
     file.write(reinterpret_cast<const uint8_t*>(&selectorLen), sizeof(selectorLen));
     file.write(reinterpret_cast<const uint8_t*>(pair.first.data()), selectorLen);
 
-    // Write CssStyle fields (all are POD types)
-    const CssStyle& style = pair.second;
+    // Write CssStyle fields (all are POD types). Styles are pooled in RAM (dedup); the on-disk
+    // format stays flat — one full style per selector — so the cache version is unchanged.
+    const CssStyle& style = stylePool_[pair.second];
     file.write(static_cast<uint8_t>(style.textAlign));
     file.write(static_cast<uint8_t>(style.fontStyle));
     file.write(static_cast<uint8_t>(style.fontWeight));
@@ -1053,19 +1066,23 @@ bool CssParser::loadFromCache() {
 
     // Defend against caches that still carry empty rules (see store-time note):
     // an empty style contributes nothing to resolveStyle, so don't hold its heap.
+    // internStyle() deduplicates identical styles into the shared pool (the heap saving).
     if (style.defined.anySet()) {
-      rulesBySelector_.emplace_back(std::move(selector), style);
+      rulesBySelector_.emplace_back(std::move(selector), internStyle(style));
     }
   }
 
   // Cache entries are written in (unordered) container order; restore the sorted
   // invariant that findRule()'s binary search relies on.
   std::sort(rulesBySelector_.begin(), rulesBySelector_.end(),
-            [](const std::pair<std::string, CssStyle>& a, const std::pair<std::string, CssStyle>& b) {
+            [](const std::pair<std::string, uint16_t>& a, const std::pair<std::string, uint16_t>& b) {
               return a.first < b.first;
             });
 
-  LOG_DBG("CSS", "Loaded %u/%u rules from cache%s", (unsigned)rulesBySelector_.size(), ruleCount,
-          cssHeapBail_ ? " (heap-capped)" : "");
+  // Only a complete (non-capped) load is "fully loaded"; a heap-capped partial load leaves
+  // loaded_ false so the section builder retries on a later build when the heap has recovered.
+  loaded_ = !cssHeapBail_;
+  LOG_DBG("CSS", "Loaded %u/%u rules from cache%s (%u distinct styles)", (unsigned)rulesBySelector_.size(), ruleCount,
+          cssHeapBail_ ? " (heap-capped)" : "", (unsigned)stylePool_.size());
   return true;
 }
