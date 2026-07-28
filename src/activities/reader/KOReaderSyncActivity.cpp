@@ -9,10 +9,9 @@
 #include <Memory.h>
 #include <SdDebugLog.h>
 #include <WiFi.h>
+#include <HalClock.h>
 #include <esp_heap_caps.h>
-#include <esp_sntp.h>
 #include <esp_wifi.h>
-#include <lwip/tcpip.h>  // LOCK_TCPIP_CORE/UNLOCK_TCPIP_CORE: framework enables CONFIG_LWIP_TCPIP_CORE_LOCKING
 
 #include <algorithm>
 #include <cassert>
@@ -37,40 +36,6 @@
 #include "util/LookupHistory.h"
 
 namespace {
-void syncTimeWithNTP() {
-  // The Arduino prebuilt framework enables CONFIG_LWIP_TCPIP_CORE_LOCKING, so any lwip timer
-  // manipulation must hold the TCPIP core lock or it asserts at runtime ("Required to lock TCPIP
-  // core functionality!", timeouts.c). esp_sntp_stop()/esp_sntp_init() call sys_untimeout()/
-  // sys_timeout() internally and the esp_sntp_* wrappers do NOT take the lock themselves, so wrap
-  // the (re)configuration here. Keep the lock OFF during the poll-wait below — holding it would
-  // block the tcpip thread that advances the sync.
-  LOCK_TCPIP_CORE();
-  // Stop SNTP if already running (can't reconfigure while running)
-  if (esp_sntp_enabled()) {
-    esp_sntp_stop();
-  }
-
-  // Configure SNTP
-  esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
-  esp_sntp_setservername(0, "pool.ntp.org");
-  esp_sntp_init();
-  UNLOCK_TCPIP_CORE();
-
-  // Wait for time to sync (with timeout)
-  int retry = 0;
-  const int maxRetries = 50;  // 5 seconds max
-  while (sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED && retry < maxRetries) {
-    vTaskDelay(100 / portTICK_PERIOD_MS);
-    retry++;
-  }
-
-  if (retry < maxRetries) {
-    LOG_DBG("KOSync", "NTP time synced");
-  } else {
-    LOG_DBG("KOSync", "NTP sync timeout, using fallback");
-  }
-}
-
 // Format a transfer byte count for the summary: < 1 MB shows 2-decimal KB,
 // otherwise 2-decimal MB (1024 base). Writes into the caller's fixed buffer.
 void formatXferBytes(uint32_t bytes, char* out, size_t outLen) {
@@ -193,8 +158,12 @@ void KOReaderSyncActivity::onWifiSelectionComplete(const bool success) {
   }
   requestUpdate(true);
 
-  // Sync time with NTP before making API requests
-  syncTimeWithNTP();
+  // Sync time with NTP before making API requests. Delegate to HalClock: it drives SNTP via the
+  // framework's configTzTime() (correct TCPIP core-lock handling), unlike the old inline esp_sntp_*
+  // sequence which deadlocked — esp_sntp_setservername() self-locks the (non-recursive) core mutex,
+  // so wrapping it in a manual LOCK_TCPIP_CORE() blocked forever. We own the WiFi connection here,
+  // so give SNTP the full 5s budget; a late packet is still adopted asynchronously by HalClock.
+  halClock.syncFromNTP(5000);
 
   {
     RenderLock lock(*this);
