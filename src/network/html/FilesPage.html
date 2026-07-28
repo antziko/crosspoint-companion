@@ -3285,7 +3285,10 @@ let operationCancelled = false; // Set by Cancel to stop conversion loops and up
 let uploadGeneration = 0;       // Incremented each uploadFile() call; guards stale restoreAfterCancel()
 let currentUploadWs = null;     // Active WebSocket reference for external abort
 let currentUploadXhr = null;    // Active XHR reference for external abort
-const WS_PORT = 81;
+// On-device HTTP uses port 80 and WebSocket uses 81. The simulator maps the
+// same adjacent-port contract to an unprivileged host pair such as 8080/8081.
+const HTTP_PORT = Number(window.location.port || 80);
+const WS_PORT = HTTP_PORT + 1;
 const WS_CHUNK_SIZE = 8192; // 8KB chunks (device WEBSOCKETS_MAX_DATA_SIZE=15KB). Safe now that the web server releases the 32KB inflate window at start (~40KB free, min-free ~11KB). Halves frame/SD-write count vs the old 4KB → higher throughput.
 
 // ============================================================================
