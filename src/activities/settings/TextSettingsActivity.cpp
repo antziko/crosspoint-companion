@@ -55,6 +55,7 @@ void TextSettingsActivity::onEnter() {
   // Family/Size open on the current selection.
   selectedIndex_[static_cast<int>(Tab::Family)] = fontPane_.highlightedIndex() + 1;
   selectedIndex_[static_cast<int>(Tab::Size)] = currentSizeIndex_ + 1;
+  selectedIndex_[static_cast<int>(tab_)] = 0;  // screen opens with the tab bar focused, not a list row
 
   requestUpdate();
 }
