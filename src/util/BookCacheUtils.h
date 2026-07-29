@@ -86,6 +86,14 @@ CachePruneResult removeOrphanCaches(const std::vector<std::string>& orphanDirNam
 // stats. Returns the combined tally. Device-only (uses Storage).
 CachePruneResult pruneOrphanCaches();
 
+// Deletes ONE book's cache dir (name relative to /.crosspoint, e.g. "epub_12345", as
+// produced by scanOrphanCaches or the reading-stats Books tab) and its sibling
+// "<dir>--<title>-by-<author>.txt" label. Unlike pruneOrphanCaches this makes no
+// orphan check — the caller has chosen to clear a book that may still be on the card,
+// so its rendered sections, cover, reading stats AND progress all go. Returns true if
+// the dir was removed. Device-only (uses Storage).
+bool removeBookCache(const std::string& dirName);
+
 // Returns true if the directory name matches a book cache entry.
 bool isBookCacheDirectoryName(const char* name);
 

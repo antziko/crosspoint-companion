@@ -1,7 +1,10 @@
 #pragma once
 #include <I18n.h>
 
+#include <cstdint>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "GlobalReadingStats.h"
 #include "StatsTimelineView.h"
@@ -23,7 +26,16 @@ class ReadingStatsActivity final : public Activity {
   void render(RenderLock&&) override;
 
  private:
-  enum class Tab { Timeline, Heatmap };
+  enum class Tab { Timeline, Heatmap, Books };
+
+  // One row of the Books breakdown tab: a book that has accrued reading time and
+  // its cross-device total (this device + last-synced other devices). Title is
+  // read from the cache label sidecar filename — no book.bin parse.
+  struct BookStatRow {
+    std::string title;
+    uint32_t allDevicesSeconds = 0;  // BookReadingStats::displayTotalSeconds()
+    std::string dirName;             // cache dir under /.crosspoint (delete target)
+  };
 
   // ~1.7 KB (embeds two ReadingTimeHistory: local + remote snapshot) —
   // heap-allocated, never a stack local or by-value member (see
@@ -34,13 +46,38 @@ class ReadingStatsActivity final : public Activity {
   // frame). Equals the local history when nothing has been synced.
   std::unique_ptr<ReadingTimeHistory> displayHist;
 
+  // Per-book breakdown for the Books tab, sorted by descending time. Built once in
+  // onEnter() (a directory scan + one stats.bin read per book — never per frame).
+  std::vector<BookStatRow> bookRows;
+  // Sum of every row's allDevicesSeconds. Shown as the pinned reconciliation
+  // subtotal: it need not equal the headline total (that is an independent
+  // monotonic counter), and the gap is the point of this screen.
+  uint32_t booksSumSeconds = 0;
+  int booksScrollOffset = 0;
+  // Selected row on the Books tab (long-press Confirm deletes its whole cache dir).
+  int booksSelectedIndex = 0;
+  // Swallow the Confirm release after a long-press has fired so it doesn't re-trigger.
+  bool booksLongPressFired = false;
+
   Tab selectedTab = Tab::Timeline;
   // Shared Timeline/Heatmap presentation (stacked Yearly/Monthly/Weekly + scroll).
   StatsTimelineView timeline;
 
   ButtonNavigator buttonNavigator;
 
-  // Area below the tab bar shared by both tabs; single source of truth so loop()'s
+  // Area below the tab bar shared by all tabs; single source of truth so loop()'s
   // scroll clamping and render()'s drawing always agree on available height.
   Rect contentRect() const;
+
+  // Scans /.crosspoint for book caches with reading time and fills bookRows +
+  // booksSumSeconds. Device-only (uses Storage); no-op result on host/empty card.
+  void buildBookBreakdown();
+  void renderBooksTab(const Rect& content) const;
+  int booksVisibleRows(const Rect& content) const;
+  int booksMaxScroll(const Rect& content) const;
+  // Keeps booksSelectedIndex within the scroll window after a selection move.
+  void scrollSelectedBookIntoView(const Rect& content);
+  // Confirms, then deletes the selected book's whole cache dir (progress + sections +
+  // stats). Drops the row locally on success — no rescan.
+  void promptDeleteBook();
 };

@@ -503,6 +503,17 @@ CachePruneResult removeOrphanCaches(const std::vector<std::string>& orphanDirNam
   return res;
 }
 
+bool removeBookCache(const std::string& dirName) {
+  const std::string dirPath = std::string(CACHE_BASE_DIR) + "/" + dirName;
+  if (!Storage.removeDir(dirPath.c_str())) {
+    LOG_ERR("BookCache", "Failed to remove cache %s", dirPath.c_str());
+    return false;
+  }
+  removeCacheLabel(dirName);
+  LOG_INF("BookCache", "Removed book cache %s", dirName.c_str());
+  return true;
+}
+
 CachePruneResult pruneOrphanCaches() {
   std::vector<std::string> orphans;
   orphans.reserve(16);

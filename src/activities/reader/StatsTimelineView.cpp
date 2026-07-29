@@ -25,8 +25,9 @@ int timelineRowHeight(GfxRenderer& renderer) { return renderer.getLineHeight(UI_
 
 // Compact H'MM reading-duration for the timeline cells (e.g. 19'02, 99'15) —
 // hours, an apostrophe, then zero-padded minutes, so a grid of them stays narrow.
-// Distinct from BookReadingStats::formatDuration()'s "1h 44m" long form, which
-// the totals/ETA lines keep.
+// Always renders as hours even below 1h (0'MM / 0'00); BookReadingStats::
+// formatDuration() shares the same H'MM hours form but drops to "45m"/"35s" for
+// sub-hour values on the totals/ETA lines.
 void formatDurationCompact(uint32_t seconds, char* buf, size_t len) {
   const uint32_t hours = seconds / 3600;
   const uint32_t minutes = (seconds % 3600) / 60;

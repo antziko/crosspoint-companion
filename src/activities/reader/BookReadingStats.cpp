@@ -175,6 +175,8 @@ void BookReadingStats::formatDuration(uint32_t seconds, char* buf, size_t len) {
   if (hours == 0) {
     snprintf(buf, len, "%lum", static_cast<unsigned long>(minutes));
   } else {
-    snprintf(buf, len, "%luh %lum", static_cast<unsigned long>(hours), static_cast<unsigned long>(minutes));
+    // Hours+minutes: compact "H'MM" (e.g. 44'05), matching the timeline grid's
+    // formatDurationCompact. Sub-hour values keep their "45m"/"35s" unit suffixes.
+    snprintf(buf, len, "%lu'%02lu", static_cast<unsigned long>(hours), static_cast<unsigned long>(minutes));
   }
 }
