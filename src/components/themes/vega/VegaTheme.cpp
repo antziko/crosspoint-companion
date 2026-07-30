@@ -48,6 +48,13 @@ constexpr int kLineGap = 4;
 constexpr int kNextThumbGap = 6;
 constexpr int kProgressBarHeight = 12;
 constexpr int kSelectionOutlineW = 3;
+// White breathing room between a cover/thumbnail edge and its selection outline.
+// The page background behind the cover is white, so pushing the outline this far
+// out leaves a visible gap ring -- without it the (black) outline blends into an
+// all-black cover and the selection reads as invisible.
+constexpr int kSelectionGap = 2;
+// Total offset of the outline's outer edge from the cover edge (gap + stroke).
+constexpr int kSelectionInset = kSelectionGap + kSelectionOutlineW;
 
 // Plain English day/month abbreviations -- mirrors HalClock::formatDate()'s
 // kDowNames/kMonthNames (HalClock.cpp:248) and the MONTH_ABBR convention
@@ -318,8 +325,8 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
   // and selection highlight, which must track selectorIndex every render.
   const bool heroSelected = (selectorIndex == 0);
   if (heroSelected) {
-    renderer.drawRoundedRect(coverX - kSelectionOutlineW, coverY - kSelectionOutlineW, coverW + 2 * kSelectionOutlineW,
-                             coverH + 2 * kSelectionOutlineW, kSelectionOutlineW, kCornerRadius, true);
+    renderer.drawRoundedRect(coverX - kSelectionInset, coverY - kSelectionInset, coverW + 2 * kSelectionInset,
+                             coverH + 2 * kSelectionInset, kSelectionOutlineW, kCornerRadius, true);
   }
 
   const int titleLineH = renderer.getLineHeight(UI_10_FONT_ID);
@@ -435,9 +442,8 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
     const int thumbX = slotX + (nextTileW - nextThumbW) / 2;
     const bool selected = (selectorIndex == i + 1);
     if (selected) {
-      renderer.drawRoundedRect(thumbX - kSelectionOutlineW, nextRowY - kSelectionOutlineW,
-                               nextThumbW + 2 * kSelectionOutlineW, nextThumbH + 2 * kSelectionOutlineW,
-                               kSelectionOutlineW, kCornerRadius, true);
+      renderer.drawRoundedRect(thumbX - kSelectionInset, nextRowY - kSelectionInset, nextThumbW + 2 * kSelectionInset,
+                               nextThumbH + 2 * kSelectionInset, kSelectionOutlineW, kCornerRadius, true);
     }
     // Coverless tiles render the title inside the placeholder, so skip the
     // duplicate title below the tile.
