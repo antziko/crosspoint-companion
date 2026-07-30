@@ -847,16 +847,18 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
     // Right aligned text for progress counter
     char progressStr[32];
 
-    // Prefix the page count with "~" while a still-building spine only yields an estimated total.
+    // Mark the *total* with "~" while a still-building spine only yields an estimated total.
+    // The tilde qualifies the total, not the current page, so it goes on the total ("4/~27").
+    // Prefixing the current page ("~4/27") reads as a negative page in the pixel status-bar font.
     const char* estimatePrefix = pageCountEstimated ? "~" : "";
 
     if (SETTINGS.statusBarBookProgressPercentage && SETTINGS.statusBarChapterPageCount) {
-      snprintf(progressStr, sizeof(progressStr), "%s%d/%d  %.0f%%", estimatePrefix, currentPage, pageCount,
+      snprintf(progressStr, sizeof(progressStr), "%d/%s%d  %.0f%%", currentPage, estimatePrefix, pageCount,
                bookProgress);
     } else if (SETTINGS.statusBarBookProgressPercentage) {
       snprintf(progressStr, sizeof(progressStr), "%.0f%%", bookProgress);
     } else {
-      snprintf(progressStr, sizeof(progressStr), "%s%d/%d", estimatePrefix, currentPage, pageCount);
+      snprintf(progressStr, sizeof(progressStr), "%d/%s%d", currentPage, estimatePrefix, pageCount);
     }
 
     progressTextWidth = renderer.getTextWidth(SMALL_FONT_ID, progressStr);
