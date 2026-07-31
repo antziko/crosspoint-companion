@@ -48,7 +48,12 @@ namespace {
 //      the scene-break gap, so cached pages laid out by older versions no longer
 //      match. Keeps <br>-per-paragraph books (common CJK formatting) from
 //      re-adding container spacing at every paragraph (#2710).
-constexpr uint8_t SECTION_FILE_VERSION = 41;
+// v42: Word-gap suppression at a CJK break opportunity now fires only for tokens glued in the
+//      source (attachToPrevious); real whitespace between two words renders as a space again,
+//      so the gaps between Hangul words survive instead of collapsing. Ruby base boundaries
+//      carry the continuation flag explicitly to stay gap-less. v41 cached word positions had
+//      the Korean spaces collapsed and no longer match (#2768).
+constexpr uint8_t SECTION_FILE_VERSION = 42;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects

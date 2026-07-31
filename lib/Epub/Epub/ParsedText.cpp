@@ -276,8 +276,7 @@ bool canGrowWordVectors(size_t newCapacity) {
   // the biggest free block available, `free` total free. A high `cap` means a very long
   // paragraph; a low `largest` with ample `free` means fragmentation, not exhaustion.
   LOG_ERR("PT", "word-vector grow blocked: cap=%u need=%u largest=%u free=%u", (unsigned)newCapacity,
-          (unsigned)wordVectorGrowBytes(newCapacity),
-          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+          (unsigned)wordVectorGrowBytes(newCapacity), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
           (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
   return false;
 }
@@ -343,7 +342,14 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle,
 
   bool effectiveAttachToPrevious = attachToPrevious;
   bool effectiveNoSpaceBefore = false;
-  if (!words.empty() && hasCjkBreakOpportunityBetween(lastCodepoint(words.back()), firstCodepoint(word))) {
+  // Only a glued token (attachToPrevious == true: no whitespace separated it from the previous
+  // word in the source) may be turned into a gap-less CJK break opportunity. When real
+  // whitespace separated the two words that space is content and must render -- Hangul is a
+  // space-delimited script that utf8IsCjkBreakable() still covers, so an unconditional collapse
+  // ate the spaces between Korean words (#2768). Ruby base boundaries set attachToPrevious
+  // explicitly in the parser so Chinese/Japanese furigana stay gap-less.
+  if (attachToPrevious && !words.empty() &&
+      hasCjkBreakOpportunityBetween(lastCodepoint(words.back()), firstCodepoint(word))) {
     effectiveAttachToPrevious = false;
     effectiveNoSpaceBefore = true;
   }
