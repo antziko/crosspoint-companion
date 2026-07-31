@@ -46,6 +46,10 @@ class TextSettingsActivity final : public Activity {
   void confirmStyleRow(int row);
   // Applies the row at the given list index for the active tab (Confirm shares this).
   void activateRow(int row);
+  // Touch input: tab-bar tap switches tabs, a list tap moves/activates a row, a
+  // vertical swipe pages the list. Returns true if it consumed this frame. Inert
+  // on non-touch boards (guards on hasTouch()).
+  bool handleTouch();
   // LOCAL(feat-dictionary): mirror the Family nav-ring position onto the compare pane's highlight.
   void syncFamilyPaneHighlight();
 

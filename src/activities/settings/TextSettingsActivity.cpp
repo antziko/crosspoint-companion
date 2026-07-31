@@ -100,9 +100,81 @@ TextSettingsActivity::PaneGeometry TextSettingsActivity::paneGeometry() const {
   return {previewTop, tabTop, listTop, listHeight};
 }
 
-// LOCAL(feat-dictionary): #2605's handleTouch() removed — touch input primitives
-// (wasScreenTapped/TouchDown, wasSwipe, tabIndexFromPoint, handleListTouch) come from the
-// unmerged touch branch (#2481). This build is button-nav only.
+// Touch handling for the settings screen (#2605's handleTouch(), restored now that
+// #2481's touch primitives are merged). Tab-bar tap switches tabs, a list tap moves
+// the highlight / activates a row, and a vertical swipe pages the list. Inert on
+// non-touch boards (X3/X4): guarded on hasTouch(), and the events never fire anyway.
+// Family-tab specifics: switch away via the tab bar stays live while the compare pane
+// is loading, but list/swipe nav honors the pane's nav-lock; and the pane highlight is
+// synced to the tapped row before activateRow() so applyFamily() commits that font.
+bool TextSettingsActivity::handleTouch() {
+  if (!mappedInput.hasTouch()) return false;
+
+  const auto geo = paneGeometry();
+
+  // Tab bar tap: switch tabs. Allowed even while the Family pane is nav-locked.
+  int tx = 0;
+  int ty = 0;
+  std::vector<TabInfo> tabs;
+  tabs.reserve(static_cast<int>(Tab::Count));
+  for (int t = 0; t < static_cast<int>(Tab::Count); t++) {
+    tabs.push_back({I18N.get(TAB_NAME_IDS[t]), tab_ == static_cast<Tab>(t)});
+  }
+  int tabHit = -1;
+  if ((mappedInput.wasScreenTouchDown(tx, ty) || mappedInput.wasScreenTapped(tx, ty)) &&
+      GUI.tabIndexFromPoint(renderer, Rect{0, geo.tabTop, renderer.getScreenWidth(), metrics_.tabBarHeight}, tabs, tx,
+                            ty, tabHit)) {
+    if (tab_ != static_cast<Tab>(tabHit)) {
+      tab_ = static_cast<Tab>(tabHit);
+      selectedIndex() = 0;
+      requestUpdate();
+    }
+    return true;
+  }
+
+  // Block list/swipe nav while the Family compare pane is still loading its preview
+  // (mirrors loop()'s nav-lock guard); the tab-bar tap above stays live.
+  if (tab_ == Tab::Family && fontPane_.navLocked()) return false;
+
+  const int listCount = currentListSize();
+
+  // List tap: handleListTouch moves the highlight on touchdown and reports Activated
+  // when a tap lands on a row. On Family, sync the pane highlight before activating.
+  int row = std::max(0, selectedIndex() - 1);
+  switch (handleListTouch(row, listCount, geo.listTop, geo.listHeight, /*hasSubtitle=*/false)) {
+    case ListTouchResult::Activated:
+      selectedIndex() = row + 1;
+      syncFamilyPaneHighlight();
+      activateRow(row);
+      return true;
+    case ListTouchResult::Consumed:
+      selectedIndex() = row + 1;
+      syncFamilyPaneHighlight();
+      requestUpdate();
+      return true;
+    case ListTouchResult::None:
+      break;
+  }
+
+  // Vertical swipe pages the list (long Family/Size lists); short lists just clamp.
+  const int pageItems = GUI.getListPageItems(geo.listHeight, /*hasSubtitle=*/false);
+  const int ringSize = listCount + 1;  // +1 for the tab bar at ring position 0
+  const auto swipe = mappedInput.wasSwipe();
+  if (swipe == MappedInputManager::SwipeDir::Up) {
+    selectedIndex() = selectedIndex() == 0 ? 1 : ButtonNavigator::nextPageIndex(selectedIndex(), ringSize, pageItems);
+    syncFamilyPaneHighlight();
+    requestUpdate();
+    return true;
+  }
+  if (swipe == MappedInputManager::SwipeDir::Down) {
+    selectedIndex() = ButtonNavigator::previousPageIndex(selectedIndex(), ringSize, pageItems);
+    syncFamilyPaneHighlight();
+    requestUpdate();
+    return true;
+  }
+
+  return false;
+}
 
 void TextSettingsActivity::loop() {
   if (optionPopup_.handleInput(mappedInput, [this] { requestUpdate(); })) return;  // picker owns input while open
@@ -111,6 +183,8 @@ void TextSettingsActivity::loop() {
     finish();
     return;
   }
+
+  if (handleTouch()) return;  // tab/list/swipe touch; inert on non-touch boards
 
   // LOCAL(feat-dictionary): Font-tab rows use tap=commit / hold=pin (like FontSelectionActivity);
   // the tab bar and every other tab keep #2605's simple press-to-activate.
