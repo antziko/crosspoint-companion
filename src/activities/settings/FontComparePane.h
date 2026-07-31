@@ -39,6 +39,12 @@ class FontComparePane {
   // '*' marker; the committed font is tagged [Selected].
   void renderList(GfxRenderer& renderer, int listTop, int listHeight) const;
 
+  // Make the highlighted font resident (SD swap) and return its fontId WITHOUT drawing the
+  // compare panes — for hosts that render their own single preview (e.g. the in-reader
+  // book-text preview). Clears the nav-lock, exactly as renderPanes does once the requested
+  // preview would be on screen.
+  int loadHighlightedFontId(GfxRenderer& renderer);
+
   // Highlight movement. Each arms the nav-lock until the next renderPanes() so held/rapid input
   // cannot outrun the (slow, SD-loading) bottom preview pane.
   void moveNext();

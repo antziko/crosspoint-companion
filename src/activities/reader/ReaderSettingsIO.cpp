@@ -10,7 +10,9 @@ namespace {
 // changes so older files are rejected and re-seeded.
 // v4: minSessionMinutes repurposed from a minutes value to a MIN_SESSION_SECONDS index;
 //     bump rejects old per-book overrides so they cleanly re-seed instead of misreading.
-constexpr uint8_t READER_SETTINGS_FILE_VERSION = 4;
+// v5: appended per-book screenMargin. Old (v4) files are rejected and re-seed from the
+//     current globals (screenMargin included), so the added field can't be misread.
+constexpr uint8_t READER_SETTINGS_FILE_VERSION = 5;
 
 // Relative path inside the epub cache dir (epub_<hash>/).
 constexpr char READER_SETTINGS_FILENAME[] = "/reader_settings.bin";
@@ -45,6 +47,7 @@ bool load(const std::string& cachePath, CrossPointSettings::ReaderOverride& out)
   f.read(reinterpret_cast<uint8_t*>(out.sdFontFamilyName), sizeof(out.sdFontFamilyName));
   out.sdFontFamilyName[sizeof(out.sdFontFamilyName) - 1] = '\0';
   serialization::readPod(f, out.minSessionMinutes);
+  serialization::readPod(f, out.screenMargin);
   out.active = true;
   return true;
 }
@@ -64,6 +67,7 @@ bool write(const std::string& cachePath, const CrossPointSettings::ReaderOverrid
   serialization::writePod(f, ov.extraParagraphSpacing);
   f.write(reinterpret_cast<const uint8_t*>(ov.sdFontFamilyName), sizeof(ov.sdFontFamilyName));
   serialization::writePod(f, ov.minSessionMinutes);
+  serialization::writePod(f, ov.screenMargin);
   return true;
 }
 

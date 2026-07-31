@@ -186,6 +186,12 @@ void FontComparePane::renderPanes(GfxRenderer& renderer, int top, int height) {
   navLocked_ = false;
 }
 
+int FontComparePane::loadHighlightedFontId(GfxRenderer& renderer) {
+  const int id = loadPaneFontId(renderer, selectedIndex_);
+  navLocked_ = false;  // the requested preview font is now resident; accept up/down again
+  return id;
+}
+
 void FontComparePane::renderList(GfxRenderer& renderer, int listTop, int listHeight) const {
   const int committedIndex = committedIndex_;
   GUI.drawList(

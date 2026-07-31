@@ -4,11 +4,11 @@
 #include <I18n.h>
 #include <Logging.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <variant>
 
-#include "../settings/FontSelectionActivity.h"
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "ReaderFontSizes.h"
@@ -27,7 +27,9 @@ enum ItemIndex : int {
   PARA_ALIGNMENT = 3,
   HYPHENATION = 4,
   EXTRA_SPACING = 5,
-  MIN_SESSION = 6,
+  SCREEN_MARGIN = 6,
+  // MIN_SESSION must stay last: itemCount() hides it by trimming the count by one.
+  MIN_SESSION = 7,
 };
 
 // Ordered cycle of valid per-book min-session values: 0xFF = use global, then indices
@@ -49,16 +51,27 @@ static void formatMinSession(uint8_t idx, char* buf, size_t len) {
   }
 }
 
+// Height for the enlarged preview pane: claim the space a compact list (capped to a few
+// visible rows, scrolls for the rest) doesn't need, so the sample text dominates the screen.
+// Clamped to [1/3, 3/4] of the content area so both panes stay usable.
+int enlargedPreviewHeight(int contentHeight, int listRowHeight, int verticalSpacing, int rows) {
+  constexpr int kMaxVisibleRows = 5;
+  const int visible = std::max(std::min(rows, kMaxVisibleRows), 1);
+  const int h = contentHeight - visible * listRowHeight - verticalSpacing;
+  return std::clamp(h, contentHeight / 3, contentHeight * 3 / 4);
+}
+
 }  // namespace
 
 ReaderOptionsActivity::ReaderOptionsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                              std::string bookCachePath,
                                              const CrossPointSettings::ReaderOverride& initialOverride,
-                                             bool showMinSession)
+                                             bool showMinSession, std::string sampleText)
     : Activity("ReaderOptions", renderer, mappedInput),
       cachePath(std::move(bookCachePath)),
       localOverride(initialOverride),
-      showMinSession(showMinSession) {}
+      showMinSession(showMinSession),
+      sampleText(std::move(sampleText)) {}
 
 void ReaderOptionsActivity::onEnter() {
   Activity::onEnter();
@@ -69,6 +82,35 @@ void ReaderOptionsActivity::onEnter() {
 void ReaderOptionsActivity::onExit() { Activity::onExit(); }
 
 void ReaderOptionsActivity::loop() {
+  // While the embedded font list is open it owns all input.
+  if (fontListOpen_) {
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+      cancelInlineFont();
+      return;
+    }
+    // Arm on a press seen inside the list so the release of the opening press is ignored.
+    if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) fontConfirmArmed_ = true;
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      if (fontConfirmArmed_) {
+        fontConfirmArmed_ = false;
+        commitInlineFont();
+        return;
+      }
+    }
+    // Gate up/down until render() has loaded the requested preview font (clears the nav-lock),
+    // so held/rapid input can't outrun the slow SD load.
+    if (fontPane_.navLocked()) return;
+    buttonNavigator.onNextRelease([this] {
+      fontPane_.moveNext();
+      requestUpdate();
+    });
+    buttonNavigator.onPreviousRelease([this] {
+      fontPane_.movePrevious();
+      requestUpdate();
+    });
+    return;
+  }
+
   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
     finish();
     return;
@@ -76,9 +118,7 @@ void ReaderOptionsActivity::loop() {
 
   if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
     if (selectedIndex == FONT_FAMILY) {
-      // Font family drills into the full picker (built-in + SD fonts), matching
-      // the global Reader Font Family screen, rather than cycling built-ins only.
-      openFontFamilyPicker();
+      openInlineFontList();
     } else {
       cycleCurrentItem();
       requestUpdate();
@@ -97,27 +137,47 @@ void ReaderOptionsActivity::loop() {
   });
 }
 
-void ReaderOptionsActivity::openFontFamilyPicker() {
-  // Reuse the global font picker; it returns a FontSelectionResult that we apply
-  // to this book's override (the reader reloads the SD font + reflows on exit).
-  startActivityForResult(
-      std::make_unique<FontSelectionActivity>(renderer, mappedInput, &sdFontSystem.registry(), localOverride.fontFamily,
-                                              std::string(localOverride.sdFontFamilyName)),
-      [this](const ActivityResult& result) {
-        if (std::holds_alternative<FontSelectionResult>(result.data)) {
-          const auto& sel = std::get<FontSelectionResult>(result.data);
-          if (sel.isBuiltin) {
-            localOverride.fontFamily = sel.builtinIndex;
-            localOverride.sdFontFamilyName[0] = '\0';
-          } else {
-            strncpy(localOverride.sdFontFamilyName, sel.sdFamilyName.c_str(),
-                    sizeof(localOverride.sdFontFamilyName) - 1);
-            localOverride.sdFontFamilyName[sizeof(localOverride.sdFontFamilyName) - 1] = '\0';
-          }
-          persistAndApply();
-        }
-        requestUpdate();
-      });
+void ReaderOptionsActivity::openInlineFontList() {
+  // Save the current font so Back can restore it; build the pane's list around it.
+  savedFontFamily_ = localOverride.fontFamily;
+  strncpy(savedSdFontFamilyName_, localOverride.sdFontFamilyName, sizeof(savedSdFontFamilyName_) - 1);
+  savedSdFontFamilyName_[sizeof(savedSdFontFamilyName_) - 1] = '\0';
+  fontPane_.build(&sdFontSystem.registry(), localOverride.fontFamily, localOverride.sdFontFamilyName);
+  fontConfirmArmed_ = false;
+  fontListOpen_ = true;
+  requestUpdate();
+}
+
+void ReaderOptionsActivity::applyHighlightedFont() {
+  const auto& hl = fontPane_.highlighted();
+  if (hl.isBuiltin) {
+    localOverride.fontFamily = hl.settingIndex;
+    localOverride.sdFontFamilyName[0] = '\0';
+  } else {
+    strncpy(localOverride.sdFontFamilyName, hl.name.c_str(), sizeof(localOverride.sdFontFamilyName) - 1);
+    localOverride.sdFontFamilyName[sizeof(localOverride.sdFontFamilyName) - 1] = '\0';
+  }
+  // Live-apply so getReaderFontId() resolves to the highlighted font for the preview.
+  SETTINGS.setReaderOverride(localOverride);
+}
+
+void ReaderOptionsActivity::commitInlineFont() {
+  applyHighlightedFont();  // ensure localOverride holds the highlighted font
+  fontPane_.commitHighlighted();
+  persistAndApply();
+  fontListOpen_ = false;
+  requestUpdate();
+}
+
+void ReaderOptionsActivity::cancelInlineFont() {
+  // Restore the pre-picker font and reload the user's actual resident SD font.
+  localOverride.fontFamily = savedFontFamily_;
+  strncpy(localOverride.sdFontFamilyName, savedSdFontFamilyName_, sizeof(localOverride.sdFontFamilyName) - 1);
+  localOverride.sdFontFamilyName[sizeof(localOverride.sdFontFamilyName) - 1] = '\0';
+  SETTINGS.setReaderOverride(localOverride);
+  fontPane_.restore(renderer);
+  fontListOpen_ = false;
+  requestUpdate();
 }
 
 void ReaderOptionsActivity::cycleCurrentItem() {
@@ -151,6 +211,15 @@ void ReaderOptionsActivity::cycleCurrentItem() {
     case EXTRA_SPACING:
       localOverride.extraParagraphSpacing = localOverride.extraParagraphSpacing ? 0 : 1;
       break;
+    case SCREEN_MARGIN: {
+      // Step through [MIN, MAX] and wrap; clamp guards a stale/out-of-range stored value.
+      const int cur = std::clamp<int>(localOverride.screenMargin, CrossPointSettings::SCREEN_MARGIN_MIN,
+                                      CrossPointSettings::SCREEN_MARGIN_MAX);
+      int next = cur + CrossPointSettings::SCREEN_MARGIN_STEP;
+      if (next > CrossPointSettings::SCREEN_MARGIN_MAX) next = CrossPointSettings::SCREEN_MARGIN_MIN;
+      localOverride.screenMargin = static_cast<uint8_t>(next);
+      break;
+    }
     case MIN_SESSION: {
       // Find current position in cycle table and advance by one.
       int pos = 0;
@@ -167,6 +236,10 @@ void ReaderOptionsActivity::cycleCurrentItem() {
       return;
   }
   persistAndApply();
+  // A size change must reload the resident SD font at the new size, or getReaderFontId()
+  // keeps resolving the old-size id and the live preview never reflows (SD fonts load one
+  // size at a time; built-ins are always resident so this is a no-op for them).
+  if (selectedIndex == FONT_SIZE) sdFontSystem.ensureLoaded(renderer);
 }
 
 void ReaderOptionsActivity::persistAndApply() {
@@ -192,6 +265,8 @@ const char* ReaderOptionsActivity::getItemName(const int index) {
       return tr(STR_HYPHENATION);
     case EXTRA_SPACING:
       return tr(STR_EXTRA_SPACING);
+    case SCREEN_MARGIN:
+      return tr(STR_SCREEN_MARGIN);
     case MIN_SESSION:
       return tr(STR_MIN_SESSION_FOR_STATS);
     default:
@@ -235,6 +310,8 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
       return localOverride.hyphenationEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     case EXTRA_SPACING:
       return localOverride.extraParagraphSpacing ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+    case SCREEN_MARGIN:
+      return std::to_string(localOverride.screenMargin);
     case MIN_SESSION: {
       const uint8_t v = localOverride.minSessionMinutes;
       if (v == CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL) {
@@ -260,13 +337,62 @@ void ReaderOptionsActivity::render(RenderLock&&) {
   const auto pageHeight = renderer.getScreenHeight();
   const auto& metrics = UITheme::getInstance().getMetrics();
 
+  // Embedded font-family picker: the font list replaces the settings list, and the book-text
+  // preview above shows the highlighted font (no separate screen, no two-pane comparison).
+  if (fontListOpen_) {
+    // Load the highlighted font (resident SD swap) + clear the nav-lock, then live-apply it so
+    // the preview renders in that font.
+    fontPane_.loadHighlightedFontId(renderer);
+    applyHighlightedFont();
+
+    GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_FONT_FAMILY));
+    const int fcTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+    const int fcHeight = pageHeight - fcTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
+    int fcListTop = fcTop;
+    int fcListHeight = fcHeight;
+    if (metrics.previewHeightPercent > 0) {
+      const int previewHeight =
+          enlargedPreviewHeight(fcHeight, metrics.listRowHeight, metrics.verticalSpacing, fontPane_.size());
+      const std::string familyName = getItemValue(FONT_FAMILY);
+      const std::string sizeName = getItemValue(FONT_SIZE);
+      textsettings::renderPreview(renderer, previewLayout_, metrics.previewPadding, metrics.verticalSpacing, fcTop,
+                                  previewHeight, familyName.c_str(), sizeName.c_str(), sampleText.c_str(),
+                                  /*showLabel=*/false);
+      fcListTop = fcTop + previewHeight + metrics.verticalSpacing;
+      fcListHeight = fcHeight - previewHeight - metrics.verticalSpacing;
+    }
+    fontPane_.renderList(renderer, fcListTop, fcListHeight);
+
+    const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    renderer.displayBuffer();
+    return;
+  }
+
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_READER_OPTIONS));
 
   const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
   const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
 
+  // Live preview pane above the list (same shared component as the global Text Settings).
+  // previewHeightPercent == 0 disables it; then the list uses the full content area.
+  int listTop = contentTop;
+  int listHeight = contentHeight;
+  if (metrics.previewHeightPercent > 0) {
+    const int previewHeight =
+        enlargedPreviewHeight(contentHeight, metrics.listRowHeight, metrics.verticalSpacing, itemCount());
+    // familyName/sizeName reuse the list's own value formatting for the font rows.
+    const std::string familyName = getItemValue(FONT_FAMILY);
+    const std::string sizeName = getItemValue(FONT_SIZE);
+    textsettings::renderPreview(renderer, previewLayout_, metrics.previewPadding, metrics.verticalSpacing, contentTop,
+                                previewHeight, familyName.c_str(), sizeName.c_str(), sampleText.c_str(),
+                                /*showLabel=*/false);
+    listTop = contentTop + previewHeight + metrics.verticalSpacing;
+    listHeight = contentHeight - previewHeight - metrics.verticalSpacing;
+  }
+
   GUI.drawList(
-      renderer, Rect{0, contentTop, pageWidth, contentHeight}, itemCount(), selectedIndex,
+      renderer, Rect{0, listTop, pageWidth, listHeight}, itemCount(), selectedIndex,
       [](int index) { return std::string(getItemName(index)); }, nullptr, nullptr,
       [this](int index) -> std::string { return getItemValue(index); }, true);
 

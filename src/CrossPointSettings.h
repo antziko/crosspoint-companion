@@ -215,6 +215,11 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     uint8_t paragraphAlignment = JUSTIFIED;
     uint8_t hyphenationEnabled = 0;
     uint8_t extraParagraphSpacing = 1;
+    // Per-book screen margin (px). Snapshotted from the global screenMargin on first open,
+    // like the font/spacing fields above; a concrete value, not an inherit sentinel.
+    // Literal (not SCREEN_MARGIN_MIN) because that constant is declared later in the
+    // enclosing class and is not visible in this nested default initializer.
+    uint8_t screenMargin = 5;
     char sdFontFamilyName[32] = "";
     // Per-book min-session threshold. 0xFF = inherit the global setting; otherwise an
     // index into CrossPointSettings::MIN_SESSION_SECONDS (0 = always commit). The field
@@ -503,6 +508,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // picker can resolve a preview fontId without mutating the active setting.
   static int computeBuiltinFontId(uint8_t family, uint8_t size);
   float getReaderLineCompression() const;
+  uint8_t getReaderScreenMargin() const;
   unsigned long getSleepTimeoutMs() const;
   int getRefreshFrequency() const;
 };

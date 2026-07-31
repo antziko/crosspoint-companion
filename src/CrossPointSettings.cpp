@@ -557,6 +557,10 @@ uint8_t CrossPointSettings::getReaderFontSize() const {
   return readerOverride.active ? readerOverride.fontPointSize : fontPointSize;
 }
 
+uint8_t CrossPointSettings::getReaderScreenMargin() const {
+  return readerOverride.active ? readerOverride.screenMargin : screenMargin;
+}
+
 const char* CrossPointSettings::getReaderSdFontFamilyName() const {
   return readerOverride.active ? readerOverride.sdFontFamilyName : sdFontFamilyName;
 }

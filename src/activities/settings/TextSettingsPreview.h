@@ -29,8 +29,14 @@ struct PreviewLayout {
   PreviewKey key;
 };
 
-// Draws the sample-text pane via the reader engine, reusing layout across redraws
+// Draws the sample-text pane via the reader engine, reusing layout across redraws.
+// sampleText overrides the built-in pangram when non-null/non-empty (e.g. the reader
+// passes the current page's own text); the global Text Settings screen passes nothing
+// and falls back to STR_FONT_PREVIEW_TEXT.
+// showLabel draws the 'Preview "family, size"' caption at the bottom; pass false to drop it
+// and let the sample text fill the whole pane (the in-reader picker uses this).
 void renderPreview(GfxRenderer& renderer, PreviewLayout& layout, int previewPadding, int labelGap, int top, int height,
-                   const char* familyName, const char* sizeName);
+                   const char* familyName, const char* sizeName, const char* sampleText = nullptr,
+                   bool showLabel = true);
 
 }  // namespace textsettings

@@ -26,19 +26,24 @@ CssTextAlign toCssAlign(uint8_t align) {
   return static_cast<CssTextAlign>(align);
 }
 
-// Lay the sample text out through the reader engine into layout.lines
-void relayout(PreviewLayout& layout, const GfxRenderer& renderer, int fontId, int textWidth) {
+// Lay the sample text out through the reader engine into layout.lines.
+// Layout-affecting settings are read through the getReader*() accessors so the pane
+// mirrors exactly what the reader will render: per-book values when a reader override is
+// active (ReaderOptionsActivity), and the globals otherwise. The global Text Settings
+// screen only ever opens outside a reader, where the override is inactive (cleared on
+// reader exit), so the accessors return the globals it edits -- behavior unchanged there.
+// focusReadingEnabled has no per-book override field, so it stays a plain global read.
+void relayout(PreviewLayout& layout, const GfxRenderer& renderer, int fontId, int textWidth, const char* text) {
   layout.lines.clear();
 
   BlockStyle style;
-  style.alignment = toCssAlign(SETTINGS.paragraphAlignment);
+  style.alignment = toCssAlign(SETTINGS.getReaderParagraphAlignment());
   style.textAlignDefined = true;  // honor the user's choice; RTL auto-detected from text
 
-  ParsedText parsed(SETTINGS.extraParagraphSpacing != 0, SETTINGS.hyphenationEnabled != 0,
+  ParsedText parsed(SETTINGS.getReaderExtraParagraphSpacing() != 0, SETTINGS.getReaderHyphenationEnabled() != 0,
                     SETTINGS.focusReadingEnabled != 0, style);
 
   // Feed one space-separated word at a time; addWord handles NFC/CJK/RTL/focus splitting
-  const char* text = I18N.get(StrId::STR_FONT_PREVIEW_TEXT);
   std::string word;
   for (const char* p = text;; p++) {
     if (*p == ' ' || *p == '\0') {
@@ -59,18 +64,23 @@ void relayout(PreviewLayout& layout, const GfxRenderer& renderer, int fontId, in
 }  // namespace
 
 void renderPreview(GfxRenderer& renderer, PreviewLayout& layout, int previewPadding, int labelGap, int top, int height,
-                   const char* familyName, const char* sizeName) {
+                   const char* familyName, const char* sizeName, const char* sampleText, bool showLabel) {
+  // The reader passes its current page text; everything else previews the pangram.
+  const char* text = (sampleText && *sampleText) ? sampleText : I18N.get(StrId::STR_FONT_PREVIEW_TEXT);
   const int left = previewPadding;
   const int width = renderer.getScreenWidth() - (previewPadding * 2);
   if (width <= 0 || height <= 0) return;
 
+  // Without the caption the sample text fills the whole pane (bar the bottom padding).
   const int labelH = renderer.getTextHeight(UI_10_FONT_ID);
-  const int labelReserved = labelH + labelGap + previewPadding;
+  const int labelReserved = showLabel ? (labelH + labelGap + previewPadding) : previewPadding;
 
-  char labelBuf[128];
-  snprintf(labelBuf, sizeof(labelBuf), "%s \"%s, %s\"", tr(STR_PREVIEW), familyName, sizeName);
-  const int labelY = top + height - previewPadding - labelH;
-  renderer.drawText(UI_10_FONT_ID, left, labelY, labelBuf);
+  if (showLabel) {
+    char labelBuf[128];
+    snprintf(labelBuf, sizeof(labelBuf), "%s \"%s, %s\"", tr(STR_PREVIEW), familyName, sizeName);
+    const int labelY = top + height - previewPadding - labelH;
+    renderer.drawText(UI_10_FONT_ID, left, labelY, labelBuf);
+  }
 
   const int fontId = SETTINGS.getReaderFontId();
   if (fontId == 0) return;
@@ -78,13 +88,13 @@ void renderPreview(GfxRenderer& renderer, PreviewLayout& layout, int previewPadd
   const int lineH = renderer.getTextHeight(fontId);
   if (lineH <= 0) return;
 
-  const int textLeft = left + SETTINGS.screenMargin;
-  const int textWidth = width - 2 * SETTINGS.screenMargin;
+  const int textLeft = left + SETTINGS.getReaderScreenMargin();
+  const int textWidth = width - 2 * SETTINGS.getReaderScreenMargin();
   if (textWidth <= 0) return;
 
   const float compression = SETTINGS.getReaderLineCompression();
   const int lineAdvance = std::max(1, renderer.getLineHeight(fontId, compression));
-  const int paragraphGap = SETTINGS.extraParagraphSpacing ? lineAdvance / 2 : 0;
+  const int paragraphGap = SETTINGS.getReaderExtraParagraphSpacing() ? lineAdvance / 2 : 0;
 
   // Re-lay-out (and re-prewarm glyphs) only when a layout-affecting setting or the
   // geometry changed; else reuse the cache. The prewarm inputs are (fontId, constant
@@ -93,19 +103,19 @@ void renderPreview(GfxRenderer& renderer, PreviewLayout& layout, int previewPadd
   // glyph cache while this activity is up — true today: the only evictor is
   // FontCacheManager::PrewarmScope, used solely by the reader/dictionary activities.
   const PreviewKey key{.fontId = fontId,
-                       .fontPointSize = SETTINGS.fontPointSize,
-                       .screenMargin = SETTINGS.screenMargin,
+                       .fontPointSize = SETTINGS.getReaderFontSize(),
+                       .screenMargin = SETTINGS.getReaderScreenMargin(),
                        .textWidth = textWidth,
                        .lineCompression = compression,
-                       .alignment = SETTINGS.paragraphAlignment,
-                       .extraParagraphSpacing = SETTINGS.extraParagraphSpacing != 0,
+                       .alignment = SETTINGS.getReaderParagraphAlignment(),
+                       .extraParagraphSpacing = SETTINGS.getReaderExtraParagraphSpacing() != 0,
                        .focusReading = SETTINGS.focusReadingEnabled != 0,
-                       .hyphenation = SETTINGS.hyphenationEnabled != 0};
+                       .hyphenation = SETTINGS.getReaderHyphenationEnabled() != 0};
   if (key != layout.key) {
     if (auto* fcm = renderer.getFontCacheManager()) {
-      fcm->prewarmCache(fontId, I18N.get(StrId::STR_FONT_PREVIEW_TEXT), SETTINGS.focusReadingEnabled ? 0x03 : 0x01);
+      fcm->prewarmCache(fontId, text, SETTINGS.focusReadingEnabled ? 0x03 : 0x01);
     }
-    relayout(layout, renderer, fontId, textWidth);
+    relayout(layout, renderer, fontId, textWidth, text);
     layout.key = key;
   }
 

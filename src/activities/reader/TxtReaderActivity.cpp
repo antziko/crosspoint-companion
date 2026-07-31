@@ -75,6 +75,7 @@ void TxtReaderActivity::onEnter() {
       bookOverride.paragraphAlignment = SETTINGS.paragraphAlignment;
       bookOverride.hyphenationEnabled = SETTINGS.hyphenationEnabled;
       bookOverride.extraParagraphSpacing = SETTINGS.extraParagraphSpacing;
+      bookOverride.screenMargin = SETTINGS.screenMargin;
       static_assert(sizeof(bookOverride.sdFontFamilyName) == sizeof(SETTINGS.sdFontFamilyName),
                     "sdFontFamilyName size mismatch");
       strncpy(bookOverride.sdFontFamilyName, SETTINGS.sdFontFamilyName, sizeof(bookOverride.sdFontFamilyName) - 1);
@@ -216,7 +217,7 @@ void TxtReaderActivity::initializeReader() {
 
   // Store current settings for cache validation
   cachedFontId = SETTINGS.getReaderFontId();
-  cachedScreenMargin = SETTINGS.screenMargin;
+  cachedScreenMargin = SETTINGS.getReaderScreenMargin();
   cachedParagraphAlignment = SETTINGS.paragraphAlignment;
 
   // Calculate viewport dimensions
@@ -771,9 +772,15 @@ void TxtReaderActivity::onReaderMenuConfirm(const TxtReaderMenuActivity::MenuAct
   using MenuAction = TxtReaderMenuActivity::MenuAction;
   switch (action) {
     case MenuAction::READER_OPTIONS: {
+      // Seed the preview with the current page's text so changes preview against the book.
+      std::string sample;
+      for (const auto& line : currentPageLines) {
+        if (!sample.empty()) sample += ' ';
+        sample += line;
+      }
       startActivityForResult(std::make_unique<ReaderOptionsActivity>(renderer, mappedInput, txt->getCachePath(),
                                                                      SETTINGS.getReaderOverride(),
-                                                                     /*showMinSession=*/false),
+                                                                     /*showMinSession=*/false, std::move(sample)),
                              [this](const ActivityResult&) {
                                // Reload SD font at the (possibly new) size, then force a
                                // re-index so the new font/margin/spacing takes effect.

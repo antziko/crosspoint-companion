@@ -271,6 +271,7 @@ void EpubReaderActivity::onEnter() {
       bookOverride.paragraphAlignment = SETTINGS.paragraphAlignment;
       bookOverride.hyphenationEnabled = SETTINGS.hyphenationEnabled;
       bookOverride.extraParagraphSpacing = SETTINGS.extraParagraphSpacing;
+      bookOverride.screenMargin = SETTINGS.screenMargin;
       static_assert(sizeof(bookOverride.sdFontFamilyName) == sizeof(SETTINGS.sdFontFamilyName),
                     "sdFontFamilyName size mismatch");
       strncpy(bookOverride.sdFontFamilyName, SETTINGS.sdFontFamilyName, sizeof(bookOverride.sdFontFamilyName) - 1);
@@ -1041,8 +1042,8 @@ void EpubReaderActivity::openWordSelect(bool framebufferContainsPage) {
   int orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft;
   renderer.getOrientedViewableTRBL(&orientedMarginTop, &orientedMarginRight, &orientedMarginBottom,
                                    &orientedMarginLeft);
-  orientedMarginTop += SETTINGS.screenMargin;
-  orientedMarginLeft += SETTINGS.screenMargin;
+  orientedMarginTop += SETTINGS.getReaderScreenMargin();
+  orientedMarginLeft += SETTINGS.getReaderScreenMargin();
 
   // Bottom reserved-area height (matches renderContents() at line 695-703). The
   // word-select activity uses this to clear exactly the strip we drew the
@@ -1053,9 +1054,9 @@ void EpubReaderActivity::openWordSelect(bool framebufferContainsPage) {
       (automaticPageTurnActive &&
        (statusBarHeight == 0 || statusBarHeight == UITheme::getInstance().getProgressBarHeight()))
           ? std::max(
-                SETTINGS.screenMargin,
+                SETTINGS.getReaderScreenMargin(),
                 static_cast<uint8_t>(statusBarHeight + UITheme::getInstance().getMetrics().statusBarVerticalMargin))
-          : std::max(SETTINGS.screenMargin, statusBarHeight);
+          : std::max(SETTINGS.getReaderScreenMargin(), statusBarHeight);
   std::string nextPageFirstWord;
   if (section && section->currentPage < section->pageCount - 1) {
     auto nextPage = section->loadPage(section->currentPage + 1);
@@ -1188,8 +1189,8 @@ void EpubReaderActivity::launchHighlightWordSelect() {
   int orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft;
   renderer.getOrientedViewableTRBL(&orientedMarginTop, &orientedMarginRight, &orientedMarginBottom,
                                    &orientedMarginLeft);
-  orientedMarginTop += SETTINGS.screenMargin;
-  orientedMarginLeft += SETTINGS.screenMargin;
+  orientedMarginTop += SETTINGS.getReaderScreenMargin();
+  orientedMarginLeft += SETTINGS.getReaderScreenMargin();
 
   // Choose the marker band from this page's dwell BEFORE the dwell is consumed/reset below.
   const WordSelectNavigator::InitialMarker initialMarker = computeWordSelectMarker();
@@ -1460,8 +1461,12 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       break;
     }
     case EpubReaderMenuActivity::MenuAction::READER_OPTIONS: {
-      startActivityForResult(std::make_unique<ReaderOptionsActivity>(renderer, mappedInput, epub->getCachePath(),
-                                                                     SETTINGS.getReaderOverride()),
+      startActivityForResult(std::make_unique<ReaderOptionsActivity>(
+                                 renderer, mappedInput, epub->getCachePath(), SETTINGS.getReaderOverride(),
+                                 /*showMinSession=*/true,
+                                 // Seed the preview with the page the reader is on, so the user
+                                 // previews font/size/margin changes against their own text.
+                                 section ? section->getTextFromSectionFile() : std::string()),
                              [this](const ActivityResult&) {
                                // Re-layout: the per-book settings may have changed, so discard the
                                // cached section and let render() rebuild it with the new parameters.
@@ -1884,9 +1889,9 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   int orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft;
   renderer.getOrientedViewableTRBL(&orientedMarginTop, &orientedMarginRight, &orientedMarginBottom,
                                    &orientedMarginLeft);
-  orientedMarginTop += SETTINGS.screenMargin;
-  orientedMarginLeft += SETTINGS.screenMargin;
-  orientedMarginRight += SETTINGS.screenMargin;
+  orientedMarginTop += SETTINGS.getReaderScreenMargin();
+  orientedMarginLeft += SETTINGS.getReaderScreenMargin();
+  orientedMarginRight += SETTINGS.getReaderScreenMargin();
 
   const uint8_t statusBarHeight = UITheme::getInstance().getStatusBarHeight();
 
@@ -1894,10 +1899,10 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   if (automaticPageTurnActive &&
       (statusBarHeight == 0 || statusBarHeight == UITheme::getInstance().getProgressBarHeight())) {
     orientedMarginBottom +=
-        std::max(SETTINGS.screenMargin,
+        std::max(SETTINGS.getReaderScreenMargin(),
                  static_cast<uint8_t>(statusBarHeight + UITheme::getInstance().getMetrics().statusBarVerticalMargin));
   } else {
-    orientedMarginBottom += std::max(SETTINGS.screenMargin, statusBarHeight);
+    orientedMarginBottom += std::max(SETTINGS.getReaderScreenMargin(), statusBarHeight);
   }
 
   const uint16_t viewportWidth = renderer.getScreenWidth() - orientedMarginLeft - orientedMarginRight;
