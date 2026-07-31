@@ -4,7 +4,6 @@
 #include <GfxRenderer.h>
 #include <Logging.h>
 #include <Utf8.h>
-#include <esp_heap_caps.h>
 
 #include <algorithm>
 #include <cmath>
@@ -250,58 +249,11 @@ bool isWordCharacter(uint32_t cp) {
   return true;
 }
 
-// Contiguous bytes a grow to `newCapacity` elements needs. The word vector is
-// std::vector<std::string> (the largest, ~24 B/elem here) and reallocation needs ONE
-// contiguous block. A headroom margin leaves room for the per-word string bodies and the
-// layout scratch that follow, so a successful grow never grabs the last big block and
-// strands the rest of the build.
-constexpr size_t WORD_VECTOR_GROW_HEADROOM_BYTES = 8 * 1024;
-size_t wordVectorGrowBytes(size_t newCapacity) {
-  return newCapacity * sizeof(std::string) + WORD_VECTOR_GROW_HEADROOM_BYTES;
-}
-
-// Silent: true when the largest free block can supply a grow to `newCapacity`. Used by the
-// parser's proactive soft-flush (atGrowthWall) which polls this per word near the wall, so
-// it must not log. total free is irrelevant to a contiguous ask, hence largest-block.
-bool contiguousFitsWordVectors(size_t newCapacity) {
-  return heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) >= wordVectorGrowBytes(newCapacity);
-}
-
-// Logging wrapper for the hard-stop path in addWord: when this returns false the block is
-// abandoned, so we emit the diagnostic once here.
-bool canGrowWordVectors(size_t newCapacity) {
-  if (contiguousFitsWordVectors(newCapacity)) return true;
-  // Diagnostic for LOWHEAP build failures: `cap` is how many words this one text
-  // block tried to hold, `need` the contiguous bytes required (cap*24 + 8KB), `largest`
-  // the biggest free block available, `free` total free. A high `cap` means a very long
-  // paragraph; a low `largest` with ample `free` means fragmentation, not exhaustion.
-  LOG_ERR("PT", "word-vector grow blocked: cap=%u need=%u largest=%u free=%u", (unsigned)newCapacity,
-          (unsigned)wordVectorGrowBytes(newCapacity), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-          (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
-  return false;
-}
-
 }  // namespace
-
-bool ParsedText::atGrowthWall() const {
-  // Already latched — the caller handles the abandoned block, nothing to flush around.
-  if (heapExhausted_) return false;
-  // Room to add at least one more word without reallocating: no wall.
-  if (words.size() < words.capacity()) return false;
-  // Full: the next add doubles the vector. Report whether that doubling can't be met, so
-  // the parser can soft-flush (which erases laid-out words, dropping size below capacity)
-  // instead of letting addWord latch heapExhausted_ and abandon the whole build.
-  const size_t nextCapacity = words.capacity() < 16 ? 16 : words.capacity() * 2;
-  return !contiguousFitsWordVectors(nextCapacity);
-}
 
 void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle, const bool underline,
                          const bool attachToPrevious) {
   if (word.empty()) return;
-  // Once the heap can't grow the word vectors, stop cold: any further push_back would
-  // reallocate and abort() under -fno-exceptions. The block is left truncated and the
-  // parser abandons the build (see ChapterHtmlSlimParser::flushPartWordBuffer).
-  if (heapExhausted_) return;
 
   // The device fonts carry no combining-mark positioning, so EPUB text stored in NFD
   // (a base letter followed by separate combining accents -- common for Vietnamese,
@@ -320,16 +272,6 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle,
 
   const auto pushToken = [&](std::string token, const bool continues, const bool noSpaceBefore,
                              const bool isFocusSuffix) {
-    if (heapExhausted_) return;
-    // Guard the reallocation before it happens: a push_back at capacity doubles the
-    // backing store, which on a fragmented heap is the throwing alloc that aborts.
-    if (words.size() == words.capacity()) {
-      const size_t newCap = words.capacity() < 16 ? 16 : words.capacity() * 2;
-      if (!canGrowWordVectors(newCap)) {
-        heapExhausted_ = true;
-        return;
-      }
-    }
     words.push_back(std::move(token));
     wordStyles.push_back(baseStyle);
     wordContinues.push_back(continues);
@@ -354,34 +296,24 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle,
     effectiveNoSpaceBefore = true;
   }
 
+  // Bulk-reserve the per-token parallel vectors before a burst of pushes so they don't
+  // repeatedly double. words and rubyTexts are std::deque (chunked growth, no reserve()/
+  // capacity() and no large contiguous realloc to avoid), so only the vectors are reserved.
+  // wordStyles' capacity gauges them all since pushToken keeps every array in lockstep.
   const auto ensureTokenCapacity = [&](const size_t additionalTokens) {
     if (additionalTokens == 0) return;
     const size_t requiredSize = words.size() + additionalTokens;
-    if (words.capacity() >= requiredSize) return;
+    if (wordStyles.capacity() >= requiredSize) return;
 
-    size_t newCapacity = words.capacity();
-    if (newCapacity < 16) {
-      newCapacity = 16;
-    }
+    size_t newCapacity = wordStyles.capacity() < 16 ? 16 : wordStyles.capacity();
     while (newCapacity < requiredSize) {
       newCapacity *= 2;
     }
 
-    // Bail before the throwing reserve if the contiguous block isn't there; pushToken
-    // (also guarded) then no-ops, leaving the block truncated for the parser to catch.
-    if (!canGrowWordVectors(newCapacity)) {
-      heapExhausted_ = true;
-      return;
-    }
-
-    words.reserve(newCapacity);
     wordStyles.reserve(newCapacity);
     wordContinues.reserve(newCapacity);
     wordNoSpaceBefore.reserve(newCapacity);
     wordIsFocusSuffix.reserve(newCapacity);
-    if (!rubyTexts.empty()) {
-      rubyTexts.reserve(newCapacity);
-    }
   };
 
   if (auto breakOffsets = cjkCharacterBreakByteOffsets(word); !breakOffsets.empty()) {
@@ -555,9 +487,8 @@ void ParsedText::setRubyGroupAt(size_t startIndex, size_t count, const std::stri
 }
 
 void ParsedText::ensureRubyCapacity() {
-  if (rubyTexts.capacity() < words.capacity()) {
-    rubyTexts.reserve(words.capacity());
-  }
+  // No-op: rubyTexts is a std::deque (chunked growth, no capacity to pre-reserve and no
+  // large contiguous realloc to avoid). Kept for call-site stability.
 }
 
 int ParsedText::resolveFirstLineIndent(const bool isFirstLine, const GfxRenderer& renderer, const int fontId) const {

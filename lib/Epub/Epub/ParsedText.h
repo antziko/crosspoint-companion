@@ -2,6 +2,7 @@
 
 #include <EpdFontFamily.h>
 
+#include <deque>
 #include <functional>
 #include <memory>
 #include <string>
@@ -13,23 +14,26 @@
 class GfxRenderer;
 
 class ParsedText {
-  std::vector<std::string> words;
+  // words/rubyTexts are std::deque, not std::vector: a paragraph can hold thousands of
+  // tokens (CJK splits every character), and a vector grows by reallocating its whole
+  // element array into one contiguous block (24 B/std::string -> tens of KB at a few
+  // thousand tokens). On the ESP32-C3 that single large contiguous request fails under a
+  // fragmented heap and the throwing operator new abort()s the firmware (fresh-open CJK
+  // crash). A deque grows in fixed ~512 B nodes, so the largest contiguous alloc stays
+  // small regardless of token count. The parallel arrays below stay vectors: 1 byte / 1 bit
+  // each, they never approach the contiguous-block ceiling.
+  std::deque<std::string> words;
   std::vector<EpdFontFamily::Style> wordStyles;
   std::vector<bool> wordContinues;      // true = word attaches to previous with no break
   std::vector<bool> wordNoSpaceBefore;  // true = may break before token, but no synthetic space when joined
   std::vector<bool> wordIsFocusSuffix;  // true = token is the regular tail of a focus bold-prefix split
-  std::vector<std::string> rubyTexts;   // per-word ruby annotation; empty when no <ruby> in this block
+  std::deque<std::string> rubyTexts;    // per-word ruby annotation; empty when no <ruby> in this block
   BlockStyle blockStyle;
   bool extraParagraphSpacing;
   bool hyphenationEnabled;
   bool focusReadingEnabled;
   bool isNaturalAlign;
   bool hasRtlWord;
-  // Set when addWord() had to stop because growing the word vectors would need a
-  // contiguous block the fragmented heap can't supply. Without this the throwing
-  // std::vector reallocation calls abort() under -fno-exceptions (a hard reboot).
-  // The parser polls heapExhausted() after each word and fails the build gracefully.
-  bool heapExhausted_ = false;
   std::vector<std::string> reorderedWordsScratch;
   std::vector<EpdFontFamily::Style> reorderedStylesScratch;
   std::vector<uint16_t> reorderedWidthsScratch;
@@ -77,15 +81,6 @@ class ParsedText {
   BlockStyle& getBlockStyle() { return blockStyle; }
   size_t size() const { return words.size(); }
   bool isEmpty() const { return words.empty(); }
-  // True once addWord() stopped accepting words because the heap can no longer
-  // supply a contiguous block for the word vectors. The block is left truncated;
-  // the caller must abandon the build rather than render partial content.
-  bool heapExhausted() const { return heapExhausted_; }
-  // True when the word vectors are full and the next word would need a heap grow the
-  // fragmented heap can't supply. The parser polls this to soft-flush the block early
-  // (shedding laid-out words) so a heavy chapter keeps paginating instead of hitting the
-  // hard heapExhausted_ stop below the soft-flush word-count threshold. Silent (no log).
-  bool atGrowthWall() const;
   void layoutAndExtractLines(const GfxRenderer& renderer, int fontId, uint16_t viewportWidth,
                              const std::function<void(std::shared_ptr<TextBlock>)>& processLine,
                              bool includeLastLine = true);

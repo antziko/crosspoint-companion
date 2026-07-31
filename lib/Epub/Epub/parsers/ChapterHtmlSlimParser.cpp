@@ -286,14 +286,6 @@ void ChapterHtmlSlimParser::flushPartWordBuffer() {
   partWordBufferIndex = 0;
   nextWordContinues = false;
   listItemBulletOnly = false;
-
-  // The block stopped accepting words because the heap can't grow its vectors — halt
-  // the parse now (from inside this expat handler) so parseStep() reports Error and the
-  // build is abandoned gracefully instead of aborting on the next reallocation.
-  if (currentTextBlock->heapExhausted()) {
-    outOfMemory_ = true;
-    XML_StopParser(xmlParser_, XML_FALSE);
-  }
 }
 
 void ChapterHtmlSlimParser::flushLongTextBlockIfNeeded() {
@@ -302,23 +294,12 @@ void ChapterHtmlSlimParser::flushLongTextBlockIfNeeded() {
   }
   // Keep token growth bounded: CSS-heavy spans can fragment text into many tiny words, so flush
   // earlier when embedded CSS is active. The "exclude last line" behavior preserves paragraph flow
-  // across chunks. Thresholds lowered from upstream (750 / 320) to keep the buffered block's parallel
-  // vectors under the fragmented largest-block wall; #2256's structural change (calling this from
-  // flushPartWordBuffer too + std::deque anchors) is what curbs the contiguous heap growth.
+  // across chunks. Thresholds lowered from upstream (750 / 320): words/rubyTexts are std::deque
+  // (chunked ~512 B nodes, no large contiguous realloc, so peak memory is bounded), but a smaller
+  // per-block transient still keeps the layout scratch light on a tight heap.
   const size_t blockWordCount = currentTextBlock->size();
   const size_t softFlushThreshold = embeddedStyle ? TEXT_BLOCK_SOFT_FLUSH_WORDS_WITH_CSS : TEXT_BLOCK_SOFT_FLUSH_WORDS;
-  // Flush on either trigger:
-  //  - word count over the threshold (bounds the layout transient on long paragraphs), or
-  //  - the word vectors are at the contiguous-heap growth wall: the next word can't double
-  //    the vector on this fragmented heap. This fires *below* the word-count threshold on a
-  //    tight heap (e.g. the 128->256 doubling failing while the count is still 128), which
-  //    is exactly the case that used to abandon the build. Flushing erases the laid-out
-  //    words, dropping size below capacity so the block keeps accepting words without a grow.
-  // Skip the wall trigger while collecting ruby: erasing words here would invalidate the
-  // absolute rubyStartWordIndex. Ruby groups are short, so they never approach the wall in
-  // practice; if one somehow does, addWord's heapExhausted_ backstop still fails gracefully.
-  const bool atGrowthWall = !inRuby && currentTextBlock->atGrowthWall();
-  if (blockWordCount <= softFlushThreshold && !atGrowthWall) {
+  if (blockWordCount <= softFlushThreshold) {
     return;
   }
 

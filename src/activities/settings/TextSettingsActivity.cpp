@@ -300,11 +300,17 @@ void TextSettingsActivity::activateRow(int row) {
     case Tab::Family:
       // LOCAL(feat-dictionary): `row` is the pane's highlighted index; apply it live.
       applyFamily();
+      // Persist immediately (#2806): the parent's result callback only fires on a normal
+      // finish(), so relying on it loses the change when this screen is left via the home
+      // gesture/key or a sleep. Saved here, outside applyFamily()'s RenderLock (released on
+      // return), so the SD write does not happen under it.
+      SETTINGS.saveToFile();
       requestUpdate();
       break;
     case Tab::Size:
       if (row != currentSizeIndex_) {
         applySize(row);
+        SETTINGS.saveToFile();  // persist immediately (#2806); outside applySize()'s RenderLock
         requestUpdate();
       }
       break;
@@ -333,17 +339,23 @@ void TextSettingsActivity::confirmLayoutRow(int row) {
   switch (static_cast<LayoutRow>(row)) {
     case LayoutRow::ParaSpacing:
       SETTINGS.extraParagraphSpacing = !SETTINGS.extraParagraphSpacing;
+      SETTINGS.saveToFile();  // persist immediately (#2806)
       requestUpdate();
       break;
     case LayoutRow::LineSpacing:
       optionPopup_.show(StrId::STR_LINE_SPACING, LINE_SPACING_IDS, static_cast<int>(std::size(LINE_SPACING_IDS)),
-                        SETTINGS.lineSpacing, [](int idx) { SETTINGS.lineSpacing = static_cast<uint8_t>(idx); });
+                        SETTINGS.lineSpacing, [](int idx) {
+                          SETTINGS.lineSpacing = static_cast<uint8_t>(idx);
+                          SETTINGS.saveToFile();  // persist immediately (#2806)
+                        });
       requestUpdate();
       break;
     case LayoutRow::Alignment:
       optionPopup_.show(StrId::STR_ALIGNMENT, ALIGNMENT_IDS, static_cast<int>(std::size(ALIGNMENT_IDS)),
-                        SETTINGS.paragraphAlignment,
-                        [](int idx) { SETTINGS.paragraphAlignment = static_cast<uint8_t>(idx); });
+                        SETTINGS.paragraphAlignment, [](int idx) {
+                          SETTINGS.paragraphAlignment = static_cast<uint8_t>(idx);
+                          SETTINGS.saveToFile();  // persist immediately (#2806)
+                        });
       requestUpdate();
       break;
     case LayoutRow::ScreenMargin: {
@@ -351,8 +363,10 @@ void TextSettingsActivity::confirmLayoutRow(int row) {
       options.reserve((MARGIN_MAX - MARGIN_MIN) / MARGIN_STEP + 1);
       for (int m = MARGIN_MIN; m <= MARGIN_MAX; m += MARGIN_STEP) options.push_back(std::to_string(m));
       const int cur = (std::clamp<int>(SETTINGS.screenMargin, MARGIN_MIN, MARGIN_MAX) - MARGIN_MIN) / MARGIN_STEP;
-      optionPopup_.show(StrId::STR_SCREEN_MARGIN, options, cur,
-                        [](int idx) { SETTINGS.screenMargin = static_cast<uint8_t>(MARGIN_MIN + idx * MARGIN_STEP); });
+      optionPopup_.show(StrId::STR_SCREEN_MARGIN, options, cur, [](int idx) {
+        SETTINGS.screenMargin = static_cast<uint8_t>(MARGIN_MIN + idx * MARGIN_STEP);
+        SETTINGS.saveToFile();  // persist immediately (#2806)
+      });
       requestUpdate();
       break;
     }
@@ -400,6 +414,7 @@ void TextSettingsActivity::confirmStyleRow(int row) {
     default:
       return;
   }
+  SETTINGS.saveToFile();  // persist immediately (#2806)
   requestUpdate();
 }
 
