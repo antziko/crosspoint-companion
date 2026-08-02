@@ -63,7 +63,16 @@ bool ReaderActivity::isTxtFile(const std::string& path) {
 bool ReaderActivity::isBmpFile(const std::string& path) { return FsHelpers::hasBmpExtension(path); }
 
 int ReaderActivity::initialRefreshCountdown() const {
-  if (!allowFastInitialRefresh) return 0;
+  // Surgical first-paint scrub: only entries that land the reader over a
+  // full-screen frame a fast diff / gentle X3 B/W reinforcement can't clear ask
+  // for it -- cold boot (boot logo), wake-from-sleep (sleep image), and KOReader
+  // sync return (the sync / "Progress found" screen). Those callers pass
+  // allowFastInitialRefresh=false; FORCE_FULL then keeps the first render on the
+  // HALF scrub path even when periodic maintenance is set to B/W reinforcement
+  // (displayWithRefreshCycle excludes FORCE_FULL from reinforce). Ordinary
+  // re-entries (book open, end-of-book "open next") default to fast so they don't
+  // flash on every open.
+  if (!allowFastInitialRefresh) return CrossPointSettings::REFRESH_COUNTDOWN_FORCE_FULL;
 
   const int refreshFrequency = SETTINGS.getRefreshFrequency();
   return refreshFrequency > 1 ? refreshFrequency : 2;

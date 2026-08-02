@@ -92,7 +92,14 @@ class ActivityManager {
   void goToRecentBooks();
   void goToReadingStats();
   void goToBrowser();
-  void goToReader(std::string path, bool allowFastInitialRefresh = false);
+  // allowFastInitialRefresh defaults true: an ordinary reader entry (book open
+  // from the browser/home, end-of-book "open next") repaints over UI that a
+  // fast/normal first paint clears well enough, so it must NOT flash on every
+  // open. Callers that land the reader over a full-screen frame a fast diff can't
+  // clear -- wake-from-sleep and KOReader sync return -- pass false to force the
+  // initial HALF scrub (see ReaderActivity::initialRefreshCountdown). Cold boot is
+  // handled explicitly in main.cpp via allowFastInitialReaderRefresh.
+  void goToReader(std::string path, bool allowFastInitialRefresh = true);
   void goToSleep(bool fromTimeout = false);
   void goToBoot();
   void goToFullScreenMessage(std::string message, EpdFontFamily::Style style = EpdFontFamily::REGULAR);

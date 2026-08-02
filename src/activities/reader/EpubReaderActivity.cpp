@@ -481,7 +481,7 @@ void EpubReaderActivity::drawIndexingPopup() {
   // otherwise the "INDEXING" text and its bar ghost under the rendered page.
   indexingPopupRect_ = GUI.drawPopup(renderer, tr(STR_INDEXING));
   lastIndexingPct_ = -1;
-  pagesUntilFullRefresh = 1;
+  pagesUntilFullRefresh = CrossPointSettings::REFRESH_COUNTDOWN_FORCE_FULL;
 }
 
 void EpubReaderActivity::updateIndexingProgress() {
@@ -1490,7 +1490,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
             // it ghosts through ("frozen list"). Force the next text-page paint onto the
             // HALF_REFRESH ghost-cleanup path so the list is wiped cleanly. (Image/grayscale
             // pages take their own refresh path and are unaffected.)
-            pagesUntilFullRefresh = 1;
+            pagesUntilFullRefresh = CrossPointSettings::REFRESH_COUNTDOWN_FORCE_FULL;
             if (!result.isCancelled) {
               const auto& bm = std::get<BookmarkResult>(result.data);
 
@@ -2201,19 +2201,16 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   }
 
   if (section->currentPage < 0 || section->currentPage >= section->pageCount) {
-    LOG_DBG("ERS", "Page out of bounds: %d (max %d)", section->currentPage, section->pageCount);
-    renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_OUT_OF_BOUNDS), true, EpdFontFamily::BOLD);
-    {
-      char dbg[56];
-      snprintf(dbg, sizeof(dbg), "[E3 pg=%d/%d heap=%u]", section->currentPage, section->pageCount,
-               (unsigned)esp_get_free_heap_size());
-      renderer.drawCenteredText(UI_12_FONT_ID, 330, dbg, true);
-    }
-    renderStatusBar();
-    renderer.displayBuffer();
-    automaticPageTurnActive = false;
-    showPendingSyncSaveError();
-    return;
+    // Stale/overflowed reading position: re-pagination (different font, margins,
+    // orientation, or a partial low-memory build) produced fewer pages than when
+    // this position was saved, so currentPage now points past the last page.
+    // Recover by clamping into range and rendering the nearest valid page instead
+    // of dead-ending on an "Out of bounds" screen. pageCount >= 1 here (the
+    // pageCount == 0 case returned above), so pageCount - 1 is a valid index.
+    const int clamped = section->currentPage < 0 ? 0 : section->pageCount - 1;
+    LOG_DBG("ERS", "Page out of bounds: %d (max %d) -> clamped to %d", section->currentPage, section->pageCount,
+            clamped);
+    section->currentPage = clamped;
   }
 
   {
@@ -2662,6 +2659,20 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     // Step 2: Re-render with images and display again (images appear clean)
     int16_t imgX, imgY, imgW, imgH;
     if (page->getImageBoundingBox(imgX, imgY, imgW, imgH)) {
+      // Port of upstream #2747 (X4 AA image path only; X3 never reaches here since
+      // imagePageWithAA is false). When a full scrub is due -- returning from
+      // KOReader sync / wake / cold boot (pagesUntilFullRefresh == FORCE_FULL, set
+      // by ReaderActivity::initialRefreshCountdown), or the periodic maintenance
+      // page -- the double-FAST dance below would otherwise run straight over the
+      // retained frame (e.g. the sync "Progress found" screen), leaving the old UI
+      // mixed under the image. Lay a clean HALF base first. The gate mirrors
+      // displayWithRefreshCycle's maintenance check, so the "Refresh: Never"
+      // (DISABLED) sentinel is excluded and does not force a base pass.
+      const bool cleanImageBasePending =
+          pagesUntilFullRefresh != CrossPointSettings::REFRESH_COUNTDOWN_DISABLED && pagesUntilFullRefresh <= 1;
+      if (cleanImageBasePending) {
+        renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+      }
       renderer.fillRect(imgX + orientedMarginLeft, imgY + orientedMarginTop, imgW, imgH, false);
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
 
@@ -2683,7 +2694,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     // regardless of residue. Only large images leave enough residue to warrant
     // this — small icons/emoji skip it (no needless refresh on the next page).
     if (hasLargeImage) {
-      pagesUntilFullRefresh = 1;
+      pagesUntilFullRefresh = CrossPointSettings::REFRESH_COUNTDOWN_FORCE_FULL;
     }
   } else {
     // Full-refresh pages double as reading-time checkpoints: the 1-2s HALF_REFRESH
@@ -2696,7 +2707,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     // can't fully clear on the next page. Force HALF on the next page to drive every
     // pixel to its target — same fix as the X4 grayscale residue path above.
     if (hasLargeImage && renderer.isX3()) {
-      pagesUntilFullRefresh = 1;
+      pagesUntilFullRefresh = CrossPointSettings::REFRESH_COUNTDOWN_FORCE_FULL;
     }
   }
   const auto tDisplay = millis();

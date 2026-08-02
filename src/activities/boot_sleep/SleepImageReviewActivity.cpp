@@ -127,7 +127,10 @@ void SleepImageReviewActivity::finishToDestination() {
   APP_STATE.saveToFile();
 
   if (resumeToReader && !readerPath.empty()) {
-    activityManager.goToReader(readerPath);
+    // Wake-from-sleep: the panel still holds the sleep image, which a fast first
+    // paint can't clear. Force the initial HALF scrub (see
+    // ReaderActivity::initialRefreshCountdown).
+    activityManager.goToReader(readerPath, /*allowFastInitialRefresh=*/false);
   } else {
     activityManager.goHome();
   }

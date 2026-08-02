@@ -443,6 +443,10 @@ int CrossPointSettings::getRefreshFrequency() const {
       return 15;
     case REFRESH_30:
       return 30;
+    case REFRESH_60:
+      return 60;
+    case REFRESH_NEVER:
+      return REFRESH_COUNTDOWN_DISABLED;
   }
 }
 

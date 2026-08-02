@@ -238,10 +238,13 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
       SettingInfo::Enum(StrId::STR_IMAGE_DITHER, &CrossPointSettings::imageDither,
                         {StrId::STR_DITHER_BLUE_NOISE, StrId::STR_DITHER_BAYER, StrId::STR_DITHER_ERROR_DIFFUSION},
                         "imageDither", StrId::STR_DISP_EINK));
-  v.push_back(SettingInfo::Enum(
-      StrId::STR_REFRESH_FREQ, &CrossPointSettings::refreshFrequency,
-      {StrId::STR_PAGES_1, StrId::STR_PAGES_5, StrId::STR_PAGES_10, StrId::STR_PAGES_15, StrId::STR_PAGES_30},
-      "refreshFrequency", StrId::STR_DISP_EINK));
+  v.push_back(SettingInfo::Enum(StrId::STR_REFRESH_FREQ, &CrossPointSettings::refreshFrequency,
+                                {StrId::STR_PAGES_1, StrId::STR_PAGES_5, StrId::STR_PAGES_10, StrId::STR_PAGES_15,
+                                 StrId::STR_PAGES_30, StrId::STR_PAGES_60, StrId::STR_PAGES_NEVER},
+                                "refreshFrequency", StrId::STR_DISP_EINK));
+  v.push_back(SettingInfo::Enum(StrId::STR_REFRESH_ACTION, &CrossPointSettings::refreshAction,
+                                {StrId::STR_REFRESH_ACTION_FULL, StrId::STR_REFRESH_ACTION_BW_REINFORCEMENT},
+                                "refreshAction", StrId::STR_DISP_EINK));
   v.push_back(
       SettingInfo::Enum(StrId::STR_REFRESH_SCREEN_MODE, &CrossPointSettings::refreshScreenMode,
                         {StrId::STR_REFRESH_MODE_FAST, StrId::STR_REFRESH_MODE_HALF, StrId::STR_REFRESH_MODE_FULL},

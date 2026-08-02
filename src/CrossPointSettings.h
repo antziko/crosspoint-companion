@@ -141,8 +141,19 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     REFRESH_10 = 2,
     REFRESH_15 = 3,
     REFRESH_30 = 4,
+    REFRESH_60 = 5,
+    REFRESH_NEVER = 6,
     REFRESH_FREQUENCY_COUNT
   };
+
+  // Periodic maintenance action. On X3, BW_REINFORCEMENT swaps the flashing HALF
+  // scrub for the OEM AA-pre-BW(mid) no-flash reinforcement waveform. No effect on
+  // X4 (SSD1677 has no reinforcement bank; displayGrayscaleBase falls back to FAST).
+  enum REFRESH_ACTION { REFRESH_ACTION_FULL = 0, REFRESH_ACTION_BW_REINFORCEMENT = 1, REFRESH_ACTION_COUNT };
+
+  // pagesUntilFullRefresh sentinels (negative so they never collide with a count):
+  static constexpr int REFRESH_COUNTDOWN_DISABLED = -1;    // "Never" — no periodic maintenance
+  static constexpr int REFRESH_COUNTDOWN_FORCE_FULL = -2;  // forced HALF scrub (residue/ghost cleanup)
 
   // Short power button press actions
   enum SHORT_PWRBTN { IGNORE = 0, SLEEP = 1, PAGE_TURN = 2, FORCE_REFRESH = 3, FOOTNOTES = 4, SHORT_PWRBTN_COUNT };
@@ -325,6 +336,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t syncPromptMinutesIdx = 1;
   // E-ink refresh frequency (default 15 pages)
   uint8_t refreshFrequency = REFRESH_15;
+  // Periodic maintenance action (default FULL; BW reinforcement is X3-only)
+  uint8_t refreshAction = REFRESH_ACTION_FULL;
   // Manual "Refresh Screen" clear mode (default FAST: grayscale-safe everywhere)
   uint8_t refreshScreenMode = RSM_FAST;
   uint8_t hyphenationEnabled = 0;

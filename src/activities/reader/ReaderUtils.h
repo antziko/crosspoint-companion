@@ -6,6 +6,7 @@
 #include <HalGPIO.h>
 #include <HalTiltSensor.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
 #include <components/bars/tap-zones.h>
 
 #include "MappedInputManager.h"
@@ -158,16 +159,43 @@ inline bool isTouchMenuGesture(const MappedInputManager& input) {
 // renderer.waitRefreshComplete() and must rebuild the differential baseline
 // before the next page turn (the tiled grayscale cleanup does).
 inline void displayWithRefreshCycle(const GfxRenderer& renderer, int& pagesUntilFullRefresh, bool async = false) {
-  const auto mode = (pagesUntilFullRefresh <= 1) ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH;
-  if (async) {
-    renderer.displayBufferAsync(mode);
-  } else {
-    renderer.displayBuffer(mode);
-  }
-  if (pagesUntilFullRefresh <= 1) {
+  // "Never": getRefreshFrequency() returns the DISABLED sentinel, parking the
+  // counter negative. Guard it so a negative counter is never read as "due".
+  const bool disabled = (pagesUntilFullRefresh == CrossPointSettings::REFRESH_COUNTDOWN_DISABLED);
+  const bool maintenanceDue = !disabled && pagesUntilFullRefresh <= 1;
+
+  if (maintenanceDue) {
+    // X3 no-flash maintenance: instead of the full-screen HALF flash, fire the OEM
+    // AA-pre-BW(mid) differential waveform — changed pixels get the strong drive,
+    // unchanged black/white pixels a gentle same-polarity top-up, settling ghosting
+    // during the page turn itself. FAST_REFRESH is the driver's fallback when a clean
+    // differential base isn't available; it degrades to fast + settle, never to a HALF
+    // flash. Forced ghost-scrubs (image residue, popup/list wipe, initial paint) arrive
+    // via the FORCE_FULL sentinel and deliberately take the HALF path — a gentle
+    // reinforce can't clear that residue.
+    const bool useBwReinforcement = renderer.isX3() &&
+                                    pagesUntilFullRefresh != CrossPointSettings::REFRESH_COUNTDOWN_FORCE_FULL &&
+                                    SETTINGS.refreshAction == CrossPointSettings::REFRESH_ACTION_BW_REINFORCEMENT;
+    // Diagnostic (enable "SD Card Logging"): one line per maintenance page so the
+    // no-flash path can be confirmed untethered on X3. reinforce=1 => AA-pre-BW(mid)
+    // ran; reinforce=0 => HALF flash (check x3/action/countdown to see why).
+    SdDebugLog::log("RFRSH", "maint x3=%d action=%d countdown=%d reinforce=%d", (int)renderer.isX3(),
+                    (int)SETTINGS.refreshAction, pagesUntilFullRefresh, (int)useBwReinforcement);
+    if (useBwReinforcement) {
+      // Synchronous by design: displayGrayscaleBase has no async form, and the periodic
+      // scrub was already blocking. `async` only applies to plain fast page turns.
+      renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
+    } else {
+      renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    }
     pagesUntilFullRefresh = SETTINGS.getRefreshFrequency();
   } else {
-    pagesUntilFullRefresh--;
+    if (async) {
+      renderer.displayBufferAsync(HalDisplay::FAST_REFRESH);
+    } else {
+      renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    }
+    if (!disabled) pagesUntilFullRefresh--;
   }
 }
 

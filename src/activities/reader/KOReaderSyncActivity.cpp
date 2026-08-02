@@ -119,7 +119,10 @@ void KOReaderSyncActivity::returnToReader() {
     APP_STATE.requestManualSleep = true;
     return;
   }
-  activityManager.goToReader(epubPath);
+  // Sync return: the panel still holds the sync / "Progress found" screen, which a
+  // fast first paint would ghost. Force the initial HALF scrub (see
+  // ReaderActivity::initialRefreshCountdown).
+  activityManager.goToReader(epubPath, /*allowFastInitialRefresh=*/false);
 }
 
 void KOReaderSyncActivity::onWifiSelectionComplete(const bool success) {
