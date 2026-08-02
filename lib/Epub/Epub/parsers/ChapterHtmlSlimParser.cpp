@@ -48,6 +48,22 @@ constexpr size_t TEXT_BLOCK_SOFT_FLUSH_WORDS = 384;
 // per-word vector overhead. 160 still lays out a full CJK page at font size 14. (Was 320; upstream=320.)
 constexpr size_t TEXT_BLOCK_SOFT_FLUSH_WORDS_WITH_CSS = 160;
 
+// Memory-adaptive early flush. The static caps above bound layout memory by word count, but they are
+// blind to how little heap is actually free at layout time: after a dictionary lookup or a KOReader
+// sync drains the heap, even a sub-cap block's layout scratch (wordWidths/lineBreakIndices/bidi
+// reorder vectors, momentarily ~2x during std::vector reallocation) can hit the throwing operator new
+// and abort() the device (upstream #2256 / observed X4 crash: 644 B alloc, largest block 500 B). So we
+// also flush when the largest contiguous free block can no longer comfortably hold this block's layout
+// transient — proactively shrinking the transient before the heap wall, routing big chapters onto more,
+// smaller layout passes instead of one fatal one. Mirrors the ImageBlock.cpp decode-guard pattern.
+// Conservative per-word estimate (bytes of contiguous scratch, incl. realloc doubling headroom).
+constexpr size_t LAYOUT_BYTES_PER_WORD = 24;
+// Headroom kept free for the rest of parsing + the allocation's transient 2x growth.
+constexpr size_t LAYOUT_HEAP_RESERVE = 16 * 1024;
+// Don't fragment small blocks: only the adaptive path considers flushing below the static cap, and
+// only once a block is at least this large (a tiny block's layout can't meaningfully overflow).
+constexpr size_t LAYOUT_MIN_ADAPTIVE_WORDS = 32;
+
 // Hard cap on the number of anchor IDs recorded per chapter. Legitimate navigation
 // anchors (TOC entries, footnotes, cross-references) rarely exceed a few hundred per
 // chapter. A runaway count usually means a converter injected machine-generated IDs on
@@ -299,11 +315,22 @@ void ChapterHtmlSlimParser::flushLongTextBlockIfNeeded() {
   // per-block transient still keeps the layout scratch light on a tight heap.
   const size_t blockWordCount = currentTextBlock->size();
   const size_t softFlushThreshold = embeddedStyle ? TEXT_BLOCK_SOFT_FLUSH_WORDS_WITH_CSS : TEXT_BLOCK_SOFT_FLUSH_WORDS;
-  if (blockWordCount <= softFlushThreshold) {
+  // Memory-adaptive early flush (see constants above): below the static cap, flush anyway when the
+  // largest contiguous free block can't comfortably hold this block's estimated layout transient.
+  // Cheap check — one heap query, only when the block is already non-trivial.
+  bool lowHeapFlush = false;
+  if (blockWordCount > softFlushThreshold) {
+    lowHeapFlush = false;  // over the static cap: normal flush below, no need to probe the heap
+  } else if (blockWordCount >= LAYOUT_MIN_ADAPTIVE_WORDS) {
+    const size_t estLayoutBytes = blockWordCount * LAYOUT_BYTES_PER_WORD;
+    const size_t largest8 = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    lowHeapFlush = largest8 < estLayoutBytes + LAYOUT_HEAP_RESERVE;
+  }
+  if (blockWordCount <= softFlushThreshold && !lowHeapFlush) {
     return;
   }
 
-  LOG_DBG("EHP", "Text block soft flush (%u words)", static_cast<unsigned>(blockWordCount));
+  LOG_DBG("EHP", "Text block soft flush (%u words, lowHeap=%d)", static_cast<unsigned>(blockWordCount), lowHeapFlush);
   // Untethered: log the layout peak (word count at flush) against the current largest block. This is
   // the transient that overflows the heap wall on big chapters; watching words vs largest8 across
   // builds shows how much headroom the soft-flush cap is buying.
