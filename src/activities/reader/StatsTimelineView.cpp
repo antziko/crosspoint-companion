@@ -36,6 +36,22 @@ void formatDurationCompact(uint32_t seconds, char* buf, size_t len) {
 
 // Columns in the Yearly/Monthly grid sections.
 constexpr int GRID_COLUMNS = 3;
+
+// A stored week (keyed by its Monday) overlaps the given calendar month if either
+// its Monday or its Sunday (Monday + 6 days) falls in that month/year. A 7-day
+// week spans at most two adjacent months, so checking both ends covers every
+// overlap. This is what lets a month's leading partial week — whose Monday sits in
+// the prior month (e.g. an Aug 1-2 weekend belongs to the week starting Jul 27) —
+// still show under the current month, matching how the Monthly bucket attributes
+// those days.
+bool weekOverlapsMonth(const ReadingTimeHistory::WeekEntry& w, uint16_t year, uint8_t month) {
+  if (w.seconds == 0) return false;                     // empty ring slot
+  if (w.year == year && w.month == month) return true;  // Monday side
+  uint16_t sunYear;
+  uint8_t sunMonth, sunDay;
+  readingHistoryDateFromDayIndex(readingHistoryDayIndex(w.year, w.month, w.day) + 6, sunYear, sunMonth, sunDay);
+  return sunYear == year && sunMonth == month;  // Sunday side
+}
 }  // namespace
 
 void StatsTimelineView::initSelection(const ReadingTimeHistory& history) {
@@ -160,7 +176,7 @@ void StatsTimelineView::rebuild(const ReadingTimeHistory& history) {
   for (size_t i = 0; i < ReadingTimeHistory::MONTHLY_COUNT; ++i)
     if (history.monthly[i].year == selYear_) ++monthlyInSel;
   for (size_t i = 0; i < ReadingTimeHistory::WEEKLY_COUNT; ++i)
-    if (history.weekly[i].year == selYear_ && history.weekly[i].month == selMonth_) ++weeklyInSel;
+    if (weekOverlapsMonth(history.weekly[i], selYear_, selMonth_)) ++weeklyInSel;
   const size_t gridRows =
       (yearlyEntries + GRID_COLUMNS - 1) / GRID_COLUMNS + (monthlyInSel + GRID_COLUMNS - 1) / GRID_COLUMNS;
   rows.reserve(gridRows + weeklyInSel + 3);
@@ -239,7 +255,7 @@ void StatsTimelineView::rebuild(const ReadingTimeHistory& history) {
   sectionStarted = false;
   for (size_t i = 0; i < ReadingTimeHistory::WEEKLY_COUNT; ++i) {
     const auto& w = history.weekly[i];
-    if (w.year != selYear_ || w.month != selMonth_) continue;
+    if (!weekOverlapsMonth(w, selYear_, selMonth_)) continue;
     if (!sectionStarted) {
       pushHeader(tr(STR_STATS_WEEKLY));
       sectionStarted = true;
