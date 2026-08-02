@@ -1,4 +1,4 @@
 [submodule "freeink-sdk"]
 	path = freeink-sdk
-	url = https://github.com/Free-Ink/freeink-sdk.git
-	branch = main
+	url = git@github.com:antziko/freeink-sdk.git
+	branch = x3-tls-maxfragment
