@@ -192,23 +192,14 @@ void BookStatsActivity::render(RenderLock&&) {
 }
 
 void BookStatsActivity::renderHeatmapTab(const Rect& rect) const {
-  // If the current session qualifies (elapsed >= threshold, dated, valid date),
-  // fold it into an in-memory scratch copy so today's reading is visible without
-  // waiting for onExit() to commit to disk.
-  std::unique_ptr<ReadingTimeHistory> scratchHistory;
-  if (session.elapsedSecs > 0 && session.elapsedSecs >= session.thresholdSecs && session.dated &&
-      session.year >= 2000) {
-    scratchHistory = makeUniqueNoThrow<ReadingTimeHistory>();
-    if (scratchHistory) {
-      if (history) *scratchHistory = *history;
-      scratchHistory->recordDay(session.year, session.month, session.day, session.dayOfWeek, session.elapsedSecs);
-    }
-  }
-  const ReadingTimeHistory* h = scratchHistory ? scratchHistory.get() : history.get();
-
-  if (!h) {
+  // Committed on-disk history only, matching the Timeline tab: the current session is
+  // folded in when the book is left (onExit -> commitReadingTime). Folding the live
+  // session here would double-count the time the mid-session checkpoints have already
+  // persisted into this same history (elapsedSecs is the whole session, not the
+  // uncommitted remainder).
+  if (!history) {
     StatsTimelineView::renderEmptyState(renderer, rect);
     return;
   }
-  StatsTimelineView::renderHeatmap(renderer, rect, *h);
+  StatsTimelineView::renderHeatmap(renderer, rect, *history);
 }

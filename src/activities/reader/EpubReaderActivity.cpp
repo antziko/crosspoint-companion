@@ -1556,20 +1556,6 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       // Live reading pace (avg real reading seconds per forward page) from the in-progress stats,
       // shown on the Book Stats summary. Fresher than the on-disk copy the activity reloads.
       session.pacePerPageSecs = readingStats.avgSecondsPerForwardPage;
-      {
-        const auto& ov = SETTINGS.getReaderOverride();
-        const uint8_t thresholdIdx =
-            (ov.active && ov.minSessionMinutes != CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL)
-                ? ov.minSessionMinutes
-                : SETTINGS.minSessionMinutes;
-        constexpr size_t kMinSessCount = sizeof(CrossPointSettings::MIN_SESSION_SECONDS) / sizeof(uint16_t);
-        session.thresholdSecs =
-            (thresholdIdx < kMinSessCount) ? CrossPointSettings::MIN_SESSION_SECONDS[thresholdIdx] : 0;
-        uint8_t hour = 0, minute = 0;
-        session.dated =
-            halClock.isAvailable() && halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, session.dayOfWeek,
-                                                                session.day, session.month, session.year, hour, minute);
-      }
       startActivityForResult(std::make_unique<BookStatsActivity>(renderer, mappedInput, epub->getTitle(),
                                                                  epub->getCachePath(), progressPercent, session),
                              [this](const ActivityResult&) {

@@ -22,16 +22,13 @@ class BookStatsActivity final : public Activity {
   // Snapshot of the in-progress reading session, passed at construction so
   // the heatmap can show today's reading without waiting for onExit().
   struct SessionContext {
+    // Live "This session" reading time (idle-capped), shown on the summary line only.
+    // Not folded into the Timeline/Heatmap history — those show committed on-disk data,
+    // which absorbs this session when the book is left (onExit -> commitReadingTime).
     uint32_t elapsedSecs = 0;
     // Live reading pace: average real reading time per forward page (sub-activity time excluded),
     // snapshotted from the reader's in-progress stats. 0 = no samples yet -> omitted.
     uint16_t pacePerPageSecs = 0;
-    uint32_t thresholdSecs = 0;  // effective gate; 0 = always show
-    bool dated = false;
-    uint16_t year = 0;
-    uint8_t month = 0;
-    uint8_t day = 0;
-    uint8_t dayOfWeek = 0;
   };
 
   explicit BookStatsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string bookTitle,
