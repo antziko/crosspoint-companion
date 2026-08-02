@@ -1471,6 +1471,14 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
                                // Re-layout: the per-book settings may have changed, so discard the
                                // cached section and let render() rebuild it with the new parameters.
                                RenderLock lock(*this);
+                               // Preserve current reading position so applyDeferredReposition() can
+                               // remap it onto the new pagination after reflow -- without this the
+                               // rebuild lands on a stale nextPageNumber and jumps the reader back.
+                               if (section) {
+                                 cachedSpineIndex = currentSpineIndex;
+                                 cachedChapterTotalPageCount = section->pageCount;
+                                 nextPageNumber = section->currentPage;
+                               }
                                // Reload any SD-card font at the new (override) size first; the
                                // size-encoded font ID then forces the section cache to rebuild.
                                sdFontSystem.ensureLoaded(renderer);
