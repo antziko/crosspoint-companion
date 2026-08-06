@@ -14,6 +14,21 @@ char Dictionary::wordBuf[256] = "";
 namespace {
 constexpr char DICT_BIN[] = "dictionary.bin";
 constexpr char GLOBAL_DICT_DIR[] = "/.crosspoint";
+
+// Word characters for edge-trimming: ASCII alphanumerics plus any UTF-8 lead or
+// continuation byte, so accented, Cyrillic and CJK words keep their edges. Plain
+// std::isalnum() rejects every byte >= 0x80, which trimmed "café" to "caf" and
+// reduced wholly non-ASCII words ("漢字", "Привет") to "" — an empty lookup.
+bool isWordByte(unsigned char c) { return c >= 0x80 || std::isalnum(c) != 0; }
+
+// True when b[i] starts a General Punctuation codepoint (U+2000-U+206F, encoded
+// E2 80 xx / E2 81 xx): curly quotes, en/em dashes, ellipsis. isWordByte keeps
+// these because they are >= 0x80, so they must be trimmed explicitly or EPUB
+// text like garage.” never matches a headword. Callers guarantee 3 bytes are
+// readable from i. (#2877)
+bool isGeneralPunctuationAt(const unsigned char* b, size_t i) {
+  return b[i] == 0xE2 && (b[i + 1] == 0x80 || b[i + 1] == 0x81);
+}
 }  // namespace
 
 // OFT file constants (StarDict Cache format, verified against real files).
@@ -247,14 +262,29 @@ DictInfo Dictionary::readInfo(const char* folderPath) {
 std::string Dictionary::cleanWord(const std::string& word) {
   if (word.empty()) return "";
 
+  const auto* b = reinterpret_cast<const unsigned char*>(word.data());
   size_t start = 0;
-  while (start < word.size() && !std::isalnum(static_cast<unsigned char>(word[start]))) {
-    start++;
-  }
-
   size_t end = word.size();
-  while (end > start && !std::isalnum(static_cast<unsigned char>(word[end - 1]))) {
-    end--;
+
+  // Trim non-word bytes from both edges, treating a General Punctuation
+  // codepoint as a single 3-byte unit rather than three word bytes.
+  while (start < end) {
+    if (!isWordByte(b[start])) {
+      start++;
+    } else if (end - start >= 3 && isGeneralPunctuationAt(b, start)) {
+      start += 3;
+    } else {
+      break;
+    }
+  }
+  while (end > start) {
+    if (!isWordByte(b[end - 1])) {
+      end--;
+    } else if (end - start >= 3 && isGeneralPunctuationAt(b, end - 3)) {
+      end -= 3;
+    } else {
+      break;
+    }
   }
 
   if (start >= end) return "";
