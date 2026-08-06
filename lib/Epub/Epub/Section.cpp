@@ -53,7 +53,11 @@ namespace {
 //      so the gaps between Hangul words survive instead of collapsing. Ruby base boundaries
 //      carry the continuation flag explicitly to stay gap-less. v41 cached word positions had
 //      the Korean spaces collapsed and no longer match (#2768).
-constexpr uint8_t SECTION_FILE_VERSION = 42;
+// v43: Ruby overhang is charged to the neighbouring word rather than the group's own leader,
+//      capped at half the neighbour's width instead of a flat ascender/2, and line breaking
+//      now favours the longer line on equal cost. Both change where the breaks land, so v42
+//      cached line/word positions no longer match (#2781).
+constexpr uint8_t SECTION_FILE_VERSION = 43;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
