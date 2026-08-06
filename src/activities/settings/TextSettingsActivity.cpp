@@ -28,6 +28,10 @@ constexpr unsigned long kPinHoldMs = 600;
 constexpr StrId LINE_SPACING_IDS[] = {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_WIDE};
 constexpr StrId ALIGNMENT_IDS[] = {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, StrId::STR_CENTER, StrId::STR_ALIGN_RIGHT,
                                    StrId::STR_BOOK_S_STYLE};
+// textAntiAliasing is a TEXT_AA enum (Off / Antialiased / Sharp), not a bool — indices must line up
+// with the enum values so the picker index maps straight onto the stored value.
+constexpr StrId TEXT_AA_IDS[] = {StrId::STR_TEXT_AA_OFF, StrId::STR_TEXT_AA_ANTIALIASED, StrId::STR_TEXT_AA_SHARP};
+static_assert(std::size(TEXT_AA_IDS) == CrossPointSettings::TEXT_AA_COUNT, "TEXT_AA_IDS must cover every TEXT_AA mode");
 constexpr int MARGIN_MIN = CrossPointSettings::SCREEN_MARGIN_MIN;
 constexpr int MARGIN_MAX = CrossPointSettings::SCREEN_MARGIN_MAX;
 constexpr int MARGIN_STEP = CrossPointSettings::SCREEN_MARGIN_STEP;
@@ -318,7 +322,10 @@ void TextSettingsActivity::render(RenderLock&&) {
           renderer, listRect, STYLE_ROWS, selectedItem,
           [](int index) { return std::string(I18N.get(ROW_NAME_IDS[index])); }, nullptr, nullptr,
           [this](int index) { return styleValueText(index); }, true);
-      confirmLabel = onTabBar ? tr(STR_FONT) : tr(STR_TOGGLE);
+      if (onTabBar)
+        confirmLabel = tr(STR_FONT);
+      else  // Anti-aliasing opens a tri-state picker; the rest toggle
+        confirmLabel = (selectedItem == static_cast<int>(StyleRow::AntiAliasing)) ? tr(STR_SELECT) : tr(STR_TOGGLE);
       break;
     }
 
@@ -482,8 +489,14 @@ void TextSettingsActivity::confirmStyleRow(int row) {
       SETTINGS.embeddedStyle = !SETTINGS.embeddedStyle;
       break;
     case StyleRow::AntiAliasing:
-      SETTINGS.textAntiAliasing = !SETTINGS.textAntiAliasing;
-      break;
+      // Tri-state picker, not a toggle: negating it made Sharp unreachable (!2 == 0).
+      optionPopup_.show(StrId::STR_TEXT_AA, TEXT_AA_IDS, static_cast<int>(std::size(TEXT_AA_IDS)),
+                        SETTINGS.textAntiAliasing, [](int idx) {
+                          SETTINGS.textAntiAliasing = static_cast<uint8_t>(idx);
+                          SETTINGS.saveToFile();  // persist immediately (#2806)
+                        });
+      requestUpdate();
+      return;
 
     default:
       return;
@@ -500,8 +513,10 @@ std::string TextSettingsActivity::styleValueText(int row) const {
       return SETTINGS.hyphenationEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     case StyleRow::EmbeddedStyle:
       return SETTINGS.embeddedStyle ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
-    case StyleRow::AntiAliasing:
-      return SETTINGS.textAntiAliasing ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+    case StyleRow::AntiAliasing: {
+      const uint8_t v = SETTINGS.textAntiAliasing;
+      return v < std::size(TEXT_AA_IDS) ? I18N.get(TEXT_AA_IDS[v]) : I18N.get(StrId::STR_TEXT_AA_ANTIALIASED);
+    }
 
     default:
       return "";
