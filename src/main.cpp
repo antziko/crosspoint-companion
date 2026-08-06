@@ -314,7 +314,7 @@ static void maybeStartBackgroundNtpSync() {
   if (!SETTINGS.homeTopBarClock && !SETTINGS.homeTopBarDate && !SETTINGS.statusBarClock && !SETTINGS.statusBarDate)
     return;
   WIFI_STORE.loadFromFile();
-  const std::string& lastSsid = WIFI_STORE.getLastConnectedSsid();
+  const std::string lastSsid = WIFI_STORE.getLastConnectedSsid();
   if (lastSsid.empty()) return;
 
   struct NtpBgCtx {
@@ -325,7 +325,9 @@ static void maybeStartBackgroundNtpSync() {
   strncpy(ntpBgCtx.ssid, lastSsid.c_str(), sizeof(ntpBgCtx.ssid) - 1);
   ntpBgCtx.ssid[sizeof(ntpBgCtx.ssid) - 1] = '\0';
   ntpBgCtx.pass[0] = '\0';
-  if (const WifiCredential* cred = WIFI_STORE.findCredential(lastSsid)) {
+  // Snapshot by value: findCredential now returns an optional copy taken under
+  // the store's mutex, so nothing here aliases the live credential vector.
+  if (const auto cred = WIFI_STORE.findCredential(lastSsid)) {
     strncpy(ntpBgCtx.pass, cred->password.c_str(), sizeof(ntpBgCtx.pass) - 1);
     ntpBgCtx.pass[sizeof(ntpBgCtx.pass) - 1] = '\0';
   }

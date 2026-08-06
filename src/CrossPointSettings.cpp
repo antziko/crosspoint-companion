@@ -16,6 +16,15 @@
 
 namespace {
 
+// Longest "<key>_obf" JSON key we ever build on the stack; SettingsList keys are
+// far shorter, so this avoids a per-field std::string allocation during load.
+constexpr size_t OBF_KEY_BUF = 64;
+
+void copyToField(char* dest, const char* src, const size_t maxLen) {
+  strncpy(dest, src, maxLen - 1);
+  dest[maxLen - 1] = '\0';
+}
+
 // Migrate a pre-refactor settings file that used the single combined `statusBar`
 // enum into the current per-element status bar fields. Runs when the new
 // statusBarChapterPageCount key is absent (see fromJson()).
@@ -196,19 +205,8 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
     if (!info.valuePtr && !info.stringOffset) continue;
 
     if (info.stringOffset) {
-      const char* strPtr = (const char*)&s + info.stringOffset;
-      const std::string fieldDefault = strPtr;  // current buffer = struct-initializer default
-      std::string val;
-      if (info.obfuscated) {
-        bool ok = false;
-        val = obfuscation::deobfuscateFromBase64(doc[std::string(info.key) + "_obf"] | "", &ok);
-        if (!ok || val.empty()) {
-          val = doc[info.key] | fieldDefault;
-          if (val != fieldDefault) needsResave = true;
-        }
-      } else {
-        val = doc[info.key] | fieldDefault;
-      }
+      // destPtr starts out holding the struct-initializer default; it stays that
+      // way unless the document actually carries a value for this key.
       char* destPtr = (char*)&s + info.stringOffset;
       if (info.stringMaxLen == 0) {
         LOG_ERR("CPS", "Misconfigured SettingInfo: stringMaxLen is 0 for key '%s'", info.key);
@@ -216,8 +214,35 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
         needsResave = true;
         continue;
       }
-      strncpy(destPtr, val.c_str(), info.stringMaxLen - 1);
-      destPtr[info.stringMaxLen - 1] = '\0';
+
+      bool loaded = false;
+      if (info.obfuscated) {
+        char obfKey[OBF_KEY_BUF];
+        snprintf(obfKey, sizeof(obfKey), "%s_obf", info.key);
+        bool ok = false;
+        bool tooLong = false;
+        const std::string decoded =
+            obfuscation::deobfuscateFromBase64(doc[obfKey] | "", info.stringMaxLen - 1, &ok, &tooLong);
+        if (tooLong) {
+          LOG_ERR("CPS", "Oversized obfuscated value for key '%s'", info.key);
+          needsResave = true;
+        }
+        if (ok && !decoded.empty()) {
+          copyToField(destPtr, decoded.c_str(), info.stringMaxLen);
+          loaded = true;
+        }
+      }
+      if (!loaded) {
+        // Read as const char*, never `| std::string(...)`: ArduinoJson's
+        // std::string converter drags a per-TU copy of the serializer into
+        // flash. See the note in PersistableStore.h.
+        const char* raw = doc[info.key].is<const char*>() ? doc[info.key].as<const char*>() : nullptr;
+        if (raw) {
+          // Obfuscated field recovered from a legacy plaintext value -> resave.
+          if (info.obfuscated && strcmp(raw, destPtr) != 0) needsResave = true;
+          copyToField(destPtr, raw, info.stringMaxLen);
+        }
+      }
     } else {
       const uint8_t fieldDefault = s.*(info.valuePtr);  // struct-initializer default, read before overwrite
       uint8_t v = doc[info.key] | fieldDefault;
