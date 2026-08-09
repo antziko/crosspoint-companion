@@ -6,7 +6,6 @@
 #include <optional>
 
 #include "BookReadingStats.h"
-#include "BookmarkEntry.h"
 #include "EndOfBookOptions.h"
 #include "EpubReaderMenuActivity.h"
 #include "ProgressMapper.h"
