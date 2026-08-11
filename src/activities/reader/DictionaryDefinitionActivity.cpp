@@ -2,12 +2,14 @@
 
 #include <DictHtmlRenderer.h>
 #include <FontCacheManager.h>
+#include <FontDecompressor.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <SdCardFont.h>
+#include <SdDebugLog.h>
 #include <Utf8.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
@@ -140,6 +142,44 @@ constexpr uint8_t spanStyleBit(const bool bold, const bool italic) {
   return static_cast<uint8_t>(1u << spanStyleIndex(bold, italic));
 }
 
+// Mirror the dictionary's font-path timings into the SD debug log. LOG_DBG only reaches a
+// serial monitor, but the reports that matter come from the device untethered, where
+// opds_debug.txt is all there is — a "definition takes a minute to open" trace previously
+// carried no timing data at all, only the Activity enter/exit markers.
+//
+// sd=0/1 is the key discriminator: the SD-font and built-in-font paths degrade through
+// entirely different mechanisms. sd=1 with a high miss/missMs means the advance table or
+// mini-data prewarm did not happen (overflow-ring thrash, one file open per glyph). sd=0
+// with a high fdcOom/fdcMs means built-in group decompression is failing for contiguous
+// heap instead. Stats are reset once per loadPage(), so wrap= is that phase alone and
+// render= is cumulative over wrap+render — the same convention the LOG_DBG logStats lines
+// already use.
+// oom= counts glyph bitmaps that failed to allocate on the on-demand path; each one is a
+// character drawText skipped, so a non-zero value here IS the "some fonts not rendering"
+// report, rather than something to infer from a low largest= on the same line.
+void logDictPhase(GfxRenderer& renderer, const int fontId, const char* phase, const unsigned long ms) {
+  uint32_t misses = 0, missMs = 0, bmpOom = 0, fdcSkips = 0, fdcMs = 0;
+  const bool isSd = renderer.isSdCardFont(fontId);
+  if (isSd) {
+    const auto& fonts = renderer.getSdCardFonts();
+    const auto it = fonts.find(fontId);
+    if (it != fonts.end() && it->second) {
+      misses = it->second->getStats().overflowMisses;
+      missMs = it->second->getStats().overflowMissMs;
+      bmpOom = it->second->getStats().bitmapOom;
+    }
+  }
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    if (auto* fd = fcm->getDecompressor()) {
+      fdcSkips = fd->getStats().hotGroupOomSkips;
+      fdcMs = fd->getStats().decompressTimeMs;
+    }
+  }
+  SdDebugLog::log("DDA", "%s=%lums sd=%d miss=%u missMs=%u oom=%u fdcOom=%u fdcMs=%u free=%u largest=%u", phase, ms,
+                  isSd ? 1 : 0, misses, missMs, bmpOom, fdcSkips, fdcMs, static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+}
+
 }  // namespace
 
 void DictionaryDefinitionActivity::onEnter() {
@@ -162,8 +202,21 @@ void DictionaryDefinitionActivity::onEnter() {
     sdFontSystem.ensureFontSize(SETTINGS.getReaderSdFontFamilyName(), SETTINGS.getDefinitionPointSize(), renderer);
   }
   wrapText();
-  requestUpdate();
-  // SD write overlaps the e-ink refresh kicked by requestUpdate() on the render task.
+  // immediate=true, and it matters. The default requestUpdate() only sets an atomic flag
+  // (ActivityManager.cpp:330-334); the render task is not notified until ActivityManager::loop()
+  // reaches :182-188, which happens after onEnter() RETURNS. So the history write below was not
+  // overlapping the e-ink refresh as intended — it was running entirely in front of it. On the
+  // slow LookupHistory path (a re-looked-up word, or history at cap: a full temp-file rewrite
+  // with byte-at-a-time reads, LookupHistory.cpp:273-330) device logs measured ~2250ms of dead
+  // time between the wrap finishing and render() starting, against ~255ms when the append fast
+  // path was taken. That gap was the largest single component of a definition open.
+  //
+  // Safe to hand the render task the activity here: everything render() reads — layoutLines,
+  // pagePool_, currentPage, totalPages, navigator — is settled by wrapText() above, and the only
+  // state mutated after this point is chain_, which render() never touches. The history write and
+  // any glyph-miss I/O the render issues both serialise on HalStorage's mutex by construction.
+  requestUpdate(true);
+  // Now genuinely concurrent with the refresh on the render task.
   LookupHistory::addWordIf(cachePath, historyWord, historyStatus, recordHistory);
 
   // Seed the back-nav chain. The initial word is the newest history entry iff it
@@ -176,7 +229,33 @@ void DictionaryDefinitionActivity::onEnter() {
 }
 
 void DictionaryDefinitionActivity::onExit() {
-  controller.onExit();
+  controller.onExit();  // stops+joins the lookup task first: nothing may free fonts under it
+  // Undo onEnter()'s font residency. Symmetry here is the whole point: releaseExtraSizes()
+  // used to run only from EpubReaderActivity::onExit(), so within one reading session the
+  // dictionary's own .cpfont (interval + glyph-metadata tables), its four persistent advance
+  // tables and its prewarmed mini bitmap arenas all stayed resident after the definition
+  // closed — ~12KB sitting mid-heap, taken while the reader was still allocated.
+  //
+  // Device evidence (X3 opds_debug.txt, two lookups in one session): the reader's steady
+  // state fell from `epub-page free=52112` to `free=40180`, and the second lookup entered at
+  // free=16240/largest=11252 instead of 30768/24564. That was enough to make the body prewarm
+  // decline every style (warmed=0x00), and since GfxRenderer::getTextWidth has no SD advance-
+  // table fast path (GfxRenderer.cpp:538) the wrap then fetched every glyph individually
+  // through onGlyphMiss — one file open + 2 seeks + 2 reads each, ~26ms apiece, 908 of them:
+  // 25.3s to wrap what took 716ms the first time, with glyph bitmaps starting to fail to
+  // allocate at largest=2036 (that is the "some fonts not rendering" report).
+  //
+  // Cost of releasing: the next lookup re-pays loadFile + the advance-table build, ~0.3s
+  // (adv=137-162ms measured, plus one header/TOC read). Against 25s that is not a trade.
+  // It also restores ensureFontSize()'s 28KB gate as a real per-lookup decision — once the
+  // size is resident, getFontIdAtSize() returns early and the gate never runs again.
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    fcm->clearCache();
+  }
+  // Keeps the reader-size font and any CJK UI fallback target (see unloadExtraSizes()), so
+  // this cannot strip the home/settings screens. Safe for the backgrounded word-select
+  // activity too: that one measures and renders through getReaderFontId() exclusively.
+  sdFontSystem.releaseExtraSizes(renderer);
   Activity::onExit();
 }
 
@@ -205,16 +284,39 @@ void DictionaryDefinitionActivity::wrapText() {
   const bool isInverted = orient == GfxRenderer::Orientation::PortraitInverted;
   hintGutterWidth = (isLandscapeCw || isLandscapeCcw) ? metrics.sideButtonHintsWidth : 0;
   hintGutterHeight = isInverted ? (metrics.buttonHintsHeight + metrics.verticalSpacing) : 0;
-  contentX = isLandscapeCw ? hintGutterWidth : 0;
-  const int sidePadding = metrics.contentSidePadding + SETTINGS.screenMargin;
-  leftPadding = contentX + sidePadding;
-  rightPadding = (isLandscapeCcw ? hintGutterWidth : 0) + sidePadding;
-  bodyStartY = hintGutterHeight + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  // Screen margin, composed the way the reader composes it (EpubReaderActivity.cpp:1896-1901):
+  // the panel's physical viewable area first, then a constant inset on top. Before this the
+  // definition viewer applied neither — a flat 5px on the sides only — which left ~2px actually
+  // visible past the 3px side bezel and put the header band's top edge under the 9px top bezel,
+  // while the screen it is opened from (DictionaryWordSelectActivity.cpp:521) already honoured
+  // the bezel. The two disagreed.
+  //
+  // X3 (792x528) and X4 (800x480) share one binary and pick the panel at runtime
+  // (FreeInkDisplay.h:9-10), so nothing here may assume a screen size: getOrientedViewableTRBL()
+  // rotates the bezel per orientation, every value below is an inset measured from an edge, and
+  // the two absolute dimensions come from getScreenWidth()/getScreenHeight(), which read the
+  // runtime panel. Identical code path on both devices.
+  //
+  // A constant, deliberately NOT SETTINGS.getReaderScreenMargin(): a definition is dense
+  // reference text read in short bursts, so screen width is worth more here than the breathing
+  // room a book page wants, and a reader configured for 40px margins should not squeeze it.
+  int bezelTop, bezelRight, bezelBottom, bezelLeft;
+  renderer.getOrientedViewableTRBL(&bezelTop, &bezelRight, &bezelBottom, &bezelLeft);
+  constexpr int kScreenMargin = 5;
 
-  const int topArea = hintGutterHeight + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int bottomArea = metrics.buttonHintsHeight + metrics.verticalSpacing;
+  // The landscape hint gutters stay inside these, so the side button hints are never overrun.
+  contentX = bezelLeft + kScreenMargin + (isLandscapeCw ? hintGutterWidth : 0);
+  leftPadding = contentX;
+  rightPadding = bezelRight + kScreenMargin + (isLandscapeCcw ? hintGutterWidth : 0);
+  contentTop = hintGutterHeight + bezelTop + kScreenMargin + metrics.topPadding;
+  bodyStartY = contentTop + metrics.headerHeight + metrics.verticalSpacing;
 
-  linesPerPage = (renderer.getScreenHeight() - topArea - bottomArea) / getLineHeight();
+  // Button hints are theme-owned chrome drawn at the panel edge on every screen in the app, so
+  // they are not inset here; the margin instead keeps the last body line off them and off the
+  // bottom bezel.
+  const int bottomArea = metrics.buttonHintsHeight + metrics.verticalSpacing + bezelBottom + kScreenMargin;
+
+  linesPerPage = (renderer.getScreenHeight() - bodyStartY - bottomArea) / getLineHeight();
   if (linesPerPage < 1) linesPerPage = 1;
 
   LOG_DBG("DDA", "wrapText: font=%d sd=%d dictFamily=%u html=%d linesPerPage=%d", defFontId_,
@@ -250,6 +352,12 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   if (!renderer.isSdCardFont(defFontId_)) return;
   auto* fcm = renderer.getFontCacheManager();
   if (!fcm) return;
+
+  // From here the SD path starts pessimistic and has to earn ipaWarm_ back at the gate below.
+  // Every early return past this point (collector OOM, dictionary file unreadable) is itself
+  // evidence of a starved heap, which is exactly when the IPA font's per-glyph 11KB group
+  // inflation drops glyphs — so those paths should land on the body-font fallback too.
+  ipaWarm_ = false;
 
   const unsigned long t0 = millis();
   auto collector = makeUniqueNoThrow<PrewarmCollector>();
@@ -306,6 +414,17 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   // below the largest contiguous blocks on an already-fragmented heap.
   fcm->clearCache();
 
+  // Heap floors for the body prewarm below, declared up here because the IPA gate that
+  // follows has to reason about the same budget. Two tiers: a uniform 16KB floor was
+  // all-or-nothing (at 13.3KB free the loop broke before warming ANYTHING and the render then
+  // paid 552 glyph-bitmap misses / 11.4s), so the most-used style — which by the sort below
+  // covers the most text — is worth taking at a lower floor. One style is ~5KB; see the
+  // 4-style figure in the loop comment.
+  constexpr size_t kMinFreeForFirstStyle = 10 * 1024;
+  constexpr size_t kMinBlockForFirstStyle = 6 * 1024;
+  constexpr size_t kMinFreeForStyle = 16 * 1024;
+  constexpr size_t kMinBlockForStyle = 8 * 1024;
+
   // IPA before the body font, deliberately. IPA runs are drawn with a built-in font whose
   // non-prewarmed path decompresses a whole ~11KB group per glyph (FontDecompressor.cpp:182);
   // once the body prewarm below has taken its share, that contiguous block no longer exists
@@ -313,10 +432,60 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   // it first, while the heap is least fragmented, both fixes that and drops the per-glyph
   // decompress. The IPA family is single-style (main.cpp:113), so 0x01 covers every style
   // the segments are drawn in.
+  //
+  // But first claim is not unconditional claim. A definition carries a handful of IPA
+  // codepoints against dozens of body ones, and prewarmCache inflates a whole group
+  // regardless, so on a tight heap the IPA font can outbid the body font and leave it with
+  // nothing: the X3 log shows a 7-codepoint IPA prewarm followed by warmed=0x00 for 68 body
+  // codepoints, which then cost 25.3s of per-glyph SD I/O. Only take IPA first if doing so
+  // still leaves the top body style affordable. Declined IPA falls back to per-glyph
+  // decompress — exactly what already happens whenever this prewarm fails.
+  //
+  // The gate tests the largest free BLOCK as well as total free heap, because what it is
+  // authorising is a single contiguous malloc of group.uncompressedSize (11131 bytes for the
+  // IPA font, FontDecompressor.cpp:487). On this activity's heap the two numbers diverge
+  // badly — device logs routinely show free=15492 largest=9716 and free=9964 largest=4084 —
+  // so a free-total gate happily passes an allocation that cannot succeed, and the failure
+  // then resurfaces at draw time as dropped glyphs. Same rule as the body-style gates below
+  // and as FontCacheManager.cpp:93-98.
+  constexpr size_t kIpaGroupReserve = 12 * 1024;  // one FontDecompressor group, with margin
+  const char* ipaOutcome = "none";
   if (!collector->ipaUtf8.empty()) {
-    fcm->prewarmCache(IPA_FONT_ID, collector->ipaUtf8.c_str(), 0x01);
+    const size_t freeHeap = ESP.getFreeHeap();
+    const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (freeHeap >= kIpaGroupReserve + kMinFreeForFirstStyle && largestBlock >= kIpaGroupReserve) {
+      // A prewarm that reports missed groups leaves those glyphs on the same failing
+      // hot-group path, so only a clean 0 counts as warm.
+      const int missed = fcm->prewarmCache(IPA_FONT_ID, collector->ipaUtf8.c_str(), 0x01);
+      ipaWarm_ = (missed == 0);
+      ipaOutcome = ipaWarm_ ? "ok" : "miss";
+    } else {
+      ipaOutcome = "skip";
+      LOG_DBG("DDA", "prewarm: skipping IPA (%u cp), free %u largest %u vs %u needed", collector->ipaCount,
+              static_cast<unsigned>(freeHeap), static_cast<unsigned>(largestBlock),
+              static_cast<unsigned>(kIpaGroupReserve));
+    }
   }
   const unsigned long tIpa = millis();
+
+  // Advance table for the body font, ALWAYS — it is the cheap half of font preparation
+  // (8 B/codepoint, batched: one file open per style with glyph-index-sorted reads, and the
+  // codepoint buffer borrows the inflate scratch window, SdCardFont.cpp:1351). Deliberately
+  // ungated: affordable at any heap this activity can reach. No-op for built-in body fonts.
+  // Runs after the IPA prewarm so that still gets first claim on a contiguous block.
+  //
+  // Scope: it feeds BOTH measuring fast paths, which is why the wrap no longer tracks
+  // warmedMask. getTextAdvanceX (GfxRenderer.cpp:2023) takes pen advances from it, and
+  // getSdInkWidth — the getTextWidth fast path — takes the bearing and width that
+  // AdvanceEntry now carries in its padding, so an ink extent no longer needs a loaded
+  // glyph either. Before that existed, every codepoint in a cold style fell into
+  // SdCardFont::onGlyphMiss at ~26ms each and a 43-codepoint definition spent 2179ms of a
+  // 2229ms wrap on SD I/O. Both fast paths skip kerning and ligatures; the styles the loop
+  // below leaves cold now cost render time only, not measure time.
+  if (!collector->utf8.empty()) {
+    renderer.ensureSdCardFontReady(defFontId_, collector->utf8.c_str(), collector->styleMask);
+  }
+  const unsigned long tAdv = millis();
 
   // Body font, one style at a time, most-used style first, stopping when the heap can no
   // longer afford the next one. Each style costs its own intervals, glyph array, bitmap
@@ -325,8 +494,11 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   // allocate anyway ("Failed to allocate mini bitmap") and everything downstream — the
   // wrap, pagePool_, the anti-aliasing pass — was running on fumes. A style left out here
   // still renders correctly; its glyphs just load on demand through the overflow ring.
-  constexpr size_t kMinFreeForStyle = 16 * 1024;
-  constexpr size_t kMinBlockForStyle = 8 * 1024;
+  //
+  // The two heap tiers are declared above the IPA gate, which budgets against them.
+  // prewarmStyle fails gracefully at every allocation site (freeStyleMiniData + return, e.g.
+  // SdCardFont.cpp:1015), so a floor set too low costs some wasted SD reads and lands back on
+  // the on-demand path.
   uint8_t order[4] = {0, 1, 2, 3};
   for (uint8_t i = 1; i < 4; i++) {  // insertion sort by descending body bytes
     for (uint8_t j = i; j > 0 && collector->styleBytes[order[j - 1]] < collector->styleBytes[order[j]]; j--) {
@@ -339,9 +511,11 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
     for (const uint8_t styleIdx : order) {
       const uint8_t bit = static_cast<uint8_t>(1u << styleIdx);
       if (!(collector->styleMask & bit)) continue;
-      if (ESP.getFreeHeap() < kMinFreeForStyle ||
-          heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < kMinBlockForStyle) {
-        LOG_DBG("DDA", "prewarm: heap floor reached, styles 0x%02X left on demand",
+      const bool isFirst = warmedMask == 0;
+      const size_t minFree = isFirst ? kMinFreeForFirstStyle : kMinFreeForStyle;
+      const size_t minBlock = isFirst ? kMinBlockForFirstStyle : kMinBlockForStyle;
+      if (ESP.getFreeHeap() < minFree || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < minBlock) {
+        LOG_DBG("DDA", "prewarm: %s heap floor reached, styles 0x%02X left on demand", isFirst ? "first" : "next",
                 static_cast<uint8_t>(collector->styleMask & ~warmedMask));
         break;
       }
@@ -350,10 +524,23 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
     }
   }
 
-  LOG_DBG("DDA", "prewarm: body=%u ipa=%u mask=0x%02X warmed=0x%02X scan=%lums ipa=%lums body=%lums free=%u largest=%u",
+  LOG_DBG("DDA",
+          "prewarm: body=%u ipa=%u mask=0x%02X warmed=0x%02X scan=%lums ipa=%lums adv=%lums body=%lums free=%u "
+          "largest=%u",
           collector->uniqueCount, collector->ipaCount, collector->styleMask, warmedMask, tScan - t0, tIpa - tScan,
-          millis() - tIpa, static_cast<unsigned>(ESP.getFreeHeap()),
+          tAdv - tIpa, millis() - tAdv, static_cast<unsigned>(ESP.getFreeHeap()),
           static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+  // warmed=0x00 here is the signature of a slow open: nothing prewarmed means every glyph
+  // is fetched individually downstream. ipaWarm= is the phonetics equivalent, and unlike
+  // warmed= it is a correctness signal rather than a speed one: anything but "ok" means the
+  // IPA segments are being drawn in the body font (see ipaFontId()).
+  SdDebugLog::log("DDA",
+                  "prewarm sd=%d body=%u ipa=%u ipaWarm=%s mask=0x%02X warmed=0x%02X adv=%lums body=%lums free=%u "
+                  "largest=%u",
+                  renderer.isSdCardFont(defFontId_) ? 1 : 0, collector->uniqueCount, collector->ipaCount, ipaOutcome,
+                  collector->styleMask, warmedMask, tAdv - tIpa, millis() - tAdv,
+                  static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
 }
 
 // Re-parse the definition and lay out ONLY `page` into layoutLines. The wrap
@@ -363,10 +550,20 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
 // on every page turn (Stage 2a: re-parse every turn, both directions).
 void DictionaryDefinitionActivity::loadPage(int page) {
   layoutLines.clear();
-  layoutLines.reserve(static_cast<size_t>(linesPerPage) + 1);
   pagePool_.clear();
   collectTargetPage_ = page;
   collectLineCount_ = 0;
+  collectOom_ = false;
+
+  // One reserve for the page's whole line budget, sized exactly. collectLineSink keeps only
+  // indices in [start, start+linesPerPage), so with this capacity in hand its push_back can
+  // never reallocate — which is what makes that push_back abort-free rather than merely
+  // unlikely to abort. If even this fails, the wrap still runs (pagination needs the line
+  // count) but pools nothing.
+  if (!reserveNoThrow(layoutLines, static_cast<size_t>(linesPerPage) + 1)) {
+    LOG_ERR("DDA", "OOM: page line budget (%d lines), page will render empty", linesPerPage);
+    collectOom_ = true;
+  }
 
   const unsigned long t0 = millis();
   auto* fcm = renderer.getFontCacheManager();
@@ -382,7 +579,15 @@ void DictionaryDefinitionActivity::loadPage(int page) {
   totalPages = DictLayout::paginate(collectLineCount_, linesPerPage);
 
   LOG_DBG("DDA", "loadPage %d: wrap=%lums lines=%d pages=%d", page, millis() - t0, collectLineCount_, totalPages);
+  if (collectOom_) {
+    LOG_ERR("DDA", "page %d truncated: %d of %d line(s) pooled", page, static_cast<int>(layoutLines.size()),
+            linesPerPage);
+    SdDebugLog::log("DDA", "page %d TRUNCATED (OOM): pooled=%u/%d free=%u largest=%u", page,
+                    static_cast<unsigned>(layoutLines.size()), linesPerPage, static_cast<unsigned>(ESP.getFreeHeap()),
+                    static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+  }
   if (fcm) fcm->logStats("dict-wrap");
+  logDictPhase(renderer, defFontId_, "wrap", millis() - t0);
 }
 
 void DictionaryDefinitionActivity::collectLineSink(void* ctx, DictLayout::LayoutLine&& line) {
@@ -391,19 +596,41 @@ void DictionaryDefinitionActivity::collectLineSink(void* ctx, DictLayout::Layout
   const int start = self->collectTargetPage_ * self->linesPerPage;
   if (idx < start || idx >= start + self->linesPerPage) return;  // not on this page — discard
 
-  // Pool the kept line's text: each (already same-style-merged) segment becomes
-  // one null-terminated pool entry referenced by {offset, len}.
+  // Every allocation below is on the definition-open path, which the device logs show
+  // running at a few KB of free heap (largest block down to ~2KB). Under -fno-exceptions a
+  // failed std::vector/std::string growth calls abort(), so the plain forms here would turn
+  // a tight heap into a reboot mid-lookup. Each one now reports instead, and a line that
+  // cannot be pooled in full is dropped whole — never pushed half-built, which would render
+  // as a line with missing segments.
+  //
+  // collectLineCount_ was already incremented above, so pagination stays correct no matter
+  // how many lines get dropped here; the page just renders short.
+  if (self->collectOom_) return;  // page budget already blown — stop pooling, keep counting
+
   PooledLine pooled;
   pooled.indentLevel = line.indentLevel;
   pooled.isListItem = line.isListItem;
-  pooled.segments.reserve(line.segments.size());
+  if (!reserveNoThrow(pooled.segments, line.segments.size())) {
+    self->collectOom_ = true;
+    return;
+  }
   for (const auto& seg : line.segments) {
     PooledSegment ps;
-    ps.offset = TextPool::append(self->pagePool_, seg.text.c_str(), seg.text.size());
+    if (!TextPool::appendNoThrow(self->pagePool_, seg.text.c_str(), seg.text.size(), ps.offset)) {
+      self->collectOom_ = true;
+      return;  // pagePool_ keeps whatever earlier segments wrote; this line is not recorded
+    }
     ps.len = static_cast<uint16_t>(seg.text.size());
     ps.style = seg.style;
     ps.isIpa = seg.isIpa;
-    pooled.segments.push_back(ps);
+    pooled.segments.push_back(ps);  // exact-size reserve above: cannot reallocate
+  }
+  // Guard rather than trust: the range check above bounds this to linesPerPage entries and
+  // loadPage() reserved that many, so capacity is there — but an explicit check is what makes
+  // "no reallocation" a property of this code instead of an invariant two functions apart.
+  if (self->layoutLines.size() >= self->layoutLines.capacity()) {
+    self->collectOom_ = true;
+    return;
   }
   self->layoutLines.push_back(std::move(pooled));
 }
@@ -417,7 +644,7 @@ int DictionaryDefinitionActivity::getMixedWidth(std::vector<IpaTextSpan>& ipaRun
   ipaRuns.clear();
   splitIpaRuns(text, ipaRuns);
   return std::accumulate(ipaRuns.begin(), ipaRuns.end(), 0, [&](int sum, const IpaTextSpan& run) {
-    return sum + renderer.getTextWidth(run.isIpa ? IPA_FONT_ID : defFontId_, run.text.c_str(), style);
+    return sum + renderer.getTextWidth(run.isIpa ? ipaFontId() : defFontId_, run.text.c_str(), style);
   });
 }
 
@@ -428,7 +655,7 @@ int DictionaryDefinitionActivity::getMixedWidth(std::vector<IpaTextSpan>& ipaRun
 int DictionaryDefinitionActivity::measureWidthAdapter(void* ctx, const char* text, EpdFontFamily::Style style,
                                                       bool isIpa) {
   auto* self = static_cast<DictionaryDefinitionActivity*>(ctx);
-  const int fontId = isIpa ? IPA_FONT_ID : self->defFontId_;
+  const int fontId = isIpa ? self->ipaFontId() : self->defFontId_;
   if (!isIpa && text[0] == ' ' && text[1] == '\0') return self->renderer.getSpaceWidth(fontId, style);
   return self->renderer.getTextWidth(fontId, text, style);
 }
@@ -481,9 +708,19 @@ void DictionaryDefinitionActivity::wrapPlain() {
     DictLayout::LayoutLine line;
     ipaRuns.clear();
     splitIpaRuns(currentLineText.c_str(), ipaRuns);
-    for (const auto& run : ipaRuns) {
-      line.segments.push_back({run.text, EpdFontFamily::REGULAR, run.isIpa});
+    // Sized exactly, so the push_back below cannot reallocate. Same reasoning as the sink:
+    // an unguarded growth here aborts under -fno-exceptions, and this producer runs one
+    // frame above collectLineSink — guarding only the sink would leave the reboot in place.
+    if (!reserveNoThrow(line.segments, ipaRuns.size())) {
+      collectOom_ = true;
+    } else {
+      for (const auto& run : ipaRuns) {
+        line.segments.push_back({run.text, EpdFontFamily::REGULAR, run.isIpa});
+      }
     }
+    // Emit even when empty: the sink increments collectLineCount_ before it inspects
+    // anything, so pagination stays correct and the page renders a blank line rather than
+    // silently renumbering itself.
     sink(std::move(line));
     currentLineText.clear();
     currentLineWidth = 0;
@@ -569,7 +806,7 @@ void DictionaryDefinitionActivity::extractWordsFromLayout() {
     }
 
     for (const auto& seg : line.segments) {
-      const int segFontId = seg.isIpa ? IPA_FONT_ID : defFontId_;
+      const int segFontId = seg.isIpa ? ipaFontId() : defFontId_;
       const int spaceWidth = renderer.getSpaceWidth(segFontId, seg.style);
       const char* p = pagePool_.data() + seg.offset;
       while (*p) {
@@ -654,7 +891,11 @@ void DictionaryDefinitionActivity::loop() {
           if (currentPage > 0) loadPage(currentPage);
         }
         isWordSelectMode = false;
-        requestUpdate();
+        // immediate=true for the same reason as onEnter(): the history write below would
+        // otherwise run in front of the render rather than beside it. Same safety argument —
+        // every field render() reads is settled by wrapText()/loadPage() above, and the switch
+        // returns straight after this case with nothing else touched.
+        requestUpdate(true);
         // Chain-forward records; chain-back-nav does not.
         LookupHistory::addWordIf(cachePath, controller.getLookupWord(),
                                  DictionaryLookupController::toHistStatus(controller.getFoundStatus()), willLog);
@@ -812,9 +1053,11 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   const int indentStep = renderer.getTextWidth(defFontId_, "   ");
 
   // Header
+  // Width spans between the two insets rather than the full screen, so the header band carries
+  // the same margin as the body. In portrait both insets are equal, which keeps the band
+  // symmetric about the screen-centred clock BaseTheme::drawTopBarClockDate draws into it.
   GUI.drawHeader(renderer,
-                 Rect{contentX, hintGutterHeight + metrics.topPadding, renderer.getScreenWidth() - hintGutterWidth,
-                      metrics.headerHeight},
+                 Rect{contentX, contentTop, renderer.getScreenWidth() - contentX - rightPadding, metrics.headerHeight},
                  headword.c_str());
 
   // Body: draw layout lines for the current page (BW pass). layoutLines holds
@@ -832,7 +1075,7 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
       }
 
       for (const auto& seg : line.segments) {
-        const int segFontId = seg.isIpa ? IPA_FONT_ID : defFontId_;
+        const int segFontId = seg.isIpa ? ipaFontId() : defFontId_;
         const char* segText = pagePool_.data() + seg.offset;
         renderer.drawText(segFontId, x, y, segText, true, seg.style);
         if ((seg.style & EpdFontFamily::UNDERLINE) != 0) {
@@ -908,4 +1151,5 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   LOG_DBG("DDA", "render: body=%lums display=%lums aa=%lums total=%lums", tBody - t0, tDisplay - tBody,
           millis() - tDisplay, millis() - t0);
   if (auto* fcm = renderer.getFontCacheManager()) fcm->logStats("dict-render");
+  logDictPhase(renderer, defFontId_, "render", millis() - t0);
 }

@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "../Activity.h"
+#include "fontIds.h"  // IPA_FONT_ID, used by ipaFontId() below
 #include "util/DictLayout.h"
 #include "util/DictionaryLookupController.h"
 #include "util/IpaUtils.h"
@@ -92,6 +93,11 @@ class DictionaryDefinitionActivity final : public Activity {
   // collectTargetPage_'s lines into layoutLines, counting all lines produced.
   int collectTargetPage_ = 0;
   int collectLineCount_ = 0;
+  // Set when a line could not be pooled for lack of heap. The wrap always runs to completion
+  // regardless (collectLineCount_ still counts every line produced, so pagination stays
+  // correct); this only records that the resident page is short some lines, so the render is
+  // a truncated page instead of a reboot. Reset per loadPage().
+  bool collectOom_ = false;
 
   // Resolved once per definition in wrapText(). SETTINGS.getDefinitionFontId() walks the
   // SD-font resolver trampoline + registry name lookup (SdCardFontSystem.cpp:47) on every
@@ -101,12 +107,28 @@ class DictionaryDefinitionActivity final : public Activity {
   // loadPage() runs on every page turn, so it is resolved once alongside defFontId_.
   bool defIsHtml_ = false;
 
+  // True only when prewarmDefinitionFont() confirmed the IPA font's glyphs are resident.
+  // The IPA font is a built-in compressed font whose non-prewarmed draw path inflates a whole
+  // ~11KB group per glyph (FontDecompressor.cpp:182); on a fragmented heap that allocation
+  // fails and the glyph is silently DROPPED, which is what device logs showed as blank
+  // phonetics. When this is false the IPA segments are drawn in the body font instead —
+  // an SD font, whose per-glyph loads are small and can never make that request.
+  // Decided before loadPage() so measurement and drawing agree; read only via ipaFontId().
+  // Defaults true for the built-in-body-font case, which returns from prewarmDefinitionFont()
+  // before the gate ever runs: those fonts have a different heap profile and used the IPA font
+  // unconditionally before this existed. The SD path resets it to false and re-earns it.
+  bool ipaWarm_ = true;
+  // Font the IPA segments are measured AND drawn with. Both must use this: picking the font
+  // differently in the two passes lays out widths for glyphs that are never drawn.
+  int ipaFontId() const { return ipaWarm_ ? IPA_FONT_ID : defFontId_; }
+
   // Orientation-aware layout gutters (computed in wrapText, used in render and extractWordsFromLayout)
   int leftPadding = 20;
   int rightPadding = 20;
   int hintGutterHeight = 0;
   int contentX = 0;
   int hintGutterWidth = 0;
+  int contentTop = 0;  // top of the header band, i.e. below the hint gutter + bezel + margin
   int bodyStartY = 0;  // top of the text body (set in wrapText)
 
   // Word-select mode (activated by pressing Look Up Word in view mode)
