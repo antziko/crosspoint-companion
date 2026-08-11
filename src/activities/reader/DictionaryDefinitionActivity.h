@@ -145,6 +145,12 @@ class DictionaryDefinitionActivity final : public Activity {
   RenderMode nextRenderMode_ = RenderMode::FullPage;
   int prevHighlightIdx_ = -1;
 
+  // Total of the last completed view-mode render, for the on-screen diagnostic readout and
+  // nothing else. Set at the end of render() after the panel refresh and the AA pass, so it is
+  // the whole cost of a page appearing — which is exactly why it can only ever be displayed on
+  // the render that follows. 0 until the first one completes.
+  unsigned long lastRenderMs_ = 0;
+
   bool skipLoopDelay() override { return controller.skipLoopDelay(); }
 
   void wrapText();

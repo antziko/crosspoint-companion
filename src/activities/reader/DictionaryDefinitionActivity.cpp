@@ -157,7 +157,13 @@ constexpr uint8_t spanStyleBit(const bool bold, const bool italic) {
 // oom= counts glyph bitmaps that failed to allocate on the on-demand path; each one is a
 // character drawText skipped, so a non-zero value here IS the "some fonts not rendering"
 // report, rather than something to infer from a low largest= on the same line.
-void logDictPhase(GfxRenderer& renderer, const int fontId, const char* phase, const unsigned long ms) {
+// displayMs/aaMs split the total for the "render" phase only; "wrap" leaves them 0. They exist
+// because the X3 is USB-locked and the SD log is its only channel: the same numbers were already
+// measured in render() but went to a serial-only LOG_DBG, so a 3461ms render could not be
+// attributed. panel-bound (displayMs dominates) and compute-bound (neither does) call for
+// completely different fixes, and the totals alone cannot tell them apart.
+void logDictPhase(GfxRenderer& renderer, const int fontId, const char* phase, const unsigned long ms,
+                  const unsigned long displayMs = 0, const unsigned long aaMs = 0) {
   uint32_t misses = 0, missMs = 0, bmpOom = 0, fdcSkips = 0, fdcMs = 0;
   const bool isSd = renderer.isSdCardFont(fontId);
   if (isSd) {
@@ -175,9 +181,11 @@ void logDictPhase(GfxRenderer& renderer, const int fontId, const char* phase, co
       fdcMs = fd->getStats().decompressTimeMs;
     }
   }
-  SdDebugLog::log("DDA", "%s=%lums sd=%d miss=%u missMs=%u oom=%u fdcOom=%u fdcMs=%u free=%u largest=%u", phase, ms,
-                  isSd ? 1 : 0, misses, missMs, bmpOom, fdcSkips, fdcMs, static_cast<unsigned>(ESP.getFreeHeap()),
-                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+  SdDebugLog::log(
+      "DDA", "%s=%lums display=%lums aa=%lums sd=%d miss=%u missMs=%u oom=%u fdcOom=%u fdcMs=%u free=%u largest=%u",
+      phase, ms, displayMs, aaMs, isSd ? 1 : 0, misses, missMs, bmpOom, fdcSkips, fdcMs,
+      static_cast<unsigned>(ESP.getFreeHeap()),
+      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
 }
 
 }  // namespace
@@ -1146,6 +1154,25 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
                       renderer.getScreenHeight() - metrics.buttonHintsHeight - metrics.verticalSpacing, pageInfo);
   }
 
+#if LOG_LEVEL >= 2
+  // Diagnostic readout: how long the PREVIOUS render of this activity took, bottom-left, at the
+  // same baseline as the page indicator on the right so the two cannot collide.
+  //
+  // Previous, not current, and it cannot be otherwise: the dominant term is the panel refresh
+  // (displayBuffer below), so a figure drawn now would have to exclude the very thing being
+  // measured. Repainting afterwards to show the real total would cost another full-panel
+  // refresh — ~637ms, more than most page turns. So the first page of a definition shows
+  // nothing and one page turn reveals what the open actually cost.
+  //
+  // No tr(): a bare "3.5s" carries no language. Dev builds only — release is LOG_LEVEL=1.
+  if (lastRenderMs_ > 0) {
+    char timing[16];
+    snprintf(timing, sizeof(timing), "%lu.%lus", lastRenderMs_ / 1000, (lastRenderMs_ % 1000) / 100);
+    renderer.drawText(SMALL_FONT_ID, leftPadding,
+                      renderer.getScreenHeight() - metrics.buttonHintsHeight - metrics.verticalSpacing, timing);
+  }
+#endif
+
   const char* btn2 = showLookupButton ? tr(STR_LOOKUP_SHORT) : "";
   const char* btn3 = totalPages > 1 ? tr(STR_DIR_UP) : "";
   const char* btn4 = totalPages > 1 ? tr(STR_DIR_DOWN) : "";
@@ -1163,5 +1190,6 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   LOG_DBG("DDA", "render: body=%lums display=%lums aa=%lums total=%lums", tBody - t0, tDisplay - tBody,
           millis() - tDisplay, millis() - t0);
   if (auto* fcm = renderer.getFontCacheManager()) fcm->logStats("dict-render");
-  logDictPhase(renderer, defFontId_, "render", millis() - t0);
+  lastRenderMs_ = millis() - t0;
+  logDictPhase(renderer, defFontId_, "render", lastRenderMs_, tDisplay - tBody, millis() - tDisplay);
 }
