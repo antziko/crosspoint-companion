@@ -3,6 +3,7 @@
 #include <GfxRenderer.h>
 #include <HalDisplay.h>
 #include <I18n.h>
+#include <Logging.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -33,7 +34,12 @@ void DictionaryLookupController::startLookup(const std::string& word, bool recor
   recordHistory_ = recordHistory;
   state = LookupState::LookingUp;
   // CLEANUP: on Auto-only commit, delete only this line (gate below stays — it's the Auto check)
-  if (shouldShowPopup()) {
+  const bool showPopup = shouldShowPopup();
+  // Why the "Looking up" toast did or didn't appear: it is Auto-gated on the .cspt index
+  // size (see shouldShowPopup), so a normally-indexed dictionary suppresses it on purpose.
+  LOG_DBG("DICT", "startLookup: cspt entries=%u popup=%d free=%u", csptEntryCountCached, showPopup ? 1 : 0,
+          static_cast<unsigned>(ESP.getFreeHeap()));
+  if (showPopup) {
     // Toast overlay: draw popup directly over whatever the user is currently viewing.
     // RenderLock serializes against the render task — without it, a prior requestUpdate()
     // (e.g. from navigation) may still be mid-refresh, and concurrent framebuffer / SPI
