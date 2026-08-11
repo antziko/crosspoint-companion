@@ -104,6 +104,12 @@ class SdCardFont {
     uint32_t seekCount = 0;
     uint32_t uniqueGlyphs = 0;
     uint32_t bitmapBytes = 0;
+    // On-demand glyph loads that fell through the overflow ring into SD I/O
+    // (open + seek + read per glyph, see onGlyphMiss). Non-zero on a text-heavy
+    // screen means that screen is missing its prewarm — the single most useful
+    // signal for diagnosing SD-font render/layout slowness.
+    uint32_t overflowMisses = 0;
+    uint32_t overflowMissMs = 0;
   };
   void logStats(const char* label = "SDCF");
   void resetStats();

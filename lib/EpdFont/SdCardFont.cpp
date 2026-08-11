@@ -1397,8 +1397,9 @@ int SdCardFont::buildAdvanceTable(const std::deque<std::string>& words, bool inc
 // --- Stats ---
 
 void SdCardFont::logStats(const char* label) {
-  LOG_DBG("SDCF", "[%s] total=%ums sd_read=%ums seeks=%u glyphs=%u bitmap=%u bytes", label, stats_.prewarmTotalMs,
-          stats_.sdReadTimeMs, stats_.seekCount, stats_.uniqueGlyphs, stats_.bitmapBytes);
+  LOG_DBG("SDCF", "[%s] total=%ums sd_read=%ums seeks=%u glyphs=%u bitmap=%u bytes miss=%u (%ums)", label,
+          stats_.prewarmTotalMs, stats_.sdReadTimeMs, stats_.seekCount, stats_.uniqueGlyphs, stats_.bitmapBytes,
+          stats_.overflowMisses, stats_.overflowMissMs);
 }
 
 void SdCardFont::resetStats() { stats_ = Stats{}; }
@@ -1476,6 +1477,18 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
   // Look up global glyph index via full intervals
   int32_t globalIdx = self->findGlobalGlyphIndex(s, codepoint);
   if (globalIdx < 0) return nullptr;
+
+  // From here on this glyph costs SD I/O (open + seek + read). Timed via RAII so
+  // the error returns below still record the time they spent. Counted per glyph,
+  // not per call: ring hits returned above are free.
+  struct MissTimer {
+    Stats& stats;
+    unsigned long start;
+    ~MissTimer() {
+      stats.overflowMisses++;
+      stats.overflowMissMs += static_cast<uint32_t>(millis() - start);
+    }
+  } missTimer{self->stats_, millis()};
 
   // Pick overflow slot (ring buffer). Read into temporaries first so the
   // existing slot stays valid if SD I/O fails. Bookkeeping (count/next)
