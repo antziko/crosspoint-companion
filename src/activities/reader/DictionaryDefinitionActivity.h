@@ -145,11 +145,14 @@ class DictionaryDefinitionActivity final : public Activity {
   RenderMode nextRenderMode_ = RenderMode::FullPage;
   int prevHighlightIdx_ = -1;
 
-  // Total of the last completed view-mode render, for the on-screen diagnostic readout and
-  // nothing else. Set at the end of render() after the panel refresh and the AA pass, so it is
-  // the whole cost of a page appearing — which is exactly why it can only ever be displayed on
-  // the render that follows. 0 until the first one completes.
-  unsigned long lastRenderMs_ = 0;
+  // What opening THIS definition cost, for the on-screen diagnostic readout and nothing else.
+  // openStartMs_ is stamped at the two points a new definition begins — onEnter() and the
+  // chained-lookup re-wrap — and deliberately not on a page turn, so the figure stays pinned to
+  // the open instead of being overwritten by the ~0.5 s a turn takes. openMs_ is set once, at
+  // the end of the first render that completes after each stamp, and covers the panel refresh
+  // and the AA pass; that is also why it can only be shown from the following render onwards.
+  unsigned long openStartMs_ = 0;
+  unsigned long openMs_ = 0;
 
   bool skipLoopDelay() override { return controller.skipLoopDelay(); }
 

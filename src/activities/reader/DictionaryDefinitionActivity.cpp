@@ -192,6 +192,10 @@ void logDictPhase(GfxRenderer& renderer, const int fontId, const char* phase, co
 
 void DictionaryDefinitionActivity::onEnter() {
   Activity::onEnter();
+  // Start of an open. Stamped before the font work below, which is part of what the user waits
+  // through. See openStartMs_ / openMs_.
+  openStartMs_ = millis();
+  openMs_ = 0;
   // Heap reclaim: this activity is PUSHED on top of a still-resident reader
   // (ActivityManager keeps the backgrounded activity alive — no onExit). On the
   // tight X3 heap that leaves little headroom for the dictionary's own layout +
@@ -950,6 +954,10 @@ void DictionaryDefinitionActivity::loop() {
         chainBackNavInProgress = false;
         headword = controller.getFoundWord();
         foundLocation = controller.getFoundLocation();
+        // A chained lookup is a new definition, so it re-measures. The other stamp site is
+        // onEnter(); a page turn is deliberately neither. See openStartMs_ / openMs_.
+        openStartMs_ = millis();
+        openMs_ = 0;
         wrapText();  // resets currentPage to 0 and loads page 0
         if (wasBackNav) {
           // Re-derive the now-current word's history position and restore its page.
@@ -1124,9 +1132,25 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   // Width spans between the two insets rather than the full screen, so the header band carries
   // the same margin as the body. In portrait both insets are equal, which keeps the band
   // symmetric about the screen-centred clock BaseTheme::drawTopBarClockDate draws into it.
+  const char* headerText = headword.c_str();
+#if LOG_LEVEL >= 2
+  // Diagnostic: prefix the searched word with what opening this definition cost. Pinned to the
+  // open (see openStartMs_), so paging up/down does not overwrite it with a page turn's ~0.5 s.
+  // Blank on the first page and unavoidably so — the panel refresh below IS the dominant term
+  // (device: display=3196ms of a 3439ms total), so any figure drawn before it would exclude
+  // what is being measured, and repainting after it costs another full-panel refresh.
+  //
+  // Stack buffer, not std::string: this is a render path. No tr() — a bare "3.5s" carries no
+  // language. Dev builds only; release is LOG_LEVEL=1 and drops the whole thing.
+  char headerBuf[96];
+  if (openMs_ > 0) {
+    snprintf(headerBuf, sizeof(headerBuf), "%lu.%lus %s", openMs_ / 1000, (openMs_ % 1000) / 100, headword.c_str());
+    headerText = headerBuf;
+  }
+#endif
   GUI.drawHeader(renderer,
                  Rect{contentX, contentTop, renderer.getScreenWidth() - contentX - rightPadding, metrics.headerHeight},
-                 headword.c_str());
+                 headerText);
 
   // Body: draw layout lines for the current page (BW pass). layoutLines holds
   // only the current page (Stage 2a streaming), so it is indexed from 0.
@@ -1202,25 +1226,6 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
                       renderer.getScreenHeight() - metrics.buttonHintsHeight - metrics.verticalSpacing, pageInfo);
   }
 
-#if LOG_LEVEL >= 2
-  // Diagnostic readout: how long the PREVIOUS render of this activity took, bottom-left, at the
-  // same baseline as the page indicator on the right so the two cannot collide.
-  //
-  // Previous, not current, and it cannot be otherwise: the dominant term is the panel refresh
-  // (displayBuffer below), so a figure drawn now would have to exclude the very thing being
-  // measured. Repainting afterwards to show the real total would cost another full-panel
-  // refresh — ~637ms, more than most page turns. So the first page of a definition shows
-  // nothing and one page turn reveals what the open actually cost.
-  //
-  // No tr(): a bare "3.5s" carries no language. Dev builds only — release is LOG_LEVEL=1.
-  if (lastRenderMs_ > 0) {
-    char timing[16];
-    snprintf(timing, sizeof(timing), "%lu.%lus", lastRenderMs_ / 1000, (lastRenderMs_ % 1000) / 100);
-    renderer.drawText(SMALL_FONT_ID, leftPadding,
-                      renderer.getScreenHeight() - metrics.buttonHintsHeight - metrics.verticalSpacing, timing);
-  }
-#endif
-
   const char* btn2 = showLookupButton ? tr(STR_LOOKUP_SHORT) : "";
   const char* btn3 = totalPages > 1 ? tr(STR_DIR_UP) : "";
   const char* btn4 = totalPages > 1 ? tr(STR_DIR_DOWN) : "";
@@ -1238,6 +1243,8 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   LOG_DBG("DDA", "render: body=%lums display=%lums aa=%lums total=%lums", tBody - t0, tDisplay - tBody,
           millis() - tDisplay, millis() - t0);
   if (auto* fcm = renderer.getFontCacheManager()) fcm->logStats("dict-render");
-  lastRenderMs_ = millis() - t0;
-  logDictPhase(renderer, defFontId_, "render", lastRenderMs_, tDisplay - tBody, millis() - tDisplay);
+  // First completed render since the definition opened: everything the user waited through,
+  // panel refresh and AA pass included. Page turns leave it alone — that is the point.
+  if (openMs_ == 0) openMs_ = millis() - openStartMs_;
+  logDictPhase(renderer, defFontId_, "render", millis() - t0, tDisplay - tBody, millis() - tDisplay);
 }
