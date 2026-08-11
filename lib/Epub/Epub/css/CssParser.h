@@ -83,6 +83,10 @@ class CssParser {
   void clear() {
     rulesBySelector_.clear();
     stylePool_.clear();
+    // Reset the bail latch with the store it guards. Without this a low-heap bail on one section
+    // permanently silenced processRuleBlockWithStyle(), so every later inline <style> block was
+    // discarded too -- loadFromCache() calls clear() at entry, so the latch outlived its cause.
+    cssHeapBail_ = false;
   }
 
   /**

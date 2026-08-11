@@ -63,28 +63,31 @@ constexpr size_t CSS_GROWTH_HEAP_MARGIN = 6 * 1024;
 // silently dropped ALL local CSS whenever a build grazed just under it.
 constexpr size_t MIN_FREE_HEAP_FOR_CSS = 16 * 1024;
 
-// Free-heap floor kept in reserve while loadFromCache() populates the rule store. A CSS-heavy book's
-// stylesheet is 200+ large CssStyle entries (~60KB), and loadFromCache() runs INSIDE a section build
+// Heap the rule store may consume while loadFromCache() populates it. A CSS-heavy book's stylesheet
+// is 200+ large CssStyle entries (~60KB), and loadFromCache() runs INSIDE a section build
 // (Section::startBuild -> getCssParser()->loadFromCache()), AFTER the build's pre-parse floor gate.
 // Without a cap the full stylesheet loads, consumes the heap the layout needs, and the section builds
-// 0 pages -- the reader then shows "Out of bounds" (no page to display). Layout itself is cheap (pages
-// stream to SD as they complete), so reserving this much free heap lets the build finish; rules past
-// the cap are dropped (partial CSS -- still readable). Mirrors the section parser's PARSE_FLOOR_MAX so
-// the two agree on how much heap a build needs. Applied only on the cache path, which runs during
-// builds -- NOT the stream path, which can run standalone during initial metadata caching and must be
-// free to store the full stylesheet into the cache.
-constexpr size_t CSS_CACHE_LAYOUT_RESERVE = 28 * 1024;
+// 0 pages -- the reader then shows "Out of bounds" (no page to display).
+//
+// This is measured as ACTUAL consumption (free heap at entry minus free heap now), not as an absolute
+// floor the heap must stay above. The absolute-floor version of this gate was the bug: it reserved a
+// fixed 24KB largest contiguous block, which a fragmented X3 heap never has, so the check tripped
+// before rule 0 and every book silently rendered with ZERO stylesheet rules ("cache-load reserve
+// bail: rules=0/52 free=62388 largest=17396" -- free was never the problem). Those same builds then
+// completed fine with 156/33/39 pages, so the reserve bought nothing and cost the whole stylesheet.
+// Budgeting consumption bounds the harm CSS can do to the layout that follows -- which is all the
+// reserve was ever trying to do -- while being immune to whatever fragmentation already existed.
+// 12KB: a normal 52-rule stylesheet costs ~7KB (~130B/rule, see processRuleBlockWithStyle), so it
+// loads complete; the pathological 200+-rule case still gets capped. Rules past the budget are
+// dropped (partial CSS -- still readable). Applied only on the cache path, which runs during builds
+// -- NOT the stream path, which can run standalone during initial metadata caching and must be free
+// to store the full stylesheet into the cache.
+constexpr size_t CSS_CACHE_BYTE_BUDGET = 12 * 1024;
 
-// Largest *contiguous* block to keep free while loadFromCache() populates the rule store.
-// This — not the free-heap floor above — is the binding gate on a fragmented heap: the deque's
-// scattered ~0.5KB nodes collapse the largest block long before total free looks low, so a
-// CSS-heavy book loads its whole stylesheet with free still ~28KB while `largest` has already
-// fallen to ~8KB, leaving no contiguous block for the layout that follows (word vectors up to
-// ~14KB, JPEG decode ~18KB). Device logs showed exactly this: free bottomed at 28.7KB (just
-// above CSS_CACHE_LAYOUT_RESERVE, so that gate never tripped) while largest collapsed to 8180
-// and the build made 0-1 pages. Bailing while a >=24KB block remains preserves room for a full
-// text block's word vectors; rules past the cap are dropped (partial CSS -- still readable).
-constexpr size_t CSS_CACHE_LARGEST_RESERVE = 24 * 1024;
+// Rules always loaded before the budget above is allowed to stop the load. Guarantees that a small
+// stylesheet is never truncated to nothing by a transient heap dip mid-load; the hard largest-block
+// floor (CSS_GROWTH_HEAP_MARGIN) still applies from rule 0, so this cannot drive an OOM abort.
+constexpr size_t CSS_MIN_RULES = 16;
 
 // Maximum length for a single selector string
 // Prevents parsing of extremely long or malformed selectors
@@ -919,21 +922,30 @@ bool CssParser::loadFromCache() {
   constexpr size_t CSS_FIXED_STYLE_BYTES =
       5 * sizeof(uint8_t) + (CSS_LENGTH_FIELD_COUNT * CSS_LENGTH_BYTES) + sizeof(uint8_t) + sizeof(uint32_t);
 
+  // Free heap when the load started; the budget below is measured against it (see
+  // CSS_CACHE_BYTE_BUDGET). Sampled after clear() so the outgoing stylesheet's memory is already
+  // back in the pool and does not count as this load's consumption.
+  const uint32_t freeAtStart = ESP.getFreeHeap();
+
   // Read each rule
   for (uint16_t i = 0; i < ruleCount; ++i) {
-    // Reserve heap for the section layout that runs with these rules resident. loadFromCache() is
-    // called mid-build, so loading the whole (large) stylesheet here would starve the build and it
-    // would produce 0-1 pages ("Out of bounds" / early BUILD-OOM). Stop once free heap nears the
-    // reserve OR the largest contiguous block falls below the layout reserve -- on a fragmented heap
-    // the largest-block gate is the one that actually fires (see CSS_CACHE_LARGEST_RESERVE). Keep the
-    // rules loaded so far -- partial CSS renders fine.
-    if (ESP.getFreeHeap() < CSS_CACHE_LAYOUT_RESERVE ||
-        heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < CSS_CACHE_LARGEST_RESERVE) {
-      SdDebugLog::log("CSS", "cache-load reserve bail: rules=%u/%u free=%u largest=%u",
-                      (unsigned)rulesBySelector_.size(), (unsigned)ruleCount, (unsigned)ESP.getFreeHeap(),
-                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-      LOG_ERR("CSS", "Low heap during cache load, stopping at %u/%u rules to reserve layout heap",
-              (unsigned)rulesBySelector_.size(), (unsigned)ruleCount);
+    // Two independent stop conditions. Bail keeps the rules loaded so far -- partial CSS renders
+    // fine, and unlike the old absolute-reserve gate this can no longer stop at zero rules.
+    const uint32_t freeNow = ESP.getFreeHeap();
+    const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    const uint32_t consumed = (freeAtStart > freeNow) ? (freeAtStart - freeNow) : 0;
+
+    // 1. Hard safety floor, from rule 0. Purely to stop before a deque node's bare `new` aborts
+    //    under -fno-exceptions -- not a layout reserve. Same floor the stream path uses.
+    // 2. Consumption budget, once the minimum tranche is in.
+    const bool hardFloor = largest < CSS_GROWTH_HEAP_MARGIN;
+    const bool overBudget = i >= CSS_MIN_RULES && consumed >= CSS_CACHE_BYTE_BUDGET;
+    if (hardFloor || overBudget) {
+      SdDebugLog::log("CSS", "cache-load bail (%s): rules=%u/%u consumed=%u/%u free=%u largest=%u",
+                      hardFloor ? "floor" : "budget", (unsigned)rulesBySelector_.size(), (unsigned)ruleCount,
+                      (unsigned)consumed, (unsigned)CSS_CACHE_BYTE_BUDGET, (unsigned)freeNow, (unsigned)largest);
+      LOG_ERR("CSS", "Stopping cache load at %u/%u rules (%s, consumed %u B)", (unsigned)rulesBySelector_.size(),
+              (unsigned)ruleCount, hardFloor ? "heap floor" : "budget", (unsigned)consumed);
       cssHeapBail_ = true;
       break;
     }

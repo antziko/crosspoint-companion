@@ -60,7 +60,14 @@ namespace {
 // v44: Persist a uint32_t visible-text start offset for every page, so a reading
 //      position can be expressed as a content offset rather than a page number
 //      (#2805). Adds a fifth header offset slot and a per-page LUT.
-constexpr uint8_t SECTION_FILE_VERSION = 44;
+// v45: no structural change -- forces stale caches to rebuild so the reworked CSS
+//      cache-load gate takes effect (same situation as v40). The old gate reserved a
+//      fixed 24KB largest contiguous block, which a fragmented X3 heap never has, so
+//      loadFromCache() bailed before rule 0 and chapters were laid out with ZERO
+//      stylesheet rules ("cache-load reserve bail: rules=0/52"). That unstyled layout
+//      -- no italics, sizes, alignment or indents -- is baked into the .bin, so fixing
+//      the gate alone changes nothing on screen until those files regenerate.
+constexpr uint8_t SECTION_FILE_VERSION = 45;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
