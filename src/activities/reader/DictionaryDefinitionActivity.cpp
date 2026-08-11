@@ -1134,17 +1134,31 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   // symmetric about the screen-centred clock BaseTheme::drawTopBarClockDate draws into it.
   const char* headerText = headword.c_str();
 #if LOG_LEVEL >= 2
-  // Diagnostic: prefix the searched word with what opening this definition cost. Pinned to the
+  // Diagnostic: annotate the searched word with what opening this definition cost. Pinned to the
   // open (see openStartMs_), so paging up/down does not overwrite it with a page turn's ~0.5 s.
-  // Blank on the first page and unavoidably so — the panel refresh below IS the dominant term
-  // (device: display=3196ms of a 3439ms total), so any figure drawn before it would exclude
-  // what is being measured, and repainting after it costs another full-panel refresh.
   //
-  // Stack buffer, not std::string: this is a render path. No tr() — a bare "3.5s" carries no
-  // language. Dev builds only; release is LOG_LEVEL=1 and drops the whole thing.
+  // The figure the user waits through cannot be known here: everything below this line — the body
+  // draw, the panel refresh, the AA pass — is still ahead, and the panel refresh alone is the
+  // dominant term (device: display=3196ms of a 3439ms total). Redrawing the header after the fact
+  // would cost a second full-panel refresh. So the FIRST render of a definition shows an estimate,
+  // marked `~`: elapsed-so-far plus what the same tail cost on the previous definition's first
+  // frame. That tail is panel time, i.e. a property of the display rather than of the entry, so it
+  // carries across definitions well; one static unsigned long in dev builds pays for it. From the
+  // second render onwards the exact measured openMs_ replaces the estimate.
+  //
+  // Raw milliseconds, not seconds: the whole point is comparing one open against the next, and
+  // at ~3-4 s per open a "%.1f s" rendering quantises every run to the same 4.0s.
+  //
+  // Stack buffer, not std::string: this is a render path. No tr() — a bare "(3512 ms)" carries
+  // no language. Dev builds only; release is LOG_LEVEL=1 and drops the whole thing.
+  static unsigned long sPostHeaderMs = 0;
+  const unsigned long tHeader = millis();
   char headerBuf[96];
   if (openMs_ > 0) {
-    snprintf(headerBuf, sizeof(headerBuf), "%lu.%lus %s", openMs_ / 1000, (openMs_ % 1000) / 100, headword.c_str());
+    snprintf(headerBuf, sizeof(headerBuf), "%s (%lu ms)", headword.c_str(), openMs_);
+    headerText = headerBuf;
+  } else if (sPostHeaderMs > 0) {
+    snprintf(headerBuf, sizeof(headerBuf), "%s (~%lu ms)", headword.c_str(), (tHeader - openStartMs_) + sPostHeaderMs);
     headerText = headerBuf;
   }
 #endif
@@ -1245,6 +1259,13 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   if (auto* fcm = renderer.getFontCacheManager()) fcm->logStats("dict-render");
   // First completed render since the definition opened: everything the user waited through,
   // panel refresh and AA pass included. Page turns leave it alone — that is the point.
-  if (openMs_ == 0) openMs_ = millis() - openStartMs_;
+  if (openMs_ == 0) {
+    openMs_ = millis() - openStartMs_;
+#if LOG_LEVEL >= 2
+    // Sample the post-header tail from a FIRST frame only, so the estimate drawn on the next
+    // definition's first frame predicts like for like (a page turn's tail carries no glyph misses).
+    sPostHeaderMs = millis() - tHeader;
+#endif
+  }
   logDictPhase(renderer, defFontId_, "render", millis() - t0, tDisplay - tBody, millis() - tDisplay);
 }
