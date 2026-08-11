@@ -606,6 +606,14 @@ void DictionaryDefinitionActivity::loadPage(int page) {
                     static_cast<unsigned>(layoutLines.size()), linesPerPage, static_cast<unsigned>(ESP.getFreeHeap()),
                     static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
   }
+  // The parser is live only for the wrap above — nothing between page turns touches it — so
+  // holding it past this point is dead weight for as long as the definition is on screen.
+  // ~7 KB on the markup path, which is what turned entering word-select into an abort():
+  // extractWordsFromLayout()'s vector doubling asks for 4096 contiguous bytes and the largest
+  // free block had fallen to 3444. Recreating on the next page turn costs ~1,952 B, noise
+  // against the ~3.2 s that turn already spends in the panel refresh.
+  htmlRenderer_.releaseParser();
+
   if (fcm) fcm->logStats("dict-wrap");
   logDictPhase(renderer, defFontId_, "wrap", millis() - t0);
 }
@@ -806,10 +814,50 @@ void DictionaryDefinitionActivity::wrapPlain() {
 
 void DictionaryDefinitionActivity::extractWordsFromLayout() {
   const unsigned long t0 = millis();
+
+  // Pre-flight gate. Everything below allocates through std::vector / std::string, i.e. through
+  // the THROWING operator new (HalSystem.cpp:100), which abort()s on failure under
+  // -fno-exceptions — there is no nullptr to check and no way to unwind. A device crash landed
+  // exactly here: the words vector doubled 64 -> 128 (32 B/entry = 4096 B) against
+  // free=7012 largest=3444.
+  //
+  // A larger reserve is NOT the fix and would make it worse: a whole page is roughly
+  // linesPerPage x ~14 words x 32 B, so reserving the worst case is a single ~8 KB block —
+  // bigger than the allocation that already failed. Declining is the only safe answer.
+  //
+  // First estimates, same standing as kMinFreeForStyle above: sized to clear one 4096 B
+  // doubling plus the text pool with margin. Tune from the logged values.
+  constexpr size_t kMinFreeForWordSelect = 12 * 1024;
+  constexpr size_t kMinBlockForWordSelect = 6 * 1024;
+  const size_t freeHeap = ESP.getFreeHeap();
+  const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (freeHeap < kMinFreeForWordSelect || largestBlock < kMinBlockForWordSelect) {
+    LOG_ERR("DDA", "word-select declined: free=%u largest=%u (need %u/%u)", static_cast<unsigned>(freeHeap),
+            static_cast<unsigned>(largestBlock), static_cast<unsigned>(kMinFreeForWordSelect),
+            static_cast<unsigned>(kMinBlockForWordSelect));
+    SdDebugLog::log("DDA", "word-select declined: free=%u largest=%u", static_cast<unsigned>(freeHeap),
+                    static_cast<unsigned>(largestBlock));
+    // Tell the user, rather than making Confirm look dead. Same shape as the other toast sites
+    // (EpubReaderActivity's mark-limit): drawPopup refreshes internally, hold it long enough to
+    // read, then repaint the definition. The clean refresh stops the popup box ghosting under
+    // the restored page. navigator stays empty, so loop() simply does not enter word-select.
+    GUI.drawPopup(renderer, tr(STR_MEMORY_ERROR));
+    delay(900);
+    renderer.forceCleanRefreshNextPaint();
+    requestUpdate();
+    return;
+  }
+
   const int indentStep = renderer.getTextWidth(defFontId_, "   ");
 
   std::vector<WordSelectNavigator::WordInfo> words;
-  words.reserve(64);
+  // Sized from the real page shape rather than a flat 64, because reaching 128 entries by
+  // DOUBLING is the worst way to get there: it holds the old 2048 B buffer and the new 4096 B
+  // one at the same time, needing 6 KB across two blocks. Reserving 128 up front is the same
+  // end state through a single 4096 B allocation — and the gate above has already established
+  // there is a 6 KB block to serve it. The cap keeps that first allocation at 4 KB; a page
+  // needing more still grows, just from a base that covers the common case.
+  words.reserve(std::min<size_t>(static_cast<size_t>(linesPerPage) * 12, 128));
   std::vector<WordSelectNavigator::Row> rows;
   rows.reserve(16);
   std::string textPool;

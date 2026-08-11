@@ -125,7 +125,9 @@ DictHtmlRenderer::DictHtmlRenderer() {
   tagStack.reserve(8);
 }
 
-DictHtmlRenderer::~DictHtmlRenderer() {
+DictHtmlRenderer::~DictHtmlRenderer() { releaseParser(); }
+
+void DictHtmlRenderer::releaseParser() {
   if (parser) {
     XML_ParserFree(parser);
     parser = nullptr;

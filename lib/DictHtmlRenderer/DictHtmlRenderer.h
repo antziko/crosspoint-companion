@@ -44,6 +44,17 @@ class DictHtmlRenderer {
   DictHtmlRenderer(const DictHtmlRenderer&) = delete;
   DictHtmlRenderer& operator=(const DictHtmlRenderer&) = delete;
 
+  // Hand the expat arena back to the heap. Safe at any time: reset() recreates the parser
+  // when it finds a null one, which is the path the very first render already takes.
+  //
+  // Exists because the arena is large and long-lived relative to how briefly it is needed —
+  // ~1,952 B on create growing to ~6,896 B retained across XML_ParserReset (measured 32-bit,
+  // under this project's -DXML_GE=0 -DXML_CONTEXT_BYTES=1024). A caller that keeps this
+  // renderer as a member holds all of that for its whole lifetime, though the parser is only
+  // live during a parse. On the X3's ~7 KB working heap that was the difference between a
+  // std::vector doubling that fits and one that calls abort().
+  void releaseParser();
+
   const std::vector<StyledSpan>& render(const char* html, int len);
 
   // Stream-render from an open file. Reads definition in 512-byte chunks — the full
