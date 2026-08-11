@@ -413,7 +413,59 @@ bool HalClock::syncFromNTP(uint32_t maxWaitMs, const volatile bool* abortFlag) {
   }
 
   LOG_INF("CLK", "Starting NTP sync...");
-  configTzTime("UTC0", "pool.ntp.org", "time.nist.gov");
+  // Resolve the servers HERE, on this task, and hand configTzTime() IP literals.
+  //
+  // Passing hostnames makes SNTP own a DNS query: sntp_request() calls dns_gethostbyname() and,
+  // when the poll below expires without a packet, we walk away leaving that query parked in
+  // DNS_STATE_ASKING with retry timers armed for the rest of the session. Later, the first
+  // hostname resolution by anything else (a KOSync TLS connect, say) reaches
+  // NetworkManager::hostByName, whose hasGlobalV4/V6 statics flip on the first call after an IP
+  // is acquired and take the dns_clear_cache() branch -- a raw lwip core call made with NO
+  // LOCK_TCPIP_CORE(). dns_clear_cache aborts the parked query via dns_call_found, which invokes
+  // sntp_dns_found(addr=NULL), which retries sntp_request -> dns_gethostbyname -> dns_alloc_pcb
+  // -> udp_new_ip_type -> LWIP_ASSERT_CORE_LOCKED() -> panic. That is the
+  // "assert failed: udp_new_ip_type ... Required to lock TCPIP core functionality!" crash.
+  //
+  // dns_gethostbyname() short-circuits on ipaddr_aton() for a literal and returns ERR_OK without
+  // enqueuing anything, so with IPs SNTP never allocates a DNS entry at all -- not on the first
+  // request, not on a retry, not after a TTL expiry. Our own hostByName() call below also becomes
+  // the first resolution after WiFi comes up, so the statics flip (and dns_clear_cache runs)
+  // while the DNS table is still empty and there is no callback to fire.
+  //
+  // static, not stack: lwip's sntp_setservername() stores the POINTER, not a copy, and
+  // sntp_request re-reads it on every retry. A stack buffer would leave lwip dereferencing a dead
+  // frame. 96 bytes of DRAM; a heap buffer could never be freed.
+  //
+  // Each slot latches only on SUCCESS. A slot that failed to resolve keeps its hostname (exactly
+  // today's behaviour, so never worse) and is retried on the next sync -- the failure is usually
+  // "this network's DNS was not up yet", not something permanent, and leaving it latched would
+  // keep the hostname in SNTP's hands for the rest of the boot.
+  static constexpr size_t kNtpServerLen = 48;  // INET6_ADDRSTRLEN is 46 and CONFIG_LWIP_IPV6=y
+  static char ntpPrimary[kNtpServerLen] = "pool.ntp.org";
+  static char ntpSecondary[kNtpServerLen] = "time.nist.gov";
+  static bool ntpPrimaryIsIp = false;
+  static bool ntpSecondaryIsIp = false;
+  struct NtpSlot {
+    char* name;
+    bool* resolved;
+  };
+  const NtpSlot slots[2] = {{ntpPrimary, &ntpPrimaryIsIp}, {ntpSecondary, &ntpSecondaryIsIp}};
+  for (const NtpSlot& slot : slots) {
+    if (*slot.resolved) continue;
+    IPAddress ip;
+    if (WiFi.hostByName(slot.name, ip)) {
+      snprintf(slot.name, kNtpServerLen, "%s", ip.toString().c_str());
+      *slot.resolved = true;
+    } else {
+      LOG_ERR("CLK", "NTP host '%s' did not resolve; using the name", slot.name);
+    }
+  }
+  // Serial-only: SdDebugLog cannot be reached from lib/hal (it would close a dependency cycle,
+  // lib/hal -> SdDebugLog -> lib/hal). On the USB-locked X3 the on-device evidence that this
+  // worked is the absence of the panic plus a completed KOSYNC leg in opds_debug.txt.
+  LOG_INF("CLK", "NTP servers: %s (ip=%d), %s (ip=%d)", ntpPrimary, ntpPrimaryIsIp ? 1 : 0, ntpSecondary,
+          ntpSecondaryIsIp ? 1 : 0);
+  configTzTime("UTC0", ntpPrimary, ntpSecondary);
   // Mark configured so isPosixTimeValid() / getTime() / getDate() pick up the async SNTP
   // result even if we time out below before the first packet arrives.
   _ntpConfigured = true;
