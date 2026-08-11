@@ -57,7 +57,29 @@ constexpr int kMaxResponseBytes = 64 * 1024;
 // Contiguous-heap headroom kept free while the response string grows. The append
 // happens with the TLS connection live (wolfSSL record buffers resident), so leave
 // room rather than consuming the very last block.
-constexpr size_t kResponseHeapMargin = 8 * 1024;
+//
+// Two sites take a response buffer, and they need different guards because they cost
+// different amounts of contiguous heap.
+//
+// reserve-once (Content-Length known): r.body is still empty, so this is a single fresh
+// allocation with no old block held alongside it. Only kReserveHeadroom is needed, to avoid
+// claiming the last usable block.
+constexpr size_t kReserveHeadroom = 1024;
+//
+// growth (chunked / unknown length): libstdc++ allocates the new capacity while the old
+// buffer is still live and copies between them, so the transient peak really is roughly twice
+// the target — hence a margin scaled to the buffer being taken. A flat 8 KB was worse in the
+// other direction: it made every response demand 8 KB no matter how small, and device logs
+// show STATS_PUT (a 90-byte response) and BOOKMARKS_PUT (70 bytes) aborting as "low-heap"
+// three times running at largest=10740, on a heap that could hold them hundreds of times over.
+// The cap keeps large responses at exactly the old 8 KB behaviour.
+constexpr size_t kResponseMarginMin = 1024;
+constexpr size_t kResponseMarginMax = 8 * 1024;
+constexpr size_t responseHeapMargin(const size_t want) {
+  if (want < kResponseMarginMin) return kResponseMarginMin;
+  if (want > kResponseMarginMax) return kResponseMarginMax;
+  return want;
+}
 }  // namespace
 
 const char* KOReaderSyncClient::deviceId() {
@@ -130,6 +152,11 @@ struct KoResponse {
   int status = 0;            // HTTP status code; <=0 => transport failure (no response)
   bool transportOk = false;  // true once a status line was read
   std::string body;          // response body (capped at kMaxResponseBytes)
+  // Set when the transfer was abandoned by the heap guards below rather than by the network.
+  // Callers that retry need the distinction: a transient connect failure is worth another
+  // attempt, an out-of-contiguous-heap abort is not — nothing changes between attempts, so
+  // the retry re-runs a full TLS handshake to fail on the identical block.
+  bool heapAbort = false;
 };
 
 // Perform one KOSync request over wolfSSL (SecureHttpClient). `method` is
@@ -207,7 +234,14 @@ KoResponse koPerform(const char* method, const std::string& url, const std::stri
       if (want > r.body.capacity()) {
         multi_heap_info_t info;
         heap_caps_get_info(&info, MALLOC_CAP_8BIT);
-        if (info.largest_free_block < want + kResponseHeapMargin) {
+        // Flat headroom, NOT responseHeapMargin. This is the first chunk: r.body is still
+        // empty, so reserve(want) is one fresh allocation with no old block held alongside
+        // it — the proportional margin below exists to cover libstdc++ keeping the old
+        // buffer alive during a growth copy, and there is no copy here. Charging it anyway
+        // made every response demand twice its own size: device logs show the per-document
+        // STATS_GET (~5667 bytes, so 11334 required) aborting four times while the global
+        // one (2569 bytes, 5138 required) succeeded on the same heap.
+        if (info.largest_free_block < want + kReserveHeadroom) {
           lowHeap = true;
           return false;
         }
@@ -222,7 +256,7 @@ KoResponse koPerform(const char* method, const std::string& url, const std::stri
       const size_t growTo = needed > dbl ? needed : dbl;
       multi_heap_info_t info;
       heap_caps_get_info(&info, MALLOC_CAP_8BIT);
-      if (info.largest_free_block < growTo + kResponseHeapMargin) {
+      if (info.largest_free_block < growTo + responseHeapMargin(growTo)) {
         lowHeap = true;
         return false;
       }
@@ -244,6 +278,7 @@ KoResponse koPerform(const char* method, const std::string& url, const std::stri
                     (unsigned)r.body.size());
     LOG_ERR("KOSync", "%s: %s response, aborting to avoid OOM", tag, overCap ? "over-cap" : "low-heap");
     r.status = -1;
+    r.heapAbort = true;
     std::string().swap(r.body);
   }
   r.transportOk = r.status > 0;
@@ -504,6 +539,17 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
     transportOk = resp.transportOk;
     LOG_DBG("KOSync", "Update bookmarks response: %d (attempt %d)", status, attempt + 1);
     if (transportOk) break;  // got an HTTP response — no point retrying the transport
+    if (resp.heapAbort) {
+      // Not a transient failure: the guards abandoned the transfer for want of contiguous
+      // heap, and nothing between attempts changes that. Device logs show all three attempts
+      // aborting at an identical largest=10740 across 2.8s, each paying a full TLS handshake
+      // for the same outcome — and each handshake fragments the heap a little further for the
+      // legs that follow. Stop and report, rather than spending the remaining budget.
+      SdDebugLog::log("KOSYNC", "BOOKMARKS_PUT: heap abort on attempt %d -> no retry (largest=%u)", attempt + 1,
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+      LOG_ERR("KOSync", "BOOKMARKS_PUT: heap abort, retrying cannot help - giving up after attempt %d", attempt + 1);
+      break;
+    }
   }
 
   if (!transportOk) return NETWORK_ERROR;
@@ -530,14 +576,32 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
 
   if (resp.status == 200 && !resp.body.empty()) {
     JsonDocument doc;
+    // Do NOT "optimise" this into the mutable-buffer overload. ArduinoJson 6's zero-copy mode
+    // is gone in 7: measured against 7.4.2 with a counting allocator, a 2541-byte stats body
+    // peaks at exactly 7474 bytes whether it is parsed from `c_str()` or from a mutable
+    // `char*`. The overload only buys a subtler contract (the body is mutated in place), for
+    // no memory at all.
     const DeserializationError error = deserializeJson(doc, resp.body.c_str());
     if (error) {
+      // SD-only: this is one of three ways `others=` silently reads 0 while every leg
+      // logs code=200. NoMemory is the interesting one — the body is still resident here
+      // and the document pool is taken on top of it, so a fetch that parsed fine on a
+      // stats-only sync can fail on a full-scope one at the same body size.
+      SdDebugLog::log("KOSYNC", "STATS_GET: body parse FAILED (%s) bytes=%u free=%u largest=%u", error.c_str(),
+                      (unsigned)resp.body.size(), (unsigned)ESP.getFreeHeap(),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
       LOG_ERR("KOSync", "JSON parse failed: %s", error.c_str());
       return JSON_ERROR;
     }
 
     // The server returns {} (no "stats" object) when nothing is stored yet.
     if (!doc["stats"].is<JsonObjectConst>()) {
+      // The caller folds NOT_FOUND into statsFetchOk, so this lands as others=0 with
+      // fetch=1 — indistinguishable in the log from a successful empty read. A tiny body
+      // here is the legitimate "server has nothing yet"; a large one means we received
+      // stats and failed to recognise their shape, which is a different problem entirely.
+      SdDebugLog::log("KOSYNC", "STATS_GET: no \"stats\" object in %u-byte body -> others will read 0",
+                      (unsigned)resp.body.size());
       return NOT_FOUND;
     }
 
@@ -562,19 +626,68 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
       if (!fcBuf) LOG_ERR("KOSync", "OOM: fc fold buffer (%u)", (unsigned)kStatsFcMaxBytes);
     }
 
+    // Admit only the keys this call will actually read. Without a filter, deserializeJson()
+    // materialises the WHOLE blob -- including the base64 "h"/"dh"/"fc" payloads -- into a
+    // second document held alongside the still-resident body and outer document, and hits
+    // NoMemory. Not hypothetical: a device log showed
+    // `dev=1 skipOom=1 bytes=5667 free=33068 largest=8180`, i.e. the other device's entry
+    // silently dropped, surfacing to the user as others=0 next to fetch=1. The folds are the
+    // only consumers of those three sections, so when a fold is off the payload is decoded
+    // purely to be discarded.
+    //
+    // Measured against ArduinoJson 7.4.2 with a counting allocator, on a blob carrying 4000
+    // bytes of "dh" plus 2000 of "fc": 10173 bytes peak unfiltered, 4142 filtered. 4142 is the
+    // floor -- an empty 35-byte blob costs the same, because it is ArduinoJson's initial pool
+    // chunk -- so the filter removes the payload cost entirely and nothing more. Worth knowing
+    // when reading a future skipOom: below ~4.2 KB of contiguous heap this parse cannot
+    // succeed at all, whatever the blob looks like.
+    //
+    // Built once here, not per device: the filter document is reusable and re-creating it
+    // inside the loop would re-allocate on every iteration.
+    JsonDocument blobFilter;
+    blobFilter["s"] = true;
+    blobFilter["lr"] = true;
+    blobFilter["lh"] = true;
+    blobFilter["lm"] = true;
+    if (datedBuf) blobFilter["h"] = true;
+    if (dictBuf) blobFilter["dh"] = true;
+    if (fcBuf) blobFilter["fc"] = true;
+
+    // Every `continue` in this loop drops one device's seconds from the caller's `others`
+    // sum with no error return, so a fully-skipped loop is reported as others=0 alongside
+    // fetch=1. Counted here and logged below rather than left as per-device LOG_DBGs the
+    // device can't emit (USB-locked X3 has no serial).
+    uint16_t skipOom = 0;   // blob parse hit NoMemory: a heap symptom, not a data one
+    uint16_t skipBad = 0;   // blob was genuinely malformed
+    uint16_t skipNull = 0;  // value wasn't a string at all
+    uint16_t skipOver = 0;  // past MAX_STATS_DEVICES
     for (JsonPairConst kv : doc["stats"].as<JsonObjectConst>()) {
       if (outCount >= MAX_STATS_DEVICES) {
+        skipOver++;
         LOG_DBG("KOSync", "More than %u stats devices; extras dropped", (unsigned)MAX_STATS_DEVICES);
-        break;
+        continue;  // keep counting so the log reports how many were dropped, not just that some were
       }
       // Each value is a per-device blob stored verbatim by the server: an embedded
       // JSON string like {"s":300,"lr":9650,"lh":21,"lm":15} (the global pseudo-doc
       // also carries an "h":"<base64>" dated-history section).
       const char* blob = kv.value().as<const char*>();
-      if (!blob) continue;
+      if (!blob) {
+        skipNull++;
+        continue;
+      }
       JsonDocument blobDoc;
-      if (deserializeJson(blobDoc, blob)) {
-        LOG_DBG("KOSync", "Skipping malformed stats blob for %s", kv.key().c_str());
+      if (const DeserializationError blobErr =
+              deserializeJson(blobDoc, blob, DeserializationOption::Filter(blobFilter))) {
+        // NoMemory here is the case worth separating: with the filter above the retained part
+        // of the blob is a handful of scalars, so failing to parse it means the heap is
+        // exhausted, not that the server sent junk. Treating the two alike is what let a heap
+        // problem present as "this device has read for 0 seconds".
+        if (blobErr == DeserializationError::NoMemory) {
+          skipOom++;
+        } else {
+          skipBad++;
+        }
+        LOG_DBG("KOSync", "Skipping stats blob for %s: %s", kv.key().c_str(), blobErr.c_str());
         continue;
       }
       KOReaderStatsEntry& e = outEntries[outCount];
@@ -631,6 +744,14 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
       }
     }
     LOG_DBG("KOSync", "Got stats for %u device(s)", (unsigned)outCount);
+    // Always logged, not just on skips: `dev=` is what tells a genuine others=0 (one
+    // device on the server — ours) apart from a decode that dropped everyone. Heap is
+    // sampled here because the fold buffers above are still resident, which is the state
+    // the per-device parses actually ran in, not the roomier one at request time.
+    SdDebugLog::log(
+        "KOSYNC", "STATS_GET decode: dev=%u skipOom=%u skipBad=%u skipNull=%u skipOver=%u bytes=%u free=%u largest=%u",
+        (unsigned)outCount, skipOom, skipBad, skipNull, skipOver, (unsigned)resp.body.size(),
+        (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     return OK;
   }
 
