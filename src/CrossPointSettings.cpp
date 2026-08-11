@@ -475,7 +475,35 @@ int CrossPointSettings::getRefreshFrequency() const {
   }
 }
 
+uint8_t CrossPointSettings::getDefinitionPointSize() const {
+  // dictionaryFontSize is a Small/Medium/Large/XL slot; these are the point sizes the
+  // built-in definition fonts are compiled at, so "Same as book" renders at the same
+  // size the other family options do.
+  static constexpr uint8_t DICT_POINT_SIZES[] = {12, 14, 16, 18};
+  const uint8_t slot = dictionaryFontSize < std::size(DICT_POINT_SIZES) ? dictionaryFontSize : MEDIUM;
+  return DICT_POINT_SIZES[slot];
+}
+
 int CrossPointSettings::getDefinitionFontId() const {
+  // "Same as book": the FAMILY follows the reader (including the per-book override and
+  // any SD family), but the SIZE stays the dictionary's own setting — a definition read
+  // at the book's 18pt wastes most of the screen.
+  //
+  // Allocation-free by contract: this runs inside layout/render loops, so it only ever
+  // LOOKS UP a font. Making the SD family resident at the dictionary's point size is
+  // DictionaryDefinitionActivity::onEnter's job (SdCardFontSystem::ensureFontSize); until
+  // that has run, the resolver returns the reader-size font and definitions simply render
+  // at the book's size rather than failing.
+  if (dictionaryFontFamily == DICT_FONT_MATCH_READER) {
+    const uint8_t pointSize = getDefinitionPointSize();
+    const char* sdFamily = getReaderSdFontFamilyName();
+    if (sdFamily[0] != '\0' && sdFontIdResolver) {
+      const int id = sdFontIdResolver(sdFontResolverCtx, sdFamily, pointSize);
+      if (id != 0) return id;
+    }
+    return computeBuiltinFontId(readerOverride.active ? readerOverride.fontFamily : fontFamily, pointSize);
+  }
+
   const FONT_FAMILY effFamily = static_cast<FONT_FAMILY>(dictionaryFontFamily);
   const FONT_SIZE effSize = static_cast<FONT_SIZE>(dictionaryFontSize);
   switch (effFamily) {
@@ -535,6 +563,10 @@ int CrossPointSettings::getReaderFontId() const {
 }
 
 float CrossPointSettings::getDefinitionLineCompression() const {
+  // Matches getDefinitionFontId(): when the definition font is the reader's, its line
+  // compression must be too (computeLineCompression() handles the SD-font case).
+  if (dictionaryFontFamily == DICT_FONT_MATCH_READER) return getReaderLineCompression();
+
   const FONT_FAMILY effFamily = static_cast<FONT_FAMILY>(dictionaryFontFamily);
   switch (effFamily) {
     case NOTOSERIF:

@@ -5,17 +5,24 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <Logging.h>
+#include <Memory.h>
+#include <SdCardFont.h>
 #include <Utf8.h>
+#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
 #include <algorithm>
+#include <cstring>
 #include <memory>
 #include <numeric>
+#include <utility>
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "ReaderUtils.h"
+#include "SdCardFontSystem.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/DictStopwords.h"
@@ -27,6 +34,114 @@
 
 static constexpr char kBullet[] = "- ";
 
+namespace {
+
+// Scan-pass accumulator for prewarmDefinitionFont(): the deduped set of codepoints the
+// definition uses, as UTF-8, plus the styles it uses them in. Heap-allocated by the caller
+// — the tables exceed the 256-byte stack budget, same reason SdCardFont::prewarm()
+// heap-allocates its own codepoint buffer (SdCardFont.cpp:757).
+//
+// Body and IPA codepoints are collected separately because they are drawn with different
+// fonts (see the isIpa branches in render/wrap): feeding IPA codepoints to the body font's
+// prewarm only produces "glyph not found" misses, and the IPA font needs a prewarm of its
+// own — see prewarmDefinitionFont().
+//
+// Dedup is split ASCII / non-ASCII deliberately: a definition is mostly ASCII, and the
+// direct-indexed table keeps that path O(1) instead of the O(n^2) linear scan a single
+// flat array would cost over several KB of text.
+struct PrewarmCollector {
+  static constexpr uint16_t MAX_NON_ASCII = 192;
+  static constexpr uint8_t MAX_IPA = 64;
+  static constexpr int CHUNK_SIZE = 512;
+
+  bool seenAscii[128] = {};
+  uint32_t nonAscii[MAX_NON_ASCII] = {};
+  uint16_t nonAsciiCount = 0;
+  uint16_t uniqueCount = 0;
+  uint32_t ipaSeen[MAX_IPA] = {};
+  uint8_t ipaCount = 0;
+  uint8_t styleMask = 0;
+  // Body bytes seen per style (index = SdCardFont style index). Only used to order the
+  // budgeted prewarm below, so that if the heap runs out it is the least-used style that
+  // goes without — not whichever happened to be last in the bitmask.
+  uint32_t styleBytes[4] = {};
+  std::string utf8;
+  std::string ipaUtf8;
+  // Read buffer for the plain-text scan; lives here rather than on the stack.
+  // +4 for the incomplete UTF-8 sequence carried over from the previous chunk.
+  char chunk[CHUNK_SIZE + 4] = {};
+
+  // Append every not-yet-seen codepoint in `text` (null-terminated) to utf8 / ipaUtf8.
+  // Returns true if the text contains any body (non-IPA) codepoint, i.e. whether the
+  // caller's style will actually be drawn in the body font.
+  bool addText(const char* text) {
+    const auto* p = reinterpret_cast<const unsigned char*>(text);
+    bool sawBody = false;
+    bool prevIsIpa = false;
+    while (*p) {
+      const unsigned char* seqStart = p;
+      const uint32_t cp = utf8NextCodepoint(&p);
+      if (cp == 0) break;
+      const size_t seqLen = static_cast<size_t>(p - seqStart);
+      const auto* seqBytes = reinterpret_cast<const char*>(seqStart);
+
+      // Same run classification splitIpaRuns() applies at layout time (combining marks
+      // inherit the current run), so both agree on which font draws each codepoint.
+      const bool combining = utf8IsCombiningMark(cp);
+      const bool isIpa = combining ? prevIsIpa : isIpaCodepoint(cp);
+      prevIsIpa = isIpa;
+
+      if (isIpa) {
+        bool seen = false;
+        for (uint8_t i = 0; i < ipaCount; i++) {
+          if (ipaSeen[i] == cp) {
+            seen = true;
+            break;
+          }
+        }
+        if (seen) continue;
+        if (ipaCount >= MAX_IPA) continue;  // table full: let it fall back to the hot group
+        ipaSeen[ipaCount++] = cp;
+        ipaUtf8.append(seqBytes, seqLen);
+        continue;
+      }
+
+      sawBody = true;
+      // Cap matches SdCardFont's own per-prewarm limit: anything past it would be
+      // dropped there anyway and is left to load on demand.
+      if (uniqueCount >= SdCardFont::MAX_PAGE_GLYPHS) continue;
+      if (cp < 128) {
+        if (seenAscii[cp]) continue;
+        seenAscii[cp] = true;
+      } else {
+        bool seen = false;
+        for (uint16_t i = 0; i < nonAsciiCount; i++) {
+          if (nonAscii[i] == cp) {
+            seen = true;
+            break;
+          }
+        }
+        if (seen) continue;
+        if (nonAsciiCount >= MAX_NON_ASCII) continue;  // table full: let it miss on demand
+        nonAscii[nonAsciiCount++] = cp;
+      }
+      uniqueCount++;
+      utf8.append(seqBytes, seqLen);
+    }
+    return sawBody;
+  }
+};
+
+// SdCardFont style index: 0 = REGULAR, 1 = BOLD, 2 = ITALIC, 3 = BOLD_ITALIC.
+constexpr uint8_t spanStyleIndex(const bool bold, const bool italic) {
+  return static_cast<uint8_t>((bold ? 1u : 0u) | (italic ? 2u : 0u));
+}
+constexpr uint8_t spanStyleBit(const bool bold, const bool italic) {
+  return static_cast<uint8_t>(1u << spanStyleIndex(bold, italic));
+}
+
+}  // namespace
+
 void DictionaryDefinitionActivity::onEnter() {
   Activity::onEnter();
   // Heap reclaim: this activity is PUSHED on top of a still-resident reader
@@ -37,6 +152,14 @@ void DictionaryDefinitionActivity::onEnter() {
   // on its next render after this activity is popped. Self-healing, ~tens of KB.
   if (auto* fcm = renderer.getFontCacheManager()) {
     fcm->clearCache();
+  }
+  // "Same as book" follows the reader's FAMILY but keeps the dictionary's own size, so
+  // that family has to be resident at the dictionary's point size before getDefinitionFontId()
+  // can resolve to it. Must run before wrapText(), which caches the resolved id. Declines
+  // itself when the size is already resident, the family ships no such file, or the heap
+  // is too tight — the definition then renders at the book's size, as before.
+  if (SETTINGS.dictionaryFontFamily == CrossPointSettings::DICT_FONT_MATCH_READER) {
+    sdFontSystem.ensureFontSize(SETTINGS.getReaderSdFontFamilyName(), SETTINGS.getDefinitionPointSize(), renderer);
   }
   wrapText();
   requestUpdate();
@@ -58,8 +181,7 @@ void DictionaryDefinitionActivity::onExit() {
 }
 
 int DictionaryDefinitionActivity::getLineHeight() const {
-  return static_cast<int>(renderer.getLineHeight(SETTINGS.getDefinitionFontId()) *
-                          SETTINGS.getDefinitionLineCompression());
+  return static_cast<int>(renderer.getLineHeight(defFontId_) * SETTINGS.getDefinitionLineCompression());
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +192,11 @@ void DictionaryDefinitionActivity::wrapText() {
   isWordSelectMode = false;
   navigator.reset();
   currentPage = 0;  // new definition always starts at page 0
+
+  // Resolve the per-definition invariants once (see defFontId_ / defIsHtml_).
+  defFontId_ = SETTINGS.getDefinitionFontId();
+  const DictInfo info = Dictionary::readInfo(foundLocation.folderPath.c_str());
+  defIsHtml_ = info.valid && info.sametypesequence[0] == 'h';
 
   const auto orient = renderer.getOrientation();
   const auto metrics = UITheme::getInstance().getMetrics();
@@ -90,7 +217,143 @@ void DictionaryDefinitionActivity::wrapText() {
   linesPerPage = (renderer.getScreenHeight() - topArea - bottomArea) / getLineHeight();
   if (linesPerPage < 1) linesPerPage = 1;
 
+  LOG_DBG("DDA", "wrapText: font=%d sd=%d dictFamily=%u html=%d linesPerPage=%d", defFontId_,
+          renderer.isSdCardFont(defFontId_) ? 1 : 0, SETTINGS.dictionaryFontFamily, defIsHtml_ ? 1 : 0, linesPerPage);
+
+  // Must precede every measuring pass: loadPage() below measures the whole definition,
+  // and so does every subsequent page turn (they call loadPage directly, so the glyphs
+  // this warms have to stay resident for the life of the definition).
+  prewarmDefinitionFont();
+
   loadPage(currentPage);
+}
+
+// ---------------------------------------------------------------------------
+// Glyph prewarm (scan pass -> unique codepoints -> one batched load per font)
+// ---------------------------------------------------------------------------
+
+void DictionaryDefinitionActivity::collectSpanForPrewarm(void* ctx, const StyledSpan& span) {
+  auto* collector = static_cast<PrewarmCollector*>(ctx);
+  if (!span.text) return;
+  // Only claim the style if the span contributes body text — a purely-IPA span is drawn
+  // in the IPA font, and claiming its style here would prewarm a whole extra style's
+  // bitmaps in the body font for nothing.
+  if (!collector->addText(span.text)) return;
+  collector->styleMask |= spanStyleBit(span.bold, span.italic);
+  collector->styleBytes[spanStyleIndex(span.bold, span.italic)] += strlen(span.text);
+}
+
+void DictionaryDefinitionActivity::prewarmDefinitionFont() {
+  // Built-in body fonts decompress into a RAM cache on first use, so they never pay
+  // per-glyph SD I/O; the scan below would be pure overhead for them. This whole path —
+  // including the IPA prewarm — exists for the SD-font heap profile.
+  if (!renderer.isSdCardFont(defFontId_)) return;
+  auto* fcm = renderer.getFontCacheManager();
+  if (!fcm) return;
+
+  const unsigned long t0 = millis();
+  auto collector = makeUniqueNoThrow<PrewarmCollector>();
+  if (!collector) {
+    LOG_ERR("DDA", "OOM: prewarm collector (%u bytes)", static_cast<unsigned>(sizeof(PrewarmCollector)));
+    return;  // not fatal: glyphs still load on demand, just slowly
+  }
+  collector->utf8.reserve(512);
+
+  const std::string dictPath = foundLocation.folderPath + ".dict";
+  if (defIsHtml_) {
+    // Same streaming producer the wrap uses, with a collecting sink instead of the
+    // measuring Wrapper — so the styles seen here are exactly the styles drawn later.
+    const DictHtmlRenderer::SpanSink sink{collector.get(), &DictionaryDefinitionActivity::collectSpanForPrewarm};
+    htmlRenderer_.renderFromFileStreaming(dictPath.c_str(), foundLocation.offset, foundLocation.size, sink);
+  } else {
+    HalFile dictFile;
+    if (!Storage.openFileForRead("DICT", dictPath.c_str(), dictFile)) return;
+    dictFile.seekSet(foundLocation.offset);
+
+    uint32_t remaining = foundLocation.size;
+    int carry = 0;  // bytes of an incomplete UTF-8 sequence held back from the last chunk
+    while (remaining > 0) {
+      const uint32_t space = static_cast<uint32_t>(PrewarmCollector::CHUNK_SIZE - carry);
+      const uint32_t toRead = remaining < space ? remaining : space;
+      const int n = dictFile.read(reinterpret_cast<uint8_t*>(collector->chunk) + carry, static_cast<int>(toRead));
+      if (n <= 0) break;
+      remaining -= static_cast<uint32_t>(n);
+
+      const int total = carry + n;
+      const int safe = utf8SafeTruncateBuffer(collector->chunk, total);
+      // Save the straddling tail before the null terminator overwrites it, then move it
+      // to the front for the next chunk.
+      char tail[4] = {};
+      const int tailLen = total - safe;
+      memcpy(tail, collector->chunk + safe, static_cast<size_t>(tailLen));
+      collector->chunk[safe] = '\0';
+      // Plain text is all REGULAR; the IPA runs inside it still route to the IPA font.
+      if (collector->addText(collector->chunk)) {
+        collector->styleMask |= spanStyleBit(false, false);
+        collector->styleBytes[spanStyleIndex(false, false)] += static_cast<uint32_t>(safe);
+      }
+      memcpy(collector->chunk, tail, static_cast<size_t>(tailLen));
+      carry = tailLen;
+    }
+  }
+
+  const unsigned long tScan = millis();
+  if (collector->styleMask == 0) collector->styleMask = spanStyleBit(false, false);
+
+  // Release the previous definition's glyph cache before allocating this one's. Two
+  // reasons: FontDecompressor::prewarmCache() consumes a fresh page slot per call and
+  // there are only MAX_PAGE_SLOTS (4) of them, and freeing first gives the allocations
+  // below the largest contiguous blocks on an already-fragmented heap.
+  fcm->clearCache();
+
+  // IPA before the body font, deliberately. IPA runs are drawn with a built-in font whose
+  // non-prewarmed path decompresses a whole ~11KB group per glyph (FontDecompressor.cpp:182);
+  // once the body prewarm below has taken its share, that contiguous block no longer exists
+  // and every IPA glyph is silently skipped ("OOM hot group ... glyph skipped"). Prewarming
+  // it first, while the heap is least fragmented, both fixes that and drops the per-glyph
+  // decompress. The IPA family is single-style (main.cpp:113), so 0x01 covers every style
+  // the segments are drawn in.
+  if (!collector->ipaUtf8.empty()) {
+    fcm->prewarmCache(IPA_FONT_ID, collector->ipaUtf8.c_str(), 0x01);
+  }
+  const unsigned long tIpa = millis();
+
+  // Body font, one style at a time, most-used style first, stopping when the heap can no
+  // longer afford the next one. Each style costs its own intervals, glyph array, bitmap
+  // arena and mini kern matrix; prewarming all four of a 60-glyph definition took the X4
+  // down to 5.9KB free / 2.1KB largest block, at which point the last style failed to
+  // allocate anyway ("Failed to allocate mini bitmap") and everything downstream — the
+  // wrap, pagePool_, the anti-aliasing pass — was running on fumes. A style left out here
+  // still renders correctly; its glyphs just load on demand through the overflow ring.
+  constexpr size_t kMinFreeForStyle = 16 * 1024;
+  constexpr size_t kMinBlockForStyle = 8 * 1024;
+  uint8_t order[4] = {0, 1, 2, 3};
+  for (uint8_t i = 1; i < 4; i++) {  // insertion sort by descending body bytes
+    for (uint8_t j = i; j > 0 && collector->styleBytes[order[j - 1]] < collector->styleBytes[order[j]]; j--) {
+      std::swap(order[j - 1], order[j]);
+    }
+  }
+
+  uint8_t warmedMask = 0;
+  if (!collector->utf8.empty()) {
+    for (const uint8_t styleIdx : order) {
+      const uint8_t bit = static_cast<uint8_t>(1u << styleIdx);
+      if (!(collector->styleMask & bit)) continue;
+      if (ESP.getFreeHeap() < kMinFreeForStyle ||
+          heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < kMinBlockForStyle) {
+        LOG_DBG("DDA", "prewarm: heap floor reached, styles 0x%02X left on demand",
+                static_cast<uint8_t>(collector->styleMask & ~warmedMask));
+        break;
+      }
+      fcm->prewarmCache(defFontId_, collector->utf8.c_str(), bit);
+      warmedMask |= bit;
+    }
+  }
+
+  LOG_DBG("DDA", "prewarm: body=%u ipa=%u mask=0x%02X warmed=0x%02X scan=%lums ipa=%lums body=%lums free=%u largest=%u",
+          collector->uniqueCount, collector->ipaCount, collector->styleMask, warmedMask, tScan - t0, tIpa - tScan,
+          millis() - tIpa, static_cast<unsigned>(ESP.getFreeHeap()),
+          static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
 }
 
 // Re-parse the definition and lay out ONLY `page` into layoutLines. The wrap
@@ -105,15 +368,21 @@ void DictionaryDefinitionActivity::loadPage(int page) {
   collectTargetPage_ = page;
   collectLineCount_ = 0;
 
-  // Choose rendering path based on dictionary content type
-  const DictInfo info = Dictionary::readInfo(foundLocation.folderPath.c_str());
-  if (info.valid && info.sametypesequence[0] == 'h') {
+  const unsigned long t0 = millis();
+  auto* fcm = renderer.getFontCacheManager();
+  if (fcm) fcm->resetStats();  // attribute SD glyph I/O below to layout, not to the render
+
+  // Choose rendering path based on dictionary content type (resolved in wrapText)
+  if (defIsHtml_) {
     wrapHtml();
   } else {
     wrapPlain();
   }
 
   totalPages = DictLayout::paginate(collectLineCount_, linesPerPage);
+
+  LOG_DBG("DDA", "loadPage %d: wrap=%lums lines=%d pages=%d", page, millis() - t0, collectLineCount_, totalPages);
+  if (fcm) fcm->logStats("dict-wrap");
 }
 
 void DictionaryDefinitionActivity::collectLineSink(void* ctx, DictLayout::LayoutLine&& line) {
@@ -148,8 +417,7 @@ int DictionaryDefinitionActivity::getMixedWidth(std::vector<IpaTextSpan>& ipaRun
   ipaRuns.clear();
   splitIpaRuns(text, ipaRuns);
   return std::accumulate(ipaRuns.begin(), ipaRuns.end(), 0, [&](int sum, const IpaTextSpan& run) {
-    return sum +
-           renderer.getTextWidth(run.isIpa ? IPA_FONT_ID : SETTINGS.getDefinitionFontId(), run.text.c_str(), style);
+    return sum + renderer.getTextWidth(run.isIpa ? IPA_FONT_ID : defFontId_, run.text.c_str(), style);
   });
 }
 
@@ -160,7 +428,7 @@ int DictionaryDefinitionActivity::getMixedWidth(std::vector<IpaTextSpan>& ipaRun
 int DictionaryDefinitionActivity::measureWidthAdapter(void* ctx, const char* text, EpdFontFamily::Style style,
                                                       bool isIpa) {
   auto* self = static_cast<DictionaryDefinitionActivity*>(ctx);
-  const int fontId = isIpa ? IPA_FONT_ID : SETTINGS.getDefinitionFontId();
+  const int fontId = isIpa ? IPA_FONT_ID : self->defFontId_;
   if (!isIpa && text[0] == ' ' && text[1] == '\0') return self->renderer.getSpaceWidth(fontId, style);
   return self->renderer.getTextWidth(fontId, text, style);
 }
@@ -168,8 +436,8 @@ int DictionaryDefinitionActivity::measureWidthAdapter(void* ctx, const char* tex
 void DictionaryDefinitionActivity::wrapHtml() {
   const int maxWidth = renderer.getScreenWidth() - leftPadding - rightPadding;
   // Indent step: 3 spaces worth of pixels at regular weight.
-  const int indentStep = renderer.getTextWidth(SETTINGS.getDefinitionFontId(), "   ");
-  const int bulletWidth = renderer.getTextWidth(SETTINGS.getDefinitionFontId(), kBullet);
+  const int indentStep = renderer.getTextWidth(defFontId_, "   ");
+  const int bulletWidth = renderer.getTextWidth(defFontId_, kBullet);
 
   // Fully streamed: the renderer delivers spans one at a time to the Wrapper, the
   // Wrapper emits completed lines to the page collector, and the collector keeps
@@ -201,7 +469,7 @@ void DictionaryDefinitionActivity::wrapPlain() {
   std::vector<IpaTextSpan> ipaRuns;
   const int screenWidth = renderer.getScreenWidth();
   const int maxWidth = screenWidth - leftPadding - rightPadding;
-  const int spaceWidth = renderer.getSpaceWidth(SETTINGS.getDefinitionFontId(), EpdFontFamily::REGULAR);
+  const int spaceWidth = renderer.getSpaceWidth(defFontId_, EpdFontFamily::REGULAR);
 
   std::string currentWord;
   std::string currentLineText;
@@ -280,7 +548,8 @@ void DictionaryDefinitionActivity::wrapPlain() {
 // ---------------------------------------------------------------------------
 
 void DictionaryDefinitionActivity::extractWordsFromLayout() {
-  const int indentStep = renderer.getTextWidth(SETTINGS.getDefinitionFontId(), "   ");
+  const unsigned long t0 = millis();
+  const int indentStep = renderer.getTextWidth(defFontId_, "   ");
 
   std::vector<WordSelectNavigator::WordInfo> words;
   words.reserve(64);
@@ -296,11 +565,11 @@ void DictionaryDefinitionActivity::extractWordsFromLayout() {
     int x = leftPadding + line.indentLevel * indentStep;
 
     if (line.isListItem) {
-      x += renderer.getTextWidth(SETTINGS.getDefinitionFontId(), kBullet);
+      x += renderer.getTextWidth(defFontId_, kBullet);
     }
 
     for (const auto& seg : line.segments) {
-      const int segFontId = seg.isIpa ? IPA_FONT_ID : SETTINGS.getDefinitionFontId();
+      const int segFontId = seg.isIpa ? IPA_FONT_ID : defFontId_;
       const int spaceWidth = renderer.getSpaceWidth(segFontId, seg.style);
       const char* p = pagePool_.data() + seg.offset;
       while (*p) {
@@ -340,6 +609,7 @@ void DictionaryDefinitionActivity::extractWordsFromLayout() {
   }
 
   WordSelectNavigator::organizeIntoRows(words, rows);
+  LOG_DBG("DDA", "extractWords: %u words in %lums", static_cast<unsigned>(words.size()), millis() - t0);
   navigator.load(std::move(words), std::move(rows), std::move(textPool));
 }
 
@@ -529,6 +799,7 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   }
 
   // Full repaint path.
+  const unsigned long t0 = millis();
   renderer.clearScreen();
   if (controller.render()) {
     // Controller drew an overlay; framebuffer state is unknown.
@@ -538,7 +809,7 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   }
 
   const auto metrics = UITheme::getInstance().getMetrics();
-  const int indentStep = renderer.getTextWidth(SETTINGS.getDefinitionFontId(), "   ");
+  const int indentStep = renderer.getTextWidth(defFontId_, "   ");
 
   // Header
   GUI.drawHeader(renderer,
@@ -556,12 +827,12 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
       int x = leftPadding + line.indentLevel * indentStep;
 
       if (line.isListItem) {
-        renderer.drawText(SETTINGS.getDefinitionFontId(), x, y, kBullet);
-        x += renderer.getTextWidth(SETTINGS.getDefinitionFontId(), kBullet);
+        renderer.drawText(defFontId_, x, y, kBullet);
+        x += renderer.getTextWidth(defFontId_, kBullet);
       }
 
       for (const auto& seg : line.segments) {
-        const int segFontId = seg.isIpa ? IPA_FONT_ID : SETTINGS.getDefinitionFontId();
+        const int segFontId = seg.isIpa ? IPA_FONT_ID : defFontId_;
         const char* segText = pagePool_.data() + seg.offset;
         renderer.drawText(segFontId, x, y, segText, true, seg.style);
         if ((seg.style & EpdFontFamily::UNDERLINE) != 0) {
@@ -574,6 +845,7 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
     }
   };
   renderBody();
+  const unsigned long tBody = millis();
 
   // Word-select mode: overlay highlighted word(s) and prime snapshot for next frame.
   // The -1 prevWordIdx literal is load-bearing: renderHighlightDifferential uses
@@ -596,6 +868,9 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
     const auto labels = mappedInput.mapLabels("", "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+
+    LOG_DBG("DDA", "render(select): body=%lums total=%lums", tBody - t0, millis() - t0);
+    if (auto* fcm = renderer.getFontCacheManager()) fcm->logStats("dict-render");
 
     prevHighlightIdx_ = currIdx;
     nextRenderMode_ = snapshotPrimed ? RenderMode::Differential : RenderMode::FullPage;
@@ -623,9 +898,14 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+  const unsigned long tDisplay = millis();
 
   // Anti-aliasing pass: overlay grayscale body text on top of the BW display
   if (SETTINGS.textAntiAliasing == CrossPointSettings::TEXT_AA_ANTIALIASED) {
     ReaderUtils::renderAntiAliased(renderer, renderBody);
   }
+
+  LOG_DBG("DDA", "render: body=%lums display=%lums aa=%lums total=%lums", tBody - t0, tDisplay - tBody,
+          millis() - tDisplay, millis() - t0);
+  if (auto* fcm = renderer.getFontCacheManager()) fcm->logStats("dict-render");
 }

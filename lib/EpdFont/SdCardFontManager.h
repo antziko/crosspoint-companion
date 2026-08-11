@@ -36,6 +36,10 @@ class SdCardFontManager {
   // or familyName doesn't match.
   int getFontId(const std::string& familyName) const;
 
+  // Look up the font ID of the loaded family at one EXACT point size (the reader size
+  // or any additively-loaded extra size). Returns 0 if that size is not resident.
+  int getFontIdAtSize(const std::string& familyName, uint8_t pointSize) const;
+
   // Get name of currently loaded family (empty if none).
   const std::string& currentFamilyName() const { return loadedFamilyName_; };
 

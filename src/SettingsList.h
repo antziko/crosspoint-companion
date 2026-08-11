@@ -273,9 +273,13 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // setting's position in the Reader category.
   v.push_back(
       SettingInfo::Enum(StrId::STR_FONT_SIZE, nullptr, {}, "fontSize", StrId::STR_CAT_READER).withTextSettings());
+  // Third option = CrossPointSettings::DICT_FONT_MATCH_READER, the only way to get an SD
+  // family in the definition viewer. It follows the reader's FAMILY only — the size below
+  // still applies. The option count is load-bearing: fromJson() clamps ENUM values to
+  // enumValues.size(), so dropping it would silently reset saved value 2.
   v.push_back(SettingInfo::Enum(StrId::STR_DICT_FONT_FAMILY, &CrossPointSettings::dictionaryFontFamily,
-                                {StrId::STR_NOTO_SERIF, StrId::STR_NOTO_SANS}, "dictionaryFontFamily",
-                                StrId::STR_READER_DICTIONARY));
+                                {StrId::STR_NOTO_SERIF, StrId::STR_NOTO_SANS, StrId::STR_SAME_AS_BOOK},
+                                "dictionaryFontFamily", StrId::STR_READER_DICTIONARY));
   v.push_back(SettingInfo::Enum(StrId::STR_DICT_FONT_SIZE, &CrossPointSettings::dictionaryFontSize,
                                 {StrId::STR_SMALL, StrId::STR_MEDIUM, StrId::STR_LARGE, StrId::STR_X_LARGE},
                                 "dictionaryFontSize", StrId::STR_READER_DICTIONARY));

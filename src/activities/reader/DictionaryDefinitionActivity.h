@@ -93,6 +93,14 @@ class DictionaryDefinitionActivity final : public Activity {
   int collectTargetPage_ = 0;
   int collectLineCount_ = 0;
 
+  // Resolved once per definition in wrapText(). SETTINGS.getDefinitionFontId() walks the
+  // SD-font resolver trampoline + registry name lookup (SdCardFontSystem.cpp:47) on every
+  // call, and the layout/render/word-extract paths query it per segment and per token.
+  int defFontId_ = 0;
+  // Content type of the current definition. Dictionary::readInfo() is an SD open+read and
+  // loadPage() runs on every page turn, so it is resolved once alongside defFontId_.
+  bool defIsHtml_ = false;
+
   // Orientation-aware layout gutters (computed in wrapText, used in render and extractWordsFromLayout)
   int leftPadding = 20;
   int rightPadding = 20;
@@ -115,6 +123,12 @@ class DictionaryDefinitionActivity final : public Activity {
   bool skipLoopDelay() override { return controller.skipLoopDelay(); }
 
   void wrapText();
+  // Load every glyph this definition needs — IPA runs first, then the body font — once per
+  // definition, BEFORE any measuring happens. Without it each body codepoint falls through
+  // to SdCardFont::onGlyphMiss (one file open + 2 seeks + 2 reads per glyph through an
+  // 8-slot ring) and every IPA glyph needs an ~11KB contiguous group buffer it cannot get
+  // once the body prewarm has run. No-op for built-in body fonts (they cache lazily).
+  void prewarmDefinitionFont();
   // Re-parse the definition and lay out ONLY page `page` into layoutLines,
   // discarding other pages as they are produced; also recomputes totalPages.
   void loadPage(int page);
@@ -130,6 +144,9 @@ class DictionaryDefinitionActivity final : public Activity {
   // Span sink bridge: forwards each streamed span from DictHtmlRenderer into the
   // DictLayout::Wrapper. ctx is the Wrapper*.
   static void feedSpanToWrapper(void* ctx, const StyledSpan& span);
+  // Span sink for the prewarm scan pass: collects unique codepoints + styles instead
+  // of measuring. ctx is a PrewarmCollector* (file-local to the .cpp).
+  static void collectSpanForPrewarm(void* ctx, const StyledSpan& span);
   bool handleLongPressExitAll(bool enabled);
   int getLineHeight() const;
 };

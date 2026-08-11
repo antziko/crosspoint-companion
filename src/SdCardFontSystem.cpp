@@ -190,11 +190,48 @@ void SdCardFontSystem::setupUiFallbacks(GfxRenderer& renderer) {
   }
 }
 
-int SdCardFontSystem::resolveFontId(const char* familyName, uint8_t /*pointSize*/) const {
-  // The manager holds exactly one reader-size font, already selected for
-  // SETTINGS.fontPointSize, so the size argument is implicit — always return
-  // that font's ID. ensureLoaded() must have run for the current settings first.
+int SdCardFontSystem::resolveFontId(const char* familyName, uint8_t pointSize) const {
+  // Prefer an exactly-matching resident size. Normally there is only the reader-size
+  // font and this is that font, but sizes can be loaded additively — the CJK UI
+  // fallbacks, and the dictionary's own point size (see ensureFontSize) — and those
+  // callers must get the size they asked for.
+  const int exact = manager_.getFontIdAtSize(familyName, pointSize);
+  if (exact != 0) return exact;
+  // Not resident at that size: fall back to the reader-size font so text still renders.
   return manager_.getFontId(familyName);
+}
+
+int SdCardFontSystem::ensureFontSize(const char* familyName, const uint8_t pointSize, GfxRenderer& renderer) {
+  if (!familyName || !*familyName) return 0;
+  // Already resident (the common case: the wanted size IS the reader's size).
+  const int existing = manager_.getFontIdAtSize(familyName, pointSize);
+  if (existing != 0) return existing;
+  // Only the currently loaded family can gain sizes — loading a second family would
+  // unload the reader's (loadFamily unloads first).
+  if (manager_.currentFamilyName() != familyName) return 0;
+
+  const auto* family = registry_.findFamily(familyName);
+  if (!family) return 0;
+
+  // A second .cpfont costs its own resident interval / glyph-metadata tables on top of
+  // the reader's (plus kern classes once something prewarms it), and this runs with the
+  // reader activity still in memory. Decline rather than starve the render that follows;
+  // the caller falls back to the reader-size font.
+  constexpr size_t kMinFreeForExtraSize = 28 * 1024;
+  const uint32_t freeBefore = ESP.getFreeHeap();
+  if (freeBefore < kMinFreeForExtraSize) {
+    LOG_DBG("SDFS", "Skipping %upt load of %s: free=%u", pointSize, familyName, (unsigned)freeBefore);
+    return 0;
+  }
+
+  const int id = manager_.loadFamilyExtraSize(*family, renderer, pointSize);
+  if (id == 0) {
+    LOG_DBG("SDFS", "%s has no %upt file", familyName, pointSize);
+    return 0;
+  }
+  LOG_DBG("SDFS", "Loaded %s at %upt for the dictionary: free %u -> %u", familyName, pointSize, (unsigned)freeBefore,
+          (unsigned)ESP.getFreeHeap());
+  return id;
 }
 
 int SdCardFontSystem::loadFamilyForPreview(const char* familyName, uint8_t pointSize, GfxRenderer& renderer) {

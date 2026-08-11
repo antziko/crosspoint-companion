@@ -105,6 +105,14 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   enum FONT_FAMILY { NOTOSERIF = 0, NOTOSANS = 1, FONT_FAMILY_COUNT };
   static constexpr uint8_t LEGACY_OPENDYSLEXIC = 2;
   static constexpr uint8_t BUILTIN_FONT_COUNT = FONT_FAMILY_COUNT;
+  // dictionaryFontFamily accepts the FONT_FAMILY values plus this sentinel, meaning
+  // "use the reader's effective font" (SD family or built-in, per-book override included).
+  // NOT a FONT_FAMILY member: buildFontFamilySetting() indexes SD families from
+  // BUILTIN_FONT_COUNT, so growing that enum would shift every SD font's index.
+  // Deliberately equal to LEGACY_OPENDYSLEXIC: a pre-1.5 file storing dictionaryFontFamily=2
+  // (OpenDyslexic) lands on "same as book", which resolves to the OpenDyslexic SD family its
+  // reader font was migrated to in fromJson() — so no separate migration is needed.
+  static constexpr uint8_t DICT_FONT_MATCH_READER = FONT_FAMILY_COUNT;
   // The reader font size is a point size (see fontPointSize), NOT an enum slot.
   // This enum survives only for the dictionary/definition viewer font size
   // (dictionaryFontSize), which still uses discrete Small/Medium/Large/XL slots.
@@ -315,7 +323,9 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t fontPointSize = DEFAULT_FONT_POINT_SIZE;
   uint8_t lineSpacing = NORMAL;
   uint8_t paragraphAlignment = JUSTIFIED;
-  // Definition viewer font (built-in fonts only).
+  // Definition viewer font: a built-in family, or DICT_FONT_MATCH_READER to follow the
+  // reader's family (the only way to render definitions in an SD family — see
+  // getDefinitionFontId()). dictionaryFontSize applies in every mode, including that one.
   uint8_t dictionaryFontFamily = NOTOSERIF;
   uint8_t dictionaryFontSize = MEDIUM;
   // Dictionary-lookup flashcards: card front style + review session card order.
@@ -471,6 +481,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // string means "use a built-in font"). Returned pointer is owned by settings.
   const char* getReaderSdFontFamilyName() const;
   int getDefinitionFontId() const;
+  // Point size the definition viewer renders at: dictionaryFontSize's slot, in points.
+  // Used by the dictionary to make an SD family resident at that size (the font id
+  // resolver cannot load anything itself — see getDefinitionFontId()).
+  uint8_t getDefinitionPointSize() const;
   float getDefinitionLineCompression() const;
 
   // Pinned-font set helpers (see pinnedFonts). `key` is "@b<index>" / "@s<name>".

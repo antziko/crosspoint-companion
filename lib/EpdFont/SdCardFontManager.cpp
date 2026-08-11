@@ -111,3 +111,11 @@ int SdCardFontManager::getFontId(const std::string& familyName) const {
   if (familyName != loadedFamilyName_ || loaded_.empty()) return 0;
   return loaded_.front().fontId;
 }
+
+int SdCardFontManager::getFontIdAtSize(const std::string& familyName, const uint8_t pointSize) const {
+  if (familyName != loadedFamilyName_) return 0;
+  for (const auto& lf : loaded_) {
+    if (lf.size == pointSize) return lf.fontId;
+  }
+  return 0;
+}
