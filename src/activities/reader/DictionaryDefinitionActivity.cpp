@@ -272,10 +272,14 @@ void DictionaryDefinitionActivity::wrapText() {
   navigator.reset();
   currentPage = 0;  // new definition always starts at page 0
 
-  // Resolve the per-definition invariants once (see defFontId_ / defIsHtml_).
+  // Resolve the per-definition invariants once (see defFontId_ / defIsMarkup_).
   defFontId_ = SETTINGS.getDefinitionFontId();
   const DictInfo info = Dictionary::readInfo(foundLocation.folderPath.c_str());
-  defIsHtml_ = info.valid && info.sametypesequence[0] == 'h';
+  // 'h' is HTML, 'x' is XDXF. Both go to DictHtmlRenderer, which registers the two tag
+  // vocabularies in one table (DictHtmlRenderer::classify). XDXF used to miss this test and
+  // fall to wrapPlain(), which drew its markup on screen verbatim — tags, attributes and
+  // undecoded &lt;/&gt; entities included.
+  defIsMarkup_ = info.valid && (info.sametypesequence[0] == 'h' || info.sametypesequence[0] == 'x');
 
   const auto orient = renderer.getOrientation();
   const auto metrics = UITheme::getInstance().getMetrics();
@@ -319,8 +323,8 @@ void DictionaryDefinitionActivity::wrapText() {
   linesPerPage = (renderer.getScreenHeight() - bodyStartY - bottomArea) / getLineHeight();
   if (linesPerPage < 1) linesPerPage = 1;
 
-  LOG_DBG("DDA", "wrapText: font=%d sd=%d dictFamily=%u html=%d linesPerPage=%d", defFontId_,
-          renderer.isSdCardFont(defFontId_) ? 1 : 0, SETTINGS.dictionaryFontFamily, defIsHtml_ ? 1 : 0, linesPerPage);
+  LOG_DBG("DDA", "wrapText: font=%d sd=%d dictFamily=%u markup=%d linesPerPage=%d", defFontId_,
+          renderer.isSdCardFont(defFontId_) ? 1 : 0, SETTINGS.dictionaryFontFamily, defIsMarkup_ ? 1 : 0, linesPerPage);
 
   // Must precede every measuring pass: loadPage() below measures the whole definition,
   // and so does every subsequent page turn (they call loadPage directly, so the glyphs
@@ -368,7 +372,7 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   collector->utf8.reserve(512);
 
   const std::string dictPath = foundLocation.folderPath + ".dict";
-  if (defIsHtml_) {
+  if (defIsMarkup_) {
     // Same streaming producer the wrap uses, with a collecting sink instead of the
     // measuring Wrapper — so the styles seen here are exactly the styles drawn later.
     const DictHtmlRenderer::SpanSink sink{collector.get(), &DictionaryDefinitionActivity::collectSpanForPrewarm};
@@ -570,7 +574,7 @@ void DictionaryDefinitionActivity::loadPage(int page) {
   if (fcm) fcm->resetStats();  // attribute SD glyph I/O below to layout, not to the render
 
   // Choose rendering path based on dictionary content type (resolved in wrapText)
-  if (defIsHtml_) {
+  if (defIsMarkup_) {
     wrapHtml();
   } else {
     wrapPlain();

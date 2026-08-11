@@ -24,8 +24,10 @@ struct StyledSpan {
 };
 
 /**
- * Renders StarDict HTML definitions (sametypesequence=h) into a flat vector
- * of StyledSpan objects suitable for display on e-ink.
+ * Renders StarDict markup definitions — HTML (sametypesequence=h) and XDXF
+ * (sametypesequence=x) — into a flat vector of StyledSpan objects suitable for
+ * display on e-ink. One tag table serves both: see classify(), where the XDXF
+ * names are registered alongside the HTML ones because none of them collide.
  *
  * Usage:
  *   DictHtmlRenderer renderer;

@@ -436,6 +436,64 @@ static const std::vector<ExpectedSpan> kHtmlEntities = {
     S("----------", true),
 };
 
+// XdxfTags — XDXF (sametypesequence=x) vocabulary, one case per tag category.
+// DictHtmlRenderer serves HTML and XDXF from a single tag table (classify()), so these run
+// against the same fixture as the HTML entries above. The entry must produce NO unknown tags:
+// XDXF names are registered explicitly rather than left to the STRIP_KEEP fallback.
+static const std::vector<ExpectedSpan> kXdxfTags = {
+    S("XDXF tag categories. Expected: the k headword dropped entirely, abr and ex italic, c and the container tags "
+      "transparent, nu breaking the line, b and blockquote styled exactly as in HTML.",
+      true),
+    S("----------", true),
+    // <k>dropped headword</k> emits nothing at all — the headword is already in the title bar.
+    S("Abbrev: ", true),
+    S("UK", false, false, /*italic=*/true),
+    S("Example: ", true),
+    S("worked example", false, false, /*italic=*/true),
+    // <c> carries a colour, which is meaningless on mono e-ink: transparent, text merged inline.
+    S("Colour: plain text", true),
+    // Container tags contribute no styling and no breaks, only their text.
+    S("Containers: translation", true),
+    S(" comment"),
+    S(" crossref"),
+    S(" grammar"),
+    S(" optional"),
+    S("Break:", true),
+    S("after break", true),
+    S("Bold: ", true),
+    S("strong", false, /*bold=*/true),
+    S("quoted passage", true, false, false, false, false, false, /*indent=*/1),
+    S("----------", true),
+};
+
+// XdxfRealWorld — the entry shape that exposed the bug: a Cambridge-style XDXF dictionary
+// rendered its markup on screen verbatim because DictionaryDefinitionActivity only routed
+// sametypesequence=h to this renderer. Guards the whole chain: no tag text survives, no raw
+// &lt;/&gt; entities, no duplicate headword, and the shared HTML tags still style.
+static const std::vector<ExpectedSpan> kXdxfRealWorld = {
+    S("Real-world XDXF entry shape, matching a Cambridge-style dictionary. Expected: no tag text, no raw entities, "
+      "the transcription and part of speech as plain text, HEAD bold, and the numbered sense indented.",
+      true),
+    S("----------", true),
+    // <k>face</k> dropped: only the <dtrn> headword below renders, so no duplicate.
+    S("face", true, /*bold=*/true),
+    S(" "),
+    S("UK", false, false, /*italic=*/true),
+    S(" ["),
+    S("fes"),
+    S("]"),
+    S(" noun"),
+    S("HEAD", false, /*bold=*/true),
+    S("1.", true, /*bold=*/true, false, false, false, false, /*indent=*/1),
+    S(" ", false, false, false, false, false, false, /*indent=*/1),
+    // &lt; / &gt; decoded to real angle brackets rather than drawn as entity text.
+    S("<", false, /*bold=*/true, false, false, false, false, /*indent=*/1),
+    S("E", false, false, /*italic=*/true, false, false, false, /*indent=*/1),
+    S(">", false, /*bold=*/true, false, false, false, false, /*indent=*/1),
+    S(" the front of the head", false, false, false, false, false, false, /*indent=*/1),
+    S("----------", true),
+};
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -476,7 +534,7 @@ int main(int argc, char** argv) {
   const TestCase tests[] = {
       {"BlazeSilent", kAbbrExpand, false},  {"ClearSvg", kBlockStrip, false},  {"DarkMath", kBlockStruct, false},
       {"EmptyGallery", kFormatTags, false}, {"FrostNowiki", kStripKeep, true}, {"GlowPoem", kWikiAnnot, false},
-      {"HazeEntity", kHtmlEntities, false},
+      {"HazeEntity", kHtmlEntities, false}, {"IvoryXdxf", kXdxfTags, false},   {"JadeXdxf", kXdxfRealWorld, false},
   };
 
   for (const auto& test : tests) {

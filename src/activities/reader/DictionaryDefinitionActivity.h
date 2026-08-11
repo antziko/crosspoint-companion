@@ -103,9 +103,12 @@ class DictionaryDefinitionActivity final : public Activity {
   // SD-font resolver trampoline + registry name lookup (SdCardFontSystem.cpp:47) on every
   // call, and the layout/render/word-extract paths query it per segment and per token.
   int defFontId_ = 0;
-  // Content type of the current definition. Dictionary::readInfo() is an SD open+read and
-  // loadPage() runs on every page turn, so it is resolved once alongside defFontId_.
-  bool defIsHtml_ = false;
+  // True when the current definition carries markup DictHtmlRenderer can parse — HTML
+  // (sametypesequence=h) or XDXF (=x). Not named defIsHtml_: both formats share one tag table,
+  // and treating XDXF as non-markup is exactly the bug that drew its tags on screen as text.
+  // Dictionary::readInfo() is an SD open+read and loadPage() runs on every page turn, so it is
+  // resolved once alongside defFontId_.
+  bool defIsMarkup_ = false;
 
   // True only when prewarmDefinitionFont() confirmed the IPA font's glyphs are resident.
   // The IPA font is a built-in compressed font whose non-prewarmed draw path inflates a whole

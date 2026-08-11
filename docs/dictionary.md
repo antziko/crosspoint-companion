@@ -11,7 +11,19 @@ A dictionary folder typically contains:
 - `.ifo` -- metadata such as dictionary name and word count (recommended)
 - `.syn` -- alternate forms and synonyms (optional, enhances lookup coverage)
 
-Minimum requirement: `.dict` (or `.dict.dz`) and `.idx`. Without `.ifo`, the dictionary will still work but metadata and HTML definition rendering may be limited.
+Minimum requirement: `.dict` (or `.dict.dz`) and `.idx`. Without `.ifo`, the dictionary will still work but metadata and styled definition rendering may be limited.
+
+### Definition content types
+
+The `.ifo` file declares its content type in `sametypesequence`, shown as **Type** on the dictionary info screen (highlight a dictionary in Settings -> Dictionary and hold Confirm for one second):
+
+| Type | Meaning | Rendering |
+|------|---------|-----------|
+| `h`  | HTML | Styled -- bold, italic, headings, lists, block quotes |
+| `x`  | XDXF | Styled -- same renderer; `<k>` headwords are dropped as duplicates of the title bar, `<abr>`/`<ex>` render italic, and `<c>` colours are ignored on the mono display |
+| `m`  | Plain text | Drawn as-is |
+
+`h` and `x` share one tag table, so a dictionary declaring either type is parsed rather than printed. A dictionary that declares `m` but actually contains markup will show its tags on screen -- that is the `.ifo` being wrong, and the **View Raw** button on the info screen will confirm it.
 
 ---
 

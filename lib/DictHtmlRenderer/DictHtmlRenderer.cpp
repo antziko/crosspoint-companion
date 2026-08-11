@@ -70,6 +70,31 @@ DictHtmlRenderer::TagAction DictHtmlRenderer::classify(const XML_Char* name) {
   if (strcmp(name, "a") == 0) return TagAction::SPAN;            // Registered; no actual anchors in dict
   if (strcmp(name, "_root") == 0) return TagAction::REGISTERED;  // Synthetic wrapper used by render()
 
+  // XDXF (sametypesequence=x). Registered unconditionally: none of these names collide with
+  // HTML ("abr" is XDXF, "abbr" is HTML), so one table serves both formats. They would already
+  // fall through to STRIP_KEEP below and render acceptably, but they are listed explicitly
+  // because the host test builds with DICT_HTML_RENDERER_TRACK_UNKNOWN and fails on unexpected
+  // unknown tags — and because <k> and <abr> want more than the default.
+  //
+  // XDXF shares <b>/<i>/<u>/<sub>/<sup>/<blockquote> with HTML, so those are already handled
+  // above and come out styled. <tr> is XDXF's transcription but HTML's table row; it is left as
+  // REGISTERED above, which keeps the text either way.
+  if (strcmp(name, "k") == 0) return TagAction::BLOCK_STRIP;      // headword — already in the title bar
+  if (strcmp(name, "abr") == 0) return TagAction::FORMAT_ITALIC;  // "UK", "US", "noun"
+  if (strcmp(name, "ex") == 0) return TagAction::FORMAT_ITALIC;   // usage example
+  if (strcmp(name, "nu") == 0) return TagAction::BLOCK_BREAK;
+  if (strcmp(name, "c") == 0) return TagAction::REGISTERED;  // colour: meaningless on mono e-ink
+  if (strcmp(name, "ar") == 0) return TagAction::REGISTERED;
+  if (strcmp(name, "xdxf") == 0) return TagAction::REGISTERED;
+  if (strcmp(name, "dtrn") == 0) return TagAction::REGISTERED;
+  if (strcmp(name, "co") == 0) return TagAction::REGISTERED;
+  if (strcmp(name, "def") == 0) return TagAction::REGISTERED;
+  if (strcmp(name, "gr") == 0) return TagAction::REGISTERED;
+  if (strcmp(name, "opt") == 0) return TagAction::REGISTERED;
+  if (strcmp(name, "kref") == 0) return TagAction::REGISTERED;  // cross-refs: keep the visible text
+  if (strcmp(name, "iref") == 0) return TagAction::REGISTERED;
+  if (strcmp(name, "rref") == 0) return TagAction::REGISTERED;
+
   // Wikitext annotation tags: t:XX, tr:XX, lang:XX, gloss:XX, pos:XX, sc:XX, alt:XX, id:XX
   if (strncmp(name, "t:", 2) == 0) return TagAction::WIKI_ANNOT;
   if (strncmp(name, "tr:", 3) == 0) return TagAction::WIKI_ANNOT;

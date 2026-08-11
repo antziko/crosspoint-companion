@@ -15,7 +15,7 @@ YAML schemas:
       name:            stem name for output files (may contain hyphens)
       bookname:        displayed name
       output_dir:      path relative to workspace root
-      entry_format:    m (plain text) or h (HTML)
+      entry_format:    m (plain text), h (HTML) or x (XDXF)
       ifo_version:     default "stardict-2.4.2"; use "2.4.2" for older format
       author:          optional
       description:     optional
@@ -58,6 +58,10 @@ Format references:
            offset[N]   = total byte size of the .idx (or .syn) file  ← sentinel
   sametypesequence=m : plain text; size from .idx (no null terminator)
   sametypesequence=h : HTML;       size from .idx (no null terminator)
+  sametypesequence=x : XDXF;       size from .idx (no null terminator)
+
+  The entry bytes are written identically for all three — the value only lands in the
+  .ifo (see write_ifo) and tells the reader how to interpret them.
 """
 
 import argparse

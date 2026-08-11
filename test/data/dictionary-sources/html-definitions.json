@@ -1,5 +1,5 @@
 {
-  "_comment": "Six entries, one per HTML tag category. Each definition: plain-text description, separator, test HTML, separator. Definitions stored as single-line strings to preserve exact HTML (no added whitespace).",
+  "_comment": "One entry per tag category. Each definition: plain-text description, separator, test markup, separator. Definitions stored as single-line strings to preserve exact markup (no added whitespace). The last two entries are XDXF (sametypesequence=x), not HTML: DictHtmlRenderer serves both formats from one tag table (classify()), so both vocabularies are exercised against this one fixture. The .ifo entry_format stays 'h' because the renderer is handed raw bytes here and never reads it — the format field only matters for on-device routing in DictionaryDefinitionActivity.",
   "meta": {
     "name": "html-definitions",
     "bookname": "HTML Definitions Test",
@@ -38,6 +38,14 @@
     {
       "headword": "HazeEntity",
       "definition": "<p>HTML named entities resolved to UTF-8. Expected: brackets, space, dash, zero-width marks dropped, unknown entity dropped.</p><p>----------</p><p>Brackets: &lsqb;enclosed&rsqb;</p><p>Non-breaking space: left&nbsp;right</p><p>En dash: 1939&ndash;1945</p><p>Zero-width: be&lrm;fore</p><p>Unknown: be&unknownentity;fore</p><p>----------</p>"
+    },
+    {
+      "headword": "IvoryXdxf",
+      "definition": "<p>XDXF tag categories. Expected: the k headword dropped entirely, abr and ex italic, c and the container tags transparent, nu breaking the line, b and blockquote styled exactly as in HTML.</p><p>----------</p><k>dropped headword</k><p>Abbrev: <abr>UK</abr></p><p>Example: <ex>worked example</ex></p><p>Colour: <c c=\"darkcyan\">plain text</c></p><p>Containers: <dtrn>translation</dtrn> <co>comment</co> <kref>crossref</kref> <gr>grammar</gr> <opt>optional</opt></p><p>Break:<nu/>after break</p><p>Bold: <b>strong</b></p><blockquote>quoted passage</blockquote><p>----------</p>"
+    },
+    {
+      "headword": "JadeXdxf",
+      "definition": "<p>Real-world XDXF entry shape, matching a Cambridge-style dictionary. Expected: no tag text, no raw entities, the transcription and part of speech as plain text, HEAD bold, and the numbered sense indented.</p><p>----------</p><k>face</k><dtrn><b>face</b> <abr>UK</abr> <c c=\"darkcyan\">[</c><c c=\"darkcyan\">fes</c><c c=\"darkcyan\">]</c> <c c=\"orange\">noun</c></dtrn><b><c c=\"darkmagenta\">HEAD</c></b><blockquote><b><c c=\"darkmagenta\">1.</c></b> <b><c c=\"lightgreen\">&lt;</c></b><abr>E</abr><b><c c=\"lightgreen\">&gt;</c></b> the front of the head</blockquote><p>----------</p>"
     }
   ]
 }
