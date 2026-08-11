@@ -1,5 +1,7 @@
 #pragma once
 
+#include <HalStorage.h>  // HalFile, held open across glyph misses (see glyphFile_)
+
 #include <cstdint>
 #include <deque>
 #include <string>
@@ -258,17 +260,46 @@ class SdCardFont {
   };
   OverflowContext overflowCtx_[MAX_STYLES] = {};
 
-  // Shared on-demand overflow buffer (ring buffer of glyphs loaded via glyphMissHandler)
-  static constexpr uint32_t OVERFLOW_CAPACITY = 8;
+  // Shared on-demand overflow buffer (FIFO of glyphs loaded via glyphMissHandler), used by
+  // every style the prewarm could not reach. Two caps, whichever binds first:
+  //
+  // OVERFLOW_CAPACITY bounds the entry array, which is a fixed member (28 B/slot). 8 could not
+  // hold the distinct letters of a single word, so common letters were evicted between their
+  // own repeats and re-read from SD at ~27ms each; device logs showed 135 misses / 3688ms in
+  // one dictionary render. It is deliberately NOT sized to hold a whole page: ~67 bitmaps
+  // costs about what prewarming a style costs (see kMinFreeForStyle in
+  // DictionaryDefinitionActivity), and a prewarmed style is strictly better — one contiguous
+  // arena, no per-glyph metadata read. If that heap were free the prewarm would have taken it.
+  //
+  // OVERFLOW_MAX_BYTES bounds the bitmaps those slots point at, which the slot count alone
+  // does not: dataLength is a uint16_t, and a large 2-bit CJK glyph is ~150 B against ~50 B
+  // for Latin. Without it 32 slots could hold ~4.8 KB on a heap whose prewarm gates run at
+  // 10-16 KB free. So Latin text is bounded by slots, CJK by bytes.
+  static constexpr uint32_t OVERFLOW_CAPACITY = 32;
+  static constexpr uint32_t OVERFLOW_MAX_BYTES = 2048;
   struct OverflowEntry {
     EpdGlyph glyph;
     uint8_t* bitmap = nullptr;
     uint32_t codepoint = 0;
     uint8_t styleIdx = 0;
   };
+  // Ring as head + count rather than next + count, so the OLDEST entry can be dropped in O(1)
+  // (evictOldestOverflow) when the byte cap binds before the slot cap. Live entries are
+  // overflow_[(overflowHead_ + i) % OVERFLOW_CAPACITY] for i in [0, overflowCount_).
   OverflowEntry overflow_[OVERFLOW_CAPACITY] = {};
+  uint32_t overflowHead_ = 0;
   uint32_t overflowCount_ = 0;
-  uint32_t overflowNext_ = 0;
+  uint32_t overflowBytes_ = 0;
+  // Free the oldest entry's bitmap and drop it from the ring. No-op when empty.
+  void evictOldestOverflow();
+
+  // The .cppfont, held open for the lifetime of the overflow ring. onGlyphMiss used to reopen
+  // it per glyph: a storage-mutex round trip, a HalFile::Impl heap allocation
+  // (HalStorage.cpp:104) and a full SdFat path walk with USE_UTF8_LONG_NAMES, all to read
+  // ~16 B of EpdGlyph and ~50 B of bitmap. Opened lazily on the first miss, so a font whose
+  // styles all prewarmed never holds a descriptor; closed by clearOverflow(), which both
+  // clearCache() and freeAll() already call, and on any I/O error so the next miss reopens.
+  HalFile glyphFile_;
 
   // Concurrency tripwire: onGlyphMiss mutates the overflow ring (and frees
   // bitmaps). It must only ever run on the render task. If a second task

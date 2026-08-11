@@ -199,13 +199,31 @@ void SdCardFont::freeAll() {
 }
 
 void SdCardFont::clearOverflow() {
-  for (uint32_t i = 0; i < overflowCount_; i++) {
-    delete[] overflow_[i].bitmap;
-    overflow_[i].bitmap = nullptr;
-    overflow_[i].codepoint = 0;
+  while (overflowCount_ > 0) {
+    evictOldestOverflow();
   }
-  overflowCount_ = 0;
-  overflowNext_ = 0;
+  overflowHead_ = 0;
+  // Released with the ring it serves: nothing can ask for an on-demand glyph until the next
+  // miss, which reopens. Keeping it beyond this point would pin an SD descriptor across a
+  // whole reading session for a font that may never miss again.
+  //
+  // The isOpen() guard is mandatory, not defensive: HalFile::close() asserts impl != nullptr
+  // (HalStorage.cpp:178) while isOpen() is null-safe (HalStorage.h). freeAll()/clearCache()
+  // reach here at boot on fonts that never missed a glyph, so glyphFile_ is still
+  // default-constructed and closing it unconditionally panics before the UI ever comes up.
+  if (glyphFile_.isOpen()) glyphFile_.close();
+}
+
+void SdCardFont::evictOldestOverflow() {
+  if (overflowCount_ == 0) return;
+  OverflowEntry& oldest = overflow_[overflowHead_];
+  overflowBytes_ -= oldest.glyph.dataLength;
+  delete[] oldest.bitmap;
+  oldest.bitmap = nullptr;
+  oldest.codepoint = 0;
+  oldest.glyph = EpdGlyph{};
+  overflowHead_ = (overflowHead_ + 1) % OVERFLOW_CAPACITY;
+  overflowCount_--;
 }
 
 // --- Per-style kern/ligature ---
@@ -1507,8 +1525,9 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
 
   // Check overflow cache first (matching both codepoint and style)
   for (uint32_t i = 0; i < self->overflowCount_; i++) {
-    if (self->overflow_[i].codepoint == codepoint && self->overflow_[i].styleIdx == styleIdx) {
-      return &self->overflow_[i].glyph;
+    OverflowEntry& e = self->overflow_[(self->overflowHead_ + i) % OVERFLOW_CAPACITY];
+    if (e.codepoint == codepoint && e.styleIdx == styleIdx) {
+      return &e.glyph;
     }
   }
 
@@ -1528,16 +1547,15 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
     }
   } missTimer{self->stats_, millis()};
 
-  // Pick overflow slot (ring buffer). Read into temporaries first so the
-  // existing slot stays valid if SD I/O fails. Bookkeeping (count/next)
-  // is deferred until after all I/O succeeds to avoid inconsistent state.
-  uint32_t slot = self->overflowNext_;
-  bool wasAtCapacity = (self->overflowCount_ == OVERFLOW_CAPACITY);
+  // Read into temporaries first, so the ring is left untouched if any of the I/O below fails.
+  // Eviction and bookkeeping happen once every read has succeeded.
 
-  // Read glyph metadata into temporary
-  HalFile file;
-  if (!Storage.openFileForRead("SDCF", self->filePath_, file)) {
+  // Opened once and kept (see glyphFile_), not per glyph. Closed on every I/O failure below so
+  // the next miss reopens — that retry is the only thing the old per-glyph open was buying.
+  HalFile& file = self->glyphFile_;
+  if (!file.isOpen() && !Storage.openFileForRead("SDCF", self->filePath_, file)) {
     LOG_ERR("SDCF", "Overflow: failed to open .cpfont");
+    file.close();
     return nullptr;
   }
 
@@ -1550,6 +1568,7 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
   }
   if (file.read(reinterpret_cast<uint8_t*>(&tempGlyph), sizeof(EpdGlyph)) != sizeof(EpdGlyph)) {
     LOG_ERR("SDCF", "Overflow: failed to read glyph metadata for U+%04X style %u", codepoint, styleIdx);
+    file.close();
     return nullptr;
   }
 
@@ -1562,6 +1581,8 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
       // the direct measure of "characters missing on screen" under heap pressure.
       self->stats_.bitmapOom++;
       LOG_ERR("SDCF", "Overflow: failed to allocate %u bytes for U+%04X bitmap", tempGlyph.dataLength, codepoint);
+      // Handle deliberately left open: the heap failed, not the card, and the next glyph has
+      // every chance of fitting.
       return nullptr;
     }
     if (!file.seekSet(s.bitmapFileOffset + tempGlyph.dataOffset)) {
@@ -1573,17 +1594,22 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
     if (file.read(tempBitmap, tempGlyph.dataLength) != static_cast<int>(tempGlyph.dataLength)) {
       LOG_ERR("SDCF", "Overflow: failed to read bitmap for U+%04X", codepoint);
       delete[] tempBitmap;
+      file.close();
       return nullptr;
     }
   }
 
-  // All reads succeeded — commit to slot and advance ring buffer
-  if (wasAtCapacity) {
-    delete[] self->overflow_[slot].bitmap;
-  } else {
-    self->overflowCount_++;
+  // All reads succeeded — make room, then commit. Both caps are enforced here rather than at
+  // entry because dataLength is only known once the metadata has been read. The byte cap keeps
+  // at least one entry so a single glyph larger than the whole budget still renders (it is
+  // simply evicted by the next one) instead of being dropped from the page.
+  while (self->overflowCount_ == OVERFLOW_CAPACITY ||
+         (self->overflowCount_ > 0 && self->overflowBytes_ + tempGlyph.dataLength > OVERFLOW_MAX_BYTES)) {
+    self->evictOldestOverflow();
   }
-  self->overflowNext_ = (slot + 1) % OVERFLOW_CAPACITY;
+  const uint32_t slot = (self->overflowHead_ + self->overflowCount_) % OVERFLOW_CAPACITY;
+  self->overflowCount_++;
+  self->overflowBytes_ += tempGlyph.dataLength;
   self->overflow_[slot].glyph = tempGlyph;
   self->overflow_[slot].bitmap = tempBitmap;
   self->overflow_[slot].codepoint = codepoint;
@@ -1598,16 +1624,15 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
 
 bool SdCardFont::isOverflowGlyph(const EpdGlyph* glyph) const {
   for (uint32_t i = 0; i < overflowCount_; i++) {
-    if (&overflow_[i].glyph == glyph) return true;
+    if (&overflow_[(overflowHead_ + i) % OVERFLOW_CAPACITY].glyph == glyph) return true;
   }
   return false;
 }
 
 const uint8_t* SdCardFont::getOverflowBitmap(const EpdGlyph* glyph) const {
   for (uint32_t i = 0; i < overflowCount_; i++) {
-    if (&overflow_[i].glyph == glyph) {
-      return overflow_[i].bitmap;
-    }
+    const OverflowEntry& e = overflow_[(overflowHead_ + i) % OVERFLOW_CAPACITY];
+    if (&e.glyph == glyph) return e.bitmap;
   }
   return nullptr;
 }
