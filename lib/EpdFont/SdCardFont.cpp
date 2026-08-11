@@ -10,6 +10,7 @@
 #include <cstring>
 #include <memory>
 
+#include "AdvanceTableMerge.h"
 #include "EpdFontFamily.h"
 
 static_assert(sizeof(EpdGlyph) == 16, "EpdGlyph must be 16 bytes to match .cpfont file layout");
@@ -1128,6 +1129,9 @@ void SdCardFont::clearPersistentCache() {
     delete[] advanceTable_[i];
     advanceTable_[i] = nullptr;
     advanceTableSize_[i] = 0;
+    // Must clear alongside the pointer: a stale capacity would send the next merge down the
+    // in-place path and write through the freed buffer.
+    advanceTableCap_[i] = 0;
   }
 }
 
@@ -1159,29 +1163,34 @@ void SdCardFont::mergeIntoAdvanceTable(uint8_t styleIdx, const AdvanceEntry* sor
   // Cap the merged size at ADVANCE_CACHE_LIMIT. Anything past the cap is
   // dropped from the tail of the sorted merge — a deterministic, bounded loss
   // that doesn't bias which codepoints get cached on subsequent passes.
-  uint32_t mergedCap = oldSize + newCount;
-  if (mergedCap > ADVANCE_CACHE_LIMIT) mergedCap = ADVANCE_CACHE_LIMIT;
+  const uint32_t needed = AdvanceTableMerge::mergedSize(oldSize, newCount, ADVANCE_CACHE_LIMIT);
 
-  AdvanceEntry* merged = new (std::nothrow) AdvanceEntry[mergedCap];
-  if (!merged) {
-    LOG_ERR("SDCF", "mergeIntoAdvanceTable: alloc failed (%u entries) style %u", mergedCap, styleIdx);
+  // Fast path: the resident buffer is already big enough, so merge backwards in place and touch
+  // the allocator zero times. This is the steady state — merges are typically a single codepoint
+  // (see the capacity note in the header), and reallocating per merge is what shredded the heap.
+  if (needed <= advanceTableCap_[styleIdx]) {
+    AdvanceTableMerge::mergeInPlace(advanceTable_[styleIdx], oldSize, sortedNew, newCount, needed);
+    advanceTableSize_[styleIdx] = needed;
     return;
   }
 
-  const AdvanceEntry* a = advanceTable_[styleIdx];
-  const AdvanceEntry* b = sortedNew;
-  uint32_t i = 0, j = 0, k = 0;
-  while (k < mergedCap && (i < oldSize || j < newCount)) {
-    if (i < oldSize && (j >= newCount || a[i].codepoint <= b[j].codepoint)) {
-      merged[k++] = a[i++];
-    } else {
-      merged[k++] = b[j++];
-    }
+  // Grow path: geometric, so a style reallocates at most 128 -> 256 -> 512 -> 768 per session.
+  const uint32_t newCap =
+      AdvanceTableMerge::nextCapacity(advanceTableCap_[styleIdx], needed, ADVANCE_CACHE_MIN_CAP, ADVANCE_CACHE_LIMIT);
+
+  AdvanceEntry* merged = new (std::nothrow) AdvanceEntry[newCap];
+  if (!merged) {
+    LOG_ERR("SDCF", "mergeIntoAdvanceTable: alloc failed (%u entries) style %u", newCap, styleIdx);
+    return;
   }
+
+  const uint32_t written =
+      AdvanceTableMerge::mergeForward(merged, needed, advanceTable_[styleIdx], oldSize, sortedNew, newCount);
 
   delete[] advanceTable_[styleIdx];
   advanceTable_[styleIdx] = merged;
-  advanceTableSize_[styleIdx] = k;
+  advanceTableSize_[styleIdx] = written;
+  advanceTableCap_[styleIdx] = newCap;
 }
 
 bool SdCardFont::hasAdvanceTable() const {
@@ -1210,6 +1219,27 @@ uint16_t SdCardFont::getAdvance(uint32_t codepoint, uint8_t style) const {
     return table[lo].advanceX;
   }
   return 0;
+}
+
+bool SdCardFont::getInkMetrics(uint32_t codepoint, uint8_t style, uint8_t* outWidth, int8_t* outLeftBearing) const {
+  style &= (MAX_STYLES - 1);
+  if (!advanceTable_[style]) return false;
+  const AdvanceEntry* table = advanceTable_[style];
+  const uint32_t size = advanceTableSize_[style];
+  uint32_t lo = 0, hi = size;
+  while (lo < hi) {
+    const uint32_t mid = lo + (hi - lo) / 2;
+    if (table[mid].codepoint < codepoint) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  if (lo >= size || table[lo].codepoint != codepoint) return false;
+  if (table[lo].width == kNoInkMetrics) return false;  // bearing didn't fit; caller must not guess
+  if (outWidth) *outWidth = table[lo].width;
+  if (outLeftBearing) *outLeftBearing = table[lo].leftBearing;
+  return true;
 }
 
 // Given a sorted array of unique codepoints, resolve glyph indices per style,
@@ -1299,6 +1329,14 @@ int SdCardFont::fetchAdvancesForCodepoints(uint32_t* codepoints, uint32_t cpCoun
       lastReadIndex = gIdx;
       staged[fetched].codepoint = mappings[i].codepoint;
       staged[fetched].advanceX = tempGlyph.advanceX;
+      // Ink metrics come off the EpdGlyph already in hand — no extra seek or read. They let
+      // getTextWidth compute an extent from this table instead of faulting in the glyph.
+      // EpdGlyph::left is int16_t; if it does not fit, flag the entry rather than truncate.
+      // (A width of exactly kNoInkMetrics is treated as unavailable too, so the sentinel can
+      // never be confused with a real 255px glyph.)
+      const bool inkFits = tempGlyph.left >= INT8_MIN && tempGlyph.left <= INT8_MAX && tempGlyph.width != kNoInkMetrics;
+      staged[fetched].width = inkFits ? tempGlyph.width : kNoInkMetrics;
+      staged[fetched].leftBearing = inkFits ? static_cast<int8_t>(tempGlyph.left) : 0;
       fetched++;
     }
     file.close();
@@ -1397,9 +1435,9 @@ int SdCardFont::buildAdvanceTable(const std::deque<std::string>& words, bool inc
 // --- Stats ---
 
 void SdCardFont::logStats(const char* label) {
-  LOG_DBG("SDCF", "[%s] total=%ums sd_read=%ums seeks=%u glyphs=%u bitmap=%u bytes miss=%u (%ums)", label,
+  LOG_DBG("SDCF", "[%s] total=%ums sd_read=%ums seeks=%u glyphs=%u bitmap=%u bytes miss=%u (%ums) oom=%u", label,
           stats_.prewarmTotalMs, stats_.sdReadTimeMs, stats_.seekCount, stats_.uniqueGlyphs, stats_.bitmapBytes,
-          stats_.overflowMisses, stats_.overflowMissMs);
+          stats_.overflowMisses, stats_.overflowMissMs, stats_.bitmapOom);
 }
 
 void SdCardFont::resetStats() { stats_ = Stats{}; }
@@ -1520,6 +1558,9 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
   if (tempGlyph.dataLength > 0) {
     tempBitmap = new (std::nothrow) uint8_t[tempGlyph.dataLength];
     if (!tempBitmap) {
+      // Returning nullptr here makes drawText skip the glyph outright, so this counter is
+      // the direct measure of "characters missing on screen" under heap pressure.
+      self->stats_.bitmapOom++;
       LOG_ERR("SDCF", "Overflow: failed to allocate %u bytes for U+%04X bitmap", tempGlyph.dataLength, codepoint);
       return nullptr;
     }

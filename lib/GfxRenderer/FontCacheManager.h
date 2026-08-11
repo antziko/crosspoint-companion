@@ -16,7 +16,13 @@ class FontCacheManager {
   void setFontDecompressor(FontDecompressor* d);
 
   void clearCache();
-  void prewarmCache(int fontId, const char* utf8Text, uint8_t styleMask = 0x0F);
+  // Returns 0 when every requested glyph was prepared, >0 for the number that were not, and
+  // -1 when the prewarm could not be attempted at all (unknown font, no decompressor, no free
+  // page slot). Callers that only want the side effect can ignore it; callers that need to
+  // know whether the on-demand fallback will be taken at draw time must not — see the IPA
+  // path in DictionaryDefinitionActivity, where the fallback costs an 11KB contiguous
+  // allocation per glyph and silently drops the glyph when it fails.
+  int prewarmCache(int fontId, const char* utf8Text, uint8_t styleMask = 0x0F);
   void logStats(const char* label = "render");
   void resetStats();
 

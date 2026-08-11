@@ -67,7 +67,13 @@ namespace {
 //      stylesheet rules ("cache-load reserve bail: rules=0/52"). That unstyled layout
 //      -- no italics, sizes, alignment or indents -- is baked into the .bin, so fixing
 //      the gate alone changes nothing on screen until those files regenerate.
-constexpr uint8_t SECTION_FILE_VERSION = 45;
+// v46: no structural change -- GfxRenderer::getTextWidth gained an SD advance-table fast
+//      path, so text measured with an SD-card font no longer faults in each glyph to get its
+//      ink extent. Like the getTextAdvanceX fast path it already sat beside, that path skips
+//      kerning and ligatures (neither is resident during layout), so a measured width can
+//      differ by a pixel or two from the v45 glyph-based one. Widths decide where lines break,
+//      and v45 cached line/word positions were computed with the old ones.
+constexpr uint8_t SECTION_FILE_VERSION = 46;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects

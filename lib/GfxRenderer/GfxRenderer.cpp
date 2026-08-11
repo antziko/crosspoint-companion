@@ -4,6 +4,7 @@
 #include <BuildScratch.h>
 #include <FontDecompressor.h>
 #include <HalGPIO.h>
+#include <InkExtent.h>
 #include <Logging.h>
 #include <SdCardFont.h>
 #include <Utf8.h>
@@ -553,9 +554,53 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
   std::string visual;
   const char* renderedText = resolveVisualText(text, visual, baseDir);
 
+  // Advance-table fast path for SD card fonts during layout. getTextDimensions below needs a
+  // real EpdGlyph per codepoint (left + width, for the ink extent), which for any style the
+  // prewarm did not reach means one SdCardFont::onGlyphMiss apiece: a fresh .cpfont open +
+  // 2 seeks + 2 reads, ~27ms each. Device log: a 43-codepoint dictionary definition spent
+  // 2179ms of a 2229ms wrap in that path. The table carries left/width alongside advanceX
+  // (free — they fit AdvanceEntry's existing padding), so the same extent can be computed
+  // without touching the SD card at all.
+  //
+  // Consistent with the getTextAdvanceX fast path below, this skips kerning and ligatures:
+  // neither is resident during layout. That is the established SD-layout tradeoff, and it is
+  // why SECTION_FILE_VERSION was bumped alongside this change.
+  int fastWidth = 0;
+  if (getSdInkWidth(resolvedFontId, renderedText, style, &fastWidth)) return fastWidth;
+
   int w = 0, h = 0;
   fontIt->second.getTextDimensions(renderedText, &w, &h, style);
   return w;
+}
+
+// Ink extent of `text` computed purely from the SD font's metrics table. Returns false — and
+// writes nothing — whenever the table cannot answer exactly; the caller then takes the normal
+// glyph path. Deliberately all-or-nothing per string: a partly-table, partly-glyph extent
+// would be neither faster nor correct, and a wrong extent shifts line breaks.
+bool GfxRenderer::getSdInkWidth(const int fontId, const char* text, const EpdFontFamily::Style style,
+                                int* outWidth) const {
+  const auto sdIt = sdCardFonts_.find(fontId);
+  if (sdIt == sdCardFonts_.end() || !sdIt->second->hasAdvanceTable()) return false;
+  const uint8_t styleIdx = resolveSdCardStyle(*sdIt->second, style);
+  const bool isSupSub = (style & (EpdFontFamily::SUP | EpdFontFamily::SUB)) != 0;
+
+  InkExtent::Accumulator acc;
+  const uint8_t* cursor = reinterpret_cast<const uint8_t*>(text);
+  while (const uint32_t cp = utf8NextCodepoint(&cursor)) {
+    // Combining marks are anchored over the preceding base glyph by combiningMark::anchorOver,
+    // which needs that glyph's real metrics. Transparent RTL marks are zero-advance overlays.
+    // Both are rare in the text this path exists for, so bail rather than approximate.
+    if (BidiUtils::isTransparentMark(cp) || utf8IsCombiningMark(cp)) return false;
+
+    uint8_t glyphWidth = 0;
+    int8_t leftBearing = 0;
+    if (!sdIt->second->getInkMetrics(cp, styleIdx, &glyphWidth, &leftBearing)) return false;
+
+    acc.add(sdIt->second->getAdvance(cp, styleIdx), glyphWidth, leftBearing, isSupSub);
+  }
+
+  *outWidth = acc.width();
+  return true;
 }
 
 int GfxRenderer::getTextAdvanceWidth(const int fontId, const char* text, const EpdFontFamily::Style style) const {

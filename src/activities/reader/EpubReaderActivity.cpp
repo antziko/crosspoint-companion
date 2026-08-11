@@ -377,6 +377,10 @@ void EpubReaderActivity::onExit() {
   // Reload any SD-card font back to the global size so the home/library UI (which
   // does not re-sync the SD font itself) matches the global font size again.
   sdFontSystem.ensureLoaded(renderer);
+  // Drop any size the dictionary added on top (ensureFontSize). ensureLoaded above only
+  // reloads when the family changed, so a dictionary-only size otherwise stays resident for
+  // the rest of the session, holding per-style tables mid-heap. Reloaded on the next lookup.
+  sdFontSystem.releaseExtraSizes(renderer);
 
   // Reset orientation back to portrait for the rest of the UI
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);

@@ -94,6 +94,26 @@ int SdCardFontManager::loadFamilyExtraSize(const SdCardFontFamilyInfo& family, G
   return loadFile(*file, family.name.c_str(), renderer);
 }
 
+int SdCardFontManager::unloadExtraSizes(GfxRenderer& renderer) {
+  int unloaded = 0;
+  // Back to front so the erase can't shift an index we still have to visit; stop above 0, the
+  // reader-size font.
+  for (size_t i = loaded_.size(); i-- > 1;) {
+    // Keep the sizes the UI depends on. setupUiFallbacks() loads CJK UI sizes through the very
+    // same loadFamilyExtraSize() path, so an indiscriminate sweep here would strip the home and
+    // settings screens of their CJK glyphs for the rest of the session.
+    if (renderer.isFallbackTarget(loaded_[i].fontId)) continue;
+    renderer.removeFont(loaded_[i].fontId);
+    delete loaded_[i].font;
+    loaded_.erase(loaded_.begin() + static_cast<long>(i));
+    unloaded++;
+  }
+  if (unloaded > 0) {
+    LOG_DBG("SDMGR", "Unloaded %d extra size(s), %u still resident", unloaded, (unsigned)loaded_.size());
+  }
+  return unloaded;
+}
+
 void SdCardFontManager::unloadAll(GfxRenderer& renderer) {
   // Drop UI CJK fallbacks before the SD fonts they point at are freed.
   renderer.clearFallbackFonts();

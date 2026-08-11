@@ -59,6 +59,12 @@ class SdCardFont {
   // Returns the 12.4 fixed-point advance, or 0 if not found.
   uint16_t getAdvance(uint32_t codepoint, uint8_t style) const;
 
+  // Look up the ink metrics (bitmap width + left bearing, both px) for a codepoint.
+  // Returns false when the codepoint is not in the table or its bearing did not fit the
+  // entry (kNoInkMetrics) — callers must then fall back to a real glyph lookup rather than
+  // guess, since a wrong extent shifts line breaks.
+  bool getInkMetrics(uint32_t codepoint, uint8_t style, uint8_t* outWidth, int8_t* outLeftBearing) const;
+
   // Returns true if advance table is populated for at least one style.
   bool hasAdvanceTable() const;
 
@@ -110,6 +116,11 @@ class SdCardFont {
     // signal for diagnosing SD-font render/layout slowness.
     uint32_t overflowMisses = 0;
     uint32_t overflowMissMs = 0;
+    // On-demand glyph bitmaps that failed to allocate (see onGlyphMiss). Each one is a
+    // glyph drawText silently skips — visible on screen as a missing character. Counted
+    // because that symptom otherwise has to be inferred from a low largest-free-block in
+    // the logs, and only ever appeared as a serial LOG_ERR the device is not attached for.
+    uint32_t bitmapOom = 0;
   };
   void logStats(const char* label = "SDCF");
   void resetStats();
@@ -266,19 +277,47 @@ class SdCardFont {
   // RAII guard in onGlyphMiss. volatile: cross-task visibility for the check.
   volatile bool inGlyphMiss_ = false;
 
-  // Compact advance-only table for layout measurement (per-style).
-  // Built by buildAdvanceTable(), queried by getAdvance().
+  // Compact metrics table for layout measurement (per-style).
+  // Built by buildAdvanceTable(), queried by getAdvance() / getInkMetrics().
+  //
+  // `width` and `leftBearing` occupy padding the 6-byte {codepoint, advanceX} pair was already
+  // paying for, so carrying them is free: the struct is 8 bytes either way (static_assert
+  // below). They exist so GfxRenderer::getTextWidth can compute an INK extent from this table.
+  // Advance alone cannot: getTextWidth -> EpdFont::getTextBounds needs per-glyph left/width,
+  // which previously forced every codepoint of a non-prewarmed style through onGlyphMiss --
+  // one file open + 2 seeks + 2 reads at ~27ms each. A 43-codepoint definition spent 2179ms of
+  // a 2229ms wrap in exactly that.
   struct AdvanceEntry {
     uint32_t codepoint;
-    uint16_t advanceX;  // 12.4 fixed-point
+    uint16_t advanceX;   // 12.4 fixed-point
+    uint8_t width;       // glyph bitmap width in px; kNoInkMetrics => ink metrics unavailable
+    int8_t leftBearing;  // EpdGlyph::left in px
   };
+  static_assert(sizeof(AdvanceEntry) == 8, "ink metrics must fit the existing padding");
+  // EpdGlyph::left is an int16_t. Real glyphs at these point sizes sit well inside int8_t, but
+  // rather than truncate a bearing that does not fit we mark the entry and let the caller take
+  // the slow path for that codepoint. 255px is not a plausible glyph width, so it is free as a
+  // sentinel.
+  static constexpr uint8_t kNoInkMetrics = 0xFF;
   // Per-style advance table. Sorted by codepoint for binary lookup.
   // Bounded to ADVANCE_CACHE_LIMIT entries; persists across layout passes
   // (across calls to clearCache()) so repeated indexing of the same font
   // amortizes SD reads. Cleared only on font unload or clearPersistentCache().
+  //
+  // Capacity is tracked separately from size because merges arrive a few (often ONE) codepoint at
+  // a time: buildAdvanceTable only fetches what the table is missing, so device logs showed
+  // "+1 from SD, total=64/768" then "total=65/768". Reallocating the whole array per merge meant
+  // ~700 allocate-copy-free cycles per style to reach the cap, each block 8B larger than the last
+  // and each freed hole too small for the next -- the session-long heap fragmenter that collapsed
+  // the largest free block from 49KB to 8KB and never recovered. With a capacity, the common case
+  // merges in place with no allocator traffic at all, and growth is geometric (<=4 reallocations
+  // per style per session). See mergeIntoAdvanceTable.
   static constexpr uint32_t ADVANCE_CACHE_LIMIT = 768;
+  // First capacity allocated for a style, and the geometric growth floor.
+  static constexpr uint32_t ADVANCE_CACHE_MIN_CAP = 128;
   AdvanceEntry* advanceTable_[MAX_STYLES] = {};
   uint32_t advanceTableSize_[MAX_STYLES] = {};
+  uint32_t advanceTableCap_[MAX_STYLES] = {};
   bool advanceTableLookup(uint8_t styleIdx, uint32_t codepoint, uint16_t* outAdvance) const;
   // Merge sortedNew (sorted by codepoint, no overlap with existing) into the
   // advance table for styleIdx, preserving sort order; cap-truncates the tail.

@@ -35,6 +35,14 @@ class SdCardFontSystem {
   /// keeps using the reader-size font. Not for switching families: use ensureLoaded().
   int ensureFontSize(const char* familyName, uint8_t pointSize, GfxRenderer& renderer);
 
+  /// Drop additively-loaded sizes from ensureFontSize(), keeping the reader-size font and the
+  /// CJK UI fallback sizes. Each extra .cpfont holds session-lifetime per-style tables
+  /// (intervals, glyph metadata, kern classes, advance table) in the middle of the heap, so a
+  /// dictionary-only size left resident permanently costs contiguous blocks the next book build
+  /// needs. Call when leaving the reader; ensureFontSize() reloads on the next lookup, under its
+  /// own heap gate.
+  void releaseExtraSizes(GfxRenderer& renderer);
+
   /// Load an arbitrary SD font family (NOT the current selection) so a settings
   /// preview can render it, returning its font ID (0 on failure). The manager holds
   /// one family resident, so this unloads the current one; call ensureLoaded() to

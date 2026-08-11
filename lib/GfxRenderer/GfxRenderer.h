@@ -41,6 +41,11 @@ class GfxRenderer {
  private:
   static constexpr size_t BW_BUFFER_CHUNK_SIZE = 8000;  // 8KB chunks to allow for non-contiguous memory
 
+  // Ink extent of `text` from an SD font's metrics table alone, no glyph loads. Returns false
+  // (writing nothing) when the table cannot answer exactly, so getTextWidth falls back to the
+  // glyph path. See the definition for why it is all-or-nothing per string.
+  bool getSdInkWidth(int fontId, const char* text, EpdFontFamily::Style style, int* outWidth) const;
+
   HalDisplay& display;
   RenderMode renderMode;
   Orientation orientation;
@@ -145,6 +150,14 @@ class GfxRenderer {
   // setFallbackFont maps a primary UI font id to an SD font id of the same size.
   void setFallbackFont(int primaryFontId, int fallbackFontId) { fallbackFontMap_[primaryFontId] = fallbackFontId; }
   void clearFallbackFonts() { fallbackFontMap_.clear(); }
+  // True when fontId is the TARGET of any fallback (i.e. some UI font resolves CJK through it).
+  // Callers freeing individual SD fonts use this to leave the UI's fallbacks alone.
+  bool isFallbackTarget(int fontId) const {
+    for (const auto& [primary, fallback] : fallbackFontMap_) {
+      if (fallback == fontId) return true;
+    }
+    return false;
+  }
   // Ensure SD card font glyph data is loaded for the given text. Called from layout code
   // (which holds a const GfxRenderer&) before measuring word widths. Safe to call on non-SD fonts (no-op).
   // styleMask: bitmask of styles to prepare (bit 0=regular, 1=bold, 2=italic, 3=bold-italic).

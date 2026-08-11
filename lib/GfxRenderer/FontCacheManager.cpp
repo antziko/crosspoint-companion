@@ -20,7 +20,7 @@ void FontCacheManager::clearCache() {
   }
 }
 
-void FontCacheManager::prewarmCache(int fontId, const char* utf8Text, uint8_t styleMask) {
+int FontCacheManager::prewarmCache(int fontId, const char* utf8Text, uint8_t styleMask) {
   // SD card font prewarm path: prewarm all requested styles in one call
   auto it = sdCardFonts_.find(fontId);
   if (it != sdCardFonts_.end()) {
@@ -28,12 +28,17 @@ void FontCacheManager::prewarmCache(int fontId, const char* utf8Text, uint8_t st
     if (missed > 0) {
       LOG_DBG("FCM", "prewarmCache(SD): %d glyph(s) not found (styleMask=0x%02X)", missed, styleMask);
     }
-    return;
+    return missed;
   }
 
   // Standard compressed font prewarm path: loop over all requested styles
-  if (!fontDecompressor_ || fontMap_.count(fontId) == 0) return;
+  if (!fontDecompressor_ || fontMap_.count(fontId) == 0) return -1;
 
+  // Worst case across the requested styles: one style failing to prepare is enough to put the
+  // draw path back on the per-glyph hot-group fallback, so a caller checking "did this work"
+  // must not see a later success mask an earlier failure. -1 (not attempted) outranks a count.
+  int worst = -1;
+  bool attempted = false;
   for (uint8_t i = 0; i < 4; i++) {
     if (!(styleMask & (1 << i))) continue;
     auto style = static_cast<EpdFontFamily::Style>(i);
@@ -43,7 +48,11 @@ void FontCacheManager::prewarmCache(int fontId, const char* utf8Text, uint8_t st
     if (missed > 0) {
       LOG_DBG("FCM", "prewarmCache: %d glyph(s) not cached for style %d", missed, i);
     }
+    if (missed < 0) return -1;  // no free page slot: nothing downstream will be cached
+    worst = attempted && worst > missed ? worst : missed;
+    attempted = true;
   }
+  return attempted ? worst : -1;
 }
 
 void FontCacheManager::logStats(const char* label) {

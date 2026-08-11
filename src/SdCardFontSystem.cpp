@@ -2,6 +2,7 @@
 
 #include <GfxRenderer.h>
 #include <Logging.h>
+#include <esp_heap_caps.h>
 
 #include <iterator>
 
@@ -232,6 +233,15 @@ int SdCardFontSystem::ensureFontSize(const char* familyName, const uint8_t point
   LOG_DBG("SDFS", "Loaded %s at %upt for the dictionary: free %u -> %u", familyName, pointSize, (unsigned)freeBefore,
           (unsigned)ESP.getFreeHeap());
   return id;
+}
+
+void SdCardFontSystem::releaseExtraSizes(GfxRenderer& renderer) {
+  const uint32_t freeBefore = ESP.getFreeHeap();
+  const int unloaded = manager_.unloadExtraSizes(renderer);
+  if (unloaded > 0) {
+    LOG_DBG("SDFS", "Released %d extra font size(s): free %u -> %u, largest %u", unloaded, (unsigned)freeBefore,
+            (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  }
 }
 
 int SdCardFontSystem::loadFamilyForPreview(const char* familyName, uint8_t pointSize, GfxRenderer& renderer) {

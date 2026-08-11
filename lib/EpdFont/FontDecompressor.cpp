@@ -543,5 +543,10 @@ void FontDecompressor::logStats(const char* label) {
   if (stats.hotGroupOomSkips > 0) {
     LOG_ERR("FDC", "[%s] hotGroup OOM skips=%lu (frag-limited; glyphs dropped)", label, stats.hotGroupOomSkips);
   }
-  resetStats();
+  // Deliberately does NOT resetStats(). SdCardFont::logStats (SdCardFont.cpp:1437) does not
+  // either, and the asymmetry silently broke the only consumer that reads these counters off
+  // the device: DictionaryDefinitionActivity calls FontCacheManager::logStats one line before
+  // logDictPhase writes fdcOom/fdcMs to the SD log, so every line in a 278-line device log
+  // read fdcOom=0 fdcMs=0 — including renders where decompression plainly dominated.
+  // FontCacheManager::resetStats() owns the per-page lifecycle (called from loadPage).
 }

@@ -32,6 +32,15 @@ class SdCardFontManager {
   // Unload everything, unregister from renderer.
   void unloadAll(GfxRenderer& renderer);
 
+  // Unload additively-loaded sizes (see loadFamilyExtraSize), freeing each SdCardFont and
+  // everything that hangs off it — per-style interval / glyph-metadata / kern-class tables and the
+  // persistent advance table. Those are session-lifetime allocations sitting in the middle of the
+  // reader's arena, so a dictionary-only size left resident permanently costs contiguous heap.
+  // Keeps the reader-size font at index 0 (getFontId() depends on it) and any size currently
+  // registered as a UI fallback target (setupUiFallbacks loads CJK UI sizes through the same
+  // path). Returns the count unloaded.
+  int unloadExtraSizes(GfxRenderer& renderer);
+
   // Look up the font ID for the loaded family. Returns 0 if nothing loaded
   // or familyName doesn't match.
   int getFontId(const std::string& familyName) const;
