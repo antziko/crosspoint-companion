@@ -1222,8 +1222,9 @@ void EpubReaderActivity::launchHighlightWordSelect() {
                 chapterTitle.empty() ? nullptr : chapterTitle.c_str(), hr->previewText.c_str(), currentPage);
             if (addRes == BookmarkStore::AddResult::LimitReached) {
               RenderLock lock(*this);
+              // drawPopup refreshes internally (BaseTheme.cpp:803); a second displayBuffer here
+              // was a second full-panel FAST refresh of the same pixels.
               GUI.drawPopup(renderer, tr(STR_MARK_LIMIT));
-              renderer.displayBuffer(HalDisplay::FAST_REFRESH);
               delay(900);
             }
           }
@@ -3058,8 +3059,7 @@ void EpubReaderActivity::addBookmark(bool returnMark, bool lightRefresh) {
     // Tell the user (a deliberate add only — auto-dropped return marks stay silent).
     if (!returnMark) {
       RenderLock lock(*this);
-      GUI.drawPopup(renderer, tr(STR_MARK_LIMIT));
-      renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+      GUI.drawPopup(renderer, tr(STR_MARK_LIMIT));  // refreshes internally (BaseTheme.cpp:803)
       delay(900);
       requestUpdate();
     }

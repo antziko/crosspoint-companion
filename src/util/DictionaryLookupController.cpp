@@ -45,8 +45,10 @@ void DictionaryLookupController::startLookup(const std::string& word, bool recor
     // (e.g. from navigation) may still be mid-refresh, and concurrent framebuffer / SPI
     // access from two tasks crashes the e-ink driver.
     RenderLock lock;
+    // No displayBuffer() after this: BaseTheme::drawPopup already ends with one
+    // (BaseTheme.cpp:803) and no theme overrides it, so a second call here was a second
+    // full-panel FAST refresh of pixels the panel had just been given.
     GUI.drawPopup(renderer, tr(STR_DICT_LOOKING_UP));
-    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
   }
   task = makeUniqueNoThrow<DictLookupTask>(*this);
   if (!task) {
@@ -237,8 +239,7 @@ void DictionaryLookupController::lookupOrPopup(const std::string& rawWord) {
 void DictionaryLookupController::showMemoryErrorAndReset() {
   {
     RenderLock lock;
-    GUI.drawPopup(renderer, tr(STR_MEMORY_ERROR));
-    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    GUI.drawPopup(renderer, tr(STR_MEMORY_ERROR));  // refreshes internally — see startLookup()
   }
   vTaskDelay(1000 / portTICK_PERIOD_MS);
   state = LookupState::Idle;
@@ -249,8 +250,7 @@ void DictionaryLookupController::showNoWordPopup() {
   {
     // Serialize with render task — see comment in startLookup() for the race this prevents.
     RenderLock lock;
-    GUI.drawPopup(renderer, tr(STR_DICT_NO_WORD));
-    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    GUI.drawPopup(renderer, tr(STR_DICT_NO_WORD));  // refreshes internally — see startLookup()
   }
   vTaskDelay(1000 / portTICK_PERIOD_MS);
   owner.requestUpdate();
@@ -310,5 +310,22 @@ bool DictionaryLookupController::shouldShowPopup() {
   if (csptEntryCountCached == UINT32_MAX) {
     csptEntryCountCached = Dictionary::readCsptEntryCount(cachePath.c_str());
   }
-  return csptEntryCountCached == 0 || csptEntryCountCached > AUTO_POPUP_CSPT_ENTRY_THRESHOLD;
+  // Two independent costs, and the popup has to cover both because nothing repaints the panel
+  // between here and the definition's first displayBuffer (DictionaryDefinitionActivity.cpp:1147)
+  // — e-ink holds the last frame, so this toast stays on glass through the whole open.
+  //
+  // 1. Lookup: the .cspt entry count predicts how long Dictionary::locate() scans. 0 means no
+  //    optimized index at all (full scan).
+  // 2. Render: an SD-card definition font. Built-ins decompress into a RAM cache and never pay
+  //    per-glyph SD I/O, which is why prewarmDefinitionFont() returns early for them
+  //    (DictionaryDefinitionActivity.cpp:352). The prewarm scan, the extra style loads and the
+  //    glyph-miss path — measured at render=4469ms with missMs=3688 of it — exist only on the SD
+  //    path. The .cspt count cannot see any of that, so a well-indexed dictionary used to
+  //    suppress the toast and then render for seconds against a frozen word-select page.
+  //
+  // Not also testing whether the definition is markup: markup costs extra only when it forces
+  // extra font styles, and extra styles cost real time only on the SD path already covered here.
+  // It would buy no discrimination and cost a second Dictionary::readInfo() SD read per lookup.
+  return csptEntryCountCached == 0 || csptEntryCountCached > AUTO_POPUP_CSPT_ENTRY_THRESHOLD ||
+         renderer.isSdCardFont(SETTINGS.getDefinitionFontId());
 }

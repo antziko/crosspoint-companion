@@ -202,6 +202,14 @@ void DictionaryDefinitionActivity::onEnter() {
     sdFontSystem.ensureFontSize(SETTINGS.getReaderSdFontFamilyName(), SETTINGS.getDefinitionPointSize(), renderer);
   }
   wrapText();
+  // The screen this replaces was painted FAST and is very likely carrying the "Looking up"
+  // toast: shouldShowPopup() now fires for every SD-font definition, and nothing repaints the
+  // panel between that popup and render()'s displayBuffer below — so the toast box sits under
+  // the incoming definition text unless this paint collapses the panel state first. Same
+  // hazard EpubReaderActivity::drawIndexingPopup() works around (:490-493), and it applies
+  // equally to the word-select highlight or a previous definition we may be replacing instead.
+  // Costs one HALF refresh in place of a FAST on the first paint only.
+  renderer.forceCleanRefreshNextPaint();
   // immediate=true, and it matters. The default requestUpdate() only sets an atomic flag
   // (ActivityManager.cpp:330-334); the render task is not notified until ActivityManager::loop()
   // reaches :182-188, which happens after onEnter() RETURNS. So the history write below was not
