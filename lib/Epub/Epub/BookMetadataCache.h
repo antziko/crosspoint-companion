@@ -62,6 +62,19 @@ class BookMetadataCache {
   // wrapper serves whichever pass is active (spine, then toc).
   std::unique_ptr<serialization::BufferedFileWriter> passOut;
 
+  // Cumulative spine sizes, cached in RAM at load() so progress/percent lookups are
+  // O(1) instead of 2 seeks + a heap-allocating SpineEntry read per access (4 bytes
+  // per spine item).
+  //
+  // Deliberately NOT a std::vector: spineCount is uint16_t and 2000+ chapter EPUBs are
+  // a documented case here (see the #134 note in finalize()), so this asks for up to
+  // 8KB contiguous on a real book and 256KB in the limit. std::vector::reserve goes
+  // through the *throwing* operator new, which -fno-exceptions turns into abort() — a
+  // failed reserve would crash on book open rather than degrade. makeUniqueNoThrow
+  // returns null instead, and callers fall back to the per-access seek path.
+  std::unique_ptr<uint32_t[]> cumulativeSizes;
+  uint16_t cumulativeSizeCount = 0;
+
   // Index for fast href→spineIndex lookup (used only for large EPUBs)
   struct SpineHrefIndexEntry {
     uint64_t hrefHash;  // FNV-1a 64-bit hash
@@ -113,6 +126,10 @@ class BookMetadataCache {
   bool load();
   SpineEntry getSpineEntry(int index);
   TocEntry getTocEntry(int index);
+  // Cumulative byte size up to and including the given spine item, from the in-RAM
+  // cache populated in load(). False when the cache is absent (allocation failed) or
+  // the index is out of range, so the caller can fall back to reading from the file.
+  bool tryGetCumulativeSize(int index, uint32_t& out) const;
   int getSpineCount() const { return spineCount; }
   int getTocCount() const { return tocCount; }
   bool isLoaded() const { return loaded; }

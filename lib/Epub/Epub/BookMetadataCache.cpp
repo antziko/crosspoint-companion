@@ -2,6 +2,7 @@
 
 #include <BufferedFile.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <Serialization.h>
 #include <Utf8.h>
 #include <ZipFile.h>
@@ -506,8 +507,39 @@ bool BookMetadataCache::load() {
   serialization::readString(bookFile, coreMetadata.coverItemHref);
   serialization::readString(bookFile, coreMetadata.textReferenceHref);
 
+  // Cache cumulative spine sizes in RAM. ProgressMapper resolves a sync position by
+  // linear-scanning these (ProgressMapper.cpp:805), which otherwise costs 2 seeks plus
+  // a heap-allocating SpineEntry read *per spine item scanned*; the progress bar pays
+  // the same cost on every render. Spine entries are written contiguously in index
+  // order immediately after the two LUTs (see finalize(): LUT positions are
+  // pos + lutOffset + lutSize), so one sequential pass fills the whole table.
+  //
+  // Optional by design — on OOM we simply keep the old per-access seek path rather
+  // than failing the book open. See the member declaration for why this is not a vector.
+  cumulativeSizeCount = 0;
+  cumulativeSizes = makeUniqueNoThrow<uint32_t[]>(spineCount);
+  if (cumulativeSizes) {
+    const uint32_t lutSize = (static_cast<uint32_t>(spineCount) + tocCount) * sizeof(uint32_t);
+    bookFile.seek(lutOffset + lutSize);
+    for (uint16_t i = 0; i < spineCount; i++) {
+      cumulativeSizes[i] = readSpineEntry(bookFile).cumulativeSize;
+    }
+    cumulativeSizeCount = spineCount;
+  } else {
+    LOG_ERR("BMC", "OOM: %u bytes for cumulative size cache; falling back to per-access reads",
+            static_cast<unsigned>(spineCount * sizeof(uint32_t)));
+  }
+
   loaded = true;
   LOG_DBG("BMC", "Loaded cache data: %d spine, %d TOC entries", spineCount, tocCount);
+  return true;
+}
+
+bool BookMetadataCache::tryGetCumulativeSize(const int index, uint32_t& out) const {
+  if (!cumulativeSizes || index < 0 || index >= static_cast<int>(cumulativeSizeCount)) {
+    return false;
+  }
+  out = cumulativeSizes[index];
   return true;
 }
 
