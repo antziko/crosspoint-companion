@@ -90,7 +90,7 @@ if (parsedSize != fileSize) {
 
 ## `section.bin`
 
-### Version 44
+### Version 47
 
 Each file in `sections/*.bin` stores one laid-out spine section. The header is
 also the cache-busting key: if any layout-affecting setting differs from the
@@ -99,6 +99,18 @@ current reader settings, the section is discarded and rebuilt.
 > This document lags the code. `SECTION_FILE_VERSION` in
 > `lib/Epub/Epub/Section.cpp` is the source of truth; versions 31-43 are
 > described only by the changelog comment above that constant.
+
+Version 47 widens the fixed-size footnote href field from 96 to 256 bytes, so
+each serialized footnote record grows from 128 to 288 bytes. `Page::serialize`
+writes the href raw at `sizeof(FootnoteEntry::href)`, so a v46 file read back at
+the new width desyncs every subsequent read — older section caches must be
+discarded and rebuilt.
+
+Versions 45 and 46 make no structural change; both exist only to force stale
+caches to rebuild after layout-affecting changes elsewhere (the reworked CSS
+cache-load gate, and the SD advance-table fast path in
+`GfxRenderer::getTextWidth`). See the changelog comment above
+`SECTION_FILE_VERSION`.
 
 Version 44 adds a fifth header offset slot and a `uint32_t` entry per page for
 the visible-text offset LUT, so a reading position can be expressed as a content
@@ -136,10 +148,10 @@ import std.mem;
 import std.string;
 import std.core;
 
-#define EXPECTED_VERSION 44
+#define EXPECTED_VERSION 47
 #define MAX_STRING_LENGTH 65535
 #define FOOTNOTE_NUMBER_LEN 32
-#define FOOTNOTE_HREF_LEN 96
+#define FOOTNOTE_HREF_LEN 256
 
 struct String {
     u32 length [[hidden, comment("String byte length")]];
