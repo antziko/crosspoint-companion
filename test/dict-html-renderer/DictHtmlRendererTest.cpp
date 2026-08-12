@@ -494,6 +494,34 @@ static const std::vector<ExpectedSpan> kXdxfRealWorld = {
     S("----------", true),
 };
 
+// KrefArrow — the U+2191 that XDXF dictionaries put in front of a cross-reference. It is link
+// decoration, not content, and no font on an SD card carries the Arrows block, so it reached the
+// screen as the U+FFFD replacement glyph ("?Affected and insincere"). Cambridge alone has 11,617
+// of them and every one sits immediately after a <kref>. The strip is scoped to that position for
+// a reason this table pins down: arrows elsewhere are real text (reader.dict writes inflections
+// as "glitch→glitches"), and an arrow-free <kref> is the norm in other dictionaries.
+static const std::vector<ExpectedSpan> kKrefArrow = {
+    S("Cross-reference arrows. Expected: a leading U+2191 dropped from kref (including through a nested c), an "
+      "arrow-free kref untouched, a non-leading arrow kept, an empty kref not eating the arrow after it, and an "
+      "arrow in ordinary body text kept.",
+      true),
+    S("----------", true),
+    // The case from the bug report: the arrow goes, the cross-reference text stays.
+    S("Lead: Stripped", true),
+    // No arrow to strip — the Oxford shape, 7168 krefs and not one arrow.
+    S("Bare: Kept plain", true),
+    // Only the LEADING arrow is decoration; one mid-text is content.
+    S("Inner: Kept \xE2\x86\x91 inside", true),
+    // <c> intervenes between the kref open and the text; the flag deliberately survives it.
+    S("Nested: Through c", true),
+    // Empty kref: the strip must be disarmed at </kref>, so the following arrow survives...
+    S("Empty: ", true),
+    S("\xE2\x86\x91Kept"),
+    // ...as must an arrow in ordinary body text, which no kref ever armed.
+    S("Body: rule \xE2\x86\x91 kept", true),
+    S("----------", true),
+};
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -535,6 +563,7 @@ int main(int argc, char** argv) {
       {"BlazeSilent", kAbbrExpand, false},  {"ClearSvg", kBlockStrip, false},  {"DarkMath", kBlockStruct, false},
       {"EmptyGallery", kFormatTags, false}, {"FrostNowiki", kStripKeep, true}, {"GlowPoem", kWikiAnnot, false},
       {"HazeEntity", kHtmlEntities, false}, {"IvoryXdxf", kXdxfTags, false},   {"JadeXdxf", kXdxfRealWorld, false},
+      {"KrefArrow", kKrefArrow, false},
   };
 
   for (const auto& test : tests) {

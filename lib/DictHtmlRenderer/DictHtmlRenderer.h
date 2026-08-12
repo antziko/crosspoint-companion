@@ -171,6 +171,14 @@ class DictHtmlRenderer {
   // Transient rendering flags — NOT saved/restored per tag
   bool newlinePending = false;
   bool listItemPending = false;
+  // Set while a <kref> has been opened but no text has arrived yet, so emitText can drop a
+  // LEADING U+2191. That arrow is StarDict link decoration ("this is a cross-reference"), not
+  // content: the Cambridge XDXF dictionary carries 11,617 of them and every single one sits
+  // immediately after a <kref>. Nothing on this device follows links, and no font on the card
+  // has the Arrows block, so it rendered as the U+FFFD replacement glyph — a bare "?" in front
+  // of every cross-reference (EpdFont.cpp:224). Scoped to kref, and to the leading position,
+  // because arrows elsewhere ARE content: reader.dict writes inflections as "glitch→glitches".
+  bool krefArrowPending_ = false;
 
   std::vector<char> textBuf;
 

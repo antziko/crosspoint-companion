@@ -143,6 +143,7 @@ void DictHtmlRenderer::reset() {
   fmt = FormatState{};
   newlinePending = false;
   listItemPending = false;
+  krefArrowPending_ = false;
   spanSink_ = SpanSink{};  // batch mode by default; streaming sets it after reset()
 
   // Reuse the existing parser (cheap reset) rather than free+create on every
@@ -202,6 +203,20 @@ void DictHtmlRenderer::pushSpan() {
 
 void DictHtmlRenderer::emitText(const char* s, int len) {
   if (len <= 0) return;
+
+  // First text inside a <kref>: drop a leading U+2191 (E2 86 91) — see krefArrowPending_.
+  // Cleared unconditionally, so only the leading position is ever considered; expat never
+  // splits a codepoint across callbacks, so the three bytes always arrive together.
+  if (krefArrowPending_) {
+    krefArrowPending_ = false;
+    if (len >= 3 && static_cast<unsigned char>(s[0]) == 0xE2 && static_cast<unsigned char>(s[1]) == 0x86 &&
+        static_cast<unsigned char>(s[2]) == 0x91) {
+      s += 3;
+      len -= 3;
+      if (len <= 0) return;
+    }
+  }
+
   for (int i = 0; i < len; i++) {
     char c = s[i];
     if (c == '\r' || c == '\n') {
@@ -334,15 +349,28 @@ void XMLCALL DictHtmlRenderer::onStart(void* ud, const XML_Char* name, const XML
       default:
         break;
     }
+
+    // Arm the leading-arrow strip. Not a switch case: classify() folds kref in with c, dtrn,
+    // iref, rref and the rest of TagAction::REGISTERED, so only the name distinguishes it.
+    // Deliberately not cleared by intervening tags — <kref><c>↑Foo</c></kref> must strip too.
+    if (strcmp(name, "kref") == 0) {
+      self->krefArrowPending_ = true;
+    }
   }
 
   self->tagStack.push_back(entry);
 }
 
 void XMLCALL DictHtmlRenderer::onEnd(void* ud, const XML_Char* name) {
-  (void)name;
   auto* self = static_cast<DictHtmlRenderer*>(ud);
   if (self->parseError) return;
+
+  // Disarm on close so an empty <kref></kref> cannot eat an arrow that belongs to the text
+  // after it. Done before the tagStack guard: the flag is parser state, not stack state.
+  if (strcmp(name, "kref") == 0) {
+    self->krefArrowPending_ = false;
+  }
+
   if (self->tagStack.empty()) return;
 
   StackEntry& entry = self->tagStack.back();
