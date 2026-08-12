@@ -522,6 +522,32 @@ static const std::vector<ExpectedSpan> kKrefArrow = {
     S("----------", true),
 };
 
+// LumenGlyph — codepoints no SD-card font subset carries, mapped to near-equivalents rather than
+// dropped, because unlike the kref arrow they are content. Cambridge uses ▪ 25,777 times as an
+// idiom separator, Ⱶ 1,694 times as a Thesaurus tree branch, and ✗ 1,497 times to mark an example
+// sentence as INCORRECT — the last with no ✓ counterpart anywhere, so losing it inverts the
+// meaning. Untouched they draw as U+FFFD, i.e. "?" (EpdFont.cpp:224). The bullet case is the
+// control: a symbol the fonts do have must pass through unchanged.
+static const std::vector<ExpectedSpan> kGlyphSubs = {
+    S("Undrawable symbol substitution. Expected: the small square, the tree tee and the ballot X each mapped to a "
+      "glyph every font carries, the bullet passed through untouched, and the kref arrow still stripped alongside a "
+      "substitution.",
+      true),
+    S("----------", true),
+    // U+25AA -> U+00B7. The kref text either side is untouched; </kref> flushes (REGISTERED),
+    // which is why the separator lands at the head of the second span rather than merging.
+    S("Sep: every minute", true),
+    S(" \xC2\xB7 every move"),
+    // U+2C75 -> "|-", and the kref arrow on the same line still goes.
+    S("Tree: |- Experienced", true),
+    // U+2717 -> U+00D7, the marker that an example is wrong.
+    S("Wrong: \xC3\x97 ", true),
+    S("I see him everytime.", false, false, /*italic=*/true),
+    // U+2022 is present in every font on the card — must NOT be substituted.
+    S("Kept: \xE2\x80\xA2 bullet", true),
+    S("----------", true),
+};
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -563,7 +589,7 @@ int main(int argc, char** argv) {
       {"BlazeSilent", kAbbrExpand, false},  {"ClearSvg", kBlockStrip, false},  {"DarkMath", kBlockStruct, false},
       {"EmptyGallery", kFormatTags, false}, {"FrostNowiki", kStripKeep, true}, {"GlowPoem", kWikiAnnot, false},
       {"HazeEntity", kHtmlEntities, false}, {"IvoryXdxf", kXdxfTags, false},   {"JadeXdxf", kXdxfRealWorld, false},
-      {"KrefArrow", kKrefArrow, false},
+      {"KrefArrow", kKrefArrow, false},     {"LumenGlyph", kGlyphSubs, false},
   };
 
   for (const auto& test : tests) {

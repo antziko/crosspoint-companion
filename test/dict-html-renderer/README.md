@@ -1,7 +1,7 @@
 # DictHtmlRenderer Smoke Test
 
 Host-side smoke test for `lib/DictHtmlRenderer/`. Verifies that the renderer
-produces correct `StyledSpan` output for all 10 tag categories in the
+produces correct `StyledSpan` output for all 11 tag categories in the
 `html-definitions` test dictionary, that the streaming render path matches the
 batch path, exercises boundary conditions, and runs the IPA utility unit tests.
 
@@ -37,9 +37,9 @@ For each test the output shows:
 
 At the end: `Results: N passed, N failed`.
 
-## Test groups (18 tests)
+## Test groups (19 tests)
 
-### Group A: Dictionary entries (10 tests)
+### Group A: Dictionary entries (11 tests)
 
 Each entry's full raw content is passed to `renderer.render()` — identical to how
 on-device lookup code delivers a dictionary entry to the renderer. The expected
@@ -61,6 +61,7 @@ collisions with real dictionary words.
 | IvoryXdxf | XDXF (`sametypesequence=x`) vocabulary: `k`, `abr`, `ex`, `c`, `dtrn`, `co`, `kref`, `gr`, `opt`, `nu`, plus the tags XDXF shares with HTML |
 | JadeXdxf | Real-world XDXF entry shape (Cambridge-style) — the regression that rendered markup as visible text |
 | KrefArrow | The U+2191 cross-reference marker: stripped when leading a `<kref>` (including through a nested tag), kept everywhere else |
+| LumenGlyph | Codepoints no font subset carries, mapped to near-equivalents: `▪`→`·`, `Ⱶ`→`\|-`, `✗`→`×`; `•` passes through untouched |
 
 ### Group D: Streaming parity (1 test)
 

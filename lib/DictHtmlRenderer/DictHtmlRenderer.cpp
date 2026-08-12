@@ -201,6 +201,31 @@ void DictHtmlRenderer::pushSpan() {
   listItemPending = false;
 }
 
+// Codepoints that no SD-card font subset carries, mapped to a near-equivalent every font has.
+// Unlike the kref arrow these are CONTENT and must not be dropped — the ✗ in particular is the
+// only thing marking an example sentence as incorrect, and the dictionary has no ✓ counterpart,
+// so losing it inverts the meaning. Left alone they reach the screen as EpdFont's U+FFFD
+// replacement glyph, i.e. a bare "?" (EpdFont.cpp:224).
+//
+// Mapped here rather than at the point of the glyph miss so that measuring, prewarm and drawing
+// all see the same character: a font-layer substitution would have to keep EpdFont::getGlyph,
+// SdCardFont's advance-table replacementIdx (SdCardFont.cpp:1293) and the prewarm scan in
+// agreement, and disagreeing lays out widths for a glyph that is never drawn. The cost is that a
+// font which genuinely has ✗ still gets ×; dingbats only arrive with the `symbols`/`reading`
+// interval presets, which no text-font subset uses.
+//
+// Caller has already matched the 0xE2 lead byte, so this is only reached for U+2000-U+2FFF.
+static const char* substituteUndrawable(const unsigned char b1, const unsigned char b2) {
+  if (b1 == 0x96 && b2 == 0xAA) return "\xC2\xB7";  // U+25AA ▪ -> U+00B7 ·  idiom separator
+  if (b1 == 0xB1 && b2 == 0xB5) return "|-";        // U+2C75 Ⱶ -> "|-"      tree tee, see below
+  if (b1 == 0x9C && b2 == 0x97) return "\xC3\x97";  // U+2717 ✗ -> U+00D7 ×  "incorrect example"
+  return nullptr;
+}
+// Ⱶ is half of a pair: the Thesaurus outline uses it for a middle child and a plain ASCII 'L'
+// for the last one — the converter's lookalikes for ├ and └. All 222 runs of Ⱶ lines in the
+// Cambridge dictionary are closed by an L line. 'L' is an ordinary letter and cannot be
+// distinguished from real text, so it stays; "|-" is chosen to still read as a tree beside it.
+
 void DictHtmlRenderer::emitText(const char* s, int len) {
   if (len <= 0) return;
 
@@ -218,6 +243,17 @@ void DictHtmlRenderer::emitText(const char* s, int len) {
   }
 
   for (int i = 0; i < len; i++) {
+    // One comparison guards the whole substitution table: every codepoint in it is U+2000-U+2FFF,
+    // so every UTF-8 encoding starts 0xE2.
+    if (static_cast<unsigned char>(s[i]) == 0xE2 && i + 2 < len) {
+      if (const char* sub =
+              substituteUndrawable(static_cast<unsigned char>(s[i + 1]), static_cast<unsigned char>(s[i + 2]))) {
+        pendingText += sub;
+        i += 2;
+        continue;
+      }
+    }
+
     char c = s[i];
     if (c == '\r' || c == '\n') {
       pushSpan();
