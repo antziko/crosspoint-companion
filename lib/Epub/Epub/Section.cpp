@@ -73,7 +73,12 @@ namespace {
 //      kerning and ligatures (neither is resident during layout), so a measured width can
 //      differ by a pixel or two from the v45 glyph-based one. Widths decide where lines break,
 //      and v45 cached line/word positions were computed with the old ones.
-constexpr uint8_t SECTION_FILE_VERSION = 46;
+// v47: Footnote href records grew from 96 to 256 bytes (#2722). Page serializes the
+//      href field raw at sizeof(FootnoteEntry::href), so the record width in the file
+//      changed — a v46 .bin read back at the new width desyncs every subsequent read.
+//      Covers upstream's separate #2935 bump (their v37) as well; feat's numbering is
+//      independently ahead, so this is one bump rather than two.
+constexpr uint8_t SECTION_FILE_VERSION = 47;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
