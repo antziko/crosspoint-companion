@@ -20,6 +20,12 @@
 
 int KOReaderSyncClient::lastHttpCode = 0;
 
+// Any 2xx means the server accepted the request. The reference kosync server always
+// answers 200, so the original code compared against it exactly; KOSync-compatible
+// implementations do not (BookLore/grimmory is a Spring service and answers a PUT with
+// the idiomatic 201/204), which made every sync against them fail — upstream issue #2876.
+static constexpr bool isSuccessStatus(const int status) { return status >= 200 && status < 300; }
+
 // Cumulative GET/PUT byte counters for the sync summary. File-scope so every leg
 // (member function) below can add to them; reset once per sync via resetByteCounters().
 static uint32_t s_bytesDown = 0;
@@ -308,7 +314,10 @@ KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
   LOG_DBG("KOSync", "Auth response: %d", resp.status);
 
   if (!resp.transportOk) return NETWORK_ERROR;
-  if (resp.status == 200) return OK;
+  // Any 2xx is success. The reference kosync server answers 200, but KOSync-compatible
+  // implementations differ (BookLore/grimmory is a Spring service and uses the idiomatic
+  // codes), and a 201/204 used to land in SERVER_ERROR — upstream issue #2876.
+  if (isSuccessStatus(resp.status)) return OK;
   if (resp.status == 401) return AUTH_FAILED;
   return SERVER_ERROR;
 }
@@ -334,7 +343,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::createUser() {
   LOG_DBG("KOSync", "Create user response: %d", resp.status);
 
   if (!resp.transportOk) return NETWORK_ERROR;
-  if (resp.status == 200 || resp.status == 201) return OK;
+  if (isSuccessStatus(resp.status)) return OK;  // 2xx: created
   if (resp.status == 402) return USER_EXISTS;
   return SERVER_ERROR;
 }
@@ -353,7 +362,12 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
 
   if (!resp.transportOk) return NETWORK_ERROR;
 
-  if (resp.status == 200 && !resp.body.empty()) {
+  // 204 = accepted, but nothing stored for this document (Spring-style implementations;
+  // the reference server answers 200 with an empty object instead). Take the same
+  // graceful no-remote-progress path as 404 rather than falling through to SERVER_ERROR.
+  if (resp.status == 204) return NOT_FOUND;
+
+  if (isSuccessStatus(resp.status) && !resp.body.empty()) {
     JsonDocument doc;
     const DeserializationError error = deserializeJson(doc, resp.body.c_str());
 
@@ -444,7 +458,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
   LOG_DBG("KOSync", "Update progress response: %d", resp.status);
 
   if (!resp.transportOk) return NETWORK_ERROR;
-  if (resp.status == 200 || resp.status == 202) return OK;
+  if (isSuccessStatus(resp.status)) return OK;
   if (resp.status == 401) return AUTH_FAILED;
   return SERVER_ERROR;
 }
@@ -464,7 +478,10 @@ KOReaderSyncClient::Error KOReaderSyncClient::getBookmarks(const std::string& do
 
   if (!resp.transportOk) return NETWORK_ERROR;
 
-  if (resp.status == 200 && !resp.body.empty()) {
+  // 204: accepted, nothing stored yet — same graceful path as 404 (see getProgress).
+  if (resp.status == 204) return NOT_FOUND;
+
+  if (isSuccessStatus(resp.status) && !resp.body.empty()) {
     JsonDocument doc;
     const DeserializationError error = deserializeJson(doc, resp.body.c_str());
     if (error) {
@@ -553,7 +570,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
   }
 
   if (!transportOk) return NETWORK_ERROR;
-  if (status == 200 || status == 202) return OK;
+  if (isSuccessStatus(status)) return OK;
   if (status == 401) return AUTH_FAILED;
   return SERVER_ERROR;
 }
@@ -574,7 +591,10 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
 
   if (!resp.transportOk) return NETWORK_ERROR;
 
-  if (resp.status == 200 && !resp.body.empty()) {
+  // 204: accepted, nothing stored yet — same graceful path as 404 (see getProgress).
+  if (resp.status == 204) return NOT_FOUND;
+
+  if (isSuccessStatus(resp.status) && !resp.body.empty()) {
     JsonDocument doc;
     // Do NOT "optimise" this into the mutable-buffer overload. ArduinoJson 6's zero-copy mode
     // is gone in 7: measured against 7.4.2 with a counting allocator, a 2541-byte stats body
@@ -863,7 +883,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& doc
   // No retry loop (unlike updateBookmarks): the counters are monotonic and re-sent
   // whole on every sync, so a dropped PUT self-heals next time — nothing diverges.
   if (!resp.transportOk) return NETWORK_ERROR;
-  if (resp.status == 200 || resp.status == 202) {
+  if (isSuccessStatus(resp.status)) {
     // The stats-enabled server echoes a capability tag ("server":"stats-v1") in
     // its response; surface it so the UI can show which server build answered.
     if (!resp.body.empty()) {
