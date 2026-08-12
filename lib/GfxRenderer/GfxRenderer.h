@@ -286,6 +286,10 @@ class GfxRenderer {
   void drawBitmap(const Bitmap& bitmap, int x, int y, int maxWidth, int maxHeight, float cropX = 0,
                   float cropY = 0) const;
   void drawBitmap1Bit(const Bitmap& bitmap, int x, int y, int maxWidth, int maxHeight) const;
+  // Counter-invert content images in the logical framebuffer so output-level night mode
+  // leaves their original polarity unchanged (photos stay photos, not negatives).
+  // No-op unless the display is actually inverted.
+  void preserveImagePolarity(int x, int y, int width, int height) const;
   void fillPolygon(const int* xPoints, const int* yPoints, int numPoints, bool state = true) const;
 
   // Text

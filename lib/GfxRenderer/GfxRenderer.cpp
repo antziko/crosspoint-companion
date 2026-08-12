@@ -1521,6 +1521,12 @@ void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
 
   free(outputRow);
   free(rowBytes);
+
+  const int sourceWidth = bitmap.getWidth() - cropPixX * 2;
+  const int sourceHeight = bitmap.getHeight() - cropPixY * 2;
+  const int renderedWidth = isScaled ? static_cast<int>(std::floor((sourceWidth - 1) * scale)) + 1 : sourceWidth;
+  const int renderedHeight = isScaled ? static_cast<int>(std::floor((sourceHeight - 1) * scale)) + 1 : sourceHeight;
+  preserveImagePolarity(x, y, renderedWidth, renderedHeight);
 }
 
 void GfxRenderer::drawBitmap1Bit(const Bitmap& bitmap, const int x, const int y, const int maxWidth,
@@ -1590,6 +1596,49 @@ void GfxRenderer::drawBitmap1Bit(const Bitmap& bitmap, const int x, const int y,
 
   free(outputRow);
   free(rowBytes);
+
+  const int renderedWidth =
+      isScaled ? static_cast<int>(std::floor((bitmap.getWidth() - 1) * scale)) + 1 : bitmap.getWidth();
+  const int renderedHeight =
+      isScaled ? static_cast<int>(std::floor((bitmap.getHeight() - 1) * scale)) + 1 : bitmap.getHeight();
+  preserveImagePolarity(x, y, renderedWidth, renderedHeight);
+}
+
+// Flip every bit of the rendered image rect. The panel driver inverts the whole frame
+// on the way out in night mode, so pre-inverting the image here cancels that out and
+// the image lands on the panel in its original polarity.
+void GfxRenderer::preserveImagePolarity(const int x, const int y, const int width, const int height) const {
+  if (renderMode != BW || !display.isInverted() || _stripActive || !frameBuffer || width <= 0 || height <= 0) {
+    return;
+  }
+
+  int ax, ay, bx, by;
+  rotateCoordinates(orientation, x, y, &ax, &ay, panelWidth, panelHeight);
+  rotateCoordinates(orientation, x + width - 1, y + height - 1, &bx, &by, panelWidth, panelHeight);
+
+  const int left = std::max(0, std::min(ax, bx));
+  const int right = std::min(static_cast<int>(panelWidth) - 1, std::max(ax, bx));
+  const int top = std::max(0, std::min(ay, by));
+  const int bottom = std::min(static_cast<int>(panelHeight) - 1, std::max(ay, by));
+  if (left > right || top > bottom) return;
+
+  for (int row = top; row <= bottom; row++) {
+    uint8_t* rowData = frameBuffer + static_cast<uint32_t>(row) * panelWidthBytes;
+    int col = left;
+    // Leading partial byte, then whole bytes, then the trailing partial byte.
+    while (col <= right && (col & 7) != 0) {
+      rowData[col >> 3] ^= static_cast<uint8_t>(0x80U >> (col & 7));
+      col++;
+    }
+    while (col + 7 <= right) {
+      rowData[col >> 3] ^= 0xFF;
+      col += 8;
+    }
+    while (col <= right) {
+      rowData[col >> 3] ^= static_cast<uint8_t>(0x80U >> (col & 7));
+      col++;
+    }
+  }
 }
 
 void GfxRenderer::fillPolygon(const int* xPoints, const int* yPoints, int numPoints, bool state) const {

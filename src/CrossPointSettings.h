@@ -247,6 +247,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     uint8_t minSessionMinutes = MIN_SESSION_USE_GLOBAL;
   };
 
+  // Night mode: inverted output polarity on the reading surfaces only (resolved per
+  // render by ActivityManager via Activity::appliesNightMode).
+  uint8_t screenInverted = 0;
+
   // Sleep screen settings
   uint8_t sleepScreen = DARK;
   // When set, after a random /sleep-folder wallpaper was shown, the next wake offers

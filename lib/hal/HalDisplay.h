@@ -57,6 +57,12 @@ class HalDisplay {
   // EXPERIMENTAL: safe for single isolated refreshes; avoid rapid consecutive calls.
   void displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool turnOffScreen = false);
 
+  // Output polarity. The framebuffer stays in normal polarity; inversion is applied by
+  // the display driver on the way to the panel, so night mode costs no extra buffer.
+  void setInverted(bool inverted);
+  bool toggleInverted();
+  bool isInverted() const;
+
   // Power management
   void deepSleep();
 

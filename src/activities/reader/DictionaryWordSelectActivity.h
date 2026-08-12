@@ -47,6 +47,9 @@ class DictionaryWordSelectActivity final : public Activity {
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
+  // Redraws the reader's page (word boxes over it), so it follows the reading
+  // surface's night-mode polarity; a normal-polarity flash mid-lookup jars.
+  bool appliesNightMode() const override { return true; }
 
  private:
   std::unique_ptr<Page> page;

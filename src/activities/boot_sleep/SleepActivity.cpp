@@ -4,6 +4,7 @@
 #include <Epub.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
+#include <HalDisplay.h>
 #include <HalGPIO.h>
 #include <HalStorage.h>
 #include <I18n.h>
@@ -21,6 +22,11 @@
 
 void SleepActivity::onEnter() {
   Activity::onEnter();
+
+  // Sleep screens always use normal polarity. This activity paints directly from
+  // onEnter, outside ActivityManager's per-render polarity resolution, so clear any
+  // inversion left over from a night-mode reader render.
+  display.setInverted(false);
 
   // Drop any wallpaper recorded for a previous sleep. Only renderCustomSleepScreen's
   // random folder pick re-sets it below; every other sleep screen (blank/cover/

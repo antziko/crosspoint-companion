@@ -320,6 +320,11 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   v.push_back(SettingInfo::Enum(StrId::STR_IMAGES, &CrossPointSettings::imageRendering,
                                 {StrId::STR_IMAGES_DISPLAY, StrId::STR_IMAGES_PLACEHOLDER, StrId::STR_IMAGES_SUPPRESS},
                                 "imageRendering", StrId::STR_READER_TEXT));
+  // Night mode = inverted output polarity on the reading surfaces only (EPUB/TXT/XTC;
+  // ActivityManager resolves the polarity per render), so it belongs with the reader
+  // settings rather than with the system-wide display ones.
+  v.push_back(SettingInfo::Toggle(StrId::STR_NIGHT_MODE, &CrossPointSettings::screenInverted, "screenInverted",
+                                  StrId::STR_READER_TEXT));
   // --- Reader > Dictionary sub-group (category STR_READER_DICTIONARY) ---
   // The dictionary selector is special-cased on Confirm (opens DictionarySelectActivity); the
   // marker-by-dwell options are a device-only action row added in SettingsActivity. Placeholder
