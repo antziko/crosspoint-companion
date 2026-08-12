@@ -52,6 +52,9 @@ SdCardFontSystem sdFontSystem;
 DictionaryRegistry dictionaryRegistry;
 FontCacheManager fontCacheManager(renderer.getFontMap(), renderer.getSdCardFonts());
 static unsigned long allowSleepAt = 0;
+// A wake hold must never become an in-app power-button action. Boot may finish while the
+// button is still held, so swallow the one release that ends that wake gesture.
+static bool wakePowerReleasePending = false;
 
 // Fonts
 EpdFont notoserif14RegularFont(&notoserif_14_regular);
@@ -134,9 +137,11 @@ constexpr uint32_t SILENT_REBOOT_TARGET_SETTINGS = 2;  // settings list (categor
 // flows suppress the splash and leave the panel holding its pre-boot frame; a
 // plain boot shows the splash. See setup() for the resolution.
 enum class BootResume : uint8_t {
-  Splash,       // cold boot, flash, panic, or plain reboot
-  Silent,       // heap-defrag ESP.restart() (RTC flag; lost on power loss)
-  QuickResume,  // wake from a quick-resume deep sleep (SD flag; survives power loss)
+  Splash,          // cold boot, flash, panic, or plain reboot
+  Silent,          // heap-defrag ESP.restart() (RTC flag; lost on power loss)
+  SplashlessWake,  // wake from deep sleep with the splash suppressed by the SD flag.
+                   // Quick Resume repaints the saved frame; a custom sleep image paints
+                   // nothing and leaves the retained image up.
 };
 
 // Latched true once enterDeepSleep() commits to sleeping, before it tears down
@@ -239,7 +244,11 @@ void enterDeepSleep(bool fromTimeout = false) {
       SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
       (fromTimeout &&
        SETTINGS.quickResumeSleepScreen == CrossPointSettings::QUICK_RESUME_SLEEP_SCREEN::QUICK_RESUME_AFTER_TIMEOUT);
-  APP_STATE.showBootScreen = !isQuickResumeSleep;
+  // A custom sleep image already leaves useful content on the panel across the sleep,
+  // so keep it there until the first real reader/home paint replaces it instead of
+  // overwriting it with the splash.
+  APP_STATE.showBootScreen =
+      !(isQuickResumeSleep || SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::CUSTOM);
 
   APP_STATE.saveToFile();
 
@@ -250,6 +259,11 @@ void enterDeepSleep(bool fromTimeout = false) {
 
   if (isQuickResumeSleep) {
     saveSleepFrameBuffer();
+  } else if (SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::CUSTOM &&
+             Storage.exists(SLEEP_FRAME_FILE)) {
+    // A stale Quick Resume frame left by an earlier sleep must not turn a custom wake
+    // into the quick-resume path and paint the old reader page over the custom image.
+    Storage.remove(SLEEP_FRAME_FILE);
   }
 
   // Tear down WiFi so the modem power domain isn't held alive across deep sleep.
@@ -476,6 +490,7 @@ void setup() {
                                         SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP)) {
         powerManager.startDeepSleep(gpio);
       }
+      wakePowerReleasePending = true;
       break;
     case HalGPIO::WakeupReason::AfterUSBPower:
       // If USB power caused a cold boot, go back to sleep
@@ -516,7 +531,7 @@ void setup() {
   // HalDisplay::begin), so the first paint is FAST_REFRESH (~500ms) over the
   // retained frame and input dispatches against a visible UI.
   const BootResume resume = isSilentReboot              ? BootResume::Silent
-                            : !APP_STATE.showBootScreen ? BootResume::QuickResume
+                            : !APP_STATE.showBootScreen ? BootResume::SplashlessWake
                                                         : BootResume::Splash;
   bool allowFastInitialReaderRefresh = false;
 
@@ -527,10 +542,10 @@ void setup() {
       // Splash skipped: the routing block below picks the target activity; the
       // panel keeps showing the pre-reboot popup until that first paint lands.
       break;
-    case BootResume::QuickResume:
-      // One-shot flag: re-arm the splash for the next non-quick-resume boot. Save
-      // before any painting so a hang in the blocking paint path can't strand
-      // us in a quick-resume-with-no-frame loop on the next boot.
+    case BootResume::SplashlessWake:
+      // One-shot flag: re-arm the splash for the next ordinary boot. Save before any
+      // painting so a hang in the blocking paint path can't strand us in a
+      // splashless-with-no-frame loop on the next boot.
       APP_STATE.showBootScreen = true;
       APP_STATE.saveToFile();
       if (loadSleepFrameBuffer()) {
@@ -550,9 +565,12 @@ void setup() {
         } else {
           renderer.displayBuffer(HalDisplay::HALF_REFRESH);
         }
-      } else {
+      } else if (SETTINGS.sleepScreen != CrossPointSettings::SLEEP_SCREEN_MODE::CUSTOM) {
         activityManager.goToBoot();  // frame file missing, fall back to the splash
       }
+      // Custom sleep image: there is deliberately no frame file (enterDeepSleep removes
+      // any stale one), and the panel still holds the image. Painting nothing here is
+      // the point — the first reader/home paint replaces it.
       // X4: time is lost on deep sleep — background-sync NTP if the clock is on.
       maybeStartBackgroundNtpSync();
       break;
@@ -639,8 +657,10 @@ void setup() {
     gpio.update();
   }
 
-  // Ensure we're not still holding the power button before leaving setup
-  waitForPowerRelease();
+  // Don't block here waiting for the power button to come up: with a custom sleep
+  // image the panel is already showing useful content, and spinning in setup() just
+  // delays the first real paint. loop() consumes the release instead, via
+  // wakePowerReleasePending.
   allowSleepAt = millis() + 2000;
 
   // Heap profiling baseline: free heap once boot is fully done (fonts, SD, first
@@ -702,6 +722,14 @@ void loop() {
     powerManager.setPowerSaving(false);  // Restore normal CPU frequency on user activity
   }
 
+  // Let wake continue as soon as its hold has been verified. The release can arrive
+  // after setup, so consume that one input frame rather than letting it become a page
+  // turn, a forced refresh, or any other short power-button action.
+  if (wakePowerReleasePending && !gpio.isPressed(HalGPIO::BTN_POWER)) {
+    wakePowerReleasePending = false;
+    return;
+  }
+
   static bool screenshotButtonsReleased = true;
   static bool screenshotComboActive = false;
   if (gpio.isPressed(HalGPIO::BTN_POWER) && gpio.isPressed(HalGPIO::BTN_BACK)) {
@@ -748,7 +776,13 @@ void loop() {
     return;
   }
 
-  if (millis() >= allowSleepAt && gpio.isPressed(HalGPIO::BTN_POWER) &&
+  // A hold that woke the device must be released before it can count as a new in-app
+  // long press. Otherwise a user who keeps holding after wake would put the device
+  // straight back to sleep once allowSleepAt expires.
+  static bool powerReleasedSinceWake = false;
+  if (!gpio.isPressed(HalGPIO::BTN_POWER)) powerReleasedSinceWake = true;
+
+  if (powerReleasedSinceWake && millis() >= allowSleepAt && gpio.isPressed(HalGPIO::BTN_POWER) &&
       gpio.getPowerButtonHeldTime() > SETTINGS.getPowerButtonDuration()) {
     // If the screenshot combination is potentially being pressed, don't sleep
     if (gpio.isPressed(HalGPIO::BTN_BACK)) {
