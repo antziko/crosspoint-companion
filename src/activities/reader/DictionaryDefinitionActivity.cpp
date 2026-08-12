@@ -1146,19 +1146,21 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   // carries across definitions well; one static unsigned long in dev builds pays for it. From the
   // second render onwards the exact measured openMs_ replaces the estimate.
   //
-  // Raw milliseconds, not seconds: the whole point is comparing one open against the next, and
-  // at ~3-4 s per open a "%.1f s" rendering quantises every run to the same 4.0s.
+  // Seconds to HUNDREDTHS, rounded — "4.06s". Tenths were tried and are useless here: the panel
+  // refresh dominates and barely varies, so every open quantised to the same "4.0s". Two decimals
+  // keep the ~250 ms that does vary between words visible while still reading as a duration.
   //
-  // Stack buffer, not std::string: this is a render path. No tr() — a bare "(3512 ms)" carries
+  // Stack buffer, not std::string: this is a render path. No tr() — a bare "(4.06s)" carries
   // no language. Dev builds only; release is LOG_LEVEL=1 and drops the whole thing.
   static unsigned long sPostHeaderMs = 0;
   const unsigned long tHeader = millis();
   char headerBuf[96];
-  if (openMs_ > 0) {
-    snprintf(headerBuf, sizeof(headerBuf), "%s (%lu ms)", headword.c_str(), openMs_);
-    headerText = headerBuf;
-  } else if (sPostHeaderMs > 0) {
-    snprintf(headerBuf, sizeof(headerBuf), "%s (~%lu ms)", headword.c_str(), (tHeader - openStartMs_) + sPostHeaderMs);
+  if (openMs_ > 0 || sPostHeaderMs > 0) {
+    const bool measured = openMs_ > 0;
+    const unsigned long ms = measured ? openMs_ : (tHeader - openStartMs_) + sPostHeaderMs;
+    const unsigned long cs = (ms + 5) / 10;  // hundredths, rounded: 4056ms -> 406 -> "4.06"
+    snprintf(headerBuf, sizeof(headerBuf), "%s (%s%lu.%02lus)", headword.c_str(), measured ? "" : "~", cs / 100,
+             cs % 100);
     headerText = headerBuf;
   }
 #endif
