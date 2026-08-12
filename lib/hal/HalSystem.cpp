@@ -11,9 +11,15 @@
 #include "esp_private/panic_internal.h"
 
 #define MAX_PANIC_STACK_DEPTH 32
+#define PANIC_CAPTURE_MAGIC 0x50414E49u
 
 RTC_NOINIT_ATTR char panicMessage[256];
 RTC_NOINIT_ATTR HalSystem::StackFrame panicStack[MAX_PANIC_STACK_DEPTH];
+// RTC_NOINIT is uninitialized on cold boot, so only this exact marker proves a panic
+// diagnostic was actually captured before the reset. Without it a plain watchdog reset
+// (which writes no diagnostic) is indistinguishable from a real panic, and the crash
+// screen shows whatever stale bytes happen to sit in RTC memory.
+RTC_NOINIT_ATTR volatile uint32_t panicCaptureMarker;
 
 #ifdef TRACE_OOM_ALLOC
 // Diagnostic (dev builds only): with -fno-exceptions a failing throwing `new`
@@ -140,6 +146,7 @@ void IRAM_ATTR __wrap_panic_abort(const char* message) {
     panicMessage[i] = message[i];
   }
   panicMessage[i] = '\0';
+  panicCaptureMarker = PANIC_CAPTURE_MAGIC;
 
   __real_panic_abort(message);
 }
@@ -179,6 +186,7 @@ void IRAM_ATTR __wrap_panic_print_backtrace(const void* frame, int core) {
       break;
     }
   }
+  panicCaptureMarker = PANIC_CAPTURE_MAGIC;
 
   __real_panic_print_backtrace(frame, core);
 #endif
@@ -209,9 +217,16 @@ void checkPanic() {
     auto panicInfo = getPanicInfo(true);
     auto file = Storage.open("/crash_report.txt", O_WRITE | O_CREAT | O_TRUNC);
     if (file) {
-      file.write(panicInfo.c_str(), panicInfo.size());
+      const size_t written = file.write(panicInfo.c_str(), panicInfo.size());
       file.close();
-      LOG_INF("SYS", "Dumped panic info to SD card");
+      if (written == panicInfo.size()) {
+        // Keep the crash data for CrashActivity, but mark it consumed so a later
+        // watchdog reset cannot be mistaken for this panic.
+        panicCaptureMarker = 0;
+        LOG_INF("SYS", "Dumped panic info to SD card");
+      } else {
+        LOG_ERR("SYS", "Failed to write complete crash report (%zu of %zu bytes)", written, panicInfo.size());
+      }
     } else {
       LOG_ERR("SYS", "Failed to open crash_report.txt for writing");
     }
@@ -219,6 +234,7 @@ void checkPanic() {
 }
 
 void clearPanic() {
+  panicCaptureMarker = 0;
   panicMessage[0] = '\0';
   for (size_t i = 0; i < MAX_PANIC_STACK_DEPTH; i++) {
     panicStack[i].sp = 0;
@@ -331,8 +347,16 @@ std::string getPanicInfo(bool full) {
 
 bool isRebootFromPanic() {
   const auto resetReason = esp_reset_reason();
-  return resetReason == ESP_RST_PANIC || resetReason == ESP_RST_CPU_LOCKUP || resetReason == ESP_RST_INT_WDT ||
-         resetReason == ESP_RST_TASK_WDT || resetReason == ESP_RST_WDT;
+  if (resetReason == ESP_RST_PANIC || resetReason == ESP_RST_CPU_LOCKUP) {
+    return true;
+  }
+
+  // A watchdog reset only counts as a panic when a diagnostic was actually captured.
+  // A bare watchdog trip writes nothing, so without the marker there is no report to
+  // show and the crash screen would display stale RTC bytes.
+  const bool watchdogReset =
+      resetReason == ESP_RST_INT_WDT || resetReason == ESP_RST_TASK_WDT || resetReason == ESP_RST_WDT;
+  return watchdogReset && panicCaptureMarker == PANIC_CAPTURE_MAGIC;
 }
 
 }  // namespace HalSystem
