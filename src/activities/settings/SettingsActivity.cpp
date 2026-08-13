@@ -91,6 +91,10 @@ void SettingsActivity::rebuildSettingsLists() {
     }
     currentSettings = &readerSettings;
     settingsCount = static_cast<int>(currentSettings->size());
+    // A sub-screen never calls selectCategory(), so this is the only place its
+    // rows get built. buildScreen() indexes rowValues_/rowItems_ by row without
+    // a bounds check, so skipping this would write past two empty vectors.
+    rebuildRowItems();
     return;
   }
 
@@ -604,6 +608,12 @@ void SettingsActivity::buildScreen(UiScreen& screen) {
   // vector growth) rather than building a new items/values vector on every
   // render.
   const auto& settings = *currentSettings;
+  // Self-heal rather than index past the end: the loop below writes by row with
+  // no bounds check, and a missed rebuild would corrupt the heap instead of just
+  // drawing the wrong list.
+  if (rowItems_.size() != settings.size() || rowValues_.size() != settings.size()) {
+    rebuildRowItems();
+  }
   for (size_t i = 0; i < settings.size(); i++) {
     rowValues_[i] = settingValueText(settings[i]);
     rowItems_[i].value = rowValues_[i].empty() ? nullptr : rowValues_[i].c_str();
