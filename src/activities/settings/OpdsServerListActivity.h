@@ -1,7 +1,9 @@
 #pragma once
 
-#include "activities/Activity.h"
-#include "util/ButtonNavigator.h"
+#include <vector>
+
+#include "activities/UiListActivity.h"
+#include "components/OptionPopup.h"
 
 /**
  * Activity showing the list of configured OPDS servers.
@@ -9,22 +11,38 @@
  * When pickerMode is true, selecting a server navigates to the OPDS browser
  * instead of opening the editor (used from the home screen).
  */
-class OpdsServerListActivity final : public Activity {
+class OpdsServerListActivity final : public UiListActivity {
  public:
-  explicit OpdsServerListActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, bool pickerMode = false)
-      : Activity("OpdsServerList", renderer, mappedInput), pickerMode(pickerMode) {}
+  explicit OpdsServerListActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, bool pickerMode = false);
 
   void onEnter() override;
-  void onExit() override;
-  void loop() override;
   void render(RenderLock&&) override;
 
  private:
-  ButtonNavigator buttonNavigator;
-  int selectedIndex = 0;
+  int listCount() const override { return getItemCount(); }
+  void buildScreen(UiScreen& screen) override;
+  void activateIndex(int index) override;
+  // Popup input goes first; while it is open it consumes the pass.
+  bool handleCustomInput() override;
+  // Picker mode backs out to the home menu rather than finishing.
+  void onBackButton() override;
+  // LOCAL(feat): Confirm is handled here rather than by the base, for the
+  // hold-to-duplicate gesture and the press-originated-here guard.
+  bool handleButtons() override;
+  const char* headerTitle() const override;
+
   bool pickerMode = false;
   bool longPressFired = false;      // Swallow Confirm release after a hold-duplicate fires
   bool confirmPressActive = false;  // True only when a Confirm press originated inside this activity
+
+  OptionPopup optionPopup;
+
+  // Row structure (labels, actionValue; server subtitles), rebuilt only when
+  // the server list itself reloads (rebuildRowItems(), called from onEnter()
+  // and after returning from the server editor) — not on every repaint. The
+  // format row's live subtitle is refreshed in place by buildScreen().
+  std::vector<freeink::ui::ListItem> rowItems_;
+  void rebuildRowItems();
 
   int getItemCount() const;
   void handleSelection();
