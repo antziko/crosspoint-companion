@@ -150,15 +150,19 @@ bool isBookOnDevice(const std::string& folder, const OpdsEntry& book) {
 constexpr fui::ActionId ACTION_ROW = 1;
 constexpr fui::ActionId ACTION_SEARCH = 2;
 constexpr fui::ActionId ACTION_CANCEL = 3;
-constexpr int DOWNLOAD_PROGRESS_STEP_PERCENT = 5;
+// Book-download progress cadence. Percent-stepped so the repaint count is bounded
+// at ~10 for any file size, with a hard floor between repaints. Both numbers are
+// about SPI contention, not looks: see the callback in downloadBook().
+constexpr int DOWNLOAD_PROGRESS_STEP_PERCENT = 10;
+constexpr size_t DOWNLOAD_PROGRESS_STEP_BYTES = 128 * 1024;  // when the server sends no Content-Length
+constexpr unsigned long DOWNLOAD_PROGRESS_MIN_INTERVAL_MS = 10000;
 
-// Feed-fetch progress cadence (see fetchFeed). Coarser than the download's because a
-// feed is a one-shot wait with no cancel-worthy duration in the normal case, and each
-// repaint competes with the socket read for the single core.
+// Feed-fetch progress cadence (see fetchFeed). Same reasoning as the download's
+// below — on X3 a repaint takes the SPI bus the transfer writes over — but a feed is
+// a shorter wait, so the floor between repaints is shorter.
 constexpr int FEED_PROGRESS_STEP_PERCENT = 10;
 constexpr size_t FEED_PROGRESS_STEP_BYTES = 32 * 1024;
 constexpr unsigned long FEED_PROGRESS_MIN_INTERVAL_MS = 3000;
-constexpr unsigned long DOWNLOAD_PROGRESS_MIN_UPDATE_MS = 5000;
 
 }  // namespace
 
@@ -990,14 +994,25 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
         // Keep the on-screen Cancel button live: the activity loop is blocked
         // for the whole transfer, so the only chance to route a tap is here.
         routeTouch(mappedInput);
-        // Throttle redraws: the callback fires every ~2KB but each e-ink
-        // refresh is slow. Percent-stepped, with a time floor so a stalled or
-        // Content-Length-less transfer still shows it is alive.
+        // Throttle redraws hard. On X3 the SD card shares the display SPI bus
+        // (BoardConfig.h XTEINK_X3: "Shares the display SPI bus (SCLK 8 / MOSI 10)"),
+        // so a repaint does not merely compete for CPU — it holds the bus this
+        // transfer needs for every write, stalling the socket read for the whole
+        // refresh. Measured on X3: 1.3-2.2s per stall.
+        //
+        // The step is percent-only and the interval is a FLOOR, never a trigger.
+        // #2957 brought upstream's rule, which repainted whenever
+        // `now - lastProgressUpdateMs >= 5000` — a periodic trigger that fires on a
+        // slow link no matter how little arrived, so a slower transfer bought itself
+        // more refreshes and got slower still. The X3 log shows it plainly: stalls
+        // spaced 4785/5420/4372ms apart, 25% of the transfer inside them, and both
+        // downloads dying incomplete at ~200KB of 1.6MB.
         const int percent = total > 0 ? static_cast<int>(static_cast<uint64_t>(downloaded) * 100 / total) : 0;
         const unsigned long now = millis();
+        const bool stepped = total > 0 ? (percent >= lastRenderedPercent + DOWNLOAD_PROGRESS_STEP_PERCENT)
+                                       : (downloaded - lastShown >= DOWNLOAD_PROGRESS_STEP_BYTES);
         if (percent >= 100 || lastRenderedPercent < 0 ||
-            percent >= lastRenderedPercent + DOWNLOAD_PROGRESS_STEP_PERCENT ||
-            now - lastProgressUpdateMs >= DOWNLOAD_PROGRESS_MIN_UPDATE_MS || downloaded - lastShown >= 64 * 1024) {
+            (stepped && now - lastProgressUpdateMs >= DOWNLOAD_PROGRESS_MIN_INTERVAL_MS)) {
           lastRenderedPercent = percent;
           lastProgressUpdateMs = now;
           lastShown = downloaded;

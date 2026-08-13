@@ -137,6 +137,12 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
     uint32_t lastChunkMs = openStartMs;
     size_t lastXferLogBytes = 0;
     bool loggedConnect = false;
+    // Running split of the transfer: time blocked on the socket vs time inside our own
+    // per-chunk work. Totals (not just the >1s outliers) so a transfer that is slow in
+    // many small increments is still attributable — the per-chunk thresholds below only
+    // ever caught the tail, which is how a 45s feed read as "34.8s of network stalls".
+    uint32_t waitTotalMs = 0;
+    uint32_t workTotalMs = 0;
 
     LOG_DBG("HTTP", "wolfSSL GET: %s", url.c_str());
     const int status = http.GET(
@@ -163,6 +169,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
           // may have been largely e-ink refreshes, not the link.
           const uint32_t now = millis();
           const uint32_t gapMs = now - lastChunkMs;
+          waitTotalMs += gapMs;
           if (gapMs > STALL_LOG_THRESHOLD_MS) {
             const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
             SdDebugLog::log("STALL", "gap=%lums bytes=%zu heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d",
@@ -181,6 +188,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
           // from STALL so a slow transfer can be attributed to the link or to us
           // without guessing.
           const uint32_t workMs = millis() - now;
+          workTotalMs += workMs;
           if (workMs > STALL_LOG_THRESHOLD_MS) {
             SdDebugLog::log("SINK", "work=%lums bytes=%zu len=%zu", (unsigned long)workMs, sink.downloaded, len);
           }
@@ -247,16 +255,30 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
     if (!http.responseComplete()) {
       const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
       LOG_ERR("HTTP", "wolfSSL incomplete: got %zu of %zu bytes", sink.downloaded, sink.total);
-      SdDebugLog::log("HTTP", "incomplete: got %zu of %zu bytes heap=%u largest8=%u", sink.downloaded, sink.total,
-                      s.heapFree, s.largest8Bit);
+      // elapsed + the wait/work split: two X3 book downloads both died here at ~200KB of
+      // 1.6MB after 26.7s and 28.2s, which looks like the server closing on its own
+      // response deadline while we drained too slowly to finish inside it. If that is
+      // right, elapsed stays ~constant across attempts while the byte count tracks
+      // whatever throughput we managed.
+      SdDebugLog::log("HTTP",
+                      "incomplete: got %zu of %zu bytes after %lums (wait=%lums work=%lums) heap=%u largest8=%u",
+                      sink.downloaded, sink.total, (unsigned long)(millis() - transferStartMs),
+                      (unsigned long)waitTotalMs, (unsigned long)workTotalMs, s.heapFree, s.largest8Bit);
       setDetail(sink.detail, "incomplete: %zu/%zu bytes", sink.downloaded, sink.total);
       return HttpDownloader::HTTP_ERROR;
     }
     {
       const uint32_t totalElapsedMs = millis() - transferStartMs;
       const unsigned bytesPerSec = totalElapsedMs > 0 ? (unsigned)(sink.downloaded * 1000UL / totalElapsedMs) : 0;
-      SdDebugLog::log("DONE", "bytes=%zu elapsed=%lums rate=%uB/s", sink.downloaded, (unsigned long)totalElapsedMs,
-                      bytesPerSec);
+      // wait= is time blocked on the socket, work= is our own per-chunk cost (SD write
+      // plus the caller's progress callback). They should roughly sum to elapsed; a large
+      // work= means we are the bottleneck, a large wait= with a small work= means the
+      // link or the server is. On X3 a repaint shows up in wait=, not work=, because
+      // requestUpdate() only posts to the render task — which then takes the SPI bus the
+      // SD card shares, so the NEXT read blocks.
+      SdDebugLog::log("DONE", "bytes=%zu elapsed=%lums rate=%uB/s wait=%lums work=%lums", sink.downloaded,
+                      (unsigned long)totalElapsedMs, bytesPerSec, (unsigned long)waitTotalMs,
+                      (unsigned long)workTotalMs);
     }
     return HttpDownloader::OK;
   }
