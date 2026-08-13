@@ -7,9 +7,8 @@
 #include <vector>
 
 #include "CrossPointSettings.h"
-#include "activities/Activity.h"
+#include "activities/UiTabListActivity.h"
 #include "components/OptionPopup.h"
-#include "util/ButtonNavigator.h"
 
 enum class SettingType { TOGGLE, ENUM, ACTION, VALUE, STRING };
 
@@ -182,12 +181,9 @@ struct SettingInfo {
   }
 };
 
-class SettingsActivity final : public Activity {
-  ButtonNavigator buttonNavigator;
-
+class SettingsActivity final : public UiTabListActivity {
   int initialCategory = 0;        // Category to open on first onEnter()
   int selectedCategoryIndex = 0;  // Currently selected category
-  int selectedSettingIndex = 0;
   int settingsCount = 0;
 
   // Sub-screen mode: when subCategory_ != STR_NONE_OPT this instance renders a single flat list
@@ -196,9 +192,6 @@ class SettingsActivity final : public Activity {
   StrId subCategory_ = StrId::STR_NONE_OPT;
   StrId subTitle_ = StrId::STR_NONE_OPT;
   bool isSubScreen() const { return subCategory_ != StrId::STR_NONE_OPT; }
-  // Index offset of the first setting row: 1 in tab mode (row 0 is the category tab bar), 0 in
-  // sub-screen mode (no tab row). Keeps the shared nav/edit/render index math in one place.
-  int settingIndexBase() const { return isSubScreen() ? 0 : 1; }
 
   // Per-category settings derived from shared list + device-only actions
   std::vector<SettingInfo> displaySettings;
@@ -212,8 +205,39 @@ class SettingsActivity final : public Activity {
 
   OptionPopup optionPopup;
 
+  // Row structure (label/actionValue) for *currentSettings, rebuilt only when
+  // the active category or a category's setting list changes
+  // (rebuildRowItems(), called from selectCategory()/rebuildSettingsLists())
+  // — not on every repaint. rowValues_ holds the live per-row value text,
+  // refreshed every buildScreen() call by assigning into the existing
+  // strings (no vector growth).
+  std::vector<std::string> rowValues_;
+  std::vector<freeink::ui::ListItem> rowItems_;
+  void rebuildRowItems();
+
   static constexpr int categoryCount = 4;
   static const StrId categoryNames[categoryCount];
+
+  // --- UiTabListActivity contract ---
+  int listCount() const override { return settingsCount; }
+  // LOCAL(feat): a sub-screen has no tab bar, but the base sizes tabNavs from
+  // tabCount() and ringPos() returns a hardcoded 0 when that vector is empty.
+  // Reporting one dummy tab keeps the ring model intact; buildScreen() simply
+  // never calls buildTabBar(), and navigateButtons() keeps the ring off 0.
+  int tabCount() const override { return isSubScreen() ? 1 : categoryCount; }
+  int activeTab() const override { return isSubScreen() ? 0 : selectedCategoryIndex; }
+  const char* tabLabel(int index) const override { return I18N.get(categoryNames[index]); }
+  void buildScreen(UiScreen& screen) override;
+  void activateIndex(int index) override;
+  void onTabAction(int index) override;
+  void stepTab(int direction) override;
+  void navigateButtons() override;
+  bool handleButtons() override;
+  bool handleCustomInput() override;
+
+  static std::string settingValueText(const SettingInfo& setting);
+  void selectCategory(int categoryIndex);
+  void applyUiSettingChange(uint8_t CrossPointSettings::* valuePtr);
 
   void enterCategory(int categoryIndex);
   void toggleCurrentSetting();
@@ -222,13 +246,10 @@ class SettingsActivity final : public Activity {
   void syncQuickResumeTimeoutForSleepScreen(bool sleepScreenChanged, bool quickResumeTimeoutChanged);
 
  public:
-  explicit SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, int initialCategory = 0)
-      : Activity("Settings", renderer, mappedInput), initialCategory(initialCategory) {}
+  explicit SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, int initialCategory = 0);
   // Sub-screen constructor: render only the settings tagged `subCategory`, titled `subTitle`.
-  SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, StrId subCategory, StrId subTitle)
-      : Activity("Settings", renderer, mappedInput), subCategory_(subCategory), subTitle_(subTitle) {}
+  SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, StrId subCategory, StrId subTitle);
   void onEnter() override;
   void onExit() override;
-  void loop() override;
   void render(RenderLock&&) override;
 };
