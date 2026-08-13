@@ -138,12 +138,9 @@ void KOReaderSyncActivity::onWifiSelectionComplete(const bool success) {
 
   LOG_DBG("KOSync", "WiFi connected, starting sync");
 
-  // Hand the 32KB inflate window back to the heap for the TLS handshakes below.
-  // This activity never builds sections (so it never needs the window), the epub
-  // was already released by EpubReaderActivity, and onExit() always reboots — which
-  // re-reserves the window on a fresh heap — so it is never re-allocated here.
-  InflateReader::releaseWindow();
-  LOG_DBG("KOSync", "Released inflate window for TLS (heap: %u)", (unsigned)ESP.getFreeHeap());
+  // The 32KB inflate window was already handed back in onEnter(), ahead of the radio
+  // rather than after it — see the rationale there. Nothing re-reserves it in between,
+  // so the handshakes below still get it.
 
   // The renderer's FontCacheManager is a global that outlives EpubReaderActivity (whose
   // onExit() clears neither), so an SD-card font's retained mini-data (#2611-E keep-if-fits)
@@ -996,6 +993,24 @@ void KOReaderSyncActivity::onEnter() {
 
   // Past this point every path uses WiFi.
   wifiActivated = true;
+
+  // Hand the 32KB inflate window back BEFORE the radio comes up, not after it connects.
+  // WifiSelectionActivity's first act is to try the last-known SSID, which brings esp_wifi
+  // + lwip up for ~53KB (measured: 60492 free entering that screen, 6880 by the time it
+  // reached a scan). Under the ~7KB left, a scan cannot run at all — so a failed
+  // auto-connect had no way to fall back to the network list, and "Show networks" only
+  // ever answered "Not enough memory". Releasing here instead of in
+  // onWifiSelectionComplete() costs the handshakes below nothing: the free heap at
+  // handshake time is the same either way, and wolfSSL wants small allocations rather
+  // than the contiguous slabs the old mbedTLS path needed (see KOReaderSyncClient.cpp).
+  //
+  // Safe here for the same reasons it was safe after connecting: this activity never
+  // builds sections, the epub was already released by EpubReaderActivity, font
+  // decompression uses a non-streaming inflate (FontDecompressor.cpp:68) and so never
+  // borrows this window, and onExit() always reboots — which re-reserves the window on a
+  // fresh heap, so it is never re-allocated under fragmentation.
+  InflateReader::releaseWindow();
+  LOG_DBG("KOSync", "Released inflate window before WiFi (heap: %u)", (unsigned)ESP.getFreeHeap());
 
   // Check if already connected (e.g. from settings page auth)
   if (WiFi.status() == WL_CONNECTED) {

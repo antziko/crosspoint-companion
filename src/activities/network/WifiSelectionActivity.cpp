@@ -206,8 +206,14 @@ void WifiSelectionActivity::onExit() {
 }
 
 bool WifiSelectionActivity::hasHeapForScan() {
-  return ESP.getFreeHeap() >= SCAN_MIN_FREE_HEAP &&
-         heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) >= SCAN_MIN_LARGEST_BLOCK;
+  // WIFI_MODE_NULL is returned whenever the driver is not running at all
+  // (WiFiGeneric.cpp:708 gates on lowLevelInitDone && _esp_wifi_started), which is
+  // exactly the question the two tiers turn on: does this scan still owe the ~53 KB
+  // for the driver, or only the ~14 KB for the scan itself?
+  const bool radioUp = WiFi.getMode() != WIFI_MODE_NULL;
+  const size_t minFree = radioUp ? SCAN_MIN_FREE_HEAP_WARM : SCAN_MIN_FREE_HEAP_COLD;
+  const size_t minBlock = radioUp ? SCAN_MIN_LARGEST_BLOCK_WARM : SCAN_MIN_LARGEST_BLOCK_COLD;
+  return ESP.getFreeHeap() >= minFree && heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) >= minBlock;
 }
 
 void WifiSelectionActivity::failWithLowMemory() {
@@ -228,17 +234,22 @@ void WifiSelectionActivity::startWifiScan(const bool autoScan) {
   requestUpdate();
 
   // Gate the scan, not the radio. Joining a known SSID needs none of the scan's
-  // per-AP buffers, so an auto-connect run below the floor walks the stored
-  // credentials blind rather than giving up — that is the KOReader-sync path,
-  // which arrives with the least headroom and never needed a network list.
-  // Only an explicit "show me what's out there" has to fail here.
+  // per-AP buffers, so a run below the floor walks the stored credentials blind
+  // rather than giving up — that is the KOReader-sync path, which arrives with the
+  // least headroom and never needed a network list.
   if (!hasHeapForScan()) {
     const unsigned freeHeap = ESP.getFreeHeap();
     const unsigned largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-    LOG_ERR("WIFI", "Scan skipped: low heap (free=%u largest=%u)", freeHeap, largest);
-    SdDebugLog::log("WIFI", "scan skipped: low heap free=%u largest=%u auto=%d", freeHeap, largest,
-                    static_cast<int>(autoScan));
-    if (autoScan && tryNextSavedCredentialBlind()) return;
+    const int radioUp = WiFi.getMode() != WIFI_MODE_NULL ? 1 : 0;
+    LOG_ERR("WIFI", "Scan skipped: low heap (free=%u largest=%u radio=%d)", freeHeap, largest, radioUp);
+    SdDebugLog::log("WIFI", "scan skipped: low heap free=%u largest=%u auto=%d radio=%d", freeHeap, largest,
+                    static_cast<int>(autoScan), radioUp);
+    // Fall back to the credential store whether or not this was an auto-scan. A manual
+    // "show me the networks" that cannot afford a scan is still better served by getting
+    // online than by a dead-end error, and tryAutoConnectCredential() skips SSIDs already
+    // tried this session, so the walk terminates either way — including straight into
+    // failWithLowMemory() once an auto-connect session has exhausted the store.
+    if (tryNextSavedCredentialBlind()) return;
     failWithLowMemory();
     return;
   }

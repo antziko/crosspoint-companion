@@ -109,16 +109,30 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
   static constexpr unsigned long SCAN_TIMEOUT_MS = 12000;
   unsigned long scanStartTime = 0;
 
-  // Heap floor for a *scan* (not for the radio). Bringing up the driver and
-  // holding a full scan result costs ~55-58 KB measured: the sync path entered
-  // at free=60364 and bottomed at 404 B before restarting, while the same screen
-  // reached from OPDS entered at 74112 and survived. The floor sits between the
-  // two. The largest-block figure did not discriminate (40-45 KB in both), so it
-  // is only a sanity check here, not the deciding term. First estimates, same
-  // standing as kMinFreeForDict in EpubReaderActivity: two data points with
-  // margin on both sides — tune from the logged "scan skipped" values.
-  static constexpr size_t SCAN_MIN_FREE_HEAP = 68 * 1024;
-  static constexpr size_t SCAN_MIN_LARGEST_BLOCK = 20 * 1024;
+  // Heap floors for a *scan* (not for the radio), in two tiers, because what a scan
+  // still has to pay for depends on whether the driver is already up. esp_wifi + lwip
+  // init costs ~53 KB measured (three runs: entered this screen at 60492/60524/60164,
+  // reached startWifiScan() at 6880/7124/6368), and the scan peaks ~14 KB on top of
+  // that — the one run that entered at 74112 reached its scan with ~20.7 KB and
+  // bottomed at 7008.
+  //
+  // A single floor could not express this. onEnter() tries the last-known SSID first,
+  // so by the time anything reaches a scan the radio is usually already up and only
+  // that ~14 KB is outstanding; 68 KB is the right cold number and an unreachable one
+  // warm, which is why every "Show networks" on the sync path answered "Not enough
+  // memory" (see WIFI "scan skipped ... auto=0" in opds_debug.txt).
+  //
+  // Largest-block is a sanity check, not the deciding term: the scan's own allocations
+  // are many small ones plus a single count*sizeof(wifi_ap_record_t) array (~2-3 KB for
+  // 30 APs), so the warm figure only has to sit above every refused sample (2.0-5.4 KB)
+  // without gating on a contiguous block the scan never asks for.
+  //
+  // First estimates, same standing as kMinFreeForDict in EpubReaderActivity — tune from
+  // the logged "scan skipped" values.
+  static constexpr size_t SCAN_MIN_FREE_HEAP_COLD = 68 * 1024;
+  static constexpr size_t SCAN_MIN_LARGEST_BLOCK_COLD = 20 * 1024;
+  static constexpr size_t SCAN_MIN_FREE_HEAP_WARM = 20 * 1024;
+  static constexpr size_t SCAN_MIN_LARGEST_BLOCK_WARM = 6 * 1024;
   static bool hasHeapForScan();
 
   // Set when the screen gave up for lack of heap rather than because a network
