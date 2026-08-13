@@ -1319,7 +1319,6 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
     }
     case EpubReaderMenuActivity::MenuAction::SELECT_CHAPTER: {
       const int spineIdx = currentSpineIndex;
-      const std::string path = epub->getPath();
       startActivityForResultNoThrow<EpubReaderChapterSelectionActivity>(
           [this](const ActivityResult& result) {
             if (!result.isCancelled) {
@@ -1352,7 +1351,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
               doNavigate();
             }
           },
-          renderer, mappedInput, epub, path, spineIdx);
+          renderer, mappedInput, epub, spineIdx);
       break;
     }
     case EpubReaderMenuActivity::MenuAction::FOOTNOTES: {

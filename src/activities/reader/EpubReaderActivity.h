@@ -379,7 +379,8 @@ class EpubReaderActivity final : public Activity {
                               int initialRefreshCountdown)
       : Activity("EpubReader", renderer, mappedInput),
         epub(std::move(epub)),
-        pagesUntilFullRefresh(initialRefreshCountdown) {}
+        pagesUntilFullRefresh(initialRefreshCountdown),
+        endOfBookOptions(renderer) {}
   void onEnter() override;
   void onExit() override;
   void onPause() override;

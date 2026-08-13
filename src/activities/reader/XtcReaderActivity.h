@@ -43,7 +43,8 @@ class XtcReaderActivity final : public Activity {
                              int initialRefreshCountdown)
       : Activity("XtcReader", renderer, mappedInput),
         xtc(std::move(xtc)),
-        pagesUntilFullRefresh(initialRefreshCountdown) {}
+        pagesUntilFullRefresh(initialRefreshCountdown),
+        endOfBookOptions(renderer) {}
   void onEnter() override;
   void onExit() override;
   void loop() override;
