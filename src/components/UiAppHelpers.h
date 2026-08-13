@@ -99,10 +99,15 @@ inline freeink::ui::BitmapRef listIconFor(const UIIcon icon, const int size = 24
         return freeink::ui::bitmapFromIcon(icon_radio_tower_32);
       // LOCAL(feat): upstream's UIIcon::Bookmark is BookmarkRibbon here (renamed to
       // avoid colliding with struct Bookmark; see BaseTheme.h). feat's extra
-      // BookmarkReturn/Highlight are theme-drawn, not SDK bitmaps, so they fall
-      // through to default like every other non-SDK icon.
+      // BookmarkReturn/Highlight are also mapped, via the freeink::Icon views in
+      // customListIcons.h — the bookmark list needs all three to stay tellable
+      // apart, and both legacy assets already use the SDK bit layout.
       case UIIcon::BookmarkRibbon:
         return freeink::ui::bitmapFromIcon(icon_bookmark_32);
+      case UIIcon::BookmarkReturn:
+        return freeink::ui::bitmapFromIcon(icon_bookmark_return_32);
+      case UIIcon::Highlight:
+        return freeink::ui::bitmapFromIcon(icon_highlight_32);
       default:
         return {};
     }

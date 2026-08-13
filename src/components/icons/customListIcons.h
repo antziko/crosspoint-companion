@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Icon.h"
+#include "bookmarkReturn.h"
+#include "highlight.h"
 
 // Hand-maintained icons that are NOT stock Lucide, kept out of the generated
 // listIcons.h so a full gen_icons.py regeneration cannot destroy them. To
@@ -41,3 +43,13 @@ static const uint8_t icon_moon_filled_32_bits[] = {
     0x1F, 0xFC, 0x00, 0x00, 0x3F, 0xFE, 0x00, 0x00, 0x7F, 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0x80, 0x01, 0xFF, 0xFF, 0xF0,
     0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static const freeink::Icon icon_moon_filled_32 = {32, 32, 17, icon_moon_filled_32_bits};
+
+// LOCAL(feat): freeink::Icon views over the two theme-drawn bookmark glyphs in
+// highlight.h / bookmarkReturn.h, so FUI list rows can show the same artwork
+// the legacy GUI.drawList rows did. No new bitmap data: both assets are already
+// in the SDK layout (32x32, 4 bytes/row, MSB-first, bit 0 = draw), so only the
+// w/h/opticalCenterY metadata was missing. opticalCenterY is the artwork's
+// center of mass, measured from the bits (bookmarkReturn is symmetric at 16;
+// highlight's quote marks sit high in the box, at 13).
+static const freeink::Icon icon_bookmark_return_32 = {32, 32, 16, BookmarkReturnIcon};
+static const freeink::Icon icon_highlight_32 = {32, 32, 13, HighlightIcon};
