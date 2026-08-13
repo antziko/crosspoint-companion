@@ -12,20 +12,44 @@
 #include "activities/reader/ReaderUtils.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
-#include "fontIds.h"
+#include "components/UiAppHelpers.h"
+
+namespace fui = freeink::ui;
 
 namespace {
 // Hold threshold for the long-press "remove from list" action (firmware convention).
 constexpr unsigned long LONG_PRESS_MS = 1000;
 }  // namespace
 
-void RecentBooksActivity::loadRecentBooks() { recentBooks = RECENT_BOOKS.getBooks(); }
+RecentBooksActivity::RecentBooksActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
+    : UiListActivity("RecentBooks", renderer, mappedInput, /*wantsTouchLongPress=*/true) {}
+
+void RecentBooksActivity::loadRecentBooks() {
+  recentBooks = RECENT_BOOKS.getBooks();
+  rebuildRowItems();
+}
+
+// Derives rowItems from recentBooks. Called whenever recentBooks changes
+// (loadRecentBooks(), i.e. load/removal) so buildScreen() reuses the cached
+// rows on every repaint instead of rebuilding them per render.
+void RecentBooksActivity::rebuildRowItems() {
+  rowItems.clear();
+  rowItems.reserve(recentBooks.size());
+  for (const auto& book : recentBooks) {
+    fui::ListItem item;
+    item.label = book.title.c_str();
+    if (!book.author.empty()) item.subtitle = book.author.c_str();
+    item.icon = listIconFor(UITheme::getFileIcon(book.path), 32);  // subtitle rows carry the larger icon
+    item.actionValue = static_cast<int16_t>(rowItems.size());
+    rowItems.push_back(item);
+  }
+}
 
 bool RecentBooksActivity::moveSelectedUp() {
-  if (!RECENT_BOOKS.moveUp(selectorIndex)) {
+  if (!RECENT_BOOKS.moveUp(nav.selected)) {
     return false;
   }
-  selectorIndex--;
+  nav.selected--;
   RECENT_BOOKS.saveToFile();
   loadRecentBooks();
   requestUpdate();
@@ -33,10 +57,10 @@ bool RecentBooksActivity::moveSelectedUp() {
 }
 
 bool RecentBooksActivity::moveSelectedDown() {
-  if (!RECENT_BOOKS.moveDown(selectorIndex)) {
+  if (!RECENT_BOOKS.moveDown(nav.selected)) {
     return false;
   }
-  selectorIndex++;
+  nav.selected++;
   RECENT_BOOKS.saveToFile();
   loadRecentBooks();
   requestUpdate();
@@ -44,7 +68,7 @@ bool RecentBooksActivity::moveSelectedDown() {
 }
 
 void RecentBooksActivity::onEnter() {
-  Activity::onEnter();
+  UiListActivity::onEnter();
 
   // One of the few non-reader screens that follows SETTINGS.displayOrientation
   // (the hold-to-rotate gesture is handled in loop(), see resolveSideNavAction).
@@ -56,11 +80,7 @@ void RecentBooksActivity::onEnter() {
     RECENT_BOOKS.saveToFile();
   }
 
-  // Load data
   loadRecentBooks();
-
-  selectorIndex = 0;
-  requestUpdate();
 }
 
 void RecentBooksActivity::onExit() {
@@ -72,14 +92,28 @@ void RecentBooksActivity::onExit() {
   recentBooks.clear();
 }
 
-void RecentBooksActivity::loop() {
+void RecentBooksActivity::activateIndex(const int index) {
+  // Opening the book leaves this screen; a lingering flash would gray an
+  // unrelated row when the list next appears.
+  app.clearTapFlash();
+  LOG_DBG("RBA", "Selected recent book: %s", recentBooks[index].path.c_str());
+  onSelectBook(recentBooks[index].path);
+}
+
+void RecentBooksActivity::onRowLongPress(const int index) {
+  // Long-press prompts removal from the list (mirrors the Confirm-button hold).
+  app.clearTapFlash();
+  promptRemoveBook(recentBooks[index].path, recentBooks[index].title);
+}
+
+bool RecentBooksActivity::handleButtons() {
   // After a long-press has fired, swallow input until Confirm is physically released
   // (so the release doesn't also open the book; re-arm only once the button is up).
   if (longPressFired) {
     if (!mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
       longPressFired = false;
     }
-    return;
+    return true;
   }
 
   // Reorder: tap Left = move the selected book up, tap Right = move it down. The
@@ -89,35 +123,40 @@ void RecentBooksActivity::loop() {
   // Intercept before the buttonNavigator block so Left/Right don't also move the cursor.
   if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
     moveSelectedUp();
-    return;
+    return true;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
     moveSelectedDown();
-    return;
+    return true;
   }
 
   // Long-press Confirm on the selected book: prompt to remove it from the list.
   // Fires when the hold times out while still held (firmware hold-to-act pattern,
   // cf. FileBrowserActivity BACK long-press).
-  if (!recentBooks.empty() && selectorIndex < recentBooks.size() &&
+  if (!recentBooks.empty() && nav.selected < listCount() &&
       mappedInput.isPressed(MappedInputManager::Button::Confirm) && mappedInput.getHeldTime() >= LONG_PRESS_MS) {
     longPressFired = true;
-    promptRemoveBook(recentBooks[selectorIndex].path, recentBooks[selectorIndex].title);
-    return;
+    promptRemoveBook(recentBooks[nav.selected].path, recentBooks[nav.selected].title);
+    return true;
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    if (!recentBooks.empty() && selectorIndex < static_cast<int>(recentBooks.size())) {
-      LOG_DBG("RBA", "Selected recent book: %s", recentBooks[selectorIndex].path.c_str());
-      onSelectBook(recentBooks[selectorIndex].path);
-      return;
+    if (!recentBooks.empty() && nav.selected < listCount()) {
+      activateIndex(nav.selected);
+      return true;
     }
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     onGoHome();
+    return true;
   }
 
+  // LOCAL(feat): side Up/Down are STEP-or-ROTATE, not plain navigation, so the
+  // base handler is deliberately not called for them. Holding a side button
+  // cycles the display orientation (this is one of the few non-reader screens
+  // that follows SETTINGS.displayOrientation); Left/Right are reserved for
+  // reordering above. Upstream has neither gesture and just returns false here.
   const int listSize = static_cast<int>(recentBooks.size());
 
   // Cursor moves on the Up/Down side buttons only — Left/Right are reserved for
@@ -126,7 +165,7 @@ void RecentBooksActivity::loop() {
   // reserved for the display-orientation-cycle gesture instead.
   switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Down)) {
     case ReaderUtils::SideNavAction::STEP:
-      selectorIndex = ButtonNavigator::nextIndex(static_cast<int>(selectorIndex), listSize);
+      nav.selected = ButtonNavigator::nextIndex(nav.selected, listSize);
       requestUpdate();
       break;
     case ReaderUtils::SideNavAction::ROTATE:
@@ -138,7 +177,7 @@ void RecentBooksActivity::loop() {
   }
   switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Up)) {
     case ReaderUtils::SideNavAction::STEP:
-      selectorIndex = ButtonNavigator::previousIndex(static_cast<int>(selectorIndex), listSize);
+      nav.selected = ButtonNavigator::previousIndex(nav.selected, listSize);
       requestUpdate();
       break;
     case ReaderUtils::SideNavAction::ROTATE:
@@ -148,6 +187,7 @@ void RecentBooksActivity::loop() {
     case ReaderUtils::SideNavAction::NONE:
       break;
   }
+  return false;
 }
 
 void RecentBooksActivity::promptRemoveBook(const std::string& path, const std::string& title) {
@@ -160,10 +200,11 @@ void RecentBooksActivity::promptRemoveBook(const std::string& path, const std::s
       LOG_DBG("RBA", "Removed from recents: %s", path.c_str());
       loadRecentBooks();
       if (recentBooks.empty()) {
-        selectorIndex = 0;
-      } else if (selectorIndex >= recentBooks.size()) {
-        selectorIndex = recentBooks.size() - 1;
+        nav.selected = 0;
+      } else if (nav.selected >= listCount()) {
+        nav.selected = listCount() - 1;
       }
+      nav.follow(listCount());
       requestUpdate(true);
     }
   };
@@ -172,31 +213,43 @@ void RecentBooksActivity::promptRemoveBook(const std::string& path, const std::s
                                                       tr(STR_REMOVE_FROM_RECENTS), title);
 }
 
-void RecentBooksActivity::render(RenderLock&&) {
-  renderer.clearScreen();
-
-  const auto pageWidth = renderer.getScreenWidth();
-  const auto pageHeight = renderer.getScreenHeight();
+void RecentBooksActivity::buildScreen(UiScreen& screen) {
   const auto& metrics = UITheme::getInstance().getMetrics();
+  // Content below the GUI.drawHeader band, above the button hints.
+  screen.setContentMargin(fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0,
+                                      static_cast<int16_t>(metrics.buttonHintsHeight), 0});
+  screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_MENU_RECENT_BOOKS));
-
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
-
-  // Recent tab
   if (recentBooks.empty()) {
-    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, contentTop + 20, tr(STR_NO_RECENT_BOOKS));
-  } else {
-    GUI.drawList(
-        renderer, Rect{0, contentTop, pageWidth, contentHeight}, recentBooks.size(), selectorIndex,
-        [this](int index) { return recentBooks[index].title; }, [this](int index) { return recentBooks[index].author; },
-        [this](int index) { return UITheme::getFileIcon(recentBooks[index].path); });
+    screen.centeredText(tr(STR_NO_RECENT_BOOKS), screen.theme().bodyText);
+    return;
   }
 
-  // Help text
-  const auto labels = mappedInput.mapLabels(tr(STR_HOME), tr(STR_OPEN), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  // rowItems is built in loadRecentBooks() (see rebuildRowItems()) and
+  // reused here on every repaint.
+  fui::ListProps props;
+  props.items = rowItems.data();
+  props.count = static_cast<uint16_t>(rowItems.size());
+  props.action = ACTION_ROW;
+  // Tap opens; long-press prompts removal (physical buttons stay in loop()).
+  props.inputMask = fui::InputTouch | fui::InputLongPress;
+  // Titles in the small font so more of a long title fits on the line; the row
+  // height stays on the theme cadence. Bold keeps the title/author hierarchy
+  // and doubles as the caller-owned marker: an all-default smallText fails
+  // textStyleUnset and Screen::list() would substitute bodyText back
+  // (FONT_SLOT_SMALL is 0). No maxLines=2 here: on subtitle rows the label
+  // band is one line tall and a wrapped title would collide with the author.
+  fui::TextStyle label = screen.theme().smallText;
+  label.bold = true;
+  props.labelText = label;
+  syncListViewport(screen, props, /*hasSubtitle=*/true);
+  screen.list(props);
+}
 
-  renderer.displayBuffer();
+void RecentBooksActivity::drawFooter() {
+  // No rows: blank the row-action hints, same as FileBrowserActivity.
+  const bool empty = recentBooks.empty();
+  const auto labels = mappedInput.mapLabels(tr(STR_HOME), empty ? "" : tr(STR_OPEN), empty ? "" : tr(STR_DIR_UP),
+                                            empty ? "" : tr(STR_DIR_DOWN));
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
