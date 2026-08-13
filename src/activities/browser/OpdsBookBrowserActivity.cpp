@@ -637,7 +637,12 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   // mirrors downloadBook's swap-to-free. Nothing below reads the old entries:
   // they're fully replaced by the parser's results after the connection closes,
   // and the ERROR paths don't touch the list.
-  std::vector<OpdsEntry>().swap(entries);
+  //
+  // Via releaseEntries(), not a bare swap of `entries`: the row buffers derived
+  // from it (rowLabels/rowItems/downloadedCache) are just as much of the feed and
+  // were being left behind, holding their blocks — and their pointers into the
+  // freed entry strings — right through the handshake.
+  releaseEntries();
 
   // Hand the 32KB inflate window back to the heap for the feed parse. A large feed's
   // entry vector + strings OOMs (crashes) without it on the low-headroom X3. This
@@ -878,13 +883,23 @@ void OpdsBookBrowserActivity::rebuildRowItems() {
   }
 }
 
+// Drop the feed and everything derived from it. Swap-with-empty on every vector,
+// never clear(): clear() destroys the elements but keeps the capacity block, and
+// the capacity is the point — a 40-row feed's rowLabels is 40 separate small
+// allocations spread through the heap, which is what collapses largest8 even while
+// free heap looks healthy (measured on X3: free=34008 with largest=9716, 524 bytes
+// under the TLS preflight, refusing three retries in a row).
+//
+// This also un-dangles rowItems: item.subtitle points into entries[i].author, so
+// freeing entries alone leaves the row buffer holding pointers into freed strings.
+// closeRouting() stops the interaction table routing taps at the stale rows until
+// the next render.
 void OpdsBookBrowserActivity::releaseEntries() {
-  // The app's interaction table holds row indices (and hit rects) for the old
-  // entries; stop routing touches against it until the next render.
   closeRouting();
   std::vector<OpdsEntry>().swap(entries);
-  downloadedCache.clear();
-  rebuildRowItems();
+  std::vector<uint8_t>().swap(downloadedCache);
+  std::vector<freeink::ui::ListItem>().swap(rowItems);
+  std::vector<std::string>().swap(rowLabels);
 }
 
 void OpdsBookBrowserActivity::navigateToEntry(const OpdsEntry& entry) {
@@ -945,7 +960,7 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   // entries now gives TLS the contiguous headroom it needs; the list is
   // re-fetched after the download. Worst on the X3 (less RAM).
   const int savedIndex = selectorIndex;
-  std::vector<OpdsEntry>().swap(entries);
+  releaseEntries();  // the row buffers are part of the feed too — see releaseEntries()
   const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   SdDebugLog::log("OPDS", "download start, heap=%u, largest=%u, url=%s", (unsigned)ESP.getFreeHeap(),
                   (unsigned)largestBlock, downloadUrl.c_str());
@@ -1151,7 +1166,18 @@ void OpdsBookBrowserActivity::launchWifiSelection() {
   // on a fresh heap. releaseWindow() is idempotent, so fetchFeed()'s call still
   // stands for the already-connected path that skips this screen.
   InflateReader::releaseWindow();
-  LOG_DBG("OPDS", "Released inflate window before WiFi (heap: %u)", (unsigned)ESP.getFreeHeap());
+
+  // Drop the feed for the duration of the WiFi round trip. Re-entering this screen
+  // from the ERROR state (the "WiFi connection failed" retry) used to run a scan on
+  // top of a live 40-row feed, and cancelling out of it left that feed in place while
+  // the radio stayed up — so the retry's fetch met a heap fragmented by both and was
+  // refused with "Memory error", identically, on every attempt. Nothing needs the list
+  // meanwhile: both branches of onWifiSelectionComplete() either re-fetch it or show
+  // an error screen.
+  releaseEntries();
+  selectorIndex = 0;
+  LOG_DBG("OPDS", "Released inflate window + feed before WiFi (heap: %u, largest: %u)", (unsigned)ESP.getFreeHeap(),
+          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
   state = BrowserState::WIFI_SELECTION;
   requestUpdate();
