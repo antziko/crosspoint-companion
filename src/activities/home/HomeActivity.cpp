@@ -12,6 +12,7 @@
 #include <Xtc.h>
 #include <esp_heap_caps.h>
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -263,6 +264,7 @@ void HomeActivity::freeCoverBuffer() {
 
 void HomeActivity::loop() {
   const int menuCount = getMenuItemCount();
+  const auto& metrics = UITheme::getInstance().getMetrics();
 
   // After a long-press fired, swallow input until Confirm is physically released so the
   // release doesn't also open the book (re-arm only once the button is up).
@@ -300,6 +302,53 @@ void HomeActivity::loop() {
     return;
   }
 
+  // Touch: the recent-book cover strip, then the menu rows below it. Ported
+  // from upstream #2957 — feat's home screen had no touch path at all, so on a
+  // touch board the whole screen was button-only.
+  const int coverColumnCount = std::max(1, metrics.homeRecentBooksCount);
+  const int recentCount = std::min(static_cast<int>(recentBooks.size()), coverColumnCount);
+  const int coverColumnWidth = (renderer.getScreenWidth() - 2 * metrics.contentSidePadding) / coverColumnCount;
+  int touchedBook = -1;
+  const auto coverTouch = mappedInput.colTouch(touchedBook, metrics.contentSidePadding, coverColumnWidth, recentCount,
+                                               metrics.homeTopPadding,
+                                               metrics.homeTopPadding + metrics.homeCoverTileHeight, coverColumnWidth);
+  if (coverTouch != MappedInputManager::RowTouch::None) {
+    if (coverTouch == MappedInputManager::RowTouch::Down) {
+      if (selectorIndex != touchedBook) {
+        selectorIndex = touchedBook;
+        requestUpdate();
+      }
+    } else {
+      selectorIndex = touchedBook;
+      activateSelection();
+    }
+    return;
+  }
+
+  const int menuTop = metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset;
+  const int renderedMenuCount =
+      menuCount - (metrics.homeContinueReadingInMenu ? 0 : static_cast<int>(recentBooks.size()));
+  int menuRow = -1;
+  // Row height from the theme, not the metrics table: RoundedRaff draws
+  // font-derived rows and the touch grid must match the visuals exactly.
+  const int menuRowHeight = GUI.getMenuRowHeight(renderer);
+  const auto menuTouch = mappedInput.rowTouch(menuRow, menuTop, menuRowHeight + metrics.menuSpacing, renderedMenuCount,
+                                              0, INT32_MAX, menuRowHeight);
+  if (menuTouch != MappedInputManager::RowTouch::None) {
+    const int touchedIndex =
+        metrics.homeContinueReadingInMenu ? menuRow : menuRow + static_cast<int>(recentBooks.size());
+    if (menuTouch == MappedInputManager::RowTouch::Down) {
+      if (selectorIndex != touchedIndex) {
+        selectorIndex = touchedIndex;
+        requestUpdate();
+      }
+    } else {
+      selectorIndex = touchedIndex;
+      activateSelection();
+    }
+    return;
+  }
+
   buttonNavigator.onNext([this, menuCount] {
     selectorIndex = ButtonNavigator::nextIndex(selectorIndex, menuCount);
     requestUpdate();
@@ -322,33 +371,40 @@ void HomeActivity::loop() {
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    if (selectorIndex < recentBooks.size()) {
-      onSelectBook(recentBooks[selectorIndex].path);
-    } else {
-      const int menuIndex = selectorIndex - static_cast<int>(recentBooks.size());
-      switch (indexToMenuItem(menuIndex, hasOpdsServers, hasReadingStats)) {
-        case HomeMenuItem::FILE_BROWSER:
-          onFileBrowserOpen();
-          break;
-        case HomeMenuItem::RECENTS:
-          onRecentsOpen();
-          break;
-        case HomeMenuItem::OPDS_BROWSER:
-          onOpdsBrowserOpen();
-          break;
-        case HomeMenuItem::READING_STATS:
-          onReadingStatsOpen();
-          break;
-        case HomeMenuItem::FILE_TRANSFER:
-          onFileTransferOpen();
-          break;
-        case HomeMenuItem::SETTINGS_MENU:
-          onSettingsOpen();
-          break;
-        default:
-          break;
-      }
-    }
+    activateSelection();
+  }
+}
+
+// Open whatever selectorIndex currently points at: a recent-book cover tile
+// below the count of recents, otherwise the menu row at that offset. Shared by
+// the Confirm release and the touch paths, which must not diverge.
+void HomeActivity::activateSelection() {
+  if (selectorIndex < static_cast<int>(recentBooks.size())) {
+    onSelectBook(recentBooks[selectorIndex].path);
+    return;
+  }
+  const int menuIndex = selectorIndex - static_cast<int>(recentBooks.size());
+  switch (indexToMenuItem(menuIndex, hasOpdsServers, hasReadingStats)) {
+    case HomeMenuItem::FILE_BROWSER:
+      onFileBrowserOpen();
+      break;
+    case HomeMenuItem::RECENTS:
+      onRecentsOpen();
+      break;
+    case HomeMenuItem::OPDS_BROWSER:
+      onOpdsBrowserOpen();
+      break;
+    case HomeMenuItem::READING_STATS:
+      onReadingStatsOpen();
+      break;
+    case HomeMenuItem::FILE_TRANSFER:
+      onFileTransferOpen();
+      break;
+    case HomeMenuItem::SETTINGS_MENU:
+      onSettingsOpen();
+      break;
+    default:
+      break;
   }
 }
 
@@ -360,7 +416,10 @@ void HomeActivity::render(RenderLock&&) {
   renderer.clearScreen();
   bool bufferRestored = coverBufferStored && restoreCoverBuffer();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.homeTopPadding},
+  // Band spans topPadding..homeTopPadding: the cover tile starts at the fixed
+  // homeTopPadding, so the height must shrink by topPadding or the band (and a
+  // centered title, e.g. RoundedRaff's book title) sinks into the tile.
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.homeTopPadding - metrics.topPadding},
                  metrics.homeContinueReadingInMenu && !recentBooks.empty() ? recentBooks[0].title.c_str() : nullptr);
 
   // Record the tile rect so storeCoverBuffer (called from the theme) knows

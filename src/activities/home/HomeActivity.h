@@ -44,6 +44,10 @@ class HomeActivity final : public Activity {
   std::vector<RecentBook> recentBooks;
   const HomeMenuItem initialMenuItem;
 
+  // Open whatever selectorIndex points at (recent cover tile or menu row);
+  // shared by the Confirm release and the touch paths.
+  void activateSelection();
+
   // Convert HomeMenuItem to menu index (used in onEnter)
   static int menuItemToIndex(HomeMenuItem item, bool hasOpdsUrl, bool hasReadingStats) {
     int i = 0;
