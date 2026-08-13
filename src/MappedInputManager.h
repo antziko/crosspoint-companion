@@ -28,7 +28,18 @@ class MappedInputManager {
   bool hasTouch() const;
   bool wasScreenTapped(int& x, int& y) const;
   bool wasScreenTouchDown(int& x, int& y) const;
+  // One-shot long-press from the SDK touch classifier, fired WHILE the finger
+  // is still down (stationary contact held past the SDK threshold). Consuming
+  // it suppresses the remainder of the contact — its continued hold and its
+  // release edge — so the ensuing finger lift can't also tap-dismiss the popup
+  // the long-press opened. The SDK owns that latch and self-clears it once the
+  // contact ends.
+  bool wasScreenLongPress(int& x, int& y) const;
   bool isScreenTouchHeld(int& x, int& y) const;
+  // Raw release edge, also true when the contact ended in a swipe or drag-off
+  // (which wasScreenTapped never reports). InputSnapshot builders forward it
+  // off-target so FreeInkUI routing clears its pressed-element state.
+  bool wasScreenTouchReleased() const;
   bool wasTapInRect(int x, int y, int width, int height) const;
   bool wasListItemTapped(int& index, int itemCount, int selectedIndex, int listTop, int listHeight,
                          bool hasSubtitle) const;
