@@ -17,11 +17,20 @@ namespace {
 // (…32→64) stay small transients, yet covers any usable page. Feeds that dump
 // hundreds of entries unpaginated are a server problem (should send rel="next").
 //
-// The cap is the ONLY guard: an instantaneous free-heap check is useless here
-// because mbedtls holds tens of KB of TLS record buffers during read, so the
-// momentary free heap dips far below the before/after snapshots and any
+// The cap is the ONLY guard on free heap: an instantaneous free-heap check is
+// useless here because the TLS stack holds its record buffers during the read, so
+// the momentary free heap dips far below the before/after snapshots and any
 // threshold misfires mid-stream (a small feed got cut to 4 entries that way).
 constexpr size_t MAX_ENTRIES = 64;
+
+// Entry-vector growth step. std::vector doubles by default, and a doubling is
+// exactly the wrong shape here: at 32 entries it asks for one 6.4KB contiguous
+// block on a heap the TLS read has already chopped into ~7KB pieces, so a feed
+// truncated at 32 entries with 19KB still free (X3 log: "count=32 need=8448
+// largest=7668" — short by 780 bytes). A fixed step keeps the request small as the
+// feed grows, at the cost of one extra copy per step: an entry is ~100 bytes, so a
+// full 64-entry page copies ~6KB across every step combined.
+constexpr size_t OPDS_GROWTH_STEP = 8;
 
 // Headroom (bytes) required beyond the entry vector's next-growth allocation before
 // we let it reallocate. Covers the inserted entry's string copies plus safety. Below
@@ -31,11 +40,11 @@ constexpr size_t MAX_ENTRIES = 64;
 constexpr size_t OPDS_GROWTH_HEAP_MARGIN = 2 * 1024;
 
 // True if the largest contiguous free block can cover the entry vector's next
-// doubling (from curCapacity) plus margin. When false, the caller stops adding
+// growth step (from curCapacity) plus margin. When false, the caller stops adding
 // entries rather than letting the reallocation's bare-`new` abort() on a starved
 // heap. Logs the shortfall to SD for the (serial-less) X3.
 bool heapCanGrowEntries(size_t curCapacity) {
-  const size_t newCap = curCapacity ? curCapacity * 2 : 8;
+  const size_t newCap = curCapacity + OPDS_GROWTH_STEP;
   const size_t needBytes = newCap * sizeof(OpdsEntry) + OPDS_GROWTH_HEAP_MARGIN;
   const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   if (largest >= needBytes) return true;
@@ -227,8 +236,7 @@ void XMLCALL OpdsParser::endElement(void* userData, const XML_Char* name) {
       // dropped => truncated flag.
       if (self->entries.size() >= MAX_ENTRIES) {
         self->truncated = true;
-      } else if (self->entries.size() == self->entries.capacity() &&
-                 !heapCanGrowEntries(self->entries.capacity())) {
+      } else if (self->entries.size() == self->entries.capacity() && !heapCanGrowEntries(self->entries.capacity())) {
         // Growing the vector reallocates (old + new block held at once) at the
         // moment the TLS read has the heap at its tightest. That bare-`new` aborts()
         // under -fno-exceptions on the X3 (a 37KB feed crashed here at ~7KB free).
@@ -237,6 +245,13 @@ void XMLCALL OpdsParser::endElement(void* userData, const XML_Char* name) {
         // unaffected — only a large feed on a starved heap gets capped.
         self->truncated = true;
       } else {
+        // Reserve the fixed step explicitly. Left to itself push_back would double,
+        // which is the allocation heapCanGrowEntries() just sanctioned a step for —
+        // and reserve() abort()s on failure under -fno-exceptions, so it must ask for
+        // the size that was actually checked.
+        if (self->entries.size() == self->entries.capacity()) {
+          self->entries.reserve(self->entries.capacity() + OPDS_GROWTH_STEP);
+        }
         self->entries.push_back(self->currentEntry);
       }
     }

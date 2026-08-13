@@ -117,6 +117,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
   }
 
   std::string url = startUrl;
+  bool retriedConnect = false;
   for (int hop = 0; hop <= MAX_REDIRECTS; ++hop) {
     freeink::SecureHttpClient http;
     http.setTimeout(HTTP_TIMEOUT_MS);
@@ -155,10 +156,13 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
                             snap.internalFree, snap.internalLargest, (int)snap.rssi, sink.total, url.c_str());
           }
 
-          // Flag any single read that blocked unusually long (network stall, not SD).
+          // Time waiting on the socket since the PREVIOUS callback returned. lastChunkMs
+          // is stamped at the END of this callback, not here: stamping it on entry folded
+          // our own SD write and the caller's progress repaint into the next "stall", so
+          // the two were indistinguishable — a 130KB OPDS feed logged 34.8s of gaps that
+          // may have been largely e-ink refreshes, not the link.
           const uint32_t now = millis();
           const uint32_t gapMs = now - lastChunkMs;
-          lastChunkMs = now;
           if (gapMs > STALL_LOG_THRESHOLD_MS) {
             const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
             SdDebugLog::log("STALL", "gap=%lums bytes=%zu heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d",
@@ -171,6 +175,16 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
           // Report progress even when total is unknown (chunked / no Content-Length):
           // callers can show a byte count instead of a percentage bar.
           if (sink.progress) sink.progress(sink.downloaded, sink.total);
+
+          // Our own per-chunk cost: the SD write plus whatever the caller's progress
+          // callback did (queueing an e-ink refresh, polling input). Logged separately
+          // from STALL so a slow transfer can be attributed to the link or to us
+          // without guessing.
+          const uint32_t workMs = millis() - now;
+          if (workMs > STALL_LOG_THRESHOLD_MS) {
+            SdDebugLog::log("SINK", "work=%lums bytes=%zu len=%zu", (unsigned long)workMs, sink.downloaded, len);
+          }
+          lastChunkMs = millis();
 
           if (sink.downloaded - lastXferLogBytes >= XFER_LOG_BYTES) {
             lastXferLogBytes = sink.downloaded;
@@ -189,6 +203,21 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       LOG_ERR("HTTP", "wolfSSL request failed: %s", url.c_str());
       SdDebugLog::log("HTTP", "wolfSSL request failed after %lums heap=%u largest8=%u url=%s",
                       (unsigned long)(millis() - openStartMs), s.heapFree, s.largest8Bit, url.c_str());
+      // Retry once when nothing arrived. The ESP32-C3's LWIP stack routinely fails the
+      // first connect made after a previous socket closed (TIME_WAIT / sock<0) and then
+      // succeeds immediately — the churn KOSync sidesteps with a keep-alive session, but
+      // OPDS opens a fresh connection per user action. Observed on X3: this URL failed
+      // after 15403ms, then completed its handshake in 588ms on the user's own retry.
+      //
+      // Guarded on downloaded == 0: past the first body byte the sink already holds
+      // partial content, and re-running the GET would append a duplicate copy. The retry
+      // spends one hop of the redirect budget rather than tracking a separate counter.
+      if (!retriedConnect && sink.downloaded == 0 && hop < MAX_REDIRECTS) {
+        retriedConnect = true;
+        SdDebugLog::log("HTTP", "connect retry (no bytes yet): %s", url.c_str());
+        delay(200);  // let the stack finish tearing the previous socket down
+        continue;
+      }
       setDetail(sink.detail, "connect/read failed");
       return HttpDownloader::HTTP_ERROR;
     }

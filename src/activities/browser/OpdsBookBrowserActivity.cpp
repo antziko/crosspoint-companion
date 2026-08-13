@@ -42,25 +42,29 @@ constexpr int LIST_TOP_Y = 60;
 constexpr int LIST_ROW_H = 30;
 constexpr int LIST_BOTTOM_RESERVE = 40;     // button-hints strip (buttonHintsHeight)
 constexpr unsigned long GO_HOME_MS = 1000;  // hold BACK this long to jump to home
-// Minimum contiguous heap required before bringing up an HTTPS connection.
-// Sized for the shrunk mbedtls record buffers (custom_sdkconfig: DYNAMIC_BUFFER
-// + IN_CONTENT_LEN=8192/OUT=2048). With dynamic buffers the largest single
-// contiguous allocation the handshake makes is the IN record (~8.2KB); 24KB
-// gives ~3x headroom for that plus the HTTPClient RX/TX scratch. The old 44KB
-// value was sized for the default 16KB IN+OUT record buffers and, post-shrink,
-// false-rejected fetches that had ample heap: on-device logs showed aborts at
-// largest=34804 (X3) and largest=45044 (X4, under the 45056 gate by 12 bytes)
-// while total free was 68-86KB. Below this the connect or an in-flight read can
-// still fail as an OOM-in-disguise and stall, so a guard remains — just smaller.
+// Minimum contiguous heap required before bringing up an HTTPS connection. Below
+// this the connect or an in-flight read can fail as an OOM-in-disguise and stall,
+// so a guard remains — but it must be sized against the TLS stack actually in use.
 //
-// Lowered 24KB -> 18KB: X4 SD traces showed the FIRST HTTPS fetch succeeds, then
-// the handshake fragments the heap so the SECOND fetch sees largest=24564 and was
-// false-rejected by the old 24576 gate (by 12 bytes) with 67KB total free. 18KB
-// still gives ~2.2x the ~8.2KB IN record (the largest single handshake alloc), so
-// a genuinely-too-fragmented heap is still caught.
-constexpr size_t MIN_CONTIGUOUS_HEAP_FOR_TLS = 18 * 1024;
+// History: 44KB (default 16KB mbedTLS IN+OUT records) -> 24KB (shrunk records,
+// DYNAMIC_BUFFER + IN_CONTENT_LEN=8192) -> 18KB. Every one of those steps was a
+// false-rejection fix, and each was still priced against an mbedTLS record buffer.
+//
+// Lowered 18KB -> 10KB for wolfSSL. The 24KB and 18KB figures were both sized
+// against mbedTLS record buffers ("~2.2x the ~8.2KB IN record"), and that record is
+// gone twice over: the app is on wolfSSL (SecureHttpClient), and HAVE_MAX_FRAGMENT
+// negotiates 2KB TLS records (platformio.ini:85-94, wolfSSL_UseMaxFragment in the
+// SDK's SecureClient.cpp), so the receive buffer is ~2KB rather than ~17KB.
+//
+// The old gate was rejecting requests wolfSSL can serve. X3 log: two handshakes
+// completed and ENDED holding largest8=11252 and 12276, while every later fetch and
+// the book download were refused at largest=13812/14324 with ~41KB free — the
+// browser went permanently dead after one big feed for want of a block nothing
+// needed. 10KB keeps a fragmentation guard without pricing in a buffer that no
+// longer exists; raise it if handshakes start failing with MEMORY_E.
+constexpr size_t MIN_CONTIGUOUS_HEAP_FOR_TLS = 10 * 1024;
 
-// Plain HTTP does no TLS handshake, so it needs no mbedTLS record buffers — only
+// Plain HTTP does no TLS handshake, so it needs no record buffers at all — only
 // a few KB contiguous for rx/tx and the client struct. A local http:// OPDS
 // server must not be rejected by the TLS-sized contiguous gate above.
 constexpr size_t MIN_CONTIGUOUS_HEAP_FOR_HTTP = 8 * 1024;
@@ -147,6 +151,13 @@ constexpr fui::ActionId ACTION_ROW = 1;
 constexpr fui::ActionId ACTION_SEARCH = 2;
 constexpr fui::ActionId ACTION_CANCEL = 3;
 constexpr int DOWNLOAD_PROGRESS_STEP_PERCENT = 5;
+
+// Feed-fetch progress cadence (see fetchFeed). Coarser than the download's because a
+// feed is a one-shot wait with no cancel-worthy duration in the normal case, and each
+// repaint competes with the socket read for the single core.
+constexpr int FEED_PROGRESS_STEP_PERCENT = 10;
+constexpr size_t FEED_PROGRESS_STEP_BYTES = 32 * 1024;
+constexpr unsigned long FEED_PROGRESS_MIN_INTERVAL_MS = 3000;
 constexpr unsigned long DOWNLOAD_PROGRESS_MIN_UPDATE_MS = 5000;
 
 }  // namespace
@@ -657,25 +668,43 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   requestUpdateAndWait();
 
   std::string httpDetail;
-  // Feed transfer progress. Feeds usually carry no Content-Length, so show bytes
-  // received (KB/MB) rather than a percentage. Throttle to every 8KB: each e-ink
-  // repaint is slow and a small feed would otherwise flood the render task.
+  // Feed transfer progress. Feeds usually carry no Content-Length, so fall back to
+  // bytes received (KB/MB) rather than a percentage when the server sends none.
+  //
+  // Throttling is deliberately coarse. This callback runs inside the socket read
+  // loop, and every update queues a full-screen e-ink refresh on the single core the
+  // transfer is also running on. The old rule repainted every 8KB, which put ~16
+  // refreshes inside one 130KB feed that took 45s at 2888 B/s. Step by percent when
+  // there is a Content-Length, by a coarse byte count when there is not, and never
+  // twice inside FEED_PROGRESS_MIN_INTERVAL_MS however fast the bytes arrive. The
+  // book-download callback below has had the same shape since #2957.
   size_t lastShown = 0;
+  int lastRenderedPercent = -1;
+  unsigned long lastProgressUpdateMs = 0;
   // Elapsed-time clock for the progress label.
   const uint32_t fetchStartMs = millis();
   cancelFetch = false;
   const auto dl = HttpDownloader::downloadToFile(
       url, kTmpFeed,
-      [this, &lastShown, fetchStartMs](const size_t downloaded, const size_t total) {
-        // Poll Back every chunk (this fires per READ_CHUNK, not just per 8KB
-        // display step) so the user can abort a slow feed instead of rebooting.
+      [this, &lastShown, &lastRenderedPercent, &lastProgressUpdateMs, fetchStartMs](const size_t downloaded,
+                                                                                    const size_t total) {
+        // Poll Back every chunk (this fires per READ_CHUNK, not just per display
+        // step) so the user can abort a slow feed instead of rebooting.
         // The downloader checks cancelFetch before the next socket read.
         mappedInput.update();
         if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
           cancelFetch = true;
           return;
         }
-        if (downloaded - lastShown < 8 * 1024 && !(total > 0 && downloaded >= total)) return;
+        const unsigned long now = millis();
+        const bool complete = total > 0 && downloaded >= total;
+        const int percent = total > 0 ? static_cast<int>(static_cast<uint64_t>(downloaded) * 100 / total) : 0;
+        const bool stepped =
+            total > 0 ? (lastRenderedPercent < 0 || percent >= lastRenderedPercent + FEED_PROGRESS_STEP_PERCENT)
+                      : (downloaded - lastShown >= FEED_PROGRESS_STEP_BYTES);
+        if (!complete && (!stepped || now - lastProgressUpdateMs < FEED_PROGRESS_MIN_INTERVAL_MS)) return;
+        lastRenderedPercent = percent;
+        lastProgressUpdateMs = now;
         lastShown = downloaded;
         char sizeText[64];
         const unsigned elapsedS = (millis() - fetchStartMs) / 1000;
