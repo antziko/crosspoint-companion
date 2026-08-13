@@ -4,8 +4,11 @@
 #include <HalClock.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 #include <esp_mac.h>
+#include <esp_wifi.h>
 
 #include <algorithm>
 
@@ -111,6 +114,8 @@ void WifiSelectionActivity::onEnter() {
   forgetPromptSelection = 0;
   autoConnecting = false;
   manualNetworkListRequested = false;
+  lowMemoryAbort = false;
+  scanStartTime = 0;
   autoAttemptedSsids.clear();
   const size_t savedCredentialCount = WIFI_STORE.getCredentialCount();
   autoAttemptedSsids.reserve(savedCredentialCount);
@@ -200,6 +205,20 @@ void WifiSelectionActivity::onExit() {
   LOG_DBG("WIFI", "Free heap at onExit end: %d bytes", ESP.getFreeHeap());
 }
 
+bool WifiSelectionActivity::hasHeapForScan() {
+  return ESP.getFreeHeap() >= SCAN_MIN_FREE_HEAP &&
+         heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) >= SCAN_MIN_LARGEST_BLOCK;
+}
+
+void WifiSelectionActivity::failWithLowMemory() {
+  lowMemoryAbort = true;
+  autoConnecting = false;
+  manualNetworkListRequested = false;
+  connectionError = tr(STR_ERROR_LOW_MEMORY);
+  state = WifiSelectionState::CONNECTION_FAILED;
+  requestUpdate();
+}
+
 void WifiSelectionActivity::startWifiScan(const bool autoScan) {
   autoConnecting = autoScan;
   manualNetworkListRequested = false;
@@ -208,26 +227,67 @@ void WifiSelectionActivity::startWifiScan(const bool autoScan) {
   networks.clear();
   requestUpdate();
 
+  // Gate the scan, not the radio. Joining a known SSID needs none of the scan's
+  // per-AP buffers, so an auto-connect run below the floor walks the stored
+  // credentials blind rather than giving up — that is the KOReader-sync path,
+  // which arrives with the least headroom and never needed a network list.
+  // Only an explicit "show me what's out there" has to fail here.
+  if (!hasHeapForScan()) {
+    const unsigned freeHeap = ESP.getFreeHeap();
+    const unsigned largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    LOG_ERR("WIFI", "Scan skipped: low heap (free=%u largest=%u)", freeHeap, largest);
+    SdDebugLog::log("WIFI", "scan skipped: low heap free=%u largest=%u auto=%d", freeHeap, largest,
+                    static_cast<int>(autoScan));
+    if (autoScan && tryNextSavedCredentialBlind()) return;
+    failWithLowMemory();
+    return;
+  }
+
   // Set WiFi mode to station
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   delay(100);
 
   // Start async scan
-  WiFi.scanNetworks(true);  // true = async scan
+  scanStartTime = millis();
+  if (WiFi.scanNetworks(true) == WIFI_SCAN_FAILED) {  // true = async scan
+    // Nothing to do beyond the log: scanComplete() reports WIFI_SCAN_FAILED on
+    // the next loop and processWifiScanResults() takes the failure path.
+    LOG_ERR("WIFI", "scanNetworks() refused to start (free=%u)", (unsigned)ESP.getFreeHeap());
+  }
 }
 
 void WifiSelectionActivity::processWifiScanResults() {
   const int16_t scanResult = WiFi.scanComplete();
 
-  if (scanResult == WIFI_SCAN_RUNNING) {
-    // Scan still in progress
+  if (scanResult == WIFI_SCAN_RUNNING && millis() - scanStartTime <= SCAN_TIMEOUT_MS) {
+    // Scan still in progress, still within budget
     return;
   }
 
-  if (scanResult == WIFI_SCAN_FAILED) {
+  // Failed, or still running past our own budget. Left to arduino-esp32 this
+  // would sit on WIFI_SCAN_RUNNING until its 60 s _scanTimeout, which is what
+  // parked the sync path on "Finding saved Wi-Fi..." for a quarter minute.
+  if (scanResult == WIFI_SCAN_FAILED || scanResult == WIFI_SCAN_RUNNING) {
+    if (scanResult == WIFI_SCAN_RUNNING) {
+      LOG_ERR("WIFI", "Scan timed out after %lums", SCAN_TIMEOUT_MS);
+      SdDebugLog::log("WIFI", "scan timeout free=%u largest=%u", (unsigned)ESP.getFreeHeap(),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+      // Abort the driver-side scan, not just the Arduino bookkeeping: scanDelete()
+      // clears WIFI_SCANNING_BIT (so a late _scanDone() no-ops and frees nothing
+      // we still point at), but the IDF scan would keep running and make the
+      // WiFi.begin() in the blind-credential fallback below fail with
+      // ESP_ERR_WIFI_STATE.
+      esp_wifi_scan_stop();
+    }
+    WiFi.scanDelete();  // drop any partial driver buffers before falling back
     networks.clear();
     realNetworkCount = 0;
+    // An auto-connect run still has stored credentials it can join without a
+    // scan; only fall through to the (now empty) list when none are left.
+    if (autoConnecting && !manualNetworkListRequested && tryNextSavedCredentialBlind()) {
+      return;
+    }
     appendHiddenNetworkEntry();
     rebuildNetworkRowItems();
     autoConnecting = false;
@@ -249,7 +309,20 @@ void WifiSelectionActivity::processWifiScanResults() {
   static constexpr size_t MAX_NETWORKS = 40;
 
   networks.clear();
-  networks.reserve(std::min<size_t>(static_cast<size_t>(std::max<int16_t>(scanResult, 0)), MAX_NETWORKS));
+  // reserve() aborts under -fno-exceptions, so size the reservation to what the
+  // heap can actually hand back in one block rather than to the AP count. The
+  // /2 leaves room for each entry's SSID string, which allocates separately.
+  // A crowded band on a tight heap then yields a shorter list instead of a
+  // reboot; the loop below is bounded by the same figure so no push_back can
+  // grow past it.
+  const size_t seenAps = static_cast<size_t>(std::max<int16_t>(scanResult, 0));
+  const size_t affordable = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) / (sizeof(WifiNetworkInfo) * 2);
+  const size_t networkCapacity = std::min({seenAps, MAX_NETWORKS, affordable});
+  if (networkCapacity < seenAps) {
+    LOG_ERR("WIFI", "Scan list capped at %u of %u APs (largest=%u)", (unsigned)networkCapacity, (unsigned)seenAps,
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  }
+  networks.reserve(networkCapacity);
 
   for (int i = 0; i < scanResult; i++) {
     std::string ssid = WiFi.SSID(i).c_str();
@@ -270,9 +343,11 @@ void WifiSelectionActivity::processWifiScanResults() {
       continue;
     }
 
-    // New SSID. Stop adding once the list is full, but keep scanning so existing
-    // entries can still be upgraded to a stronger signal above.
-    if (networks.size() >= MAX_NETWORKS) {
+    // New SSID. Stop adding once the reserved capacity is full, but keep scanning
+    // so existing entries can still be upgraded to a stronger signal above.
+    // Bounded by networkCapacity, not MAX_NETWORKS: growing past the reservation
+    // would reallocate, and that reallocation is the abort we just sized around.
+    if (networks.size() >= networkCapacity) {
       continue;
     }
 
@@ -459,6 +534,23 @@ bool WifiSelectionActivity::tryNextSavedNetworkFromScan() {
     }
 
     const auto cred = WIFI_STORE.findCredential(network.ssid);
+    if (cred && tryAutoConnectCredential(*cred)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Sourced from the credential store rather than the scan list, for when there is
+// no scan to draw on (unaffordable, failed, or timed out). WiFi.begin() with a
+// known SSID needs none of the scan's per-AP buffers, which is the whole point
+// on the sync path. Ordering is store order rather than signal strength — there
+// is no RSSI to sort by without a scan. tryAutoConnectCredential() skips SSIDs
+// already tried this session, so the walk always terminates.
+bool WifiSelectionActivity::tryNextSavedCredentialBlind() {
+  const size_t count = WIFI_STORE.getCredentialCount();
+  for (size_t i = 0; i < count; i++) {
+    const auto cred = WIFI_STORE.getCredentialAt(i);
     if (cred && tryAutoConnectCredential(*cred)) {
       return true;
     }
@@ -769,6 +861,13 @@ void WifiSelectionActivity::loop() {
   if (state == WifiSelectionState::CONNECTION_FAILED) {
     if (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
         mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+      // A low-heap abort is not the network's fault: leave rather than offer to
+      // forget a credential that works, and hand the failure to the caller so
+      // the sync/browse screen behind us can report it.
+      if (lowMemoryAbort) {
+        onComplete(false);
+        return;
+      }
       // If we were auto-connecting or using a saved credential, offer to forget
       // the network
       if (autoConnecting || usedSavedPassword) {

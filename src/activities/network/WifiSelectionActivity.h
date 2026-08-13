@@ -103,6 +103,30 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
   static constexpr unsigned long AUTO_CONNECTION_TIMEOUT_MS = 7000;
   unsigned long connectionStartTime = 0;
 
+  // Scan timeout. Every other wait on this screen is bounded, but the scan was
+  // not: arduino-esp32's own guard is _scanTimeout = 60 s (WiFiScan.cpp), long
+  // enough that a stalled scan reads as a hang on "Finding saved Wi-Fi...".
+  static constexpr unsigned long SCAN_TIMEOUT_MS = 12000;
+  unsigned long scanStartTime = 0;
+
+  // Heap floor for a *scan* (not for the radio). Bringing up the driver and
+  // holding a full scan result costs ~55-58 KB measured: the sync path entered
+  // at free=60364 and bottomed at 404 B before restarting, while the same screen
+  // reached from OPDS entered at 74112 and survived. The floor sits between the
+  // two. The largest-block figure did not discriminate (40-45 KB in both), so it
+  // is only a sanity check here, not the deciding term. First estimates, same
+  // standing as kMinFreeForDict in EpubReaderActivity: two data points with
+  // margin on both sides — tune from the logged "scan skipped" values.
+  static constexpr size_t SCAN_MIN_FREE_HEAP = 68 * 1024;
+  static constexpr size_t SCAN_MIN_LARGEST_BLOCK = 20 * 1024;
+  static bool hasHeapForScan();
+
+  // Set when the screen gave up for lack of heap rather than because a network
+  // misbehaved; dismissing that error leaves instead of offering to forget a
+  // credential that is perfectly good.
+  bool lowMemoryAbort = false;
+  void failWithLowMemory();
+
   // The UiAppHost app hosts the network list and the save/forget prompts
   // (themed rows and dialogs, touch routing); every other state keeps its
   // legacy centered-text rendering.
@@ -133,6 +157,9 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
   void checkConnectionStatus();
   bool tryAutoConnectCredential(const WifiCredential& cred);
   bool tryNextSavedNetworkFromScan();
+  // Same idea as tryNextSavedNetworkFromScan(), but sourced from the credential
+  // store instead of the scan list, for when there is no scan to draw on.
+  bool tryNextSavedCredentialBlind();
   void handleAutoConnectFailure();
   void showNetworkListFromAutoConnect();
   bool hasAttemptedAutoSsid(const std::string& ssid) const;
