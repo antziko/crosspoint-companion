@@ -403,7 +403,15 @@ void SettingsActivity::toggleCurrentSetting() {
             renderer, mappedInput, &sdFontSystem.registry(), TextSettingsActivity::Tab::Family);
         break;
       case SettingAction::Language:
-        startActivityForResultNoThrow<LanguageSelectActivity>(resultHandler, renderer, mappedInput);
+        // Row labels are translated once in rebuildSettingsLists() and nothing
+        // re-runs it on Pop (there is no onResume), so a language switch needs an
+        // explicit rebuild here rather than the generic resultHandler.
+        startActivityForResultNoThrow<LanguageSelectActivity>(
+            [this](const ActivityResult&) {
+              SETTINGS.saveToFile();
+              rebuildSettingsLists();
+            },
+            renderer, mappedInput);
         break;
       case SettingAction::None:
         // Do nothing
