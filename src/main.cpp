@@ -244,11 +244,10 @@ void enterDeepSleep(bool fromTimeout = false) {
       SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
       (fromTimeout &&
        SETTINGS.quickResumeSleepScreen == CrossPointSettings::QUICK_RESUME_SLEEP_SCREEN::QUICK_RESUME_AFTER_TIMEOUT);
-  // A custom sleep image already leaves useful content on the panel across the sleep,
-  // so keep it there until the first real reader/home paint replaces it instead of
-  // overwriting it with the splash.
-  APP_STATE.showBootScreen =
-      !(isQuickResumeSleep || SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::CUSTOM);
+  // Every sleep mode leaves a complete retained frame on the e-ink panel. Keep it
+  // there until the first real reader/home paint replaces it instead of overwriting
+  // it with the splash.
+  APP_STATE.showBootScreen = false;
 
   APP_STATE.saveToFile();
 
@@ -259,10 +258,9 @@ void enterDeepSleep(bool fromTimeout = false) {
 
   if (isQuickResumeSleep) {
     saveSleepFrameBuffer();
-  } else if (SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::CUSTOM &&
-             Storage.exists(SLEEP_FRAME_FILE)) {
-    // A stale Quick Resume frame left by an earlier sleep must not turn a custom wake
-    // into the quick-resume path and paint the old reader page over the custom image.
+  } else if (Storage.exists(SLEEP_FRAME_FILE)) {
+    // A stale Quick Resume frame left by an earlier sleep must not replace the
+    // selected sleep screen during wake by painting the old reader page over it.
     Storage.remove(SLEEP_FRAME_FILE);
   }
 
@@ -530,9 +528,13 @@ void setup() {
   // skips the panel-clearing pass and the X3 initial-full-sync arming (see
   // HalDisplay::begin), so the first paint is FAST_REFRESH (~500ms) over the
   // retained frame and input dispatches against a visible UI.
-  const BootResume resume = isSilentReboot              ? BootResume::Silent
-                            : !APP_STATE.showBootScreen ? BootResume::SplashlessWake
-                                                        : BootResume::Splash;
+  // Only a verified deep-sleep wake may use the one-shot persisted flag. Otherwise a
+  // stale flag (e.g. a battery pull between enterDeepSleep's save and the wake) could
+  // suppress the splash on a cold boot, leaving the panel blank until the first paint.
+  const bool isSleepWake = wakeupReason == HalGPIO::WakeupReason::PowerButton;
+  const BootResume resume = isSilentReboot                             ? BootResume::Silent
+                            : isSleepWake && !APP_STATE.showBootScreen ? BootResume::SplashlessWake
+                                                                       : BootResume::Splash;
   bool allowFastInitialReaderRefresh = false;
 
   setupDisplayAndFonts(resume != BootResume::Splash);
@@ -548,7 +550,7 @@ void setup() {
       // splashless-with-no-frame loop on the next boot.
       APP_STATE.showBootScreen = true;
       APP_STATE.saveToFile();
-      if (loadSleepFrameBuffer()) {
+      if (Storage.exists(SLEEP_FRAME_FILE) && loadSleepFrameBuffer()) {
         // Frame restored: swap the sleep moon for the loading icon.
         const bool useDifferentialRefresh = gpio.deviceIsX3();
         if (useDifferentialRefresh) {
@@ -565,12 +567,11 @@ void setup() {
         } else {
           renderer.displayBuffer(HalDisplay::HALF_REFRESH);
         }
-      } else if (SETTINGS.sleepScreen != CrossPointSettings::SLEEP_SCREEN_MODE::CUSTOM) {
-        activityManager.goToBoot();  // frame file missing, fall back to the splash
       }
-      // Custom sleep image: there is deliberately no frame file (enterDeepSleep removes
-      // any stale one), and the panel still holds the image. Painting nothing here is
-      // the point — the first reader/home paint replaces it.
+      // No frame file: every non-Quick-Resume sleep mode deliberately leaves none
+      // (enterDeepSleep removes any stale one), and the panel still holds that mode's
+      // retained image. Painting nothing here is the point — the first reader/home
+      // paint replaces it.
       // X4: time is lost on deep sleep — background-sync NTP if the clock is on.
       maybeStartBackgroundNtpSync();
       break;
