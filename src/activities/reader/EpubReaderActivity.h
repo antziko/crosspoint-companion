@@ -3,6 +3,8 @@
 #include <Epub/FootnoteEntry.h>
 #include <Epub/Section.h>
 
+#include <atomic>
+#include <memory>
 #include <optional>
 
 #include "BookReadingStats.h"
@@ -44,6 +46,11 @@ class EpubReaderActivity final : public Activity {
   std::optional<uint32_t> cachedVisibleTextOffset;
   unsigned long lastPageTurnTime = 0UL;
   unsigned long pageTurnDuration = 0UL;
+  // A turn that arrived while a render was in flight (or inside the debounce
+  // gap), latched instead of dropped: -1 back, +1 forward, 0 none. Holds at
+  // most one turn — mashing collapses to the latest direction — and is
+  // executed by loop() once the render task is idle again.
+  int8_t pendingManualTurn = 0;
   // Signals that the next render should reposition within the newly loaded section
   // based on a cross-book percentage jump.
   bool pendingPercentJump = false;
@@ -157,8 +164,16 @@ class EpubReaderActivity final : public Activity {
   // Set in renderContents().
   bool lastPageHadImages = false;
 
-  // Next-book suggestion menu for the End-of-Book screen
-  EndOfBookOptions endOfBookOptions;
+  // Next-book suggestion menu for the End-of-Book screen. Lazy: it embeds a
+  // GfxRendererTarget + FreeInkApp (theme tokens by value, ~2KB), so it only
+  // exists while the end screen is actually showing — created at the render
+  // path's sole load site, dropped by loop() when the user pages back in.
+  std::unique_ptr<EndOfBookOptions> endOfBookOptions;
+  // Publication flag for the pointer above: the render task creates the object
+  // and release-stores true; the main task acquire-loads before dereferencing,
+  // so it never sees a partially constructed object. Cleared (main task, under
+  // RenderLock) before reset.
+  std::atomic<bool> endOfBookOptionsReady{false};
 
   // Footnote support
   std::vector<FootnoteEntry> currentPageFootnotes;
@@ -379,8 +394,7 @@ class EpubReaderActivity final : public Activity {
                               int initialRefreshCountdown)
       : Activity("EpubReader", renderer, mappedInput),
         epub(std::move(epub)),
-        pagesUntilFullRefresh(initialRefreshCountdown),
-        endOfBookOptions(renderer) {}
+        pagesUntilFullRefresh(initialRefreshCountdown) {}
   void onEnter() override;
   void onExit() override;
   void onPause() override;
