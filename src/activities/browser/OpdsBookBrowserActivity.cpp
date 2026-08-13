@@ -1138,6 +1138,21 @@ void OpdsBookBrowserActivity::checkAndConnectWifi() {
 }
 
 void OpdsBookBrowserActivity::launchWifiSelection() {
+  // Hand the 32KB inflate window back BEFORE the radio comes up, not in fetchFeed()
+  // (which runs after WiFi is already connected). Bringing esp_wifi + lwip up costs
+  // ~53KB measured, so entering this screen with the window still held leaves the
+  // scan nothing to work with: the X3 log shows "enter WifiSelection free=60296"
+  // followed by "scan skipped: low heap free=6500 largest=2804" — a failure the user
+  // sees as "Not enough memory" on every Show. The same release was added to
+  // KOReaderSyncActivity::onEnter() and simply never reached this path.
+  //
+  // Safe here for the same reason it is safe in fetchFeed(): this activity never
+  // inflates EPUB content and onExit() silent-restarts, which re-reserves the window
+  // on a fresh heap. releaseWindow() is idempotent, so fetchFeed()'s call still
+  // stands for the already-connected path that skips this screen.
+  InflateReader::releaseWindow();
+  LOG_DBG("OPDS", "Released inflate window before WiFi (heap: %u)", (unsigned)ESP.getFreeHeap());
+
   state = BrowserState::WIFI_SELECTION;
   requestUpdate();
 

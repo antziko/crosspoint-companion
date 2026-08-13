@@ -33,6 +33,12 @@ namespace {
 // slow servers room.
 constexpr int HTTP_TIMEOUT_MS = 60000;
 constexpr int MAX_REDIRECTS = 5;
+// Range-resume budget for a body that dies mid-stream. The X3 manages ~215KB per
+// connection before wolfSSL's record buffer hits the heap's 14KB contiguous ceiling
+// (see the truncation handler in runGet), so 16 hops cover a ~3.5MB book. Each hop
+// costs one TLS handshake (~700ms measured) and every hop must make forward progress,
+// so this is bounded, not open-ended.
+constexpr int MAX_RESUME_ATTEMPTS = 16;
 
 // X3 HTTPS troubleshooting instrumentation (SdDebugLog "STALL"/"XFER"): a
 // per-chunk read taking longer than this is logged with a heap+RSSI snapshot —
@@ -118,7 +124,13 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
 
   std::string url = startUrl;
   bool retriedConnect = false;
-  for (int hop = 0; hop <= MAX_REDIRECTS; ++hop) {
+  int redirects = 0;
+  // Byte offset a resumed hop asks the server to continue from (0 = fresh request).
+  // See the truncation handler below for why a mid-stream drop is resumed rather
+  // than failed.
+  size_t resumeOffset = 0;
+  int resumes = 0;
+  for (;;) {
     freeink::SecureHttpClient http;
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.setInsecure();
@@ -126,6 +138,9 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       LOG_ERR("HTTP", "wolfSSL bad URL: %s", url.c_str());
       setDetail(sink.detail, "bad URL");
       return HttpDownloader::HTTP_ERROR;
+    }
+    if (resumeOffset > 0) {
+      http.addHeader("Range", "bytes=" + std::to_string(resumeOffset) + "-");
     }
     // setUserAgent replaces SecureHttpClient's built-in UA; addHeader would append
     // a second User-Agent header, which strict servers reject.
@@ -148,13 +163,17 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
     const int status = http.GET(
         [&](const uint8_t* data, size_t len) {
           // Header parsing is done by the time the first body chunk arrives; skip
-          // any body on a non-200 (a 30x body is drained by the caller loop below).
-          if (http.getStatus() != 200) return true;
+          // any body on a non-200/206 (a 30x body is drained by the caller loop below).
+          if (http.getStatus() != 200 && http.getStatus() != 206) return true;
           if (!loggedConnect) {
             loggedConnect = true;
             transferStartMs = millis();
             lastChunkMs = transferStartMs;
-            if (sink.total == 0 && http.hasContentLength()) sink.total = http.getContentLength();
+            // A 206's Content-Length is the length of the RANGE, not of the resource,
+            // so never let it overwrite the full size learned on the first hop. The
+            // sink.total == 0 guard already covers this (a resume only happens once
+            // total is known); resumeOffset makes the intent explicit.
+            if (sink.total == 0 && resumeOffset == 0 && http.hasContentLength()) sink.total = http.getContentLength();
             const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
             SdDebugLog::log("CONNECT",
                             "handshake=%lums heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d total=%zu url=%s",
@@ -220,7 +239,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       // Guarded on downloaded == 0: past the first body byte the sink already holds
       // partial content, and re-running the GET would append a duplicate copy. The retry
       // spends one hop of the redirect budget rather than tracking a separate counter.
-      if (!retriedConnect && sink.downloaded == 0 && hop < MAX_REDIRECTS) {
+      if (!retriedConnect && sink.downloaded == 0) {
         retriedConnect = true;
         SdDebugLog::log("HTTP", "connect retry (no bytes yet): %s", url.c_str());
         delay(200);  // let the stack finish tearing the previous socket down
@@ -230,6 +249,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       return HttpDownloader::HTTP_ERROR;
     }
     if (isRedirect(status)) {
+      if (++redirects > MAX_REDIRECTS) break;
       const std::string location = http.getHeader("location");
       if (location.empty() || !freeink::SecureHttpClient::resolveUrl(url, location, url)) {
         LOG_ERR("HTTP", "wolfSSL bad redirect: %d", status);
@@ -239,7 +259,15 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       SdDebugLog::log("HTTP", "redirect %d -> %s", status, url.c_str());
       continue;
     }
-    if (status != 200) {
+    // A resumed hop MUST answer 206. A 200 means the server ignored the Range header
+    // and is restarting the body from byte 0 — appending that to what we already hold
+    // would silently corrupt the file, so stop instead.
+    if (resumeOffset > 0 && status == 200) {
+      SdDebugLog::log("HTTP", "resume unsupported (200 for Range at %zu bytes)", resumeOffset);
+      setDetail(sink.detail, "incomplete: %zu/%zu bytes", sink.downloaded, sink.total);
+      return HttpDownloader::HTTP_ERROR;
+    }
+    if (status != 200 && status != 206) {
       LOG_ERR("HTTP", "wolfSSL unexpected status: %d", status);
       SdDebugLog::log("HTTP", "unexpected status: %d", status);
       setDetail(sink.detail, "HTTP %d", status);
@@ -255,17 +283,58 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
     if (!http.responseComplete()) {
       const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
       LOG_ERR("HTTP", "wolfSSL incomplete: got %zu of %zu bytes", sink.downloaded, sink.total);
-      // elapsed + the wait/work split: two X3 book downloads both died here at ~200KB of
-      // 1.6MB after 26.7s and 28.2s, which looks like the server closing on its own
-      // response deadline while we drained too slowly to finish inside it. If that is
-      // right, elapsed stays ~constant across attempts while the byte count tracks
-      // whatever throughput we managed.
       SdDebugLog::log("HTTP",
                       "incomplete: got %zu of %zu bytes after %lums (wait=%lums work=%lums) heap=%u largest8=%u",
                       sink.downloaded, sink.total, (unsigned long)(millis() - transferStartMs),
                       (unsigned long)waitTotalMs, (unsigned long)workTotalMs, s.heapFree, s.largest8Bit);
+
+      // Resume rather than throw the partial body away.
+      //
+      // On the X3 a 1.6MB book download dies mid-stream at ~215KB, every time, on a
+      // healthy link: two attempts logged 215179/1676098 after 1742ms and
+      // 216812/1676098 after 1783ms while running at ~121KB/s, and a 130KB feed to the
+      // same host completed at 119KB/s in the same session. So it is neither slowness
+      // nor a server response deadline (an earlier attempt died at 203242 bytes after
+      // 26.7s — same bytes, wildly different time).
+      //
+      // The mechanism is the heap. With WiFi up the X3's largest free block is pinned
+      // at 14324 bytes in every snapshot, before and after the handshake. wolfSSL sizes
+      // its receive buffer to each incoming record (GrowInputBuffer), so the first
+      // full-size 16KB TLS record the server emits needs a ~16.7KB contiguous
+      // allocation that cannot exist, fails MEMORY_E, and kills the session mid-body.
+      // Servers ramp record size as a connection warms up, which is why small feeds
+      // finish and only a large download crosses the wall — and why a FRESH connection
+      // gets another ~200KB before hitting it again. HAVE_MAX_FRAGMENT already asks for
+      // 2KB records (SecureClient.cpp), but RFC 6066 max_fragment_length is advisory
+      // and widely unimplemented (nginx has never supported it), so it cannot be relied
+      // on. Nothing app-side can enlarge that 14KB block while the radio is up.
+      //
+      // Resuming from the byte offset works around it and is the right response to any
+      // mid-stream drop whatever the cause. Guarded on forward progress, so a server
+      // that fails at offset 0 ends the loop instead of spinning.
+      if (sink.total > 0 && sink.downloaded > resumeOffset && sink.downloaded < sink.total &&
+          resumes < MAX_RESUME_ATTEMPTS && !(sink.cancelFlag && *sink.cancelFlag)) {
+        ++resumes;
+        resumeOffset = sink.downloaded;
+        retriedConnect = false;  // each resumed hop gets its own one-shot connect retry
+        SdDebugLog::log("HTTP", "resuming at %zu/%zu (attempt %d/%d)", resumeOffset, sink.total, resumes,
+                        MAX_RESUME_ATTEMPTS);
+        delay(200);  // let the stack tear the dead socket down before reconnecting
+        continue;
+      }
       setDetail(sink.detail, "incomplete: %zu/%zu bytes", sink.downloaded, sink.total);
       return HttpDownloader::HTTP_ERROR;
+    }
+    // A complete hop that still leaves the resource short means the server answered a
+    // bounded range (or closed exactly on a boundary); ask for the rest.
+    if (sink.total > 0 && sink.downloaded < sink.total && sink.downloaded > resumeOffset &&
+        resumes < MAX_RESUME_ATTEMPTS && !(sink.cancelFlag && *sink.cancelFlag)) {
+      ++resumes;
+      resumeOffset = sink.downloaded;
+      retriedConnect = false;
+      SdDebugLog::log("HTTP", "short range, resuming at %zu/%zu (attempt %d/%d)", resumeOffset, sink.total, resumes,
+                      MAX_RESUME_ATTEMPTS);
+      continue;
     }
     {
       const uint32_t totalElapsedMs = millis() - transferStartMs;
@@ -276,9 +345,9 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       // link or the server is. On X3 a repaint shows up in wait=, not work=, because
       // requestUpdate() only posts to the render task — which then takes the SPI bus the
       // SD card shares, so the NEXT read blocks.
-      SdDebugLog::log("DONE", "bytes=%zu elapsed=%lums rate=%uB/s wait=%lums work=%lums", sink.downloaded,
+      SdDebugLog::log("DONE", "bytes=%zu elapsed=%lums rate=%uB/s wait=%lums work=%lums resumes=%d", sink.downloaded,
                       (unsigned long)totalElapsedMs, bytesPerSec, (unsigned long)waitTotalMs,
-                      (unsigned long)workTotalMs);
+                      (unsigned long)workTotalMs, resumes);
     }
     return HttpDownloader::OK;
   }
