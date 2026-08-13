@@ -158,8 +158,12 @@ static void testOrganizeIntoRows() {
   WordSelectNavigator::organizeIntoRows(words, rows);
 
   CHECK(rows.size() == 2, "two rows created");
-  CHECK(rows[0].wordIndices.size() == 3, "row 0 has three words");
-  CHECK(rows[1].wordIndices.size() == 1, "row 1 has one word");
+  // Rows hold a contiguous flat range rather than an index vector, so the invariant to
+  // check is that the ranges partition the word list in order with no gap or overlap.
+  CHECK(rows[0].firstWord == 0 && rows[0].wordCount == 3, "row 0 covers words [0,3)");
+  CHECK(rows[1].firstWord == 3 && rows[1].wordCount == 1, "row 1 covers words [3,4)");
+  CHECK(rows[0].firstWord + rows[0].wordCount == rows[1].firstWord, "rows are contiguous");
+  CHECK(rows[1].firstWord + rows[1].wordCount == static_cast<int>(words.size()), "rows cover every word");
   CHECK(words[0].row == 0, "word 0 in row 0");
   CHECK(words[1].row == 0, "word 1 in row 0");
   CHECK(words[2].row == 0, "word 2 in row 0 (within tolerance)");
@@ -707,6 +711,60 @@ static void testBuildPhraseHyphenatedPairNotDuplicated() {
         "inside the selected range");
 }
 
+// Build a single-row navigator from a list of display strings, each 20px wide.
+// Used by the join tests below, which only care about buildPhrase's separator logic.
+static WordSelectNavigator makeSingleRowFixture(const std::vector<const char*>& texts) {
+  std::string pool;
+  std::vector<WordSelectNavigator::WordInfo> words;
+  int16_t x = 0;
+  for (const char* t : texts) {
+    WordSelectNavigator::WordInfo w = mkWord(t, x, 0, 20, 0);
+    w.textOffset = poolAppendString(pool, t);
+    w.lookupOffset = w.textOffset;
+    words.push_back(w);
+    x = static_cast<int16_t>(x + 25);
+  }
+  std::vector<WordSelectNavigator::Row> rows;
+  WordSelectNavigator::organizeIntoRows(words, rows);
+  WordSelectNavigator nav;
+  nav.load(std::move(words), std::move(rows), std::move(pool));
+  return nav;
+}
+
+// CJK is written without spaces, so a space-joined phrase matches no headword.
+// buildPhrase must suppress the separator at any boundary touching CJK, while leaving
+// Latin joins exactly as they were.
+static void testBuildPhraseCjkJoinsWithoutSpaces() {
+  std::printf("testBuildPhraseCjkJoinsWithoutSpaces\n");
+
+  WordSelectNavigator han = makeSingleRowFixture({"\xE4\xB8\xAD", "\xE5\x9B\xBD", "\xE4\xBA\xBA"});  // 中 国 人
+  CHECK(han.buildPhrase(0, 2) == "\xE4\xB8\xAD\xE5\x9B\xBD\xE4\xBA\xBA", "Han run joins with no spaces (中国人)");
+  CHECK(han.buildPhrase(0, 1) == "\xE4\xB8\xAD\xE5\x9B\xBD", "Han pair joins with no spaces (中国)");
+  CHECK(han.buildPhrase(1, 1) == "\xE5\x9B\xBD", "single Han character is itself");
+
+  // Kana and Hangul take the same path (utf8IsCjkBreakable covers both).
+  WordSelectNavigator kana = makeSingleRowFixture({"\xE3\x81\x8B", "\xE3\x81\xAA"});  // か な
+  CHECK(kana.buildPhrase(0, 1) == "\xE3\x81\x8B\xE3\x81\xAA", "Kana pair joins with no spaces (かな)");
+
+  // Regression guard: Latin behaviour must be byte-identical to before the CJK change.
+  WordSelectNavigator latin = makeSingleRowFixture({"the", "quick", "fox"});
+  CHECK(latin.buildPhrase(0, 2) == "the quick fox", "Latin run still space-joined");
+
+  // Mixed boundary: the space is dropped on whichever side touches CJK, and kept
+  // between the two Latin tokens.
+  WordSelectNavigator mixed = makeSingleRowFixture({"WiFi", "\xE5\xAF\x86\xE7\xA0\x81", "now"});  // WiFi 密码 now
+  CHECK(mixed.buildPhrase(0, 2) ==
+            "WiFi\xE5\xAF\x86\xE7\xA0\x81"
+            "now",
+        "CJK-adjacent boundaries drop the space on both sides");
+  CHECK(mixed.buildPhrase(0, 0) == "WiFi", "leading Latin token unaffected");
+
+  // Fullwidth digits are content, not punctuation, and are CJK-breakable — so they
+  // join gap-lessly like the surrounding Han.
+  WordSelectNavigator fullwidth = makeSingleRowFixture({"\xEF\xBC\x91", "\xE6\x9C\x88"});  // １ 月
+  CHECK(fullwidth.buildPhrase(0, 1) == "\xEF\xBC\x91\xE6\x9C\x88", "fullwidth digit + Han join with no space (１月)");
+}
+
 // Run Tests A–E against any two-row fixture with the same layout as
 // makeHyphenatedFixture. firstHalf / secondHalf are the display strings of
 // the two pair members; the surrounding words are always wordA/wordB/wordD/wordE.
@@ -934,6 +992,7 @@ int main() {
   testRenderHighlightMultiSelectHyphenatedFirstHalf();
   testRenderHighlightMultiSelectHyphenatedSecondHalf();
   testBuildPhraseHyphenatedPairNotDuplicated();
+  testBuildPhraseCjkJoinsWithoutSpaces();
   testHyphenBothEndsNotPaired();
   testMergeLookupBothHyphens();
   testHyphenEndOnly();

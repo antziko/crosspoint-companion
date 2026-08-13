@@ -26,9 +26,12 @@ CXXFLAGS=(
   -I"$ROOT_DIR/lib/Utf8"
 )
 
+# Utf8.cpp is needed for utf8NextCodepoint: buildPhrase's CJK-aware join calls the
+# inline utf8First/LastCodepoint helpers, which decode through it.
 "$CXX" "${CXXFLAGS[@]}" \
   "$ROOT_DIR/test/dict-word-select-nav/DictWordSelectNavigatorTest.cpp" \
   "$ROOT_DIR/src/util/WordSelectNavigator.cpp" \
+  "$ROOT_DIR/lib/Utf8/Utf8.cpp" \
   -o "$BINARY"
 
 "$BINARY" "$@"

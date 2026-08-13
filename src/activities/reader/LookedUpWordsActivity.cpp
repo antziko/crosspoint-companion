@@ -2,6 +2,7 @@
 
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <Memory.h>
 
 #include <algorithm>
 
@@ -63,19 +64,26 @@ void LookedUpWordsActivity::loop() {
   if (controller.isActive()) {
     switch (controller.handleInput()) {
       case DictionaryLookupController::LookupEvent::FoundDefinition: {
-        startActivityForResult(std::make_unique<DictionaryDefinitionActivity>(
-                                   renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(),
-                                   true, cachePath, controller.getRecordHistory(), controller.getLookupWord(),
-                                   DictionaryLookupController::toHistStatus(controller.getFoundStatus())),
-                               [this](const ActivityResult& result) {
-                                 refreshCount();
-                                 if (!result.isCancelled) {
-                                   setResult(ActivityResult{});
-                                   finish();
-                                 } else {
-                                   requestUpdate();
-                                 }
-                               });
+        // Nothrow: ~4.8 KB pushed straight after the lookup's glyph prewarm. See the note at
+        // the matching site in DictionaryWordSelectActivity — a bare new aborts the device.
+        auto definition = makeUniqueNoThrow<DictionaryDefinitionActivity>(
+            renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(), true, cachePath,
+            controller.getRecordHistory(), controller.getLookupWord(),
+            DictionaryLookupController::toHistStatus(controller.getFoundStatus()));
+        if (!definition) {
+          LOG_ERR("LUW", "OOM: DictionaryDefinitionActivity");
+          requestUpdate();
+          break;
+        }
+        startActivityForResult(std::move(definition), [this](const ActivityResult& result) {
+          refreshCount();
+          if (!result.isCancelled) {
+            setResult(ActivityResult{});
+            finish();
+          } else {
+            requestUpdate();
+          }
+        });
         break;
       }
       case DictionaryLookupController::LookupEvent::NotFoundDismissedBack:

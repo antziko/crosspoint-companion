@@ -10,6 +10,7 @@ void StreamingJsonParser::reset() {
   expectingValue = false;
   escaped = false;
   tokenOverflow = false;
+  chunkEmitted = false;
   error = false;
   nestingDepth = 0;
   literalLen = 0;
@@ -45,6 +46,7 @@ void StreamingJsonParser::handleScanning(char c) {
     case '"':
       tokenLen = 0;
       tokenOverflow = false;
+      chunkEmitted = false;  // a fresh value: the next chunk emitted for it is its `first`
       if (expectingValue || inArray()) {
         state = State::IN_STRING_VALUE;
       } else {
@@ -226,9 +228,20 @@ void StreamingJsonParser::handleSkipString(char c) {
 void StreamingJsonParser::appendToken(char c) {
   if (tokenLen < TOKEN_BUF_SIZE - 1) {
     tokenBuf[tokenLen++] = c;
-  } else {
-    tokenOverflow = true;
+    return;
   }
+  // Buffer full. A chunk consumer takes delivery of what we have and the value continues;
+  // everyone else keeps the original behaviour, where the whole value is dropped at emit.
+  // Numbers and keys are deliberately excluded: neither has a legitimate 512-byte form here.
+  if (state == State::IN_STRING_VALUE && cb.onStringChunk) {
+    tokenBuf[tokenLen] = '\0';
+    cb.onStringChunk(cb.ctx, tokenBuf, tokenLen, !chunkEmitted, false);
+    chunkEmitted = true;
+    tokenLen = 0;
+    tokenBuf[tokenLen++] = c;
+    return;
+  }
+  tokenOverflow = true;
 }
 
 void StreamingJsonParser::emitToken() {
@@ -239,7 +252,14 @@ void StreamingJsonParser::emitToken() {
     }
     state = State::SCANNING;
   } else {
-    if (!tokenOverflow && cb.onString) {
+    if (cb.onStringChunk) {
+      // Terminal piece, always emitted even when empty so the consumer sees exactly one
+      // `last` per value. `first` is still true when the whole value fit in one buffer, so a
+      // chunk consumer never needs onString as well.
+      tokenBuf[tokenLen] = '\0';
+      cb.onStringChunk(cb.ctx, tokenBuf, tokenLen, !chunkEmitted, true);
+      chunkEmitted = false;
+    } else if (!tokenOverflow && cb.onString) {
       tokenBuf[tokenLen] = '\0';
       cb.onString(cb.ctx, tokenBuf, tokenLen);
     }

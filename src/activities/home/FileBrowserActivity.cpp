@@ -443,7 +443,7 @@ void FileBrowserActivity::loop() {
 
       std::string heading = tr(STR_DELETE) + std::string("? ");
 
-      startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, entry), handler);
+      startActivityForResultNoThrow<ConfirmationActivity>(handler, renderer, mappedInput, heading, entry);
       return;
     } else {
       // --- SHORT PRESS ACTION: OPEN/NAVIGATE ---

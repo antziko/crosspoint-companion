@@ -1,5 +1,6 @@
 #include "QrUtils.h"
 
+#include <Memory.h>
 #include <Utf8.h>
 #include <qrcode.h>
 
@@ -33,7 +34,11 @@ void QrUtils::drawQrCode(const GfxRenderer& renderer, const Rect& bounds, const 
 
   // Make sure we have a large enough buffer on the heap to avoid blowing the stack
   uint32_t bufferSize = qrcode_getBufferSize(version);
-  auto qrcodeBytes = std::make_unique<uint8_t[]>(bufferSize);
+  auto qrcodeBytes = makeUniqueNoThrow<uint8_t[]>(bufferSize);
+  if (!qrcodeBytes) {
+    LOG_ERR("QR", "OOM: %u bytes for QR buffer", (unsigned)bufferSize);
+    return;
+  }
 
   QRCode qrcode;
   // Initialize the QR code. We use ECC_LOW for max capacity.

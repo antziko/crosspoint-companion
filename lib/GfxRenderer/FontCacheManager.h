@@ -16,6 +16,11 @@ class FontCacheManager {
   void setFontDecompressor(FontDecompressor* d);
 
   void clearCache();
+  // clearCache() that actually gives the heap back: the SD fonts' mini arenas are retained
+  // across pages by default, so clearCache() frees them only under its own heap floor. Use
+  // this before a heap-critical operation that will not render book text first — see the
+  // KOSync TLS handshake.
+  void releaseCache();
   // Returns 0 when every requested glyph was prepared, >0 for the number that were not, and
   // -1 when the prewarm could not be attempted at all (unknown font, no decompressor, no free
   // page slot). Callers that only want the side effect can ignore it; callers that need to

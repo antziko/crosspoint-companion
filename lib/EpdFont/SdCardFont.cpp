@@ -3,7 +3,9 @@
 #include <HalStorage.h>
 #include <InflateReader.h>
 #include <Logging.h>
+#include <SdDebugLog.h>  // budget lines must survive an untethered test; LOG_* is serial-only
 #include <Utf8.h>
+#include <esp_heap_caps.h>  // heap_caps_get_largest_free_block: sizes the mini bitmap budget
 
 #include <algorithm>
 #include <climits>
@@ -11,6 +13,7 @@
 #include <memory>
 
 #include "AdvanceTableMerge.h"
+#include "CodepointFreq.h"
 #include "EpdFontFamily.h"
 
 static_assert(sizeof(EpdGlyph) == 16, "EpdGlyph must be 16 bytes to match .cpfont file layout");
@@ -67,12 +70,50 @@ bool collectUniqueCodepoints(const char* text, uint32_t* codepoints, uint32_t& c
   return false;
 }
 
+// Packed codepoint + occurrence count for prewarm()'s dedup buffer; see CodepointFreq.h for
+// why the count lives in the codepoint's spare high bits rather than in a parallel array.
+// Short aliases because these appear in every codepoint comparison in prewarm/prewarmStyle.
+constexpr auto cpValue = CodepointFreq::value;
+constexpr auto cpFreq = CodepointFreq::freq;
+constexpr auto cpPack = CodepointFreq::pack;
+constexpr auto cpBump = CodepointFreq::bump;
+
 const char* asCStr(const std::string& s) { return s.c_str(); }
 const char* asCStr(const char* s) { return s; }
 
 // resetStyleMiniData retention bounds (see the PerStyle comment in the header).
 constexpr size_t MINI_RETAIN_MIN_FREE_HEAP = 40 * 1024;
 constexpr uint8_t MINI_UNDERUSE_RUNS_BEFORE_FREE = 3;
+
+// Bitmap-arena budget, used only when a page's glyphs will not all fit (see the trim in
+// prewarmStyle).
+//
+// This arena is a *cache*. Two rules follow from that, and both are load-bearing — an earlier
+// version of this budget had only "largest free block minus a fixed headroom", and it rebooted
+// the device on every Chinese lookup:
+//
+//   1. Never take more than half the largest block. Whatever runs immediately after the prewarm
+//      still needs a block of comparable size. The crash was an X3 with free=45016 largest=26612
+//      taking 23350 for the arena, leaving largest=3444 — and the very next allocation was the
+//      4844-byte DictionaryDefinitionActivity, which aborted under -fno-exceptions.
+//   2. Never pull total free below MINI_FREE_FLOOR. Rule 1 alone does not save a *healthy* heap,
+//      because half of a 26 KB block is still 13 KB; this is the bound that keeps the render
+//      path, the activity push and the TLS buffers in business.
+//
+// The mistake worth not repeating: the old headroom was calibrated against traces where `largest`
+// was 7-15 KB and concluded "the failure is fragmentation, not exhaustion, so consuming the
+// largest block is safe because other blocks remain". That generalises a fragmented-heap
+// observation to the healthy-heap case, where it is false and fatal.
+//
+// FLOOR is sized from device data: the definition view needs 14-32 body glyphs and must keep
+// fitting (it took misses from 138-179 down to single digits), while the ~95-glyph whole-screen
+// PrewarmScope grab that over-ran the heap must not. At the observed free values (30-45 KB) a
+// 24 KB floor leaves 6-13 KB of budget, which spans the first and excludes the second.
+//
+// MIN_BUDGET is ~18 CJK glyphs' worth. Below that a partial prewarm buys less than the overflow
+// ring already holds, so the SD pass is not worth its cost and we bail as before.
+constexpr size_t MINI_FREE_FLOOR = 24 * 1024;
+constexpr uint32_t MINI_BITMAP_MIN_BUDGET = 1536;
 
 // Keep-if-fits buffer reuse: only reallocate when the needed size exceeds the
 // current capacity. Freeing + reallocating slightly different sizes every page
@@ -212,6 +253,34 @@ void SdCardFont::clearOverflow() {
   // reach here at boot on fonts that never missed a glyph, so glyphFile_ is still
   // default-constructed and closing it unconditionally panics before the UI ever comes up.
   if (glyphFile_.isOpen()) glyphFile_.close();
+}
+
+uint32_t SdCardFont::overflowByteBudget() const {
+  // Measure the heap as it would be WITHOUT this ring, then take half of whatever sits above
+  // the floor. Adding overflowBytes_ back is what makes the budget stable: computed from raw
+  // free heap it would shrink as the ring filled, so the ring would evict, which would raise
+  // free, which would raise the budget — an oscillation that re-reads the evicted glyphs from
+  // SD at ~3.7 ms each, the precise cost this cache exists to avoid.
+  //
+  // Other resident SD fonts' rings are deliberately NOT added back. Their bytes are genuinely
+  // spent, so they correctly depress this font's budget, and the formula stays safe when
+  // several fonts (reader size + UI CJK fallbacks) miss glyphs in the same session.
+  //
+  // Half, not all, of the surplus: leaves the render path room to finish the page it is in the
+  // middle of drawing. Against the free-heap values an X3 actually reports while rendering CJK,
+  // this yields (glyph counts at the measured ~295 B; OVERFLOW_CAPACITY caps the top row at 40):
+  //   free=45016 -> 12268 (~41 glyphs)     free=30512 ->  5016 (~17 glyphs)
+  //   free=34140 ->  6830 (~23 glyphs)     free=27076 ->  3298 (~11 glyphs)
+  //   free<=24576 -> floored to 2048       (~6 glyphs, i.e. exactly today's behaviour)
+  // So it degrades to the old fixed cap under pressure and only spends when there is genuine
+  // surplus — never worse than before, 2-6x better when the heap allows.
+  const size_t freeNow = ESP.getFreeHeap();
+  const size_t effectiveFree = freeNow + overflowBytes_;
+  if (effectiveFree <= OVERFLOW_FREE_FLOOR) return OVERFLOW_MIN_BYTES;
+  const size_t surplus = (effectiveFree - OVERFLOW_FREE_FLOOR) / 2;
+  if (surplus < OVERFLOW_MIN_BYTES) return OVERFLOW_MIN_BYTES;
+  if (surplus > OVERFLOW_MAX_BYTES) return OVERFLOW_MAX_BYTES;
+  return static_cast<uint32_t>(surplus);
 }
 
 void SdCardFont::evictOldestOverflow() {
@@ -367,9 +436,11 @@ bool SdCardFont::buildMiniKernMatrix(PerStyle& s, const uint32_t* codepoints, ui
   bool usedLeft[256] = {};
   bool usedRight[256] = {};
   for (uint32_t i = 0; i < cpCount; i++) {
-    uint8_t lc = miniLookupKernClass(s.kernLeftClasses, s.header.kernLeftEntryCount, codepoints[i]);
+    // codepoints[] carries a packed occurrence count in its high bits (see cpPack).
+    const uint32_t cp = cpValue(codepoints[i]);
+    uint8_t lc = miniLookupKernClass(s.kernLeftClasses, s.header.kernLeftEntryCount, cp);
     if (lc) usedLeft[lc] = true;
-    uint8_t rc = miniLookupKernClass(s.kernRightClasses, s.header.kernRightEntryCount, codepoints[i]);
+    uint8_t rc = miniLookupKernClass(s.kernRightClasses, s.header.kernRightEntryCount, cp);
     if (rc) usedRight[rc] = true;
   }
 
@@ -402,8 +473,9 @@ bool SdCardFont::buildMiniKernMatrix(PerStyle& s, const uint32_t* codepoints, ui
   uint16_t miniLeftCount = 0;
   uint16_t miniRightCount = 0;
   for (uint32_t i = 0; i < cpCount; i++) {
-    if (miniLookupKernClass(s.kernLeftClasses, s.header.kernLeftEntryCount, codepoints[i]) != 0) miniLeftCount++;
-    if (miniLookupKernClass(s.kernRightClasses, s.header.kernRightEntryCount, codepoints[i]) != 0) miniRightCount++;
+    const uint32_t cp = cpValue(codepoints[i]);  // packed: count in the high bits
+    if (miniLookupKernClass(s.kernLeftClasses, s.header.kernLeftEntryCount, cp) != 0) miniLeftCount++;
+    if (miniLookupKernClass(s.kernRightClasses, s.header.kernRightEntryCount, cp) != 0) miniRightCount++;
   }
 
   // Step 4: size the three mini buffers (reused across pages when they fit; the
@@ -424,7 +496,9 @@ bool SdCardFont::buildMiniKernMatrix(PerStyle& s, const uint32_t* codepoints, ui
   // search in lookupKernClass during render.
   uint16_t lIdx = 0, rIdx = 0;
   for (uint32_t i = 0; i < cpCount; i++) {
-    uint32_t cp = codepoints[i];
+    // cpValue is essential here, not cosmetic: a packed entry always has bits above 21 set,
+    // so the uint16_t guard below would reject every codepoint and silently drop all kerning.
+    uint32_t cp = cpValue(codepoints[i]);
     if (cp > 0xFFFF) continue;  // kern class entries are uint16_t
     uint8_t lc = miniLookupKernClass(s.kernLeftClasses, s.header.kernLeftEntryCount, cp);
     if (lc) {
@@ -785,15 +859,19 @@ int SdCardFont::prewarm(const char* utf8Text, uint8_t styleMask, bool metadataOn
     uint32_t cp = utf8NextCodepoint(&p);
     if (cp == 0) break;
 
+    // Entries are packed (count << 21 | codepoint) — see cpPack above. A repeat bumps the
+    // count instead of being discarded, which is what lets prewarmStyle rank glyphs when it
+    // cannot afford all of them.
     bool found = false;
     for (uint32_t i = 0; i < cpCount; i++) {
-      if (codepoints[i] == cp) {
+      if (cpValue(codepoints[i]) == cp) {
+        codepoints[i] = cpBump(codepoints[i]);
         found = true;
         break;
       }
     }
     if (!found) {
-      codepoints[cpCount++] = cp;
+      codepoints[cpCount++] = cpPack(cp);
     }
   }
 
@@ -801,13 +879,15 @@ int SdCardFont::prewarm(const char* utf8Text, uint8_t styleMask, bool metadataOn
   {
     bool hasReplacement = false;
     for (uint32_t i = 0; i < cpCount; i++) {
-      if (codepoints[i] == REPLACEMENT_GLYPH) {
+      if (cpValue(codepoints[i]) == REPLACEMENT_GLYPH) {
         hasReplacement = true;
         break;
       }
     }
     if (!hasReplacement && cpCount < MAX_PAGE_GLYPHS) {
-      codepoints[cpCount++] = REPLACEMENT_GLYPH;
+      // Max count: the fallback for every glyph the page fails to render, so it must never
+      // be the one the budget drops.
+      codepoints[cpCount++] = CodepointFreq::packWith(REPLACEMENT_GLYPH, CodepointFreq::FREQ_MAX);
     }
   }
 
@@ -829,29 +909,33 @@ int SdCardFont::prewarm(const char* utf8Text, uint8_t styleMask, bool metadataOn
 
           bool hasLeft = false, hasRight = false;
           for (uint32_t i = 0; i < cpCount; i++) {
-            if (codepoints[i] == leftCp) hasLeft = true;
-            if (codepoints[i] == rightCp) hasRight = true;
+            if (cpValue(codepoints[i]) == leftCp) hasLeft = true;
+            if (cpValue(codepoints[i]) == rightCp) hasRight = true;
             if (hasLeft && hasRight) break;
           }
           if (!hasLeft || !hasRight) continue;
 
           bool hasOut = false;
           for (uint32_t i = 0; i < cpCount; i++) {
-            if (codepoints[i] == outCp) {
+            if (cpValue(codepoints[i]) == outCp) {
               hasOut = true;
               break;
             }
           }
           if (!hasOut) {
-            codepoints[cpCount++] = outCp;
+            // A ligature output stands in for both its inputs wherever they occur, so rank
+            // it with them rather than at the bottom.
+            codepoints[cpCount++] = cpPack(outCp);
           }
         }
       }
     }
   }
 
-  // Sort codepoints for ordered interval building
-  std::sort(codepoints.get(), codepoints.get() + cpCount);
+  // Sort by codepoint for ordered interval building; the packed counts ride along in the
+  // high bits, so the comparator has to look at the value half only.
+  std::sort(codepoints.get(), codepoints.get() + cpCount,
+            [](const uint32_t a, const uint32_t b) { return cpValue(a) < cpValue(b); });
 
   // Prewarm each requested style
   int totalMissed = 0;
@@ -876,7 +960,7 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
     bool covered = true;
     int missedInMini = 0;
     for (uint32_t i = 0; i < cpCount && covered; i++) {
-      const uint32_t cp = codepoints[i];
+      const uint32_t cp = cpValue(codepoints[i]);
       bool inMini = false;
       for (uint32_t iv = 0; iv < s.miniIntervalCount; iv++) {
         if (cp < s.miniIntervals[iv].first) break;  // intervals sorted ascending
@@ -910,8 +994,12 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
 
   uint32_t validCount = 0;
   for (uint32_t i = 0; i < cpCount; i++) {
-    int32_t idx = findGlobalGlyphIndex(s, codepoints[i]);
+    int32_t idx = findGlobalGlyphIndex(s, cpValue(codepoints[i]));
     if (idx >= 0) {
+      // Stored PACKED, count and all. The budget below ranks by that count, and carrying it
+      // in the field that already exists costs nothing — a `freq` member would have added
+      // 4 bytes x validCount (~1.6 KB on a CJK page) to the very heap we are short of.
+      // Every read of the codepoint itself goes through cpValue().
       mappings[validCount].codepoint = codepoints[i];
       mappings[validCount].globalIndex = idx;
       validCount++;
@@ -938,23 +1026,10 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
   memset(&s.miniData, 0, sizeof(s.miniData));
   s.epdFont.data = &s.stubData;
 
-  if (!ensureArrayCapacity(s.miniIntervals, s.miniIntervalCapacity, validCount)) {
-    LOG_ERR("SDCF", "Failed to allocate mini intervals for style %u", styleIdx);
-    delete[] mappings;
-    return static_cast<int>(cpCount);
-  }
-
-  s.miniIntervalCount = 0;
-  uint32_t rangeStart = 0;
-  for (uint32_t i = 1; i <= validCount; i++) {
-    if (i == validCount || mappings[i].codepoint != mappings[i - 1].codepoint + 1) {
-      s.miniIntervals[s.miniIntervalCount].first = mappings[rangeStart].codepoint;
-      s.miniIntervals[s.miniIntervalCount].last = mappings[i - 1].codepoint;
-      s.miniIntervals[s.miniIntervalCount].offset = rangeStart;
-      s.miniIntervalCount++;
-      rangeStart = i;
-    }
-  }
+  // NOTE ON ORDER: the mini intervals are built further down, AFTER the glyph metadata has
+  // been read, not here. They have to describe the set that actually ends up in the arena,
+  // and which glyphs those are is only decided once their dataLength is known — see the
+  // bitmap budget below. Nothing between here and there reads miniIntervals.
 
   // Mini glyph array (reused across pages when it fits)
   if (!ensureArrayCapacity(s.miniGlyphs, s.miniGlyphCapacity, validCount)) {
@@ -963,7 +1038,8 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
     freeStyleMiniData(s);
     return static_cast<int>(cpCount);
   }
-  s.miniGlyphCount = validCount;
+  // miniGlyphCount stays 0 until the surviving set is known (set after the trim below).
+  // Nothing reads it in between: epdFont.data still points at the stub.
 
   // Build sorted read order for sequential I/O
   uint32_t* readOrder = new (std::nothrow) uint32_t[validCount];
@@ -1022,11 +1098,140 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
     lastReadIndex = gIdx;
   }
 
+  // --- Bitmap budget: keep the glyphs the page leans on, instead of all or nothing ---
+  //
+  // A CJK page wants 25-38 KB of glyph bitmaps (~400 unique glyphs at ~85 B each) on a heap
+  // whose largest free block while reading is 7-15 KB, so the arena allocation below could
+  // never succeed — and its failure path frees the mini data outright and returns. Every
+  // character on the page then fell through to onGlyphMiss' overflow ring, which under the
+  // fixed 2 KB cap it had then held ~7 CJK glyphs and therefore thrashed, making each draw a
+  // fresh SD read at ~3.7 ms. That was the Chinese-book page-turn and Reader Options slowness.
+  // The ring is heap-adaptive now (overflowByteBudget), so what this trim drops lands somewhere
+  // meaningfully larger — but the ranking below still matters, because the ring is FIFO and
+  // has no idea which glyphs the page leans on.
+  //
+  // So trim to what the heap can actually place, most-used glyphs first (the counts packed
+  // into mappings[].codepoint). Dropped glyphs still render via the ring exactly as they do
+  // today; the difference is that the frequent ones no longer do. Latin pages need ~4 KB and
+  // never reach this branch.
+  //
+  // Consequence worth knowing: a trimmed mini fails the coverage check at the top of this
+  // function, so the next prewarm rebuilds rather than reusing it. That costs the
+  // idle-prewarm carry on CJK — but it costs nothing against today's behaviour, where the
+  // rebuild happens anyway because nothing was ever cached.
+  uint32_t keptCount = validCount;
+  if (!metadataOnly) {
+    uint32_t fullSize = 0;
+    for (uint32_t i = 0; i < validCount; i++) fullSize += s.miniGlyphs[i].dataLength;
+
+    // A retained arena that already fits needs no budget: ensureArrayCapacity will not
+    // allocate at all, so there is no block to find.
+    uint32_t budget = fullSize;
+    size_t largest = 0;
+    if (s.miniBitmapCapacity < fullSize) {
+      largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+      const size_t freeNow = ESP.getFreeHeap();
+      // Both bounds, lower wins — see the MINI_FREE_FLOOR comment for why neither is
+      // sufficient alone.
+      const uint32_t fromLargest = static_cast<uint32_t>(largest / 2);
+      const uint32_t fromFree = freeNow > MINI_FREE_FLOOR ? static_cast<uint32_t>(freeNow - MINI_FREE_FLOOR) : 0;
+      budget = std::min(fromLargest, fromFree);
+      if (budget > fullSize) budget = fullSize;
+    }
+
+    if (fullSize > budget && budget < MINI_BITMAP_MIN_BUDGET) {
+      // Too little to be worth an SD pass — give up as before. `largest` is logged raw because
+      // it is one of the two inputs the budget is derived from, and a budget of 0 otherwise
+      // hides whether the block was 800 bytes or the free floor was the binding constraint.
+      LOG_ERR("SDCF", "Mini bitmap unaffordable (%u bytes, budget %u, largest %u) for style %u", fullSize, budget,
+              static_cast<unsigned>(largest), styleIdx);
+      // Mirrored to SD: this and the trim line below are the only direct evidence of what the
+      // budget actually did, and the device is normally read untethered.
+      SdDebugLog::log("SDCF", "mini unaffordable: want=%u budget=%u largest=%u free=%u style=%u", fullSize, budget,
+                      (unsigned)largest, (unsigned)ESP.getFreeHeap(), styleIdx);
+      delete[] readOrder;
+      delete[] mappings;
+      freeStyleMiniData(s);
+      return static_cast<int>(cpCount);
+    }
+
+    if (fullSize > budget) {
+      // Rank by occurrence count, densest-first on ties so a tie spends the budget on more
+      // glyphs. readOrder is scratch here — it is regenerated below either way.
+      for (uint32_t i = 0; i < validCount; i++) readOrder[i] = i;
+      std::sort(readOrder, readOrder + validCount, [&](const uint32_t a, const uint32_t b) {
+        const uint32_t fa = cpFreq(mappings[a].codepoint), fb = cpFreq(mappings[b].codepoint);
+        if (fa != fb) return fa > fb;
+        return s.miniGlyphs[a].dataLength < s.miniGlyphs[b].dataLength;
+      });
+      uint32_t spent = 0;
+      for (uint32_t i = 0; i < validCount; i++) {
+        const uint32_t idx = readOrder[i];
+        const uint32_t len = s.miniGlyphs[idx].dataLength;
+        if (spent + len > budget) {
+          mappings[idx].globalIndex = -1;  // dropped; globalIndex is never negative otherwise
+          continue;
+        }
+        spent += len;
+      }
+      // Stable-compact both arrays in ascending order, so what survives stays sorted by
+      // codepoint — the interval build below depends on that.
+      uint32_t w = 0;
+      for (uint32_t r = 0; r < validCount; r++) {
+        if (mappings[r].globalIndex < 0) continue;
+        if (w != r) {
+          mappings[w] = mappings[r];
+          s.miniGlyphs[w] = s.miniGlyphs[r];
+        }
+        w++;
+      }
+      keptCount = w;
+      // `largest` is logged alongside the budget because the two bounds are indistinguishable
+      // from the budget alone, and knowing which one bound is what the next recalibration needs.
+      LOG_DBG("SDCF", "Mini bitmap trimmed: %u/%u glyphs, %u/%u bytes (budget %u, largest %u) style %u", keptCount,
+              validCount, spent, fullSize, budget, static_cast<unsigned>(largest), styleIdx);
+      SdDebugLog::log("SDCF", "mini trimmed: kept=%u/%u spent=%u/%u budget=%u largest=%u free=%u style=%u", keptCount,
+                      validCount, spent, fullSize, budget, (unsigned)largest, (unsigned)ESP.getFreeHeap(), styleIdx);
+    }
+  }
+
+  if (keptCount == 0) {
+    delete[] readOrder;
+    delete[] mappings;
+    freeStyleMiniData(s);
+    return static_cast<int>(cpCount);
+  }
+
+  // Mini intervals, built from the surviving mappings (see the ORDER note above). Sized to
+  // keptCount, which for an untrimmed page is validCount exactly as before.
+  if (!ensureArrayCapacity(s.miniIntervals, s.miniIntervalCapacity, keptCount)) {
+    LOG_ERR("SDCF", "Failed to allocate mini intervals for style %u", styleIdx);
+    delete[] readOrder;
+    delete[] mappings;
+    freeStyleMiniData(s);
+    return static_cast<int>(cpCount);
+  }
+  s.miniIntervalCount = 0;
+  uint32_t rangeStart = 0;
+  for (uint32_t i = 1; i <= keptCount; i++) {
+    if (i == keptCount || cpValue(mappings[i].codepoint) != cpValue(mappings[i - 1].codepoint) + 1) {
+      s.miniIntervals[s.miniIntervalCount].first = cpValue(mappings[rangeStart].codepoint);
+      s.miniIntervals[s.miniIntervalCount].last = cpValue(mappings[i - 1].codepoint);
+      s.miniIntervals[s.miniIntervalCount].offset = rangeStart;
+      s.miniIntervalCount++;
+      rangeStart = i;
+    }
+  }
+  s.miniGlyphCount = keptCount;
+
+  // Read order now covers the survivors only; re-sorted by file offset below.
+  for (uint32_t i = 0; i < keptCount; i++) readOrder[i] = i;
+
   uint32_t totalBitmapSize = 0;
 
   if (!metadataOnly) {
     // Compute total bitmap size
-    for (uint32_t i = 0; i < validCount; i++) {
+    for (uint32_t i = 0; i < keptCount; i++) {
       totalBitmapSize += s.miniGlyphs[i].dataLength;
     }
 
@@ -1040,12 +1245,12 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
     s.miniBitmapUsed = totalBitmapSize;  // underuse-hysteresis signal for resetStyleMiniData
 
     // Read bitmap data sorted by file offset
-    std::sort(readOrder, readOrder + validCount,
+    std::sort(readOrder, readOrder + keptCount,
               [&](uint32_t a, uint32_t b) { return s.miniGlyphs[a].dataOffset < s.miniGlyphs[b].dataOffset; });
 
     uint32_t miniBitmapOffset = 0;
     uint32_t lastBitmapEnd = UINT32_MAX;
-    for (uint32_t i = 0; i < validCount; i++) {
+    for (uint32_t i = 0; i < keptCount; i++) {
       uint32_t mapIdx = readOrder[i];
       EpdGlyph& glyph = s.miniGlyphs[mapIdx];
 
@@ -1120,7 +1325,7 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
   // Accumulate stats
   stats_.sdReadTimeMs += sdTime;
   stats_.seekCount += seekCount;
-  stats_.uniqueGlyphs += validCount;
+  stats_.uniqueGlyphs += keptCount;
   stats_.bitmapBytes += totalBitmapSize;
 
   return missed;
@@ -1136,6 +1341,18 @@ void SdCardFont::clearCache() {
   for (uint8_t i = 0; i < MAX_STYLES; i++) {
     if (!styles_[i].present) continue;
     resetStyleMiniData(styles_[i]);
+    applyGlyphMissCallback(i);
+  }
+}
+
+void SdCardFont::releaseCache() {
+  clearOverflow();
+  // Advance table preserved for the same reason as in clearCache(): it is small, it is not
+  // what the TLS handshake is short of, and rebuilding it costs an SD pass per style.
+  for (uint8_t i = 0; i < MAX_STYLES; i++) {
+    if (!styles_[i].present) continue;
+    freeStyleMiniData(styles_[i]);
+    styles_[i].epdFont.data = &styles_[i].stubData;
     applyGlyphMissCallback(i);
   }
 }
@@ -1603,8 +1820,13 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
   // entry because dataLength is only known once the metadata has been read. The byte cap keeps
   // at least one entry so a single glyph larger than the whole budget still renders (it is
   // simply evicted by the next one) instead of being dropped from the page.
+  // Read once per insertion rather than per eviction. The value is invariant across the loop
+  // anyway — an eviction returns ~dataLength to free heap and removes exactly dataLength from
+  // overflowBytes_, so the effectiveFree the budget is built from does not move — and hoisting
+  // it keeps one ESP.getFreeHeap() per miss instead of one per evicted glyph.
+  const uint32_t byteBudget = self->overflowByteBudget();
   while (self->overflowCount_ == OVERFLOW_CAPACITY ||
-         (self->overflowCount_ > 0 && self->overflowBytes_ + tempGlyph.dataLength > OVERFLOW_MAX_BYTES)) {
+         (self->overflowCount_ > 0 && self->overflowBytes_ + tempGlyph.dataLength > byteBudget)) {
     self->evictOldestOverflow();
   }
   const uint32_t slot = (self->overflowHead_ + self->overflowCount_) % OVERFLOW_CAPACITY;

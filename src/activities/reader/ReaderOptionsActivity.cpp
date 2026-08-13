@@ -76,6 +76,7 @@ ReaderOptionsActivity::ReaderOptionsActivity(GfxRenderer& renderer, MappedInputM
 void ReaderOptionsActivity::onEnter() {
   Activity::onEnter();
   selectedIndex = 0;
+  fullRedraw_ = true;
   requestUpdate();
 }
 
@@ -145,6 +146,7 @@ void ReaderOptionsActivity::openInlineFontList() {
   fontPane_.build(&sdFontSystem.registry(), localOverride.fontFamily, localOverride.sdFontFamilyName);
   fontConfirmArmed_ = false;
   fontListOpen_ = true;
+  fullRedraw_ = true;
   requestUpdate();
 }
 
@@ -166,6 +168,7 @@ void ReaderOptionsActivity::commitInlineFont() {
   fontPane_.commitHighlighted();
   persistAndApply();
   fontListOpen_ = false;
+  fullRedraw_ = true;
   requestUpdate();
 }
 
@@ -177,6 +180,7 @@ void ReaderOptionsActivity::cancelInlineFont() {
   SETTINGS.setReaderOverride(localOverride);
   fontPane_.restore(renderer);
   fontListOpen_ = false;
+  fullRedraw_ = true;
   requestUpdate();
 }
 
@@ -236,6 +240,9 @@ void ReaderOptionsActivity::cycleCurrentItem() {
       return;
   }
   persistAndApply();
+  // Every item cycled here feeds the preview except MIN_SESSION, which is stats-only and
+  // appears nowhere in PreviewKey — so its toggle keeps the cheap list-only repaint.
+  if (selectedIndex != MIN_SESSION) fullRedraw_ = true;
   // A size change must reload the resident SD font at the new size, or getReaderFontId()
   // keeps resolving the old-size id and the live preview never reflows (SD fonts load one
   // size at a time; built-ins are always resident so this is a no-op for them).
@@ -331,8 +338,6 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
 }
 
 void ReaderOptionsActivity::render(RenderLock&&) {
-  renderer.clearScreen();
-
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
   const auto& metrics = UITheme::getInstance().getMetrics();
@@ -340,6 +345,10 @@ void ReaderOptionsActivity::render(RenderLock&&) {
   // Embedded font-family picker: the font list replaces the settings list, and the book-text
   // preview above shows the highlighted font (no separate screen, no two-pane comparison).
   if (fontListOpen_) {
+    renderer.clearScreen();
+    // Whatever the picker leaves on screen is not the settings view, so the settings view
+    // must repaint in full once the picker closes.
+    fullRedraw_ = true;
     // Load the highlighted font (resident SD swap) + clear the nav-lock, then live-apply it so
     // the preview renders in that font.
     fontPane_.loadHighlightedFontId(renderer);
@@ -369,35 +378,56 @@ void ReaderOptionsActivity::render(RenderLock&&) {
     return;
   }
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_READER_OPTIONS));
-
   const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
   const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
 
   // Live preview pane above the list (same shared component as the global Text Settings).
   // previewHeightPercent == 0 disables it; then the list uses the full content area.
+  // Geometry is resolved before any drawing because the list band is also what a
+  // preview-preserving redraw clears.
   int listTop = contentTop;
   int listHeight = contentHeight;
+  int previewHeight = 0;
   if (metrics.previewHeightPercent > 0) {
-    const int previewHeight =
-        enlargedPreviewHeight(contentHeight, metrics.listRowHeight, metrics.verticalSpacing, itemCount());
-    // familyName/sizeName reuse the list's own value formatting for the font rows.
-    const std::string familyName = getItemValue(FONT_FAMILY);
-    const std::string sizeName = getItemValue(FONT_SIZE);
-    textsettings::renderPreview(renderer, previewLayout_, metrics.previewPadding, metrics.verticalSpacing, contentTop,
-                                previewHeight, familyName.c_str(), sizeName.c_str(), sampleText.c_str(),
-                                /*showLabel=*/false);
+    previewHeight = enlargedPreviewHeight(contentHeight, metrics.listRowHeight, metrics.verticalSpacing, itemCount());
     listTop = contentTop + previewHeight + metrics.verticalSpacing;
     listHeight = contentHeight - previewHeight - metrics.verticalSpacing;
+  }
+
+  // Moving the highlight up/down changes nothing outside the list band, but re-rendering the
+  // preview is by far the most expensive thing on this screen: on a CJK page it is ~165 glyph
+  // draws, and every one that misses the SD font cache costs ~3.7ms. So repaint the preview,
+  // header and hints only when they can actually differ, and otherwise clear just the list band
+  // and let the framebuffer keep the rest.
+  //
+  // This relies on nothing else painting the framebuffer between our renders. True today:
+  // ActivityManager never clears it, this activity pushes no sub-activities (the font picker is
+  // inline), loop() takes no touch input, and deep sleep resets the chip rather than resuming.
+  // Adding a sub-screen or a touch handler here means setting fullRedraw_ alongside it.
+  if (fullRedraw_) {
+    renderer.clearScreen();
+    GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_READER_OPTIONS));
+
+    if (metrics.previewHeightPercent > 0) {
+      // familyName/sizeName reuse the list's own value formatting for the font rows.
+      const std::string familyName = getItemValue(FONT_FAMILY);
+      const std::string sizeName = getItemValue(FONT_SIZE);
+      textsettings::renderPreview(renderer, previewLayout_, metrics.previewPadding, metrics.verticalSpacing, contentTop,
+                                  previewHeight, familyName.c_str(), sizeName.c_str(), sampleText.c_str(),
+                                  /*showLabel=*/false);
+    }
+
+    const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_TOGGLE), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    fullRedraw_ = false;
+  } else {
+    renderer.clearRect(0, listTop, pageWidth, listHeight);
   }
 
   GUI.drawList(
       renderer, Rect{0, listTop, pageWidth, listHeight}, itemCount(), selectedIndex,
       [](int index) { return std::string(getItemName(index)); }, nullptr, nullptr,
       [this](int index) -> std::string { return getItemValue(index); }, true);
-
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_TOGGLE), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer();
 }

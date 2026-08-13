@@ -12,11 +12,18 @@
 #include "SyncScope.h"
 #include "activities/Activity.h"
 #include "components/themes/BaseTheme.h"  // Rect (indexing popup progress bar)
+#include "util/Dictionary.h"              // Dictionary::SessionOverrideScope member
 #include "util/WordSelectNavigator.h"
 
 class EpubReaderActivity final : public Activity {
   std::shared_ptr<Epub> epub;
   std::unique_ptr<Section> section = nullptr;
+  // Clears any session dictionary override (set by long-press Confirm on the definition
+  // screen) when this activity is destroyed. This is the one that defines "session" for
+  // the feature: a switched dictionary lasts for the rest of the book and reverts to the
+  // configured selection on close. RAII rather than a call in onExit(): activities are
+  // heap-allocated and deleted on exit, so the destructor always runs.
+  Dictionary::SessionOverrideScope dictOverrideScope_;
   // True right after this render rebuilt the section cache from scratch. If a
   // page then STILL fails to load, the cache isn't the problem — stop instead of
   // clearing + rebuilding forever (the old behavior looked "stuck on Indexing").

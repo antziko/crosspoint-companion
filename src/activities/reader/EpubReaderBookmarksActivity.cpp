@@ -79,17 +79,18 @@ void EpubReaderBookmarksActivity::loop() {
     // Quote rows open the full-text viewer (which forwards a jump on its own Confirm);
     // point bookmarks jump straight to their page.
     if (bm.isQuote()) {
-      startActivityForResult(std::make_unique<QuoteViewerActivity>(renderer, mappedInput, selectorIndex),
-                             [this](const ActivityResult& r) {
-                               if (!r.isCancelled) {
-                                 if (const auto* br = std::get_if<BookmarkResult>(&r.data)) {
-                                   setResult(ActivityResult{*br});
-                                   finish();
-                                   return;
-                                 }
-                               }
-                               requestUpdate();
-                             });
+      startActivityForResultNoThrow<QuoteViewerActivity>(
+          [this](const ActivityResult& r) {
+            if (!r.isCancelled) {
+              if (const auto* br = std::get_if<BookmarkResult>(&r.data)) {
+                setResult(ActivityResult{*br});
+                finish();
+                return;
+              }
+            }
+            requestUpdate();
+          },
+          renderer, mappedInput, selectorIndex);
       return;
     }
     setResult(BookmarkResult{bm.spineIndex, bm.progress, bm.paragraphIndex});

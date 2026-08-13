@@ -30,6 +30,7 @@
 #include "util/DictStopwords.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
+#include "util/DictionaryRegistry.h"
 #include "util/IpaUtils.h"
 #include "util/LookupHistory.h"
 #include "util/TextPool.h"
@@ -51,6 +52,15 @@ namespace {
 // Dedup is split ASCII / non-ASCII deliberately: a definition is mostly ASCII, and the
 // direct-indexed table keeps that path O(1) instead of the O(n^2) linear scan a single
 // flat array would cost over several KB of text.
+// Builds "<folderPath>.dict" into a caller-supplied buffer. The three call sites used to
+// write `foundLocation.folderPath + ".dict"`, which heap-allocates (paths run ~60 chars,
+// far past the SSO threshold) and, with -fno-exceptions, abort()s rather than returning
+// null. Every one of them is on the definition screen, which device logs show running
+// under 8KB free. 128 bytes matches Dictionary's own path buffers (Dictionary.cpp:93).
+void buildDictPath(char* buf, size_t bufSize, const std::string& folderPath) {
+  snprintf(buf, bufSize, "%s.dict", folderPath.c_str());
+}
+
 struct PrewarmCollector {
   static constexpr uint16_t MAX_NON_ASCII = 192;
   static constexpr uint8_t MAX_IPA = 64;
@@ -67,11 +77,44 @@ struct PrewarmCollector {
   // budgeted prewarm below, so that if the heap runs out it is the least-used style that
   // goes without — not whichever happened to be last in the bitmask.
   uint32_t styleBytes[4] = {};
-  std::string utf8;
-  std::string ipaUtf8;
+
+  // Fixed buffers, not std::string. Both are bounded by the dedup tables above — a
+  // codepoint only ever reaches them once, and only if it fit in seenAscii/nonAscii/ipaSeen
+  // — so a growing container was never needed to hold them. It was actively harmful: with
+  // -fno-exceptions both reserve() and append()-past-capacity abort() instead of failing,
+  // which is how a 513-byte std::string::reserve rebooted the device three times in one
+  // session while the heap gates further down were correctly refusing to warm anything.
+  // Sizing them from the caps also drops two heap allocations from a path that runs when
+  // the heap is at its worst.
+  // Derived from the tables rather than chosen, so raising a cap resizes the buffer with it
+  // and the two cannot drift apart: at most 128 distinct ASCII at 1 byte each, plus
+  // MAX_NON_ASCII distinct non-ASCII at the 4-byte UTF-8 maximum.
+  static constexpr uint16_t UTF8_CAP = 128 * 1 + MAX_NON_ASCII * 4;
+  static constexpr uint16_t IPA_CAP = MAX_IPA * 4;
+
+  char utf8[UTF8_CAP + 1] = {};
+  char ipaUtf8[IPA_CAP + 1] = {};
+  uint16_t utf8Len = 0;
+  uint16_t ipaLen = 0;
   // Read buffer for the plain-text scan; lives here rather than on the stack.
   // +4 for the incomplete UTF-8 sequence carried over from the previous chunk.
   char chunk[CHUNK_SIZE + 4] = {};
+
+  // Bounds-checked appends. The caps are derived from the dedup tables, so overflow is
+  // unreachable; the guards are here so that if a table cap is ever raised without raising
+  // these, the effect is a dropped glyph that loads on demand rather than a buffer overrun.
+  void appendBody(const char* bytes, size_t len) {
+    if (utf8Len + len > UTF8_CAP) return;
+    memcpy(utf8 + utf8Len, bytes, len);
+    utf8Len = static_cast<uint16_t>(utf8Len + len);
+    utf8[utf8Len] = '\0';
+  }
+  void appendIpa(const char* bytes, size_t len) {
+    if (ipaLen + len > IPA_CAP) return;
+    memcpy(ipaUtf8 + ipaLen, bytes, len);
+    ipaLen = static_cast<uint16_t>(ipaLen + len);
+    ipaUtf8[ipaLen] = '\0';
+  }
 
   // Append every not-yet-seen codepoint in `text` (null-terminated) to utf8 / ipaUtf8.
   // Returns true if the text contains any body (non-IPA) codepoint, i.e. whether the
@@ -104,7 +147,7 @@ struct PrewarmCollector {
         if (seen) continue;
         if (ipaCount >= MAX_IPA) continue;  // table full: let it fall back to the hot group
         ipaSeen[ipaCount++] = cp;
-        ipaUtf8.append(seqBytes, seqLen);
+        appendIpa(seqBytes, seqLen);
         continue;
       }
 
@@ -128,7 +171,7 @@ struct PrewarmCollector {
         nonAscii[nonAsciiCount++] = cp;
       }
       uniqueCount++;
-      utf8.append(seqBytes, seqLen);
+      appendBody(seqBytes, seqLen);
     }
     return sawBody;
   }
@@ -389,17 +432,18 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
     LOG_ERR("DDA", "OOM: prewarm collector (%u bytes)", static_cast<unsigned>(sizeof(PrewarmCollector)));
     return;  // not fatal: glyphs still load on demand, just slowly
   }
-  collector->utf8.reserve(512);
-
-  const std::string dictPath = foundLocation.folderPath + ".dict";
+  // No reserve here: collector->utf8 is a fixed buffer sized from the dedup caps, so there
+  // is nothing to grow and nothing that can abort. See PrewarmCollector's UTF8_CAP.
+  char dictPath[128];
+  buildDictPath(dictPath, sizeof(dictPath), foundLocation.folderPath);
   if (defIsMarkup_) {
     // Same streaming producer the wrap uses, with a collecting sink instead of the
     // measuring Wrapper — so the styles seen here are exactly the styles drawn later.
     const DictHtmlRenderer::SpanSink sink{collector.get(), &DictionaryDefinitionActivity::collectSpanForPrewarm};
-    htmlRenderer_.renderFromFileStreaming(dictPath.c_str(), foundLocation.offset, foundLocation.size, sink);
+    htmlRenderer_.renderFromFileStreaming(dictPath, foundLocation.offset, foundLocation.size, sink);
   } else {
     HalFile dictFile;
-    if (!Storage.openFileForRead("DICT", dictPath.c_str(), dictFile)) return;
+    if (!Storage.openFileForRead("DICT", dictPath, dictFile)) return;
     dictFile.seekSet(foundLocation.offset);
 
     uint32_t remaining = foundLocation.size;
@@ -474,13 +518,13 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   // and as FontCacheManager.cpp:93-98.
   constexpr size_t kIpaGroupReserve = 12 * 1024;  // one FontDecompressor group, with margin
   const char* ipaOutcome = "none";
-  if (!collector->ipaUtf8.empty()) {
+  if (collector->ipaLen != 0) {
     const size_t freeHeap = ESP.getFreeHeap();
     const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
     if (freeHeap >= kIpaGroupReserve + kMinFreeForFirstStyle && largestBlock >= kIpaGroupReserve) {
       // A prewarm that reports missed groups leaves those glyphs on the same failing
       // hot-group path, so only a clean 0 counts as warm.
-      const int missed = fcm->prewarmCache(IPA_FONT_ID, collector->ipaUtf8.c_str(), 0x01);
+      const int missed = fcm->prewarmCache(IPA_FONT_ID, collector->ipaUtf8, 0x01);
       ipaWarm_ = (missed == 0);
       ipaOutcome = ipaWarm_ ? "ok" : "miss";
     } else {
@@ -506,8 +550,8 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   // SdCardFont::onGlyphMiss at ~26ms each and a 43-codepoint definition spent 2179ms of a
   // 2229ms wrap on SD I/O. Both fast paths skip kerning and ligatures; the styles the loop
   // below leaves cold now cost render time only, not measure time.
-  if (!collector->utf8.empty()) {
-    renderer.ensureSdCardFontReady(defFontId_, collector->utf8.c_str(), collector->styleMask);
+  if (collector->utf8Len != 0) {
+    renderer.ensureSdCardFontReady(defFontId_, collector->utf8, collector->styleMask);
   }
   const unsigned long tAdv = millis();
 
@@ -531,7 +575,7 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   }
 
   uint8_t warmedMask = 0;
-  if (!collector->utf8.empty()) {
+  if (collector->utf8Len != 0) {
     for (const uint8_t styleIdx : order) {
       const uint8_t bit = static_cast<uint8_t>(1u << styleIdx);
       if (!(collector->styleMask & bit)) continue;
@@ -543,7 +587,7 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
                 static_cast<uint8_t>(collector->styleMask & ~warmedMask));
         break;
       }
-      fcm->prewarmCache(defFontId_, collector->utf8.c_str(), bit);
+      fcm->prewarmCache(defFontId_, collector->utf8, bit);
       warmedMask |= bit;
     }
   }
@@ -709,9 +753,10 @@ void DictionaryDefinitionActivity::wrapHtml() {
   // Renderer is a reused activity member (3.1-A): renderFromFileStreaming resets
   // it each call (XML_ParserReset, not free+create), so no per-turn object/parser
   // churn. Streaming means it never materializes the whole-definition buffers.
-  const std::string dictPath = foundLocation.folderPath + ".dict";
+  char dictPath[128];
+  buildDictPath(dictPath, sizeof(dictPath), foundLocation.folderPath);
   const DictHtmlRenderer::SpanSink spanSink{&wrapper, &DictionaryDefinitionActivity::feedSpanToWrapper};
-  htmlRenderer_.renderFromFileStreaming(dictPath.c_str(), foundLocation.offset, foundLocation.size, spanSink);
+  htmlRenderer_.renderFromFileStreaming(dictPath, foundLocation.offset, foundLocation.size, spanSink);
   wrapper.finish();
   // Only the kept page's span text was ever copied into layoutLines.
 }
@@ -780,9 +825,10 @@ void DictionaryDefinitionActivity::wrapPlain() {
   };
 
   // Stream from .dict file — the full definition is never held in RAM.
-  const std::string dictPath = foundLocation.folderPath + ".dict";
+  char dictPath[128];
+  buildDictPath(dictPath, sizeof(dictPath), foundLocation.folderPath);
   HalFile dictFile;
-  if (!Storage.openFileForRead("DICT", dictPath.c_str(), dictFile)) return;
+  if (!Storage.openFileForRead("DICT", dictPath, dictFile)) return;
   dictFile.seekSet(foundLocation.offset);
 
   uint32_t remaining = foundLocation.size;
@@ -909,7 +955,6 @@ void DictionaryDefinitionActivity::extractWordsFromLayout() {
           wi.width = static_cast<int16_t>(tokVisualWidth);
           wi.style = seg.style;
           wi.isIpa = seg.isIpa;
-          wi.fontId = segFontId;
           words.push_back(wi);
         }
         x += tokAdvanceX;
@@ -919,6 +964,8 @@ void DictionaryDefinitionActivity::extractWordsFromLayout() {
 
   WordSelectNavigator::organizeIntoRows(words, rows);
   LOG_DBG("DDA", "extractWords: %u words in %lums", static_cast<unsigned>(words.size()), millis() - t0);
+  // WordInfo carries only the isIpa flag; the navigator resolves it against these two.
+  navigator.setFonts(defFontId_, ipaFontId());
   navigator.load(std::move(words), std::move(rows), std::move(textPool));
 }
 
@@ -936,22 +983,90 @@ bool DictionaryDefinitionActivity::handleLongPressExitAll(bool enabled) {
   return false;
 }
 
+void DictionaryDefinitionActivity::revertDictSwitchIfPending() {
+  // Gated on the flag: a plain in-definition word lookup can also be cancelled or come
+  // back not-found, and must not undo an override the user set earlier and is happy with.
+  if (!dictSwitchInProgress_) return;
+  Dictionary::setSessionDictPath(prevSessionDict_.c_str());
+  dictSwitchInProgress_ = false;
+  prevSessionDict_.clear();
+}
+
+bool DictionaryDefinitionActivity::handleDictSwitch() {
+  // Swallow the Confirm release left over from the press that fired the switch, so it
+  // doesn't also fall through and open word-select.
+  //
+  // Clearing is driven by the isPressed LEVEL, not the wasReleased EDGE. The edge is
+  // unreliable here: startLookup() makes the controller active, so loop() returns at its
+  // isActive() branch for the next several frames and never reaches this function — the
+  // user's release lands inside that window and is gone by the time we look. Waiting for
+  // an edge that already fired left the flag stuck true, and this function then returned
+  // true forever, swallowing every input including Back. Same shape as
+  // DictionaryWordSelectActivity's consumeInitialBackRelease_ (line 392).
+  if (dictSwitchReleaseConsumed_) {
+    const bool released = mappedInput.wasReleased(MappedInputManager::Button::Confirm);
+    if (!mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
+      dictSwitchReleaseConsumed_ = false;
+      // Only consume the frame if the release actually landed on it; otherwise fall
+      // through so this frame's other input (Back, page turns) is still handled.
+      return released;
+    }
+    return true;  // still physically held — keep swallowing
+  }
+
+  // Nothing to cycle to with 0 or 1 dictionaries installed.
+  if (dictionaryRegistry.count() < 2) return false;
+
+  // Fire at the threshold rather than on release, so the gesture is distinguishable
+  // from the short Confirm that opens word-select.
+  if (!mappedInput.isPressed(MappedInputManager::Button::Confirm) ||
+      mappedInput.getHeldTime() < Dictionary::LONG_PRESS_MS) {
+    return false;
+  }
+
+  // Only mutate the session path while no lookup task is running — see the threading
+  // note on Dictionary::setSessionDictPath. The caller already returns early when the
+  // controller is active, so this is belt-and-braces for future call sites.
+  if (controller.isActive()) return false;
+
+  const std::string current = Dictionary::activeDictPath(cachePath.empty() ? nullptr : cachePath.c_str());
+  // Partitioned by dictionary type: a type-'m' dictionary cycles only to another 'm',
+  // everything else only among themselves. Returns -1 when this is the only dictionary
+  // of its type, and the guard below then leaves the screen untouched.
+  const int nextIdx = dictionaryRegistry.nextEntryIndexInGroup(dictionaryRegistry.indexOf(current));
+  if (nextIdx < 0) return false;
+
+  prevSessionDict_ = current;
+  dictSwitchReleaseConsumed_ = true;
+  dictSwitchInProgress_ = true;
+  Dictionary::setSessionDictPath(dictionaryRegistry.getEntries()[nextIdx].basePath.c_str());
+  LOG_DBG("DDA", "dict switch -> %s", dictionaryRegistry.getEntries()[nextIdx].name.c_str());
+  // recordHistory=false: the word is already in history from the original lookup.
+  controller.startLookup(headword, false);
+  return true;
+}
+
 void DictionaryDefinitionActivity::loop() {
   // --- Controller active (LookingUp / AltFormPrompt / NotFound) ---
   if (controller.isActive()) {
     switch (controller.handleInput()) {
       case DictionaryLookupController::LookupEvent::FoundDefinition: {
         const bool wasBackNav = chainBackNavInProgress;
+        // A dictionary switch re-resolves the SAME word, so it is not navigation:
+        // no chain entry, no history write, no page restore. It only re-wraps.
+        const bool wasDictSwitch = dictSwitchInProgress_;
         // Must match addWordIf exactly (incl. stopword filter) so the chain's
         // back-nav indices stay in lockstep with what actually lands in history.
-        const bool willLog =
-            !wasBackNav && controller.getRecordHistory() && !DictStopwords::isStopword(controller.getLookupWord());
-        if (!wasBackNav) {
+        const bool willLog = !wasBackNav && !wasDictSwitch && controller.getRecordHistory() &&
+                             !DictStopwords::isStopword(controller.getLookupWord());
+        if (!wasBackNav && !wasDictSwitch) {
           // Forward: push a back-entry for the word being left (current headword,
           // on currentPage), referencing its history position.
           chain_.onForward(static_cast<uint16_t>(currentPage), willLog);
         }
         chainBackNavInProgress = false;
+        dictSwitchInProgress_ = false;
+        prevSessionDict_.clear();
         headword = controller.getFoundWord();
         foundLocation = controller.getFoundLocation();
         // A chained lookup is a new definition, so it re-measures. The other stamp site is
@@ -978,13 +1093,21 @@ void DictionaryDefinitionActivity::loop() {
         break;
       }
       case DictionaryLookupController::LookupEvent::NotFoundDismissedBack:
+        // The previous definition is still on screen. If a dictionary switch is what
+        // failed, put the old dictionary back so the footer label and the body agree.
+        revertDictSwitchIfPending();
         requestUpdate();
         break;
       case DictionaryLookupController::LookupEvent::NotFoundDismissedDone:
+        // Done closes the screen, so there is no stale body to disagree with the
+        // override — the user's dictionary choice stands for the rest of the session.
+        dictSwitchInProgress_ = false;
+        prevSessionDict_.clear();
         setResult(ActivityResult{});
         finish();
         break;
       case DictionaryLookupController::LookupEvent::Cancelled:
+        revertDictSwitchIfPending();
         isWordSelectMode = false;
         navigator.reset();
         requestUpdate();
@@ -1054,6 +1177,10 @@ void DictionaryDefinitionActivity::loop() {
     }
     return;
   }
+
+  // Long-press Confirm: cycle the session dictionary. Checked before the release
+  // handler below so the switch wins over word-select on a held Confirm.
+  if (handleDictSwitch()) return;
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     if (showLookupButton) {
@@ -1234,18 +1361,31 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   prevHighlightIdx_ = -1;
 
   // Pagination indicator and button hints
+  const int footerY = renderer.getScreenHeight() - metrics.buttonHintsHeight - metrics.verticalSpacing;
   if (totalPages > 1) {
     char pageInfo[16];
     snprintf(pageInfo, sizeof(pageInfo), "%d/%d", currentPage + 1, totalPages);
     int textWidth = renderer.getTextWidth(SMALL_FONT_ID, pageInfo);
-    renderer.drawText(SMALL_FONT_ID, renderer.getScreenWidth() - rightPadding - textWidth,
-                      renderer.getScreenHeight() - metrics.buttonHintsHeight - metrics.verticalSpacing, pageInfo);
+    renderer.drawText(SMALL_FONT_ID, renderer.getScreenWidth() - rightPadding - textWidth, footerY, pageInfo);
   }
 
+  // Active dictionary, bottom-left, mirroring the pagination indicator opposite it.
+  // Shown only when there is something to switch between: it is both the feedback for
+  // the long-press-Confirm switch and (the hint bar having no free slot to spell the
+  // gesture out) the only on-screen affordance for it.
+  if (dictionaryRegistry.count() > 1) {
+    const std::string dictName =
+        DictUtils::dictDisplayName(Dictionary::activeDictPath(cachePath.empty() ? nullptr : cachePath.c_str()));
+    renderer.drawText(SMALL_FONT_ID, leftPadding, footerY, dictName.c_str());
+  }
+
+  // Confirm label only — Back and the Up/Down page labels are left empty so this
+  // matches the word-select screen that precedes it, which draws hints the same way
+  // (DictionaryWordSelectActivity.cpp:587). The buttons themselves are unaffected:
+  // Back still exits/chains back and Up/Down still page. Paging stays discoverable
+  // via the "n/m" indicator drawn opposite the dictionary name above.
   const char* btn2 = showLookupButton ? tr(STR_LOOKUP_SHORT) : "";
-  const char* btn3 = totalPages > 1 ? tr(STR_DIR_UP) : "";
-  const char* btn4 = totalPages > 1 ? tr(STR_DIR_DOWN) : "";
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), btn2, btn3, btn4);
+  const auto labels = mappedInput.mapLabels("", btn2, "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);

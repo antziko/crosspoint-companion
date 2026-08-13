@@ -75,6 +75,14 @@ class SdCardFont {
   // previously fetched metrics.
   void clearCache();
 
+  // clearCache() with the retention bets switched off: frees the per-style mini arenas
+  // outright instead of keeping them for the next page (resetStyleMiniData only frees under
+  // a heap floor or sustained underuse — see its comment). For callers that need the
+  // contiguous heap back NOW and will not render book text before it is rebuilt, i.e. the
+  // KOSync TLS handshake, whose 55 KB floor the retained arena is exactly big enough to
+  // block. clearCache() alone does not guarantee that reclaim.
+  void releaseCache();
+
   // Drop the persistent advance cache. Call when unloading the SD font or
   // when font/size/family/glyph-table state changes.
   void clearPersistentCache();
@@ -263,26 +271,50 @@ class SdCardFont {
   // Shared on-demand overflow buffer (FIFO of glyphs loaded via glyphMissHandler), used by
   // every style the prewarm could not reach. Two caps, whichever binds first:
   //
-  // OVERFLOW_CAPACITY bounds the entry array, which is a fixed member (28 B/slot). 8 could not
-  // hold the distinct letters of a single word, so common letters were evicted between their
-  // own repeats and re-read from SD at ~27ms each; device logs showed 135 misses / 3688ms in
-  // one dictionary render. It is deliberately NOT sized to hold a whole page: ~67 bitmaps
-  // costs about what prewarming a style costs (see kMinFreeForStyle in
-  // DictionaryDefinitionActivity), and a prewarmed style is strictly better — one contiguous
-  // arena, no per-glyph metadata read. If that heap were free the prewarm would have taken it.
+  // OVERFLOW_CAPACITY bounds the entry array, which is a fixed member (28 B/slot, asserted
+  // below). 8 could not hold the distinct letters of a single word, so common letters were
+  // evicted between their own repeats and re-read from SD at ~27ms each; device logs showed 135
+  // misses / 3688ms in one dictionary render.
   //
-  // OVERFLOW_MAX_BYTES bounds the bitmaps those slots point at, which the slot count alone
-  // does not: dataLength is a uint16_t, and a large 2-bit CJK glyph is ~150 B against ~50 B
-  // for Latin. Without it 32 slots could hold ~4.8 KB on a heap whose prewarm gates run at
-  // 10-16 KB free. So Latin text is bounded by slots, CJK by bytes.
-  static constexpr uint32_t OVERFLOW_CAPACITY = 32;
-  static constexpr uint32_t OVERFLOW_MAX_BYTES = 2048;
+  // The byte cap bounds the bitmaps those slots point at, which the slot count alone does not:
+  // dataLength is a uint16_t, and a CJK glyph measures ~295 B at reader size (a device trim log
+  // read 28032 bytes / 95 glyphs) against ~50 B for Latin. So Latin text is bounded by slots,
+  // CJK by bytes.
+  //
+  // The byte cap is computed per insertion (overflowByteBudget) rather than fixed, because the
+  // old fixed 2048 held only ~7 CJK glyphs while a page needs hundreds. Two things make a
+  // bigger ring safe here where a bigger prewarm arena was not:
+  //
+  //   - Ring bitmaps are individually allocated (~295 B each), so they fit in fragments no
+  //     contiguous arena could use. On a heap reading free=30512 largest=7924, the arena is
+  //     capped at 7924 while the ring is capped only by total free. The two do NOT compete for
+  //     the same resource, which is exactly what the previous version of this comment got wrong.
+  //   - Ring memory is reclaimable at any instant (evictOldestOverflow is O(1)), and a failed
+  //     ring allocation is already graceful — glyphMissHandler nulls out and the glyph is
+  //     skipped, never aborted.
+  //
+  // Still floored, because the lesson from the prewarm-arena crash applies to any cache: never
+  // drain the heap. See overflowByteBudget for the formula and its device calibration.
+  static constexpr uint32_t OVERFLOW_CAPACITY = 40;
+  // Never below this: the previous fixed cap, so a tight heap is never worse than it was.
+  static constexpr uint32_t OVERFLOW_MIN_BYTES = 2048;
+  // Hard ceiling, reached only above ~44 KB free. Sized just past what OVERFLOW_CAPACITY can
+  // hold in CJK (40 x ~295 B = 11800), so the slot cap binds marginally first on CJK and the
+  // byte cap governs everywhere below the ceiling. Neither is dead weight.
+  static constexpr uint32_t OVERFLOW_MAX_BYTES = 12 * 1024;
+  // Total free heap the ring will not dip below. Lower than the prewarm arena's floor
+  // (MINI_FREE_FLOOR, 24 KB) for the two reasons above — no contiguity demand, instantly
+  // reclaimable — but present for the same reason it is there.
+  static constexpr size_t OVERFLOW_FREE_FLOOR = 20 * 1024;
   struct OverflowEntry {
     EpdGlyph glyph;
     uint8_t* bitmap = nullptr;
     uint32_t codepoint = 0;
     uint8_t styleIdx = 0;
   };
+  // The per-slot cost is multiplied by every resident SD font (SdCardFontManager::loaded_ holds
+  // the reader size plus any UI CJK fallback sizes), so a silent growth here is not local.
+  static_assert(sizeof(OverflowEntry) == 28, "OverflowEntry size feeds the OVERFLOW_CAPACITY budget");
   // Ring as head + count rather than next + count, so the OLDEST entry can be dropped in O(1)
   // (evictOldestOverflow) when the byte cap binds before the slot cap. Live entries are
   // overflow_[(overflowHead_ + i) % OVERFLOW_CAPACITY] for i in [0, overflowCount_).
@@ -292,6 +324,8 @@ class SdCardFont {
   uint32_t overflowBytes_ = 0;
   // Free the oldest entry's bitmap and drop it from the ring. No-op when empty.
   void evictOldestOverflow();
+  // Current byte cap for the ring, recomputed per insertion from live free heap.
+  uint32_t overflowByteBudget() const;
 
   // The .cppfont, held open for the lifetime of the overflow ring. onGlyphMiss used to reopen
   // it per glyph: a storage-mutex round trip, a HalFile::Impl heap allocation
@@ -368,6 +402,10 @@ class SdCardFont {
   void freeStyleKernLigatureData(PerStyle& s);
   void freeStyleMiniKern(PerStyle& s);
   bool loadStyleKernLigatureData(PerStyle& s);
+  // WARNING: `codepoints` here is prewarm()'s PACKED buffer — each entry carries an
+  // occurrence count in its high bits (CodepointFreq.h). Read every entry through
+  // CodepointFreq::value(); a raw entry always has bits above 21 set, so a uint16_t range
+  // check on one silently rejects it and the page loses its kerning with no error.
   bool buildMiniKernMatrix(PerStyle& s, const uint32_t* codepoints, uint32_t cpCount);
   void applyKernLigaturePointers(PerStyle& s, EpdFontData& data) const;
   void applyGlyphMissCallback(uint8_t styleIdx);
@@ -376,6 +414,9 @@ class SdCardFont {
   template <typename Iter>
   int buildAdvanceTableRange(Iter begin, Iter end, bool includeSpace, bool includeHyphen, uint8_t styleMask,
                              const char* extraText = nullptr);
+  // `codepoints` is prewarm()'s PACKED buffer (see the warning on buildMiniKernMatrix below,
+  // and CodepointFreq.h). The counts are what let this pick which glyphs to keep when the
+  // page's bitmaps do not all fit the heap.
   int prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint32_t cpCount, bool metadataOnly);
 
   // Global helpers

@@ -19,6 +19,12 @@ class MappedInputManager;
 // The calling activity owns single-select Confirm/Back and activity-specific logic.
 class WordSelectNavigator {
  public:
+  // One selectable token. Kept as small as it can be made: CJK layout tokenises one
+  // word per *character* (ParsedText.cpp:399-423), so a Chinese page yields ~400 of
+  // these against ~60 for the same page in English, and the flat array needs all of it
+  // in ONE contiguous block. At the old 32 bytes a 256-entry growth step asked for 8192
+  // against a 7412-byte largest free block and abort()ed in extractWords. Every field
+  // below is sized against a single page, not a book.
   struct WordInfo {
     uint16_t textOffset = 0;
     uint16_t textLen = 0;
@@ -28,17 +34,42 @@ class WordSelectNavigator {
     int16_t screenY = 0;
     int16_t width = 0;
     int16_t row = 0;
-    int continuationIndex = -1;  // index of hyphenated second half (EPUB only)
-    int continuationOf = -1;     // index of hyphenated first half (EPUB only)
+    // Flat indices of the hyphenated other half (EPUB only), -1 when unpaired. int16_t
+    // because these index words on one page, which is in the hundreds.
+    int16_t continuationIndex = -1;  // index of hyphenated second half
+    int16_t continuationOf = -1;     // index of hyphenated first half
     EpdFontFamily::Style style = EpdFontFamily::REGULAR;
+    // Selects between the two font ids held by the navigator (see setFonts). The
+    // definition view renders IPA runs in a different font from the body; word-select
+    // over book text sets neither flag nor a second font, so it always resolves to the
+    // reader font. Storing the flag rather than the id keeps this struct 2-byte aligned.
     bool isIpa = false;
-    int fontId = 0;  // resolved at extraction time; used by renderHighlight()
   };
 
+  // Words are extracted in flat order and assigned to rows in that same order
+  // (organizeIntoRows), so a row's members are always the contiguous flat range
+  // [firstWord, firstWord + wordCount). Holding that as two integers rather than a
+  // std::vector<int> per row removes ~14 small heap blocks per CJK page, each of which
+  // used to grow by doubling *interleaved with* the large word-array growth — the
+  // allocator traffic that shredded the largest free block right before the abort.
   struct Row {
     int16_t yPos = 0;
-    std::vector<int> wordIndices;
+    int16_t firstWord = 0;
+    int16_t wordCount = 0;
   };
+
+  // The whole point of the two structs above is their size; a stray int would undo it.
+  static_assert(sizeof(WordInfo) == 22, "WordInfo must stay 22 bytes - see the comment above");
+  static_assert(sizeof(Row) == 6, "Row must stay 6 bytes - see the comment above");
+
+  // Members of row r, by position within the row. No bounds checking: callers index
+  // with values derived from rowSize(r), exactly as they did with wordIndices[i].
+  int rowSize(int r) const { return rows[r].wordCount; }
+  bool rowEmpty(int r) const { return rows[r].wordCount == 0; }
+  int wordAt(int r, int i) const { return rows[r].firstWord + i; }
+  // Position of flat index `flat` within row r. Replaces the linear scans that used to
+  // search wordIndices for it.
+  int posInRow(int r, int flat) const { return flat - rows[r].firstWord; }
 
   // Bounding rectangle in framebuffer coordinates. Used by the differential
   // repaint path to identify which screen region to push to the panel.
@@ -66,6 +97,16 @@ class WordSelectNavigator {
   const char* getDisplay(const WordInfo& w) const { return textPool.data() + w.textOffset; }
   // Access null-terminated lookup text from the pool.
   const char* getLookup(const WordInfo& w) const { return textPool.data() + w.lookupOffset; }
+
+  // Fonts the word list was laid out in. Only ever two across both callers — the body
+  // font, and the IPA font the definition view uses for pronunciation runs — so they
+  // live here once instead of costing 4 bytes in every WordInfo. Call before load();
+  // ipa defaults to body, which is what word-select over book text wants.
+  void setFonts(int bodyFontId, int ipaFontId = 0) {
+    bodyFontId_ = bodyFontId;
+    ipaFontId_ = ipaFontId != 0 ? ipaFontId : bodyFontId;
+  }
+  int fontIdFor(const WordInfo& w) const { return w.isIpa ? ipaFontId_ : bodyFontId_; }
 
   // Organise a flat word list into rows by Y coordinate (2px tolerance).
   // Sets each word's row field and populates the rows vector.
@@ -223,6 +264,8 @@ class WordSelectNavigator {
   std::vector<WordInfo> words;
   std::vector<Row> rows;
   std::string textPool;
+  int bodyFontId_ = 0;
+  int ipaFontId_ = 0;
   int currentRow = 0;
   int currentWordInRow = 0;
   bool inMultiSelectMode = false;

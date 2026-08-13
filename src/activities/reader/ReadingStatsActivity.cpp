@@ -170,8 +170,8 @@ void ReadingStatsActivity::promptDeleteBook() {
   };
 
   // Reuse "Delete Book Cache" as the heading; the book title is the body.
-  startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_DELETE_CACHE), title),
-                         std::move(handler));
+  startActivityForResultNoThrow<ConfirmationActivity>(std::move(handler), renderer, mappedInput, tr(STR_DELETE_CACHE),
+                                                      title);
 }
 
 void ReadingStatsActivity::onExit() {

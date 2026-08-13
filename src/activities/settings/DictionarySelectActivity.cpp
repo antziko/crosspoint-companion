@@ -195,7 +195,9 @@ void DictionarySelectActivity::loop() {
   if (mappedInput.isPressed(MappedInputManager::Button::Confirm) && mappedInput.getHeldTime() >= VIEW_INFO_MS &&
       selectedIndex > 0) {
     std::string folder = folderForIndex(selectedIndex);
-    currentInfo = Dictionary::readInfo(folder.c_str());
+    // Straight into the member: the by-value form would put a 608-byte DictInfo temporary
+    // in this frame just to copy-assign it away.
+    Dictionary::readInfoInto(folder.c_str(), currentInfo);
     showingInfo = true;
     showingRaw = false;
     requestUpdate();
@@ -213,14 +215,15 @@ void DictionarySelectActivity::loop() {
     // It detects required steps and either runs them or exits immediately if none are needed.
     if (selectedIndex > 0) {
       std::string folder = folderForIndex(selectedIndex);
-      startActivityForResult(std::make_unique<DictPrepareActivity>(renderer, mappedInput, folder),
-                             [this](const ActivityResult& result) {
-                               if (!result.isCancelled) {
-                                 applySelection();
-                                 finish();
-                               }
-                               // Cancelled/failed: stay in picker with the same highlighted index.
-                             });
+      startActivityForResultNoThrow<DictPrepareActivity>(
+          [this](const ActivityResult& result) {
+            if (!result.isCancelled) {
+              applySelection();
+              finish();
+            }
+            // Cancelled/failed: stay in picker with the same highlighted index.
+          },
+          renderer, mappedInput, folder);
       return;
     }
 

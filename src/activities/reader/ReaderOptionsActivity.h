@@ -66,6 +66,11 @@ class ReaderOptionsActivity final : public Activity {
   // Cached layout, relaid only when a layout-affecting value or the geometry changes.
   textsettings::PreviewLayout previewLayout_;
 
+  // False means the framebuffer already holds a valid header/preview/hints frame, so render()
+  // repaints only the list band. Set wherever anything outside that band can change; see the
+  // comment in render() for the framebuffer-ownership assumption this rests on.
+  bool fullRedraw_ = true;
+
   // Embedded font-family picker state. fontPane_ owns the font list + SD-preview loading;
   // the two-pane compare it can draw is unused here — we render a single book-text preview.
   FontComparePane fontPane_;

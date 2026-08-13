@@ -5,6 +5,7 @@
 #include <Memory.h>
 #include <SdDebugLog.h>  // build-time heap trajectory diagnostics (free + largest block)
 #include <Serialization.h>
+#include <Utf8.h>           // CJK-aware word joining in getTextFromSectionFile
 #include <esp_heap_caps.h>  // heap_caps_get_largest_free_block for the contiguous-block trace
 #include <esp_system.h>     // esp_get_free_heap_size() for the pre-parse heap-floor guard
 
@@ -924,8 +925,15 @@ std::string Section::getTextFromSectionFile() {
         if (line.getBlock()) {
           const auto& block = *line.getBlock();
           for (uint16_t i = 0; i < block.wordCount(); i++) {
-            if (!fullText.empty()) fullText += " ";
-            fullText += block.wordText(i);
+            const char* word = block.wordText(i);
+            // A space is the ONLY delimiter this flattened form has, so callers that split it
+            // back apart (TextSettingsPreview::relayout) cannot tell a real space from a mere
+            // word boundary. Layout knows the difference — noSpaceBefore per word — but that
+            // is exactly what flattening discards, so the join has to reconstruct the rule.
+            // Without this, CJK reaches the Reader Options preview and the QR text as
+            // "中 国 人 民".
+            if (utf8NeedsSpaceBetween(fullText, word)) fullText += " ";
+            fullText += word;
           }
         }
       }

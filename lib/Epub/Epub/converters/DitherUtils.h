@@ -1,8 +1,7 @@
 #pragma once
 
-#include <stdint.h>
-
 #include <OrderedDither.h>  // shared blue-noise / Bayer 1-bit dither (lib/GfxRenderer)
+#include <stdint.h>
 
 // Classify an image's tonal class from its sampled pixel fractions and return the
 // X4 tone curve to apply. Shared by JPEG and PNG probe paths so the classification
@@ -16,8 +15,8 @@
 //   light image    : else                            → None
 inline X4Tone classifyImageTone(uint32_t darkPct, uint32_t brightPct, uint32_t midPct) {
   if (darkPct >= X4_DARK_FRACTION_PCT && brightPct >= X4_BRIGHT_FRACTION_PCT) return X4Tone::None;
-  if (darkPct >= X4_DARK_FRACTION_PCT && brightPct < X4_BRIGHT_FRACTION_PCT &&
-      midPct >= X4_TEXT_FRACTION_MIN_PCT && midPct <= X4_TEXT_FRACTION_MAX_PCT)
+  if (darkPct >= X4_DARK_FRACTION_PCT && brightPct < X4_BRIGHT_FRACTION_PCT && midPct >= X4_TEXT_FRACTION_MIN_PCT &&
+      midPct <= X4_TEXT_FRACTION_MAX_PCT)
     return X4Tone::DarkText;
   if (darkPct >= X4_DARK_FRACTION_PCT) return X4Tone::Brighten;
   return X4Tone::None;

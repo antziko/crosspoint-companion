@@ -28,6 +28,7 @@ class FlashcardReviewActivity final : public Activity {
 
   void onEnter() override;
   void onExit() override;
+  void onResume() override;
   void loop() override;
   void render(RenderLock&&) override;
 
@@ -47,6 +48,12 @@ class FlashcardReviewActivity final : public Activity {
 
   std::string cachePath;
   DictionaryLookupController controller;
+
+  // Clears any session dictionary override (set by long-press Confirm on the definition
+  // screen) when this activity is destroyed, so a switch cannot outlive the screen that
+  // hosted it. RAII rather than a call in onExit(): activities are heap-allocated and
+  // deleted on exit, so the destructor always runs.
+  Dictionary::SessionOverrideScope dictOverrideScope_;
 
   std::vector<uint16_t> session;  // newest-first deck indices, shuffled
   size_t cursor = 0;

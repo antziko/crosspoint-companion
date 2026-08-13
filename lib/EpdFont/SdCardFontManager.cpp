@@ -139,3 +139,18 @@ int SdCardFontManager::getFontIdAtSize(const std::string& familyName, const uint
   }
   return 0;
 }
+
+int SdCardFontManager::getFontIdNearestSize(const std::string& familyName, const uint8_t pointSize) const {
+  if (familyName != loadedFamilyName_) return 0;
+  const LoadedFont* best = nullptr;
+  uint8_t bestDelta = 255;
+  for (const auto& lf : loaded_) {
+    const uint8_t delta = lf.size > pointSize ? lf.size - pointSize : pointSize - lf.size;
+    // Ties resolve to the smaller size, matching SdCardFontFamilyInfo::findNearestSize().
+    if (!best || delta < bestDelta || (delta == bestDelta && lf.size < best->size)) {
+      best = &lf;
+      bestDelta = delta;
+    }
+  }
+  return best ? best->fontId : 0;
+}

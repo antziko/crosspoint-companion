@@ -85,6 +85,12 @@ class ActivityManager {
   // Will replace currentActivity and drop all activities on stack
   void replaceActivity(std::unique_ptr<Activity>&& newActivity);
 
+  // Allocating form of the above that degrades instead of aborting on OOM; every goTo* below
+  // uses it. Definition (and the reasoning) live beside those in ActivityManager.cpp — it is
+  // only ever instantiated there, so it does not need to be visible to other translation units.
+  template <typename T, typename... Args>
+  bool replaceActivityNoThrow(const char* what, Args&&... args);
+
   // goTo... functions are convenient wrapper for replaceActivity()
   void goToFileTransfer();
   void goToSettings(int initialCategory = 0);

@@ -96,11 +96,10 @@ void KOReaderServerListActivity::handleSelection() {
   };
 
   if (selectedIndex < serverCount) {
-    startActivityForResult(std::make_unique<KOReaderSettingsActivity>(renderer, mappedInput, selectedIndex),
-                           resultHandler);
+    startActivityForResultNoThrow<KOReaderSettingsActivity>(resultHandler, renderer, mappedInput, selectedIndex);
   } else {
     // "Add Server" virtual item
-    startActivityForResult(std::make_unique<KOReaderSettingsActivity>(renderer, mappedInput, -1), resultHandler);
+    startActivityForResultNoThrow<KOReaderSettingsActivity>(resultHandler, renderer, mappedInput, -1);
   }
 }
 
@@ -124,9 +123,8 @@ void KOReaderServerListActivity::duplicateSelectedServer() {
     requestUpdate(true);
   };
 
-  startActivityForResult(
-      std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_KOREADER_DUPLICATE_SERVER), body),
-      std::move(handler));
+  startActivityForResultNoThrow<ConfirmationActivity>(std::move(handler), renderer, mappedInput,
+                                                      tr(STR_KOREADER_DUPLICATE_SERVER), body);
 }
 
 void KOReaderServerListActivity::render(RenderLock&&) {

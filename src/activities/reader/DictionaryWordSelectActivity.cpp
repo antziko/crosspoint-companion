@@ -3,7 +3,9 @@
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <Memory.h>
 #include <Utf8.h>
+#include <esp_heap_caps.h>  // heap_caps_get_largest_free_block: pre-flight for the word-array reserve
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -51,6 +53,56 @@ int16_t measureWordAdvanceX(const GfxRenderer& renderer, int fontId, const std::
   return static_cast<int16_t>(renderer.getTextAdvanceX(fontId, sanitized.c_str(), style));
 }
 
+// True when the token carries at least one CJK letter (Han, Kana, Hangul, fullwidth
+// letters/digits) — i.e. content rather than CJK punctuation. utf8IsCjkBreakable is the
+// same predicate layout uses to split CJK runs (ParsedText.cpp:399), so what it accepts
+// here is exactly what arrives as one-character tokens.
+//
+// Takes pointer+length rather than std::string because the counting pass below runs it
+// over every token on the page before anything is allocated; a std::string per token
+// would put heap traffic in front of the very reserve the count exists to protect.
+bool containsCjkLetter(const char* text, size_t len) {
+  const auto* ptr = reinterpret_cast<const unsigned char*>(text);
+  const auto* end = ptr + len;
+  while (ptr < end) {
+    const uint32_t cp = utf8NextCodepoint(&ptr);
+    if (cp == 0) break;
+    if (utf8IsCjkBreakable(cp) && !utf8IsCjkPunctuation(cp)) return true;
+  }
+  return false;
+}
+
+// Paired with containsCjkLetter to decide whether a token is a selection stop. Kept a
+// pure byte test (it only ever matches ASCII), so the two together read as "carries a
+// letter or digit in either script family".
+bool containsAsciiAlnum(const char* text, size_t len) {
+  return std::any_of(text, text + len, [](unsigned char c) { return c < 0x80 && std::isalnum(c) != 0; });
+}
+
+// The single definition of "this token gets a cursor stop", shared by the counting pass
+// and the extraction pass. If these two ever disagree the reserve is wrong and the vector
+// grows — which is the crash this whole path exists to avoid — so they must not be two
+// copies of the same condition.
+bool isSelectableToken(const char* text, size_t len, bool& outIsCjk) {
+  outIsCjk = containsCjkLetter(text, len);
+  return outIsCjk || containsAsciiAlnum(text, len);
+}
+
+// En-dash (U+2013) and em-dash (U+2014), both E2 80 93/94 in UTF-8. Each one splits its
+// token into an extra WordInfo, so the counting pass needs the same tally the extraction
+// pass derives from splitStarts.
+size_t countDashes(const char* text, size_t len) {
+  size_t n = 0;
+  for (size_t i = 0; i + 2 < len; i++) {
+    if (static_cast<uint8_t>(text[i]) == 0xE2 && static_cast<uint8_t>(text[i + 1]) == 0x80 &&
+        (static_cast<uint8_t>(text[i + 2]) == 0x93 || static_cast<uint8_t>(text[i + 2]) == 0x94)) {
+      n++;
+      i += 2;
+    }
+  }
+  return n;
+}
+
 // Single-style prewarm/advance-table bitmask: bit 0 = REGULAR, 1 = BOLD,
 // 2 = ITALIC, 3 = BOLD_ITALIC. The `& 0x03` is defensive — Style enum
 // is two bits, but UNDERLINE etc. live in higher bits if ever OR'd in.
@@ -64,8 +116,7 @@ void DictionaryWordSelectActivity::onEnter() {
   Activity::onEnter();
   std::vector<WordSelectNavigator::WordInfo> words;
   std::vector<WordSelectNavigator::Row> rows;
-  std::string textPool;
-  textPool.reserve(512);
+  std::string textPool;  // sized exactly inside extractWords, from its counting pass
   extractWords(words, rows, textPool);
   mergeHyphenatedWords(words, rows, textPool);
   // Only consume the initial Confirm release if Confirm is still held at onEnter — i.e.
@@ -73,6 +124,8 @@ void DictionaryWordSelectActivity::onEnter() {
   // already released Confirm by the time we open, so consuming would swallow the user's
   // first deliberate tap and force them to press twice.
   const bool consumeInitialConfirm = mappedInput.isPressed(MappedInputManager::Button::Confirm);
+  // Book text is all one font; no IPA runs here, so the second slot defaults to the first.
+  navigator.setFonts(SETTINGS.getReaderFontId());
   navigator.load(std::move(words), std::move(rows), std::move(textPool), consumeInitialConfirm, initialMarker_);
   // Opened via the reader's hold-Back gesture? Back is still held — swallow its release once.
   consumeInitialBackRelease_ = mappedInput.isPressed(MappedInputManager::Button::Back);
@@ -118,12 +171,82 @@ void DictionaryWordSelectActivity::prebuildAdvanceTable() {
   renderer.ensureSdCardFontReady(SETTINGS.getReaderFontId(), pageText.c_str(), pageStyleMask);
 }
 
+void DictionaryWordSelectActivity::countTokens(size_t& outWords, size_t& outPoolBytes, size_t& outRows) const {
+  outWords = 0;
+  outPoolBytes = 0;
+  outRows = 0;
+  int16_t lastY = 0;
+  bool haveRow = false;
+
+  for (const auto& element : page->elements) {
+    if (element->getTag() != TAG_PageLine) continue;
+    const auto* line = static_cast<const PageLine*>(element.get());
+    const auto& block = line->getBlock();
+    if (!block) continue;
+    const uint16_t n = block->wordCount();
+    for (uint16_t i = 0; i < n; i++) {
+      const char* text = block->wordText(i);
+      const size_t len = block->wordTextLen(i);
+      bool isCjk = false;
+      if (!isSelectableToken(text, len, isCjk)) continue;
+
+      // Upper bound: a token with d dashes yields at most d + 1 parts, and their bytes sum
+      // to at most len (the dash bytes themselves are dropped). Exact for the overwhelming
+      // majority — the existing code notes dash-split words run ~0-2 per page — and erring
+      // high only costs a few spare entries in a reservation, never a re-allocation.
+      const size_t parts = countDashes(text, len) + 1;
+      outWords += parts;
+      outPoolBytes += len + parts;  // one NUL terminator per part
+
+      // Mirrors organizeIntoRows' 2px Y tolerance so the row reserve is right too.
+      const int16_t y = static_cast<int16_t>(line->yPos);
+      if (!haveRow || std::abs(y - lastY) > 2) {
+        outRows++;
+        lastY = y;
+        haveRow = true;
+      }
+    }
+  }
+}
+
 void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator::WordInfo>& words,
                                                 std::vector<WordSelectNavigator::Row>& rows, std::string& textPool) {
   words.clear();
-  words.reserve(64);
   rows.clear();
-  rows.reserve(16);
+
+  // Count first, then make exactly one allocation each. The flat word array has to land in
+  // ONE contiguous block, and CJK layout tokenises per *character* (ParsedText.cpp:399-423),
+  // so a Chinese page produces ~400 entries where English produces ~60. Letting the vector
+  // reach that by doubling asks for 8192 bytes at the 256-entry step — and std::vector's
+  // growth routes to a THROWING operator new, which abort()s under -fno-exceptions instead
+  // of returning null. That is the reported crash: 8192 wanted against a 7412-byte largest
+  // free block, from a Chinese book's dictionary lookup.
+  size_t wantWords = 0, wantPoolBytes = 0, wantRows = 0;
+  countTokens(wantWords, wantPoolBytes, wantRows);
+
+  if (wantWords > 0) {
+    // Probe the block before reserving. reserve() itself cannot fail safely here, so the
+    // check has to happen first — the same idiom, for the same reason, as
+    // FontCacheManager.cpp:105-109 and KOReaderSyncClient.cpp:528-537. Headroom covers the
+    // rows array, the pool, and the per-token std::string temporaries below.
+    constexpr size_t kExtractHeadroom = 4096;
+    const size_t wordBytes = wantWords * sizeof(WordSelectNavigator::WordInfo);
+    const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (largest < wordBytes + kExtractHeadroom) {
+      // Degrade rather than abort: onEnter() loads an empty navigator, render() draws the
+      // empty state and loop() lets Back out (see the navigator.isEmpty() branch below).
+      LOG_ERR("DWS", "Word list too large for heap: need %u+%u, largest %u - selection disabled", (unsigned)wordBytes,
+              (unsigned)kExtractHeadroom, (unsigned)largest);
+      return;
+    }
+    words.reserve(wantWords);
+    rows.reserve(wantRows);
+    // Reserve the pool exactly too, so TextPool::append's +256 linear growth — which also
+    // routes to the aborting operator new — never fires. The slack absorbs the merged
+    // lookup strings mergeHyphenatedWords appends afterwards (at most one per row).
+    constexpr size_t kPoolSlack = 256;
+    textPool.reserve(wantPoolBytes + kPoolSlack);
+  }
 
   // Populate the SD font's advance table once so every getTextAdvanceX call
   // below takes the fast in-RAM path.
@@ -172,13 +295,25 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
     for (uint16_t wIdx = 0; wIdx < blockWordCount; wIdx++) {
       int16_t screenX = line->xPos + block->wordXpos(wIdx) + marginLeft;
       int16_t screenY = line->yPos + marginTop + rubyShift;
-      const std::string wordText(block->wordText(wIdx), block->wordTextLen(wIdx));
       const EpdFontFamily::Style wordStyle = block->wordStyle(wIdx);
 
-      // Skip tokens with no alphanumeric characters (bullets, punctuation, etc.)
-      if (!std::any_of(wordText.begin(), wordText.end(), [](unsigned char c) { return std::isalnum(c); })) {
+      // Skip tokens with no letter or digit (bullets, punctuation, etc.).
+      // This was a bare std::isalnum byte scan, which rejects every byte >= 0x80 and so
+      // dropped wholly non-ASCII tokens ("中", "漢字") — leaving CJK pages with no
+      // selectable words at all and no cursor. The CJK clause is strictly additive: a
+      // Latin token carries no CJK codepoint, so its verdict — and therefore every
+      // word's flat index, which the bookmark store persists as a highlight anchor —
+      // is unchanged. Cf. Dictionary.cpp:22, the same byte-vs-codepoint fix on the
+      // lookup side.
+      //
+      // Tested before the std::string is built, so rejected tokens cost no allocation —
+      // and via the same helper countTokens() used, so the reserve above cannot drift
+      // out of step with what actually gets pushed.
+      bool isCjkToken = false;
+      if (!isSelectableToken(block->wordText(wIdx), block->wordTextLen(wIdx), isCjkToken)) {
         continue;
       }
+      const std::string wordText(block->wordText(wIdx), block->wordTextLen(wIdx));
 
       // Split on en-dash (U+2013: E2 80 93) and em-dash (U+2014: E2 80 94)
       std::vector<size_t> splitStarts;
@@ -207,7 +342,17 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
         // negative kerning, short words where the entire xpos diff is the
         // gap).
         int16_t wordWidth;
-        if (wIdx + 1 < blockWordCount) {
+        if (isCjkToken) {
+          // The xpos-diff derivation below assumes an inter-word gap that CJK does not
+          // have: layout adds nothing to totalNaturalGaps for a noSpaceBefore token
+          // (ParsedText.cpp:1207-1210), so lineGapWidth falls back to a full space width
+          // and the highlight box comes out a space too narrow. A justified CJK line
+          // additionally carries a variable justifyExtra in that diff, which must not
+          // land inside the box either. Measuring is exact and costs nothing here — CJK
+          // tokens are single characters and prebuildAdvanceTable() already made this an
+          // in-RAM advance-table hit.
+          wordWidth = measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), wordText, wordStyle);
+        } else if (wIdx + 1 < blockWordCount) {
           const int16_t raw = static_cast<int16_t>(block->wordXpos(wIdx + 1) - block->wordXpos(wIdx));
           wordWidth = std::max(static_cast<int16_t>(1), static_cast<int16_t>(raw - lineGapWidth));
         } else {
@@ -224,7 +369,6 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
           wi.screenY = screenY;
           wi.width = wordWidth;
           wi.style = wordStyle;
-          wi.fontId = SETTINGS.getReaderFontId();
           words.push_back(wi);
         }
       } else {
@@ -263,7 +407,6 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
             wi.screenY = screenY;
             wi.width = partWidth;
             wi.style = wordStyle;
-            wi.fontId = SETTINGS.getReaderFontId();
             words.push_back(wi);
           }
         }
@@ -282,7 +425,7 @@ void DictionaryWordSelectActivity::mergeHyphenatedWords(std::vector<WordSelectNa
   // Cross-page hyphenation: update lookup text when the last word on this page
   // ends with a hyphen and its continuation begins the next page.
   if (!nextPageFirstWord.empty() && !rows.empty()) {
-    int lastWordIdx = rows.back().wordIndices.back();
+    int lastWordIdx = rows.back().firstWord + rows.back().wordCount - 1;
     const char* lastWord = textPool.data() + words[lastWordIdx].textOffset;
     uint16_t lastLen = words[lastWordIdx].textLen;
     if (lastLen > 0 && utf8EndsWithHyphen(lastWord, lastLen) && lastWord[0] != '-') {
@@ -296,7 +439,7 @@ void DictionaryWordSelectActivity::mergeHyphenatedWords(std::vector<WordSelectNa
   }
 
   rows.erase(
-      std::remove_if(rows.begin(), rows.end(), [](const WordSelectNavigator::Row& r) { return r.wordIndices.empty(); }),
+      std::remove_if(rows.begin(), rows.end(), [](const WordSelectNavigator::Row& r) { return r.wordCount == 0; }),
       rows.end());
 }
 
@@ -339,7 +482,14 @@ std::string DictionaryWordSelectActivity::buildLookupExcerpt() const {
   if (static_cast<int>(excerpt.size()) > FlashcardDeck::EXCERPT_MAX) {
     excerpt.resize(FlashcardDeck::EXCERPT_MAX);
     const size_t sp = excerpt.find_last_of(' ');
-    if (sp != std::string::npos && sp > 0) excerpt.resize(sp);
+    if (sp != std::string::npos && sp > 0) {
+      excerpt.resize(sp);
+    } else {
+      // CJK excerpts have no spaces, so there is no word boundary to fall back to and
+      // the resize above can land mid-sequence. Trim to the last complete codepoint —
+      // a partial sequence renders as a broken glyph on the flashcard face.
+      excerpt.resize(static_cast<size_t>(utf8SafeTruncateBuffer(excerpt.data(), static_cast<int>(excerpt.size()))));
+    }
   }
   return excerpt;
 }
@@ -354,19 +504,29 @@ void DictionaryWordSelectActivity::loop() {
         if (!cachePath.empty()) {
           FlashcardDeck::enroll(cachePath, controller.getLookupWord(), buildLookupExcerpt(), chapterTitle_);
         }
-        startActivityForResult(std::make_unique<DictionaryDefinitionActivity>(
-                                   renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(),
-                                   true, cachePath, controller.getRecordHistory(), controller.getLookupWord(),
-                                   DictionaryLookupController::toHistStatus(controller.getFoundStatus())),
-                               [this](const ActivityResult& result) {
-                                 if (!result.isCancelled) {
-                                   setResult(ActivityResult{});
-                                   finish();
-                                 } else {
-                                   forceFullRepaintOnNextRender();
-                                   requestUpdate();
-                                 }
-                               });
+        // Nothrow because this push runs on the most stressed heap in the firmware: the popup
+        // render's glyph prewarm has just taken its arena, and this object is ~4.8 KB. A bare
+        // new here aborts the device (it did — DictionaryWordSelectActivity.cpp:506 in the X3
+        // crash trace); failing back to the word list is a far better outcome than a reboot.
+        auto definition = makeUniqueNoThrow<DictionaryDefinitionActivity>(
+            renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(), true, cachePath,
+            controller.getRecordHistory(), controller.getLookupWord(),
+            DictionaryLookupController::toHistStatus(controller.getFoundStatus()));
+        if (!definition) {
+          LOG_ERR("DWS", "OOM: DictionaryDefinitionActivity");
+          forceFullRepaintOnNextRender();
+          requestUpdate();
+          break;
+        }
+        startActivityForResult(std::move(definition), [this](const ActivityResult& result) {
+          if (!result.isCancelled) {
+            setResult(ActivityResult{});
+            finish();
+          } else {
+            forceFullRepaintOnNextRender();
+            requestUpdate();
+          }
+        });
         break;
       }
       case DictionaryLookupController::LookupEvent::NotFoundDismissedBack:

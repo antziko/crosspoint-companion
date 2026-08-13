@@ -22,8 +22,8 @@ void ClockSyncActivity::onEnter() {
   // Bring up the radio and let the user pick a network first (saved networks
   // connect with one tap). Once connected we run the NTP sync.
   WiFi.mode(WIFI_STA);
-  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
-                         [this](const ActivityResult& result) { onWifiSelectionComplete(!result.isCancelled); });
+  startActivityForResultNoThrow<WifiSelectionActivity>(
+      [this](const ActivityResult& result) { onWifiSelectionComplete(!result.isCancelled); }, renderer, mappedInput);
 }
 
 void ClockSyncActivity::onExit() {

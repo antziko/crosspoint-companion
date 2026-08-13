@@ -5,6 +5,7 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <Memory.h>
 #include <Serialization.h>
 #include <Utf8.h>
 
@@ -754,18 +755,18 @@ void TxtReaderActivity::applyOrientation(const uint8_t orientation) {
 
 void TxtReaderActivity::openReaderMenu() {
   const int progressPercent = totalPages > 0 ? static_cast<int>((currentPage + 1) * 100.0f / totalPages + 0.5f) : 0;
-  startActivityForResult(std::make_unique<TxtReaderMenuActivity>(
-                             renderer, mappedInput, txt->getTitle(), currentPage + 1, totalPages,
-                             std::min(progressPercent, 100), APP_STATE.activeOrientation, selectedPageTurnOption),
-                         [this](const ActivityResult& result) {
-                           // Always apply orientation / auto-page-turn changes even if cancelled.
-                           const auto& menu = std::get<MenuResult>(result.data);
-                           applyOrientation(menu.orientation);
-                           toggleAutoPageTurn(menu.pageTurnOption);
-                           if (!result.isCancelled) {
-                             onReaderMenuConfirm(static_cast<TxtReaderMenuActivity::MenuAction>(menu.action));
-                           }
-                         });
+  startActivityForResultNoThrow<TxtReaderMenuActivity>(
+      [this](const ActivityResult& result) {
+        // Always apply orientation / auto-page-turn changes even if cancelled.
+        const auto& menu = std::get<MenuResult>(result.data);
+        applyOrientation(menu.orientation);
+        toggleAutoPageTurn(menu.pageTurnOption);
+        if (!result.isCancelled) {
+          onReaderMenuConfirm(static_cast<TxtReaderMenuActivity::MenuAction>(menu.action));
+        }
+      },
+      renderer, mappedInput, txt->getTitle(), currentPage + 1, totalPages, std::min(progressPercent, 100),
+      APP_STATE.activeOrientation, selectedPageTurnOption);
 }
 
 void TxtReaderActivity::onReaderMenuConfirm(const TxtReaderMenuActivity::MenuAction action) {
@@ -778,22 +779,26 @@ void TxtReaderActivity::onReaderMenuConfirm(const TxtReaderMenuActivity::MenuAct
         if (!sample.empty()) sample += ' ';
         sample += line;
       }
-      startActivityForResult(std::make_unique<ReaderOptionsActivity>(renderer, mappedInput, txt->getCachePath(),
-                                                                     SETTINGS.getReaderOverride(),
-                                                                     /*showMinSession=*/false, std::move(sample)),
-                             [this](const ActivityResult&) {
-                               // Reload SD font at the (possibly new) size, then force a
-                               // re-index so the new font/margin/spacing takes effect.
-                               sdFontSystem.ensureLoaded(renderer);
-                               pendingProgressFraction =
-                                   totalPages > 1 ? static_cast<float>(currentPage) / (totalPages - 1) : 0.0f;
-                               restorePendingFraction = true;
-                               initialized = false;
-                               pageOffsets.clear();
-                               currentPageLines.clear();
-                               ignoreBackUntilRelease = true;
-                               requestUpdate();
-                             });
+      auto options = makeUniqueNoThrow<ReaderOptionsActivity>(renderer, mappedInput, txt->getCachePath(),
+                                                              SETTINGS.getReaderOverride(),
+                                                              /*showMinSession=*/false, std::move(sample));
+      if (!options) {
+        LOG_ERR("TXT", "OOM: ReaderOptionsActivity");
+        openReaderMenu();
+        break;
+      }
+      startActivityForResult(std::move(options), [this](const ActivityResult&) {
+        // Reload SD font at the (possibly new) size, then force a
+        // re-index so the new font/margin/spacing takes effect.
+        sdFontSystem.ensureLoaded(renderer);
+        pendingProgressFraction = totalPages > 1 ? static_cast<float>(currentPage) / (totalPages - 1) : 0.0f;
+        restorePendingFraction = true;
+        initialized = false;
+        pageOffsets.clear();
+        currentPageLines.clear();
+        ignoreBackUntilRelease = true;
+        requestUpdate();
+      });
       break;
     }
     case MenuAction::VIEW_BOOKMARKS: {
@@ -802,25 +807,25 @@ void TxtReaderActivity::onReaderMenuConfirm(const TxtReaderMenuActivity::MenuAct
     }
     case MenuAction::GO_TO_PERCENT: {
       const int initialPercent = totalPages > 0 ? static_cast<int>((currentPage + 1) * 100.0f / totalPages + 0.5f) : 0;
-      startActivityForResult(
-          std::make_unique<EpubReaderPercentSelectionActivity>(renderer, mappedInput, std::min(initialPercent, 100)),
+      startActivityForResultNoThrow<EpubReaderPercentSelectionActivity>(
           [this](const ActivityResult& result) {
             if (!result.isCancelled) {
               jumpToPercent(std::get<PercentResult>(result.data).percent);
             }
-          });
+          },
+          renderer, mappedInput, std::min(initialPercent, 100));
       break;
     }
     case MenuAction::DELETE_CACHE: {
-      startActivityForResult(
-          std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_CONFIRM_DELETE_CACHE), ""),
+      startActivityForResultNoThrow<ConfirmationActivity>(
           [this](const ActivityResult& confirmResult) {
             if (confirmResult.isCancelled) {
               return;
             }
             txt->clearCache();
             onGoHome();
-          });
+          },
+          renderer, mappedInput, tr(STR_CONFIRM_DELETE_CACHE), "");
       break;
     }
     case MenuAction::SCREENSHOT: {
@@ -835,8 +840,8 @@ void TxtReaderActivity::onReaderMenuConfirm(const TxtReaderMenuActivity::MenuAct
         fullText += '\n';
       }
       if (!fullText.empty()) {
-        startActivityForResult(std::make_unique<QrDisplayActivity>(renderer, mappedInput, fullText),
-                               [this](const ActivityResult&) { ignoreBackUntilRelease = true; });
+        startActivityForResultNoThrow<QrDisplayActivity>(
+            [this](const ActivityResult&) { ignoreBackUntilRelease = true; }, renderer, mappedInput, fullText);
       } else {
         requestUpdate();
       }
@@ -886,8 +891,7 @@ void TxtReaderActivity::toggleBookmark() {
 }
 
 void TxtReaderActivity::openBookmarks() {
-  startActivityForResult(
-      std::make_unique<TxtReaderBookmarksActivity>(renderer, mappedInput, txt->getCachePath(), totalPages),
+  startActivityForResultNoThrow<TxtReaderBookmarksActivity>(
       [this](const ActivityResult& result) {
         ignoreBackUntilRelease = true;
         // The viewer may have deleted entries; refresh the cached indicator set.
@@ -899,7 +903,8 @@ void TxtReaderActivity::openBookmarks() {
           currentPage = page;
         }
         requestUpdate();
-      });
+      },
+      renderer, mappedInput, txt->getCachePath(), totalPages);
 }
 
 void TxtReaderActivity::reloadBookmarkPages() {

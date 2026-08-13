@@ -21,10 +21,15 @@ class GfxRenderer {
 
   // Instrumented rendering methods — counters and call-log are mutable so
   // renderHighlight (which takes const GfxRenderer&) can still be observed.
-  void fillRect(int x, int y, int width, int height, bool state = true) const { ++fillRectCallCount; }
+  // Unused parameters are name-elided rather than named: this suite builds under
+  // -Wall -Wextra as part of the CTest run, and a stub that only counts calls would
+  // otherwise emit a dozen -Wunused-parameter warnings on every build.
+  void fillRect(int /*x*/, int /*y*/, int /*width*/, int /*height*/, bool /*state*/ = true) const {
+    ++fillRectCallCount;
+  }
 
-  void drawText(int fontId, int x, int y, const char* text, bool black = true, uint8_t style = 0,
-                BidiUtils::BidiBaseDir baseDir = BidiUtils::BidiBaseDir::AUTO) const {
+  void drawText(int /*fontId*/, int x, int y, const char* text, bool /*black*/ = true, uint8_t /*style*/ = 0,
+                BidiUtils::BidiBaseDir /*baseDir*/ = BidiUtils::BidiBaseDir::AUTO) const {
     if (drawCallCount < MAX_DRAW_CALLS) {
       drawCalls[drawCallCount] = {x, y, text};
     }
@@ -33,10 +38,12 @@ class GfxRenderer {
   }
 
   // No-op framebuffer methods (only called by HighlightSnapshot).
-  size_t readFramebufferRegion(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint8_t* dst, size_t dstCapacity) const {
+  size_t readFramebufferRegion(uint16_t /*x*/, uint16_t /*y*/, uint16_t /*w*/, uint16_t /*h*/, uint8_t* /*dst*/,
+                               size_t /*dstCapacity*/) const {
     return 0;
   }
-  void writeFramebufferRegion(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const uint8_t* src) const {}
+  void writeFramebufferRegion(uint16_t /*x*/, uint16_t /*y*/, uint16_t /*w*/, uint16_t /*h*/,
+                              const uint8_t* /*src*/) const {}
 
   void resetCounters() const {
     fillRectCallCount = 0;

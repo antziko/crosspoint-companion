@@ -1,5 +1,6 @@
 #include "KOReaderAuthActivity.h"
 
+#include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <InflateReader.h>
@@ -39,6 +40,22 @@ void KOReaderAuthActivity::onWifiSelectionComplete(const bool success) {
   // the handshake, below MIN_HEAP_FOR_TLS, and HTTPS auth fails with LOW_MEMORY.
   // Mirrors KOReaderSyncActivity's reader-context release.
   InflateReader::releaseWindow();
+
+  // Same reclaim KOReaderSyncActivity does before its handshakes (KOReaderSyncActivity.cpp:161).
+  // The FontCacheManager is a renderer-level global that outlives every activity, so an SD font's
+  // retained mini arena survives straight from the reader into this screen — reachable as: read a
+  // CJK book -> Settings -> KOReader auth, on one power cycle. onExit() always reboots
+  // (silentRestartToSettings), so the cache is rebuilt fresh next reader open and there is
+  // nothing to preserve here.
+  //
+  // releaseCache(), not clearCache(): the latter routes to resetStyleMiniData, which KEEPS the
+  // arena unless free heap is already under its own 40 KB floor, so it is not a guaranteed
+  // reclaim. This path exists precisely to guarantee it.
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    const uint32_t before = ESP.getFreeHeap();
+    fcm->releaseCache();
+    LOG_DBG("KOAuth", "Released font cache for TLS (heap: %u -> %u)", (unsigned)before, (unsigned)ESP.getFreeHeap());
+  }
 
   performAuthentication();
 }
@@ -88,8 +105,8 @@ void KOReaderAuthActivity::onEnter() {
   }
 
   // Launch WiFi selection
-  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
-                         [this](const ActivityResult& result) { onWifiSelectionComplete(!result.isCancelled); });
+  startActivityForResultNoThrow<WifiSelectionActivity>(
+      [this](const ActivityResult& result) { onWifiSelectionComplete(!result.isCancelled); }, renderer, mappedInput);
 }
 
 void KOReaderAuthActivity::onExit() {

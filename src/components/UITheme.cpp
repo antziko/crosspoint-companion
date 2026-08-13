@@ -28,6 +28,11 @@ void UITheme::reload() {
   setTheme(themeType);
 }
 
+// Deliberately the one place in the UI that keeps throwing `new`. Everywhere else a failed
+// activity allocation degrades to "stay put", but currentTheme is dereferenced by every draw
+// call with no null check, so handing back nullptr would convert a logged abort into a wild
+// null-deref — strictly worse. These objects are a vtable pointer each and are only allocated
+// at boot and on an explicit theme change, both on a heap with tens of KB free.
 void UITheme::setTheme(CrossPointSettings::UI_THEME type) {
   switch (type) {
     case CrossPointSettings::UI_THEME::CLASSIC:

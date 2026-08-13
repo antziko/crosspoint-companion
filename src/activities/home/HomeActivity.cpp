@@ -450,9 +450,8 @@ void HomeActivity::promptRemoveRecentBook(const std::string& path, const std::st
     requestUpdate(true);
   };
 
-  startActivityForResult(
-      std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_REMOVE_FROM_RECENTS), title),
-      std::move(handler));
+  startActivityForResultNoThrow<ConfirmationActivity>(std::move(handler), renderer, mappedInput,
+                                                      tr(STR_REMOVE_FROM_RECENTS), title);
 }
 
 void HomeActivity::onFileBrowserOpen() { activityManager.goToFileBrowser(); }

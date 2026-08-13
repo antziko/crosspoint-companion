@@ -27,13 +27,36 @@ FontDownloadActivity::FontDownloadActivity(GfxRenderer& renderer, MappedInputMan
 
 void FontDownloadActivity::onEnter() {
   Activity::onEnter();
+
+  // Font-download troubleshooting: own the SD trace for the lifetime of this activity,
+  // the same way OpdsBookBrowserActivity does for its feed + book download. Both go
+  // through HttpDownloader::runGet, so the HTTP/FONT lines below are the whole story.
+  //
+  // Wired explicitly rather than relying on Activity::onEnter's logHeap(), which also
+  // flips the trace on but only under TRACE_HEAP — that covers the `default` and
+  // `memtrace` envs and nothing else, so a release-build repro would silently capture
+  // nothing. clear() first so the capture starts at this screen instead of being buried
+  // under every previous activity's MEM lines; it discards the previous /opds_debug.txt.
+  SdDebugLog::clear();
+  SdDebugLog::setEnabled(true);
+  // Anchor line: if /opds_debug.txt is missing or empty after a run, the master switch
+  // (SETTINGS.sdCardLogging) is off — not the download path failing to reach any code.
+  SdDebugLog::log("FONT", "screen enter, manifest=%s", FONT_MANIFEST_URL);
+
   WiFi.mode(WIFI_STA);
-  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
-                         [this](const ActivityResult& result) { onWifiSelectionComplete(!result.isCancelled); });
+  startActivityForResultNoThrow<WifiSelectionActivity>(
+      [this](const ActivityResult& result) { onWifiSelectionComplete(!result.isCancelled); }, renderer, mappedInput);
 }
 
 void FontDownloadActivity::onExit() {
   Activity::onExit();
+
+  // After Activity::onExit(), whose logHeap() re-enables the trace under TRACE_HEAP —
+  // otherwise the rest of the session would keep appending. Every log() line is
+  // force-synced as it is written, so the silent restart below cannot truncate the
+  // capture.
+  SdDebugLog::log("FONT", "screen exit");
+  SdDebugLog::setEnabled(false);
 
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(false);
@@ -434,8 +457,9 @@ void FontDownloadActivity::promptDeleteSelectedFamily() {
   std::string heading = tr(STR_DELETE);
   const auto& family = families_[pendingDeleteFamilyIndex];
   std::string body = family.name;
-  startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, body),
-                         [this](const ActivityResult& result) { onDeleteConfirmationResult(result); });
+  startActivityForResultNoThrow<ConfirmationActivity>(
+      [this](const ActivityResult& result) { onDeleteConfirmationResult(result); }, renderer, mappedInput, heading,
+      body);
 }
 
 void FontDownloadActivity::onDeleteConfirmationResult(const ActivityResult& result) {

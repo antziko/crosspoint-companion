@@ -17,6 +17,7 @@
 #include <memory>
 
 #include "KOReaderCredentialStore.h"
+#include "StatsStreamDecode.h"
 
 int KOReaderSyncClient::lastHttpCode = 0;
 
@@ -42,18 +43,8 @@ namespace {
 // Server capability tag from the last updateStats response (see statsServerTag()).
 char statsServerTagBuf[32] = {0};
 
-// Upper bound on a decoded dated-history blob (ReadingTimeHistory::BLOB_MAX_BYTES
-// is 876; round up for headroom). Bounds the single reusable decode buffer in the
-// streaming fold — a malformed/oversized "h" is rejected rather than allocated for.
-constexpr size_t kStatsDatedMaxBytes = 1024;
-
-// Upper bound on a decoded per-book dictionary-history blob ("dh"). Matches the
-// 4 KB serializeBlob cap on the sender; bounds the reusable decode buffer.
-constexpr size_t kStatsDictMaxBytes = 4096;
-
-// Upper bound on a decoded per-book flashcard blob ("fc"). Matches the sender's
-// FlashcardDeck::FC_SLICE_CEIL adaptive cap; bounds the reusable decode buffer.
-constexpr size_t kStatsFcMaxBytes = 6144;
+// kostats::kStatsDatedMaxBytes / kostats::kStatsDictMaxBytes / kostats::kStatsFcMaxBytes now live in
+// StatsStreamDecode.h, beside the streaming decoder that bounds its base64 writes with them.
 
 // Hard ceiling on a single HTTP response body. The stats GET aggregates every
 // device's blob (each may carry a base64 "dh" up to ~5.5 KB), so the body scales
@@ -165,12 +156,25 @@ struct KoResponse {
   bool heapAbort = false;
 };
 
+// Optional streaming consumer for the response body. When supplied, bytes go straight here and
+// KoResponse::body stays empty — nothing accumulates, so none of the reserve/growth heap guards
+// below apply and no contiguous block is ever needed for the response.
+//
+// This is what lets STATS_GET survive: its body plus the ArduinoJson document built over it
+// peaked around 36 KB on a heap reporting free=36256 largest=6388, and failed as a silent
+// half-sync. Return false to abort the transfer (treated exactly like the low-heap guards).
+struct KoStreamSink {
+  void* ctx = nullptr;
+  bool (*fn)(void* ctx, const uint8_t* data, size_t len) = nullptr;
+};
+
 // Perform one KOSync request over wolfSSL (SecureHttpClient). `method` is
 // "GET"/"PUT"/"POST"; `body` is null for GET. Attaches the KOSync auth headers +
-// pinned-root CA, streams the response into a 64 KB-capped buffer, updates the
-// byte counters + lastHttpCode, and reuses the session connection when one is
-// active (otherwise a one-shot local client that closes after).
-KoResponse koPerform(const char* method, const std::string& url, const std::string* body, const char* tag) {
+// pinned-root CA, streams the response into a 64 KB-capped buffer (or into `stream`
+// when one is given), updates the byte counters + lastHttpCode, and reuses the session
+// connection when one is active (otherwise a one-shot local client that closes after).
+KoResponse koPerform(const char* method, const std::string& url, const std::string* body, const char* tag,
+                     const KoStreamSink* stream = nullptr) {
   KoResponse r;
   const NoWifiSleep noWifiSleep;
   const uint32_t startMs = koTraceReq(tag, body ? body->size() : 0);
@@ -226,7 +230,19 @@ KoResponse koPerform(const char* method, const std::string& url, const std::stri
   bool overCap = false;
   bool lowHeap = false;
   bool reserved = false;
-  const auto sink = [&r, &overCap, &lowHeap, &reserved, http](const uint8_t* data, size_t len) {
+  size_t streamedBytes = 0;
+  const auto sink = [&r, &overCap, &lowHeap, &reserved, &streamedBytes, http, stream](const uint8_t* data, size_t len) {
+    // Streaming consumer: nothing is retained, so the cap and the two heap guards below have
+    // nothing to guard. A consumer that returns false is reported as a clean abort, same as a
+    // guard trip, so callers take their existing NETWORK_ERROR path rather than a partial parse.
+    if (stream && stream->fn) {
+      streamedBytes += len;
+      if (!stream->fn(stream->ctx, data, len)) {
+        lowHeap = true;
+        return false;
+      }
+      return true;
+    }
     if (r.body.size() + len > static_cast<size_t>(kMaxResponseBytes)) {
       overCap = true;
       return false;
@@ -291,8 +307,11 @@ KoResponse koPerform(const char* method, const std::string& url, const std::stri
   KOReaderSyncClient::lastHttpCode = r.transportOk ? r.status : 0;
 
   if (body) s_bytesUp += static_cast<uint32_t>(body->size());
-  s_bytesDown += static_cast<uint32_t>(r.body.size());
-  koTraceResp(tag, r.status, r.body.size(), startMs);
+  // Streamed responses never populate r.body, so the byte counters and the trace read the
+  // streamed total instead — otherwise a streaming leg would report 0 bytes down.
+  const size_t downBytes = (stream && stream->fn) ? streamedBytes : r.body.size();
+  s_bytesDown += static_cast<uint32_t>(downBytes);
+  koTraceResp(tag, r.status, downBytes, startMs);
   return r;
 }
 }  // namespace
@@ -586,7 +605,79 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
   }
 
   const std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/stats/" + documentHash;
-  const KoResponse resp = koPerform("GET", url, nullptr, "STATS_GET");
+
+  // Fold decode buffers, allocated up front because the streaming decoder writes base64 output
+  // straight into them as it goes — there is no encoded copy to hold anywhere.
+  std::unique_ptr<uint8_t[]> datedBuf;
+  if (fold && fold->fn) {
+    datedBuf = makeUniqueNoThrow<uint8_t[]>(kostats::kStatsDatedMaxBytes);
+    if (!datedBuf) LOG_ERR("KOSync", "OOM: dated fold buffer (%u)", (unsigned)kostats::kStatsDatedMaxBytes);
+  }
+  std::unique_ptr<uint8_t[]> dictBuf;
+  if (dictFold && dictFold->fn) {
+    dictBuf = makeUniqueNoThrow<uint8_t[]>(kostats::kStatsDictMaxBytes);
+    if (!dictBuf) LOG_ERR("KOSync", "OOM: dict fold buffer (%u)", (unsigned)kostats::kStatsDictMaxBytes);
+  }
+  std::unique_ptr<uint8_t[]> fcBuf;
+  if (fcFold && fcFold->fn) {
+    fcBuf = makeUniqueNoThrow<uint8_t[]>(kostats::kStatsFcMaxBytes);
+    if (!fcBuf) LOG_ERR("KOSync", "OOM: fc fold buffer (%u)", (unsigned)kostats::kStatsFcMaxBytes);
+  }
+
+  // Both parsers on the heap: each carries a 512-byte token buffer, well past the 256-byte
+  // stack budget this codebase works to.
+  kostats::StatsDecoder dec;
+  dec.outEntries = outEntries;
+  dec.selfDeviceId = deviceId();
+  dec.maxEntries = MAX_STATS_DEVICES;
+  dec.blob.fold = fold;
+  dec.blob.dictFold = dictFold;
+  dec.blob.fcFold = fcFold;
+  dec.blob.datedBuf = datedBuf.get();
+  dec.blob.dictBuf = dictBuf.get();
+  dec.blob.fcBuf = fcBuf.get();
+
+  JsonCallbacks blobCbs = {};
+  blobCbs.ctx = &dec.blob;
+  blobCbs.onKey = kostats::blobOnKey;
+  blobCbs.onNumber = kostats::blobOnNumber;
+  blobCbs.onStringChunk = kostats::blobOnStringChunk;
+  auto innerParser = makeUniqueNoThrow<StreamingJsonParser>(blobCbs);
+  if (!innerParser) {
+    LOG_ERR("KOSync", "OOM: stats blob parser");
+    return NETWORK_ERROR;
+  }
+  dec.inner = innerParser.get();
+
+  JsonCallbacks envCbs = {};
+  envCbs.ctx = &dec;
+  envCbs.onKey = kostats::statsOnKey;
+  envCbs.onObjectStart = kostats::statsOnObjectStart;
+  envCbs.onObjectEnd = kostats::statsOnObjectEnd;
+  envCbs.onStringChunk = kostats::statsOnStringChunk;
+  auto outerParser = makeUniqueNoThrow<StreamingJsonParser>(envCbs);
+  if (!outerParser) {
+    LOG_ERR("KOSync", "OOM: stats envelope parser");
+    return NETWORK_ERROR;
+  }
+
+  // Only 2xx bodies are worth decoding; an error body would otherwise be fed to the parser and
+  // reported as a malformed envelope. The status is known before any body byte arrives.
+  struct SinkCtx {
+    StreamingJsonParser* parser;
+    kostats::StatsDecoder* dec;
+  } sinkCtx{outerParser.get(), &dec};
+
+  const KoStreamSink streamSink{&sinkCtx, [](void* ctx, const uint8_t* data, size_t len) {
+                                  auto* s = static_cast<SinkCtx*>(ctx);
+                                  s->dec->bytes += len;
+                                  s->parser->feed(reinterpret_cast<const char*>(data), len);
+                                  // Keep consuming even on a parse error: aborting mid-transfer
+                                  // would poison a keep-alive session for the legs that follow.
+                                  return true;
+                                }};
+
+  const KoResponse resp = koPerform("GET", url, nullptr, "STATS_GET", &streamSink);
   LOG_DBG("KOSync", "Get stats response: %d", resp.status);
 
   if (!resp.transportOk) return NETWORK_ERROR;
@@ -594,184 +685,32 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
   // 204: accepted, nothing stored yet — same graceful path as 404 (see getProgress).
   if (resp.status == 204) return NOT_FOUND;
 
-  if (isSuccessStatus(resp.status) && !resp.body.empty()) {
-    JsonDocument doc;
-    // Do NOT "optimise" this into the mutable-buffer overload. ArduinoJson 6's zero-copy mode
-    // is gone in 7: measured against 7.4.2 with a counting allocator, a 2541-byte stats body
-    // peaks at exactly 7474 bytes whether it is parsed from `c_str()` or from a mutable
-    // `char*`. The overload only buys a subtler contract (the body is mutated in place), for
-    // no memory at all.
-    const DeserializationError error = deserializeJson(doc, resp.body.c_str());
-    if (error) {
-      // SD-only: this is one of three ways `others=` silently reads 0 while every leg
-      // logs code=200. NoMemory is the interesting one — the body is still resident here
-      // and the document pool is taken on top of it, so a fetch that parsed fine on a
-      // stats-only sync can fail on a full-scope one at the same body size.
-      SdDebugLog::log("KOSYNC", "STATS_GET: body parse FAILED (%s) bytes=%u free=%u largest=%u", error.c_str(),
-                      (unsigned)resp.body.size(), (unsigned)ESP.getFreeHeap(),
-                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-      LOG_ERR("KOSync", "JSON parse failed: %s", error.c_str());
+  if (isSuccessStatus(resp.status)) {
+    if (outerParser->hasError()) {
+      SdDebugLog::log("KOSYNC", "STATS_GET: envelope parse FAILED bytes=%u free=%u largest=%u", (unsigned)dec.bytes,
+                      (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+      LOG_ERR("KOSync", "Stats envelope parse failed");
       return JSON_ERROR;
     }
-
-    // The server returns {} (no "stats" object) when nothing is stored yet.
-    if (!doc["stats"].is<JsonObjectConst>()) {
-      // The caller folds NOT_FOUND into statsFetchOk, so this lands as others=0 with
-      // fetch=1 — indistinguishable in the log from a successful empty read. A tiny body
-      // here is the legitimate "server has nothing yet"; a large one means we received
-      // stats and failed to recognise their shape, which is a different problem entirely.
+    if (!dec.sawStats) {
+      // The server returns {} (no "stats" object) when nothing is stored yet. The caller folds
+      // NOT_FOUND into statsFetchOk, so this lands as others=0 with fetch=1 — a tiny body here
+      // is the legitimate "server has nothing yet"; a large one means we received stats and
+      // failed to recognise their shape, which is a different problem entirely.
       SdDebugLog::log("KOSYNC", "STATS_GET: no \"stats\" object in %u-byte body -> others will read 0",
-                      (unsigned)resp.body.size());
+                      (unsigned)dec.bytes);
       return NOT_FOUND;
     }
 
-    // One reusable decode buffer for the streaming dated-history fold (cap+stream:
-    // decode -> fold -> reuse, so transient heap stays bounded regardless of how
-    // many devices carry an "h" section). Allocated only when a fold is requested.
-    std::unique_ptr<uint8_t[]> datedBuf;
-    if (fold && fold->fn) {
-      datedBuf = makeUniqueNoThrow<uint8_t[]>(kStatsDatedMaxBytes);
-      if (!datedBuf) LOG_ERR("KOSync", "OOM: dated fold buffer (%u)", (unsigned)kStatsDatedMaxBytes);
-    }
-    // Separate reusable decode buffer for the per-book dictionary-history "dh" fold.
-    std::unique_ptr<uint8_t[]> dictBuf;
-    if (dictFold && dictFold->fn) {
-      dictBuf = makeUniqueNoThrow<uint8_t[]>(kStatsDictMaxBytes);
-      if (!dictBuf) LOG_ERR("KOSync", "OOM: dict fold buffer (%u)", (unsigned)kStatsDictMaxBytes);
-    }
-    // Separate reusable decode buffer for the per-book flashcard "fc" fold.
-    std::unique_ptr<uint8_t[]> fcBuf;
-    if (fcFold && fcFold->fn) {
-      fcBuf = makeUniqueNoThrow<uint8_t[]>(kStatsFcMaxBytes);
-      if (!fcBuf) LOG_ERR("KOSync", "OOM: fc fold buffer (%u)", (unsigned)kStatsFcMaxBytes);
-    }
-
-    // Admit only the keys this call will actually read. Without a filter, deserializeJson()
-    // materialises the WHOLE blob -- including the base64 "h"/"dh"/"fc" payloads -- into a
-    // second document held alongside the still-resident body and outer document, and hits
-    // NoMemory. Not hypothetical: a device log showed
-    // `dev=1 skipOom=1 bytes=5667 free=33068 largest=8180`, i.e. the other device's entry
-    // silently dropped, surfacing to the user as others=0 next to fetch=1. The folds are the
-    // only consumers of those three sections, so when a fold is off the payload is decoded
-    // purely to be discarded.
-    //
-    // Measured against ArduinoJson 7.4.2 with a counting allocator, on a blob carrying 4000
-    // bytes of "dh" plus 2000 of "fc": 10173 bytes peak unfiltered, 4142 filtered. 4142 is the
-    // floor -- an empty 35-byte blob costs the same, because it is ArduinoJson's initial pool
-    // chunk -- so the filter removes the payload cost entirely and nothing more. Worth knowing
-    // when reading a future skipOom: below ~4.2 KB of contiguous heap this parse cannot
-    // succeed at all, whatever the blob looks like.
-    //
-    // Built once here, not per device: the filter document is reusable and re-creating it
-    // inside the loop would re-allocate on every iteration.
-    JsonDocument blobFilter;
-    blobFilter["s"] = true;
-    blobFilter["lr"] = true;
-    blobFilter["lh"] = true;
-    blobFilter["lm"] = true;
-    if (datedBuf) blobFilter["h"] = true;
-    if (dictBuf) blobFilter["dh"] = true;
-    if (fcBuf) blobFilter["fc"] = true;
-
-    // Every `continue` in this loop drops one device's seconds from the caller's `others`
-    // sum with no error return, so a fully-skipped loop is reported as others=0 alongside
-    // fetch=1. Counted here and logged below rather than left as per-device LOG_DBGs the
-    // device can't emit (USB-locked X3 has no serial).
-    uint16_t skipOom = 0;   // blob parse hit NoMemory: a heap symptom, not a data one
-    uint16_t skipBad = 0;   // blob was genuinely malformed
-    uint16_t skipNull = 0;  // value wasn't a string at all
-    uint16_t skipOver = 0;  // past MAX_STATS_DEVICES
-    for (JsonPairConst kv : doc["stats"].as<JsonObjectConst>()) {
-      if (outCount >= MAX_STATS_DEVICES) {
-        skipOver++;
-        LOG_DBG("KOSync", "More than %u stats devices; extras dropped", (unsigned)MAX_STATS_DEVICES);
-        continue;  // keep counting so the log reports how many were dropped, not just that some were
-      }
-      // Each value is a per-device blob stored verbatim by the server: an embedded
-      // JSON string like {"s":300,"lr":9650,"lh":21,"lm":15} (the global pseudo-doc
-      // also carries an "h":"<base64>" dated-history section).
-      const char* blob = kv.value().as<const char*>();
-      if (!blob) {
-        skipNull++;
-        continue;
-      }
-      JsonDocument blobDoc;
-      if (const DeserializationError blobErr =
-              deserializeJson(blobDoc, blob, DeserializationOption::Filter(blobFilter))) {
-        // NoMemory here is the case worth separating: with the filter above the retained part
-        // of the blob is a handful of scalars, so failing to parse it means the heap is
-        // exhausted, not that the server sent junk. Treating the two alike is what let a heap
-        // problem present as "this device has read for 0 seconds".
-        if (blobErr == DeserializationError::NoMemory) {
-          skipOom++;
-        } else {
-          skipBad++;
-        }
-        LOG_DBG("KOSync", "Skipping stats blob for %s: %s", kv.key().c_str(), blobErr.c_str());
-        continue;
-      }
-      KOReaderStatsEntry& e = outEntries[outCount];
-      snprintf(e.deviceId, sizeof(e.deviceId), "%s", kv.key().c_str());
-      e.seconds = blobDoc["s"].as<uint32_t>();
-      e.lastReadDayIndex = blobDoc["lr"].as<uint32_t>();
-      e.lastReadHour = blobDoc["lh"].as<uint8_t>();
-      e.lastReadMinute = blobDoc["lm"].as<uint8_t>();
-      outCount++;
-
-      // Fold this device's dated history (OTHER devices only — local history is the
-      // source of truth and is uploaded, not merged back in).
-      const bool isOther = strcmp(kv.key().c_str(), deviceId()) != 0;
-      if (datedBuf && isOther) {
-        const char* hb64 = blobDoc["h"].as<const char*>();
-        if (hb64 && hb64[0]) {
-          size_t dlen = 0;
-          const int rc = mbedtls_base64_decode(datedBuf.get(), kStatsDatedMaxBytes, &dlen,
-                                               reinterpret_cast<const unsigned char*>(hb64), strlen(hb64));
-          if (rc == 0 && dlen > 0) {
-            fold->fn(fold->ctx, datedBuf.get(), dlen);
-          } else {
-            LOG_DBG("KOSync", "Skipping bad dated blob for %s (rc=%d)", kv.key().c_str(), rc);
-          }
-        }
-      }
-      // Fold this device's dictionary history ("dh", OTHER devices only).
-      if (dictBuf && isOther) {
-        const char* dhb64 = blobDoc["dh"].as<const char*>();
-        if (dhb64 && dhb64[0]) {
-          size_t dlen = 0;
-          const int rc = mbedtls_base64_decode(dictBuf.get(), kStatsDictMaxBytes, &dlen,
-                                               reinterpret_cast<const unsigned char*>(dhb64), strlen(dhb64));
-          if (rc == 0 && dlen > 0) {
-            dictFold->fn(dictFold->ctx, dictBuf.get(), dlen);
-          } else {
-            LOG_DBG("KOSync", "Skipping bad dict blob for %s (rc=%d)", kv.key().c_str(), rc);
-          }
-        }
-      }
-      // Fold this device's flashcard deck ("fc", OTHER devices only).
-      if (fcBuf && isOther) {
-        const char* fcb64 = blobDoc["fc"].as<const char*>();
-        if (fcb64 && fcb64[0]) {
-          size_t dlen = 0;
-          const int rc = mbedtls_base64_decode(fcBuf.get(), kStatsFcMaxBytes, &dlen,
-                                               reinterpret_cast<const unsigned char*>(fcb64), strlen(fcb64));
-          if (rc == 0 && dlen > 0) {
-            fcFold->fn(fcFold->ctx, fcBuf.get(), dlen);
-          } else {
-            LOG_DBG("KOSync", "Skipping bad fc blob for %s (rc=%d)", kv.key().c_str(), rc);
-          }
-        }
-      }
-    }
+    outCount = dec.count;
     LOG_DBG("KOSync", "Got stats for %u device(s)", (unsigned)outCount);
-    // Always logged, not just on skips: `dev=` is what tells a genuine others=0 (one
-    // device on the server — ours) apart from a decode that dropped everyone. Heap is
-    // sampled here because the fold buffers above are still resident, which is the state
-    // the per-device parses actually ran in, not the roomier one at request time.
-    SdDebugLog::log(
-        "KOSYNC", "STATS_GET decode: dev=%u skipOom=%u skipBad=%u skipNull=%u skipOver=%u bytes=%u free=%u largest=%u",
-        (unsigned)outCount, skipOom, skipBad, skipNull, skipOver, (unsigned)resp.body.size(),
-        (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    // Always logged, not just on skips: `dev=` is what tells a genuine others=0 (one device on
+    // the server — ours) apart from a decode that dropped everyone. No skipOom counter any more:
+    // the per-device ArduinoJson document that could run out of memory is gone, which is the
+    // entire point of the rewrite. skipBad covers blobs the inner parser rejected.
+    SdDebugLog::log("KOSYNC", "STATS_GET decode: dev=%u skipBad=%u skipOver=%u bytes=%u free=%u largest=%u",
+                    (unsigned)outCount, dec.skipBad, dec.skipOver, (unsigned)dec.bytes, (unsigned)ESP.getFreeHeap(),
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     return OK;
   }
 

@@ -61,6 +61,21 @@ class DictionaryDefinitionActivity final : public Activity {
   LookupChain::Entry pendingBack_{};
   bool chainBackNavInProgress = false;
 
+  // Long-press Confirm cycles the session dictionary and re-looks-up the SAME headword.
+  // The user has not navigated to a new word, so the FoundDefinition handler must skip
+  // chain_.onForward — otherwise every switch would push a bogus back-entry. Unlike
+  // chainBackNavInProgress this restores no page and touches no history index.
+  bool dictSwitchInProgress_ = false;
+  // The override in force before the current switch, so a switch that lands on a
+  // dictionary without the word can be undone when the user dismisses the not-found
+  // popup. Without it the footer would name dictionary B while the body still shows
+  // dictionary A's definition.
+  std::string prevSessionDict_;
+  // Swallows the Confirm release that follows the long-press switch, so it doesn't
+  // also fall through and open word-select. Same shape as
+  // WordSelectNavigator::handleMultiSelectInput's confirmReleaseConsumed.
+  bool dictSwitchReleaseConsumed_ = false;
+
   // Resident page representation (Stage 2b-pool). Segments reference text by
   // {offset, len} into pagePool_ instead of owning a std::string each — the
   // Wrapper already merged same-style runs, so each segment is one pooled,
@@ -185,5 +200,14 @@ class DictionaryDefinitionActivity final : public Activity {
   // of measuring. ctx is a PrewarmCollector* (file-local to the .cpp).
   static void collectSpanForPrewarm(void* ctx, const StyledSpan& span);
   bool handleLongPressExitAll(bool enabled);
+  // Long-press Confirm in view mode: advance the session dictionary and re-run the
+  // current headword against it. Returns true when the gesture fired or its trailing
+  // release was consumed (caller must return from loop()).
+  bool handleDictSwitch();
+  // Undo a switch whose re-lookup failed or was cancelled, so the dictionary named in
+  // the footer still matches the definition left on screen. No-op unless a switch is
+  // pending — an ordinary word lookup that comes back not-found must not clear an
+  // override the user set earlier.
+  void revertDictSwitchIfPending();
   int getLineHeight() const;
 };

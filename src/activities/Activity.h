@@ -1,5 +1,6 @@
 #pragma once
 #include <Logging.h>
+#include <Memory.h>  // makeUniqueNoThrow, for startActivityForResultNoThrow
 
 #include <cassert>
 #include <memory>
@@ -64,6 +65,30 @@ class Activity {
   // Start a new activity without destroying the current one
   // Note: requestUpdate() will be invoked automatically once resultHandler finishes
   void startActivityForResult(std::unique_ptr<Activity>&& activity, ActivityResultHandler resultHandler);
+
+  // As above, but allocates the activity itself and tolerates failure.
+  //
+  // `std::make_unique` is throwing `new`: with -fno-exceptions an OOM calls abort() and the
+  // device reboots. That is not theoretical — an X3 rebooted here on every Chinese dictionary
+  // lookup, pushing a 4844-byte DictionaryDefinitionActivity onto a heap whose largest block
+  // the glyph prewarm had just taken down to 3444 bytes.
+  //
+  // Returns false (having logged) instead, leaving the caller on its current screen. Callers
+  // that need a different fallback should check the return value; most simply want "nothing
+  // happened", which is already far better than a reboot.
+  //
+  // The template costs nothing over what it replaces: `std::make_unique<T>` was already
+  // instantiated per activity type at each of these call sites.
+  template <typename T, typename... Args>
+  bool startActivityForResultNoThrow(ActivityResultHandler resultHandler, Args&&... args) {
+    auto activity = makeUniqueNoThrow<T>(std::forward<Args>(args)...);
+    if (!activity) {
+      LOG_ERR("ACT", "OOM allocating activity; staying put");
+      return false;
+    }
+    startActivityForResult(std::move(activity), std::move(resultHandler));
+    return true;
+  }
 
   // Set the result to be passed back to the previous activity when this activity finishes
   void setResult(ActivityResult&& result);

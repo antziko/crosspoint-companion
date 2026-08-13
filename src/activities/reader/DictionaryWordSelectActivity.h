@@ -137,6 +137,14 @@ class DictionaryWordSelectActivity final : public Activity {
   // of the slow per-glyph fontMap fallback (~50ms each).
   void prebuildAdvanceTable();
 
+  // Allocation-free dry run of extractWords: how many WordInfo entries it will emit, how
+  // many text-pool bytes they need, and how many rows they fall into. Lets extractWords
+  // size its containers in one shot instead of growing into an abort on a CJK page, where
+  // per-character tokenisation makes the word array the largest contiguous block the
+  // reader asks for outside the framebuffer. Counts are exact except for dash-split
+  // tokens, which are bounded high.
+  void countTokens(size_t& outWords, size_t& outPoolBytes, size_t& outRows) const;
+
   void extractWords(std::vector<WordSelectNavigator::WordInfo>& words, std::vector<WordSelectNavigator::Row>& rows,
                     std::string& textPool);
   void mergeHyphenatedWords(std::vector<WordSelectNavigator::WordInfo>& words,

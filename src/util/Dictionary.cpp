@@ -2,6 +2,8 @@
 
 #include <HalStorage.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
+#include <Utf8.h>
 
 #include <algorithm>
 #include <cctype>
@@ -10,6 +12,7 @@
 
 // Static member definitions
 char Dictionary::wordBuf[256] = "";
+char Dictionary::sessionPath[128] = "";
 
 namespace {
 constexpr char DICT_BIN[] = "dictionary.bin";
@@ -28,6 +31,42 @@ bool isWordByte(unsigned char c) { return c >= 0x80 || std::isalnum(c) != 0; }
 // readable from i. (#2877)
 bool isGeneralPunctuationAt(const unsigned char* b, size_t i) {
   return b[i] == 0xE2 && (b[i + 1] == 0x80 || b[i + 1] == 0x81);
+}
+
+// True when b[i] starts a CJK punctuation codepoint: the CJK Symbols and Punctuation
+// block (。、「」《》【】, U+3000-U+303F, encoded E3 80 xx) and the Fullwidth Forms
+// (，！？：（）, U+FF01-U+FF65, encoded EF BC/BD xx), plus the vertical punctuation
+// forms. Like General Punctuation above, isWordByte keeps all of these because they
+// are >= 0x80, so they must be trimmed explicitly or a Chinese word touching
+// punctuation never matches a headword.
+//
+// They arrive glued to the word rather than as their own token: layout forbids a line
+// break before closing punctuation and after opening punctuation
+// (ParsedText.cpp:150-155), so 國。 and 「中 are each a single token by design.
+//
+// U+3005-U+3007 and U+303B fall inside that first block but are content, not
+// punctuation: 々 repeats the preceding character (人々), 〆 is an abbreviation mark and
+// 〇 is the ideographic zero (二〇二五). Trimming them would reduce 人々。 to 人.
+// utf8IsCjkPunctuation does not draw that distinction — it is also the selectability
+// filter at DictionaryWordSelectActivity.cpp:70 — so the carve-out lives here, where
+// the question is only what to strip off a lookup key.
+//
+// Every codepoint in these ranges is 3 bytes in UTF-8, so this slots into the existing
+// 3-byte edge handling. Callers guarantee 3 bytes are readable from i; the encoding is
+// still validated so a truncated tail is never decoded as punctuation.
+bool isCjkPunctuationAt(const unsigned char* b, size_t i) {
+  if (b[i] < 0xE0 || b[i] > 0xEF) return false;
+  if ((b[i + 1] & 0xC0) != 0x80 || (b[i + 2] & 0xC0) != 0x80) return false;
+  const uint32_t cp = (static_cast<uint32_t>(b[i] & 0x0F) << 12) | (static_cast<uint32_t>(b[i + 1] & 0x3F) << 6) |
+                      static_cast<uint32_t>(b[i + 2] & 0x3F);
+  if (cp >= 0x3005 && cp <= 0x3007) return false;  // 々 〆 〇 — content, not punctuation
+  if (cp == 0x303B) return false;                  // 〻 vertical iteration mark
+  return utf8IsCjkPunctuation(cp);
+}
+
+// Either class of 3-byte punctuation that isWordByte would otherwise keep.
+bool isTrimmable3ByteAt(const unsigned char* b, size_t i) {
+  return isGeneralPunctuationAt(b, i) || isCjkPunctuationAt(b, i);
 }
 }  // namespace
 
@@ -106,12 +145,25 @@ void Dictionary::saveGlobalDictPath(const char* folderPath) {
   f.close();
 }
 
+void Dictionary::setSessionDictPath(const char* folderPath) {
+  if (!folderPath || folderPath[0] == '\0') {
+    sessionPath[0] = '\0';
+    return;
+  }
+  snprintf(sessionPath, sizeof(sessionPath), "%s", folderPath);
+}
+
+std::string Dictionary::activeDictPath(const char* cachePath) {
+  if (sessionPath[0] != '\0') return sessionPath;
+  return readDictPath(cachePath);
+}
+
 // ---------------------------------------------------------------------------
 // Validity checks
 // ---------------------------------------------------------------------------
 
 bool Dictionary::exists(const char* cachePath) {
-  std::string folderPath = readDictPath(cachePath);
+  std::string folderPath = activeDictPath(cachePath);
   if (folderPath.empty()) return false;
   DictPaths dp(folderPath);
   if (!Storage.exists(dp.idx().c_str())) return false;
@@ -119,7 +171,7 @@ bool Dictionary::exists(const char* cachePath) {
 }
 
 bool Dictionary::hasAltForms(const char* cachePath) {
-  std::string folderPath = readDictPath(cachePath);
+  std::string folderPath = activeDictPath(cachePath);
   if (folderPath.empty()) return false;
   return Storage.exists(DictPaths(folderPath).syn().c_str());
 }
@@ -141,15 +193,16 @@ bool Dictionary::isValidDictionary() {
 // .ifo parsing
 // ---------------------------------------------------------------------------
 
-DictInfo Dictionary::readInfo(const char* folderPath) {
-  DictInfo info;
-  if (folderPath == nullptr || folderPath[0] == '\0') return info;
+bool Dictionary::readInfoInto(const char* folderPath, DictInfo& info) {
+  info = DictInfo{};  // callers may reuse one scratch object across dictionaries
+
+  if (folderPath == nullptr || folderPath[0] == '\0') return false;
 
   std::string folder(folderPath);
   std::string ifoPath = DictPaths(folder).ifo();
 
   HalFile file;
-  if (!Storage.openFileForRead("DICT", ifoPath.c_str(), file)) return info;
+  if (!Storage.openFileForRead("DICT", ifoPath.c_str(), file)) return false;
 
   // Validate header line byte by byte — no line buffer needed.
   static constexpr const char HEADER[] = "StarDict's dict ifo file";
@@ -158,7 +211,7 @@ DictInfo Dictionary::readInfo(const char* folderPath) {
     if (b < 0 || static_cast<char>(b) != HEADER[i]) {
       LOG_ERR("DICT", "Invalid .ifo header in %s", folderPath);
       file.close();
-      return info;
+      return false;
     }
   }
   // Skip remainder of header line.
@@ -252,6 +305,12 @@ DictInfo Dictionary::readInfo(const char* folderPath) {
   info.isCompressed = !dictExists && Storage.exists(dp.dictDz().c_str());
 
   info.valid = true;
+  return true;
+}
+
+DictInfo Dictionary::readInfo(const char* folderPath) {
+  DictInfo info;
+  readInfoInto(folderPath, info);
   return info;
 }
 
@@ -266,12 +325,12 @@ std::string Dictionary::cleanWord(const std::string& word) {
   size_t start = 0;
   size_t end = word.size();
 
-  // Trim non-word bytes from both edges, treating a General Punctuation
-  // codepoint as a single 3-byte unit rather than three word bytes.
+  // Trim non-word bytes from both edges, treating a General Punctuation or CJK
+  // punctuation codepoint as a single 3-byte unit rather than three word bytes.
   while (start < end) {
     if (!isWordByte(b[start])) {
       start++;
-    } else if (end - start >= 3 && isGeneralPunctuationAt(b, start)) {
+    } else if (end - start >= 3 && isTrimmable3ByteAt(b, start)) {
       start += 3;
     } else {
       break;
@@ -280,7 +339,7 @@ std::string Dictionary::cleanWord(const std::string& word) {
   while (end > start) {
     if (!isWordByte(b[end - 1])) {
       end--;
-    } else if (end - start >= 3 && isGeneralPunctuationAt(b, end - 3)) {
+    } else if (end - start >= 3 && isTrimmable3ByteAt(b, end - 3)) {
       end -= 3;
     } else {
       break;
@@ -338,7 +397,7 @@ static int cistrcmp(const char* a, const char* b) {
 
 // CLEANUP: on Auto-only commit, delete only this line (readCsptEntryCount below stays)
 uint32_t Dictionary::readCsptEntryCount(const char* cachePath) {
-  std::string folderPath = readDictPath(cachePath);
+  std::string folderPath = activeDictPath(cachePath);
   if (folderPath.empty()) return 0;
   HalFile cspt;
   if (!Storage.openFileForRead("DICT", DictPaths(folderPath).idxOftCspt().c_str(), cspt)) return 0;
@@ -411,6 +470,80 @@ bool Dictionary::binarySearchCspt(HalFile& cspt, const char* target, uint32_t id
   }
 
   return true;
+}
+
+// How many index pages either side of the landing page a widened sweep covers. Shared by
+// locate()'s miss retry and findSimilar() so the exact lookup and the suggestion scan always
+// consider the same region — them covering different amounts is the bug this constant exists
+// to keep fixed (see the retry in locate()).
+static constexpr uint32_t PAGE_RADIUS = 7;
+
+// Byte offset where index page `page` begins. Page 0 always starts at 0; entry (page-1) of the
+// .cspt/.oft records the start of page `page`. These recorded starts are the ONLY legal seek
+// targets in a .idx — its entries are variable-length (null-terminated word + 8 bytes), so an
+// arbitrary byte offset would land mid-record and desynchronise the reader.
+static bool readIndexPageStart(HalFile& index, bool isCspt, uint32_t numEntries, uint32_t page, uint32_t* out) {
+  if (page == 0) {
+    *out = 0;
+    return true;
+  }
+  if (page > numEntries) return false;
+  const uint32_t pos =
+      isCspt ? (CSPT_HEADER_SIZE + (page - 1) * CSPT_ENTRY_SIZE + CSPT_PREFIX_LEN) : (OFT_HEADER_SIZE + (page - 1) * 4);
+  index.seekSet(pos);
+  uint8_t raw[4];
+  if (index.read(raw, 4) != 4) return false;
+  memcpy(out, raw, sizeof(*out));  // both index formats store a little-endian uint32
+  return true;
+}
+
+// Expand a single-page window to PAGE_RADIUS pages either side of it, on real page boundaries.
+// Defaults to the whole file when no page index exists (then it is already one page).
+static void widenScanBounds(const char* csptPath, const char* oftPath, uint32_t srcFileSize, uint32_t centerStart,
+                            uint32_t* outStart, uint32_t* outEnd) {
+  *outStart = 0;
+  *outEnd = srcFileSize;
+
+  HalFile index;
+  bool isCspt = false;
+  uint32_t numEntries = 0;
+  if (Storage.openFileForRead("DICT", csptPath, index)) {
+    isCspt = true;
+    const uint32_t sz = static_cast<uint32_t>(index.fileSize());
+    numEntries = sz > CSPT_HEADER_SIZE ? (sz - CSPT_HEADER_SIZE) / CSPT_ENTRY_SIZE : 0;
+  } else if (Storage.openFileForRead("DICT", oftPath, index)) {
+    const uint32_t sz = static_cast<uint32_t>(index.fileSize());
+    numEntries = sz > OFT_HEADER_SIZE ? (sz - OFT_HEADER_SIZE) / 4 : 0;
+  } else {
+    return;
+  }
+  if (numEntries == 0) return;
+
+  // Page starts are monotonically increasing, so binary search for the page holding centerStart.
+  uint32_t lo = 0;
+  uint32_t hi = numEntries;
+  uint32_t landed = 0;
+  while (lo <= hi) {
+    const uint32_t mid = lo + (hi - lo) / 2;
+    uint32_t start = 0;
+    if (!readIndexPageStart(index, isCspt, numEntries, mid, &start)) break;
+    if (start <= centerStart) {
+      landed = mid;
+      lo = mid + 1;
+    } else {
+      if (mid == 0) break;
+      hi = mid - 1;
+    }
+  }
+
+  uint32_t bound = 0;
+  if (readIndexPageStart(index, isCspt, numEntries, landed > PAGE_RADIUS ? landed - PAGE_RADIUS : 0, &bound)) {
+    *outStart = bound;
+  }
+  // End of the last page in the window == start of the page after it; past the end, the file end.
+  if (readIndexPageStart(index, isCspt, numEntries, landed + PAGE_RADIUS + 1, &bound)) {
+    *outEnd = bound;
+  }
 }
 
 void Dictionary::resolveScanBounds(const char* csptPath, const char* oftPath, HalFile& src, uint32_t srcFileSize,
@@ -499,7 +632,7 @@ std::string Dictionary::readDefinition(const std::string& folderPath, uint32_t o
 
 DictLocation Dictionary::locate(const std::string& word, const DictLookupCallbacks& cbs, const char* cachePath) {
   DictLocation result;
-  result.folderPath = readDictPath(cachePath);
+  result.folderPath = activeDictPath(cachePath);
   if (result.folderPath.empty()) return result;
 
   DictPaths dp(result.folderPath);
@@ -541,6 +674,50 @@ DictLocation Dictionary::locate(const std::string& word, const DictLookupCallbac
     }
 
     if (cmp > 0) break;
+  }
+
+  if (!result.found) {
+    // Both exits above are collation-dependent, and both are wrong for a dictionary that is not
+    // sorted the way cistrcmp compares:
+    //   1. resolveScanBounds picked ONE page using cistrcmp, so a differently-sorted index lands
+    //      the search a page off and the word is never scanned at all;
+    //   2. the `cmp > 0` break abandons the page early once cistrcmp thinks it has passed the
+    //      target, so even the RIGHT page can be given up on before reaching the entry.
+    // cistrcmp assumes case-insensitive ordering, true of the wiktionary-derived dictionaries it
+    // was written for. CC-CEDICT-derived Chinese dictionaries are commonly byte-sorted and mix
+    // ASCII pinyin with CJK headwords — precisely where the two orders diverge. The visible
+    // symptom is "Did you mean?" offering neighbours of a word that is plainly in the dictionary,
+    // because findSimilar's PAGE_RADIUS sweep finds what this scan just missed.
+    //
+    // So retry over that same window, comparing for equality only — no ordering shortcut, since
+    // it is the ordering assumption that failed. Runs on misses only, and a miss was about to
+    // scan this exact region through findSimilar anyway.
+    uint32_t wideStart = 0;
+    uint32_t wideEnd = idxFileSize;
+    widenScanBounds(dp.idxOftCspt().c_str(), dp.idxOft().c_str(), idxFileSize, startByte, &wideStart, &wideEnd);
+
+    if (wideStart < startByte || wideEnd > endByte) {
+      idx.seekSet(wideStart);
+      while (static_cast<uint32_t>(idx.position()) < wideEnd) {
+        if (cbs.shouldCancel && cbs.shouldCancel(cbs.ctx)) break;
+        const int len = readWordInto(idx, wordBuf, sizeof(wordBuf));
+        if (len < 0) break;
+        uint8_t suffix[8];
+        if (idx.read(suffix, 8) != 8) break;
+        if (len == 0 || cistrcmp(wordBuf, word.c_str()) != 0) continue;
+
+        result.offset = (static_cast<uint32_t>(suffix[0]) << 24) | (static_cast<uint32_t>(suffix[1]) << 16) |
+                        (static_cast<uint32_t>(suffix[2]) << 8) | static_cast<uint32_t>(suffix[3]);
+        result.size = (static_cast<uint32_t>(suffix[4]) << 24) | (static_cast<uint32_t>(suffix[5]) << 16) |
+                      (static_cast<uint32_t>(suffix[6]) << 8) | static_cast<uint32_t>(suffix[7]);
+        result.found = true;
+        // Logged to SD because it is the signal that a dictionary's sort order disagrees with
+        // cistrcmp: a hit here is one the single-page scan should have found and did not.
+        SdDebugLog::log("DICT", "locate: widened scan hit, page window %u-%u vs %u-%u", (unsigned)wideStart,
+                        (unsigned)wideEnd, (unsigned)startByte, (unsigned)endByte);
+        break;
+      }
+    }
   }
 
   idx.close();
@@ -604,7 +781,7 @@ std::string Dictionary::wordAtOrdinal(const std::string& folderPath, uint32_t or
 }
 
 std::string Dictionary::resolveAltForm(const std::string& word, const char* cachePath) {
-  std::string folderPath = readDictPath(cachePath);
+  std::string folderPath = activeDictPath(cachePath);
   if (folderPath.empty()) return "";
 
   DictPaths dp(folderPath);
@@ -852,7 +1029,7 @@ int Dictionary::editDistance(const std::string& a, const std::string& b, int max
 }
 
 std::vector<std::string> Dictionary::findSimilar(const std::string& word, int maxResults, const char* cachePath) {
-  std::string folderPath = readDictPath(cachePath);
+  std::string folderPath = activeDictPath(cachePath);
   if (folderPath.empty()) return {};
 
   DictPaths dp(folderPath);
@@ -873,7 +1050,6 @@ std::vector<std::string> Dictionary::findSimilar(const std::string& word, int ma
   // Extend the scan window by ±7 pages around the found neighbourhood page.
   // Each page is approximately (centerEnd - centerStart) bytes.
   const uint32_t pageSize = (centerEnd > centerStart) ? (centerEnd - centerStart) : 1;
-  static constexpr uint32_t PAGE_RADIUS = 7;
   const uint32_t scanStart = (centerStart > PAGE_RADIUS * pageSize) ? (centerStart - PAGE_RADIUS * pageSize) : 0;
   const uint32_t scanEnd = std::min(idxFileSize, centerEnd + PAGE_RADIUS * pageSize);
 

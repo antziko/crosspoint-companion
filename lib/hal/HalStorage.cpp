@@ -2,6 +2,7 @@
 
 #include <FS.h>  // need to be included before SdFat.h for compatibility with FS.h's File class
 #include <Logging.h>
+#include <Memory.h>
 #include <SDCardManager.h>
 
 #include <cassert>
@@ -83,7 +84,7 @@ HalFile& HalFile::operator=(HalFile&&) = default;
 
 HalFile HalStorage::open(const char* path, const oflag_t oflag) {
   StorageLock lock;  // ensure thread safety for the duration of this function
-  return HalFile(std::make_unique<HalFile::Impl>(SDCard.open(path, oflag)));
+  return HalFile(makeUniqueNoThrow<HalFile::Impl>(SDCard.open(path, oflag)));
 }
 
 bool HalStorage::mkdir(const char* path, const bool pFlag) { HAL_STORAGE_WRAPPED_CALL(mkdir, path, pFlag); }
@@ -101,7 +102,14 @@ bool HalStorage::openFileForRead(const char* moduleName, const char* path, HalFi
   StorageLock lock;  // ensure thread safety for the duration of this function
   FsFile fsFile;
   bool ok = SDCard.openFileForRead(moduleName, path, fsFile);
-  file = HalFile(std::make_unique<HalFile::Impl>(std::move(fsFile)));
+  // A failed Impl allocation must read as a failed open: the HalFile would otherwise be
+  // returned with a null impl (isOpen() == false) while `ok` still said the open succeeded.
+  auto impl = makeUniqueNoThrow<HalFile::Impl>(std::move(fsFile));
+  if (!impl) {
+    LOG_ERR("HalStorage", "OOM allocating file handle for %s", path);
+    ok = false;
+  }
+  file = HalFile(std::move(impl));
   return ok;
 }
 
@@ -117,7 +125,14 @@ bool HalStorage::openFileForWrite(const char* moduleName, const char* path, HalF
   StorageLock lock;  // ensure thread safety for the duration of this function
   FsFile fsFile;
   bool ok = SDCard.openFileForWrite(moduleName, path, fsFile);
-  file = HalFile(std::make_unique<HalFile::Impl>(std::move(fsFile)));
+  // A failed Impl allocation must read as a failed open: the HalFile would otherwise be
+  // returned with a null impl (isOpen() == false) while `ok` still said the open succeeded.
+  auto impl = makeUniqueNoThrow<HalFile::Impl>(std::move(fsFile));
+  if (!impl) {
+    LOG_ERR("HalStorage", "OOM allocating file handle for %s", path);
+    ok = false;
+  }
+  file = HalFile(std::move(impl));
   return ok;
 }
 
@@ -134,7 +149,13 @@ bool HalStorage::openFileForAppend(const char* moduleName, const char* path, Hal
   if (!ok) {
     LOG_ERR(moduleName, "Failed to open file for append: %s", path);
   }
-  file = HalFile(std::make_unique<HalFile::Impl>(std::move(fsFile)));
+  // See openFileForRead: a null impl must report as a failed open, not a successful one.
+  auto impl = makeUniqueNoThrow<HalFile::Impl>(std::move(fsFile));
+  if (!impl) {
+    LOG_ERR("HalStorage", "OOM allocating file handle for %s", path);
+    ok = false;
+  }
+  file = HalFile(std::move(impl));
   return ok;
 }
 
@@ -179,7 +200,7 @@ bool HalFile::close() { HAL_FILE_WRAPPED_CALL(close, ); }
 HalFile HalFile::openNextFile() {
   HalStorage::StorageLock lock;
   assert(impl != nullptr);
-  return HalFile(std::make_unique<Impl>(impl->file.openNextFile()));
+  return HalFile(makeUniqueNoThrow<Impl>(impl->file.openNextFile()));
 }
 bool HalFile::isOpen() const { return impl != nullptr && impl->file.isOpen(); }  // already thread-safe, no need to wrap
 HalFile::operator bool() const { return isOpen(); }

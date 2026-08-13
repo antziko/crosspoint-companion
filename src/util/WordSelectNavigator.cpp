@@ -29,32 +29,30 @@ void WordSelectNavigator::load(std::vector<WordInfo> w, std::vector<Row> r, std:
       break;
   }
   currentRow = std::clamp(targetRow, 0, rowCount > 0 ? rowCount - 1 : 0);
-  currentWordInRow = (!rows.empty() && !rows[currentRow].wordIndices.empty())
-                         ? static_cast<int>(rows[currentRow].wordIndices.size()) / 2
-                         : 0;
+  currentWordInRow = (!rows.empty() && !rowEmpty(currentRow)) ? rowSize(currentRow) / 2 : 0;
   confirmReleaseConsumed = consumeInitialConfirm;
 }
 
 void WordSelectNavigator::organizeIntoRows(std::vector<WordInfo>& words, std::vector<Row>& rows) {
   if (words.empty()) return;
   int16_t currentY = words[0].screenY;
-  rows.push_back({currentY, {}});
+  rows.push_back({currentY, 0, 0});
   for (size_t i = 0; i < words.size(); i++) {
     if (std::abs(words[i].screenY - currentY) > 2) {
       currentY = words[i].screenY;
-      rows.push_back({currentY, {}});
+      rows.push_back({currentY, static_cast<int16_t>(i), 0});
     }
     words[i].row = static_cast<int16_t>(rows.size() - 1);
-    rows.back().wordIndices.push_back(static_cast<int>(i));
+    rows.back().wordCount++;
   }
 }
 
 void WordSelectNavigator::mergeHyphenatedPairs(std::vector<WordInfo>& words, const std::vector<Row>& rows,
                                                std::string& textPool) {
   for (size_t r = 0; r + 1 < rows.size(); r++) {
-    if (rows[r].wordIndices.empty() || rows[r + 1].wordIndices.empty()) continue;
+    if (rows[r].wordCount == 0 || rows[r + 1].wordCount == 0) continue;
 
-    int lastWordIdx = rows[r].wordIndices.back();
+    int lastWordIdx = rows[r].firstWord + rows[r].wordCount - 1;
     const char* lastWord = textPool.data() + words[lastWordIdx].textOffset;
     uint16_t lastLen = words[lastWordIdx].textLen;
     if (lastLen == 0) continue;
@@ -63,9 +61,9 @@ void WordSelectNavigator::mergeHyphenatedPairs(std::vector<WordInfo>& words, con
     // not the first half of a line-break compound.
     if (lastWord[0] == '-') continue;
 
-    int nextWordIdx = rows[r + 1].wordIndices.front();
-    words[lastWordIdx].continuationIndex = nextWordIdx;
-    words[nextWordIdx].continuationOf = lastWordIdx;
+    int nextWordIdx = rows[r + 1].firstWord;
+    words[lastWordIdx].continuationIndex = static_cast<int16_t>(nextWordIdx);
+    words[nextWordIdx].continuationOf = static_cast<int16_t>(lastWordIdx);
 
     std::string firstPart(lastWord, lastLen);
     utf8RemoveTrailingHyphen(firstPart);
@@ -98,14 +96,14 @@ void WordSelectNavigator::reset() {
 
 const WordSelectNavigator::WordInfo* WordSelectNavigator::getSelected() const {
   if (rows.empty() || currentRow >= static_cast<int>(rows.size())) return nullptr;
-  if (rows[currentRow].wordIndices.empty()) return nullptr;
-  return &words[rows[currentRow].wordIndices[currentWordInRow]];
+  if (rowEmpty(currentRow)) return nullptr;
+  return &words[wordAt(currentRow, currentWordInRow)];
 }
 
 const WordSelectNavigator::WordInfo* WordSelectNavigator::getPairedHalf() const {
   const WordInfo* sel = getSelected();
   if (!sel) return nullptr;
-  const int wordIdx = rows[currentRow].wordIndices[currentWordInRow];
+  const int wordIdx = wordAt(currentRow, currentWordInRow);
   int otherIdx = (sel->continuationOf >= 0) ? sel->continuationOf : -1;
   if (otherIdx < 0 && sel->continuationIndex >= 0 && sel->continuationIndex != wordIdx) {
     otherIdx = sel->continuationIndex;
@@ -118,8 +116,8 @@ const WordSelectNavigator::WordInfo* WordSelectNavigator::getPairedHalf() const 
 
 int WordSelectNavigator::getCurrentFlatIndex() const {
   if (rows.empty() || currentRow >= static_cast<int>(rows.size())) return -1;
-  if (rows[currentRow].wordIndices.empty()) return -1;
-  return rows[currentRow].wordIndices[currentWordInRow];
+  if (rowEmpty(currentRow)) return -1;
+  return wordAt(currentRow, currentWordInRow);
 }
 
 const WordSelectNavigator::WordInfo* WordSelectNavigator::getWordAt(int idx) const {
@@ -138,29 +136,33 @@ std::string WordSelectNavigator::buildPhrase(int fromIdx, int toIdx) const {
     if (i == skipIdx) continue;
     const auto* w = getWordAt(i);
     if (!w) continue;
-    if (!phrase.empty()) phrase += ' ';
     // getLookup() returns the merged, hyphen-stripped text for a hyphenated
     // pair (e.g. "externity" for "exter-" + "nity"), matching the single-word
     // lookup path. For ordinary words it equals the display text.
-    phrase += getLookup(*w);
-    if (w->continuationIndex >= 0) skipIdx = w->continuationIndex;
+    const char* lookup = getLookup(*w);
+    // CJK words are written without spaces, so joining 中 + 国 with one produces "中 国",
+    // which matches no headword. utf8NeedsSpaceBetween is the shared rule — Section's
+    // page-text flattening reconstructs the same one.
+    if (utf8NeedsSpaceBetween(phrase, lookup)) phrase += ' ';
+    phrase += lookup;
+    if (w->continuationIndex >= 0) skipIdx = static_cast<int>(w->continuationIndex);
   }
   return phrase;
 }
 
 int WordSelectNavigator::findClosestWord(int targetRow) const {
-  if (rows[targetRow].wordIndices.empty()) return 0;
-  const int wordIdx = rows[currentRow].wordIndices[currentWordInRow];
+  if (rowEmpty(targetRow)) return 0;
+  const int wordIdx = wordAt(currentRow, currentWordInRow);
   const int currentCenterX = words[wordIdx].screenX + words[wordIdx].width / 2;
   return findClosestWordFromX(targetRow, currentCenterX);
 }
 
 int WordSelectNavigator::findClosestWordFromX(int targetRow, int refCenterX) const {
-  if (rows[targetRow].wordIndices.empty()) return 0;
+  if (rowEmpty(targetRow)) return 0;
   int bestMatch = 0;
   int bestDist = INT_MAX;
-  for (int i = 0; i < static_cast<int>(rows[targetRow].wordIndices.size()); i++) {
-    const int idx = rows[targetRow].wordIndices[i];
+  for (int i = 0; i < rowSize(targetRow); i++) {
+    const int idx = wordAt(targetRow, i);
     const int centerX = words[idx].screenX + words[idx].width / 2;
     const int dist = std::abs(centerX - refCenterX);
     if (dist < bestDist) {
@@ -238,13 +240,13 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
       currentWordInRow--;
     } else if (rowCount > 1) {
       currentRow = (currentRow > 0) ? currentRow - 1 : rowCount - 1;
-      currentWordInRow = static_cast<int>(rows[currentRow].wordIndices.size()) - 1;
+      currentWordInRow = rowSize(currentRow) - 1;
     }
     changed = true;
   }
 
   if (wordNextPressed) {
-    if (currentWordInRow < static_cast<int>(rows[currentRow].wordIndices.size()) - 1) {
+    if (currentWordInRow < rowSize(currentRow) - 1) {
       currentWordInRow++;
     } else if (rowCount > 1) {
       currentRow = (currentRow < rowCount - 1) ? currentRow + 1 : 0;
@@ -264,7 +266,7 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
     if (idx >= 0 && words[idx].continuationOf >= 0) {
       if (wordNextPressed) {
         // Moving forward: skip past the second half to the next word.
-        if (currentWordInRow < static_cast<int>(rows[currentRow].wordIndices.size()) - 1) {
+        if (currentWordInRow < rowSize(currentRow) - 1) {
           currentWordInRow++;
         } else if (rowCount > 1) {
           currentRow = (currentRow < rowCount - 1) ? currentRow + 1 : 0;
@@ -277,12 +279,7 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
         if (skippedIdx >= 0 && words[skippedIdx].continuationOf >= 0) {
           const int firstIdx = words[skippedIdx].continuationOf;
           currentRow = words[firstIdx].row;
-          for (int i = 0; i < static_cast<int>(rows[currentRow].wordIndices.size()); i++) {
-            if (rows[currentRow].wordIndices[i] == firstIdx) {
-              currentWordInRow = i;
-              break;
-            }
-          }
+          currentWordInRow = posInRow(currentRow, firstIdx);
         }
       } else if (wordPrevPressed) {
         // Moving backward: snap to the first half.
@@ -291,12 +288,7 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
         pendingSnapIdx = idx;
         const int firstIdx = words[idx].continuationOf;
         currentRow = words[firstIdx].row;
-        for (int i = 0; i < static_cast<int>(rows[currentRow].wordIndices.size()); i++) {
-          if (rows[currentRow].wordIndices[i] == firstIdx) {
-            currentWordInRow = i;
-            break;
-          }
-        }
+        currentWordInRow = posInRow(currentRow, firstIdx);
       }
       // Row navigation leaves cursor on whichever half
       // findClosestWord landed on. Both halves highlight regardless.
@@ -313,7 +305,7 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
           currentWordInRow--;
         } else if (rowCount > 1) {
           currentRow = (currentRow > 0) ? currentRow - 1 : rowCount - 1;
-          currentWordInRow = static_cast<int>(rows[currentRow].wordIndices.size()) - 1;
+          currentWordInRow = rowSize(currentRow) - 1;
         }
       }
     }
@@ -421,7 +413,7 @@ void WordSelectNavigator::drawSingleHighlight(const GfxRenderer& renderer, int l
   const auto* w = getWordAt(wordIndex);
   if (!w) return;
   renderer.fillRect(w->screenX - 2, w->screenY - 2, w->width + 4, lineHeight + 4, true);
-  renderer.drawText(w->fontId, w->screenX, w->screenY, getDisplay(*w), false, w->style);
+  renderer.drawText(fontIdFor(*w), w->screenX, w->screenY, getDisplay(*w), false, w->style);
 }
 
 void WordSelectNavigator::drawContinuationsIfOutside(const GfxRenderer& renderer, int lineHeight, const WordInfo* w,

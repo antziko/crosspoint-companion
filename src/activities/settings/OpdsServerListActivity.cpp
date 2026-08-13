@@ -124,7 +124,12 @@ void OpdsServerListActivity::handleSelection() {
     if (selectedIndex < serverCount) {
       const auto* server = OPDS_STORE.getServer(static_cast<size_t>(selectedIndex));
       if (server) {
-        activityManager.replaceActivity(std::make_unique<OpdsBookBrowserActivity>(renderer, mappedInput, *server));
+        auto browser = makeUniqueNoThrow<OpdsBookBrowserActivity>(renderer, mappedInput, *server);
+        if (!browser) {
+          LOG_ERR("OPDSLIST", "OOM: OpdsBookBrowserActivity; staying on the server list");
+          return;
+        }
+        activityManager.replaceActivity(std::move(browser));
       }
     }
     return;
@@ -138,10 +143,10 @@ void OpdsServerListActivity::handleSelection() {
   };
 
   if (selectedIndex < serverCount) {
-    startActivityForResult(std::make_unique<OpdsSettingsActivity>(renderer, mappedInput, selectedIndex), resultHandler);
+    startActivityForResultNoThrow<OpdsSettingsActivity>(resultHandler, renderer, mappedInput, selectedIndex);
   } else if (selectedIndex == serverCount) {
     // "Add Server" virtual item
-    startActivityForResult(std::make_unique<OpdsSettingsActivity>(renderer, mappedInput, -1), resultHandler);
+    startActivityForResultNoThrow<OpdsSettingsActivity>(resultHandler, renderer, mappedInput, -1);
   } else if (selectedIndex == serverCount + 1) {
     // "Filename format" virtual item: tap cycles through the available formats.
     SETTINGS.opdsFilenameFormat =
@@ -171,9 +176,8 @@ void OpdsServerListActivity::duplicateSelectedServer() {
     requestUpdate(true);
   };
 
-  startActivityForResult(
-      std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_OPDS_DUPLICATE_SERVER), body),
-      std::move(handler));
+  startActivityForResultNoThrow<ConfirmationActivity>(std::move(handler), renderer, mappedInput,
+                                                      tr(STR_OPDS_DUPLICATE_SERVER), body);
 }
 
 void OpdsServerListActivity::render(RenderLock&&) {

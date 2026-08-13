@@ -72,8 +72,7 @@ std::string bookFileName(const OpdsEntry& book) {
   // branch's long-standing download convention. bookFileNameCandidates() below
   // matches every order, so the "already downloaded" marker stays correct
   // regardless of the chosen format.
-  return opdsBookFilename(book.author, book.title,
-                          static_cast<OpdsFilenameFormat>(SETTINGS.opdsFilenameFormat));
+  return opdsBookFilename(book.author, book.title, static_cast<OpdsFilenameFormat>(SETTINGS.opdsFilenameFormat));
 }
 
 // Per-server download folder, named after the OPDS server: "/<sanitized name>".
@@ -789,15 +788,16 @@ void OpdsBookBrowserActivity::launchSearch() {
   state = BrowserState::SEARCH_INPUT;
   requestUpdate();
 
-  auto keyboard = std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_SEARCH));
-  startActivityForResult(std::move(keyboard), [this](const ActivityResult& result) {
-    state = BrowserState::BROWSING;
-    if (!result.isCancelled) {
-      performSearch(std::get<KeyboardResult>(result.data).text);
-    } else {
-      requestUpdate();
-    }
-  });
+  startActivityForResultNoThrow<KeyboardEntryActivity>(
+      [this](const ActivityResult& result) {
+        state = BrowserState::BROWSING;
+        if (!result.isCancelled) {
+          performSearch(std::get<KeyboardResult>(result.data).text);
+        } else {
+          requestUpdate();
+        }
+      },
+      renderer, mappedInput, tr(STR_SEARCH));
 }
 
 void OpdsBookBrowserActivity::performSearch(const std::string& query) {
@@ -851,8 +851,8 @@ void OpdsBookBrowserActivity::launchWifiSelection() {
   state = BrowserState::WIFI_SELECTION;
   requestUpdate();
 
-  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
-                         [this](const ActivityResult& result) { onWifiSelectionComplete(!result.isCancelled); });
+  startActivityForResultNoThrow<WifiSelectionActivity>(
+      [this](const ActivityResult& result) { onWifiSelectionComplete(!result.isCancelled); }, renderer, mappedInput);
 }
 
 void OpdsBookBrowserActivity::onWifiSelectionComplete(const bool connected) {

@@ -4,6 +4,7 @@
 #include <GfxRenderer.h>
 #include <HalClock.h>
 #include <I18n.h>
+#include <Memory.h>
 
 #include <algorithm>
 #include <cctype>
@@ -32,6 +33,10 @@ uint32_t xorshift32(uint32_t& s) {
 
 void FlashcardReviewActivity::onEnter() {
   Activity::onEnter();
+
+  // Card faces render through getDefinitionFontId() (FlashcardCardFace.cpp:198), so the
+  // dictionary's size needs the same font residency the definition viewer arranges.
+  DictUtils::ensureDefinitionFontResident(renderer);
 
   // Resolve today in the user's local calendar day (same convention as reading
   // stats); if the RTC is unavailable, today stays 0 and the scope falls back to
@@ -149,22 +154,21 @@ void FlashcardReviewActivity::promptSuspendToggle() {
   // Capture the word now -- `card` is overwritten as soon as we advance.
   const std::string word = card.word;
   const bool unsuspending = suspendedMode;
-  startActivityForResult(std::make_unique<ConfirmationActivity>(
-                             renderer, mappedInput,
-                             unsuspending ? tr(STR_FLASHCARD_UNSUSPEND_TITLE) : tr(STR_FLASHCARD_SUSPEND_TITLE), word),
-                         [this, word, unsuspending](const ActivityResult& res) {
-                           if (res.isCancelled) {
-                             requestUpdate();  // back to the card, unchanged
-                             return;
-                           }
-                           if (unsuspending) {
-                             FlashcardDeck::unsuspend(cachePath, word);
-                           } else {
-                             FlashcardDeck::suspend(cachePath, word);
-                           }
-                           suspended++;
-                           advanceCard();
-                         });
+  startActivityForResultNoThrow<ConfirmationActivity>(
+      [this, word, unsuspending](const ActivityResult& res) {
+        if (res.isCancelled) {
+          requestUpdate();  // back to the card, unchanged
+          return;
+        }
+        if (unsuspending) {
+          FlashcardDeck::unsuspend(cachePath, word);
+        } else {
+          FlashcardDeck::suspend(cachePath, word);
+        }
+        suspended++;
+        advanceCard();
+      },
+      renderer, mappedInput, unsuspending ? tr(STR_FLASHCARD_UNSUSPEND_TITLE) : tr(STR_FLASHCARD_SUSPEND_TITLE), word);
 }
 
 void FlashcardReviewActivity::promptDelete() {
@@ -172,8 +176,7 @@ void FlashcardReviewActivity::promptDelete() {
   // irreversible (the deck has no tombstone), so it is gated by a confirmation,
   // matching promptSuspendToggle.
   const std::string word = card.word;
-  startActivityForResult(
-      std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_FLASHCARD_DELETE_TITLE), word),
+  startActivityForResultNoThrow<ConfirmationActivity>(
       [this, word](const ActivityResult& res) {
         if (res.isCancelled) {
           requestUpdate();  // back to the card, unchanged
@@ -199,12 +202,20 @@ void FlashcardReviewActivity::promptDelete() {
           phase = Phase::Front;
         }
         requestUpdate();
-      });
+      },
+      renderer, mappedInput, tr(STR_FLASHCARD_DELETE_TITLE), word);
 }
 
 void FlashcardReviewActivity::onExit() {
-  controller.onExit();
+  controller.onExit();  // stops+joins the lookup task first: nothing may free fonts under it
+  DictUtils::releaseDefinitionFont(renderer);
   Activity::onExit();
+}
+
+void FlashcardReviewActivity::onResume() {
+  // A definition opened from a card face releases the extra size on its way out, so the
+  // next card would draw at the reader's size again. Re-take it (no-op if still resident).
+  DictUtils::ensureDefinitionFontResident(renderer);
 }
 
 void FlashcardReviewActivity::loop() {
@@ -212,14 +223,24 @@ void FlashcardReviewActivity::loop() {
     switch (controller.handleInput()) {
       case DictionaryLookupController::LookupEvent::FoundDefinition: {
         // Back face = the live definition (never re-recorded into history).
-        startActivityForResult(std::make_unique<DictionaryDefinitionActivity>(
-                                   renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(),
-                                   true, cachePath, controller.getRecordHistory(), controller.getLookupWord(),
-                                   DictionaryLookupController::toHistStatus(controller.getFoundStatus())),
-                               [this](const ActivityResult&) {
-                                 phase = Phase::AwaitingGrade;  // definition viewed -> prompt for grade
-                                 requestUpdate();
-                               });
+        // Nothrow: ~4.8 KB pushed straight after the lookup's glyph prewarm. See the note at
+        // the matching site in DictionaryWordSelectActivity — a bare new aborts the device.
+        // On failure fall through to the grade prompt, exactly as the not-found cases below do,
+        // so the review session stays usable.
+        auto definition = makeUniqueNoThrow<DictionaryDefinitionActivity>(
+            renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(), true, cachePath,
+            controller.getRecordHistory(), controller.getLookupWord(),
+            DictionaryLookupController::toHistStatus(controller.getFoundStatus()));
+        if (!definition) {
+          LOG_ERR("FCR", "OOM: DictionaryDefinitionActivity");
+          phase = Phase::AwaitingGrade;
+          requestUpdate();
+          break;
+        }
+        startActivityForResult(std::move(definition), [this](const ActivityResult&) {
+          phase = Phase::AwaitingGrade;  // definition viewed -> prompt for grade
+          requestUpdate();
+        });
         break;
       }
       case DictionaryLookupController::LookupEvent::NotFoundDismissedBack:

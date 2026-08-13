@@ -33,15 +33,16 @@ void CalibreConnectActivity::onEnter() {
   exitRequested = false;
 
   if (WiFi.status() != WL_CONNECTED) {
-    startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
-                           [this](const ActivityResult& result) {
-                             if (!result.isCancelled) {
-                               const auto& wifi = std::get<WifiResult>(result.data);
-                               connectedIP = wifi.ip;
-                               connectedSSID = wifi.ssid;
-                             }
-                             onWifiSelectionComplete(!result.isCancelled);
-                           });
+    startActivityForResultNoThrow<WifiSelectionActivity>(
+        [this](const ActivityResult& result) {
+          if (!result.isCancelled) {
+            const auto& wifi = std::get<WifiResult>(result.data);
+            connectedIP = wifi.ip;
+            connectedSSID = wifi.ssid;
+          }
+          onWifiSelectionComplete(!result.isCancelled);
+        },
+        renderer, mappedInput);
   } else {
     connectedIP = WiFi.localIP().toString().c_str();
     connectedSSID = WiFi.SSID().c_str();

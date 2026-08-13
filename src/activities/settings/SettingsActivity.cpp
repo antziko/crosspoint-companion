@@ -300,8 +300,8 @@ void SettingsActivity::toggleCurrentSetting() {
     if (setting.nameId == StrId::STR_DICTIONARY) {
       // Launch the dictionary picker (rich metadata/preparation flow) instead of cycling.
       // The picker writes the selection to dictionary.bin itself; just refresh on return.
-      startActivityForResult(std::make_unique<DictionarySelectActivity>(renderer, mappedInput),
-                             [this](const ActivityResult&) { rebuildSettingsLists(); });
+      startActivityForResultNoThrow<DictionarySelectActivity>([this](const ActivityResult&) { rebuildSettingsLists(); },
+                                                              renderer, mappedInput);
       return;
     }
     const uint8_t totalValues = setting.enumStringValues.empty()
@@ -342,29 +342,27 @@ void SettingsActivity::toggleCurrentSetting() {
 
     switch (setting.action) {
       case SettingAction::RemapFrontButtons:
-        startActivityForResult(std::make_unique<ButtonRemapActivity>(renderer, mappedInput), resultHandler);
+        startActivityForResultNoThrow<ButtonRemapActivity>(resultHandler, renderer, mappedInput);
         break;
       case SettingAction::RemapFrontButtonsCW:
-        startActivityForResult(std::make_unique<ButtonRemapActivity>(renderer, mappedInput, /*cwMode=*/true),
-                               resultHandler);
+        startActivityForResultNoThrow<ButtonRemapActivity>(resultHandler, renderer, mappedInput, /*cwMode=*/true);
         break;
       case SettingAction::CustomiseStatusBar:
-        startActivityForResult(std::make_unique<StatusBarSettingsActivity>(renderer, mappedInput), resultHandler);
+        startActivityForResultNoThrow<StatusBarSettingsActivity>(resultHandler, renderer, mappedInput);
         break;
       case SettingAction::OpenSubCategory:
         // Open a nested category-scoped settings screen (reuses this activity in sub-screen mode).
-        startActivityForResult(
-            std::make_unique<SettingsActivity>(renderer, mappedInput, setting.subCategory, setting.nameId),
-            resultHandler);
+        startActivityForResultNoThrow<SettingsActivity>(resultHandler, renderer, mappedInput, setting.subCategory,
+                                                        setting.nameId);
         break;
       case SettingAction::CustomiseTopBar:
-        startActivityForResult(std::make_unique<HomeTopBarSettingsActivity>(renderer, mappedInput), resultHandler);
+        startActivityForResultNoThrow<HomeTopBarSettingsActivity>(resultHandler, renderer, mappedInput);
         break;
       case SettingAction::KOReaderSync:
-        startActivityForResult(std::make_unique<KOReaderServerListActivity>(renderer, mappedInput), resultHandler);
+        startActivityForResultNoThrow<KOReaderServerListActivity>(resultHandler, renderer, mappedInput);
         break;
       case SettingAction::OPDSBrowser:
-        startActivityForResult(std::make_unique<OpdsServerListActivity>(renderer, mappedInput), resultHandler);
+        startActivityForResultNoThrow<OpdsServerListActivity>(resultHandler, renderer, mappedInput);
         break;
       case SettingAction::Network:
         // No-op result handler (NOT the shared one that calls SETTINGS.saveToFile()).
@@ -373,40 +371,39 @@ void SettingsActivity::toggleCurrentSetting() {
         // saveToFile() builds a JsonDocument, and on X3 the WiFi scan can leave heap
         // as low as ~10KB, where that allocation throws bad_alloc -> abort() (observed
         // crash on entering then cancelling the WiFi network picker).
-        startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
-                               [](const ActivityResult&) {});
+        startActivityForResultNoThrow<WifiSelectionActivity>([](const ActivityResult&) {}, renderer, mappedInput);
         break;
       case SettingAction::ClearCache:
-        startActivityForResult(std::make_unique<ClearCacheActivity>(renderer, mappedInput), resultHandler);
+        startActivityForResultNoThrow<ClearCacheActivity>(resultHandler, renderer, mappedInput);
         break;
       case SettingAction::PruneCache:
-        startActivityForResult(
-            std::make_unique<ClearCacheActivity>(renderer, mappedInput, ClearCacheActivity::Mode::PruneOrphans),
-            resultHandler);
+        startActivityForResultNoThrow<ClearCacheActivity>(resultHandler, renderer, mappedInput,
+                                                          ClearCacheActivity::Mode::PruneOrphans);
         break;
       case SettingAction::CheckForUpdates:
-        startActivityForResult(std::make_unique<OtaUpdateActivity>(renderer, mappedInput), resultHandler);
+        startActivityForResultNoThrow<OtaUpdateActivity>(resultHandler, renderer, mappedInput);
         break;
       case SettingAction::SdFirmwareUpdate:
-        startActivityForResult(std::make_unique<SdFirmwareUpdateActivity>(renderer, mappedInput), resultHandler);
+        startActivityForResultNoThrow<SdFirmwareUpdateActivity>(resultHandler, renderer, mappedInput);
         break;
       case SettingAction::DownloadFonts:
-        startActivityForResult(std::make_unique<FontDownloadActivity>(renderer, mappedInput),
-                               [this](const ActivityResult&) {
-                                 SETTINGS.saveToFile();
-                                 rebuildSettingsLists();
-                               });
+        startActivityForResultNoThrow<FontDownloadActivity>(
+            [this](const ActivityResult&) {
+              SETTINGS.saveToFile();
+              rebuildSettingsLists();
+            },
+            renderer, mappedInput);
         break;
       case SettingAction::TextSettings:
-        startActivityForResult(std::make_unique<TextSettingsActivity>(renderer, mappedInput, &sdFontSystem.registry(),
-                                                                      TextSettingsActivity::Tab::Family),
-                               [this](const ActivityResult&) {
-                                 SETTINGS.saveToFile();
-                                 rebuildSettingsLists();
-                               });
+        startActivityForResultNoThrow<TextSettingsActivity>(
+            [this](const ActivityResult&) {
+              SETTINGS.saveToFile();
+              rebuildSettingsLists();
+            },
+            renderer, mappedInput, &sdFontSystem.registry(), TextSettingsActivity::Tab::Family);
         break;
       case SettingAction::Language:
-        startActivityForResult(std::make_unique<LanguageSelectActivity>(renderer, mappedInput), resultHandler);
+        startActivityForResultNoThrow<LanguageSelectActivity>(resultHandler, renderer, mappedInput);
         break;
       case SettingAction::None:
         // Do nothing
@@ -447,18 +444,17 @@ void SettingsActivity::syncQuickResumeTimeoutForSleepScreen(bool sleepScreenChan
 }
 
 void SettingsActivity::openSleepTimeoutPicker() {
-  startActivityForResult(
-      std::make_unique<IntervalSelectionActivity>(
-          renderer, mappedInput, "SleepTimeoutInterval", StrId::STR_TIME_TO_SLEEP, SETTINGS.sleepTimeoutMinutes,
-          CrossPointSettings::MIN_SLEEP_TIMEOUT_MINUTES, CrossPointSettings::MAX_SLEEP_TIMEOUT_MINUTES, 1, 5,
-          StrId::STR_SLEEP_TIMER_VALUE_FORMAT, false, true, StrId::STR_SLEEP_NEVER),
+  startActivityForResultNoThrow<IntervalSelectionActivity>(
       [this](const ActivityResult& result) {
         if (!result.isCancelled) {
           SETTINGS.sleepTimeoutMinutes = static_cast<uint8_t>(std::get<IntervalResult>(result.data).value);
           SETTINGS.saveToFile();
         }
         requestUpdate();
-      });
+      },
+      renderer, mappedInput, "SleepTimeoutInterval", StrId::STR_TIME_TO_SLEEP, SETTINGS.sleepTimeoutMinutes,
+      CrossPointSettings::MIN_SLEEP_TIMEOUT_MINUTES, CrossPointSettings::MAX_SLEEP_TIMEOUT_MINUTES, 1, 5,
+      StrId::STR_SLEEP_TIMER_VALUE_FORMAT, false, true, StrId::STR_SLEEP_NEVER);
 }
 
 void SettingsActivity::render(RenderLock&&) {

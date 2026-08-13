@@ -3,6 +3,7 @@
 #include <GfxRenderer.h>
 #include <HalClock.h>
 #include <I18n.h>
+#include <Memory.h>
 
 #include <algorithm>
 
@@ -29,6 +30,10 @@ const char* FlashcardListActivity::glyphFor(const FlashcardDeck::Entry& e, uint3
 
 void FlashcardListActivity::onEnter() {
   Activity::onEnter();
+
+  // The detail card face renders through getDefinitionFontId() (FlashcardCardFace.cpp:198),
+  // so the dictionary's size needs the same font residency the definition viewer arranges.
+  DictUtils::ensureDefinitionFontResident(renderer);
 
   // Resolve today in the user's local calendar day (same convention as reading
   // stats / FlashcardReviewActivity); 0 when the RTC is unavailable, which makes
@@ -69,27 +74,41 @@ void FlashcardListActivity::openDetail() {
 }
 
 void FlashcardListActivity::onExit() {
-  controller.onExit();
+  controller.onExit();  // stops+joins the lookup task first: nothing may free fonts under it
+  DictUtils::releaseDefinitionFont(renderer);
   Activity::onExit();
+}
+
+void FlashcardListActivity::onResume() {
+  // A definition opened from the detail face releases the extra size on its way out, so the
+  // card would draw at the reader's size again. Re-take it (no-op if still resident).
+  DictUtils::ensureDefinitionFontResident(renderer);
 }
 
 void FlashcardListActivity::loop() {
   if (controller.isActive()) {
     switch (controller.handleInput()) {
       case DictionaryLookupController::LookupEvent::FoundDefinition: {
-        startActivityForResult(std::make_unique<DictionaryDefinitionActivity>(
-                                   renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(),
-                                   true, cachePath, controller.getRecordHistory(), controller.getLookupWord(),
-                                   DictionaryLookupController::toHistStatus(controller.getFoundStatus())),
-                               [this](const ActivityResult& result) {
-                                 refreshCount();
-                                 if (!result.isCancelled) {
-                                   setResult(ActivityResult{});
-                                   finish();
-                                 } else {
-                                   requestUpdate();  // back to the detail view
-                                 }
-                               });
+        // Nothrow: ~4.8 KB pushed straight after the lookup's glyph prewarm. See the note at
+        // the matching site in DictionaryWordSelectActivity — a bare new aborts the device.
+        auto definition = makeUniqueNoThrow<DictionaryDefinitionActivity>(
+            renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(), true, cachePath,
+            controller.getRecordHistory(), controller.getLookupWord(),
+            DictionaryLookupController::toHistStatus(controller.getFoundStatus()));
+        if (!definition) {
+          LOG_ERR("FCL", "OOM: DictionaryDefinitionActivity");
+          requestUpdate();
+          break;
+        }
+        startActivityForResult(std::move(definition), [this](const ActivityResult& result) {
+          refreshCount();
+          if (!result.isCancelled) {
+            setResult(ActivityResult{});
+            finish();
+          } else {
+            requestUpdate();  // back to the detail view
+          }
+        });
         break;
       }
       case DictionaryLookupController::LookupEvent::NotFoundDismissedBack:

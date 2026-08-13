@@ -216,49 +216,67 @@ void ActivityManager::replaceActivity(std::unique_ptr<Activity>&& newActivity) {
   }
 }
 
+// Every goTo* below replaces the current screen, so a failed allocation must not abort: with
+// -fno-exceptions `std::make_unique` calls abort() on OOM and the device reboots mid-navigation.
+// Constructing through this instead leaves the user on the screen they were already on, which is
+// always a better outcome than a reboot and is usually recoverable (back out, free some heap,
+// retry). The template adds nothing over the std::make_unique<T> it replaces — that was already
+// instantiated per activity type here.
+template <typename T, typename... Args>
+bool ActivityManager::replaceActivityNoThrow(const char* what, Args&&... args) {
+  auto activity = makeUniqueNoThrow<T>(std::forward<Args>(args)...);
+  if (!activity) {
+    LOG_ERR("ACT", "OOM allocating %s; staying on the current screen", what);
+    return false;
+  }
+  replaceActivity(std::move(activity));
+  return true;
+}
+
 void ActivityManager::goToFileTransfer() {
-  replaceActivity(std::make_unique<CrossPointWebServerActivity>(renderer, mappedInput));
+  replaceActivityNoThrow<CrossPointWebServerActivity>("CrossPointWebServer", renderer, mappedInput);
 }
 
 void ActivityManager::goToSettings(int initialCategory) {
-  replaceActivity(std::make_unique<SettingsActivity>(renderer, mappedInput, initialCategory));
+  replaceActivityNoThrow<SettingsActivity>("Settings", renderer, mappedInput, initialCategory);
 }
 
 void ActivityManager::goToFileBrowser(std::string path) {
-  replaceActivity(std::make_unique<FileBrowserActivity>(renderer, mappedInput, std::move(path)));
+  replaceActivityNoThrow<FileBrowserActivity>("FileBrowser", renderer, mappedInput, std::move(path));
 }
 
 void ActivityManager::goToRecentBooks() {
-  replaceActivity(std::make_unique<RecentBooksActivity>(renderer, mappedInput));
+  replaceActivityNoThrow<RecentBooksActivity>("RecentBooks", renderer, mappedInput);
 }
 
 void ActivityManager::goToReadingStats() {
-  replaceActivity(std::make_unique<ReadingStatsActivity>(renderer, mappedInput));
+  replaceActivityNoThrow<ReadingStatsActivity>("ReadingStats", renderer, mappedInput);
 }
 
 void ActivityManager::goToBrowser() {
   const auto& servers = OPDS_STORE.getServers();
   // Skip the server picker when there's only one server configured
   if (servers.size() == 1) {
-    replaceActivity(std::make_unique<OpdsBookBrowserActivity>(renderer, mappedInput, servers[0]));
+    replaceActivityNoThrow<OpdsBookBrowserActivity>("OpdsBookBrowser", renderer, mappedInput, servers[0]);
   } else {
-    replaceActivity(std::make_unique<OpdsServerListActivity>(renderer, mappedInput, true));
+    replaceActivityNoThrow<OpdsServerListActivity>("OpdsServerList", renderer, mappedInput, true);
   }
 }
 
 void ActivityManager::goToReader(std::string path, const bool allowFastInitialRefresh) {
-  replaceActivity(std::make_unique<ReaderActivity>(renderer, mappedInput, std::move(path), allowFastInitialRefresh));
+  replaceActivityNoThrow<ReaderActivity>("Reader", renderer, mappedInput, std::move(path), allowFastInitialRefresh);
 }
 
 void ActivityManager::goToSleep(bool fromTimeout) {
-  replaceActivity(std::make_unique<SleepActivity>(renderer, mappedInput, fromTimeout));
+  replaceActivityNoThrow<SleepActivity>("Sleep", renderer, mappedInput, fromTimeout);
   loop();  // Important: sleep screen must be rendered immediately, the caller will go to sleep right after this returns
 }
 
-void ActivityManager::goToBoot() { replaceActivity(std::make_unique<BootActivity>(renderer, mappedInput)); }
+void ActivityManager::goToBoot() { replaceActivityNoThrow<BootActivity>("Boot", renderer, mappedInput); }
 
 void ActivityManager::goToFullScreenMessage(std::string message, EpdFontFamily::Style style) {
-  replaceActivity(std::make_unique<FullScreenMessageActivity>(renderer, mappedInput, std::move(message), style));
+  replaceActivityNoThrow<FullScreenMessageActivity>("FullScreenMessage", renderer, mappedInput, std::move(message),
+                                                    style);
 }
 
 void ActivityManager::goHome(HomeMenuItem initialMenuItem) {
@@ -278,9 +296,9 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem) {
       initialMenuItem = HomeMenuItem::SETTINGS_MENU;
     }
   }
-  replaceActivity(std::make_unique<HomeActivity>(renderer, mappedInput, initialMenuItem));
+  replaceActivityNoThrow<HomeActivity>("Home", renderer, mappedInput, initialMenuItem);
 }
-void ActivityManager::goToCrashReport() { replaceActivity(std::make_unique<CrashActivity>(renderer, mappedInput)); }
+void ActivityManager::goToCrashReport() { replaceActivityNoThrow<CrashActivity>("Crash", renderer, mappedInput); }
 
 void ActivityManager::pushActivity(std::unique_ptr<Activity>&& activity) {
   if (pendingActivity) {

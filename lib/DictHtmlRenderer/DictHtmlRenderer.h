@@ -150,6 +150,9 @@ class DictHtmlRenderer {
   };
 
   void reset();
+  // Reserve the batch-mode span/text accumulators. Streaming never needs them — see the
+  // definition in the .cpp for why they are not reserved in the constructor.
+  void ensureBatchBuffers();
   void pushSpan();
   void emitText(const char* s, int len);
   void flushPending();

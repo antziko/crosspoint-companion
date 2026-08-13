@@ -154,26 +154,50 @@ void ReaderActivity::goToLibrary(const std::string& fromBookPath) {
 void ReaderActivity::onGoToEpubReader(std::unique_ptr<Epub> epub) {
   const auto epubPath = epub->getPath();
   currentBookPath = epubPath;
-  activityManager.replaceActivity(
-      std::make_unique<EpubReaderActivity>(renderer, mappedInput, std::move(epub), initialRefreshCountdown()));
+  auto epubReader =
+      makeUniqueNoThrow<EpubReaderActivity>(renderer, mappedInput, std::move(epub), initialRefreshCountdown());
+  if (!epubReader) {
+    LOG_ERR("READER", "OOM: EpubReaderActivity; returning home");
+    activityManager.goHome();
+    return;
+  }
+  activityManager.replaceActivity(std::move(epubReader));
 }
 
 void ReaderActivity::onGoToBmpViewer(const std::string& path) {
-  activityManager.replaceActivity(std::make_unique<BmpViewerActivity>(renderer, mappedInput, path));
+  auto viewer = makeUniqueNoThrow<BmpViewerActivity>(renderer, mappedInput, path);
+  if (!viewer) {
+    LOG_ERR("READER", "OOM: BmpViewerActivity; returning home");
+    activityManager.goHome();
+    return;
+  }
+  activityManager.replaceActivity(std::move(viewer));
 }
 
 void ReaderActivity::onGoToXtcReader(std::unique_ptr<Xtc> xtc) {
   const auto xtcPath = xtc->getPath();
   currentBookPath = xtcPath;
-  activityManager.replaceActivity(
-      std::make_unique<XtcReaderActivity>(renderer, mappedInput, std::move(xtc), initialRefreshCountdown()));
+  auto xtcReader =
+      makeUniqueNoThrow<XtcReaderActivity>(renderer, mappedInput, std::move(xtc), initialRefreshCountdown());
+  if (!xtcReader) {
+    LOG_ERR("READER", "OOM: XtcReaderActivity; returning home");
+    activityManager.goHome();
+    return;
+  }
+  activityManager.replaceActivity(std::move(xtcReader));
 }
 
 void ReaderActivity::onGoToTxtReader(std::unique_ptr<Txt> txt) {
   const auto txtPath = txt->getPath();
   currentBookPath = txtPath;
-  activityManager.replaceActivity(
-      std::make_unique<TxtReaderActivity>(renderer, mappedInput, std::move(txt), initialRefreshCountdown()));
+  auto txtReader =
+      makeUniqueNoThrow<TxtReaderActivity>(renderer, mappedInput, std::move(txt), initialRefreshCountdown());
+  if (!txtReader) {
+    LOG_ERR("READER", "OOM: TxtReaderActivity; returning home");
+    activityManager.goHome();
+    return;
+  }
+  activityManager.replaceActivity(std::move(txtReader));
 }
 
 void ReaderActivity::onEnter() {

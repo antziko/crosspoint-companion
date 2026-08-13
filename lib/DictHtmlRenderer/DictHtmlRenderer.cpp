@@ -120,9 +120,25 @@ const char* DictHtmlRenderer::findAttr(const XML_Char** atts, const char* name) 
 // ---------------------------------------------------------------------------
 
 DictHtmlRenderer::DictHtmlRenderer() {
-  spans.reserve(64);
-  textBuf.reserve(512);
+  // spans/textBuf are deliberately NOT reserved here — see ensureBatchBuffers(). tagStack is
+  // used by both modes and is small, so it stays.
   tagStack.reserve(8);
+}
+
+// Reserve the batch-mode accumulators, on first batch use rather than at construction.
+//
+// Only batch rendering (render / renderFromFile) fills these; the streaming path hands each
+// span straight to its sink and never touches them — pushSpan's sink branch, and the note at
+// the end of renderFromFileStreaming. Reserving them in the constructor therefore charged
+// every DictHtmlRenderer ~1536 bytes it might never read, and charged it through the THROWING
+// operator new, which abort()s instead of failing. The definition viewer owns one of these as
+// a member and streams exclusively, on a heap device logs show at single-digit KB — so this
+// was 1.5 KB taken from, and a reboot risk imposed on, the one screen that wanted neither.
+//
+// clear() keeps capacity, so this is a no-op after the first batch render.
+void DictHtmlRenderer::ensureBatchBuffers() {
+  if (spans.capacity() == 0) spans.reserve(64);
+  if (textBuf.capacity() == 0) textBuf.reserve(512);
 }
 
 DictHtmlRenderer::~DictHtmlRenderer() { releaseParser(); }
@@ -557,6 +573,7 @@ static const char* lookupHtmlEntity(const char* name, int nameLen) {
 
 const std::vector<StyledSpan>& DictHtmlRenderer::render(const char* html, int len) {
   reset();
+  ensureBatchBuffers();
 
   if (!parser) {
     parseError = true;
@@ -784,6 +801,7 @@ void DictHtmlRenderer::parseOpenFile(HalFile& file, uint32_t size) {
 
 const std::vector<StyledSpan>& DictHtmlRenderer::renderFromFile(const char* dictPath, uint32_t offset, uint32_t size) {
   reset();
+  ensureBatchBuffers();
 
   if (!parser) {
     parseError = true;

@@ -23,16 +23,20 @@ class SdCardFontSystem {
   void ensureLoaded(GfxRenderer& renderer);
 
   /// Resolve an SD card font ID from family name + point size. Returns the font at that
-  /// exact size when it is resident, else the reader-size font, else 0. Used by
+  /// exact size when it is resident, else the resident size closest to it (which is the
+  /// reader-size font when that is all there is), else 0. Used by
   /// CrossPointSettings::getReaderFontId() / getDefinitionFontId().
   int resolveFontId(const char* familyName, uint8_t pointSize) const;
 
   /// Additively load the CURRENTLY LOADED family at one more point size, so
   /// resolveFontId() can hand out that size (the dictionary renders at its own size
-  /// while following the book's family). No-op if already resident. Returns the font id,
-  /// or 0 if the family ships no file at that size, is not the loaded family, or the
-  /// heap cannot afford a second .cpfont's resident tables — in which case the caller
-  /// keeps using the reader-size font. Not for switching families: use ensureLoaded().
+  /// while following the book's family). The size is snapped to the nearest one the family
+  /// actually ships — a family converted at sizes that miss the dictionary's 12/14/16/18
+  /// slots would otherwise silently keep rendering definitions at the reader's size. No-op
+  /// if the snapped size is already resident. Returns the font id, or 0 if the family is
+  /// not the loaded one, ships nothing, or the heap cannot afford a second .cpfont's
+  /// resident tables — in which case the caller keeps using the reader-size font. Not for
+  /// switching families: use ensureLoaded().
   int ensureFontSize(const char* familyName, uint8_t pointSize, GfxRenderer& renderer);
 
   /// Drop additively-loaded sizes from ensureFontSize(), keeping the reader-size font and the

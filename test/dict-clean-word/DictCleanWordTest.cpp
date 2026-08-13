@@ -82,6 +82,70 @@ TEST(DictCleanWord, EmptyWhenNothingRemains) {
   EXPECT_EQ(clean("… — ‘"), "");
 }
 
+// --- CJK punctuation ----------------------------------------------------------
+//
+// Chinese/Japanese punctuation is not in General Punctuation (U+2000-U+206F); it
+// lives in CJK Symbols and Punctuation (U+3000-U+303F) and the Fullwidth Forms
+// (U+FF01-U+FF65). Both are >= 0x80, so isWordByte kept them and every Chinese
+// lookup on a word touching punctuation returned "no result".
+//
+// These arrive glued to the word rather than as their own token: layout forbids a
+// break before closing punctuation and after opening punctuation
+// (ParsedText.cpp:150-155), so 國。 and 「中 are each a single token by design.
+
+TEST(DictCleanWord, TrimsTrailingCjkPunctuation) {
+  EXPECT_EQ(clean("國。"), "國");      // 。 ideographic full stop U+3002
+  EXPECT_EQ(clean("你好，"), "你好");  // ， fullwidth comma U+FF0C
+  EXPECT_EQ(clean("走、"), "走");      // 、 ideographic comma U+3001
+  EXPECT_EQ(clean("什麼？"), "什麼");  // ？ fullwidth question mark U+FF1F
+  EXPECT_EQ(clean("住手！"), "住手");  // ！ fullwidth exclamation U+FF01
+}
+
+TEST(DictCleanWord, TrimsLeadingCjkPunctuation) {
+  EXPECT_EQ(clean("「中"), "中");  // 「 corner bracket U+300C
+  EXPECT_EQ(clean("《紅"), "紅");  // 《 double angle bracket U+300A
+  EXPECT_EQ(clean("（漢"), "漢");  // （ fullwidth left paren U+FF08
+}
+
+TEST(DictCleanWord, TrimsCjkPunctuationOnBothEdges) {
+  EXPECT_EQ(clean("《紅樓夢》"), "紅樓夢");
+  EXPECT_EQ(clean("「中國」"), "中國");
+  EXPECT_EQ(clean("（漢字）"), "漢字");
+  EXPECT_EQ(clean("【注】。"), "注");  // mixed classes stacked on one edge
+}
+
+TEST(DictCleanWord, EmptyWhenOnlyCjkPunctuation) {
+  EXPECT_EQ(clean("。"), "");
+  EXPECT_EQ(clean("。、！"), "");
+  EXPECT_EQ(clean("「」"), "");
+  EXPECT_EQ(clean("　"), "");  // U+3000 ideographic space
+}
+
+// Interior punctuation is left alone, exactly as it is for ASCII (don't) — only
+// the edges are trimmed. A multi-select phrase spanning a sentence break keeps it.
+TEST(DictCleanWord, KeepsInteriorCjkPunctuation) {
+  EXPECT_EQ(clean("中國。他說"), "中國。他說");
+  EXPECT_EQ(clean("。中國。他說。"), "中國。他說");
+}
+
+// U+3005-U+3007 and U+303B sit inside the CJK Symbols and Punctuation block but
+// are content, not punctuation: 々 repeats the preceding character (人々 = "people"),
+// 〇 is the ideographic zero. A greedy edge trim over the whole block would reduce
+// 人々。 to 人 and 二〇二五 to 二.
+TEST(DictCleanWord, KeepsIterationMarksAndIdeographicZero) {
+  EXPECT_EQ(clean("人々"), "人々");          // 々 U+3005
+  EXPECT_EQ(clean("人々。"), "人々");        // trim the 。 but keep the 々
+  EXPECT_EQ(clean("二〇二五"), "二〇二五");  // 〇 U+3007 ideographic zero
+  EXPECT_EQ(clean("〆"), "〆");              // U+3006
+}
+
+// Fullwidth digits and fullwidth Latin letters are content, not punctuation.
+TEST(DictCleanWord, KeepsFullwidthAlphanumerics) {
+  EXPECT_EQ(clean("１２３"), "１２３");  // U+FF11-FF13
+  EXPECT_EQ(clean("Ａ"), "Ａ");          // U+FF21
+  EXPECT_EQ(clean("（Ａ）"), "Ａ");      // trimmed parens, kept the letter
+}
+
 TEST(DictCleanWord, HandlesTruncatedUtf8WithoutOverreading) {
   // A lone 0xE2 lead byte has no continuation bytes to inspect; the 3-byte
   // guard must stop the General-Punctuation probe from reading past the end.

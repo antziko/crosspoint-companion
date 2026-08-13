@@ -591,8 +591,15 @@ void setup() {
 
   if (recoveryFirmwareMode) {
     // Skip normal home/reader routing: jump straight into the SD firmware picker.
-    activityManager.replaceActivity(
-        std::make_unique<SdFirmwareUpdateActivity>(renderer, mappedInputManager, /*recoveryMode=*/true));
+    auto recovery = makeUniqueNoThrow<SdFirmwareUpdateActivity>(renderer, mappedInputManager, /*recoveryMode=*/true);
+    if (recovery) {
+      activityManager.replaceActivity(std::move(recovery));
+    } else {
+      // Recovery mode is the user's way out of a bad flash; falling back to home at least
+      // leaves a usable device instead of aborting the boot.
+      LOG_ERR("MAIN", "OOM: SdFirmwareUpdateActivity (recovery); going home");
+      activityManager.goHome();
+    }
   } else if (rebootedFromPanic) {
     // If we rebooted from a panic, go to crash report screen to show the panic info
     activityManager.goToCrashReport();
@@ -611,10 +618,16 @@ void setup() {
              mappedInputManager.isPressed(MappedInputManager::Button::Back) || APP_STATE.readerActivityLoadCount > 0) {
     // Boot to home screen if no book is open, last sleep was not from reader, back button is held, or reader activity
     // crashed (indicated by readerActivityLoadCount > 0)
-    if (reviewSleepImage) {
-      activityManager.replaceActivity(std::make_unique<SleepImageReviewActivity>(
-          renderer, mappedInputManager, APP_STATE.lastSleepImagePath, /*resumeToReader=*/false, std::string()));
+    // Nothrow: an OOM here would abort during boot, which reads to the user as a bricked
+    // device. Skipping the review and going home loses nothing but the sleep image.
+    auto review = reviewSleepImage ? makeUniqueNoThrow<SleepImageReviewActivity>(
+                                         renderer, mappedInputManager, APP_STATE.lastSleepImagePath,
+                                         /*resumeToReader=*/false, std::string())
+                                   : nullptr;
+    if (review) {
+      activityManager.replaceActivity(std::move(review));
     } else {
+      if (reviewSleepImage) LOG_ERR("MAIN", "OOM: SleepImageReviewActivity; going home");
       activityManager.goHome();
     }
   } else {
@@ -623,11 +636,16 @@ void setup() {
     APP_STATE.openEpubPath = "";
     APP_STATE.readerActivityLoadCount++;
     APP_STATE.saveToFile();
-    if (reviewSleepImage) {
-      // Review first, then resume the book (the review activity routes onward).
-      activityManager.replaceActivity(std::make_unique<SleepImageReviewActivity>(
-          renderer, mappedInputManager, APP_STATE.lastSleepImagePath, /*resumeToReader=*/true, path));
+    // Review first, then resume the book (the review activity routes onward). Nothrow: on OOM
+    // go straight to the book rather than aborting the boot.
+    auto review = reviewSleepImage ? makeUniqueNoThrow<SleepImageReviewActivity>(renderer, mappedInputManager,
+                                                                                 APP_STATE.lastSleepImagePath,
+                                                                                 /*resumeToReader=*/true, path)
+                                   : nullptr;
+    if (review) {
+      activityManager.replaceActivity(std::move(review));
     } else {
+      if (reviewSleepImage) LOG_ERR("MAIN", "OOM: SleepImageReviewActivity; opening the book directly");
       activityManager.goToReader(path, allowFastInitialReaderRefresh);
     }
   }

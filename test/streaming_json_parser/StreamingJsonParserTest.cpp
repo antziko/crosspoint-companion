@@ -504,3 +504,139 @@ TEST(StreamingJsonParser, NullCallbacksNoCrash) {
   parser.feed(json, strlen(json));
   EXPECT_FALSE(parser.hasError());
 }
+
+// --- onStringChunk: large string values stream instead of vanishing ------------------------
+
+namespace {
+
+struct ChunkContext {
+  std::string assembled;            // every piece concatenated, in order
+  int calls = 0;                    // total chunk callbacks
+  int firsts = 0;                   // pieces flagged `first`
+  int lasts = 0;                    // pieces flagged `last`
+  size_t maxPiece = 0;              // largest single piece handed over
+  std::vector<std::string> values;  // one entry per completed value
+  std::vector<Event> plain;         // onString deliveries, to prove they stop
+};
+
+void onChunk(void* ctx, const char* data, size_t len, bool first, bool last) {
+  auto* c = static_cast<ChunkContext*>(ctx);
+  c->calls++;
+  if (first) {
+    c->firsts++;
+    c->assembled.clear();
+  }
+  if (len > c->maxPiece) c->maxPiece = len;
+  c->assembled.append(data, len);
+  if (last) {
+    c->lasts++;
+    c->values.push_back(c->assembled);
+  }
+}
+
+void onPlainString(void* ctx, const char* value, size_t len) {
+  static_cast<ChunkContext*>(ctx)->plain.push_back({EventType::STRING, std::string(value, len)});
+}
+
+JsonCallbacks makeChunkCallbacks(ChunkContext* ctx) {
+  JsonCallbacks cbs = {};
+  cbs.ctx = ctx;
+  cbs.onString = onPlainString;  // deliberately set, to prove chunking takes precedence
+  cbs.onStringChunk = onChunk;
+  return cbs;
+}
+
+ChunkContext parseChunked(const std::string& json, size_t feedSize = 0) {
+  ChunkContext ctx;
+  StreamingJsonParser parser(makeChunkCallbacks(&ctx));
+  if (feedSize == 0) {
+    parser.feed(json.data(), json.size());
+  } else {
+    for (size_t i = 0; i < json.size(); i += feedSize) {
+      parser.feed(json.data() + i, std::min(feedSize, json.size() - i));
+    }
+  }
+  return ctx;
+}
+
+}  // namespace
+
+TEST(StreamingJsonParserChunk, LongValueSurvivesInsteadOfBeingDropped) {
+  const std::string longVal(StreamingJsonParser::TOKEN_BUF_SIZE * 3 + 77, 'x');
+  const auto ctx = parseChunked(R"({"long": ")" + longVal + R"("})");
+
+  ASSERT_EQ(ctx.values.size(), 1u);
+  EXPECT_EQ(ctx.values[0], longVal);  // byte-exact, nothing lost at the seams
+  EXPECT_GT(ctx.calls, 1);            // it really was split
+  EXPECT_EQ(ctx.firsts, 1);
+  EXPECT_EQ(ctx.lasts, 1);
+  EXPECT_LE(ctx.maxPiece, StreamingJsonParser::TOKEN_BUF_SIZE - 1);
+  EXPECT_TRUE(ctx.plain.empty()) << "onString must not fire when onStringChunk is set";
+}
+
+TEST(StreamingJsonParserChunk, ShortValueArrivesAsOneFirstAndLastPiece) {
+  const auto ctx = parseChunked(R"({"k": "hello"})");
+
+  ASSERT_EQ(ctx.values.size(), 1u);
+  EXPECT_EQ(ctx.values[0], "hello");
+  EXPECT_EQ(ctx.calls, 1);  // a consumer never needs onString as a fallback
+  EXPECT_EQ(ctx.firsts, 1);
+  EXPECT_EQ(ctx.lasts, 1);
+}
+
+TEST(StreamingJsonParserChunk, EmptyValueStillEmitsExactlyOneTerminalPiece) {
+  const auto ctx = parseChunked(R"({"k": ""})");
+
+  ASSERT_EQ(ctx.values.size(), 1u);
+  EXPECT_EQ(ctx.values[0], "");
+  EXPECT_EQ(ctx.calls, 1);
+  EXPECT_EQ(ctx.lasts, 1);
+}
+
+TEST(StreamingJsonParserChunk, EscapesResolveBeforeChunking) {
+  // The KOReader stats shape: a JSON document embedded in a JSON string. Pieces must come out
+  // unescaped so the result can be re-parsed directly.
+  const std::string inner = R"({"s":300,"lr":9650})";
+  const auto ctx = parseChunked(R"({"dev": "{\"s\":300,\"lr\":9650}"})");
+
+  ASSERT_EQ(ctx.values.size(), 1u);
+  EXPECT_EQ(ctx.values[0], inner);
+}
+
+TEST(StreamingJsonParserChunk, PieceBoundariesAreIndependentOfFeedSplits) {
+  // A value spanning several buffers, fed one byte at a time, must reassemble identically —
+  // the split points of feed() must not leak into the reassembled value.
+  const std::string longVal(StreamingJsonParser::TOKEN_BUF_SIZE * 2 + 5, 'q');
+  const std::string json = R"({"a": ")" + longVal + R"(", "b": "tail"})";
+
+  const auto whole = parseChunked(json);
+  const auto byByte = parseChunked(json, 1);
+  const auto byThree = parseChunked(json, 3);
+
+  ASSERT_EQ(whole.values.size(), 2u);
+  EXPECT_EQ(whole.values[0], longVal);
+  EXPECT_EQ(whole.values[1], "tail");
+  EXPECT_EQ(byByte.values, whole.values);
+  EXPECT_EQ(byThree.values, whole.values);
+}
+
+TEST(StreamingJsonParserChunk, MultipleLongValuesEachGetTheirOwnFirstAndLast) {
+  const std::string a(StreamingJsonParser::TOKEN_BUF_SIZE + 10, 'a');
+  const std::string b(StreamingJsonParser::TOKEN_BUF_SIZE + 20, 'b');
+  const auto ctx = parseChunked(R"({"x": ")" + a + R"(", "y": ")" + b + R"("})");
+
+  ASSERT_EQ(ctx.values.size(), 2u);
+  EXPECT_EQ(ctx.values[0], a);
+  EXPECT_EQ(ctx.values[1], b);
+  EXPECT_EQ(ctx.firsts, 2);
+  EXPECT_EQ(ctx.lasts, 2);
+}
+
+TEST(StreamingJsonParserChunk, LongKeysAreUnaffected) {
+  // Keys keep the truncate-and-drop path: chunking is for values only.
+  const std::string longKey(StreamingJsonParser::TOKEN_BUF_SIZE + 50, 'k');
+  const auto ctx = parseChunked(R"({")" + longKey + R"(": "v"})");
+
+  ASSERT_EQ(ctx.values.size(), 1u);
+  EXPECT_EQ(ctx.values[0], "v");  // the value still arrives
+}

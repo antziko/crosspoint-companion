@@ -19,8 +19,12 @@ class MappedInputManager {
     heldTime_ = 0;
   }
 
-  bool wasReleased(Button button) const { return released_[static_cast<int>(button)]; }
-  bool isPressed(Button button) const { return pressed_[static_cast<int>(button)]; }
+  // applySwap mirrors the real signature (MappedInputManager.h:26-27) so the two-arg
+  // call sites in WordSelectNavigator::handleNavigation compile. It is ignored here:
+  // the swap consults CrossPointSettings, which the host build has no instance of, and
+  // no navigator test depends on the swapped mapping.
+  bool wasReleased(Button button, bool /*applySwap*/ = true) const { return released_[static_cast<int>(button)]; }
+  bool isPressed(Button button, bool /*applySwap*/ = true) const { return pressed_[static_cast<int>(button)]; }
   unsigned long getHeldTime() const { return heldTime_; }
 
  private:

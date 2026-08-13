@@ -127,9 +127,8 @@ void OpdsSettingsActivity::handleSelection() {
         requestUpdate();
       }
     };
-    startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_SERVER_NAME),
-                                                                   editServer.name, 63, InputType::Text),
-                           handler);
+    startActivityForResultNoThrow<KeyboardEntryActivity>(handler, renderer, mappedInput, tr(STR_SERVER_NAME),
+                                                         editServer.name, 63, InputType::Text);
   } else if (selectedIndex == 1) {
     // Server URL
     const std::string prefillUrl = editServer.url.empty() ? "https://" : editServer.url;
@@ -141,9 +140,8 @@ void OpdsSettingsActivity::handleSelection() {
         requestUpdate();
       }
     };
-    startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_OPDS_SERVER_URL),
-                                                                   prefillUrl, 127, InputType::Url),
-                           handler);
+    startActivityForResultNoThrow<KeyboardEntryActivity>(handler, renderer, mappedInput, tr(STR_OPDS_SERVER_URL),
+                                                         prefillUrl, 127, InputType::Url);
   } else if (selectedIndex == 2) {
     // Username
     auto handler = [this](const ActivityResult& result) {
@@ -154,9 +152,8 @@ void OpdsSettingsActivity::handleSelection() {
         requestUpdate();
       }
     };
-    startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_USERNAME),
-                                                                   editServer.username, 63, InputType::Text),
-                           handler);
+    startActivityForResultNoThrow<KeyboardEntryActivity>(handler, renderer, mappedInput, tr(STR_USERNAME),
+                                                         editServer.username, 63, InputType::Text);
   } else if (selectedIndex == 3) {
     // Password
     auto handler = [this](const ActivityResult& result) {
@@ -167,9 +164,8 @@ void OpdsSettingsActivity::handleSelection() {
         requestUpdate();
       }
     };
-    startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_PASSWORD),
-                                                                   editServer.password, 63, InputType::Password),
-                           handler);
+    startActivityForResultNoThrow<KeyboardEntryActivity>(handler, renderer, mappedInput, tr(STR_PASSWORD),
+                                                         editServer.password, 63, InputType::Password);
   } else if (selectedIndex == 4) {
     // Sort A-Z toggle: flip in place and persist.
     editServer.sortAlphabetical = !editServer.sortAlphabetical;
@@ -185,25 +181,25 @@ void OpdsSettingsActivity::handleSelection() {
         requestUpdate();
       }
     };
-    startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_OPDS_EXTRA_QUERY),
-                                                                   editServer.extraQuery, 63, InputType::Text),
-                           handler);
+    startActivityForResultNoThrow<KeyboardEntryActivity>(handler, renderer, mappedInput, tr(STR_OPDS_EXTRA_QUERY),
+                                                         editServer.extraQuery, 63, InputType::Text);
   } else if (selectedIndex == 6 && !isNewServer) {
     // Delete flow is only available for existing servers. Confirm first so a
     // mis-press on this row can't silently destroy a configured server.
     const int idx = serverIndex;
     const std::string& body = editServer.name.empty() ? editServer.url : editServer.name;
-    startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_DELETE_SERVER), body),
-                           [this, idx](const ActivityResult& res) {
-                             if (res.isCancelled) return;
-                             if (!OPDS_STORE.removeServer(static_cast<size_t>(idx))) {
-                               LOG_ERR("OPS", "Failed to remove OPDS server at index %d", idx);
-                               showSaveError = true;
-                               requestUpdate();
-                               return;
-                             }
-                             finish();
-                           });
+    startActivityForResultNoThrow<ConfirmationActivity>(
+        [this, idx](const ActivityResult& res) {
+          if (res.isCancelled) return;
+          if (!OPDS_STORE.removeServer(static_cast<size_t>(idx))) {
+            LOG_ERR("OPS", "Failed to remove OPDS server at index %d", idx);
+            showSaveError = true;
+            requestUpdate();
+            return;
+          }
+          finish();
+        },
+        renderer, mappedInput, tr(STR_DELETE_SERVER), body);
   }
 }
 

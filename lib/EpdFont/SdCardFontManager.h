@@ -49,6 +49,13 @@ class SdCardFontManager {
   // or any additively-loaded extra size). Returns 0 if that size is not resident.
   int getFontIdAtSize(const std::string& familyName, uint8_t pointSize) const;
 
+  // Look up the font ID of the loaded family at the resident size CLOSEST to `pointSize`
+  // (ties resolve to the smaller size, matching SdCardFontFamilyInfo::findNearestSize).
+  // An exact match wins by construction (delta 0), and with only the reader-size font
+  // resident this returns exactly that — same answer getFontId() gives. Returns 0 only
+  // when nothing of that family is loaded.
+  int getFontIdNearestSize(const std::string& familyName, uint8_t pointSize) const;
+
   // Get name of currently loaded family (empty if none).
   const std::string& currentFamilyName() const { return loadedFamilyName_; };
 

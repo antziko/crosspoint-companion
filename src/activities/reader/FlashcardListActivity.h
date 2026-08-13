@@ -28,11 +28,18 @@ class FlashcardListActivity final : public Activity {
 
   void onEnter() override;
   void onExit() override;
+  void onResume() override;
   void loop() override;
   void render(RenderLock&&) override;
 
  private:
   enum class Phase { List, Detail };
+
+  // Clears any session dictionary override (set by long-press Confirm on the definition
+  // screen) when this activity is destroyed, so a switch cannot outlive the screen that
+  // hosted it. RAII rather than a call in onExit(): activities are heap-allocated and
+  // deleted on exit, so the destructor always runs.
+  Dictionary::SessionOverrideScope dictOverrideScope_;
 
   std::string cachePath;
   // Same windowed-paging discipline as LookedUpWordsActivity: only the on-screen

@@ -67,6 +67,63 @@ inline bool utf8IsCjkCodepoint(const uint32_t cp) {
          || (cp >= 0x30000 && cp <= 0x323AF);  // CJK Extensions G-H
 }
 
+// Returns true for CJK punctuation and symbol codepoints — the subset of the CJK blocks
+// that carries no lexical content. Both utf8IsCjkBreakable and utf8IsCjkCodepoint include
+// these ranges (they are break opportunities and need the CJK fallback font), so callers
+// that want CJK *letters* must subtract this set. Deliberately excludes the fullwidth
+// digits (U+FF10-FF19) and fullwidth Latin letters (U+FF21-FF3A, U+FF41-FF5A), which are
+// content.
+inline bool utf8IsCjkPunctuation(const uint32_t cp) {
+  return (cp >= 0x3000 && cp <= 0x303F)      // CJK Symbols and Punctuation 。、「」『』【】〔〕
+         || (cp >= 0xFE10 && cp <= 0xFE1F)   // Vertical Forms
+         || (cp >= 0xFE30 && cp <= 0xFE4F)   // CJK Compatibility Forms (vertical punctuation)
+         || (cp >= 0xFF01 && cp <= 0xFF0F)   // Fullwidth ! " # $ % & ' ( ) * + , - . /
+         || (cp >= 0xFF1A && cp <= 0xFF20)   // Fullwidth : ; < = > ? @
+         || (cp >= 0xFF3B && cp <= 0xFF40)   // Fullwidth [ \ ] ^ _ `
+         || (cp >= 0xFF5B && cp <= 0xFF65);  // Fullwidth { | } ~ and halfwidth punctuation
+}
+
+// First codepoint of a string, or 0 when empty/null. Takes const char* so callers with a
+// raw pool pointer don't materialise a temporary std::string just to read one codepoint.
+// Named with the utf8 prefix because ParsedText.cpp has its own file-local
+// firstCodepoint/lastCodepoint and includes this header — unprefixed names would make its
+// unqualified calls ambiguous.
+inline uint32_t utf8FirstCodepoint(const char* s) {
+  if (!s || !*s) return 0;
+  const auto* ptr = reinterpret_cast<const unsigned char*>(s);
+  return utf8NextCodepoint(&ptr);
+}
+
+// Last codepoint of a string, or 0 when empty. Scans backward over continuation bytes
+// (10xxxxxx) to find the start of the final sequence, then decodes forward from there.
+inline uint32_t utf8LastCodepoint(const std::string& s) {
+  if (s.empty()) return 0;
+  size_t i = s.size() - 1;
+  while (i > 0 && (static_cast<uint8_t>(s[i]) & 0xC0) == 0x80) {
+    --i;
+  }
+  const auto* ptr = reinterpret_cast<const unsigned char*>(s.c_str()) + i;
+  return utf8NextCodepoint(&ptr);
+}
+
+// Whether a separating space belongs between text built so far and the next token, when
+// re-joining words that layout had already split.
+//
+// The problem this solves: CJK is written without spaces, and layout tokenises it one word
+// per character. Joining those tokens with an unconditional " " turns 中国人民 into
+// "中 国 人 民" — which matches no dictionary headword, and which any consumer that splits
+// the string back on spaces (the Reader Options preview) then renders as spaced-out text.
+// Layout itself records the distinction per word as noSpaceBefore (ParsedText.cpp:351-356);
+// this is the rule to apply when that flag is no longer available, and it mirrors layout's
+// own hasCjkBreakOpportunityBetween (ParsedText.cpp:150).
+//
+// Latin text carries no CJK codepoints, so both tests pass and the space is inserted exactly
+// as an unconditional join would have.
+inline bool utf8NeedsSpaceBetween(const std::string& left, const char* right) {
+  if (left.empty() || !right || !*right) return false;
+  return !utf8IsCjkBreakable(utf8LastCodepoint(left)) && !utf8IsCjkBreakable(utf8FirstCodepoint(right));
+}
+
 // Returns true for Unicode combining diacritical marks that should not advance the cursor.
 inline bool utf8IsCombiningMark(const uint32_t cp) {
   return (cp >= 0x0300 && cp <= 0x036F)      // Combining Diacritical Marks

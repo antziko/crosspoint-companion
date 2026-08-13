@@ -21,6 +21,12 @@ class LookedUpWordsActivity final : public Activity {
 
  private:
   std::string cachePath;
+
+  // Clears any session dictionary override (set by long-press Confirm on the definition
+  // screen) when this activity is destroyed, so a switch cannot outlive the screen that
+  // hosted it. RAII rather than a call in onExit(): activities are heap-allocated and
+  // deleted on exit, so the destructor always runs.
+  Dictionary::SessionOverrideScope dictOverrideScope_;
   // History is paged from SD, not materialized: only the on-screen window lives
   // in RAM, so the list is bounded regardless of how large the history grows
   // (the prerequisite that makes the "Unlimited" cap safe). totalCount drives

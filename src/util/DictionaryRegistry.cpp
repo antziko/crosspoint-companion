@@ -2,10 +2,13 @@
 
 #include <HalStorage.h>
 #include <Logging.h>
+#include <Memory.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+
+#include "Dictionary.h"
 
 // Candidate SD card root directories for dictionaries, checked in priority order.
 // The first directory found on the SD card is used; the rest are ignored.
@@ -41,6 +44,11 @@ bool DictionaryRegistry::discover() {
   }
 
   rootDir.rewindDirectory();
+
+  // One 608-byte .ifo scratch for the whole scan, on the heap rather than in this frame
+  // (see the read site below). Freed when discover() returns.
+  auto scratchInfo = makeUniqueNoThrow<DictInfo>();
+  if (!scratchInfo) LOG_ERR("DREG", "OOM: .ifo scratch; dictionary types unavailable");
 
   char name[500];
   for (auto entry = rootDir.openNextFile(); entry; entry = rootDir.openNextFile()) {
@@ -106,8 +114,23 @@ bool DictionaryRegistry::discover() {
       e.name = name;
       e.stem = foundStem;
       e.basePath = root_ + "/" + e.name + "/" + e.stem;
+      // Read the StarDict type now so the long-press switch can partition on it without
+      // touching the SD card from an input path. Costs one extra .ifo open and byte-wise
+      // parse per dictionary, at scan time only — .ifo files are a few hundred bytes and
+      // this loop already opens every subdirectory. Deliberately not lazy: the cycle needs
+      // *every* entry's type to find the next group member, so deferring it would move the
+      // whole scan onto the first long press and stall the UI there instead.
+      //
+      // Through the scratch object rather than by value: DictInfo is 608 bytes and this
+      // function already carries 1500 bytes of name buffers. A null scratch (OOM) just
+      // leaves every dictionary in the non-'m' group, which costs cycling precision and
+      // nothing else.
+      if (scratchInfo && Dictionary::readInfoInto(e.basePath.c_str(), *scratchInfo)) {
+        e.typeIsM = scratchInfo->sametypesequence[0] == 'm';
+      }
+      LOG_DBG("DREG", "Found dictionary: %s/%s (type=%s)", name, foundStem,
+              (scratchInfo && scratchInfo->sametypesequence[0] != '\0') ? scratchInfo->sametypesequence : "?");
       entries_.push_back(std::move(e));
-      LOG_DBG("DREG", "Found dictionary: %s/%s", name, foundStem);
     }
   }
 
@@ -128,6 +151,13 @@ bool DictionaryRegistry::discover() {
   });
 
   return !entries_.empty();
+}
+
+int DictionaryRegistry::nextEntryIndexInGroup(int current) const {
+  return nextIndexInGroup(
+      current, count(),
+      [](const void* ctx, int index) { return static_cast<const DictionaryRegistry*>(ctx)->entries_[index].typeIsM; },
+      this);
 }
 
 int DictionaryRegistry::indexOf(const std::string& basePath) const {

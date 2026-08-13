@@ -2,6 +2,7 @@
 
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
+#include <HalClock.h>
 #include <HalStorage.h>
 #include <I18n.h>
 #include <InflateReader.h>
@@ -9,7 +10,6 @@
 #include <Memory.h>
 #include <SdDebugLog.h>
 #include <WiFi.h>
-#include <HalClock.h>
 #include <esp_heap_caps.h>
 #include <esp_wifi.h>
 
@@ -152,10 +152,16 @@ void KOReaderSyncActivity::onWifiSelectionComplete(const bool success) {
   // the bookmark/progress TLS handshake. This activity never renders book text, and onExit()
   // always reboots, so the cache is rebuilt fresh on the next reader open -- free it here for
   // the handshake, symmetric with the inflate-window release above.
+  //
+  // releaseCache(), not clearCache(): the latter routes to resetStyleMiniData, which KEEPS
+  // the mini arena unless free heap is already under its own 40 KB floor, so it was never a
+  // guaranteed reclaim. That mattered little while a CJK page's prewarm failed outright and
+  // retained nothing; now that prewarmStyle trims to a budget and succeeds, the arena is
+  // resident on exactly the books this path has to survive. releaseCache() frees it outright.
   if (auto* fcm = renderer.getFontCacheManager()) {
     const uint32_t before = ESP.getFreeHeap();
-    fcm->clearCache();
-    LOG_DBG("KOSync", "Cleared font caches for TLS (heap: %u -> %u)", (unsigned)before, (unsigned)ESP.getFreeHeap());
+    fcm->releaseCache();
+    LOG_DBG("KOSync", "Released font caches for TLS (heap: %u -> %u)", (unsigned)before, (unsigned)ESP.getFreeHeap());
   }
 
   {
@@ -1000,8 +1006,8 @@ void KOReaderSyncActivity::onEnter() {
 
   // Launch WiFi selection subactivity
   LOG_DBG("KOSync", "Launching WifiSelectionActivity...");
-  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
-                         [this](const ActivityResult& result) { onWifiSelectionComplete(!result.isCancelled); });
+  startActivityForResultNoThrow<WifiSelectionActivity>(
+      [this](const ActivityResult& result) { onWifiSelectionComplete(!result.isCancelled); }, renderer, mappedInput);
 }
 
 void KOReaderSyncActivity::onExit() {

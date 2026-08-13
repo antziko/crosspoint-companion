@@ -30,3 +30,19 @@ target_link_libraries(InkExtentTest PRIVATE
 )
 
 gtest_discover_tests(InkExtentTest)
+
+add_executable(CodepointFreqTest
+  CodepointFreqTest.cpp
+)
+
+# CodepointFreq is header-only + pure (constexpr bit packing) — no .cpp, no Arduino/HAL link.
+target_include_directories(CodepointFreqTest PRIVATE
+  ${REPO_ROOT}/lib/EpdFont
+)
+
+target_link_libraries(CodepointFreqTest PRIVATE
+  crosspoint_test_common
+  GTest::gtest_main
+)
+
+gtest_discover_tests(CodepointFreqTest)

@@ -198,8 +198,14 @@ int SdCardFontSystem::resolveFontId(const char* familyName, uint8_t pointSize) c
   // callers must get the size they asked for.
   const int exact = manager_.getFontIdAtSize(familyName, pointSize);
   if (exact != 0) return exact;
-  // Not resident at that size: fall back to the reader-size font so text still renders.
-  return manager_.getFontId(familyName);
+  // Not resident at that exact size: the closest resident size instead. A family ships
+  // whatever sizes it was converted at, so the dictionary's 12/14/16/18 slots may match no
+  // file at all — ensureFontSize() then loads the nearest size the family DOES ship, and
+  // this is what hands that font back for the requested size. When only the reader-size
+  // font is resident this returns exactly that, as it always did (and 0 when the family is
+  // not loaded), so the reader path is unaffected: it asks for a size that is resident by
+  // construction and hits the exact match above.
+  return manager_.getFontIdNearestSize(familyName, pointSize);
 }
 
 int SdCardFontSystem::ensureFontSize(const char* familyName, const uint8_t pointSize, GfxRenderer& renderer) {
@@ -214,6 +220,23 @@ int SdCardFontSystem::ensureFontSize(const char* familyName, const uint8_t point
   const auto* family = registry_.findFamily(familyName);
   if (!family) return 0;
 
+  // The dictionary asks in 12/14/16/18 point slots, but a family ships whatever sizes it was
+  // converted at — and the reader's size list is built from those same files, so a family
+  // converted at e.g. 15/20 is perfectly readable and matches no dictionary slot at all.
+  // Requiring an exact file here left every such family rendering definitions at the reader's
+  // size (resolveFontId's fallback), silently. Snap to the nearest size the family DOES ship;
+  // resolveFontId() serves that same font back for the requested size.
+  const SdCardFontFileInfo* file = family->findNearestSize(pointSize);
+  if (!file) {
+    LOG_DBG("SDFS", "%s ships no regular-style font files", familyName);
+    return 0;
+  }
+  const uint8_t loadSize = file->pointSize;
+  // The snapped size can already be resident — a CJK UI fallback size (8/10/12), or the
+  // reader's own size when the family ships nothing closer to what was asked for. Free.
+  const int snapped = manager_.getFontIdAtSize(familyName, loadSize);
+  if (snapped != 0) return snapped;
+
   // A second .cpfont costs its own resident interval / glyph-metadata tables on top of
   // the reader's (plus kern classes once something prewarms it), and this runs with the
   // reader activity still in memory. Decline rather than starve the render that follows;
@@ -221,17 +244,17 @@ int SdCardFontSystem::ensureFontSize(const char* familyName, const uint8_t point
   constexpr size_t kMinFreeForExtraSize = 28 * 1024;
   const uint32_t freeBefore = ESP.getFreeHeap();
   if (freeBefore < kMinFreeForExtraSize) {
-    LOG_DBG("SDFS", "Skipping %upt load of %s: free=%u", pointSize, familyName, (unsigned)freeBefore);
+    LOG_DBG("SDFS", "Skipping %upt load of %s: free=%u", loadSize, familyName, (unsigned)freeBefore);
     return 0;
   }
 
-  const int id = manager_.loadFamilyExtraSize(*family, renderer, pointSize);
+  const int id = manager_.loadFamilyExtraSize(*family, renderer, loadSize);
   if (id == 0) {
-    LOG_DBG("SDFS", "%s has no %upt file", familyName, pointSize);
+    LOG_DBG("SDFS", "%s failed to load at %upt", familyName, loadSize);
     return 0;
   }
-  LOG_DBG("SDFS", "Loaded %s at %upt for the dictionary: free %u -> %u", familyName, pointSize, (unsigned)freeBefore,
-          (unsigned)ESP.getFreeHeap());
+  LOG_DBG("SDFS", "Loaded %s at %upt (asked %upt) for the dictionary: free %u -> %u", familyName, loadSize, pointSize,
+          (unsigned)freeBefore, (unsigned)ESP.getFreeHeap());
   return id;
 }
 

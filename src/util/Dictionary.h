@@ -68,6 +68,36 @@ class Dictionary {
   // Pass empty string to clear the global dictionary.
   static void saveGlobalDictPath(const char* folderPath);
 
+  // --- Session override -----------------------------------------------------
+  // A dictionary chosen for the current reading session only. Nothing is written
+  // to the SD card, and the configured per-book / global selection is untouched:
+  // readDictPath() keeps reporting what dictionary.bin says, so the settings
+  // picker and the reader menu still show (and save) the real selection.
+  //
+  // THREADING: the lookup itself runs on DictLookupTask, a separate FreeRTOS task.
+  // setSessionDictPath must only be called from the UI task while no lookup is in
+  // flight (DictionaryLookupController::isActive() == false). The xTaskCreate inside
+  // startLookup() is then the barrier that publishes the new path to the lookup task.
+  // That invariant is what lets this be a plain char[] instead of a mutex — do not
+  // call the setter from anywhere that can race a running lookup.
+  static void setSessionDictPath(const char* folderPath);
+
+  // The session override if one is set, otherwise the configured path for cachePath.
+  // This is what every lookup resolves through; readDictPath() is the configured value.
+  static std::string activeDictPath(const char* cachePath = nullptr);
+
+  // RAII clear for the session override. Held as a member by every activity that can
+  // host the lookup flow, so the override cannot outlive the screen that set it —
+  // activities are heap-allocated and deleted on exit (main.cpp:132-143), so the
+  // destructor is guaranteed to run. Preferred over a bare setSessionDictPath("") in
+  // each onExit(), which a future host would eventually forget.
+  struct SessionOverrideScope {
+    SessionOverrideScope() = default;
+    ~SessionOverrideScope() { setSessionDictPath(""); }
+    SessionOverrideScope(const SessionOverrideScope&) = delete;
+    SessionOverrideScope& operator=(const SessionOverrideScope&) = delete;
+  };
+
   // Returns true if a dictionary is configured and all required files exist.
   static bool exists(const char* cachePath = nullptr);
 
@@ -79,8 +109,16 @@ class Dictionary {
   // If the path is missing or the required files are gone, clears the file. Returns true if valid.
   static bool isValidDictionary();
 
-  // Parse the .ifo file in folderPath and return metadata.
+  // Parse the .ifo file in folderPath into `info`, returning info.valid. Resets `info`
+  // first, so one scratch object can be reused across several dictionaries.
   // Also checks for .syn and .dict.dz presence.
+  //
+  // Prefer this over readInfo() wherever the result would land on the stack: DictInfo is
+  // 608 bytes, well past the 256-byte budget CLAUDE.md sets for locals.
+  static bool readInfoInto(const char* folderPath, DictInfo& info);
+
+  // By-value form, for callers that want a throwaway. Note the 608 bytes land in the
+  // caller's frame — see readInfoInto above.
   static DictInfo readInfo(const char* folderPath);
 
   // Search .idx for word (via .idx.oft if present). Returns file location without reading content.
@@ -111,6 +149,11 @@ class Dictionary {
   // Shared word read buffer. Lookup functions are single-threaded; this avoids
   // putting a 256-byte array on the stack in every caller (and 512B peak when nested).
   static char wordBuf[256];
+
+  // Session override path; empty means "no override". Fixed array rather than a
+  // std::string so it costs no heap and no global constructor. 128 matches the
+  // char binPath[128] that readDictPath already assumes for dictionary paths.
+  static char sessionPath[128];
 
   // Read a null-terminated word from an open file into buf (max bufSize-1 chars).
   // Returns the number of characters read (excluding null), or -1 on error.
