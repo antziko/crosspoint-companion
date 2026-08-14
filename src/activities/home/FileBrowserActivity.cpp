@@ -47,7 +47,7 @@ bool FileBrowserActivity::accepts(const char* name, bool isDir) const {
   std::string_view fn{name};
   if (mode == Mode::PickFirmware) return FsHelpers::checkFileExtension(fn, ".bin");
   return FsHelpers::hasEpubExtension(fn) || FsHelpers::hasXtcExtension(fn) || FsHelpers::hasTxtExtension(fn) ||
-         FsHelpers::hasMarkdownExtension(fn) || FsHelpers::hasBmpExtension(fn);
+         FsHelpers::hasMarkdownExtension(fn) || FsHelpers::hasBmpExtension(fn) || FsHelpers::hasPngExtension(fn);
 }
 
 // Rows that fit one screen. Must mirror render()'s content rect exactly so drawList's

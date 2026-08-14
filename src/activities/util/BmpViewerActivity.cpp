@@ -2,6 +2,7 @@
 
 #include <Bitmap.h>
 #include <BitmapRenderUtils.h>
+#include <Epub/converters/PngToFramebufferConverter.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
@@ -44,7 +45,7 @@ void BmpViewerActivity::computeSiblings() {
     return;
   }
 
-  // One pass: track the largest .bmp name strictly before the current file and the
+  // One pass: track the largest image name strictly before the current file and the
   // smallest strictly after it. Bounded RAM (two strings) for any folder size.
   char name[500];
   size_t scanned = 0;
@@ -53,7 +54,8 @@ void BmpViewerActivity::computeSiblings() {
       file.getName(name, sizeof(name));
       if (name[0] != '.') {
         const std::string fname(name);
-        if (fname.length() >= 4 && fname.substr(fname.length() - 4) == ".bmp" && fname != fileName) {
+        const bool isImage = FsHelpers::hasBmpExtension(fname) || FsHelpers::hasPngExtension(fname);
+        if (isImage && fname != fileName) {
           if (bmpNameLess(fname, fileName)) {
             if (prevName.empty() || bmpNameLess(prevName, fname)) prevName = fname;  // largest below
           } else if (bmpNameLess(fileName, fname)) {
@@ -82,6 +84,39 @@ void BmpViewerActivity::onEnter() {
 // to white before this runs, so re-decode and redraw the current bitmap.
 void BmpViewerActivity::render(RenderLock&&) { renderImage(); }
 
+bool BmpViewerActivity::canSetSleepCover() const { return FsHelpers::hasBmpExtension(filePath); }
+
+bool BmpViewerActivity::renderPngImage(const int pageWidth, const int pageHeight) {
+  ImageDimensions dims{};
+  if (!PngToFramebufferConverter::getDimensionsStatic(filePath, dims)) return false;
+  if (dims.width <= 0 || dims.height <= 0) return false;
+
+  // Fit inside the screen, never upscale: a small PNG stays its own size rather than
+  // being blown up and re-dithered.
+  const float fit =
+      std::min({static_cast<float>(pageWidth) / dims.width, static_cast<float>(pageHeight) / dims.height, 1.0f});
+  const int width = std::min(pageWidth, static_cast<int>(dims.width * fit));
+  const int height = std::min(pageHeight, static_cast<int>(dims.height * fit));
+  if (width <= 0 || height <= 0) return false;
+
+  RenderConfig config;
+  config.x = (pageWidth - width) / 2;
+  config.y = (pageHeight - height) / 2;
+  config.maxWidth = width;
+  config.maxHeight = height;
+  // Always dither to a 1-bit halftone here. DirectPixelWriter latches the render mode at
+  // init, so one decodeToFramebuffer() call fills exactly one plane; 4-level grayscale
+  // would need a decode per plane (BW/LSB/MSB) like BitmapRenderUtils does for BMP, and a
+  // PNG decode is far too slow to run three times. A halftone carries full tonal detail in
+  // the single BW pass instead of dropping the grays and rendering dark.
+  config.oneBitDither = true;
+  config.ditherBlueNoise = renderer.imageDitherBlueNoise();  // Display > Image Dither
+  config.useExactDimensions = true;                          // dimensions already fitted above
+
+  PngToFramebufferConverter converter;
+  return converter.decodeToFramebuffer(filePath, renderer, config);
+}
+
 void BmpViewerActivity::renderImage() {
   HalFile file;
 
@@ -91,6 +126,36 @@ void BmpViewerActivity::renderImage() {
   // ~637ms FAST e-ink refresh, and the bar only covered the fast header-parse (the
   // slow part is the image refresh chain below, which it never tracked).
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+
+  // PNG goes through the shared converter rather than Bitmap. Handled before the open
+  // below so a .png never reaches the BMP header parser.
+  if (FsHelpers::hasPngExtension(filePath)) {
+    const bool hasPrevious = !prevName.empty();
+    const bool hasNext = !nextName.empty();
+    // A PNG can never become the cover (see canSetSleepCover), but an existing cover can
+    // still be cleared from here, so the Confirm slot stays useful.
+    coverExists = Storage.exists("/sleep.bmp");
+    const char* confirmLabel = coverExists ? tr(STR_CLEAR_BUTTON) : "";
+
+    // Wipe ghosting with the same single mild HALF refresh the BMP path uses.
+    renderer.clearScreen();
+    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+
+    renderer.clearScreen();
+    if (renderPngImage(pageWidth, pageHeight)) {
+      const auto labels =
+          mappedInput.mapLabels(tr(STR_BACK), confirmLabel, (hasPrevious ? "<" : ""), (hasNext ? ">" : ""));
+      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+      renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    } else {
+      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_FILE_OPEN_FAILED));
+      const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+      renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    }
+    return;
+  }
+
   // 1. Open the file
   if (Storage.openFileForRead("BMP", filePath, file)) {
     Bitmap bitmap(file, true);
@@ -227,7 +292,7 @@ void BmpViewerActivity::loop() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     if (coverExists) {
       doClearSleepCover();
-    } else {
+    } else if (canSetSleepCover()) {
       doSetSleepCover();
     }
     return;

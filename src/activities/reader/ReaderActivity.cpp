@@ -60,7 +60,9 @@ bool ReaderActivity::isTxtFile(const std::string& path) {
          FsHelpers::hasMarkdownExtension(path);  // Treat .md as txt files (until we have a markdown reader)
 }
 
-bool ReaderActivity::isBmpFile(const std::string& path) { return FsHelpers::hasBmpExtension(path); }
+bool ReaderActivity::isImageFile(const std::string& path) {
+  return FsHelpers::hasBmpExtension(path) || FsHelpers::hasPngExtension(path);
+}
 
 int ReaderActivity::initialRefreshCountdown() const {
   // Surgical first-paint scrub: only entries that land the reader over a
@@ -215,7 +217,7 @@ void ReaderActivity::onEnter() {
   sdFontSystem.ensureLoaded(renderer);
 
   currentBookPath = initialBookPath;
-  if (isBmpFile(initialBookPath)) {
+  if (isImageFile(initialBookPath)) {
     onGoToBmpViewer(initialBookPath);
   } else if (isXtcFile(initialBookPath)) {
     auto xtc = loadXtc(initialBookPath);

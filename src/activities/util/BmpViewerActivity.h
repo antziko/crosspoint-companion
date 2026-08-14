@@ -20,12 +20,18 @@ class BmpViewerActivity final : public Activity {
   void render(RenderLock&&) override;
 
  private:
-  // Find the immediate previous/next sibling .bmp of the current file by a single
-  // bounded directory scan (largest name < current, smallest name > current). Holds O(1)
-  // RAM regardless of how many images the folder has — a folder of thousands of sleep
+  // Find the immediate previous/next sibling image (.bmp or .png) of the current file by a
+  // single bounded directory scan (largest name < current, smallest name > current). Holds
+  // O(1) RAM regardless of how many images the folder has — a folder of thousands of sleep
   // BMPs would OOM-abort if every name were materialised into a vector.
   void computeSiblings();
   void renderImage();
+  // Decode and draw the current file through the PNG converter. Returns false when the
+  // file cannot be read or has unusable dimensions; the caller then shows the error page.
+  bool renderPngImage(int pageWidth, int pageHeight);
+  // Only a BMP can become the sleep cover: SleepActivity reads /sleep.bmp exclusively, so
+  // offering "Set Cover" for a PNG would write a file it never looks at.
+  bool canSetSleepCover() const;
   void doSetSleepCover();
   void doClearSleepCover();
 
