@@ -1193,9 +1193,14 @@ void OpdsBookBrowserActivity::onWifiSelectionComplete(const bool connected) {
     requestUpdate(true);
     fetchFeed(currentPath);
   } else {
+    // "Not connected", not "connection failed". Since 0bf4d8d8 the picker reports the
+    // radio's postcondition rather than which button closed it, so arriving here means
+    // one thing — there is no usable connection — and it covers both a failed attempt
+    // and a user who declined to make one. Calling a deliberate Cancel a failure named
+    // a fault that did not occur.
     // Leave WiFi up; onExit's silent reboot handles teardown without fragmenting.
     state = BrowserState::ERROR;
-    errorMessage = tr(STR_WIFI_CONN_FAILED);
+    errorMessage = tr(STR_WIFI_NOT_CONNECTED);
     requestUpdate();
   }
 }
