@@ -166,7 +166,11 @@ void BaseTheme::drawHintLabel(GfxRenderer& renderer, const int fontId, const cha
   const int step = renderer.getTextHeight(fontId) + lineGap;
   const auto lines = renderer.wrappedText(fontId, label, maxTextWidth, 2);
   const int block = static_cast<int>(lines.size()) * step - lineGap;
-  int lineY = boxTop + std::max(1, (boxHeight - block) / 2);
+  // wrappedText breaks only at spaces, so a single over-wide word (Lyra gives a hint
+  // just 72px of text room) comes back as ONE ellipsised line. Centring that in the box
+  // would drop it several pixels below every neighbouring label that took the fast path
+  // above — so a one-line result shares their baseline whichever branch produced it.
+  int lineY = lines.size() == 1 ? boxTop + singleLineYOffset : boxTop + std::max(1, (boxHeight - block) / 2);
   for (const auto& line : lines) {
     const int lineWidth = renderer.getTextWidth(fontId, line.c_str());
     renderer.drawText(fontId, x + (boxWidth - 1 - lineWidth) / 2, lineY, line.c_str());
