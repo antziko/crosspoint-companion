@@ -230,6 +230,28 @@ TEST_F(DictLookupSession, StaleCsptFallsBackToOftNotAFullScan) {
   EXPECT_EQ(opens(), 0);
 }
 
+TEST_F(DictLookupSession, StaleCsptMissStillResolvesEveryWord) {
+  // The miss path widens the scan window using a page index. With a stale .cspt it must
+  // widen against the .oft fallback, not against the sidecar already known to be bad —
+  // widening off garbage page starts sends the retry to the wrong region of the .idx.
+  // Every headword must still be findable, including across the whole file.
+  installDictionary("english-full", kDictDir, kDictBase);
+  const fs::path cspt = root_ / "dictionaries/english-full/english-full.idx.oft.cspt";
+  {
+    std::fstream f(cspt, std::ios::in | std::ios::out | std::ios::binary);
+    ASSERT_TRUE(f.is_open());
+    f.seekp(0);
+    f.write("XXXX", 4);
+  }
+
+  Dictionary::LookupCtx ctx;
+  ASSERT_TRUE(Dictionary::openLookupCtx(ctx));
+  for (const char* w : {"above-mentioned", "apple", "grove", "point", "willow", "zenith"}) {
+    EXPECT_TRUE(Dictionary::locateIn(ctx, w).found) << w;
+  }
+  EXPECT_FALSE(Dictionary::locateIn(ctx, "notaword").found);
+}
+
 TEST_F(DictLookupSession, ReopeningACtxAgainstAnotherDictionaryDoesNotLeakState) {
   // Reopening a ctx must fully reset it. The lazily-opened .oft fallback is the dangerous
   // one: left set, the second dictionary's probes would resolve their scan bounds against

@@ -661,7 +661,10 @@ bool Dictionary::openLookupCtx(LookupCtx& ctx, const char* cachePath) {
   const std::string folder = activeDictPath(cachePath);
   if (folder.empty()) return false;
   if (!buildPath(ctx.base, sizeof(ctx.base), folder.c_str(), "")) {
+    // snprintf still wrote a truncated path; blank it so callers never see a partial one.
+    // 128 is the same ceiling setSessionDictPath and readDictPath already impose.
     LOG_ERR("DICT", "Dictionary path too long: %s", folder.c_str());
+    ctx.base[0] = '\0';
     return false;
   }
 
@@ -762,7 +765,13 @@ DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const
     // scan this exact region through findSimilar anyway.
     uint32_t wideStart = 0;
     uint32_t wideEnd = idxFileSize;
-    if (ctx.hasPageIndex) {
+    // Prefer the .oft fallback when one is open: it exists only because the .cspt search
+    // already failed, and widening against a sidecar known to be bad reads garbage page
+    // starts. (The old path-based widenScanBounds always reopened the .cspt and did exactly
+    // that; holding both handles is what makes the better choice free.)
+    if (ctx.hasOftFallback) {
+      widenScanBoundsIn(ctx.oftFallback, /*isCspt=*/false, idxFileSize, startByte, &wideStart, &wideEnd);
+    } else if (ctx.hasPageIndex) {
       widenScanBoundsIn(ctx.pageIndex, ctx.pageIndexIsCspt, idxFileSize, startByte, &wideStart, &wideEnd);
     }
 
