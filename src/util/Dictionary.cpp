@@ -631,25 +631,6 @@ void Dictionary::findPageBounds(HalFile& oft, HalFile& src, uint32_t srcFileSize
 }
 
 // ---------------------------------------------------------------------------
-// Reading helpers
-// ---------------------------------------------------------------------------
-
-std::string Dictionary::readDefinition(const std::string& folderPath, uint32_t offset, uint32_t size) {
-  HalFile dict;
-  if (!Storage.openFileForRead("DICT", DictPaths(folderPath).dict().c_str(), dict)) return "";
-
-  dict.seekSet(offset);
-
-  std::string def(size, '\0');
-  int bytesRead = dict.read(reinterpret_cast<uint8_t*>(&def[0]), size);
-  dict.close();
-
-  if (bytesRead < 0) return "";
-  if (static_cast<uint32_t>(bytesRead) < size) def.resize(bytesRead);
-  return def;
-}
-
-// ---------------------------------------------------------------------------
 // Locate (index search only — no definition read, zero RAM growth)
 // ---------------------------------------------------------------------------
 
@@ -812,16 +793,6 @@ DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const
 
   if (cbs.onProgress) cbs.onProgress(cbs.ctx, 100);
   return result;
-}
-
-// ---------------------------------------------------------------------------
-// Lookup (convenience wrapper — locate + read into string)
-// ---------------------------------------------------------------------------
-
-std::string Dictionary::lookup(const std::string& word, const DictLookupCallbacks& cbs, const char* cachePath) {
-  auto loc = locate(word, cbs, cachePath);
-  if (!loc.found) return "";
-  return readDefinition(loc.folderPath, loc.offset, loc.size);
 }
 
 // ---------------------------------------------------------------------------

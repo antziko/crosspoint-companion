@@ -184,9 +184,10 @@ class Dictionary {
   static DictLocation locate(const std::string& word, const DictLookupCallbacks& cbs = {},
                              const char* cachePath = nullptr);
 
-  // Look up word in .idx (via .idx.oft if present). Returns definition or empty string.
-  static std::string lookup(const std::string& word, const DictLookupCallbacks& cbs = {},
-                            const char* cachePath = nullptr);
+  // NOTE: there is deliberately no lookup()-returns-the-definition entry point. Definitions
+  // are streamed from .dict in 512-byte chunks (DictHtmlRenderer::renderFromFileStreaming),
+  // never materialised in RAM — a definition can be tens of KB and this heap cannot take it.
+  // Callers locate() first, then stream from the returned offset/size.
 
   // Look up word in .syn (via .syn.oft if present).
   // Returns the canonical headword from .idx, or empty string if not found.
@@ -230,8 +231,6 @@ class Dictionary {
   // Read the word at ordinal `ordinal` in .idx.
   // folderPath is the dictionary base path (e.g. /dictionary/dict-en-en/dict-data).
   static std::string wordAtOrdinal(const std::string& folderPath, uint32_t ordinal);
-
-  static std::string readDefinition(const std::string& folderPath, uint32_t offset, uint32_t size);
 
   // Binary search .oft to find the page boundary bytes in src containing target.
   // On return, *startByte and *endByte delimit the 32-word page to scan linearly.
