@@ -4,6 +4,7 @@
 #include <HalDisplay.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -23,7 +24,23 @@ DictionaryLookupController::DictionaryLookupController(GfxRenderer& renderer, Ma
 
 DictionaryLookupController::~DictionaryLookupController() = default;
 
+// One SD line at every terminal exit of a lookup. Until now nothing in this controller was
+// timed at all, so "the dictionary feels slower" was unanswerable from a device dump: every
+// duration in the log came from DictionaryDefinitionActivity, and those are font and e-ink
+// panel time (display alone is ~3.2s on open, ~438ms per page). Reading DICT: lookup beside
+// DDA: render separates index cost from panel cost instead of leaving it to inference.
+//
+// To SD rather than serial-only because the sessions worth diagnosing are untethered. One
+// line per lookup is the same order of traffic as the DDA: prewarm / wrap / render lines
+// already written per definition open.
+void DictionaryLookupController::logLookupOutcome(const char* outcome) const {
+  SdDebugLog::log("DICT", "lookup '%s' %s %lums free=%u largest=%u", lookupWord.c_str(), outcome,
+                  static_cast<unsigned long>(millis() - lookupStartMs_), static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+}
+
 void DictionaryLookupController::startLookup(const std::string& word, bool recordHistory) {
+  lookupStartMs_ = millis();
   lookupWord = word;
   foundWord.clear();
   foundLocation = DictLocation{};
@@ -88,6 +105,7 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
 
       if (lookupCancelled) {
         nextIsSuggestion = false;
+        logLookupOutcome("cancelled");
         return LookupEvent::Cancelled;
       }
 
@@ -95,6 +113,7 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
         foundWord = lookupWord;
         foundStatus = nextIsSuggestion ? FoundStatus::Suggestion : FoundStatus::Direct;
         nextIsSuggestion = false;
+        logLookupOutcome("direct");
         return LookupEvent::FoundDefinition;
       }
 
@@ -105,6 +124,7 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
         notFoundMsg_ = foundLocation.status == LookupStatus::NoDictionary ? StrId::STR_DICT_NO_DICT_SET
                                                                           : StrId::STR_DICT_UNREADABLE;
         nextIsSuggestion = false;
+        logLookupOutcome(foundLocation.status == LookupStatus::NoDictionary ? "nodict" : "unreadable");
         setNotFound();
         return LookupEvent::None;
       }
@@ -124,6 +144,7 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
               foundLocation = std::move(loc);
               foundStatus = nextIsSuggestion ? FoundStatus::Suggestion : FoundStatus::Stem;
               nextIsSuggestion = false;
+              logLookupOutcome("stem");
               return LookupEvent::FoundDefinition;
             }
           }
@@ -134,6 +155,9 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
       if (Dictionary::hasAltForms(cachePath.c_str())) {
         altFormWord = lookupWord;
         state = LookupState::AltFormPrompt;
+        // The machine search stops here and waits for the user. Log what it cost so far;
+        // the resume below re-stamps the clock so the user's think-time is never counted.
+        logLookupOutcome("altprompt");
         owner.requestUpdate();
         return LookupEvent::None;
       }
@@ -153,6 +177,9 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
   if (state == LookupState::AltFormPrompt) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       state = LookupState::Idle;
+      // Restart the clock: everything between "altprompt" and here was the user deciding,
+      // and folding that into a duration would make the number useless for diagnosing speed.
+      lookupStartMs_ = millis();
       std::string canonical = Dictionary::resolveAltForm(altFormWord, cachePath.c_str());
       if (!canonical.empty()) {
         auto loc = Dictionary::locate(canonical, {}, cachePath.c_str());
@@ -161,6 +188,7 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
           foundLocation = std::move(loc);
           foundStatus = nextIsSuggestion ? FoundStatus::Suggestion : FoundStatus::AltForm;
           nextIsSuggestion = false;
+          logLookupOutcome("altform");
           return LookupEvent::FoundDefinition;
         }
       }
@@ -280,6 +308,11 @@ void DictionaryLookupController::showNoWordPopup() {
 
 void DictionaryLookupController::handleLookupFailed() {
   auto similar = Dictionary::findSimilar(lookupWord, 6, cachePath.c_str());
+  // Logged after findSimilar, not before: its PAGE_RADIUS sweep is part of what a miss
+  // costs, and a miss is the expensive case — it is the only one that runs the widened
+  // retry in locateIn AND this sweep. If dictionary lookups ever get slower, this is the
+  // line that will show it.
+  logLookupOutcome(similar.empty() ? "miss" : "miss+sug");
   if (!similar.empty()) {
     auto sugActivity = makeUniqueNoThrow<DictionarySuggestionsActivity>(renderer, mappedInput, std::move(similar));
     if (!sugActivity) {

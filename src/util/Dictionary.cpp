@@ -782,6 +782,14 @@ DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const
     }
 
     if (wideStart < startByte || wideEnd > endByte) {
+      // Every byte of this window is read on a miss, so its size IS the cost of the retry.
+      // Reported whether or not it hits: a wide scan that finds nothing is silent otherwise,
+      // and that silent case is the one that would make lookups feel slower.
+      //
+      // Bytes rather than milliseconds: no millis() on the host, where this file is compiled
+      // by the dict-lookup-session suite, and the controller's "miss" line already times the
+      // whole miss. The window size is the cost driver and is deterministic per dictionary.
+      const uint32_t wideBytes = wideEnd - wideStart;
       idx.seekSet(wideStart);
       while (static_cast<uint32_t>(idx.position()) < wideEnd) {
         if (cbs.shouldCancel && cbs.shouldCancel(cbs.ctx)) break;
@@ -799,9 +807,12 @@ DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const
         result.status = LookupStatus::Found;
         // Logged to SD because it is the signal that a dictionary's sort order disagrees with
         // cistrcmp: a hit here is one the single-page scan should have found and did not.
-        SdDebugLog::log("DICT", "locate: widened scan hit, page window %u-%u vs %u-%u", (unsigned)wideStart,
-                        (unsigned)wideEnd, (unsigned)startByte, (unsigned)endByte);
+        SdDebugLog::log("DICT", "locate: widened scan hit, page window %u-%u vs %u-%u, %uB", (unsigned)wideStart,
+                        (unsigned)wideEnd, (unsigned)startByte, (unsigned)endByte, (unsigned)wideBytes);
         break;
+      }
+      if (!result.found) {
+        SdDebugLog::log("DICT", "locate: widened scan miss, %uB", (unsigned)wideBytes);
       }
     }
   }

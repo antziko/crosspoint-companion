@@ -128,6 +128,12 @@ class DictionaryLookupController {
 
   std::unique_ptr<DictLookupTask> task;
 
+  // millis() at the start of the current *machine* search, for logLookupOutcome below.
+  // Re-stamped when a user prompt resumes the search so no logged duration ever contains
+  // the user's think-time — see the alt-form resume in handleInput().
+  uint32_t lookupStartMs_ = 0;
+  void logLookupOutcome(const char* outcome) const;
+
   void runLookup();
   void handleLookupFailed();
   void showMemoryErrorAndReset();

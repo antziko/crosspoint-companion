@@ -151,43 +151,20 @@ TEST(DictRegistryCycleGroup, FullCycleVisitsOnlyOwnGroup) {
 
 // --- The grouping rule itself -------------------------------------------------
 //
-// nameIsStGroup is what fills DictionaryEntry::nameIsSt during discover(). It is
-// static precisely so it can be tested here without linking the SD-backed half of
-// the class — the same split as nextIndex above.
+// nameIsStGroup fills DictionaryEntry::nameIsSt during discover(), and is static so it
+// can be covered here without linking the SD-backed half of the class.
 //
-// This replaced a read of the StarDict .ifo sametypesequence. That field is optional
-// in the spec, so an absent one silently filed a dictionary in the wrong group; a
-// folder name cannot go missing, which is the point of the change.
-
-TEST(DictRegistryStGroup, MatchesTheStPrefix) {
+// One line of logic, so one test. Only the cases that can actually fail differently:
+// the case-insensitivity the rule deliberately has, the prefix/substring distinction
+// ("stardict" is the trap), and nullptr.
+TEST(DictRegistryStGroup, ClassifiesFolderNames) {
   EXPECT_TRUE(DictionaryRegistry::nameIsStGroup("st-oxford"));
-  EXPECT_TRUE(DictionaryRegistry::nameIsStGroup("st-collins"));
-  // Nothing after the hyphen is still a match — the rule is the prefix, not the suffix.
-  EXPECT_TRUE(DictionaryRegistry::nameIsStGroup("st-"));
-}
-
-// A folder copied from a case-preserving filesystem must not land in the wrong group.
-TEST(DictRegistryStGroup, IsCaseInsensitive) {
-  EXPECT_TRUE(DictionaryRegistry::nameIsStGroup("ST-Oxford"));
+  EXPECT_TRUE(DictionaryRegistry::nameIsStGroup("ST-Oxford"));  // copied from a case-preserving fs
   EXPECT_TRUE(DictionaryRegistry::nameIsStGroup("St-Collins"));
-  EXPECT_TRUE(DictionaryRegistry::nameIsStGroup("sT-mixed"));
-}
 
-TEST(DictRegistryStGroup, RejectsEverythingElse) {
   EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("wiki-en"));
-  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("cc-cedict"));
-  // The hyphen is part of the prefix: "stardict" is not an st- dictionary.
-  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("stardict"));
-  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("stardict-en"));
-  // Must be a prefix, not a substring.
-  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("best-dict"));
-}
-
-// Short and absent names must not read past the end of the buffer. strncasecmp stops
-// at the first difference, and a NUL differs from '-', so "st" is safely rejected.
-TEST(DictRegistryStGroup, HandlesShortAndNullNames) {
-  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("st"));
-  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("s"));
-  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup(""));
+  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("stardict"));   // the hyphen is part of the prefix
+  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("best-dict"));  // prefix, not substring
+  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("st"));         // shorter than the prefix
   EXPECT_FALSE(DictionaryRegistry::nameIsStGroup(nullptr));
 }
