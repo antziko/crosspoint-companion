@@ -54,9 +54,9 @@ TEST(DictRegistryCycle, FullCycleReturnsToStart) {
 // --- Group-partitioned cycling ------------------------------------------------
 //
 // nextIndexInGroup keeps the long-press switch inside one family of dictionaries:
-// a type-'m' dictionary only ever cycles to another type-'m' one, and a non-'m'
-// only to another non-'m'. The group flag is DictionaryEntry::typeIsM, derived
-// from the StarDict sametypesequence at discovery time.
+// an "st-" dictionary only ever cycles to another "st-" one, and a non-"st-" only
+// to another non-"st-". The group flag is DictionaryEntry::nameIsSt, derived from
+// the folder name at discovery time (see nameIsStGroup, covered further down).
 //
 // The production caller reads that flag off entries_; here it comes from a plain
 // array through the same accessor, so these exercise the shipped scan rather than
@@ -66,32 +66,32 @@ namespace {
 // Captureless, so it converts to the plain function pointer nextIndexInGroup takes.
 bool groupFromArray(const void* ctx, int index) { return static_cast<const bool*>(ctx)[index]; }
 
-int nextInGroup(int current, const bool* isM, int count) {
-  return DictionaryRegistry::nextIndexInGroup(current, count, groupFromArray, isM);
+int nextInGroup(int current, const bool* isSt, int count) {
+  return DictionaryRegistry::nextIndexInGroup(current, count, groupFromArray, isSt);
 }
 }  // namespace
 
-// Interleaved m / non-m: each group skips over the other's members.
+// Interleaved st- / non-st-: each group skips over the other's members.
 TEST(DictRegistryCycleGroup, SkipsTheOtherGroup) {
-  //                    0     1      2     3
-  const bool isM[] = {true, false, true, false};
-  // m group is {0, 2}
-  EXPECT_EQ(nextInGroup(0, isM, 4), 2);
-  EXPECT_EQ(nextInGroup(2, isM, 4), 0);
-  // non-m group is {1, 3}
-  EXPECT_EQ(nextInGroup(1, isM, 4), 3);
-  EXPECT_EQ(nextInGroup(3, isM, 4), 1);
+  //                     0     1      2     3
+  const bool isSt[] = {true, false, true, false};
+  // st- group is {0, 2}
+  EXPECT_EQ(nextInGroup(0, isSt, 4), 2);
+  EXPECT_EQ(nextInGroup(2, isSt, 4), 0);
+  // non-st- group is {1, 3}
+  EXPECT_EQ(nextInGroup(1, isSt, 4), 3);
+  EXPECT_EQ(nextInGroup(3, isSt, 4), 1);
 }
 
 // Groups need not be the same size, and the scan wraps past the end of the list.
 TEST(DictRegistryCycleGroup, WrapsWithUnevenGroups) {
-  //                    0      1      2     3      4
-  const bool isM[] = {false, false, true, false, false};
-  // Sole m entry has nobody to cycle to.
-  EXPECT_EQ(nextInGroup(2, isM, 5), -1);
-  // non-m group is {0, 1, 3, 4} and skips index 2.
-  EXPECT_EQ(nextInGroup(1, isM, 5), 3);
-  EXPECT_EQ(nextInGroup(4, isM, 5), 0);  // wraps
+  //                      0      1      2     3      4
+  const bool isSt[] = {false, false, true, false, false};
+  // Sole st- entry has nobody to cycle to.
+  EXPECT_EQ(nextInGroup(2, isSt, 5), -1);
+  // non-st- group is {0, 1, 3, 4} and skips index 2.
+  EXPECT_EQ(nextInGroup(1, isSt, 5), 3);
+  EXPECT_EQ(nextInGroup(4, isSt, 5), 0);  // wraps
 }
 
 // The whole point of the change: a group of one must NOT cycle to itself, or the
@@ -109,10 +109,10 @@ TEST(DictRegistryCycleGroup, SingleMemberGroupReturnsNegativeOne) {
 // With every dictionary in the same group the partition is a no-op, so this must
 // behave exactly like the plain nextIndex it replaces.
 TEST(DictRegistryCycleGroup, AllSameGroupMatchesPlainNextIndex) {
-  const bool allM[] = {true, true, true};
+  const bool allSt[] = {true, true, true};
   const bool allOther[] = {false, false, false};
   for (int i = 0; i < 3; ++i) {
-    EXPECT_EQ(nextInGroup(i, allM, 3), DictionaryRegistry::nextIndex(i, 3));
+    EXPECT_EQ(nextInGroup(i, allSt, 3), DictionaryRegistry::nextIndex(i, 3));
     EXPECT_EQ(nextInGroup(i, allOther, 3), DictionaryRegistry::nextIndex(i, 3));
   }
 }
@@ -121,30 +121,73 @@ TEST(DictRegistryCycleGroup, AllSameGroupMatchesPlainNextIndex) {
 // returns when the configured dictionary is not among the installed entries — has
 // no group to match, so it starts the cycle at 0 rather than refusing to switch.
 TEST(DictRegistryCycleGroup, OutOfRangeCurrentStartsAtZero) {
-  const bool isM[] = {true, false, true};
-  EXPECT_EQ(nextInGroup(-1, isM, 3), 0);
-  EXPECT_EQ(nextInGroup(3, isM, 3), 0);
-  EXPECT_EQ(nextInGroup(99, isM, 3), 0);
+  const bool isSt[] = {true, false, true};
+  EXPECT_EQ(nextInGroup(-1, isSt, 3), 0);
+  EXPECT_EQ(nextInGroup(3, isSt, 3), 0);
+  EXPECT_EQ(nextInGroup(99, isSt, 3), 0);
 }
 
 // Degenerate inputs must not divide by zero or dereference the flag array.
 TEST(DictRegistryCycleGroup, EmptyListReturnsNegativeOne) {
-  const bool isM[] = {true};
-  EXPECT_EQ(nextInGroup(0, isM, 0), -1);
-  EXPECT_EQ(nextInGroup(-1, isM, 0), -1);
-  EXPECT_EQ(nextInGroup(5, isM, -3), -1);
+  const bool isSt[] = {true};
+  EXPECT_EQ(nextInGroup(0, isSt, 0), -1);
+  EXPECT_EQ(nextInGroup(-1, isSt, 0), -1);
+  EXPECT_EQ(nextInGroup(5, isSt, -3), -1);
   EXPECT_EQ(DictionaryRegistry::nextIndexInGroup(0, 2, nullptr, nullptr), -1);
 }
 
 // Repeated presses visit every member of the group and nothing else.
 TEST(DictRegistryCycleGroup, FullCycleVisitsOnlyOwnGroup) {
-  //                    0     1      2     3     4      5
-  const bool isM[] = {true, false, true, true, false, false};
+  //                     0     1      2     3     4      5
+  const bool isSt[] = {true, false, true, true, false, false};
   int idx = 0;
   for (int i = 0; i < 3; ++i) {
-    idx = nextInGroup(idx, isM, 6);
+    idx = nextInGroup(idx, isSt, 6);
     ASSERT_GE(idx, 0);
-    EXPECT_TRUE(isM[idx]) << "left the m group at step " << i;
+    EXPECT_TRUE(isSt[idx]) << "left the st- group at step " << i;
   }
   EXPECT_EQ(idx, 0) << "three presses over a 3-member group should return to the start";
+}
+
+// --- The grouping rule itself -------------------------------------------------
+//
+// nameIsStGroup is what fills DictionaryEntry::nameIsSt during discover(). It is
+// static precisely so it can be tested here without linking the SD-backed half of
+// the class — the same split as nextIndex above.
+//
+// This replaced a read of the StarDict .ifo sametypesequence. That field is optional
+// in the spec, so an absent one silently filed a dictionary in the wrong group; a
+// folder name cannot go missing, which is the point of the change.
+
+TEST(DictRegistryStGroup, MatchesTheStPrefix) {
+  EXPECT_TRUE(DictionaryRegistry::nameIsStGroup("st-oxford"));
+  EXPECT_TRUE(DictionaryRegistry::nameIsStGroup("st-collins"));
+  // Nothing after the hyphen is still a match — the rule is the prefix, not the suffix.
+  EXPECT_TRUE(DictionaryRegistry::nameIsStGroup("st-"));
+}
+
+// A folder copied from a case-preserving filesystem must not land in the wrong group.
+TEST(DictRegistryStGroup, IsCaseInsensitive) {
+  EXPECT_TRUE(DictionaryRegistry::nameIsStGroup("ST-Oxford"));
+  EXPECT_TRUE(DictionaryRegistry::nameIsStGroup("St-Collins"));
+  EXPECT_TRUE(DictionaryRegistry::nameIsStGroup("sT-mixed"));
+}
+
+TEST(DictRegistryStGroup, RejectsEverythingElse) {
+  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("wiki-en"));
+  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("cc-cedict"));
+  // The hyphen is part of the prefix: "stardict" is not an st- dictionary.
+  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("stardict"));
+  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("stardict-en"));
+  // Must be a prefix, not a substring.
+  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("best-dict"));
+}
+
+// Short and absent names must not read past the end of the buffer. strncasecmp stops
+// at the first difference, and a NUL differs from '-', so "st" is safely rejected.
+TEST(DictRegistryStGroup, HandlesShortAndNullNames) {
+  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("st"));
+  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("s"));
+  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup(""));
+  EXPECT_FALSE(DictionaryRegistry::nameIsStGroup(nullptr));
 }

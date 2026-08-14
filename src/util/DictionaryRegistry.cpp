@@ -2,14 +2,10 @@
 
 #include <HalStorage.h>
 #include <Logging.h>
-#include <Memory.h>
-#include <SdDebugLog.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cstring>
-
-#include "Dictionary.h"
 
 // Candidate SD card root directories for dictionaries, checked in priority order.
 // The first directory found on the SD card is used; the rest are ignored.
@@ -45,11 +41,6 @@ bool DictionaryRegistry::discover() {
   }
 
   rootDir.rewindDirectory();
-
-  // One 608-byte .ifo scratch for the whole scan, on the heap rather than in this frame
-  // (see the read site below). Freed when discover() returns.
-  auto scratchInfo = makeUniqueNoThrow<DictInfo>();
-  if (!scratchInfo) LOG_ERR("DREG", "OOM: .ifo scratch; dictionary types unavailable");
 
   char name[500];
   for (auto entry = rootDir.openNextFile(); entry; entry = rootDir.openNextFile()) {
@@ -115,29 +106,10 @@ bool DictionaryRegistry::discover() {
       e.name = name;
       e.stem = foundStem;
       e.basePath = root_ + "/" + e.name + "/" + e.stem;
-      // Read the StarDict type now so the long-press switch can partition on it without
-      // touching the SD card from an input path. Costs one extra .ifo open and byte-wise
-      // parse per dictionary, at scan time only — .ifo files are a few hundred bytes and
-      // this loop already opens every subdirectory. Deliberately not lazy: the cycle needs
-      // *every* entry's type to find the next group member, so deferring it would move the
-      // whole scan onto the first long press and stall the UI there instead.
-      //
-      // Through the scratch object rather than by value: DictInfo is 608 bytes and this
-      // function already carries 1500 bytes of name buffers. A null scratch (OOM) just
-      // leaves every dictionary in the non-'m' group, which costs cycling precision and
-      // nothing else.
-      if (scratchInfo && Dictionary::readInfoInto(e.basePath.c_str(), *scratchInfo)) {
-        e.typeIsM = scratchInfo->sametypesequence[0] == 'm';
-      }
-      const char* typeStr =
-          (scratchInfo && scratchInfo->sametypesequence[0] != '\0') ? scratchInfo->sametypesequence : "?";
-      LOG_DBG("DREG", "Found dictionary: %s/%s (type=%s)", name, foundStem, typeStr);
-      // Also to SD: which group each dictionary lands in decides where the long-press switch
-      // can hop, and a misread .ifo (absent sametypesequence, unexpected header) silently
-      // files an 'm' dictionary under "other". Serial-only logging cannot show that after the
-      // fact. Scan time only — a handful of lines per boot, next to MEM: enter/exit per
-      // activity.
-      SdDebugLog::log("DREG", "dict %s type=%s group=%s", name, typeStr, e.typeIsM ? "m" : "other");
+      // Classify now so the long-press switch never touches the SD card from an input path.
+      // Free, unlike the .ifo read this replaced: the name is already in hand.
+      e.nameIsSt = nameIsStGroup(name);
+      LOG_DBG("DREG", "Found dictionary: %s/%s (group=%s)", name, foundStem, e.nameIsSt ? "st" : "other");
       entries_.push_back(std::move(e));
     }
   }
@@ -164,7 +136,7 @@ bool DictionaryRegistry::discover() {
 int DictionaryRegistry::nextEntryIndexInGroup(int current) const {
   return nextIndexInGroup(
       current, count(),
-      [](const void* ctx, int index) { return static_cast<const DictionaryRegistry*>(ctx)->entries_[index].typeIsM; },
+      [](const void* ctx, int index) { return static_cast<const DictionaryRegistry*>(ctx)->entries_[index].nameIsSt; },
       this);
 }
 

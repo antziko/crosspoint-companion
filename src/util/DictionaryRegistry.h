@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -9,13 +10,15 @@ struct DictionaryEntry {
   std::string name;      // folder name, e.g. "dict-en-en"
   std::string stem;      // file stem (".idx"/".ifo" base), e.g. "dict-data"
   std::string basePath;  // <root>/<name>/<stem>, e.g. "/.dictionaries/dict-en-en/dict-data"
-  // Which family the long-press dictionary switch keeps this entry in: true when the
-  // .ifo's sametypesequence starts with 'm' (plain-text definitions), false for every
-  // other value including an absent one. Read once at discover() time — see the cost
-  // note there. A bool rather than the type string so an entry gains one byte instead
-  // of a fourth heap allocation; the settings screen reads its own DictInfo for display
-  // (DictionarySelectActivity.cpp:402).
-  bool typeIsM = false;
+  // Which family the long-press dictionary switch keeps this entry in — see
+  // nameIsStGroup() below for the rule. Derived from `name` at discover() time and cached
+  // as one byte so the input path never re-derives it.
+  //
+  // This used to come from the .ifo's sametypesequence. It does not any more: that field is
+  // OPTIONAL in the StarDict spec, so an absent or unexpected value silently filed a
+  // dictionary in the wrong group with nothing on screen to show it had happened. A folder
+  // name is visible in the settings list and cannot be misread.
+  bool nameIsSt = false;
 };
 
 // Discovers installed dictionaries on the SD card. Mirrors SdCardFontRegistry:
@@ -34,6 +37,17 @@ class DictionaryRegistry {
   // Index of the entry whose basePath == path, or -1 if not found / path empty.
   int indexOf(const std::string& basePath) const;
 
+  // The entire grouping rule for the long-press switch: a folder name beginning "st-",
+  // case-insensitively, is one group and everything else is the other.
+  //
+  // Case-insensitive because the rest of this class already is — discover() sorts through
+  // tolower() (below) and skips .DS_Store through strcasecmp — and because a folder copied
+  // from a case-preserving filesystem would otherwise land in the wrong group.
+  //
+  // Static and stateless so the host test can drive it without stubbing the SD-backed
+  // discovery half of this class, the same reason nextIndex is split out.
+  static bool nameIsStGroup(const char* name) { return name != nullptr && strncasecmp(name, "st-", 3) == 0; }
+
   // Next index after `current` in a list of `count` items, wrapping at the end.
   // Returns -1 for an empty list. Any out-of-range `current` — including the -1
   // indexOf() returns when the configured dictionary isn't among the installed
@@ -46,8 +60,8 @@ class DictionaryRegistry {
   }
 
   // Next index after `current` whose group matches current's, wrapping at the end.
-  // Grouping is the type-'m' partition described on DictionaryEntry::typeIsM: an 'm'
-  // dictionary only ever cycles to another 'm', and a non-'m' only to another non-'m'.
+  // Grouping is the name partition described on nameIsStGroup above: an "st-" dictionary
+  // only ever cycles to another "st-" one, and a non-"st-" only to another non-"st-".
   //
   // Returns -1 when the group has no other member, which is what makes a long press on
   // the only dictionary of its type do nothing rather than pointlessly re-running the

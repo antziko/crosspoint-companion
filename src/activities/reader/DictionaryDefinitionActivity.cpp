@@ -1031,22 +1031,22 @@ bool DictionaryDefinitionActivity::handleDictSwitch() {
 
   const std::string current = Dictionary::activeDictPath(cachePath.empty() ? nullptr : cachePath.c_str());
   const int curIdx = dictionaryRegistry.indexOf(current);
-  // Partitioned by dictionary type: a type-'m' dictionary cycles only to another 'm',
-  // everything else only among themselves. Returns -1 when this is the only dictionary
-  // of its type, and the guard below then leaves the screen untouched.
+  // Partitioned by folder name (DictionaryRegistry::nameIsStGroup): an "st-" dictionary
+  // cycles only to another "st-", everything else only among themselves. Returns -1 when
+  // this is the only dictionary in its group, and the guard below then leaves the screen
+  // untouched.
   //
   // curIdx < 0 means the active dictionary is not in the registry (dictionary.bin empty, or
   // pointing at a folder discover() skipped as ambiguous). nextIndexInGroup has no group to
-  // match then and falls back to index 0 — which is the ONE path that can cross the type
-  // partition, landing an 'h'/'x' dictionary on an 'm' one. Decline instead: crossing the
-  // partition is exactly what this gesture is supposed to prevent.
+  // match then and falls back to index 0 — which is the ONE path that can cross the
+  // partition. Decline instead: crossing it is exactly what this gesture prevents.
   const int nextIdx = curIdx < 0 ? -1 : dictionaryRegistry.nextEntryIndexInGroup(curIdx);
   if (nextIdx < 0) {
     // Swallow the release too. Falling through left `wasReleased(Confirm)` to open
     // word-select below — no heldTime check there — so a declined long press acted like a
     // short one instead of doing nothing, which is what the gesture documents.
     SdDebugLog::log("DDA", "dict switch declined: cur=%d group=%s count=%d", curIdx,
-                    curIdx < 0 ? "?" : (dictionaryRegistry.getEntries()[curIdx].typeIsM ? "m" : "other"),
+                    curIdx < 0 ? "?" : (dictionaryRegistry.getEntries()[curIdx].nameIsSt ? "st" : "other"),
                     dictionaryRegistry.count());
     dictSwitchReleaseConsumed_ = true;
     return true;
@@ -1057,12 +1057,12 @@ bool DictionaryDefinitionActivity::handleDictSwitch() {
   dictSwitchInProgress_ = true;
   Dictionary::setSessionDictPath(dictionaryRegistry.getEntries()[nextIdx].basePath.c_str());
   LOG_DBG("DDA", "dict switch -> %s", dictionaryRegistry.getEntries()[nextIdx].name.c_str());
-  // To SD as well as serial: a wrong-group hop is only diagnosable from the pair of type
+  // To SD as well as serial: a wrong-group hop is only diagnosable from the pair of group
   // flags, and the SD log is what actually comes back from a device session.
   SdDebugLog::log("DDA", "dict switch: %s(%s) -> %s(%s)", dictionaryRegistry.getEntries()[curIdx].name.c_str(),
-                  dictionaryRegistry.getEntries()[curIdx].typeIsM ? "m" : "other",
+                  dictionaryRegistry.getEntries()[curIdx].nameIsSt ? "st" : "other",
                   dictionaryRegistry.getEntries()[nextIdx].name.c_str(),
-                  dictionaryRegistry.getEntries()[nextIdx].typeIsM ? "m" : "other");
+                  dictionaryRegistry.getEntries()[nextIdx].nameIsSt ? "st" : "other");
   // recordHistory=false: the word is already in history from the original lookup.
   controller.startLookup(headword, false);
   return true;
