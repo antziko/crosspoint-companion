@@ -1251,9 +1251,38 @@ void WifiSelectionActivity::renderConnectionFailed(const Rect* screen, const The
 
 void WifiSelectionActivity::onComplete(const bool connected) {
   ActivityResult result;
-  result.isCancelled = !connected;
-  if (connected) {
-    result.data = WifiResult{true, selectedSSID, connectedIP};
+
+  // "The user left this screen" is not the same as "there is no network". This
+  // screen's contract with its callers is a postcondition — is the device online —
+  // not a record of which button ended it.
+  //
+  // The distinction is not theoretical: onEnter() starts an auto-connect to the
+  // last-known SSID, and that association keeps running while the user stops it,
+  // presses Show networks, waits out a scan, and reads the list. It routinely
+  // completes in the background during those several seconds. Back then reported a
+  // cancel, and every caller renders a cancel as "WiFi connection failed" — over a
+  // radio that is associated and holding an IP. On the OPDS browser the lie is
+  // visible: dismissing that error and pressing Confirm re-checks WiFi.status(),
+  // finds it connected, and fetches the feed immediately.
+  //
+  // Every caller launches this screen as a precondition gate for work the user has
+  // already asked for (OPDS browse, KOSync, OTA, font download, clock sync), so
+  // reporting the true state is also what each of them wants to act on.
+  const bool online = WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0);
+  const bool usable = connected || online;
+  result.isCancelled = !usable;
+  if (usable) {
+    // CrossPointWebServerActivity and CalibreConnectActivity both do
+    // std::get<WifiResult>(result.data) on every non-cancelled result, and std::get
+    // on the wrong variant alternative calls std::terminate under -fno-exceptions.
+    // So this must be populated on the newly-reachable path too, not just when this
+    // screen made the connection itself. Fall back to the radio for either field the
+    // screen never recorded.
+    std::string ssid = connected ? selectedSSID : std::string();
+    std::string ip = connected ? connectedIP : std::string();
+    if (ssid.empty()) ssid = WiFi.SSID().c_str();
+    if (ip.empty()) ip = WiFi.localIP().toString().c_str();
+    result.data = WifiResult{true, std::move(ssid), std::move(ip)};
   }
   setResult(std::move(result));
   finish();
