@@ -4,24 +4,64 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <Memory.h>
+#include <SdDebugLog.h>
 #include <Utf8.h>
 #include <esp_heap_caps.h>  // heap_caps_get_largest_free_block: pre-flight for the word-array reserve
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 #include "CrossPointSettings.h"
 #include "DictionaryDefinitionActivity.h"
 #include "MappedInputManager.h"
+#include "SdCardFontSystem.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
+#include "util/DictionaryRegistry.h"
 #include "util/FlashcardDeck.h"
 
+// Per-move SD trace for the gloss peek. On for the first device pass — measuring what a probe
+// actually costs on the card is the whole point of it — and off once the numbers are in, at
+// which point the serial LOG_DBG line remains. This is the ONLY per-keypress SD write on the
+// gloss path; nothing else about it touches the card except reading the dictionary.
+#ifndef DICT_GLOSS_TRACE
+#define DICT_GLOSS_TRACE 1
+#endif
+
 namespace {
+
+// Gloss box chrome, in pixels: 1 px frame, then padding before the text. Deliberately tight —
+// the box costs page rows, so every pixel of chrome is a pixel of definition not shown.
+constexpr int kGlossFrame = 1;
+constexpr int kGlossPad = 4;
+// Below this the box cannot hold a useful row, so the feature declines instead.
+constexpr int kGlossMinWidth = 80;
+// Vertical clearance the box keeps from the highlight: 7 px covers HighlightSnapshot's outward
+// byte-alignment (WordSelectNavigator.h:215-231), plus 3 because the box is anchored to the row's
+// y and a word may sit up to 2 px off it (the row-grouping tolerance in
+// WordSelectNavigator.cpp:41).
+constexpr int kGlossClearance = 10;
+
+// Screen-space vertical extent of one page element, used to decide which elements have to be
+// re-rendered when the box moves off a strip. A PageLine is one line of text (TextBlock.h:12) and
+// carries no height at all, and even an element that does know its height can draw outside it —
+// ruby annotations sit above the line, descenders below. So every extent is padded by one reader
+// line either side. Erring wide only repaints pixels that are already correct; erring narrow
+// leaves a white gap where the box used to be.
+void elementExtent(const PageElement& el, int marginTop, int pad, int& outTop, int& outBottom) {
+  const int top = el.yPos + marginTop;
+  int bottom = top;
+  if (el.getTag() == TAG_PageImage) {
+    bottom = top + static_cast<const PageImage&>(el).getImageBlock().getHeight();
+  }
+  outTop = top - pad;
+  outBottom = bottom + pad;
+}
 
 // A display token ends a sentence if its last byte is ASCII '.', '!' or '?'.
 // Multibyte UTF-8 characters end with a continuation byte (>= 0x80), so a raw
@@ -129,11 +169,21 @@ void DictionaryWordSelectActivity::onEnter() {
   navigator.load(std::move(words), std::move(rows), std::move(textPool), consumeInitialConfirm, initialMarker_);
   // Opened via the reader's hold-Back gesture? Back is still held — swallow its release once.
   consumeInitialBackRelease_ = mappedInput.isPressed(MappedInputManager::Button::Back);
+  // After the word array and its text pool, never before: they are the big contiguous
+  // requests, and the gloss is the optional extra.
+  initGloss();
   requestUpdate();
 }
 
 void DictionaryWordSelectActivity::onExit() {
   controller.onExit();
+  // Hand the box's refresh residue to the screen that replaces us, where the collapse is hidden
+  // inside a screen change instead of interrupting a scan.
+  clearGlossGhostOnNextPaint();
+  // The session's three dictionary handles (.idx, page index, .dict) live inside GlossState, so
+  // this is their intended release point — DESTRUCTOR_CLOSES_FILE only covers locals at scope
+  // exit, and HalFile's destructor takes the storage mutex before closing.
+  gloss_.reset();
   Activity::onExit();
 }
 
@@ -313,6 +363,13 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
       if (!isSelectableToken(block->wordText(wIdx), block->wordTextLen(wIdx), isCjkToken)) {
         continue;
       }
+      // Page composition, reported in the gloss timing lines: CJK pages are the expensive case
+      // (one token per character, so the most cursor stops and the coldest glyphs), and the
+      // numbers are unreadable without knowing which kind of page produced them. Free here —
+      // the tokeniser has just decided both facts — where a separate pass would re-walk every
+      // token's codepoints.
+      selectableTokenCount_++;
+      if (isCjkToken) cjkTokenCount_++;
       const std::string wordText(block->wordText(wIdx), block->wordTextLen(wIdx));
 
       // Split on en-dash (U+2013: E2 80 93) and em-dash (U+2014: E2 80 94)
@@ -508,6 +565,9 @@ void DictionaryWordSelectActivity::loop() {
         // render's glyph prewarm has just taken its arena, and this object is ~4.8 KB. A bare
         // new here aborts the device (it did — DictionaryWordSelectActivity.cpp:506 in the X3
         // crash trace); failing back to the word list is a far better outcome than a reboot.
+        // The definition screen repaints everything anyway, so let its first paint also collapse
+        // the residue the box left in its band.
+        clearGlossGhostOnNextPaint();
         auto definition = makeUniqueNoThrow<DictionaryDefinitionActivity>(
             renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(), true, cachePath,
             controller.getRecordHistory(), controller.getLookupWord(),
@@ -635,18 +695,454 @@ void DictionaryWordSelectActivity::emitQuoteResult(int fromFlatIdx, int toFlatId
   finish();
 }
 
+// ---------------------------------------------------------------------------
+// Inline gloss box
+// ---------------------------------------------------------------------------
+
+int DictionaryWordSelectActivity::measureGlossWidth(void* ctx, const char* text, EpdFontFamily::Style style, bool) {
+  auto* self = static_cast<DictionaryWordSelectActivity*>(ctx);
+  // Only ever called from inside DictGloss::fit, which only runs with a gloss allocated.
+  return self->renderer.getTextAdvanceX(self->gloss_->fontId, text, style);
+}
+
+void DictionaryWordSelectActivity::resolveGlossFont() {
+  if (!gloss_) return;
+
+  // "Same as book" follows the reader's FAMILY at the dictionary's own SIZE, and getDefinitionFontId
+  // can only resolve to that size once the family is resident at it — the resolver allocates
+  // nothing itself (CrossPointSettings.cpp:495-499). Same call the definition viewer makes
+  // (DictionaryDefinitionActivity.cpp:257); it declines itself when the size is already resident,
+  // when the family ships no such size, or when the heap is too tight, and we then render at the
+  // reader's size exactly as the definition screen does.
+  if (SETTINGS.dictionaryFontFamily == CrossPointSettings::DICT_FONT_MATCH_READER) {
+    sdFontSystem.ensureFontSize(SETTINGS.getReaderSdFontFamilyName(), SETTINGS.getDefinitionPointSize(), renderer);
+  }
+
+  // Re-resolved on every peek rather than cached once, because the id can go stale underneath
+  // us: DictionaryDefinitionActivity::onExit releases the extra size (its :321), on the
+  // documented assumption that word-select renders through getReaderFontId() only — which stopped
+  // being true when the box moved to the definition font. So after Confirm → definition → Back,
+  // this is what re-establishes the size and picks up whatever id is actually live now.
+  const int fontId = SETTINGS.getDefinitionFontId();
+  if (fontId == gloss_->fontId) return;
+
+  gloss_->fontId = fontId;
+  gloss_->lineHeight = renderer.getLineHeight(fontId);
+  gloss_->height = DictGloss::GlossResult::kMaxRows * gloss_->lineHeight + 2 * (kGlossPad + kGlossFrame);
+  // A dictionary size well above the reader's can make the box too tall for the page to be worth
+  // reading around; when it is, the box is simply not drawn (see drawGloss). The worst case is
+  // the box plus its clearance plus the selected row and one more row of context still visible —
+  // which is what minTextRoom holds. Per-selection placement is stricter still (placeGloss).
+  gloss_->fits = gloss_->bottomLimit - gloss_->topY >= gloss_->height + kGlossClearance + gloss_->minTextRoom;
+  // Metrics changed, so the rows wrapped at the old ones are wrong. Forcing a re-peek is cheaper
+  // to reason about than re-wrapping from a buffer fit() has already compacted in place.
+  gloss_->forFlatIdx = -1;
+  LOG_DBG("DGL", "font=%d lh=%d h=%d fits=%d", fontId, gloss_->lineHeight, gloss_->height, gloss_->fits ? 1 : 0);
+}
+
+void DictionaryWordSelectActivity::initGloss() {
+  if (mode_ != Mode::Dictionary) return;  // quote selection looks nothing up
+  if (!SETTINGS.dictInlineGlossEnabled) return;
+  if (navigator.isEmpty()) return;
+
+  // Gate: plain-text dictionaries only. A folder named "st-" is that group by convention
+  // (DictionaryRegistry.h:49); a declared sametypesequence of 'm' says the same thing, and is
+  // checked second because the .ifo field is optional and often absent or wrong — which is why
+  // the folder-name rule replaced it for grouping in the first place. Markup dictionaries need
+  // DictHtmlRenderer's expat arena (~6.9 KB retained, DictHtmlRenderer.h:47-56) on the heap this
+  // screen has least of, so they stay out until that headroom is measured.
+  //
+  // Note the book's script is deliberately NOT part of this gate: a CJK page read with a markup
+  // dictionary still could not be rendered here, so the script decides nothing on its own.
+  const std::string dictPath = Dictionary::activeDictPath(cachePath.c_str());
+  if (dictPath.empty()) return;
+  const int regIdx = dictionaryRegistry.indexOf(dictPath);
+  bool plainDict = regIdx >= 0 && dictionaryRegistry.getEntries()[regIdx].nameIsSt;
+  if (!plainDict) {
+    // 608 bytes, so heap rather than the 256-byte stack budget (Dictionary.h:130-138). Once per
+    // session, never per cursor move.
+    auto info = makeUniqueNoThrow<DictInfo>();
+    if (!info) {
+      LOG_ERR("DGL", "OOM: DictInfo");
+      return;
+    }
+    if (!Dictionary::readInfoInto(dictPath.c_str(), *info)) return;
+    plainDict = info->sametypesequence[0] == 'm';
+  }
+  if (!plainDict) {
+    LOG_DBG("DGL", "off: not a plain-text dictionary");
+    return;
+  }
+
+  // Heap floor. First estimates, same standing as the other gates on this screen
+  // (DictionaryDefinitionActivity.cpp:388): GlossState is ~1.2 KB and the peek allocates only
+  // the transient strings DictLayout's wrapper makes. Tune from the logged values.
+  constexpr size_t kMinFreeForGloss = 8 * 1024;
+  constexpr size_t kMinBlockForGloss = 4 * 1024;
+  const size_t freeHeap = ESP.getFreeHeap();
+  const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (freeHeap < kMinFreeForGloss || largestBlock < kMinBlockForGloss) {
+    LOG_ERR("DGL", "off: free=%u largest=%u (need %u/%u)", static_cast<unsigned>(freeHeap),
+            static_cast<unsigned>(largestBlock), static_cast<unsigned>(kMinFreeForGloss),
+            static_cast<unsigned>(kMinBlockForGloss));
+    return;
+  }
+
+  // Geometry. Orientation-aware exactly as the definition viewer composes it
+  // (DictionaryDefinitionActivity.cpp:347-385): the panel's physical viewable area first, then
+  // the reader's own margin, then the button-hint chrome — which is a bottom band in Portrait,
+  // also a top band when Inverted, and a side column in both Landscapes. Nothing here assumes
+  // a screen size: X3 (792x528) and X4 (800x480) share one binary.
+  //
+  // Only the horizontal extents and the vertical limits the box may not cross are settled here.
+  // Everything that depends on the box's own line height belongs to resolveGlossFont(), because
+  // that height follows the definition font and the definition font can change mid-session.
+  const int lineHeight = renderer.getLineHeight(SETTINGS.getReaderFontId());
+  int bezelTop, bezelRight, bezelBottom, bezelLeft;
+  renderer.getOrientedViewableTRBL(&bezelTop, &bezelRight, &bezelBottom, &bezelLeft);
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const auto orient = renderer.getOrientation();
+  const bool isLandscapeCw = orient == GfxRenderer::Orientation::LandscapeClockwise;
+  const bool isLandscapeCcw = orient == GfxRenderer::Orientation::LandscapeCounterClockwise;
+  const bool isInverted = orient == GfxRenderer::Orientation::PortraitInverted;
+  const int sideGutter = (isLandscapeCw || isLandscapeCcw) ? metrics.sideButtonHintsWidth : 0;
+  const int hintBand = metrics.buttonHintsHeight + metrics.verticalSpacing;
+
+  const int x = marginLeft + (isLandscapeCw ? sideGutter : 0);
+  const int rightInset = bezelRight + SETTINGS.getReaderScreenMargin() + (isLandscapeCcw ? sideGutter : 0);
+  const int width = renderer.getScreenWidth() - x - rightInset;
+  const int topY = std::max(marginTop, bezelTop + (isInverted ? hintBand : 0));
+  const int bottomLimit = renderer.getScreenHeight() - bezelBottom - hintBand;
+
+  if (width < kGlossMinWidth) {
+    LOG_DBG("DGL", "off: no room (w=%d)", width);
+    return;
+  }
+
+  auto state = makeUniqueNoThrow<GlossState>();
+  if (!state) {
+    LOG_ERR("DGL", "OOM: GlossState (%u bytes)", static_cast<unsigned>(sizeof(GlossState)));
+    return;
+  }
+
+  // One ctx for the whole session: .idx and the page index stay open, so a cursor move costs
+  // one seek+scan instead of the four SD opens a fresh locate() pays (Dictionary.h:140-155).
+  if (!Dictionary::openLookupCtx(state->ctx, cachePath.c_str())) {
+    LOG_DBG("DGL", "off: dictionary unreadable");
+    return;
+  }
+  // Without a page index, locate() degrades to a full .idx scan. On this synchronous
+  // per-keypress path that is a watchdog risk, not just slow, so decline instead.
+  if (!state->ctx.hasPageIndex) {
+    LOG_DBG("DGL", "off: no page index (.idx.oft/.cspt) — run Prepare on this dictionary");
+    return;
+  }
+  char dictFilePath[160];
+  snprintf(dictFilePath, sizeof(dictFilePath), "%s.dict", state->ctx.base);
+  if (!Storage.openFileForRead("DGL", dictFilePath, state->dict)) {
+    LOG_DBG("DGL", "off: %s will not open", dictFilePath);
+    return;
+  }
+
+  state->x = x;
+  state->width = width;
+  state->topY = topY;
+  state->bottomLimit = bottomLimit;
+  // Two rows of the reader's own text, since that is what the box is measured against covering.
+  state->minTextRoom = 2 * lineHeight;
+
+  gloss_ = std::move(state);
+  resolveGlossFont();
+
+  // A page that cannot show the box plus two rows of text outside it gets no box at all, rather
+  // than one covering everything there is to read.
+  if (!gloss_->fits) {
+    LOG_DBG("DGL", "off: no room (h=%d page=%d)", gloss_->height, bottomLimit - topY);
+    gloss_.reset();
+    return;
+  }
+
+  // The miss label is constant, so warm it once here instead of on the first miss — where it
+  // would land in the middle of a frame the user is waiting on.
+  constexpr uint8_t kRegularOnly = styleToBitMask(EpdFontFamily::REGULAR);
+  renderer.ensureSdCardFontReady(gloss_->fontId, tr(STR_DICT_NOT_FOUND), kRegularOnly);
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    fcm->prewarmCache(gloss_->fontId, tr(STR_DICT_NOT_FOUND), kRegularOnly);
+  }
+
+  LOG_DBG("DGL", "on: w=%d h=%d top=%d bottom=%d cjk=%d/%d", width, gloss_->height, topY, bottomLimit, cjkTokenCount_,
+          selectableTokenCount_);
+}
+
+bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHeight) {
+  if (!gloss_) return false;
+  if (currIdx < 0 || controller.isActive()) {
+    gloss_->place = false;
+    return false;
+  }
+  const auto* w = navigator.getWordAt(currIdx);
+  if (!w) {
+    gloss_->place = false;
+    return false;
+  }
+
+  // Before the peek: it decides the wrap width's line count and can force a re-peek.
+  resolveGlossFont();
+
+  // Placement. Directly above the selected row by preference — that covers rows already read —
+  // and directly below when the selection sits too near the top for the box to fit above.
+  // kGlossClearance is not cosmetic: HighlightSnapshot::capture snaps its rectangle outward to
+  // byte boundaries along the panel-memory x-axis, which is the screen VERTICAL axis in Portrait,
+  // so a box within ~7 px of the highlight can be captured with it and pasted back stale later
+  // (WordSelectNavigator.h:215-231). Keeping the gap here makes that unreachable by construction.
+  //
+  // Multi-select is excluded outright: the highlight then spans a range of rows that the
+  // single-token peek does not describe, and that the box could be sitting inside.
+  //
+  // Anchored to the ROW, not to the word: words are grouped into a row with a 2 px tolerance
+  // (WordSelectNavigator.cpp:41), so anchoring to the word's own screenY would shift the box a
+  // pixel or two on a plain left/right step — and every shift is a strip restore and a clean
+  // refresh. Anchored to the row, a scan along one row leaves the box perfectly still.
+  gloss_->place = false;
+  if (gloss_->fits && !navigator.isMultiSelecting()) {
+    const int rowTop = navigator.rowY(w->row);
+    const int above = rowTop - kGlossClearance - gloss_->height;
+    const int below = rowTop + selectionLineHeight + kGlossClearance;
+    if (above >= gloss_->topY) {
+      gloss_->y = above;
+      gloss_->place = true;
+    } else if (below + gloss_->height <= gloss_->bottomLimit) {
+      gloss_->y = below;
+      gloss_->place = true;
+    }
+  }
+
+  if (currIdx != gloss_->forFlatIdx) {
+    gloss_->forFlatIdx = currIdx;
+    const unsigned long t0 = millis();
+    // Through cleanWord, exactly as the Confirm path does (DictionaryLookupController's
+    // lookupOrPopup). Skipping it would make the box disagree with the screen Confirm opens on
+    // the very tokens cleanWord exists for — attached CJK punctuation, quotes, trailing commas —
+    // reporting "not found" for a word the full lookup then finds. Short tokens stay inside the
+    // std::string SSO buffer, so a CJK character or an ordinary word costs no allocation.
+    const std::string token = Dictionary::cleanWord(navigator.getLookup(*w));
+    const size_t n = token.empty() ? 0
+                                   : DictGloss::readEntry(gloss_->ctx, gloss_->dict, token.c_str(), gloss_->raw,
+                                                          sizeof(gloss_->raw));
+    const unsigned long tProbe = millis();
+    unsigned long tWarm = tProbe;
+    if (n == 0) {
+      gloss_->result.reset();
+    } else {
+      // Before any measuring, never after: a codepoint that misses here falls through to
+      // SdCardFont's per-glyph path at ~50 ms each, and one CJK gloss is 30-60 glyphs. Same
+      // ordering, and the same two calls, as prebuildAdvanceTable + prewarmHighlightGlyphs
+      // above — advance table first (measurement), bitmaps second (drawing). Against the gloss
+      // font, which is a different size from the page's, so none of the page's warm glyphs count.
+      constexpr uint8_t kRegularOnly = styleToBitMask(EpdFontFamily::REGULAR);
+      renderer.ensureSdCardFontReady(gloss_->fontId, gloss_->raw, kRegularOnly);
+      if (auto* fcm = renderer.getFontCacheManager()) fcm->prewarmCache(gloss_->fontId, gloss_->raw, kRegularOnly);
+
+      // The reading renders bold, which is a separate glyph set. Warmed over the bracketed run
+      // ALONE, never the whole entry: bold Han would double the glyph work on the one path that
+      // runs per keypress, for characters that are never drawn bold. The run is ASCII and its
+      // alphabet is tiny, so after the first few words it is permanently warm. Found on the raw
+      // bytes, which is also where fit() decides whether the run is on the first line.
+      const DictGloss::ReadingSpan reading = DictGloss::findReading(gloss_->raw);
+      if (reading.found) {
+        constexpr uint8_t kBoldOnly = styleToBitMask(EpdFontFamily::BOLD);
+        char* const run = gloss_->raw + reading.start;
+        const char saved = run[reading.len];
+        run[reading.len] = '\0';
+        renderer.ensureSdCardFontReady(gloss_->fontId, run, kBoldOnly);
+        if (auto* fcm = renderer.getFontCacheManager()) fcm->prewarmCache(gloss_->fontId, run, kBoldOnly);
+        run[reading.len] = saved;
+      }
+      tWarm = millis();
+
+      const DictLayout::Measurer measure{this, &DictionaryWordSelectActivity::measureGlossWidth};
+      const DictLayout::WrapMetrics wrapMetrics{gloss_->width - 2 * (kGlossPad + kGlossFrame), 0, 0};
+      DictGloss::fit(gloss_->raw, wrapMetrics, measure, gloss_->result);
+    }
+    const unsigned long tFit = millis();
+    LOG_DBG("DGL", "peek '%s' %s rows=%d probe=%lums warm=%lums fit=%lums", token.c_str(),
+            gloss_->result.found ? "hit" : "miss", gloss_->result.rowCount, tProbe - t0, tWarm - tProbe, tFit - tWarm);
+#if DICT_GLOSS_TRACE
+    // Per-move SD write, and the only one on this path — it is what phase 0 is for. Turn
+    // DICT_GLOSS_TRACE off once the timings are known; the serial line above stays.
+    //
+    // row0 and bold= are here to answer a question no fixture in the repo can: what a real 'm'
+    // entry actually looks like on the card. bold= is offset+length of the bracketed reading in
+    // row 0, so a wrong split shows up as numbers that do not bracket "[...]" in row0.
+    SdDebugLog::log(
+        "DGL", "peek %s bytes=%u rows=%d bold=%u+%u probe=%lu warm=%lu fit=%lu cjk=%d/%d free=%u largest=%u row0='%s'",
+        gloss_->result.found ? "hit" : "miss", static_cast<unsigned>(n), gloss_->result.rowCount,
+        static_cast<unsigned>(gloss_->result.boldStart[0]), static_cast<unsigned>(gloss_->result.boldLen[0]),
+        tProbe - t0, tWarm - tProbe, tFit - tWarm, cjkTokenCount_, selectableTokenCount_,
+        static_cast<unsigned>(ESP.getFreeHeap()),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+        gloss_->result.rowCount > 0 ? gloss_->result.rows[0] : "");
+#endif
+  }
+
+  // A move matters only when the framebuffer actually holds a box somewhere else. Giving that
+  // strip back to the page is normally a handful of text lines (restoreVacatedGlossStrip), which
+  // keeps a row change on the differential path. An image in the strip is the one thing that
+  // cannot be put back cheaply — it may need decoding — so that case alone falls to the full
+  // repaint, which redraws the page anyway.
+  const bool moving = gloss_->drawnY != kGlossNotDrawn && (!gloss_->place || gloss_->drawnY != gloss_->y);
+  return moving && stripHasImage(gloss_->drawnY, gloss_->height);
+}
+
+void DictionaryWordSelectActivity::renderPageStrip(int y, int height) {
+  renderer.clearRect(gloss_->x, y, gloss_->width, height);
+
+  const int fontId = SETTINGS.getReaderFontId();
+  const int pad = renderer.getLineHeight(fontId);
+
+  // Scan pass then real pass, exactly as the full repaint below does. Not optional here: the gloss
+  // prewarm loads the DEFINITION font's glyphs into the same cache, so the reader-font glyphs in
+  // this strip may well have been evicted since the page was drawn. Every cold one would otherwise
+  // fall to SdCardFont's per-glyph path at ~50 ms each; the scan pass collapses the whole strip
+  // into one batched SD read. The scan pass draws nothing (GfxRenderer::isFontCacheScanning).
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    auto scope = fcm->createPrewarmScope();
+    for (const auto& el : page->elements) {
+      int top, bottom;
+      elementExtent(*el, marginTop, pad, top, bottom);
+      if (bottom <= y || top >= y + height) continue;
+      el->render(renderer, fontId, marginLeft, marginTop);
+    }
+    scope.endScanAndPrewarm();
+  }
+
+  for (const auto& el : page->elements) {
+    int top, bottom;
+    elementExtent(*el, marginTop, pad, top, bottom);
+    if (bottom <= y || top >= y + height) continue;
+    el->render(renderer, fontId, marginLeft, marginTop);
+  }
+}
+
+bool DictionaryWordSelectActivity::stripHasImage(int y, int height) const {
+  const int pad = renderer.getLineHeight(SETTINGS.getReaderFontId());
+  for (const auto& el : page->elements) {
+    if (el->getTag() != TAG_PageImage) continue;
+    int top, bottom;
+    elementExtent(*el, marginTop, pad, top, bottom);
+    if (bottom > y && top < y + height) return true;
+  }
+  return false;
+}
+
+void DictionaryWordSelectActivity::restoreVacatedGlossStrip() {
+  if (!gloss_ || gloss_->drawnY == kGlossNotDrawn) return;
+  if (gloss_->place && gloss_->y == gloss_->drawnY) return;  // parked — the common case
+
+  // The whole old rectangle, not just the part the new box will leave uncovered: the new box is
+  // drawn on top straight afterwards, so re-rendering a line or two underneath it costs almost
+  // nothing and removes a class of off-by-one from the overlap arithmetic.
+  renderPageStrip(gloss_->drawnY, gloss_->height);
+  gloss_->drawnY = kGlossNotDrawn;
+
+  // The box has moved, so this frame already shows a visibly different layout — the one moment
+  // where collapsing the accumulated FAST-refresh residue costs nothing perceptually. It is what
+  // keeps a box that walks down the page from leaving a trail behind it, and it is deliberately
+  // NOT the periodic refresh this replaced: that one fired while the box sat still, which read
+  // as the screen flashing mid-scan. A left/right step along one row never reaches here.
+  renderer.forceCleanRefreshNextPaint();
+}
+
+// The box's rows advance by gloss_->lineHeight, which is the DEFINITION font's and is generally a
+// different size from the reader's. Placement (updateGloss) has already decided where it goes and
+// whether it goes anywhere at all.
+void DictionaryWordSelectActivity::drawGloss() {
+  // Nothing to show for this selection: no room on either side, multi-select, or no selection at
+  // all. Whatever was on screen has already been dealt with — the differential path calls
+  // restoreVacatedGlossStrip first, and the full-repaint path has just redrawn the page over it.
+  if (!gloss_ || !gloss_->place) return;
+  const int y = gloss_->y;
+
+  renderer.clearRect(gloss_->x, y, gloss_->width, gloss_->height);
+  renderer.drawRect(gloss_->x, y, gloss_->width, gloss_->height, true);
+
+  const int textX = gloss_->x + kGlossFrame + kGlossPad;
+  int textY = y + kGlossFrame + kGlossPad;
+  if (gloss_->result.found) {
+    for (int i = 0; i < gloss_->result.rowCount; i++) {
+      char* row = gloss_->result.rows[i];
+      const uint8_t boldStart = gloss_->result.boldStart[i];
+      const uint8_t boldLen = gloss_->result.boldLen[i];
+      if (boldLen > 0) {
+        // Head, reading, tail. drawText takes a NUL-terminated C string and one style, so each
+        // piece is drawn with the terminator moved onto its end byte and put straight back — no
+        // second buffer on a path that runs per cursor move. x advances by the measured width of
+        // what was just drawn, so the row still reads as one continuous line.
+        int x = textX;
+        if (boldStart > 0) {
+          const char saved = row[boldStart];
+          row[boldStart] = '\0';
+          renderer.drawText(gloss_->fontId, x, textY, row, true);
+          x += renderer.getTextAdvanceX(gloss_->fontId, row, EpdFontFamily::REGULAR);
+          row[boldStart] = saved;
+        }
+        char* const run = row + boldStart;
+        const char saved = run[boldLen];
+        run[boldLen] = '\0';
+        renderer.drawText(gloss_->fontId, x, textY, run, true, EpdFontFamily::BOLD);
+        x += renderer.getTextAdvanceX(gloss_->fontId, run, EpdFontFamily::BOLD);
+        run[boldLen] = saved;
+        renderer.drawText(gloss_->fontId, x, textY, run + boldLen, true);
+      } else {
+        renderer.drawText(gloss_->fontId, textX, textY, row, true);
+      }
+      textY += gloss_->lineHeight;
+    }
+  } else {
+    // Say so rather than showing an empty frame: while scanning, "looked up, absent" is
+    // information, and a blank box reads as a bug.
+    renderer.drawText(gloss_->fontId, textX, textY, tr(STR_DICT_NOT_FOUND), true);
+  }
+  gloss_->drawnY = y;
+}
+
+void DictionaryWordSelectActivity::clearGlossGhostOnNextPaint() {
+  if (!gloss_ || gloss_->drawnY == kGlossNotDrawn) return;
+  // Repainting the same strip over and over with FAST refreshes leaves residue behind, and only a
+  // state-collapsing refresh removes it. Two moments qualify: when the box relocates (handled in
+  // restoreVacatedGlossStrip) and the transitions out of it — leaving word-select, and opening the
+  // full definition — which is what this call covers. Both are screen changes, so the refresh is
+  // invisible inside them, and the residue never outlives the box that caused it.
+  renderer.forceCleanRefreshNextPaint();
+}
+
 void DictionaryWordSelectActivity::render(RenderLock&&) {
   const int lineHeight = renderer.getLineHeight(SETTINGS.getReaderFontId());
   const int currIdx = navigator.getCurrentFlatIndex();
 
+  // Peek the selection and place its box before either repaint path runs. Placement is relative
+  // to the selected row, so it changes on a row change, not on every keypress.
+  const bool glossNeedsFullRepaint = updateGloss(currIdx, lineHeight);
+
   // Differential fast path. Only valid when:
   //   - we set it up on the previous frame (RenderMode::Differential),
   //   - the controller has nothing pending to draw,
-  //   - we have a current selection.
-  if (nextRenderMode_ == RenderMode::Differential && !controller.isActive() && currIdx >= 0) {
+  //   - we have a current selection,
+  //   - the strip the gloss box is vacating can be re-rendered without the page (no image in it).
+  if (nextRenderMode_ == RenderMode::Differential && !controller.isActive() && currIdx >= 0 && !glossNeedsFullRepaint) {
     prewarmHighlightGlyphs(currIdx);
+    // Before the highlight, never after: this re-renders page lines, and one redrawn over a
+    // freshly drawn highlight would print black text across the inverted rectangle. It is also
+    // clear of the PREVIOUS highlight — the box kept kGlossClearance from the selection it was
+    // placed against — so the snapshot the call below is about to restore stays untouched.
+    restoreVacatedGlossStrip();
     auto dirty = navigator.renderHighlightDifferential(renderer, lineHeight, prevHighlightIdx_, currIdx);
     if (dirty.has_value()) {
+      // Drawn after the highlight, never before: renderHighlightDifferential captures the pixels
+      // under the new highlight first, and the box must not be inside that capture. Placement
+      // keeps them kGlossClearance apart by construction, and the box region is fully overwritten
+      // every time, so it needs no snapshot of its own.
+      drawGloss();
       // Push full panel — the SDK's windowed-refresh path produces alternating black→white
       // transition failures on consecutive fast partial refreshes, so it's intentionally not
       // wired up here. The savings come from skipping page->render, which dominates the
@@ -698,6 +1194,7 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
         // on entry.
         navigator.renderHighlight(renderer, lineHeight);
       }
+      drawGloss();
       const auto labels = mappedInput.mapLabels("", confirmHintLabel(), "", "");
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
@@ -715,6 +1212,7 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
     // Controller drew an overlay; framebuffer state is unknown.
     nextRenderMode_ = RenderMode::FullPage;
     prevHighlightIdx_ = -1;
+    if (gloss_) gloss_->drawnY = kGlossNotDrawn;
     return;
   }
 
@@ -747,6 +1245,11 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
   if (!snapshotPrimed) {
     navigator.renderHighlight(renderer, lineHeight);
   }
+
+  // The page has just been redrawn, so wherever the box was is page text again — no strip to
+  // give back, and this is the frame that resolves a move the differential path declined.
+  if (gloss_) gloss_->drawnY = kGlossNotDrawn;
+  drawGloss();
 
   const auto labels = mappedInput.mapLabels("", confirmHintLabel(), "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

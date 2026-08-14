@@ -176,6 +176,7 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   doc["dictMarkerDwellEnabled"] = s.dictMarkerDwellEnabled;
   doc["dictMarkerT1Idx"] = s.dictMarkerT1Idx;
   doc["dictMarkerT2Idx"] = s.dictMarkerT2Idx;
+  doc["dictInlineGlossEnabled"] = s.dictInlineGlossEnabled;
 
   // Flashcard style + session scope — chosen on the review overview, not in SettingsList.
   doc["flashcardCardStyle"] = s.flashcardCardStyle;
@@ -326,6 +327,8 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
       clamp(doc["dictMarkerDwellEnabled"] | s.dictMarkerDwellEnabled, 2, s.dictMarkerDwellEnabled);
   s.dictMarkerT1Idx = clamp(doc["dictMarkerT1Idx"] | s.dictMarkerT1Idx, kDictMarkerT1Count, s.dictMarkerT1Idx);
   s.dictMarkerT2Idx = clamp(doc["dictMarkerT2Idx"] | s.dictMarkerT2Idx, kDictMarkerT2Count, s.dictMarkerT2Idx);
+  s.dictInlineGlossEnabled =
+      clamp(doc["dictInlineGlossEnabled"] | s.dictInlineGlossEnabled, 2, s.dictInlineGlossEnabled);
 
   // Flashcard style + session scope — chosen on the review overview, not in SettingsList.
   s.flashcardCardStyle =

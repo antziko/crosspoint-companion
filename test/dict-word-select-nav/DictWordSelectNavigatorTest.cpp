@@ -168,6 +168,15 @@ static void testOrganizeIntoRows() {
   CHECK(words[1].row == 0, "word 1 in row 0");
   CHECK(words[2].row == 0, "word 2 in row 0 (within tolerance)");
   CHECK(words[3].row == 1, "word 3 in row 1");
+
+  // rowY is the row's single y, not each word's own. The gloss box is positioned against it for
+  // exactly this reason: word "c" sits 2px below its row-mates, and a box anchored to the word
+  // would shift by those 2px on a plain left/right step — which costs a strip restore and a
+  // clean panel refresh every time.
+  WordSelectNavigator nav;
+  nav.load(words, rows, pool);
+  CHECK(nav.rowY(0) == 0, "row 0 y is the row's, not word c's 2");
+  CHECK(nav.rowY(1) == 10, "row 1 y");
 }
 
 static void testHyphenatedNavBackward() {

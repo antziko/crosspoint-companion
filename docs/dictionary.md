@@ -65,6 +65,25 @@ If **Dictionary Hold to Look Up** is enabled in Settings, holding **Confirm** in
 
 This setting is off by default.
 
+### Inline Gloss Box
+
+With **Inline Gloss Box** enabled (Settings -> Reader -> Dictionary), word-select looks the highlighted word up as you move the cursor and shows up to three rows of its entry in a box drawn over the page. **Left/Right** becomes scan-and-read: no Confirm, no full definition screen, no Back. **Confirm** still opens the full definition screen, with lookup history and flashcard enrollment as usual.
+
+The box sits directly **above** the row you are on, so the meaning appears where your eye already is and the rows it covers are ones you have already read. When the cursor is too near the top of the page for the box to fit above, it goes directly below instead. It stays put while you scan along a row and moves only when you change rows -- and the screen does one clean refresh when it moves, which is what stops it leaving a trail behind it as it walks down the page.
+
+It is deliberately narrow in scope, and stays off unless all of the following hold:
+
+- The active dictionary is **plain text**: a folder named `st-...`, or an `.ifo` declaring `sametypesequence=m`. HTML and XDXF dictionaries are not supported here (their parser needs more RAM than this screen has to spare) -- the box simply does not appear.
+- The dictionary has been prepared, so it has an index sidecar (`.idx.oft` or `.idx.oft.cspt`). Without one, each lookup would scan the whole index, which is far too slow to do on every keypress. Run **Prepare** on the dictionary first.
+- There is room on the page for the box plus at least two rows of text outside it, and enough free heap.
+- You are not selecting a phrase: during a long-press multi-word selection the box is hidden, since the highlight then spans rows the box would have to sit inside.
+
+In a Chinese entry the **pinyin is shown bold**, so the pronunciation is separable from the meaning at a glance. It is the first bracketed run on the entry's first line -- the `[pin1 yin1]` in `拼音 [pin1 yin1] /pinyin/` -- brackets included. An entry with no such run, or one whose brackets are empty, unclosed or too far into the text to be a reading, simply gets no bold.
+
+Entries longer than three rows end with `...`; open the full definition for the rest. A word that is not in the dictionary shows **Not found** in the box -- unlike Confirm, the inline lookup does not try stems, alternate forms or suggestions, because each of those is another SD card read on a path that runs every time you move the cursor.
+
+This setting is off by default.
+
 ### How Lookup Works
 
 When you select a word, the reader searches for it in this order:

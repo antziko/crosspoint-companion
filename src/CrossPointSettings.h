@@ -426,6 +426,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t dictMarkerT2Idx = 2;  // default 12s
   static constexpr uint16_t DICT_MARKER_T1_SECONDS[] = {3, 5, 8, 10};
   static constexpr uint16_t DICT_MARKER_T2_SECONDS[] = {7, 9, 12, 15};
+  // Inline gloss box: while word-select is open, look the highlighted token up on every cursor
+  // move and show up to three rows of it in a box over the page, so Left/Right becomes "scan and
+  // read" instead of select-Confirm-read-Back. Only ever active for plain-text ("st-"/type-'m')
+  // dictionaries — see DictionaryWordSelectActivity::initGloss, which declines everything else.
+  // 0 = off. Default off until the on-device timings are in; see DICT_GLOSS_TRACE.
+  uint8_t dictInlineGlossEnabled = 0;
   // Reading-progress save debounce: write /progress.bin only every N page turns (plus a flush on
   // reader exit / sleep) to cut SD wear. Stored as an index into PROGRESS_SAVE_PAGES. Index 0 = 1
   // (save every turn, the safest legacy behaviour — no progress loss on hard power-off).

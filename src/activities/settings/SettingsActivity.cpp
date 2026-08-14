@@ -76,6 +76,8 @@ void SettingsActivity::rebuildSettingsLists() {
       readerSettings.push_back(
           SettingInfo::Toggle(StrId::STR_DICT_MARKER_DWELL, &CrossPointSettings::dictMarkerDwellEnabled));
       readerSettings.push_back(
+          SettingInfo::Toggle(StrId::STR_DICT_INLINE_GLOSS, &CrossPointSettings::dictInlineGlossEnabled));
+      readerSettings.push_back(
           SettingInfo::Enum(StrId::STR_DICT_MARKER_T1, &CrossPointSettings::dictMarkerT1Idx,
                             {StrId::STR_SEC_3, StrId::STR_SEC_5, StrId::STR_SEC_8, StrId::STR_SEC_10}));
       readerSettings.push_back(

@@ -70,6 +70,11 @@ class WordSelectNavigator {
   // Position of flat index `flat` within row r. Replaces the linear scans that used to
   // search wordIndices for it.
   int posInRow(int r, int flat) const { return flat - rows[r].firstWord; }
+  // Top y of row r. organizeIntoRows groups words into a row with a 2 px tolerance, so two words
+  // on the same row can report screenY values a pixel or two apart. Anything that positions UI
+  // relative to "the row the cursor is on" must use this, or a plain left/right step inside one
+  // row moves that UI. Unchecked, like the three accessors above.
+  int rowY(int r) const { return rows[r].yPos; }
 
   // Bounding rectangle in framebuffer coordinates. Used by the differential
   // repaint path to identify which screen region to push to the panel.

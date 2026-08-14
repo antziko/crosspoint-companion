@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "../Activity.h"
+#include "util/DictGloss.h"
 #include "util/DictionaryLookupController.h"
 #include "util/WordSelectNavigator.h"
 
@@ -123,7 +124,105 @@ class DictionaryWordSelectActivity final : public Activity {
   void forceFullRepaintOnNextRender() {
     nextRenderMode_ = RenderMode::FullPage;
     prevHighlightIdx_ = -1;
+    // Whatever drew over us also erased the box, so nothing holds one any more. Left stale,
+    // restoreVacatedGlossStrip would clear and re-render a strip of a framebuffer that no
+    // longer contains the page.
+    if (gloss_) gloss_->drawnY = kGlossNotDrawn;
   }
+
+  // --- Inline gloss box ------------------------------------------------------------------
+  // The box sits directly above the selected row, or directly below it when the selection is
+  // too near the top of the page for the box to fit above. Above is preferred because it
+  // covers rows already read, where the opposite-half band this replaced could cover rows the
+  // reader had not reached yet.
+  //
+  // A box that follows the selection has to give back the page text it was covering when it
+  // moves. Doing that with page->render would cost the very thing the differential path above
+  // exists to avoid, so restoreVacatedGlossStrip re-renders only the handful of page elements
+  // that intersect the vacated strip. The box moves once per ROW change, not once per
+  // keypress: a left/right scan along a row leaves it parked.
+  static constexpr int kGlossNotDrawn = -1;
+
+  // Everything the gloss needs, in one heap block allocated by initGloss() only when every
+  // gate passes — a non-CJK session with an ordinary dictionary pays nothing at all. Allocated
+  // AFTER extractWords, because the word array is the largest contiguous request this screen
+  // makes (WordSelectNavigator.h:28-63) and must have first claim; a failed allocation here
+  // just leaves the feature off.
+  struct GlossState {
+    Dictionary::LookupCtx ctx;  // .idx + page index, open for the whole session
+    HalFile dict;               // .dict, ditto — a member handle, so closed in onExit()
+    DictGloss::GlossResult result;
+    char raw[DictGloss::kPeekBytes] = {};
+
+    int forFlatIdx = -1;          // word `result` describes; -1 = nothing peeked yet
+    int y = 0;                    // top edge the box belongs at for the current selection
+    bool place = false;           // false = neither side fits this selection; show no box
+    int drawnY = kGlossNotDrawn;  // top edge of the box the framebuffer currently holds
+
+    // Fixed for the session by initGloss(): neither orientation nor the page margins can change
+    // while this activity is alive.
+    int x = 0;
+    int width = 0;
+    int topY = 0;         // first y the box may occupy
+    int bottomLimit = 0;  // first y the bottom chrome occupies; the box must end above it
+    int minTextRoom = 0;  // page text that must stay visible outside the box (2 reader rows)
+
+    // Follow the definition font, so they are re-derived by resolveGlossFont() rather than
+    // fixed: the size can come and go mid-session (see that function).
+    int fontId = 0;
+    int lineHeight = 0;
+    int height = 0;
+    bool fits = false;  // false = the box would not leave enough page visible; draw nothing
+  };
+  std::unique_ptr<GlossState> gloss_;
+
+  // Page-composition counters filled by extractWords, used by initGloss's CJK gate. Counting
+  // there rather than re-scanning costs nothing: the tokeniser already computes both.
+  int selectableTokenCount_ = 0;
+  int cjkTokenCount_ = 0;
+
+  // Open the dictionary handles, compute the band geometry and allocate gloss_ — or leave it
+  // null, which is the "feature off, behave exactly as before" state every gate falls back to.
+  void initGloss();
+
+  // Point the box at the definition font (family + the dictionary's own point size) and re-derive
+  // everything that depends on its line height. Called on every peek, not once, because the size
+  // can disappear underneath us — see the comment on the definition.
+  void resolveGlossFont();
+
+  // Peek the word at currIdx and place its box relative to the selected row. Returns true when
+  // the caller must take the full-repaint path — only when the strip the box is leaving holds
+  // an image, which restoreVacatedGlossStrip cannot put back cheaply.
+  bool updateGloss(int currIdx, int selectionLineHeight);
+
+  // Give the page back the strip the box has just moved off. Must run BEFORE the highlight is
+  // drawn: it re-renders page lines, which would otherwise paint text over a fresh highlight.
+  // No-op while the box is parked, which is every keypress except a row change.
+  void restoreVacatedGlossStrip();
+
+  // Clear `height` pixels of the box column at `y` and re-render the page elements that
+  // intersect it. Over-inclusive by a line either side: redrawing a line that is already
+  // correct paints identical pixels, whereas missing one leaves a white gap.
+  void renderPageStrip(int y, int height);
+
+  // True if a PageImage intersects [y, y+height). Text and rules are cheap to re-render;
+  // an image may need decoding, so a strip containing one is left to the full-repaint path.
+  bool stripHasImage(int y, int height) const;
+
+  // Paint the box at gloss_->y: clear, frame, rows. No panel push — the caller's single
+  // displayBuffer covers the highlight and the box in one refresh.
+  void drawGloss();
+
+  // Ask the NEXT paint to collapse the box's accumulated refresh residue. Called when the box
+  // relocates (a row change, which is already a large visual change) and on the transitions out
+  // of it. Never on a plain left/right step: a refresh there is a flash in the middle of a
+  // stationary box the user is reading.
+  void clearGlossGhostOnNextPaint();
+
+  // Width measurement injected into DictGloss::fit. ctx is `this`. isIpa is ignored: the gloss
+  // is drawn entirely in the reader font, which is the CJK-capable one and is already partly
+  // resident from the page render.
+  static int measureGlossWidth(void* ctx, const char* text, EpdFontFamily::Style style, bool isIpa);
 
   // Batched bitmap-glyph prewarm for the word at currIdx, so the upcoming
   // drawText (inside renderHighlightDifferential / renderHighlight) doesn't
