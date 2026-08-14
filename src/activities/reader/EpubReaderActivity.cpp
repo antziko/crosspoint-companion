@@ -1039,6 +1039,7 @@ void EpubReaderActivity::jumpToPercent(int percent) {
   // Reset state so render() reloads and repositions on the target spine.
   {
     RenderLock lock(*this);
+    clearDeferredReposition();
     currentSpineIndex = targetSpineIndex;
     nextPageNumber = 0;
     pendingPercentJump = true;
@@ -1341,13 +1342,17 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
         targetPage = fallback.pageNumber;
       }
 
+      // Any explicit selection supersedes the session-start resume/reflow anchor, including a
+      // selection that resolves to the page already showing. One lock covers the whole decision:
+      // RenderLock wraps a non-recursive mutex, so the branches must not take their own.
+      RenderLock lock(*this);
+      clearDeferredReposition();
+
       if (currentSpineIndex != targetSpineIndex) {
-        RenderLock lock(*this);
         currentSpineIndex = targetSpineIndex;
         nextPageNumber = targetPage;
         section.reset();
       } else if (section && section->currentPage != targetPage) {
-        RenderLock lock(*this);
         const int clampedTargetPage = std::max(0, targetPage);
         section->currentPage = clampedTargetPage;
       } else if (!section) {
@@ -1384,6 +1389,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
 
               auto doNavigate = [this, chapterResult]() {
                 RenderLock lock(*this);
+                clearDeferredReposition();
                 currentSpineIndex = chapterResult.spineIndex;
                 pendingAnchor = chapterResult.anchor;
                 nextPageNumber = 0;
@@ -1886,6 +1892,13 @@ void EpubReaderActivity::accumulateVisibleSegment() {
 }
 
 void EpubReaderActivity::pageTurn(bool isForwardTurn) {
+  // A page turn is authoritative: it must not be undone by a resume/reflow anchor captured at
+  // session start once the incremental build completes. Safe to lock here — every caller bails
+  // out on RenderLock::peek() before reaching this point, so the lock is never already held.
+  {
+    RenderLock lock(*this);
+    clearDeferredReposition();
+  }
   if (isForwardTurn) {
     // Fold the final visible segment into the page's accumulated reading time (sub-activity
     // time is already excluded). The idle cap is applied to this total by the new-page render
@@ -2102,8 +2115,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
       // as-is: consume any pending settings-change reposition. Without this, a chapter total
       // saved while the section was still building (i.e. a watermark, not the real count)
       // would remap the resume page against the finalized count and teleport the reader.
-      cachedChapterTotalPageCount = 0;
-      cachedVisibleTextOffset.reset();
+      clearDeferredReposition();
     }
     const bool cacheComplete = cacheLoaded && !section->isPartial();
     if (!cacheComplete) {
@@ -2490,9 +2502,13 @@ bool EpubReaderActivity::applyDeferredReposition() {
       changed = true;
     }
   }
-  cachedChapterTotalPageCount = 0;  // consumed; don't read cached progress again
-  cachedVisibleTextOffset.reset();
+  clearDeferredReposition();  // consumed; don't read cached progress again
   return changed;
+}
+
+void EpubReaderActivity::clearDeferredReposition() {
+  cachedChapterTotalPageCount = 0;
+  cachedVisibleTextOffset.reset();
 }
 
 void EpubReaderActivity::rememberCurrentContentOffset() {
@@ -3126,6 +3142,7 @@ void EpubReaderActivity::navigateToHref(const std::string& hrefStr, const bool s
 
   {
     RenderLock lock(*this);
+    clearDeferredReposition();
     pendingAnchor = std::move(anchor);
     currentSpineIndex = targetSpineIndex;
     nextPageNumber = 0;
@@ -3143,6 +3160,7 @@ void EpubReaderActivity::restoreSavedPosition() {
 
   {
     RenderLock lock(*this);
+    clearDeferredReposition();
     currentSpineIndex = pos.spineIndex;
     nextPageNumber = pos.pageNumber;
     section.reset();
