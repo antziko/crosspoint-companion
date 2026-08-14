@@ -572,8 +572,9 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
   MappedInputManager::Labels labels;
   switch (state) {
     case BrowserState::BROWSING: {
+      // STR_GET, not STR_DOWNLOAD: the hint pill only fits ~72px at the 8pt hint face.
       const char* confirmLabel =
-          (!entries.empty() && entries[selectorIndex].type == OpdsEntryType::BOOK) ? tr(STR_DOWNLOAD) : tr(STR_OPEN);
+          (!entries.empty() && entries[selectorIndex].type == OpdsEntryType::BOOK) ? tr(STR_GET) : tr(STR_OPEN);
       const char* searchLabel = (!searchTemplate.empty() && selectorIndex == 0) ? tr(STR_SEARCH) : tr(STR_DIR_UP);
       labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, searchLabel, tr(STR_DIR_DOWN));
       break;
