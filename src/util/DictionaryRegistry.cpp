@@ -3,6 +3,7 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <SdDebugLog.h>
 
 #include <algorithm>
 #include <cctype>
@@ -128,8 +129,15 @@ bool DictionaryRegistry::discover() {
       if (scratchInfo && Dictionary::readInfoInto(e.basePath.c_str(), *scratchInfo)) {
         e.typeIsM = scratchInfo->sametypesequence[0] == 'm';
       }
-      LOG_DBG("DREG", "Found dictionary: %s/%s (type=%s)", name, foundStem,
-              (scratchInfo && scratchInfo->sametypesequence[0] != '\0') ? scratchInfo->sametypesequence : "?");
+      const char* typeStr =
+          (scratchInfo && scratchInfo->sametypesequence[0] != '\0') ? scratchInfo->sametypesequence : "?";
+      LOG_DBG("DREG", "Found dictionary: %s/%s (type=%s)", name, foundStem, typeStr);
+      // Also to SD: which group each dictionary lands in decides where the long-press switch
+      // can hop, and a misread .ifo (absent sametypesequence, unexpected header) silently
+      // files an 'm' dictionary under "other". Serial-only logging cannot show that after the
+      // fact. Scan time only — a handful of lines per boot, next to MEM: enter/exit per
+      // activity.
+      SdDebugLog::log("DREG", "dict %s type=%s group=%s", name, typeStr, e.typeIsM ? "m" : "other");
       entries_.push_back(std::move(e));
     }
   }
