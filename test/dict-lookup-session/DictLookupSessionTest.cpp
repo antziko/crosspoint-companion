@@ -230,6 +230,37 @@ TEST_F(DictLookupSession, StaleCsptFallsBackToOftNotAFullScan) {
   EXPECT_EQ(opens(), 0);
 }
 
+TEST_F(DictLookupSession, ReopeningACtxAgainstAnotherDictionaryDoesNotLeakState) {
+  // Reopening a ctx must fully reset it. The lazily-opened .oft fallback is the dangerous
+  // one: left set, the second dictionary's probes would resolve their scan bounds against
+  // the FIRST dictionary's page index and answer from the wrong region.
+  installDictionary("english-full", kDictDir, kDictBase);
+  const fs::path cspt = root_ / "dictionaries/english-full/english-full.idx.oft.cspt";
+  {
+    std::fstream f(cspt, std::ios::in | std::ios::out | std::ios::binary);
+    ASSERT_TRUE(f.is_open());
+    f.seekp(0);
+    f.write("XXXX", 4);
+  }
+
+  Dictionary::LookupCtx ctx;
+  ASSERT_TRUE(Dictionary::openLookupCtx(ctx));
+  EXPECT_TRUE(Dictionary::locateIn(ctx, "grove").found);
+  ASSERT_TRUE(ctx.hasOftFallback) << "precondition: the stale .cspt forced the fallback open";
+
+  // Point the same ctx at a different dictionary that has no page index at all.
+  installDictionary("no-ifo", "/dictionaries/no-ifo", "/dictionaries/no-ifo/no-ifo");
+  ASSERT_TRUE(Dictionary::openLookupCtx(ctx));
+  EXPECT_FALSE(ctx.hasOftFallback);
+  EXPECT_FALSE(ctx.hasPageIndex);
+  EXPECT_FALSE(ctx.pageIndexIsCspt);
+  EXPECT_STREQ(ctx.base, "/dictionaries/no-ifo/no-ifo");
+
+  const auto loc = Dictionary::locateIn(ctx, "apple");
+  EXPECT_TRUE(loc.found);
+  EXPECT_EQ(loc.folderPath, "/dictionaries/no-ifo/no-ifo");
+}
+
 TEST_F(DictLookupSession, NoDictionaryConfigured) {
   // No dictionary.bin at all.
   Dictionary::LookupCtx ctx;

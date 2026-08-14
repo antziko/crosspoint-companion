@@ -659,8 +659,20 @@ bool Dictionary::buildPath(char* buf, size_t bufSize, const char* base, const ch
 }
 
 bool Dictionary::openLookupCtx(LookupCtx& ctx, const char* cachePath) {
+  // Full reset, not just the validity flags. A ctx reopened against a DIFFERENT dictionary
+  // would otherwise keep the previous one's lazily-opened .oft fallback and answer probes
+  // from the wrong index, and would leave its old handles open for the ctx's lifetime.
+  // Closing is explicit here because these are members, not scope-local files.
+  ctx.idx.close();
+  ctx.pageIndex.close();
+  ctx.oftFallback.close();
   ctx.valid = false;
   ctx.hasPageIndex = false;
+  ctx.pageIndexIsCspt = false;
+  ctx.oftTried = false;
+  ctx.hasOftFallback = false;
+  ctx.idxSize = 0;
+  ctx.base[0] = '\0';
 
   // One resolve for the whole probe sequence. activeDictPath() reads dictionary.bin off SD
   // whenever no session override is set, which the reader flow does not set — so this alone
