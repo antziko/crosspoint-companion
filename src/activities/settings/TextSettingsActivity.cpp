@@ -17,12 +17,20 @@
 #include "TextSettingsPreview.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/ButtonNavigator.h"
+
+namespace fui = freeink::ui;
 
 namespace {
 // Tab labels for Font | Size | Layout | Style.
 constexpr StrId TAB_NAME_IDS[] = {StrId::STR_FONT, StrId::STR_SIZE, StrId::STR_LAYOUT, StrId::STR_STYLE};
 
-// LOCAL(feat-dictionary): Hold Confirm this long on a Font-tab row to pin/unpin (vs a tap = commit).
+constexpr StrId LAYOUT_ROW_NAME_IDS[] = {StrId::STR_LINE_SPACING, StrId::STR_EXTRA_SPACING, StrId::STR_ALIGNMENT,
+                                         StrId::STR_SCREEN_MARGIN};
+constexpr StrId STYLE_ROW_NAME_IDS[] = {StrId::STR_FOCUS_READING, StrId::STR_HYPHENATION, StrId::STR_EMBEDDED_STYLE,
+                                        StrId::STR_TEXT_AA};
+
+// LOCAL(feat): Hold Confirm this long on a Font-tab row to pin/unpin (vs a tap = commit).
 constexpr unsigned long kPinHoldMs = 600;
 
 constexpr StrId LINE_SPACING_IDS[] = {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_WIDE};
@@ -39,10 +47,12 @@ constexpr int MARGIN_STEP = CrossPointSettings::SCREEN_MARGIN_STEP;
 
 TextSettingsActivity::TextSettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                            const SdCardFontRegistry* registry, Tab initialTab)
-    : Activity("TextSettings", renderer, mappedInput), registry_(registry), tab_(initialTab) {}
+    : UiTabListActivity("TextSettings", renderer, mappedInput), registry_(registry), tab_(initialTab) {}
+
+const char* TextSettingsActivity::tabLabel(const int index) const { return I18N.get(TAB_NAME_IDS[index]); }
 
 void TextSettingsActivity::onEnter() {
-  Activity::onEnter();
+  UiTabListActivity::onEnter();
 
   metrics_ = UITheme::getInstance().getMetrics();
   afterHeader = metrics_.topPadding + metrics_.headerHeight + metrics_.verticalSpacing;
@@ -50,24 +60,61 @@ void TextSettingsActivity::onEnter() {
   usableHeight = renderer.getScreenHeight() - afterHeader - bottomReserved;
   previewHeight = usableHeight * metrics_.previewHeightPercent / 100;
 
-  // LOCAL(feat-dictionary): the shared compare pane owns the font list (built-in + SD, pinned-first).
+  // LOCAL(feat): the shared compare pane owns the font list (built-in + SD, pinned-first).
   fontPane_.build(registry_, SETTINGS.fontFamily, SETTINGS.sdFontFamilyName);
 
   rebuildSizeList();  // populates sizes_ and currentSizeIndex_ from the active family's point sizes
 
-  std::fill(std::begin(selectedIndex_), std::end(selectedIndex_), 1);  // default to the first list row
-  // Family/Size open on the current selection.
-  selectedIndex_[static_cast<int>(Tab::Family)] = fontPane_.highlightedIndex() + 1;
-  selectedIndex_[static_cast<int>(Tab::Size)] = currentSizeIndex_ + 1;
-  selectedIndex_[static_cast<int>(tab_)] = 0;  // screen opens with the tab bar focused, not a list row
+  // Per-tab ring positions (0 = tab bar, 1..N = row). The base reset each tab's
+  // nav with followOnBuild armed, so each tab's first build shows its remembered
+  // selection (Family/Size open on the current item).
+  for (auto& n : tabNavs) n.selected = 1;  // default to the first list row
+  tabNavs[static_cast<int>(Tab::Family)].selected = fontPane_.highlightedIndex() + 1;
+  tabNavs[static_cast<int>(Tab::Size)].selected = currentSizeIndex_ + 1;
+  tabNavs[static_cast<int>(tab_)].selected = 0;  // screen opens with the tab bar focused, not a list row
 
-  requestUpdate();
+  rebuildRowItems();
 }
 
 void TextSettingsActivity::onExit() {
-  // LOCAL(feat-dictionary): restore the user's resident SD font if a Font-tab preview swapped it out.
+  // LOCAL(feat): restore the user's resident SD font if a Font-tab preview swapped it out.
   fontPane_.restore(renderer);
-  Activity::onExit();
+  UiTabListActivity::onExit();
+}
+
+// Rebuilds rowItems_ (label + actionValue) for the active tab. Structural —
+// call only when tab_ or its backing data (sizes_) changes, never from
+// buildScreen(), which just refreshes rowValues_/rowItems_[].value in place.
+// The Font tab draws its own list through FontComparePane, so it keeps none.
+void TextSettingsActivity::rebuildRowItems() {
+  if (onFamilyTab()) {
+    rowValues_.clear();
+    rowItems_.clear();
+    return;
+  }
+
+  const int count = listCount();
+  rowValues_.assign(count, std::string());
+  rowItems_.clear();
+  rowItems_.reserve(count);
+  for (int i = 0; i < count; i++) {
+    fui::ListItem item;
+    switch (tab_) {
+      case Tab::Size:
+        item.label = sizes_[i].name.c_str();
+        break;
+      case Tab::Layout:
+        item.label = I18N.get(LAYOUT_ROW_NAME_IDS[i]);
+        break;
+      case Tab::Style:
+        item.label = I18N.get(STYLE_ROW_NAME_IDS[i]);
+        break;
+      default:
+        break;
+    }
+    item.actionValue = static_cast<int16_t>(i);
+    rowItems_.push_back(item);
+  }
 }
 
 // The selectable sizes belong to the active family, so this runs on entry and
@@ -95,6 +142,9 @@ void TextSettingsActivity::rebuildSizeList() {
   }
 }
 
+// Only the Font tab needs this: the other tabs get their body rect from the FUI
+// content margin set in buildScreen(). Mirrors that margin so the pane's list
+// occupies exactly the band a FUI list would.
 TextSettingsActivity::PaneGeometry TextSettingsActivity::paneGeometry() const {
   const int previewTop = afterHeader;
   const int tabTop = previewTop + previewHeight;
@@ -104,100 +154,61 @@ TextSettingsActivity::PaneGeometry TextSettingsActivity::paneGeometry() const {
   return {previewTop, tabTop, listTop, listHeight};
 }
 
-// Touch handling for the settings screen (#2605's handleTouch(), restored now that
-// #2481's touch primitives are merged). Tab-bar tap switches tabs, a list tap moves
-// the highlight / activates a row, and a vertical swipe pages the list. Inert on
-// non-touch boards (X3/X4): guarded on hasTouch(), and the events never fire anyway.
-// Family-tab specifics: switch away via the tab bar stays live while the compare pane
-// is loading, but list/swipe nav honors the pane's nav-lock; and the pane highlight is
-// synced to the tapped row before activateRow() so applyFamily() commits that font.
-bool TextSettingsActivity::handleTouch() {
-  if (!mappedInput.hasTouch()) return false;
-
-  const auto geo = paneGeometry();
-
-  // Tab bar tap: switch tabs. Allowed even while the Family pane is nav-locked.
-  int tx = 0;
-  int ty = 0;
-  std::vector<TabInfo> tabs;
-  tabs.reserve(static_cast<int>(Tab::Count));
-  for (int t = 0; t < static_cast<int>(Tab::Count); t++) {
-    tabs.push_back({I18N.get(TAB_NAME_IDS[t]), tab_ == static_cast<Tab>(t)});
-  }
-  int tabHit = -1;
-  if ((mappedInput.wasScreenTouchDown(tx, ty) || mappedInput.wasScreenTapped(tx, ty)) &&
-      GUI.tabIndexFromPoint(renderer, Rect{0, geo.tabTop, renderer.getScreenWidth(), metrics_.tabBarHeight}, tabs, tx,
-                            ty, tabHit)) {
-    if (tab_ != static_cast<Tab>(tabHit)) {
-      tab_ = static_cast<Tab>(tabHit);
-      selectedIndex() = 0;
-      requestUpdate();
-    }
-    return true;
-  }
-
-  // Block list/swipe nav while the Family compare pane is still loading its preview
-  // (mirrors loop()'s nav-lock guard); the tab-bar tap above stays live.
-  if (tab_ == Tab::Family && fontPane_.navLocked()) return false;
-
-  const int listCount = currentListSize();
-
-  // List tap: handleListTouch moves the highlight on touchdown and reports Activated
-  // when a tap lands on a row. On Family, sync the pane highlight before activating.
-  int row = std::max(0, selectedIndex() - 1);
-  switch (handleListTouch(row, listCount, geo.listTop, geo.listHeight, /*hasSubtitle=*/false)) {
-    case ListTouchResult::Activated:
-      selectedIndex() = row + 1;
-      syncFamilyPaneHighlight();
-      activateRow(row);
-      return true;
-    case ListTouchResult::Consumed:
-      selectedIndex() = row + 1;
-      syncFamilyPaneHighlight();
-      requestUpdate();
-      return true;
-    case ListTouchResult::None:
-      break;
-  }
-
-  // Vertical swipe pages the list (long Family/Size lists); short lists just clamp.
-  const int pageItems = GUI.getListPageItems(geo.listHeight, /*hasSubtitle=*/false);
-  const int ringSize = listCount + 1;  // +1 for the tab bar at ring position 0
-  const auto swipe = mappedInput.wasSwipe();
-  if (swipe == MappedInputManager::SwipeDir::Up) {
-    selectedIndex() = selectedIndex() == 0 ? 1 : ButtonNavigator::nextPageIndex(selectedIndex(), ringSize, pageItems);
-    syncFamilyPaneHighlight();
+void TextSettingsActivity::onTabAction(const int index) {
+  if (optionPopup_.isActive()) return;
+  if (tab_ != static_cast<Tab>(index)) {
+    tab_ = static_cast<Tab>(index);
+    rebuildRowItems();
+    auto& n = activeNav();
+    n.selected = 0;          // tab taps land with the tab bar focused (legacy tap behavior)
+    n.followOnBuild = true;  // pull the new tab's viewport to its remembered selection
     requestUpdate();
-    return true;
   }
-  if (swipe == MappedInputManager::SwipeDir::Down) {
-    selectedIndex() = ButtonNavigator::previousPageIndex(selectedIndex(), ringSize, pageItems);
-    syncFamilyPaneHighlight();
-    requestUpdate();
-    return true;
-  }
+  // The switched-to tab repaints as the selected pill; a flash overlay on top
+  // of it just repaints the pill in the focused style.
+  app.clearTapFlash();
+}
 
+void TextSettingsActivity::activateIndex(const int index) {
+  if (optionPopup_.isActive()) return;
+  // Most rows repaint a different surface (popup, preview, new value);
+  // a lingering tap flash would gray an unrelated element.
+  app.clearTapFlash();
+  activateRow(index);
+}
+
+bool TextSettingsActivity::handleCustomInput() {
+  if (optionPopup_.handleInput(mappedInput, [this] { requestUpdate(); })) return true;  // picker owns input while open
+  // LOCAL(feat): the Font tab registers no FUI list, so the base's routeListTouch()
+  // has no row rects to hit. Route its taps and swipes here instead. Tab-bar taps
+  // still come from the FUI tab pills that buildTabBar() registered.
+  if (onFamilyTab()) return handleFamilyTouch();
   return false;
 }
 
-void TextSettingsActivity::loop() {
-  if (optionPopup_.handleInput(mappedInput, [this] { requestUpdate(); })) return;  // picker owns input while open
+bool TextSettingsActivity::handleButtons() {
+  // Act on the release, but only when the matching press landed here. Upstream's version
+  // acts on a bare wasReleased(), which is wrong for feat: SettingsActivity opens this
+  // screen on Confirm PRESS, so the release that ends that same physical click arrives
+  // here and would immediately advance the tab. confirmArmed_ doubles as the Confirm
+  // latch — it already had exactly this shape for the Font tab's hold-to-pin gesture.
+  if (mappedInput.wasPressed(MappedInputManager::Button::Back)) backPressActive_ = true;
+  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) confirmArmed_ = true;
 
-  if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-    finish();
-    return;
+  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    const bool originatedHere = backPressActive_;
+    backPressActive_ = false;
+    if (originatedHere) finish();
+    return true;  // swallow either way — a foreign release must not fall through
   }
 
-  if (handleTouch()) return;  // tab/list/swipe touch; inert on non-touch boards
-
-  // LOCAL(feat-dictionary): Font-tab rows use tap=commit / hold=pin (like FontSelectionActivity);
-  // the tab bar and every other tab keep #2605's simple press-to-activate.
-  if (tab_ == Tab::Family && selectedIndex() != 0) {
-    if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) confirmArmed_ = true;
+  // LOCAL(feat): Font-tab rows use tap=commit / hold=pin (like FontSelectionActivity);
+  // the tab bar and every other tab keep the simple release-to-activate.
+  if (onFamilyTab() && ringPos() != 0) {
     if (confirmArmed_ && mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
       if (!pinFiredThisHold_ && mappedInput.getHeldTime() > kPinHoldMs) {
         fontPane_.togglePinSelected();
-        selectedIndex() = fontPane_.highlightedIndex() + 1;  // pin re-sort moved the highlighted row
+        activeNav().selected = fontPane_.highlightedIndex() + 1;  // pin re-sort moved the highlighted row
         pinFiredThisHold_ = true;
         requestUpdate();
       }
@@ -207,46 +218,162 @@ void TextSettingsActivity::loop() {
       const bool wasPin = pinFiredThisHold_;
       confirmArmed_ = false;
       pinFiredThisHold_ = false;
-      if (armed && !wasPin) {
-        activateRow(selectedIndex() - 1);
-        return;
+      if (armed && !wasPin) activateRow(ringPos() - 1);
+      return true;
+    }
+    return false;
+  }
+
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    const bool originatedHere = confirmArmed_;
+    confirmArmed_ = false;
+    if (originatedHere) {
+      if (ringPos() == 0) {
+        switchTab();
+      } else {
+        activateRow(ringPos() - 1);
       }
     }
-  } else if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
-    if (selectedIndex() == 0) {
-      switchTab();
-      return;
-    }
-    activateRow(selectedIndex() - 1);
+    return true;  // swallow either way — a foreign release must not fall through
+  }
+
+  return false;
+}
+
+// LOCAL(feat): gate the ring walk on the compare pane's nav-lock so held or rapid
+// input cannot outrun the (slow, SD-loading) bottom preview pane, and mirror the
+// resulting ring position onto the pane's highlight.
+void TextSettingsActivity::navigateButtons() {
+  if (onFamilyTab() && fontPane_.navLocked()) return;
+  UiTabListActivity::navigateButtons();
+  syncFamilyPaneHighlight();
+}
+
+void TextSettingsActivity::syncFamilyPaneHighlight() {
+  if (!onFamilyTab()) return;
+  if (ringPos() >= 1) fontPane_.setHighlight(ringPos() - 1);
+}
+
+// Tap/swipe routing for the Font tab. The tab bar is handled by FUI; this covers
+// the pane's own list region. Mirrors the base's touch semantics: a tap moves the
+// highlight and activates, a vertical swipe pages.
+bool TextSettingsActivity::handleFamilyTouch() {
+  if (!mappedInput.hasTouch()) return false;
+
+  // Block list/swipe nav while the compare pane is still loading its preview.
+  // Tab-bar taps stay live because FUI routes them before this runs.
+  if (fontPane_.navLocked()) return false;
+
+  const auto geo = paneGeometry();
+  const int count = listCount();
+
+  int row = std::max(0, ringPos() - 1);
+  switch (handleListTouch(row, count, geo.listTop, geo.listHeight, /*hasSubtitle=*/false)) {
+    case ListTouchResult::Activated:
+      activeNav().selected = row + 1;
+      syncFamilyPaneHighlight();
+      activateRow(row);
+      return true;
+    case ListTouchResult::Consumed:
+      activeNav().selected = row + 1;
+      syncFamilyPaneHighlight();
+      requestUpdate();
+      return true;
+    case ListTouchResult::None:
+      break;
+  }
+
+  const int pageItems = GUI.getListPageItems(geo.listHeight, /*hasSubtitle=*/false);
+  const int ringSize = count + 1;  // +1 for the tab bar at ring position 0
+  const auto swipe = mappedInput.wasSwipe();
+  if (swipe == MappedInputManager::SwipeDir::Up) {
+    activeNav().selected = ringPos() == 0 ? 1 : ButtonNavigator::nextPageIndex(ringPos(), ringSize, pageItems);
+    syncFamilyPaneHighlight();
+    requestUpdate();
+    return true;
+  }
+  if (swipe == MappedInputManager::SwipeDir::Down) {
+    activeNav().selected = ButtonNavigator::previousPageIndex(ringPos(), ringSize, pageItems);
+    syncFamilyPaneHighlight();
+    requestUpdate();
+    return true;
+  }
+
+  return false;
+}
+
+void TextSettingsActivity::buildScreen(UiScreen& screen) {
+  // Content sits below the preview pane (render() draws header + preview
+  // directly) and above the caption band + button hints.
+  const int tabTop = afterHeader + previewHeight;
+  const int captionHeight = renderer.getTextHeight(UI_10_FONT_ID) + metrics_.verticalSpacing;
+  screen.setContentMargin(
+      fui::Insets{static_cast<int16_t>(tabTop), 0, static_cast<int16_t>(bottomReserved + captionHeight), 0});
+
+  buildTabBar(screen);
+
+  // LOCAL(feat): the Font tab draws its list itself (render() calls
+  // FontComparePane::renderList after renderUi), so no FUI list is registered.
+  // Only visibleRows is still needed here — the base's page-jump navigation
+  // reads it, and syncTabListViewport() is what would normally set it.
+  if (onFamilyTab()) {
+    const int rows = GUI.getListPageItems(paneGeometry().listHeight, /*hasSubtitle=*/false);
+    activeNav().visibleRows = rows > 0 ? rows : 1;
     return;
   }
 
-  // LOCAL(feat-dictionary): on the Font tab, block nav until the compare pane has rendered its preview.
-  if (tab_ == Tab::Family && fontPane_.navLocked()) return;
+  // rowItems_ (label/actionValue) was built by rebuildRowItems() when the tab
+  // was last switched; only the live value text needs refreshing here, by
+  // assigning into the existing rowValues_ strings (no vector growth) rather
+  // than building a new items/values vector on every render.
+  const int count = listCount();
+  for (int i = 0; i < count; i++) {
+    switch (tab_) {
+      case Tab::Size:
+        rowValues_[i] = (i == currentSizeIndex_) ? tr(STR_SELECTED) : "";
+        break;
+      case Tab::Layout:
+        rowValues_[i] = layoutValueText(i);
+        break;
+      case Tab::Style:
+        rowValues_[i] = styleValueText(i);
+        break;
+      default:
+        break;
+    }
+    rowItems_[i].value = rowValues_[i].empty() ? nullptr : rowValues_[i].c_str();
+  }
 
-  const int ringSize = currentListSize() + 1;  // +1 for the tab bar at position 0
-
-  buttonNavigator_.onNextRelease([this, ringSize] {
-    selectedIndex() = ButtonNavigator::nextIndex(selectedIndex(), ringSize);
-    syncFamilyPaneHighlight();
-    requestUpdate();
-  });
-
-  buttonNavigator_.onPreviousRelease([this, ringSize] {
-    selectedIndex() = ButtonNavigator::previousIndex(selectedIndex(), ringSize);
-    syncFamilyPaneHighlight();
-    requestUpdate();
-  });
-
-  buttonNavigator_.onNextContinuous([this] { switchTab(); });
-  buttonNavigator_.onPreviousContinuous([this] { switchTab(-1); });
+  fui::ListProps props;
+  props.items = rowItems_.data();
+  props.count = static_cast<uint16_t>(rowItems_.size());
+  props.action = ACTION_ROW;
+  props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
+  props.valueInset = 8;               // air between the value and the row edge
+  // Titles match the value's font size (smallText) so both sides of a row
+  // read as one unit; labels that still don't fit wrap onto a second line.
+  // maxLines=2 also marks the style explicitly set (see SettingsActivity).
+  props.labelText = screen.theme().smallText;
+  props.labelText.maxLines = 2;
+  syncTabListViewport(screen, props);
+  screen.list(props);
 }
 
-// LOCAL(feat-dictionary): mirror the Family nav-ring position (0 = tab bar, 1..N = row) onto the
-// compare pane's highlight, arming its nav-lock so input can't outrun the SD preview load.
-void TextSettingsActivity::syncFamilyPaneHighlight() {
-  if (tab_ != Tab::Family) return;
-  if (selectedIndex() >= 1) fontPane_.setHighlight(selectedIndex() - 1);
+const char* TextSettingsActivity::confirmLabelText() const {
+  if (ringPos() == 0) {
+    // Confirm on the tab bar advances to the next tab.
+    return I18N.get(TAB_NAME_IDS[(static_cast<int>(tab_) + 1) % static_cast<int>(Tab::Count)]);
+  }
+  switch (tab_) {
+    case Tab::Layout:
+      // Extra Paragraph Spacing toggles; the rest open a picker
+      return ringPos() - 1 == static_cast<int>(LayoutRow::ParaSpacing) ? tr(STR_TOGGLE) : tr(STR_SELECT);
+    case Tab::Style:
+      // Anti-aliasing opens a tri-state picker; the rest toggle
+      return ringPos() - 1 == static_cast<int>(StyleRow::AntiAliasing) ? tr(STR_SELECT) : tr(STR_TOGGLE);
+    default:
+      return tr(STR_SELECT);
+  }
 }
 
 void TextSettingsActivity::render(RenderLock&&) {
@@ -258,87 +385,35 @@ void TextSettingsActivity::render(RenderLock&&) {
 
   GUI.drawHeader(renderer, Rect{0, metrics_.topPadding, pageWidth, metrics_.headerHeight}, tr(STR_TEXT_SETTINGS));
 
-  const auto geo = paneGeometry();
-  if (tab_ == Tab::Family) {
-    // LOCAL(feat-dictionary): the Font tab shows the two-pane live compare (committed vs highlighted)
+  if (onFamilyTab()) {
+    // LOCAL(feat): the Font tab shows the two-pane live compare (committed vs highlighted)
     // in the preview region instead of the shared single-pane preview.
-    fontPane_.renderPanes(renderer, geo.previewTop, previewHeight);
+    fontPane_.renderPanes(renderer, afterHeader, previewHeight);
   } else {
     const char* familyName = fontPane_.committed().name.c_str();
     const char* sizeName = (currentSizeIndex_ >= 0 && currentSizeIndex_ < static_cast<int>(sizes_.size()))
                                ? sizes_[currentSizeIndex_].name.c_str()
                                : "";
     textsettings::renderPreview(renderer, previewLayout_, metrics_.previewPadding, metrics_.verticalSpacing,
-                                geo.previewTop, previewHeight, familyName, sizeName);
+                                afterHeader, previewHeight, familyName, sizeName);
   }
 
-  const bool onTabBar = selectedIndex() == 0;
-  std::vector<TabInfo> tabs;
-  tabs.reserve(static_cast<int>(Tab::Count));
-  for (int t = 0; t < static_cast<int>(Tab::Count); t++) {
-    tabs.push_back({I18N.get(TAB_NAME_IDS[t]), tab_ == static_cast<Tab>(t)});
-  }
-  GUI.drawTabBar(renderer, Rect{0, geo.tabTop, pageWidth, metrics_.tabBarHeight}, tabs, onTabBar);
+  // Tab bar + (on every tab but Font) the active tab's list draw inside the screen builder.
+  renderUi();
 
-  const Rect listRect{0, geo.listTop, pageWidth, geo.listHeight};
-  const int selectedItem = selectedIndex() - 1;
-  const char* confirmLabel = tr(STR_SELECT);
-
-  switch (tab_) {
-    case Tab::Family:
-      // LOCAL(feat-dictionary): compare pane owns the font list (pins float to top, live highlight).
-      fontPane_.renderList(renderer, geo.listTop, geo.listHeight);
-      if (onTabBar) confirmLabel = tr(STR_SIZE);
-      break;
-
-    case Tab::Size:
-      GUI.drawList(
-          renderer, listRect, static_cast<int>(sizes_.size()), selectedItem,
-          [this](int index) { return sizes_[index].name; }, nullptr, nullptr,
-          [this](int index) -> std::string { return index == currentSizeIndex_ ? tr(STR_SELECTED) : ""; }, true);
-      if (onTabBar) confirmLabel = tr(STR_LAYOUT);
-      break;
-
-    case Tab::Layout: {
-      constexpr int LAYOUT_ROWS = static_cast<int>(LayoutRow::Count);
-      static constexpr StrId ROW_NAME_IDS[LAYOUT_ROWS] = {StrId::STR_LINE_SPACING, StrId::STR_EXTRA_SPACING,
-                                                          StrId::STR_ALIGNMENT, StrId::STR_SCREEN_MARGIN};
-      GUI.drawList(
-          renderer, listRect, LAYOUT_ROWS, selectedItem,
-          [](int index) { return std::string(I18N.get(ROW_NAME_IDS[index])); }, nullptr, nullptr,
-          [this](int index) { return layoutValueText(index); }, true);
-      if (onTabBar)
-        confirmLabel = tr(STR_STYLE);
-      else  // Extra Paragraph Spacing toggles; the rest open a picker
-        confirmLabel = (selectedItem == static_cast<int>(LayoutRow::ParaSpacing)) ? tr(STR_TOGGLE) : tr(STR_SELECT);
-      break;
-    }
-
-    case Tab::Style: {
-      constexpr int STYLE_ROWS = static_cast<int>(StyleRow::Count);
-      static constexpr StrId ROW_NAME_IDS[STYLE_ROWS] = {StrId::STR_FOCUS_READING, StrId::STR_HYPHENATION,
-                                                         StrId::STR_EMBEDDED_STYLE, StrId::STR_TEXT_AA};
-      GUI.drawList(
-          renderer, listRect, STYLE_ROWS, selectedItem,
-          [](int index) { return std::string(I18N.get(ROW_NAME_IDS[index])); }, nullptr, nullptr,
-          [this](int index) { return styleValueText(index); }, true);
-      if (onTabBar)
-        confirmLabel = tr(STR_FONT);
-      else  // Anti-aliasing opens a tri-state picker; the rest toggle
-        confirmLabel = (selectedItem == static_cast<int>(StyleRow::AntiAliasing)) ? tr(STR_SELECT) : tr(STR_TOGGLE);
-      break;
-    }
-
-    default:
-      break;
+  // LOCAL(feat): drawn after renderUi so it lands in the body region the FUI frame left empty.
+  if (onFamilyTab()) {
+    const auto geo = paneGeometry();
+    fontPane_.renderList(renderer, geo.listTop, geo.listHeight);
   }
 
   if (focusedRowHasNoPreview()) {
-    const int capY = geo.listTop + geo.listHeight + metrics_.verticalSpacing;
+    const int captionHeight = renderer.getTextHeight(UI_10_FONT_ID) + metrics_.verticalSpacing;
+    const int capY = afterHeader + usableHeight - captionHeight + metrics_.verticalSpacing;
     renderer.drawText(UI_10_FONT_ID, metrics_.previewPadding, capY, tr(STR_NOT_IN_PREVIEW));
   }
 
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabelText(), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer();
@@ -351,7 +426,7 @@ void TextSettingsActivity::render(RenderLock&&) {
 // arrays out from under prewarmStyle() (crash: null s.miniGlyphs mid-read/sort).
 void TextSettingsActivity::applyFamily() {
   RenderLock lock;
-  // LOCAL(feat-dictionary): apply the compare pane's highlighted font live to global settings.
+  // LOCAL(feat): apply the compare pane's highlighted font live to global settings.
   const auto& font = fontPane_.highlighted();
   if (font.isBuiltin) {
     SETTINGS.fontFamily = font.settingIndex;
@@ -373,13 +448,13 @@ void TextSettingsActivity::applyFamily() {
   // snapped the selection into it, so the Size tab's list and its nav position
   // both have to be rebuilt.
   rebuildSizeList();
-  selectedIndex_[static_cast<int>(Tab::Size)] = currentSizeIndex_ + 1;
+  tabNavs[static_cast<int>(Tab::Size)].selected = currentSizeIndex_ + 1;
 }
 
 void TextSettingsActivity::activateRow(int row) {
   switch (tab_) {
     case Tab::Family:
-      // LOCAL(feat-dictionary): `row` is the pane's highlighted index; apply it live.
+      // LOCAL(feat): `row` is the pane's highlighted index; apply it live.
       applyFamily();
       // Persist immediately (#2806): the parent's result callback only fires on a normal
       // finish(), so relying on it loses the change when this screen is left via the home
@@ -526,23 +601,26 @@ std::string TextSettingsActivity::styleValueText(int row) const {
 // Only Focus Reading shows in the preview (bold prefixes); the other Style rows
 // have no distinct preview.
 bool TextSettingsActivity::focusedRowHasNoPreview() const {
-  if (selectedIndex() == 0 || tab_ != Tab::Style) return false;
-  const StyleRow row = static_cast<StyleRow>(selectedIndex() - 1);
+  if (ringPos() == 0 || tab_ != Tab::Style) return false;
+  const StyleRow row = static_cast<StyleRow>(ringPos() - 1);
   return row == StyleRow::Hyphenation || row == StyleRow::EmbeddedStyle || row == StyleRow::AntiAliasing;
 }
 
 void TextSettingsActivity::switchTab(int direction) {
-  const bool onTabBar = selectedIndex() == 0;
+  const bool onTabBar = ringPos() == 0;
   constexpr int tabCount = static_cast<int>(Tab::Count);
   tab_ = static_cast<Tab>((static_cast<int>(tab_) + direction + tabCount) % tabCount);
-  if (onTabBar) selectedIndex() = 0;
+  rebuildRowItems();
+  auto& n = activeNav();
+  if (onTabBar) n.selected = 0;
+  n.followOnBuild = true;  // pull the new tab's viewport to its remembered selection
   requestUpdate();
 }
 
-int TextSettingsActivity::currentListSize() const {
+int TextSettingsActivity::listCount() const {
   switch (tab_) {
     case Tab::Family:
-      return fontPane_.size();  // LOCAL(feat-dictionary): pane owns the font list
+      return fontPane_.size();  // LOCAL(feat): pane owns the font list
     case Tab::Size:
       return static_cast<int>(sizes_.size());
     case Tab::Layout:
@@ -554,6 +632,3 @@ int TextSettingsActivity::currentListSize() const {
       return 0;
   }
 }
-
-int& TextSettingsActivity::selectedIndex() { return selectedIndex_[static_cast<int>(tab_)]; }
-int TextSettingsActivity::selectedIndex() const { return selectedIndex_[static_cast<int>(tab_)]; }
