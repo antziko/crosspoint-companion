@@ -37,14 +37,9 @@ class DictLookupSession : public ::testing::Test {
     // Session override leaks across tests otherwise: activeDictPath() prefers it over
     // dictionary.bin, which would silently skip the path-resolution open being counted.
     Dictionary::setSessionDictPath("");
-    halFileBadCloseCount = 0;
   }
 
   void TearDown() override {
-    // Checked for every test, not just one: close() on a never-opened HalFile is a device
-    // panic, and a fresh stack LookupCtx holds three of them. Guarding it here means any
-    // future reset/cleanup path that reintroduces the bug fails the whole suite.
-    EXPECT_EQ(halFileBadCloseCount, 0) << "close() called on a never-opened HalFile — panics on device";
     Dictionary::setSessionDictPath("");
     HalStorage::getInstance().setRoot("");
     std::error_code ec;
@@ -321,31 +316,25 @@ TEST_F(DictLookupSession, LocateInOnUnopenedCtxIsSafe) {
   EXPECT_FALSE(loc.found);
 }
 
-// Regression: openLookupCtx used to reset by calling close() on all three handles. On a fresh
-// stack LookupCtx those have no pimpl, and the device HalFile::close() asserts impl != nullptr
-// — so every single lookup panicked with "assert failed: bool HalFile::close()". Releasing by
-// move-assignment is the only reset that is safe on a never-opened handle.
-TEST_F(DictLookupSession, OpeningAFreshCtxNeverClosesAnUnopenedHandle) {
+// Pins the HalFile contract this stub must keep mirroring. openLookupCtx once reset by calling
+// close() on all three handles; on a fresh stack LookupCtx those have no pimpl, and close()
+// asserted impl != nullptr, so every lookup panicked on device with
+// "assert failed: bool HalFile::close()". close() is now a no-op on a null impl (HalStorage.cpp)
+// — but the ctx still releases by move-assignment, which additionally frees the Impl.
+TEST_F(DictLookupSession, ClosingANeverOpenedHandleIsANoOp) {
+  HalFile f;
+  EXPECT_TRUE(f.close());
+  EXPECT_FALSE(f.isOpen());
+}
+
+TEST_F(DictLookupSession, OpeningAFreshCtxTwiceIsSafe) {
   installDictionary("english-full", kDictDir, kDictBase);
 
   Dictionary::LookupCtx ctx;  // all three HalFiles have no impl yet
   ASSERT_TRUE(Dictionary::openLookupCtx(ctx));
-  EXPECT_EQ(halFileBadCloseCount, 0);
-
-  // Reopening must stay safe too: .oftFallback is opened lazily, so on this path it is still
-  // impl-less the second time around.
+  // .oftFallback is opened lazily, so it is still impl-less on the second pass.
   ASSERT_TRUE(Dictionary::openLookupCtx(ctx));
-  EXPECT_EQ(halFileBadCloseCount, 0);
   EXPECT_TRUE(Dictionary::locateIn(ctx, "apple").found);
-}
-
-TEST_F(DictLookupSession, PlainLocateNeverClosesAnUnopenedHandle) {
-  installDictionary("english-full", kDictDir, kDictBase);
-
-  // locate() builds a fresh ctx per call — this is the exact device path that panicked.
-  EXPECT_TRUE(Dictionary::locate("apple").found);
-  EXPECT_FALSE(Dictionary::locate("zzzznotaword").found);
-  EXPECT_EQ(halFileBadCloseCount, 0);
 }
 
 // --- Failure reason -----------------------------------------------------------

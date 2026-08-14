@@ -196,7 +196,24 @@ size_t HalFile::write(uint8_t b) { HAL_FILE_WRAPPED_CALL(write, b); }
 bool HalFile::rename(const char* newPath) { HAL_FILE_WRAPPED_CALL(rename, newPath); }
 bool HalFile::isDirectory() const { HAL_FILE_FORWARD_CALL(isDirectory, ); }  // already thread-safe, no need to wrap
 void HalFile::rewindDirectory() { HAL_FILE_WRAPPED_CALL(rewindDirectory, ); }
-bool HalFile::close() { HAL_FILE_WRAPPED_CALL(close, ); }
+// The one method that tolerates a null impl, deliberately. Every other call above asserts
+// because reading or seeking a handle that was never opened is a caller bug with no sane
+// answer. "Close something already closed" has one: do nothing. SdFat agrees — FsBaseFile
+// ::close() returns true when neither underlying file is open (FsFile.cpp:58-63) — and no
+// caller in this repo inspects the return value.
+//
+// Asserting here cost a shipped reboot: openLookupCtx released three never-opened handles
+// and panicked on every dictionary lookup (fixed in 9ff55eff). The assert turned a benign
+// no-op into a hard reset in the field, since no environment defines NDEBUG.
+//
+// Note this only makes close() SAFE, not preferable: it leaves the Impl allocated. To
+// actually release a member handle, move-assign a fresh one (`f = HalFile()`), which frees
+// the Impl and closes the FsFile via ~Impl under the same lock.
+bool HalFile::close() {
+  if (!impl) return true;
+  HalStorage::StorageLock lock;
+  return impl->file.close();
+}
 HalFile HalFile::openNextFile() {
   HalStorage::StorageLock lock;
   assert(impl != nullptr);

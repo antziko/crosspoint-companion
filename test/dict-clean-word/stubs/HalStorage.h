@@ -1,5 +1,4 @@
 #pragma once
-#include <cassert>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -16,12 +15,6 @@
 // land in a temp dir. cleanWord itself touches no storage — this exists purely
 // so the translation unit links.
 
-// Incremented whenever close() is called on a handle that was never opened. On device that is
-// not a soft failure: HalFile is a pimpl and close() asserts impl != nullptr, so it PANICS
-// ("assert failed: bool HalFile::close()"). Asserting here would not help — the suite builds
-// Release with -DNDEBUG (test/CMakeLists.txt) — so tests check this counter instead.
-inline int halFileBadCloseCount = 0;
-
 class HalFile {
  public:
   HalFile() = default;
@@ -36,28 +29,23 @@ class HalFile {
     if (this != &other) {
       closeHandle();
       fp_ = other.fp_;
-      opened_ = other.opened_;
       other.fp_ = nullptr;
-      other.opened_ = false;  // moved-from == default-constructed: no impl
     }
     return *this;
   }
 
   bool openForRead(const std::string& path) {
     closeHandle();
-    opened_ = true;  // device-side the Impl is allocated even when the open fails
     fp_ = std::fopen(path.c_str(), "rb");
     return fp_ != nullptr;
   }
   bool openForWrite(const std::string& path) {
     closeHandle();
-    opened_ = true;
     fp_ = std::fopen(path.c_str(), "wb");
     return fp_ != nullptr;
   }
   bool openForAppend(const std::string& path) {
     closeHandle();
-    opened_ = true;
     fp_ = std::fopen(path.c_str(), "ab");
     return fp_ != nullptr;
   }
@@ -106,18 +94,13 @@ class HalFile {
     std::fseek(fp_, cur, SEEK_SET);
     return static_cast<int>(end - cur);
   }
-  bool close() {
-    if (!opened_) ++halFileBadCloseCount;  // would panic on device
-    assert(opened_ && "HalFile::close() on a never-opened handle panics on device");
-    return closeHandle();
-  }
+  // Mirrors the device contract (HalStorage.cpp): closing a handle that was never opened, or
+  // was already closed, is a no-op returning true. Every OTHER method there asserts on a null
+  // impl, so do not widen this to the rest of the surface.
+  bool close() { return closeHandle(); }
   bool isOpen() const { return fp_ != nullptr; }
 
  private:
-  // Destructor/reset path: releases the FILE* without the never-opened check, mirroring the
-  // device pimpl destructor, which is a no-op on a null impl rather than an assert.
-  // Deliberately leaves opened_ alone: on device close() does not free the Impl, so closing
-  // an already-closed handle stays legal. Only move-assignment and destruction drop it.
   bool closeHandle() {
     if (fp_) {
       std::fclose(fp_);
@@ -127,7 +110,6 @@ class HalFile {
   }
 
   std::FILE* fp_ = nullptr;
-  bool opened_ = false;  // an Impl exists (device: impl != nullptr)
 };
 
 class HalStorage {
