@@ -293,3 +293,46 @@ TEST_F(DictLookupSession, LocateInOnUnopenedCtxIsSafe) {
   const auto loc = Dictionary::locateIn(ctx, "apple");
   EXPECT_FALSE(loc.found);
 }
+
+// --- Failure reason -----------------------------------------------------------
+
+TEST_F(DictLookupSession, StatusSeparatesMissFromBrokenDictionary) {
+  // The three outcomes must be distinguishable, because the UI reports them differently:
+  // a miss offers suggestions, the other two say what is actually wrong instead of
+  // "Not found" — which reads as "you spelled it wrong".
+  installDictionary("english-full", kDictDir, kDictBase);
+  EXPECT_EQ(Dictionary::locate("apple").status, LookupStatus::Found);
+  EXPECT_EQ(Dictionary::locate("notaword").status, LookupStatus::NotFound);
+
+  // Configured, but the .idx is gone.
+  fs::remove(root_ / "dictionaries/english-full/english-full.idx");
+  EXPECT_EQ(Dictionary::locate("apple").status, LookupStatus::ReadError);
+
+  // Nothing configured at all.
+  fs::remove(root_ / ".crosspoint/dictionary.bin");
+  EXPECT_EQ(Dictionary::locate("apple").status, LookupStatus::NoDictionary);
+}
+
+TEST_F(DictLookupSession, StatusIsSetOnTheWidenedRetryHitToo) {
+  // The widened-retry path has its own `found = true` assignment; a status left at the
+  // default there would report a hit as NotFound to the caller.
+  installDictionary("english-full", kDictDir, kDictBase);
+
+  Dictionary::LookupCtx ctx;
+  ASSERT_TRUE(Dictionary::openLookupCtx(ctx));
+  for (const char* w : {"apple", "grove", "zenith", "above-mentioned"}) {
+    const auto loc = Dictionary::locateIn(ctx, w);
+    ASSERT_TRUE(loc.found) << w;
+    EXPECT_EQ(loc.status, LookupStatus::Found) << w;
+  }
+}
+
+TEST_F(DictLookupSession, StatusFromLocateInMatchesLocate) {
+  installDictionary("english-full", kDictDir, kDictBase);
+
+  Dictionary::LookupCtx ctx;
+  ASSERT_TRUE(Dictionary::openLookupCtx(ctx));
+  for (const char* w : {"apple", "notaword", "zzzzzz", "grave"}) {
+    EXPECT_EQ(Dictionary::locate(w).status, Dictionary::locateIn(ctx, w).status) << w;
+  }
+}

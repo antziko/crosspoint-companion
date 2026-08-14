@@ -709,6 +709,9 @@ DictLocation Dictionary::locate(const std::string& word, const DictLookupCallbac
   LookupCtx ctx;
   if (!openLookupCtx(ctx, cachePath)) {
     DictLocation result;
+    // base is filled only when the dictionary resolved but its .idx would not open, which
+    // is what separates "nothing configured" from "configured but broken".
+    result.status = ctx.base[0] == '\0' ? LookupStatus::NoDictionary : LookupStatus::ReadError;
     result.folderPath = ctx.base;  // "" when no dictionary is configured
     return result;
   }
@@ -717,7 +720,10 @@ DictLocation Dictionary::locate(const std::string& word, const DictLookupCallbac
 
 DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const DictLookupCallbacks& cbs) {
   DictLocation result;
-  if (!ctx.valid) return result;
+  if (!ctx.valid) {
+    result.status = ctx.base[0] == '\0' ? LookupStatus::NoDictionary : LookupStatus::ReadError;
+    return result;
+  }
   result.folderPath = ctx.base;
 
   HalFile& idx = ctx.idx;
@@ -749,6 +755,7 @@ DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const
       result.size = (static_cast<uint32_t>(suffix[4]) << 24) | (static_cast<uint32_t>(suffix[5]) << 16) |
                     (static_cast<uint32_t>(suffix[6]) << 8) | static_cast<uint32_t>(suffix[7]);
       result.found = true;
+      result.status = LookupStatus::Found;
       if (cbs.onProgress) cbs.onProgress(cbs.ctx, 100);
       return result;
     }
@@ -793,6 +800,7 @@ DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const
         result.size = (static_cast<uint32_t>(suffix[4]) << 24) | (static_cast<uint32_t>(suffix[5]) << 16) |
                       (static_cast<uint32_t>(suffix[6]) << 8) | static_cast<uint32_t>(suffix[7]);
         result.found = true;
+        result.status = LookupStatus::Found;
         // Logged to SD because it is the signal that a dictionary's sort order disagrees with
         // cistrcmp: a hit here is one the single-page scan should have found and did not.
         SdDebugLog::log("DICT", "locate: widened scan hit, page window %u-%u vs %u-%u", (unsigned)wideStart,

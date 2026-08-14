@@ -1,4 +1,6 @@
 #pragma once
+#include <I18n.h>  // StrId, for the NotFound popup's message
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -109,6 +111,10 @@ class DictionaryLookupController {
   std::string foundWord;
   DictLocation foundLocation;
   std::string altFormWord;
+
+  // What the NotFound popup says. A genuine miss reads "Not found"; an unset or unreadable
+  // dictionary says so instead, rather than sending the user hunting for a typo.
+  StrId notFoundMsg_ = StrId::STR_DICT_NOT_FOUND;
 
   // CLEANUP: on Auto-only commit, delete only this line (threshold/cache/method below drive Auto mode — keep)
   static constexpr uint32_t AUTO_POPUP_CSPT_ENTRY_THRESHOLD = 50000;

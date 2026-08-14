@@ -27,6 +27,9 @@ void DictionaryLookupController::startLookup(const std::string& word, bool recor
   lookupWord = word;
   foundWord.clear();
   foundLocation = DictLocation{};
+  // Per-lookup, not sticky: without this reset a later genuine miss would still be
+  // reported with the previous lookup's "No dictionary set" / "Dictionary unreadable".
+  notFoundMsg_ = StrId::STR_DICT_NOT_FOUND;
   lookupProgress = 0;
   lookupDone = false;
   lookupCancelled = false;
@@ -93,6 +96,17 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
         foundStatus = nextIsSuggestion ? FoundStatus::Suggestion : FoundStatus::Direct;
         nextIsSuggestion = false;
         return LookupEvent::FoundDefinition;
+      }
+
+      // No usable dictionary: the search never ran, so stems, alt forms and fuzzy
+      // suggestions would all re-fail against the same missing files. Say what is actually
+      // wrong instead of "Not found", which reads as "you spelled it wrong".
+      if (foundLocation.status == LookupStatus::NoDictionary || foundLocation.status == LookupStatus::ReadError) {
+        notFoundMsg_ = foundLocation.status == LookupStatus::NoDictionary ? StrId::STR_DICT_NO_DICT_SET
+                                                                          : StrId::STR_DICT_UNREADABLE;
+        nextIsSuggestion = false;
+        setNotFound();
+        return LookupEvent::None;
       }
 
       // Try stem variants (locate only — no definition loaded into RAM).
@@ -200,7 +214,7 @@ bool DictionaryLookupController::render() {
   }
 
   if (state == LookupState::NotFound) {
-    GUI.drawPopup(renderer, tr(STR_DICT_NOT_FOUND));
+    GUI.drawPopup(renderer, I18n::getInstance().get(notFoundMsg_));
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_DONE), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer(HalDisplay::FAST_REFRESH);

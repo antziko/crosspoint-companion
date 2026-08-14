@@ -47,11 +47,27 @@ struct DictInfo {
 };
 
 // Result of an index search — file location of a definition without reading it.
+// Why a lookup returned nothing, so the UI can tell "this word is not in the dictionary"
+// from "there is no usable dictionary to look it up in". Both used to surface as
+// "Not found", which sent the user hunting for a spelling mistake when the real problem
+// was an unset or unreadable dictionary.
+//
+// Deliberately NOT modelled on upstream's LookupResult: its LowMemory and Decompress
+// states describe a .dict.dz inflate that cannot happen here — this engine extracts
+// during DictPrepareActivity, so the lookup path performs no large allocation.
+enum class LookupStatus : uint8_t {
+  Found,
+  NotFound,      // the search ran and the word is genuinely absent
+  NoDictionary,  // no dictionary configured (no dictionary.bin, or it is empty)
+  ReadError,     // a dictionary is configured but its .idx could not be opened
+};
+
 struct DictLocation {
   std::string folderPath;  // dictionary base path (e.g. /dictionary/dict-en-en/dict-data)
   uint32_t offset = 0;     // byte offset in .dict file
   uint32_t size = 0;       // byte length in .dict file
   bool found = false;
+  LookupStatus status = LookupStatus::NotFound;
 };
 
 class Dictionary {
