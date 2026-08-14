@@ -1043,6 +1043,9 @@ void EpubReaderActivity::jumpToPercent(int percent) {
     currentSpineIndex = targetSpineIndex;
     nextPageNumber = 0;
     pendingPercentJump = true;
+    // A percentage jump targets a position, not a paragraph. Drop any anchor still pending
+    // from an earlier bookmark jump so it cannot override this one.
+    pendingParagraphAnchor = UINT16_MAX;
     section.reset();
   }
 }
@@ -1652,6 +1655,9 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
                 currentSpineIndex = bm.spineIndex;
                 pendingSpineProgress = bm.progress;
                 pendingPercentJump = true;
+                // Prefer the recorded paragraph over the progress fraction so the jump
+                // survives a re-layout; the fraction stays as the fallback.
+                pendingParagraphAnchor = bm.paragraphIndex;
                 section.reset();
               };
 
@@ -2278,6 +2284,21 @@ void EpubReaderActivity::render(RenderLock&& lock) {
         LOG_DBG("ERS", "Anchor '%s' not found in section %d", pendingAnchor.c_str(), currentSpineIndex);
       }
       pendingAnchor.clear();
+    }
+
+    // Land on the bookmarked paragraph when one was recorded: it names the actual text, so
+    // it stays correct across a re-layout that moved every page number. Falls through to
+    // the percentage below when the section carries no page for it.
+    if (pendingParagraphAnchor != UINT16_MAX && section->pageCount > 0) {
+      const auto anchoredPage = section->getPageForParagraphIndex(pendingParagraphAnchor);
+      if (anchoredPage.has_value() && *anchoredPage < section->pageCount) {
+        section->currentPage = *anchoredPage;
+        pendingPercentJump = false;
+        LOG_DBG("ERS", "Bookmark paragraph %u -> page %u", pendingParagraphAnchor, *anchoredPage);
+      } else {
+        LOG_DBG("ERS", "Bookmark paragraph %u unresolved; using progress", pendingParagraphAnchor);
+      }
+      pendingParagraphAnchor = UINT16_MAX;
     }
 
     if (pendingPercentJump && section->pageCount > 0) {

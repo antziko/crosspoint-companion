@@ -56,6 +56,13 @@ class EpubReaderActivity final : public Activity {
   bool pendingPercentJump = false;
   // Normalized 0.0-1.0 progress within the target spine item, computed from book percentage.
   float pendingSpineProgress = 0.0f;
+  // Paragraph anchor to land on once the target section is built, taking precedence over
+  // pendingSpineProgress. A bookmark's progress is a page-count fraction captured when it
+  // was made, so re-pagination (font size, margins, line spacing, rotation) moves it;
+  // the paragraph index names the actual text and survives. UINT16_MAX means unavailable
+  // (legacy bookmark, or a section whose cache carries no paragraph map) and the
+  // percentage jump then applies unchanged.
+  uint16_t pendingParagraphAnchor = UINT16_MAX;
   bool pendingScreenshot = false;
   bool pendingSyncSaveError = false;
   // Consecutive page-load failures. Each failure drops the section and rebuilds on the next render,
