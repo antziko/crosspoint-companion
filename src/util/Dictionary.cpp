@@ -643,10 +643,16 @@ bool Dictionary::openLookupCtx(LookupCtx& ctx, const char* cachePath) {
   // Full reset, not just the validity flags. A ctx reopened against a DIFFERENT dictionary
   // would otherwise keep the previous one's lazily-opened .oft fallback and answer probes
   // from the wrong index, and would leave its old handles open for the ctx's lifetime.
-  // Closing is explicit here because these are members, not scope-local files.
-  ctx.idx.close();
-  ctx.pageIndex.close();
-  ctx.oftFallback.close();
+  // Releasing is explicit here because these are members, not scope-local files.
+  //
+  // Move-assign a fresh handle rather than calling close(): HalFile is a pimpl, and close()
+  // asserts impl != nullptr (HalStorage.cpp), so it PANICS on a never-opened handle — which
+  // is exactly what a stack LookupCtx is on the first call. Assignment also frees the Impl,
+  // which close() alone does not; the old Impl's destructor takes StorageLock and closes the
+  // underlying FsFile.
+  ctx.idx = HalFile();
+  ctx.pageIndex = HalFile();
+  ctx.oftFallback = HalFile();
   ctx.valid = false;
   ctx.hasPageIndex = false;
   ctx.pageIndexIsCspt = false;
