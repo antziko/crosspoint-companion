@@ -42,15 +42,37 @@ void UiListActivity::onRowAction(const fui::ActionEvent& event) {
 }
 
 bool UiListActivity::handleButtons() {
-  if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-    onBackButton();
+  // Act on the RELEASE, but only when the matching press landed in this activity.
+  //
+  // Acting on the press meant the release outlived the screen: a row that opens a
+  // sub-activity handed it the still-pending release, which the sub-activity then read as
+  // its own input. The scattered consume/swallow flags around the codebase all work
+  // around that. Latching the press instead fixes it at the source and — unlike simply
+  // moving to wasReleased — stays correct while other screens still act on press, so this
+  // needs no lockstep change. Same shape as OpdsServerListActivity::handleButtons(), which
+  // arrived at it independently for its hold-to-duplicate gesture.
+  if (mappedInput.wasPressed(MappedInputManager::Button::Back)) backPressActive = true;
+  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) confirmPressActive = true;
+
+  // The latch is cleared before dispatching: onBackButton()/activateIndex() can finish()
+  // this activity, and touching members afterwards would be a use-after-free.
+  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    const bool originatedHere = backPressActive;
+    backPressActive = false;
+    if (originatedHere) onBackButton();
+    return true;  // swallow either way — a foreign release must not fall through to touch
+  }
+
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    const bool originatedHere = confirmPressActive;
+    confirmPressActive = false;
+    if (originatedHere) {
+      const int selected = activeNav().selected;
+      if (selected >= 0 && selected < listCount()) activateIndex(selected);
+    }
     return true;
   }
-  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
-    const int selected = activeNav().selected;
-    if (selected >= 0 && selected < listCount()) activateIndex(selected);
-    return true;
-  }
+
   return false;
 }
 

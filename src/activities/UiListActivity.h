@@ -90,4 +90,9 @@ class UiListActivity : public Activity, protected UiAppHost {
   bool routeListTouch();
 
   const bool wantsTouchLongPress;
+  // Press-origin latches for the default handleButtons(): a release only acts when its
+  // press landed in this activity, so a screen opened mid-hold ignores the stale release
+  // that ends the launching gesture instead of self-activating.
+  bool backPressActive = false;
+  bool confirmPressActive = false;
 };
