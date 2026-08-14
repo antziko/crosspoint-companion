@@ -95,16 +95,24 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
         return LookupEvent::FoundDefinition;
       }
 
-      // Try stem variants (locate only — no definition loaded into RAM)
+      // Try stem variants (locate only — no definition loaded into RAM).
+      // One ctx for the whole probe sequence: opening per stem cost four SD opens and ~six
+      // transient path strings each, which is heap churn this screen cannot afford. The ctx
+      // is local to this UI-task call and never shared with the lookup task.
       auto stems = Dictionary::getStemVariants(lookupWord);
-      for (const auto& stem : stems) {
-        auto loc = Dictionary::locate(stem, {}, cachePath.c_str());
-        if (loc.found) {
-          foundWord = stem;
-          foundLocation = std::move(loc);
-          foundStatus = nextIsSuggestion ? FoundStatus::Suggestion : FoundStatus::Stem;
-          nextIsSuggestion = false;
-          return LookupEvent::FoundDefinition;
+      if (!stems.empty()) {
+        Dictionary::LookupCtx ctx;
+        if (Dictionary::openLookupCtx(ctx, cachePath.c_str())) {
+          for (const auto& stem : stems) {
+            auto loc = Dictionary::locateIn(ctx, stem);
+            if (loc.found) {
+              foundWord = stem;
+              foundLocation = std::move(loc);
+              foundStatus = nextIsSuggestion ? FoundStatus::Suggestion : FoundStatus::Stem;
+              nextIsSuggestion = false;
+              return LookupEvent::FoundDefinition;
+            }
+          }
         }
       }
 

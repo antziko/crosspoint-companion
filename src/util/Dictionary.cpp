@@ -497,26 +497,24 @@ static bool readIndexPageStart(HalFile& index, bool isCspt, uint32_t numEntries,
   return true;
 }
 
+// Entry count a page index holds, given its format. Shared so the open-handle and
+// open-by-path forms of widenScanBounds cannot drift apart.
+static uint32_t pageIndexEntryCount(HalFile& index, bool isCspt) {
+  const uint32_t sz = static_cast<uint32_t>(index.fileSize());
+  if (isCspt) return sz > CSPT_HEADER_SIZE ? (sz - CSPT_HEADER_SIZE) / CSPT_ENTRY_SIZE : 0;
+  return sz > OFT_HEADER_SIZE ? (sz - OFT_HEADER_SIZE) / 4 : 0;
+}
+
 // Expand a single-page window to PAGE_RADIUS pages either side of it, on real page boundaries.
 // Defaults to the whole file when no page index exists (then it is already one page).
-static void widenScanBounds(const char* csptPath, const char* oftPath, uint32_t srcFileSize, uint32_t centerStart,
-                            uint32_t* outStart, uint32_t* outEnd) {
+// Open-handle form: the caller already holds the page index, so the miss path no longer
+// reopens the file resolveScanBounds just finished with.
+static void widenScanBoundsIn(HalFile& index, bool isCspt, uint32_t srcFileSize, uint32_t centerStart,
+                              uint32_t* outStart, uint32_t* outEnd) {
   *outStart = 0;
   *outEnd = srcFileSize;
 
-  HalFile index;
-  bool isCspt = false;
-  uint32_t numEntries = 0;
-  if (Storage.openFileForRead("DICT", csptPath, index)) {
-    isCspt = true;
-    const uint32_t sz = static_cast<uint32_t>(index.fileSize());
-    numEntries = sz > CSPT_HEADER_SIZE ? (sz - CSPT_HEADER_SIZE) / CSPT_ENTRY_SIZE : 0;
-  } else if (Storage.openFileForRead("DICT", oftPath, index)) {
-    const uint32_t sz = static_cast<uint32_t>(index.fileSize());
-    numEntries = sz > OFT_HEADER_SIZE ? (sz - OFT_HEADER_SIZE) / 4 : 0;
-  } else {
-    return;
-  }
+  const uint32_t numEntries = pageIndexEntryCount(index, isCspt);
   if (numEntries == 0) return;
 
   // Page starts are monotonically increasing, so binary search for the page holding centerStart.
@@ -543,6 +541,31 @@ static void widenScanBounds(const char* csptPath, const char* oftPath, uint32_t 
   // End of the last page in the window == start of the page after it; past the end, the file end.
   if (readIndexPageStart(index, isCspt, numEntries, landed + PAGE_RADIUS + 1, &bound)) {
     *outEnd = bound;
+  }
+}
+
+void Dictionary::resolveScanBoundsIn(LookupCtx& ctx, const char* target, uint32_t* startByte, uint32_t* endByte) {
+  if (!ctx.hasPageIndex) return;  // no index: caller's full-file bounds stand
+
+  if (!ctx.pageIndexIsCspt) {
+    findPageBounds(ctx.pageIndex, ctx.idx, ctx.idxSize, target, startByte, endByte);
+    return;
+  }
+
+  if (binarySearchCspt(ctx.pageIndex, target, ctx.idxSize, startByte, endByte)) return;
+
+  // .cspt is stale or malformed. The path-based form falls back to .oft here, and dropping
+  // that would turn every probe into a full-file scan on a large dictionary — so keep it,
+  // but open .oft lazily and once: the fallback costs nothing until a bad sidecar needs it.
+  if (!ctx.oftTried) {
+    ctx.oftTried = true;
+    char path[160];
+    if (buildPath(path, sizeof(path), ctx.base, ".idx.oft")) {
+      ctx.hasOftFallback = Storage.openFileForRead("DICT", path, ctx.oftFallback);
+    }
+  }
+  if (ctx.hasOftFallback) {
+    findPageBounds(ctx.oftFallback, ctx.idx, ctx.idxSize, target, startByte, endByte);
   }
 }
 
@@ -630,30 +653,76 @@ std::string Dictionary::readDefinition(const std::string& folderPath, uint32_t o
 // Locate (index search only — no definition read, zero RAM growth)
 // ---------------------------------------------------------------------------
 
+bool Dictionary::buildPath(char* buf, size_t bufSize, const char* base, const char* suffix) {
+  const int n = snprintf(buf, bufSize, "%s%s", base, suffix);
+  return n > 0 && static_cast<size_t>(n) < bufSize;
+}
+
+bool Dictionary::openLookupCtx(LookupCtx& ctx, const char* cachePath) {
+  ctx.valid = false;
+  ctx.hasPageIndex = false;
+
+  // One resolve for the whole probe sequence. activeDictPath() reads dictionary.bin off SD
+  // whenever no session override is set, which the reader flow does not set — so this alone
+  // was an SD open per probe.
+  const std::string folder = activeDictPath(cachePath);
+  if (folder.empty()) return false;
+  if (!buildPath(ctx.base, sizeof(ctx.base), folder.c_str(), "")) {
+    LOG_ERR("DICT", "Dictionary path too long: %s", folder.c_str());
+    return false;
+  }
+
+  char path[160];
+  if (!buildPath(path, sizeof(path), ctx.base, ".idx")) return false;
+  if (!Storage.openFileForRead("DICT", path, ctx.idx)) return false;  // base is set: unreadable, not absent
+  ctx.idxSize = static_cast<uint32_t>(ctx.idx.fileSize());
+
+  // Page index is optional — without it locate() falls back to a full scan. .cspt first,
+  // matching resolveScanBounds' preference order.
+  if (buildPath(path, sizeof(path), ctx.base, ".idx.oft.cspt") &&
+      Storage.openFileForRead("DICT", path, ctx.pageIndex)) {
+    ctx.pageIndexIsCspt = true;
+    ctx.hasPageIndex = true;
+  } else if (buildPath(path, sizeof(path), ctx.base, ".idx.oft") &&
+             Storage.openFileForRead("DICT", path, ctx.pageIndex)) {
+    ctx.pageIndexIsCspt = false;
+    ctx.hasPageIndex = true;
+  }
+
+  ctx.valid = true;
+  return true;
+}
+
 DictLocation Dictionary::locate(const std::string& word, const DictLookupCallbacks& cbs, const char* cachePath) {
+  LookupCtx ctx;
+  if (!openLookupCtx(ctx, cachePath)) {
+    DictLocation result;
+    result.folderPath = ctx.base;  // "" when no dictionary is configured
+    return result;
+  }
+  return locateIn(ctx, word, cbs);
+}
+
+DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const DictLookupCallbacks& cbs) {
   DictLocation result;
-  result.folderPath = activeDictPath(cachePath);
-  if (result.folderPath.empty()) return result;
+  if (!ctx.valid) return result;
+  result.folderPath = ctx.base;
 
-  DictPaths dp(result.folderPath);
-  HalFile idx;
-  if (!Storage.openFileForRead("DICT", dp.idx().c_str(), idx)) return result;
-
-  const uint32_t idxFileSize = static_cast<uint32_t>(idx.fileSize());
+  HalFile& idx = ctx.idx;
+  const uint32_t idxFileSize = ctx.idxSize;
   uint32_t startByte = 0;
   uint32_t endByte = idxFileSize;
 
-  resolveScanBounds(dp.idxOftCspt().c_str(), dp.idxOft().c_str(), idx, idxFileSize, word.c_str(), &startByte, &endByte);
+  resolveScanBoundsIn(ctx, word.c_str(), &startByte, &endByte);
 
   if (cbs.onProgress) cbs.onProgress(cbs.ctx, 70);
 
   idx.seekSet(startByte);
 
+  // No idx.close() on any exit below: the handle belongs to the ctx and the next probe in a
+  // stem sequence reuses it. It closes with the ctx (DESTRUCTOR_CLOSES_FILE=1).
   while (static_cast<uint32_t>(idx.position()) < endByte) {
-    if (cbs.shouldCancel && cbs.shouldCancel(cbs.ctx)) {
-      idx.close();
-      return result;
-    }
+    if (cbs.shouldCancel && cbs.shouldCancel(cbs.ctx)) return result;
 
     int len = readWordInto(idx, wordBuf, sizeof(wordBuf));
     if (len < 0) break;
@@ -668,7 +737,6 @@ DictLocation Dictionary::locate(const std::string& word, const DictLookupCallbac
       result.size = (static_cast<uint32_t>(suffix[4]) << 24) | (static_cast<uint32_t>(suffix[5]) << 16) |
                     (static_cast<uint32_t>(suffix[6]) << 8) | static_cast<uint32_t>(suffix[7]);
       result.found = true;
-      idx.close();
       if (cbs.onProgress) cbs.onProgress(cbs.ctx, 100);
       return result;
     }
@@ -694,7 +762,9 @@ DictLocation Dictionary::locate(const std::string& word, const DictLookupCallbac
     // scan this exact region through findSimilar anyway.
     uint32_t wideStart = 0;
     uint32_t wideEnd = idxFileSize;
-    widenScanBounds(dp.idxOftCspt().c_str(), dp.idxOft().c_str(), idxFileSize, startByte, &wideStart, &wideEnd);
+    if (ctx.hasPageIndex) {
+      widenScanBoundsIn(ctx.pageIndex, ctx.pageIndexIsCspt, idxFileSize, startByte, &wideStart, &wideEnd);
+    }
 
     if (wideStart < startByte || wideEnd > endByte) {
       idx.seekSet(wideStart);
@@ -720,7 +790,6 @@ DictLocation Dictionary::locate(const std::string& word, const DictLookupCallbac
     }
   }
 
-  idx.close();
   if (cbs.onProgress) cbs.onProgress(cbs.ctx, 100);
   return result;
 }

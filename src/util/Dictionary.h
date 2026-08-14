@@ -121,7 +121,50 @@ class Dictionary {
   // caller's frame — see readInfoInto above.
   static DictInfo readInfo(const char* folderPath);
 
+  // The .idx + page-index handles shared by every locate() in one lookup, so a probe
+  // sequence opens them once instead of once per probe.
+  //
+  // A miss costs four SD opens per locate(): dictionary.bin (via activeDictPath), .idx,
+  // the page index inside resolveScanBounds(), and the SAME page index again inside the
+  // widened-retry path. The stem-variant fallback runs up to six probes, so a missed word
+  // was costing ~28 opens and ~42 transient std::strings (every DictPaths accessor returns
+  // by value) before findSimilar() even started — heap churn on precisely the path whose
+  // fragmentation makes lookups fail mid-session.
+  //
+  // Handles stay open for the ctx's lifetime; every reader seeks before it reads, so they
+  // are safe to share across probes. All fixed-size members: no heap, nothing to free
+  // (DESTRUCTOR_CLOSES_FILE=1 closes both files at scope exit).
+  //
+  // NOT thread-safe and must NOT be shared across tasks: runLookup() probes the exact word
+  // on DictLookupTask while the stem loop runs on the UI task. Each opens its own ctx.
+  struct LookupCtx {
+    HalFile idx;
+    HalFile pageIndex;  // .idx.oft.cspt when present, else .idx.oft
+    // Opened lazily, and only if a .cspt search fails (stale/malformed sidecar), to preserve
+    // the .cspt -> .oft fallback the path-based resolveScanBounds has. Without it a bad
+    // sidecar would demote every probe to a full-file scan.
+    HalFile oftFallback;
+    bool pageIndexIsCspt = false;
+    bool hasPageIndex = false;
+    bool oftTried = false;
+    bool hasOftFallback = false;
+    uint32_t idxSize = 0;
+    char base[128] = "";  // resolved dictionary base path, "" when none is configured
+    bool valid = false;
+  };
+
+  // Resolve the active dictionary once and open .idx (required) plus the page index
+  // (optional — locate falls back to a full scan without it). False when no dictionary is
+  // configured or .idx will not open; ctx.base is still filled when only .idx failed, so
+  // callers can tell "no dictionary" from "unreadable dictionary".
+  static bool openLookupCtx(LookupCtx& ctx, const char* cachePath = nullptr);
+
+  // locate() against an already-open ctx. Identical semantics to locate(); this is the form
+  // to use when probing several candidate spellings for one word.
+  static DictLocation locateIn(LookupCtx& ctx, const std::string& word, const DictLookupCallbacks& cbs = {});
+
   // Search .idx for word (via .idx.oft if present). Returns file location without reading content.
+  // Thin wrapper: opens a LookupCtx and calls locateIn(). Prefer the ctx form for probe loops.
   static DictLocation locate(const std::string& word, const DictLookupCallbacks& cbs = {},
                              const char* cachePath = nullptr);
 
@@ -159,6 +202,15 @@ class Dictionary {
   // Returns the number of characters read (excluding null), or -1 on error.
   static int readWordInto(HalFile& file, char* buf, size_t bufSize);
 
+  // Build "<base><suffix>" into a caller-supplied buffer. The hot lookup path uses this
+  // instead of the DictPaths accessors, which return std::string by value — ~60-char paths
+  // are well past SSO, so each accessor call is a heap round trip, and with -fno-exceptions
+  // a failed one abort()s rather than returning null. Mirrors buildDictPath() in
+  // DictionaryDefinitionActivity.cpp, which exists for the same reason. DictPaths stays for
+  // cold callers (settings and registry screens), where the churn does not matter.
+  // Returns false when the result would be truncated.
+  static bool buildPath(char* buf, size_t bufSize, const char* base, const char* suffix);
+
   // Read the word at ordinal `ordinal` in .idx.
   // folderPath is the dictionary base path (e.g. /dictionary/dict-en-en/dict-data).
   static std::string wordAtOrdinal(const std::string& folderPath, uint32_t ordinal);
@@ -182,6 +234,10 @@ class Dictionary {
   // (full-file scan). Used by both .idx (locate) and .syn (resolveAltForm) lookups.
   static void resolveScanBounds(const char* csptPath, const char* oftPath, HalFile& src, uint32_t srcFileSize,
                                 const char* target, uint32_t* startByte, uint32_t* endByte);
+
+  // resolveScanBounds against an already-open ctx. Same .cspt-then-.oft preference order as
+  // the path-based form; takes the whole ctx because the .oft fallback is opened lazily.
+  static void resolveScanBoundsIn(LookupCtx& ctx, const char* target, uint32_t* startByte, uint32_t* endByte);
 
   static int editDistance(const std::string& a, const std::string& b, int maxDist);
 };
