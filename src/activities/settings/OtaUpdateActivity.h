@@ -21,6 +21,8 @@ class OtaUpdateActivity : public Activity {
 
   State state = WIFI_SELECTION;
   unsigned int lastUpdaterPercentage = UNINITIALIZED_PERCENTAGE;
+  // Guards the ~16s pre-reboot panel scrub in render()'s FINISHED branch against a repeat.
+  bool deepCleanDone = false;
   OtaUpdater updater;
   // Optional detail line shown under the generic "Update failed" heading.
   // Points into the i18n string table (flash-resident, so no lifetime concern);

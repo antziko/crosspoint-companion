@@ -94,9 +94,6 @@ void OtaUpdateActivity::render(RenderLock&&) {
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
 
-  renderer.clearScreen();
-
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_UPDATE));
   const auto height = renderer.getLineHeight(UI_10_FONT_ID);
   const auto top = (pageHeight - height) / 2;
 
@@ -104,11 +101,29 @@ void OtaUpdateActivity::render(RenderLock&&) {
   if (state == UPDATE_IN_PROGRESS) {
     LOG_DBG("OTA", "Update progress: %d / %d", updater.getProcessedSize(), updater.getTotalSize());
     updaterProgress = static_cast<float>(updater.getProcessedSize()) / static_cast<float>(updater.getTotalSize());
-    // Only update every 2% at the most
+    // Only update every 2% at the most. Checked before any drawing: this used to sit below
+    // clearScreen() + drawHeader(), so a throttled callback wiped the framebuffer and drew
+    // the header into it, then returned without pushing either.
     if (static_cast<int>(updaterProgress * 50) == lastUpdaterPercentage / 2) {
       return;
     }
     lastUpdaterPercentage = static_cast<int>(updaterProgress * 100);
+  }
+
+  renderer.clearScreen();
+
+  if (state == UPDATE_IN_PROGRESS) {
+    // Plain title instead of the themed header while the download+install runs. GUI.drawHeader
+    // draws a solid black full-width rule under a titled band (BaseTheme.cpp:484-487 — 3px on
+    // Lyra/Lyra-3/Vega, 0 on Classic/RoundedRaff) at y = topPadding + headerHeight - 3. An OTA
+    // holds one layout for the whole download AND flash, so that rule would sit at solid DC
+    // black on the same three rows the entire time. That dwell — not the frame count — is what
+    // sets e-ink image sticking, and it surfaces later as a faint line across the sleep
+    // wallpaper. Same treatment as SdFirmwareUpdateActivity, which was confirmed on device.
+    renderer.drawCenteredText(UI_10_FONT_ID, metrics.topPadding + (metrics.headerHeight - height) / 2, tr(STR_UPDATE),
+                              true, EpdFontFamily::BOLD);
+  } else {
+    GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_UPDATE));
   }
 
   if (state == CHECKING_FOR_UPDATE) {
@@ -151,11 +166,26 @@ void OtaUpdateActivity::render(RenderLock&&) {
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   } else if (state == FINISHED) {
+    // Deep clean before the reboot, while we still control the panel — the last chance to
+    // clear what the install just burned in. Nothing after ESP.restart() (loop(), SHUTTING_DOWN)
+    // can do it, so the residue would otherwise be inherited by every screen the new firmware
+    // draws, including the next sleep image where it finally becomes visible. A single
+    // FULL_REFRESH is one inversion cycle and does not release sticking set over minutes.
+    //
+    // One-shot: deepCleanPanel takes ~16s, and FINISHED is followed by a delay(3000) before
+    // SHUTTING_DOWN (runUpdateInstall), so a second render must not repeat it.
+    if (!deepCleanDone) {
+      deepCleanDone = true;
+      renderer.deepCleanPanel();
+    }
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_COMPLETE), true, EpdFontFamily::BOLD);
     renderer.drawCenteredText(UI_10_FONT_ID, top + height + metrics.verticalSpacing, tr(STR_POWER_ON_HINT));
   }
 
-  renderer.displayBuffer();
+  // Terminal states get a full GC flash so the panel is left clean — FINISHED because the
+  // reboot follows immediately, FAILED because the dwell already happened.
+  const bool terminal = state == FINISHED || state == FAILED;
+  renderer.displayBuffer(terminal ? HalDisplay::FULL_REFRESH : HalDisplay::FAST_REFRESH);
 }
 
 void OtaUpdateActivity::runUpdateInstall() {

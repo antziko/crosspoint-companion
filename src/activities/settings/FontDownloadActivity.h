@@ -79,6 +79,13 @@ class FontDownloadActivity final : public UiListActivity {
   size_t currentFileTotal_ = 0;
   size_t fileProgress_ = 0;
   size_t fileTotal_ = 0;
+  // Progress redraw granularity. Each repaint is a full-screen refresh (~435ms on X3) that
+  // competes with the transfer and, because SD shares the display SPI bus, with the file
+  // writes too. Must divide 100 so the last step lands on a drawn frame.
+  static constexpr unsigned int PROGRESS_STEP_PERCENT = 10;
+  // Sentinel: outside 0..100 so the first callback of every file always draws.
+  static constexpr unsigned int PERCENT_UNRENDERED = 101;
+  unsigned int lastRenderedPercent_ = PERCENT_UNRENDERED;
   int downloadingFamilyIndex_ = 0;
   std::string errorMessage_;
   bool cancelRequested_ = false;

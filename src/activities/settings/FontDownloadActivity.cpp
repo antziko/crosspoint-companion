@@ -360,6 +360,7 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
       RenderLock lock(*this);
       fileProgress_ = 0;
       fileTotal_ = file.size;
+      lastRenderedPercent_ = PERCENT_UNRENDERED;  // per-file: progress restarts at 0
     }
     requestUpdateAndWait();
 
@@ -396,7 +397,22 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
             cancelRequested_ = true;
             goHomeRequested_ = true;
           }
-          requestUpdate(true);
+          // Repaint at most once per PROGRESS_STEP_PERCENT. This callback used to request an
+          // update unconditionally, i.e. as fast as the panel would accept one — ~435ms per
+          // full-screen refresh, continuously, for the whole download. requestUpdate(true) is
+          // non-blocking (ActivityManager.cpp:349, xTaskNotify), so the cost does not land in
+          // this callback; it lands in the next socket wait, and on X3 the SD card shares the
+          // display SPI bus (BoardConfig.h) so it also sits between the file writes.
+          //
+          // Percent-based only. A time term here would have to be a FLOOR (AND), never a
+          // trigger (OR): an OR clause lets a slower transfer buy itself MORE refreshes and
+          // get slower still, which is the regression fixed in 24ffd03c.
+          const unsigned int pct = fileTotal_ > 0 ? static_cast<unsigned int>((fileProgress_ * 100) / fileTotal_) : 0;
+          const unsigned int step = pct - (pct % PROGRESS_STEP_PERCENT);
+          if (step != lastRenderedPercent_ || cancelRequested_) {
+            lastRenderedPercent_ = step;
+            requestUpdate(true);
+          }
         },
         &cancelRequested_, "", "", nullptr, FONT_CA_GITHUB_PEM, FONT_CA_ASSETS_PEM);
 
@@ -698,9 +714,20 @@ void FontDownloadActivity::render(RenderLock&&) {
 
   renderer.clearScreen();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_FONT_BROWSER));
-
   const auto lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  if (state_ == DOWNLOADING) {
+    // Plain title instead of the themed header for the duration of the download. GUI.drawHeader
+    // draws a solid black full-width rule under a titled band (BaseTheme.cpp:484-487 — 3px on
+    // Lyra/Lyra-3/Vega, 0 on Classic/RoundedRaff) at y = topPadding + headerHeight - 3. A family
+    // download holds this one layout across every file in it, and that dwell — not the frame
+    // count — is what sets e-ink image sticking, which surfaces later as a faint line across the
+    // sleep wallpaper. Same treatment as SdFirmwareUpdateActivity, confirmed on device.
+    renderer.drawCenteredText(UI_10_FONT_ID, metrics.topPadding + (metrics.headerHeight - lineHeight) / 2,
+                              tr(STR_FONT_BROWSER), true, EpdFontFamily::BOLD);
+  } else {
+    GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_FONT_BROWSER));
+  }
+
   const auto contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
   const auto centerY = (pageHeight - lineHeight) / 2;
 
