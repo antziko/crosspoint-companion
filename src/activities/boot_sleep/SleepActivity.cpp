@@ -289,6 +289,12 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap) const {
   // Wipe ghosting from the previously displayed screen before drawing the
   // wallpaper. Clear to white first, then a FULL refresh (full black/white
   // flash) to completely clear prior content before showing the image.
+  //
+  // Keep this FULL. It was verified on device (2641ms — a genuine GC flash, not the
+  // ~300ms of a demoted differential) during the 08-15 hunt for a horizontal line on
+  // the wallpaper. That line turned out to be image sticking burned in elsewhere, by
+  // the themed header's solid black rule; this render was never at fault. Weakening
+  // the wipe would reintroduce ordinary ghosting on top of that.
   renderer.clearScreen();
   renderer.displayBuffer(HalDisplay::FULL_REFRESH);
 

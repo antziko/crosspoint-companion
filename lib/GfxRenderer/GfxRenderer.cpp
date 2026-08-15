@@ -1837,6 +1837,21 @@ bool GfxRenderer::glyphIntersectsStrip(int x0, int y0, int x1, int y1) const {
   return !(maxY < _stripY0 || minY >= _stripY0 + _stripRows);
 }
 
+unsigned long GfxRenderer::deepCleanPanel(const uint8_t cycles) const {
+  const unsigned long startMs = millis();
+  for (uint8_t i = 0; i < cycles; i++) {
+    clearScreen(0x00);  // 0x00 = all black (clearScreen memsets the 1bpp buffer; 0xFF is white)
+    displayBuffer(HalDisplay::FULL_REFRESH);
+    clearScreen(0xFF);
+    displayBuffer(HalDisplay::FULL_REFRESH);
+  }
+  // Duration is the tuning knob: if residue survives N cycles we raise N, and the
+  // cost of doing so has to stay visible in the log.
+  const unsigned long elapsedMs = millis() - startMs;
+  LOG_INF("GFX", "deepCleanPanel: %u cycles in %lu ms", static_cast<unsigned>(cycles), elapsedMs);
+  return elapsedMs;
+}
+
 void GfxRenderer::invertScreen() const {
   for (uint32_t i = 0; i < frameBufferSize; i++) {
     frameBuffer[i] = ~frameBuffer[i];

@@ -876,22 +876,28 @@ void loop() {
     //   - FAST: grayscale-safe. A HALF/FULL clear firms the e-ink particles too
     //     hard for the X4 grayscale LUT to darken back, washing AA/image/sleep
     //     pages whitish. FAST avoids that (same trick as the image-blanking dance).
-    //   - HALF/FULL: stronger ghost clear. Safe on X3 (1-bit panel, no grayscale
+    //   - HALF: stronger ghost clear. Safe on X3 (1-bit panel, no grayscale
     //     image pass); on X4 may wash grayscale content whitish.
-    HalDisplay::RefreshMode clearMode = HalDisplay::FAST_REFRESH;
-    switch (SETTINGS.refreshScreenMode) {
-      case CrossPointSettings::RSM_HALF:
-        clearMode = HalDisplay::HALF_REFRESH;
-        break;
-      case CrossPointSettings::RSM_FULL:
-        clearMode = HalDisplay::FULL_REFRESH;
-        break;
-      case CrossPointSettings::RSM_FAST:
-      default:
-        clearMode = HalDisplay::FAST_REFRESH;
-        break;
-    }
-    {
+    //   - FULL: multi-cycle deep clean (deepCleanPanel), for image sticking that a
+    //     single inversion cannot release — a black rule held at a fixed y for
+    //     minutes, e.g. the themed header underline through an SD firmware write.
+    //     Takes ~15s of visible black/white flashing and is the only way to clear
+    //     burn that is already set, so it is a deliberate user action, not a default.
+    if (SETTINGS.refreshScreenMode == CrossPointSettings::RSM_FULL) {
+      unsigned long cleanMs = 0;
+      {
+        RenderLock lock;
+        cleanMs = renderer.deepCleanPanel();
+      }
+      // On the SD log, not just serial: this is the one burn-in remedy the user can
+      // trigger by hand, and without a trace here a later "the line came back" report
+      // can't be told apart from "no clean was ever run".
+      SdDebugLog::setEnabled(true);
+      SdDebugLog::log("GFX", "deepclean manual cycles=3 ms=%lu", cleanMs);
+    } else {
+      const HalDisplay::RefreshMode clearMode = SETTINGS.refreshScreenMode == CrossPointSettings::RSM_HALF
+                                                    ? HalDisplay::HALF_REFRESH
+                                                    : HalDisplay::FAST_REFRESH;
       RenderLock lock;
       renderer.clearScreen();
       renderer.displayBuffer(clearMode);

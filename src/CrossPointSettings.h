@@ -170,6 +170,9 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // whole-panel ghost clear in main.cpp. FAST is grayscale-safe (X4 default);
   // HALF/FULL give a stronger ghost clear but firm the e-ink particles too hard
   // for the following grayscale pass, washing AA/image pages whitish on X4.
+  // FULL is the multi-cycle deep clean (GfxRenderer::deepCleanPanel, ~15s of
+  // black/white flashing) — the only thing that releases image sticking already
+  // burned in, as opposed to plain differential ghosting.
   enum REFRESH_SCREEN_MODE { RSM_FAST = 0, RSM_HALF = 1, RSM_FULL = 2, REFRESH_SCREEN_MODE_COUNT };
 
   // Hide battery percentage

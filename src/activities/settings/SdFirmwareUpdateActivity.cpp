@@ -5,8 +5,10 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
 #include <esp_ota_ops.h>
 
+#include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "activities/home/FileBrowserActivity.h"
 #include "activities/util/ConfirmationActivity.h"
@@ -145,6 +147,8 @@ void SdFirmwareUpdateActivity::onConfirmationResult(const ActivityResult& result
     state = State::UPDATING;
     writtenBytes = 0;
     lastRenderedPercent = 101;
+    progressFrames = 0;
+    updateStartMs = millis();
   }
   requestUpdateAndWait();
   performUpdate();
@@ -189,6 +193,27 @@ void SdFirmwareUpdateActivity::performUpdate() {
   ESP.restart();
 }
 
+void SdFirmwareUpdateActivity::logUpdateDiagnostics(unsigned long cleanMs) const {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  // Deduct the deep clean: it runs before this call, but it is a white/black panel
+  // sequence, not the UPDATING layout. dwellMs has to mean "how long the progress
+  // screen was held", because dwell is the quantity the whole burn-in theory turns on.
+  const unsigned long elapsedMs = updateStartMs > 0 ? millis() - updateStartMs : 0;
+  const unsigned long dwellMs = elapsedMs > cleanMs ? elapsedMs - cleanMs : elapsedMs;
+  // headerY is the exact panel row the themed header rule would have occupied. If a
+  // burned line is reported, it should measure at this y — that is the check that
+  // confirms (or kills) the header-rule explanation.
+  const int headerY = metrics.topPadding + metrics.headerHeight - metrics.headerUnderlineSize;
+  SdDebugLog::setEnabled(true);
+  // The absence of this line is itself diagnostic: it means the firmware that performed
+  // the write predates these changes, so neither the header-rule removal nor the deep
+  // clean ran — the burn seen afterwards was produced by the old code, not by this one.
+  SdDebugLog::log("FWU",
+                  "sd-update ok size=%u frames=%u dwellMs=%lu cleanMs=%lu theme=%d underline=%d headerY=%d recovery=%d",
+                  static_cast<unsigned>(firmwareSize), progressFrames, dwellMs, cleanMs,
+                  static_cast<int>(SETTINGS.uiTheme), metrics.headerUnderlineSize, headerY, recoveryMode ? 1 : 0);
+}
+
 void SdFirmwareUpdateActivity::loop() {
   if (state == State::FAILED) {
     int x = 0;
@@ -211,24 +236,53 @@ void SdFirmwareUpdateActivity::render(RenderLock&&) {
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
 
+  const auto lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+
+  unsigned int pct = 0;
+  if (state == State::UPDATING) {
+    // Throttle redraws to once per PROGRESS_STEP_PERCENT, not once per percent.
+    // Checked before any drawing so a throttled callback does no work at all.
+    //
+    // This is a throughput fix, not the ghosting fix: on X3 the SD card shares the
+    // display SPI bus, so every repaint here stalls the flash writes it sits between.
+    // It does NOT reduce panel residue — displayBuffer() below defaults to FAST_REFRESH,
+    // and a differential waveform gives no drive at all to a pixel whose value does not
+    // change (Uc8253X3Driver.cpp:191-206), so pixels identical across every frame are
+    // unaffected by how many frames there are. See the header note below for what
+    // actually burns.
+    pct = firmwareSize > 0 ? static_cast<unsigned int>((writtenBytes * 100) / firmwareSize) : 0;
+    const unsigned int step = pct - (pct % PROGRESS_STEP_PERCENT);
+    if (step == lastRenderedPercent) {
+      return;
+    }
+    lastRenderedPercent = step;
+    progressFrames++;
+  }
+
   renderer.clearScreen();
 
   const char* headerText = recoveryMode ? tr(STR_RECOVERY_MODE) : tr(STR_SD_FIRMWARE_UPDATE);
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, headerText);
+  if (state == State::UPDATING) {
+    // Plain title instead of the themed header, deliberately: GUI.drawHeader draws a
+    // solid black full-width rule under a titled band (BaseTheme.cpp:484-487 — 3px on
+    // Lyra/Lyra-3/Vega, 0 on Classic/RoundedRaff), landing at y = topPadding +
+    // headerHeight - 3. A firmware write holds one layout for tens of seconds to
+    // minutes, so that rule would sit at solid DC black on the same three rows for the
+    // whole flash. That dwell — not the frame count — is what sets e-ink image sticking,
+    // and it shows up later as a faint line across the sleep wallpaper, the only
+    // full-screen content with nothing drawn at that y. Text glyphs are thin and sparse,
+    // so the title itself is not a comparable risk.
+    renderer.drawCenteredText(UI_10_FONT_ID, metrics.topPadding + (metrics.headerHeight - lineHeight) / 2, headerText,
+                              true, EpdFontFamily::BOLD);
+  } else {
+    GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, headerText);
+  }
 
-  const auto lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
   const auto top = (pageHeight - lineHeight) / 2;
 
   if (state == State::VALIDATING) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_VALIDATING_FIRMWARE));
   } else if (state == State::UPDATING) {
-    // Throttle redraws to once per percent.
-    const unsigned int pct = firmwareSize > 0 ? static_cast<unsigned int>((writtenBytes * 100) / firmwareSize) : 0;
-    if (pct == lastRenderedPercent) {
-      return;
-    }
-    lastRenderedPercent = pct;
-
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATING), true, EpdFontFamily::BOLD);
 
     int y = top + lineHeight + metrics.verticalSpacing;
@@ -248,6 +302,21 @@ void SdFirmwareUpdateActivity::render(RenderLock&&) {
       y += lineHeight;
     }
   } else if (state == State::SUCCESS) {
+    // Deep clean before the reboot, while we still control the panel. This is the moment
+    // right after the longest unbroken static-black dwell the UI ever produces, and it is
+    // the last chance to clear it: nothing after ESP.restart() can, so the residue would
+    // otherwise be inherited by every screen the new firmware draws — including the next
+    // sleep image, where it is finally visible.
+    //
+    // A single FULL_REFRESH (what this used to be) is one inversion cycle and does not
+    // release sticking set over minutes; deepCleanPanel runs several. It leaves the panel
+    // and framebuffer white, so the success text below is drawn onto a clean buffer and
+    // pushed by the terminal FULL at the end of this function.
+    //
+    // The user sees a few black/white flashes for ~15s before "Update complete". That is
+    // acceptable here — they are already waiting on a flash and told not to power off —
+    // and it is the only automatic clear in the firmware.
+    logUpdateDiagnostics(renderer.deepCleanPanel());
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_COMPLETE), true, EpdFontFamily::BOLD);
     // Wrap the restart hint ("...hold the power for a few seconds...") over up to 3
     // lines instead of a single centered line that runs off both edges (X3 narrower).
@@ -277,5 +346,11 @@ void SdFirmwareUpdateActivity::render(RenderLock&&) {
     }
   }
 
-  renderer.displayBuffer();
+  // Terminal states get a full flash: SUCCESS is the last frame before ESP.restart() (and
+  // follows the deep clean above, so it paints from a white panel), and FAILED is read
+  // then navigated away from. Both are rare and one-shot, so the ~2s costs nothing.
+  // UPDATING stays on the default FAST — a full flash per step would add ~20s to a flash
+  // whose repaints already contend with the SD card for the shared SPI bus.
+  const bool terminal = state == State::SUCCESS || state == State::FAILED;
+  renderer.displayBuffer(terminal ? HalDisplay::FULL_REFRESH : HalDisplay::FAST_REFRESH);
 }

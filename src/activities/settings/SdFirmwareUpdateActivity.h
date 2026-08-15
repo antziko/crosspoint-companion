@@ -44,7 +44,19 @@ class SdFirmwareUpdateActivity : public Activity {
   std::string firmwarePath;
   size_t firmwareSize = 0;
   size_t writtenBytes = 0;
+  // Progress redraw granularity. Each redraw is a full-screen differential refresh, and a
+  // long run of those is what burns a residual band into the panel (see render()). 10%
+  // keeps the bar visibly moving on a flash that takes tens of seconds while cutting the
+  // frame count from ~100 to 10. Must divide 100 so the last step lands on a drawn frame.
+  static constexpr unsigned int PROGRESS_STEP_PERCENT = 10;
+  // Sentinel: outside 0..100 so the first progress callback always draws.
   unsigned int lastRenderedPercent = 101;
+  // Troubleshooting counters for the panel-burn investigation: how many progress
+  // frames were actually painted, and how long the UPDATING layout was held on
+  // screen. Dwell (not frame count) is what sets image sticking, so both are
+  // logged on the terminal transition.
+  unsigned int progressFrames = 0;
+  unsigned long updateStartMs = 0;
   std::string errorMessage;
 
   void launchPicker();
@@ -53,4 +65,8 @@ class SdFirmwareUpdateActivity : public Activity {
   void promptConfirmation();
   void onConfirmationResult(const ActivityResult& result);
   void performUpdate();
+  // Panel-burn troubleshooting: records the UPDATING dwell, painted frame count and the
+  // active theme's header-rule thickness to the SD debug log, immediately before the
+  // reboot that would otherwise lose them.
+  void logUpdateDiagnostics(unsigned long cleanMs) const;
 };

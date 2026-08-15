@@ -217,6 +217,26 @@ class GfxRenderer {
   bool supportsAsyncRefresh() const;
   void invertScreen() const;
   void clearScreen(uint8_t color = 0xFF) const;
+
+  // Multi-cycle ghost clear: drives every pixel through `cycles` complete
+  // black -> white inversions, each half of a cycle a FULL_REFRESH.
+  //
+  // One FULL_REFRESH already inverts once (the X3 `_full` bank runs VSH then VSL
+  // from a forced-white DTM1 baseline — Uc8253X3Driver.cpp:181-185), and that is
+  // enough for ordinary differential ghosting. It is NOT enough for image
+  // sticking set by minutes of unbroken DC on the same pixels — e.g. the themed
+  // header's solid black rule (BaseTheme.cpp:484-487; 3px on Lyra/Vega), which
+  // sits at a fixed y on every menu screen and is held black through an entire
+  // SD firmware write. Releasing that needs several cycles.
+  //
+  // Leaves the framebuffer and the panel white — the caller must re-render.
+  // Costs 2 x cycles full refreshes (~2.6s each on X3), so this is a deliberate,
+  // user-visible operation: never call it from a normal render path.
+  //
+  // Returns elapsed milliseconds so callers can record the dose in the SD debug
+  // log; GfxRenderer itself only logs to serial, which is not available on the
+  // device runs this is being tuned against.
+  unsigned long deepCleanPanel(uint8_t cycles = 3) const;
   void getOrientedViewableTRBL(int* outTop, int* outRight, int* outBottom, int* outLeft) const;
 
   // Tiled grayscale strip target. While active, drawPixel() and clearScreen()
