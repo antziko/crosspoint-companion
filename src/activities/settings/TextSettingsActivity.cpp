@@ -251,7 +251,15 @@ void TextSettingsActivity::navigateButtons() {
 
 void TextSettingsActivity::syncFamilyPaneHighlight() {
   if (!onFamilyTab()) return;
-  if (ringPos() >= 1) fontPane_.setHighlight(ringPos() - 1);
+  if (ringPos() < 1) return;
+  const int row = std::clamp(ringPos() - 1, 0, std::max(0, fontPane_.size() - 1));
+  // Only on an actual move. setHighlight() arms the pane's nav lock, and this runs from
+  // navigateButtons() on EVERY loop pass, not just the ones that moved: re-arming it for a
+  // highlight that did not change deadlocked the screen. The lock is cleared by renderPanes(),
+  // so a no-op re-arm right after the render left navigateButtons() taking its early return
+  // with nothing left to request another render -- one Down into the list and up/down was dead.
+  if (fontPane_.highlightedIndex() == row) return;
+  fontPane_.setHighlight(row);
 }
 
 // Tap/swipe routing for the Font tab. The tab bar is handled by FUI; this covers
