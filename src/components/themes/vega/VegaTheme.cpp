@@ -302,9 +302,146 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
   const int nextThumbW = nextTileW - kNextThumbGap;
   const int nextCount = std::min(static_cast<int>(recentBooks.size()) - 1, 3);
 
-  // Expensive work (SD bitmap reads, epub/progress/stats I/O for the hero card
-  // text) happens once per cover-bitmap generation, then gets snapshotted --
-  // identical lifecycle to Lyra3CoversTheme's per-tile bitmap loads.
+  // Hero text block. Static for a given hero book -- nothing in it depends on selectorIndex --
+  // so it belongs in the snapshot alongside the cover bitmaps, not in the per-frame path. It
+  // used to be redrawn every frame, which on a CJK title is not the cheap operation the old
+  // comment claimed: each wrappedText/drawText pulls Han glyphs through the SD font, and on this
+  // screen the glyph ring is pinned at its 2048-byte floor (device log: home sits at ~23KB free,
+  // under both SdCardFont floors), so most glyphs were re-read from SD at ~27ms each on every
+  // press. A lambda rather than a member function: it needs a dozen geometry locals, and called
+  // directly (never stored in a std::function) it costs nothing.
+  auto drawHeroText = [&]() {
+    const int titleLineH = renderer.getLineHeight(UI_10_FONT_ID);
+    const int textLineH = renderer.getLineHeight(SMALL_FONT_ID);
+    int textY = coverY;
+
+    const HeroDetails& details = cachedHeroDetails;
+
+    // Bottom block height: progress-section + today + lastRead.
+    // Chapter moves to the top block so is excluded here.
+    int detailBlockH = 0;
+    if (details.hasProgress) {
+      detailBlockH += textLineH + kLineGap;           // "xx% - duration" label
+      detailBlockH += kProgressBarHeight + kLineGap;  // bar
+      if (details.hasTodayDuration) {
+        detailBlockH += textLineH + kLineGap;  // "Today: X" line
+      }
+    } else if (details.hasDuration) {
+      detailBlockH += textLineH + kLineGap;  // duration alone
+    }
+    if (details.hasLastRead) {
+      detailBlockH += textLineH;  // last element, no trailing gap
+    }
+
+    // Top block: title lines + gap + chapter. Title and chapter share the space
+    // above the bottom-anchored detail block. The chapter wraps fully (no 1-line
+    // ellipsis) into whatever height remains after the book name, separated by a
+    // readable gap. One chapter line is reserved up front so a long book name can't
+    // crowd the chapter out entirely.
+    const int topBlockH = coverH - detailBlockH;
+    const bool hasChapter = !details.chapterTitle.empty();
+    const int chapterGap = hasChapter ? kHeroChapterGap : 0;
+    const int minChapterH = hasChapter ? textLineH : 0;
+    const int availableForTitle = topBlockH - chapterGap - minChapterH;
+    const int dynamicTitleMaxLines = std::max(1, availableForTitle / titleLineH);
+    const int titleMaxLines = std::min(kHeroTitleMaxLines, dynamicTitleMaxLines);
+
+    // Draw book name (top-aligned)
+    const std::string& heroTitle = hero.title.empty() ? hero.path : hero.title;
+    const auto titleLines = renderer.wrappedText(UI_10_FONT_ID, heroTitle.c_str(), textW, titleMaxLines);
+    for (const auto& line : titleLines) {
+      renderer.drawText(UI_10_FONT_ID, textX, textY, line.c_str(), true, EpdFontFamily::BOLD);
+      textY += titleLineH;
+    }
+
+    // Gap + chapter (top-aligned, wraps fully into the remaining top-block height)
+    if (hasChapter) {
+      textY += chapterGap;
+      const int remainingH = (coverY + topBlockH) - textY;
+      const int chapterMaxLines = std::max(1, remainingH / textLineH);
+      const auto chapterLines =
+          renderer.wrappedText(SMALL_FONT_ID, details.chapterTitle.c_str(), textW, chapterMaxLines);
+      for (const auto& line : chapterLines) {
+        renderer.drawText(SMALL_FONT_ID, textX, textY, line.c_str(), true);
+        textY += textLineH;
+      }
+    }
+
+    // Bottom block anchored to cover bottom edge
+    textY = coverY + coverH - detailBlockH;
+
+    // "xx% - duration" rides one line above the bar, aligned over the fill edge.
+    const int barInnerX = textX + 2;
+    const int barInnerW = textW - 4;
+    const int fillW = details.hasProgress ? barInnerW * details.progressPercent / 100 : 0;
+    const int fillEdgeX = barInnerX + fillW;
+
+    auto drawTrackingLabel = [&](const char* text) {
+      const int labelW = renderer.getTextWidth(SMALL_FONT_ID, text);
+      const int labelX = std::clamp(fillEdgeX - labelW, textX, textX + textW - labelW);
+      renderer.drawText(SMALL_FONT_ID, labelX, textY, text, true);
+    };
+
+    if (details.hasProgress) {
+      char label[40];
+      if (details.hasDuration) {
+        snprintf(label, sizeof(label), "%d%% - %s", details.progressPercent, details.durationText);
+      } else {
+        snprintf(label, sizeof(label), "%d%%", details.progressPercent);
+      }
+      drawTrackingLabel(label);
+      textY += textLineH + kLineGap;
+
+      renderer.drawRect(textX, textY, textW, kProgressBarHeight, true);
+      if (fillW > 0) {
+        renderer.fillRect(barInnerX, textY + 2, fillW, kProgressBarHeight - 4, true);
+      }
+      textY += kProgressBarHeight + kLineGap;
+
+      if (details.hasTodayDuration) {
+        char todayLine[40];
+        snprintf(todayLine, sizeof(todayLine), "%s: %s", tr(STR_STATS_TODAY), details.todayDurationText);
+        renderer.drawText(SMALL_FONT_ID, textX, textY, todayLine, true);
+        if (details.hasEstRemaining) {
+          const int estLineW = renderer.getTextWidth(SMALL_FONT_ID, details.estRemainingText);
+          renderer.drawText(SMALL_FONT_ID, textX + textW - estLineW, textY, details.estRemainingText, true);
+        }
+        textY += textLineH + kLineGap;
+      }
+    } else if (details.hasDuration) {
+      renderer.drawText(SMALL_FONT_ID, textX, textY, details.durationText, true);
+      textY += textLineH + kLineGap;
+    }
+
+    if (details.hasLastRead) {
+      renderer.drawText(SMALL_FONT_ID, textX, textY, details.lastReadText, true);
+    }
+  };
+
+  // "Next 3" tile captions. Static per hero book for the same reason as the hero text, so it is
+  // snapshotted with it; only the tile's selection outline below tracks selectorIndex.
+  auto drawNextTitles = [&]() {
+    for (int i = 0; i < nextCount; i++) {
+      // Coverless tiles render the title inside the placeholder, so skip the
+      // duplicate title below the tile.
+      if (!cachedNextHasCover[i]) continue;
+      const int slotX = rect.x + padding + i * nextTileW;
+      const std::string& title = recentBooks[i + 1].title.empty() ? recentBooks[i + 1].path : recentBooks[i + 1].title;
+      const auto titleLines = renderer.wrappedText(SMALL_FONT_ID, title.c_str(), nextTileW - 4, 2);
+      int lineY = nextRowY + nextThumbH + kLineGap;
+      for (const auto& line : titleLines) {
+        const int lineW = renderer.getTextWidth(SMALL_FONT_ID, line.c_str());
+        renderer.drawText(SMALL_FONT_ID, slotX + (nextTileW - lineW) / 2, lineY, line.c_str(), true);
+        lineY += nextLineH;
+      }
+    }
+  };
+
+  // Expensive work (SD bitmap reads, epub/progress/stats I/O for the hero card text) happens once
+  // per cover-bitmap generation, then gets snapshotted -- identical lifecycle to
+  // Lyra3CoversTheme's per-tile bitmap loads. The static text is drawn BEFORE storeCoverBuffer()
+  // so the snapshot carries it too; HomeActivity::restoreCoverBuffer() then blits both back on
+  // every later frame and nothing here has to redraw them.
   if (!coverRendered) {
     drawCoverTile(renderer, hero.coverBmpPath, coverH, coverX, coverY, coverW, coverH);
     cachedHeroDetails = loadHeroDetails(hero);
@@ -317,147 +454,30 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
                                             nextThumbH, next.title.empty() ? next.path : next.title);
     }
 
+    drawHeroText();
+    drawNextTitles();
+
     coverBufferStored = storeCoverBuffer();
     coverRendered = coverBufferStored;
+  } else if (!bufferRestored) {
+    // The snapshot could not be taken (OOM) or could not be blitted back this frame, so the
+    // framebuffer holds neither. Redraw the text, exactly as every frame used to. The cover
+    // bitmaps stay missing here because they sit behind !coverRendered -- pre-existing.
+    drawHeroText();
+    drawNextTitles();
   }
 
-  // Cheap per-frame redraw: hero text block (cached, no I/O) + "next 3" titles
-  // and selection highlight, which must track selectorIndex every render.
-  const bool heroSelected = (selectorIndex == 0);
-  if (heroSelected) {
+  // The only per-frame work: selection outlines, which must track selectorIndex.
+  if (selectorIndex == 0) {
     renderer.drawRoundedRect(coverX - kSelectionInset, coverY - kSelectionInset, coverW + 2 * kSelectionInset,
                              coverH + 2 * kSelectionInset, kSelectionOutlineW, kCornerRadius, true);
   }
-
-  const int titleLineH = renderer.getLineHeight(UI_10_FONT_ID);
-  const int textLineH = renderer.getLineHeight(SMALL_FONT_ID);
-  int textY = coverY;
-
-  const HeroDetails& details = cachedHeroDetails;
-
-  // Bottom block height: progress-section + today + lastRead.
-  // Chapter moves to the top block so is excluded here.
-  int detailBlockH = 0;
-  if (details.hasProgress) {
-    detailBlockH += textLineH + kLineGap;           // "xx% - duration" label
-    detailBlockH += kProgressBarHeight + kLineGap;  // bar
-    if (details.hasTodayDuration) {
-      detailBlockH += textLineH + kLineGap;  // "Today: X" line
-    }
-  } else if (details.hasDuration) {
-    detailBlockH += textLineH + kLineGap;  // duration alone
-  }
-  if (details.hasLastRead) {
-    detailBlockH += textLineH;  // last element, no trailing gap
-  }
-
-  // Top block: title lines + gap + chapter. Title and chapter share the space
-  // above the bottom-anchored detail block. The chapter wraps fully (no 1-line
-  // ellipsis) into whatever height remains after the book name, separated by a
-  // readable gap. One chapter line is reserved up front so a long book name can't
-  // crowd the chapter out entirely.
-  const int topBlockH = coverH - detailBlockH;
-  const bool hasChapter = !details.chapterTitle.empty();
-  const int chapterGap = hasChapter ? kHeroChapterGap : 0;
-  const int minChapterH = hasChapter ? textLineH : 0;
-  const int availableForTitle = topBlockH - chapterGap - minChapterH;
-  const int dynamicTitleMaxLines = std::max(1, availableForTitle / titleLineH);
-  const int titleMaxLines = std::min(kHeroTitleMaxLines, dynamicTitleMaxLines);
-
-  // Draw book name (top-aligned)
-  const std::string& heroTitle = hero.title.empty() ? hero.path : hero.title;
-  const auto titleLines = renderer.wrappedText(UI_10_FONT_ID, heroTitle.c_str(), textW, titleMaxLines);
-  for (const auto& line : titleLines) {
-    renderer.drawText(UI_10_FONT_ID, textX, textY, line.c_str(), true, EpdFontFamily::BOLD);
-    textY += titleLineH;
-  }
-
-  // Gap + chapter (top-aligned, wraps fully into the remaining top-block height)
-  if (hasChapter) {
-    textY += chapterGap;
-    const int remainingH = (coverY + topBlockH) - textY;
-    const int chapterMaxLines = std::max(1, remainingH / textLineH);
-    const auto chapterLines = renderer.wrappedText(SMALL_FONT_ID, details.chapterTitle.c_str(), textW, chapterMaxLines);
-    for (const auto& line : chapterLines) {
-      renderer.drawText(SMALL_FONT_ID, textX, textY, line.c_str(), true);
-      textY += textLineH;
-    }
-  }
-
-  // Bottom block anchored to cover bottom edge
-  textY = coverY + coverH - detailBlockH;
-
-  // "xx% - duration" rides one line above the bar, aligned over the fill edge.
-  const int barInnerX = textX + 2;
-  const int barInnerW = textW - 4;
-  const int fillW = details.hasProgress ? barInnerW * details.progressPercent / 100 : 0;
-  const int fillEdgeX = barInnerX + fillW;
-
-  auto drawTrackingLabel = [&](const char* text) {
-    const int labelW = renderer.getTextWidth(SMALL_FONT_ID, text);
-    const int labelX = std::clamp(fillEdgeX - labelW, textX, textX + textW - labelW);
-    renderer.drawText(SMALL_FONT_ID, labelX, textY, text, true);
-  };
-
-  if (details.hasProgress) {
-    char label[40];
-    if (details.hasDuration) {
-      snprintf(label, sizeof(label), "%d%% - %s", details.progressPercent, details.durationText);
-    } else {
-      snprintf(label, sizeof(label), "%d%%", details.progressPercent);
-    }
-    drawTrackingLabel(label);
-    textY += textLineH + kLineGap;
-
-    renderer.drawRect(textX, textY, textW, kProgressBarHeight, true);
-    if (fillW > 0) {
-      renderer.fillRect(barInnerX, textY + 2, fillW, kProgressBarHeight - 4, true);
-    }
-    textY += kProgressBarHeight + kLineGap;
-
-    if (details.hasTodayDuration) {
-      char todayLine[40];
-      snprintf(todayLine, sizeof(todayLine), "%s: %s", tr(STR_STATS_TODAY), details.todayDurationText);
-      renderer.drawText(SMALL_FONT_ID, textX, textY, todayLine, true);
-      if (details.hasEstRemaining) {
-        const int estLineW = renderer.getTextWidth(SMALL_FONT_ID, details.estRemainingText);
-        renderer.drawText(SMALL_FONT_ID, textX + textW - estLineW, textY, details.estRemainingText, true);
-      }
-      textY += textLineH + kLineGap;
-    }
-  } else if (details.hasDuration) {
-    renderer.drawText(SMALL_FONT_ID, textX, textY, details.durationText, true);
-    textY += textLineH + kLineGap;
-  }
-
-  if (details.hasLastRead) {
-    renderer.drawText(SMALL_FONT_ID, textX, textY, details.lastReadText, true);
-  }
-
-  // "Next 3" row -- titles + selection highlight redrawn every frame so the
-  // highlighted tile always tracks selectorIndex (covers are baked into the
-  // snapshot above; mirrors Lyra3CoversTheme.cpp:90-128's split).
   for (int i = 0; i < nextCount; i++) {
+    if (selectorIndex != i + 1) continue;
     const int slotX = rect.x + padding + i * nextTileW;
     const int thumbX = slotX + (nextTileW - nextThumbW) / 2;
-    const bool selected = (selectorIndex == i + 1);
-    if (selected) {
-      renderer.drawRoundedRect(thumbX - kSelectionInset, nextRowY - kSelectionInset, nextThumbW + 2 * kSelectionInset,
-                               nextThumbH + 2 * kSelectionInset, kSelectionOutlineW, kCornerRadius, true);
-    }
-    // Coverless tiles render the title inside the placeholder, so skip the
-    // duplicate title below the tile.
-    if (!cachedNextHasCover[i]) {
-      continue;
-    }
-    const std::string& title = recentBooks[i + 1].title.empty() ? recentBooks[i + 1].path : recentBooks[i + 1].title;
-    const auto titleLines = renderer.wrappedText(SMALL_FONT_ID, title.c_str(), nextTileW - 4, 2);
-    int lineY = nextRowY + nextThumbH + kLineGap;
-    for (const auto& line : titleLines) {
-      const int lineW = renderer.getTextWidth(SMALL_FONT_ID, line.c_str());
-      renderer.drawText(SMALL_FONT_ID, slotX + (nextTileW - lineW) / 2, lineY, line.c_str(), true);
-      lineY += nextLineH;
-    }
+    renderer.drawRoundedRect(thumbX - kSelectionInset, nextRowY - kSelectionInset, nextThumbW + 2 * kSelectionInset,
+                             nextThumbH + 2 * kSelectionInset, kSelectionOutlineW, kCornerRadius, true);
   }
 }
 
