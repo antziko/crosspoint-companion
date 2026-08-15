@@ -415,6 +415,15 @@ void EpubReaderActivity::onExit() {
   } else {
     epub.reset();
   }
+
+  // Do NOT add a FontCacheManager::releaseCache() here. It was tried (08-15) to give Home's
+  // cover snapshot back some contiguity, and measured on device across three reader->Home
+  // cycles as recovering exactly nothing:
+  //     EPUB: font cache released free=56952->56952 largest=17396->17396
+  // The SD fonts' arenas are already gone by this point -- sdFontSystem.ensureLoaded() and
+  // releaseExtraSizes() above handle them -- so the call was pure cost. KOSync still needs its
+  // own release (KOReaderSyncActivity.cpp:145-158); that one runs mid-session before a TLS
+  // handshake, not after this teardown, so it is not the same situation.
 }
 
 void EpubReaderActivity::onPause() {

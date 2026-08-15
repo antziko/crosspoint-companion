@@ -9,6 +9,7 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Memory.h>
+#include <SdCardFont.h>  // getStats() on each resident SD font, for the HOME paint line
 #include <SdDebugLog.h>
 #include <Utf8.h>
 #include <Xtc.h>
@@ -206,10 +207,33 @@ bool HomeActivity::storeCoverBuffer() {
   // fragmented heap (one big contiguous alloc fails after the reader chops the
   // heap up). Byte size scales ~linearly with logical height in every
   // orientation, so equal row-strips give roughly equal-size chunks.
-  int count = static_cast<int>((total + COVER_CHUNK_TARGET_BYTES - 1) / COVER_CHUNK_TARGET_BYTES);
-  if (count < 1) count = 1;
-  if (count > COVER_MAX_CHUNKS) count = COVER_MAX_CHUNKS;
-  const int stripH = (coverRectH + count - 1) / count;  // rows per chunk
+  // Strip height MUST be a multiple of 8. A logical row is one panel column after the portrait
+  // rotate, so an 8-row strip is exactly one whole byte per column and getRegionByteSize has
+  // nothing to snap; any other height pays padding on both ends of every strip. See the
+  // measured table on COVER_CHUNK_TARGET_BYTES — this single constraint is what makes fine
+  // chunking safe rather than actively harmful.
+  int stripH = static_cast<int>(COVER_CHUNK_TARGET_BYTES * static_cast<size_t>(coverRectH) / total);
+  stripH = ((stripH + 4) / 8) * 8;  // nearest multiple of 8, never 0
+  if (stripH < 8) stripH = 8;
+  int count = (coverRectH + stripH - 1) / stripH;
+  while (count > COVER_MAX_CHUNKS) {
+    stripH += 8;
+    count = (coverRectH + stripH - 1) / stripH;
+  }
+
+  // Bail before allocating anything the heap plainly cannot cover. With 8-row alignment
+  // `total` is what the strips actually consume, so this is an exact test rather than a tuned
+  // one — it rejects only attempts that were already doomed. Without it a doomed attempt walks
+  // most of the way through the region before failing and then frees it all, once per paint;
+  // the device log caught that trough at free=5588 / minFreeEver=4508.
+  const size_t freeNow = ESP.getFreeHeap();
+  if (freeNow < total + COVER_SNAPSHOT_FREE_FLOOR) {
+    SdDebugLog::setEnabled(true);
+    SdDebugLog::log("HOME", "snapshot SKIPPED need=%u+%u free=%u largest=%u -> SD", (unsigned)total,
+                    (unsigned)COVER_SNAPSHOT_FREE_FLOOR, (unsigned)freeNow,
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    return storeCoverBufferToSd();
+  }
 
   for (int i = 0; i < count; i++) {
     const int y = coverRectY + i * stripH;
@@ -222,8 +246,18 @@ bool HomeActivity::storeCoverBuffer() {
     auto* chunk = static_cast<uint8_t*>(malloc(sz));
     if (!chunk) {
       LOG_ERR("HOME", "OOM: cover chunk %d/%d (%u bytes)", i + 1, count, (unsigned)sz);
+      // To SD as well: this failure is the difference between an 11ms paint and an 880ms one
+      // (see COVER_CHUNK_TARGET_BYTES), and the LOG_ERR above never reaches an X3.
+      SdDebugLog::setEnabled(true);
+      multi_heap_info_t info;
+      heap_caps_get_info(&info, MALLOC_CAP_8BIT);
+      SdDebugLog::log("HOME", "snapshot FAILED at chunk %d/%d want=%u total=%u free=%u largest=%u blocks=%u -> SD",
+                      i + 1, count, (unsigned)sz, (unsigned)total, (unsigned)info.total_free_bytes,
+                      (unsigned)info.largest_free_block, (unsigned)info.free_blocks);
       freeCoverBuffer();
-      return false;
+      // Fall through to the heap-independent path rather than leaving the caller to redraw
+      // everything on every later paint — that fallback is the whole ~890ms cost.
+      return storeCoverBufferToSd();
     }
     if (!renderer.copyRegionToBuffer(coverRectX, y, coverRectW, h, chunk, sz)) {
       free(chunk);
@@ -235,10 +269,90 @@ bool HomeActivity::storeCoverBuffer() {
   }
   coverChunkCount = count;
   coverChunkStripH = stripH;
+  SdDebugLog::setEnabled(true);
+  // allocated= is the sum of the per-strip sizes, which exceeds `total` by the byte-alignment
+  // padding each strip pays. It is logged separately from total= precisely because that gap is
+  // what a chunk-count change moves, and reading total= as the cost is how the 2048-byte
+  // experiment went wrong (see COVER_CHUNK_TARGET_BYTES).
+  size_t allocated = 0;
+  for (int i = 0; i < count; i++) allocated += coverChunkSizes[i];
+  SdDebugLog::setEnabled(true);
+  SdDebugLog::log("HOME", "snapshot ok chunks=%d strip=%u total=%u allocated=%u free=%u largest=%u", count,
+                  (unsigned)stripH, (unsigned)total, (unsigned)allocated, (unsigned)ESP.getFreeHeap(),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   return coverChunkCount > 0;
 }
 
+// Stream the tile region to SD one 8-row strip at a time. Heap cost is a single ~528-byte
+// scratch buffer regardless of region size, which is the entire point: the RAM path fails on
+// block distribution, and no chunk size fixes an arbitrary distribution.
+bool HomeActivity::storeCoverBufferToSd() {
+  coverSdSnapshot = false;
+  if (coverRectW <= 0 || coverRectH <= 0) return false;
+
+  const size_t stripBytes = renderer.getRegionByteSize(coverRectX, coverRectY, coverRectW, COVER_SD_STRIP_ROWS);
+  if (stripBytes == 0) return false;
+  auto scratch = makeUniqueNoThrow<uint8_t[]>(stripBytes);
+  if (!scratch) {
+    LOG_ERR("HOME", "OOM: SD snapshot scratch (%u bytes)", (unsigned)stripBytes);
+    return false;
+  }
+
+  const unsigned long tStart = millis();
+  // Close before any reopen of the same path (DESTRUCTOR_CLOSES_FILE only covers scope exit),
+  // so the write below always starts from a truncated file.
+  {
+    HalFile out;
+    if (!Storage.openFileForWrite("HOME", COVER_SD_PATH, out)) {
+      SdDebugLog::setEnabled(true);
+      SdDebugLog::log("HOME", "sd-snapshot open-for-write FAILED %s", COVER_SD_PATH);
+      return false;
+    }
+    for (int y = coverRectY; y < coverRectY + coverRectH; y += COVER_SD_STRIP_ROWS) {
+      const int h = std::min(COVER_SD_STRIP_ROWS, coverRectY + coverRectH - y);
+      const size_t sz = renderer.getRegionByteSize(coverRectX, y, coverRectW, h);
+      if (sz == 0 || sz > stripBytes) return false;
+      if (!renderer.copyRegionToBuffer(coverRectX, y, coverRectW, h, scratch.get(), sz)) return false;
+      if (out.write(scratch.get(), sz) != sz) {
+        SdDebugLog::setEnabled(true);
+        SdDebugLog::log("HOME", "sd-snapshot write FAILED at y=%d", y);
+        return false;
+      }
+    }
+    out.close();
+  }
+
+  coverSdSnapshot = true;
+  SdDebugLog::setEnabled(true);
+  SdDebugLog::log("HOME", "sd-snapshot ok strip=%d stripBytes=%u ms=%lu free=%u largest=%u", COVER_SD_STRIP_ROWS,
+                  (unsigned)stripBytes, millis() - tStart, (unsigned)ESP.getFreeHeap(),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  return true;
+}
+
+bool HomeActivity::restoreCoverBufferFromSd() {
+  if (!coverSdSnapshot || coverRectW <= 0 || coverRectH <= 0) return false;
+
+  const size_t stripBytes = renderer.getRegionByteSize(coverRectX, coverRectY, coverRectW, COVER_SD_STRIP_ROWS);
+  if (stripBytes == 0) return false;
+  auto scratch = makeUniqueNoThrow<uint8_t[]>(stripBytes);
+  if (!scratch) return false;
+
+  HalFile in;
+  if (!Storage.openFileForRead("HOME", COVER_SD_PATH, in)) return false;
+  for (int y = coverRectY; y < coverRectY + coverRectH; y += COVER_SD_STRIP_ROWS) {
+    const int h = std::min(COVER_SD_STRIP_ROWS, coverRectY + coverRectH - y);
+    const size_t sz = renderer.getRegionByteSize(coverRectX, y, coverRectW, h);
+    if (sz == 0 || sz > stripBytes) return false;
+    if (in.read(scratch.get(), sz) != static_cast<int>(sz)) return false;
+    if (!renderer.copyBufferToRegion(coverRectX, y, coverRectW, h, scratch.get(), sz)) return false;
+  }
+  return true;
+}
+
 bool HomeActivity::restoreCoverBuffer() {
+  // SD-backed snapshot takes precedence: when it is set, the RAM chunks were never allocated.
+  if (coverSdSnapshot) return restoreCoverBufferFromSd();
   if (coverChunkCount <= 0 || coverChunkStripH <= 0 || coverRectW <= 0 || coverRectH <= 0) return false;
   // Recompute the same strip partition store used and blit each chunk back.
   for (int i = 0; i < coverChunkCount; i++) {
@@ -262,6 +376,9 @@ void HomeActivity::freeCoverBuffer() {
   coverChunkCount = 0;
   coverChunkStripH = 0;
   coverBufferStored = false;
+  // The SD file is left in place (it is rewritten on the next store), but the flag must clear
+  // or restoreCoverBuffer would keep dispatching to a snapshot this instance no longer owns.
+  coverSdSnapshot = false;
 }
 
 void HomeActivity::loop() {
@@ -485,11 +602,45 @@ void HomeActivity::render(RenderLock&&) {
 
   const unsigned long tDraw = millis();
   renderer.displayBuffer();
+  const unsigned long displayMs = millis() - tDraw;
 
-  LOG_DBG("HOME", "paint draw=%lu display=%lu free=%u largest=%u", tDraw - tStart, millis() - tDraw,
+  LOG_DBG("HOME", "paint draw=%lu display=%lu free=%u largest=%u", tDraw - tStart, displayMs,
           static_cast<unsigned>(esp_get_free_heap_size()),
           static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
   if (fcm) fcm->logStats("home");
+
+  // Mirror the paint split to SD, for the same reason logDictPhase does
+  // (DictionaryDefinitionActivity.cpp:188): the LOG_DBG above and fcm->logStats() only reach
+  // a serial monitor, and the X3 is USB-locked — every report about this screen arrives as
+  // opds_debug.txt and nothing else. The FRAG cover-pass line already lands there but is
+  // emitted at the END of this function, so it timestamps the paint without describing it.
+  //
+  // miss/missMs is the discriminator for "Home is slow, but only after opening a Chinese
+  // book". Han in a recent-book title routes to the SD fallback font, and the mini cache
+  // that covers it is budgeted from free heap and largest block (SdCardFont MINI_FREE_FLOOR):
+  // affordable on a fresh heap, unaffordable once the reader has fragmented it — at which
+  // point every Han glyph becomes an individual SD read. Summed over EVERY resident SD font,
+  // not one id, because the fallback is registered at several UI sizes; recents= is here
+  // because Vega draws 4 titles to Lyra's 1, so the same per-glyph cost is paid 4x.
+  {
+    uint32_t misses = 0, missMs = 0;
+    for (const auto& [fontId, font] : renderer.getSdCardFonts()) {
+      if (!font) continue;
+      misses += font->getStats().overflowMisses;
+      missMs += font->getStats().overflowMissMs;
+    }
+    // snap= is the single most diagnostic bit on this line. 0 = fell through to the full
+    // redraw (four SD cover bitmaps + both CJK title blocks, ~890ms); 1 = blitted back from
+    // the RAM chunks (~10ms); 2 = streamed back from the SD file (~40-80ms). Every slow paint
+    // should be snap=0, and a slow paint with snap=1 or 2 means the cause is elsewhere.
+    SdDebugLog::setEnabled(true);
+    SdDebugLog::log("HOME",
+                    "paint draw=%lu display=%lu miss=%u missMs=%u snap=%d recents=%u sdFonts=%u free=%u largest=%u",
+                    tDraw - tStart, displayMs, misses, missMs, bufferRestored ? (coverSdSnapshot ? 2 : 1) : 0,
+                    static_cast<unsigned>(recentBooks.size()), static_cast<unsigned>(renderer.getSdCardFonts().size()),
+                    static_cast<unsigned>(esp_get_free_heap_size()),
+                    static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+  }
 
   if (!firstRenderDone) {
     firstRenderDone = true;

@@ -27,9 +27,54 @@ class HomeActivity final : public Activity {
   // Cover snapshot is stored in horizontal-strip chunks, not one contiguous
   // buffer: returning from the reader fragments the heap (free heap can be 60 KB+
   // while the largest contiguous block is < the ~33 KB the full region needs), so
-  // a single malloc fails. Splitting into ~12 KB chunks fits the fragmented holes.
-  static constexpr size_t COVER_CHUNK_TARGET_BYTES = 12000;
-  static constexpr int COVER_MAX_CHUNKS = 16;  // 16 * 12KB = 192KB region ceiling, far above need
+  // a single malloc fails. Splitting into chunks fits the fragmented holes.
+  //
+  // Chunk sizing is only safe because the strip height is forced to a multiple of 8 (see
+  // storeCoverBuffer). A logical row maps to one panel COLUMN after the portrait rotate, and
+  // getRegionByteSize snaps each strip outward to byte boundaries, so a strip whose height is
+  // not a multiple of 8 pays padding on both ends — PER STRIP. Two measured points from the
+  // device, same 38016-byte region (X3, 528x576 logical = 66 panel rows x 528):
+  //     144 rows -> 18 bytes x 528 = 9504 each,  4 chunks = 38016 allocated  (0 waste)
+  //      31 rows ->  5 bytes x 528 = 2640 each, 19 chunks = 50160 allocated  (12144 waste, 32%)
+  // The 2048/32 attempt hit the second row: it allocated 12 KB more than the region, left the
+  // largest free block 8.7 KB shorter, and on failure walked to chunk 18/19 having driven free
+  // heap to 5588 (minFreeEver=4508) once per paint. With -fno-exceptions that is a reboot
+  // waiting to happen.
+  //
+  // With 8-row alignment the waste is exactly zero at ANY granularity, so the count can be
+  // raised purely on fit grounds. 1 KB targets ~16-row strips (~1056 B) on X3 — nine times
+  // smaller than the 9504 that failed at chunk 3/4 against largest=16372, at a cost of ~430
+  // bytes of allocator headers.
+  //
+  // Any future change here must be justified against the measured `allocated=` field, never
+  // against the region size.
+  static constexpr size_t COVER_CHUNK_TARGET_BYTES = 1024;
+  static constexpr int COVER_MAX_CHUNKS = 96;
+  // Never start a snapshot that cannot finish. storeCoverBuffer is all-or-nothing, so a doomed
+  // attempt allocates most of the heap, fails, and frees it — once per paint, with a free-heap
+  // trough deep enough to threaten any allocation racing it. Skipping costs only what failing
+  // already cost (the redraw happens either way) and removes the trough.
+  static constexpr size_t COVER_SNAPSHOT_FREE_FLOOR = 8 * 1024;
+
+  // SD-backed fallback. Finer chunks improve the odds of the RAM snapshot fitting but cannot
+  // guarantee it — the heap after a CJK book is ~50 KB free in ~44 blocks whose largest is
+  // 16372, and no chunk size makes an arbitrary block distribution work. This path does not
+  // depend on the heap at all: the tile is streamed to a file one 8-row strip at a time
+  // through a ~528-byte buffer, then streamed back on every later paint.
+  //
+  // ~40-80 ms per paint against the ~890 ms full redraw it replaces (four SD cover-bitmap
+  // reads plus both CJK title blocks), so it is a large win even though it is much slower than
+  // the ~10 ms RAM path. Written once per Home entry, so SD wear is negligible — and this is
+  // the SD card, not SPIFFS, so the settings-write throttling rule does not apply.
+  //
+  // No staleness risk: HomeActivity is recreated on every entry with coverRendered=false, so
+  // the file is always rewritten before it is ever read back, and reads are gated on a store
+  // that succeeded in THIS instance.
+  static constexpr int COVER_SD_STRIP_ROWS = 8;  // exactly 1 panel byte per column — zero padding
+  static constexpr const char* COVER_SD_PATH = "/.crosspoint/home_tile.bin";
+  bool coverSdSnapshot = false;  // true when the tile lives in COVER_SD_PATH, not in coverChunks
+  bool storeCoverBufferToSd();
+  bool restoreCoverBufferFromSd();
   uint8_t* coverChunks[COVER_MAX_CHUNKS] = {nullptr};
   size_t coverChunkSizes[COVER_MAX_CHUNKS] = {0};
   int coverChunkCount = 0;
