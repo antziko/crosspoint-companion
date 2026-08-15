@@ -13,11 +13,24 @@ namespace VegaMetrics {
 // tile-height computation below and the actual draw geometry can't drift apart.
 constexpr int kHeroPadding = 20;
 constexpr int kSectionGap = 20;
-// Reserve below each "next 3" thumbnail for its 2-line wrapped title
-// (label-font line-height x2 + line-gap, computed at runtime in
-// VegaTheme.cpp -- this is a fixed upper-bound margin for the constexpr
-// tile-height calc below; SMALL_FONT_ID is an 8px face, ~10-14px lines).
-constexpr int kNextLabelReserve = 32;
+// Reserve below each "next 3" thumbnail for its 2-line wrapped title:
+// kLineGap + 2 x the label font's line height, which is what VegaTheme.cpp
+// actually lays out. SMALL_FONT_ID is notosans_8, whose advanceY is 23
+// (builtinFonts/notosans_8_regular.h) -- so 4 + 2*23 = 50, plus 2px slack.
+//
+// This was 32, from a comment guessing "an 8px face, ~10-14px lines". The face
+// is 8 POINT, not 8 pixels; the real line height is 23, so a two-line caption
+// overran the tile by 18px. That went unnoticed while the caption was redrawn
+// into the framebuffer every frame (the overflow simply painted into the empty
+// band above the menu), and became visible as clipped text the moment the
+// caption moved into the cover snapshot, which is clipped to exactly this tile
+// height. drawNextTitles() now also clamps its line count to the rect, so a
+// future font change degrades to fewer lines instead of clipped ones.
+//
+// Costs no layout: Vega's menu row is bottom-anchored and ignores the rect it
+// is passed (see drawButtonMenu), so a taller tile grows into the empty band
+// rather than pushing anything down.
+constexpr int kNextLabelReserve = 52;
 // The hero cover draws taller than the "next 3" row. The cached thumbnail is
 // generated once at the hero height (homeCoverHeight is the cache key/size,
 // see HomeActivity::loadRecentCovers); the hero draws it at native size and

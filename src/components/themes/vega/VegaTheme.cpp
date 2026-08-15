@@ -421,14 +421,21 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
   // "Next 3" tile captions. Static per hero book for the same reason as the hero text, so it is
   // snapshotted with it; only the tile's selection outline below tracks selectorIndex.
   auto drawNextTitles = [&]() {
+    // Clamp to the lines that actually fit inside the tile rect. Anything drawn past it is
+    // cropped out of the cover snapshot and therefore lost on every later frame, so the caption
+    // must never overrun -- measured against the real rect rather than trusting
+    // kNextLabelReserve, which was wrong by 18px until this was found on device.
+    const int captionTop = nextRowY + nextThumbH + kLineGap;
+    const int captionMaxLines = std::max(1, ((rect.y + rect.height) - captionTop) / nextLineH);
     for (int i = 0; i < nextCount; i++) {
       // Coverless tiles render the title inside the placeholder, so skip the
       // duplicate title below the tile.
       if (!cachedNextHasCover[i]) continue;
       const int slotX = rect.x + padding + i * nextTileW;
       const std::string& title = recentBooks[i + 1].title.empty() ? recentBooks[i + 1].path : recentBooks[i + 1].title;
-      const auto titleLines = renderer.wrappedText(SMALL_FONT_ID, title.c_str(), nextTileW - 4, 2);
-      int lineY = nextRowY + nextThumbH + kLineGap;
+      const auto titleLines =
+          renderer.wrappedText(SMALL_FONT_ID, title.c_str(), nextTileW - 4, std::min(2, captionMaxLines));
+      int lineY = captionTop;
       for (const auto& line : titleLines) {
         const int lineW = renderer.getTextWidth(SMALL_FONT_ID, line.c_str());
         renderer.drawText(SMALL_FONT_ID, slotX + (nextTileW - lineW) / 2, lineY, line.c_str(), true);
