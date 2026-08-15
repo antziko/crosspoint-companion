@@ -114,6 +114,21 @@ ReadingSpan findReading(const char* s);
 // and the full definition screen always show the same thing.
 size_t readEntry(Dictionary::LookupCtx& ctx, HalFile& dictFile, const char* token, char* buf, size_t bufSize);
 
+// How the entry's fields are distributed across the rows. Both flags exist for the enlarged-
+// character layout, where the box is columns rather than a paragraph: the headword field is drawn
+// as its own column, and the reading gets a row to itself so the eye finds it in the same place on
+// every cursor move. A default-constructed FitOptions reproduces the flowed layout exactly, which
+// is what a Latin token or a too-narrow box still gets.
+//
+// Both are ignored when findReading() finds nothing: with no reading there is no field boundary to
+// split on, so the whole entry flows as before.
+struct FitOptions {
+  // Drop everything before the reading — the script variant, which the caller draws as a column.
+  bool dropLeadingField = false;
+  // Reading alone on row 0, ellipsised if it overflows; the definition body starts on row 1.
+  bool readingOnOwnRow = false;
+};
+
 // Wrap NUL-terminated buf into at most kMaxRows rows of metrics.maxWidth pixels.
 //
 // buf is MODIFIED IN PLACE — control bytes become spaces and whitespace runs are collapsed —
@@ -123,6 +138,7 @@ size_t readEntry(Dictionary::LookupCtx& ctx, HalFile& dictFile, const char* toke
 // Wrapping goes through DictLayout::Wrapper rather than a local loop because its breakToken
 // (DictLayout.cpp:65-91) breaks per codepoint when a token overflows, which is the only reason
 // a CJK run — one token with no spaces in it — wraps at all instead of running off the row.
-void fit(char* buf, const DictLayout::WrapMetrics& metrics, const DictLayout::Measurer& measure, GlossResult& out);
+void fit(char* buf, const DictLayout::WrapMetrics& metrics, const DictLayout::Measurer& measure, GlossResult& out,
+         FitOptions opts = {});
 
 }  // namespace DictGloss

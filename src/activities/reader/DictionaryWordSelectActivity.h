@@ -172,7 +172,21 @@ class DictionaryWordSelectActivity final : public Activity {
     int fontId = 0;
     int lineHeight = 0;
     int height = 0;
-    bool fits = false;  // false = the box would not leave enough page visible; draw nothing
+    int ascender = 0;      // the enlarged cell's own height unit
+    int maxCellScale = 0;  // largest replication factor the box's height allows
+    bool fits = false;     // false = the box would not leave enough page visible; draw nothing
+
+    // Enlarged-character columns, re-decided on every peek because they depend on the token as
+    // well as the font. cellScale == 0 is the flowed layout — the whole box is text, exactly as
+    // it was before the columns existed, and every gate below falls back to it.
+    uint32_t tokenCp = 0;    // selected character, when it is a single CJK codepoint
+    uint32_t variantCp = 0;  // the entry's script variant, when it differs and there is room
+    bool dropField = false;  // the entry's headword field is a cell, or repeats the token: not text
+    int cellScale = 0;
+    int cellCount = 0;
+    int cellW = 0;      // one cell; both are drawn the same width so the glyphs line up
+    int textX = 0;      // left edge of the text column
+    int wrapWidth = 0;  // usable width inside it
   };
   std::unique_ptr<GlossState> gloss_;
 
@@ -189,6 +203,14 @@ class DictionaryWordSelectActivity final : public Activity {
   // everything that depends on its line height. Called on every peek, not once, because the size
   // can disappear underneath us — see the comment on the definition.
   void resolveGlossFont();
+
+  // Decide the enlarged-character columns for the token just peeked: how many cells, at what
+  // replication factor, and what is left for the text column. Sets gloss_->cellScale to 0 —
+  // the flowed layout — for anything that is not a single CJK codepoint, or when the cells
+  // would leave too little width for a definition worth reading.
+  // `entry` is the raw bytes readEntry filled, or nullptr on a miss — the variant is read from
+  // there, and on a miss the buffer still holds the PREVIOUS word's entry.
+  void planGlossCells(const char* token, const char* entry);
 
   // Peek the word at currIdx and place its box relative to the selected row. Returns true when
   // the caller must take the full-repaint path — only when the strip the box is leaving holds

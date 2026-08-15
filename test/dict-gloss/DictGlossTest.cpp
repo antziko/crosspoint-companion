@@ -44,10 +44,19 @@ DictLayout::Measurer measurer() { return DictLayout::Measurer{nullptr, &measureB
 DictLayout::WrapMetrics metricsForChars(int chars) { return DictLayout::WrapMetrics{chars * kCpWidth, 0, 0}; }
 
 // Wrap a copy of `text`, so callers can pass literals to a function that edits in place.
-void fitCopy(const std::string& text, int maxChars, DictGloss::GlossResult& out) {
+void fitCopy(const std::string& text, int maxChars, DictGloss::GlossResult& out, DictGloss::FitOptions opts = {}) {
   std::vector<char> buf(text.begin(), text.end());
   buf.push_back('\0');
-  DictGloss::fit(buf.data(), metricsForChars(maxChars), measurer(), out);
+  DictGloss::fit(buf.data(), metricsForChars(maxChars), measurer(), out, opts);
+}
+
+// The columnar layout the enlarged-character box asks for: reading on its own row, variant field
+// drawn as a cell rather than flowed.
+DictGloss::FitOptions columnOpts() {
+  DictGloss::FitOptions opts;
+  opts.readingOnOwnRow = true;
+  opts.dropLeadingField = true;
+  return opts;
 }
 
 std::string joinRows(const DictGloss::GlossResult& r) {
@@ -203,6 +212,70 @@ TEST_F(DictGlossTest, FitMarksTheBracketedReadingBoldInACjkEntry) {
   // that renders as '?'.
   ASSERT_LE(r.boldStart[0] + r.boldLen[0], std::strlen(r.rows[0]));
   EXPECT_EQ(std::string(r.rows[0] + r.boldStart[0], r.boldLen[0]), "[pin1 yin1]");
+}
+
+// --- fit(), columnar layout ------------------------------------------------------------
+//
+// The enlarged-character box draws the selected character (and the entry's script variant) as
+// columns, leaving the rows for reading + definition. Each case below is a distinct way that
+// split can go wrong on the device, not a restatement of the flowed cases above.
+
+TEST_F(DictGlossTest, ColumnLayoutGivesTheReadingItsOwnRowAndDropsTheVariantField) {
+  // "變 [bian4 hua4] /change/" — the variant is drawn as a cell, so it must not also appear in the
+  // text; and the reading owns row 0 so the eye finds it in the same place on every cursor move.
+  DictGloss::GlossResult r;
+  fitCopy("\xE8\xAE\x8A [bian4 hua4] /change; to transform/", 40, r, columnOpts());
+
+  ASSERT_GE(r.rowCount, 2);
+  EXPECT_STREQ(r.rows[0], "[bian4 hua4]");
+  EXPECT_EQ(r.boldStart[0], 0);
+  EXPECT_EQ(r.boldLen[0], std::strlen("[bian4 hua4]"));
+  // The definition starts on row 1, with no trace of the variant character.
+  EXPECT_EQ(joinRows(r).find("\xE8\xAE\x8A"), std::string::npos);
+  EXPECT_NE(std::string(r.rows[1]).find("change"), std::string::npos);
+}
+
+TEST_F(DictGlossTest, ColumnLayoutKeepsTheVariantInTheTextWhenItIsNotDrawnAsACell) {
+  // Too narrow for a second cell: the variant has nowhere else to appear, so it flows ahead of
+  // the definition rather than being lost. Row 0 stays pure reading either way.
+  DictGloss::FitOptions opts;
+  opts.readingOnOwnRow = true;
+  DictGloss::GlossResult r;
+  fitCopy("\xE8\xAE\x8A [bian4 hua4] /change/", 40, r, opts);
+
+  ASSERT_GE(r.rowCount, 2);
+  EXPECT_STREQ(r.rows[0], "[bian4 hua4]");
+  EXPECT_EQ(std::string(r.rows[1]).find("\xE8\xAE\x8A"), 0u);
+}
+
+TEST_F(DictGlossTest, ColumnLayoutEllipsisesAReadingWiderThanTheColumn) {
+  // A long reading must not wrap into the definition's rows — the cells narrow the column, which
+  // is exactly when this bites. One row, cut, and saying so.
+  DictGloss::GlossResult r;
+  fitCopy("\xE8\xAE\x8A [zhong1 hua2 ren2 min2 gong4 he2 guo2] /China/", 12, r, columnOpts());
+
+  ASSERT_GE(r.rowCount, 2);
+  const std::string reading = r.rows[0];
+  EXPECT_LE(measureByCodepoint(nullptr, reading.c_str(), EpdFontFamily::REGULAR, false), metricsForChars(12).maxWidth);
+  ASSERT_GE(reading.size(), 3u);
+  EXPECT_EQ(reading.substr(reading.size() - 3), "...");
+  // Bold covers the whole row, and stays inside it after the ellipsis shortened it.
+  EXPECT_EQ(r.boldStart[0] + r.boldLen[0], reading.size());
+  // The definition still got its rows.
+  EXPECT_NE(std::string(r.rows[1]).find("China"), std::string::npos);
+}
+
+TEST_F(DictGlossTest, ColumnOptionsAreIgnoredWithoutAReading) {
+  // A Latin entry, or one whose format does not match: there is no field boundary to split on, so
+  // the entry flows exactly as it does with the columns off.
+  DictGloss::GlossResult flowed;
+  DictGloss::GlossResult columnar;
+  fitCopy("noun: the round fruit of a tree", 40, flowed);
+  fitCopy("noun: the round fruit of a tree", 40, columnar, columnOpts());
+
+  EXPECT_EQ(columnar.rowCount, flowed.rowCount);
+  EXPECT_EQ(joinRows(columnar), joinRows(flowed));
+  EXPECT_EQ(columnar.boldLen[0], 0);
 }
 
 TEST_F(DictGlossTest, ReadingIsUnmarkedWhenThereIsNoBracketedRunToMark) {

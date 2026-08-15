@@ -306,6 +306,20 @@ class GfxRenderer {
   void drawText(int fontId, int x, int y, const char* text, bool black = true,
                 EpdFontFamily::Style style = EpdFontFamily::REGULAR,
                 BidiUtils::BidiBaseDir baseDir = BidiUtils::BidiBaseDir::AUTO) const;
+  /// Draw ONE codepoint with every glyph pixel replicated `scale` times in both axes, from
+  /// `yTop` (the top of the scaled text cell, matching drawText's y convention). Returns the
+  /// scaled pen advance, or 0 when the glyph is unavailable.
+  ///
+  /// A codepoint rather than a string: the caller is the dictionary gloss box drawing a single
+  /// Han character, so kerning, ligatures, BiDi and combining marks have nothing to do, and
+  /// keeping them out keeps this off drawText's hot path entirely.
+  ///
+  /// Ink only — a replicated pixel block is either drawn or not, so the 2-bit grayscale levels
+  /// collapse the same way BW mode already collapses them in renderCharImpl. Scaling up an
+  /// anti-aliased edge would smear it into a 3x3 block of solid ink; thresholding is what keeps
+  /// the enlarged strokes crisp.
+  int drawGlyphScaled(int fontId, uint32_t cp, int x, int yTop, int scale, bool black = true,
+                      EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   int getSpaceWidth(int fontId, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   /// Returns the total inter-word advance: fp4::toPixel(spaceAdvance + kern(leftCp,' ') + kern(' ',rightCp)).
   /// Using a single snap avoids the +/-1 px rounding error that arises when space advance and kern are

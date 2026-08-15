@@ -388,6 +388,58 @@ static void renderCharScaled(const GfxRenderer& renderer, GfxRenderer::RenderMod
   }
 }
 
+// Render a glyph at an integer UPSCALE: each source pixel becomes a scale x scale block. The 50%
+// path above is the same idea in the other direction; this one exists for the dictionary gloss
+// box, which wants a Han character three text rows tall and cannot get there by loading a bigger
+// font — SdCardFontSystem::ensureFontSize snaps every request to a size the family actually ships.
+//
+// Ink is thresholded rather than resampled. A 2-bit glyph's anti-aliased fringe carries the
+// stroke's soft edge; replicated 3x3 it stops being an edge and becomes solid ink, so the
+// character comes out mushy and several pixels too fat. Dropping only the lightest level (raw 1)
+// keeps the stroke core — which at these sizes is 2-3 px of raw 2-3 — and leaves the outline
+// crisp. Same >= 2 rule renderCharScaled uses on the same font data.
+static void renderCharUpscaled(const GfxRenderer& renderer, const EpdFontFamily& fontFamily, const uint32_t cp,
+                               const int cursorX, const int cursorY, const int scale, const bool pixelState,
+                               const EpdFontFamily::Style style) {
+  const EpdGlyph* glyph = fontFamily.getGlyph(cp, style);
+  if (!glyph) return;
+
+  const EpdFontData* fontData = fontFamily.getData(style);
+  const uint8_t* bitmap = renderer.getGlyphBitmap(fontData, glyph);
+  if (!bitmap) return;
+
+  const int srcW = glyph->width;
+  const int srcH = glyph->height;
+  // Bearings scale with the glyph, so the enlarged character keeps its position relative to the
+  // pen origin instead of drifting up-left as the scale grows.
+  const int baseX = cursorX + glyph->left * scale;
+  const int baseY = cursorY - glyph->top * scale;
+  const bool is2Bit = fontData->is2Bit;
+
+  int pixelPosition = 0;
+  for (int srcY = 0; srcY < srcH; srcY++) {
+    for (int srcX = 0; srcX < srcW; srcX++, pixelPosition++) {
+      bool ink;
+      if (is2Bit) {
+        const uint8_t byte = bitmap[pixelPosition >> 2];
+        const uint8_t raw = (byte >> ((3 - (pixelPosition & 3)) * 2)) & 0x3;
+        ink = raw >= 2;
+      } else {
+        ink = ((bitmap[pixelPosition >> 3] >> (7 - (pixelPosition & 7))) & 1) != 0;
+      }
+      if (!ink) continue;
+
+      const int dstX = baseX + srcX * scale;
+      const int dstY = baseY + srcY * scale;
+      for (int dy = 0; dy < scale; dy++) {
+        for (int dx = 0; dx < scale; dx++) {
+          renderer.drawPixel(dstX + dx, dstY + dy, pixelState);
+        }
+      }
+    }
+  }
+}
+
 template <TextRotation rotation = TextRotation::None>
 static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode renderMode,
                            const EpdFontFamily& fontFamily, const uint32_t cp, int cursorX, int cursorY,
@@ -535,6 +587,40 @@ void GfxRenderer::drawPixel(const int x, const int y, const bool state) const {
   } else {
     target[byteIndex] |= 1 << bitPosition;  // Set bit
   }
+}
+
+int GfxRenderer::drawGlyphScaled(const int fontId, const uint32_t cp, const int x, const int yTop, const int scale,
+                                 const bool black, const EpdFontFamily::Style style) const {
+  if (scale < 1 || cp == 0) return 0;
+
+  // Route to the CJK fallback font on the same terms drawText does (resolveTextFontId), so a
+  // caller holding a Latin UI font id still gets its Han glyph rather than a replacement box.
+  char utf8[5] = {};
+  utf8EncodeCodepoint(cp, utf8);
+  const int resolvedFontId = resolveTextFontId(fontId, utf8, style);
+
+  const auto fontIt = fontMap.find(resolvedFontId);
+  if (fontIt == fontMap.end()) {
+    LOG_ERR("GFX", "Font %d not found", resolvedFontId);
+    return 0;
+  }
+  const auto& font = fontIt->second;
+
+  // Scan pass: record the codepoint so the batched prewarm loads it, and draw nothing — same
+  // contract drawText honours, so a caller inside a prewarm scope behaves as it expects.
+  if (fontCacheManager_ && fontCacheManager_->isScanning()) {
+    fontCacheManager_->recordText(utf8, resolvedFontId, style);
+    return 0;
+  }
+
+  const EpdGlyph* glyph = font.getGlyph(cp, style);
+  if (!glyph) return 0;
+  // Read before rendering: an SD font's glyph miss handler may evict this pointer when the
+  // bitmap fetch inside renderCharUpscaled pulls another glyph through the ring.
+  const int advance = fp4::toPixel(glyph->advanceX) * scale;
+
+  renderCharUpscaled(*this, font, cp, x, yTop + getFontAscenderSize(resolvedFontId) * scale, scale, black, style);
+  return advance;
 }
 
 int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontFamily::Style style,

@@ -66,6 +66,33 @@ void appendEllipsis(char* row) {
   memcpy(row + len, kEllipsis, kEllipsisLen + 1);
 }
 
+// Copy `src` into `dst` as ONE row of at most maxWidth pixels, ellipsising it if it does not fit.
+// Returns the byte length written.
+//
+// The ellipsis is applied here rather than by setting GlossResult::truncated, so that the tail
+// pass at the end of fit() — which appends to the LAST row — cannot append a second one to a row
+// that already carries it. That collision is reachable: an entry can consist of a reading and
+// nothing else, leaving the reading as both the first and the last row.
+size_t fitSingleRow(char* dst, const char* src, const int maxWidth, const DictLayout::Measurer& measure,
+                    const EpdFontFamily::Style style) {
+  size_t len = strlen(src);
+  if (len > GlossResult::kRowBytes - 1) len = fitToCodepoint(src, GlossResult::kRowBytes - 1);
+  memcpy(dst, src, len);
+  dst[len] = '\0';
+  if (len == 0 || measure(dst, style, false) <= maxWidth) return len;
+
+  // Shorten a codepoint at a time until the row plus its ellipsis fits. Measuring each step
+  // rather than estimating: this runs once per cursor move on a string of a few dozen bytes,
+  // against an advance table that is already resident.
+  while (len > 0) {
+    len = fitToCodepoint(dst, len - 1);
+    memcpy(dst + len, kEllipsis, kEllipsisLen + 1);
+    if (measure(dst, style, false) <= maxWidth) return len + kEllipsisLen;
+    dst[len] = '\0';
+  }
+  return 0;
+}
+
 // Sink for DictLayout::Wrapper: copy the first kMaxRows lines into the result and count the
 // rest, so `truncated` is accurate rather than a guess. The Wrapper merges same-style runs, so
 // a plain-text gloss line is normally a single segment; concatenating them adds no separator
@@ -152,7 +179,8 @@ size_t readEntry(Dictionary::LookupCtx& ctx, HalFile& dictFile, const char* toke
   return len;
 }
 
-void fit(char* buf, const DictLayout::WrapMetrics& metrics, const DictLayout::Measurer& measure, GlossResult& out) {
+void fit(char* buf, const DictLayout::WrapMetrics& metrics, const DictLayout::Measurer& measure, GlossResult& out,
+         const FitOptions opts) {
   out.reset();
   if (buf == nullptr || buf[0] == '\0') return;
 
@@ -194,8 +222,30 @@ void fit(char* buf, const DictLayout::WrapMetrics& metrics, const DictLayout::Me
   // for the spaces the Wrapper dropped to break on. Each split is a terminator swapped in and out
   // again, never a copy of the entry.
   const ReadingSpan reading = readingOnFirstLine ? findReading(buf) : ReadingSpan{};
+  const size_t readingEnd = reading.start + reading.len;
+  const bool columnar = reading.found && opts.readingOnOwnRow;
+
+  // Columnar layout: the reading owns row 0, written straight into the row rather than fed through
+  // the Wrapper — the Wrapper would break an overlong reading across lines and eat the body's
+  // rows, where here it is capped at one row by construction. Everything after it wraps through
+  // the same Wrapper as always, into whatever rows are left.
+  if (columnar) {
+    const char saved = buf[readingEnd];
+    buf[readingEnd] = '\0';
+    const size_t len = fitSingleRow(out.rows[0], buf + reading.start, metrics.maxWidth, measure, EpdFontFamily::BOLD);
+    buf[readingEnd] = saved;
+
+    out.boldStart[0] = 0;
+    out.boldLen[0] = static_cast<uint8_t>(len);
+    out.rowCount = 1;
+  }
+
   if (reading.found) {
-    if (reading.start > 0) {
+    // The leading field — the script variant — is dropped when the caller is drawing it as its own
+    // column. Kept otherwise, including in the columnar layout when the box was too narrow for a
+    // second cell: there it flows ahead of the definition rather than being lost, and row 0 stays
+    // pure reading either way.
+    if (reading.start > 0 && !opts.dropLeadingField) {
       const char saved = buf[reading.start];
       buf[reading.start] = '\0';
       StyledSpan head;
@@ -204,17 +254,18 @@ void fit(char* buf, const DictLayout::WrapMetrics& metrics, const DictLayout::Me
       buf[reading.start] = saved;
     }
 
-    const size_t end = reading.start + reading.len;
-    const char saved = buf[end];
-    buf[end] = '\0';
-    StyledSpan bold;
-    bold.text = buf + reading.start;
-    bold.bold = true;
-    wrapper.onSpan(bold);
-    buf[end] = saved;
+    if (!columnar) {
+      const char saved = buf[readingEnd];
+      buf[readingEnd] = '\0';
+      StyledSpan bold;
+      bold.text = buf + reading.start;
+      bold.bold = true;
+      wrapper.onSpan(bold);
+      buf[readingEnd] = saved;
+    }
 
     StyledSpan body;
-    body.text = buf + end;
+    body.text = buf + readingEnd;
     wrapper.onSpan(body);
   } else {
     StyledSpan span;

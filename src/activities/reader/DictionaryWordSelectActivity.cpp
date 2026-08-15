@@ -47,6 +47,36 @@ constexpr int kGlossMinWidth = 80;
 // WordSelectNavigator.cpp:41).
 constexpr int kGlossClearance = 10;
 
+// Enlarged-character columns. The glyph is the definition font's own, drawn with each pixel
+// replicated cellScale times (GfxRenderer::drawGlyphScaled) — a larger font is not an option
+// here, since SdCardFontSystem::ensureFontSize snaps every request to a size the family ships
+// (SdCardFontSystem.cpp:223-233) and would cost a third resident size besides.
+//
+// 3x against a 16pt definition font is a ~108 px character, which is the whole height of a
+// three-row box. Past that the cell starves the definition on every screen this runs on.
+constexpr int kGlossMaxCellScale = 3;
+constexpr int kGlossCellGap = 8;
+// What the text column must keep for the box to still be worth reading, whatever the cells want.
+// Portrait is 480 logical px wide, so two 3x cells would leave ~12 Latin characters per row; the
+// fraction is what pushes that case down to 2x while landscape keeps 3x, with no orientation
+// branch anywhere. The absolute floor covers the smallest box the geometry gates allow.
+constexpr int kGlossTextWidthNum = 3;
+constexpr int kGlossTextWidthDen = 5;
+constexpr int kGlossMinTextWidth = 120;
+
+// The token as a single CJK codepoint, or 0 when it is anything else — a Latin word, a multi-
+// character token, punctuation. Only a single character can go in a cell: CJK layout tokenises
+// per character (see extractWords below), so this is the normal case on a Chinese page, while an
+// English token is a whole word and keeps the flowed layout.
+uint32_t singleCjkCodepoint(const char* text) {
+  if (text == nullptr || *text == '\0') return 0;
+  const auto* cursor = reinterpret_cast<const unsigned char*>(text);
+  const uint32_t cp = utf8NextCodepoint(&cursor);
+  if (*cursor != '\0') return 0;  // more than one codepoint
+  if (!utf8IsCjkBreakable(cp) || utf8IsCjkPunctuation(cp)) return 0;
+  return cp;
+}
+
 // Screen-space vertical extent of one page element, used to decide which elements have to be
 // re-rendered when the box moves off a strip. A PageLine is one line of text (TextBlock.h:12) and
 // carries no height at all, and even an element that does know its height can draw outside it —
@@ -729,6 +759,11 @@ void DictionaryWordSelectActivity::resolveGlossFont() {
   gloss_->fontId = fontId;
   gloss_->lineHeight = renderer.getLineHeight(fontId);
   gloss_->height = DictGloss::GlossResult::kMaxRows * gloss_->lineHeight + 2 * (kGlossPad + kGlossFrame);
+  // Height budget for an enlarged cell: the rows it spans, over the font's own ascender, which is
+  // what a Han glyph fills. Width is settled per token in planGlossCells.
+  gloss_->ascender = renderer.getFontAscenderSize(fontId);
+  const int rowsHeight = DictGloss::GlossResult::kMaxRows * gloss_->lineHeight;
+  gloss_->maxCellScale = gloss_->ascender > 0 ? std::min(kGlossMaxCellScale, rowsHeight / gloss_->ascender) : 0;
   // A dictionary size well above the reader's can make the box too tall for the page to be worth
   // reading around; when it is, the box is simply not drawn (see drawGloss). The worst case is
   // the box plus its clearance plus the selected row and one more row of context still visible —
@@ -738,6 +773,77 @@ void DictionaryWordSelectActivity::resolveGlossFont() {
   // to reason about than re-wrapping from a buffer fit() has already compacted in place.
   gloss_->forFlatIdx = -1;
   LOG_DBG("DGL", "font=%d lh=%d h=%d fits=%d", fontId, gloss_->lineHeight, gloss_->height, gloss_->fits ? 1 : 0);
+}
+
+void DictionaryWordSelectActivity::planGlossCells(const char* token, const char* entry) {
+  const int innerW = gloss_->width - 2 * (kGlossFrame + kGlossPad);
+
+  // Flowed layout is the default and the fallback for every decline below: the whole box is text,
+  // exactly as it was before the columns existed.
+  gloss_->tokenCp = 0;
+  gloss_->variantCp = 0;
+  gloss_->dropField = false;
+  gloss_->cellScale = 0;
+  gloss_->cellCount = 0;
+  gloss_->cellW = 0;
+  gloss_->textX = gloss_->x + kGlossFrame + kGlossPad;
+  gloss_->wrapWidth = innerW;
+
+  // Scale 1 is the character at its ordinary size in a column of its own, which is worse than no
+  // column at all — so a box too short to double it declines outright.
+  if (gloss_->maxCellScale < 2) return;
+  const uint32_t cp = singleCjkCodepoint(token);
+  if (cp == 0) return;
+
+  // Measured off the advance table, which the prewarm has already made resident for this token —
+  // no glyph load, so this costs nothing on the per-keypress path.
+  const int advance = renderer.getTextAdvanceX(gloss_->fontId, token, EpdFontFamily::REGULAR);
+  if (advance <= 0) return;
+
+  // The entry's own headword field — the bytes before the reading — is the script variant. Worth a
+  // column only when it is a single character that differs from the one on the page; when
+  // traditional and simplified coincide, which is most characters, a second cell would just show
+  // the same glyph twice. Anything longer stays in the flowed text (DictGloss::FitOptions).
+  uint32_t fieldCp = 0;
+  if (entry != nullptr) {
+    const DictGloss::ReadingSpan reading = DictGloss::findReading(entry);
+    size_t len = reading.found ? reading.start : 0;
+    while (len > 0 && static_cast<unsigned char>(entry[len - 1]) <= 0x20) len--;
+    char field[16];
+    if (len > 0 && len < sizeof(field)) {
+      memcpy(field, entry, len);
+      field[len] = '\0';
+      fieldCp = singleCjkCodepoint(field);
+    }
+  }
+  const uint32_t variantCp = fieldCp != cp ? fieldCp : 0;
+  // A field that merely repeats the character on the page carries nothing, so it comes out of the
+  // text as well as staying out of a cell. A field this could not read as a single character — a
+  // multi-character or Latin headword — is left in the text, where it is the only place it would
+  // appear at all.
+  const bool fieldIsToken = fieldCp != 0 && fieldCp == cp;
+
+  // Widest arrangement that still leaves a definition worth reading, preferring to keep both
+  // characters over keeping them large — a variant shown small beats a variant not shown.
+  for (int cells = variantCp != 0 ? 2 : 1; cells >= 1; cells--) {
+    for (int scale = gloss_->maxCellScale; scale >= 2; scale--) {
+      const int cellW = advance * scale;
+      const int used = cells * (cellW + kGlossCellGap);
+      const int textW = innerW - used;
+      if (textW < kGlossMinTextWidth) continue;
+      if (textW * kGlossTextWidthDen < innerW * kGlossTextWidthNum) continue;
+
+      gloss_->tokenCp = cp;
+      gloss_->variantCp = cells > 1 ? variantCp : 0;
+      gloss_->dropField = cells > 1 || fieldIsToken;
+      gloss_->cellScale = scale;
+      gloss_->cellCount = cells;
+      gloss_->cellW = cellW;
+      gloss_->textX = gloss_->x + kGlossFrame + kGlossPad + used;
+      gloss_->wrapWidth = textW;
+      return;
+    }
+  }
 }
 
 void DictionaryWordSelectActivity::initGloss() {
@@ -931,15 +1037,30 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
                                                           sizeof(gloss_->raw));
     const unsigned long tProbe = millis();
     unsigned long tWarm = tProbe;
+
+    // The selected character warmed on its own, on the hit path as well as the miss one. It is
+    // drawn enlarged from this same font, and it is NOT reliably part of the entry below: a
+    // simplified page against an entry whose headword field is the traditional form shares no
+    // glyph at all. On a miss nothing else is warmed, so without this the enlarged character
+    // would take SdCardFont's ~50 ms per-glyph path on the very frame that reports the miss.
+    constexpr uint8_t kRegularOnly = styleToBitMask(EpdFontFamily::REGULAR);
+    if (!token.empty()) {
+      renderer.ensureSdCardFontReady(gloss_->fontId, token.c_str(), kRegularOnly);
+      if (auto* fcm = renderer.getFontCacheManager()) fcm->prewarmCache(gloss_->fontId, token.c_str(), kRegularOnly);
+    }
+
     if (n == 0) {
       gloss_->result.reset();
+      // nullptr, not gloss_->raw: readEntry leaves the buffer holding the PREVIOUS word's entry.
+      planGlossCells(token.c_str(), nullptr);
+      tWarm = millis();
     } else {
       // Before any measuring, never after: a codepoint that misses here falls through to
       // SdCardFont's per-glyph path at ~50 ms each, and one CJK gloss is 30-60 glyphs. Same
       // ordering, and the same two calls, as prebuildAdvanceTable + prewarmHighlightGlyphs
       // above — advance table first (measurement), bitmaps second (drawing). Against the gloss
       // font, which is a different size from the page's, so none of the page's warm glyphs count.
-      constexpr uint8_t kRegularOnly = styleToBitMask(EpdFontFamily::REGULAR);
+      // This also covers the variant character, which is part of the entry by definition.
       renderer.ensureSdCardFontReady(gloss_->fontId, gloss_->raw, kRegularOnly);
       if (auto* fcm = renderer.getFontCacheManager()) fcm->prewarmCache(gloss_->fontId, gloss_->raw, kRegularOnly);
 
@@ -960,9 +1081,19 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
       }
       tWarm = millis();
 
+      // Before fit(), which compacts the buffer in place and moves every offset in it. The wrap
+      // width it settles is what the entry is then wrapped to.
+      planGlossCells(token.c_str(), gloss_->raw);
+
       const DictLayout::Measurer measure{this, &DictionaryWordSelectActivity::measureGlossWidth};
-      const DictLayout::WrapMetrics wrapMetrics{gloss_->width - 2 * (kGlossPad + kGlossFrame), 0, 0};
-      DictGloss::fit(gloss_->raw, wrapMetrics, measure, gloss_->result);
+      const DictLayout::WrapMetrics wrapMetrics{gloss_->wrapWidth, 0, 0};
+      // Columns only when there are cells: with the character enlarged beside it, the reading gets
+      // a row of its own so the eye finds it in the same place on every move, and the variant is
+      // dropped from the text exactly when it is being drawn as a cell instead.
+      DictGloss::FitOptions opts;
+      opts.readingOnOwnRow = gloss_->cellScale > 0;
+      opts.dropLeadingField = gloss_->dropField;
+      DictGloss::fit(gloss_->raw, wrapMetrics, measure, gloss_->result, opts);
     }
     const unsigned long tFit = millis();
     LOG_DBG("DGL", "peek '%s' %s rows=%d probe=%lums warm=%lums fit=%lums", token.c_str(),
@@ -1066,8 +1197,30 @@ void DictionaryWordSelectActivity::drawGloss() {
   renderer.clearRect(gloss_->x, y, gloss_->width, gloss_->height);
   renderer.drawRect(gloss_->x, y, gloss_->width, gloss_->height, true);
 
-  const int textX = gloss_->x + kGlossFrame + kGlossPad;
+  const int textX = gloss_->textX;
   int textY = y + kGlossFrame + kGlossPad;
+
+  // Enlarged character column(s), each closed by a rule so the eye reads them as cells rather
+  // than as oversized text that happens to precede the definition. Centred on the rows they span:
+  // the scale was chosen to fit that height, so it always leaves a little slack.
+  if (gloss_->cellScale > 0 && gloss_->tokenCp != 0) {
+    const int rowsHeight = DictGloss::GlossResult::kMaxRows * gloss_->lineHeight;
+    const int glyphTop = textY + (rowsHeight - gloss_->ascender * gloss_->cellScale) / 2;
+    int cellX = gloss_->x + kGlossFrame + kGlossPad;
+
+    const uint32_t cells[2] = {gloss_->tokenCp, gloss_->variantCp};
+    for (int i = 0; i < gloss_->cellCount; i++) {
+      if (cells[i] == 0) break;
+      // Drawn at the cell's left edge rather than centred in it: cellW is the token's own scaled
+      // advance and Han advances are uniform, so the two glyphs line up without measuring the
+      // second one.
+      renderer.drawGlyphScaled(gloss_->fontId, cells[i], cellX, glyphTop, gloss_->cellScale, true);
+      cellX += gloss_->cellW + kGlossCellGap;
+      renderer.drawLine(cellX - kGlossCellGap / 2, y + kGlossFrame, cellX - kGlossCellGap / 2,
+                        y + gloss_->height - kGlossFrame - 1, true);
+    }
+  }
+
   if (gloss_->result.found) {
     for (int i = 0; i < gloss_->result.rowCount; i++) {
       char* row = gloss_->result.rows[i];
