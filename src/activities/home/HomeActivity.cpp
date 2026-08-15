@@ -1,7 +1,9 @@
 #include "HomeActivity.h"
 
+#include <Arduino.h>  // millis()
 #include <Bitmap.h>
 #include <Epub.h>
+#include <FontCacheManager.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
@@ -413,6 +415,17 @@ void HomeActivity::render(RenderLock&&) {
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
 
+  // Paint timing, split draw vs panel. A whole-screen render is normally dominated by the e-ink
+  // refresh, so a single elapsed number would hide what we are actually chasing here: with a CJK
+  // SD family selected, Han in book titles routes to the SD fallback font (SdCardFontSystem's
+  // kUiFontSizes) and every glyph the 40-slot overflow ring cannot hold is an individual SD read.
+  // logStats prints that as `miss=N (Nms)` per resident SD font; free/largest say whether a
+  // batched prewarm could even be budgeted here (it needs largest/2 and 24KB of headroom --
+  // SdCardFont.cpp MINI_FREE_FLOOR). Reset per paint so the numbers are for THIS selection move.
+  auto* fcm = renderer.getFontCacheManager();
+  if (fcm) fcm->resetStats();
+  const unsigned long tStart = millis();
+
   renderer.clearScreen();
   bool bufferRestored = coverBufferStored && restoreCoverBuffer();
 
@@ -470,7 +483,13 @@ void HomeActivity::render(RenderLock&&) {
                                             tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
+  const unsigned long tDraw = millis();
   renderer.displayBuffer();
+
+  LOG_DBG("HOME", "paint draw=%lu display=%lu free=%u largest=%u", tDraw - tStart, millis() - tDraw,
+          static_cast<unsigned>(esp_get_free_heap_size()),
+          static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+  if (fcm) fcm->logStats("home");
 
   if (!firstRenderDone) {
     firstRenderDone = true;
