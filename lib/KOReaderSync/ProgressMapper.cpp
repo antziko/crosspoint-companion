@@ -1003,17 +1003,13 @@ std::optional<CrossPointPosition> ProgressMapper::fromRichPosition(const std::sh
   CrossPointPosition result{};
   result.spineIndex = rich.spineIndex;
 
-  // The existing rich extension carries the same KOReader XPath as the standard
-  // progress field. Resolve that content anchor first; remote page counts are
-  // layout-dependent hints only.
-  if (!rich.xpath.empty()) {
-    SavedProgressPosition saved{rich.xpath, static_cast<float>(rich.pctQ) / 1000000.0f};
-    auto contentMapped = toCrossPoint(epub, saved, renderer);
-    if (contentMapped.hasVisibleTextOffset) {
-      return contentMapped;
-    }
-  }
-
+  // No XPath resolution here, by contract: rich.xpath is the *same* string as the
+  // standard progress field (both are localProgress.xpath — see
+  // KOReaderSyncActivity::performUpload), and the caller only reaches this function
+  // after toCrossPoint() on that string failed to yield a content offset. Retrying
+  // it would re-run up to four streamSpine() passes over the same spine item, off
+  // the SD card, for a guaranteed-identical failure. The spine/page/paragraph hints
+  // below are the only thing this function can add.
   Section tempSection(epub, result.spineIndex, renderer);
   const auto cachedCount = tempSection.getCachedPageCount();
   if (!cachedCount || *cachedCount <= 0) {

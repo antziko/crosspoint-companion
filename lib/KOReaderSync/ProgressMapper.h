@@ -72,14 +72,18 @@ class ProgressMapper {
                                          int totalPagesInCurrentSpine = 0, int fallbackTotalPages = 0);
 
   /**
-   * Convert a rich CrossPoint position (downloaded from a crosspoint-sync
-   * server) directly to a CrossPoint position. Its standard KOReader XPath is
-   * resolved to a content offset first; legacy spine/page/paragraph hints are
-   * used only when that content anchor cannot be applied.
+   * Resolve a rich CrossPoint position (downloaded from a crosspoint-sync server)
+   * using its spine/page/paragraph hints.
    *
-   * @return The position, or std::nullopt when the rich position cannot be
-   *         applied (spine out of range, no section cache) and the caller
-   *         should fall back to toCrossPoint().
+   * PRECONDITION: the caller must have already resolved the standard KOReader
+   * XPath via toCrossPoint() and found no visible text offset. rich.xpath is the
+   * same string as the standard progress field, so this function deliberately does
+   * not re-resolve it — doing so would repeat that failed spine streaming for an
+   * identical result. Call this only as the fallback for that miss.
+   *
+   * @return The position, or std::nullopt when the rich hints cannot be applied
+   *         (spine out of range, no section cache), leaving the caller's existing
+   *         toCrossPoint() result in place.
    */
   static std::optional<CrossPointPosition> fromRichPosition(const std::shared_ptr<Epub>& epub,
                                                             const KOReaderRichPosition& rich, GfxRenderer& renderer);
