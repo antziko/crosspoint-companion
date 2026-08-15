@@ -30,6 +30,7 @@
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
+#include "SettingsPersistence.h"
 #include "WifiCredentialStore.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
@@ -463,6 +464,12 @@ void setup() {
   }
 
   HalSystem::checkPanic();
+
+  // Development-only: confirm the constexpr persistence table still matches SettingsList.h.
+  // Runs before the first load so any drift is logged above the values it would affect.
+  // Compiles to nothing in gh_release. Free heap here is ~200 KB, so building the full
+  // settings list for the comparison is free.
+  verifySettingsPersistenceTable();
 
   SETTINGS.loadFromFile();
   // Apply the SD-logging toggle now that settings are loaded (default off). Governs

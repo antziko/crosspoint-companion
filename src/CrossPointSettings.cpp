@@ -2,28 +2,17 @@
 
 #include <I18n.h>
 #include <Logging.h>
-#include <ObfuscationUtils.h>
 #include <SdDebugLog.h>
 
 #include <cstring>
 #include <iterator>
-#include <string>
 
 #include "I18nKeys.h"
 #include "ReaderFontSizes.h"
-#include "SettingsList.h"
+#include "SettingsPersistence.h"
 #include "fontIds.h"
 
 namespace {
-
-// Longest "<key>_obf" JSON key we ever build on the stack; SettingsList keys are
-// far shorter, so this avoids a per-field std::string allocation during load.
-constexpr size_t OBF_KEY_BUF = 64;
-
-void copyToField(char* dest, const char* src, const size_t maxLen) {
-  strncpy(dest, src, maxLen - 1);
-  dest[maxLen - 1] = '\0';
-}
 
 // Migrate a pre-refactor settings file that used the single combined `statusBar`
 // enum into the current per-element status bar fields. Runs when the new
@@ -130,21 +119,11 @@ bool CrossPointSettings::saveToFile() const {
 void CrossPointSettings::toJson(JsonDocument& doc) const {
   const CrossPointSettings& s = *this;
 
-  for (const auto& info : getSettingsList()) {
-    if (!info.key) continue;
-    // Dynamic entries (KOReader etc.) are stored in their own files — skip.
-    if (!info.valuePtr && !info.stringOffset) continue;
-
-    if (info.stringOffset) {
-      const char* strPtr = (const char*)&s + info.stringOffset;
-      if (info.obfuscated) {
-        doc[std::string(info.key) + "_obf"] = obfuscation::obfuscateToBase64(strPtr);
-      } else {
-        doc[info.key] = strPtr;
-      }
-    } else {
-      doc[info.key] = s.*(info.valuePtr);
-    }
+  // Walks the constexpr table in SettingsPersistence.h rather than getSettingsList(), which
+  // builds ~5.8 KB of SettingInfo on the heap — a contiguous allocation that aborts (and so
+  // reboots) when a save lands at low heap. See the header for the full rationale.
+  for (const PersistedU8& p : kPersistedSettings) {
+    doc[p.key] = s.*(p.ptr);
   }
 
   // Front button remap — managed by RemapFrontButtons sub-activity, not in SettingsList.
@@ -200,65 +179,23 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
     applyLegacyStatusBarSettings(s);
   }
 
-  for (const auto& info : getSettingsList()) {
-    if (!info.key) continue;
-    // Dynamic entries (KOReader etc.) are stored in their own files — skip.
-    if (!info.valuePtr && !info.stringOffset) continue;
-
-    if (info.stringOffset) {
-      // destPtr starts out holding the struct-initializer default; it stays that
-      // way unless the document actually carries a value for this key.
-      char* destPtr = (char*)&s + info.stringOffset;
-      if (info.stringMaxLen == 0) {
-        LOG_ERR("CPS", "Misconfigured SettingInfo: stringMaxLen is 0 for key '%s'", info.key);
-        destPtr[0] = '\0';
-        needsResave = true;
-        continue;
-      }
-
-      bool loaded = false;
-      if (info.obfuscated) {
-        char obfKey[OBF_KEY_BUF];
-        snprintf(obfKey, sizeof(obfKey), "%s_obf", info.key);
-        bool ok = false;
-        bool tooLong = false;
-        const std::string decoded =
-            obfuscation::deobfuscateFromBase64(doc[obfKey] | "", info.stringMaxLen - 1, &ok, &tooLong);
-        if (tooLong) {
-          LOG_ERR("CPS", "Oversized obfuscated value for key '%s'", info.key);
-          needsResave = true;
-        }
-        if (ok && !decoded.empty()) {
-          copyToField(destPtr, decoded.c_str(), info.stringMaxLen);
-          loaded = true;
-        }
-      }
-      if (!loaded) {
-        // Read as const char*, never `| std::string(...)`: ArduinoJson's
-        // std::string converter drags a per-TU copy of the serializer into
-        // flash. See the note in PersistableStore.h.
-        const char* raw = doc[info.key].is<const char*>() ? doc[info.key].as<const char*>() : nullptr;
-        if (raw) {
-          // Obfuscated field recovered from a legacy plaintext value -> resave.
-          if (info.obfuscated && strcmp(raw, destPtr) != 0) needsResave = true;
-          copyToField(destPtr, raw, info.stringMaxLen);
-        }
-      }
-    } else {
-      const uint8_t fieldDefault = s.*(info.valuePtr);  // struct-initializer default, read before overwrite
-      uint8_t v = doc[info.key] | fieldDefault;
-      if (info.type == SettingType::ENUM) {
-        v = clamp(v, (uint8_t)info.enumValues.size(), fieldDefault);
-      } else if (info.type == SettingType::TOGGLE) {
-        v = clamp(v, (uint8_t)2, fieldDefault);
-      } else if (info.type == SettingType::VALUE) {
-        if (v < info.valueRange.min)
-          v = info.valueRange.min;
-        else if (v > info.valueRange.max)
-          v = info.valueRange.max;
-      }
-      s.*(info.valuePtr) = v;
+  // Mirrors toJson(): walks the constexpr table, not getSettingsList(). The clamps below
+  // reproduce what the SettingInfo loop applied per SettingType — VALUE sliders clamp into
+  // their range, TOGGLE/ENUM fall back to the field's struct-initializer default, which is
+  // what keeps sentinel values (minSessionMinutes' MIN_SESSION_USE_GLOBAL) intact instead of
+  // folding them onto a bound.
+  for (const PersistedU8& p : kPersistedSettings) {
+    const uint8_t fieldDefault = s.*(p.ptr);  // struct-initializer default, read before overwrite
+    uint8_t v = doc[p.key] | fieldDefault;
+    if (p.clampToRange) {
+      if (v < p.lo)
+        v = p.lo;
+      else if (v > p.hi)
+        v = p.hi;
+    } else if (v < p.lo || v > p.hi) {
+      v = fieldDefault;
     }
+    s.*(p.ptr) = v;
   }
 
   if (doc["sleepTimeoutMinutes"].isNull() && !doc["sleepTimeout"].isNull()) {

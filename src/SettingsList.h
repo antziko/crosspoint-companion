@@ -205,7 +205,13 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // SettingInfo temporaries on the stack at once via std::initializer_list, which would overflow
   // the 8 KB loopTask stack; push_back keeps peak stack usage to ~sizeof(SettingInfo).
   std::vector<SettingInfo> v;
-  v.reserve(60);
+  // Must be >= the number of push_back calls below. It was 60 against 74 entries, so every
+  // call allocated 60 x sizeof(SettingInfo), then reallocated to 120 while still holding the
+  // first block — two contiguous allocations and a copy where one would do. The 8640-byte
+  // growth allocation is what aborted (and rebooted the device) when settings were saved at
+  // low heap; see SettingsPersistence.h. Keep headroom above the real count.
+  constexpr size_t kSettingCount = 80;
+  v.reserve(kSettingCount);
 
   // --- Display ---
   // Appearance basics stay at the Display top level; sleep-screen and e-ink refresh tuning live in
