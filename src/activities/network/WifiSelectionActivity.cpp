@@ -3,6 +3,7 @@
 #include <GfxRenderer.h>
 #include <HalClock.h>
 #include <I18n.h>
+#include <InflateReader.h>
 #include <Logging.h>
 #include <SdDebugLog.h>
 #include <WiFi.h>
@@ -90,6 +91,22 @@ void WifiSelectionActivity::onPromptEvent(const fui::ActionEvent& event, void* u
 
 void WifiSelectionActivity::onEnter() {
   Activity::onEnter();
+
+  // Reclaim the 32KB inflate window (reserved at boot, main.cpp:419) before anything here
+  // touches the radio. This is arithmetic, not tuning: the X3's free heap peaks at ~71KB
+  // with the window held (opds_debug.txt "enter Boot free=71368"), while esp_wifi + lwip
+  // init costs ~53KB and a scan needs ~14KB more on top — 73KB that simply does not exist.
+  // The observed failure is entry at free=56404, then 7s later (AUTO_CONNECTION_TIMEOUT_MS,
+  // the last-SSID attempt that brought the radio up) "scan skipped: low heap free=4280
+  // largest=2036 auto=1 radio=1", the blind credential walk exhausting, and
+  // failWithLowMemory() reporting "Not enough memory".
+  //
+  // Released HERE rather than at each launch site: five callers already do this
+  // (OpdsBookBrowser x2, KOReaderSync, CrossPointWebServer, KOReaderAuth) and four never
+  // got it — SettingsActivity (the Wi-Fi Networks row), ClockSync, FontDownload,
+  // OtaUpdate — plus CalibreConnect. Every screen that brings the radio up needs this and
+  // does not get it for free; owning it once is what stops the sixth copy being written.
+  InflateReader::releaseWindow();
 
   // Load saved WiFi credentials - SD card operations need lock as we use SPI
   // for both
@@ -202,6 +219,25 @@ void WifiSelectionActivity::onExit() {
   // (CrossPointWebServerActivity) manages WiFi connection state. We just clean
   // up the scan and task.
 
+  // Do NOT call InflateReader::ensureWindow() here. It was added (08-15) so that a user who
+  // opens Settings > Wi-Fi Networks and backs out would not read the rest of the session with
+  // the window released, and it broke the KOReader sync path outright.
+  //
+  // This screen is a sub-activity. Its callers release the window immediately before pushing
+  // it precisely so the radio and TLS have the heap (KOReaderSyncActivity.cpp:1012,
+  // OpdsBookBrowserActivity.cpp:656,1169) — so re-reserving at this exit hands the 32KB back
+  // at the exact moment the caller needs it most. Measured on device, KOSync:
+  //     MEM: exit WifiSelection free=44100 largest=40948   <- logged before this point
+  //     KOSYNC: PROGRESS_GET req heap=9656 largest8=6132   <- 40948 - 32768 = 8180
+  //     KOSYNC: PROGRESS_GET resp code=-1
+  // The request ran on 9.6KB instead of 44KB and could not connect; the stats upload then
+  // skipped itself too ("pre-stats ... stats needs ~33KB contig").
+  //
+  // The deeper rule, from InflateReader.cpp:21-24: the window is heap-resident *so that it can
+  // be released for network work*, and is re-reserved only on a pristine boot heap. Any
+  // mid-session ensureWindow() violates that on both counts — it competes with the radio, and
+  // it carves 32KB out of an already-fragmented heap. Releasing until the next boot is the
+  // designed behaviour, not a leak (InflateReader.h:111).
   LOG_DBG("WIFI", "Free heap at onExit end: %d bytes", ESP.getFreeHeap());
 }
 
