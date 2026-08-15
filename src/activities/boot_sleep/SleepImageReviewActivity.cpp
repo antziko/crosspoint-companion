@@ -63,15 +63,29 @@ void SleepImageReviewActivity::renderImage() {
   // produces a 1-bit halftone so a single BW pass is correct.
   const bool hasGreyscale = bitmap.hasGreyscale() && !renderer.isX3();
 
-  // Wipe ghosting before drawing the image with a single mild HALF refresh.
+  // Same two-step recipe as SleepActivity::renderBitmapSleepScreen — this screen shows the
+  // very image the panel is still retaining from sleep, so anything weaker ghosts:
+  //   - The wipe must be FULL. On X4 HALF and FAST are the same DU waveform
+  //     (Uc8279X4Driver.cpp:179 `fast = (mode != Full)`), so only FULL seeds the OLD plane
+  //     white and actually erases the retained frame.
+  //   - The paint must be HALF, never FAST. On X3 FAST is the `_fast` turbo differential
+  //     driven off the stale DTM1 plane (Uc8253X3Driver.cpp:191-206), while HALF loads the
+  //     `_half` scrub bank that drives every pixel to target regardless of prior state.
   renderer.clearScreen();
-  renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+  renderer.displayBuffer(HalDisplay::FULL_REFRESH);
 
   renderer.clearScreen();
   renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, 0, 0);
   // Button hints (Skip / Keep / Remove) are self-explanatory; no heading prompt needed.
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-  renderer.displayBuffer(hasGreyscale ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
+  if (hasGreyscale) {
+    // Must be displayGrayscaleBase, not displayBuffer: the gray nudge LUT applied by
+    // applyGrayscaleOverlay below is calibrated against the pixel state this base leaves
+    // behind (see the same call in SleepActivity).
+    renderer.displayGrayscaleBase(HalDisplay::HALF_REFRESH);
+  } else {
+    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+  }
 
   if (hasGreyscale) {
     BitmapRenderUtils::applyGrayscaleOverlay(renderer, bitmap, x, y, pageWidth, pageHeight);
