@@ -28,6 +28,10 @@ add_library(crosspoint_test_common INTERFACE)
 target_include_directories(crosspoint_test_common INTERFACE
   ${REPO_ROOT}
   ${REPO_ROOT}/lib
+  # src/util sources are compiled by the host suite, so any lib/ header they include has to
+  # resolve here too. Memory.h (makeUniqueNoThrow) is pure standard C++ with no Arduino
+  # dependency, so exposing it costs the host build nothing.
+  ${REPO_ROOT}/lib/Memory
 )
 target_compile_options(crosspoint_test_common INTERFACE
   -Wall
@@ -57,6 +61,7 @@ add_subdirectory(book-cache-utils)
 add_subdirectory(flashcard-deck)
 add_subdirectory(utf8_compose)
 add_subdirectory(opds_filename)
+add_subdirectory(opds-string-arena)
 add_subdirectory(minibidi_arabic)
 add_subdirectory(combining_marks)
 add_subdirectory(credential_integrity)

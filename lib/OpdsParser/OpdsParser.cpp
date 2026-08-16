@@ -28,8 +28,11 @@ constexpr size_t MAX_ENTRIES = 64;
 // block on a heap the TLS read has already chopped into ~7KB pieces, so a feed
 // truncated at 32 entries with 19KB still free (X3 log: "count=32 need=8448
 // largest=7668" — short by 780 bytes). A fixed step keeps the request small as the
-// feed grows, at the cost of one extra copy per step: an entry is ~100 bytes, so a
-// full 64-entry page copies ~6KB across every step combined.
+// feed grows, at the cost of one extra copy per step.
+//
+// Since the text moved into OpdsStringArena an entry is 16 bytes rather than 76, so a
+// full 64-entry page now tops out at a 1KB vector instead of 4.9KB and the copies are
+// negligible. The step stays small anyway: nothing here wants a big late allocation.
 constexpr size_t OPDS_GROWTH_STEP = 8;
 
 // Headroom (bytes) required beyond the entry vector's next-growth allocation before
@@ -43,13 +46,23 @@ constexpr size_t OPDS_GROWTH_HEAP_MARGIN = 2 * 1024;
 // growth step (from curCapacity) plus margin. When false, the caller stops adding
 // entries rather than letting the reallocation's bare-`new` abort() on a starved
 // heap. Logs the shortfall to SD for the (serial-less) X3.
-bool heapCanGrowEntries(size_t curCapacity) {
+//
+// `logged` latches the SD line, not the decision: every remaining entry in a capped feed
+// re-probes (so a heap that recovers mid-parse can still let the feed continue, which is
+// the pre-existing behaviour and worth keeping), but only the first shortfall is written
+// out. Each SdDebugLog::log is two SD opens plus a mutex, and a device capture shows the
+// identical bail repeated ten times per feed — `count=32 need=6048 largest=4596 free=8892`
+// unchanged on every line — all of it spent on the heap that is already too tight.
+bool heapCanGrowEntries(size_t curCapacity, bool& logged) {
   const size_t newCap = curCapacity + OPDS_GROWTH_STEP;
   const size_t needBytes = newCap * sizeof(OpdsEntry) + OPDS_GROWTH_HEAP_MARGIN;
   const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   if (largest >= needBytes) return true;
-  SdDebugLog::log("OPDS", "entries growth bailed: count=%u need=%u largest=%u free=%u", (unsigned)curCapacity,
-                  (unsigned)needBytes, (unsigned)largest, (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
+  if (!logged) {
+    logged = true;
+    SdDebugLog::log("OPDS", "entries growth bailed: count=%u need=%u largest=%u free=%u", (unsigned)curCapacity,
+                    (unsigned)needBytes, (unsigned)largest, (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
+  }
   return false;
 }
 }  // namespace
@@ -136,23 +149,24 @@ void OpdsParser::flush() {
 
 bool OpdsParser::error() const { return errorOccured; }
 
+std::vector<OpdsEntry> OpdsParser::takeEntries(OpdsStringArena& arenaOut) {
+  // Arena first: the entries about to be returned point into it, so it has to reach the
+  // caller whatever happens to the vector afterwards.
+  arenaOut = std::move(arena);
+  return std::move(entries);
+}
+
 void OpdsParser::clear() {
   entries.clear();
+  arena.clear();
   searchTemplate.clear();
   nextPageUrl.clear();
   prevPageUrl.clear();
-  currentEntry = OpdsEntry{};
+  currentEntry = StagedEntry{};
   currentText.clear();
-  inEntry = inTitle = inAuthor = inAuthorName = inId = false;
+  inEntry = inTitle = inAuthor = inAuthorName = false;
   truncated = false;
-}
-
-std::vector<OpdsEntry> OpdsParser::getBooks() const {
-  std::vector<OpdsEntry> books;
-  for (const auto& entry : entries) {
-    if (entry.type == OpdsEntryType::BOOK) books.push_back(entry);
-  }
-  return books;
+  loggedGrowthBail = false;
 }
 
 const char* OpdsParser::findAttribute(const XML_Char** atts, const char* name) {
@@ -207,7 +221,12 @@ void XMLCALL OpdsParser::startElement(void* userData, const XML_Char* name, cons
 
   if (strcmp(name, "entry") == 0 || strstr(name, ":entry") != nullptr) {
     self->inEntry = true;
-    self->currentEntry = OpdsEntry{};
+    // Reset the fields, not the object: assigning a fresh StagedEntry would free the three
+    // string buffers this reuses across the whole feed.
+    self->currentEntry.type = OpdsEntryType::NAVIGATION;
+    self->currentEntry.title.clear();
+    self->currentEntry.author.clear();
+    self->currentEntry.href.clear();
     return;
   }
 
@@ -221,9 +240,6 @@ void XMLCALL OpdsParser::startElement(void* userData, const XML_Char* name, cons
   } else if (self->inAuthor && (strcmp(name, "name") == 0 || strstr(name, ":name") != nullptr)) {
     self->inAuthorName = true;
     self->currentText.clear();
-  } else if (strcmp(name, "id") == 0 || strstr(name, ":id") != nullptr) {
-    self->inId = true;
-    self->currentText.clear();
   }
 }
 
@@ -236,7 +252,8 @@ void XMLCALL OpdsParser::endElement(void* userData, const XML_Char* name) {
       // dropped => truncated flag.
       if (self->entries.size() >= MAX_ENTRIES) {
         self->truncated = true;
-      } else if (self->entries.size() == self->entries.capacity() && !heapCanGrowEntries(self->entries.capacity())) {
+      } else if (self->entries.size() == self->entries.capacity() &&
+                 !heapCanGrowEntries(self->entries.capacity(), self->loggedGrowthBail)) {
         // Growing the vector reallocates (old + new block held at once) at the
         // moment the TLS read has the heap at its tightest. That bare-`new` aborts()
         // under -fno-exceptions on the X3 (a 37KB feed crashed here at ~7KB free).
@@ -245,14 +262,26 @@ void XMLCALL OpdsParser::endElement(void* userData, const XML_Char* name) {
         // unaffected — only a large feed on a starved heap gets capped.
         self->truncated = true;
       } else {
-        // Reserve the fixed step explicitly. Left to itself push_back would double,
-        // which is the allocation heapCanGrowEntries() just sanctioned a step for —
-        // and reserve() abort()s on failure under -fno-exceptions, so it must ask for
-        // the size that was actually checked.
-        if (self->entries.size() == self->entries.capacity()) {
-          self->entries.reserve(self->entries.capacity() + OPDS_GROWTH_STEP);
+        // Copy the staged text into the arena before touching the vector. A failure here
+        // is the arena running out of chunks, which is the same "feed larger than RAM
+        // allows" condition the cap above reports — so it truncates rather than storing an
+        // entry whose title would be a null pointer. author is optional and yields a
+        // static "", which never fails.
+        const char* title = self->arena.add(self->currentEntry.title);
+        const char* author = self->arena.add(self->currentEntry.author);
+        const char* href = self->arena.add(self->currentEntry.href);
+        if (title == nullptr || author == nullptr || href == nullptr) {
+          self->truncated = true;
+        } else {
+          // Reserve the fixed step explicitly. Left to itself push_back would double,
+          // which is the allocation heapCanGrowEntries() just sanctioned a step for —
+          // and reserve() abort()s on failure under -fno-exceptions, so it must ask for
+          // the size that was actually checked.
+          if (self->entries.size() == self->entries.capacity()) {
+            self->entries.reserve(self->entries.capacity() + OPDS_GROWTH_STEP);
+          }
+          self->entries.push_back(OpdsEntry{self->currentEntry.type, title, author, href});
         }
-        self->entries.push_back(self->currentEntry);
       }
     }
     self->inEntry = false;
@@ -265,16 +294,13 @@ void XMLCALL OpdsParser::endElement(void* userData, const XML_Char* name) {
     } else if (self->inAuthorName && (strcmp(name, "name") == 0 || strstr(name, ":name") != nullptr)) {
       self->currentEntry.author = self->currentText;
       self->inAuthorName = false;
-    } else if (strcmp(name, "id") == 0 || strstr(name, ":id") != nullptr) {
-      if (self->inId) self->currentEntry.id = self->currentText;
-      self->inId = false;
     }
   }
 }
 
 void XMLCALL OpdsParser::characterData(void* userData, const XML_Char* s, const int len) {
   auto* self = static_cast<OpdsParser*>(userData);
-  if (self->inTitle || self->inAuthorName || self->inId) {
+  if (self->inTitle || self->inAuthorName) {
     self->currentText.append(s, len);
   }
 }

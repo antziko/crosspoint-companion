@@ -29,6 +29,10 @@ class OpdsBookBrowserActivity final : public Activity, private UiAppHost {
   ButtonNavigator buttonNavigator;
   BrowserState state = BrowserState::LOADING;
   std::vector<OpdsEntry> entries;
+  // Owns the text every entry above points at. Taken from the parser together with the
+  // vector (OpdsParser::takeEntries) and released with it in releaseEntries() — an entry
+  // outliving this arena is a dangling read, not an empty string.
+  OpdsStringArena entriesArena;
   // Cached "book already on SD" flag per entry (1=on device, 0=not/navigation).
   // Computed once per feed load — NOT per render — so cursor moves don't re-stat
   // the SD card (~276 Storage.exists() calls/keypress before this cache). Parallel
@@ -54,6 +58,11 @@ class OpdsBookBrowserActivity final : public Activity, private UiAppHost {
   // in-flight feed download. Read/written only on the main task — fetchFeed and
   // its progress callback both run there — so no volatile/barrier needed.
   bool cancelFetch = false;
+  // Largest free block measured at the previous contiguous-heap abort (fetch or
+  // download), 0 if none this session. Only used to label a repeat abort as WEDGED in
+  // the SD trace: nothing in this activity defragments, so an abort at the same-or-worse
+  // block means retrying is futile and only onExit()'s silent restart will clear it.
+  size_t lastAbortLargestBlock = 0;
   bool lockLongPressBack = false;  // swallow BACK release after long-press-to-home
   int selectorIndex = 0;
   std::string errorMessage;
@@ -81,6 +90,10 @@ class OpdsBookBrowserActivity final : public Activity, private UiAppHost {
   static void onCancelEvent(const freeink::ui::ActionEvent& event, void* user);
   void screenHeader(UiScreen& screen, bool withSearch);
   void buildBrowsingScreen(UiScreen& screen);
+  // allowCache: re-parse this depth's cached body if one is on the card, skipping the
+  // network entirely. Opt-in, and only the two callers that return to a page they just
+  // left pass true (navigateBack, the post-download reload) — a forward navigation or an
+  // explicit retry always goes to the server. See feedCachePath() in the .cpp.
   void buildDownloadScreen(UiScreen& screen);
   void buildStatusScreen(UiScreen& screen);
   void activateSelected();
@@ -88,7 +101,7 @@ class OpdsBookBrowserActivity final : public Activity, private UiAppHost {
   void checkAndConnectWifi();
   void launchWifiSelection();
   void onWifiSelectionComplete(bool connected);
-  void fetchFeed(const std::string& path);
+  void fetchFeed(const std::string& path, bool allowCache = false);
   void refreshDownloadedCache();
   void navigateToEntry(const OpdsEntry& entry);
   void navigateBack();

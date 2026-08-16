@@ -115,8 +115,8 @@ std::vector<std::string> bookFileNameCandidates(const OpdsEntry& book) {
     out.push_back(std::move(name));
   };
 
-  const std::string& title = book.title;
-  const std::string& author = book.author;
+  const std::string title = book.title;
+  const std::string author = book.author;
 
   add(title);  // title-only / already-combined as the feed presents it
   if (!author.empty()) {
@@ -147,6 +147,40 @@ bool isBookOnDevice(const std::string& folder, const OpdsEntry& book) {
   }
   return false;
 }
+// Feed cache: the parsed-and-discarded feed body, kept on SD so returning to a page
+// already visited re-parses it instead of re-downloading it.
+//
+// Worth doing because the re-fetch is not cheap on this device. Measured on X3
+// (opds_debug.txt): the reload that follows every book download re-pulled a 130676-byte
+// feed — a 1096ms TLS handshake plus a 2186ms body, ~3.3s and 130KB of radio to redisplay
+// a list the user was looking at moments earlier. Backing out of a sub-catalog pays the
+// same. The "already downloaded" marker is NOT read from the feed (refreshDownloadedCache
+// stats the card), so a cached re-parse still shows a book that was just fetched.
+//
+// Keyed by navigation DEPTH, not by URL, and that is sound rather than lazy: every fetch
+// writes the file for the depth it happens at, and the cache is only read by the two
+// callers that return to a depth they just left (navigateBack, the post-download reload).
+// A URL key would need a hash, a sidecar file to store it, and heap to compare it —
+// against a stack that already tells us the answer. Forward navigation and the explicit
+// retry never read it, so a feed the server has since changed is one Back away, not stuck.
+constexpr int MAX_CACHE_DEPTH = 4;  // ~4 x <=200KB of SD; deeper levels simply refetch
+
+// "" when the depth is past the cache, which the caller reads as "use the scratch file
+// and delete it after the parse" — i.e. exactly the old behaviour.
+std::string feedCachePath(const size_t depth) {
+  if (depth >= static_cast<size_t>(MAX_CACHE_DEPTH)) return "";
+  return "/.opds_c" + std::to_string(depth) + ".xml";
+}
+
+// Drop every cached feed. Runs on entry (a previous session's files are stale and their
+// depths mean nothing here) and on exit (they are scratch, not user data).
+void purgeFeedCache() {
+  for (int d = 0; d < MAX_CACHE_DEPTH; d++) {
+    const std::string path = feedCachePath(static_cast<size_t>(d));
+    if (!path.empty()) Storage.remove(path.c_str());
+  }
+}
+
 constexpr fui::ActionId ACTION_ROW = 1;
 constexpr fui::ActionId ACTION_SEARCH = 2;
 constexpr fui::ActionId ACTION_CANCEL = 3;
@@ -188,6 +222,9 @@ void OpdsBookBrowserActivity::onEnter() {
   state = BrowserState::CHECK_WIFI;
   entries.clear();
   navigationHistory.clear();
+  // Any cached feed on the card belongs to a previous session, where the same depth
+  // meant a different page. Depth is only a valid key within one browsing session.
+  purgeFeedCache();
   searchTemplate = "";
   currentPath = "";
   selectorIndex = 0;
@@ -217,6 +254,7 @@ void OpdsBookBrowserActivity::onExit() {
 
   entries.clear();
   navigationHistory.clear();
+  purgeFeedCache();  // scratch, not user data
 
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(false);
@@ -603,7 +641,7 @@ int OpdsBookBrowserActivity::itemsPerPage() const {
   return std::max(1, avail / LIST_ROW_H);
 }
 
-void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
+void OpdsBookBrowserActivity::fetchFeed(const std::string& path, const bool allowCache) {
   if (server.url.empty()) {
     state = BrowserState::ERROR;
     errorMessage = tr(STR_NO_SERVER_URL);
@@ -630,6 +668,14 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   // the TLS read only worked for tiny feeds that fit in the 5KB sliver.)
   static constexpr const char* kTmpFeed = "/.opds_feed.tmp";
 
+  // Where this feed's body lives. A cacheable depth writes (and keeps) its own file;
+  // deeper levels fall back to the shared scratch file and delete it after the parse.
+  const std::string cachePath = feedCachePath(navigationHistory.size());
+  const std::string feedPath = cachePath.empty() ? std::string(kTmpFeed) : cachePath;
+  const bool keepAfterParse = !cachePath.empty();
+  // A hit skips the radio entirely: no handshake, no transfer, no heap preflight.
+  const bool fromCache = allowCache && keepAfterParse && Storage.exists(feedPath.c_str());
+
   // Free the current page's entries BEFORE the new feed's TLS connection comes
   // up. A full page (e.g. 50 bookmark entries) holds ~33KB; leaving it allocated
   // while mbedtls grabs its handshake record buffers fragments the heap (free
@@ -655,116 +701,141 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   // to gpio.deviceIsX3() if HTTPS OPDS regresses on X4.
   InflateReader::releaseWindow();
 
-  // Preflight the contiguous heap. If TLS can't get its buffers the connect or an
-  // in-flight read fails as an OOM-in-disguise and can hang for minutes; fail fast
-  // instead. entries were just freed, so a retry from the ERROR state has more
-  // headroom and can succeed.
-  const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  if (largestBlock < minContiguousForUrl(url)) {
-    SdDebugLog::log("OPDS", "fetch aborted: low heap, largest=%u free=%u", (unsigned)largestBlock,
-                    (unsigned)ESP.getFreeHeap());
-    LOG_ERR("OPDS", "Fetch aborted: low heap (largest=%u)", (unsigned)largestBlock);
-    state = BrowserState::ERROR;
-    errorMessage = tr(STR_MEMORY_ERROR);
-    requestUpdate();
-    return;
-  }
+  if (fromCache) {
+    SdDebugLog::log("OPDS", "feed cache hit: depth=%u path=%s heap=%u", (unsigned)navigationHistory.size(),
+                    feedPath.c_str(), (unsigned)ESP.getFreeHeap());
+  } else {
+    // Preflight the contiguous heap. If TLS can't get its buffers the connect or an
+    // in-flight read fails as an OOM-in-disguise and can hang for minutes; fail fast
+    // instead.
+    //
+    // This used to claim "entries were just freed, so a retry from the ERROR state has
+    // more headroom and can succeed". That is FALSE and the device log disproves it four
+    // times in a row: releaseEntries() runs above this check on the FIRST attempt too, so
+    // a retry re-measures an identical heap. 2026-08-16 capture, four attempts across four
+    // different URLs over 11 seconds, every one of them `largest=9204` to the byte, with
+    // 36KB free. Nothing inside this activity defragments; the only thing that recovers it
+    // is onExit()'s silent restart. Log the repeat explicitly so a capture shows the
+    // difference between "tight heap" and "wedged heap" instead of four identical lines.
+    const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (largestBlock < minContiguousForUrl(url)) {
+      SdDebugLog::log(
+          "OPDS", "fetch aborted: low heap, largest=%u free=%u prevAbort=%u%s", (unsigned)largestBlock,
+          (unsigned)ESP.getFreeHeap(), (unsigned)lastAbortLargestBlock,
+          lastAbortLargestBlock > 0 && largestBlock <= lastAbortLargestBlock ? " WEDGED (retry cannot help)" : "");
+      lastAbortLargestBlock = largestBlock;
+      LOG_ERR("OPDS", "Fetch aborted: low heap (largest=%u)", (unsigned)largestBlock);
+      state = BrowserState::ERROR;
+      errorMessage = tr(STR_MEMORY_ERROR);
+      requestUpdate();
+      return;
+    }
 
-  // Show "Connecting..." before the blocking TLS handshake. The render task is
-  // event-driven (no timer), so nothing repaints while we're stalled inside the
-  // handshake — paint the label now (And-Wait) so the user sees the stage instead
-  // of a frozen "Loading...".
-  statusMessage = tr(STR_CONNECTING);
-  requestUpdateAndWait();
+    // Show "Connecting..." before the blocking TLS handshake. The render task is
+    // event-driven (no timer), so nothing repaints while we're stalled inside the
+    // handshake — paint the label now (And-Wait) so the user sees the stage instead
+    // of a frozen "Loading...".
+    statusMessage = tr(STR_CONNECTING);
+    requestUpdateAndWait();
 
-  std::string httpDetail;
-  // Feed transfer progress. Feeds usually carry no Content-Length, so fall back to
-  // bytes received (KB/MB) rather than a percentage when the server sends none.
-  //
-  // Throttling is deliberately coarse. This callback runs inside the socket read
-  // loop, and every update queues a full-screen e-ink refresh on the single core the
-  // transfer is also running on. The old rule repainted every 8KB, which put ~16
-  // refreshes inside one 130KB feed that took 45s at 2888 B/s. Step by percent when
-  // there is a Content-Length, by a coarse byte count when there is not, and never
-  // twice inside FEED_PROGRESS_MIN_INTERVAL_MS however fast the bytes arrive. The
-  // book-download callback below has had the same shape since #2957.
-  size_t lastShown = 0;
-  int lastRenderedPercent = -1;
-  unsigned long lastProgressUpdateMs = 0;
-  // Elapsed-time clock for the progress label.
-  const uint32_t fetchStartMs = millis();
-  cancelFetch = false;
-  const auto dl = HttpDownloader::downloadToFile(
-      url, kTmpFeed,
-      [this, &lastShown, &lastRenderedPercent, &lastProgressUpdateMs, fetchStartMs](const size_t downloaded,
-                                                                                    const size_t total) {
-        // Poll Back every chunk (this fires per READ_CHUNK, not just per display
-        // step) so the user can abort a slow feed instead of rebooting.
-        // The downloader checks cancelFetch before the next socket read.
-        mappedInput.update();
-        if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-          cancelFetch = true;
-          return;
-        }
-        const unsigned long now = millis();
-        const bool complete = total > 0 && downloaded >= total;
-        const int percent = total > 0 ? static_cast<int>(static_cast<uint64_t>(downloaded) * 100 / total) : 0;
-        const bool stepped =
-            total > 0 ? (lastRenderedPercent < 0 || percent >= lastRenderedPercent + FEED_PROGRESS_STEP_PERCENT)
-                      : (downloaded - lastShown >= FEED_PROGRESS_STEP_BYTES);
-        if (!complete && (!stepped || now - lastProgressUpdateMs < FEED_PROGRESS_MIN_INTERVAL_MS)) return;
-        lastRenderedPercent = percent;
-        lastProgressUpdateMs = now;
-        lastShown = downloaded;
-        char sizeText[64];
-        const unsigned elapsedS = (millis() - fetchStartMs) / 1000;
-        const double bytes = static_cast<double>(downloaded);
-        if (bytes < 1024.0 * 1024.0) {
-          snprintf(sizeText, sizeof(sizeText), "%s %.0f KB (%us)", tr(STR_DOWNLOADING), bytes / 1024.0, elapsedS);
-        } else {
-          snprintf(sizeText, sizeof(sizeText), "%s %.1f MB (%us)", tr(STR_DOWNLOADING), bytes / (1024.0 * 1024.0),
-                   elapsedS);
-        }
-        statusMessage = sizeText;
-        requestUpdate(true);
-      },
-      &cancelFetch, server.username, server.password, &httpDetail);
-  if (dl == HttpDownloader::ABORTED) {
-    // User pressed Back during the transfer. Drop to ERROR (not a hard failure):
-    // Confirm retries, Back steps up a level — both handled in loop(). Avoids
-    // recursing into navigateBack() from inside fetchFeed on the main task stack.
-    Storage.remove(kTmpFeed);
-    state = BrowserState::ERROR;
-    errorMessage = tr(STR_LOADING_CANCELLED);
-    consumeBack = true;  // swallow the Back release that triggered the cancel
-    requestUpdate();
-    return;
-  }
-  if (dl != HttpDownloader::OK) {
-    SdDebugLog::log("OPDS", "FETCH FAILED (http) code=%d detail=%s heap=%u", static_cast<int>(dl),
-                    httpDetail.empty() ? "?" : httpDetail.c_str(), (unsigned)ESP.getFreeHeap());
-    LOG_ERR("OPDS", "Fetch failed: %s (url=%s)", httpDetail.empty() ? "?" : httpDetail.c_str(), url.c_str());
-    Storage.remove(kTmpFeed);
-    state = BrowserState::ERROR;
-    // Append the real cause so a user without a serial cable sees it on screen.
-    errorMessage = httpDetail.empty() ? std::string(tr(STR_FETCH_FEED_FAILED))
-                                      : std::string(tr(STR_FETCH_FEED_FAILED)) + ": " + httpDetail;
-    requestUpdate();
-    return;
-  }
+    std::string httpDetail;
+    // Feed transfer progress. Feeds usually carry no Content-Length, so fall back to
+    // bytes received (KB/MB) rather than a percentage when the server sends none.
+    //
+    // Throttling is deliberately coarse. This callback runs inside the socket read
+    // loop, and every update queues a full-screen e-ink refresh on the single core the
+    // transfer is also running on. The old rule repainted every 8KB, which put ~16
+    // refreshes inside one 130KB feed that took 45s at 2888 B/s. Step by percent when
+    // there is a Content-Length, by a coarse byte count when there is not, and never
+    // twice inside FEED_PROGRESS_MIN_INTERVAL_MS however fast the bytes arrive. The
+    // book-download callback below has had the same shape since #2957.
+    size_t lastShown = 0;
+    int lastRenderedPercent = -1;
+    unsigned long lastProgressUpdateMs = 0;
+    // Elapsed-time clock for the progress label.
+    const uint32_t fetchStartMs = millis();
+    cancelFetch = false;
+    const auto dl = HttpDownloader::downloadToFile(
+        url, feedPath.c_str(),
+        [this, &lastShown, &lastRenderedPercent, &lastProgressUpdateMs, fetchStartMs](const size_t downloaded,
+                                                                                      const size_t total) {
+          // Poll Back every chunk (this fires per READ_CHUNK, not just per display
+          // step) so the user can abort a slow feed instead of rebooting.
+          // The downloader checks cancelFetch before the next socket read.
+          mappedInput.update();
+          if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+            cancelFetch = true;
+            return;
+          }
+          const unsigned long now = millis();
+          const bool complete = total > 0 && downloaded >= total;
+          const int percent = total > 0 ? static_cast<int>(static_cast<uint64_t>(downloaded) * 100 / total) : 0;
+          const bool stepped =
+              total > 0 ? (lastRenderedPercent < 0 || percent >= lastRenderedPercent + FEED_PROGRESS_STEP_PERCENT)
+                        : (downloaded - lastShown >= FEED_PROGRESS_STEP_BYTES);
+          if (!complete && (!stepped || now - lastProgressUpdateMs < FEED_PROGRESS_MIN_INTERVAL_MS)) return;
+          lastRenderedPercent = percent;
+          lastProgressUpdateMs = now;
+          lastShown = downloaded;
+          char sizeText[64];
+          const unsigned elapsedS = (millis() - fetchStartMs) / 1000;
+          const double bytes = static_cast<double>(downloaded);
+          if (bytes < 1024.0 * 1024.0) {
+            snprintf(sizeText, sizeof(sizeText), "%s %.0f KB (%us)", tr(STR_DOWNLOADING), bytes / 1024.0, elapsedS);
+          } else {
+            snprintf(sizeText, sizeof(sizeText), "%s %.1f MB (%us)", tr(STR_DOWNLOADING), bytes / (1024.0 * 1024.0),
+                     elapsedS);
+          }
+          statusMessage = sizeText;
+          requestUpdate(true);
+        },
+        &cancelFetch, server.username, server.password, &httpDetail);
+    if (dl == HttpDownloader::ABORTED) {
+      // User pressed Back during the transfer. Drop to ERROR (not a hard failure):
+      // Confirm retries, Back steps up a level — both handled in loop(). Avoids
+      // recursing into navigateBack() from inside fetchFeed on the main task stack.
+      Storage.remove(feedPath.c_str());
+      state = BrowserState::ERROR;
+      errorMessage = tr(STR_LOADING_CANCELLED);
+      consumeBack = true;  // swallow the Back release that triggered the cancel
+      requestUpdate();
+      return;
+    }
+    if (dl != HttpDownloader::OK) {
+      SdDebugLog::log("OPDS", "FETCH FAILED (http) code=%d detail=%s heap=%u", static_cast<int>(dl),
+                      httpDetail.empty() ? "?" : httpDetail.c_str(), (unsigned)ESP.getFreeHeap());
+      LOG_ERR("OPDS", "Fetch failed: %s (url=%s)", httpDetail.empty() ? "?" : httpDetail.c_str(), url.c_str());
+      Storage.remove(feedPath.c_str());
+      state = BrowserState::ERROR;
+      // Append the real cause so a user without a serial cable sees it on screen.
+      errorMessage = httpDetail.empty() ? std::string(tr(STR_FETCH_FEED_FAILED))
+                                        : std::string(tr(STR_FETCH_FEED_FAILED)) + ": " + httpDetail;
+      requestUpdate();
+      return;
+    }
+  }  // end !fromCache
 
   // Parse runs after the connection closes (frees TLS heap). Label it: on a large
   // feed the parse itself is a noticeable, otherwise-silent stall.
   statusMessage = tr(STR_PARSING);
   requestUpdateAndWait();
 
-  OpdsParser parser;
+  // The parser lives in its own scope so expat and its buffers are freed BEFORE the
+  // sort / nav-link insert / rebuildRows below. That sequence is the tightest point in
+  // the whole feed flow — the device log reaches it at free=10588 on a 40-entry feed,
+  // and it is where "entries growth bailed" and "nav links dropped: low heap" fire.
+  // Previously `parser` stayed alive through all of it for no reason: everything still
+  // needed is copied out at the end of the scope. nextUrl/prevUrl are VALUES, not the
+  // references they used to be — they pointed into the parser and would dangle here.
+  std::string nextUrl;
+  std::string prevUrl;
   {
+    OpdsParser parser;
     auto rdbuf = makeUniqueNoThrow<uint8_t[]>(1024);
     HalFile feedFile;
-    if (!rdbuf || !Storage.openFileForRead("OPDS", kTmpFeed, feedFile)) {
+    if (!rdbuf || !Storage.openFileForRead("OPDS", feedPath.c_str(), feedFile)) {
       SdDebugLog::log("OPDS", "FEED reopen failed / OOM, heap=%u", (unsigned)ESP.getFreeHeap());
-      Storage.remove(kTmpFeed);
+      Storage.remove(feedPath.c_str());
       state = BrowserState::ERROR;
       errorMessage = tr(STR_FETCH_FEED_FAILED);
       requestUpdate();
@@ -775,38 +846,54 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
       if (parser.error()) break;
     }
     parser.flush();
-  }
-  Storage.remove(kTmpFeed);
+    feedFile.close();  // before Storage.remove() on the same path
+    // Keep a cacheable depth's file so Back / the post-download reload can re-parse it;
+    // the scratch file is still deleted immediately, as before. purgeFeedCache() on exit
+    // is what stops these accumulating.
+    if (!keepAfterParse) Storage.remove(feedPath.c_str());
 
-  if (!parser) {
-    SdDebugLog::log("OPDS", "PARSE FAILED: %s (line %ld), heap=%u", parser.getErrorDetail(), parser.getErrorLine(),
-                    (unsigned)ESP.getFreeHeap());
-    LOG_ERR("OPDS", "Parse failed: %s (line %ld)", parser.getErrorDetail(), parser.getErrorLine());
-    state = BrowserState::ERROR;
-    const char* parseDetail = parser.getErrorDetail();
-    errorMessage = (parseDetail && parseDetail[0]) ? std::string(tr(STR_PARSE_FEED_FAILED)) + ": " + parseDetail
-                                                   : std::string(tr(STR_PARSE_FEED_FAILED));
-    requestUpdate();
-    return;
-  }
-  SdDebugLog::log("OPDS", "fetch ok, %u entries%s, heap=%u", (unsigned)parser.getEntries().size(),
-                  parser.wasTruncated() ? " (TRUNCATED: feed too large for RAM)" : "", (unsigned)ESP.getFreeHeap());
+    if (!parser) {
+      // A file that will not parse is worse than no cache — it would fail identically on
+      // every Back. Drop it so the next visit refetches.
+      Storage.remove(feedPath.c_str());
+      SdDebugLog::log("OPDS", "PARSE FAILED: %s (line %ld), heap=%u", parser.getErrorDetail(), parser.getErrorLine(),
+                      (unsigned)ESP.getFreeHeap());
+      LOG_ERR("OPDS", "Parse failed: %s (line %ld)", parser.getErrorDetail(), parser.getErrorLine());
+      state = BrowserState::ERROR;
+      const char* parseDetail = parser.getErrorDetail();
+      errorMessage = (parseDetail && parseDetail[0]) ? std::string(tr(STR_PARSE_FEED_FAILED)) + ": " + parseDetail
+                                                     : std::string(tr(STR_PARSE_FEED_FAILED));
+      requestUpdate();
+      return;
+    }
+    SdDebugLog::log("OPDS", "fetch ok, %u entries%s, arena=%uB/%uchunks, heap=%u", (unsigned)parser.getEntries().size(),
+                    parser.wasTruncated() ? " (TRUNCATED: feed too large for RAM)" : "", (unsigned)parser.arenaBytes(),
+                    (unsigned)parser.arenaChunks(), (unsigned)ESP.getFreeHeap());
 
-  searchTemplate = parser.getSearchTemplate();
-  const auto& nextUrl = parser.getNextPageUrl();
-  const auto& prevUrl = parser.getPrevPageUrl();
-  entries = std::move(parser).getEntries();
+    searchTemplate = parser.getSearchTemplate();
+    nextUrl = parser.getNextPageUrl();
+    prevUrl = parser.getPrevPageUrl();
+    // Takes the arena as well as the vector: entries are pointers into it (OpdsParser.h).
+    entries = parser.takeEntries(entriesArena);
+  }  // parser destroyed here: expat + its buffers return to the heap before the work below
 
   // Sort the page alphabetically (case-insensitive) by title, navigation folders
   // before books. Done before the prev/next links are added so those stay pinned at
   // the top/bottom. OPDS feeds are paginated server-side, so this orders the current
   // page only — not the whole catalog. Per-server toggle, set in the server editor.
   if (server.sortAlphabetical) {
+    // Sorting moves 16-byte entries, never the text: the arena's chunks stay put, so every
+    // title/author/href pointer survives the shuffle.
     std::sort(entries.begin(), entries.end(), [](const OpdsEntry& a, const OpdsEntry& b) {
       if (a.type != b.type) return a.type < b.type;  // NAVIGATION (0) before BOOK (1)
-      return std::lexicographical_compare(
-          a.title.begin(), a.title.end(), b.title.begin(), b.title.end(),
-          [](unsigned char c1, unsigned char c2) { return std::tolower(c1) < std::tolower(c2); });
+      const char* x = a.title;
+      const char* y = b.title;
+      for (; *x && *y; ++x, ++y) {
+        const int cx = std::tolower(static_cast<unsigned char>(*x));
+        const int cy = std::tolower(static_cast<unsigned char>(*y));
+        if (cx != cy) return cx < cy;
+      }
+      return *x == '\0' && *y != '\0';  // shorter title sorts first on a common prefix
     });
   }
 
@@ -819,12 +906,18 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   if (navLinks > 0) {
     const size_t needBytes = (entries.size() + navLinks) * sizeof(OpdsEntry) + 1024;
     if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) >= needBytes) {
+      // The hrefs are locals, so they must be copied into the arena: an entry holds a
+      // pointer, and a pointer to prevUrl/nextUrl would dangle the moment this function
+      // returns. tr() is a flash literal and needs no copy. A null add() means the arena
+      // is out of chunks — drop that link rather than store a null href.
+      const char* prevHref = prevUrl.empty() ? nullptr : entriesArena.add(prevUrl);
+      const char* nextHref = nextUrl.empty() ? nullptr : entriesArena.add(nextUrl);
       entries.reserve(entries.size() + navLinks);
-      if (!prevUrl.empty()) {
-        entries.insert(entries.begin(), OpdsEntry{OpdsEntryType::NAVIGATION, tr(STR_PREV_PAGE), "", prevUrl, ""});
+      if (prevHref != nullptr) {
+        entries.insert(entries.begin(), OpdsEntry{OpdsEntryType::NAVIGATION, tr(STR_PREV_PAGE), "", prevHref});
       }
-      if (!nextUrl.empty()) {
-        entries.push_back(OpdsEntry{OpdsEntryType::NAVIGATION, tr(STR_NEXT_PAGE), "", nextUrl, ""});
+      if (nextHref != nullptr) {
+        entries.push_back(OpdsEntry{OpdsEntryType::NAVIGATION, tr(STR_NEXT_PAGE), "", nextHref});
       }
     } else {
       SdDebugLog::log("OPDS", "nav links dropped: low heap size=%u need=%u largest=%u", (unsigned)entries.size(),
@@ -873,11 +966,15 @@ void OpdsBookBrowserActivity::rebuildRowItems() {
     // truncation. Read from the per-feed cache (refreshDownloadedCache) so a
     // repaint never re-stats the card.
     const bool downloaded = entry.type == OpdsEntryType::BOOK && i < downloadedCache.size() && downloadedCache[i];
-    rowLabels.push_back(downloaded ? "* " + entry.title : entry.title);
+    // std::string(...) on both arms, not "* " + entry.title: entry.title is a const char*
+    // now, so the bare form would be pointer arithmetic that compiles and silently reads
+    // past the literal.
+    rowLabels.push_back(downloaded ? std::string("* ") + entry.title : std::string(entry.title));
 
     fui::ListItem item;
     item.label = rowLabels.back().c_str();
-    if (entry.type == OpdsEntryType::BOOK && !entry.author.empty()) item.subtitle = entry.author.c_str();
+    // subtitle points straight into the arena — no copy, and valid as long as the feed is.
+    if (entry.type == OpdsEntryType::BOOK && entry.author[0] != '\0') item.subtitle = entry.author;
     if (entry.type == OpdsEntryType::NAVIGATION) item.value = ">";
     item.actionValue = static_cast<int16_t>(rowItems.size());
     rowItems.push_back(item);
@@ -898,6 +995,10 @@ void OpdsBookBrowserActivity::rebuildRowItems() {
 void OpdsBookBrowserActivity::releaseEntries() {
   closeRouting();
   std::vector<OpdsEntry>().swap(entries);
+  // The arena goes with them: it holds every title/author/href, and it is the larger half
+  // of a feed's footprint now that the entry vector is 16 bytes per row. Freeing the
+  // entries without it would keep the text alive for nothing.
+  entriesArena.clear();
   std::vector<uint8_t>().swap(downloadedCache);
   std::vector<freeink::ui::ListItem>().swap(rowItems);
   std::vector<std::string>().swap(rowLabels);
@@ -923,34 +1024,52 @@ void OpdsBookBrowserActivity::navigateBack() {
   } else {
     currentPath = navigationHistory.back();
     navigationHistory.pop_back();
+    // pop_back first, so navigationHistory.size() inside fetchFeed is the depth we are
+    // returning TO — which is the depth whose cached body we want.
     state = BrowserState::LOADING;
     statusMessage = tr(STR_LOADING);
     entries.clear();
     selectorIndex = 0;
     requestUpdate();
-    fetchFeed(currentPath);
+    fetchFeed(currentPath, /*allowCache=*/true);
   }
 }
 
 void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
-  // Copy by value: `book` references entries[selectorIndex], and we free the
-  // entries vector below to reclaim heap for the TLS handshake.
-  const OpdsEntry bookCopy = book;
+  // Take OWNED copies of the text, not a copy of the entry. `book` references
+  // entries[selectorIndex], and releaseEntries() below drops both the vector and the arena
+  // its three fields point into to reclaim heap for the TLS handshake — so copying the
+  // struct would only copy pointers and leave them dangling the moment the arena goes.
+  // Three short strings is a cheap price for making that impossible rather than merely
+  // ordered correctly.
+  const std::string bookTitle = book.title;
+  const std::string bookHref = book.href;
+  const std::string bookAuthor = book.author;
 
   state = BrowserState::DOWNLOADING;
-  statusMessage = bookCopy.title;
+  statusMessage = bookTitle;
   downloadProgress = downloadTotal = 0;
   cancelDownload = false;
   goHomeAfterCancel = false;
-  requestUpdate(true);
+  // And-Wait, not requestUpdate(true). requestUpdate(true) only posts to the render task
+  // (ActivityManager.cpp:349, xTaskNotify), so the repaint runs CONCURRENTLY with the code
+  // below — including the contiguous-heap preflight, which then measures the heap at the
+  // render's transient trough. Device log: "download aborted: low heap, largest=10228"
+  // against a 10240 floor, twelve bytes short, while the very next TLS connection five
+  // seconds later started from largest=24564. Waiting for the paint costs nothing here (the
+  // TLS handshake that follows is far slower) and makes the measurement mean what it says.
+  // This is also exactly what fetchFeed() does before its own handshake.
+  requestUpdateAndWait();
 
   // Build full download URL relative to the current feed, not the root server URL
   const std::string feedUrl = UrlUtils::buildUrl(server.url, currentPath);
-  std::string downloadUrl = UrlUtils::buildUrl(feedUrl, bookCopy.href);
+  std::string downloadUrl = UrlUtils::buildUrl(feedUrl, bookHref.c_str());
   // Contain each server's books in a folder named after the server, so finished
   // books move into that folder's "read" subfolder (see EpubReaderActivity).
   const std::string folder = serverFolder(server.name);
   if (!folder.empty()) Storage.mkdir(folder.c_str());
+  // Rebuilt from the owned copies, so the name survives releaseEntries() below.
+  const OpdsEntry bookCopy{OpdsEntryType::BOOK, bookTitle.c_str(), bookAuthor.c_str(), bookHref.c_str()};
   std::string filename = bookFilePath(folder, bookCopy);
   LOG_DBG("OPDS", "Downloading: %s -> %s", downloadUrl.c_str(), filename.c_str());
 
@@ -970,7 +1089,11 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   // stalling for minutes on an OOM-in-disguise connect/read. RETRY reloads the
   // feed (entries were freed above).
   if (largestBlock < minContiguousForUrl(downloadUrl)) {
-    SdDebugLog::log("OPDS", "download aborted: low heap, largest=%u", (unsigned)largestBlock);
+    SdDebugLog::log(
+        "OPDS", "download aborted: low heap, largest=%u prevAbort=%u%s", (unsigned)largestBlock,
+        (unsigned)lastAbortLargestBlock,
+        lastAbortLargestBlock > 0 && largestBlock <= lastAbortLargestBlock ? " WEDGED (retry cannot help)" : "");
+    lastAbortLargestBlock = largestBlock;
     LOG_ERR("OPDS", "Download aborted: low heap (largest=%u)", (unsigned)largestBlock);
     state = BrowserState::ERROR;
     errorMessage = tr(STR_MEMORY_ERROR);
@@ -1070,7 +1193,11 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
     state = BrowserState::LOADING;
     statusMessage = tr(STR_LOADING);
     downloadProgress = downloadTotal = 0;
-    fetchFeed(currentPath);
+    // Re-parse the cached body rather than re-pulling it: the download just freed the
+    // heap, the list is byte-for-byte the one we left, and the new "downloaded" marker
+    // comes from refreshDownloadedCache() stat-ing the card, not from the feed. Measured
+    // saving on X3: a 1096ms handshake plus a 2186ms 130676-byte transfer.
+    fetchFeed(currentPath, /*allowCache=*/true);
     if (!entries.empty()) selectorIndex = std::min<int>(savedIndex, entries.size() - 1);
     requestUpdate();
     return;
