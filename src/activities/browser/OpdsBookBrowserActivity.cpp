@@ -1178,7 +1178,15 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
     state = BrowserState::LOADING;
     statusMessage = tr(STR_LOADING);
     downloadProgress = downloadTotal = 0;
-    fetchFeed(currentPath);
+    // Cached, for the same reason the OK path below is — and it matters MORE here. A
+    // cancel usually follows a long transfer, which is exactly when contiguous heap is at
+    // its worst, and this refetch was going to the network at that moment. Measured on X3
+    // (opds_debug.txt): user cancelled a 7745578-byte download, this line then fetched a
+    // 130676-byte feed that had completed fine minutes earlier, entered its handshake at
+    // 12252 free / 6644 largest, and died at 80432 bytes with MEMORY_E — and because the
+    // feed endpoints ignore Range, there was no resume. The user saw "Failed to fetch
+    // feed" for a list the card already held byte-for-byte.
+    fetchFeed(currentPath, /*allowCache=*/true);
     if (!entries.empty()) selectorIndex = std::min<int>(savedIndex, entries.size() - 1);
     requestUpdate();
     return;
