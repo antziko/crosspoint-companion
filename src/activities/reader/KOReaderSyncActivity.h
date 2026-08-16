@@ -77,12 +77,30 @@ class KOReaderSyncActivity final : public Activity {
   std::string statusMessage;
   std::string documentHash;
 
-  // Phased status display: feature index ([n/total]) + a sub-phase label, so a long
-  // leg shows motion instead of one frozen "Syncing X" string. syncStepTotal is set
-  // once in performSync (3 for ALL, 1 for single-feature); the prefix is omitted when
-  // total <= 1. See setSyncPhase().
+  // Phased status display: [n/total] + the phase label, so a long leg shows motion
+  // instead of one frozen "Syncing X" string. Counts PHASES, not network legs, and is
+  // shown for EVERY scope — see the budget table in performSync(). setSyncPhase() owns
+  // the increment; nothing else should touch syncStepIndex.
   int syncStepIndex = 0;
   int syncStepTotal = 0;
+
+  // --- In-leg liveness tick ---------------------------------------------------
+  // performSync() runs INLINE on this activity's task, so loop() cannot tick while a
+  // network leg blocks. A device capture caught STATS_GET at 51-60s (vs 20-73ms for
+  // every other leg to the same server) with the screen frozen on "Stats: fetching...".
+  // KOReaderSyncClient::setHeartbeat() gives us the one poll point inside a blocking
+  // request; syncTick() appends an elapsed-seconds counter to the current phase label.
+  //
+  // syncPhaseBase holds the phase text WITHOUT the counter so each tick re-renders from
+  // the original rather than appending to its own output. Fixed buffer, not std::string:
+  // the tick runs where free heap was measured at 24464, so it must not allocate.
+  char syncPhaseBase[96] = {0};
+  uint32_t syncPhaseStartMs = 0;     // millis() when the current phase label was set
+  uint32_t syncTickLastPaintMs = 0;  // last tick that actually repainted
+  uint32_t syncTickLastSecs = 0;     // last elapsed value rendered, to skip no-op repaints
+  static void syncTickTrampoline(void* ctx, uint32_t elapsedMs, size_t received, size_t total);
+  static void mergePumpTrampoline(void* ctx, size_t done, size_t total);
+  void syncTick(uint32_t elapsedMs, size_t received, size_t total);
 
   // Remote progress data
   bool hasRemoteProgress = false;

@@ -188,6 +188,18 @@ void KOReaderSyncActivity::performSync() {
   // Zero the cumulative GET/PUT transfer counters so the summary reflects only this sync.
   KOReaderSyncClient::resetByteCounters();
 
+  // Liveness tick for the whole sync. The client holds this raw `this` until cleared, and
+  // activities are deleted on exit — onExit() clears it, and every early return below
+  // leaves the activity alive, so the pointer stays valid for as long as it is held.
+  KOReaderSyncClient::setHeartbeat(&KOReaderSyncActivity::syncTickTrampoline, this);
+  // The transport heartbeat only fires between socket reads, and the dict/flashcard merges
+  // run INSIDE one of those reads (the stats sink), so a slow merge is invisible to it —
+  // that is exactly why the counter sat frozen at [5/6]. These pump the same tick from
+  // inside the merge loops; both share syncTick's time floor, so registering all three
+  // costs at most one repaint per interval no matter which one is running.
+  LookupHistory::setMergeProgressHook(&KOReaderSyncActivity::mergePumpTrampoline, this);
+  FlashcardDeck::setMergeProgressHook(&KOReaderSyncActivity::mergePumpTrampoline, this);
+
   // Calculate document hash based on user's preferred method
   if (KOREADER_STORE.getMatchMethod() == DocumentMatchMethod::FILENAME) {
     documentHash = KOReaderDocumentId::calculateFromFilename(epubPath);
@@ -206,9 +218,38 @@ void KOReaderSyncActivity::performSync() {
 
   LOG_DBG("KOSync", "Document hash: %s", documentHash.c_str());
 
-  // Phased-status step counter: ALL runs three network legs (progress, bookmarks,
-  // stats); single-feature scopes run one (prefix is then hidden — see setSyncPhase).
-  syncStepTotal = (syncScope == SyncScope::All) ? 3 : 1;
+  // Phased-status step counter. Counts PHASES (label changes), not network legs, and is
+  // shown for every scope.
+  //
+  // It used to count legs — 3 for ALL, 1 for anything else — with the prefix suppressed
+  // when the total was 1. Two problems: a single-feature scope showed no counter at all
+  // (the "missing indicator"), and even in ALL the number sat still while the label moved,
+  // because the whole of syncBookmarks() is one leg but three phases ([2/3] appeared over
+  // "fetching", "merging" and "uploading" alike).
+  //
+  // Phase budget per leg, from the setSyncPhase() calls in each:
+  //   progress    = 1  (STR_FETCH_PROGRESS)
+  //   bookmarks   = 3  (BM_FETCH, BM_MERGE, BM_UPLOAD)
+  //   stats       = 2  (STATS_FETCH, STATS_UPLOAD)
+  // Every one of those sits at its function's top level, so a leg that returns early just
+  // stops short — the index can never exceed the total, which is the only way this could
+  // look broken.
+  switch (syncScope) {
+    case SyncScope::All:
+      syncStepTotal = 1 + 3 + 2;
+      break;
+    case SyncScope::Bookmarks:
+      syncStepTotal = 3;
+      break;
+    case SyncScope::Stats:
+    case SyncScope::Dict:
+    case SyncScope::Flashcards:
+      syncStepTotal = 2;
+      break;
+    default:  // Progress: the fetch phase only
+      syncStepTotal = 1;
+      break;
+  }
   syncStepIndex = 0;
 
   // Connection strategy. A keep-alive session wraps the small-body legs (progress + bookmarks):
@@ -253,7 +294,6 @@ void KOReaderSyncActivity::performSync() {
     return;
   }
 
-  syncStepIndex = 1;  // progress leg
   setSyncPhase(tr(STR_FETCH_PROGRESS));
 
   // Progress runs in a short keep-alive session (just the GET here). The session CLOSES at the
@@ -274,7 +314,6 @@ void KOReaderSyncActivity::performSync() {
   // Silent and best-effort: it does not change the progress sync outcome below. Sessionless, at
   // recovered heap — see syncBookmarks.
   if (syncScope == SyncScope::All && (result == KOReaderSyncClient::OK || result == KOReaderSyncClient::NOT_FOUND)) {
-    syncStepIndex = 2;  // bookmarks leg
     syncBookmarks();
   }
 
@@ -292,7 +331,6 @@ void KOReaderSyncActivity::performSync() {
 
   // Reading stats (ALL only), sessionless at recovered heap. PROGRESS scope skips it.
   if (syncScope == SyncScope::All && (result == KOReaderSyncClient::OK || result == KOReaderSyncClient::NOT_FOUND)) {
-    syncStepIndex = 3;  // stats leg
     syncStats(/*includeDict=*/true, /*includeGlobal=*/true, /*includeFlashcards=*/true);
   }
 
@@ -459,19 +497,85 @@ void KOReaderSyncActivity::performUpload() {
 }
 
 void KOReaderSyncActivity::setSyncPhase(const char* phase) {
-  char buf[96];
-  if (syncStepTotal > 1) {
-    snprintf(buf, sizeof(buf), tr(STR_SYNC_STEP_FORMAT), syncStepIndex, syncStepTotal, phase);
-  } else {
-    snprintf(buf, sizeof(buf), "%s", phase);
-  }
+  // Advance here rather than at the call sites: every phase change is exactly one step, so
+  // the counter cannot drift out of sync with the label it is attached to. Clamped so a
+  // miscounted budget shows [n/n] rather than an obviously wrong [4/3].
+  if (syncStepIndex < syncStepTotal) ++syncStepIndex;
+  snprintf(syncPhaseBase, sizeof(syncPhaseBase), tr(STR_SYNC_STEP_FORMAT), syncStepIndex, syncStepTotal, phase);
+  // Restart the liveness clock: the counter is per-phase, so it reads as "this leg has
+  // been running Ns", not "the whole sync has".
+  syncPhaseStartMs = millis();
+  syncTickLastPaintMs = 0;
+  syncTickLastSecs = 0;
   {
     RenderLock lock(*this);
     state = SYNCING;
-    statusMessage = buf;
+    statusMessage = syncPhaseBase;
   }
   // Block until painted: the caller proceeds into a multi-second blocking network
   // leg next, and the message must be on screen before that stall begins.
+  requestUpdateAndWait();
+}
+
+void KOReaderSyncActivity::syncTickTrampoline(void* ctx, const uint32_t elapsedMs, const size_t received,
+                                              const size_t total) {
+  static_cast<KOReaderSyncActivity*>(ctx)->syncTick(elapsedMs, received, total);
+}
+
+// Merge-loop pump. The merges carry no clock of their own, so elapsed is measured from the
+// phase start — the same origin the transport heartbeat uses, so the seconds keep counting
+// up smoothly when a leg hands off from "receiving" to "merging" rather than restarting.
+void KOReaderSyncActivity::mergePumpTrampoline(void* ctx, const size_t done, const size_t total) {
+  auto* self = static_cast<KOReaderSyncActivity*>(ctx);
+  self->syncTick(millis() - self->syncPhaseStartMs, done, total);
+}
+
+// Called from inside SecureHttpClient's read loop (see KOReaderSyncClient::setHeartbeat).
+// performSync() blocks this task for the whole sync, so this is the only place anything
+// can repaint while a leg is in flight.
+//
+// Rate limiting is a TIME FLOOR and nothing else — deliberately not tied to bytes. On X3
+// the SD shares the display SPI bus, so a byte-proportional repaint feeds back on itself
+// (slower transfer -> more repaints -> slower still); that is exactly how #2957 stage L
+// took a download from 121KB/s to 5KB/s. A floor caps the cost at a fixed number of
+// repaints per second of stall no matter what the transfer does.
+void KOReaderSyncActivity::syncTick(const uint32_t elapsedMs, const size_t received, const size_t total) {
+  // Stay completely out of the way of a normal sync. Every leg in a healthy capture
+  // finished in 20-73ms, so nothing below runs at all unless a leg is genuinely stuck.
+  static constexpr uint32_t kFirstTickMs = 3000;
+  static constexpr uint32_t kTickIntervalMs = 5000;
+  if (elapsedMs < kFirstTickMs) return;
+
+  const uint32_t now = millis();
+  if (syncTickLastPaintMs != 0 && now - syncTickLastPaintMs < kTickIntervalMs) return;
+
+  // The label only shows whole seconds, so skip a repaint that would draw the same text.
+  const uint32_t secs = elapsedMs / 1000;
+  if (secs == syncTickLastSecs) return;
+  syncTickLastSecs = secs;
+  syncTickLastPaintMs = now;
+
+  // Bytes are DISPLAYED here, never used to decide whether to paint — the trigger above
+  // stays purely time-based. This is what turns "is it stuck?" into an answer: a counter
+  // frozen at 0B means the server has not sent anything yet (we are waiting on the
+  // network), while bytes climbing under a still-rising clock means the body is arriving
+  // and our own per-entry merge work is what is slow.
+  char buf[160];
+  if (total > 0) {
+    snprintf(buf, sizeof(buf), tr(STR_SYNC_PH_ELAPSED_OF), syncPhaseBase, static_cast<unsigned long>(secs),
+             static_cast<unsigned long>(received), static_cast<unsigned long>(total));
+  } else {
+    snprintf(buf, sizeof(buf), tr(STR_SYNC_PH_ELAPSED), syncPhaseBase, static_cast<unsigned long>(secs),
+             static_cast<unsigned long>(received));
+  }
+  {
+    RenderLock lock(*this);
+    statusMessage = buf;
+  }
+  // And-Wait, not requestUpdate(true). An async repaint would run CONCURRENTLY with the
+  // socket read and the merge folds' SD writes on this same task — the cause-11 shape,
+  // where a heap gate or a transfer measures the paint's transient trough. Waiting costs
+  // one panel refresh per tick and keeps the two off each other's back.
   requestUpdateAndWait();
 }
 
@@ -599,12 +703,54 @@ void KOReaderSyncActivity::syncBookmarks() {
   }
 }
 
+namespace {
+
+// Write a serialized upload blob to SD so it need not stay resident across the stats GET
+// handshake. Returns false if the write did not complete, in which case the caller treats
+// the blob as absent rather than uploading a truncated one.
+bool spoolUploadBlob(const char* path, const uint8_t* data, const size_t len) {
+  HalFile f;
+  if (!Storage.openFileForWrite("KOSYNC", path, f)) {
+    SdDebugLog::log("KOSYNC", "upload spool open failed: %s", path);
+    return false;
+  }
+  const size_t written = f.write(data, len);
+  f.close();  // flush before it is read back below
+  if (written == len) return true;
+  SdDebugLog::log("KOSYNC", "upload spool short write: %s %u/%u", path, (unsigned)written, (unsigned)len);
+  Storage.remove(path);
+  return false;
+}
+
+// Read a spooled blob back for the PUT. Allocated here, at PUT time, so it is absent during
+// the GET handshake — which is the whole point of spooling it. Null on OOM or a short read;
+// the leg then uploads counters only and does not advance its watermark, so the same slice
+// is retried next sync.
+std::unique_ptr<uint8_t[]> loadUploadBlob(const char* path, const size_t len) {
+  if (len == 0) return nullptr;
+  auto buf = makeUniqueNoThrow<uint8_t[]>(len);
+  if (!buf) {
+    SdDebugLog::log("KOSYNC", "upload blob OOM: %s %u bytes", path, (unsigned)len);
+    return nullptr;
+  }
+  HalFile f;
+  if (!Storage.openFileForRead("KOSYNC", path, f)) return nullptr;
+  const int n = f.read(buf.get(), len);
+  if (n != static_cast<int>(len)) {
+    SdDebugLog::log("KOSYNC", "upload blob short read: %s %d/%u", path, n, (unsigned)len);
+    return nullptr;
+  }
+  return buf;
+}
+
+}  // namespace
+
 void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool includeFlashcards) {
   // Sessionless, deliberately — and the caller (performSync) closes the progress+bookmarks
   // session BEFORE calling this so heap has recovered. The stats PUTs can carry LARGE bodies:
   // a base64 "dh" dictionary-history blob (per-book, up to ~5.5KB) and a base64 "h" dated-
   // history blob (global). Those builds use throwing allocations and are gated on full heap
-  // (kDictSyncMinHeap 48KB / kGlobalStatsMinHeap 32KB). Inside a held-arena session only ~18KB
+  // (kDictSyncMinHeap / kGlobalStatsMinHeap). Inside a held-arena session only ~18KB
   // is free, which would force both to skip every time (and risk an abort if they didn't).
   // A fresh connection at recovered heap gives each PUT room for its body and re-arms the
   // contigOkForPut gate, so an oversized body skips cleanly instead of crashing.
@@ -624,11 +770,60 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool 
   // the response buffer is hard-capped, so this just avoids attempting when heap is
   // genuinely too low. Kept well below the typical reader-context free heap so it
   // doesn't spuriously skip on the constrained X3/X4.
-  constexpr uint32_t kDictSyncMinHeap = 48 * 1024;
+  // REPRICED 2026-08-16 (was 48KB). 48KB was an mbedTLS-era number: it was chosen "well
+  // below the typical reader-context free heap" (~67KB) but is tested POST-RADIO, and
+  // c44b03ac's wolfSSL migration dropped the post-WiFi ceiling from ~56KB to ~44KB. That
+  // commit swept the stale gates out of KOReaderSyncClient.cpp (MIN_HEAP_FOR_TLS,
+  // contigOkForPut, ...) but these two live in the activity and were missed, so from
+  // 2026-07-27 onward the gate could not pass on any X3 and dict/flashcard sync silently
+  // never ran — surfacing as "Dictionary: skipped (low memory)" on every sync, with or
+  // without HTTPS (the gate is free-heap only; TLS is not involved).
+  //
+  // Hardware-measured at this gate, three captures: 38952 (worst, after a bookmark leg in
+  // the same sync) .. 44660. Post-WiFi ceiling 43364..44024.
+  //
+  // Priced against what this branch actually costs ON TOP of the stats GET that runs
+  // regardless: one 4KB nothrow scratch plus a tight copy of a few hundred bytes, both
+  // freed before the handshake, then a streaming merge (mergeBlob folds entry-by-entry;
+  // LookupHistory::load() — the one throwing reserve in that file — is not on this path).
+  // 24KB keeps ~5x headroom over that marginal cost while still vetoing a genuinely
+  // starved heap. Do NOT re-raise this without re-measuring the post-radio ceiling: the
+  // reader-context free heap is the wrong yardstick for anything past WiFi.
+  // Spool files for the pre-merge upload blobs (see the dict block below). Card-root dot
+  // files, like the OPDS feed scratch, and removed on every exit path from this leg.
+  static constexpr const char* kDictUploadSpool = "/.kosync_du.bin";
+  static constexpr const char* kFcUploadSpool = "/.kosync_fu.bin";
+
+  constexpr uint32_t kDictSyncMinHeap = 24 * 1024;
   constexpr size_t kDictBlobCap = 4096;
   // includeDict gates dict by scope; the heap check is the OOM backstop on top.
-  const bool doDictSync = includeDict && ESP.getFreeHeap() > kDictSyncMinHeap;
-  std::unique_ptr<uint8_t[]> dictUp;
+  const uint32_t heapAtStatsStart = ESP.getFreeHeap();
+  const bool doDictSync = includeDict && heapAtStatsStart > kDictSyncMinHeap;
+  // The stats line reports dictUp=0/0 whether the scope excluded dict or the heap gate
+  // silently vetoed it, and LOG_ERR does not reach an X3 (no serial). That ambiguity is
+  // why "sync did nothing" reports could never be traced. Say which it was, on SD.
+  if (includeDict && !doDictSync) {
+    SdDebugLog::log("KOSYNC", "dict sync SKIPPED by heap gate: free=%u need>%u", (unsigned)heapAtStatsStart,
+                    (unsigned)kDictSyncMinHeap);
+  }
+  // Pre-merge upload blobs are SPOOLED TO SD, not held in RAM, across the stats GET.
+  //
+  // The GET that follows opens a cold TLS connection, and this session established that a
+  // wolfSSL TLS 1.3 handshake needs roughly 35-43KB free: at 22.6KB it fails outright. The
+  // device capture shows exactly that here — `STATS_GET req heap=19240` then
+  // `resp code=-1 elapsed=10162ms beats=1 bytes=0`, against the same leg succeeding from
+  // 33752 on a run where nothing preceded it. Between the `pre-stats heap free=37860` probe
+  // and the request, 18620 bytes went into building a payload the GET does not need and the
+  // PUT will not use until afterwards.
+  //
+  // The code already understood the hazard for the SCRATCH buffer ("free the scratch BEFORE
+  // the GET ... the handshake gets a clean contiguous block") and then held the finished
+  // blob across it anyway. Spooling closes that gap: serialization still happens PRE-MERGE,
+  // which is the semantic that matters (serializing after the GET's fold would re-upload
+  // other devices' entries), but nothing of it is resident while the handshake runs.
+  //
+  // Failure to spool is not fatal: the length stays 0, the leg uploads counters only, and
+  // the watermark is not advanced, so the same slice is retried next sync.
   size_t dictUpLen = 0;
   // Delta-vs-keyframe upload bookkeeping: serializeForUpload picks the blob and
   // reports what it covered; the watermark is advanced (commitUpload) only after a
@@ -658,13 +853,7 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool 
       dictSerialized = true;
       dictUploadedWords = dictUpStats.histCount;
       dictUploadedDeletes = dictUpStats.tombCount;
-      if (n > 0) {
-        dictUp = makeUniqueNoThrow<uint8_t[]>(n);
-        if (dictUp) {
-          std::copy_n(dictScratch.get(), n, dictUp.get());
-          dictUpLen = n;
-        }
-      }
+      if (n > 0 && spoolUploadBlob(kDictUploadSpool, dictScratch.get(), n)) dictUpLen = n;
     }
     // dictScratch frees at this block's end (before getStats): its 4KB returns to the heap so
     // the handshake gets a clean contiguous block.
@@ -685,9 +874,21 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool 
   // count), free the scratch BEFORE the GET handshake, and merge every OTHER
   // device's "fc" blob during the GET. Gated on its OWN scope flag (independent of
   // dict) + the same heap backstop.
-  const bool doFcSync = includeFlashcards && ESP.getFreeHeap() > kDictSyncMinHeap;
-  std::unique_ptr<uint8_t[]> fcUp;
-  size_t fcUpLen = 0;
+  //
+  // Own constant since 2026-08-16 rather than borrowing kDictSyncMinHeap: this branch is
+  // cheaper than the dict one and is already self-limiting. adaptiveSliceCap() scales the
+  // scratch from free heap, and below its 56KB threshold it returns FC_SLICE_FLOOR (2048),
+  // so post-radio the marginal cost here is a 2KB nothrow buffer plus a tight copy. Same
+  // mbedTLS-era mispricing as the dict gate above (see that comment for the c44b03ac
+  // history); measured at this gate: 38952..44572, against a 49152 requirement.
+  constexpr uint32_t kFlashcardSyncMinHeap = 20 * 1024;
+  const uint32_t heapAtFcGate = ESP.getFreeHeap();
+  const bool doFcSync = includeFlashcards && heapAtFcGate > kFlashcardSyncMinHeap;
+  if (includeFlashcards && !doFcSync) {
+    SdDebugLog::log("KOSYNC", "flashcard sync SKIPPED by heap gate: free=%u need>%u", (unsigned)heapAtFcGate,
+                    (unsigned)kFlashcardSyncMinHeap);
+  }
+  size_t fcUpLen = 0;  // spooled to kFcUploadSpool — see the dict blob above
   bool fcSerialized = false;
   FlashcardDeck::BlobStats fcUpStats;
   struct FcMergeCtx {
@@ -708,13 +909,7 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool 
       fcUploadedCards = fcUpStats.histCount;
       fcHealCards = fcUpStats.rollCount;
       fcUploadedDeletes = fcUpStats.tombCount;
-      if (n > 0) {
-        fcUp = makeUniqueNoThrow<uint8_t[]>(n);
-        if (fcUp) {
-          std::copy_n(fcScratch.get(), n, fcUp.get());
-          fcUpLen = n;
-        }
-      }
+      if (n > 0 && spoolUploadBlob(kFcUploadSpool, fcScratch.get(), n)) fcUpLen = n;
     }
     // fcScratch frees here (before getStats) so the handshake gets a clean block.
     fcFold.ctx = &fcMergeCtx;
@@ -733,6 +928,9 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool 
   auto entriesBuf = makeUniqueNoThrow<KOReaderStatsEntry[]>(KOReaderSyncClient::MAX_STATS_DEVICES);
   if (!entriesBuf) {
     LOG_ERR("KOSync", "OOM: stats entries");
+    // The only return between spooling and the PUT — do not leave the blobs on the card.
+    Storage.remove(kDictUploadSpool);
+    Storage.remove(kFcUploadSpool);
     return;
   }
   KOReaderStatsEntry* entries = entriesBuf.get();
@@ -740,6 +938,11 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool 
   // Pull every device's counter. NOT_FOUND = server has nothing yet; still upload ours.
   // The dict fold (when enabled) merges other devices' lookup history during this GET.
   size_t count = 0;
+  // Brackets the serialize step against the `pre-stats heap` probe in performSync: this is
+  // the heap the cold handshake actually gets, and dictUp/fcUp say how much of any drop is
+  // payload (now spooled, so it should be near zero) versus something else in that block.
+  SdDebugLog::log("KOSYNC", "stats pre-GET heap free=%u largest=%u dictUp=%u fcUp=%u", (unsigned)ESP.getFreeHeap(),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), (unsigned)dictUpLen, (unsigned)fcUpLen);
   const auto getResult = KOReaderSyncClient::getStats(documentHash, entries, count, nullptr,
                                                       doDictSync ? &dictFold : nullptr, doFcSync ? &fcFold : nullptr);
   statsFetchOk = (getResult == KOReaderSyncClient::OK || getResult == KOReaderSyncClient::NOT_FOUND);
@@ -789,9 +992,19 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool 
   mine.lastReadMinute = stats.lastReadMinute;
   setSyncPhase(tr(STR_SYNC_PH_STATS_UPLOAD));
   // Upload our scalar counters + our (pre-merge) "dh" dictionary-history and "fc"
-  // flashcard blobs.
+  // flashcard blobs, read back from SD now that the GET handshake is behind us. A blob that
+  // will not load is dropped rather than failing the leg: the counters still go up, and its
+  // watermark is left alone so the slice is retried next sync.
+  const std::unique_ptr<uint8_t[]> dictUp = loadUploadBlob(kDictUploadSpool, dictUpLen);
+  const std::unique_ptr<uint8_t[]> fcUp = loadUploadBlob(kFcUploadSpool, fcUpLen);
+  if (!dictUp) dictUpLen = 0;
+  if (!fcUp) fcUpLen = 0;
   const auto putResult = KOReaderSyncClient::updateStats(
       documentHash, mine, nullptr, 0, dictUp ? dictUp.get() : nullptr, dictUpLen, fcUp ? fcUp.get() : nullptr, fcUpLen);
+  // Scratch, not state: the blob is regenerated from the watermark on every sync, so a
+  // leftover file would only ever be stale. Removed whatever the PUT returned.
+  Storage.remove(kDictUploadSpool);
+  Storage.remove(kFcUploadSpool);
   statsUploadOk = (putResult == KOReaderSyncClient::OK);
   if (!statsUploadOk) {
     LOG_ERR("KOSync", "Stats upload failed: %s", KOReaderSyncClient::errorString(putResult));
@@ -878,10 +1091,22 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool 
     // already guards the upload, but skip the whole phase if heap is degraded (e.g. a large
     // per-book dict merge left it low) rather than risk the fold's allocations. The global
     // counter is monotonic and re-syncs next time. (No session: each leg is a fresh conn.)
-    constexpr uint32_t kGlobalStatsMinHeap = 32 * 1024;
+    // 32KB is also an mbedTLS-era number (see kDictSyncMinHeap). It still passes today, but
+    // only just: it runs LAST in syncStats, and the hardware trace shows free=38952 reaching
+    // this point after a bookmark leg — ~6.8KB of margin against a ceiling that the wolfSSL
+    // migration already moved once. Dropped to 26KB, which still covers the fold's two
+    // ReadingTimeHistory accumulators plus a BLOB_MAX_BYTES buffer (all nothrow, so the gate
+    // is a backstop and not the safety guarantee) without sitting one regression away from
+    // becoming a permanent veto the way the dict gate did.
+    constexpr uint32_t kGlobalStatsMinHeap = 26 * 1024;
     const uint32_t freeHeap = ESP.getFreeHeap();
     if (freeHeap < kGlobalStatsMinHeap) {
       LOG_ERR("KOSync", "Global stats skipped: low heap %u < %u", (unsigned)freeHeap, (unsigned)kGlobalStatsMinHeap);
+      // Also to SD: an X3 has no serial, so this skip was previously indistinguishable
+      // from "the scope excluded global stats" — the absence of a `global stats sync:`
+      // line meant both things at once.
+      SdDebugLog::log("KOSYNC", "global stats SKIPPED by heap gate: free=%u need>=%u", (unsigned)freeHeap,
+                      (unsigned)kGlobalStatsMinHeap);
       return;  // global is the last phase of syncStats — nothing after it
     }
     // Underscores, not hyphens: the sync server's gin router compiles the
@@ -1027,6 +1252,14 @@ void KOReaderSyncActivity::onEnter() {
 
 void KOReaderSyncActivity::onExit() {
   Activity::onExit();
+
+  // Drop the heartbeat's pointer to this activity BEFORE anything else can run: the sync
+  // client holds it in a file-scope variable that outlives us, and this object is deleted
+  // right after onExit() returns. Unconditional, and first, so no early return below can
+  // skip it.
+  KOReaderSyncClient::setHeartbeat(nullptr, nullptr);
+  LookupHistory::setMergeProgressHook(nullptr, nullptr);
+  FlashcardDeck::setMergeProgressHook(nullptr, nullptr);
 
   SdDebugLog::setEnabled(false);
 
