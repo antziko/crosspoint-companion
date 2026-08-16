@@ -6,9 +6,11 @@
 #include <SdDebugLog.h>
 #include <base64.h>
 #include <esp_wifi.h>
+#include <strings.h>  // strncasecmp (case-insensitive scheme match)
 
 #include <cstdarg>
 #include <functional>
+#include <memory>
 #include <string>
 
 #if defined(FREEINK_NET_WOLFSSL)
@@ -33,12 +35,41 @@ namespace {
 // slow servers room.
 constexpr int HTTP_TIMEOUT_MS = 60000;
 constexpr int MAX_REDIRECTS = 5;
-// Range-resume budget for a body that dies mid-stream. The X3 manages ~215KB per
-// connection before wolfSSL's record buffer hits the heap's 14KB contiguous ceiling
-// (see the truncation handler in runGet), so 16 hops cover a ~3.5MB book. Each hop
-// costs one TLS handshake (~700ms measured) and every hop must make forward progress,
-// so this is bounded, not open-ended.
-constexpr int MAX_RESUME_ATTEMPTS = 16;
+// wolfSSL's MEMORY_E, spelled out rather than including wolfSSL's error headers here just
+// to name one code. Reported by SecureHttpClient::lastTlsError() when an incoming record
+// could not be buffered.
+constexpr int WOLFSSL_MEMORY_E = -125;
+// Range-resume budget for a body that dies mid-stream. A flat hop count is really a
+// cap on FILE SIZE, and it was set from an optimistic per-hop figure: at the ~215KB
+// per connection the X3 was once measured at, 16 hops covered ~3.5MB, but a heap
+// under more pressure gets far less. Measured on a 7714005-byte OPDS book download
+// (opds_debug.txt): 16 hops delivering 53046..206093 bytes each, EVERY ONE making
+// healthy forward progress, ran the budget out at 1364258 bytes (18%) and failed a
+// download that was converging perfectly well.
+//
+// So budget on CONVERGENCE, not on hop count: a hop that advances less than
+// MIN_RESUME_HOP_BYTES is a stall, and only consecutive stalls end the loop. The
+// absolute ceiling stays as a backstop against a server that dribbles just over the
+// stall threshold forever; at the measured 53KB/hop floor it covers ~6.8MB, and at
+// the 206KB best case ~26MB. Every hop still costs one TLS handshake (~1.3s measured)
+// and must make strict forward progress, and the caller's cancel flag is polled per
+// chunk, so a user can always abort.
+constexpr int MAX_RESUME_ATTEMPTS = 128;
+constexpr size_t MIN_RESUME_HOP_BYTES = 16 * 1024;
+constexpr int MAX_RESUME_STALLS = 4;
+// Full restarts allowed when a server answers 200 to a Range request (i.e. it does
+// not support resuming at all). Two, because a restart is only worth attempting while
+// a fresh connection still has a real chance: the same 130676-byte feed completed
+// outright on 2 of 5 attempts in one session, so a couple of retries convert the
+// user's manual "try again, try again" into one operation, while more than that would
+// just burn radio time on a link that clearly cannot hold the transfer.
+constexpr int MAX_RANGE_RESTARTS = 2;
+// Smallest https body worth leasing the TLS record slab for (see the lease site in
+// runGet). The failure it guards against is the ~200KB-per-connection record wall; the
+// largest feed either OPDS server here serves is 130668 bytes and has never needed it,
+// while book downloads are megabytes. 128KB sits just under that measured feed size, so
+// feeds keep their heap and downloads keep their block.
+constexpr size_t SLAB_MIN_BODY_BYTES = 128 * 1024;
 
 // X3 HTTPS troubleshooting instrumentation (SdDebugLog "STALL"/"XFER"): a
 // per-chunk read taking longer than this is logged with a heap+RSSI snapshot —
@@ -61,6 +92,14 @@ struct Sink {
   // Mirrors what's logged to SdDebugLog so a user without a serial cable can see
   // the real cause (status code, OOM, esp_err) on the device screen.
   std::string* detail = nullptr;
+  // Optional: throw away everything written so far and reopen the destination empty,
+  // so the transfer can start over at byte 0. Only a destination that can be truncated
+  // can offer this (downloadToFile); when it is null a server that refuses Range is a
+  // hard failure, which is the previous behaviour. Raw function pointer + context
+  // rather than a second std::function signature — see the KoStreamSink precedent in
+  // KOReaderSyncClient.cpp and the template-bloat rule in CLAUDE.md.
+  void* rewindCtx = nullptr;
+  bool (*rewind)(void* ctx) = nullptr;
 };
 
 // snprintf into a stack buffer, then store the reason in *out (if provided).
@@ -78,6 +117,10 @@ void setDetail(std::string* out, const char* fmt, ...) {
 bool isRedirect(int status) {
   return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
 }
+
+// Scheme test for the TLS record-slab lease. Case-insensitive per RFC 3986 3.1, matching
+// SecureHttpClient::parseUrl, so a "HTTPS://" Location header is not mistaken for plain HTTP.
+bool isHttpsUrl(const std::string& url) { return url.size() >= 8 && strncasecmp(url.c_str(), "https://", 8) == 0; }
 
 // Disable WiFi modem power-save for the duration of a transfer, then restore the
 // default. At the default WIFI_PS_MIN_MODEM the radio sleeps between DTIM beacons;
@@ -130,7 +173,51 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
   // than failed.
   size_t resumeOffset = 0;
   int resumes = 0;
+  // Hops that advanced less than MIN_RESUME_HOP_BYTES, in a row. Reset by any hop that
+  // makes real progress, so a converging transfer is never cut off by its own length.
+  int stalledResumes = 0;
+  // Full restarts spent because the server answered 200 to a Range request.
+  int rangeRestarts = 0;
+  // wolfSSL error that ended the PREVIOUS hop, 0 for a hop that ended cleanly. Read by the
+  // range-restart decision below, which must know whether the last failure was one a fresh
+  // connection could plausibly avoid.
+  int lastHopTlsErr = 0;
+
+  // Back wolfSSL's per-record receive buffer with one block bought here, at the healthiest
+  // heap state this request will ever see, and held across every redirect and resume hop.
+  //
+  // Without it wolfSSL re-allocates ~16.4KB contiguous for each incoming record (it frees
+  // the buffer after every record it delivers — see TlsRecordSlab), which on the X3's
+  // post-WiFi heap fails partway through and kills the body with MEMORY_E (tlsErr=-125).
+  // Captures show that ending every HTTPS transfer at ~200-215KB: servers that honour
+  // Range hide it as a long string of resumed hops, and a server that refuses Range cannot
+  // finish at all because each restart re-runs the same 205KB and dies again. The same
+  // files over plain HTTP, same sink, complete at 1.7MB with no retries.
+  //
+  // Scoped to this transfer: outside it wolfSSL allocates exactly as before, so KOSync and
+  // feed fetches are untouched. If the block cannot be bought the lease is inactive and
+  // behaviour is today's, so this can help and cannot regress.
+  //
+  // ONLY for an https hop. SecureHttpClient runs plain http over its WiFiClient transport
+  // (ensureConnected()) and never enters wolfSSL, so on an http:// URL this block is 17KB
+  // of dead weight held for the whole transfer — and on the X3 that is the difference
+  // between a feed that reads and one that does not. Measured against one plain-HTTP host
+  // in a single session (opds_debug.txt): every request that took the lease lost ~18KB at
+  // GET start (38872 -> 20528 free) and entered its body with 6012 free / 2420 largest,
+  // and the 37977-byte feed died mid-body at 11426 and again at 5682 bytes; the requests
+  // where the malloc happened to fail (logged active=0, so no lease) streamed a
+  // 1676098-byte download to completion at 233KB/s. Every completed plain-HTTP transfer in
+  // that capture also logged slabHit=0 slabMiss=0 — the block was never handed out once,
+  // because wolfSSL was not in the path to ask for it.
+  //
+  // Held indirectly, and bought at the FIRST BODY BYTE rather than before the request —
+  // see the lease site in the body callback for why the handshake must not pay for it.
+  std::unique_ptr<freeink::TlsRecordSlab> recordSlab;
+
   for (;;) {
+    // Re-evaluated per hop: a redirect can cross schemes in either direction.
+    const bool secureHop = isHttpsUrl(url);
+
     freeink::SecureHttpClient http;
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.setInsecure();
@@ -165,6 +252,50 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
           // Header parsing is done by the time the first body chunk arrives; skip
           // any body on a non-200/206 (a 30x body is drained by the caller loop below).
           if (http.getStatus() != 200 && http.getStatus() != 206) return true;
+          // A resumed hop that answers 200 ignored our Range header and is restarting the
+          // resource from byte 0. Appending it would duplicate what the sink already holds
+          // (measured on X3 before this check existed: a 130676-byte feed grew to 217792
+          // bytes over 15s before the post-GET status check noticed), so it must never be
+          // appended.
+          //
+          // But the server is, right now, sending exactly the bytes we want from exactly
+          // the offset we can use — so take them. Empty the destination and treat this
+          // response as a fresh download instead of throwing the connection away: no extra
+          // handshake, no wasted round trip, and it turns a dead end into the retry the
+          // user was performing by hand. books.yapaa.org's generated feed endpoints ignore
+          // Range, and the same feed completed outright on 2 of 5 attempts in one session,
+          // so a fresh full body has a real chance where a resume has none.
+          //
+          // sink.total is deliberately NOT reset: it was learned from hop 1's
+          // Content-Length and is the full resource size, which is what the progress bar
+          // and the completeness check below both want. resumeOffset going to 0 also makes
+          // the `sink.total == 0 && resumeOffset == 0` guard below inert, as intended.
+          //
+          // Without a rewind (a sink that cannot be truncated) or out of restart budget,
+          // fall back to refusing the first byte; the status check below the GET then
+          // reports "resume unsupported" exactly as before, just far earlier.
+          if (resumeOffset > 0 && http.getStatus() == 200) {
+            // ...but only when the previous hop died of something a fresh connection might
+            // not repeat. MEMORY_E is not that. The record wall sits at a fixed heap size,
+            // so a restart replays the identical transfer into the identical wall: measured
+            // on an X3, three restarts of one article.epub died at 204762, 217647 and
+            // 215408 bytes — ~6s of radio and 640KB of traffic spent to re-prove what the
+            // first hop already established. Refuse the byte instead and let the
+            // "resume unsupported" branch below report it truthfully, at once.
+            if (lastHopTlsErr == WOLFSSL_MEMORY_E) {
+              SdDebugLog::log("HTTP", "range ignored at %zu after MEMORY_E -> restart would hit the same wall",
+                              resumeOffset);
+              return false;
+            }
+            if (!sink.rewind || rangeRestarts >= MAX_RANGE_RESTARTS || !sink.rewind(sink.rewindCtx)) return false;
+            ++rangeRestarts;
+            SdDebugLog::log("HTTP", "range ignored at %zu -> restarting from 0 (%d/%d)", resumeOffset, rangeRestarts,
+                            MAX_RANGE_RESTARTS);
+            resumeOffset = 0;
+            sink.downloaded = 0;
+            lastXferLogBytes = 0;
+            stalledResumes = 0;
+          }
           if (!loggedConnect) {
             loggedConnect = true;
             transferStartMs = millis();
@@ -179,6 +310,41 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
                             "handshake=%lums heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d total=%zu url=%s",
                             (unsigned long)(transferStartMs - openStartMs), snap.heapFree, snap.largest8Bit,
                             snap.internalFree, snap.internalLargest, (int)snap.rssi, sink.total, url.c_str());
+
+            // Lease the record slab HERE, at the first body byte — never before the request.
+            //
+            // The TLS handshake, not the body, is the peak allocation of a session: wolfSSL
+            // TLS 1.3 with SP-ECC needs ~35-43KB of small blocks for it. Buying 17408 of
+            // them up front left the handshake ~22KB and killed every https fetch in the
+            // 08-16 capture before it ever connected — GET start 41124 free, 22612 after
+            // the lease, then "wolfSSL request failed" with no CONNECT line at all; four
+            // attempts across two hosts, all identical. The control is KOSync: same wolfSSL
+            // stack, same https, ~43KB free, no lease anywhere in its path, 200 every time.
+            // By the time a body byte arrives the handshake scratch is freed and the record
+            // buffer is the only thing left that wants a big contiguous block, which is the
+            // one this was ever meant to serve.
+            //
+            // Leased ONLY for a body whose Content-Length says it can reach the
+            // ~200KB-per-connection record wall documented at the truncation handler below.
+            // An unknown length does NOT lease, and that is the whole point: read.yapaa.org
+            // frames every response — feed and download alike — without a Content-Length, so
+            // treating "unknown" as "might be big" leased the block for a 15827-byte feed,
+            // took heap to 11620 / largest 4340, and killed the fetch (tlsErr=-397 after
+            // 9178ms) on a request that would otherwise have finished in 143ms. Unknown
+            // length is not evidence of a large body; it is the absence of evidence.
+            //
+            // Expect active=0 here on the X3 and do not "fix" that by moving the lease
+            // earlier: post-handshake the largest free block is ~14324 while this block is
+            // 17408, so it cannot be bought at this point — and it cannot be bought before
+            // the handshake either, which is what 14c proved. A failed lease is inert, so
+            // this stays correct where the contiguous heap does exist.
+            if (!recordSlab && secureHop && sink.total >= SLAB_MIN_BODY_BYTES) {
+              recordSlab = makeUniqueNoThrow<freeink::TlsRecordSlab>();
+              const SdDebugLog::NetSnapshot after = SdDebugLog::captureNetSnapshot();
+              SdDebugLog::log("HTTP", "tls slab: active=%d total=%zu size=%u heap=%u largest8=%u",
+                              (recordSlab && recordSlab->active()) ? 1 : 0, sink.total,
+                              (unsigned)freeink::TlsRecordSlab::size(), after.heapFree, after.largest8Bit);
+            }
           }
 
           // Time waiting on the socket since the PREVIOUS callback returned. lastChunkMs
@@ -217,8 +383,17 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
             lastXferLogBytes = sink.downloaded;
             const uint32_t elapsedMs = now - transferStartMs;
             const unsigned bytesPerSec = elapsedMs > 0 ? (unsigned)(sink.downloaded * 1000UL / elapsedMs) : 0;
-            SdDebugLog::log("XFER", "bytes=%zu elapsed=%lums rate=%uB/s heap=%u", sink.downloaded,
-                            (unsigned long)elapsedMs, bytesPerSec, (unsigned)ESP.getFreeHeap());
+            // largest8 is the number that decides whether an https body survives, and it was
+            // the one this line did not print. wolfSSL sizes its receive buffer to each
+            // incoming record and servers ramp record size as a connection warms, so the
+            // body dies the first time a record needs more contiguous heap than exists.
+            // Free heap alone cannot show that coming: at the 08-16 wall free was 21700 while
+            // largest was 14324 against a ~16717 requirement — a 2.4KB deficit invisible in
+            // the free figure. Printing it per 32KB shows the trajectory instead of the
+            // post-mortem, which is what says whether that gap is closable at all.
+            const SdDebugLog::NetSnapshot xs = SdDebugLog::captureNetSnapshot();
+            SdDebugLog::log("XFER", "bytes=%zu elapsed=%lums rate=%uB/s heap=%u largest8=%u", sink.downloaded,
+                            (unsigned long)elapsedMs, bytesPerSec, xs.heapFree, xs.largest8Bit);
           }
           return true;
         },
@@ -261,11 +436,34 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
     }
     // A resumed hop MUST answer 206. A 200 means the server ignored the Range header
     // and is restarting the body from byte 0 — appending that to what we already hold
-    // would silently corrupt the file, so stop instead.
+    // would silently corrupt the file, so stop instead. The body callback already
+    // refused the first byte for this reason, so sink.downloaded below is still the
+    // honest pre-hop count; this branch also covers a 200 that carried no body at all.
     if (resumeOffset > 0 && status == 200) {
-      SdDebugLog::log("HTTP", "resume unsupported (200 for Range at %zu bytes)", resumeOffset);
-      setDetail(sink.detail, "incomplete: %zu/%zu bytes", sink.downloaded, sink.total);
+      SdDebugLog::log("HTTP", "resume unsupported (200 for Range at %zu bytes, tlsErr=%d)", resumeOffset,
+                      lastHopTlsErr);
+      // Name the real cause. "incomplete: 215408/0 bytes" sent the user looking at their
+      // network, which was moving at ~120KB/s when the body died; the actual pairing is a
+      // TLS record this device cannot buffer plus a server that will not resume, and only
+      // the second half is fixable (by the server sending Content-Length and honouring
+      // Range). Same wording as the resume-budget path below, deliberately.
+      if (lastHopTlsErr == WOLFSSL_MEMORY_E) {
+        setDetail(sink.detail, "out of memory for TLS record at %zu bytes; server cannot resume", sink.downloaded);
+      } else {
+        setDetail(sink.detail, "incomplete: %zu/%zu bytes", sink.downloaded, sink.total);
+      }
       return HttpDownloader::HTTP_ERROR;
+    }
+    // 416 answering a Range means our offset is at or past the end of the resource, i.e.
+    // we already hold every byte. That only became reachable once unframed bodies could
+    // resume: with no Content-Length there is nothing to compare against, so a body that
+    // was truncated exactly at its final byte still arrives here with responseComplete()
+    // false and resumes one hop too far. Treating it as an error would fail a download
+    // that is, in fact, whole.
+    if (resumeOffset > 0 && status == 416) {
+      SdDebugLog::log("HTTP", "range not satisfiable at %zu -> body already complete (%zu bytes)", resumeOffset,
+                      sink.downloaded);
+      return HttpDownloader::OK;
     }
     if (status != 200 && status != 206) {
       LOG_ERR("HTTP", "wolfSSL unexpected status: %d", status);
@@ -283,10 +481,24 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
     if (!http.responseComplete()) {
       const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
       LOG_ERR("HTTP", "wolfSSL incomplete: got %zu of %zu bytes", sink.downloaded, sink.total);
+      // tlsErr names the cause instead of leaving it to inference: -125 (MEMORY_E) is
+      // wolfSSL failing to allocate the receive buffer for an incoming record, which on
+      // this device means the record was larger than the biggest free block; 0 means the
+      // peer closed or the transport dropped and the heap is not implicated at all.
+      // slabMiss > 0 alongside tlsErr=-125 means the reserved block was already taken when
+      // wolfSSL asked, so the request went to malloc and lost; slabMiss=0 with tlsErr=-125
+      // means the failing allocation was outside the record-size band this reserves.
       SdDebugLog::log("HTTP",
-                      "incomplete: got %zu of %zu bytes after %lums (wait=%lums work=%lums) heap=%u largest8=%u",
+                      "incomplete: got %zu of %zu bytes after %lums (wait=%lums work=%lums) heap=%u largest8=%u "
+                      "tlsErr=%d slabHit=%lu slabMiss=%lu",
                       sink.downloaded, sink.total, (unsigned long)(millis() - transferStartMs),
-                      (unsigned long)waitTotalMs, (unsigned long)workTotalMs, s.heapFree, s.largest8Bit);
+                      (unsigned long)waitTotalMs, (unsigned long)workTotalMs, s.heapFree, s.largest8Bit,
+                      http.lastTlsError(), (unsigned long)freeink::TlsRecordSlab::hits(),
+                      (unsigned long)freeink::TlsRecordSlab::misses());
+      if (freeink::TlsRecordSlab::largestMiss() > 0) {
+        SdDebugLog::log("HTTP", "tls slab largest miss=%lu (block=%u)",
+                        (unsigned long)freeink::TlsRecordSlab::largestMiss(), (unsigned)freeink::TlsRecordSlab::size());
+      }
 
       // Resume rather than throw the partial body away.
       //
@@ -311,29 +523,64 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       //
       // Resuming from the byte offset works around it and is the right response to any
       // mid-stream drop whatever the cause. Guarded on forward progress, so a server
-      // that fails at offset 0 ends the loop instead of spinning.
-      if (sink.total > 0 && sink.downloaded > resumeOffset && sink.downloaded < sink.total &&
-          resumes < MAX_RESUME_ATTEMPTS && !(sink.cancelFlag && *sink.cancelFlag)) {
+      // that fails at offset 0 ends the loop instead of spinning — and on CONVERGENCE
+      // (see MIN_RESUME_HOP_BYTES), so a transfer that is advancing steadily is never
+      // cut off just for being long.
+      // A body with no Content-Length — chunked, or connection-delimited — leaves
+      // sink.total at 0, and the guard here used to open with `sink.total > 0`. That
+      // disabled resume ENTIRELY for those responses: the condition failed on its first
+      // term, fell through to "resume budget spent", and reported resumes=0 having never
+      // been allowed a single attempt. A device capture shows three consecutive downloads
+      // of a dynamically generated article.epub dying at 214852, 217976 and 204755 bytes
+      // "of 0" — the same mid-stream TLS drop described above, on the one response shape
+      // that could not recover from it.
+      //
+      // Unknown length changes only what "not finished yet" means. It cannot be
+      // `downloaded < total`, so completeness is decided where it already was: a hop that
+      // ends with responseComplete() returns OK, and only a TRUNCATED hop reaches here.
+      // Every other guard is unchanged and does the real work — strict forward progress,
+      // stall convergence, the attempt ceiling, and the cancel flag.
+      const bool lengthKnown = sink.total > 0;
+      const size_t hopBytes = sink.downloaded - resumeOffset;
+      if (sink.downloaded > resumeOffset && (!lengthKnown || sink.downloaded < sink.total) &&
+          resumes < MAX_RESUME_ATTEMPTS && stalledResumes < MAX_RESUME_STALLS &&
+          !(sink.cancelFlag && *sink.cancelFlag)) {
+        stalledResumes = hopBytes < MIN_RESUME_HOP_BYTES ? stalledResumes + 1 : 0;
         ++resumes;
         resumeOffset = sink.downloaded;
-        retriedConnect = false;  // each resumed hop gets its own one-shot connect retry
-        SdDebugLog::log("HTTP", "resuming at %zu/%zu (attempt %d/%d)", resumeOffset, sink.total, resumes,
-                        MAX_RESUME_ATTEMPTS);
+        lastHopTlsErr = http.lastTlsError();  // the next hop's restart decision reads this
+        retriedConnect = false;               // each resumed hop gets its own one-shot connect retry
+        SdDebugLog::log("HTTP", "resuming at %zu/%zu (attempt %d/%d, hop=%zu stalls=%d)", resumeOffset, sink.total,
+                        resumes, MAX_RESUME_ATTEMPTS, hopBytes, stalledResumes);
         delay(200);  // let the stack tear the dead socket down before reconnecting
         continue;
       }
-      setDetail(sink.detail, "incomplete: %zu/%zu bytes", sink.downloaded, sink.total);
+      SdDebugLog::log("HTTP", "resume budget spent: got=%zu/%zu resumes=%d stalls=%d lastHop=%zu tlsErr=%d",
+                      sink.downloaded, sink.total, resumes, stalledResumes, hopBytes, http.lastTlsError());
+      // MEMORY_E means wolfSSL could not allocate the receive buffer for an incoming TLS
+      // record — the server sends records larger than our biggest free block. Reporting
+      // that as "incomplete" sends the user looking at their network, which is the one
+      // thing that is fine: the same connection was moving at ~120KB/s when it died.
+      if (http.lastTlsError() == WOLFSSL_MEMORY_E) {
+        setDetail(sink.detail, "out of memory for TLS record at %zu bytes (file too large)", sink.downloaded);
+      } else {
+        setDetail(sink.detail, "incomplete: %zu/%zu bytes", sink.downloaded, sink.total);
+      }
       return HttpDownloader::HTTP_ERROR;
     }
     // A complete hop that still leaves the resource short means the server answered a
-    // bounded range (or closed exactly on a boundary); ask for the rest.
+    // bounded range (or closed exactly on a boundary); ask for the rest. Same
+    // convergence guard as the truncation path — this branch has no inter-hop delay, so
+    // a server answering tiny ranges would otherwise spin through the whole budget.
+    const size_t shortHopBytes = sink.downloaded - resumeOffset;
     if (sink.total > 0 && sink.downloaded < sink.total && sink.downloaded > resumeOffset &&
-        resumes < MAX_RESUME_ATTEMPTS && !(sink.cancelFlag && *sink.cancelFlag)) {
+        resumes < MAX_RESUME_ATTEMPTS && stalledResumes < MAX_RESUME_STALLS && !(sink.cancelFlag && *sink.cancelFlag)) {
+      stalledResumes = shortHopBytes < MIN_RESUME_HOP_BYTES ? stalledResumes + 1 : 0;
       ++resumes;
       resumeOffset = sink.downloaded;
       retriedConnect = false;
-      SdDebugLog::log("HTTP", "short range, resuming at %zu/%zu (attempt %d/%d)", resumeOffset, sink.total, resumes,
-                      MAX_RESUME_ATTEMPTS);
+      SdDebugLog::log("HTTP", "short range, resuming at %zu/%zu (attempt %d/%d, hop=%zu stalls=%d)", resumeOffset,
+                      sink.total, resumes, MAX_RESUME_ATTEMPTS, shortHopBytes, stalledResumes);
       continue;
     }
     {
@@ -345,9 +592,16 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       // link or the server is. On X3 a repaint shows up in wait=, not work=, because
       // requestUpdate() only posts to the render task — which then takes the SPI bus the
       // SD card shares, so the NEXT read blocks.
-      SdDebugLog::log("DONE", "bytes=%zu elapsed=%lums rate=%uB/s wait=%lums work=%lums resumes=%d", sink.downloaded,
-                      (unsigned long)totalElapsedMs, bytesPerSec, (unsigned long)waitTotalMs,
-                      (unsigned long)workTotalMs, resumes);
+      // slabHit/slabMiss are the record-buffer allocations wolfSSL made: hits came from
+      // the reserved block, misses fell through to malloc and are the ones that can still
+      // fail with MEMORY_E. A healthy HTTPS transfer should show many hits and no misses;
+      // hits=0 on an https:// URL means the allocator hook never saw the record buffer and
+      // the diagnosis needs revisiting, not the sizing.
+      SdDebugLog::log("DONE",
+                      "bytes=%zu elapsed=%lums rate=%uB/s wait=%lums work=%lums resumes=%d slabHit=%lu slabMiss=%lu",
+                      sink.downloaded, (unsigned long)totalElapsedMs, bytesPerSec, (unsigned long)waitTotalMs,
+                      (unsigned long)workTotalMs, resumes, (unsigned long)freeink::TlsRecordSlab::hits(),
+                      (unsigned long)freeink::TlsRecordSlab::misses());
     }
     return HttpDownloader::OK;
   }
@@ -930,6 +1184,22 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
   sink.cancelFlag = cancelFlag;
   sink.detail = errorDetail;
   sink.write = [&file](const uint8_t* data, size_t len) { return file.write(data, len) == len; };
+  // A file destination can be emptied, so this transfer can start over at byte 0 when a
+  // server turns out not to honour Range. HalFile has no truncate(); reopening for write
+  // does truncate, and the close() first is required before any reopen of the same handle
+  // (DESTRUCTOR_CLOSES_FILE only covers scope exit — see CLAUDE.md).
+  struct RewindCtx {
+    HalFile* file;
+    const char* path;
+  } rewindCtx{&file, destPath.c_str()};
+  sink.rewindCtx = &rewindCtx;
+  sink.rewind = [](void* ctx) {
+    auto* rc = static_cast<RewindCtx*>(ctx);
+    rc->file->close();
+    if (Storage.openFileForWrite("HTTP", rc->path, *rc->file)) return true;
+    LOG_ERR("HTTP", "rewind: cannot reopen %s", rc->path);
+    return false;
+  };
 
   const DownloadError result = runGet(url, username, password, sink, caPemOverride, caPemRedirect);
   // Close before any remove() on the same path; DESTRUCTOR_CLOSES_FILE would
