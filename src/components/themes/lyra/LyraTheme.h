@@ -24,7 +24,23 @@ constexpr ThemeMetrics values = {.batteryWidth = 16,
                                  .listScrollSide = 0,
                                  .listTitleBold = false,
                                  .headerSidePadding = 18,
-                                 .headerUnderlineSize = 3,
+                                 // 0, not 3. This was a solid full-width black rule that
+                                 // BaseTheme::drawHeader parks at a FIXED y (topPadding +
+                                 // headerHeight - size = 86) on every titled screen, and
+                                 // e-ink image sticking is set by DWELL, not by frame count:
+                                 // under a differential waveform a pixel that never changes
+                                 // receives no drive at all, so three rows held at DC black
+                                 // across minutes of menus burn in. The sleep wallpaper is
+                                 // the only full-screen content with nothing drawn at that y,
+                                 // which is why it is the only place the residue shows.
+                                 //
+                                 // Inherited by Lyra-3-Covers and Vega (both copy these
+                                 // metrics), so all three stop causing it. Classic and
+                                 // RoundedRaff already shipped 0 and have never burned.
+                                 // deepCleanPanel still clears what is ALREADY burned —
+                                 // this only stops making more. To restore the rule, put
+                                 // the 3 back; nothing else keys off it.
+                                 .headerUnderlineSize = 0,
                                  .headerTitleAlign = 0,  // left
                                  .headerBatterySide = 0,
                                  .headerBatteryDetached = true,
