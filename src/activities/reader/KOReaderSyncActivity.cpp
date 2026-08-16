@@ -310,17 +310,14 @@ void KOReaderSyncActivity::performSync() {
     result = KOReaderSyncClient::getProgress(documentHash, remoteProgress);
   }  // session closed: arena freed, heap recovers for bookmarks + stats' fresh handshakes
 
-  // Full sync (ALL) also merges bookmarks whenever the server is reachable (OK or NOT_FOUND).
-  // Silent and best-effort: it does not change the progress sync outcome below. Sessionless, at
-  // recovered heap — see syncBookmarks.
-  if (syncScope == SyncScope::All && (result == KOReaderSyncClient::OK || result == KOReaderSyncClient::NOT_FOUND)) {
-    syncBookmarks();
-  }
+  // Both best-effort legs below run only when the server answered, and PROGRESS scope runs
+  // neither. Hoisted so the two cannot drift apart — being the same condition is the point.
+  const bool serverReachable =
+      syncScope == SyncScope::All && (result == KOReaderSyncClient::OK || result == KOReaderSyncClient::NOT_FOUND);
 
-  // PROBE: heap state right before stats' cold handshake (needs ~33.4KB contiguous = two
-  // ~16.7KB record buffers). If `largest` here stays well below ~33KB across runs, the prior
-  // legs fragmented the heap and smaller TLS record buffers are the only real fix; ~33KB+ means
-  // recovery works and stats handshakes.
+  // PROBE: heap state entering the stats leg. Format deliberately unchanged so it still
+  // greps against older captures — but read it knowing this now sits directly after
+  // progress rather than after bookmarks (see the ordering note below).
   {
     const unsigned freeAfter = (unsigned)ESP.getFreeHeap();
     const unsigned largestAfter = (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
@@ -329,9 +326,37 @@ void KOReaderSyncActivity::performSync() {
     SdDebugLog::log("KOSYNC", "pre-stats heap free=%u largest=%u (stats needs ~33KB contig)", freeAfter, largestAfter);
   }
 
-  // Reading stats (ALL only), sessionless at recovered heap. PROGRESS scope skips it.
-  if (syncScope == SyncScope::All && (result == KOReaderSyncClient::OK || result == KOReaderSyncClient::NOT_FOUND)) {
+  // STATS BEFORE BOOKMARKS: biggest body first, while contiguity is still good.
+  //
+  // Stats carries by far the largest request body of the sync — the dict history, the
+  // flashcard deck and the global counters all ride one PUT — and wolfSSL needs a
+  // contiguous block for the record on top of the body itself. Running it last meant it
+  // paid for every leg before it. Measured on X3 (opds_debug.txt):
+  //
+  //   after progress+bookmarks: pre-stats largest=20468 -> GET 13812 -> PUT largest 8180
+  //                             against body 8234 -> STATS_PUT code=-1 in 152ms, 0 bytes
+  //   straight to stats:        pre-stats largest=38900 -> GET 32756 -> PUT largest 16372
+  //                             against body 5602 -> 200 OK
+  //
+  // 8234 against a largest block of 8180 is the entire failure: the body fit, the record
+  // buffer for it did not. Most of the ~18KB of contiguity between those two runs is not
+  // the bookmark merge — syncBookmarks() calls ensureEpubLoaded(), so the Epub object and
+  // its parse fragmentation stay resident for everything after it. The comment on
+  // kDictSyncMinHeap already recorded the same effect from the other side ("38952 (worst,
+  // after a bookmark leg in the same sync)").
+  //
+  // The order between these two is free: nothing below reads bookmark state, syncStats()
+  // never touches `epub`, and both are silent best-effort legs that leave `result` alone.
+  // The phase counter is unaffected — the labels appear in the new order and the total is
+  // still 1 + 3 + 2.
+  if (serverReachable) {
     syncStats(/*includeDict=*/true, /*includeGlobal=*/true, /*includeFlashcards=*/true);
+  }
+
+  // Bookmarks, sessionless at recovered heap — see syncBookmarks. Silent and best-effort:
+  // it does not change the progress sync outcome below.
+  if (serverReachable) {
+    syncBookmarks();
   }
 
   if (result == KOReaderSyncClient::NOT_FOUND) {
@@ -746,8 +771,9 @@ std::unique_ptr<uint8_t[]> loadUploadBlob(const char* path, const size_t len) {
 }  // namespace
 
 void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool includeFlashcards) {
-  // Sessionless, deliberately — and the caller (performSync) closes the progress+bookmarks
-  // session BEFORE calling this so heap has recovered. The stats PUTs can carry LARGE bodies:
+  // Sessionless, deliberately — and the caller (performSync) closes the progress session
+  // BEFORE calling this, and now also runs this leg AHEAD of bookmarks, so heap is at its
+  // best when the largest body of the sync goes out. The stats PUTs can carry LARGE bodies:
   // a base64 "dh" dictionary-history blob (per-book, up to ~5.5KB) and a base64 "h" dated-
   // history blob (global). Those builds use throwing allocations and are gated on full heap
   // (kDictSyncMinHeap / kGlobalStatsMinHeap). Inside a held-arena session only ~18KB
