@@ -55,6 +55,26 @@ class HomeActivity final : public Activity {
   // trough deep enough to threaten any allocation racing it. Skipping costs only what failing
   // already cost (the redraw happens either way) and removes the trough.
   static constexpr size_t COVER_SNAPSHOT_FREE_FLOOR = 8 * 1024;
+  // ...and never take it out of an ALREADY fragmented heap, however much free heap there is.
+  // The free-heap gate above only asks "can the 38 KB fit"; on a heap the reader has chopped up
+  // it fits by filling ~36 small holes, and the long-lived allocations the rest of the paint
+  // makes (glyph-cache misses on a CJK title, the SD cover reads) then land in whatever large
+  // hole is left. Freeing the chunks at onExit() cannot undo that: the tile is gone but the
+  // heap stays shredded for the whole session, and every network screen after Home runs under
+  // its TLS gates.
+  //
+  // Measured on X3 (.pio/x3/opds_debug.txt), largest free block at Home entry -> largest at the
+  // NEXT activity's entry, after the chunks were freed:
+  //     61428 -> 57332   fresh boot, recovers fully
+  //     38900 -> 38900   recovers fully
+  //     18420 -> 12788   does NOT recover; that session's OPDS feed then truncated at 53049 of
+  //                      130676 bytes with largest8=1396 during the handshake, and ended at a
+  //                      permanent largest=6644 / "fetch aborted: low heap" on every retry
+  //     14324 ->  6900   does not recover
+  // 32 KB sits in the wide gap between the two groups. Below it the SD path is taken instead:
+  // ~126 ms per paint against ~15 ms for RAM chunks, but still ~8x better than the ~1050 ms
+  // full redraw, and it costs the heap a single ~528-byte buffer.
+  static constexpr size_t COVER_SNAPSHOT_MIN_LARGEST_BLOCK = 32 * 1024;
 
   // SD-backed fallback. Finer chunks improve the odds of the RAM snapshot fitting but cannot
   // guarantee it — the heap after a CJK book is ~50 KB free in ~44 blocks whose largest is

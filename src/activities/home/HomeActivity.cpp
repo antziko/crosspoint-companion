@@ -226,12 +226,20 @@ bool HomeActivity::storeCoverBuffer() {
   // one — it rejects only attempts that were already doomed. Without it a doomed attempt walks
   // most of the way through the region before failing and then frees it all, once per paint;
   // the device log caught that trough at free=5588 / minFreeEver=4508.
+  //
+  // The second condition is about CONTIGUITY, not fit. Fine chunks can fit an already
+  // fragmented heap, but only by scattering into the small holes, and freeing them at onExit()
+  // does not put the heap back — see COVER_SNAPSHOT_MIN_LARGEST_BLOCK for the measured
+  // entry-to-next-activity table. That damage outlives Home and lands on whatever network
+  // screen runs next, so a fragmented heap must take the SD path even when free heap is ample.
   const size_t freeNow = ESP.getFreeHeap();
-  if (freeNow < total + COVER_SNAPSHOT_FREE_FLOOR) {
+  const size_t largestNow = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (freeNow < total + COVER_SNAPSHOT_FREE_FLOOR || largestNow < COVER_SNAPSHOT_MIN_LARGEST_BLOCK) {
     SdDebugLog::setEnabled(true);
-    SdDebugLog::log("HOME", "snapshot SKIPPED need=%u+%u free=%u largest=%u -> SD", (unsigned)total,
-                    (unsigned)COVER_SNAPSHOT_FREE_FLOOR, (unsigned)freeNow,
-                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    SdDebugLog::log("HOME", "snapshot SKIPPED (%s) need=%u+%u free=%u largest=%u min=%u -> SD",
+                    freeNow < total + COVER_SNAPSHOT_FREE_FLOOR ? "free" : "frag", (unsigned)total,
+                    (unsigned)COVER_SNAPSHOT_FREE_FLOOR, (unsigned)freeNow, (unsigned)largestNow,
+                    (unsigned)COVER_SNAPSHOT_MIN_LARGEST_BLOCK);
     return storeCoverBufferToSd();
   }
 
