@@ -247,6 +247,11 @@ class FlashcardDeck {
   // *outDeleted (if non-null) gets the deletes applied.
   static int mergeBlob(const std::string& cachePath, const uint8_t* blob, size_t len, int* outDeleted = nullptr);
 
+  // Liveness pump for mergeBlob — same contract as LookupHistory::setMergeProgressHook:
+  // called once per blob line with progress in BYTES across both passes (total = 2 * len),
+  // must not allocate or touch the deck files, and must rate-limit itself. Null by default.
+  static void setMergeProgressHook(void (*fn)(void* ctx, size_t done, size_t total), void* ctx);
+
   // Read the upload watermark (exposed for the activity + tests).
   static SyncWatermark loadWatermark(const std::string& cachePath);
 

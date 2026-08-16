@@ -1,5 +1,3 @@
-#include "util/LookupHistory.h"
-
 #include <gtest/gtest.h>
 
 #include <cstdio>
@@ -9,6 +7,7 @@
 #include <vector>
 
 #include "CrossPointSettings.h"
+#include "util/LookupHistory.h"
 
 namespace {
 
@@ -17,8 +16,8 @@ using Status = LookupHistory::Status;
 class LookupHistoryTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    cachePath = ::testing::TempDir() + "lookup_history_" +
-                ::testing::UnitTest::GetInstance()->current_test_info()->name();
+    cachePath =
+        ::testing::TempDir() + "lookup_history_" + ::testing::UnitTest::GetInstance()->current_test_info()->name();
     std::filesystem::create_directories(cachePath);
     // TempDir is shared across runs; start from a clean slate.
     std::remove(historyFile().c_str());
@@ -68,9 +67,7 @@ class LookupHistoryTest : public ::testing::Test {
   std::string cachePath;
 };
 
-TEST_F(LookupHistoryTest, LoadFromMissingFileIsEmpty) {
-  EXPECT_TRUE(LookupHistory::load(cachePath).empty());
-}
+TEST_F(LookupHistoryTest, LoadFromMissingFileIsEmpty) { EXPECT_TRUE(LookupHistory::load(cachePath).empty()); }
 
 TEST_F(LookupHistoryTest, AddWordCreatesFileWithSingleEntry) {
   EXPECT_EQ(LookupHistory::addWord(cachePath, "alpha", Status::Direct), 1);
@@ -270,7 +267,7 @@ TEST_F(LookupHistoryTest, DeltaIncludesNewTombstoneOnly) {
   LookupHistory::addWord(cachePath, "a", Status::Direct);  // v1
   LookupHistory::addWord(cachePath, "b", Status::Direct);  // v2
   LookupHistory::addWord(cachePath, "c", Status::Direct);  // v3
-  EXPECT_TRUE(LookupHistory::removeAt(cachePath, 1));       // delete "b" -> tombstone v4
+  EXPECT_TRUE(LookupHistory::removeAt(cachePath, 1));      // delete "b" -> tombstone v4
   uint8_t buf[256];
   LookupHistory::BlobStats st;
   const size_t n = LookupHistory::serializeBlob(cachePath, buf, sizeof(buf), 3 /*since*/, &st);
@@ -389,8 +386,8 @@ TEST_F(LookupHistoryTest, DeltaTruncationFallsBackToKeyframe) {
 TEST_F(LookupHistoryTest, DeltaRoundTripPropagatesAddUpdateDelete) {
   const std::string pathB = cachePath + "_B";
   std::filesystem::create_directories(pathB);
-  for (const char* suff : {"/dictionary_history.txt", "/dictionary_history.tomb", "/dictionary_history.ver",
-                           "/dictionary_history.sync"})
+  for (const char* suff :
+       {"/dictionary_history.txt", "/dictionary_history.tomb", "/dictionary_history.ver", "/dictionary_history.sync"})
     std::remove((pathB + suff).c_str());
 
   uint8_t buf[1024];
@@ -446,6 +443,67 @@ TEST_F(LookupHistoryTest, DeltaRoundTripPropagatesAddUpdateDelete) {
     const auto e = LookupHistory::load(pathB);
     for (const auto& x : e) EXPECT_NE(x.word, "beta");
   }
+}
+
+// mergeBlob caches the per-word history/tombstone versions in a slot array indexed by blob
+// line, instead of rescanning both files once per line. The cache is only correct if the
+// slot a line gets while merging is the slot the file scan filled for it, so this pins the
+// two words to versions that make a swap change the OUTCOME rather than just the reads:
+// gamma is old (must accept the remote update), alpha is newer (must reject it). An off-by-
+// one in either walk inverts both decisions.
+TEST_F(LookupHistoryTest, MergeBlobResolvesVersionsPerLineNotPerSlotOrder) {
+  LookupHistory::addWord(cachePath, "gamma", Status::Direct);                              // v1
+  for (int i = 0; i < 9; i++) LookupHistory::addWord(cachePath, "alpha", Status::Direct);  // ends at v10
+
+  // A short junk line between the two real ones: mergeBlob advances its slot for EVERY
+  // line, matched or not, so a filler that both walks must count identically belongs here.
+  const std::string blob = "Hgamma|S|5\n#\nHalpha|S|5\n";
+  int deleted = -1;
+  const int added =
+      LookupHistory::mergeBlob(cachePath, reinterpret_cast<const uint8_t*>(blob.data()), blob.size(), &deleted);
+
+  EXPECT_EQ(added, 1);  // gamma only
+  EXPECT_EQ(deleted, 0);
+  const auto e = LookupHistory::load(cachePath);
+  bool sawGamma = false, sawAlpha = false;
+  for (const auto& x : e) {
+    if (x.word == "gamma") {
+      sawGamma = true;
+      EXPECT_EQ(x.status, Status::Suggestion);  // v5 > v1 -> remote wins
+    }
+    if (x.word == "alpha") {
+      sawAlpha = true;
+      EXPECT_EQ(x.status, Status::Direct);  // v5 <= v10 -> local wins
+    }
+  }
+  EXPECT_TRUE(sawGamma);
+  EXPECT_TRUE(sawAlpha);
+}
+
+// Every applied add/delete rewrites the history file, so the cached versions are dropped and
+// rebuilt before the next lookup. This walks a blob where each line mutates, which is the
+// path that would break if the cache were patched incrementally or never invalidated: the
+// second and later lines would read pre-merge state.
+TEST_F(LookupHistoryTest, MergeBlobAppliesEveryLineWhenEachOneMutates) {
+  LookupHistory::addWord(cachePath, "keep", Status::Direct);  // v1
+
+  const std::string blob = "Hone|D|5\nHtwo|D|6\nHthree|D|7\nTkeep|8\n";
+  int deleted = -1;
+  const int added =
+      LookupHistory::mergeBlob(cachePath, reinterpret_cast<const uint8_t*>(blob.data()), blob.size(), &deleted);
+
+  EXPECT_EQ(added, 3);
+  EXPECT_EQ(deleted, 1);
+  const auto e = LookupHistory::load(cachePath);
+  EXPECT_EQ(e.size(), 3u);
+  for (const auto& x : e) EXPECT_NE(x.word, "keep");
+
+  // Re-merging the same blob must be a no-op: the versions now match exactly, which also
+  // proves the rebuilt cache reflects the post-merge file rather than the snapshot.
+  int deleted2 = -1;
+  EXPECT_EQ(LookupHistory::mergeBlob(cachePath, reinterpret_cast<const uint8_t*>(blob.data()), blob.size(), &deleted2),
+            0);
+  EXPECT_EQ(deleted2, 0);
 }
 
 }  // namespace

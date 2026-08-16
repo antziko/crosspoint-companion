@@ -2,6 +2,7 @@
 
 #include <HalStorage.h>
 #include <Logging.h>
+#include <Memory.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -22,9 +23,7 @@ std::string LookupHistory::tombFilePath(const std::string& cachePath) { return c
 
 std::string LookupHistory::verFilePath(const std::string& cachePath) { return cachePath + "/dictionary_history.ver"; }
 
-std::string LookupHistory::syncFilePath(const std::string& cachePath) {
-  return cachePath + "/dictionary_history.sync";
-}
+std::string LookupHistory::syncFilePath(const std::string& cachePath) { return cachePath + "/dictionary_history.sync"; }
 
 namespace {
 
@@ -147,9 +146,25 @@ bool LookupHistory::forEachLine(const std::string& path, bool (*fn)(void* ctx, c
   char lineBuf[256];
   int lineLen = 0;
 
-  while (file.available()) {
-    const int b = file.read();
-    if (b < 0) break;
+  // Block reads, not byte reads. Every HalFile call takes the storage mutex, so the
+  // previous one-byte-at-a-time loop paid a mutex round trip per character: a ~5KB
+  // history file cost ~5000 guarded reads per scan, and mergeBlob scans it once per
+  // blob line. A device capture measured a stats leg at sink=52236ms of elapsed=52362ms
+  // with the network taking 126ms. Line splitting, truncation, early-stop and
+  // trailing-line handling are all unchanged — only the source of the bytes differs.
+  // 64 bytes rather than something larger because lineBuf already puts 256 on the
+  // stack here; this cuts mutex traffic ~64x for 64 more bytes.
+  char chunk[64];
+  int have = 0;
+  int pos = 0;
+
+  for (;;) {
+    if (pos == have) {
+      have = file.read(chunk, sizeof(chunk));
+      if (have <= 0) break;  // EOF or error
+      pos = 0;
+    }
+    const char b = chunk[pos++];
 
     if (b == '\n' || b == '\r') {
       if (lineLen > 0) {
@@ -161,7 +176,7 @@ bool LookupHistory::forEachLine(const std::string& path, bool (*fn)(void* ctx, c
     }
 
     if (lineLen < static_cast<int>(sizeof(lineBuf)) - 1) {
-      lineBuf[lineLen++] = static_cast<char>(b);
+      lineBuf[lineLen++] = b;
     }
   }
 
@@ -705,7 +720,7 @@ size_t LookupHistory::serializeBlob(const std::string& cachePath, uint8_t* out, 
       [](void* ctx, const char* line, int len) {
         auto* c = static_cast<SumCtx*>(ctx);
         if (verOf(line, len) <= c->since) return true;  // delta filter
-        c->total += static_cast<size_t>(len) + 2;        // 'H' + line + '\n'
+        c->total += static_cast<size_t>(len) + 2;       // 'H' + line + '\n'
         return true;
       },
       &sc);
@@ -835,10 +850,111 @@ void LookupHistory::commitUpload(const std::string& cachePath, const BlobStats& 
   storeWatermark(cachePath, wm);
 }
 
+namespace {
+
+// Snapshot of the two per-word version lookups mergeBlob needs, one slot per blob line.
+// `hist` is -1 when the word is absent from the history file (what historyVersionOf
+// returns); `tomb` is 0 when absent (what tombstoneVersionOf returns).
+struct BlobVerPair {
+  int32_t hist;
+  uint32_t tomb;
+};
+
+struct BlobFillCtx {
+  const uint8_t* blob;
+  size_t len;
+  BlobVerPair* out;
+  size_t count;
+  bool fillingTomb;
+};
+
+// forEachLine callback: takes ONE line of the history (or tombstone) file and pushes its
+// version into every blob slot whose word matches.
+//
+// This is the loop inversion that removes the cost. The old code walked the blob and
+// scanned a whole file per blob line (O(blob x file) SD reads); this walks each file once
+// and scans the blob — already in RAM — per file line. Same O(blob x file) comparisons,
+// but they are memcmp against a RAM buffer instead of mutex-guarded SD reads.
+bool blobFillLine(void* ctx, const char* line, int len) {
+  auto* c = static_cast<BlobFillCtx*>(ctx);
+  const Parsed fp = parseEntry(line, len);
+  if (fp.wordLen <= 0) return true;
+
+  size_t idx = 0;
+  size_t i = 0;
+  while (i < c->len && idx < c->count) {
+    size_t j = i;
+    while (j < c->len && c->blob[j] != '\n') j++;
+    const char* lineStart = reinterpret_cast<const char*>(c->blob + i);
+    const int lineLen = static_cast<int>(j - i);
+    i = j + 1;
+    // Advance for EVERY line, matched or not, so slots agree with mergeBlob's indexing.
+    const size_t slot = idx++;
+    if (lineLen < 2) continue;
+    const Parsed bp = parseEntry(lineStart + 1, lineLen - 1);
+    if (bp.wordLen != fp.wordLen) continue;
+    if (memcmp(lineStart + 1, line, static_cast<size_t>(fp.wordLen)) != 0) continue;
+    if (c->fillingTomb) {
+      if (fp.ver > c->out[slot].tomb) c->out[slot].tomb = fp.ver;
+    } else if (static_cast<int32_t>(fp.ver) > c->out[slot].hist) {
+      c->out[slot].hist = static_cast<int32_t>(fp.ver);
+    }
+  }
+  return true;
+}
+
+// Liveness pump — see LookupHistory::setMergeProgressHook.
+void (*s_mergePumpFn)(void* ctx, size_t done, size_t total) = nullptr;
+void* s_mergePumpCtx = nullptr;
+
+}  // namespace
+
+void LookupHistory::setMergeProgressHook(void (*fn)(void* ctx, size_t done, size_t total), void* ctx) {
+  s_mergePumpFn = fn;
+  s_mergePumpCtx = ctx;
+}
+
 int LookupHistory::mergeBlob(const std::string& cachePath, const uint8_t* blob, size_t len, int* outDeleted) {
   if (outDeleted) *outDeleted = 0;
   if (!blob || len == 0) return 0;
-  loadCounter(cachePath);  // materialize the Lamport clock before observeVersion calls
+
+  // RAM-only pre-pass: count lines and find the highest version in the blob, so the
+  // Lamport clock is raised ONCE (and before any edit lands) instead of once per line.
+  // observeVersion() re-reads the counter file on every call, and on a legacy all-zero
+  // history it re-derives the clock from full scans of BOTH files and then declines to
+  // persist it (`if (cur > 0)`), so the old per-line call could be two whole file scans
+  // per blob line on its own.
+  size_t lineCount = 0;
+  uint32_t maxVer = 0;
+  {
+    size_t i = 0;
+    while (i < len) {
+      size_t j = i;
+      while (j < len && blob[j] != '\n') j++;
+      const char* lineStart = reinterpret_cast<const char*>(blob + i);
+      const int lineLen = static_cast<int>(j - i);
+      i = j + 1;
+      lineCount++;
+      // Same admission test as the merge loop below, so the clock is raised past exactly
+      // the versions the old per-line observeVersion() would have seen — no more.
+      if (lineLen < 2 || (lineStart[0] != 'T' && lineStart[0] != 'H')) continue;
+      const Parsed p = parseEntry(lineStart + 1, lineLen - 1);
+      if (p.wordLen > 0 && p.ver > maxVer) maxVer = p.ver;
+    }
+  }
+  observeVersion(cachePath, maxVer);  // materializes the clock too (loadCounter inside)
+
+  // Version snapshot, rebuilt after any applied add/delete. Rebuilding rather than
+  // patching is what keeps it exactly equivalent to querying live: addWordVer() can
+  // evict an unrelated word when the history is at its cap, which would silently
+  // invalidate a patched entry. Optional — over the cap or on OOM the live queries run.
+  constexpr size_t kMaxCachedLines = 512;  // 512 * 8B = 4KB
+  std::unique_ptr<BlobVerPair[]> vers;
+  if (lineCount > 0 && lineCount <= kMaxCachedLines) {
+    vers = makeUniqueNoThrow<BlobVerPair[]>(lineCount);
+    if (!vers) LOG_DBG("LH", "merge: no heap for %u-slot version cache; using live queries", (unsigned)lineCount);
+  }
+  bool versValid = false;
 
   int added = 0;
   int deleted = 0;
@@ -848,12 +964,16 @@ int LookupHistory::mergeBlob(const std::string& cachePath, const uint8_t* blob, 
   for (int pass = 0; pass < 2; pass++) {
     const char want = (pass == 0) ? 'T' : 'H';
     size_t i = 0;
+    size_t idx = 0;
     while (i < len) {
       size_t j = i;
       while (j < len && blob[j] != '\n') j++;
       const char* lineStart = reinterpret_cast<const char*>(blob + i);
       const int lineLen = static_cast<int>(j - i);
       i = j + 1;
+      // Advance for EVERY line, matched or not — blobFillLine indexes the same way.
+      const size_t slot = idx++;
+      if (s_mergePumpFn) s_mergePumpFn(s_mergePumpCtx, static_cast<size_t>(pass) * len + i, len * 2);
       if (lineLen < 2 || lineStart[0] != want) continue;
 
       const char* payload = lineStart + 1;
@@ -863,10 +983,20 @@ int LookupHistory::mergeBlob(const std::string& cachePath, const uint8_t* blob, 
       std::string word;
       word.assign(payload, static_cast<size_t>(p.wordLen));
 
-      observeVersion(cachePath, p.ver);
+      if (vers && !versValid) {
+        for (size_t k = 0; k < lineCount; k++) {
+          vers[k].hist = -1;
+          vers[k].tomb = 0;
+        }
+        BlobFillCtx hc{blob, len, vers.get(), lineCount, false};
+        forEachLine(filePath(cachePath), blobFillLine, &hc);
+        BlobFillCtx tc{blob, len, vers.get(), lineCount, true};
+        forEachLine(tombFilePath(cachePath), blobFillLine, &tc);
+        versValid = true;
+      }
 
-      const int histVer = historyVersionOf(cachePath, word);  // -1 if absent
-      const uint32_t tombVer = tombstoneVersionOf(cachePath, word);
+      const int histVer = vers ? vers[slot].hist : historyVersionOf(cachePath, word);  // -1 if absent
+      const uint32_t tombVer = vers ? vers[slot].tomb : tombstoneVersionOf(cachePath, word);
 
       if (want == 'T') {
         // Apply a remote delete only if it is newer than what we know about the
@@ -876,6 +1006,7 @@ int LookupHistory::mergeBlob(const std::string& cachePath, const uint8_t* blob, 
         removeWord(cachePath, word);
         setTombstone(cachePath, word, p.ver);
         deleted++;
+        versValid = false;  // both files changed; re-scan before the next lookup
       } else {
         // Apply a remote add if: the word is entirely new to us (covers legacy v0
         // entries, which must merge even though their version ties absent==0), OR
@@ -887,6 +1018,7 @@ int LookupHistory::mergeBlob(const std::string& cachePath, const uint8_t* blob, 
         }
         addWordVer(cachePath, word, statusFromChar(p.status), p.ver);
         added++;
+        versValid = false;  // history rewritten (and a tombstone possibly cleared)
       }
     }
   }

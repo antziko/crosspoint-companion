@@ -129,6 +129,17 @@ class LookupHistory {
   // outDeleted is non-null, receives the number of remote DELETES applied.
   static int mergeBlob(const std::string& cachePath, const uint8_t* blob, size_t len, int* outDeleted = nullptr);
 
+  // Liveness pump for mergeBlob, which runs inside the stats GET's response callback and
+  // so blocks the only task that can repaint. Called once per blob line with progress in
+  // BYTES across both merge passes (done <= total, total = 2 * blob length).
+  //
+  // CONTRACT: called from deep inside a merge — it must not allocate, must not touch the
+  // history files, and must rate-limit itself (this fires per line, not on a clock). Raw
+  // function pointer + ctx rather than std::function: no heap, no per-signature bloat.
+  // Must be cleared before the owning object is destroyed. Null by default, so host tests
+  // and every non-sync caller pay one predictable branch per line.
+  static void setMergeProgressHook(void (*fn)(void* ctx, size_t done, size_t total), void* ctx);
+
  private:
   static std::string filePath(const std::string& cachePath);
   static std::string tmpFilePath(const std::string& cachePath);

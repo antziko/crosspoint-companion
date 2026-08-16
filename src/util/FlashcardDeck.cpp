@@ -212,9 +212,21 @@ bool FlashcardDeck::forEachLine(const std::string& path, bool (*fn)(void* ctx, c
   char lineBuf[512];
   int lineLen = 0;
 
-  while (file.available()) {
-    const int b = file.read();
-    if (b < 0) break;
+  // Block reads, not byte reads — same change and same reason as
+  // LookupHistory::forEachLine (see the comment there): each HalFile call takes the
+  // storage mutex, and mergeBlob rescans the deck once per blob line. Behaviour is
+  // identical; only the byte source changes.
+  char chunk[64];
+  int have = 0;
+  int pos = 0;
+
+  for (;;) {
+    if (pos == have) {
+      have = file.read(chunk, sizeof(chunk));
+      if (have <= 0) break;  // EOF or error
+      pos = 0;
+    }
+    const char b = chunk[pos++];
 
     if (b == '\n' || b == '\r') {
       if (lineLen > 0) {
@@ -225,7 +237,7 @@ bool FlashcardDeck::forEachLine(const std::string& path, bool (*fn)(void* ctx, c
       continue;
     }
 
-    if (lineLen < static_cast<int>(sizeof(lineBuf)) - 1) lineBuf[lineLen++] = static_cast<char>(b);
+    if (lineLen < static_cast<int>(sizeof(lineBuf)) - 1) lineBuf[lineLen++] = b;
   }
 
   if (lineLen > 0) {
@@ -1247,10 +1259,61 @@ void FlashcardDeck::commitUpload(const std::string& cachePath, const BlobStats& 
 
 // --- Merge -----------------------------------------------------------------
 
+namespace {
+// Liveness pump — see FlashcardDeck::setMergeProgressHook.
+void (*s_mergePumpFn)(void* ctx, size_t done, size_t total) = nullptr;
+void* s_mergePumpCtx = nullptr;
+}  // namespace
+
+void FlashcardDeck::setMergeProgressHook(void (*fn)(void* ctx, size_t done, size_t total), void* ctx) {
+  s_mergePumpFn = fn;
+  s_mergePumpCtx = ctx;
+}
+
 int FlashcardDeck::mergeBlob(const std::string& cachePath, const uint8_t* blob, size_t len, int* outDeleted) {
   if (outDeleted) *outDeleted = 0;
   if (!blob || len == 0) return 0;
-  loadCounter(cachePath);  // materialize the Lamport clock before observeVersion calls
+
+  // RAM-only pre-pass: raise the Lamport clock ONCE, before any edit lands, instead of
+  // once per blob line. observeVersion() re-reads the counter file on every call, so the
+  // per-line form cost a file open per line on its own. The admission tests below mirror
+  // the merge loop exactly, so the clock is raised past the same versions and no others.
+  {
+    uint32_t maxVer = 0;
+    size_t i = 0;
+    while (i < len) {
+      size_t j = i;
+      while (j < len && blob[j] != '\n') j++;
+      const char* lineStart = reinterpret_cast<const char*>(blob + i);
+      const int lineLen = static_cast<int>(j - i);
+      i = j + 1;
+      if (lineLen < 2) continue;
+      const char* payload = lineStart + 1;
+      const int plen = lineLen - 1;
+      if (lineStart[0] == 'T') {
+        int wl = 0;
+        const uint32_t ver = parseTomb(payload, plen, &wl);
+        if (wl > 0 && ver > maxVer) maxVer = ver;
+      } else if (lineStart[0] == 'H') {
+        int p0 = -1, p1 = -1, p2 = -1;
+        for (int k = 0; k < plen; k++)
+          if (payload[k] == '|') {
+            if (p0 < 0)
+              p0 = k;
+            else if (p1 < 0)
+              p1 = k;
+            else {
+              p2 = k;
+              break;
+            }
+          }
+        if (p0 < 0 || p1 < 0 || p2 < 0) continue;
+        const uint32_t ver = parseU32(payload + p1 + 1, p2 - p1 - 1);
+        if (ver > maxVer) maxVer = ver;
+      }
+    }
+    observeVersion(cachePath, maxVer);  // materializes the clock too (loadCounter inside)
+  }
 
   int added = 0;
   int deleted = 0;
@@ -1266,6 +1329,7 @@ int FlashcardDeck::mergeBlob(const std::string& cachePath, const uint8_t* blob, 
       const char* lineStart = reinterpret_cast<const char*>(blob + i);
       const int lineLen = static_cast<int>(j - i);
       i = j + 1;
+      if (s_mergePumpFn) s_mergePumpFn(s_mergePumpCtx, static_cast<size_t>(pass) * len + i, len * 2);
       if (lineLen < 2 || lineStart[0] != want) continue;
       const char* payload = lineStart + 1;
       const int plen = lineLen - 1;
@@ -1278,7 +1342,6 @@ int FlashcardDeck::mergeBlob(const std::string& cachePath, const uint8_t* blob, 
         // plus a `word` typedef, so `std::string word(payload, n)` expands the macro and
         // `word` never becomes a variable. Braces avoid the macro (no `word(`).
         std::string word{payload, static_cast<size_t>(wl)};
-        observeVersion(cachePath, ver);
         const int cardVer = cardVersionOf(cachePath, word);
         const uint32_t tombVer = tombstoneVersionOf(cachePath, word);
         const uint32_t localVer = std::max(cardVer >= 0 ? static_cast<uint32_t>(cardVer) : 0u, tombVer);
@@ -1309,7 +1372,6 @@ int FlashcardDeck::mergeBlob(const std::string& cachePath, const uint8_t* blob, 
         const uint32_t ver = parseU32(payload + p1 + 1, p2 - p1 - 1);
         const char* excerpt = payload + p2 + 1;
         const int excerptLen = plen - (p2 + 1);
-        observeVersion(cachePath, ver);
         const int cardVer = cardVersionOf(cachePath, word);
         if (cardVer >= 0) {
           if (ver <= static_cast<uint32_t>(cardVer)) continue;  // have it, not newer

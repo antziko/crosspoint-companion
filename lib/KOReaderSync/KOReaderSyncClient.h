@@ -244,4 +244,33 @@ class KOReaderSyncClient {
   static void resetByteCounters();
   static uint32_t bytesDown();
   static uint32_t bytesUp();
+
+  // --- In-request heartbeat -------------------------------------------------
+  // A sync runs INLINE on the calling activity's task (performSync() is not a
+  // FreeRTOS task), so Activity::loop() cannot tick while a leg is in flight and a
+  // slow leg leaves the screen frozen on one label. A device capture shows STATS_GET
+  // taking 51-60s while every other leg to the same server answered in 20-73ms.
+  //
+  // This hands the caller the only poll point that exists inside a blocking request:
+  // SecureHttpClient calls its AbortCallback on every iteration of the header/body
+  // read loops, including the delay() waits. `elapsedMs` is measured from the start of
+  // the current request.
+  //
+  // Raw function pointer + ctx, not std::function, per the project rule on template /
+  // std::function bloat — this signature would otherwise be instantiated per call site.
+  //
+  // CONTRACT — read before implementing one:
+  //  - It is called from inside the socket read loop on the sync task. Whatever it does
+  //    delays the transfer, so it MUST rate-limit itself on a TIME FLOOR. Never make the
+  //    work proportional to bytes: on X3 the SD shares the display SPI bus, and a
+  //    byte-triggered repaint feeds back (slower transfer -> more repaints -> slower
+  //    still), which is exactly how #2957 stage L took a download from 121KB/s to 5KB/s.
+  //    `received`/`total` are here to be DISPLAYED on a time-driven tick, never to drive
+  //    one. `total` is 0 until the Content-Length header has been parsed (and stays 0 if
+  //    the server sends none), so `received` climbing with `total` still 0 is normal.
+  //  - It must not allocate meaningfully: heap here is at its tightest (measured 24464
+  //    free mid-STATS_GET).
+  //  - Pass nullptr to clear. The client holds the pointer, so any object-bound callback
+  //    MUST clear it before that object is destroyed (activities are deleted on exit).
+  static void setHeartbeat(void (*fn)(void* ctx, uint32_t elapsedMs, size_t received, size_t total), void* ctx);
 };

@@ -124,6 +124,11 @@ struct NoWifiSleep {
 std::unique_ptr<freeink::SecureHttpClient> s_sessionClient;
 bool s_sessionActive = false;
 
+// In-request heartbeat (see KOReaderSyncClient::setHeartbeat). Null unless an activity
+// registered one; kept null-checked so a request pays nothing when nobody is listening.
+void (*s_heartbeatFn)(void* ctx, uint32_t elapsedMs, size_t received, size_t total) = nullptr;
+void* s_heartbeatCtx = nullptr;
+
 void beginSession() { s_sessionActive = true; }  // client lazily created on first request
 void endSession() {
   s_sessionClient.reset();  // closes the kept-alive connection
@@ -138,10 +143,31 @@ uint32_t koTraceReq(const char* tag, size_t bodyLen) {
                   snap.heapFree, snap.largest8Bit, snap.internalFree, (int)snap.rssi);
   return millis();
 }
-void koTraceResp(const char* tag, int status, size_t bytes, uint32_t startMs) {
+// `sinkMs` is time spent INSIDE our own response callback (JSON parse + the dict/
+// flashcard merge folds, which do SD I/O), separated from everything else — connect,
+// handshake, and waiting on the socket. HttpDownloader has printed this split as
+// `wait=/work=` since #2957 and it is the only thing that tells "the server is slow"
+// apart from "we are slow while the server waits for us".
+//
+// Why it matters here: STATS_GET is the ONLY leg with a streaming sink, and a device
+// capture shows it taking 60734ms and 51680ms while PROGRESS_GET (20ms), BOOKMARKS_GET
+// (32ms) and BOOKMARKS_PUT (28ms) hit the same server seconds apart. If sinkMs turns out
+// to be most of that, the stall is our fold doing per-entry SD work inside the socket
+// read loop — not the network — and the fix belongs in mergeBlob, not the transport.
+//
+// `beats` counts how many times the heartbeat callback ran. It is a diagnostic for the
+// on-screen liveness tick, which rides that same callback: SecureHttpClient polls it on
+// every iteration of the header and body read loops, but NOT inside ensureConnected()
+// (SecureHttpClient.h:214) — DNS, TCP connect and the TLS handshake all block with nothing
+// running. So a slow leg that reports beats=0 spent its time connecting, where no repaint
+// is reachable from this task at all, and beats>0 with no visible tick would instead mean
+// the paint path is at fault. One number separates those two.
+void koTraceResp(const char* tag, int status, size_t bytes, uint32_t startMs, uint32_t sinkMs = 0, uint32_t beats = 0) {
   const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
-  SdDebugLog::log("KOSYNC", "%s resp code=%d elapsed=%lums bytes=%u heap=%u largest8=%u", tag, status,
-                  (unsigned long)(millis() - startMs), (unsigned)bytes, snap.heapFree, snap.largest8Bit);
+  const unsigned long elapsed = millis() - startMs;
+  SdDebugLog::log("KOSYNC", "%s resp code=%d elapsed=%lums sink=%lums net=%lums beats=%lu bytes=%u heap=%u largest8=%u",
+                  tag, status, elapsed, (unsigned long)sinkMs, elapsed > sinkMs ? elapsed - sinkMs : 0,
+                  (unsigned long)beats, (unsigned)bytes, snap.heapFree, snap.largest8Bit);
 }
 
 // Outcome of a KOSync request: HTTP status + response body.
@@ -231,13 +257,18 @@ KoResponse koPerform(const char* method, const std::string& url, const std::stri
   bool lowHeap = false;
   bool reserved = false;
   size_t streamedBytes = 0;
-  const auto sink = [&r, &overCap, &lowHeap, &reserved, &streamedBytes, http, stream](const uint8_t* data, size_t len) {
+  uint32_t sinkMs = 0;  // cumulative time inside stream->fn — see koTraceResp
+  const auto sink = [&r, &overCap, &lowHeap, &reserved, &streamedBytes, &sinkMs, http, stream](const uint8_t* data,
+                                                                                               size_t len) {
     // Streaming consumer: nothing is retained, so the cap and the two heap guards below have
     // nothing to guard. A consumer that returns false is reported as a clean abort, same as a
     // guard trip, so callers take their existing NETWORK_ERROR path rather than a partial parse.
     if (stream && stream->fn) {
       streamedBytes += len;
-      if (!stream->fn(stream->ctx, data, len)) {
+      const uint32_t sinkStart = millis();
+      const bool ok = stream->fn(stream->ctx, data, len);
+      sinkMs += millis() - sinkStart;
+      if (!ok) {
         lowHeap = true;
         return false;
       }
@@ -287,10 +318,31 @@ KoResponse koPerform(const char* method, const std::string& url, const std::stri
     return true;
   };
 
+  // Heartbeat rides SecureHttpClient's AbortCallback: it is polled on every iteration of
+  // the header and body read loops INCLUDING the delay() waits, which is the only place
+  // anything can run while a leg blocks. It never aborts — always returns false. The
+  // std::function is constructed only when a heartbeat is registered, so the common path
+  // still passes the default nullptr and allocates nothing.
+  freeink::SecureHttpClient::AbortCallback beat;
+  uint32_t beats = 0;
+  if (s_heartbeatFn) {
+    beat = [startMs, &streamedBytes, &r, http, stream, &beats]() {
+      ++beats;
+      if (s_heartbeatFn) {
+        // Streaming legs never fill r.body, buffered ones never touch streamedBytes.
+        const size_t got = (stream && stream->fn) ? streamedBytes : r.body.size();
+        // 0 until the Content-Length header lands; stays 0 for a chunked/unframed body.
+        const size_t total = http->hasContentLength() ? http->getContentLength() : 0;
+        s_heartbeatFn(s_heartbeatCtx, millis() - startMs, got, total);
+      }
+      return false;  // never abort; this is a liveness tick, not a cancel
+    };
+  }
+
   if (body) {
-    r.status = http->sendRequest(method, reinterpret_cast<const uint8_t*>(body->data()), body->size(), sink);
+    r.status = http->sendRequest(method, reinterpret_cast<const uint8_t*>(body->data()), body->size(), sink, beat);
   } else {
-    r.status = http->GET(sink);
+    r.status = http->GET(sink, beat);
   }
   // A guard-tripped transfer is a failure, not a partial success: force a transport
   // error so callers (getStats/getBookmarks) fall to their NETWORK_ERROR path rather
@@ -311,10 +363,16 @@ KoResponse koPerform(const char* method, const std::string& url, const std::stri
   // streamed total instead — otherwise a streaming leg would report 0 bytes down.
   const size_t downBytes = (stream && stream->fn) ? streamedBytes : r.body.size();
   s_bytesDown += static_cast<uint32_t>(downBytes);
-  koTraceResp(tag, r.status, downBytes, startMs);
+  koTraceResp(tag, r.status, downBytes, startMs, sinkMs, beats);
   return r;
 }
 }  // namespace
+
+void KOReaderSyncClient::setHeartbeat(void (*fn)(void* ctx, uint32_t elapsedMs, size_t received, size_t total),
+                                      void* ctx) {
+  s_heartbeatFn = fn;
+  s_heartbeatCtx = ctx;
+}
 
 // RAII guard (declared in the header): open a keep-alive session for its lifetime.
 // Anonymous-namespace helpers above remain visible at file scope in this TU.
@@ -739,7 +797,29 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateStats(const std::string& doc
   // dictionary-history) and "fc" (per-book flashcards) sections are spliced in before
   // the closing brace. base64 uses A-Za-z0-9+/= — none need JSON-string escaping.
   std::string statsBlob;  // outlives serializeJson below
-  statsBlob.reserve(64);
+  // Reserve the exact final size instead of growing from 64 by doubling. base64 of the
+  // three optional blobs can reach ~8KB together, and libstdc++ realloc holds the old
+  // buffer while it allocates the new one — an unguarded throwing growth whose transient
+  // peak (old + new) is ~3x the final string. That peak, not the string, is what forced
+  // the activity-side dict/flashcard heap gates to be set absurdly high; sizing once
+  // removes it. Same reasoning as `body` below, which was already exact-reserved.
+  // base64 of n bytes is 4*ceil(n/3); +5 covers the ,"xx":"" punctuation per field.
+  {
+    auto b64Len = [](size_t n) { return n == 0 ? size_t{0} : 4 * ((n + 2) / 3) + 8; };
+    const size_t blobCap = 64 + b64Len(datedLen) + b64Len(dictLen) + b64Len(fcLen);
+    // reserve() throws-and-aborts under -fno-exceptions, so pre-check contiguity exactly
+    // as the `body` reserve below does. A starved heap gets a clean LOW_MEMORY skip.
+    multi_heap_info_t blobInfo;
+    heap_caps_get_info(&blobInfo, MALLOC_CAP_8BIT);
+    if (blobInfo.largest_free_block < blobCap) {
+      SdDebugLog::log("KOSYNC", "STATS_PUT blob-build: largest=%u < need=%u -> SKIP",
+                      (unsigned)blobInfo.largest_free_block, (unsigned)blobCap);
+      LOG_ERR("KOSync", "STATS_PUT: largest block %u < %u for blob build - skip to avoid abort",
+              (unsigned)blobInfo.largest_free_block, (unsigned)blobCap);
+      return LOW_MEMORY;
+    }
+    statsBlob.reserve(blobCap);
+  }
   {
     char scalar[64];
     const int sn = snprintf(
