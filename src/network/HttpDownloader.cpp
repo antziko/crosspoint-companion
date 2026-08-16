@@ -405,22 +405,75 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       LOG_ERR("HTTP", "wolfSSL request failed: %s", url.c_str());
       SdDebugLog::log("HTTP", "wolfSSL request failed after %lums heap=%u largest8=%u url=%s",
                       (unsigned long)(millis() - openStartMs), s.heapFree, s.largest8Bit, url.c_str());
-      // Retry once when nothing arrived. The ESP32-C3's LWIP stack routinely fails the
-      // first connect made after a previous socket closed (TIME_WAIT / sock<0) and then
+      // "This hop delivered nothing" — the condition both recovery paths below need, and
+      // NOT the same as "the transfer holds no bytes". resumeOffset and sink.downloaded
+      // are set equal at the top of every hop (by both resume branches below and by the
+      // range-restart rewind) and only the body callback moves them apart. Re-issuing
+      // such a hop is idempotent: it carries `Range: bytes=<resumeOffset>-` and appends
+      // exactly what the dead hop would have, so there is no duplicate to fear. On hop 1
+      // resumeOffset is 0 and this is the original `sink.downloaded == 0` unchanged.
+      const bool hopDeliveredNothing = sink.downloaded == resumeOffset;
+
+      // Retry once, immediately. The ESP32-C3's LWIP stack routinely fails the first
+      // connect made after a previous socket closed (TIME_WAIT / sock<0) and then
       // succeeds immediately — the churn KOSync sidesteps with a keep-alive session, but
-      // OPDS opens a fresh connection per user action. Observed on X3: this URL failed
-      // after 15403ms, then completed its handshake in 588ms on the user's own retry.
-      //
-      // Guarded on downloaded == 0: past the first body byte the sink already holds
-      // partial content, and re-running the GET would append a duplicate copy. The retry
-      // spends one hop of the redirect budget rather than tracking a separate counter.
-      if (!retriedConnect && sink.downloaded == 0) {
+      // OPDS opens a fresh connection per hop. Observed on X3: this URL failed after
+      // 15403ms, then completed its handshake in 588ms on the user's own retry.
+      if (!retriedConnect && hopDeliveredNothing) {
         retriedConnect = true;
-        SdDebugLog::log("HTTP", "connect retry (no bytes yet): %s", url.c_str());
+        SdDebugLog::log("HTTP", "connect retry (no bytes this hop): %s", url.c_str());
         delay(200);  // let the stack finish tearing the previous socket down
         continue;
       }
-      setDetail(sink.detail, "connect/read failed");
+
+      // A dead connect on a RESUME hop is a zero-byte hop, not the end of the download.
+      //
+      // Measured on X3 (opds_debug.txt): two runs at a 24139108-byte book carried 3452556
+      // and 2138234 bytes over 21 and 11 hops of clean forward progress, then both ended
+      // identically — the server closed mid-hop (tlsErr=-397 SOCKET_PEER_CLOSED_E) after
+      // a >26s stall, the reconnect failed in 4ms, and the whole partial download was
+      // discarded with over 100 resume attempts unspent. Neither memory nor the link was
+      // the problem: that 4ms failure was measured at 37248 free / 19444 largest, and a
+      // fresh connection to the same host 17s later handshook in 749ms and pulled a
+      // 130676-byte feed clean. A single 200ms retry is not always enough for whatever
+      // the far end is doing after ~100s of range requests, so give the hop the same
+      // convergence budget a truncated one gets.
+      //
+      // Sharing stalledResumes with the truncation path keeps the total bounded and lets
+      // any healthy hop reset it, so a long download that hiccups once every twenty hops
+      // never accumulates toward the ceiling. resumeOffset > 0 keeps this off the first
+      // hop: there is no partial body to protect there, and a server refusing the very
+      // first connect should fail fast rather than after four backoffs.
+      if (resumeOffset > 0 && hopDeliveredNothing && stalledResumes < MAX_RESUME_STALLS &&
+          resumes < MAX_RESUME_ATTEMPTS && !(sink.cancelFlag && *sink.cancelFlag)) {
+        ++stalledResumes;
+        ++resumes;
+        retriedConnect = false;  // the next hop gets its own one-shot immediate retry
+        // lastHopTlsErr is deliberately NOT touched: it records the error of the last hop
+        // that actually moved bytes, which is what the range-restart decision reads. A
+        // connect that never opened says nothing about record sizes.
+        const uint32_t backoffMs = 500u * static_cast<uint32_t>(stalledResumes);
+        SdDebugLog::log("HTTP", "connect failed on resume hop at %zu, backing off %lums (stall %d/%d, attempt %d/%d)",
+                        resumeOffset, (unsigned long)backoffMs, stalledResumes, MAX_RESUME_STALLS, resumes,
+                        MAX_RESUME_ATTEMPTS);
+        // Sliced, because nothing polls input during a backoff — the caller's progress
+        // callback only runs on body chunks — and at the top of the range that would be a
+        // 2s window with a dead Cancel button.
+        for (uint32_t slept = 0; slept < backoffMs && !(sink.cancelFlag && *sink.cancelFlag); slept += 100) {
+          delay(100);
+        }
+        if (sink.cancelFlag && *sink.cancelFlag) return HttpDownloader::ABORTED;
+        continue;
+      }
+      // Name the failure the user actually hit. "connect/read failed" is right for a hop
+      // that never opened, but says nothing after a resumed transfer has carried
+      // megabytes and then lost the far end — which is the case this branch now reaches
+      // only once the backoff above is spent.
+      if (resumeOffset > 0) {
+        setDetail(sink.detail, "connection lost at %zu bytes; server stopped responding", sink.downloaded);
+      } else {
+        setDetail(sink.detail, "connect/read failed");
+      }
       return HttpDownloader::HTTP_ERROR;
     }
     if (isRedirect(status)) {
