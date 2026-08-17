@@ -205,7 +205,11 @@ void OpdsServerListActivity::handleSelection() {
 
   // Settings mode: open editor for selected server, or create a new one
   auto resultHandler = [this](const ActivityResult&) {
-    // Reload server list when returning from editor
+    // Reload server list when returning from editor. Under the render lock:
+    // rebuildRowItems() clears rowItems_, whose label pointers the render task
+    // dereferences (same race as FileBrowserActivity, #3034). Result handlers
+    // are dispatched with the lock released, so taking it here is safe.
+    RenderLock lock(*this);
     OPDS_STORE.loadFromFile();
     nav.selected = 0;
     rebuildRowItems();
@@ -239,9 +243,13 @@ void OpdsServerListActivity::duplicateSelectedServer() {
   auto handler = [this, copy](const ActivityResult& res) {
     if (res.isCancelled) return;
     if (!OPDS_STORE.addServer(copy)) return;  // at-limit safety; already logged in store
-    // The list grew, so the row array is stale; rebuild before selecting the copy.
-    rebuildRowItems();
-    nav.selected = static_cast<int>(OPDS_STORE.getCount()) - 1;
+    {
+      // The list grew, so the row array is stale; rebuild before selecting the
+      // copy -- under the render lock, see the editor result handler above.
+      RenderLock lock(*this);
+      rebuildRowItems();
+      nav.selected = static_cast<int>(OPDS_STORE.getCount()) - 1;
+    }
     requestUpdate(true);
   };
 

@@ -45,14 +45,21 @@ void TxtReaderBookmarksActivity::loop() {
         requestUpdate();
         return;
       }
-      if (selectorIndex >= 0 && selectorIndex < static_cast<int>(bookmarks.size())) {
-        bookmarks.erase(bookmarks.begin() + selectorIndex);
-        TxtBookmarkStore::save(cachePath, bookmarks);
+      {
+        // render() indexes bookmarks with .at(), which aborts under
+        // -fno-exceptions when the index is stale -- so erasing here while the
+        // render task is mid-row is a reboot, not a glitch. Same race as
+        // FileBrowserActivity (#3034); released before requestUpdate().
+        RenderLock lock(*this);
+        if (selectorIndex >= 0 && selectorIndex < static_cast<int>(bookmarks.size())) {
+          bookmarks.erase(bookmarks.begin() + selectorIndex);
+          TxtBookmarkStore::save(cachePath, bookmarks);
+        }
+        if (selectorIndex >= static_cast<int>(bookmarks.size()) && selectorIndex > 0) {
+          selectorIndex--;
+        }
+        confirmingDelete = DELETE_MODE_OFF;
       }
-      if (selectorIndex >= static_cast<int>(bookmarks.size()) && selectorIndex > 0) {
-        selectorIndex--;
-      }
-      confirmingDelete = DELETE_MODE_OFF;
       requestUpdate();
       return;
     } else if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {

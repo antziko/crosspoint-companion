@@ -217,16 +217,23 @@ void EpubReaderBookmarksActivity::deleteSelectedBookmark() {
   if (bookmarks.empty() || nav.selected < 0 || nav.selected >= listCount()) {
     return;
   }
-  BOOKMARKS.removeBookmarkAt(static_cast<size_t>(nav.selected));
-  bookmarks = BOOKMARKS.getBookmarks();
-  // Deleting shifts every later bookmark's index, so the cached labels,
-  // subtitles and actionValues must be re-derived, not just trimmed.
-  rebuildRowItems();
+  {
+    // rowItems holds bare const char* into rowLabels/rowSubtitles, which
+    // rebuildRowItems() clears and refills. The render task dereferences those
+    // pointers, so the whole swap must be atomic against it (same race as
+    // FileBrowserActivity, #3034). Released before requestUpdate().
+    RenderLock lock(*this);
+    BOOKMARKS.removeBookmarkAt(static_cast<size_t>(nav.selected));
+    bookmarks = BOOKMARKS.getBookmarks();
+    // Deleting shifts every later bookmark's index, so the cached labels,
+    // subtitles and actionValues must be re-derived, not just trimmed.
+    rebuildRowItems();
 
-  if (nav.selected >= listCount() && nav.selected > 0) {
-    nav.selected--;
+    if (nav.selected >= listCount() && nav.selected > 0) {
+      nav.selected--;
+    }
+    nav.follow(listCount());
   }
-  nav.follow(listCount());
   requestUpdate(true);
 }
 

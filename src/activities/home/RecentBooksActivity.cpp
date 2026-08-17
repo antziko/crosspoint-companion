@@ -49,9 +49,16 @@ bool RecentBooksActivity::moveSelectedUp() {
   if (!RECENT_BOOKS.moveUp(nav.selected)) {
     return false;
   }
-  nav.selected--;
-  RECENT_BOOKS.saveToFile();
-  loadRecentBooks();
+  {
+    // loadRecentBooks() refills recentBooks and rebuilds rowItems, whose
+    // label/subtitle pointers the render task dereferences; mutate under the
+    // render lock (same race as FileBrowserActivity, #3034). Released before
+    // requestUpdate().
+    RenderLock lock(*this);
+    nav.selected--;
+    RECENT_BOOKS.saveToFile();
+    loadRecentBooks();
+  }
   requestUpdate();
   return true;
 }
@@ -60,9 +67,12 @@ bool RecentBooksActivity::moveSelectedDown() {
   if (!RECENT_BOOKS.moveDown(nav.selected)) {
     return false;
   }
-  nav.selected++;
-  RECENT_BOOKS.saveToFile();
-  loadRecentBooks();
+  {
+    RenderLock lock(*this);  // see moveSelectedUp()
+    nav.selected++;
+    RECENT_BOOKS.saveToFile();
+    loadRecentBooks();
+  }
   requestUpdate();
   return true;
 }
@@ -198,13 +208,19 @@ void RecentBooksActivity::promptRemoveBook(const std::string& path, const std::s
     }
     if (RECENT_BOOKS.removeByPath(path)) {
       LOG_DBG("RBA", "Removed from recents: %s", path.c_str());
-      loadRecentBooks();
-      if (recentBooks.empty()) {
-        nav.selected = 0;
-      } else if (nav.selected >= listCount()) {
-        nav.selected = listCount() - 1;
+      {
+        // Result handlers run with the render lock released (ActivityManager
+        // unlocks before dispatch precisely so a handler can take its own), and
+        // loadRecentBooks() invalidates every row pointer. See moveSelectedUp().
+        RenderLock lock(*this);
+        loadRecentBooks();
+        if (recentBooks.empty()) {
+          nav.selected = 0;
+        } else if (nav.selected >= listCount()) {
+          nav.selected = listCount() - 1;
+        }
+        nav.follow(listCount());
       }
-      nav.follow(listCount());
       requestUpdate(true);
     }
   };
