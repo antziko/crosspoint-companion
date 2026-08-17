@@ -53,21 +53,34 @@ constexpr int WOLFSSL_MEMORY_E = -125;
 // stall threshold forever. Every hop must make strict forward progress, and the
 // caller's cancel flag is polled per chunk, so a user can always abort.
 //
-// 256, not 128, because 128 was still a file-size cap in disguise and a measured X4
-// capture ran into it. On a 24,139,108-byte book over https, 18 hops delivered
-// 2,482,875 bytes -- 137,937 B/hop, every single hop between 51,748 and 219,477 bytes,
-// i.e. an order of magnitude above MIN_RESUME_HOP_BYTES with stalls=0 the whole way.
-// A perfectly converging transfer, and 128 * 137,937 = 17.7MB would have failed it at
-// 73% of the file. 256 covers ~35MB at that rate.
+// 512, arrived at in two measured steps on the same 24,139,108-byte https book.
 //
-// Raising it is cheap because this ceiling is not what bounds a bad server:
+// 128 -> 256: an X4 capture ran 18 hops at 137,937 B/hop, so 128 worked out to 17.7MB
+// and would have failed the file at 73%.
+//
+// 256 -> 512: a full X3 capture then showed the per-hop figure is not a constant but a
+// function of heap contiguity, and X3 sits far worse than X4. 139 hops delivered
+// 13,880,662 bytes -- 99,861 B/hop, needing 242 hops for the file against a cap of 256.
+// Six percent of margin, on a distribution that is BIMODAL rather than clustered: 62 of
+// those hops fell in 50-75KB and only 22 in 200-225KB, tracking `largest8` at connect
+// time. A run that lands in the low mode more often blows straight through 256 -- at the
+// smallest hop actually observed (51,731 bytes) the file needs 467. 512 covers that.
+//
+// Contiguity also erodes as a download proceeds, which is why the low mode is not rare:
+// across that capture free heap held flat (12,339 -> 11,822 comparing the first 40 hops
+// to the last 40) while largest8 fell 3,572 -> 2,632. Fragmentation, not a leak, so the
+// budget has to survive hops getting shorter rather than assume an average.
+//
+// Raising it stays cheap because this ceiling is not what bounds a bad server:
 // MAX_RESUME_STALLS ends a non-converging transfer after 4 consecutive short hops no
-// matter how high this is. What the ceiling bounds is total wall time on a server that
-// dribbles just above the stall threshold, and the per-hop cost that sets that is
-// ~1.4s, of which the TLS handshake is now only ~90ms (session tickets, see
-// SecureClient) -- the rest is TCP connect plus the server's time-to-first-byte on a
-// Range request.
-constexpr int MAX_RESUME_ATTEMPTS = 256;
+// matter how high this sits, and every hop must make strict forward progress. What the
+// ceiling bounds is wall time against a server dribbling just ABOVE the stall threshold
+// -- and the measured per-hop cost is ~1.36s of connect, of which only ~57ms is the TLS
+// handshake (session tickets) and ~15ms is TCP. The other ~1,285ms is the server's
+// time-to-first-byte on a Range request, i.e. 95% of a hop is the peer thinking. Nothing
+// here can shorten that; the ceiling only decides how long we are willing to keep trying,
+// and the caller's cancel flag is polled per chunk so a user can always stop it.
+constexpr int MAX_RESUME_ATTEMPTS = 512;
 constexpr size_t MIN_RESUME_HOP_BYTES = 16 * 1024;
 constexpr int MAX_RESUME_STALLS = 4;
 // Full restarts allowed when a server answers 200 to a Range request (i.e. it does
