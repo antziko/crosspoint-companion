@@ -2,6 +2,7 @@
 
 #include <DNSServer.h>
 #include <ESPmDNS.h>
+#include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <InflateReader.h>
@@ -279,6 +280,19 @@ void CrossPointWebServerActivity::startWebServer() {
   // disconnect/reconnect flapping and multi-second handleClient stalls. Mirrors
   // KOReaderSyncActivity / KOReaderAuthActivity.
   InflateReader::releaseWindow();
+
+  // Same for the SD font's resident glyph/kern arenas: the Wi-Fi picker rendered
+  // since onEnter() and a CJK SSID repopulates them, so they are live right at the
+  // moment the server object allocates. Rebuildable on demand; this activity's
+  // remaining screens are short status lines. Ports the reclaim from #3035, using
+  // feat's releaseCache() (a guaranteed reclaim) rather than upstream's
+  // releaseResidentCaches().
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    const uint32_t before = ESP.getFreeHeap();
+    fcm->releaseCache();
+    LOG_DBG("WEBACT", "Released font caches for the server (heap: %u -> %u)", (unsigned)before,
+            (unsigned)ESP.getFreeHeap());
+  }
 
   // Create the web server instance
   webServer.reset(new CrossPointWebServer());

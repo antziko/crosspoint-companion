@@ -1,5 +1,6 @@
 #include "OtaUpdateActivity.h"
 
+#include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <WiFi.h>
@@ -25,6 +26,18 @@ void OtaUpdateActivity::onWifiSelectionComplete(const bool success) {
     state = CHECKING_FOR_UPDATE;
   }
   requestUpdateAndWait();
+
+  // Release the SD font's resident glyph/kern arenas before the HTTPS work. The
+  // Wi-Fi picker this path just came through renders SSIDs, and a CJK one
+  // populates them; they are rebuildable on demand and sit in the size class the
+  // TLS record buffer competes for. Every remaining screen here is a short status
+  // line. Same reclaim as KOReaderSyncActivity; covers both the release-JSON fetch
+  // and the firmware download that follows.
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    const uint32_t before = ESP.getFreeHeap();
+    fcm->releaseCache();
+    LOG_DBG("OTA", "Released font caches for TLS (heap: %u -> %u)", (unsigned)before, (unsigned)ESP.getFreeHeap());
+  }
 
   const auto res = updater.checkForUpdate();
   if (res != OtaUpdater::OK) {

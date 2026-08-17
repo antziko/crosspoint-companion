@@ -231,6 +231,17 @@ void SdCardFont::freeStyleKernLigatureData(PerStyle& s) {
   s.kernRightClasses = nullptr;
   delete[] s.ligaturePairs;
   s.ligaturePairs = nullptr;
+  // loadStyleKernLigatureData() publishes ligaturePairs into stubData, and
+  // applyKernLigaturePointers() publishes it into miniData. Both structures
+  // outlive this free -- epdFont.data points at one of them -- so leaving the
+  // published copies behind hands the draw path a freed array with a non-zero
+  // count. Harmless while this was only reachable from load error paths (the
+  // array was still null there) and from freeStyleAll (which unloads the style
+  // outright), but releaseCache() now calls it on a LIVE style.
+  s.stubData.ligaturePairs = nullptr;
+  s.stubData.ligaturePairCount = 0;
+  s.miniData.ligaturePairs = nullptr;
+  s.miniData.ligaturePairCount = 0;
   s.kernLigLoaded = false;
 }
 
@@ -1407,6 +1418,14 @@ void SdCardFont::releaseCache() {
   for (uint8_t i = 0; i < MAX_STYLES; i++) {
     if (!styles_[i].present) continue;
     freeStyleMiniData(styles_[i]);
+    // Kern class tables + ligature pairs too (~3KB each for the classes). They are
+    // rebuildable: loadStyleKernLigatureData() re-reads them from the .cpfont on the next
+    // prewarm, gated by the kernLigLoaded flag this clears. Size class matters more than
+    // the total here -- a few 3KB blocks sitting mid-heap are exactly what a TLS record
+    // buffer cannot allocate around. Upstream's equivalent (#3035
+    // releaseResidentCaches) frees these too, but leaves stubData.ligaturePairs pointing
+    // at the freed array; freeStyleKernLigatureData() nulls the published copies here.
+    freeStyleKernLigatureData(styles_[i]);
     styles_[i].epdFont.data = &styles_[i].stubData;
     applyGlyphMissCallback(i);
   }

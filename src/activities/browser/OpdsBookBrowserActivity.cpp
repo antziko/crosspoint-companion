@@ -1,6 +1,7 @@
 #include "OpdsBookBrowserActivity.h"
 
 #include <Arduino.h>
+#include <FontCacheManager.h>
 #include <FreeInkUIIcon.h>
 #include <GfxRenderer.h>
 #include <HalGPIO.h>
@@ -701,6 +702,19 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path, const bool allo
   // to gpio.deviceIsX3() if HTTPS OPDS regresses on X4.
   InflateReader::releaseWindow();
 
+  // Same reclaim for the SD font's resident glyph/kern arenas. The browsing list
+  // renders CJK book titles through the SD fallback, so by the time a feed is
+  // re-fetched those arenas are populated -- and they sit in exactly the 3-12KB
+  // size class the TLS record buffer needs. Rebuilt on demand by the list repaint
+  // after the transfer (one batch prewarm now, see GfxRenderer::
+  // ensureSdGlyphsResident), so the cost is paid where there is heap for it.
+  // releaseCache(), not clearCache(): the latter keeps the mini arena unless free
+  // heap is already under its own 40KB floor, so it is not a guaranteed reclaim.
+  // Placed BEFORE the preflight below so the measurement sees the recovered heap.
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    fcm->releaseCache();
+  }
+
   if (fromCache) {
     SdDebugLog::log("OPDS", "feed cache hit: depth=%u path=%s heap=%u", (unsigned)navigationHistory.size(),
                     feedPath.c_str(), (unsigned)ESP.getFreeHeap());
@@ -1081,6 +1095,10 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   // re-fetched after the download. Worst on the X3 (less RAM).
   const int savedIndex = selectorIndex;
   releaseEntries();  // the row buffers are part of the feed too — see releaseEntries()
+  // And the SD font arenas the list render populated — see fetchFeed().
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    fcm->releaseCache();
+  }
   const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   SdDebugLog::log("OPDS", "download start, heap=%u, largest=%u, url=%s", (unsigned)ESP.getFreeHeap(),
                   (unsigned)largestBlock, downloadUrl.c_str());

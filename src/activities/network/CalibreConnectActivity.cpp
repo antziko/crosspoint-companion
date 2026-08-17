@@ -1,6 +1,7 @@
 #include "CalibreConnectActivity.h"
 
 #include <ESPmDNS.h>
+#include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <WiFi.h>
@@ -79,6 +80,13 @@ void CalibreConnectActivity::startWebServer() {
   if (MDNS.begin(HOSTNAME)) {
     // mDNS is optional for the Calibre plugin but still helpful for users.
     LOG_DBG("CAL", "mDNS started: http://%s.local/", HOSTNAME);
+  }
+
+  // Release the SD font's resident glyph/kern arenas before the server object
+  // allocates -- the Wi-Fi picker may have repopulated them rendering a CJK SSID.
+  // Rebuildable on demand. See CrossPointWebServerActivity::startWebServer().
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    fcm->releaseCache();
   }
 
   webServer.reset(new CrossPointWebServer());
