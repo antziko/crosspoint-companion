@@ -79,7 +79,12 @@ namespace {
 //      changed — a v46 .bin read back at the new width desyncs every subsequent read.
 //      Covers upstream's separate #2935 bump (their v37) as well; feat's numbering is
 //      independently ahead, so this is one bump rather than two.
-constexpr uint8_t SECTION_FILE_VERSION = 47;
+// v48: Focus Reading line breaking changed -- a visible hyphen or dash inside a word is now a
+//      break opportunity, and Focus emphasis became a byte annotation on a whole token instead
+//      of a two-token split, so the hyphenator sees the whole word and every legal break is
+//      reachable. Both move where lines break, so v47 cached line/word positions no longer
+//      match. Covers upstream's #2892 (their v38).
+constexpr uint8_t SECTION_FILE_VERSION = 48;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
