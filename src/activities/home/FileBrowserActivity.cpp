@@ -361,6 +361,22 @@ bool FileBrowserActivity::removeDirFile(const std::string& fullPath) {
   return true;
 }
 
+// Every mutation of the list state below runs under a RenderLock.
+//
+// render() executes on the ActivityManager render task and reads `basepath`,
+// `files[i].name`/`.size`, `selectorIndex`, `totalFiles` and
+// `windowStartFileRank`; loop() runs on the main task and rebuilds all of them
+// through loadWindow(), which clears and refills `files`. ActivityManager
+// deliberately leaves the locking to the activity, and this screen never took
+// it. Upstream decoded the resulting crash on hardware: the render task's row
+// lambda called getFileExtension() on a freed std::string, rfind('.') over
+// garbage returned npos, and substr(npos) aborted (#3034). The window scales
+// with render time, so the CJK SD-fallback path widens it considerably.
+//
+// The lock is always released before requestUpdate(), finish(), onSelectBook(),
+// onGoHome() and startActivityForResult*(): RenderLock wraps a plain
+// (non-recursive) mutex taken with portMAX_DELAY, so holding it across an
+// activity transition deadlocks rather than fails.
 void FileBrowserActivity::loop() {
   // Hold Back at root (button reads "Home") toggles show-hidden-files and reloads the list.
   if (mode == Mode::Books && basepath == "/" && !lockLongPressBack && !hiddenToggleFired &&
@@ -368,7 +384,10 @@ void FileBrowserActivity::loop() {
     hiddenToggleFired = true;
     SETTINGS.showHiddenFiles = !SETTINGS.showHiddenFiles;
     SETTINGS.saveToFile();
-    loadFirstWindow();  // the visible set changed; restart from the top
+    {
+      RenderLock lock(*this);
+      loadFirstWindow();  // the visible set changed; restart from the top
+    }
     requestUpdate(true);
     return;
   }
@@ -382,8 +401,11 @@ void FileBrowserActivity::loop() {
   // In firmware-pick mode we keep navigation simple: short Back = up dir / cancel.
   if (mode == Mode::Books && mappedInput.isPressed(MappedInputManager::Button::Back) &&
       mappedInput.getHeldTime() >= GO_HOME_MS && basepath != "/" && !lockLongPressBack) {
-    basepath = "/";
-    loadFirstWindow();
+    {
+      RenderLock lock(*this);
+      basepath = "/";
+      loadFirstWindow();
+    }
     requestUpdate();
     return;
   }
@@ -431,7 +453,10 @@ void FileBrowserActivity::loop() {
             if (RECENT_BOOKS.pruneMissing()) {
               RECENT_BOOKS.saveToFile();
             }
-            reloadCurrentWindow();  // re-pull the window around the current position
+            {
+              RenderLock lock(*this);
+              reloadCurrentWindow();  // re-pull the window around the current position
+            }
             requestUpdate(true);
           } else {
             LOG_ERR("FileBrowser", "Failed to delete: %s", fullPath.c_str());
@@ -447,14 +472,24 @@ void FileBrowserActivity::loop() {
       return;
     } else {
       // --- SHORT PRESS ACTION: OPEN/NAVIGATE ---
-      if (basepath.back() != '/') basepath += "/";
-
       if (isDirectory) {
-        basepath += entry.substr(0, entry.length() - 1);
-        loadFirstWindow();
+        {
+          RenderLock lock(*this);
+          // `entry` is a reference INTO files[], which loadFirstWindow() clears
+          // — read it into basepath before the load, never after.
+          if (basepath.back() != '/') basepath += "/";
+          basepath += entry.substr(0, entry.length() - 1);
+          loadFirstWindow();
+        }
         requestUpdate();
       } else {
-        onSelectBook(basepath + entry);
+        std::string fullPath;
+        {
+          RenderLock lock(*this);
+          if (basepath.back() != '/') basepath += "/";
+          fullPath = basepath + entry;  // own the string: `entry` points into files[]
+        }
+        onSelectBook(fullPath);  // launches an activity: never under the lock
       }
     }
     return;
@@ -465,14 +500,14 @@ void FileBrowserActivity::loop() {
     if (mappedInput.getHeldTime() < GO_HOME_MS) {
       if (basepath != "/") {
         const std::string oldPath = basepath;
-
-        basepath.replace(basepath.find_last_of('/'), std::string::npos, "");
-        if (basepath.empty()) basepath = "/";
-
         const auto pos = oldPath.find_last_of('/');
         const std::string dirName = oldPath.substr(pos + 1) + "/";
-        loadWindowContaining(dirName);  // restore selection onto the folder we came out of
-
+        {
+          RenderLock lock(*this);
+          basepath.replace(basepath.find_last_of('/'), std::string::npos, "");
+          if (basepath.empty()) basepath = "/";
+          loadWindowContaining(dirName);  // restore selection onto the folder we came out of
+        }
         requestUpdate();
       } else if (mode == Mode::PickFirmware) {
         // Firmware picker at root: cancel back to caller instead of going home.
@@ -489,20 +524,26 @@ void FileBrowserActivity::loop() {
   // Single-step within the window; crossing an edge loads the adjacent window (which wraps
   // around at the very ends). `files` is one screen, so a step past the edge is a page-turn.
   const auto navigateNext = [this] {
-    if (files.empty()) return;
-    if (selectorIndex + 1 < files.size()) {
-      selectorIndex++;
-    } else {
-      pageDown();
+    {
+      RenderLock lock(*this);
+      if (files.empty()) return;
+      if (selectorIndex + 1 < files.size()) {
+        selectorIndex++;
+      } else {
+        pageDown();  // rebuilds files[]
+      }
     }
     requestUpdate();
   };
   const auto navigatePrevious = [this] {
-    if (files.empty()) return;
-    if (selectorIndex > 0) {
-      selectorIndex--;
-    } else {
-      pageUp();
+    {
+      RenderLock lock(*this);
+      if (files.empty()) return;
+      if (selectorIndex > 0) {
+        selectorIndex--;
+      } else {
+        pageUp();  // rebuilds files[]
+      }
     }
     requestUpdate();
   };
@@ -511,11 +552,17 @@ void FileBrowserActivity::loop() {
   buttonNavigator.onRelease({MappedInputManager::Button::Right}, navigateNext);
   buttonNavigator.onRelease({MappedInputManager::Button::Left}, navigatePrevious);
   buttonNavigator.onContinuous({MappedInputManager::Button::Right}, [this] {
-    pageDown();
+    {
+      RenderLock lock(*this);
+      pageDown();
+    }
     requestUpdate();
   });
   buttonNavigator.onContinuous({MappedInputManager::Button::Left}, [this] {
-    pageUp();
+    {
+      RenderLock lock(*this);
+      pageUp();
+    }
     requestUpdate();
   });
 
@@ -527,7 +574,10 @@ void FileBrowserActivity::loop() {
       break;
     case ReaderUtils::SideNavAction::ROTATE:
       ReaderUtils::cycleDisplayOrientation(renderer, -1);
-      reloadCurrentWindow();  // window capacity changed with orientation; re-pull from current top
+      {
+        RenderLock lock(*this);
+        reloadCurrentWindow();  // window capacity changed with orientation; re-pull from current top
+      }
       requestUpdate();
       break;
     case ReaderUtils::SideNavAction::NONE:
@@ -539,7 +589,10 @@ void FileBrowserActivity::loop() {
       break;
     case ReaderUtils::SideNavAction::ROTATE:
       ReaderUtils::cycleDisplayOrientation(renderer, 1);
-      reloadCurrentWindow();  // window capacity changed with orientation; re-pull from current top
+      {
+        RenderLock lock(*this);
+        reloadCurrentWindow();  // window capacity changed with orientation; re-pull from current top
+      }
       requestUpdate();
       break;
     case ReaderUtils::SideNavAction::NONE:
