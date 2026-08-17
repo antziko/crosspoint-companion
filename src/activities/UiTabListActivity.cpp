@@ -46,6 +46,11 @@ void UiTabListActivity::onRowAction(const fui::ActionEvent& event) {
 }
 
 void UiTabListActivity::moveRingTo(const int ringIndex) {
+  // Under the render lock: syncTabListViewport() now hands ListNav to list()
+  // (props.nav), so the render task WRITES top/drawnRows back into the same
+  // struct this mutates. Released before requestUpdate() -- RenderLock is a
+  // plain, non-recursive mutex.
+  RenderLock lock(*this);
   auto& n = activeNav();
   n.selected = ringIndex;
   if (ringIndex == 0) {
@@ -61,6 +66,7 @@ void UiTabListActivity::moveRingTo(const int ringIndex) {
     n.top = fui::listTopIndexFor(static_cast<int16_t>(ringIndex - 1), static_cast<uint16_t>(n.top < 0 ? 0 : n.top),
                                  rows, static_cast<uint16_t>(listCount()));
   }
+  lock.unlock();
   requestUpdate();
 }
 
