@@ -91,11 +91,20 @@ constexpr int MAX_RESUME_STALLS = 4;
 // just burn radio time on a link that clearly cannot hold the transfer.
 constexpr int MAX_RANGE_RESTARTS = 2;
 // Smallest https body worth leasing the TLS record slab for (see the lease site in
-// runGet). The failure it guards against is the ~200KB-per-connection record wall; the
-// largest feed either OPDS server here serves is 130668 bytes and has never needed it,
-// while book downloads are megabytes. 128KB sits just under that measured feed size, so
-// feeds keep their heap and downloads keep their block.
+// runGet). The failure it guards against is the per-connection record wall; the largest
+// feed either OPDS server here serves is 130668 bytes and has never needed it, while book
+// downloads are megabytes. 128KB sits just under that measured feed size, so feeds keep
+// their heap and downloads keep their block.
 constexpr size_t SLAB_MIN_BODY_BYTES = 128 * 1024;
+// Heap floors the slab lease must clear, both measured off the "incomplete:" lines of the
+// X3 capture where the lease now happens: largest8 there runs 10228-14324 with 32-36KB
+// free. The largest-block floor is SLAB_SIZE (5120) plus a 4KB block left over, so buying
+// it cannot leave the handshake without a mid-sized allocation; the free floor keeps ~28KB
+// for the ~24KB a resumed session needs. Both are floors with margin ON PURPOSE -- the one
+// time a lease preceded a handshake without them (17408 bytes, 14c) it left ~22KB and
+// killed every https fetch before it connected.
+constexpr uint32_t SLAB_LEASE_MIN_LARGEST = 5120 + 4096;
+constexpr uint32_t SLAB_LEASE_MIN_FREE = 28 * 1024;
 
 // X3 HTTPS troubleshooting instrumentation (SdDebugLog "STALL"/"XFER"): a
 // per-chunk read taking longer than this is logged with a heap+RSSI snapshot —
@@ -236,13 +245,48 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
   // that capture also logged slabHit=0 slabMiss=0 — the block was never handed out once,
   // because wolfSSL was not in the path to ask for it.
   //
-  // Held indirectly, and bought at the FIRST BODY BYTE rather than before the request —
-  // see the lease site in the body callback for why the handshake must not pay for it.
+  // Held indirectly, and bought at the top of a RESUMED hop — see leaseRecordSlab below.
   std::unique_ptr<freeink::TlsRecordSlab> recordSlab;
 
   for (;;) {
     // Re-evaluated per hop: a redirect can cross schemes in either direction.
     const bool secureHop = isHttpsUrl(url);
+
+    // Lease the record slab at the top of a RESUMED hop: before this hop's handshake, but
+    // never before the first one.
+    //
+    // The first hop cannot lease. Its Content-Length is not known yet, and "unknown length"
+    // must never be read as "probably big" — doing that once leased the block for a
+    // 15827-byte feed and killed a request that would have finished in 143ms. Hop 1
+    // therefore behaves exactly as it does today, which also means this cannot regress a
+    // download that never needs to resume.
+    //
+    // From hop 2 the size IS known and the heap has just recovered: every "incomplete:"
+    // line in the X3 capture reports largest8 of 10228-14324 with 32-36KB free, because the
+    // dead session's ~24KB has just been returned. That is the one moment in a hop's life
+    // when 5120 contiguous bytes are comfortably available -- at the old lease point (first
+    // body byte) largest8 is already down to ~2400, which is why the block was never once
+    // bought in any capture.
+    //
+    // Gated on measured headroom, not hope. 14c is the cautionary tale: leasing 17408
+    // before a handshake left it ~22KB and every https fetch died before it connected. The
+    // block is 5120 now and the handshake is a ~90ms resumed one, but the shape of that
+    // failure is why the thresholds below are floors with real margin rather than a bare
+    // "did malloc succeed". A failed or skipped lease is inert -- it is exactly today's
+    // behaviour -- so the downside of being wrong here is no change, not a worse download.
+    if (!recordSlab && secureHop && resumeOffset > 0 && sink.total >= SLAB_MIN_BODY_BYTES) {
+      const SdDebugLog::NetSnapshot before = SdDebugLog::captureNetSnapshot();
+      if (before.largest8Bit >= SLAB_LEASE_MIN_LARGEST && before.heapFree >= SLAB_LEASE_MIN_FREE) {
+        recordSlab = makeUniqueNoThrow<freeink::TlsRecordSlab>();
+        const SdDebugLog::NetSnapshot after = SdDebugLog::captureNetSnapshot();
+        SdDebugLog::log("HTTP", "tls slab: active=%d size=%u total=%zu heap=%u->%u largest8=%u->%u",
+                        (recordSlab && recordSlab->active()) ? 1 : 0, (unsigned)freeink::TlsRecordSlab::size(),
+                        sink.total, before.heapFree, after.heapFree, before.largest8Bit, after.largest8Bit);
+      } else {
+        SdDebugLog::log("HTTP", "tls slab: skipped (heap=%u largest8=%u need %u/%u)", before.heapFree,
+                        before.largest8Bit, (unsigned)SLAB_LEASE_MIN_LARGEST, (unsigned)SLAB_LEASE_MIN_FREE);
+      }
+    }
 
     freeink::SecureHttpClient http;
     http.setTimeout(HTTP_TIMEOUT_MS);
@@ -350,41 +394,6 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
                             (unsigned long)openMs, (unsigned long)tcpMs, (unsigned long)tlsMs, (unsigned long)ttfbMs,
                             http.tlsSessionResumed() ? 1 : 0, snap.heapFree, snap.largest8Bit, snap.internalFree,
                             snap.internalLargest, (int)snap.rssi, sink.total, url.c_str());
-
-            // Lease the record slab HERE, at the first body byte — never before the request.
-            //
-            // The TLS handshake, not the body, is the peak allocation of a session: wolfSSL
-            // TLS 1.3 with SP-ECC needs ~35-43KB of small blocks for it. Buying 17408 of
-            // them up front left the handshake ~22KB and killed every https fetch in the
-            // 08-16 capture before it ever connected — GET start 41124 free, 22612 after
-            // the lease, then "wolfSSL request failed" with no CONNECT line at all; four
-            // attempts across two hosts, all identical. The control is KOSync: same wolfSSL
-            // stack, same https, ~43KB free, no lease anywhere in its path, 200 every time.
-            // By the time a body byte arrives the handshake scratch is freed and the record
-            // buffer is the only thing left that wants a big contiguous block, which is the
-            // one this was ever meant to serve.
-            //
-            // Leased ONLY for a body whose Content-Length says it can reach the
-            // ~200KB-per-connection record wall documented at the truncation handler below.
-            // An unknown length does NOT lease, and that is the whole point: read.yapaa.org
-            // frames every response — feed and download alike — without a Content-Length, so
-            // treating "unknown" as "might be big" leased the block for a 15827-byte feed,
-            // took heap to 11620 / largest 4340, and killed the fetch (tlsErr=-397 after
-            // 9178ms) on a request that would otherwise have finished in 143ms. Unknown
-            // length is not evidence of a large body; it is the absence of evidence.
-            //
-            // Expect active=0 here on the X3 and do not "fix" that by moving the lease
-            // earlier: post-handshake the largest free block is ~14324 while this block is
-            // 17408, so it cannot be bought at this point — and it cannot be bought before
-            // the handshake either, which is what 14c proved. A failed lease is inert, so
-            // this stays correct where the contiguous heap does exist.
-            if (!recordSlab && secureHop && sink.total >= SLAB_MIN_BODY_BYTES) {
-              recordSlab = makeUniqueNoThrow<freeink::TlsRecordSlab>();
-              const SdDebugLog::NetSnapshot after = SdDebugLog::captureNetSnapshot();
-              SdDebugLog::log("HTTP", "tls slab: active=%d total=%zu size=%u heap=%u largest8=%u",
-                              (recordSlab && recordSlab->active()) ? 1 : 0, sink.total,
-                              (unsigned)freeink::TlsRecordSlab::size(), after.heapFree, after.largest8Bit);
-            }
           }
 
           // Time waiting on the socket since the PREVIOUS callback returned. lastChunkMs
