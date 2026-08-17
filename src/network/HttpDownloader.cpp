@@ -105,6 +105,13 @@ constexpr size_t SLAB_MIN_BODY_BYTES = 128 * 1024;
 // killed every https fetch before it connected.
 constexpr uint32_t SLAB_LEASE_MIN_LARGEST = 5120 + 4096;
 constexpr uint32_t SLAB_LEASE_MIN_FREE = 28 * 1024;
+// How long to wait for the station to re-associate before treating a dead connect as a
+// transfer failure, and how many times per transfer. 15s covers a normal reassociation;
+// 3 recoveries keeps a genuinely lost AP from holding the screen indefinitely, while still
+// protecting a multi-megabyte partial across the kind of dropout that discarded 2,611,177
+// bytes in the X3 capture. See the link-down branch in runGet.
+constexpr uint32_t LINK_WAIT_MS = 15000;
+constexpr int LINK_WAIT_LIMIT = 3;
 
 // X3 HTTPS troubleshooting instrumentation (SdDebugLog "STALL"/"XFER"): a
 // per-chunk read taking longer than this is logged with a heap+RSSI snapshot —
@@ -202,6 +209,8 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
 
   std::string url = startUrl;
   bool retriedConnect = false;
+  // Link-down recoveries used by this transfer (see LINK_WAIT_LIMIT).
+  int linkWaits = 0;
   int redirects = 0;
   // Byte offset a resumed hop asks the server to continue from (0 = fresh request).
   // See the truncation handler below for why a mid-stream drop is resumed rather
@@ -452,8 +461,13 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
     if (status < 0) {
       const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
       LOG_ERR("HTTP", "wolfSSL request failed: %s", url.c_str());
-      SdDebugLog::log("HTTP", "wolfSSL request failed after %lums heap=%u largest8=%u url=%s",
-                      (unsigned long)(millis() - openStartMs), s.heapFree, s.largest8Bit, url.c_str());
+      // rssi is on this line because its ABSENCE is the diagnosis. captureNetSnapshot
+      // reports 0 when esp_wifi_sta_get_ap_info() fails, i.e. when the station is not
+      // associated — and without it a capture full of "failed after 4ms" is unreadable.
+      // 4ms is far too fast for a TCP connect to have been attempted, so the radio, not
+      // the peer, is the suspect; this is what turns that suspicion into a fact.
+      SdDebugLog::log("HTTP", "wolfSSL request failed after %lums heap=%u largest8=%u rssi=%d url=%s",
+                      (unsigned long)(millis() - openStartMs), s.heapFree, s.largest8Bit, (int)s.rssi, url.c_str());
       // "This hop delivered nothing" — the condition both recovery paths below need, and
       // NOT the same as "the transfer holds no bytes". resumeOffset and sink.downloaded
       // are set equal at the top of every hop (by both resume branches below and by the
@@ -462,6 +476,41 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       // exactly what the dead hop would have, so there is no duplicate to fear. On hop 1
       // resumeOffset is 0 and this is the original `sink.downloaded == 0` unchanged.
       const bool hopDeliveredNothing = sink.downloaded == resumeOffset;
+
+      // A dropped WiFi association is not a server failure, and must not be charged to the
+      // resume budget.
+      //
+      // Measured on X3: a download holding 2,611,177 bytes with 487 attempts unspent was
+      // discarded after eight consecutive "wolfSSL request failed after 4ms". Four
+      // milliseconds cannot contain a TCP connect, so nothing was ever attempted — and the
+      // capture's surrounding lines show the link collapsing (rssi -75 to -91, and a feed
+      // fetch minutes later needing tcp=4020ms to connect). The retry ladder above spent
+      // the whole stall budget in seven seconds against a radio that was not associated,
+      // then told the user the server had stopped responding.
+      //
+      // So wait for the link instead of consuming the budget. Bounded by LINK_WAIT_LIMIT
+      // recoveries per transfer, cancel-polled throughout, and charged nothing when it
+      // succeeds: a hop that never opened carried no bytes, so re-issuing it is idempotent
+      // exactly as the retry below is.
+      if (s.rssi == 0 && hopDeliveredNothing && linkWaits < LINK_WAIT_LIMIT) {
+        ++linkWaits;
+        SdDebugLog::log("HTTP", "link down at %zu bytes, waiting up to %lums (%d/%d)", sink.downloaded,
+                        (unsigned long)LINK_WAIT_MS, linkWaits, LINK_WAIT_LIMIT);
+        bool linkBack = false;
+        for (uint32_t waited = 0; waited < LINK_WAIT_MS; waited += 250) {
+          if (sink.cancelFlag && *sink.cancelFlag) return HttpDownloader::ABORTED;
+          delay(250);
+          if (SdDebugLog::captureNetSnapshot().rssi != 0) {
+            linkBack = true;
+            break;
+          }
+        }
+        SdDebugLog::log("HTTP", "link %s", linkBack ? "back" : "still down");
+        if (linkBack) {
+          retriedConnect = false;  // the recovered hop gets its own one-shot immediate retry
+          continue;
+        }
+      }
 
       // Retry once, immediately. The ESP32-C3's LWIP stack routinely fails the first
       // connect made after a previous socket closed (TIME_WAIT / sock<0) and then
@@ -518,7 +567,11 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       // that never opened, but says nothing after a resumed transfer has carried
       // megabytes and then lost the far end — which is the case this branch now reaches
       // only once the backoff above is spent.
-      if (resumeOffset > 0) {
+      if (s.rssi == 0) {
+        // Never blame the server for a radio that is not associated — the previous wording
+        // sent the user to check a server that had done nothing wrong.
+        setDetail(sink.detail, "WiFi connection lost at %zu bytes", sink.downloaded);
+      } else if (resumeOffset > 0) {
         setDetail(sink.detail, "connection lost at %zu bytes; server stopped responding", sink.downloaded);
       } else {
         setDetail(sink.detail, "connect/read failed");
@@ -598,7 +651,10 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
                       http.lastTlsError(), (unsigned long)freeink::TlsRecordSlab::hits(),
                       (unsigned long)freeink::TlsRecordSlab::misses());
       if (freeink::TlsRecordSlab::largestMiss() > 0) {
-        SdDebugLog::log("HTTP", "tls slab largest miss=%lu (block=%u)",
+        // "Ever", not "this hop": largestMiss is a running maximum reset only when the
+        // block is bought, so once one 16401-byte record overshoots it prints on every
+        // subsequent hop and reads exactly like a fresh per-hop measurement. It is not.
+        SdDebugLog::log("HTTP", "tls slab maxMissEver=%lu (block=%u)",
                         (unsigned long)freeink::TlsRecordSlab::largestMiss(), (unsigned)freeink::TlsRecordSlab::size());
       }
 
