@@ -212,6 +212,26 @@ int GfxRenderer::resolveTextFontId(const int fontId, const char* text, const Epd
   return fontId;
 }
 
+// Batch-load `text`'s glyphs into an SD-card font's resident mini tables before a
+// per-glyph measure/draw loop runs. Only worth calling when resolveTextFontId
+// redirected the string: UI screens draw those CJK strings with no PrewarmScope
+// and no advance table, so every codepoint would otherwise fault through
+// SdCardFont::onGlyphMiss -- a .cpfont open + 2 seeks + 2 reads apiece, per
+// redraw (#2725/#3026). One prewarm costs a single file open; a repeat measure
+// or draw of the same string is then a RAM-only subset check (see
+// prewarmStyle's resident-hit early-out). No-op for built-in fonts.
+void GfxRenderer::ensureSdGlyphsResident(const int fontId, const char* text, const EpdFontFamily::Style style,
+                                         const bool metadataOnly) const {
+  const auto sdIt = sdCardFonts_.find(fontId);
+  if (sdIt == sdCardFonts_.end()) {
+    return;
+  }
+  // SUP/SUB bits don't select a distinct .cpfont style bitstream -- mask to the
+  // base style. resolveStyleMask() inside prewarm folds absent styles.
+  const uint8_t styleMask = static_cast<uint8_t>(1u << (static_cast<uint8_t>(style) & 0x03));
+  sdIt->second->prewarm(text, styleMask, metadataOnly);
+}
+
 // Translate logical (x,y) coordinates to physical panel coordinates based on current orientation
 // This should always be inlined for better performance
 static inline void rotateCoordinates(const GfxRenderer::Orientation orientation, const int x, const int y, int* phyX,
@@ -655,6 +675,15 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
   int fastWidth = 0;
   if (getSdInkWidth(resolvedFontId, renderedText, style, &fastWidth)) return fastWidth;
 
+  // No advance table to answer from -- the UI screens never build one, and this
+  // is exactly where the redirected CJK strings land. Batch-load the glyphs so
+  // getTextDimensions below reads RAM instead of faulting one per codepoint.
+  // Deliberately AFTER the fast path (upstream #3026 puts it before): when the
+  // table can answer, the prewarm would be pure waste.
+  if (resolvedFontId != fontId) {
+    ensureSdGlyphsResident(resolvedFontId, renderedText, style, /*metadataOnly=*/true);
+  }
+
   int w = 0, h = 0;
   fontIt->second.getTextDimensions(renderedText, &w, &h, style);
   return w;
@@ -750,6 +779,13 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
   if (fontCacheManager_ && fontCacheManager_->isScanning()) {
     fontCacheManager_->recordText(renderedText, resolvedFontId, style);
     return;
+  }
+
+  // Redirected to the SD fallback: batch-load the glyphs so the draw loop below
+  // doesn't fault them in one SD read at a time (#3026). After the scan
+  // early-return -- a scanning pass draws nothing and needs no bitmaps.
+  if (resolvedFontId != fontId) {
+    ensureSdGlyphsResident(resolvedFontId, renderedText, style, /*metadataOnly=*/false);
   }
 
   const auto fontIt = fontMap.find(resolvedFontId);
@@ -2332,6 +2368,10 @@ void GfxRenderer::drawTextRotated90CW(const int fontId, const int x, const int y
 
   // Route CJK-bearing strings to the fallback font (see resolveTextFontId).
   const int resolvedFontId = resolveTextFontId(fontId, text, style);
+  // Redirected to the SD fallback: batch-load the glyphs (#3026).
+  if (resolvedFontId != fontId) {
+    ensureSdGlyphsResident(resolvedFontId, text, style, /*metadataOnly=*/false);
+  }
   const auto fontIt = fontMap.find(resolvedFontId);
   if (fontIt == fontMap.end()) {
     LOG_ERR("GFX", "Font %d not found", resolvedFontId);
