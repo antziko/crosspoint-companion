@@ -87,6 +87,11 @@ class HalFile : public Print {
   size_t position() const;
   int read(void* buf, size_t count);
   int read();  // read a single byte
+  // Print's block-write virtual. Without this override Print::write(buf, count)
+  // falls back to its default loop of one write(uint8_t) per byte -- and every one
+  // of those takes the storage mutex. Anything writing through a Print& (stream
+  // serialisers, item extraction) paid that per byte.
+  size_t write(const uint8_t* buf, size_t count) override;
   size_t write(const void* buf, size_t count);
   size_t write(uint8_t b) override;
   bool rename(const char* newPath);

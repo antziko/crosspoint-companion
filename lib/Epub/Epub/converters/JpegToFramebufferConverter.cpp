@@ -51,6 +51,7 @@ struct JpegContext {
   // during decode instead. Mutually exclusive with `cache` (full-buffer path).
   StreamingPixelCache* stream{nullptr};
   bool caching{false};
+  uint32_t lastYieldMs{0};  // throttle state for yieldDuringDecode()
 
   // Per-image tone curve selection (see X4Tone in OrderedDither.h). Determined by
   // a cheap 1/8-scale luminance probe before the real decode. Defaults to Brighten
@@ -69,7 +70,7 @@ struct JpegContext {
 struct JpegLumProbe {
   uint32_t dark{0};
   uint32_t bright{0};
-  uint32_t mid{0};   // pixels in [X4_TEXT_PIXEL_CUTOFF, X4_BRIGHT_PIXEL_CUTOFF)
+  uint32_t mid{0};  // pixels in [X4_TEXT_PIXEL_CUTOFF, X4_BRIGHT_PIXEL_CUTOFF)
   uint32_t count{0};
 };
 
@@ -186,6 +187,8 @@ constexpr int32_t FP_MASK = FP_ONE - 1;
 int jpegDrawCallback(JPEGDRAW* pDraw) {
   JpegContext* ctx = reinterpret_cast<JpegContext*>(pDraw->pUser);
   if (!ctx || !ctx->config || !ctx->renderer) return 0;
+
+  ImageToFramebufferDecoder::yieldDuringDecode(ctx->lastYieldMs);
 
   // In EIGHT_BIT_GRAYSCALE mode, pPixels contains 8-bit grayscale values
   // Buffer is densely packed: stride = pDraw->iWidth, valid columns = pDraw->iWidthUsed
@@ -462,19 +465,19 @@ X4Tone jpegImageIsDark(const std::string& imagePath, bool& sharpUpscale) {
   jpeg->setUserPointer(&probe);
   if (jpeg->decode(0, 0, JPEG_SCALE_EIGHTH) != 1 || probe.count == 0) return X4Tone::Brighten;
 
-  const uint32_t darkPct   = probe.dark   * 100u / probe.count;
+  const uint32_t darkPct = probe.dark * 100u / probe.count;
   const uint32_t brightPct = probe.bright * 100u / probe.count;
-  const uint32_t midPct    = probe.mid    * 100u / probe.count;
+  const uint32_t midPct = probe.mid * 100u / probe.count;
 
   const X4Tone tone = classifyImageTone(darkPct, brightPct, midPct);
   // Text images (white-on-dark → None+dark, grey-on-dark → DarkText) need sharp
   // upscale; dark photos (Brighten) and light images (None+not-dark) use bilinear.
   sharpUpscale = (tone != X4Tone::Brighten) && (darkPct >= X4_DARK_FRACTION_PCT);
 
-  const char* label = (tone == X4Tone::DarkText)  ? "grey-on-dark/darktext+sharp"
-                    : (tone == X4Tone::None && darkPct >= X4_DARK_FRACTION_PCT) ? "white-on-dark/sharp"
-                    : (tone == X4Tone::Brighten)   ? "dark/brighten"
-                                                   : "light/skip";
+  const char* label = (tone == X4Tone::DarkText)                                  ? "grey-on-dark/darktext+sharp"
+                      : (tone == X4Tone::None && darkPct >= X4_DARK_FRACTION_PCT) ? "white-on-dark/sharp"
+                      : (tone == X4Tone::Brighten)                                ? "dark/brighten"
+                                                                                  : "light/skip";
   LOG_DBG("JPG", "Dark %u%% Bright %u%% Mid %u%% (%s)", darkPct, brightPct, midPct, label);
   return tone;
 }
@@ -503,9 +506,10 @@ bool JpegToFramebufferConverter::getDimensionsStatic(const std::string& imagePat
     return false;
   }
 
-  out.width = jpeg->getWidth();
-  out.height = jpeg->getHeight();
-  LOG_DBG("JPG", "Image dimensions: %dx%d", out.width, out.height);
+  const int width = jpeg->getWidth();
+  const int height = jpeg->getHeight();
+  if (!validateAndStoreDimensions(width, height, out, "JPEG")) return false;
+  LOG_DBG("JPG", "Image dimensions: %dx%d", width, height);
 
   return true;
 }
@@ -617,11 +621,11 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   ctx.scaledSrcHeight = (srcHeight + jpegScaleDenom - 1) / jpegScaleDenom;
 
   // Pixel-budget check on the actual decode grid (after JPEGDEC's built-in scaling).
-  if (ctx.scaledSrcWidth * ctx.scaledSrcHeight > MAX_SOURCE_PIXELS) {
+  if (ctx.scaledSrcWidth * ctx.scaledSrcHeight > MAX_DECODE_GRID_PIXELS) {
     LOG_ERR("JPG", "Scaled decode grid too large (%dx%d = %d px), max %d", ctx.scaledSrcWidth, ctx.scaledSrcHeight,
-            ctx.scaledSrcWidth * ctx.scaledSrcHeight, MAX_SOURCE_PIXELS);
+            ctx.scaledSrcWidth * ctx.scaledSrcHeight, MAX_DECODE_GRID_PIXELS);
     SdDebugLog::log("JPG", "grid too large %dx%d=%d max=%d %s", ctx.scaledSrcWidth, ctx.scaledSrcHeight,
-                    ctx.scaledSrcWidth * ctx.scaledSrcHeight, MAX_SOURCE_PIXELS, imagePath.c_str());
+                    ctx.scaledSrcWidth * ctx.scaledSrcHeight, MAX_DECODE_GRID_PIXELS, imagePath.c_str());
     return false;
   }
 
@@ -669,6 +673,7 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   }
 
   unsigned long decodeStart = millis();
+  ctx.lastYieldMs = decodeStart;
   rc = jpeg->decode(0, 0, jpegScaleOption);
   unsigned long decodeTime = millis() - decodeStart;
 
@@ -677,7 +682,7 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
     SdDebugLog::log("JPG", "decode fail rc=%d lastErr=%d %dx%d->%dx%d %s", rc, jpeg->getLastError(), srcWidth,
                     srcHeight, destWidth, destHeight, imagePath.c_str());
     if (ctx.stream) {
-      streamCache.finish();                     // close the file before removing it
+      streamCache.finish();                      // close the file before removing it
       Storage.remove(config.cachePath.c_str());  // drop the partial cache
     }
     return false;

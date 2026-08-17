@@ -40,6 +40,7 @@ struct PngContext {
   bool caching{false};
 
   uint8_t* grayLineBuffer{nullptr};
+  uint32_t lastYieldMs{0};  // throttle state for yieldDuringDecode()
 
   // Per-image tone curve selection (see X4Tone in OrderedDither.h). Determined by
   // a sampled luminance probe before the real decode. Defaults to Brighten
@@ -222,6 +223,8 @@ int pngDrawCallback(PNGDRAW* pDraw) {
   PngContext* ctx = reinterpret_cast<PngContext*>(pDraw->pUser);
   if (!ctx || !ctx->config || !ctx->renderer || !ctx->grayLineBuffer) return 0;
 
+  ImageToFramebufferDecoder::yieldDuringDecode(ctx->lastYieldMs);
+
   int srcY = pDraw->y;
   int srcWidth = ctx->srcWidth;
 
@@ -308,7 +311,7 @@ int pngDrawCallback(PNGDRAW* pDraw) {
 struct PngLumProbe {
   uint32_t dark{0};
   uint32_t bright{0};
-  uint32_t mid{0};   // pixels in [X4_TEXT_PIXEL_CUTOFF, X4_BRIGHT_PIXEL_CUTOFF)
+  uint32_t mid{0};  // pixels in [X4_TEXT_PIXEL_CUTOFF, X4_BRIGHT_PIXEL_CUTOFF)
   uint32_t count{0};
   int srcWidth{0};
   uint8_t* gray{nullptr};
@@ -360,15 +363,15 @@ X4Tone pngImageIsDark(const std::string& imagePath) {
 
   if (png->decode(&probe, 0) != PNG_SUCCESS || probe.count == 0) return X4Tone::Brighten;
 
-  const uint32_t darkPct   = probe.dark   * 100u / probe.count;
+  const uint32_t darkPct = probe.dark * 100u / probe.count;
   const uint32_t brightPct = probe.bright * 100u / probe.count;
-  const uint32_t midPct    = probe.mid    * 100u / probe.count;
+  const uint32_t midPct = probe.mid * 100u / probe.count;
 
   const X4Tone tone = classifyImageTone(darkPct, brightPct, midPct);
-  const char* label = (tone == X4Tone::DarkText)  ? "grey-on-dark/darktext"
-                    : (tone == X4Tone::None && darkPct >= X4_DARK_FRACTION_PCT) ? "white-on-dark/skip"
-                    : (tone == X4Tone::Brighten)   ? "dark/brighten"
-                                                   : "light/skip";
+  const char* label = (tone == X4Tone::DarkText)                                  ? "grey-on-dark/darktext"
+                      : (tone == X4Tone::None && darkPct >= X4_DARK_FRACTION_PCT) ? "white-on-dark/skip"
+                      : (tone == X4Tone::Brighten)                                ? "dark/brighten"
+                                                                                  : "light/skip";
   LOG_DBG("PNG", "Dark %u%% Bright %u%% Mid %u%% (%s)", darkPct, brightPct, midPct, label);
   return tone;
 }
@@ -399,10 +402,7 @@ bool PngToFramebufferConverter::getDimensionsStatic(const std::string& imagePath
     return false;
   }
 
-  out.width = png->getWidth();
-  out.height = png->getHeight();
-
-  return true;
+  return validateAndStoreDimensions(png->getWidth(), png->getHeight(), out, "PNG");
 }
 
 bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath, GfxRenderer& renderer,
@@ -446,14 +446,15 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
     return false;
   }
 
-  if (!validateImageDimensions(png->getWidth(), png->getHeight(), "PNG")) {
+  ImageDimensions sourceDimensions;
+  if (!validateAndStoreDimensions(png->getWidth(), png->getHeight(), sourceDimensions, "PNG")) {
     SdDebugLog::log("PNG", "bad dims %dx%d %s", png->getWidth(), png->getHeight(), imagePath.c_str());
     return false;
   }
 
   // Calculate output dimensions
-  ctx.srcWidth = png->getWidth();
-  ctx.srcHeight = png->getHeight();
+  ctx.srcWidth = sourceDimensions.width;
+  ctx.srcHeight = sourceDimensions.height;
 
   if (config.useExactDimensions && config.maxWidth > 0 && config.maxHeight > 0) {
     // Use exact dimensions as specified (avoids rounding mismatches with pre-calculated sizes)
@@ -532,6 +533,7 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
   }
 
   unsigned long decodeStart = millis();
+  ctx.lastYieldMs = decodeStart;
   rc = png->decode(&ctx, 0);
   unsigned long decodeTime = millis() - decodeStart;
 
