@@ -306,10 +306,11 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
             // total is known); resumeOffset makes the intent explicit.
             if (sink.total == 0 && resumeOffset == 0 && http.hasContentLength()) sink.total = http.getContentLength();
             const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
-            SdDebugLog::log("CONNECT",
-                            "handshake=%lums heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d total=%zu url=%s",
-                            (unsigned long)(transferStartMs - openStartMs), snap.heapFree, snap.largest8Bit,
-                            snap.internalFree, snap.internalLargest, (int)snap.rssi, sink.total, url.c_str());
+            SdDebugLog::log(
+                "CONNECT",
+                "handshake=%lums resumed=%d heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d total=%zu url=%s",
+                (unsigned long)(transferStartMs - openStartMs), http.tlsSessionResumed() ? 1 : 0, snap.heapFree,
+                snap.largest8Bit, snap.internalFree, snap.internalLargest, (int)snap.rssi, sink.total, url.c_str());
 
             // Lease the record slab HERE, at the first body byte — never before the request.
             //
