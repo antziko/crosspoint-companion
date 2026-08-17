@@ -8,11 +8,13 @@
 #include <WiFi.h>
 #include <esp_efuse.h>
 #include <esp_efuse_table.h>
+#include <esp_heap_caps.h>
 #include <esp_mac.h>
 #include <esp_task_wdt.h>
 
 #include <algorithm>
 #include <cctype>
+#include <new>
 
 #include "CrossPointSettings.h"
 #include "FontInstaller.h"
@@ -116,7 +118,16 @@ void CrossPointWebServer::begin() {
   LOG_DBG("WEB", "Network mode: %s", apMode ? "AP" : "STA");
 
   LOG_DBG("WEB", "Creating web server on port %d...", port);
-  server.reset(new WebServer(port));
+  // nothrow: a bare new aborts (reboots) on OOM under -fno-exceptions, and this
+  // allocation happens at the tightest moment in the whole firmware -- WiFi is up
+  // and the radio has just taken ~45KB. Leave running == false and let the caller
+  // report the failure through isRunning().
+  server.reset(new (std::nothrow) WebServer(port));
+  if (!server) {
+    LOG_ERR("WEB", "OOM: WebServer (free=%u largest=%u)", (unsigned)ESP.getFreeHeap(),
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    return;
+  }
 
   // Disable WiFi sleep to improve responsiveness and prevent 'unreachable' errors.
   // This is critical for reliable web server operation on ESP32.
@@ -192,18 +203,30 @@ void CrossPointWebServer::begin() {
   // Collect WebDAV headers and register handler
   const char* davHeaders[] = {"Depth", "Destination", "Overwrite", "If", "Lock-Token", "Timeout"};
   server->collectHeaders(davHeaders, 6);
-  server->addHandler(new WebDAVHandler());  // Note: WebDAVHandler will be deleted by WebServer when server is stopped
-  LOG_DBG("WEB", "WebDAV handler initialized");
+  // Raw new (std::nothrow), not makeUniqueNoThrow: addHandler takes ownership and
+  // WebServer deletes it when the server stops. On OOM, carry on without WebDAV --
+  // plain HTTP file transfer still works, which is better than a reboot.
+  if (auto* davHandler = new (std::nothrow) WebDAVHandler()) {
+    server->addHandler(davHandler);
+    LOG_DBG("WEB", "WebDAV handler initialized");
+  } else {
+    LOG_ERR("WEB", "OOM: WebDAVHandler -- continuing without WebDAV");
+  }
 
   server->begin();
 
   // Start WebSocket server for fast binary uploads
   LOG_DBG("WEB", "Starting WebSocket server on port %d...", wsPort);
-  wsServer.reset(new WebSocketsServer(wsPort));
-  wsInstance = const_cast<CrossPointWebServer*>(this);
-  wsServer->begin();
-  wsServer->onEvent(wsEventCallback);
-  LOG_DBG("WEB", "WebSocket server started");
+  wsServer.reset(new (std::nothrow) WebSocketsServer(wsPort));
+  if (wsServer) {
+    wsInstance = const_cast<CrossPointWebServer*>(this);
+    wsServer->begin();
+    wsServer->onEvent(wsEventCallback);
+    LOG_DBG("WEB", "WebSocket server started");
+  } else {
+    // Uploads fall back to the HTTP path; the server is still usable.
+    LOG_ERR("WEB", "OOM: WebSocketsServer -- continuing without the binary upload socket");
+  }
 
   udpActive = udp.begin(LOCAL_UDP_PORT);
   LOG_DBG("WEB", "Discovery UDP %s on port %d", udpActive ? "enabled" : "failed", LOCAL_UDP_PORT);

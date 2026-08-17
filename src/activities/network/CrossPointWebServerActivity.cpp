@@ -294,8 +294,14 @@ void CrossPointWebServerActivity::startWebServer() {
             (unsigned)ESP.getFreeHeap());
   }
 
-  // Create the web server instance
-  webServer.reset(new CrossPointWebServer());
+  // Create the web server instance. nothrow: a bare new aborts on OOM under
+  // -fno-exceptions, and this runs with the radio already holding ~45KB.
+  webServer.reset(new (std::nothrow) CrossPointWebServer());
+  if (!webServer) {
+    LOG_ERR("WEBACT", "OOM: CrossPointWebServer (free=%u)", (unsigned)ESP.getFreeHeap());
+    onGoHome();
+    return;
+  }
   webServer->begin();
 
   if (webServer->isRunning()) {

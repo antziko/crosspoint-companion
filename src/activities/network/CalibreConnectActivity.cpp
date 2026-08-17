@@ -6,6 +6,8 @@
 #include <I18n.h>
 #include <WiFi.h>
 
+#include <new>
+
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
 #include "WifiSelectionActivity.h"
@@ -89,7 +91,15 @@ void CalibreConnectActivity::startWebServer() {
     fcm->releaseCache();
   }
 
-  webServer.reset(new CrossPointWebServer());
+  // nothrow: a bare new aborts on OOM under -fno-exceptions (see
+  // CrossPointWebServerActivity::startWebServer()).
+  webServer.reset(new (std::nothrow) CrossPointWebServer());
+  if (!webServer) {
+    LOG_ERR("CAL", "OOM: CrossPointWebServer (free=%u)", (unsigned)ESP.getFreeHeap());
+    state = CalibreConnectState::ERROR;
+    requestUpdate();
+    return;
+  }
   webServer->begin();
 
   if (webServer->isRunning()) {
