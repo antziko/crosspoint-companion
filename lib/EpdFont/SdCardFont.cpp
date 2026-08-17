@@ -118,13 +118,30 @@ constexpr uint8_t MINI_UNDERUSE_RUNS_BEFORE_FREE = 3;
 // render paid it back as 122 glyph misses / 482 ms, on every page turn as well as the open.
 // Exactly the failure the floor was written to prevent, arrived at from the other side.
 //
-// So below the healthy floor, spend down to a hard TIGHT floor instead of stopping dead, capped
-// small. Both original rules survive intact: never more than half the largest block, never pull
-// total free past a floor. The cap is what keeps the tight tier from becoming the old bug — the
-// 23,350-byte arena grab behind the original crash happened at free=45016, i.e. on the healthy
-// tier, where nothing here changes.
+// So the budget is a BASELINE plus a bonus, not two disjoint tiers:
 //
-// To revert to single-tier behaviour: set MINI_FREE_FLOOR_TIGHT = MINI_FREE_FLOOR.
+//   baseline: up to MINI_TIGHT_MAX_BUDGET, at any heap level, provided total free stays above
+//             the hard MINI_FREE_FLOOR_TIGHT;
+//   bonus:    freeNow - MINI_FREE_FLOOR, which only exceeds the baseline past ~28.7 KB free.
+//
+// It was first written as two disjoint tiers, and that was wrong in a way worth recording: as a
+// bare slope, `freeNow - MINI_FREE_FLOOR` is near zero just ABOVE the floor, so the healthy tier
+// granted *less* than the tight tier did far below it — `budget=1340 largest=22516 free=25916`
+// declining a 2507-byte arena, against `budget=2216 largest=10740 free=14504` granting one. Less
+// budget for more memory. Taking the larger of baseline and bonus makes the budget monotonic in
+// free heap and continuous at the floor.
+//
+// Both original rules survive intact: never more than half the largest block, never pull total
+// free past a floor (MINI_FREE_FLOOR_TIGHT is that floor; MINI_FREE_FLOOR is now the point where
+// the bonus takes over). Above ~28.7 KB the arithmetic is byte-for-byte what it always was — the
+// 23,350-byte grab behind the original crash happened at free=45016 and is still bounded by the
+// half-largest rule.
+//
+// To revert to baseline-only behaviour: set MINI_TIGHT_MAX_BUDGET = 0.
+//
+// General rule this keeps re-teaching: a heap budget must be MONOTONIC in free heap. Whenever a
+// gate here is written as `free - FLOOR`, check what it yields just ABOVE FLOOR before trusting
+// it — that is where this class of bug hides, not at the extremes anyone tests.
 //
 // MIN_BUDGET is ~18 CJK glyphs' worth. Below that a partial prewarm buys less than the overflow
 // ring already holds, so the SD pass is not worth its cost and we bail as before.
@@ -1152,16 +1169,26 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
       // Both bounds, lower wins — see the MINI_FREE_FLOOR comment for why neither is
       // sufficient alone.
       const uint32_t fromLargest = static_cast<uint32_t>(largest / 2);
-      uint32_t fromFree;
+      // Baseline allowance, applied at EVERY heap level: spend up to MINI_TIGHT_MAX_BUDGET as
+      // long as that leaves total free above the hard floor. A small cache always beats none —
+      // each glyph left out is an SD read per draw.
+      const uint32_t headroom =
+          freeNow > MINI_FREE_FLOOR_TIGHT ? static_cast<uint32_t>(freeNow - MINI_FREE_FLOOR_TIGHT) : 0;
+      uint32_t fromFree = std::min(headroom, MINI_TIGHT_MAX_BUDGET);
+      // Above the healthy floor, scale past the baseline. `freeNow - MINI_FREE_FLOOR` only
+      // exceeds the baseline past ~28.7KB, which is where the large whole-screen PrewarmScope
+      // grabs live and where a bigger arena is genuinely affordable.
+      //
+      // std::max, not a separate branch: as a bare slope from the floor this term is NOT
+      // monotonic in freeNow, and the discontinuity landed exactly where the definition viewer
+      // runs. Device log (opds_debug.txt): `budget=1340 largest=22516 free=25916` declining
+      // 2507 bytes against 22KB of contiguous free, while the tight tier granted 2216 at
+      // free=14504 — more budget for less memory. Taking the larger of the two makes the
+      // function monotonic and continuous at the floor, and leaves everything above 28.7KB
+      // byte-for-byte unchanged (in particular the 23,350-byte grab at free=45016 that the
+      // floor was originally added to stop is still bounded by fromLargest, exactly as before).
       if (freeNow > MINI_FREE_FLOOR) {
-        fromFree = static_cast<uint32_t>(freeNow - MINI_FREE_FLOOR);
-      } else {
-        // Tight tier: a small cache still beats none (each glyph left out is an SD read per
-        // draw), but it is capped so this branch can never make the healthy-heap grab the
-        // floor was added to stop.
-        const uint32_t headroom =
-            freeNow > MINI_FREE_FLOOR_TIGHT ? static_cast<uint32_t>(freeNow - MINI_FREE_FLOOR_TIGHT) : 0;
-        fromFree = std::min(headroom, MINI_TIGHT_MAX_BUDGET);
+        fromFree = std::max(fromFree, static_cast<uint32_t>(freeNow - MINI_FREE_FLOOR));
       }
       budget = std::min(fromLargest, fromFree);
       if (budget > fullSize) budget = fullSize;
