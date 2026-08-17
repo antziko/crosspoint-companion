@@ -458,7 +458,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t lookupHistoryCap = HIST_CAP_DEFAULT;
   // Action triggered by holding Confirm in the reader.
   // OFF: no action (default). BOOKMARK: add bookmark @ BOOKMARK_HOLD_MS (400ms).
-  // DICTIONARY: open word-select @ Dictionary::LONG_PRESS_MS (600ms, requires per-book dictionary).
+  // DICTIONARY: open word-select @ Dictionary::LONG_PRESS_MS (400ms, requires per-book dictionary).
   enum HOLD_CONFIRM_ACTION : uint8_t { HOLD_CONFIRM_OFF = 0, HOLD_CONFIRM_BOOKMARK = 1, HOLD_CONFIRM_DICTIONARY = 2 };
   uint8_t holdConfirmAction = HOLD_CONFIRM_OFF;
   // Tilt-based page turning (X3 only — requires QMI8658 IMU)

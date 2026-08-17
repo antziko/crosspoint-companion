@@ -57,6 +57,10 @@ const LookupHistory::Entry* LookedUpWordsActivity::entryAt(int uiIndex) {
 
 void LookedUpWordsActivity::onExit() {
   controller.onExit();
+  // The definition viewer no longer releases the definition-size font itself; the host that
+  // outlives it does, so the reader underneath never carries it. Same pattern as the flashcard
+  // screens and word-select.
+  DictUtils::releaseDefinitionFont(renderer);
   Activity::onExit();
 }
 

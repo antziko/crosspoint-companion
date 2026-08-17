@@ -319,10 +319,24 @@ void DictionaryDefinitionActivity::onExit() {
   if (auto* fcm = renderer.getFontCacheManager()) {
     fcm->clearCache();
   }
-  // Keeps the reader-size font and any CJK UI fallback target (see unloadExtraSizes()), so
-  // this cannot strip the home/settings screens. Safe for the backgrounded word-select
-  // activity too: that one measures and renders through getReaderFontId() exclusively.
-  sdFontSystem.releaseExtraSizes(renderer);
+  // The size registration itself is NOT released here any more — the HOST activity that outlives
+  // this one releases it on its own exit (DictionaryWordSelectActivity, LookedUpWordsActivity,
+  // and the two flashcard screens, which already did). Two reasons the trailing comment above is
+  // no longer sufficient:
+  //
+  //   - "word-select measures and renders through getReaderFontId() exclusively" stopped being
+  //     true when the inline gloss box moved to the definition font (resolveGlossFont(), and its
+  //     note at DictionaryWordSelectActivity.cpp:803-807). Releasing here forced word-select to
+  //     re-run ensureFontSize on EVERY re-entry: gloss=620ms steady state, 904ms cold, i.e. half
+  //     of the whole press-to-highlight wait.
+  //   - The ~12KB regression this release was added to stop was dominated by the PREWARM
+  //     products — four advance tables plus the mini bitmap arenas — and clearCache() above
+  //     still frees those on every exit. What persists now is only the .cpfont size
+  //     registration, and only for as long as a screen that needs it is on top.
+  //
+  // The invariant that actually matters is unchanged: the READER must never carry the extra size
+  // (that is the free=52112 -> 40180 / warmed=0x00 / 25.3s wrap regression documented above), and
+  // it still cannot, because every host releases before returning to it.
   Activity::onExit();
 }
 
@@ -493,27 +507,15 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   // covers the most text — is worth taking at a lower floor. One style is ~5KB; see the
   // 4-style figure in the loop comment.
   //
-  // The subsequent-style floor was 16KB/8KB and is now 13KB/7KB. What forced it down: once the
-  // mini-bitmap budget stopped under-granting (SdCardFont.cpp, the monotonicity fix), each warmed
-  // style takes a full arena, which spends the heap the NEXT style is measured against — and the
-  // loop started stopping after ONE style where it used to manage two or three. Device capture:
-  // `mask=0x0F warmed=0x04 free=15636 largest=9716 -> miss=51` and `warmed=0x04 free=14616
-  // largest=8692 -> miss=64`, against `warmed=0x05 -> miss=13` on a definition of the same
-  // length. `alone` missed the old floor by 748 bytes.
-  //
-  // Style COUNT dominates arena depth, which is the non-obvious part: `slowly` warmed three
-  // styles, one of which got `budget=0` — no arena whatsoever — and still only missed 16. A
-  // style warmed without a bitmap arena still beats a style left cold, so admitting more styles
-  // is worth more than feeding the ones already admitted.
-  //
-  // 13KB is bounded by measurement, not taste: the same capture has a two-style prewarm ending
-  // at free=12708 largest=7156 that rendered correctly (miss=13, oom=0), so that is demonstrated
-  // survivable on X3. kMinBlockForStyle stays a hard contiguity check — it is what still blocks
-  // the X4 four-style case in the loop comment below, which ran the heap to 2.1KB largest.
+  // TRIED AND REVERTED (13KB/7KB): once the mini-bitmap budget stopped under-granting, lowering
+  // this floor to admit more styles did nothing — device capture still showed warmed=0x04/0x05
+  // with miss=58/78, because the loop then stopped on kMinBlockForStyle instead (post-prewarm
+  // largest=6132-6900). It only cost 2KB of heap floor: minEver fell 10204 -> 8208. Style count
+  // does correlate with misses, but it is not reachable by relaxing this gate.
   constexpr size_t kMinFreeForFirstStyle = 10 * 1024;
   constexpr size_t kMinBlockForFirstStyle = 6 * 1024;
-  constexpr size_t kMinFreeForStyle = 13 * 1024;
-  constexpr size_t kMinBlockForStyle = 7 * 1024;
+  constexpr size_t kMinFreeForStyle = 16 * 1024;
+  constexpr size_t kMinBlockForStyle = 8 * 1024;
 
   // IPA before the body font, deliberately. IPA runs are drawn with a built-in font whose
   // non-prewarmed path decompresses a whole ~11KB group per glyph (FontDecompressor.cpp:182);

@@ -705,7 +705,8 @@ void EpubReaderActivity::loop() {
   }
 
   // Hold-Confirm dispatch — mutually exclusive based on user setting.
-  // Dictionary uses 600 ms (Dictionary::LONG_PRESS_MS); Bookmark uses 400 ms (ReaderUtils::BOOKMARK_HOLD_MS).
+  // Both are 400 ms now: Dictionary::LONG_PRESS_MS and ReaderUtils::BOOKMARK_HOLD_MS. They are mutually
+  // exclusive by setting, so there is no reason for them to feel different.
   if (section && mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
     if (SETTINGS.holdConfirmAction == CrossPointSettings::HOLD_CONFIRM_DICTIONARY &&
         mappedInput.getHeldTime() >= Dictionary::LONG_PRESS_MS) {

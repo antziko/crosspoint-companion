@@ -72,7 +72,11 @@ struct DictLocation {
 
 class Dictionary {
  public:
-  static constexpr unsigned long LONG_PRESS_MS = 600;
+  // 400, matching ReaderUtils::BOOKMARK_HOLD_MS — the two hold-Confirm gestures are mutually
+  // exclusive by setting, so there is no reason for them to feel different. Was 600: pure dead
+  // time with no on-screen feedback (an indicator would cost a 435ms panel repaint, i.e. more
+  // than the wait it disguises), and it fronted a press-to-highlight path already ~1.7s long.
+  static constexpr unsigned long LONG_PRESS_MS = 400;
 
   // Returns the active dictionary folder base path by reading dictionary.bin from the SD card.
   // If cachePath is non-null and non-empty, reads <cachePath>/dictionary.bin (per-book override).

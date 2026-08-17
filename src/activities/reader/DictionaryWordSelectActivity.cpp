@@ -260,6 +260,12 @@ void DictionaryWordSelectActivity::onExit() {
   // this is their intended release point — DESTRUCTOR_CLOSES_FILE only covers locals at scope
   // exit, and HalFile's destructor takes the storage mutex before closing.
   gloss_.reset();
+  // Definition-size font, released HERE rather than in DictionaryDefinitionActivity::onExit (see
+  // its note). This screen outlives the definition viewer and its gloss box draws in that font,
+  // so releasing it there meant re-loading it on every re-entry — 620ms steady state, 904ms
+  // cold, about half the press-to-highlight wait. Releasing at this point keeps the reader
+  // underneath free of the extra size, which is the invariant that regression was about.
+  DictUtils::releaseDefinitionFont(renderer);
   Activity::onExit();
 }
 
