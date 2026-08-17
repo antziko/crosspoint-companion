@@ -33,7 +33,7 @@ constexpr StrId STYLE_ROW_NAME_IDS[] = {StrId::STR_FOCUS_READING, StrId::STR_HYP
 // LOCAL(feat): Hold Confirm this long on a Font-tab row to pin/unpin (vs a tap = commit).
 constexpr unsigned long kPinHoldMs = 600;
 
-constexpr StrId LINE_SPACING_IDS[] = {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_WIDE};
+constexpr StrId LINE_SPACING_IDS[] = {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_WIDE, StrId::STR_EXTRA_WIDE};
 constexpr StrId ALIGNMENT_IDS[] = {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, StrId::STR_CENTER, StrId::STR_ALIGN_RIGHT,
                                    StrId::STR_BOOK_S_STYLE};
 // textAntiAliasing is a TEXT_AA enum (Off / Antialiased / Sharp), not a bool — indices must line up

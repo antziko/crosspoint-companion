@@ -300,6 +300,8 @@ float CrossPointSettings::computeLineCompression(const uint8_t family, const uin
         return 1.0f;
       case WIDE:
         return 1.1f;
+      case EXTRA_WIDE:
+        return 1.2f;
     }
   }
 
@@ -314,6 +316,8 @@ float CrossPointSettings::computeLineCompression(const uint8_t family, const uin
           return 1.0f;
         case WIDE:
           return 1.1f;
+        case EXTRA_WIDE:
+          return 1.2f;
       }
     case NOTOSANS:
       switch (lineSpacing) {
@@ -324,6 +328,8 @@ float CrossPointSettings::computeLineCompression(const uint8_t family, const uin
           return 0.95f;
         case WIDE:
           return 1.0f;
+        case EXTRA_WIDE:
+          return 1.05f;
       }
   }
 }
@@ -519,6 +525,8 @@ float CrossPointSettings::getDefinitionLineCompression() const {
           return 1.0f;
         case WIDE:
           return 1.1f;
+        case EXTRA_WIDE:
+          return 1.2f;
       }
     case NOTOSANS:
       switch (lineSpacing) {
@@ -529,6 +537,8 @@ float CrossPointSettings::getDefinitionLineCompression() const {
           return 0.95f;
         case WIDE:
           return 1.0f;
+        case EXTRA_WIDE:
+          return 1.05f;
       }
   }
 }
