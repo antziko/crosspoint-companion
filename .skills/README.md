@@ -9,7 +9,7 @@ These are written for capable agents, not beginners. They are principle- and
 decision-focused on purpose. They deliberately avoid line-number citations,
 which drift; they anchor on durable names (APIs, types, macros, files).
 
-This is separate from `.skills/SKILL.md`, the GitHub coding-agent guide that
+This is separate from `AGENTS.md`, the GitHub coding-agent guide that
 mirrors CLAUDE.md. CLAUDE.md stays the always-loaded rule set; these skills are
 the applied decision procedures that load on demand and add the judgment layer
 CLAUDE.md does not carry.

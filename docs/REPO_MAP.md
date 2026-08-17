@@ -73,7 +73,7 @@ python scripts/gen_i18n.py lib/I18n/translations lib/I18n/   # i18n tables
 | `platformio.ini` | Main build config + critical `-D` flags (single-buffer mode, USB CDC, XML limits). Committed. |
 | `platformio.local.ini` | Personal overrides (ports, debug flags). Gitignored — never commit. |
 | `partitions.csv` | ESP32 flash partition layout. |
-| `CLAUDE.md` | Project rules (RAM protocol, HAL, allocation, dictionary rules). Symlink → `.skills/SKILL.md`; edit the real target. |
+| `AGENTS.md` | Project rules (RAM protocol, HAL, allocation, dictionary rules). `CLAUDE.md` is a symlink to it; edit `AGENTS.md`. |
 | `SCOPE.md` / `GOVERNANCE.md` | Feature scope + project governance. |
 | `test/CMakeLists.txt` | Host test build; pins gtest version. |
 | `scripts/register_unit_tests_target.py` | Registers `pio run -t unit-tests`. |
@@ -128,5 +128,5 @@ python scripts/gen_i18n.py lib/I18n/translations lib/I18n/   # i18n tables
 - **Orientation**: 4 modes (Portrait/Inverted/Landscape CW/CCW). Never hardcode 800/480; use renderer getters. Verify switch/case covers all 4.
 - **Activity lifecycle leaks**: activities are heap-allocated and `delete`d on exit. Tasks must `vTaskDelete` and member `FsFile` must close in `onExit()`.
 - **Generated files**: `*.generated.h`, `I18n*.{h,cpp}` are gitignored/regenerated — never hand-edit or commit.
-- **Symlinked `CLAUDE.md`** → `.skills/SKILL.md`; edits must target the real file.
+- **Symlinked `CLAUDE.md`** → `AGENTS.md`; edits must target the real file.
 - **Two boards (X4/X3)**: X3 adds tilt sensor; confirm board-specific paths when touching input/power.
