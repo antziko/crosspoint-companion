@@ -50,11 +50,24 @@ constexpr int WOLFSSL_MEMORY_E = -125;
 // So budget on CONVERGENCE, not on hop count: a hop that advances less than
 // MIN_RESUME_HOP_BYTES is a stall, and only consecutive stalls end the loop. The
 // absolute ceiling stays as a backstop against a server that dribbles just over the
-// stall threshold forever; at the measured 53KB/hop floor it covers ~6.8MB, and at
-// the 206KB best case ~26MB. Every hop still costs one TLS handshake (~1.3s measured)
-// and must make strict forward progress, and the caller's cancel flag is polled per
-// chunk, so a user can always abort.
-constexpr int MAX_RESUME_ATTEMPTS = 128;
+// stall threshold forever. Every hop must make strict forward progress, and the
+// caller's cancel flag is polled per chunk, so a user can always abort.
+//
+// 256, not 128, because 128 was still a file-size cap in disguise and a measured X4
+// capture ran into it. On a 24,139,108-byte book over https, 18 hops delivered
+// 2,482,875 bytes -- 137,937 B/hop, every single hop between 51,748 and 219,477 bytes,
+// i.e. an order of magnitude above MIN_RESUME_HOP_BYTES with stalls=0 the whole way.
+// A perfectly converging transfer, and 128 * 137,937 = 17.7MB would have failed it at
+// 73% of the file. 256 covers ~35MB at that rate.
+//
+// Raising it is cheap because this ceiling is not what bounds a bad server:
+// MAX_RESUME_STALLS ends a non-converging transfer after 4 consecutive short hops no
+// matter how high this is. What the ceiling bounds is total wall time on a server that
+// dribbles just above the stall threshold, and the per-hop cost that sets that is
+// ~1.4s, of which the TLS handshake is now only ~90ms (session tickets, see
+// SecureClient) -- the rest is TCP connect plus the server's time-to-first-byte on a
+// Range request.
+constexpr int MAX_RESUME_ATTEMPTS = 256;
 constexpr size_t MIN_RESUME_HOP_BYTES = 16 * 1024;
 constexpr int MAX_RESUME_STALLS = 4;
 // Full restarts allowed when a server answers 200 to a Range request (i.e. it does
@@ -306,11 +319,24 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
             // total is known); resumeOffset makes the intent explicit.
             if (sink.total == 0 && resumeOffset == 0 && http.hasContentLength()) sink.total = http.getContentLength();
             const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
-            SdDebugLog::log(
-                "CONNECT",
-                "handshake=%lums resumed=%d heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d total=%zu url=%s",
-                (unsigned long)(transferStartMs - openStartMs), http.tlsSessionResumed() ? 1 : 0, snap.heapFree,
-                snap.largest8Bit, snap.internalFree, snap.internalLargest, (int)snap.rssi, sink.total, url.c_str());
+            // handshake= is the whole open, first byte to first byte. Split it: with
+            // session tickets the TLS leg is ~90ms but the whole open measured ~1350ms on
+            // X4, so ~1250ms per hop belongs to something else, and over the ~177 hops a
+            // 24MB book needs that is minutes. tcp covers DNS + SYN (both inside
+            // WiFiClient::connect); ttfb is the remainder -- request write plus the
+            // server's think time seeking to the Range offset -- and is the only leg here
+            // that is not ours to fix. tcp/tls read 0 on a plain-HTTP hop, where the
+            // whole open is ttfb by definition.
+            const uint32_t openMs = transferStartMs - openStartMs;
+            const uint32_t tcpMs = http.tcpConnectMs();
+            const uint32_t tlsMs = http.tlsHandshakeMs();
+            const uint32_t ttfbMs = openMs > tcpMs + tlsMs ? openMs - tcpMs - tlsMs : 0;
+            SdDebugLog::log("CONNECT",
+                            "handshake=%lums tcp=%lums tls=%lums ttfb=%lums resumed=%d heap=%u largest8=%u intFree=%u "
+                            "intLargest=%u rssi=%d total=%zu url=%s",
+                            (unsigned long)openMs, (unsigned long)tcpMs, (unsigned long)tlsMs, (unsigned long)ttfbMs,
+                            http.tlsSessionResumed() ? 1 : 0, snap.heapFree, snap.largest8Bit, snap.internalFree,
+                            snap.internalLargest, (int)snap.rssi, sink.total, url.c_str());
 
             // Lease the record slab HERE, at the first body byte — never before the request.
             //
