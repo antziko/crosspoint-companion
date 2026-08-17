@@ -310,16 +310,23 @@ void StatusBarSettingsActivity::buildScreen(UiScreen& screen) {
 void StatusBarSettingsActivity::render(RenderLock&&) {
   if (optionPopup.processRender(renderer, mappedInput)) return;
 
-  renderer.clearScreen();
+  // Through renderListFrame: this screen's rows set labelText.maxLines = 2, so
+  // a wrapped row is taller than the estimate and the list's layout feedback
+  // can move the viewport mid-build (see UiListActivity::renderListFrame).
+  renderListFrame(
+      [](void* ctx) {
+        auto* self = static_cast<StatusBarSettingsActivity*>(ctx);
+        self->renderer.clearScreen();
+        const auto m = UITheme::getInstance().getMetrics();
+        // Header via GUI.drawHeader (already FreeInkUI-themed) for the battery
+        // indicator; the list renders through the app; the preview stays raw.
+        GUI.drawHeader(self->renderer, Rect{0, m.topPadding, self->renderer.getScreenWidth(), m.headerHeight},
+                       tr(STR_CUSTOMISE_STATUS_BAR));
+        self->renderUi();
+      },
+      this);
 
   auto metrics = UITheme::getInstance().getMetrics();
-  const auto pageWidth = renderer.getScreenWidth();
-
-  // Header via GUI.drawHeader (already FreeInkUI-themed) for the battery
-  // indicator; the list renders through the app; the preview stays raw.
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_CUSTOMISE_STATUS_BAR));
-
-  renderUi();
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_TOGGLE), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

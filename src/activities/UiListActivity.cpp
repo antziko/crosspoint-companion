@@ -88,9 +88,16 @@ bool UiListActivity::routeListTouch() {
 }
 
 void UiListActivity::moveSelectionTo(const int index) {
-  auto& n = activeNav();
-  n.selected = index;
-  n.follow(listCount());
+  {
+    // The render task reads nav mid-build (syncToProps, and now the
+    // onListRendered layout feedback writes top/drawnRows back into it), so a
+    // press landing during a render would otherwise tear selection/viewport.
+    // Released before requestUpdate(): RenderLock is non-recursive.
+    RenderLock lock(*this);
+    auto& n = activeNav();
+    n.selected = index;
+    n.follow(listCount());
+  }
   requestUpdate();
 }
 
@@ -103,9 +110,16 @@ void UiListActivity::loop() {
   // off-screen) and button navigation pulls the view back to it.
   const auto swipe = mappedInput.wasSwipe();
   if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
-    auto& n = activeNav();
-    const int delta = swipe == MappedInputManager::SwipeDir::Up ? n.visibleRows : -n.visibleRows;
-    if (n.scrollBy(delta, listCount())) requestUpdate();
+    bool moved = false;
+    {
+      // Same nav-vs-render race as moveSelectionTo: the render task writes
+      // top/drawnRows mid-build, so read and mutate under one lock.
+      RenderLock lock(*this);
+      auto& n = activeNav();
+      const int delta = swipe == MappedInputManager::SwipeDir::Up ? n.pageRows() : -n.pageRows();
+      moved = n.scrollBy(delta, listCount());
+    }
+    if (moved) requestUpdate();
     return;
   }
 
@@ -118,10 +132,16 @@ void UiListActivity::navigateButtons() {
   buttonNavigator.onNextRelease([this, count, &n] { moveSelectionTo(ButtonNavigator::nextIndex(n.selected, count)); });
   buttonNavigator.onPreviousRelease(
       [this, count, &n] { moveSelectionTo(ButtonNavigator::previousIndex(n.selected, count)); });
+  // Page by the rows the last build actually drew (pageRows), not the
+  // fixed-height visibleRows estimate: rows whose label wraps to a second line
+  // grow, so the estimate overshoots and the rows between two pages would never
+  // be shown. Every screen that sets maxLines = 2 (Settings, Status Bar, Text
+  // Settings, Wi-Fi) is affected on the dense X3/X4 row heights, where the
+  // two-line label always exceeds the theme row height.
   buttonNavigator.onNextContinuous(
-      [this, count, &n] { moveSelectionTo(ButtonNavigator::nextPageIndex(n.selected, count, n.visibleRows)); });
+      [this, count, &n] { moveSelectionTo(ButtonNavigator::nextPageIndex(n.selected, count, n.pageRows())); });
   buttonNavigator.onPreviousContinuous(
-      [this, count, &n] { moveSelectionTo(ButtonNavigator::previousPageIndex(n.selected, count, n.visibleRows)); });
+      [this, count, &n] { moveSelectionTo(ButtonNavigator::previousPageIndex(n.selected, count, n.pageRows())); });
 }
 
 void UiListActivity::syncListViewport(UiScreen& screen, fui::ListProps& props, const bool hasSubtitle) {
@@ -151,10 +171,26 @@ void UiListActivity::drawFooter() {
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
 
+void UiListActivity::renderListFrame(void (*drawFrame)(void*), void* ctx) {
+  drawFrame(ctx);
+  // Bounded: onListRendered() moves top strictly forward toward the selection
+  // each pass, and a viewport starting at the selection always draws it, so
+  // this converges well inside the cap. The cap is belt-and-braces against a
+  // subclass whose row heights are not stable across builds.
+  for (int pass = 0; activeNav().consumeRebuildNeeded() && pass < 8; ++pass) {
+    drawFrame(ctx);
+  }
+}
+
 void UiListActivity::render(RenderLock&&) {
-  renderer.clearScreen();
-  drawChrome();
-  renderUi();
+  renderListFrame(
+      [](void* ctx) {
+        auto* self = static_cast<UiListActivity*>(ctx);
+        self->renderer.clearScreen();
+        self->drawChrome();
+        self->renderUi();
+      },
+      this);
   drawFooter();
   renderer.displayBuffer();
 }

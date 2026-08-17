@@ -75,6 +75,20 @@ class UiListActivity : public Activity, protected UiAppHost {
   void syncListViewport(UiScreen& screen, freeink::ui::ListProps& props, bool hasSubtitle = false);
   // Move the selection to index and pull the viewport to it.
   void moveSelectionTo(int index);
+  // Draw a list frame, repeating it while the list's layout feedback keeps
+  // moving the viewport. Rows whose label wraps are taller than the
+  // fixed-height estimate ListNav plans with, so a followed selection can land
+  // past the rows list() actually drew; ListNav::onListRendered then advances
+  // the viewport and asks for another build. Without this the corrected
+  // viewport would only appear on the NEXT repaint — one visibly wrong e-ink
+  // frame per navigation.
+  //
+  // `drawFrame` must repaint the whole frame (clear included), since each pass
+  // redraws over the last. Function pointer + context rather than
+  // std::function: no heap, no per-signature binary growth (CLAUDE.md).
+  // render() uses it directly; subclasses that override render() should route
+  // their clear/chrome/renderUi sequence through it.
+  void renderListFrame(void (*drawFrame)(void*), void* ctx);
 
   // --- shared state ----------------------------------------------------------
   // Selection + viewport (selected/top/visibleRows/followOnBuild). Access via

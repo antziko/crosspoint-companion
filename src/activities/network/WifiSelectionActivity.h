@@ -155,6 +155,9 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
   void buildListScreen(UiScreen& screen);
   void buildPromptDialog(UiScreen& screen);
 
+  // Title + AP-count + MAC band, common to every state. Extracted so the
+  // network-list rebuild pass can repaint the whole frame (see render()).
+  void drawHeaderBand(const Rect& screen, const ThemeMetrics& metrics) const;
   void renderNetworkList(const Rect* screen, const ThemeMetrics* metrics);
   void renderPasswordEntry(const Rect* screen, const ThemeMetrics* metrics) const;
   void renderConnecting(const Rect* screen, const ThemeMetrics* metrics) const;

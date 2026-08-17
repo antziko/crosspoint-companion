@@ -53,7 +53,11 @@ void UiTabListActivity::moveRingTo(const int ringIndex) {
   } else {
     // Pull the viewport to the row (ring - 1); ListNav::follow reads
     // n.selected as a row index, so compute directly here.
-    const uint16_t rows = n.visibleRows > 0 ? static_cast<uint16_t>(n.visibleRows) : 1;
+    // pageRows(), not visibleRows: with wrapped (maxLines = 2) labels the rows
+    // that actually fit are fewer than the fixed-height estimate, and pulling
+    // by the estimate leaves the target row clipped below the drawn range.
+    const int measured = n.pageRows();
+    const uint16_t rows = measured > 0 ? static_cast<uint16_t>(measured) : 1;
     n.top = fui::listTopIndexFor(static_cast<int16_t>(ringIndex - 1), static_cast<uint16_t>(n.top < 0 ? 0 : n.top),
                                  rows, static_cast<uint16_t>(listCount()));
   }
@@ -96,6 +100,14 @@ void UiTabListActivity::syncTabListViewport(UiScreen& screen, fui::ListProps& pr
   n.scrollBy(0, count);  // clamp to range
   props.topIndex = static_cast<uint16_t>(n.top);
   props.selectedIndex = static_cast<int16_t>(n.selected - 1);  // -1 = tab band focused
+  // Layout feedback: list() reports back the top it actually drew from and how
+  // many rows fit, so pageRows() reflects wrapped (taller) rows instead of the
+  // fixed-height estimate. followPending is deliberately NOT armed here the way
+  // ListNav::follow() would: onListRendered() compares against n.selected as a
+  // ROW index, while the tab ring stores row + 1, so its clipped-selection
+  // correction would be off by one. moveRingTo() does the equivalent pull using
+  // pageRows(), which is the measurement this wiring exists to supply.
+  props.nav = &n;
 }
 
 void UiTabListActivity::buildTabBar(UiScreen& screen) {

@@ -977,7 +977,9 @@ void WifiSelectionActivity::loop() {
       // navigation pulls the view back to it.
       const auto swipe = mappedInput.wasSwipe();
       if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
-        const int delta = swipe == MappedInputManager::SwipeDir::Up ? listNav.visibleRows : -listNav.visibleRows;
+        // pageRows(), not visibleRows: a wrapped SSID row is taller than the
+        // fixed-height estimate, so paging by the estimate skips rows.
+        const int delta = swipe == MappedInputManager::SwipeDir::Up ? listNav.pageRows() : -listNav.pageRows();
         if (listNav.scrollBy(delta, static_cast<int>(networks.size()))) requestUpdate();
         return;
       }
@@ -1024,17 +1026,7 @@ void WifiSelectionActivity::render(RenderLock&&) {
   auto metrics = theme.getMetrics();
   Rect screen = theme.getScreenSafeArea(renderer, true, false);
 
-  // Draw header
-  // STR_NETWORKS_FOUND is ~37 bytes once the Arabic translation is substituted,
-  // so 32 truncated it. See ClockSyncActivity for the same class of bug.
-  char countStr[64];
-  snprintf(countStr, sizeof(countStr), tr(STR_NETWORKS_FOUND), realNetworkCount);
-  GUI.drawHeader(renderer, Rect{screen.x, screen.y + metrics.topPadding, screen.width, metrics.headerHeight},
-                 tr(STR_WIFI_NETWORKS), countStr);
-  GUI.drawSubHeader(
-      renderer,
-      Rect{screen.x, screen.y + metrics.topPadding + metrics.headerHeight, screen.width, metrics.tabBarHeight},
-      cachedMacAddress.c_str());
+  drawHeaderBand(screen, metrics);
 
   switch (state) {
     case WifiSelectionState::AUTO_CONNECTING:
@@ -1045,6 +1037,19 @@ void WifiSelectionActivity::render(RenderLock&&) {
       break;
     case WifiSelectionState::NETWORK_LIST:
       renderNetworkList(&screen, &metrics);
+      // This screen sets labelText.maxLines = 2, so an SSID that wraps makes
+      // its row taller than the fixed-height estimate listNav planned with and
+      // the selection can land past the rows list() drew. onListRendered then
+      // advances the viewport and asks for a rebuild; repaint the whole frame
+      // now so the corrected viewport lands in THIS e-ink update rather than
+      // showing one wrong frame first. Bounded: top moves strictly forward
+      // toward the selection each pass. Mirrors
+      // UiListActivity::renderListFrame, which this screen predates.
+      for (int pass = 0; listNav.consumeRebuildNeeded() && pass < 8; ++pass) {
+        renderer.clearScreen();
+        drawHeaderBand(screen, metrics);
+        renderNetworkList(&screen, &metrics);
+      }
       break;
     case WifiSelectionState::HIDDEN_SSID_ENTRY:
       // Transitioning to/from the SSID keyboard subactivity - nothing to draw
@@ -1196,6 +1201,19 @@ void WifiSelectionActivity::buildPromptDialog(UiScreen& screen) {
   if (width > body.width) width = body.width;
   const int16_t height = fui::optionDialogHeight(screen.target(), props, width);
   fui::optionDialog(screen.frame(), fui::centeredRect(body, fui::Size{width, height}), props);
+}
+
+void WifiSelectionActivity::drawHeaderBand(const Rect& screen, const ThemeMetrics& metrics) const {
+  // STR_NETWORKS_FOUND is ~37 bytes once the Arabic translation is substituted,
+  // so 32 truncated it. See ClockSyncActivity for the same class of bug.
+  char countStr[64];
+  snprintf(countStr, sizeof(countStr), tr(STR_NETWORKS_FOUND), realNetworkCount);
+  GUI.drawHeader(renderer, Rect{screen.x, screen.y + metrics.topPadding, screen.width, metrics.headerHeight},
+                 tr(STR_WIFI_NETWORKS), countStr);
+  GUI.drawSubHeader(
+      renderer,
+      Rect{screen.x, screen.y + metrics.topPadding + metrics.headerHeight, screen.width, metrics.tabBarHeight},
+      cachedMacAddress.c_str());
 }
 
 void WifiSelectionActivity::renderNetworkList(const Rect* screen, const ThemeMetrics* metrics) {
