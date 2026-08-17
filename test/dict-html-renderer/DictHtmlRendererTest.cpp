@@ -838,8 +838,8 @@ int main(int argc, char** argv) {
     // Empty string → 0 runs
     {
       std::vector<IpaTextSpan> runs;
-      splitIpaRuns("", runs);
-      const bool ok = runs.empty();
+      const bool split = splitIpaRuns("", runs);
+      const bool ok = split && runs.empty();
       printf("  empty string → %zu runs (expected 0)%s\n", runs.size(), ok ? "" : " FAIL");
       if (!ok) allPass = false;
     }
@@ -847,8 +847,8 @@ int main(int argc, char** argv) {
     // Pure ASCII → 1 non-IPA run
     {
       std::vector<IpaTextSpan> runs;
-      splitIpaRuns("abc", runs);
-      const bool ok = runs.size() == 1 && !runs[0].isIpa && runs[0].text == "abc";
+      const bool split = splitIpaRuns("abc", runs);
+      const bool ok = split && runs.size() == 1 && !runs[0].isIpa && runs[0].text == "abc";
       printf("  \"abc\" → %zu run(s), isIpa=%d (expected 1, false)%s\n", runs.size(),
              runs.empty() ? -1 : (int)runs[0].isIpa, ok ? "" : " FAIL");
       if (!ok) allPass = false;
@@ -860,8 +860,8 @@ int main(int argc, char** argv) {
       ipa += '\xC9';
       ipa += '\x90';
       std::vector<IpaTextSpan> runs;
-      splitIpaRuns(ipa.c_str(), runs);
-      const bool ok = runs.size() == 1 && runs[0].isIpa && runs[0].text == ipa;
+      const bool split = splitIpaRuns(ipa.c_str(), runs);
+      const bool ok = split && runs.size() == 1 && runs[0].isIpa && runs[0].text == ipa;
       printf("  U+0250 → %zu run(s), isIpa=%d (expected 1, true)%s\n", runs.size(),
              runs.empty() ? -1 : (int)runs[0].isIpa, ok ? "" : " FAIL");
       if (!ok) allPass = false;
@@ -874,9 +874,9 @@ int main(int argc, char** argv) {
       mixed += '\x90';
       mixed += "xyz";
       std::vector<IpaTextSpan> runs;
-      splitIpaRuns(mixed.c_str(), runs);
-      const bool ok = runs.size() == 3 && !runs[0].isIpa && runs[0].text == "abc" && runs[1].isIpa && !runs[2].isIpa &&
-                      runs[2].text == "xyz";
+      const bool split = splitIpaRuns(mixed.c_str(), runs);
+      const bool ok = split && runs.size() == 3 && !runs[0].isIpa && runs[0].text == "abc" && runs[1].isIpa &&
+                      !runs[2].isIpa && runs[2].text == "xyz";
       printf("  \"abc\"+U+0250+\"xyz\" → %zu run(s) (expected 3)%s\n", runs.size(), ok ? "" : " FAIL");
       if (!ok) allPass = false;
     }
@@ -890,8 +890,8 @@ int main(int argc, char** argv) {
       s += '\x91';  // U+0251
       s += "cd";
       std::vector<IpaTextSpan> runs;
-      splitIpaRuns(s.c_str(), runs);
-      const bool ok = runs.size() == 3 && !runs[0].isIpa && runs[0].text == "ab" && runs[1].isIpa &&
+      const bool split = splitIpaRuns(s.c_str(), runs);
+      const bool ok = split && runs.size() == 3 && !runs[0].isIpa && runs[0].text == "ab" && runs[1].isIpa &&
                       runs[1].text.size() == 4 && !runs[2].isIpa && runs[2].text == "cd";
       printf("  \"ab\"+U+0250+U+0251+\"cd\" → %zu run(s) (expected 3, IPA run len 4)%s\n", runs.size(),
              ok ? "" : " FAIL");
@@ -907,10 +907,59 @@ int main(int argc, char** argv) {
       s += '\xCC';
       s += '\x81';  // U+0301 (combining acute)
       std::vector<IpaTextSpan> runs;
-      splitIpaRuns(s.c_str(), runs);
-      const bool ok = runs.size() == 1 && runs[0].isIpa && runs[0].text.size() == 4;
+      const bool split = splitIpaRuns(s.c_str(), runs);
+      const bool ok = split && runs.size() == 1 && runs[0].isIpa && runs[0].text.size() == 4;
       printf("  U+0250+U+0301(combining) → %zu run(s), isIpa=%d (expected 1, true)%s\n", runs.size(),
              runs.empty() ? -1 : (int)runs[0].isIpa, ok ? "" : " FAIL");
+      if (!ok) allPass = false;
+    }
+
+    printf("  %s\n", allPass ? "PASS" : "FAIL");
+    if (allPass)
+      passed++;
+    else
+      failed++;
+  }
+
+  // Group C: textHasIpa agrees with splitIpaRuns
+  //
+  // DictLayout::Wrapper skips splitIpaRuns entirely when textHasIpa() says no, and measures
+  // and appends the string as one non-IPA run. If the two ever disagree, IPA text takes the
+  // fast path and is silently measured and drawn in the body font instead of the IPA font —
+  // no crash, no log, just wrong glyphs. That is the one failure mode the fast path can have,
+  // so it gets one property check over the same inputs the split tests use.
+  {
+    printf("\n=== textHasIpa vs splitIpaRuns ===\n");
+    bool allPass = true;
+
+    std::string ipaCp;  // U+0250
+    ipaCp += '\xC9';
+    ipaCp += '\x90';
+    std::string combining;  // U+0301 combining acute
+    combining += '\xCC';
+    combining += '\x81';
+
+    const std::string cases[] = {
+        "",                          // empty
+        "abc",                       // pure ASCII
+        "\xE4\xBA\xBA\xE7\x9A\x84",  // CJK (the crashing entry's script): no IPA
+        ipaCp,                       // single IPA codepoint
+        "abc" + ipaCp + "xyz",       // mixed
+        ipaCp + combining,           // IPA + combining mark
+        "a" + combining,             // non-IPA + combining mark
+        "caf\xC3\xA9",               // Latin-1 accented, not IPA
+        "\xC3\xA6",                  // U+00E6, an IPA character outside the IPA blocks
+    };
+
+    for (const auto& s : cases) {
+      std::vector<IpaTextSpan> runs;
+      const bool split = splitIpaRuns(s.c_str(), runs);
+      bool anyIpaRun = false;
+      for (const auto& r : runs) anyIpaRun = anyIpaRun || r.isIpa;
+      const bool fast = textHasIpa(s.c_str());
+      const bool ok = split && fast == anyIpaRun;
+      printf("  %-24s textHasIpa=%d splitHasIpaRun=%d%s\n", s.empty() ? "(empty)" : s.c_str(), (int)fast,
+             (int)anyIpaRun, ok ? "" : " FAIL");
       if (!ok) allPass = false;
     }
 

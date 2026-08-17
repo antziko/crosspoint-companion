@@ -27,6 +27,7 @@ CXXFLAGS=(
   -I"$ROOT_DIR/lib/expat"
   -I"$ROOT_DIR/lib/EpdFont"
   -I"$ROOT_DIR/lib/Utf8"
+  -I"$ROOT_DIR/lib/Memory"  # appendNoThrow / reserveNoThrow, used by IpaUtils.h and Utf8.cpp
   -I"$ROOT_DIR/lib/DictHtmlRenderer"
   -I"$ROOT_DIR/src/util"
 )

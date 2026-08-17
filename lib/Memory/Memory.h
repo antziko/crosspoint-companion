@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <memory>
 #include <new>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -55,6 +56,32 @@ template <typename T>
   if (!probe) return false;
   ::operator delete(probe, std::nothrow);
   v.reserve(n);
+  return true;
+}
+
+// Nothrow std::string::append. Same problem and same probe-then-commit technique as
+// reserveNoThrow above: append() past capacity reallocates, and a failed reallocation calls
+// std::__throw_bad_alloc() -> abort(). Growth is requested at std::string's own 2x rate so a
+// character-at-a-time caller does not pay a realloc per character; `needed` wins when the
+// append is larger than a doubling.
+//
+//   if (!appendNoThrow(s, p, len)) { LOG_ERR("TAG", "OOM"); return false; }
+//
+// On false, `s` is unchanged. Carries reserveNoThrow's caveat verbatim: the probe is freed
+// before reserve() re-takes it, so this is a near-certain graceful failure, not a guarantee.
+[[nodiscard]] inline bool appendNoThrow(std::string& s, const char* data, const size_t len) {
+  if (len == 0) return true;
+  const size_t needed = s.size() + len;
+  if (needed > s.capacity()) {
+    const size_t doubled = s.capacity() * 2;
+    const size_t want = needed > doubled ? needed : doubled;
+    // +1 covers the null terminator std::string keeps beyond size() in its own buffer.
+    void* probe = ::operator new(want + 1, std::nothrow);
+    if (!probe) return false;
+    ::operator delete(probe, std::nothrow);
+    s.reserve(want);
+  }
+  s.append(data, len);  // capacity now covers this: no reallocation, no abort
   return true;
 }
 

@@ -59,6 +59,22 @@ void DictionaryLookupController::startLookup(const std::string& word, bool recor
   // size (see shouldShowPopup), so a normally-indexed dictionary suppresses it on purpose.
   LOG_DBG("DICT", "startLookup: cspt entries=%u popup=%d free=%u", csptEntryCountCached, showPopup ? 1 : 0,
           static_cast<unsigned>(ESP.getFreeHeap()));
+  // Task BEFORE the toast, deliberately. The toast's panel refresh is ~437ms of which almost all
+  // is waiting on the panel's BUSY line, and the lookup is 500-800ms of SD reads on its own
+  // FreeRTOS task — so drawing first made them serial for no reason. Started first, they overlap
+  // and the toast becomes very nearly free. progressCallback() only stores an int and explicitly
+  // does not requestUpdate(), so nothing the task does can race the draw below.
+  //
+  // (The SPI contention this might look like is not one: the framebuffer push is short and the
+  // rest of the refresh is a BUSY wait with the bus idle, which is when the SD reads happen.)
+  task = makeUniqueNoThrow<DictLookupTask>(*this);
+  if (!task) {
+    LOG_ERR("DICT", "OOM: DictLookupTask");
+    showMemoryErrorAndReset();
+    return;
+  }
+  task->start("DictLookup", 4096, 1);
+
   if (showPopup) {
     // Toast overlay: draw popup directly over whatever the user is currently viewing.
     // RenderLock serializes against the render task — without it, a prior requestUpdate()
@@ -69,14 +85,14 @@ void DictionaryLookupController::startLookup(const std::string& word, bool recor
     // (BaseTheme.cpp:803) and no theme overrides it, so a second call here was a second
     // full-panel FAST refresh of pixels the panel had just been given.
     GUI.drawPopup(renderer, tr(STR_DICT_LOOKING_UP));
+    // This box is why the next full paint has to scrub instead of taking a plain differential.
+    // Setting the flag HERE rather than in DictionaryDefinitionActivity::onEnter ties the cost to
+    // its cause: when the toast is suppressed the definition's first paint is an ordinary FAST
+    // refresh (~437ms) instead of a scrub (~730ms). The flag is one-shot and consumed by the next
+    // displayBuffer, which is whichever screen replaces this one — the definition, the
+    // "not found" popup, or the word-select repaint after a cancel. All three need the box gone.
+    renderer.forceCleanRefreshNextPaint();
   }
-  task = makeUniqueNoThrow<DictLookupTask>(*this);
-  if (!task) {
-    LOG_ERR("DICT", "OOM: DictLookupTask");
-    showMemoryErrorAndReset();
-    return;
-  }
-  task->start("DictLookup", 4096, 1);
 }
 
 void DictionaryLookupController::startLookupAsSuggestion(const std::string& word) {
@@ -92,6 +108,19 @@ void DictionaryLookupController::setNotFound() {
 void DictionaryLookupController::onExit() {
   if (task) {
     task->stop();
+    // Task::wait() is an unbounded `while (handle) vTaskDelay(1)` (Task.h:31-33). Because it
+    // YIELDS, the idle task keeps feeding the watchdog, so a lookup that never returns hangs the
+    // UI silently and forever — no panic, no reboot, no crash report. That is the shape of the
+    // stuck-needs-power-cycle report: opds_debug.txt ends at `MEM: enter DictionaryWordSelect`
+    // and the next boot goes Boot -> Reader with no `enter Crash`.
+    //
+    // Not bounding the wait: on timeout the task is still live and would write lookupDone /
+    // foundLocation into a destroyed controller. A use-after-free is worse than a hang. So log
+    // the entry instead — if the hang recurs, this line is the last one written and names the
+    // wait as the place it stopped, which is exactly what the capture was missing.
+    if (task->isRunning()) {
+      SdDebugLog::log("DICT", "onExit: joining lookup task for '%s'", lookupWord.c_str());
+    }
     task->wait();
     task.reset();
   }
@@ -374,9 +403,15 @@ bool DictionaryLookupController::shouldShowPopup() {
   // 2. Render: an SD-card definition font. Built-ins decompress into a RAM cache and never pay
   //    per-glyph SD I/O, which is why prewarmDefinitionFont() returns early for them
   //    (DictionaryDefinitionActivity.cpp:352). The prewarm scan, the extra style loads and the
-  //    glyph-miss path — measured at render=4469ms with missMs=3688 of it — exist only on the SD
-  //    path. The .cspt count cannot see any of that, so a well-indexed dictionary used to
-  //    suppress the toast and then render for seconds against a frozen word-select page.
+  //    glyph-miss path exist only on the SD path. The .cspt count cannot see any of that, so a
+  //    well-indexed dictionary used to suppress the toast and then render for seconds against a
+  //    frozen word-select page.
+  //
+  //    This term is deliberately KEPT even though that render is now ~950ms rather than the
+  //    ~4470ms it was: the toast is the only signal that a lookup fired at all, and a lookup that
+  //    silently does nothing for a second and a half reads as a dropped keypress. Its cost is
+  //    what changed — startLookup() now starts the lookup task BEFORE drawing it, so the toast's
+  //    panel refresh overlaps the SD scan instead of preceding it.
   //
   // Not also testing whether the definition is markup: markup costs extra only when it forces
   // extra font styles, and extra styles cost real time only on the SD path already covered here.

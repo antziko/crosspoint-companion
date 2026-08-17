@@ -24,6 +24,7 @@ CXXFLAGS=(
   -I"$ROOT_DIR/lib"
   -I"$ROOT_DIR/lib/EpdFont"
   -I"$ROOT_DIR/lib/Utf8"
+  -I"$ROOT_DIR/lib/Memory"  # appendNoThrow / reserveNoThrow, used by IpaUtils.h and Utf8.cpp
 )
 
 # Utf8.cpp is needed for utf8NextCodepoint: buildPhrase's CJK-aware join calls the

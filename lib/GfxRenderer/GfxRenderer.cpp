@@ -1863,7 +1863,14 @@ void GfxRenderer::displayBuffer(const HalDisplay::RefreshMode refreshMode) const
   LOG_DBG("GFX", "Time = %lu ms from clearScreen to displayBuffer", elapsed);
   HalDisplay::RefreshMode mode = refreshMode;
   if (forceCleanRefreshOnce_) {
-    mode = HalDisplay::HALF_REFRESH;  // clear ghosting once (e.g. first paint after silent reboot)
+    // SCRUB, not HALF: every caller of forceCleanRefreshNextPaint() is erasing a popup or toast
+    // this code drew a moment ago (main.cpp:684, DictionaryDefinitionActivity.cpp:267/918,
+    // DictionaryWordSelectActivity.cpp:1184/1269) — none is a cover-image transition, which is
+    // what the X3 forced resync on HALF exists for (0a57c0a5). Asking for HALF here bought a
+    // three-pass deep sync: the dictionary's first paint measured display=3203ms against 437ms
+    // for every later paint in the same activity. SCRUB drives every pixel from scratch exactly
+    // as HALF does, in one pass. Explicit displayBuffer(HALF_REFRESH) callers are unaffected.
+    mode = HalDisplay::SCRUB_REFRESH;  // clear ghosting once (e.g. first paint after silent reboot)
     forceCleanRefreshOnce_ = false;
   }
   display.displayBuffer(mode, fadingFix);

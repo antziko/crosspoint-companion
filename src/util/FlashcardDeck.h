@@ -87,8 +87,9 @@ class FlashcardDeck {
     uint32_t dueDay = 0;
     std::string chapter;
     std::string excerpt;
-    uint32_t version = 0;  // per-word Lamport version (sync); 0 for legacy lines
-    uint32_t count = 1;    // local lookup count (times re-enrolled); 1 for legacy lines
+    uint32_t version = 0;   // per-word Lamport version (sync); 0 for legacy lines
+    uint32_t count = 1;     // local lookup count (times re-enrolled); 1 for legacy lines
+    uint32_t dictHash = 0;  // dictionary the card was saved from; 0 = unrecorded -> use active
   };
 
   // Deck-wide review stats, computed in one streaming pass (no materialization).
@@ -127,9 +128,14 @@ class FlashcardDeck {
   // from the history list passes ""), so a re-enroll without page context keeps
   // the original context. Values are control-char-stripped and capped
   // (EXCERPT_MAX / CHAPTER_MAX); chapter additionally has '|' stripped.
-  // Returns false on I/O failure.
+  //
+  // dictHash is DictionaryRegistry::nameHash() of the dictionary the lookup resolved through,
+  // so the card's back face can be rendered in THAT dictionary later instead of whatever is
+  // active at review time. 0 = unrecorded, which falls back to the active dictionary. Like
+  // excerpt/chapter it is overwritten only when non-zero, so a re-lookup from the history list
+  // (which has no dictionary context) keeps the original association.
   static bool enroll(const std::string& cachePath, const std::string& word, const std::string& excerpt,
-                     const std::string& chapter = "");
+                     const std::string& chapter = "", uint32_t dictHash = 0);
 
   // Total card count without materializing the deck (one streaming pass).
   static int count(const std::string& cachePath);
@@ -282,6 +288,9 @@ class FlashcardDeck {
                                int chapterLen, const char* excerpt, int excerptLen, uint32_t version);
   static bool updateRemoteCard(const std::string& cachePath, const std::string& word, const char* chapter,
                                int chapterLen, const char* excerpt, int excerptLen, uint32_t version);
+  // Apply a 'D' line: set only the dictionary association, leaving content and the local
+  // schedule untouched.
+  static bool setCardDict(const std::string& cachePath, const std::string& word, uint32_t dictHash);
   static void removeCardRow(const std::string& cachePath, const std::string& word);
   // Shared fixed-value row rewrite backing suspend()/unsuspend(): force `word`'s
   // box/dueDay, copying all other rows verbatim. No-op if the word is absent.

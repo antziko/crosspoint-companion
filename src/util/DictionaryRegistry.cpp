@@ -147,3 +147,11 @@ int DictionaryRegistry::indexOf(const std::string& basePath) const {
   }
   return -1;
 }
+
+int DictionaryRegistry::indexOfHash(const uint32_t hash) const {
+  if (hash == 0) return -1;  // reserved sentinel: "no dictionary recorded"
+  for (size_t i = 0; i < entries_.size(); i++) {
+    if (nameHash(entries_[i].name.c_str()) == hash) return static_cast<int>(i);
+  }
+  return -1;
+}

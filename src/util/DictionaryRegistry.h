@@ -37,6 +37,41 @@ class DictionaryRegistry {
   // Index of the entry whose basePath == path, or -1 if not found / path empty.
   int indexOf(const std::string& basePath) const;
 
+  // Stable 32-bit identity for a dictionary, hashed from its FOLDER NAME.
+  //
+  // Used by FlashcardDeck to remember which dictionary a card was saved from, so the card's
+  // back face is looked up in that dictionary rather than whatever happens to be active. The
+  // value travels between devices on the sync wire, which fixes three properties:
+  //
+  //   - Folder name, not basePath: the folder is what the user copies between devices; the
+  //     root prefix is a local detail and can differ.
+  //   - FNV-1a, not std::hash: std::hash is unspecified and may differ across libstdc++
+  //     versions, so it cannot be a wire value. (Its use for epub cache paths is fine — those
+  //     never leave the device.)
+  //   - A hash, not an index into entries_: entries_ is sorted by name and renumbers whenever
+  //     a dictionary is added or removed, which would silently repoint every existing card.
+  //
+  // Case-insensitive, matching nameIsStGroup() and discover()'s sort, so a folder copied from
+  // a case-preserving filesystem still resolves. 0 is reserved for "unset": the empty name maps
+  // to it by construction, and no real folder name is expected to (FNV-1a can only reach 0 if an
+  // intermediate hash happens to equal the very next byte, which needs a value below 256 at that
+  // step). A folder that did collide would simply read as "unrecorded" and fall back to the
+  // active dictionary — a cosmetic miss, not corruption.
+  static uint32_t nameHash(const char* name) {
+    if (name == nullptr || name[0] == '\0') return 0;
+    uint32_t h = 2166136261u;  // FNV-1a 32 offset basis
+    for (const char* p = name; *p != '\0'; ++p) {
+      h ^= static_cast<uint32_t>(static_cast<unsigned char>(tolower(static_cast<unsigned char>(*p))));
+      h *= 16777619u;  // FNV prime
+    }
+    return h;
+  }
+
+  // Index of the entry whose folder name hashes to `hash`, or -1 when none does — which is the
+  // normal case for a card synced from a device with a different dictionary set, or one whose
+  // dictionary has since been deleted. Callers fall back to the active dictionary.
+  int indexOfHash(uint32_t hash) const;
+
   // The entire grouping rule for the long-press switch: a folder name beginning "st-",
   // case-insensitively, is one group and everything else is the other.
   //

@@ -4,6 +4,7 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <Memory.h>
+#include <SdCardFont.h>  // getStats() on the reader font, for the render instrumentation
 #include <SdDebugLog.h>
 #include <Utf8.h>
 #include <esp_heap_caps.h>  // heap_caps_get_largest_free_block: pre-flight for the word-array reserve
@@ -180,15 +181,54 @@ constexpr uint8_t styleToBitMask(EpdFontFamily::Style style) {
   return static_cast<uint8_t>(1u << (static_cast<uint8_t>(style) & 0x03));
 }
 
+// Cached answer to initGloss()'s "is this dictionary plain-text?" probe.
+//
+// The probe reads the dictionary's .ifo off the SD card, and device instrumentation measured it
+// at 331ms — a third of the 1226ms it costs to open word-select. It ran on EVERY entry because
+// the activity, and therefore any member cache, is destroyed when the screen closes; the comment
+// at the call site said "once per session", but a session is one entry. For a markup dictionary
+// (the common case, where the answer is "no") that is 331ms spent re-learning the same fact
+// every time the user picks a word.
+//
+// File scope so it outlives the activity, keyed by path so switching dictionaries re-probes.
+// A fixed buffer rather than std::string: it holds at most one path and this is the heap-poorest
+// screen in the app. Paths are built into char[128] elsewhere (buildDictPath), so the width
+// matches; a path that does not fit is simply never cached rather than risking a prefix collision.
+char g_plainProbePath[128] = "";
+bool g_plainProbeIsPlain = false;
+
+// Returns true when `path` has a cached answer, writing it to `out`.
+bool plainDictProbeCached(const char* path, bool& out) {
+  if (g_plainProbePath[0] == '\0' || strcmp(g_plainProbePath, path) != 0) return false;
+  out = g_plainProbeIsPlain;
+  return true;
+}
+
+void rememberPlainDictProbe(const char* path, bool isPlain) {
+  if (strlen(path) >= sizeof(g_plainProbePath)) return;  // would truncate: skip rather than alias
+  snprintf(g_plainProbePath, sizeof(g_plainProbePath), "%s", path);
+  g_plainProbeIsPlain = isPlain;
+}
+
 }  // namespace
 
 void DictionaryWordSelectActivity::onEnter() {
   Activity::onEnter();
+  // Instrumentation, not behaviour. This screen was the only stage of a lookup with no timing
+  // line at all, which is why the ~2s between `MEM: enter DictionaryWordSelect` and
+  // `DICT: lookup` could not be split into code time and the user finding their word. onEnter
+  // and the first render() are the code half; whatever is left over is the user.
+  const unsigned long tEnter0 = millis();
   std::vector<WordSelectNavigator::WordInfo> words;
   std::vector<WordSelectNavigator::Row> rows;
   std::string textPool;  // sized exactly inside extractWords, from its counting pass
   extractWords(words, rows, textPool);
+  const unsigned long tExtract = millis();
   mergeHyphenatedWords(words, rows, textPool);
+  const unsigned long tMerge = millis();
+  // Captured before load() moves the vector out. The navigator exposes only isEmpty(), and a
+  // diagnostic is not a reason to widen its API.
+  const unsigned wordCount = static_cast<unsigned>(words.size());
   // Only consume the initial Confirm release if Confirm is still held at onEnter — i.e.
   // we were opened mid hold-to-lookup. Other entry paths (e.g. reader menu → Lookup) have
   // already released Confirm by the time we open, so consuming would swallow the user's
@@ -197,11 +237,17 @@ void DictionaryWordSelectActivity::onEnter() {
   // Book text is all one font; no IPA runs here, so the second slot defaults to the first.
   navigator.setFonts(SETTINGS.getReaderFontId());
   navigator.load(std::move(words), std::move(rows), std::move(textPool), consumeInitialConfirm, initialMarker_);
+  const unsigned long tLoad = millis();
   // Opened via the reader's hold-Back gesture? Back is still held — swallow its release once.
   consumeInitialBackRelease_ = mappedInput.isPressed(MappedInputManager::Button::Back);
   // After the word array and its text pool, never before: they are the big contiguous
   // requests, and the gloss is the optional extra.
   initGloss();
+  // words= is the page's selectable-token count, which is what extract/merge/load all scale
+  // with — without it a slow entry cannot be told from a dense page.
+  SdDebugLog::log("DWS", "enter extract=%lums merge=%lums load=%lums gloss=%lums total=%lums words=%u free=%u",
+                  tExtract - tEnter0, tMerge - tExtract, tLoad - tMerge, millis() - tLoad, millis() - tEnter0,
+                  wordCount, static_cast<unsigned>(ESP.getFreeHeap()));
   requestUpdate();
 }
 
@@ -589,7 +635,13 @@ void DictionaryWordSelectActivity::loop() {
         // with live page context for the excerpt; the navigator still holds the
         // page words + current selection here (it is reset on activity exit).
         if (!cachePath.empty()) {
-          FlashcardDeck::enroll(cachePath, controller.getLookupWord(), buildLookupExcerpt(), chapterTitle_);
+          // Record WHICH dictionary answered, so the card's back face is later rendered from
+          // that one rather than whatever happens to be active at review time — the whole point
+          // being that a word saved from a Chinese dictionary must not flip to an English
+          // definition after a switch. activeDictPath() resolves the session override too, so a
+          // long-press dictionary switch is captured, not just the configured selection.
+          FlashcardDeck::enroll(cachePath, controller.getLookupWord(), buildLookupExcerpt(), chapterTitle_,
+                                DictUtils::activeDictHash(cachePath.c_str()));
         }
         // Nothrow because this push runs on the most stressed heap in the firmware: the popup
         // render's glyph prewarm has just taken its arena, and this object is ~4.8 KB. A bare
@@ -864,7 +916,7 @@ void DictionaryWordSelectActivity::initGloss() {
   if (dictPath.empty()) return;
   const int regIdx = dictionaryRegistry.indexOf(dictPath);
   bool plainDict = regIdx >= 0 && dictionaryRegistry.getEntries()[regIdx].nameIsSt;
-  if (!plainDict) {
+  if (!plainDict && !plainDictProbeCached(dictPath.c_str(), plainDict)) {
     // 608 bytes, so heap rather than the 256-byte stack budget (Dictionary.h:130-138). Once per
     // session, never per cursor move.
     auto info = makeUniqueNoThrow<DictInfo>();
@@ -872,8 +924,9 @@ void DictionaryWordSelectActivity::initGloss() {
       LOG_ERR("DGL", "OOM: DictInfo");
       return;
     }
-    if (!Dictionary::readInfoInto(dictPath.c_str(), *info)) return;
+    if (!Dictionary::readInfoInto(dictPath.c_str(), *info)) return;  // unreadable: do not cache
     plainDict = info->sametypesequence[0] == 'm';
+    rememberPlainDictProbe(dictPath.c_str(), plainDict);
   }
   if (!plainDict) {
     LOG_DBG("DGL", "off: not a plain-text dictionary");
@@ -1270,6 +1323,7 @@ void DictionaryWordSelectActivity::clearGlossGhostOnNextPaint() {
 }
 
 void DictionaryWordSelectActivity::render(RenderLock&&) {
+  const unsigned long tRender0 = millis();
   const int lineHeight = renderer.getLineHeight(SETTINGS.getReaderFontId());
   const int currIdx = navigator.getCurrentFlatIndex();
 
@@ -1301,6 +1355,12 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
       // wired up here. The savings come from skipping page->render, which dominates the
       // pre-optimization cost; the full push at the end is a hardware floor (~444ms).
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+      // One line per cursor move. This is the path that decides how long "the user finding
+      // their word" really takes: every move ends in a full-panel push, so N moves to reach a
+      // word cost N x this. If that product is most of the pre-lookup gap, the fix is here and
+      // not in the entry render.
+      SdDebugLog::log("DWS", "render diff total=%lums free=%u", millis() - tRender0,
+                      static_cast<unsigned>(ESP.getFreeHeap()));
       prevHighlightIdx_ = currIdx;
       return;
     }
@@ -1351,6 +1411,11 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
       const auto labels = mappedInput.mapLabels("", confirmHintLabel(), "", "");
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+      // The cheap entry: the caller left the page in the framebuffer, so this skips BOTH page
+      // renders. Seeing this line instead of "render full" means entry cost is already near the
+      // panel floor and the double render is not what the first lookup is paying for.
+      SdDebugLog::log("DWS", "render skip-initial total=%lums free=%u", millis() - tRender0,
+                      static_cast<unsigned>(ESP.getFreeHeap()));
       prevHighlightIdx_ = currIdx;
       nextRenderMode_ = snapshotPrimed ? RenderMode::Differential : RenderMode::FullPage;
       return;
@@ -1360,6 +1425,7 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
   }
 
   // Full repaint path.
+  const unsigned long tFull0 = millis();
   renderer.clearScreen();
   if (controller.render()) {
     // Controller drew an overlay; framebuffer state is unknown.
@@ -1376,8 +1442,11 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
   auto* fcm = renderer.getFontCacheManager();
   auto scope = fcm->createPrewarmScope();
   page->render(renderer, SETTINGS.getReaderFontId(), marginLeft, marginTop);  // scan pass
+  const unsigned long tScan = millis();
   scope.endScanAndPrewarm();
+  const unsigned long tPrewarm = millis();
   page->render(renderer, SETTINGS.getReaderFontId(), marginLeft, marginTop);
+  const unsigned long tDraw = millis();
 
   // Set up snapshot AND draw the highlight via the differential entry point with
   // prevWordIdx = -1 (no previous highlight to wipe). This both draws the highlight
@@ -1398,15 +1467,44 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
   if (!snapshotPrimed) {
     navigator.renderHighlight(renderer, lineHeight);
   }
+  const unsigned long tHighlight = millis();
 
   // The page has just been redrawn, so wherever the box was is page text again — no strip to
   // give back, and this is the frame that resolves a move the differential path declined.
   if (gloss_) gloss_->drawnY = kGlossNotDrawn;
   drawGloss();
+  const unsigned long tGloss = millis();
 
   const auto labels = mappedInput.mapLabels("", confirmHintLabel(), "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+  const unsigned long tDisplay = millis();
+
+  // The page is rendered TWICE here — a scan pass to collect glyphs, then the real draw — so
+  // scan= and draw= are logged apart: if they are both large the double render is the cost, if
+  // only scan= is, the prewarm is not paying for itself. scan= also carries clearScreen() and
+  // PrewarmScope's clearCache(), which is where the total starts. display= is the panel floor
+  // (~437ms) and is not fixable from here.
+  //
+  // Miss counters need no reset: PrewarmScope's constructor calls resetStats()
+  // (FontCacheManager.cpp:98), so these are scoped to this render. Same counters the DDA lines
+  // read, so a word-select miss count is directly comparable to a definition one.
+  uint32_t misses = 0, missMs = 0;
+  const int readerFontId = SETTINGS.getReaderFontId();
+  if (renderer.isSdCardFont(readerFontId)) {
+    const auto& fonts = renderer.getSdCardFonts();
+    const auto it = fonts.find(readerFontId);
+    if (it != fonts.end() && it->second) {
+      misses = it->second->getStats().overflowMisses;
+      missMs = it->second->getStats().overflowMissMs;
+    }
+  }
+  SdDebugLog::log("DWS",
+                  "render full scan=%lums prewarm=%lums draw=%lums hl=%lums gloss=%lums display=%lums total=%lums "
+                  "miss=%u missMs=%u free=%u largest=%u",
+                  tScan - tFull0, tPrewarm - tScan, tDraw - tPrewarm, tHighlight - tDraw, tGloss - tHighlight,
+                  tDisplay - tGloss, tDisplay - tFull0, misses, missMs, static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
 
   prevHighlightIdx_ = currIdx;
   nextRenderMode_ = snapshotPrimed ? RenderMode::Differential : RenderMode::FullPage;

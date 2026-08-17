@@ -50,6 +50,9 @@ EInkDisplay::RefreshMode convertRefreshMode(HalDisplay::RefreshMode mode) {
     case HalDisplay::FULL_REFRESH:
       return EInkDisplay::FULL_REFRESH;
     case HalDisplay::HALF_REFRESH:
+    // Same panel waveform as HALF; the difference is entirely that the callers below do not
+    // fire requestResync() for it. See the SCRUB_REFRESH comment in HalDisplay.h.
+    case HalDisplay::SCRUB_REFRESH:
       return EInkDisplay::HALF_REFRESH;
     case HalDisplay::FAST_REFRESH:
     default:

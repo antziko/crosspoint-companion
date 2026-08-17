@@ -131,6 +131,12 @@ void FlashcardListActivity::loop() {
   // ----- Detail phase: Confirm looks up the live definition, Back returns. -----
   if (phase == Phase::Detail) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      // Same rule as the review screen's flip: look the word up in the dictionary the card was
+      // saved from, silently falling back to the active one when it is not installed. The two
+      // screens must agree — opening the same card from the list and from a review should not
+      // produce different definitions. Safe here for the same reason: loop() is the UI task and
+      // the controller has nothing in flight (Dictionary.h:94-99).
+      DictUtils::applyCardDict(detail.dictHash);
       controller.startLookup(detail.word);
       return;
     }

@@ -790,6 +790,21 @@ DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const
       // by the dict-lookup-session suite, and the controller's "miss" line already times the
       // whole miss. The window size is the cost driver and is deterministic per dictionary.
       const uint32_t wideBytes = wideEnd - wideStart;
+      // Logged BEFORE the scan, not just after it. The miss/hit lines below only ever appear
+      // once the loop has finished, so a scan that never finishes is invisible — and this loop
+      // is the leading suspect for the "stuck, had to power-cycle" report: when widening cannot
+      // narrow the window it stays at wideEnd = idxFileSize, i.e. a byte-at-a-time pass over the
+      // WHOLE index. If that hang recurs, this is the last line written and its wideBytes says
+      // whether the window was the cause. Cheap: one SD log line per miss, against a scan that
+      // is already reading kilobytes.
+      //
+      // No yield in the loop below: the lookup task and the UI task both run at priority 1 and
+      // the build has configUSE_TIME_SLICING=1 at configTICK_RATE_HZ=1000, so equal-priority
+      // round-robin already preempts this every tick. A vTaskDelay here would buy no
+      // responsiveness and would not compile on the host, where this file is built by the
+      // dict-lookup-session suite.
+      SdDebugLog::log("DICT", "locate: widened scan start, window %u-%u (%uB) for '%s'", (unsigned)wideStart,
+                      (unsigned)wideEnd, (unsigned)wideBytes, word.c_str());
       idx.seekSet(wideStart);
       while (static_cast<uint32_t>(idx.position()) < wideEnd) {
         if (cbs.shouldCancel && cbs.shouldCancel(cbs.ctx)) break;

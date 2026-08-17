@@ -110,9 +110,27 @@ constexpr uint8_t MINI_UNDERUSE_RUNS_BEFORE_FREE = 3;
 // PrewarmScope grab that over-ran the heap must not. At the observed free values (30-45 KB) a
 // 24 KB floor leaves 6-13 KB of budget, which spans the first and excludes the second.
 //
+// That calibration has since been outgrown, which is why there are two tiers. "free values
+// 30-45 KB" is no longer where the definition view runs: device logs now show it at 14-20 KB
+// (opds_debug.txt: `mini unaffordable: want=2211 budget=0 largest=15348 free=18092`). Below the
+// floor `freeNow - MINI_FREE_FLOOR` is zero by construction, so the cache was refused
+// UNCONDITIONALLY on that screen — 2.2 KB declined against 15 KB of contiguous free — and the
+// render paid it back as 122 glyph misses / 482 ms, on every page turn as well as the open.
+// Exactly the failure the floor was written to prevent, arrived at from the other side.
+//
+// So below the healthy floor, spend down to a hard TIGHT floor instead of stopping dead, capped
+// small. Both original rules survive intact: never more than half the largest block, never pull
+// total free past a floor. The cap is what keeps the tight tier from becoming the old bug — the
+// 23,350-byte arena grab behind the original crash happened at free=45016, i.e. on the healthy
+// tier, where nothing here changes.
+//
+// To revert to single-tier behaviour: set MINI_FREE_FLOOR_TIGHT = MINI_FREE_FLOOR.
+//
 // MIN_BUDGET is ~18 CJK glyphs' worth. Below that a partial prewarm buys less than the overflow
 // ring already holds, so the SD pass is not worth its cost and we bail as before.
 constexpr size_t MINI_FREE_FLOOR = 24 * 1024;
+constexpr size_t MINI_FREE_FLOOR_TIGHT = 12 * 1024;
+constexpr uint32_t MINI_TIGHT_MAX_BUDGET = 4 * 1024;
 constexpr uint32_t MINI_BITMAP_MIN_BUDGET = 1536;
 
 // Keep-if-fits buffer reuse: only reallocate when the needed size exceeds the
@@ -1134,7 +1152,17 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
       // Both bounds, lower wins — see the MINI_FREE_FLOOR comment for why neither is
       // sufficient alone.
       const uint32_t fromLargest = static_cast<uint32_t>(largest / 2);
-      const uint32_t fromFree = freeNow > MINI_FREE_FLOOR ? static_cast<uint32_t>(freeNow - MINI_FREE_FLOOR) : 0;
+      uint32_t fromFree;
+      if (freeNow > MINI_FREE_FLOOR) {
+        fromFree = static_cast<uint32_t>(freeNow - MINI_FREE_FLOOR);
+      } else {
+        // Tight tier: a small cache still beats none (each glyph left out is an SD read per
+        // draw), but it is capped so this branch can never make the healthy-heap grab the
+        // floor was added to stop.
+        const uint32_t headroom =
+            freeNow > MINI_FREE_FLOOR_TIGHT ? static_cast<uint32_t>(freeNow - MINI_FREE_FLOOR_TIGHT) : 0;
+        fromFree = std::min(headroom, MINI_TIGHT_MAX_BUDGET);
+      }
       budget = std::min(fromLargest, fromFree);
       if (budget > fullSize) budget = fullSize;
     }

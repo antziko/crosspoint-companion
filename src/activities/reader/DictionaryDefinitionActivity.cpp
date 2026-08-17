@@ -257,14 +257,18 @@ void DictionaryDefinitionActivity::onEnter() {
     sdFontSystem.ensureFontSize(SETTINGS.getReaderSdFontFamilyName(), SETTINGS.getDefinitionPointSize(), renderer);
   }
   wrapText();
-  // The screen this replaces was painted FAST and is very likely carrying the "Looking up"
-  // toast: shouldShowPopup() now fires for every SD-font definition, and nothing repaints the
-  // panel between that popup and render()'s displayBuffer below — so the toast box sits under
-  // the incoming definition text unless this paint collapses the panel state first. Same
-  // hazard EpubReaderActivity::drawIndexingPopup() works around (:490-493), and it applies
-  // equally to the word-select highlight or a previous definition we may be replacing instead.
-  // Costs one HALF refresh in place of a FAST on the first paint only.
-  renderer.forceCleanRefreshNextPaint();
+  // No forceCleanRefreshNextPaint() here any more. The screen this replaces may be carrying the
+  // "Looking up" toast, whose box would otherwise sit under the incoming definition text — but
+  // that is the TOAST's cost, so DictionaryLookupController::startLookup now sets the flag when
+  // (and only when) it draws one. Doing it unconditionally here charged every definition for a
+  // box that was not always on the glass: a scrub is ~730ms against ~437ms for a plain
+  // differential, and the flag is one-shot, so an open with no toast now pays the difference back.
+  //
+  // What this does NOT cover, deliberately: the word-select highlight and a previous definition
+  // being replaced. Both are ordinary full-content changes, and the dictionary-switch path
+  // already repaints over exactly that with a plain FAST refresh (device logs: display=437ms, no
+  // ghosting reported). Same hazard EpubReaderActivity::drawIndexingPopup() works around
+  // (:490-493) — and it too sets the flag at the popup, not at the screen that follows.
   // immediate=true, and it matters. The default requestUpdate() only sets an atomic flag
   // (ActivityManager.cpp:330-334); the render task is not notified until ActivityManager::loop()
   // reaches :182-188, which happens after onEnter() RETURNS. So the history write below was not
@@ -717,8 +721,15 @@ void DictionaryDefinitionActivity::collectLineSink(void* ctx, DictLayout::Layout
 
 int DictionaryDefinitionActivity::getMixedWidth(std::vector<IpaTextSpan>& ipaRuns, const char* text,
                                                 EpdFontFamily::Style style) {
+  // Mirrors DictLayout::Wrapper::getMixedWidth: text without IPA is one non-IPA run, so
+  // measure it directly rather than copying it onto a heap that has a few KB left.
+  if (!text || !text[0]) return 0;
+  if (!textHasIpa(text)) return renderer.getTextWidth(defFontId_, text, style);
   ipaRuns.clear();
-  splitIpaRuns(text, ipaRuns);
+  if (!splitIpaRuns(text, ipaRuns)) {
+    collectOom_ = true;
+    return 0;
+  }
   return std::accumulate(ipaRuns.begin(), ipaRuns.end(), 0, [&](int sum, const IpaTextSpan& run) {
     return sum + renderer.getTextWidth(run.isIpa ? ipaFontId() : defFontId_, run.text.c_str(), style);
   });
@@ -758,6 +769,12 @@ void DictionaryDefinitionActivity::wrapHtml() {
   const DictHtmlRenderer::SpanSink spanSink{&wrapper, &DictionaryDefinitionActivity::feedSpanToWrapper};
   htmlRenderer_.renderFromFileStreaming(dictPath, foundLocation.offset, foundLocation.size, spanSink);
   wrapper.finish();
+  // The wrapper's own transient strings are allocated on the same starved heap as everything
+  // else here, and it stops rather than aborting when one fails. Folding its flag into
+  // collectOom_ routes that into the truncation report loadPage() already emits — this is the
+  // path that used to reboot the device (splitIpaRuns -> operator new(241) -> abort at 1220
+  // bytes free).
+  if (wrapper.oom()) collectOom_ = true;
   // Only the kept page's span text was ever copied into layoutLines.
 }
 
@@ -784,15 +801,24 @@ void DictionaryDefinitionActivity::wrapPlain() {
     if (currentLineText.empty()) return;
     DictLayout::LayoutLine line;
     ipaRuns.clear();
-    splitIpaRuns(currentLineText.c_str(), ipaRuns);
+    // A failed split leaves partial runs, which would render the line with text missing —
+    // drop the segments and let the truncation report stand instead.
+    if (!splitIpaRuns(currentLineText.c_str(), ipaRuns)) {
+      collectOom_ = true;
+      ipaRuns.clear();
+    }
     // Sized exactly, so the push_back below cannot reallocate. Same reasoning as the sink:
     // an unguarded growth here aborts under -fno-exceptions, and this producer runs one
     // frame above collectLineSink — guarding only the sink would leave the reboot in place.
     if (!reserveNoThrow(line.segments, ipaRuns.size())) {
       collectOom_ = true;
     } else {
-      for (const auto& run : ipaRuns) {
-        line.segments.push_back({run.text, EpdFontFamily::REGULAR, run.isIpa});
+      // Move rather than copy: every consumer of ipaRuns clears it before use (here and in
+      // getMixedWidth), so the runs are dead after this loop. Copying them allocated a second
+      // std::string per segment — an unguarded growth, i.e. another abort site — for text that
+      // was about to be discarded.
+      for (auto& run : ipaRuns) {
+        line.segments.push_back({std::move(run.text), EpdFontFamily::REGULAR, run.isIpa});
       }
     }
     // Emit even when empty: the sink increments collectLineCount_ before it inspects
@@ -1341,6 +1367,24 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
           renderer.drawLine(x, underlineY, x + segWidth, underlineY, true);
         }
         x += renderer.getTextAdvanceX(segFontId, segText, seg.style);
+      }
+    }
+
+    // Truncation notice. Without it a definition that ran out of heap mid-layout is
+    // indistinguishable from a genuinely short entry — the reader has no way to tell that text
+    // is missing, or that backing out and reopening on a calmer heap would show more. Drawn
+    // outside layoutLines, so it is not word-selectable and the highlight navigator's indices
+    // are unaffected.
+    //
+    // REGULAR deliberately, not italic: on an SD-card font only the styles prewarmDefinitionFont
+    // could afford are resident, and by the time this notice is drawn the heap is by definition
+    // too small to load a cold style's glyphs on demand — an italic notice would render as a row
+    // of missing-glyph marks, which is worse than no notice at all.
+    if (collectOom_) {
+      const int noticeRow = static_cast<int>(layoutLines.size());
+      if (noticeRow < linesPerPage) {
+        renderer.drawText(defFontId_, leftPadding, bodyStartY + noticeRow * lineHeight, tr(STR_ERROR_LOW_MEMORY), true,
+                          EpdFontFamily::REGULAR);
       }
     }
   };

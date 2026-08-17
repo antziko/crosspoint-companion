@@ -102,6 +102,12 @@ class FlashcardReviewActivity final : public Activity {
   void promptSuspendToggle();
   // Suspended-review only: confirm + permanently delete the current set-aside card.
   void promptDelete();
+  // Flip to the back face: look the word up in the dictionary the card was SAVED from, falling
+  // back to the active one when that dictionary is not installed here. Every flip goes through
+  // this rather than calling startLookup directly, so the override is applied in exactly one
+  // place — and applied from loop(), which is the UI task with no lookup in flight, the
+  // condition Dictionary::setSessionDictPath requires (Dictionary.h:94-99).
+  void flipToBackFace();
   void displayList();  // push with the list refresh policy (FAST + landscape scrub)
 
   // Render helpers.

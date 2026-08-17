@@ -54,15 +54,26 @@ bool isAllDigits(const char* p, int n) {
   return true;
 }
 
-// Parsed fields of a "word|box|dueDay|chapter|version|excerpt" line. The excerpt
-// is the remainder after the fifth '|', so an embedded '|' in the excerpt is
-// harmless. The version field (between chapter and excerpt) is recognised only
-// when it is all-digits; otherwise the line is read as a legacy
-// "word|box|dueDay|chapter|excerpt" (version 0) -- the field is then the start of
-// a pipe-containing excerpt. Legacy 4-field lines ("word|box|dueDay|excerpt",
-// three '|') parse with an empty chapter, version 0, and the excerpt intact.
-// Malformed lines (fewer than three '|') degrade to box 0 / dueDay 0 / no
-// chapter / version 0 / no excerpt, whole line = word.
+// Parsed fields of a "word|box|dueDay|chapter|version|count|dictHash|excerpt" line. The excerpt
+// is the remainder after the last delimiter, so an embedded '|' in the excerpt is harmless to
+// the fields BEFORE it. Each optional trailing field (version, count, dictHash) is recognised
+// only when it is all-digits; the first non-numeric field ends the header and starts the
+// excerpt. That is how every older layout still parses:
+//   word|box|dueDay|chapter|version|count|excerpt   -> dictHash 0
+//   word|box|dueDay|chapter|version|excerpt         -> count 1, dictHash 0
+//   word|box|dueDay|chapter|excerpt                 -> version 0, count 1, dictHash 0
+//   word|box|dueDay|excerpt                         -> no chapter either
+// Malformed lines (fewer than three '|') degrade to box 0 / dueDay 0 / no chapter / version 0 /
+// no excerpt, whole line = word.
+//
+// The all-digits rule is a heuristic only for lines this build did NOT write. writeCard always
+// emits all three optional fields, 0 included, so a current line has exactly seven header
+// delimiters, every sniff tests a numeric field, and the excerpt (which may contain '|') starts
+// past the last delimiter parseLine tracks. A LEGACY line that is short a field AND whose
+// excerpt begins with a numeric pipe-token ("1999|was a good year") reads that token as the
+// missing field. That hazard predates dictHash — it already applied to count — and it cannot be
+// fixed from the write end for lines already on disk, so it is pinned by a test rather than
+// papered over. Adding a FOURTH optional field would need the same audit again.
 struct Parsed {
   int wordLen;
   uint8_t box;
@@ -70,14 +81,16 @@ struct Parsed {
   const char* chapter;
   int chapterLen;
   uint32_t version;
-  uint32_t count;  // local lookup count; defaults to 1 when the field is absent (legacy)
+  uint32_t count;     // local lookup count; defaults to 1 when the field is absent (legacy)
+  uint32_t dictHash;  // DictionaryRegistry::nameHash of the dictionary the card was saved from;
+                      // 0 = unrecorded (legacy line, or a card received from an older device)
   const char* excerpt;
   int excerptLen;
 };
 
 Parsed parseLine(const char* line, int len) {
-  Parsed r{len, 0, 0, line + len, 0, 0, 1, line + len, 0};
-  int p0 = -1, p1 = -1, p2 = -1, p3 = -1, p4 = -1, p5 = -1;
+  Parsed r{len, 0, 0, line + len, 0, 0, 1, 0, line + len, 0};
+  int p0 = -1, p1 = -1, p2 = -1, p3 = -1, p4 = -1, p5 = -1, p6 = -1;
   for (int i = 0; i < len; i++) {
     if (line[i] != '|') continue;
     if (p0 < 0)
@@ -90,8 +103,10 @@ Parsed parseLine(const char* line, int len) {
       p3 = i;
     else if (p4 < 0)
       p4 = i;
-    else {
+    else if (p5 < 0)
       p5 = i;
+    else {
+      p6 = i;
       break;
     }
   }
@@ -111,10 +126,18 @@ Parsed parseLine(const char* line, int len) {
     // chapter|version|... : version present.
     r.version = parseU32(line + p3 + 1, p4 - (p3 + 1));
     if (p5 >= 0 && isAllDigits(line + p4 + 1, p5 - (p4 + 1))) {
-      // New 7-field line: chapter|version|count|excerpt.
+      // chapter|version|count|... : count present.
       r.count = parseU32(line + p4 + 1, p5 - (p4 + 1));
-      r.excerpt = line + p5 + 1;
-      r.excerptLen = len - (p5 + 1);
+      if (p6 >= 0 && isAllDigits(line + p5 + 1, p6 - (p5 + 1))) {
+        // Current 8-field line: chapter|version|count|dictHash|excerpt.
+        r.dictHash = parseU32(line + p5 + 1, p6 - (p5 + 1));
+        r.excerpt = line + p6 + 1;
+        r.excerptLen = len - (p6 + 1);
+      } else {
+        // 7-field line: chapter|version|count|excerpt (dictHash absent -> 0).
+        r.excerpt = line + p5 + 1;
+        r.excerptLen = len - (p5 + 1);
+      }
     } else {
       // 6-field line: chapter|version|excerpt (count absent -> default 1).
       r.excerpt = line + p4 + 1;
@@ -138,18 +161,24 @@ bool writeRaw(HalFile& out, const char* p, int n) {
   return out.write(p, static_cast<size_t>(n)) == static_cast<size_t>(n);
 }
 
-// Write a full "word|box|dueDay|chapter|version|count|excerpt\n" card line.
+// Write a full "word|box|dueDay|chapter|version|count|dictHash|excerpt\n" card line.
 bool writeCard(HalFile& out, const char* word, size_t wordLen, uint8_t box, uint32_t dueDay, const char* chapter,
-               int chapterLen, uint32_t version, uint32_t count, const char* excerpt, int excerptLen) {
+               int chapterLen, uint32_t version, uint32_t count, uint32_t dictHash, const char* excerpt,
+               int excerptLen) {
   char mid[24];
   const int m = snprintf(mid, sizeof(mid), "|%u|%lu|", static_cast<unsigned>(box), static_cast<unsigned long>(dueDay));
   bool ok = writeRaw(out, word, static_cast<int>(wordLen)) && writeRaw(out, mid, m);
   if (ok && chapterLen > 0) ok = writeRaw(out, chapter, chapterLen);
-  // |version|count| (delimits chapter from the remainder excerpt). count is local-only
-  // (lookup tally), never sent on the sync wire — buildCardPayload omits it.
-  char vtail[24];
-  const int v = snprintf(vtail, sizeof(vtail), "|%lu|%lu|", static_cast<unsigned long>(version),
-                         static_cast<unsigned long>(count));
+  // |version|count|dictHash| (delimits chapter from the remainder excerpt). Of these only
+  // version goes on the sync wire in the card line — buildCardPayload omits count (a local
+  // lookup tally) and dictHash (carried by its own 'D' line, so older devices ignore it
+  // instead of swallowing it into the excerpt).
+  //
+  // dictHash is written unconditionally, 0 included: a fixed field count is what lets the
+  // all-digits sniffing in parseLine stay unambiguous for every line this build produces.
+  char vtail[36];
+  const int v = snprintf(vtail, sizeof(vtail), "|%lu|%lu|%lu|", static_cast<unsigned long>(version),
+                         static_cast<unsigned long>(count), static_cast<unsigned long>(dictHash));
   if (ok) ok = writeRaw(out, vtail, v);
   if (ok && excerptLen > 0) ok = writeRaw(out, excerpt, excerptLen);
   const char nl = '\n';
@@ -180,7 +209,9 @@ struct CountCtx {
   int savedExcerptLen;
   char savedChapter[FlashcardDeck::CHAPTER_MAX];  // chapter of the matched dropWord line
   int savedChapterLen;
-  uint32_t savedCount;  // lookup count of the matched dropWord line (for the re-enroll bump)
+  uint32_t savedCount;     // lookup count of the matched dropWord line (for the re-enroll bump)
+  uint32_t savedDictHash;  // dictionary of the matched dropWord line (kept when the re-enroll
+                           // supplies none, e.g. a re-lookup from the history list)
 };
 
 bool countLine(void* ctx, const char* line, int len) {
@@ -193,6 +224,7 @@ bool countLine(void* ctx, const char* line, int len) {
     c->savedChapterLen = std::min(p.chapterLen, FlashcardDeck::CHAPTER_MAX);
     if (c->savedChapterLen > 0) memcpy(c->savedChapter, p.chapter, static_cast<size_t>(c->savedChapterLen));
     c->savedCount = p.count;
+    c->savedDictHash = p.dictHash;
   } else {
     c->count++;
   }
@@ -324,16 +356,22 @@ bool FlashcardDeck::isDue(uint8_t box, uint32_t dueDay, uint32_t today) {
 // ---------------------------------------------------------------------------
 
 bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word, const std::string& excerpt,
-                           const std::string& chapter) {
+                           const std::string& chapter, uint32_t dictHash) {
   if (word.empty() || cachePath.empty()) return false;
 
   const std::string path = filePath(cachePath);
 
   // Pass 1: count survivors and, if the word is already present, capture its
   // existing excerpt + chapter so we can preserve them when the new ones are empty.
-  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0};
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0};
   forEachLine(path, countLine, &cc);
 
+  // stripPipe stays FALSE for the excerpt (unlike chapter). The excerpt is the line remainder
+  // and writeCard always emits all three optional fields — version|count|dictHash, 0 included —
+  // so a line this build writes always has exactly seven header delimiters and parseLine's
+  // all-digits sniffs always resolve against numeric fields. Any '|' in the excerpt lands past
+  // the last one parseLine tracks and is returned intact. Stripping it would destroy the user's
+  // sentence to buy a disambiguation the fixed field count already provides.
   char newExcerpt[EXCERPT_MAX];
   int newLen = sanitizeField(excerpt, newExcerpt, EXCERPT_MAX, /*stripPipe=*/false);
   // Empty new excerpt on a re-enroll keeps the previously captured sentence.
@@ -342,6 +380,10 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
     useExcerpt = cc.savedExcerpt;
     newLen = cc.savedExcerptLen;
   }
+
+  // Same rule as excerpt/chapter: a re-enroll that carries no dictionary context (the history
+  // list re-lookup) must not erase the association the original in-book lookup recorded.
+  if (dictHash == 0 && cc.dupSeen) dictHash = cc.savedDictHash;
 
   char newChapter[CHAPTER_MAX];
   int chapLen = sanitizeField(chapter, newChapter, CHAPTER_MAX, /*stripPipe=*/true);
@@ -368,8 +410,8 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
       LOG_ERR("FCD", "Failed to open for append: %s", path.c_str());
       return false;
     }
-    const bool ok =
-        writeCard(out, word.c_str(), word.size(), 0, 0, useChapter, chapLen, version, newCount, useExcerpt, newLen);
+    const bool ok = writeCard(out, word.c_str(), word.size(), 0, 0, useChapter, chapLen, version, newCount, dictHash,
+                              useExcerpt, newLen);
     out.close();
     if (!ok) LOG_ERR("FCD", "Enroll append failed: %s", path.c_str());
     return ok;
@@ -385,7 +427,8 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
     int excerptLen;
     uint32_t version;
     uint32_t count;
-  } ec{&word, useChapter, chapLen, useExcerpt, newLen, version, newCount};
+    uint32_t dictHash;
+  } ec{&word, useChapter, chapLen, useExcerpt, newLen, version, newCount, dictHash};
   return rewriteDeck(
       cachePath, &ec,
       [](void* ctx, HalFile& out, const char* line, int len) {
@@ -396,7 +439,7 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
       [](void* ctx, HalFile& out) {
         auto* c = static_cast<EnrollCtx*>(ctx);
         return writeCard(out, c->word->c_str(), c->word->size(), 0, 0, c->chapter, c->chapLen, c->version, c->count,
-                         c->excerpt, c->excerptLen);
+                         c->dictHash, c->excerpt, c->excerptLen);
       });
 }
 
@@ -405,7 +448,7 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
 // ---------------------------------------------------------------------------
 
 int FlashcardDeck::count(const std::string& cachePath) {
-  CountCtx cc{nullptr, 0, false, {}, 0, {}, 0, 0};
+  CountCtx cc{nullptr, 0, false, {}, 0, {}, 0, 0, 0};
   forEachLine(filePath(cachePath), countLine, &cc);
   return cc.count;
 }
@@ -443,7 +486,7 @@ int FlashcardDeck::loadWindow(const std::string& cachePath, int startNewest, int
   if (startNewest < 0 || n <= 0 || !out) return 0;
   const std::string path = filePath(cachePath);
 
-  CountCtx cc{nullptr, 0, false, {}, 0, {}, 0, 0};
+  CountCtx cc{nullptr, 0, false, {}, 0, {}, 0, 0, 0};
   if (!forEachLine(path, countLine, &cc) || cc.count == 0) return 0;
   const int total = cc.count;
   if (startNewest >= total) return 0;
@@ -472,6 +515,9 @@ int FlashcardDeck::loadWindow(const std::string& cachePath, int startNewest, int
         e.dueDay = p.dueDay;
         e.version = p.version;
         e.count = p.count;  // kept even in wordsOnly mode so the list row can show "xN"
+        // Also kept in wordsOnly mode: the list view opens definitions straight from a row, so
+        // it needs the association without a second pass over the deck.
+        e.dictHash = p.dictHash;
         if (c->wordsOnly) {
           // List view shows word + box glyph only; skip the two string allocs.
           e.chapter.clear();
@@ -494,7 +540,7 @@ bool FlashcardDeck::removeAt(const std::string& cachePath, int index) {
   if (index < 0) return false;
   const std::string path = filePath(cachePath);
 
-  CountCtx cc{nullptr, 0, false, {}, 0, {}, 0, 0};
+  CountCtx cc{nullptr, 0, false, {}, 0, {}, 0, 0, 0};
   if (!forEachLine(path, countLine, &cc)) return false;
   if (index >= cc.count) return false;
 
@@ -522,7 +568,7 @@ bool FlashcardDeck::remove(const std::string& cachePath, const std::string& word
   const std::string path = filePath(cachePath);
 
   // Scan first: skip the rewrite entirely if the word is absent.
-  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0};
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0};
   if (!forEachLine(path, countLine, &cc) || !cc.dupSeen) return false;
 
   const bool ok =
@@ -545,7 +591,7 @@ bool FlashcardDeck::grade(const std::string& cachePath, const std::string& word,
   const std::string path = filePath(cachePath);
 
   // Scan first: skip the rewrite entirely if the word is absent.
-  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0};
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0};
   if (!forEachLine(path, countLine, &cc) || !cc.dupSeen) return false;
 
   struct GradeCtx {
@@ -561,9 +607,10 @@ bool FlashcardDeck::grade(const std::string& cachePath, const std::string& word,
     uint8_t box = p.box;
     uint32_t dueDay = p.dueDay;
     applyGrade(box, dueDay, c->correct, c->today);
-    // Grading is a local schedule change -- preserve the wire version and lookup count.
+    // Grading is a local schedule change -- preserve the wire version, lookup count and the
+    // dictionary the card was saved from.
     return writeCard(out, line, static_cast<size_t>(p.wordLen), box, dueDay, p.chapter, p.chapterLen, p.version,
-                     p.count, p.excerpt, p.excerptLen);
+                     p.count, p.dictHash, p.excerpt, p.excerptLen);
   });
 }
 
@@ -585,7 +632,7 @@ bool FlashcardDeck::setBoxForWord(const std::string& cachePath, const std::strin
   const std::string path = filePath(cachePath);
 
   // Scan first: skip the rewrite entirely if the word is absent.
-  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0};
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0};
   if (!forEachLine(path, countLine, &cc) || !cc.dupSeen) return false;
 
   // Force the matched row's box/dueDay, copying every other line verbatim.
@@ -599,9 +646,9 @@ bool FlashcardDeck::setBoxForWord(const std::string& cachePath, const std::strin
     const Parsed p = parseLine(line, len);
     if (static_cast<size_t>(p.wordLen) != c->word->size() || memcmp(line, c->word->c_str(), p.wordLen) != 0)
       return writeRaw(out, line, len) && out.write("\n", 1) == 1;  // copy verbatim
-    // suspend/unsuspend are local schedule changes -- preserve the version and count.
+    // suspend/unsuspend are local schedule changes -- preserve version, count and dictHash.
     return writeCard(out, line, static_cast<size_t>(p.wordLen), c->box, c->dueDay, p.chapter, p.chapterLen, p.version,
-                     p.count, p.excerpt, p.excerptLen);
+                     p.count, p.dictHash, p.excerpt, p.excerptLen);
   });
 }
 
@@ -807,6 +854,24 @@ struct FcUploadCtx {
 };
 
 // Append "tag<payload>\n" if it fits; set truncated + return false otherwise.
+// "word|dictHash|version" for a 'D' line: the dictionary a card was saved from.
+//
+// A SEPARATE line type rather than an eighth field on 'H', because the card decoder in
+// mergeBlob() finds exactly three pipes and then takes the excerpt as everything after the
+// third. An older device reading an extended 'H' would therefore store "dictHash|excerpt" as
+// the excerpt and re-broadcast that corruption through the rolling heal. Unknown line types,
+// by contrast, are skipped by construction (`lineStart[0] != want`), so 'D' is invisible to
+// every build that predates it.
+int buildDictPayload(char* buf, int cap, const char* line, const Parsed& p) {
+  char nums[24];
+  const int nlen = snprintf(nums, sizeof(nums), "|%lu|%lu", static_cast<unsigned long>(p.dictHash),
+                            static_cast<unsigned long>(p.version));
+  if (p.wordLen + nlen > cap) return -1;
+  memcpy(buf, line, static_cast<size_t>(p.wordLen));
+  memcpy(buf + p.wordLen, nums, static_cast<size_t>(nlen));
+  return p.wordLen + nlen;
+}
+
 bool fcEmit(FcUploadCtx* c, char tag, const char* payload, int plen) {
   const size_t need = 1 + static_cast<size_t>(plen) + 1;
   if (c->used + need > c->cap) {
@@ -993,7 +1058,7 @@ void FlashcardDeck::clearTombstone(const std::string& cachePath, const std::stri
 // --- Merge primitives (no version bump; the wire version is authoritative) --
 
 void FlashcardDeck::removeCardRow(const std::string& cachePath, const std::string& word) {
-  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0};
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0};
   if (!forEachLine(filePath(cachePath), countLine, &cc) || !cc.dupSeen) return;
   rewriteDeck(cachePath, const_cast<std::string*>(&word), [](void* ctx, HalFile& out, const char* line, int len) {
     const auto* w = static_cast<const std::string*>(ctx);
@@ -1011,10 +1076,40 @@ bool FlashcardDeck::appendRemoteCard(const std::string& cachePath, const std::st
     LOG_ERR("FCD", "Failed to append remote card: %s", path.c_str());
     return false;
   }
-  // Remote-received card: local lookup count starts at 1 (count is not synced).
-  const bool ok = writeCard(out, word.c_str(), word.size(), 0, 0, chapter, chapterLen, version, 1, excerpt, excerptLen);
+  // Remote-received card: local lookup count starts at 1 (count is not synced), and dictHash
+  // starts at 0 (unrecorded) -- the peer's 'D' line, if it sent one, sets it in the later pass.
+  const bool ok =
+      writeCard(out, word.c_str(), word.size(), 0, 0, chapter, chapterLen, version, 1, 0, excerpt, excerptLen);
   out.close();
   return ok;
+}
+
+// Apply a 'D' line: set the dictionary a card was saved from, leaving every other field alone.
+// Separate from updateRemoteCard because the association travels on its own line and may arrive
+// for a card this device already had (no content change) as well as one that just landed.
+bool FlashcardDeck::setCardDict(const std::string& cachePath, const std::string& word, uint32_t dictHash) {
+  // Scan before rewriting. rewriteDeck reads the whole deck, writes a temp copy and renames, so
+  // it is far too expensive to run unconditionally here: the rolling heal re-broadcasts a 'D'
+  // for every card in its slice on every sync, and nearly all of those carry a value this device
+  // already has. Without this guard a sync costs one full deck rewrite per healed card.
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0};
+  if (!forEachLine(filePath(cachePath), countLine, &cc) || !cc.dupSeen) return false;
+  if (cc.savedDictHash == dictHash) return true;  // already correct — no I/O, no SD wear
+
+  struct D {
+    const std::string* word;
+    uint32_t dictHash;
+  } d{&word, dictHash};
+  return rewriteDeck(cachePath, &d, [](void* ctx, HalFile& out, const char* line, int len) {
+    auto* c = static_cast<D*>(ctx);
+    const Parsed p = parseLine(line, len);
+    if (static_cast<size_t>(p.wordLen) != c->word->size() || memcmp(line, c->word->c_str(), p.wordLen) != 0)
+      return writeRaw(out, line, len) && out.write("\n", 1) == 1;  // copy verbatim
+    // Only the dictionary changes. box/dueDay are this device's own schedule and are never
+    // synced; version/count/chapter/excerpt are whatever the 'H' pass already settled.
+    return writeCard(out, line, static_cast<size_t>(p.wordLen), p.box, p.dueDay, p.chapter, p.chapterLen, p.version,
+                     p.count, c->dictHash, p.excerpt, p.excerptLen);
+  });
 }
 
 bool FlashcardDeck::updateRemoteCard(const std::string& cachePath, const std::string& word, const char* chapter,
@@ -1032,10 +1127,12 @@ bool FlashcardDeck::updateRemoteCard(const std::string& cachePath, const std::st
     const Parsed p = parseLine(line, len);
     if (static_cast<size_t>(p.wordLen) != c->word->size() || memcmp(line, c->word->c_str(), p.wordLen) != 0)
       return writeRaw(out, line, len) && out.write("\n", 1) == 1;  // copy verbatim
-    // Field-level: keep the local schedule (box/dueDay) and local lookup count, take
-    // the wire content (chapter/version/excerpt).
+    // Field-level: keep the local schedule (box/dueDay), local lookup count and local dictHash,
+    // take the wire content (chapter/version/excerpt). dictHash is deliberately NOT taken from
+    // the card line -- it does not travel there. Its own 'D' line carries it, applied in a later
+    // pass, so a peer that never sends one leaves whatever this device already knew.
     return writeCard(out, line, static_cast<size_t>(p.wordLen), p.box, p.dueDay, c->chapter, c->chapterLen, c->version,
-                     p.count, c->excerpt, c->excerptLen);
+                     p.count, p.dictHash, c->excerpt, c->excerptLen);
   });
 }
 
@@ -1167,6 +1264,13 @@ size_t FlashcardDeck::serializeForUpload(const std::string& cachePath, uint8_t* 
         if (!fcEmit(c, 'H', buf, n)) return false;
         c->histCount++;
         if (p.version > c->maxVer) c->maxVer = p.version;
+        // The dictionary association rides its own line, emitted only when there is one. If the
+        // budget runs out between the two, the card still lands on the peer with correct front
+        // content and no association; the rolling heal below re-sends it on a later sync.
+        if (p.dictHash != 0) {
+          const int dn = buildDictPayload(buf, sizeof(buf), line, p);
+          if (dn >= 0 && !fcEmit(c, 'D', buf, dn)) return false;
+        }
         return true;
       },
       &c);
@@ -1219,7 +1323,11 @@ size_t FlashcardDeck::serializeForUpload(const std::string& cachePath, uint8_t* 
           if (n < 0) return true;
           if (!fcEmit(c, 'H', buf, n)) return false;  // budget full -> stop rolling
           c->rollCount++;                             // re-broadcast heal, not a new delta
-          c->nextCursor = idx + 1;                    // resume after this card next sync
+          if (p.dictHash != 0) {
+            const int dn = buildDictPayload(buf, sizeof(buf), line, p);
+            if (dn >= 0 && !fcEmit(c, 'D', buf, dn)) return false;
+          }
+          c->nextCursor = idx + 1;  // resume after this card next sync
           return true;
         },
         &c);
@@ -1310,6 +1418,23 @@ int FlashcardDeck::mergeBlob(const std::string& cachePath, const uint8_t* blob, 
         if (p0 < 0 || p1 < 0 || p2 < 0) continue;
         const uint32_t ver = parseU32(payload + p1 + 1, p2 - p1 - 1);
         if (ver > maxVer) maxVer = ver;
+      } else if (lineStart[0] == 'D') {
+        // "word|dictHash|version". Counted here for the same reason 'H' is: the clock must be
+        // raised past every version the blob carries, and a 'D' can be the only line for a card
+        // whose content the peer already had.
+        int p0 = -1, p1 = -1;
+        for (int k = 0; k < plen; k++)
+          if (payload[k] == '|') {
+            if (p0 < 0)
+              p0 = k;
+            else {
+              p1 = k;
+              break;
+            }
+          }
+        if (p0 < 0 || p1 < 0) continue;
+        const uint32_t ver = parseU32(payload + p1 + 1, plen - (p1 + 1));
+        if (ver > maxVer) maxVer = ver;
       }
     }
     observeVersion(cachePath, maxVer);  // materializes the clock too (loadCounter inside)
@@ -1318,10 +1443,12 @@ int FlashcardDeck::mergeBlob(const std::string& cachePath, const uint8_t* blob, 
   int added = 0;
   int deleted = 0;
 
-  // Two passes: tombstones first, then cards, so a re-enroll (higher version)
-  // correctly beats a delete for the same word.
-  for (int pass = 0; pass < 2; pass++) {
-    const char want = (pass == 0) ? 'T' : 'H';
+  // Three passes: tombstones first, then cards, so a re-enroll (higher version) correctly beats
+  // a delete for the same word -- then dictionary associations, which must run LAST because a
+  // 'D' line is only applicable to a card that exists, and its card may be arriving in the very
+  // same blob's 'H' pass.
+  for (int pass = 0; pass < 3; pass++) {
+    const char want = (pass == 0) ? 'T' : (pass == 1) ? 'H' : 'D';
     size_t i = 0;
     while (i < len) {
       size_t j = i;
@@ -1349,7 +1476,7 @@ int FlashcardDeck::mergeBlob(const std::string& cachePath, const uint8_t* blob, 
         removeCardRow(cachePath, word);
         setTombstone(cachePath, word, ver);
         deleted++;
-      } else {
+      } else if (want == 'H') {
         // payload = "word|chapter|version|excerpt" (chapter has no '|'; excerpt
         // is the remainder and may).
         int p0 = -1, p1 = -1, p2 = -1;
@@ -1382,6 +1509,31 @@ int FlashcardDeck::mergeBlob(const std::string& cachePath, const uint8_t* blob, 
           appendRemoteCard(cachePath, word, chapter, chapterLen, excerpt, excerptLen, ver);
           added++;
         }
+      } else {  // want == 'D': "word|dictHash|version"
+        int p0 = -1, p1 = -1;
+        for (int k = 0; k < plen; k++)
+          if (payload[k] == '|') {
+            if (p0 < 0)
+              p0 = k;
+            else {
+              p1 = k;
+              break;
+            }
+          }
+        if (p0 < 0 || p1 < 0) continue;
+        // Brace-init: avoids the Arduino word(...) macro — see the 'T' branch above.
+        std::string word{payload, static_cast<size_t>(p0)};
+        const uint32_t dictHash = parseU32(payload + p0 + 1, p1 - (p0 + 1));
+        const uint32_t ver = parseU32(payload + p1 + 1, plen - (p1 + 1));
+        if (dictHash == 0) continue;  // nothing to record
+        const int cardVer = cardVersionOf(cachePath, word);
+        if (cardVer < 0) continue;  // no such card here (deleted, or never arrived) — drop it
+        // >= not >: the 'D' carries its card's OWN version, so after the 'H' pass above has
+        // written that version locally the two are equal and the association must still apply.
+        // A strictly newer local version means this device re-enrolled the word since, and its
+        // own association wins.
+        if (ver < static_cast<uint32_t>(cardVer)) continue;
+        setCardDict(cachePath, word, dictHash);
       }
     }
   }

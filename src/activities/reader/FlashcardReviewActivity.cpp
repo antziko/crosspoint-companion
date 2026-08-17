@@ -171,6 +171,15 @@ void FlashcardReviewActivity::promptSuspendToggle() {
       renderer, mappedInput, unsuspending ? tr(STR_FLASHCARD_UNSUSPEND_TITLE) : tr(STR_FLASHCARD_SUSPEND_TITLE), word);
 }
 
+void FlashcardReviewActivity::flipToBackFace() {
+  // Returns false when the card records no dictionary (legacy card, or one synced from a device
+  // whose dictionary set differs) or when the recorded one is not installed. Either way we leave
+  // the active dictionary in place and look up there — a definition from the wrong dictionary
+  // beats no definition at all.
+  DictUtils::applyCardDict(card.dictHash);
+  controller.startLookup(card.word, /*recordHistory=*/false);
+}
+
 void FlashcardReviewActivity::promptDelete() {
   // Capture the word now -- `card` is overwritten as soon as we advance. Delete is
   // irreversible (the deck has no tombstone), so it is gated by a confirmation,
@@ -311,7 +320,7 @@ void FlashcardReviewActivity::loop() {
         } else if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
           navigateCard(+1);
         } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-          controller.startLookup(card.word, /*recordHistory=*/false);  // flip -> back face
+          flipToBackFace();
         }
       } else if (cardStyle == CrossPointSettings::FLASHCARD_STYLE_CLOZE) {
         // Cloze hides the word: a front grade first REVEALS the answer (word
@@ -325,7 +334,7 @@ void FlashcardReviewActivity::loop() {
           phase = Phase::Revealed;
           requestUpdate();
         } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-          controller.startLookup(card.word, /*recordHistory=*/false);  // flip -> back face
+          flipToBackFace();
         }
       } else {
         // Word+context already shows the word: grade directly, no reveal step.
@@ -334,7 +343,7 @@ void FlashcardReviewActivity::loop() {
         } else if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
           gradeAndAdvance(/*correctRecall=*/false);
         } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-          controller.startLookup(card.word, /*recordHistory=*/false);  // flip -> back face
+          flipToBackFace();
         }
       }
       break;
@@ -355,7 +364,7 @@ void FlashcardReviewActivity::loop() {
         pendingCorrect = false;
         requestUpdate();
       } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-        controller.startLookup(card.word, /*recordHistory=*/false);  // flip -> back face
+        flipToBackFace();
       }
       break;
     case Phase::AwaitingGrade:
@@ -365,7 +374,7 @@ void FlashcardReviewActivity::loop() {
       if (mappedInput.wasReleased(MappedInputManager::Button::PageBack)) {
         promptSuspendToggle();
       } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-        controller.startLookup(card.word, /*recordHistory=*/false);  // flip -> back face
+        flipToBackFace();
       } else if (suspendedMode) {
         // Suspended review: "next" (PageForward) deletes; Left/Right page through
         // cards instead of grading.

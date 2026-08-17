@@ -200,9 +200,24 @@ TEST_F(FlashcardDeckTest, LookupCountIsLocalNotSynced) {
   EXPECT_EQ(e.count, 1u);  // peer starts its own tally
 }
 
+// Excerpt pipes used to round-trip verbatim: the excerpt is the line remainder, so a '|' in it
+// could not break the fields before it. That stopped being true once the line grew optional
+// trailing fields sniffed by "is it all-digits" — a legacy excerpt like "1999|was a good year"
+// reads its leading token as the next optional field. Stripping at the write end is what makes
+// every line this build produces unambiguous, so dictHash (and anything after it) is safe to add.
+// The excerpt keeps its pipes: it is the line remainder, and writeCard always emits all three
+// optional fields, so every delimiter parseLine tracks is consumed by the header.
 TEST_F(FlashcardDeckTest, ExcerptWithEmbeddedPipesRoundTrips) {
   FlashcardDeck::enroll(cachePath, "alpha", "ctx|with|pipes|inside");
   EXPECT_EQ(at(0).excerpt, "ctx|with|pipes|inside");
+}
+
+// The field-sniffing hazard, pinned from the write side: an excerpt beginning with a numeric
+// pipe-delimited token still round-trips intact, because dictHash occupies the slot that token
+// would otherwise be mistaken for. This is what makes stripping unnecessary.
+TEST_F(FlashcardDeckTest, ExcerptStartingWithNumericTokenSurvives) {
+  FlashcardDeck::enroll(cachePath, "alpha", "1999|was a good year");
+  EXPECT_EQ(at(0).excerpt, "1999|was a good year");
 }
 
 TEST_F(FlashcardDeckTest, ExcerptNewlinesSanitizedAndCapped) {
@@ -233,7 +248,7 @@ TEST_F(FlashcardDeckTest, ChapterRoundTrips) {
 TEST_F(FlashcardDeckTest, ChapterPipeStripped) {
   FlashcardDeck::enroll(cachePath, "alpha", "ctx|with|pipes", "Part|II");
   EXPECT_EQ(at(0).chapter, "Part II");         // '|' collapsed so it can't break parse
-  EXPECT_EQ(at(0).excerpt, "ctx|with|pipes");  // excerpt unaffected
+  EXPECT_EQ(at(0).excerpt, "ctx|with|pipes");  // excerpt is the remainder — pipes are harmless
 }
 
 TEST_F(FlashcardDeckTest, ChapterPreservedOnEmptyReEnroll) {
@@ -816,6 +831,155 @@ TEST_F(FlashcardDeckTest, LegacyLinesParseAsVersionZero) {
   EXPECT_EQ(e.chapter, "");
   EXPECT_EQ(e.excerpt, "four field excerpt");
   EXPECT_EQ(e.version, 0u);
+}
+
+// --------------------------------------------------------------------------
+// dictHash: which dictionary a card was saved from
+// --------------------------------------------------------------------------
+
+TEST_F(FlashcardDeckTest, DictHashRoundTrips) {
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx", "Ch1", 12345u);
+  EXPECT_EQ(at(0).dictHash, 12345u);
+}
+
+TEST_F(FlashcardDeckTest, DictHashDefaultsToZeroWhenNotSupplied) {
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx");
+  EXPECT_EQ(at(0).dictHash, 0u);
+}
+
+// A re-lookup from the history list has no page and no dictionary context, and passes 0. That
+// must not erase what the original in-book lookup recorded -- same rule excerpt/chapter follow.
+TEST_F(FlashcardDeckTest, DictHashPreservedOnReEnrollWithoutContext) {
+  FlashcardDeck::enroll(cachePath, "alpha", "first ctx", "Ch1", 999u);
+  FlashcardDeck::enroll(cachePath, "alpha", "", "", 0u);
+  EXPECT_EQ(at(0).dictHash, 999u);
+}
+
+TEST_F(FlashcardDeckTest, DictHashOverwrittenWhenReEnrolledFromAnotherDictionary) {
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx", "Ch1", 111u);
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx", "Ch1", 222u);
+  EXPECT_EQ(at(0).dictHash, 222u);
+}
+
+// The local schedule must survive a dictHash write, and the dictHash must survive a grade --
+// they are stored on the same line but owned by different halves of the system.
+TEST_F(FlashcardDeckTest, DictHashSurvivesGradeAndScheduleSurvivesDictHash) {
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx", "Ch1", 777u);
+  FlashcardDeck::grade(cachePath, "alpha", /*correct=*/true, /*today=*/100);
+  FlashcardDeck::Entry e;
+  ASSERT_TRUE(findCard(cachePath, "alpha", e));
+  EXPECT_EQ(e.dictHash, 777u);
+  EXPECT_EQ(e.box, 1);
+}
+
+// A card written before dictHash existed: 7 fields, no hash. Must parse with dictHash 0 and an
+// intact excerpt rather than reading the excerpt's leading token as a hash.
+TEST_F(FlashcardDeckTest, LegacySevenFieldLineParsesWithoutDictHash) {
+  const std::string path = cachePath + "/dictionary_flashcards.txt";
+  std::FILE* f = std::fopen(path.c_str(), "wb");
+  ASSERT_NE(f, nullptr);
+  const char* lines = "old7|2|40|ChA|9|3|seven field excerpt\n";
+  std::fwrite(lines, 1, std::strlen(lines), f);
+  std::fclose(f);
+
+  FlashcardDeck::Entry e;
+  ASSERT_TRUE(findCard(cachePath, "old7", e));
+  EXPECT_EQ(e.version, 9u);
+  EXPECT_EQ(e.count, 3u);
+  EXPECT_EQ(e.dictHash, 0u);
+  EXPECT_EQ(e.excerpt, "seven field excerpt");
+}
+
+// The documented limit of the all-digits sniffing, pinned so a future change has to notice it: a
+// PRE-EXISTING line whose excerpt still contains a pipe after a numeric token is misread. Lines
+// this build writes cannot hit it -- enroll() strips '|' from excerpts (see
+// ExcerptStartingWithNumericTokenSurvives) -- but a SHORT legacy line can still trip it.
+TEST_F(FlashcardDeckTest, LegacyExcerptWithNumericPipeTokenIsAbsorbedAsDictHash) {
+  const std::string path = cachePath + "/dictionary_flashcards.txt";
+  std::FILE* f = std::fopen(path.c_str(), "wb");
+  ASSERT_NE(f, nullptr);
+  const char* lines = "old|0|0|ChA|9|3|1999|was a good year\n";
+  std::fwrite(lines, 1, std::strlen(lines), f);
+  std::fclose(f);
+
+  FlashcardDeck::Entry e;
+  ASSERT_TRUE(findCard(cachePath, "old", e));
+  EXPECT_EQ(e.dictHash, 1999u);  // absorbed -- the known, bounded cost
+  EXPECT_EQ(e.excerpt, "was a good year");
+}
+
+// --------------------------------------------------------------------------
+// dictHash over the sync wire (the 'D' line)
+// --------------------------------------------------------------------------
+
+TEST_F(FlashcardDeckTest, DictHashPropagatesToPeer) {
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx", "Ch1", 4242u);
+  uint8_t blob[2048];
+  FlashcardDeck::BlobStats st;
+  const size_t n = FlashcardDeck::serializeForUpload(cachePath, blob, sizeof(blob), &st);
+  ASSERT_GT(n, 0u);
+
+  const std::string peer = makeDevice();
+  FlashcardDeck::mergeBlob(peer, blob, n, nullptr);
+  FlashcardDeck::Entry e;
+  ASSERT_TRUE(findCard(peer, "alpha", e));
+  EXPECT_EQ(e.dictHash, 4242u);
+  EXPECT_EQ(e.excerpt, "ctx");  // the card line itself is untouched by the 'D' line
+}
+
+// A card with no association emits no 'D' line, and the peer simply has none.
+TEST_F(FlashcardDeckTest, NoDictHashMeansNoAssociationOnPeer) {
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx");
+  uint8_t blob[2048];
+  FlashcardDeck::BlobStats st;
+  const size_t n = FlashcardDeck::serializeForUpload(cachePath, blob, sizeof(blob), &st);
+  ASSERT_GT(n, 0u);
+
+  const std::string peer = makeDevice();
+  FlashcardDeck::mergeBlob(peer, blob, n, nullptr);
+  FlashcardDeck::Entry e;
+  ASSERT_TRUE(findCard(peer, "alpha", e));
+  EXPECT_EQ(e.dictHash, 0u);
+}
+
+// A 'D' for a word the peer does not have must be dropped, not create a card.
+TEST_F(FlashcardDeckTest, DictLineForUnknownWordIsIgnored) {
+  const std::string peer = makeDevice();
+  const char* blob = "Dghost|55|7\n";
+  const int added = FlashcardDeck::mergeBlob(peer, reinterpret_cast<const uint8_t*>(blob), std::strlen(blob), nullptr);
+  EXPECT_EQ(added, 0);
+  EXPECT_EQ(FlashcardDeck::count(peer), 0);
+}
+
+// The peer's own Leitner schedule is local and must not be disturbed by an incoming association.
+TEST_F(FlashcardDeckTest, DictLineDoesNotDisturbLocalSchedule) {
+  const std::string peer = makeDevice();
+  FlashcardDeck::enroll(peer, "alpha", "ctx");
+  FlashcardDeck::grade(peer, "alpha", /*correct=*/true, /*today=*/100);
+  FlashcardDeck::Entry before;
+  ASSERT_TRUE(findCard(peer, "alpha", before));
+
+  const std::string line = "Dalpha|8080|" + std::to_string(before.version) + "\n";
+  FlashcardDeck::mergeBlob(peer, reinterpret_cast<const uint8_t*>(line.data()), line.size(), nullptr);
+
+  FlashcardDeck::Entry after;
+  ASSERT_TRUE(findCard(peer, "alpha", after));
+  EXPECT_EQ(after.dictHash, 8080u);
+  EXPECT_EQ(after.box, before.box);
+  EXPECT_EQ(after.dueDay, before.dueDay);
+  EXPECT_EQ(after.excerpt, before.excerpt);
+}
+
+// A blob from an older device carries no 'D' lines at all; merging must still work unchanged.
+TEST_F(FlashcardDeckTest, BlobWithoutDictLinesStillMerges) {
+  const std::string peer = makeDevice();
+  const char* blob = "Halpha|ChA|5|some excerpt\n";
+  const int added = FlashcardDeck::mergeBlob(peer, reinterpret_cast<const uint8_t*>(blob), std::strlen(blob), nullptr);
+  EXPECT_EQ(added, 1);
+  FlashcardDeck::Entry e;
+  ASSERT_TRUE(findCard(peer, "alpha", e));
+  EXPECT_EQ(e.excerpt, "some excerpt");
+  EXPECT_EQ(e.dictHash, 0u);
 }
 
 }  // namespace

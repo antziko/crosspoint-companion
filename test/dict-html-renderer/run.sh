@@ -33,6 +33,7 @@ CXXFLAGS=(
   -I"$ROOT_DIR/lib"
   -I"$ROOT_DIR/lib/expat"
   -I"$ROOT_DIR/lib/Utf8"
+  -I"$ROOT_DIR/lib/Memory"  # appendNoThrow / reserveNoThrow, used by IpaUtils.h and Utf8.cpp
 )
 
 # Compile expat C sources with gcc

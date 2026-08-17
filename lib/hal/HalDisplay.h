@@ -14,7 +14,20 @@ class HalDisplay {
   enum RefreshMode {
     FULL_REFRESH,  // Full refresh with complete waveform
     HALF_REFRESH,  // Half refresh (1720ms) - balanced quality and speed
-    FAST_REFRESH   // Fast refresh using custom LUT
+    FAST_REFRESH,  // Fast refresh using custom LUT
+    // Clean full-frame repaint: same panel waveform as HALF_REFRESH, but WITHOUT the X3
+    // resync the three methods below force on every HALF. Use it to erase a popup or toast
+    // this code drew — the case where the panel needs every pixel driven from scratch, but
+    // not the cover-transition-grade deep sync.
+    //
+    // Why it is a distinct mode rather than a flag: the X3 branches test `== HALF_REFRESH`
+    // explicitly, so a separate value bypasses them by construction and no existing HALF
+    // caller changes behaviour. On X4 and every non-X3 board this IS HALF_REFRESH, because
+    // the branch never fired there.
+    //
+    // Cost on X3, measured (opds_debug.txt, dictionary definition first paint): the forced
+    // resync runs three panel passes for 3203ms; this runs one.
+    SCRUB_REFRESH
   };
 
   // Pass seamless=true on any path where the panel already shows the

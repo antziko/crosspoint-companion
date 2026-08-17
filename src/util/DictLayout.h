@@ -70,13 +70,24 @@ class Wrapper {
   void onSpan(const StyledSpan& span);  // process one span; emit completed lines to the sink
   void finish();                        // flush the trailing in-progress line
 
+  // True once an allocation failed. The wrap stops at that point rather than continuing with
+  // dropped text — silently losing a segment would change the line breaks and render a page
+  // that looks complete but is not. Callers report truncation from this
+  // (DictionaryDefinitionActivity::loadPage, DictGloss::fit).
+  //
+  // Why this exists at all: with -fno-exceptions a failed std::string/std::vector growth calls
+  // abort(), and this wrap runs on whatever heap is left after the definition's glyph prewarm
+  // — measured at 2432 bytes free / 1652 largest on an X3 opening a 234-codepoint CJK entry,
+  // which rebooted the device inside splitIpaRuns().
+  bool oom() const { return oom_; }
+
  private:
   int getMixedWidth(const char* text, EpdFontFamily::Style style);
   void flushLine();
   void startLine(uint8_t indent, bool listItem);
-  void appendToLine(const std::string& text, EpdFontFamily::Style style, bool isIpa, int width);
+  void appendToLine(const char* text, size_t len, EpdFontFamily::Style style, bool isIpa, int width);
   void appendMixed(const char* text, EpdFontFamily::Style style);
-  void breakToken(const std::string& tok, EpdFontFamily::Style style, uint8_t indentLevel);
+  void breakToken(const char* tok, EpdFontFamily::Style style, uint8_t indentLevel);
 
   const int maxWidth_;
   const int indentStep_;
@@ -85,7 +96,14 @@ class Wrapper {
   LineSink sink_;
   LayoutLine currentLine_;
   int currentX_ = 0;
+  bool oom_ = false;
   std::vector<IpaTextSpan> ipaRuns_;  // reused scratch for IPA run splitting
+  // Reused scratch for the word-wrap token and the codepoint-break accumulator. Members rather
+  // than locals so their capacity survives across tokens and across spans: constructing a
+  // std::string per token (and, in breakToken, per codepoint) was one malloc/free pair per
+  // character on CJK text, which has no spaces and therefore always reaches breakToken.
+  std::string tok_;
+  std::string pending_;
 };
 
 // Streaming layout: word-wrap every span and emit each completed line to `sink`

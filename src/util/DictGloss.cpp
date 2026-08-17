@@ -273,6 +273,10 @@ void fit(char* buf, const DictLayout::WrapMetrics& metrics, const DictLayout::Me
     wrapper.onSpan(span);
   }
   wrapper.finish();
+  // An OOM inside the wrap stops it early, so the rows collected so far are a prefix of the
+  // gloss rather than the whole of it. Report that the same way a row-cap cut does: the box has
+  // no space for a message, but the ellipsis below at least marks the text as incomplete.
+  if (wrapper.oom()) out.truncated = true;
 
   if (out.truncated && out.rowCount > 0) {
     const int last = out.rowCount - 1;

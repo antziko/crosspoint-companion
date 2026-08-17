@@ -1,5 +1,7 @@
 #include "Utf8.h"
 
+#include <Memory.h>
+
 #include "Utf8ComposeTable.h"
 
 namespace {
@@ -205,4 +207,9 @@ int utf8EncodeCodepoint(uint32_t cp, char* buf) {
 void utf8AppendCodepoint(std::string& str, uint32_t cp) {
   char buf[4];
   str.append(buf, utf8EncodeCodepoint(cp, buf));
+}
+
+bool utf8AppendCodepointNoThrow(std::string& str, uint32_t cp) {
+  char buf[4];
+  return appendNoThrow(str, buf, static_cast<size_t>(utf8EncodeCodepoint(cp, buf)));
 }

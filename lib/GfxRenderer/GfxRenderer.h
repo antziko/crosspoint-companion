@@ -178,11 +178,14 @@ class GfxRenderer {
   // FAST_REFRESH if the mapping produces an invalid rect.
   // EXPERIMENTAL — safe for single isolated refreshes; see HalDisplay::displayWindow.
   void displayWindowRegion(int lx, int ly, int lw, int lh) const;
-  // Force the next displayBuffer() to use HALF_REFRESH (state-collapsed, ignores stale
+  // Force the next displayBuffer() to use SCRUB_REFRESH (state-collapsed, ignores stale
   // old-RAM residue) regardless of the mode requested, then revert to normal. Used to
   // clear e-ink ghosting on the first paint after a silent reboot: the seamless boot skips
   // the panel clear, so a fast paint would ghost the pre-reboot frame (e.g. the KOReader
-  // sync result screen) under the new content. HALF avoids FULL's hard black/white flash.
+  // sync result screen) under the new content. SCRUB avoids FULL's hard black/white flash,
+  // and unlike HALF it does not trigger the X3 cover-transition resync — see the note at
+  // the override in GfxRenderer.cpp for why that distinction is worth ~1.8s per dictionary
+  // lookup.
   void forceCleanRefreshNextPaint() const { forceCleanRefreshOnce_ = true; }
   // Read a rectangular region of the 1-bpp framebuffer into 'dst'. Inputs are
   // SCREEN coordinates (the same coordinate system fillRect / drawText use).

@@ -139,6 +139,11 @@ int utf8EncodeCodepoint(uint32_t cp, char* buf);
 // Append a Unicode codepoint as UTF-8 to a string.
 void utf8AppendCodepoint(std::string& str, uint32_t cp);
 
+// As above, but reports failure instead of aborting — for the dictionary wrap path, which
+// runs on a few KB of free heap where an unguarded append() reboots the device. On false the
+// string is unchanged. See appendNoThrow() in Memory.h for the mechanism and its caveat.
+[[nodiscard]] bool utf8AppendCodepointNoThrow(std::string& str, uint32_t cp);
+
 // Returns true if the string ends with '-' or soft-hyphen (U+00AD = 0xC2 0xAD in UTF-8).
 inline bool utf8EndsWithHyphen(const char* str, size_t len) {
   if (len == 0) return false;
