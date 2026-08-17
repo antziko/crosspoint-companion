@@ -492,10 +492,28 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   // paid 552 glyph-bitmap misses / 11.4s), so the most-used style — which by the sort below
   // covers the most text — is worth taking at a lower floor. One style is ~5KB; see the
   // 4-style figure in the loop comment.
+  //
+  // The subsequent-style floor was 16KB/8KB and is now 13KB/7KB. What forced it down: once the
+  // mini-bitmap budget stopped under-granting (SdCardFont.cpp, the monotonicity fix), each warmed
+  // style takes a full arena, which spends the heap the NEXT style is measured against — and the
+  // loop started stopping after ONE style where it used to manage two or three. Device capture:
+  // `mask=0x0F warmed=0x04 free=15636 largest=9716 -> miss=51` and `warmed=0x04 free=14616
+  // largest=8692 -> miss=64`, against `warmed=0x05 -> miss=13` on a definition of the same
+  // length. `alone` missed the old floor by 748 bytes.
+  //
+  // Style COUNT dominates arena depth, which is the non-obvious part: `slowly` warmed three
+  // styles, one of which got `budget=0` — no arena whatsoever — and still only missed 16. A
+  // style warmed without a bitmap arena still beats a style left cold, so admitting more styles
+  // is worth more than feeding the ones already admitted.
+  //
+  // 13KB is bounded by measurement, not taste: the same capture has a two-style prewarm ending
+  // at free=12708 largest=7156 that rendered correctly (miss=13, oom=0), so that is demonstrated
+  // survivable on X3. kMinBlockForStyle stays a hard contiguity check — it is what still blocks
+  // the X4 four-style case in the loop comment below, which ran the heap to 2.1KB largest.
   constexpr size_t kMinFreeForFirstStyle = 10 * 1024;
   constexpr size_t kMinBlockForFirstStyle = 6 * 1024;
-  constexpr size_t kMinFreeForStyle = 16 * 1024;
-  constexpr size_t kMinBlockForStyle = 8 * 1024;
+  constexpr size_t kMinFreeForStyle = 13 * 1024;
+  constexpr size_t kMinBlockForStyle = 7 * 1024;
 
   // IPA before the body font, deliberately. IPA runs are drawn with a built-in font whose
   // non-prewarmed path decompresses a whole ~11KB group per glyph (FontDecompressor.cpp:182);
