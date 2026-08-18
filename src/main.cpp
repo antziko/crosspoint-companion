@@ -971,6 +971,11 @@ void loop() {
       renderer.clearScreen();
       renderer.displayBuffer(clearMode);
     }
+    // Both branches leave the framebuffer blank — deepCleanPanel by contract (GfxRenderer.h),
+    // the else branch via clearScreen() — so any activity holding differential state must drop
+    // it before the re-render below, or that render restores pixels this just wiped instead of
+    // repainting. Outside the RenderLock scopes above: this only flips flags.
+    activityManager.notifyFramebufferInvalidated();
     activityManager.requestUpdate();
   }
 

@@ -36,6 +36,13 @@ class Activity {
   // uses these to freeze its wall-clock reading-time while a sub-screen is foreground.
   virtual void onPause() {}
   virtual void onResume() {}
+  // Called when something outside render() has wiped or overwritten the framebuffer — the
+  // manual screen refresh in main.cpp, which blanks it and then asks for a re-render.
+  // Activities carrying incremental framebuffer state across renders (snapshots, dirty rects,
+  // "the page is already drawn" flags) MUST drop it here, or the next render restores pixels
+  // that are no longer on screen. The default no-op is correct for any activity whose render()
+  // repaints from scratch.
+  virtual void onFramebufferInvalidated() {}
   virtual void loop() {}
 
   virtual void render(RenderLock&&) {}

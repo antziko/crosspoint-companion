@@ -45,6 +45,12 @@ class DictionaryDefinitionActivity final : public Activity {
   // Part of the reading flow (opened from the page mid-read), so it follows the
   // reading surface's night-mode polarity like the word-select overlay.
   bool appliesNightMode() const override { return true; }
+  // The manual screen refresh blanks the framebuffer from the main loop, so the snapshot the
+  // in-definition word-select path would restore describes pixels that are no longer there.
+  void onFramebufferInvalidated() override {
+    nextRenderMode_ = RenderMode::FullPage;
+    prevHighlightIdx_ = -1;
+  }
 
  private:
   std::string headword;

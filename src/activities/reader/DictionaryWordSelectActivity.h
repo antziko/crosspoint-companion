@@ -51,6 +51,10 @@ class DictionaryWordSelectActivity final : public Activity {
   // Redraws the reader's page (word boxes over it), so it follows the reading
   // surface's night-mode polarity; a normal-polarity flash mid-lookup jars.
   bool appliesNightMode() const override { return true; }
+  // The manual screen refresh blanks the framebuffer from the main loop, so the snapshot and
+  // dirty-rect state the differential path would restore describes pixels that are no longer
+  // there. Same reset the sub-activity returns take.
+  void onFramebufferInvalidated() override { forceFullRepaintOnNextRender(); }
 
  private:
   std::unique_ptr<Page> page;

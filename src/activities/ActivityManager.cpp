@@ -336,6 +336,10 @@ bool ActivityManager::preventAutoSleep() const { return currentActivity && curre
 
 bool ActivityManager::onManualSleepRequested() { return currentActivity && currentActivity->onManualSleepRequested(); }
 
+void ActivityManager::notifyFramebufferInvalidated() {
+  if (currentActivity) currentActivity->onFramebufferInvalidated();
+}
+
 bool ActivityManager::isReaderActivity() const {
   return std::any_of(stackActivities.begin(), stackActivities.end(),
                      [](const auto& activity) { return activity->isReaderActivity(); }) ||
