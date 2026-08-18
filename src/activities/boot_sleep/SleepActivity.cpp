@@ -2,6 +2,7 @@
 
 #include <BitmapRenderUtils.h>
 #include <Epub.h>
+#include <FontCacheManager.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalDisplay.h>
@@ -77,6 +78,20 @@ void SleepActivity::onEnter() {
   // SD write each time would cost more than the diagnostic is worth. Visible with SD Card
   // Logging on, which is when we are measuring anyway.
   SdDebugLog::log("SLP", "sleep deepclean cycles=%u ms=%lu", static_cast<unsigned>(kSleepDeepCleanCycles), cleanMs);
+
+  // Hand the SD glyph arenas and the decompressor cache back before the sleep screens
+  // run. The image paths below (custom bitmap, PNG wallpaper, book cover) each want a
+  // large contiguous block for the decode, and a reader session leaves tens of KB of
+  // resident glyph data that nothing after this point needs -- the two label strings on
+  // the default screen re-fetch from SD at a cost that is invisible on the way into
+  // sleep. No RenderLock: SleepActivity does not override render(), so the render task
+  // has no paint of its own that could be walking these arenas (cf. the OPDS teardown
+  // race, where it did).
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    LOG_DBG("SLP", "Free heap before SD font cache release: %d bytes", ESP.getFreeHeap());
+    fcm->releaseCache();
+    LOG_DBG("SLP", "Free heap before sleep screen render: %d bytes", ESP.getFreeHeap());
+  }
 
   switch (SETTINGS.sleepScreen) {
     case (CrossPointSettings::SLEEP_SCREEN_MODE::BLANK):
