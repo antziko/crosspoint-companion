@@ -1225,9 +1225,9 @@ bool DictionaryWordSelectActivity::stripHasImage(int y, int height) const {
   return false;
 }
 
-void DictionaryWordSelectActivity::restoreVacatedGlossStrip() {
-  if (!gloss_ || gloss_->drawnY == kGlossNotDrawn) return;
-  if (gloss_->place && gloss_->y == gloss_->drawnY) return;  // parked — the common case
+bool DictionaryWordSelectActivity::restoreVacatedGlossStrip() {
+  if (!gloss_ || gloss_->drawnY == kGlossNotDrawn) return false;
+  if (gloss_->place && gloss_->y == gloss_->drawnY) return false;  // parked — the common case
 
   // The whole old rectangle, not just the part the new box will leave uncovered: the new box is
   // drawn on top straight afterwards, so re-rendering a line or two underneath it costs almost
@@ -1241,6 +1241,7 @@ void DictionaryWordSelectActivity::restoreVacatedGlossStrip() {
   // NOT the periodic refresh this replaced: that one fired while the box sat still, which read
   // as the screen flashing mid-scan. A left/right step along one row never reaches here.
   renderer.forceCleanRefreshNextPaint();
+  return true;
 }
 
 // The box's rows advance by gloss_->lineHeight, which is the DEFINITION font's and is generally a
@@ -1348,7 +1349,7 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
     // freshly drawn highlight would print black text across the inverted rectangle. It is also
     // clear of the PREVIOUS highlight — the box kept kGlossClearance from the selection it was
     // placed against — so the snapshot the call below is about to restore stays untouched.
-    restoreVacatedGlossStrip();
+    const bool relocationScrubbed = restoreVacatedGlossStrip();
     auto dirty = navigator.renderHighlightDifferential(renderer, lineHeight, prevHighlightIdx_, currIdx);
     if (dirty.has_value()) {
       // Drawn after the highlight, never before: renderHighlightDifferential captures the pixels
@@ -1364,8 +1365,9 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
       // One line per cursor move. This is the path that decides how long "the user finding
       // their word" really takes: every move ends in a full-panel push, so N moves to reach a
       // word cost N x this. If that product is most of the pre-lookup gap, the fix is here and
-      // not in the entry render.
-      SdDebugLog::log("DWS", "render diff total=%lums free=%u", millis() - tRender0,
+      // not in the entry render. scrub=1 marks a relocation frame, which re-renders the vacated
+      // strip and collapses the box's residue — measured at roughly twice a plain move.
+      SdDebugLog::log("DWS", "render diff total=%lums scrub=%d free=%u", millis() - tRender0, (int)relocationScrubbed,
                       static_cast<unsigned>(ESP.getFreeHeap()));
       prevHighlightIdx_ = currIdx;
       return;

@@ -224,7 +224,9 @@ class DictionaryWordSelectActivity final : public Activity {
   // Give the page back the strip the box has just moved off. Must run BEFORE the highlight is
   // drawn: it re-renders page lines, which would otherwise paint text over a fresh highlight.
   // No-op while the box is parked, which is every keypress except a row change.
-  void restoreVacatedGlossStrip();
+  // Returns true when it scrubbed, which the caller records in the render log: a relocation
+  // frame costs roughly twice a plain one, so the two must stay distinguishable there.
+  bool restoreVacatedGlossStrip();
 
   // Clear `height` pixels of the box column at `y` and re-render the page elements that
   // intersect it. Over-inclusive by a line either side: redrawing a line that is already
