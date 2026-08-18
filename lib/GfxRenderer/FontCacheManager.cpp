@@ -76,19 +76,57 @@ void FontCacheManager::resetStats() {
   }
 }
 
+// Later scan slots hold short furniture strings (status bar, header, page number), so they
+// get a small reserve -- and only when the heap can still afford one. See recordText().
+constexpr size_t kLateSlotReserve = 256;
+constexpr size_t kLateSlotHeadroom = 512;
+
 bool FontCacheManager::isScanning() const { return scanMode_ == ScanMode::Scanning; }
 
 void FontCacheManager::recordText(const char* text, int fontId, EpdFontFamily::Style style) {
-  scanText_ += text;
-  if (scanFontId_ < 0) scanFontId_ = fontId;
-  const uint8_t baseStyle = static_cast<uint8_t>(style) & 0x03;
-  const unsigned char* p = reinterpret_cast<const unsigned char*>(text);
-  uint32_t cpCount = 0;
-  while (*p) {
-    if ((*p & 0xC0) != 0x80) cpCount++;
-    p++;
+  if (!text || *text == '\0') return;
+
+  ScanEntry* entry = nullptr;
+  for (auto& e : scanEntries_) {
+    if (e.used && e.fontId == fontId) {
+      entry = &e;
+      break;
+    }
+    if (!e.used) {
+      e.used = true;
+      e.fontId = fontId;
+      e.text.clear();
+      // Slot 0 was reserved at scope entry, behind the heap gate there. Later slots hold
+      // short furniture strings (status bar, headers) and are claimed mid-scan, when the
+      // heap is in a worse state than it was at scope entry -- so re-check before
+      // reserving. std::string growth goes through the global operator new, which abort()s
+      // rather than returning null; an unguarded reserve here is the same crash the scope
+      // gate was added to prevent. Skipping the reserve is not a failure, it just lets the
+      // string grow on demand.
+      if (&e != &scanEntries_[0] &&
+          heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) >= kLateSlotReserve + kLateSlotHeadroom) {
+        e.text.reserve(kLateSlotReserve);
+      }
+      entry = &e;
+      break;
+    }
   }
-  scanStyleCounts_[baseStyle] += cpCount;
+  // Every slot taken by another font: not batched. The string still gets its glyphs via the
+  // per-string prewarm on the real draw pass, just without sharing this pass's SD trip.
+  if (!entry) return;
+
+  entry->text += text;
+  entry->styleMask |= static_cast<uint8_t>(1u << (static_cast<uint8_t>(style) & 0x03));
+}
+
+void FontCacheManager::resetScanEntries() {
+  for (auto& e : scanEntries_) {
+    e.used = false;
+    e.fontId = 0;
+    e.styleMask = 0;
+    e.text.clear();
+    e.text.shrink_to_fit();
+  }
 }
 
 // --- PrewarmScope implementation ---
@@ -96,9 +134,7 @@ void FontCacheManager::recordText(const char* text, int fontId, EpdFontFamily::S
 FontCacheManager::PrewarmScope::PrewarmScope(FontCacheManager& manager) : manager_(&manager) {
   manager_->clearCache();
   manager_->resetStats();
-  manager_->scanText_.clear();
-  memset(manager_->scanStyleCounts_, 0, sizeof(manager_->scanStyleCounts_));
-  manager_->scanFontId_ = -1;
+  manager_->resetScanEntries();
 
   // Prewarm is a fragmentation/perf optimization, not a correctness requirement:
   // it batches glyph caching for one page. Without it, glyphs still cache lazily
@@ -117,30 +153,27 @@ FontCacheManager::PrewarmScope::PrewarmScope(FontCacheManager& manager) : manage
     return;
   }
   manager_->scanMode_ = ScanMode::Scanning;
-  manager_->scanText_.reserve(kScanReserve);  // Pre-allocate to avoid fragmentation from repeated concat
+  // Pre-size slot 0's buffer -- the page body lands there, and this is the allocation the
+  // gate above just priced. Left unclaimed (used=false) so recordText assigns it to the
+  // first font id it sees; its clear() keeps the capacity reserved here.
+  manager_->scanEntries_[0].text.reserve(kScanReserve);  // avoid fragmentation from repeated concat
 }
 
 void FontCacheManager::PrewarmScope::endScanAndPrewarm() {
   manager_->scanMode_ = ScanMode::None;
-  if (manager_->scanText_.empty()) return;
 
-  // Build style bitmask from all styles that appeared during the scan
-  uint8_t styleMask = 0;
-  for (uint8_t i = 0; i < 4; i++) {
-    if (manager_->scanStyleCounts_[i] > 0) styleMask |= (1 << i);
+  // One prewarm per font id that actually appeared. styleMask carries the styles seen for
+  // that id; an entry that recorded text but no style bit defaults to regular.
+  for (auto& e : manager_->scanEntries_) {
+    if (!e.used || e.text.empty()) continue;
+    manager_->prewarmCache(e.fontId, e.text.c_str(), e.styleMask != 0 ? e.styleMask : 1);
   }
-  if (styleMask == 0) styleMask = 1;  // default to regular
-
-  manager_->prewarmCache(manager_->scanFontId_, manager_->scanText_.c_str(), styleMask);
-
-  // Free scan string memory
-  manager_->scanText_.clear();
-  manager_->scanText_.shrink_to_fit();
+  manager_->resetScanEntries();
 }
 
 FontCacheManager::PrewarmScope::~PrewarmScope() {
   if (active_) {
-    endScanAndPrewarm();  // no-op if already called (scanText_ is empty)
+    endScanAndPrewarm();  // no-op if already called (the scan entries are released there)
     manager_->clearCache();
   }
 }

@@ -44,8 +44,24 @@ class SdCardFont {
   // styleMask: bitmask of styles to prewarm (bit 0=regular, 1=bold, 2=italic, 3=bolditalic).
   // Default 0x0F = all present styles.
   // When metadataOnly=true, only glyph metrics are loaded (no bitmap data).
+  // Accumulative: codepoints already resident from an earlier prewarm stay resident (the
+  // rebuild unions them with the request, budget permitting), so per-string callers converge
+  // instead of evicting each other's glyphs on every repaint.
+  // loadKernLig=false skips the kern/ligature class tables and the mini kern matrix. UI
+  // fallback text (CJK titles, filenames) has no useful kern pairs, and the ~3KB class tables
+  // are the size class that strands a TLS record buffer on a heap-tight screen. Reader-quality
+  // paths keep the default.
   // Returns number of glyphs that couldn't be loaded (0 on full success).
-  int prewarm(const char* utf8Text, uint8_t styleMask = 0x0F, bool metadataOnly = false);
+  int prewarm(const char* utf8Text, uint8_t styleMask = 0x0F, bool metadataOnly = false, bool loadKernLig = true);
+
+  // Multi-string variant: extracts codepoints from `textCount` strings fetched one at a time
+  // through `getter`. A C-style callback, not std::function -- no closure heap allocation and
+  // no per-signature binary bloat -- and callers never build a concatenated copy, which on a
+  // heap-tight screen is a bare-new string append that abort()s. A null getter result skips
+  // that index.
+  using TextGetter = const char* (*)(const void* ctx, uint32_t index);
+  int prewarm(TextGetter getter, const void* ctx, uint32_t textCount, uint8_t styleMask = 0x0F,
+              bool metadataOnly = false, bool loadKernLig = true);
 
   // Build a compact advance-only table for layout measurement.
   // Extracts ALL unique codepoints from words (no MAX_PAGE_GLYPHS cap),
@@ -417,7 +433,7 @@ class SdCardFont {
   // `codepoints` is prewarm()'s PACKED buffer (see the warning on buildMiniKernMatrix below,
   // and CodepointFreq.h). The counts are what let this pick which glyphs to keep when the
   // page's bitmaps do not all fit the heap.
-  int prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint32_t cpCount, bool metadataOnly);
+  int prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint32_t cpCount, bool metadataOnly, bool loadKernLig);
 
   // Global helpers
   void freeAll();

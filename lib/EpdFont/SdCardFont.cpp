@@ -906,14 +906,54 @@ int32_t SdCardFont::findGlobalGlyphIndex(const PerStyle& s, uint32_t codepoint) 
 
 // --- Prewarm ---
 
-int SdCardFont::prewarm(const char* utf8Text, uint8_t styleMask, bool metadataOnly) {
-  if (!loaded_) return -1;
+namespace {
+const char* singleTextGetter(const void* ctx, uint32_t) { return static_cast<const char*>(ctx); }
+}  // namespace
+
+int SdCardFont::prewarm(const char* utf8Text, uint8_t styleMask, bool metadataOnly, bool loadKernLig) {
+  return prewarm(&singleTextGetter, utf8Text, 1, styleMask, metadataOnly, loadKernLig);
+}
+
+int SdCardFont::prewarm(TextGetter getter, const void* ctx, uint32_t textCount, uint8_t styleMask, bool metadataOnly,
+                        bool loadKernLig) {
+  if (!loaded_ || getter == nullptr) return -1;
   styleMask = resolveStyleMask(styleMask);
   if (styleMask == 0) return 0;
 
   unsigned long startMs = millis();
 
-  // Step 1: Extract unique codepoints from UTF-8 text (shared across all styles).
+  // Cap the unique-codepoint budget by what the heap can actually hold as a full mini arena.
+  // Multi-string batches only: a several-hundred-entry CJK table of contents would otherwise
+  // extract up to MAX_PAGE_GLYPHS and fail the whole arena allocation, where loading the first
+  // screens' worth and letting later pages union theirs in is strictly better. Single-string
+  // requests are small and already bounded by the per-style trim below; metadata-only prewarms
+  // load no bitmaps at all. Bytes/glyph prefers the measured average from the resident mini --
+  // CJK ink boxes run well under the advanceY-squared em estimate, which otherwise roughly
+  // halves the usable budget.
+  uint32_t cpBudget = MAX_PAGE_GLYPHS;
+  if (!metadataOnly && textCount > 1) {
+    uint8_t refStyle = MAX_STYLES;
+    for (uint8_t si = 0; si < MAX_STYLES && refStyle == MAX_STYLES; si++) {
+      if ((styleMask & (1 << si)) && styles_[si].present) refStyle = si;
+    }
+    if (refStyle < MAX_STYLES) {
+      const auto& s = styles_[refStyle];
+      const uint32_t bpp = s.header.is2Bit ? 2 : 1;
+      uint32_t bitmapPerGlyph = (static_cast<uint32_t>(s.header.advanceY) * s.header.advanceY * bpp) / 8 + 4;
+      if (s.miniGlyphCount > 0 && s.miniBitmapUsed > 0) {
+        bitmapPerGlyph = s.miniBitmapUsed / s.miniGlyphCount;
+      }
+      const uint32_t perGlyph = bitmapPerGlyph + sizeof(EpdGlyph);
+      constexpr uint32_t PREWARM_HEAP_HEADROOM = 16 * 1024;
+      const uint32_t freeHeap = ESP.getFreeHeap();
+      const uint32_t budgetBytes = freeHeap > PREWARM_HEAP_HEADROOM ? freeHeap - PREWARM_HEAP_HEADROOM : 0;
+      const uint32_t budgetGlyphs = budgetBytes / (perGlyph > 0 ? perGlyph : 1);
+      if (budgetGlyphs < cpBudget) cpBudget = budgetGlyphs;
+    }
+  }
+  if (cpBudget == 0) return -1;
+
+  // Step 1: Extract unique codepoints from the UTF-8 texts (shared across all styles).
   // Dedup uses O(n^2) linear scan — worst case is MAX_PAGE_GLYPHS (512) unique codepoints
   // = ~131K comparisons, but in practice pages contain far fewer unique codepoints so the
   // actual cost is much lower. This is dwarfed by SD I/O that follows. Alternatives (hash
@@ -926,24 +966,29 @@ int SdCardFont::prewarm(const char* utf8Text, uint8_t styleMask, bool metadataOn
   }
   uint32_t cpCount = 0;
 
-  const unsigned char* p = reinterpret_cast<const unsigned char*>(utf8Text);
-  while (*p && cpCount < MAX_PAGE_GLYPHS) {
-    uint32_t cp = utf8NextCodepoint(&p);
-    if (cp == 0) break;
+  for (uint32_t ti = 0; ti < textCount; ti++) {
+    const char* text = getter(ctx, ti);
+    if (text == nullptr) continue;
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(text);
+    while (*p) {
+      uint32_t cp = utf8NextCodepoint(&p);
+      if (cp == 0) break;
 
-    // Entries are packed (count << 21 | codepoint) — see cpPack above. A repeat bumps the
-    // count instead of being discarded, which is what lets prewarmStyle rank glyphs when it
-    // cannot afford all of them.
-    bool found = false;
-    for (uint32_t i = 0; i < cpCount; i++) {
-      if (cpValue(codepoints[i]) == cp) {
-        codepoints[i] = cpBump(codepoints[i]);
-        found = true;
-        break;
+      // Entries are packed (count << 21 | codepoint) — see cpPack above. A repeat bumps the
+      // count instead of being discarded, which is what lets prewarmStyle rank glyphs when it
+      // cannot afford all of them. Repeats keep counting past the budget: a codepoint already
+      // in the set costs nothing more, and its rank is what decides who survives the trim.
+      bool found = false;
+      for (uint32_t i = 0; i < cpCount; i++) {
+        if (cpValue(codepoints[i]) == cp) {
+          codepoints[i] = cpBump(codepoints[i]);
+          found = true;
+          break;
+        }
       }
-    }
-    if (!found) {
-      codepoints[cpCount++] = cpPack(cp);
+      if (!found && cpCount < cpBudget) {
+        codepoints[cpCount++] = cpPack(cp);
+      }
     }
   }
 
@@ -956,7 +1001,7 @@ int SdCardFont::prewarm(const char* utf8Text, uint8_t styleMask, bool metadataOn
         break;
       }
     }
-    if (!hasReplacement && cpCount < MAX_PAGE_GLYPHS) {
+    if (!hasReplacement && cpCount < cpBudget) {
       // Max count: the fallback for every glyph the page fails to render, so it must never
       // be the one the budget drops.
       codepoints[cpCount++] = CodepointFreq::packWith(REPLACEMENT_GLYPH, CodepointFreq::FREQ_MAX);
@@ -967,14 +1012,14 @@ int SdCardFont::prewarm(const char* utf8Text, uint8_t styleMask, bool metadataOn
   // Skip during metadata-only prewarm (layout measurement) to avoid loading
   // kern/lig data for all styles upfront (~22KB per style). Kern/lig is
   // loaded per-style in prewarmStyle() during the full render prewarm instead.
-  if (!metadataOnly) {
+  if (!metadataOnly && loadKernLig) {
     for (uint8_t si = 0; si < MAX_STYLES; si++) {
       if (!(styleMask & (1 << si)) || !styles_[si].present) continue;
       auto& s = styles_[si];
 
       loadStyleKernLigatureData(s);
       if (s.ligaturePairs && s.header.ligaturePairCount > 0) {
-        for (uint8_t li = 0; li < s.header.ligaturePairCount && cpCount < MAX_PAGE_GLYPHS; li++) {
+        for (uint8_t li = 0; li < s.header.ligaturePairCount && cpCount < cpBudget; li++) {
           uint32_t leftCp = s.ligaturePairs[li].pair >> 16;
           uint32_t rightCp = s.ligaturePairs[li].pair & 0xFFFF;
           uint32_t outCp = s.ligaturePairs[li].ligatureCp;
@@ -1013,14 +1058,15 @@ int SdCardFont::prewarm(const char* utf8Text, uint8_t styleMask, bool metadataOn
   int totalMissed = 0;
   for (uint8_t si = 0; si < MAX_STYLES; si++) {
     if (!(styleMask & (1 << si)) || !styles_[si].present) continue;
-    totalMissed += prewarmStyle(si, codepoints.get(), cpCount, metadataOnly);
+    totalMissed += prewarmStyle(si, codepoints.get(), cpCount, metadataOnly, loadKernLig);
   }
 
   stats_.prewarmTotalMs = millis() - startMs;
   return totalMissed;
 }
 
-int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint32_t cpCount, bool metadataOnly) {
+int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint32_t cpCount, bool metadataOnly,
+                             bool loadKernLig) {
   auto& s = styles_[styleIdx];
 
   // Idle-prewarm hit: mini data persists across PrewarmScopes (resetStyleMiniData
@@ -1049,7 +1095,85 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
       }
     }
     if (covered) {
+      // A kern-wanting request (the reader path) can subset-hit a mini that a kern-free UI
+      // prewarm built. Top the matrix up for the requested codepoints rather than declining
+      // the hit -- no glyph is re-read, only the class tables.
+      if (!metadataOnly && loadKernLig && s.miniKernLeftClassCount == 0 && s.header.kernLeftEntryCount > 0) {
+        if (loadStyleKernLigatureData(s) && buildMiniKernMatrix(s, codepoints, cpCount)) {
+          applyKernLigaturePointers(s, s.miniData);
+        }
+      }
       return missedInMini;
+    }
+  }
+
+  // Union the resident mini's codepoints into the request so the rebuild ACCUMULATES rather
+  // than replaces. List screens draw several distinct fallback strings per refresh (browser
+  // rows, chapter titles, the reader status bar after the page scope); replacing meant each
+  // string evicted the previous one's glyphs and every repaint went back to the SD forever.
+  // With the union, residency converges after one pass and repaints stay in RAM.
+  //
+  // Entries stay PACKED. A codepoint present in both streams keeps the request's occurrence
+  // count, so the current page still outranks stale residents when the bitmap budget trims;
+  // a resident-only codepoint enters at count 1, which is exactly the "keep it if it fits"
+  // priority we want for it.
+  std::unique_ptr<uint32_t[]> unionCps;
+  if (s.miniGlyphCount > 0 && s.miniIntervalCount > 0 && ESP.getFreeHeap() < MINI_RETAIN_MIN_FREE_HEAP) {
+    // Heap-tight (a chapter list stacked over an open book). Size-aware rather than a flat
+    // refusal: a small union -- a screen's worth of titles -- is precisely what stops the
+    // per-string eviction, so allow it while the estimated arena still leaves headroom. Only
+    // when the union would crowd the remaining heap (page-scale arenas) drop the retained
+    // data and rebuild request-only, which is bounded exactly like the pre-union behaviour
+    // and hands the freed arena back for the smaller allocation.
+    const uint32_t unionMaxCount = s.miniGlyphCount + cpCount;  // pre-dedup upper bound
+    const uint32_t avgBitmapBytes =
+        (s.miniBitmapUsed > 0 && s.miniGlyphCount > 0) ? s.miniBitmapUsed / s.miniGlyphCount : 64;
+    const uint32_t estArenaBytes = unionMaxCount * (static_cast<uint32_t>(sizeof(EpdGlyph)) + avgBitmapBytes);
+    constexpr uint32_t UNION_PRESSURE_HEADROOM = 12 * 1024;
+    if (estArenaBytes + UNION_PRESSURE_HEADROOM > ESP.getFreeHeap()) {
+      freeStyleMiniData(s);
+    }
+  }
+  if (s.miniGlyphCount > 0 && s.miniIntervalCount > 0) {
+    const uint32_t unionMax = s.miniGlyphCount + cpCount;
+    unionCps.reset(new (std::nothrow) uint32_t[unionMax]);
+    if (unionCps) {
+      // Two-way sorted merge: the resident stream walks the mini intervals (ascending), the
+      // request stream is the caller's array, sorted by cpValue() in prewarm().
+      uint32_t n = 0;
+      uint32_t ivIdx = 0;
+      uint32_t ivCp = s.miniIntervals[0].first;
+      bool ivActive = true;
+      uint32_t ri = 0;
+      while ((ivActive || ri < cpCount) && n < unionMax) {
+        uint32_t next;
+        if (ivActive && (ri >= cpCount || ivCp <= cpValue(codepoints[ri]))) {
+          if (ri < cpCount && cpValue(codepoints[ri]) == ivCp) {
+            next = codepoints[ri++];  // in both: keep the request's count
+          } else {
+            next = cpPack(ivCp);  // resident only: enters at count 1
+          }
+          if (ivCp < s.miniIntervals[ivIdx].last) {
+            ivCp++;
+          } else if (++ivIdx < s.miniIntervalCount) {
+            ivCp = s.miniIntervals[ivIdx].first;
+          } else {
+            ivActive = false;
+          }
+        } else {
+          next = codepoints[ri++];
+        }
+        unionCps[n++] = next;
+      }
+      if (!ivActive && ri >= cpCount && n <= MAX_PAGE_GLYPHS) {
+        // A full mini must stay full: a metadata-only request may not drop bitmaps that other
+        // strings on this screen are still rendering from.
+        metadataOnly = metadataOnly && s.miniMetadataOnly;
+        codepoints = unionCps.get();
+        cpCount = n;
+      } else {
+        unionCps.reset();
+      }
     }
   }
 
@@ -1389,7 +1513,7 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
   // page's codepoints. Skip during metadata-only prewarm — layout only needs
   // advanceX and the mini kern would be thrown away before rendering.
   bool kernLigOk = false;
-  if (!metadataOnly) {
+  if (!metadataOnly && loadKernLig) {
     if (loadStyleKernLigatureData(s)) {
       kernLigOk = buildMiniKernMatrix(s, codepoints, cpCount);
     }

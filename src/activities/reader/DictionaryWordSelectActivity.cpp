@@ -279,8 +279,8 @@ void DictionaryWordSelectActivity::prewarmHighlightGlyphs(int currIdx) {
 
 void DictionaryWordSelectActivity::prebuildAdvanceTable() {
   // Concatenate every word on the page and OR the style flags. ~2KB transient
-  // string; freed on return. Matches FontCacheManager::PrewarmScope's
-  // scanText_ allocation pattern.
+  // string; freed on return. Matches the per-font scan buffers
+  // FontCacheManager::PrewarmScope accumulates into.
   std::string pageText;
   pageText.reserve(2048);
   uint8_t pageStyleMask = 0;
