@@ -292,7 +292,7 @@ void ActivityManager::goToFullScreenMessage(std::string message, EpdFontFamily::
                                                     style);
 }
 
-void ActivityManager::goHome(HomeMenuItem initialMenuItem) {
+void ActivityManager::goHome(HomeMenuItem initialMenuItem, const bool cleanInitialRefresh) {
   if (initialMenuItem == HomeMenuItem::NONE && currentActivity) {
     const auto& activityName = currentActivity->name;
     if (activityName == "FileBrowser") {
@@ -309,7 +309,7 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem) {
       initialMenuItem = HomeMenuItem::SETTINGS_MENU;
     }
   }
-  replaceActivityNoThrow<HomeActivity>("Home", renderer, mappedInput, initialMenuItem);
+  replaceActivityNoThrow<HomeActivity>("Home", renderer, mappedInput, initialMenuItem, cleanInitialRefresh);
 }
 void ActivityManager::goToCrashReport() { replaceActivityNoThrow<CrashActivity>("Crash", renderer, mappedInput); }
 

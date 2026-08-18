@@ -110,7 +110,10 @@ class ActivityManager {
   void goToBoot();
   void goToFullScreenMessage(std::string message, EpdFontFamily::Style style = EpdFontFamily::REGULAR);
   void goToCrashReport();
-  void goHome(HomeMenuItem initialMenuItem = HomeMenuItem::NONE);
+  // cleanInitialRefresh forces Home's first paint to HALF instead of the FAST default, for
+  // the one caller that lands Home over a retained sleep image (splashless wake, no frame
+  // file). The reader equivalent is goToReader's allowFastInitialRefresh=false.
+  void goHome(HomeMenuItem initialMenuItem = HomeMenuItem::NONE, bool cleanInitialRefresh = false);
 
   // This will move current activity to stack instead of deleting it
   void pushActivity(std::unique_ptr<Activity>&& activity);

@@ -581,6 +581,10 @@ void setup() {
                             : isSleepWake && !APP_STATE.showBootScreen ? BootResume::SplashlessWake
                                                                        : BootResume::Splash;
   bool allowFastInitialReaderRefresh = false;
+  // Splashless wake that restores no frame paints nothing before the first activity render,
+  // so the panel still shows the sleep image. The reader path already forces a scrub via
+  // allowFastInitialReaderRefresh=false; Home needs telling explicitly.
+  bool needsWakeRefresh = false;
 
   // Second USB sample (first one right after powerManager.begin()): settles the
   // SOF host-link verdict before the first refresh can slice-sleep.
@@ -616,11 +620,16 @@ void setup() {
         } else {
           renderer.displayBuffer(HalDisplay::HALF_REFRESH);
         }
+      } else {
+        // No frame file: every non-Quick-Resume sleep mode deliberately leaves none
+        // (enterDeepSleep removes any stale one), and the panel still holds that mode's
+        // retained image. Painting nothing here is the point — the first reader/home
+        // paint replaces it. But it has to replace it with a mode that clears the glass:
+        // a FAST diff is computed against a framebuffer the panel no longer matches, so
+        // the sleep image survives underneath. The reader gets that from
+        // allowFastInitialReaderRefresh staying false; Home is told via goHome() below.
+        needsWakeRefresh = true;
       }
-      // No frame file: every non-Quick-Resume sleep mode deliberately leaves none
-      // (enterDeepSleep removes any stale one), and the panel still holds that mode's
-      // retained image. Painting nothing here is the point — the first reader/home
-      // paint replaces it.
       // X4: time is lost on deep sleep — background-sync NTP if the clock is on.
       maybeStartBackgroundNtpSync();
       break;
@@ -678,7 +687,7 @@ void setup() {
       activityManager.replaceActivity(std::move(review));
     } else {
       if (reviewSleepImage) LOG_ERR("MAIN", "OOM: SleepImageReviewActivity; going home");
-      activityManager.goHome();
+      activityManager.goHome(HomeMenuItem::NONE, needsWakeRefresh);
     }
   } else {
     // Clear app state to avoid getting into a boot loop if the epub doesn't load

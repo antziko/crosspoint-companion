@@ -6,6 +6,7 @@
 #include <FontCacheManager.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
+#include <HalDisplay.h>
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Memory.h>
@@ -609,7 +610,11 @@ void HomeActivity::render(RenderLock&&) {
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   const unsigned long tDraw = millis();
-  renderer.displayBuffer();
+  // A splashless wake with no restored frame leaves the sleep image on the panel and paints
+  // nothing over it until this render. FAST is a differential update against a framebuffer
+  // that no longer matches the glass, so the sleep image survives underneath Home; scrub it
+  // once with HALF on the first paint only.
+  renderer.displayBuffer(cleanInitialRefresh && !firstRenderDone ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
   const unsigned long displayMs = millis() - tDraw;
 
   LOG_DBG("HOME", "paint draw=%lu display=%lu free=%u largest=%u", tDraw - tStart, displayMs,

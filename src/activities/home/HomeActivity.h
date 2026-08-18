@@ -108,6 +108,9 @@ class HomeActivity final : public Activity {
   int coverRectH = 0;
   std::vector<RecentBook> recentBooks;
   const HomeMenuItem initialMenuItem;
+  // Set when Home is the first paint after a splashless wake that restored no frame:
+  // the panel still physically holds the sleep image, which a FAST diff will not clear.
+  const bool cleanInitialRefresh = false;
 
   // Open whatever selectorIndex points at (recent cover tile or menu row);
   // shared by the Confirm release and the touch paths.
@@ -160,8 +163,10 @@ class HomeActivity final : public Activity {
 
  public:
   explicit HomeActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                        HomeMenuItem initialMenuItemValue = HomeMenuItem::NONE)
-      : Activity("Home", renderer, mappedInput), initialMenuItem(initialMenuItemValue) {}
+                        HomeMenuItem initialMenuItemValue = HomeMenuItem::NONE, bool cleanInitialRefreshValue = false)
+      : Activity("Home", renderer, mappedInput),
+        initialMenuItem(initialMenuItemValue),
+        cleanInitialRefresh(cleanInitialRefreshValue) {}
   void onEnter() override;
   void onExit() override;
   void loop() override;
