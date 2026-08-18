@@ -57,23 +57,39 @@ void OpdsServerListActivity::onEnter() {
   rebuildRowItems();
 }
 
-// Rebuilds rowItems_ (labels/actionValue, server subtitles) from OPDS_STORE.
+// Rebuilds rowItems_ (labels/actionValue) and their backing label text from
+// OPDS_STORE.
 // Structural — call only when the server list actually reloads, not from
 // buildScreen(). The format row's live subtitle is refreshed in place by
 // buildScreen() every render instead, since it tracks a live SETTINGS value
 // that can change without a server-list reload.
 void OpdsServerListActivity::rebuildRowItems() {
   rowItems_.clear();
+  serverLabels_.clear();
   const int itemCount = getItemCount();
   if (itemCount == 0) return;
   rowItems_.reserve(itemCount);
 
   const auto& servers = OPDS_STORE.getServers();
   const auto serverCount = static_cast<int>(servers.size());
+
+  // Server rows read "name - url" on one label instead of a name/URL subtitle
+  // pair, so a row costs one line when it fits. The joined text has no home in
+  // the store, so it is owned here: at most maxServers() short strings, built
+  // only on a list reload (not per repaint), and reserved up front so no
+  // push_back can reallocate the pointers handed to rowItems_ below.
+  serverLabels_.reserve(serverCount);
+  for (int i = 0; i < serverCount; i++) {
+    if (servers[i].name.empty()) {
+      serverLabels_.push_back(servers[i].url);
+    } else {
+      serverLabels_.push_back(servers[i].name + " - " + servers[i].url);
+    }
+  }
+
   for (int i = 0; i < serverCount; i++) {
     fui::ListItem item;
-    item.label = servers[i].name.empty() ? servers[i].url.c_str() : servers[i].name.c_str();
-    if (!servers[i].name.empty()) item.subtitle = servers[i].url.c_str();
+    item.label = serverLabels_[i].c_str();
     item.actionValue = static_cast<int16_t>(i);
     rowItems_.push_back(item);
   }
@@ -274,8 +290,8 @@ void OpdsServerListActivity::buildScreen(UiScreen& screen) {
     return;
   }
 
-  // rowItems_ (labels/actionValue, server subtitles) was built by
-  // rebuildRowItems() when the server list last reloaded; only the format
+  // rowItems_ (labels/actionValue) was built by rebuildRowItems() when the
+  // server list last reloaded; only the format
   // row's live subtitle needs refreshing here (pointer reassignment onto an
   // already-owned string — no allocation).
   if (!pickerMode) {
@@ -292,7 +308,18 @@ void OpdsServerListActivity::buildScreen(UiScreen& screen) {
   props.count = static_cast<uint16_t>(rowItems_.size());
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
-  syncListViewport(screen, props, /*hasSubtitle=*/true);
+  if (!mappedInput.hasTouch()) {
+    // Non-touch hardware (X3/X4): the Settings list's label size on the plain
+    // row height, which list() grows only for the rows that need it — a
+    // "name - url" label too long for one line wraps to two, everything that
+    // fits stays at the dense single-line height.
+    // maxLines = 2 also marks the style explicitly set — an all-default
+    // smallText fails textStyleUnset and Screen::list() would substitute
+    // bodyText back (see SettingsActivity).
+    props.labelText = screen.theme().smallText;
+    props.labelText.maxLines = 2;
+  }
+  syncListViewport(screen, props, /*hasSubtitle=*/false);
   screen.list(props);
 }
 

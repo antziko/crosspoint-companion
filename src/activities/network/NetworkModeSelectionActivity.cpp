@@ -21,11 +21,14 @@ constexpr UIIcon menuIcons[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {UII
 NetworkModeSelectionActivity::NetworkModeSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
     : UiListActivity("NetworkModeSelection", renderer, mappedInput) {
   // Entirely static, so built once here rather than every buildScreen() call.
+  // Subtitle rows carry the larger icon; the dense non-touch rows take the 24px
+  // one, which still leaves padding inside a label+subtitle row.
+  const int iconSize = mappedInput.hasTouch() ? 32 : 24;
   for (int i = 0; i < MENU_ITEM_COUNT; i++) {
     fui::ListItem item;
     item.label = I18N.get(menuItems[i]);
     item.subtitle = I18N.get(menuDescs[i]);
-    item.icon = listIconFor(menuIcons[i], 32);  // subtitle rows carry the larger icon
+    item.icon = listIconFor(menuIcons[i], iconSize);
     item.actionValue = static_cast<int16_t>(i);
     rowItems_[i] = item;
   }
@@ -64,7 +67,17 @@ void NetworkModeSelectionActivity::buildScreen(UiScreen& screen) {
   props.count = static_cast<uint16_t>(MENU_ITEM_COUNT);
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
-  syncListViewport(screen, props, /*hasSubtitle=*/true);
+  if (!mappedInput.hasTouch()) {
+    // Non-touch hardware (X3/X4): the Settings list's label size on the plain
+    // row height, which list() grows just enough to hold the label+subtitle
+    // pair — denser than reserving listWithSubtitleRowHeight up front.
+    // maxLines = 2 also marks the style explicitly set — an all-default
+    // smallText fails textStyleUnset and Screen::list() would substitute
+    // bodyText back (see SettingsActivity).
+    props.labelText = screen.theme().smallText;
+    props.labelText.maxLines = 2;
+  }
+  syncListViewport(screen, props, /*hasSubtitle=*/false);
   screen.list(props);
 }
 

@@ -36,12 +36,6 @@
 namespace fui = freeink::ui;
 
 namespace {
-// List layout: first row baseline and row pitch (px). itemsPerPage() derives the
-// visible row count from these and the current screen height so nothing draws
-// past the bottom of the panel in any orientation.
-constexpr int LIST_TOP_Y = 60;
-constexpr int LIST_ROW_H = 30;
-constexpr int LIST_BOTTOM_RESERVE = 40;     // button-hints strip (buttonHintsHeight)
 constexpr unsigned long GO_HOME_MS = 1000;  // hold BACK this long to jump to home
 // Minimum contiguous heap required before bringing up an HTTPS connection. Below
 // this the connect or an in-flight read can fail as an OOM-in-disguise and stall,
@@ -374,7 +368,7 @@ void OpdsBookBrowserActivity::loop() {
       // off-screen) and button navigation pulls the view back to it.
       const auto swipe = mappedInput.wasSwipe();
       if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
-        const int delta = swipe == MappedInputManager::SwipeDir::Up ? listNav.visibleRows : -listNav.visibleRows;
+        const int delta = swipe == MappedInputManager::SwipeDir::Up ? listNav.pageRows() : -listNav.pageRows();
         if (listNav.scrollBy(delta, static_cast<int>(entries.size()))) requestUpdate();
         return;
       }
@@ -403,10 +397,10 @@ void OpdsBookBrowserActivity::loop() {
       buttonNavigator.onRelease({MappedInputManager::Button::Right}, navigateNext);
       buttonNavigator.onRelease({MappedInputManager::Button::Left}, navigatePrevious);
       buttonNavigator.onContinuous({MappedInputManager::Button::Right}, [this, moveSelection] {
-        moveSelection(ButtonNavigator::nextPageIndex(selectorIndex, entries.size(), listNav.visibleRows));
+        moveSelection(ButtonNavigator::nextPageIndex(selectorIndex, entries.size(), listNav.pageRows()));
       });
       buttonNavigator.onContinuous({MappedInputManager::Button::Left}, [this, moveSelection] {
-        moveSelection(ButtonNavigator::previousPageIndex(selectorIndex, entries.size(), listNav.visibleRows));
+        moveSelection(ButtonNavigator::previousPageIndex(selectorIndex, entries.size(), listNav.pageRows()));
       });
 
       // Physical side Up/Down: single-step only (no continuous page-jump) --
@@ -471,7 +465,26 @@ void OpdsBookBrowserActivity::screenHeader(UiScreen& screen, const bool withSear
     header.actionOffsetY =
         static_cast<int16_t>((renderer.getLineHeight(titleFontId) - renderer.getTextHeight(titleFontId)) / 2);
   }
-  screen.header(header);
+  // Entry count for the feed on screen, right-aligned in the header band. It
+  // shares the band with the search button (which only shrinks the text
+  // content), so both fit. Must outlive screen.header() — header() draws
+  // immediately, so this scope is enough.
+  char countLabel[16];
+  if (state == BrowserState::BROWSING && !entries.empty()) {
+    snprintf(countLabel, sizeof(countLabel), "(%u)", static_cast<unsigned>(entries.size()));
+    header.rightLabel = countLabel;
+  }
+  // Compact band. The theme's headerHeight also reserves the battery strip
+  // that GUI.drawHeader draws on the other screens (Lyra: 84px for a 40px strip
+  // plus the title line); this screen draws no battery, so the whole strip came
+  // out as dead space between the server name and the first row. Take what the
+  // title line needs instead, capped at the theme value so a theme whose band
+  // is already tight is unaffected.
+  const auto& tokens = screen.theme();
+  const int16_t titleLineHeight = screen.target().lineHeight(tokens.titleText.font);
+  int16_t bandHeight = static_cast<int16_t>(titleLineHeight + tokens.spaceMd * 2 + tokens.headerUnderline);
+  if (bandHeight > tokens.headerHeight) bandHeight = tokens.headerHeight;
+  screen.header(header, fui::LayoutAnchor::Top, bandHeight);
   // Same breathing room between header and content as the legacy screens.
   screen.spacer(static_cast<int16_t>(UITheme::getInstance().getMetrics().verticalSpacing));
 }
@@ -494,15 +507,43 @@ void OpdsBookBrowserActivity::buildBrowsingScreen(UiScreen& screen) {
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
   props.valueInset = 8;               // air between the nav chevron and the row edge
+  // A book row's two lines are laid out on a ONE-line rowHeight below, which
+  // spares no vertical padding of its own: without this the title and author
+  // sit flush against the row edges and against the next row. Same breathing
+  // room the theme builds into its own two-line row height.
+  props.subtitleRowPadding = screen.theme().spaceMd;
   listNav.selected = selectorIndex;
+  // Bold the SHORT line only, and never the title: bold glyphs are wider, so
+  // the long line stays regular and fits more characters before it ellipsizes.
+  // Which line the author is on follows the filename format (rebuildRowItems).
+  const bool authorFirst = SETTINGS.opdsFilenameFormat == static_cast<uint8_t>(OpdsFilenameFormat::AuthorTitle);
+  props.subtitleText = screen.theme().smallText;
+  // Both styles are final from here: textStylesExplicit stops Screen::list()
+  // from substituting the larger bodyText back over an all-default smallText,
+  // which it cannot tell apart from "caller left this unset".
+  props.textStylesExplicit = true;
+
   int16_t rowHeight = screen.theme().rowHeight;
   if (!mappedInput.hasTouch()) {
-    // Non-touch hardware (X3/X4) keeps the original, denser row height
-    // instead of FreeInkUI's touch-target-sized default (see
+    // Non-touch hardware (X3/X4) reads the browser at the Settings list's
+    // density instead of FreeInkUI's touch-target-sized default (see
     // UiListActivity::syncListViewport; this screen predates that base and
-    // syncs its own viewport directly). Book rows carry an author subtitle.
-    rowHeight = static_cast<int16_t>(UITheme::getInstance().getMetrics().listWithSubtitleRowHeight);
+    // syncs its own viewport directly): settings-sized labels on the plain
+    // row height. Book rows carry a second line (see rebuildRowItems) and grow
+    // to fit it, so navigation rows stay at the dense height.
+    // The label stays single-line (the default maxLines) so a long title is
+    // ellipsized rather than wrapped: a book row is then exactly two lines,
+    // never three.
+    props.labelText = screen.theme().smallText;
+    rowHeight = static_cast<int16_t>(UITheme::getInstance().getMetrics().listRowHeight);
     props.rowHeight = rowHeight;
+  } else {
+    props.labelText = screen.theme().bodyText;
+  }
+  if (authorFirst) {
+    props.labelText.bold = true;
+  } else {
+    props.subtitleText.bold = true;
   }
   listNav.syncToProps(screen.body(), rowHeight, screen.theme().listRowGap, static_cast<int>(entries.size()), props);
   screen.list(props);
@@ -606,8 +647,6 @@ void OpdsBookBrowserActivity::buildStatusScreen(UiScreen& screen) {
 }
 
 void OpdsBookBrowserActivity::render(RenderLock&&) {
-  renderer.clearScreen();
-
   MappedInputManager::Labels labels;
   switch (state) {
     case BrowserState::BROWSING: {
@@ -628,18 +667,20 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
       labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
       break;
   }
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-
-  renderUi();
+  // Rows are variable height (a wrapped title grows its row, a subtitle row
+  // grows past the dense row height), so the fixed-height viewport estimate can
+  // fit fewer rows than it predicted and list() reports the correction back
+  // through listNav. Rebuild until it settles, the same bounded loop as
+  // UiListActivity::renderListFrame: each pass moves the viewport strictly
+  // forward toward the selection, and a viewport starting at the selection
+  // always draws it.
+  for (int pass = 0; pass < 8; pass++) {
+    renderer.clearScreen();
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    renderUi();
+    if (!listNav.consumeRebuildNeeded()) break;
+  }
   renderer.displayBuffer();
-}
-
-int OpdsBookBrowserActivity::itemsPerPage() const {
-  // Rows that fit between the list top and the button-hints strip in the current
-  // orientation. getScreenHeight() is 800 in portrait, 480 in landscape, so this
-  // is ~23 vs ~12 — preventing off-panel draws that flood the per-pixel LOG_ERR.
-  const int avail = renderer.getScreenHeight() - LIST_TOP_Y - LIST_BOTTOM_RESERVE;
-  return std::max(1, avail / LIST_ROW_H);
 }
 
 void OpdsBookBrowserActivity::fetchFeed(const std::string& path, const bool allowCache) {
@@ -690,29 +731,42 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path, const bool allo
   // from it (rowLabels/rowItems/downloadedCache) are just as much of the feed and
   // were being left behind, holding their blocks — and their pointers into the
   // freed entry strings — right through the handshake.
-  releaseEntries();
+  //
+  // Under the RENDER LOCK, with the two frees below it. All three hand memory the
+  // render task reads back to the heap: releaseEntries() drops the row array
+  // list() is walking plus the label/author strings it dereferences, and
+  // releaseCache() drops the SD glyph arenas getTextWidth()/prewarm() walk. The
+  // repaint queued when this screen resumed (returning from the search keyboard,
+  // or from a Back that pops a subactivity) is still in flight here — that is a
+  // use-after-free that panics with no message and a backtrace through
+  // list() -> text() -> wrappedText(). The lock does NOT extend over the
+  // transfer below, which must stay unlocked.
+  {
+    RenderLock lock;
+    releaseEntries();
 
-  // Hand the 32KB inflate window back to the heap for the feed parse. A large feed's
-  // entry vector + strings OOMs (crashes) without it on the low-headroom X3. This
-  // activity never inflates EPUB content, and onExit() silent-restarts (re-reserving
-  // the window on a fresh heap), so it is never re-allocated under fragmentation.
-  // Idempotent across the feed's repeated fetches.
-  // NOTE: on X4 the freed mid-session block fragments rather than helps the HTTPS
-  // handshake (30s reads / preflight "memory error"); enabled here per request, revert
-  // to gpio.deviceIsX3() if HTTPS OPDS regresses on X4.
-  InflateReader::releaseWindow();
+    // Hand the 32KB inflate window back to the heap for the feed parse. A large feed's
+    // entry vector + strings OOMs (crashes) without it on the low-headroom X3. This
+    // activity never inflates EPUB content, and onExit() silent-restarts (re-reserving
+    // the window on a fresh heap), so it is never re-allocated under fragmentation.
+    // Idempotent across the feed's repeated fetches.
+    // NOTE: on X4 the freed mid-session block fragments rather than helps the HTTPS
+    // handshake (30s reads / preflight "memory error"); enabled here per request, revert
+    // to gpio.deviceIsX3() if HTTPS OPDS regresses on X4.
+    InflateReader::releaseWindow();
 
-  // Same reclaim for the SD font's resident glyph/kern arenas. The browsing list
-  // renders CJK book titles through the SD fallback, so by the time a feed is
-  // re-fetched those arenas are populated -- and they sit in exactly the 3-12KB
-  // size class the TLS record buffer needs. Rebuilt on demand by the list repaint
-  // after the transfer (one batch prewarm now, see GfxRenderer::
-  // ensureSdGlyphsResident), so the cost is paid where there is heap for it.
-  // releaseCache(), not clearCache(): the latter keeps the mini arena unless free
-  // heap is already under its own 40KB floor, so it is not a guaranteed reclaim.
-  // Placed BEFORE the preflight below so the measurement sees the recovered heap.
-  if (auto* fcm = renderer.getFontCacheManager()) {
-    fcm->releaseCache();
+    // Same reclaim for the SD font's resident glyph/kern arenas. The browsing list
+    // renders CJK book titles through the SD fallback, so by the time a feed is
+    // re-fetched those arenas are populated -- and they sit in exactly the 3-12KB
+    // size class the TLS record buffer needs. Rebuilt on demand by the list repaint
+    // after the transfer (one batch prewarm now, see GfxRenderer::
+    // ensureSdGlyphsResident), so the cost is paid where there is heap for it.
+    // releaseCache(), not clearCache(): the latter keeps the mini arena unless free
+    // heap is already under its own 40KB floor, so it is not a guaranteed reclaim.
+    // Placed BEFORE the preflight below so the measurement sees the recovered heap.
+    if (auto* fcm = renderer.getFontCacheManager()) {
+      fcm->releaseCache();
+    }
   }
 
   if (fromCache) {
@@ -973,6 +1027,9 @@ void OpdsBookBrowserActivity::rebuildRowItems() {
   // invalidate a c_str() taken during the loop.
   rowLabels.clear();
   rowLabels.reserve(entries.size());
+  // A book row's two lines are ordered by the filename format, so a row reads
+  // the way its download will be named on the card.
+  const auto format = static_cast<OpdsFilenameFormat>(SETTINGS.opdsFilenameFormat);
   for (size_t i = 0; i < entries.size(); i++) {
     const auto& entry = entries[i];
     // Mark books already on the SD card (download folder or the finished
@@ -980,15 +1037,28 @@ void OpdsBookBrowserActivity::rebuildRowItems() {
     // truncation. Read from the per-feed cache (refreshDownloadedCache) so a
     // repaint never re-stats the card.
     const bool downloaded = entry.type == OpdsEntryType::BOOK && i < downloadedCache.size() && downloadedCache[i];
-    // std::string(...) on both arms, not "* " + entry.title: entry.title is a const char*
-    // now, so the bare form would be pointer arithmetic that compiles and silently reads
+
+    // Author-first only when there is an author to lead with and the format
+    // asks for it; Title-only drops the second line entirely, and navigation
+    // rows have no author at all, so both stay one line.
+    const bool isBook = entry.type == OpdsEntryType::BOOK;
+    const bool hasAuthor = isBook && entry.author[0] != '\0';
+    const bool authorFirst = hasAuthor && format == OpdsFilenameFormat::AuthorTitle;
+    const char* primary = authorFirst ? entry.author : entry.title;
+    const char* secondary = nullptr;
+    if (hasAuthor && format != OpdsFilenameFormat::TitleOnly) {
+      secondary = authorFirst ? entry.title : entry.author;
+    }
+
+    // std::string(...) on both arms, not "* " + primary: primary is a const char*,
+    // so the bare form would be pointer arithmetic that compiles and silently reads
     // past the literal.
-    rowLabels.push_back(downloaded ? std::string("* ") + entry.title : std::string(entry.title));
+    rowLabels.push_back(downloaded ? std::string("* ") + primary : std::string(primary));
 
     fui::ListItem item;
     item.label = rowLabels.back().c_str();
     // subtitle points straight into the arena — no copy, and valid as long as the feed is.
-    if (entry.type == OpdsEntryType::BOOK && entry.author[0] != '\0') item.subtitle = entry.author;
+    item.subtitle = secondary;
     if (entry.type == OpdsEntryType::NAVIGATION) item.value = ">";
     item.actionValue = static_cast<int16_t>(rowItems.size());
     rowItems.push_back(item);
@@ -1094,10 +1164,17 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   // entries now gives TLS the contiguous headroom it needs; the list is
   // re-fetched after the download. Worst on the X3 (less RAM).
   const int savedIndex = selectorIndex;
-  releaseEntries();  // the row buffers are part of the feed too — see releaseEntries()
-  // And the SD font arenas the list render populated — see fetchFeed().
-  if (auto* fcm = renderer.getFontCacheManager()) {
-    fcm->releaseCache();
+  // Render lock for the same reason as fetchFeed's teardown. The And-Wait above
+  // has already drained the in-flight repaint, so this is belt-and-braces — but
+  // the invariant is "never free render-visible state unlocked", not "free it
+  // after a paint that happens to have finished".
+  {
+    RenderLock lock;
+    releaseEntries();  // the row buffers are part of the feed too — see releaseEntries()
+    // And the SD font arenas the list render populated — see fetchFeed().
+    if (auto* fcm = renderer.getFontCacheManager()) {
+      fcm->releaseCache();
+    }
   }
   const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   SdDebugLog::log("OPDS", "download start, heap=%u, largest=%u, url=%s", (unsigned)ESP.getFreeHeap(),
@@ -1307,6 +1384,11 @@ void OpdsBookBrowserActivity::checkAndConnectWifi() {
 }
 
 void OpdsBookBrowserActivity::launchWifiSelection() {
+  // Render lock over the teardown: releaseEntries() below frees the row array and
+  // the strings a queued repaint of the browsing list is still walking — see
+  // fetchFeed's teardown for the crash that is.
+  RenderLock wifiTeardownLock;
+
   // Hand the 32KB inflate window back BEFORE the radio comes up, not in fetchFeed()
   // (which runs after WiFi is already connected). Bringing esp_wifi + lwip up costs
   // ~53KB measured, so entering this screen with the window still held leaves the
@@ -1330,6 +1412,7 @@ void OpdsBookBrowserActivity::launchWifiSelection() {
   // an error screen.
   releaseEntries();
   selectorIndex = 0;
+  wifiTeardownLock.unlock();
   LOG_DBG("OPDS", "Released inflate window + feed before WiFi (heap: %u, largest: %u)", (unsigned)ESP.getFreeHeap(),
           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 

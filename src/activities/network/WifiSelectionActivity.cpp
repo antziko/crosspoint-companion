@@ -1139,7 +1139,11 @@ void WifiSelectionActivity::buildListScreen(UiScreen& screen) {
     // Non-touch hardware (X3/X4) keeps the original, denser row height
     // instead of FreeInkUI's touch-target-sized default (see
     // UiListActivity::syncListViewport; this screen predates that base and
-    // syncs its own viewport directly).
+    // syncs its own viewport directly), with the Settings list's smaller
+    // label font to match — an SSID that wrapped at body size usually fits
+    // one line here, so rows stay at the dense height.
+    props.labelText = screen.theme().smallText;
+    props.labelText.maxLines = 2;
     rowHeight = static_cast<int16_t>(metrics.listRowHeight);
     props.rowHeight = rowHeight;
   }

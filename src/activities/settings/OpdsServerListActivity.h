@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <vector>
 
 #include "activities/UiListActivity.h"
@@ -37,11 +38,14 @@ class OpdsServerListActivity final : public UiListActivity {
 
   OptionPopup optionPopup;
 
-  // Row structure (labels, actionValue; server subtitles), rebuilt only when
-  // the server list itself reloads (rebuildRowItems(), called from onEnter()
-  // and after returning from the server editor) — not on every repaint. The
-  // format row's live subtitle is refreshed in place by buildScreen().
+  // Row structure (labels, actionValue), rebuilt only when the server list
+  // itself reloads (rebuildRowItems(), called from onEnter() and after
+  // returning from the server editor) — not on every repaint. The format
+  // row's live subtitle is refreshed in place by buildScreen().
   std::vector<freeink::ui::ListItem> rowItems_;
+  // Backing storage for the server rows' "name - url" labels; rowItems_ holds
+  // pointers into these, so it must not outlive or be rebuilt without them.
+  std::vector<std::string> serverLabels_;
   void rebuildRowItems();
 
   int getItemCount() const;

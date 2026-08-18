@@ -108,9 +108,5 @@ class OpdsBookBrowserActivity final : public Activity, private UiAppHost {
   void downloadBook(const OpdsEntry& book);
   void launchSearch();
   void performSearch(const std::string& query);
-  // Number of list rows that fit in the current orientation. Portrait (800 tall)
-  // ~23; landscape (480 tall) ~12. Hardcoding caused rows to draw off-panel in
-  // landscape, flooding drawPixel's per-pixel "Outside range" LOG_ERR.
-  int itemsPerPage() const;
   bool preventAutoSleep() override { return true; }
 };
