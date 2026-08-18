@@ -1,5 +1,6 @@
 #pragma once
 
+#include <BoardConfig.h>
 #include <HalGPIO.h>
 
 class GfxRenderer;
@@ -64,7 +65,20 @@ class MappedInputManager {
   // ReaderUtils::handleBackNavigation).
   bool wasBackGesture() const;
   bool wasHomeGesture() const;
+  // A Home-key hold, for surfaces that want a second action from the key.
+  bool wasHomeKeyHold() const;
   bool wasMenuGesture() const;
+  // Top-edge down-swipe opens the light panel when the board has a frontlight.
+  // ActivityManager consumes it before activity input.
+  bool wasLightPanelGesture() const;
+#if FREEINK_CAP_TOUCH
+  // Power short-click acting as Confirm. On boards with no front buttons this
+  // is the only Confirm there is, so wasPressed/wasReleased fold it in.
+  bool wasPowerConfirmClick() const;
+  // X4 Pro delays a single power click until its frontlight double-click window
+  // expires. The main loop supplies that one-frame event here.
+  void setPowerConfirmClickFrame(const bool clicked) { powerConfirmClickFrame = clicked; }
+#endif
   bool wasAnyPressed() const;
   bool wasAnyReleased() const;
   unsigned long getHeldTime() const;
@@ -84,6 +98,10 @@ class MappedInputManager {
  private:
   HalGPIO& gpio;
   const GfxRenderer& renderer;
+#if FREEINK_CAP_TOUCH
+  // One-frame latch set by the main loop; see setPowerConfirmClickFrame().
+  bool powerConfirmClickFrame = false;
+#endif
 
   bool mapButton(Button button, bool (HalGPIO::*fn)(uint8_t) const, bool applySwap = true) const;
   // Fetch the pending swipe (if any) and map both endpoints to logical screen coords

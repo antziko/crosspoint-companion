@@ -151,9 +151,11 @@ inline TouchPageTurn detectTouchPageTurn(GfxRenderer& renderer, const MappedInpu
 
 // Tap in the middle third of the screen: the tap path into the reader menu on
 // every touch board. The page-turn tap zones are the outer thirds, so the
-// middle is free in tap mode.
+// middle is free in tap mode. The opt-out is only surfaced on home-key boards
+// (SettingsList), where the menu stays reachable through the key's hold.
 inline bool isTouchMenuTap(const GfxRenderer& renderer, const MappedInputManager& input) {
   if (!input.hasTouch()) return false;
+  if (!SETTINGS.tapForReaderMenu) return false;
   int x = 0;
   int y = 0;
   if (!input.wasScreenTapped(x, y)) return false;
@@ -171,6 +173,11 @@ inline bool isTouchMenuTap(const GfxRenderer& renderer, const MappedInputManager
 // menu included, so a stray brush of the screen can't open it; the menu stays
 // reachable via the Confirm button.
 inline bool isTouchMenuGesture(const GfxRenderer& renderer, const MappedInputManager& input) {
+  // A Home-key hold is board input, not a touch-reader control, so it stays
+  // available with touch reader controls Off. On a frontlight board the
+  // top-edge swipe belongs to the light panel, which makes this the reliable
+  // way in and is why tapForReaderMenu may be turned off there at all.
+  if (input.wasHomeKeyHold()) return true;
   if (!SETTINGS.touchReaderControls) return false;
   return (input.hasTouch() && input.wasMenuGesture()) || isTouchMenuTap(renderer, input);
 }

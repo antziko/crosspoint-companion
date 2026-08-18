@@ -7,6 +7,7 @@
 #include <GfxRenderer.h>
 #include <HalClock.h>
 #include <HalDisplay.h>
+#include <HalFrontlight.h>
 #include <HalGPIO.h>
 #include <HalPowerManager.h>
 #include <HalStorage.h>
@@ -52,6 +53,18 @@ FontDecompressor fontDecompressor;
 SdCardFontSystem sdFontSystem;
 DictionaryRegistry dictionaryRegistry;
 FontCacheManager fontCacheManager(renderer.getFontMap(), renderer.getSdCardFonts());
+
+// X4 Pro power-button timing. The board has no dedicated light key, so a double
+// click of POWER toggles the frontlight; a single click still runs the
+// configured short-press action once the double-click window has passed.
+namespace {
+constexpr unsigned long X4PRO_POWER_DOUBLE_CLICK_MS = 500;
+constexpr unsigned long X4PRO_POWER_CLICK_MAX_HOLD_MS = 300;
+constexpr unsigned long X4PRO_RECOVERY_SETTLE_MS = 20;
+constexpr unsigned long DEFAULT_RECOVERY_SETTLE_MS = 500;
+}  // namespace
+static unsigned long lastX4ProPowerClickAt = 0;
+
 static unsigned long allowSleepAt = 0;
 // A wake hold must never become an in-app power-button action. Boot may finish while the
 // button is still held, so swallow the one release that ends that wake gesture.
@@ -482,6 +495,13 @@ void setup() {
   // this per-book; non-reader UI keeps it mirroring the global setting.
   APP_STATE.activeOrientation = SETTINGS.orientation;
 
+  // Brightness and warmth are always restored. A normal wake starts with the light off
+  // unless Restore Light on Wake is enabled; a silent maintenance reboot preserves the
+  // live state so the screen does not unexpectedly go dark mid-session. Inert on boards
+  // without a frontlight.
+  const bool restoreLightOn = SETTINGS.frontlightOn != 0 && (SETTINGS.frontlightRestoreOnWake != 0 || isSilentReboot);
+  Frontlight.begin(SETTINGS.frontlightBrightness, SETTINGS.frontlightWarmth, restoreLightOn);
+
   // Clamp lookup history cap to a valid step in [MIN, UNLIMITED] (UNLIMITED is the
   // top sentinel = no eviction).
   if (SETTINGS.lookupHistoryCap < CrossPointSettings::HIST_CAP_MIN ||
@@ -523,22 +543,26 @@ void setup() {
       break;
   }
 
-  // Recovery firmware mode: hold left side button (BTN_UP) together with the power button at
-  // boot to skip directly to the SD-card firmware update screen. Useful on devices where USB
-  // flashing has been locked down (e.g. recent X3 firmware).
+  // Recovery firmware mode: hold a side button together with the power button at boot to skip
+  // directly to the SD-card firmware update screen. Useful on devices where USB flashing has
+  // been locked down (e.g. recent X3 firmware). X4 Pro uses BTN_DOWN because its BTN_UP is
+  // GPIO0, a boot-strap pin that must not be held during reset; its plain digital buttons also
+  // debounce in 5 ms rather than needing the legacy Xteink settling window.
   bool recoveryFirmwareMode = false;
   if (wakeupReason == HalGPIO::WakeupReason::PowerButton) {
     // Refresh the cached button state a few times — isPressed() needs ~half a second to settle
     // after boot per the HalGPIO contract. Use a millis-based deadline so we always wait the full
     // settle window even if the loop body takes longer than expected on slow boots.
+    const unsigned long settleMs = BoardConfig::isX4Pro() ? X4PRO_RECOVERY_SETTLE_MS : DEFAULT_RECOVERY_SETTLE_MS;
     const unsigned long settleStart = millis();
-    while (millis() - settleStart < 500) {
+    while (millis() - settleStart < settleMs) {
       gpio.update();
       delay(10);
     }
-    if (gpio.isPressed(HalGPIO::BTN_UP)) {
+    const uint8_t recoveryButton = BoardConfig::isX4Pro() ? HalGPIO::BTN_DOWN : HalGPIO::BTN_UP;
+    if (gpio.isPressed(recoveryButton)) {
       recoveryFirmwareMode = true;
-      LOG_INF("MAIN", "Recovery firmware mode (UP + POWER held at boot)");
+      LOG_INF("MAIN", "Recovery firmware mode (%s + POWER held at boot)", BoardConfig::isX4Pro() ? "DOWN" : "UP");
     }
   }
 
@@ -725,6 +749,33 @@ static void delayWallClock(const unsigned long ms) {
   }
 }
 
+// X4 Pro: a double click of POWER toggles the frontlight. Returns true when the
+// release was consumed as the second click, so the caller skips the configured
+// short-press action for it.
+static bool handleX4ProFrontlightDoubleClick() {
+  if (!BoardConfig::isX4Pro() || !gpio.wasReleased(HalGPIO::BTN_POWER)) return false;
+
+  const unsigned long now = millis();
+  // A long hold is the sleep gesture, never half of a double click.
+  if (gpio.getPowerButtonHeldTime() > X4PRO_POWER_CLICK_MAX_HOLD_MS) {
+    lastX4ProPowerClickAt = 0;
+    return false;
+  }
+
+  if (lastX4ProPowerClickAt == 0 || now - lastX4ProPowerClickAt > X4PRO_POWER_DOUBLE_CLICK_MS) {
+    lastX4ProPowerClickAt = now;
+    return false;
+  }
+
+  lastX4ProPowerClickAt = 0;
+  const bool lightOn = !Frontlight.isOn();
+  Frontlight.setOn(lightOn);
+  SETTINGS.frontlightOn = lightOn ? 1 : 0;
+  SETTINGS.saveToFile();
+  LOG_INF("LIGHT", "Frontlight toggled %s by power-button double-click", lightOn ? "on" : "off");
+  return true;
+}
+
 void loop() {
   static unsigned long maxLoopDuration = 0;
   const unsigned long loopStartTime = millis();
@@ -862,6 +913,24 @@ void loop() {
     // This should never be hit as `enterDeepSleep` calls esp_deep_sleep_start
     return;
   }
+
+  // X4 Pro frontlight double-click. Runs before the short-press actions below so
+  // the second click toggles the light instead of also firing them.
+  if (handleX4ProFrontlightDoubleClick()) {
+    lastActivityTime = millis();
+    return;
+  }
+#if FREEINK_CAP_TOUCH
+  // A single X4 Pro power click becomes Confirm only once the double-click
+  // window has closed, so the first click of a pair is never also a Confirm.
+  if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::PWR_CONFIRM && BoardConfig::isX4Pro() &&
+      lastX4ProPowerClickAt != 0 && millis() - lastX4ProPowerClickAt > X4PRO_POWER_DOUBLE_CLICK_MS) {
+    lastX4ProPowerClickAt = 0;
+    mappedInputManager.setPowerConfirmClickFrame(true);
+  } else {
+    mappedInputManager.setPowerConfirmClickFrame(false);
+  }
+#endif
 
   // Refresh screen when power button is short-pressed with FORCE_REFRESH setting.
   if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::FORCE_REFRESH &&

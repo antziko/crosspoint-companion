@@ -1,6 +1,7 @@
 #include "MappedInputManager.h"
 
 #include <GfxRenderer.h>
+#include <HalFrontlight.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -312,6 +313,10 @@ bool MappedInputManager::wasMenuGesture() const {
 }
 
 bool MappedInputManager::wasHomeGesture() const {
+  // Home-key boards (X4 Pro) use a short Home-key tap; their bottom-edge swipe
+  // is intentionally left unused so it cannot fire the same action twice.
+  if (gpio.hasHomeKey()) return gpio.wasHomeKeyTapped();
+
   int sx = 0;
   int sy = 0;
   int ex = 0;
@@ -327,13 +332,36 @@ bool MappedInputManager::wasHomeGesture() const {
   return false;
 }
 
+bool MappedInputManager::wasHomeKeyHold() const { return gpio.hasHomeKey() && gpio.wasHomeKeyLongPressed(); }
+
+bool MappedInputManager::wasLightPanelGesture() const {
+  // On lightless boards the same edge stays with the reader menu.
+  return Frontlight.present() && wasMenuGesture();
+}
+
+#if FREEINK_CAP_TOUCH
+bool MappedInputManager::wasPowerConfirmClick() const {
+  if (!gpio.hasTouch() || SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::PWR_CONFIRM) return false;
+  // Wait out the X4 Pro's frontlight double-click window before treating its
+  // first release as Confirm; main.cpp supplies that one-frame event.
+  if (BoardConfig::isX4Pro()) return powerConfirmClickFrame;
+  return gpio.wasReleased(HalGPIO::BTN_POWER) && gpio.getPowerButtonHeldTime() <= SETTINGS.getPowerButtonDuration();
+}
+#endif
+
 bool MappedInputManager::wasPressed(const Button button, const bool applySwap) const {
   if (button == Button::Back && wasBackGesture()) return true;
+#if FREEINK_CAP_TOUCH
+  if (button == Button::Confirm && wasPowerConfirmClick()) return true;
+#endif
   return mapButton(button, &HalGPIO::wasPressed, applySwap);
 }
 
 bool MappedInputManager::wasReleased(const Button button, const bool applySwap) const {
   if (button == Button::Back && wasBackGesture()) return true;
+#if FREEINK_CAP_TOUCH
+  if (button == Button::Confirm && wasPowerConfirmClick()) return true;
+#endif
   return mapButton(button, &HalGPIO::wasReleased, applySwap);
 }
 

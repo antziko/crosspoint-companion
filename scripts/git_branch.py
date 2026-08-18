@@ -80,7 +80,7 @@ def inject_version(env):
     # Applies to the dev environments (default + single-diagnostic variants);
     # release envs set the version via build_flags in platformio.ini and are
     # unaffected.
-    if env['PIOENV'] not in ('default', 'oomtrace', 'memtrace', 'sticky'):
+    if env['PIOENV'] not in ('default', 'oomtrace', 'memtrace', 'sticky', 'x4pro'):
         return
 
     project_dir = env['PROJECT_DIR']

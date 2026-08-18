@@ -1,5 +1,6 @@
 #pragma once
 
+#include <BoardConfig.h>
 #include <stdint.h>
 
 #include "CrossPointSettings.h"
@@ -142,13 +143,28 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
     persisted::toggle("swapSideButtonsCW", &CrossPointSettings::swapSideButtonsCW),
     persisted::enumerated("sideLongPressButtonBehavior", &CrossPointSettings::sideLongPressButtonBehavior,
                           CrossPointSettings::LONG_PRESS_BUTTON_BEHAVIOR_COUNT - 1),
+// The Confirm action is offered only on touch boards (SettingsList.h), so the accepted
+// range has to track that or the drift check fires. A settings.json carrying Confirm and
+// loaded on a button board falls back to the default, which is what should happen: that
+// board reaches Confirm through its own key.
+#if FREEINK_CAP_TOUCH
     persisted::enumerated("shortPwrBtn", &CrossPointSettings::shortPwrBtn, CrossPointSettings::SHORT_PWRBTN_COUNT - 1),
+#else
+    persisted::enumerated("shortPwrBtn", &CrossPointSettings::shortPwrBtn, CrossPointSettings::SHORT_PWRBTN::FOOTNOTES),
+#endif
+    persisted::toggle("tapForReaderMenu", &CrossPointSettings::tapForReaderMenu),
     persisted::toggle("pwrBtnFootnoteBack", &CrossPointSettings::pwrBtnFootnoteBack),
     persisted::toggle("backShortToFileBrowser", &CrossPointSettings::backShortToFileBrowser),
 
     // --- Power ---
     persisted::ranged("sleepTimeoutMinutes", &CrossPointSettings::sleepTimeoutMinutes,
                       CrossPointSettings::MIN_SLEEP_TIMEOUT_MINUTES, CrossPointSettings::MAX_SLEEP_TIMEOUT_MINUTES),
+
+    // --- Frontlight (quick panel state; no Settings-screen rows) ---
+    persisted::ranged("frontlightBrightness", &CrossPointSettings::frontlightBrightness, 0, 100),
+    persisted::ranged("frontlightWarmth", &CrossPointSettings::frontlightWarmth, 0, 100),
+    persisted::toggle("frontlightOn", &CrossPointSettings::frontlightOn),
+    persisted::toggle("frontlightRestoreOnWake", &CrossPointSettings::frontlightRestoreOnWake),
 
     // --- Sync ---
     persisted::toggle("syncPromptOnSleep", &CrossPointSettings::syncPromptOnSleep),

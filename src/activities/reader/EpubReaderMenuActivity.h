@@ -31,7 +31,8 @@ class EpubReaderMenuActivity final : public UiListActivity {
     SET_BOOK_DICTIONARY,
     READER_OPTIONS,
     BOOK_STATS,
-    ADD_HIGHLIGHT
+    ADD_HIGHLIGHT,
+    FRONTLIGHT
   };
 
   explicit EpubReaderMenuActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const std::string& title,
@@ -56,12 +57,12 @@ class EpubReaderMenuActivity final : public UiListActivity {
   static std::vector<MenuItem> buildMenuItems(bool hasFootnotes, bool hasDictionary);
 
   // Row storage: menuItems is at most MAX_MENU_ITEMS (10 always-present rows +
-  // FOOTNOTES + the 3 dictionary rows in buildMenuItems()), so a
-  // fixed-capacity array avoids any heap allocation for the row list. Labels
-  // are set once in the constructor (buildMenuRowItems()); buildScreen()
-  // only refreshes the two rows whose value reflects live state (rotation,
-  // page-turn interval).
-  static constexpr size_t MAX_MENU_ITEMS = 14;
+  // FOOTNOTES + the 3 dictionary rows in buildMenuItems() + FRONTLIGHT on
+  // boards that have one), so a fixed-capacity array avoids any heap
+  // allocation for the row list. Labels are set once in the constructor
+  // (buildMenuRowItems()); buildScreen() only refreshes the rows whose value
+  // reflects live state (rotation, page-turn interval, dictionary, frontlight).
+  static constexpr size_t MAX_MENU_ITEMS = 15;
   freeink::ui::ListItem menuRowItems[MAX_MENU_ITEMS]{};
   void buildMenuRowItems();
 

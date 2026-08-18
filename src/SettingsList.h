@@ -210,7 +210,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // first block — two contiguous allocations and a copy where one would do. The 8640-byte
   // growth allocation is what aborted (and rebooted the device) when settings were saved at
   // low heap; see SettingsPersistence.h. Keep headroom above the real count.
-  constexpr size_t kSettingCount = 80;
+  constexpr size_t kSettingCount = 88;
   v.reserve(kSettingCount);
 
   // --- Display ---
@@ -268,6 +268,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
       SettingInfo::Enum(StrId::STR_DISPLAY_ORIENTATION, &CrossPointSettings::displayOrientation,
                         {StrId::STR_PORTRAIT, StrId::STR_LANDSCAPE_CW, StrId::STR_INVERTED, StrId::STR_LANDSCAPE_CCW},
                         "displayOrientation", StrId::STR_CAT_DISPLAY));
+#if FREEINK_CAP_FRONTLIGHT
+  v.push_back(SettingInfo::Toggle(StrId::STR_RESTORE_LIGHT_ON_WAKE, &CrossPointSettings::frontlightRestoreOnWake,
+                                  "frontlightRestoreOnWake", StrId::STR_CAT_DISPLAY));
+#endif
 
   // --- Reader ---
   // Built-in font-family entry. Replaced per-call with a registry-aware version when SD fonts installed.
@@ -393,11 +397,26 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                          StrId::STR_LONG_PRESS_BEHAVIOR_ORIENTATION, StrId::STR_LONG_PRESS_BEHAVIOR_BOOKMARK_SYNC},
                         "sideLongPressButtonBehavior", StrId::STR_CAT_CONTROLS));
 
-  // Power button (tiltPageTurn is inserted right after this row further below)
+  // Center-third tap into the reader menu. Removed below on boards without a
+  // Home key, where the tap is the only way in.
+  v.push_back(SettingInfo::Toggle(StrId::STR_TAP_FOR_READER_MENU, &CrossPointSettings::tapForReaderMenu,
+                                  "tapForReaderMenu", StrId::STR_CAT_CONTROLS));
+
+  // Power button (tiltPageTurn is inserted right after this row further below).
+  // Confirm is offered only on touch boards: it exists for hardware whose front
+  // buttons are absent (X4 Pro), and on a button board it would shadow the real
+  // Confirm key.
+#if FREEINK_CAP_TOUCH
+  v.push_back(SettingInfo::Enum(StrId::STR_SHORT_PWR_BTN, &CrossPointSettings::shortPwrBtn,
+                                {StrId::STR_IGNORE, StrId::STR_SLEEP, StrId::STR_PAGE_TURN, StrId::STR_FORCE_REFRESH,
+                                 StrId::STR_FOOTNOTES, StrId::STR_CONFIRM},
+                                "shortPwrBtn", StrId::STR_CAT_CONTROLS));
+#else
   v.push_back(SettingInfo::Enum(
       StrId::STR_SHORT_PWR_BTN, &CrossPointSettings::shortPwrBtn,
       {StrId::STR_IGNORE, StrId::STR_SLEEP, StrId::STR_PAGE_TURN, StrId::STR_FORCE_REFRESH, StrId::STR_FOOTNOTES},
       "shortPwrBtn", StrId::STR_CAT_CONTROLS));
+#endif
   v.push_back(SettingInfo::Toggle(StrId::STR_PWR_BTN_FOOTNOTE_BACK, &CrossPointSettings::pwrBtnFootnoteBack,
                                   "pwrBtnFootnoteBack", StrId::STR_CAT_CONTROLS));
   v.push_back(SettingInfo::Toggle(StrId::STR_BACK_SHORT_TO_FILE_BROWSER, &CrossPointSettings::backShortToFileBrowser,
@@ -535,6 +554,21 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
       SettingInfo::Enum(StrId::STR_DATE_FORMAT, &CrossPointSettings::homeTopBarDateFormat,
                         {StrId::STR_DATE_FMT_0, StrId::STR_DATE_FMT_1, StrId::STR_DATE_FMT_2, StrId::STR_DATE_FMT_3},
                         "homeTopBarDateFormat", StrId::STR_CUSTOMISE_TOP_BAR));
+
+#if FREEINK_CAP_FRONTLIGHT
+  // Frontlight quick-panel state: persisted and web-exposed, but deliberately
+  // category-less so it stays out of the on-device Settings screen — the swipe
+  // panel owns these. SettingsActivity only buckets rows carrying one of the
+  // four top-level categories.
+  v.push_back(SettingInfo::Value(StrId::STR_BRIGHTNESS, &CrossPointSettings::frontlightBrightness, {0, 100, 5},
+                                 "frontlightBrightness"));
+#if FREEINK_CAP_WARMLIGHT
+  v.push_back(
+      SettingInfo::Value(StrId::STR_WARMTH, &CrossPointSettings::frontlightWarmth, {0, 100, 5}, "frontlightWarmth"));
+#endif
+  v.push_back(SettingInfo::Toggle(StrId::STR_FRONTLIGHT, &CrossPointSettings::frontlightOn, "frontlightOn"));
+#endif
+
   // Only show tilt page turn setting when the QMI8658 IMU is present (X3)
   if (halTiltSensor.isAvailable()) {
     // Insert after the short power button setting (end of Controls section)
@@ -567,6 +601,15 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
     if (it != v.end()) {
       *it = buildFontSizeSetting(registry);
     }
+  }
+
+  // The tap-for-menu opt-out only makes sense where the menu stays reachable
+  // without the tap (the capacitive Home key); everywhere else the tap is the
+  // primary path into the reader menu and stays on.
+  if (!BoardConfig::hasHomeKey()) {
+    v.erase(std::remove_if(v.begin(), v.end(),
+                           [](const SettingInfo& s) { return s.nameId == StrId::STR_TAP_FOR_READER_MENU; }),
+            v.end());
   }
 
   // Touch-vs-button setting visibility (#2481, corrected per #2689). Non-touch

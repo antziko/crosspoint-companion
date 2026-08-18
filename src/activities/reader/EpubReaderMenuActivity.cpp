@@ -1,8 +1,10 @@
 #include "EpubReaderMenuActivity.h"
 
 #include <GfxRenderer.h>
+#include <HalFrontlight.h>
 #include <I18n.h>
 
+#include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "ReaderUtils.h"
 #include "components/UITheme.h"
@@ -40,10 +42,11 @@ void EpubReaderMenuActivity::buildMenuRowItems() {
 std::vector<EpubReaderMenuActivity::MenuItem> EpubReaderMenuActivity::buildMenuItems(bool hasFootnotes,
                                                                                      bool hasDictionary) {
   std::vector<MenuItem> items;
-  // 10 always-present rows + FOOTNOTES + the 3 dictionary rows = 14 worst case.
-  // This was 13, one short, so a fully populated menu reallocated once — and a
-  // vector growth that fails aborts here rather than returning null.
-  items.reserve(14);
+  // 10 always-present rows + FOOTNOTES + the 3 dictionary rows + FRONTLIGHT on
+  // boards that have one = 15 worst case. This was 13, one short, so a fully
+  // populated menu reallocated once — and a vector growth that fails aborts
+  // here rather than returning null. Keep in step with MAX_MENU_ITEMS.
+  items.reserve(15);
   items.push_back({MenuAction::READER_OPTIONS, StrId::STR_READER_OPTIONS});
   items.push_back({MenuAction::VIEW_BOOKMARKS, StrId::STR_BOOKMARKS});
   items.push_back({MenuAction::SELECT_CHAPTER, StrId::STR_SELECT_CHAPTER});
@@ -63,6 +66,11 @@ std::vector<EpubReaderMenuActivity::MenuItem> EpubReaderMenuActivity::buildMenuI
     items.push_back({MenuAction::FLASHCARDS_LIST, StrId::STR_FLASHCARDS_LIST});
   }
   items.push_back({MenuAction::BOOK_STATS, StrId::STR_BOOK_STATS});
+  // Frontlight boards get an in-menu toggle; the swipe panel owns brightness
+  // and warmth. Absent everywhere else, so the row count stays as it was.
+  if (Frontlight.present()) {
+    items.push_back({MenuAction::FRONTLIGHT, StrId::STR_FRONTLIGHT});
+  }
   return items;
 }
 
@@ -87,6 +95,17 @@ void EpubReaderMenuActivity::activateIndex(const int index) {
   nav.selected = index;
 
   const auto selectedAction = menuItems[index].action;
+  if (selectedAction == MenuAction::FRONTLIGHT) {
+    // Toggles in place and stays in the menu, so the value column updates and
+    // the user can keep going.
+    const bool lightOn = !Frontlight.isOn();
+    Frontlight.setOn(lightOn);
+    SETTINGS.frontlightOn = lightOn ? 1 : 0;
+    SETTINGS.saveToFile();
+    requestUpdate();
+    return;
+  }
+
   if (selectedAction == MenuAction::ROTATE_SCREEN) {
     optionPopup.show(StrId::STR_ORIENTATION, orientationLabels.data(), static_cast<int>(orientationLabels.size()),
                      pendingOrientation, [this](int idx) {
@@ -178,7 +197,9 @@ void EpubReaderMenuActivity::buildScreen(UiScreen& screen) {
   // page-turn interval) need refreshing here.
   for (size_t i = 0; i < menuItems.size(); i++) {
     const auto action = menuItems[i].action;
-    if (action == MenuAction::ROTATE_SCREEN) {
+    if (action == MenuAction::FRONTLIGHT) {
+      menuRowItems[i].value = I18N.get(Frontlight.isOn() ? StrId::STR_STATE_ON : StrId::STR_STATE_OFF);
+    } else if (action == MenuAction::ROTATE_SCREEN) {
       menuRowItems[i].value = I18N.get(orientationLabels[pendingOrientation]);
     } else if (action == MenuAction::AUTO_PAGE_TURN) {
       menuRowItems[i].value = pageTurnLabels[selectedPageTurnOption];

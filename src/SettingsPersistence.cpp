@@ -95,8 +95,13 @@ void verifySettingsPersistenceTable() {
   // all of them so settings.json stays board-independent -- a file written on an X3 loads
   // unchanged on a touch board and vice versa. Only the UI row is board-specific, not the
   // stored value, so these are expected absences rather than drift.
-  static constexpr const char* kBoardConditionalKeys[] = {"touchReaderControls", "frontButtonFollowOrientation",
-                                                          "fadingFix"};
+  // The frontlight keys are additionally compiled out of boards without one
+  // (FREEINK_CAP_FRONTLIGHT), and tapForReaderMenu is dropped on boards with no
+  // Home key. Same reasoning: the value travels, only the row is board-specific.
+  static constexpr const char* kBoardConditionalKeys[] = {
+      "touchReaderControls", "frontButtonFollowOrientation", "fadingFix",
+      "tapForReaderMenu",    "frontlightBrightness",         "frontlightWarmth",
+      "frontlightOn",        "frontlightRestoreOnWake"};
 
   // Rows with no counterpart: a setting removed from SettingsList but left here would keep
   // being written to settings.json forever.

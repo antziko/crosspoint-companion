@@ -20,6 +20,9 @@
 #include "reader/ReadingStatsActivity.h"
 #include "settings/OpdsServerListActivity.h"
 #include "settings/SettingsActivity.h"
+#if FREEINK_CAP_FRONTLIGHT
+#include "util/FrontlightPanelActivity.h"
+#endif
 #include "util/FullScreenMessageActivity.h"
 
 static portMUX_TYPE activityManagerSpinlock = portMUX_INITIALIZER_UNLOCKED;
@@ -87,6 +90,16 @@ void ActivityManager::loop() {
       goHome();
       return;
     }
+
+#if FREEINK_CAP_FRONTLIGHT
+    // Top-edge down-swipe opens the frontlight panel, ahead of activity input so
+    // it works from every screen. Suppressed while the panel itself is up, where
+    // the same edge would immediately reopen it.
+    if (currentActivity->name != "FrontlightPanel" && mappedInput.wasLightPanelGesture()) {
+      pushActivity(std::make_unique<FrontlightPanelActivity>(renderer, mappedInput));
+      return;
+    }
+#endif
 
     // Note: do not hold a lock here, the loop() method must be responsible for acquire one if needed
     currentActivity->loop();

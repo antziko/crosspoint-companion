@@ -163,8 +163,18 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   static constexpr int REFRESH_COUNTDOWN_DISABLED = -1;    // "Never" — no periodic maintenance
   static constexpr int REFRESH_COUNTDOWN_FORCE_FULL = -2;  // forced HALF scrub (residue/ghost cleanup)
 
-  // Short power button press actions
-  enum SHORT_PWRBTN { IGNORE = 0, SLEEP = 1, PAGE_TURN = 2, FORCE_REFRESH = 3, FOOTNOTES = 4, SHORT_PWRBTN_COUNT };
+  // Short power button press actions. PWR_CONFIRM exists for boards whose only
+  // buttons are the page pair plus power (X4 Pro): it is how Confirm is reached
+  // at all there, so it is the default on those boards.
+  enum SHORT_PWRBTN {
+    IGNORE = 0,
+    SLEEP = 1,
+    PAGE_TURN = 2,
+    FORCE_REFRESH = 3,
+    FOOTNOTES = 4,
+    PWR_CONFIRM = 5,
+    SHORT_PWRBTN_COUNT
+  };
 
   // Manual "Refresh Screen" (power-button FORCE_REFRESH) clear mode. Drives the
   // whole-panel ghost clear in main.cpp. FAST is grayscale-safe (X4 default);
@@ -465,6 +475,16 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t tiltPageTurn = TILT_OFF;
   // Touch screen reader zones/gestures on boards with a touch controller.
   uint8_t touchReaderControls = TOUCH_READER_ON;
+  // Center-third tap opens the reader menu (0 = disabled, 1 = enabled). Only
+  // surfaced on home-key boards, where the menu stays reachable without it.
+  uint8_t tapForReaderMenu = 1;
+  // Frontlight quick-panel state, on boards that have a frontlight.
+  uint8_t frontlightBrightness = 60;
+  uint8_t frontlightWarmth = 50;  // 0 = cool .. 100 = warm
+  uint8_t frontlightOn = 0;
+  // Restore the saved on/off state after a normal boot or wake. Brightness and
+  // warmth are always remembered even when this is disabled.
+  uint8_t frontlightRestoreOnWake = 1;
   // Language setting (Language enum index, default 0 = EN)
   uint8_t language = 0;
   // Quick Resume: keep current content visible with moon icon instead of showing a static sleep screen.

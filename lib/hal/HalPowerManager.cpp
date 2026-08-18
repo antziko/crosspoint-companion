@@ -1,6 +1,7 @@
 #include "HalPowerManager.h"
 
 #include <BoardConfig.h>
+#include <HalFrontlight.h>
 #include <Logging.h>
 #include <PowerManager.h>
 #include <WiFi.h>
@@ -131,9 +132,19 @@ bool HalPowerManager::lightSleep(const HalGPIO& gpio) const {
     return false;
   }
   // Light sleep drops a WiFi association and kills an enumerated USB-CDC link.
+#ifdef FREEINK_FRONTLIGHT_LS
+  // The frontlight PWM runs from RC_FAST with KEEP_ALIVE and survives light
+  // sleep (SDK FREEINK_FRONTLIGHT_LS), so a lit light no longer blocks it.
   if (WiFi.getMode() != WIFI_MODE_NULL || gpio.isUsbConnectedCached()) {
     return false;
   }
+#else
+  // Without that SDK support light sleep also stops the default LEDC PWM output,
+  // visibly flashing an ESP-driven frontlight as the idle loop enters slices.
+  if (WiFi.getMode() != WIFI_MODE_NULL || gpio.isUsbConnectedCached() || (Frontlight.present() && Frontlight.isOn())) {
+    return false;
+  }
+#endif
 
   // Serialize wake-source arming with the render task's BUSY-wait slice (see
   // sleepMutex declaration for the failure mode this prevents).
@@ -194,11 +205,16 @@ bool HalPowerManager::lightSleep(const HalGPIO& gpio) const {
 }
 
 bool HalPowerManager::onEinkBusyWaitSlice(const int8_t busyPin, const uint8_t busyLevel) {
-  // Same exclusions as lightSleep(): light sleep drops a WiFi association and
-  // kills an enumerated USB-CDC link. No LOG here — this runs ~50x/s mid-refresh.
+  // Same exclusions as lightSleep(). No LOG here — this runs ~50x/s mid-refresh.
+#ifdef FREEINK_FRONTLIGHT_LS
   if (WiFi.getMode() != WIFI_MODE_NULL || gpio.isUsbConnectedCached()) {
     return false;
   }
+#else
+  if (WiFi.getMode() != WIFI_MODE_NULL || gpio.isUsbConnectedCached() || (Frontlight.present() && Frontlight.isOn())) {
+    return false;
+  }
+#endif
 
   // Mid-debounce: committing needs a second sample, so let the SDK's short poll
   // delay run instead of halting the chip. Same guard lightSleep() gets in loop().
