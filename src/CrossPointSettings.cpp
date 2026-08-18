@@ -513,34 +513,9 @@ float CrossPointSettings::getDefinitionLineCompression() const {
   // compression must be too (computeLineCompression() handles the SD-font case).
   if (dictionaryFontFamily == DICT_FONT_MATCH_READER) return getReaderLineCompression();
 
-  const FONT_FAMILY effFamily = static_cast<FONT_FAMILY>(dictionaryFontFamily);
-  switch (effFamily) {
-    case NOTOSERIF:
-    default:
-      switch (lineSpacing) {
-        case TIGHT:
-          return 0.95f;
-        case NORMAL:
-        default:
-          return 1.0f;
-        case WIDE:
-          return 1.1f;
-        case EXTRA_WIDE:
-          return 1.2f;
-      }
-    case NOTOSANS:
-      switch (lineSpacing) {
-        case TIGHT:
-          return 0.90f;
-        case NORMAL:
-        default:
-          return 0.95f;
-        case WIDE:
-          return 1.0f;
-        case EXTRA_WIDE:
-          return 1.05f;
-      }
-  }
+  // A dictionary family is always built-in (see the DICT_FONT_MATCH_READER sentinel), so
+  // there is no SD font name to pass — the same contract as getDefinitionFontId() here.
+  return computeLineCompression(dictionaryFontFamily, lineSpacing, nullptr);
 }
 
 // static
