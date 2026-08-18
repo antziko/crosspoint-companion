@@ -319,6 +319,14 @@ void ChapterHtmlSlimParser::flushLongTextBlockIfNeeded() {
   if (!currentTextBlock) {
     return;
   }
+  // Never split a ruby group across a flush: setRubyGroupAt() marks the base run with
+  // RUBY_CONTINUE relative to the group's first word, and a flush ends the block between
+  // them, stranding the continuation with no base. Gates BOTH triggers below (the static
+  // cap and the low-heap probe) — a ruby group is a handful of words, so deferring the
+  // heap-adaptive flush until </ruby> is bounded.
+  if (inRuby) {
+    return;
+  }
   // Keep token growth bounded: CSS-heavy spans can fragment text into many tiny words, so flush
   // earlier when embedded CSS is active. The "exclude last line" behavior preserves paragraph flow
   // across chunks. Thresholds lowered from upstream (750 / 320): words/rubyTexts are std::deque

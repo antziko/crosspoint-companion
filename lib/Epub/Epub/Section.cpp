@@ -84,7 +84,11 @@ namespace {
 //      of a two-token split, so the hyphenator sees the whole word and every legal break is
 //      reachable. Both move where lines break, so v47 cached line/word positions no longer
 //      match. Covers upstream's #2892 (their v38).
-constexpr uint8_t SECTION_FILE_VERSION = 48;
+// v49: Ruby groups no longer break. setRubyGroupAt() clears noSpaceBefore on the group's
+//      continuation words (the v48 boundary rework had left allowsBreak() true for them),
+//      and a text-block soft flush is deferred while inside a <ruby> element. Both change
+//      where lines and pages break around ruby. Covers upstream's #3102 (their v40).
+constexpr uint8_t SECTION_FILE_VERSION = 49;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
