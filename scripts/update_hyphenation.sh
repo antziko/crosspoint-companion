@@ -16,13 +16,14 @@ process() {
     --output "lib/Epub/Epub/hyphenation/generated/hyph-${lang}.trie.h"
 }
 
+# German, Russian, Swedish, Ukrainian and Polish are deliberately omitted to
+# reclaim flash: together their tries cost ~300 KB, the bulk of all hyphenation
+# data. A book in a dropped language still renders, just with ragged margins.
+# To restore one, add its `process <tag>` line here and re-add the include,
+# LanguageHyphenator and entries() row in LanguageRegistry.cpp (and bump the
+# EntryArray size).
 process en
 process fr
-process de
 process es
-process ru
 process it
-process uk
-process pl
-process sv
 process fi
