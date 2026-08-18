@@ -112,6 +112,13 @@ class DictionaryLookupController {
   DictLocation foundLocation;
   std::string altFormWord;
 
+  // Set by the sweep in runLookup() when a dictionary OTHER than the active one answered;
+  // empty otherwise. Written on the lookup task and read on the UI task, published by the same
+  // lookupDone barrier that already publishes foundLocation. handleInput() promotes it to the
+  // session dictionary — see the comment there for why that has to happen on the UI task.
+  std::string fallbackDictPath_;
+  int fallbackHops_ = 0;  // dictionaries tried past the active one, for the SD log
+
   // What the NotFound popup says. A genuine miss reads "Not found"; an unset or unreadable
   // dictionary says so instead, rather than sending the user hunting for a typo.
   StrId notFoundMsg_ = StrId::STR_DICT_NOT_FOUND;
@@ -135,6 +142,10 @@ class DictionaryLookupController {
   void logLookupOutcome(const char* outcome) const;
 
   void runLookup();
+  // The same-category sweep runLookup() delegates to once the active dictionary has missed.
+  // Returns the winning location, or `primary` untouched when nothing in the group has the word.
+  DictLocation sweepGroup(Dictionary::LookupCtx& ctx, const std::string& activeBase, const DictLocation& primary,
+                          const DictLookupCallbacks& cbs);
   void handleLookupFailed();
   void showMemoryErrorAndReset();
   static void progressCallback(void* ctx, int percent);

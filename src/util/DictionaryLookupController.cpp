@@ -17,6 +17,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/Dictionary.h"
+#include "util/DictionaryRegistry.h"
 
 DictionaryLookupController::DictionaryLookupController(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                                        Activity& owner, std::string cachePath)
@@ -52,6 +53,8 @@ void DictionaryLookupController::startLookup(const std::string& word, bool recor
   lookupCancelled = false;
   lookupCancelRequested = false;
   recordHistory_ = recordHistory;
+  fallbackDictPath_.clear();
+  fallbackHops_ = 0;
   state = LookupState::LookingUp;
   // CLEANUP: on Auto-only commit, delete only this line (gate below stays — it's the Auto check)
   const bool showPopup = shouldShowPopup();
@@ -142,7 +145,16 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
         foundWord = lookupWord;
         foundStatus = nextIsSuggestion ? FoundStatus::Suggestion : FoundStatus::Direct;
         nextIsSuggestion = false;
-        logLookupOutcome("direct");
+        // A same-category fallback answered: promote that dictionary to the session one, exactly
+        // as a long-press switch does. The definition itself streams from foundLocation.folderPath
+        // either way, but the header name, the long-press cycle origin and the dictionary a
+        // flashcard records each re-read activeDictPath() independently — without this they would
+        // all name the configured dictionary while showing another one's entry.
+        //
+        // UI task, and the lookup task is already joined by the task.reset() above: that is the
+        // no-lookup-in-flight invariant setSessionDictPath requires (Dictionary.h).
+        if (!fallbackDictPath_.empty()) Dictionary::setSessionDictPath(fallbackDictPath_.c_str());
+        logLookupOutcome(fallbackDictPath_.empty() ? "direct" : "fallback");
         return LookupEvent::FoundDefinition;
       }
 
@@ -377,12 +389,77 @@ bool DictionaryLookupController::cancelCallback(void* ctx) {
   return static_cast<DictionaryLookupController*>(ctx)->lookupCancelRequested;
 }
 
+// Try the exact word in each OTHER dictionary of the active one's category before giving up.
+// Category is the folder-name partition in DictionaryRegistry::nameIsStGroup: an "st-" dictionary
+// only ever falls back to another "st-" one. Exact match only — stems, alt forms and suggestions
+// stay with the active dictionary, which keeps every hop on this task (cancellable, with the
+// toast already on glass) and never multiplies the user-blocking alt-form prompt.
+DictLocation DictionaryLookupController::sweepGroup(Dictionary::LookupCtx& ctx, const std::string& activeBase,
+                                                    const DictLocation& primary, const DictLookupCallbacks& cbs) {
+  if (!SETTINGS.dictFallbackGroup) return primary;
+  // Nothing configured at all has no group to sweep, and "No dictionary set" is the honest
+  // message — silently answering out of some other dictionary would hide the real problem.
+  if (primary.status == LookupStatus::NoDictionary) return primary;
+  if (dictionaryRegistry.count() < 2) return primary;
+
+  // Reading entries_ from the lookup task needs no lock: discover() runs at boot (main.cpp) and
+  // from DictionarySelectActivity, and refreshIfDirty() only from SettingsActivity::onEnter —
+  // none of which can run while a reader lookup is in flight.
+  const int startIdx = dictionaryRegistry.indexOf(activeBase);
+  // Not in the registry (dictionary.bin empty, or pointing at a folder discover() skipped as
+  // ambiguous): it has no group to match, and nextIndexInGroup would fall back to index 0 — the
+  // one path that crosses the partition. Decline, exactly as the long-press switch does.
+  if (startIdx < 0) return primary;
+
+  const auto& entries = dictionaryRegistry.getEntries();
+  int idx = startIdx;
+  int hops = 0;
+  while (true) {
+    if (cbs.shouldCancel && cbs.shouldCancel(cbs.ctx)) return primary;
+    idx = dictionaryRegistry.nextEntryIndexInGroup(idx);
+    if (idx < 0 || idx == startIdx) break;  // sole member of its group, or wrapped back to the start
+    hops++;
+    // Reuses the caller's ctx: openLookupCtxAt resets it first, so the previous hop's handles are
+    // released before this one opens and only ever one dictionary is open at a time.
+    if (!Dictionary::openLookupCtxAt(ctx, entries[idx].basePath.c_str())) continue;
+    DictLocation loc = Dictionary::locateIn(ctx, lookupWord, cbs);
+    if (!loc.found) continue;
+    fallbackDictPath_ = entries[idx].basePath;
+    fallbackHops_ = hops;
+    // To SD as well as serial: which dictionary answered, and whether it stayed in the right
+    // group, is only diagnosable from a device session — same reason the long-press logs here.
+    SdDebugLog::log("DICT", "fallback: %s(%s) -> %s(%s) after %d", entries[startIdx].name.c_str(),
+                    entries[startIdx].nameIsSt ? "st" : "other", entries[idx].name.c_str(),
+                    entries[idx].nameIsSt ? "st" : "other", hops);
+    return loc;
+  }
+  return primary;
+}
+
 void DictionaryLookupController::runLookup() {
   DictLookupCallbacks cbs;
   cbs.ctx = this;
   cbs.onProgress = &DictionaryLookupController::progressCallback;
   cbs.shouldCancel = &DictionaryLookupController::cancelCallback;
-  foundLocation = Dictionary::locate(lookupWord, cbs, cachePath.c_str());
+
+  // Resolved once and handed to sweepGroup for its registry lookup: activeDictPath() reads
+  // dictionary.bin off SD whenever no session override is set, so re-deriving it on the miss
+  // path would cost a second open.
+  const std::string activeBase = Dictionary::activeDictPath(cachePath.c_str());
+
+  // One ctx for the active dictionary and every fallback hop — see sweepGroup.
+  Dictionary::LookupCtx ctx;
+  if (Dictionary::openLookupCtxAt(ctx, activeBase.c_str())) {
+    foundLocation = Dictionary::locateIn(ctx, lookupWord, cbs);
+  } else {
+    foundLocation = DictLocation{};
+    // base is filled only when the dictionary resolved but its .idx would not open, which is what
+    // separates "nothing configured" from "configured but broken" for the popup wording above.
+    foundLocation.status = ctx.base[0] == '\0' ? LookupStatus::NoDictionary : LookupStatus::ReadError;
+    foundLocation.folderPath = ctx.base;
+  }
+  if (!foundLocation.found) foundLocation = sweepGroup(ctx, activeBase, foundLocation, cbs);
+
   lookupCancelled = lookupCancelRequested;
   lookupDone = true;
   // Don't call requestUpdate(true) here - it triggers an unnecessary e-ink refresh

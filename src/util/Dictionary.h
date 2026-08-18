@@ -179,6 +179,12 @@ class Dictionary {
   // callers can tell "no dictionary" from "unreadable dictionary".
   static bool openLookupCtx(LookupCtx& ctx, const char* cachePath = nullptr);
 
+  // openLookupCtx against an explicit dictionary base path, skipping activeDictPath(). Same
+  // semantics otherwise, including the full ctx reset — the same-category fallback sweep reuses
+  // one ctx across several dictionaries and relies on that reset to drop the previous one's
+  // handles and lazily-opened .oft before the next probe.
+  static bool openLookupCtxAt(LookupCtx& ctx, const char* basePath);
+
   // locate() against an already-open ctx. Identical semantics to locate(); this is the form
   // to use when probing several candidate spellings for one word.
   static DictLocation locateIn(LookupCtx& ctx, const std::string& word, const DictLookupCallbacks& cbs = {});

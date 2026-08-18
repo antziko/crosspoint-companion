@@ -640,6 +640,17 @@ bool Dictionary::buildPath(char* buf, size_t bufSize, const char* base, const ch
 }
 
 bool Dictionary::openLookupCtx(LookupCtx& ctx, const char* cachePath) {
+  // One resolve for the whole probe sequence. activeDictPath() reads dictionary.bin off SD
+  // whenever no session override is set, which the reader flow does not set — so this alone
+  // was an SD open per probe.
+  // "" still goes through openLookupCtxAt so the ctx is reset even on this path: callers read
+  // ctx.base to tell "nothing configured" from "unreadable", and a reused ctx would otherwise
+  // still be holding the previous dictionary's handles and path.
+  const std::string folder = activeDictPath(cachePath);
+  return openLookupCtxAt(ctx, folder.c_str());
+}
+
+bool Dictionary::openLookupCtxAt(LookupCtx& ctx, const char* basePath) {
   // Full reset, not just the validity flags. A ctx reopened against a DIFFERENT dictionary
   // would otherwise keep the previous one's lazily-opened .oft fallback and answer probes
   // from the wrong index, and would leave its old handles open for the ctx's lifetime.
@@ -661,15 +672,11 @@ bool Dictionary::openLookupCtx(LookupCtx& ctx, const char* cachePath) {
   ctx.idxSize = 0;
   ctx.base[0] = '\0';
 
-  // One resolve for the whole probe sequence. activeDictPath() reads dictionary.bin off SD
-  // whenever no session override is set, which the reader flow does not set — so this alone
-  // was an SD open per probe.
-  const std::string folder = activeDictPath(cachePath);
-  if (folder.empty()) return false;
-  if (!buildPath(ctx.base, sizeof(ctx.base), folder.c_str(), "")) {
+  if (basePath == nullptr || basePath[0] == '\0') return false;
+  if (!buildPath(ctx.base, sizeof(ctx.base), basePath, "")) {
     // snprintf still wrote a truncated path; blank it so callers never see a partial one.
     // 128 is the same ceiling setSessionDictPath and readDictPath already impose.
-    LOG_ERR("DICT", "Dictionary path too long: %s", folder.c_str());
+    LOG_ERR("DICT", "Dictionary path too long: %s", basePath);
     ctx.base[0] = '\0';
     return false;
   }

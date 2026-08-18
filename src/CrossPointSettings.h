@@ -466,6 +466,11 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // the whole file). See LookupHistory / LookedUpWordsActivity.
   static constexpr uint8_t HIST_CAP_UNLIMITED = HIST_CAP_MAX + HIST_CAP_STEP;  // 250
   uint8_t lookupHistoryCap = HIST_CAP_DEFAULT;
+  // When the active dictionary misses, probe the exact word in each other dictionary of the same
+  // category (DictionaryRegistry::nameIsStGroup) before falling back to stems / alt forms /
+  // suggestions. Off by default: it only ever costs time on the miss path, which is already the
+  // slowest one, and the gain depends on having several dictionaries of one kind installed.
+  uint8_t dictFallbackGroup = 0;
   // Action triggered by holding Confirm in the reader.
   // OFF: no action (default). BOOKMARK: add bookmark @ BOOKMARK_HOLD_MS (400ms).
   // DICTIONARY: open word-select @ Dictionary::LONG_PRESS_MS (400ms, requires per-book dictionary).

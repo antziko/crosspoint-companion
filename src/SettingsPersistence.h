@@ -123,6 +123,7 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
                       CrossPointSettings::HIST_CAP_UNLIMITED),
     persisted::enumerated("holdConfirmAction", &CrossPointSettings::holdConfirmAction,
                           CrossPointSettings::HOLD_CONFIRM_DICTIONARY),
+    persisted::toggle("dictFallbackGroup", &CrossPointSettings::dictFallbackGroup),
 
     // --- Reader: stats ---
     persisted::enumerated("minSessionMinutes", &CrossPointSettings::minSessionMinutes,

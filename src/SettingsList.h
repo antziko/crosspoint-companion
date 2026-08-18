@@ -348,6 +348,8 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // chosen per-session on the FlashcardReviewActivity overview (Up/Down = card
   // style, Left/Right = due-first / shuffled) and the picks are persisted as the
   // defaults. Hand-persisted in CrossPointSettings::toJson/fromJson (like dictMarker).
+  v.push_back(SettingInfo::Toggle(StrId::STR_DICT_FALLBACK, &CrossPointSettings::dictFallbackGroup, "dictFallbackGroup",
+                                  StrId::STR_READER_DICTIONARY));
   v.push_back(SettingInfo::Enum(StrId::STR_HOLD_CONFIRM, &CrossPointSettings::holdConfirmAction,
                                 {StrId::STR_STATE_OFF, StrId::STR_HOLD_CONFIRM_BOOKMARK, StrId::STR_HOLD_CONFIRM_DICT},
                                 "holdConfirmAction", StrId::STR_READER_DICTIONARY));
