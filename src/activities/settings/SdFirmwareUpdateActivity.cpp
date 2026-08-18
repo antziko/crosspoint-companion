@@ -310,15 +310,16 @@ void SdFirmwareUpdateActivity::render(RenderLock&&) {
     // otherwise be inherited by every screen the new firmware draws — including the next
     // sleep image, where it is finally visible.
     //
-    // A single FULL_REFRESH (what this used to be) is one inversion cycle and does not
-    // release sticking set over minutes; deepCleanPanel runs several. It leaves the panel
-    // and framebuffer white, so the success text below is drawn onto a clean buffer and
-    // pushed by the terminal FULL at the end of this function.
+    // One cycle rather than deepCleanPanel's default 3, to keep the post-update flashing
+    // short. It leaves the panel and framebuffer white, so the success text below is drawn
+    // onto a clean buffer and pushed by the terminal FULL at the end of this function.
     //
-    // The user sees a few black/white flashes for ~15s before "Update complete". That is
-    // acceptable here — they are already waiting on a flash and told not to power off —
-    // and it is the only automatic clear in the firmware.
-    logUpdateDiagnostics(renderer.deepCleanPanel());
+    // The dose is deliberately small BECAUSE the every-sleep clean (SleepActivity.cpp) now
+    // backstops it: anything one cycle here fails to release gets another cycle at each
+    // subsequent sleep. Without that backstop this would need the full 3 — the header rule
+    // held black through an entire flash write is the canonical set-in-sticking case
+    // (GfxRenderer.h:238-244), and after ESP.restart() nothing can clear it.
+    logUpdateDiagnostics(renderer.deepCleanPanel(1));
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_COMPLETE), true, EpdFontFamily::BOLD);
     // Wrap the restart hint ("...hold the power for a few seconds...") over up to 3
     // lines instead of a single centered line that runs off both edges (X3 narrower).

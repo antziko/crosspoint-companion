@@ -8,6 +8,7 @@
 #include <HalGPIO.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <SdDebugLog.h>
 #include <Txt.h>
 #include <Xtc.h>
 #include <esp_random.h>
@@ -55,6 +56,27 @@ void SleepActivity::onEnter() {
   } else {
     GUI.drawPopup(renderer, tr(STR_ENTERING_SLEEP));
   }
+
+  // Ghost clear before the sleep image goes down. Sleep is the one moment where a multi-cycle
+  // clean is affordable: the panel is about to change completely, the user is not interacting,
+  // and every sleep screen below re-renders from a cleared framebuffer anyway — which is what
+  // deepCleanPanel leaves behind. Runs after the popup so the flashing has an explanation on
+  // screen before it starts; the popup is wiped by the clean and replaced by the sleep screen.
+  //
+  // The quick-resume path never reaches here: it returned above precisely because it keeps the
+  // last screen, which a panel wipe cannot coexist with.
+  //
+  // One cycle, not the 3 the manual remedy uses. That dose exists to release sticking already
+  // set by minutes of unbroken DC (GfxRenderer.h:238-244); cleaning at every sleep never lets it
+  // get there, so the recurring maintenance wants the small dose and the occasional manual
+  // refresh keeps the large one. Cleaning often and cleaning hard are alternatives, not
+  // partners — and this cost is paid on every single sleep, in time and in panel wear.
+  static constexpr uint8_t kSleepDeepCleanCycles = 1;
+  const unsigned long cleanMs = renderer.deepCleanPanel(kSleepDeepCleanCycles);
+  // Not force-enabled like the manual refresh's line: this runs on every sleep, and forcing an
+  // SD write each time would cost more than the diagnostic is worth. Visible with SD Card
+  // Logging on, which is when we are measuring anyway.
+  SdDebugLog::log("SLP", "sleep deepclean cycles=%u ms=%lu", static_cast<unsigned>(kSleepDeepCleanCycles), cleanMs);
 
   switch (SETTINGS.sleepScreen) {
     case (CrossPointSettings::SLEEP_SCREEN_MODE::BLANK):
