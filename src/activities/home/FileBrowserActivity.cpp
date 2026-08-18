@@ -421,6 +421,9 @@ void FileBrowserActivity::loop() {
       return;
     }
     if (files.empty()) return;
+    // An activation can carry a row index captured before a delete or a reload
+    // shrank the list; the next render re-registers the rows.
+    if (selectorIndex >= files.size()) return;
 
     const std::string& entry = files[selectorIndex].name;
     bool isDirectory = (entry.back() == '/');
@@ -718,8 +721,8 @@ void FileBrowserActivity::render(RenderLock&&) {
   const char* backLabel = (basepath == "/") ? (mode == Mode::PickFirmware ? tr(STR_BACK) : tr(STR_HOME)) : tr(STR_BACK);
   // In PickFirmware mode, Confirm on a .bin returns the path to the caller (not "open"); show
   // STR_SELECT instead. Directories in the same picker still descend, so keep STR_OPEN there.
-  const bool selectingFirmwareFile =
-      mode == Mode::PickFirmware && !files.empty() && files[selectorIndex].name.back() != '/';
+  const bool selectingFirmwareFile = mode == Mode::PickFirmware && !files.empty() && selectorIndex < files.size() &&
+                                     files[selectorIndex].name.back() != '/';
   const char* confirmLabel = files.empty() ? "" : (selectingFirmwareFile ? tr(STR_SELECT) : tr(STR_OPEN));
   const auto labels = mappedInput.mapLabels(backLabel, confirmLabel, files.empty() ? "" : tr(STR_DIR_UP),
                                             files.empty() ? "" : tr(STR_DIR_DOWN));

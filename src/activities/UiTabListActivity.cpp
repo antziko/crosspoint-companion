@@ -83,6 +83,9 @@ void UiTabListActivity::navigateButtons() {
 void UiTabListActivity::syncTabListViewport(UiScreen& screen, fui::ListProps& props, const bool hasSubtitle) {
   const int count = listCount();
   auto& n = activeNav();
+  // listCount() may shrink between passes (ring: 0 = tab band, 1..count = rows);
+  // keep a stale ring selection from indexing past the new row count.
+  if (n.selected > count) n.selected = count;
   int16_t rowHeight = screen.theme().rowHeight;
   if (!mappedInput.hasTouch()) {
     // Non-touch hardware (X3/X4) keeps the original, denser per-theme row
