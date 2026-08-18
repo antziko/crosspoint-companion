@@ -173,7 +173,8 @@ int WordSelectNavigator::findClosestWordFromX(int targetRow, int refCenterX) con
   return bestMatch;
 }
 
-bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, const GfxRenderer& renderer) {
+bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, const GfxRenderer& renderer,
+                                           const bool swapAxes) {
   if (rows.empty()) return false;
 
   const auto orient = renderer.getOrientation();
@@ -204,6 +205,14 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
     rowNextPressed = input.wasReleased(MappedInputManager::Button::Down);
     wordPrevPressed = input.wasReleased(MappedInputManager::Button::Left, false);
     wordNextPressed = input.wasReleased(MappedInputManager::Button::Right, false);
+  }
+
+  // Trade the axes AFTER the orientation chain has resolved which physical button means
+  // which direction, so each pair keeps its own direction sense in all four orientations
+  // and the front reads keep their applySwap=false (this class does its own mapping).
+  if (swapAxes) {
+    std::swap(rowPrevPressed, wordPrevPressed);
+    std::swap(rowNextPressed, wordNextPressed);
   }
 
   const int rowCount = static_cast<int>(rows.size());

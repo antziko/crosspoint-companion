@@ -1188,7 +1188,7 @@ void DictionaryDefinitionActivity::loop() {
 
   // --- Word-select mode ---
   if (isWordSelectMode) {
-    if (navigator.handleNavigation(mappedInput, renderer)) {
+    if (navigator.handleNavigation(mappedInput, renderer, SETTINGS.getReaderSwapWordSelectAxes())) {
       requestUpdate();
     }
 

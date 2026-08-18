@@ -132,7 +132,10 @@ class WordSelectNavigator {
   // Process navigation input for the current screen orientation.
   // Returns true if the selection changed (caller should requestUpdate).
   // Does NOT consume Confirm or Back.
-  bool handleNavigation(const MappedInputManager& input, const GfxRenderer& renderer);
+  // swapAxes trades the two button pairs' roles: the side pair walks word by word
+  // and the front pair moves between rows. Passed in rather than read from settings
+  // so this file stays free of CrossPointSettings (see test/dict-word-select-nav).
+  bool handleNavigation(const MappedInputManager& input, const GfxRenderer& renderer, bool swapAxes = false);
 
   // Currently highlighted word. nullptr if the word list is empty.
   const WordInfo* getSelected() const;

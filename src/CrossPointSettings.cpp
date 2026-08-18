@@ -593,3 +593,7 @@ uint8_t CrossPointSettings::getReaderHyphenationEnabled() const {
 uint8_t CrossPointSettings::getReaderExtraParagraphSpacing() const {
   return readerOverride.active ? readerOverride.extraParagraphSpacing : extraParagraphSpacing;
 }
+
+bool CrossPointSettings::getReaderSwapWordSelectAxes() const {
+  return readerOverride.active && readerOverride.swapWordSelectAxes != 0;
+}

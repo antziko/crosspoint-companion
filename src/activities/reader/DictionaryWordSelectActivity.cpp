@@ -712,7 +712,7 @@ void DictionaryWordSelectActivity::loop() {
     return;
   }
 
-  if (navigator.handleNavigation(mappedInput, renderer)) {
+  if (navigator.handleNavigation(mappedInput, renderer, SETTINGS.getReaderSwapWordSelectAxes())) {
     requestUpdate();
   }
 

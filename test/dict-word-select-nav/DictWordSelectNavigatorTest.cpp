@@ -241,6 +241,56 @@ static void testHyphenatedNavForward() {
   }
 }
 
+// swapAxes trades the pairs: the side buttons walk word by word and the front pair
+// moves between rows. One distinct failure mode -- the swap not reaching the axes --
+// so one test per direction of the trade.
+static void testSwapAxesSideStepsWords() {
+  std::printf("testSwapAxesSideStepsWords\n");
+  WordSelectNavigator nav = makeHyphenatedFixture();
+  MappedInputManager input;
+  GfxRenderer renderer;
+
+  // Fixture starts on wordD; wordE is the next word in the same row.
+  input.reset();
+  input.setReleased(MappedInputManager::Button::Down, true);
+  const bool changed = nav.handleNavigation(input, renderer, /*swapAxes=*/true);
+  CHECK(changed, "swapped: side Down changed the selection");
+  const WordSelectNavigator::WordInfo* sel = nav.getSelected();
+  CHECK(sel != nullptr, "swapped: has selected word");
+  if (sel) {
+    CHECK(std::strcmp(nav.getDisplay(*sel), "wordE") == 0, "swapped: side Down stepped to 'wordE'");
+  }
+
+  // Unswapped, the same press is row navigation and must not land on wordE.
+  WordSelectNavigator plain = makeHyphenatedFixture();
+  input.reset();
+  input.setReleased(MappedInputManager::Button::Down, true);
+  plain.handleNavigation(input, renderer);
+  const WordSelectNavigator::WordInfo* plainSel = plain.getSelected();
+  if (plainSel) {
+    CHECK(std::strcmp(plain.getDisplay(*plainSel), "wordE") != 0, "unswapped: side Down is not a word step");
+  }
+}
+
+static void testSwapAxesFrontMovesRows() {
+  std::printf("testSwapAxesFrontMovesRows\n");
+  WordSelectNavigator nav = makeHyphenatedFixture();
+  MappedInputManager input;
+  GfxRenderer renderer;
+
+  // Fixture starts on wordD in row 1; swapped, front Left is row-previous.
+  CHECK(nav.getSelected() != nullptr && nav.getSelected()->row == 1, "starts on row 1");
+  input.reset();
+  input.setReleased(MappedInputManager::Button::Left, true);
+  const bool changed = nav.handleNavigation(input, renderer, /*swapAxes=*/true);
+  CHECK(changed, "swapped: front Left changed the selection");
+  const WordSelectNavigator::WordInfo* sel = nav.getSelected();
+  CHECK(sel != nullptr, "swapped: has selected word");
+  if (sel) {
+    CHECK(sel->row == 0, "swapped: front Left moved to the previous row");
+  }
+}
+
 static void testHyphenatedNavRowNavExempt() {
   std::printf("testHyphenatedNavRowNavExempt\n");
   WordSelectNavigator nav = makeHyphenatedFixture();
@@ -989,6 +1039,8 @@ int main() {
   testHyphenatedNavBackward();
   testHyphenatedNavForward();
   testHyphenatedNavRowNavExempt();
+  testSwapAxesSideStepsWords();
+  testSwapAxesFrontMovesRows();
   testHyphenatedGetPairedHalf();
   testForwardSkipAtRowBoundary();
   testSingleRowForwardSkipWraps();

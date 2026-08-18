@@ -10,9 +10,11 @@
 #include "util/ButtonNavigator.h"
 
 // In-reader per-book reader settings editor.
-// Displays 6 settings items (font family, font size, line spacing, paragraph
-// alignment, hyphenation, extra paragraph spacing).  Changes are applied live
-// to the SETTINGS override and persisted to reader_settings.bin immediately.
+// Displays the per-book text settings (font family, font size, line spacing,
+// paragraph alignment, hyphenation, extra paragraph spacing, screen margin) plus
+// the word-select button assignment and the stats min-read-time.  Changes are
+// applied live to the SETTINGS override and persisted to reader_settings.bin
+// immediately.
 class ReaderOptionsActivity final : public Activity {
  public:
   // showMinSession controls the "min read time for stats" item. Readers without
@@ -30,7 +32,7 @@ class ReaderOptionsActivity final : public Activity {
 
  private:
   // MIN_SESSION is the last item; hiding it just trims the count by one.
-  static constexpr int ITEM_COUNT = 8;
+  static constexpr int ITEM_COUNT = 9;
   int itemCount() const { return showMinSession ? ITEM_COUNT : ITEM_COUNT - 1; }
 
   std::string cachePath;

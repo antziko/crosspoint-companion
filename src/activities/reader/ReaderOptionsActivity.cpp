@@ -28,8 +28,9 @@ enum ItemIndex : int {
   HYPHENATION = 4,
   EXTRA_SPACING = 5,
   SCREEN_MARGIN = 6,
+  WORD_SELECT_BUTTONS = 7,
   // MIN_SESSION must stay last: itemCount() hides it by trimming the count by one.
-  MIN_SESSION = 7,
+  MIN_SESSION = 8,
 };
 
 // Ordered cycle of valid per-book min-session values: 0xFF = use global, then indices
@@ -224,6 +225,9 @@ void ReaderOptionsActivity::cycleCurrentItem() {
       localOverride.screenMargin = static_cast<uint8_t>(next);
       break;
     }
+    case WORD_SELECT_BUTTONS:
+      localOverride.swapWordSelectAxes = localOverride.swapWordSelectAxes ? 0 : 1;
+      break;
     case MIN_SESSION: {
       // Find current position in cycle table and advance by one.
       int pos = 0;
@@ -240,9 +244,10 @@ void ReaderOptionsActivity::cycleCurrentItem() {
       return;
   }
   persistAndApply();
-  // Every item cycled here feeds the preview except MIN_SESSION, which is stats-only and
-  // appears nowhere in PreviewKey — so its toggle keeps the cheap list-only repaint.
-  if (selectedIndex != MIN_SESSION) fullRedraw_ = true;
+  // Most items cycled here feed the preview. MIN_SESSION (stats-only) and
+  // WORD_SELECT_BUTTONS (input mapping) appear nowhere in PreviewKey, so they keep the
+  // cheap list-only repaint.
+  if (selectedIndex != MIN_SESSION && selectedIndex != WORD_SELECT_BUTTONS) fullRedraw_ = true;
   // A size change must reload the resident SD font at the new size, or getReaderFontId()
   // keeps resolving the old-size id and the live preview never reflows (SD fonts load one
   // size at a time; built-ins are always resident so this is a no-op for them).
@@ -274,6 +279,8 @@ const char* ReaderOptionsActivity::getItemName(const int index) {
       return tr(STR_EXTRA_SPACING);
     case SCREEN_MARGIN:
       return tr(STR_SCREEN_MARGIN);
+    case WORD_SELECT_BUTTONS:
+      return tr(STR_WORD_SELECT_BUTTONS);
     case MIN_SESSION:
       return tr(STR_MIN_SESSION_FOR_STATS);
     default:
@@ -319,6 +326,9 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
       return localOverride.extraParagraphSpacing ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     case SCREEN_MARGIN:
       return std::to_string(localOverride.screenMargin);
+    case WORD_SELECT_BUTTONS:
+      // Names the pair that steps word by word; the other pair moves between rows.
+      return localOverride.swapWordSelectAxes ? tr(STR_WORD_SELECT_SIDE) : tr(STR_WORD_SELECT_FRONT);
     case MIN_SESSION: {
       const uint8_t v = localOverride.minSessionMinutes;
       if (v == CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL) {

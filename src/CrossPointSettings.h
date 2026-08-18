@@ -258,6 +258,11 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     // name is kept for the settings/cache key, but it now holds an index, not minutes.
     static constexpr uint8_t MIN_SESSION_USE_GLOBAL = 0xFF;
     uint8_t minSessionMinutes = MIN_SESSION_USE_GLOBAL;
+    // Word-select navigation axes. 0 = side buttons step rows and front Left/Right step
+    // words; 1 = the two pairs trade axes, so the side buttons walk word by word (one
+    // character at a time in CJK) and the front pair moves between rows. Per-book only:
+    // there is no global counterpart, so a book that has never enabled it reads 0.
+    uint8_t swapWordSelectAxes = 0;
   };
 
   // Night mode: inverted output polarity on the reading surfaces only (resolved per
@@ -549,6 +554,9 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t getReaderParagraphAlignment() const;
   uint8_t getReaderHyphenationEnabled() const;
   uint8_t getReaderExtraParagraphSpacing() const;
+  // True when the active book asked for the word-select axis swap. Off whenever no
+  // override is active (non-reader screens, XTC), since the field is per-book only.
+  bool getReaderSwapWordSelectAxes() const;
 
   // PersistableStore hooks (getInstance/loadFromFile come from the CRTP base).
   static const char* getFilePath() { return "/.crosspoint/settings.json"; }
