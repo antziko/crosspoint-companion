@@ -150,7 +150,24 @@ int8_t EpdFont::getKerning(const uint32_t leftCp, const uint32_t rightCp) const 
   if (lc == 0) return 0;
   const uint8_t rc = lookupKernClass(data->kernRightClasses, data->kernRightEntryCount, rightCp);
   if (rc == 0) return 0;
-  return data->kernMatrix[(lc - 1) * data->kernRightClassCount + (rc - 1)];
+  if (!data->kernRowOffsets) {
+    return data->kernMatrix[(lc - 1) * data->kernRightClassCount + (rc - 1)];
+  }
+  // CSR: binary search the row's ascending column list. Rows average ~11 entries.
+  const uint8_t target = static_cast<uint8_t>(rc - 1);
+  uint16_t lo = data->kernRowOffsets[lc - 1];
+  uint16_t hi = data->kernRowOffsets[lc];
+  while (lo < hi) {
+    const uint16_t mid = static_cast<uint16_t>(lo + (hi - lo) / 2);
+    const uint8_t col = data->kernCols[mid];
+    if (col == target) return data->kernMatrix[mid];
+    if (col < target) {
+      lo = static_cast<uint16_t>(mid + 1);
+    } else {
+      hi = mid;
+    }
+  }
+  return 0;  // absent from the row == no kerning for this pair
 }
 
 uint32_t EpdFont::getLigature(const uint32_t leftCp, const uint32_t rightCp) const {

@@ -314,7 +314,7 @@ class SdCardFont {
   };
   // The per-slot cost is multiplied by every resident SD font (SdCardFontManager::loaded_ holds
   // the reader size plus any UI CJK fallback sizes), so a silent growth here is not local.
-  static_assert(sizeof(OverflowEntry) == 28, "OverflowEntry size feeds the OVERFLOW_CAPACITY budget");
+  static_assert(sizeof(OverflowEntry) == 24, "OverflowEntry size feeds the OVERFLOW_CAPACITY budget");
   // Ring as head + count rather than next + count, so the OLDEST entry can be dropped in O(1)
   // (evictOldestOverflow) when the byte cap binds before the slot cap. Live entries are
   // overflow_[(overflowHead_ + i) % OVERFLOW_CAPACITY] for i in [0, overflowCount_).

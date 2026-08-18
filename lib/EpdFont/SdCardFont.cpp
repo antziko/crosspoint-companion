@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 
@@ -16,7 +17,11 @@
 #include "CodepointFreq.h"
 #include "EpdFontFamily.h"
 
-static_assert(sizeof(EpdGlyph) == 16, "EpdGlyph must be 16 bytes to match .cpfont file layout");
+// The .cpfont glyph record is 16 bytes on disk (<BBHhhH2xI in fontconvert_sdcard.py).
+// EpdGlyph is 12 bytes in RAM, so records are decoded field-by-field rather than read
+// straight into the struct -- see decodeGlyphRecord(). The file format is unchanged.
+static constexpr uint32_t CPFONT_GLYPH_RECORD_SIZE = 16;
+static_assert(sizeof(EpdGlyph) == 12, "EpdGlyph should be 12 bytes; update decodeGlyphRecord if it changes");
 static_assert(sizeof(EpdUnicodeInterval) == 12, "EpdUnicodeInterval must be 12 bytes to match .cpfont file layout");
 static_assert(sizeof(EpdKernClassEntry) == 3, "EpdKernClassEntry must be 3 bytes to match .cpfont file layout");
 static_assert(sizeof(EpdLigaturePair) == 8, "EpdLigaturePair must be 8 bytes to match .cpfont file layout");
@@ -45,7 +50,28 @@ constexpr uint32_t STYLE_TOC_ENTRY_SIZE = 32;
 // Helper to read little-endian values from byte buffer
 inline uint16_t readU16(const uint8_t* p) { return p[0] | (p[1] << 8); }
 inline int16_t readI16(const uint8_t* p) { return static_cast<int16_t>(p[0] | (p[1] << 8)); }
+
 inline uint32_t readU32(const uint8_t* p) { return p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24); }
+
+/// Decode one 16-byte .cpfont glyph record into the 12-byte in-RAM EpdGlyph.
+/// `left`/`top` are int16_t on disk but int8_t in RAM; real fonts stay far inside
+/// that range (measured -38..51 over 264k CJK glyphs), so an out-of-range value means
+/// a corrupt or hand-built file. Clamp rather than wrap, and report it once per glyph.
+inline void decodeGlyphRecord(const uint8_t* p, EpdGlyph& out) {
+  const int16_t left = readI16(p + 4);
+  const int16_t top = readI16(p + 6);
+  if (left < INT8_MIN || left > INT8_MAX || top < INT8_MIN || top > INT8_MAX) {
+    LOG_ERR("SDCF", "Glyph bearing out of int8 range (left=%d top=%d); clamping", left, top);
+  }
+  out.width = p[0];
+  out.height = p[1];
+  out.advanceX = readU16(p + 2);
+  out.left = static_cast<int8_t>(std::clamp<int16_t>(left, INT8_MIN, INT8_MAX));
+  out.top = static_cast<int8_t>(std::clamp<int16_t>(top, INT8_MIN, INT8_MAX));
+  out.dataLength = readU16(p + 8);
+  // bytes 10-11 are on-disk padding
+  out.dataOffset = readU32(p + 12);
+}
 
 // Walks a null-terminated UTF-8 string and appends each unique codepoint to
 // codepoints[0..cpCount-1] via O(n²) dedup.  Returns true if the buffer
@@ -632,7 +658,7 @@ bool SdCardFont::onCoverageQuery(void* ctx, const uint32_t codepoint) {
 void SdCardFont::computeStyleFileOffsets(PerStyle& s, uint32_t baseOffset) {
   s.intervalsFileOffset = baseOffset;
   s.glyphsFileOffset = s.intervalsFileOffset + s.header.intervalCount * sizeof(EpdUnicodeInterval);
-  s.kernLeftFileOffset = s.glyphsFileOffset + s.header.glyphCount * sizeof(EpdGlyph);
+  s.kernLeftFileOffset = s.glyphsFileOffset + s.header.glyphCount * CPFONT_GLYPH_RECORD_SIZE;
   s.kernRightFileOffset = s.kernLeftFileOffset + s.header.kernLeftEntryCount * sizeof(EpdKernClassEntry);
   s.kernMatrixFileOffset = s.kernRightFileOffset + s.header.kernRightEntryCount * sizeof(EpdKernClassEntry);
   s.ligatureFileOffset =
@@ -1122,7 +1148,7 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
     uint32_t mapIdx = readOrder[i];
     int32_t gIdx = mappings[mapIdx].globalIndex;
 
-    uint32_t fileOff = s.glyphsFileOffset + static_cast<uint32_t>(gIdx) * sizeof(EpdGlyph);
+    uint32_t fileOff = s.glyphsFileOffset + static_cast<uint32_t>(gIdx) * CPFONT_GLYPH_RECORD_SIZE;
     if (gIdx != lastReadIndex + 1) {
       if (!file.seekSet(fileOff)) {
         LOG_ERR("SDCF", "Prewarm: failed to seek to glyph %d (style %u)", gIdx, styleIdx);
@@ -1134,13 +1160,15 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
       }
       seekCount++;
     }
-    if (file.read(reinterpret_cast<uint8_t*>(&s.miniGlyphs[mapIdx]), sizeof(EpdGlyph)) != sizeof(EpdGlyph)) {
+    uint8_t glyphRec[CPFONT_GLYPH_RECORD_SIZE];
+    if (file.read(glyphRec, CPFONT_GLYPH_RECORD_SIZE) != static_cast<int>(CPFONT_GLYPH_RECORD_SIZE)) {
       LOG_ERR("SDCF", "Prewarm: short glyph read (style %u, glyph %d)", styleIdx, gIdx);
       delete[] readOrder;
       delete[] mappings;
       freeStyleMiniData(s);
       return static_cast<int>(cpCount);
     }
+    decodeGlyphRecord(glyphRec, s.miniGlyphs[mapIdx]);
     lastReadIndex = gIdx;
   }
 
@@ -1624,17 +1652,19 @@ int SdCardFont::fetchAdvancesForCodepoints(uint32_t* codepoints, uint32_t cpCoun
     int32_t lastReadIndex = INT32_MIN;
     for (uint32_t i = 0; i < needCount; i++) {
       int32_t gIdx = mappings[i].glyphIndex;
-      uint32_t fileOff = s.glyphsFileOffset + static_cast<uint32_t>(gIdx) * sizeof(EpdGlyph);
+      uint32_t fileOff = s.glyphsFileOffset + static_cast<uint32_t>(gIdx) * CPFONT_GLYPH_RECORD_SIZE;
       if (gIdx != lastReadIndex + 1) {
         if (!file.seekSet(fileOff)) {
           LOG_ERR("SDCF", "buildAdvanceTable: failed to seek to glyph %d (style %u)", gIdx, si);
           break;
         }
       }
-      if (file.read(reinterpret_cast<uint8_t*>(&tempGlyph), sizeof(EpdGlyph)) != sizeof(EpdGlyph)) {
+      uint8_t glyphRec[CPFONT_GLYPH_RECORD_SIZE];
+      if (file.read(glyphRec, CPFONT_GLYPH_RECORD_SIZE) != static_cast<int>(CPFONT_GLYPH_RECORD_SIZE)) {
         LOG_ERR("SDCF", "buildAdvanceTable: short glyph read (style %u, glyph %d)", si, gIdx);
         break;
       }
+      decodeGlyphRecord(glyphRec, tempGlyph);
       lastReadIndex = gIdx;
       staged[fetched].codepoint = mappings[i].codepoint;
       staged[fetched].advanceX = tempGlyph.advanceX;
@@ -1851,17 +1881,19 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
   }
 
   EpdGlyph tempGlyph = {};
-  uint32_t glyphFileOff = s.glyphsFileOffset + static_cast<uint32_t>(globalIdx) * sizeof(EpdGlyph);
+  uint32_t glyphFileOff = s.glyphsFileOffset + static_cast<uint32_t>(globalIdx) * CPFONT_GLYPH_RECORD_SIZE;
   if (!file.seekSet(glyphFileOff)) {
     LOG_ERR("SDCF", "Overflow: failed to seek to glyph for U+%04X style %u", codepoint, styleIdx);
     file.close();
     return nullptr;
   }
-  if (file.read(reinterpret_cast<uint8_t*>(&tempGlyph), sizeof(EpdGlyph)) != sizeof(EpdGlyph)) {
+  uint8_t glyphRec[CPFONT_GLYPH_RECORD_SIZE];
+  if (file.read(glyphRec, CPFONT_GLYPH_RECORD_SIZE) != static_cast<int>(CPFONT_GLYPH_RECORD_SIZE)) {
     LOG_ERR("SDCF", "Overflow: failed to read glyph metadata for U+%04X style %u", codepoint, styleIdx);
     file.close();
     return nullptr;
   }
+  decodeGlyphRecord(glyphRec, tempGlyph);
 
   // Read bitmap data into temporary (if any)
   uint8_t* tempBitmap = nullptr;

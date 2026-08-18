@@ -128,12 +128,18 @@ constexpr int raiseAboveBase(const Anchor anchor, const int markTop, const int m
 /// Both share 4 fractional bits so they combine directly in an accumulator.
 
 /// Font data stored PER GLYPH
+/// 12 bytes and naturally aligned: width(0) height(1) advanceX(2) left(4) top(5)
+/// dataLength(6) dataOffset(8). No packing attribute, so no unaligned loads on RISC-V.
+/// `left`/`top` are int8_t: measured range is -28..41 across the built-in faces and
+/// -38..51 across 264k glyphs of real .cpfont SD fonts, well inside int8_t.
+/// The .cpfont on-disk glyph record stays 16 bytes -- see CPFONT_GLYPH_RECORD_SIZE
+/// and decodeGlyphRecord() in SdCardFont.cpp, which widen/narrow at the file boundary.
 typedef struct {
   uint8_t width;        ///< Bitmap dimensions in pixels
   uint8_t height;       ///< Bitmap dimensions in pixels
   uint16_t advanceX;    ///< Distance to advance cursor (x axis), 12.4 fixed-point in pixels
-  int16_t left;         ///< X dist from cursor pos to UL corner
-  int16_t top;          ///< Y dist from cursor pos to UL corner
+  int8_t left;          ///< X dist from cursor pos to UL corner
+  int8_t top;           ///< Y dist from cursor pos to UL corner
   uint16_t dataLength;  ///< Size of the font data.
   uint32_t dataOffset;  ///< Pointer into EpdFont->bitmap (or within-group offset for compressed fonts)
 } EpdGlyph;
@@ -187,7 +193,16 @@ typedef struct {
   const uint16_t* glyphToGroup;               ///< Per-glyph group ID (nullptr for contiguous-group fonts)
   const EpdKernClassEntry* kernLeftClasses;   ///< Sorted left-side class map (nullptr if none)
   const EpdKernClassEntry* kernRightClasses;  ///< Sorted right-side class map (nullptr if none)
-  const int8_t* kernMatrix;              ///< Flat leftClassCount x rightClassCount matrix, 4.4 fixed-point in pixels
+  /// Kerning values, 4.4 fixed-point in pixels. Two encodings share this pointer:
+  ///   kernRowOffsets == nullptr -> dense, flat leftClassCount x rightClassCount matrix
+  ///                                (SD-card fonts, which build theirs in RAM)
+  ///   kernRowOffsets != nullptr -> CSR values, parallel to kernCols
+  /// Built-in fonts are CSR: the dense form is ~89% zeros, so CSR saves ~250KB of flash.
+  const int8_t* kernMatrix;
+  /// CSR row index, leftClassCount + 1 entries. nullptr selects the dense encoding.
+  const uint16_t* kernRowOffsets;
+  /// CSR column indices (0-based right class), ascending within each row.
+  const uint8_t* kernCols;
   uint16_t kernLeftEntryCount;           ///< Entries in kernLeftClasses
   uint16_t kernRightEntryCount;          ///< Entries in kernRightClasses
   uint8_t kernLeftClassCount;            ///< Number of distinct left classes (matrix rows)

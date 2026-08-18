@@ -23,6 +23,7 @@ parser.add_argument("--additional-intervals", dest="additional_intervals", actio
 parser.add_argument("--compress", dest="compress", action="store_true", help="Compress glyph bitmaps using DEFLATE with group-based compression.")
 parser.add_argument("--force-autohint", dest="force_autohint", action="store_true", help="Force FreeType auto-hinter instead of native font hinting. Improves stem width consistency for fonts with weak or no native TrueType hints.")
 parser.add_argument("--no-default-intervals", dest="no_default_intervals", action="store_true", help="Skip the built-in codepoint interval list; export only the intervals supplied via --additional-intervals.")
+parser.add_argument("--no-vietnamese", dest="no_vietnamese", action="store_true", help="Drop the precomposed Vietnamese block (U+1EA0-1EF9) from the default intervals. Used for the reading faces, which trade Vietnamese coverage for flash; the UI faces keep it so the Vietnamese UI language still renders.")
 parser.add_argument("--pnum", dest="pnum", action="store_true", help="Use proportional numerals (pnum OpenType feature) instead of default tabular figures. Reduces visual gaps between digits in running prose.")
 args = parser.parse_args()
 
@@ -245,7 +246,10 @@ def load_glyph(code_point):
         face_index += 1
     return None
 
-unmerged_intervals = sorted(([] if args.no_default_intervals else intervals) + add_ints)
+base_intervals = [] if args.no_default_intervals else list(intervals)
+if args.no_vietnamese:
+    base_intervals = [iv for iv in base_intervals if iv != (0x1EA0, 0x1EF9)]
+unmerged_intervals = sorted(base_intervals + add_ints)
 intervals = []
 unvalidated_intervals = []
 for i_start, i_end in unmerged_intervals:
@@ -977,12 +981,29 @@ if kern_map:
         print(f"    {{ 0x{cp:04X}, {cls} }}, // {cp_label(cp)}")
     print("};\n")
 
-    print(f"static const int8_t {font_name}KernMatrix[] = {{")
+    # CSR: the dense matrix is ~89% zeros. Store only non-zero cells plus a row
+    # index; EpdFont::getKerning binary-searches each row's ascending column list.
+    csr_vals, csr_cols, row_offsets = [], [], [0]
     for row in range(kern_left_class_count):
         row_start = row * kern_right_class_count
-        row_vals = kern_matrix[row_start:row_start + kern_right_class_count]
-        print("    " + ", ".join(f"{v:4d}" for v in row_vals) + ",")
-    print("};\n")
+        for col in range(kern_right_class_count):
+            v = kern_matrix[row_start + col]
+            if v:
+                csr_cols.append(col)
+                csr_vals.append(v)
+        row_offsets.append(len(csr_cols))
+    assert row_offsets[-1] <= 0xFFFF, "CSR row offset exceeds uint16_t"
+    assert not csr_cols or max(csr_cols) <= 0xFF, "CSR column exceeds uint8_t"
+
+    def _emit(decl, values, per_line=16):
+        print(decl)
+        for i in range(0, len(values), per_line):
+            print("    " + ", ".join(str(v) for v in values[i:i + per_line]) + ",")
+        print("};\n")
+
+    _emit(f"static const int8_t {font_name}KernMatrix[] = {{", csr_vals)
+    _emit(f"static const uint16_t {font_name}KernRowOffsets[] = {{", row_offsets)
+    _emit(f"static const uint8_t {font_name}KernCols[] = {{", csr_cols)
 
 if ligature_pairs:
     print(f"static const EpdLigaturePair {font_name}LigaturePairs[] = {{")
@@ -1011,6 +1032,8 @@ if kern_map:
     print(f"    {font_name}KernLeftClasses,")
     print(f"    {font_name}KernRightClasses,")
     print(f"    {font_name}KernMatrix,")
+    print(f"    {font_name}KernRowOffsets,")
+    print(f"    {font_name}KernCols,")
     print(f"    {len(kern_left_classes)},")
     print(f"    {len(kern_right_classes)},")
     print(f"    {kern_left_class_count},")
@@ -1019,6 +1042,8 @@ else:
     print(f"    nullptr,")
     print(f"    nullptr,")
     print(f"    nullptr,")
+    print(f"    nullptr,")  # kernRowOffsets
+    print(f"    nullptr,")  # kernCols
     print(f"    0,")
     print(f"    0,")
     print(f"    0,")
