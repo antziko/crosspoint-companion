@@ -167,6 +167,20 @@ void FileBrowserActivity::loadWindow(filewindow::WindowSelector::Mode mode_, std
       windowStartFileRank = (filesLessThanCursor >= filesInWindow) ? filesLessThanCursor - filesInWindow : 0;
       break;
   }
+
+  // One SD pass for every CJK filename now in the window; the repaints that follow (cursor
+  // steps, tap flashes) then hit the resident tables instead of re-reading per string. Getter
+  // form: no concatenated copy, whose bare-new growth is what abort()s under heap pressure.
+  // Rows draw in UI_10_FONT_ID (BaseTheme::drawList); the path band below them draws in
+  // SMALL_FONT_ID and is warmed separately -- a different font id means a different arena, so
+  // folding it into the row batch would not have covered it.
+  renderer.prewarmFallbackText(
+      UI_10_FONT_ID,
+      [](const void* ctx, uint32_t i) -> const char* {
+        return (*static_cast<const std::vector<FileEntry>*>(ctx))[i].name.c_str();
+      },
+      &files, static_cast<uint32_t>(files.size()));
+  renderer.prewarmFallbackText(SMALL_FONT_ID, basepath.c_str());
 }
 
 void FileBrowserActivity::loadFirstWindow() {

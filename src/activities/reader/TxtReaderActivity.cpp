@@ -533,6 +533,9 @@ void TxtReaderActivity::renderPage() {
   auto* fcm = renderer.getFontCacheManager();
   auto scope = fcm->createPrewarmScope();
   renderLines();  // scan pass — text accumulated, no drawing
+  // Scan the status bar too: a CJK title redirected to the SD fallback font joins this page's
+  // single batch prewarm instead of triggering its own SD pass after the scope ends.
+  if (txt) renderStatusBar();
   scope.endScanAndPrewarm();
 
   // BW rendering

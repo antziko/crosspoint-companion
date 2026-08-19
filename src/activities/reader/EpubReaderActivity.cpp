@@ -2814,6 +2814,10 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   auto* fcm = renderer.getFontCacheManager();
   auto scope = fcm->createPrewarmScope();
   page->render(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);  // scan pass
+  // Scan the status bar too: a CJK book or chapter title redirected to the SD fallback font
+  // joins this page's single batch prewarm instead of triggering its own SD pass after the
+  // scope ends. Guarded because renderStatusBar() dereferences section unconditionally.
+  if (section) renderStatusBar();
   scope.endScanAndPrewarm();
   const auto tPrewarm = millis();
 
