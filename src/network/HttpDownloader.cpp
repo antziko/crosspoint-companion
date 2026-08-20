@@ -178,6 +178,22 @@ constexpr uint32_t EMPTY_HOP_WALL_DELAY_MS = 200;
 // SourceCodePro_12.cpfont spent all three retries and succeeded on the last one it was
 // allowed. Ten takes per-file failure to 0.02% and costs 3.5s of worst case.
 constexpr int MAX_FRESH_RETRIES = 3;
+// Free heap below which a wolfSSL handshake cannot be expected to complete.
+//
+// Measured, not guessed. In the 08-20 NotoSerifExtended capture every one of 54 failed
+// handshakes reported 29,640-35,504 bytes free, while the files that succeeded had started
+// from 41,376-41,456. SecureClient puts a TLS 1.3 handshake at ~35-43KB of small allocations,
+// and its MEMFIX-PORT note records the same failure from the other side: a keygen allocation
+// fails and the ClientHello is never sent.
+//
+// The signature is exact and worth learning: tcp>0 (the socket opened), tls=0 (the handshake
+// never completed), tlsErr=0 (no read error, because nothing was ever read). That is
+// starvation, not a peer or a link problem, and retrying does not fix it.
+constexpr uint32_t TLS_HANDSHAKE_MIN_FREE = 36 * 1024;
+// Connect attempts allowed once starvation is identified AND the slab has already been handed
+// back. Two, not MAX_EMPTY_HOPS: by then the heap is all we are going to get, and each further
+// attempt is measurably destructive — see the ratchet at the release site in runGet.
+constexpr int MAX_STARVED_CONNECTS = 2;
 constexpr int MAX_FRESH_RETRIES_RECORD_WALL = 10;
 // Full restarts allowed when a server answers 200 to a Range request (i.e. it does
 // not support resuming at all). Two, because a restart is only worth attempting while
@@ -377,6 +393,12 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
   //
   // Held indirectly, and bought at the top of a RESUMED hop — see leaseRecordSlab below.
   std::unique_ptr<freeink::TlsRecordSlab> recordSlab;
+  // Set once the slab has been handed back to rescue a starving handshake. The lease site
+  // must not buy it again afterwards: it was released precisely because the heap could not
+  // afford both it and a handshake, and that does not change later in the transfer.
+  bool slabSurrendered = false;
+  // Connect attempts made after starvation was identified and the slab was already gone.
+  int starvedConnects = 0;
 
   for (;;) {
     // Re-evaluated per hop: a redirect can cross schemes in either direction.
@@ -404,7 +426,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
     // failure is why the thresholds below are floors with real margin rather than a bare
     // "did malloc succeed". A failed or skipped lease is inert -- it is exactly today's
     // behaviour -- so the downside of being wrong here is no change, not a worse download.
-    if (!recordSlab && secureHop && resumeOffset > 0 && sink.total >= SLAB_MIN_BODY_BYTES) {
+    if (!recordSlab && !slabSurrendered && secureHop && resumeOffset > 0 && sink.total >= SLAB_MIN_BODY_BYTES) {
       const SdDebugLog::NetSnapshot before = SdDebugLog::captureNetSnapshot();
       if (before.largest8Bit >= SLAB_LEASE_MIN_LARGEST && before.heapFree >= SLAB_LEASE_MIN_FREE) {
         recordSlab = makeUniqueNoThrow<freeink::TlsRecordSlab>();
@@ -609,6 +631,46 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
                       (unsigned long)(millis() - openStartMs), (unsigned long)http.tcpConnectMs(),
                       (unsigned long)http.tlsHandshakeMs(), http.lastTlsError(), s.heapFree, s.largest8Bit, (int)s.rssi,
                       url.c_str());
+      // A handshake that never completed, at a heap too small to run one, is starvation —
+      // and it is the one connect failure that retrying makes actively WORSE.
+      //
+      // Measured on X3 (08-20, NotoSerifExtended): three files of 703KB, 880KB and 1.08MB
+      // completed, then every connect failed with tcp>0 tls=0 tlsErr=0 at 29,640-35,504 bytes
+      // free. Each failed attempt costs ~190 bytes that do not come back, so an exhausted
+      // 8-rung ladder (18 attempts) burned ~3.4KB — and the loss carried into the NEXT file,
+      // whose GET start fell 41,456 -> 38,100 -> 37,888. That is a one-way ratchet: the first
+      // starved file drags the whole session below the threshold and every file after it
+      // fails too, which is exactly the "it keeps failing" the retries were meant to prevent.
+      //
+      // So before spending another attempt, give back anything we are holding. The TLS record
+      // slab is 5,120 bytes of free heap and 6,144 of the largest block (22,516 -> 16,372 in
+      // that capture) and slabHit has been 0 in every capture ever taken here — it is sized
+      // for a record ramp this CDN never uses. Handing it back returns ~38.4KB, which is where
+      // handshakes were still succeeding. Costs nothing even if that is not the cause: the
+      // block was doing nothing.
+      if (recordSlab && http.tcpConnectMs() > 0 && http.tlsHandshakeMs() == 0) {
+        recordSlab.reset();
+        slabSurrendered = true;
+        const SdDebugLog::NetSnapshot after = SdDebugLog::captureNetSnapshot();
+        SdDebugLog::log("HTTP", "handshake starved at %u free — released tls slab, now %u free / %u largest",
+                        s.heapFree, after.heapFree, after.largest8Bit);
+        retriedConnect = false;  // the rescued hop gets a clean one-shot retry
+        continue;
+      }
+
+      // Slab already gone and the handshake still cannot run: stop early rather than ratchet
+      // the heap down for the files that follow. This deliberately overrides the connect
+      // ladder below — that ladder is right for a transport failure (a dropped association
+      // returns in ~4ms with tcp=0 and recovers), and wrong for this one.
+      if (http.tcpConnectMs() > 0 && http.tlsHandshakeMs() == 0 && s.heapFree < TLS_HANDSHAKE_MIN_FREE) {
+        if (++starvedConnects >= MAX_STARVED_CONNECTS) {
+          SdDebugLog::log("HTTP", "handshake starved at %u free (< %u), giving up after %d attempts", s.heapFree,
+                          (unsigned)TLS_HANDSHAKE_MIN_FREE, starvedConnects);
+          setDetail(sink.detail, "not enough memory for a secure connection (%u bytes free)", s.heapFree);
+          return HttpDownloader::HTTP_ERROR;
+        }
+      }
+
       // "This hop delivered nothing" — the condition both recovery paths below need, and
       // NOT the same as "the transfer holds no bytes". resumeOffset and sink.downloaded
       // are set equal at the top of every hop (by both resume branches below and by the
