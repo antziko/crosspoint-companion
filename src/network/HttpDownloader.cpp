@@ -254,10 +254,35 @@ constexpr int MAX_FRESH_RETRIES = 3;
 // There is no ratchet left to protect against, so the floor drops to the level where failure
 // really was permanent (29,640 was the lowest ever observed) and retrying gets a real budget.
 constexpr uint32_t TLS_HANDSHAKE_MIN_FREE = 30 * 1024;
-// Connect attempts allowed once starvation is identified. Six, not two: with the ratchet gone
-// a starved handshake is a transient the next attempt usually wins, and the capture above shows
-// exactly that -- one retry was enough for both files that were allowed one. Six attempts cost
-// ~1.2s at the ~200ms these failures take, against a download worth ~15s.
+// Cumulative free-heap loss, measured from the FIRST starved connect of a run, that says the
+// retries have become the problem rather than the cure.
+//
+// This is the test that a fixed heap floor cannot do, and both floors tried here were wrong for
+// the same reason: whether a starved handshake recovers is not a function of the absolute
+// number. 36KB aborted downloads that a single retry completed; 30KB let a hopeless run fall
+// through to the connect ladder and spend 18 attempts and 13s of backoff going nowhere.
+//
+// What DOES separate them is the direction of travel. A failed handshake costs ~200 bytes that
+// never come back, so a run that is going to fail declines monotonically, and one that is
+// merely unlucky does not. Measured on the 08-20c capture, one ladder over 18 attempts:
+// 37,456 -> 37,192 -> 36,712 -> 36,664 -> 36,404 -> 36,544 -> 35,932 -> ... -> 34,064, i.e.
+// -3,392 and never a real recovery. Against that, the pair that DID recover in 08-20b read
+// 35,912 -> 36,084 -- up 172.
+//
+// 1024, and the value was traced against every starved run on record rather than picked:
+//
+//   run                                   512      1024     1536
+//   08-20c font 1 (RECOVERED on try 3)    abort!   retry    retry
+//   08-20c font 2 (hopeless, 18 tries)    try 3    try 5    budget at 6
+//
+// 512 looks tighter and is simply wrong: font 1 lost 624 bytes on its second attempt and then
+// connected, so 512 would abort a download that works. 1536 never fires before the attempt
+// budget does, which makes it decoration. 1024 clears the one measured recovery and still ends
+// a hopeless ladder in ~2s instead of the 20s one actually cost.
+constexpr uint32_t STARVED_RATCHET_BYTES = 1024;
+// Starved connects allowed before giving up even while the heap is holding steady. Six: a
+// starved handshake that is NOT ratcheting is a transient the next attempt usually wins, and
+// six attempts cost ~1.2s at the ~200ms these failures take, against a download worth ~15s.
 constexpr int MAX_STARVED_CONNECTS = 6;
 constexpr int MAX_FRESH_RETRIES_RECORD_WALL = 10;
 // Full restarts allowed when a server answers 200 to a Range request (i.e. it does
@@ -465,8 +490,11 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
   // Leasing it costs 1.7x throughput. Re-enable only against an origin whose records are
   // proven to sit in the 4-5KB band, and only on that origin's evidence.
 
-  // Connect attempts made after a handshake was identified as starved.
+  // Connect attempts made after a handshake was identified as starved, and the free heap at the
+  // first of them. The pair is what STARVED_RATCHET_BYTES compares against: absolute level says
+  // very little, the slope says everything.
   int starvedConnects = 0;
+  uint32_t starvedHeapFirst = 0;
 
   for (;;) {
     freeink::SecureHttpClient http;
@@ -685,15 +713,25 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       // starved file drags the whole session below the threshold and every file after it
       // fails too, which is exactly the "it keeps failing" the retries were meant to prevent.
       //
-      // So stop early rather than ratchet the heap down for the files that follow. Dropping
-      // the record slab (see runGet's opening note) already returned 5,120 of those bytes to
-      // every hop, which is what makes two attempts enough. This deliberately overrides the
-      // connect ladder below — that ladder is right for a transport failure (a dropped association
-      // returns in ~4ms with tcp=0 and recovers), and wrong for this one.
-      if (http.tcpConnectMs() > 0 && http.tlsHandshakeMs() == 0 && s.heapFree < TLS_HANDSHAKE_MIN_FREE) {
-        if (++starvedConnects >= MAX_STARVED_CONNECTS) {
-          SdDebugLog::log("HTTP", "handshake starved at %u free (< %u), giving up after %d attempts", s.heapFree,
-                          (unsigned)TLS_HANDSHAKE_MIN_FREE, starvedConnects);
+      // The counting is gated on the SIGNATURE, never on the heap level. Gating the whole block
+      // on `heapFree < floor` is a bug worth not repeating: it means lowering the floor silently
+      // disables the counter for the band the failures actually live in, and control falls
+      // through to the connect ladder below — which spent 18 attempts and 13s of backoff on a
+      // run that had been hopeless since attempt 3 (08-20c capture, heap 37,456 -> 34,064).
+      //
+      // That ladder is right for a transport failure (a dropped association returns in ~4ms with
+      // tcp=0 and does recover) and wrong for this one, so this must decide first.
+      if (http.tcpConnectMs() > 0 && http.tlsHandshakeMs() == 0) {
+        ++starvedConnects;
+        if (starvedHeapFirst == 0) starvedHeapFirst = s.heapFree;
+        const bool ratcheting = s.heapFree + STARVED_RATCHET_BYTES < starvedHeapFirst;
+        const char* why = s.heapFree < TLS_HANDSHAKE_MIN_FREE       ? "heap below the floor"
+                          : ratcheting                              ? "each attempt costing heap"
+                          : starvedConnects >= MAX_STARVED_CONNECTS ? "retry budget spent"
+                                                                    : nullptr;
+        if (why != nullptr) {
+          SdDebugLog::log("HTTP", "handshake starved: %s (%u free, %u at first of %d attempts)", why, s.heapFree,
+                          starvedHeapFirst, starvedConnects);
           setDetail(sink.detail, "not enough memory for a secure connection (%u bytes free)", s.heapFree);
           return HttpDownloader::HTTP_ERROR;
         }
