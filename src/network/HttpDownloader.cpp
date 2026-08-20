@@ -6,7 +6,6 @@
 #include <SdDebugLog.h>
 #include <base64.h>
 #include <esp_wifi.h>
-#include <strings.h>  // strncasecmp (case-insensitive scheme match)
 
 #include <cstdarg>
 #include <functional>
@@ -153,15 +152,22 @@ constexpr uint32_t MAX_RESUME_BACKOFF_MS = 2000;
 // exhausted 8 and killed files that were 43% and 6% delivered.
 //
 // It is affordable only because the flat delay replaces the ladder: 40 attempts at
-// EMPTY_HOP_WALL_DELAY_MS plus a ~150ms hop is ~14s of worst case, which is exactly what 8
+// EMPTY_HOP_WALL_DELAY_MS plus a ~330ms hop is ~14s of worst case, which is exactly what 8
 // rungs of the old ladder already cost for a fifth of the attempts (measured twice, 14.288s
 // and 14.281s). Typical cost is far lower -- the median run recovers in 2 attempts.
 constexpr int MAX_EMPTY_HOPS_RECORD_WALL = 40;
-// Flat delay before re-asking for a range that came back empty on the record wall. Not zero:
-// the socket from the dead hop still needs tearing down (the same reason the truncation path
-// delays 200ms), and it keeps the request rate to ~3/s so a long file does not read as a
-// burst to the CDN.
-constexpr uint32_t EMPTY_HOP_WALL_DELAY_MS = 200;
+// Flat delay before re-asking for a range that came back empty on the record wall.
+//
+// Small on purpose. Waiting does not improve the odds: across 1,165 hops of one four-font
+// family, the chance the next hop delivers bytes is flat at 0.16-0.18 whether the gap before
+// it was under 250ms or over 1.5s. At 200ms the 968 empty hops in that capture spent 194 of
+// its 958 seconds asleep for nothing.
+//
+// Not zero either: the socket from the dead hop still needs tearing down (the same reason the
+// truncation path delays), and the loop must yield to the WiFi task. A hop costs ~330ms of
+// real work on its own, so this does not change the request rate the CDN sees in any way that
+// matters -- ~2.8/s against ~1.9/s.
+constexpr uint32_t EMPTY_HOP_WALL_DELAY_MS = 25;
 // Re-issues allowed for a FRESH hop that answered 200/206 and then delivered nothing. Bounded
 // hard because nothing advances between attempts -- there is no offset to move and no counter
 // to reset, so this is the only thing standing between an unlucky first hop and a spin.
@@ -190,9 +196,11 @@ constexpr int MAX_FRESH_RETRIES = 3;
 // never completed), tlsErr=0 (no read error, because nothing was ever read). That is
 // starvation, not a peer or a link problem, and retrying does not fix it.
 constexpr uint32_t TLS_HANDSHAKE_MIN_FREE = 36 * 1024;
-// Connect attempts allowed once starvation is identified AND the slab has already been handed
-// back. Two, not MAX_EMPTY_HOPS: by then the heap is all we are going to get, and each further
-// attempt is measurably destructive — see the ratchet at the release site in runGet.
+// Connect attempts allowed once starvation is identified. Two, not MAX_EMPTY_HOPS: by then the
+// heap is all we are going to get, and each further attempt is measurably destructive — every
+// failed handshake costs ~190 bytes that do not come back, so an exhausted 8-rung ladder (18
+// attempts) burned ~3.4KB and dragged the NEXT file's GET start down with it (41,456 -> 38,100
+// -> 37,888). That ratchet is why the first starved file used to poison a whole session.
 constexpr int MAX_STARVED_CONNECTS = 2;
 constexpr int MAX_FRESH_RETRIES_RECORD_WALL = 10;
 // Full restarts allowed when a server answers 200 to a Range request (i.e. it does
@@ -202,21 +210,6 @@ constexpr int MAX_FRESH_RETRIES_RECORD_WALL = 10;
 // user's manual "try again, try again" into one operation, while more than that would
 // just burn radio time on a link that clearly cannot hold the transfer.
 constexpr int MAX_RANGE_RESTARTS = 2;
-// Smallest https body worth leasing the TLS record slab for (see the lease site in
-// runGet). The failure it guards against is the per-connection record wall; the largest
-// feed either OPDS server here serves is 130668 bytes and has never needed it, while book
-// downloads are megabytes. 128KB sits just under that measured feed size, so feeds keep
-// their heap and downloads keep their block.
-constexpr size_t SLAB_MIN_BODY_BYTES = 128 * 1024;
-// Heap floors the slab lease must clear, both measured off the "incomplete:" lines of the
-// X3 capture where the lease now happens: largest8 there runs 10228-14324 with 32-36KB
-// free. The largest-block floor is SLAB_SIZE (5120) plus a 4KB block left over, so buying
-// it cannot leave the handshake without a mid-sized allocation; the free floor keeps ~28KB
-// for the ~24KB a resumed session needs. Both are floors with margin ON PURPOSE -- the one
-// time a lease preceded a handshake without them (17408 bytes, 14c) it left ~22KB and
-// killed every https fetch before it connected.
-constexpr uint32_t SLAB_LEASE_MIN_LARGEST = 5120 + 4096;
-constexpr uint32_t SLAB_LEASE_MIN_FREE = 28 * 1024;
 // How long to wait for the station to re-associate before treating a dead connect as a
 // transfer failure, and how many times per transfer. 15s covers a normal reassociation;
 // 3 recoveries keeps a genuinely lost AP from holding the screen indefinitely, while still
@@ -271,10 +264,6 @@ void setDetail(std::string* out, const char* fmt, ...) {
 bool isRedirect(int status) {
   return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
 }
-
-// Scheme test for the TLS record-slab lease. Case-insensitive per RFC 3986 3.1, matching
-// SecureHttpClient::parseUrl, so a "HTTPS://" Location header is not mistaken for plain HTTP.
-bool isHttpsUrl(const std::string& url) { return url.size() >= 8 && strncasecmp(url.c_str(), "https://", 8) == 0; }
 
 // Disable WiFi modem power-save for the duration of a transfer, then restore the
 // default. At the default WIFI_PS_MIN_MODEM the radio sleeps between DTIM beacons;
@@ -364,82 +353,25 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
   // connection could plausibly avoid.
   int lastHopTlsErr = 0;
 
-  // Back wolfSSL's per-record receive buffer with one block bought here, at the healthiest
-  // heap state this request will ever see, and held across every redirect and resume hop.
+  // wolfSSL's per-record receive buffer is NOT backed by a reserved block here, and must not
+  // be. TlsRecordSlab was sized (5120) for a record ramp measured against a different origin,
+  // where a hop died on the step to 4,246-byte records. release-assets.githubusercontent.com
+  // does not ramp: it goes straight to 16,401, so every capture logs slabHit=0 with
+  // maxMissEver=16401 — the block is bought, never handed out once, and the 5,120 bytes it
+  // takes come out of the largest free block, which is the one resource the 16,401-byte
+  // allocation actually needs (largest8 22,516 -> 17,396).
   //
-  // Without it wolfSSL re-allocates ~16.4KB contiguous for each incoming record (it frees
-  // the buffer after every record it delivers — see TlsRecordSlab), which on the X3's
-  // post-WiFi heap fails partway through and kills the body with MEMORY_E (tlsErr=-125).
-  // Captures show that ending every HTTPS transfer at ~200-215KB: servers that honour
-  // Range hide it as a long string of resumed hops, and a server that refuses Range cannot
-  // finish at all because each restart re-runs the same 205KB and dies again. The same
-  // files over plain HTTP, same sink, complete at 1.7MB with no retries.
-  //
-  // Scoped to this transfer: outside it wolfSSL allocates exactly as before, so KOSync and
-  // feed fetches are untouched. If the block cannot be bought the lease is inactive and
-  // behaviour is today's, so this can help and cannot regress.
-  //
-  // ONLY for an https hop. SecureHttpClient runs plain http over its WiFiClient transport
-  // (ensureConnected()) and never enters wolfSSL, so on an http:// URL this block is 17KB
-  // of dead weight held for the whole transfer — and on the X3 that is the difference
-  // between a feed that reads and one that does not. Measured against one plain-HTTP host
-  // in a single session (opds_debug.txt): every request that took the lease lost ~18KB at
-  // GET start (38872 -> 20528 free) and entered its body with 6012 free / 2420 largest,
-  // and the 37977-byte feed died mid-body at 11426 and again at 5682 bytes; the requests
-  // where the malloc happened to fail (logged active=0, so no lease) streamed a
-  // 1676098-byte download to completion at 233KB/s. Every completed plain-HTTP transfer in
-  // that capture also logged slabHit=0 slabMiss=0 — the block was never handed out once,
-  // because wolfSSL was not in the path to ask for it.
-  //
-  // Held indirectly, and bought at the top of a RESUMED hop — see leaseRecordSlab below.
-  std::unique_ptr<freeink::TlsRecordSlab> recordSlab;
-  // Set once the slab has been handed back to rescue a starving handshake. The lease site
-  // must not buy it again afterwards: it was released precisely because the heap could not
-  // afford both it and a handshake, and that does not change later in the transfer.
-  bool slabSurrendered = false;
-  // Connect attempts made after starvation was identified and the slab was already gone.
+  // Measured over 1,148 hops of one four-font family, comparing the segments where the block
+  // happened to be held against those where it had been handed back:
+  //   held: largest8 17,396, 84% of hops empty, mean hop 17,428 B, 7,214 B/s
+  //   off : largest8 22,516, 76% of hops empty, mean hop 23,652 B, 12,325 B/s
+  // Leasing it costs 1.7x throughput. Re-enable only against an origin whose records are
+  // proven to sit in the 4-5KB band, and only on that origin's evidence.
+
+  // Connect attempts made after a handshake was identified as starved.
   int starvedConnects = 0;
 
   for (;;) {
-    // Re-evaluated per hop: a redirect can cross schemes in either direction.
-    const bool secureHop = isHttpsUrl(url);
-
-    // Lease the record slab at the top of a RESUMED hop: before this hop's handshake, but
-    // never before the first one.
-    //
-    // The first hop cannot lease. Its Content-Length is not known yet, and "unknown length"
-    // must never be read as "probably big" — doing that once leased the block for a
-    // 15827-byte feed and killed a request that would have finished in 143ms. Hop 1
-    // therefore behaves exactly as it does today, which also means this cannot regress a
-    // download that never needs to resume.
-    //
-    // From hop 2 the size IS known and the heap has just recovered: every "incomplete:"
-    // line in the X3 capture reports largest8 of 10228-14324 with 32-36KB free, because the
-    // dead session's ~24KB has just been returned. That is the one moment in a hop's life
-    // when 5120 contiguous bytes are comfortably available -- at the old lease point (first
-    // body byte) largest8 is already down to ~2400, which is why the block was never once
-    // bought in any capture.
-    //
-    // Gated on measured headroom, not hope. 14c is the cautionary tale: leasing 17408
-    // before a handshake left it ~22KB and every https fetch died before it connected. The
-    // block is 5120 now and the handshake is a ~90ms resumed one, but the shape of that
-    // failure is why the thresholds below are floors with real margin rather than a bare
-    // "did malloc succeed". A failed or skipped lease is inert -- it is exactly today's
-    // behaviour -- so the downside of being wrong here is no change, not a worse download.
-    if (!recordSlab && !slabSurrendered && secureHop && resumeOffset > 0 && sink.total >= SLAB_MIN_BODY_BYTES) {
-      const SdDebugLog::NetSnapshot before = SdDebugLog::captureNetSnapshot();
-      if (before.largest8Bit >= SLAB_LEASE_MIN_LARGEST && before.heapFree >= SLAB_LEASE_MIN_FREE) {
-        recordSlab = makeUniqueNoThrow<freeink::TlsRecordSlab>();
-        const SdDebugLog::NetSnapshot after = SdDebugLog::captureNetSnapshot();
-        SdDebugLog::log("HTTP", "tls slab: active=%d size=%u total=%zu heap=%u->%u largest8=%u->%u",
-                        (recordSlab && recordSlab->active()) ? 1 : 0, (unsigned)freeink::TlsRecordSlab::size(),
-                        sink.total, before.heapFree, after.heapFree, before.largest8Bit, after.largest8Bit);
-      } else {
-        SdDebugLog::log("HTTP", "tls slab: skipped (heap=%u largest8=%u need %u/%u)", before.heapFree,
-                        before.largest8Bit, (unsigned)SLAB_LEASE_MIN_LARGEST, (unsigned)SLAB_LEASE_MIN_FREE);
-      }
-    }
-
     freeink::SecureHttpClient http;
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.setInsecure();
@@ -642,25 +574,10 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       // starved file drags the whole session below the threshold and every file after it
       // fails too, which is exactly the "it keeps failing" the retries were meant to prevent.
       //
-      // So before spending another attempt, give back anything we are holding. The TLS record
-      // slab is 5,120 bytes of free heap and 6,144 of the largest block (22,516 -> 16,372 in
-      // that capture) and slabHit has been 0 in every capture ever taken here — it is sized
-      // for a record ramp this CDN never uses. Handing it back returns ~38.4KB, which is where
-      // handshakes were still succeeding. Costs nothing even if that is not the cause: the
-      // block was doing nothing.
-      if (recordSlab && http.tcpConnectMs() > 0 && http.tlsHandshakeMs() == 0) {
-        recordSlab.reset();
-        slabSurrendered = true;
-        const SdDebugLog::NetSnapshot after = SdDebugLog::captureNetSnapshot();
-        SdDebugLog::log("HTTP", "handshake starved at %u free — released tls slab, now %u free / %u largest",
-                        s.heapFree, after.heapFree, after.largest8Bit);
-        retriedConnect = false;  // the rescued hop gets a clean one-shot retry
-        continue;
-      }
-
-      // Slab already gone and the handshake still cannot run: stop early rather than ratchet
-      // the heap down for the files that follow. This deliberately overrides the connect
-      // ladder below — that ladder is right for a transport failure (a dropped association
+      // So stop early rather than ratchet the heap down for the files that follow. Dropping
+      // the record slab (see runGet's opening note) already returned 5,120 of those bytes to
+      // every hop, which is what makes two attempts enough. This deliberately overrides the
+      // connect ladder below — that ladder is right for a transport failure (a dropped association
       // returns in ~4ms with tcp=0 and recovers), and wrong for this one.
       if (http.tcpConnectMs() > 0 && http.tlsHandshakeMs() == 0 && s.heapFree < TLS_HANDSHAKE_MIN_FREE) {
         if (++starvedConnects >= MAX_STARVED_CONNECTS) {
@@ -866,23 +783,14 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       // wolfSSL failing to allocate the receive buffer for an incoming record, which on
       // this device means the record was larger than the biggest free block; 0 means the
       // peer closed or the transport dropped and the heap is not implicated at all.
-      // slabMiss > 0 alongside tlsErr=-125 means the reserved block was already taken when
-      // wolfSSL asked, so the request went to malloc and lost; slabMiss=0 with tlsErr=-125
-      // means the failing allocation was outside the record-size band this reserves.
+      // largest8 is the number that matters next to a -125: it is what the record buffer has
+      // to fit in, and 16,401 is what this CDN asks for.
       SdDebugLog::log("HTTP",
                       "incomplete: got %zu of %zu bytes after %lums (wait=%lums work=%lums) heap=%u largest8=%u "
-                      "tlsErr=%d slabHit=%lu slabMiss=%lu",
+                      "tlsErr=%d",
                       sink.downloaded, sink.total, (unsigned long)(millis() - transferStartMs),
                       (unsigned long)waitTotalMs, (unsigned long)workTotalMs, s.heapFree, s.largest8Bit,
-                      http.lastTlsError(), (unsigned long)freeink::TlsRecordSlab::hits(),
-                      (unsigned long)freeink::TlsRecordSlab::misses());
-      if (freeink::TlsRecordSlab::largestMiss() > 0) {
-        // "Ever", not "this hop": largestMiss is a running maximum reset only when the
-        // block is bought, so once one 16401-byte record overshoots it prints on every
-        // subsequent hop and reads exactly like a fresh per-hop measurement. It is not.
-        SdDebugLog::log("HTTP", "tls slab maxMissEver=%lu (block=%u)",
-                        (unsigned long)freeink::TlsRecordSlab::largestMiss(), (unsigned)freeink::TlsRecordSlab::size());
-      }
+                      http.lastTlsError());
 
       // Resume rather than throw the partial body away.
       //
@@ -939,7 +847,10 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
         retriedConnect = false;               // each resumed hop gets its own one-shot connect retry
         SdDebugLog::log("HTTP", "resuming at %zu/%zu (attempt %d/%d, hop=%zu stalls=%d)", resumeOffset, sink.total,
                         resumes, MAX_RESUME_ATTEMPTS, hopBytes, stalledResumes);
-        delay(200);  // let the stack tear the dead socket down before reconnecting
+        // Same teardown as the empty-hop path and worth the same: the server closed, so
+        // there is no TIME_WAIT on our side to wait out. 200ms here was 40s of the 958s
+        // that capture spent on four fonts, all of it blocking the UI.
+        delay(EMPTY_HOP_WALL_DELAY_MS);
         continue;
       }
 
@@ -1071,17 +982,9 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       // link or the server is. On X3 a repaint shows up in wait=, not work=, because
       // requestUpdate() only posts to the render task — which then takes the SPI bus the
       // SD card shares, so the NEXT read blocks.
-      // slabHit/slabMiss are the record-buffer allocations wolfSSL made: hits came from
-      // the reserved block, misses fell through to malloc and are the ones that can still
-      // fail with MEMORY_E. A healthy HTTPS transfer should show many hits and no misses;
-      // hits=0 on an https:// URL means the allocator hook never saw the record buffer and
-      // the diagnosis needs revisiting, not the sizing.
-      SdDebugLog::log("DONE",
-                      "bytes=%zu elapsed=%lums rate=%uB/s wait=%lums work=%lums resumes=%d empty=%d fresh=%d "
-                      "slabHit=%lu slabMiss=%lu",
+      SdDebugLog::log("DONE", "bytes=%zu elapsed=%lums rate=%uB/s wait=%lums work=%lums resumes=%d empty=%d fresh=%d",
                       sink.downloaded, (unsigned long)totalElapsedMs, bytesPerSec, (unsigned long)waitAllMs,
-                      (unsigned long)workAllMs, resumes, emptyHopsTotal, freshRetries,
-                      (unsigned long)freeink::TlsRecordSlab::hits(), (unsigned long)freeink::TlsRecordSlab::misses());
+                      (unsigned long)workAllMs, resumes, emptyHopsTotal, freshRetries);
     }
     return HttpDownloader::OK;
   }
