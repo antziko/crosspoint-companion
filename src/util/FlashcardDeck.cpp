@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include "DictStopwords.h"
+
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
@@ -212,6 +214,11 @@ struct CountCtx {
   uint32_t savedCount;     // lookup count of the matched dropWord line (for the re-enroll bump)
   uint32_t savedDictHash;  // dictionary of the matched dropWord line (kept when the re-enroll
                            // supplies none, e.g. a re-lookup from the history list)
+  uint8_t savedBox;        // Leitner box + schedule of the matched dropWord line. Carried over
+  uint32_t savedDueDay;    // for the same reason updateRemoteCard keeps them when the identical
+                           // re-enroll arrives from a peer: looking a word up again is not a
+                           // failed recall (enrollment is automatic on every lookup), and the
+                           // deliberate signal for that is grading it wrong in review.
 };
 
 bool countLine(void* ctx, const char* line, int len) {
@@ -225,13 +232,71 @@ bool countLine(void* ctx, const char* line, int len) {
     if (c->savedChapterLen > 0) memcpy(c->savedChapter, p.chapter, static_cast<size_t>(c->savedChapterLen));
     c->savedCount = p.count;
     c->savedDictHash = p.dictHash;
+    c->savedBox = p.box;
+    c->savedDueDay = p.dueDay;
   } else {
     c->count++;
   }
   return true;
 }
 
+// Recently-enrolled words, for the re-count throttle. Fixed static storage — 8 slots x 8
+// bytes — so the lookup path allocates nothing; the deck itself is streamed line-by-line
+// for the same reason (see the class comment). Oldest slot is overwritten, which is
+// exactly right: an entry that falls out simply stops suppressing.
+//
+// The key covers the BOOK as well as the word. Without it, looking a word up in book A
+// and then in book B within the window would suppress B's enroll and leave B's deck
+// without the card at all.
+constexpr int ENROLL_RING_SLOTS = 8;
+
+struct EnrollStamp {
+  uint32_t key = 0;      // 0 = empty slot
+  uint32_t stampMs = 0;  // millis() of the enroll that filled it
+};
+
+EnrollStamp enrollRing[ENROLL_RING_SLOTS];
+int enrollRingNext = 0;
+
+uint32_t enrollKey(const std::string& cachePath, const std::string& word) {
+  uint32_t h = 2166136261u;  // FNV-1a over cachePath + '\0' + word
+  for (const char c : cachePath) h = (h ^ static_cast<uint8_t>(c)) * 16777619u;
+  h = (h ^ 0u) * 16777619u;
+  for (const char c : word) h = (h ^ static_cast<uint8_t>(c)) * 16777619u;
+  return h == 0 ? 1u : h;  // 0 marks an empty slot
+}
+
+// True when this word was enrolled less than windowMs ago. Unsigned subtraction, so the
+// millis() wrap at ~49.7 days reads as "long ago" rather than "just now".
+bool enrollThrottled(uint32_t key, uint32_t nowMs, uint32_t windowMs) {
+  if (windowMs == 0) return false;
+  for (const auto& slot : enrollRing) {
+    if (slot.key == key) return nowMs - slot.stampMs < windowMs;
+  }
+  return false;
+}
+
+// Start this word's window. Called only after a card was actually written, so an enroll that
+// failed on SD is retried by the next lookup instead of being throttled against a card that
+// was never created.
+void recordEnroll(uint32_t key, uint32_t nowMs, uint32_t windowMs) {
+  if (windowMs == 0) return;  // no window configured: leave the ring alone
+  for (auto& slot : enrollRing) {
+    if (slot.key == key) {
+      slot.stampMs = nowMs;
+      return;
+    }
+  }
+  enrollRing[enrollRingNext] = EnrollStamp{key, nowMs};
+  enrollRingNext = (enrollRingNext + 1) % ENROLL_RING_SLOTS;
+}
+
 }  // namespace
+
+void FlashcardDeck::clearEnrollCooldown() {
+  for (auto& slot : enrollRing) slot = EnrollStamp{};
+  enrollRingNext = 0;
+}
 
 // ---------------------------------------------------------------------------
 // forEachLine (512-byte buffer; lines carry an excerpt)
@@ -356,14 +421,27 @@ bool FlashcardDeck::isDue(uint8_t box, uint32_t dueDay, uint32_t today) {
 // ---------------------------------------------------------------------------
 
 bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word, const std::string& excerpt,
-                           const std::string& chapter, uint32_t dictHash) {
+                           const std::string& chapter, uint32_t dictHash, uint32_t nowMs, uint32_t windowMs) {
   if (word.empty() || cachePath.empty()) return false;
+  // Same filter, same reason, as LookupHistory::addWordIf (LookupHistory.cpp:362): a closed-class
+  // function word is not study material. Enrollment is automatic on every in-book lookup, so
+  // without this every "a"/"the"/"of" the reader taps became a card while being correctly kept
+  // out of the history log — the two lists disagreeing about the same lookup.
+  //
+  // Ahead of the throttle deliberately: a word that can never be enrolled should not occupy a
+  // slot in the re-enroll table either.
+  if (DictStopwords::isStopword(word)) return false;
+
+  // Before any file I/O: a throttled re-enroll skips the counting pass AND the full deck
+  // rewrite below, which is the expensive half of looking a word up twice in one sitting.
+  const uint32_t throttleKey = enrollKey(cachePath, word);
+  if (enrollThrottled(throttleKey, nowMs, windowMs)) return true;
 
   const std::string path = filePath(cachePath);
 
   // Pass 1: count survivors and, if the word is already present, capture its
   // existing excerpt + chapter so we can preserve them when the new ones are empty.
-  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0};
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0, 0, 0};
   forEachLine(path, countLine, &cc);
 
   // stripPipe stays FALSE for the excerpt (unlike chapter). The excerpt is the line remainder
@@ -414,6 +492,7 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
                               useExcerpt, newLen);
     out.close();
     if (!ok) LOG_ERR("FCD", "Enroll append failed: %s", path.c_str());
+    if (ok) recordEnroll(throttleKey, nowMs, windowMs);
     return ok;
   }
 
@@ -428,8 +507,10 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
     uint32_t version;
     uint32_t count;
     uint32_t dictHash;
-  } ec{&word, useChapter, chapLen, useExcerpt, newLen, version, newCount, dictHash};
-  return rewriteDeck(
+    uint8_t box;
+    uint32_t dueDay;
+  } ec{&word, useChapter, chapLen, useExcerpt, newLen, version, newCount, dictHash, cc.savedBox, cc.savedDueDay};
+  const bool ok = rewriteDeck(
       cachePath, &ec,
       [](void* ctx, HalFile& out, const char* line, int len) {
         auto* c = static_cast<EnrollCtx*>(ctx);
@@ -438,9 +519,12 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
       },
       [](void* ctx, HalFile& out) {
         auto* c = static_cast<EnrollCtx*>(ctx);
-        return writeCard(out, c->word->c_str(), c->word->size(), 0, 0, c->chapter, c->chapLen, c->version, c->count,
-                         c->dictHash, c->excerpt, c->excerptLen);
+        // c->box / c->dueDay, not 0 / 0: the card keeps its place in the review schedule.
+        return writeCard(out, c->word->c_str(), c->word->size(), c->box, c->dueDay, c->chapter, c->chapLen, c->version,
+                         c->count, c->dictHash, c->excerpt, c->excerptLen);
       });
+  if (ok) recordEnroll(throttleKey, nowMs, windowMs);
+  return ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -448,7 +532,7 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
 // ---------------------------------------------------------------------------
 
 int FlashcardDeck::count(const std::string& cachePath) {
-  CountCtx cc{nullptr, 0, false, {}, 0, {}, 0, 0, 0};
+  CountCtx cc{nullptr, 0, false, {}, 0, {}, 0, 0, 0, 0, 0};
   forEachLine(filePath(cachePath), countLine, &cc);
   return cc.count;
 }
@@ -486,7 +570,7 @@ int FlashcardDeck::loadWindow(const std::string& cachePath, int startNewest, int
   if (startNewest < 0 || n <= 0 || !out) return 0;
   const std::string path = filePath(cachePath);
 
-  CountCtx cc{nullptr, 0, false, {}, 0, {}, 0, 0, 0};
+  CountCtx cc{nullptr, 0, false, {}, 0, {}, 0, 0, 0, 0, 0};
   if (!forEachLine(path, countLine, &cc) || cc.count == 0) return 0;
   const int total = cc.count;
   if (startNewest >= total) return 0;
@@ -538,9 +622,12 @@ int FlashcardDeck::loadWindow(const std::string& cachePath, int startNewest, int
 
 bool FlashcardDeck::removeAt(const std::string& cachePath, int index) {
   if (index < 0) return false;
+  // The card is going away, so nothing is left for the re-count window to protect: a
+  // re-lookup right after a delete must re-create the card, not be throttled against it.
+  clearEnrollCooldown();
   const std::string path = filePath(cachePath);
 
-  CountCtx cc{nullptr, 0, false, {}, 0, {}, 0, 0, 0};
+  CountCtx cc{nullptr, 0, false, {}, 0, {}, 0, 0, 0, 0, 0};
   if (!forEachLine(path, countLine, &cc)) return false;
   if (index >= cc.count) return false;
 
@@ -565,10 +652,11 @@ bool FlashcardDeck::removeAt(const std::string& cachePath, int index) {
 
 bool FlashcardDeck::remove(const std::string& cachePath, const std::string& word) {
   if (word.empty() || cachePath.empty()) return false;
+  clearEnrollCooldown();  // see removeAt()
   const std::string path = filePath(cachePath);
 
   // Scan first: skip the rewrite entirely if the word is absent.
-  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0};
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0, 0, 0};
   if (!forEachLine(path, countLine, &cc) || !cc.dupSeen) return false;
 
   const bool ok =
@@ -591,7 +679,7 @@ bool FlashcardDeck::grade(const std::string& cachePath, const std::string& word,
   const std::string path = filePath(cachePath);
 
   // Scan first: skip the rewrite entirely if the word is absent.
-  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0};
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0, 0, 0};
   if (!forEachLine(path, countLine, &cc) || !cc.dupSeen) return false;
 
   struct GradeCtx {
@@ -632,7 +720,7 @@ bool FlashcardDeck::setBoxForWord(const std::string& cachePath, const std::strin
   const std::string path = filePath(cachePath);
 
   // Scan first: skip the rewrite entirely if the word is absent.
-  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0};
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0, 0, 0};
   if (!forEachLine(path, countLine, &cc) || !cc.dupSeen) return false;
 
   // Force the matched row's box/dueDay, copying every other line verbatim.
@@ -1058,7 +1146,7 @@ void FlashcardDeck::clearTombstone(const std::string& cachePath, const std::stri
 // --- Merge primitives (no version bump; the wire version is authoritative) --
 
 void FlashcardDeck::removeCardRow(const std::string& cachePath, const std::string& word) {
-  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0};
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0, 0, 0};
   if (!forEachLine(filePath(cachePath), countLine, &cc) || !cc.dupSeen) return;
   rewriteDeck(cachePath, const_cast<std::string*>(&word), [](void* ctx, HalFile& out, const char* line, int len) {
     const auto* w = static_cast<const std::string*>(ctx);
@@ -1092,7 +1180,7 @@ bool FlashcardDeck::setCardDict(const std::string& cachePath, const std::string&
   // it is far too expensive to run unconditionally here: the rolling heal re-broadcasts a 'D'
   // for every card in its slice on every sync, and nearly all of those carry a value this device
   // already has. Without this guard a sync costs one full deck rewrite per healed card.
-  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0};
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0, 0, 0};
   if (!forEachLine(filePath(cachePath), countLine, &cc) || !cc.dupSeen) return false;
   if (cc.savedDictHash == dictHash) return true;  // already correct — no I/O, no SD wear
 

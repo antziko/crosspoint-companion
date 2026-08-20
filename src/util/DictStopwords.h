@@ -6,12 +6,15 @@
 #include <cstring>
 #include <string_view>
 
-// Curated English closed-class stopword list for the dictionary lookup-history
-// filter. These are the function words (articles, prepositions, pronouns,
-// conjunctions, core auxiliaries/modals) that clutter the per-book lookup
-// history with no value as study material. The dictionary still LOOKS UP and
-// DISPLAYS these words when tapped; they are only excluded from being recorded
-// to history. See LookupHistory::addWordIf (the single record choke point).
+// Curated English closed-class stopword list for the automatic-capture filter.
+// These are the function words (articles, prepositions, pronouns, conjunctions,
+// core auxiliaries/modals) that clutter the per-book lookup history and
+// flashcard deck with no value as study material. The dictionary still LOOKS UP
+// and DISPLAYS these words when tapped; they are only excluded from being
+// captured. Two choke points, which must stay in agreement — a word kept out of
+// history but enrolled as a card is the two lists disagreeing about one lookup:
+//   * LookupHistory::addWordIf  (per-book lookup log)
+//   * FlashcardDeck::enroll     (per-book deck)
 //
 // Design constraints (CLAUDE.md):
 //   * Flash-resident, zero DRAM: an array of `const char*` literals marked

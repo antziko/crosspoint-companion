@@ -646,8 +646,12 @@ void DictionaryWordSelectActivity::loop() {
           // being that a word saved from a Chinese dictionary must not flip to an English
           // definition after a switch. activeDictPath() resolves the session override too, so a
           // long-press dictionary switch is captured, not just the configured selection.
+          // The last two arguments are the re-count window: the same word looked up again
+          // within it leaves its card untouched (no count bump, no deck rewrite). This is the
+          // only enroll call site with a clock, and the only one that passes a window.
           FlashcardDeck::enroll(cachePath, controller.getLookupWord(), buildLookupExcerpt(), chapterTitle_,
-                                DictUtils::activeDictHash(cachePath.c_str()));
+                                DictUtils::activeDictHash(cachePath.c_str()), millis(),
+                                static_cast<uint32_t>(SETTINGS.flashcardRecountMins) * 60000UL);
         }
         // Nothrow because this push runs on the most stressed heap in the firmware: the popup
         // render's glyph prewarm has just taken its arena, and this object is ~4.8 KB. A bare

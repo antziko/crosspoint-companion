@@ -218,6 +218,13 @@ void EpubReaderMenuActivity::buildScreen(UiScreen& screen) {
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
   props.valueInset = 8;               // air between the value and the row edge
+  // Row titles at the Settings screens' size (smallText) so every list in the
+  // app reads at one size; labels that still don't fit wrap onto a second
+  // line. maxLines=2 also marks the style explicitly set (an all-default
+  // smallText fails textStyleUnset and Screen::list() would substitute
+  // bodyText back, FONT_SLOT_SMALL being 0).
+  props.labelText = screen.theme().smallText;
+  props.labelText.maxLines = 2;
   syncListViewport(screen, props);
   screen.list(props);
 }

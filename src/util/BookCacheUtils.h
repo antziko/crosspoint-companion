@@ -94,6 +94,19 @@ CachePruneResult pruneOrphanCaches();
 // the dir was removed. Device-only (uses Storage).
 bool removeBookCache(const std::string& dirName);
 
+// Returns the book path recorded in a cache dir's content_id.bin (dirName relative to
+// /.crosspoint, e.g. "epub_12345"), or an empty string when the dir has no readable
+// fingerprint (caches written before content_id.bin existed) or the recorded path does
+// not hash back to this dir. The dir name is a one-way hash of the path, so this file is
+// the only way back from a cache dir to its book. Device-only (uses Storage).
+std::string recordedBookPathForCache(const std::string& dirName);
+
+// Removes the book state that lives OUTSIDE the path-hash cache dir: bookmark/tombstone
+// sidecars, the recent-books entry, and the global resume pointer. Pair with
+// removeBookCache() to leave a book as if it had never been opened. Does nothing for
+// non-book files. No-op per item when nothing references bookPath. Device-only.
+void forgetBookSidecars(const std::string& bookPath);
+
 // Returns true if the directory name matches a book cache entry.
 bool isBookCacheDirectoryName(const char* name);
 

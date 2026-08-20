@@ -21,12 +21,20 @@ class RecentBooksActivity final : public UiListActivity {
   // Confirm activates on RELEASE here (a hold is "remove from list"), and Back
   // goes home rather than finishing.
   bool handleButtons() override;
+  // No-op: handleButtons() already owns every button this screen navigates
+  // with. See the definition for why the base tail double-handled them.
+  void navigateButtons() override;
   const char* headerTitle() const override { return tr(STR_MENU_RECENT_BOOKS); }
   void drawFooter() override;
 
   // Set when a long-press has fired; input is swallowed until Confirm is released
   // again so the release doesn't also open the book.
   bool longPressFired = false;
+
+  // Title-line font, matched to the OPDS browser's book rows: the touch-target
+  // sized body font on touch hardware, the denser small font on X3/X4 (where it
+  // also fits more of a long title before the line ellipsizes).
+  bool usesBodyLabel() const;
 
   std::vector<RecentBook> recentBooks;
   // Row buffer, built in loadRecentBooks() (not buildScreen(), which reuses

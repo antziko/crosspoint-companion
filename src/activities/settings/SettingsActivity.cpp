@@ -579,6 +579,15 @@ std::string SettingsActivity::settingValueText(const SettingInfo& setting) {
         SETTINGS.*(setting.valuePtr) >= CrossPointSettings::HIST_CAP_UNLIMITED) {
       return tr(STR_UNLIMITED);
     }
+    // The re-count window is a duration, and 0 means "no window" rather than "0 minutes".
+    // Shares the sleep timer's "%u min" format instead of adding a second one.
+    if (setting.nameId == StrId::STR_FC_RECOUNT_WINDOW) {
+      if (SETTINGS.*(setting.valuePtr) == 0) return tr(STR_STATE_OFF);
+      char valueBuffer[32];
+      snprintf(valueBuffer, sizeof(valueBuffer), tr(STR_SLEEP_TIMER_VALUE_FORMAT),
+               static_cast<unsigned int>(SETTINGS.*(setting.valuePtr)));
+      return valueBuffer;
+    }
     return std::to_string(SETTINGS.*(setting.valuePtr));
   }
   // LOCAL(feat): ACTION rows can carry a live value string (e.g. the current

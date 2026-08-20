@@ -121,6 +121,8 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
     // HIST_CAP_UNLIMITED is the sentinel one step above HIST_CAP_MAX and is a valid value.
     persisted::ranged("lookupHistoryCap", &CrossPointSettings::lookupHistoryCap, CrossPointSettings::HIST_CAP_MIN,
                       CrossPointSettings::HIST_CAP_UNLIMITED),
+    persisted::ranged("flashcardRecountMins", &CrossPointSettings::flashcardRecountMins,
+                      CrossPointSettings::FC_RECOUNT_MIN, CrossPointSettings::FC_RECOUNT_MAX),
     persisted::enumerated("holdConfirmAction", &CrossPointSettings::holdConfirmAction,
                           CrossPointSettings::HOLD_CONFIRM_DICTIONARY),
     persisted::toggle("dictFallbackGroup", &CrossPointSettings::dictFallbackGroup),

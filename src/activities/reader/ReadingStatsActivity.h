@@ -77,7 +77,14 @@ class ReadingStatsActivity final : public Activity {
   int booksMaxScroll(const Rect& content) const;
   // Keeps booksSelectedIndex within the scroll window after a selection move.
   void scrollSelectedBookIntoView(const Rect& content);
-  // Confirms, then deletes the selected book's whole cache dir (progress + sections +
-  // stats). Drops the row locally on success — no rescan.
+  // Confirms, then clears the selected book so it reads as never opened: its whole cache
+  // dir (progress + sections + cover + stats), bookmarks, recent-books entry and the
+  // resume pointer. The book file itself is kept. Drops the row locally on success — no
+  // rescan.
   void promptDeleteBook();
+  // Opens the selected row's book in the reader. The row only knows its path-hash cache
+  // dir, so the book path is read from that dir's content_id.bin on demand (one SD read
+  // per press — never per row at scan time). Toasts instead of navigating when the path
+  // is unknown or the file is gone.
+  void openSelectedBook();
 };

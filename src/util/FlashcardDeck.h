@@ -134,8 +134,25 @@ class FlashcardDeck {
   // active at review time. 0 = unrecorded, which falls back to the active dictionary. Like
   // excerpt/chapter it is overwritten only when non-zero, so a re-lookup from the history list
   // (which has no dictionary context) keeps the original association.
+  //
+  // A re-enroll KEEPS the card's box and dueDay: enrollment is automatic on every lookup, so
+  // looking a word up again is not evidence of a failed recall (grading it wrong in review is,
+  // and that path already resets the box). This matches updateRemoteCard, which keeps the local
+  // schedule when the identical re-enroll arrives from a peer.
+  //
+  // Returns false without touching the deck for a DictStopwords closed-class word, matching the
+  // filter LookupHistory::addWordIf applies — the history log and the deck capture the same set.
+  //
+  // nowMs / windowMs throttle the RE-COUNT: a re-enroll of the same word in the same book within
+  // windowMs of the previous one is a no-op and returns true (the card is present and already
+  // current). windowMs 0 disables the throttle, which is what every caller without a clock — and
+  // every host test — uses. Suppressing also skips the deck rewrite a re-enroll otherwise costs.
   static bool enroll(const std::string& cachePath, const std::string& word, const std::string& excerpt,
-                     const std::string& chapter = "", uint32_t dictHash = 0);
+                     const std::string& chapter = "", uint32_t dictHash = 0, uint32_t nowMs = 0, uint32_t windowMs = 0);
+
+  // Forget every recorded enroll time. Called when a card is deleted, so re-looking the word up
+  // immediately re-creates it rather than being throttled against the card that no longer exists.
+  static void clearEnrollCooldown();
 
   // Total card count without materializing the deck (one streaming pass).
   static int count(const std::string& cachePath);

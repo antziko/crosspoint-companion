@@ -514,6 +514,43 @@ bool removeBookCache(const std::string& dirName) {
   return true;
 }
 
+std::string recordedBookPathForCache(const std::string& dirName) {
+  const std::string dirPath = std::string(CACHE_BASE_DIR) + "/" + dirName;
+  std::string id;
+  std::string recordedPath;
+  if (!readContentId(dirPath, id, recordedPath)) {
+    return {};  // legacy cache with no fingerprint: the path hash cannot be inverted
+  }
+  const char* prefix = cacheDirPrefixForPath(recordedPath);
+  if (!prefix || cacheDirForPath(prefix, recordedPath) != dirPath) {
+    return {};  // corrupt/foreign id record — dir was not created for that path
+  }
+  return recordedPath;
+}
+
+void forgetBookSidecars(const std::string& bookPath) {
+  // Bookmarks + tombstones live under /.crosspoint/bookmarks keyed by crc32(path), not in
+  // the cache dir, so removeBookCache() never touches them.
+  if (FsHelpers::hasEpubExtension(bookPath)) {
+    BookmarkStore::deleteForFilePath(bookPath, "epub");
+  } else if (FsHelpers::hasXtcExtension(bookPath)) {
+    BookmarkStore::deleteForFilePath(bookPath, "xtc");
+  } else if (FsHelpers::hasTxtExtension(bookPath)) {
+    BookmarkStore::deleteForFilePath(bookPath, "txt");
+  } else {
+    return;  // not a book file: nothing keyed on this path
+  }
+
+  if (RECENT_BOOKS.removeByPath(bookPath)) {
+    LOG_DBG("BookCache", "Removed from recents: %s", bookPath.c_str());
+  }
+  // The resume pointer would otherwise offer a book whose progress and cover are gone.
+  if (APP_STATE.openEpubPath == bookPath) {
+    APP_STATE.openEpubPath.clear();
+    APP_STATE.saveToFile();
+  }
+}
+
 CachePruneResult pruneOrphanCaches() {
   std::vector<std::string> orphans;
   orphans.reserve(16);

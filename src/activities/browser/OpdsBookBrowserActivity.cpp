@@ -465,14 +465,20 @@ void OpdsBookBrowserActivity::screenHeader(UiScreen& screen, const bool withSear
     header.actionOffsetY =
         static_cast<int16_t>((renderer.getLineHeight(titleFontId) - renderer.getTextHeight(titleFontId)) / 2);
   }
+  const auto& tokens = screen.theme();
   // Entry count for the feed on screen, right-aligned in the header band. It
   // shares the band with the search button (which only shrinks the text
   // content), so both fit. Must outlive screen.header() — header() draws
   // immediately, so this scope is enough.
   char countLabel[16];
   if (state == BrowserState::BROWSING && !entries.empty()) {
-    snprintf(countLabel, sizeof(countLabel), "(%u)", static_cast<unsigned>(entries.size()));
+    snprintf(countLabel, sizeof(countLabel), "%u", static_cast<unsigned>(entries.size()));
     header.rightLabel = countLabel;
+    // Draw the count in the title's font: header() bottom-aligns the label's
+    // line box to the title's, so only a matching line height puts the two on
+    // one baseline — the small font's shallower descender left the count
+    // hanging below the server name and the search icon.
+    header.subtitleText = tokens.titleText;
   }
   // Compact band. The theme's headerHeight also reserves the battery strip
   // that GUI.drawHeader draws on the other screens (Lyra: 84px for a 40px strip
@@ -480,7 +486,6 @@ void OpdsBookBrowserActivity::screenHeader(UiScreen& screen, const bool withSear
   // out as dead space between the server name and the first row. Take what the
   // title line needs instead, capped at the theme value so a theme whose band
   // is already tight is unaffected.
-  const auto& tokens = screen.theme();
   const int16_t titleLineHeight = screen.target().lineHeight(tokens.titleText.font);
   int16_t bandHeight = static_cast<int16_t>(titleLineHeight + tokens.spaceMd * 2 + tokens.headerUnderline);
   if (bandHeight > tokens.headerHeight) bandHeight = tokens.headerHeight;
@@ -1326,6 +1331,10 @@ void OpdsBookBrowserActivity::launchSearch() {
         // when that button is actually still held on resume — a blanket flag set
         // at launch went stale on touch flows and ate the next genuine Confirm.
         consumeConfirm = mappedInput.isPressed(MappedInputManager::Button::Confirm);
+        // Same for Back: the keyboard cancels on the PRESS, so its release
+        // lands here and used to fall through to navigateBack() — one Back
+        // press closed the keyboard and also stepped up a feed level.
+        consumeBack = mappedInput.isPressed(MappedInputManager::Button::Back);
         state = BrowserState::BROWSING;
         if (!result.isCancelled) {
           performSearch(std::get<KeyboardResult>(result.data).text);

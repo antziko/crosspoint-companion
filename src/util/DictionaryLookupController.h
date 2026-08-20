@@ -96,6 +96,16 @@ class DictionaryLookupController {
   FoundStatus getFoundStatus() const { return foundStatus; }
   bool getRecordHistory() const { return recordHistory_; }
 
+  // The history write handleLookupFailed() performed, if any, consumed once. A recorded miss grows
+  // the log without any navigation happening, so an owner that addresses the log by position
+  // (DictionaryDefinitionActivity's LookupChain) has to re-index exactly once when it does.
+  // Also cleared by startLookup, so a stale write can never be claimed by the next lookup.
+  LookupHistory::WriteResult takeHistoryWrite() {
+    const LookupHistory::WriteResult result = historyWrite_;
+    historyWrite_ = {};
+    return result;
+  }
+
  private:
   GfxRenderer& renderer;
   MappedInputManager& mappedInput;
@@ -118,6 +128,24 @@ class DictionaryLookupController {
   // session dictionary — see the comment there for why that has to happen on the UI task.
   std::string fallbackDictPath_;
   int fallbackHops_ = 0;  // dictionaries tried past the active one, for the SD log
+
+  // The stem variant that answered when the exact word missed; empty when the exact word hit
+  // (or nothing did). Written on the lookup task and published by the same lookupDone barrier
+  // that already publishes foundLocation and fallbackDictPath_.
+  std::string stemWord_;
+
+  // A sweep hop slower than this gets named in the SD log. Above any indexed dictionary's probe
+  // and below the multi-second stall an unindexed one produces, so it only fires on real
+  // trouble.
+  static constexpr uint32_t SLOW_HOP_LOG_MS = 500;
+
+  // A fallback promotion this lookup suspended so it could start from the configured
+  // dictionary (see startLookup). Re-installed if the lookup produces no new definition,
+  // because the entry it belongs to is then still the one on screen. Empty otherwise.
+  std::string suspendedPromotion_;
+
+  // Set by handleLookupFailed() when it records the miss in history; consumed by takeHistoryWrite().
+  LookupHistory::WriteResult historyWrite_;
 
   // What the NotFound popup says. A genuine miss reads "Not found"; an unset or unreadable
   // dictionary says so instead, rather than sending the user hunting for a typo.
@@ -147,6 +175,8 @@ class DictionaryLookupController {
   DictLocation sweepGroup(Dictionary::LookupCtx& ctx, const std::string& activeBase, const DictLocation& primary,
                           const DictLookupCallbacks& cbs);
   void handleLookupFailed();
+  // Put back a promotion suspended by startLookup. No-op when none is held.
+  void restoreSuspendedPromotion();
   void showMemoryErrorAndReset();
   static void progressCallback(void* ctx, int percent);
   static bool cancelCallback(void* ctx);

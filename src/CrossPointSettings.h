@@ -471,6 +471,16 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // the whole file). See LookupHistory / LookedUpWordsActivity.
   static constexpr uint8_t HIST_CAP_UNLIMITED = HIST_CAP_MAX + HIST_CAP_STEP;  // 250
   uint8_t lookupHistoryCap = HIST_CAP_DEFAULT;
+  // Minutes before looking the same word up again counts as a new enrollment. Inside the
+  // window a re-lookup leaves the card exactly as it is (no count bump, no deck rewrite);
+  // 0 disables the window so every lookup counts, which is how the deck behaved before.
+  // Minutes rather than seconds because the window is measured on millis() and only has to
+  // cover "I read this passage twice".
+  static constexpr uint8_t FC_RECOUNT_MIN = 0;  // 0 = off
+  static constexpr uint8_t FC_RECOUNT_MAX = 60;
+  static constexpr uint8_t FC_RECOUNT_STEP = 5;
+  static constexpr uint8_t FC_RECOUNT_DEFAULT = 5;
+  uint8_t flashcardRecountMins = FC_RECOUNT_DEFAULT;
   // When the active dictionary misses, probe the exact word in each other dictionary of the same
   // category (DictionaryRegistry::nameIsStGroup) before falling back to stems / alt forms /
   // suggestions. Off by default: it only ever costs time on the miss path, which is already the

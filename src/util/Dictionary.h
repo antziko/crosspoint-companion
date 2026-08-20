@@ -102,6 +102,27 @@ class Dictionary {
   // call the setter from anywhere that can race a running lookup.
   static void setSessionDictPath(const char* folderPath);
 
+  // Install `folderPath` for the entry a same-group fallback sweep just answered. As
+  // visible as setSessionDictPath — everything resolves through activeDictPath(), so the
+  // header name, the long-press cycle origin and the dictionary a flashcard records all
+  // name the dictionary whose entry is actually on screen — but marked TRANSIENT: it is
+  // scoped to that entry, not to the reading session. takeFallbackPromotion() undoes it so
+  // the next lookup starts from the dictionary the user configured, and an explicit
+  // setSessionDictPath (the user's own long-press choice) outranks and clears the mark.
+  // Same threading rule as setSessionDictPath.
+  static void promoteFallbackDictPath(const char* folderPath);
+
+  // Undo a fallback promotion, restoring whatever was in force before it, and return the
+  // path it had installed ("" when no promotion is in force — including after an explicit
+  // setSessionDictPath). Callers re-promote it if the lookup they cleared it for fails and
+  // the promoted entry stays on screen. Same threading rule as setSessionDictPath.
+  static std::string takeFallbackPromotion();
+
+  // True when the path currently in force was installed by promoteFallbackDictPath and
+  // not superseded since. Lets a caller that saves and restores the session path put it
+  // back with the transiency it had, instead of promoting it to an explicit choice.
+  static bool sessionPathIsFallbackPromotion();
+
   // The session override if one is set, otherwise the configured path for cachePath.
   // This is what every lookup resolves through; readDictPath() is the configured value.
   static std::string activeDictPath(const char* cachePath = nullptr);
@@ -224,10 +245,60 @@ class Dictionary {
   // std::string so it costs no heap and no global constructor. 128 matches the
   // char binPath[128] that readDictPath already assumes for dictionary paths.
   static char sessionPath[128];
+  // What sessionPath held before the fallback promotion in force, and whether one is: the
+  // revert target for takeFallbackPromotion(). Static buffers rather than std::string for
+  // the same reason sessionPath is one — this is touched on the lookup path, where the
+  // largest free block can be a few KB.
+  static char preFallbackPath[128];
+  static bool sessionPathIsFallback;
 
   // Read a null-terminated word from an open file into buf (max bufSize-1 chars).
   // Returns the number of characters read (excluding null), or -1 on error.
   static int readWordInto(HalFile& file, char* buf, size_t bufSize);
+
+  // Read-ahead window over one .idx, for the SEQUENTIAL scans only.
+  //
+  // Every HalFile call takes storageMutex (HalStorage.cpp:172), and the raw scans spend one
+  // on each of: the loop's position() test, every byte of the headword, and the 8-byte
+  // suffix — ~13 per ~19-byte entry, which is why a scan measures ~115KB/s on device. Serving
+  // those from a block window makes it one per BUF_SIZE bytes, and position() free.
+  //
+  // Deliberately NOT used by findPageBounds: that is a binary search of random seeks, where a
+  // read-ahead window is filled and discarded on every probe.
+  //
+  // The buffer is static for the same reason wordBuf is — the lookup path is single-threaded
+  // (runLookup joins its task before the UI task probes again) and 512 bytes is twice the
+  // whole per-function stack budget.
+  class IdxScanner {
+   public:
+    IdxScanner(HalFile& file, uint32_t startPos) : file_(file), pos_(startPos) { file_.seekSet(startPos); }
+
+    // Logical offset of the next byte, answered without touching the file.
+    uint32_t position() const { return pos_; }
+
+    // Next byte, or -1 at EOF / on error.
+    int readByte();
+    // Exactly `count` bytes; false if fewer were available.
+    bool readBytes(void* dst, size_t count);
+    // Re-point the window. Only the widened retry needs this.
+    void seek(uint32_t offset);
+
+   private:
+    // Refill the window from the file. False when nothing more could be read.
+    bool refill();
+
+    static constexpr size_t BUF_SIZE = 512;
+    static uint8_t buf_[BUF_SIZE];
+
+    HalFile& file_;
+    uint32_t pos_ = 0;   // logical file offset of the next byte to return
+    size_t avail_ = 0;   // valid bytes currently in buf_
+    size_t cursor_ = 0;  // next unread index into buf_
+    bool eof_ = false;
+  };
+
+  // readWordInto against a scanner window. Same contract as the HalFile form.
+  static int readWordInto(IdxScanner& scanner, char* buf, size_t bufSize);
 
   // Build "<base><suffix>" into a caller-supplied buffer. The hot lookup path uses this
   // instead of the DictPaths accessors, which return std::string by value — ~60-char paths

@@ -344,6 +344,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
       StrId::STR_LOOKUP_HIST_CAP, &CrossPointSettings::lookupHistoryCap,
       {CrossPointSettings::HIST_CAP_MIN, CrossPointSettings::HIST_CAP_UNLIMITED, CrossPointSettings::HIST_CAP_STEP},
       "lookupHistoryCap", StrId::STR_READER_DICTIONARY));
+  v.push_back(SettingInfo::Value(
+      StrId::STR_FC_RECOUNT_WINDOW, &CrossPointSettings::flashcardRecountMins,
+      {CrossPointSettings::FC_RECOUNT_MIN, CrossPointSettings::FC_RECOUNT_MAX, CrossPointSettings::FC_RECOUNT_STEP},
+      "flashcardRecountMins", StrId::STR_READER_DICTIONARY));
   // flashcardCardStyle + flashcardSessionScope are NOT registered here: both are
   // chosen per-session on the FlashcardReviewActivity overview (Up/Down = card
   // style, Left/Right = due-first / shuffled) and the picks are persisted as the

@@ -36,13 +36,24 @@ class LookupHistory {
     Status status = Status::NotFound;
   };
 
+  // What a write did, for callers that track positions in the log (LookupChain).
+  // `wrote` is false when the write was skipped (disabled, empty word, stopword) or
+  // failed — in either case the log did not move. `prevIndex` is the word's newest-first
+  // index BEFORE the write, or -1 when it was not in the log: a word already present is
+  // MOVED to newest rather than appended, which shifts the other entries differently.
+  struct WriteResult {
+    bool wrote = false;
+    int prevIndex = -1;
+  };
+
   // Append word+status. Evicts oldest entries if over cap. Returns the new
   // entry count, or -1 on I/O failure (existing history left unchanged).
-  static int addWord(const std::string& cachePath, const std::string& word, Status status);
+  // outPrevIndex (optional) receives the word's pre-write newest-first index, -1 if new.
+  static int addWord(const std::string& cachePath, const std::string& word, Status status, int* outPrevIndex = nullptr);
 
   // Conditional addWord: short-circuits if disabled, word empty, or cachePath empty.
   // Single guarded entry point used by all dictionary lookup recording sites.
-  static void addWordIf(const std::string& cachePath, const std::string& word, Status status, bool enabled);
+  static WriteResult addWordIf(const std::string& cachePath, const std::string& word, Status status, bool enabled);
 
   // Load all entries in most-recent-first order. The one API that materializes
   // the history (the history-list UI genuinely needs it); its callers run in
@@ -167,7 +178,8 @@ class LookupHistory {
 
   // Core add with an explicit version (dedup-move-to-newest, cap eviction,
   // clears any tombstone for `word`). addWord wraps this with nextVersion().
-  static int addWordVer(const std::string& cachePath, const std::string& word, Status status, uint32_t version);
+  static int addWordVer(const std::string& cachePath, const std::string& word, Status status, uint32_t version,
+                        int* outPrevIndex = nullptr);
 
   // Word's local history version, or -1 if the word is not in the history file.
   // (Distinguishing "absent" from "present at version 0" is required so legacy

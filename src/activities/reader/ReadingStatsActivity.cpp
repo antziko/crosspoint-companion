@@ -147,10 +147,16 @@ void ReadingStatsActivity::promptDeleteBook() {
   // Copy by value: the row is erased inside the handler, so it can't be referenced then.
   const std::string dirName = bookRows[booksSelectedIndex].dirName;
   const std::string title = bookRows[booksSelectedIndex].title;
+  // Resolve now, not in the handler: content_id.bin lives inside the dir about to be
+  // deleted. Empty on a legacy cache with no fingerprint — the cache still goes, only the
+  // path-keyed sidecars are then unreachable.
+  const std::string bookPath = recordedBookPathForCache(dirName);
 
-  auto handler = [this, dirName](const ActivityResult& res) {
+  auto handler = [this, dirName, bookPath](const ActivityResult& res) {
     if (res.isCancelled) return;
     if (!removeBookCache(dirName)) return;  // removeBookCache already logged; keep the row
+    // Leave the book as if never opened: bookmarks, recents entry, resume pointer.
+    if (!bookPath.empty()) forgetBookSidecars(bookPath);
 
     // Drop the row locally (no full rescan): subtract its time, erase, then clamp the
     // selection and scroll window to the shrunken list.
@@ -169,9 +175,28 @@ void ReadingStatsActivity::promptDeleteBook() {
     requestUpdate(true);
   };
 
-  // Reuse "Delete Book Cache" as the heading; the book title is the body.
-  startActivityForResultNoThrow<ConfirmationActivity>(std::move(handler), renderer, mappedInput, tr(STR_DELETE_CACHE),
-                                                      title);
+  // Heading states the effect (all reading data, not just the render cache); body is the title.
+  startActivityForResultNoThrow<ConfirmationActivity>(std::move(handler), renderer, mappedInput,
+                                                      tr(STR_STATS_FORGET_BOOK), title);
+}
+
+void ReadingStatsActivity::openSelectedBook() {
+  if (booksSelectedIndex < 0 || booksSelectedIndex >= static_cast<int>(bookRows.size())) return;
+  const std::string bookPath = recordedBookPathForCache(bookRows[booksSelectedIndex].dirName);
+
+  // No fingerprint (legacy cache) or the file has since been deleted/moved off the card.
+  // Toast rather than navigate: goToReader() replaces this screen, and a failed load only
+  // finishes back to the home screen with nothing said.
+  if (bookPath.empty() || !Storage.exists(bookPath.c_str())) {
+    LOG_ERR("ReadingStats", "Cannot open %s: no book path", bookRows[booksSelectedIndex].dirName.c_str());
+    GUI.drawPopup(renderer, tr(STR_STATS_BOOK_MISSING));
+    delay(900);
+    renderer.forceCleanRefreshNextPaint();  // stop the popup box ghosting under the list
+    requestUpdate();
+    return;
+  }
+
+  onSelectBook(bookPath);
 }
 
 void ReadingStatsActivity::onExit() {
@@ -292,6 +317,14 @@ void ReadingStatsActivity::loop() {
     return;
   }
 
+  // Tap Confirm opens the selected book; the hold above deletes it. Ordering matters: the
+  // long-press sets booksLongPressFired, whose guard at the top of loop() swallows the
+  // release that follows so the book does not also open.
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    if (selectedTab == Tab::Books && !bookRows.empty()) openSelectedBook();
+    return;
+  }
+
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     onGoHome();
     return;
@@ -349,8 +382,8 @@ void ReadingStatsActivity::render(RenderLock&&) {
     StatsTimelineView::renderEmptyState(renderer, content);
   }
 
-  // Confirm hint only on the Books tab (hold to delete the selected book's cache).
-  const char* confirmHint = (selectedTab == Tab::Books && !bookRows.empty()) ? tr(STR_DELETE) : "";
+  // Confirm hint only on the Books tab: tap opens the book, hold clears its reading data.
+  const char* confirmHint = (selectedTab == Tab::Books && !bookRows.empty()) ? tr(STR_OPEN) : "";
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmHint, tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 

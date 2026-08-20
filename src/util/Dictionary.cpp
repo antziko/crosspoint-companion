@@ -12,7 +12,10 @@
 
 // Static member definitions
 char Dictionary::wordBuf[256] = "";
+uint8_t Dictionary::IdxScanner::buf_[Dictionary::IdxScanner::BUF_SIZE] = {};
 char Dictionary::sessionPath[128] = "";
+char Dictionary::preFallbackPath[128] = "";
+bool Dictionary::sessionPathIsFallback = false;
 
 namespace {
 constexpr char DICT_BIN[] = "dictionary.bin";
@@ -146,11 +149,35 @@ void Dictionary::saveGlobalDictPath(const char* folderPath) {
 }
 
 void Dictionary::setSessionDictPath(const char* folderPath) {
+  // An explicit choice outranks any fallback promotion and drops its pending revert, so a
+  // later takeFallbackPromotion() cannot undo what the user just chose.
+  sessionPathIsFallback = false;
+  preFallbackPath[0] = '\0';
   if (!folderPath || folderPath[0] == '\0') {
     sessionPath[0] = '\0';
     return;
   }
   snprintf(sessionPath, sizeof(sessionPath), "%s", folderPath);
+}
+
+void Dictionary::promoteFallbackDictPath(const char* folderPath) {
+  if (!folderPath || folderPath[0] == '\0') return;
+  // Only the first promotion records the revert target: a second one in a row would
+  // otherwise overwrite it with the first promotion's own path.
+  if (!sessionPathIsFallback) snprintf(preFallbackPath, sizeof(preFallbackPath), "%s", sessionPath);
+  snprintf(sessionPath, sizeof(sessionPath), "%s", folderPath);
+  sessionPathIsFallback = true;
+}
+
+bool Dictionary::sessionPathIsFallbackPromotion() { return sessionPathIsFallback; }
+
+std::string Dictionary::takeFallbackPromotion() {
+  if (!sessionPathIsFallback) return std::string();
+  std::string promoted = sessionPath;
+  snprintf(sessionPath, sizeof(sessionPath), "%s", preFallbackPath);  // "" = no override
+  preFallbackPath[0] = '\0';
+  sessionPathIsFallback = false;
+  return promoted;
 }
 
 std::string Dictionary::activeDictPath(const char* cachePath) {
@@ -373,6 +400,72 @@ int Dictionary::readWordInto(HalFile& file, char* buf, size_t bufSize) {
   int ch;
   do {
     ch = file.read();
+  } while (ch > 0);
+  return static_cast<int>(bufSize - 1);
+}
+
+bool Dictionary::IdxScanner::refill() {
+  if (eof_) return false;
+  const int got = file_.read(buf_, BUF_SIZE);
+  if (got <= 0) {
+    eof_ = true;
+    avail_ = 0;
+    cursor_ = 0;
+    return false;
+  }
+  avail_ = static_cast<size_t>(got);
+  cursor_ = 0;
+  // A short read is NOT treated as end-of-file: only a read that returns nothing latches eof_.
+  // Costs at most one extra read per scan and avoids assuming the underlying reader short-reads
+  // solely at EOF — an assumption that, if wrong, would silently truncate a scan into a miss.
+  return true;
+}
+
+int Dictionary::IdxScanner::readByte() {
+  if (cursor_ >= avail_ && !refill()) return -1;
+  pos_++;
+  return buf_[cursor_++];
+}
+
+bool Dictionary::IdxScanner::readBytes(void* dst, size_t count) {
+  auto* out = static_cast<uint8_t*>(dst);
+  while (count > 0) {
+    if (cursor_ >= avail_ && !refill()) return false;
+    const size_t chunk = std::min(count, avail_ - cursor_);
+    memcpy(out, buf_ + cursor_, chunk);
+    cursor_ += chunk;
+    pos_ += static_cast<uint32_t>(chunk);
+    out += chunk;
+    count -= chunk;
+  }
+  return true;
+}
+
+void Dictionary::IdxScanner::seek(uint32_t offset) {
+  file_.seekSet(offset);
+  pos_ = offset;
+  avail_ = 0;
+  cursor_ = 0;
+  // A previous short read may have latched eof_ while the new target is well inside the file.
+  eof_ = false;
+}
+
+int Dictionary::readWordInto(IdxScanner& scanner, char* buf, size_t bufSize) {
+  size_t i = 0;
+  while (i < bufSize - 1) {
+    const int ch = scanner.readByte();
+    if (ch < 0) return -1;  // EOF or I/O error
+    if (ch == 0) {
+      buf[i] = '\0';
+      return static_cast<int>(i);
+    }
+    buf[i++] = static_cast<char>(ch);
+  }
+  // Word too long for buffer — consume remaining bytes to stay in sync
+  buf[bufSize - 1] = '\0';
+  int ch;
+  do {
+    ch = scanner.readByte();
   } while (ch > 0);
   return static_cast<int>(bufSize - 1);
 }
@@ -732,18 +825,17 @@ DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const
 
   if (cbs.onProgress) cbs.onProgress(cbs.ctx, 70);
 
-  idx.seekSet(startByte);
-
   // No idx.close() on any exit below: the handle belongs to the ctx and the next probe in a
   // stem sequence reuses it. It closes with the ctx (DESTRUCTOR_CLOSES_FILE=1).
-  while (static_cast<uint32_t>(idx.position()) < endByte) {
+  IdxScanner scan(idx, startByte);
+  while (scan.position() < endByte) {
     if (cbs.shouldCancel && cbs.shouldCancel(cbs.ctx)) return result;
 
-    int len = readWordInto(idx, wordBuf, sizeof(wordBuf));
+    int len = readWordInto(scan, wordBuf, sizeof(wordBuf));
     if (len < 0) break;
 
     uint8_t suffix[8];
-    if (idx.read(suffix, 8) != 8) break;
+    if (!scan.readBytes(suffix, 8)) break;
 
     int cmp = cistrcmp(wordBuf, word.c_str());
     if (cmp == 0) {
@@ -812,13 +904,13 @@ DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const
       // dict-lookup-session suite.
       SdDebugLog::log("DICT", "locate: widened scan start, window %u-%u (%uB) for '%s'", (unsigned)wideStart,
                       (unsigned)wideEnd, (unsigned)wideBytes, word.c_str());
-      idx.seekSet(wideStart);
-      while (static_cast<uint32_t>(idx.position()) < wideEnd) {
+      scan.seek(wideStart);
+      while (scan.position() < wideEnd) {
         if (cbs.shouldCancel && cbs.shouldCancel(cbs.ctx)) break;
-        const int len = readWordInto(idx, wordBuf, sizeof(wordBuf));
+        const int len = readWordInto(scan, wordBuf, sizeof(wordBuf));
         if (len < 0) break;
         uint8_t suffix[8];
-        if (idx.read(suffix, 8) != 8) break;
+        if (!scan.readBytes(suffix, 8)) break;
         if (len == 0 || cistrcmp(wordBuf, word.c_str()) != 0) continue;
 
         result.offset = (static_cast<uint32_t>(suffix[0]) << 24) | (static_cast<uint32_t>(suffix[1]) << 16) |
@@ -867,22 +959,22 @@ std::string Dictionary::wordAtOrdinal(const std::string& folderPath, uint32_t or
     }
   }
 
-  idx.seekSet(pageStartByte);
+  IdxScanner scan(idx, pageStartByte);
 
   // Skip `withinPage` entries to reach the target
   for (uint32_t i = 0; i < withinPage; i++) {
-    if (readWordInto(idx, wordBuf, sizeof(wordBuf)) < 0) {
+    if (readWordInto(scan, wordBuf, sizeof(wordBuf)) < 0) {
       idx.close();
       return "";
     }
     uint8_t skip[8];
-    if (idx.read(skip, 8) != 8) {
+    if (!scan.readBytes(skip, 8)) {
       idx.close();
       return "";
     }
   }
 
-  int len = readWordInto(idx, wordBuf, sizeof(wordBuf));
+  int len = readWordInto(scan, wordBuf, sizeof(wordBuf));
   idx.close();
   if (len < 0) return "";
   return std::string(wordBuf, static_cast<size_t>(len));
@@ -904,29 +996,35 @@ std::string Dictionary::resolveAltForm(const std::string& word, const char* cach
 
   resolveScanBounds(dp.synOftCspt().c_str(), dp.synOft().c_str(), syn, synFileSize, word.c_str(), &startByte, &endByte);
 
-  syn.seekSet(startByte);
+  // The .idx ordinal the matching .syn entry points at; -1 until the scan finds one.
+  // Resolved AFTER the scanner is gone, not inside the loop: wordAtOrdinal opens a scanner of
+  // its own, and IdxScanner shares one static window (as wordBuf does), so two live scanners
+  // must never both be read from.
+  int64_t originalIdx = -1;
+  {
+    IdxScanner scan(syn, startByte);
+    while (scan.position() < endByte) {
+      int len = readWordInto(scan, wordBuf, sizeof(wordBuf));
+      if (len < 0) break;
 
-  while (static_cast<uint32_t>(syn.position()) < endByte) {
-    int len = readWordInto(syn, wordBuf, sizeof(wordBuf));
-    if (len < 0) break;
+      uint8_t idxBuf[4];
+      if (!scan.readBytes(idxBuf, 4)) break;
 
-    uint8_t idxBuf[4];
-    if (syn.read(idxBuf, 4) != 4) break;
+      int cmp = cistrcmp(wordBuf, word.c_str());
+      if (cmp == 0) {
+        // Big-endian original word index in .idx
+        originalIdx = (static_cast<uint32_t>(idxBuf[0]) << 24) | (static_cast<uint32_t>(idxBuf[1]) << 16) |
+                      (static_cast<uint32_t>(idxBuf[2]) << 8) | static_cast<uint32_t>(idxBuf[3]);
+        break;
+      }
 
-    int cmp = cistrcmp(wordBuf, word.c_str());
-    if (cmp == 0) {
-      // Big-endian original word index in .idx
-      uint32_t originalIdx = (static_cast<uint32_t>(idxBuf[0]) << 24) | (static_cast<uint32_t>(idxBuf[1]) << 16) |
-                             (static_cast<uint32_t>(idxBuf[2]) << 8) | static_cast<uint32_t>(idxBuf[3]);
-      syn.close();
-      return wordAtOrdinal(folderPath, originalIdx);
+      if (cmp > 0) break;
     }
-
-    if (cmp > 0) break;
   }
 
   syn.close();
-  return "";
+  if (originalIdx < 0) return "";
+  return wordAtOrdinal(folderPath, static_cast<uint32_t>(originalIdx));
 }
 
 // ---------------------------------------------------------------------------
@@ -1161,6 +1259,8 @@ std::vector<std::string> Dictionary::findSimilar(const std::string& word, int ma
   const uint32_t scanStart = (centerStart > PAGE_RADIUS * pageSize) ? (centerStart - PAGE_RADIUS * pageSize) : 0;
   const uint32_t scanEnd = std::min(idxFileSize, centerEnd + PAGE_RADIUS * pageSize);
 
+  uint32_t scanFrom = scanStart;
+
   if (hasOft) {
     // Snap scanStart back to the true page boundary containing it via binary search.
     // Re-use findPageBounds with the first word of the scan region as target would be complex;
@@ -1185,9 +1285,7 @@ std::vector<std::string> Dictionary::findSimilar(const std::string& word, int ma
     }
     oft.close();
 
-    idx.seekSet(snappedStart);
-  } else {
-    idx.seekSet(scanStart);
+    scanFrom = snappedStart;
   }
 
   int maxDist = std::max(2, static_cast<int>(word.size()) / 3 + 1);
@@ -1199,12 +1297,13 @@ std::vector<std::string> Dictionary::findSimilar(const std::string& word, int ma
   std::vector<Candidate> candidates;
   candidates.reserve(static_cast<size_t>(maxResults) * 4);
 
-  while (static_cast<uint32_t>(idx.position()) < scanEnd) {
-    int len = readWordInto(idx, wordBuf, sizeof(wordBuf));
+  IdxScanner scan(idx, scanFrom);
+  while (scan.position() < scanEnd) {
+    int len = readWordInto(scan, wordBuf, sizeof(wordBuf));
     if (len < 0) break;
 
     uint8_t skip[8];
-    if (idx.read(skip, 8) != 8) break;
+    if (!scan.readBytes(skip, 8)) break;
 
     if (len == 0) continue;
     if (cistrcmp(wordBuf, word.c_str()) == 0) continue;

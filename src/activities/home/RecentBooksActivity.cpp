@@ -25,6 +25,8 @@ constexpr unsigned long LONG_PRESS_MS = 1000;
 RecentBooksActivity::RecentBooksActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
     : UiListActivity("RecentBooks", renderer, mappedInput, /*wantsTouchLongPress=*/true) {}
 
+bool RecentBooksActivity::usesBodyLabel() const { return mappedInput.hasTouch(); }
+
 void RecentBooksActivity::loadRecentBooks() {
   recentBooks = RECENT_BOOKS.getBooks();
   rebuildRowItems();
@@ -46,22 +48,23 @@ void RecentBooksActivity::rebuildRowItems() {
   }
 
   // One SD pass for every CJK title/author on the screen; repaints then hit the resident
-  // tables instead of re-reading per string. Titles draw bold and authors regular, so they
-  // need separate per-style prewarms. Getter form: no concatenated copy, whose bare-new
-  // growth is what abort()s under heap pressure. See GfxRenderer::prewarmFallbackText().
+  // tables instead of re-reading per string. Authors draw bold and titles regular (see
+  // buildScreen), so they need separate per-style prewarms, and the title line follows the
+  // same font branch the rows are drawn with. Getter form: no concatenated copy, whose
+  // bare-new growth is what abort()s under heap pressure. See GfxRenderer::prewarmFallbackText().
   const auto count = static_cast<uint32_t>(recentBooks.size());
   renderer.prewarmFallbackText(
-      uiScaleSpec().smallFontId,
+      usesBodyLabel() ? uiScaleSpec().bodyFontId : uiScaleSpec().smallFontId,
       [](const void* ctx, uint32_t i) -> const char* {
         return (*static_cast<const std::vector<RecentBook>*>(ctx))[i].title.c_str();
       },
-      &recentBooks, count, EpdFontFamily::BOLD);
+      &recentBooks, count);
   renderer.prewarmFallbackText(
       uiScaleSpec().smallFontId,
       [](const void* ctx, uint32_t i) -> const char* {
         return (*static_cast<const std::vector<RecentBook>*>(ctx))[i].author.c_str();
       },
-      &recentBooks, count);
+      &recentBooks, count, EpdFontFamily::BOLD);
 }
 
 bool RecentBooksActivity::moveSelectedUp() {
@@ -77,6 +80,12 @@ bool RecentBooksActivity::moveSelectedUp() {
     nav.selected--;
     RECENT_BOOKS.saveToFile();
     loadRecentBooks();
+    // The rows swapped under the published interaction table, so a tap arriving
+    // before the next render would activate by the pre-move index; and without
+    // follow() the moved row can walk off the top of the viewport, which just
+    // looks like the book disappearing.
+    closeRouting();
+    nav.follow(listCount());
   }
   requestUpdate();
   return true;
@@ -91,6 +100,8 @@ bool RecentBooksActivity::moveSelectedDown() {
     nav.selected++;
     RECENT_BOOKS.saveToFile();
     loadRecentBooks();
+    closeRouting();
+    nav.follow(listCount());
   }
   requestUpdate();
   return true;
@@ -193,37 +204,52 @@ bool RecentBooksActivity::handleButtons() {
   // that follows SETTINGS.displayOrientation); Left/Right are reserved for
   // reordering above. Upstream has neither gesture and just returns false here.
   const int listSize = static_cast<int>(recentBooks.size());
+  bool consumed = false;
 
   // Cursor moves on the Up/Down side buttons only — Left/Right are reserved for
   // reordering above, so they are deliberately excluded from navigation here.
   // Single-step only (no continuous page-jump): holding side Up/Down is
   // reserved for the display-orientation-cycle gesture instead.
+  // moveSelectionTo (not a bare nav.selected write): it takes the render lock
+  // and pulls the viewport to the new selection, which a raw write does not.
   switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Down)) {
     case ReaderUtils::SideNavAction::STEP:
-      nav.selected = ButtonNavigator::nextIndex(nav.selected, listSize);
-      requestUpdate();
+      moveSelectionTo(ButtonNavigator::nextIndex(nav.selected, listSize));
+      consumed = true;
       break;
     case ReaderUtils::SideNavAction::ROTATE:
       ReaderUtils::cycleDisplayOrientation(renderer, -1);
       requestUpdate();
+      consumed = true;
       break;
     case ReaderUtils::SideNavAction::NONE:
       break;
   }
   switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Up)) {
     case ReaderUtils::SideNavAction::STEP:
-      nav.selected = ButtonNavigator::previousIndex(nav.selected, listSize);
-      requestUpdate();
+      moveSelectionTo(ButtonNavigator::previousIndex(nav.selected, listSize));
+      consumed = true;
       break;
     case ReaderUtils::SideNavAction::ROTATE:
       ReaderUtils::cycleDisplayOrientation(renderer, 1);
       requestUpdate();
+      consumed = true;
       break;
     case ReaderUtils::SideNavAction::NONE:
       break;
   }
-  return false;
+  // false when nothing fired, so touch and swipe still reach the rest of loop().
+  return consumed;
 }
+
+// This screen owns all four navigable buttons itself (handleButtons): side
+// Up/Down step or rotate, front Left/Right reorder. The base tail would claim
+// the same four — its next/previous sets are {Down, Right} / {Up, Left} — and
+// on a different edge: it steps on RELEASE where resolveSideNavAction's default
+// branch steps on PRESS, so every side tap moved the cursor twice, and holding
+// Left/Right page-jumped the cursor before the release reordered whatever book
+// had scrolled under it.
+void RecentBooksActivity::navigateButtons() {}
 
 void RecentBooksActivity::promptRemoveBook(const std::string& path, const std::string& title) {
   auto handler = [this, path](const ActivityResult& res) {
@@ -277,15 +303,22 @@ void RecentBooksActivity::buildScreen(UiScreen& screen) {
   props.action = ACTION_ROW;
   // Tap opens; long-press prompts removal (physical buttons stay in loop()).
   props.inputMask = fui::InputTouch | fui::InputLongPress;
-  // Titles in the small font so more of a long title fits on the line; the row
-  // height stays on the theme cadence. Bold keeps the title/author hierarchy
-  // and doubles as the caller-owned marker: an all-default smallText fails
-  // textStyleUnset and Screen::list() would substitute bodyText back
-  // (FONT_SLOT_SMALL is 0). No maxLines=2 here: on subtitle rows the label
-  // band is one line tall and a wrapped title would collide with the author.
-  fui::TextStyle label = screen.theme().smallText;
-  label.bold = true;
-  props.labelText = label;
+  // Book rows read exactly like the OPDS browser's (buildBrowsingScreen): the
+  // title on the first line, the author under it, and only the SHORT line bold
+  // — bold glyphs are wider, so the title stays regular and fits more
+  // characters before it ellipsizes. Both lines keep the default maxLines, so
+  // a row is exactly two lines, never three (a wrapped title would collide
+  // with the author anyway: the label band is one line tall).
+  props.labelText = usesBodyLabel() ? screen.theme().bodyText : screen.theme().smallText;
+  props.subtitleText = screen.theme().smallText;
+  props.subtitleText.bold = true;
+  // Both styles are final from here: textStylesExplicit stops Screen::list()
+  // from substituting the larger bodyText back over an all-default smallText,
+  // which it cannot tell apart from "caller left this unset".
+  props.textStylesExplicit = true;
+  // Minimum air around the two-line block for themes whose row height spares
+  // none of its own (see ListProps::subtitleRowPadding).
+  props.subtitleRowPadding = screen.theme().spaceMd;
   syncListViewport(screen, props, /*hasSubtitle=*/true);
   screen.list(props);
 }

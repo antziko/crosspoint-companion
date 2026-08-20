@@ -27,7 +27,6 @@
 #include "SdCardFontSystem.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
-#include "util/DictStopwords.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
 #include "util/DictionaryRegistry.h"
@@ -284,15 +283,15 @@ void DictionaryDefinitionActivity::onEnter() {
   // any glyph-miss I/O the render issues both serialise on HalStorage's mutex by construction.
   requestUpdate(true);
   // Now genuinely concurrent with the refresh on the render task.
-  LookupHistory::addWordIf(cachePath, historyWord, historyStatus, recordHistory);
+  const LookupHistory::WriteResult initialWrite =
+      LookupHistory::addWordIf(cachePath, historyWord, historyStatus, recordHistory);
 
-  // Seed the back-nav chain. The initial word is the newest history entry iff it
-  // was just logged (same condition addWordIf applies internally, including the
-  // stopword filter — a filtered word is NOT recorded, so it has no history slot).
+  // Seed the back-nav chain. The initial word is the newest history entry iff that write
+  // actually landed — ask the write rather than re-deriving the conditions it applies
+  // (history disabled, empty word, the stopword filter, an SD failure). A word with no
+  // history slot cannot be referenced by an index, hence -1.
   chain_.reset(SETTINGS.getLookupHistoryCapValue());
-  const bool initialLogged =
-      recordHistory && !historyWord.empty() && !cachePath.empty() && !DictStopwords::isStopword(historyWord);
-  chain_.setCurrentHistIndex(initialLogged ? 0 : -1);
+  chain_.setCurrentHistIndex(initialWrite.wrote ? 0 : -1);
 }
 
 void DictionaryDefinitionActivity::onExit() {
@@ -1033,9 +1032,23 @@ void DictionaryDefinitionActivity::revertDictSwitchIfPending() {
   // Gated on the flag: a plain in-definition word lookup can also be cancelled or come
   // back not-found, and must not undo an override the user set earlier and is happy with.
   if (!dictSwitchInProgress_) return;
-  Dictionary::setSessionDictPath(prevSessionDict_.c_str());
+  if (prevSessionDictWasPromotion_) {
+    Dictionary::promoteFallbackDictPath(prevSessionDict_.c_str());
+  } else {
+    Dictionary::setSessionDictPath(prevSessionDict_.c_str());
+  }
   dictSwitchInProgress_ = false;
+  prevSessionDictWasPromotion_ = false;
   prevSessionDict_.clear();
+}
+
+void DictionaryDefinitionActivity::restoreChainBackIfPending() {
+  if (!chainBackNavInProgress) return;
+  chainBackNavInProgress = false;
+  // Puts the level back. The current history index needs no repair: pop() leaves it
+  // alone, and the word on screen never changed.
+  chain_.unpop(pendingBack_);
+  pendingBack_ = {};
 }
 
 bool DictionaryDefinitionActivity::handleDictSwitch() {
@@ -1099,6 +1112,9 @@ bool DictionaryDefinitionActivity::handleDictSwitch() {
   }
 
   prevSessionDict_ = current;
+  // A fallback promotion is scoped to the entry on screen; restoring it as an explicit
+  // path would make it outlive that entry, which is exactly what the scoping prevents.
+  prevSessionDictWasPromotion_ = Dictionary::sessionPathIsFallbackPromotion();
   dictSwitchReleaseConsumed_ = true;
   dictSwitchInProgress_ = true;
   Dictionary::setSessionDictPath(dictionaryRegistry.getEntries()[nextIdx].basePath.c_str());
@@ -1117,24 +1133,27 @@ bool DictionaryDefinitionActivity::handleDictSwitch() {
 void DictionaryDefinitionActivity::loop() {
   // --- Controller active (LookingUp / AltFormPrompt / NotFound) ---
   if (controller.isActive()) {
-    switch (controller.handleInput()) {
+    const DictionaryLookupController::LookupEvent event = controller.handleInput();
+    // A miss the controller recorded (DictionaryLookupController::handleLookupFailed) grew the
+    // history log without any navigation, so every chain index moved. Re-index before
+    // anything reads them, or the next Back resolves one slot too new.
+    if (const LookupHistory::WriteResult missWrite = controller.takeHistoryWrite(); missWrite.wrote) {
+      chain_.onHistoryWrite(missWrite.prevIndex);
+    }
+    switch (event) {
       case DictionaryLookupController::LookupEvent::FoundDefinition: {
         const bool wasBackNav = chainBackNavInProgress;
         // A dictionary switch re-resolves the SAME word, so it is not navigation:
         // no chain entry, no history write, no page restore. It only re-wraps.
         const bool wasDictSwitch = dictSwitchInProgress_;
-        // Must match addWordIf exactly (incl. stopword filter) so the chain's
-        // back-nav indices stay in lockstep with what actually lands in history.
-        const bool willLog = !wasBackNav && !wasDictSwitch && controller.getRecordHistory() &&
-                             !DictStopwords::isStopword(controller.getLookupWord());
-        if (!wasBackNav && !wasDictSwitch) {
-          // Forward: push a back-entry for the word being left (current headword,
-          // on currentPage), referencing its history position.
-          chain_.onForward(static_cast<uint16_t>(currentPage), willLog);
-        }
+        // The page the word being left is on, captured before wrapText() below resets it.
+        // The chain entry for it is pushed after the history write, which is what decides
+        // how the indices move.
+        const uint16_t leftOnPage = static_cast<uint16_t>(currentPage);
         chainBackNavInProgress = false;
         dictSwitchInProgress_ = false;
         prevSessionDict_.clear();
+        prevSessionDictWasPromotion_ = false;
         headword = controller.getFoundWord();
         foundLocation = controller.getFoundLocation();
         // A chained lookup is a new definition, so it re-measures. The other stamp site is
@@ -1155,15 +1174,24 @@ void DictionaryDefinitionActivity::loop() {
         // every field render() reads is settled by wrapText()/loadPage() above, and the switch
         // returns straight after this case with nothing else touched.
         requestUpdate(true);
-        // Chain-forward records; chain-back-nav does not.
-        LookupHistory::addWordIf(cachePath, controller.getLookupWord(),
-                                 DictionaryLookupController::toHistStatus(controller.getFoundStatus()), willLog);
+        // Chain-forward records; chain-back-nav and dictionary switches do not (both
+        // re-resolve a word that is already in history).
+        const LookupHistory::WriteResult write =
+            LookupHistory::addWordIf(cachePath, controller.getLookupWord(),
+                                     DictionaryLookupController::toHistStatus(controller.getFoundStatus()),
+                                     !wasBackNav && !wasDictSwitch && controller.getRecordHistory());
+        // Forward: push a back-entry for the word being left, referencing its history
+        // position. Driven by what the write actually did rather than by a re-derived
+        // "will this be logged?" — the log skips stopwords and MOVES a word it already
+        // holds, and each of those shifts the indices differently.
+        if (!wasBackNav && !wasDictSwitch) chain_.onForward(leftOnPage, write.wrote, write.prevIndex);
         break;
       }
       case DictionaryLookupController::LookupEvent::NotFoundDismissedBack:
         // The previous definition is still on screen. If a dictionary switch is what
         // failed, put the old dictionary back so the footer label and the body agree.
         revertDictSwitchIfPending();
+        restoreChainBackIfPending();
         requestUpdate();
         break;
       case DictionaryLookupController::LookupEvent::NotFoundDismissedDone:
@@ -1171,11 +1199,13 @@ void DictionaryDefinitionActivity::loop() {
         // override — the user's dictionary choice stands for the rest of the session.
         dictSwitchInProgress_ = false;
         prevSessionDict_.clear();
+        prevSessionDictWasPromotion_ = false;
         setResult(ActivityResult{});
         finish();
         break;
       case DictionaryLookupController::LookupEvent::Cancelled:
         revertDictSwitchIfPending();
+        restoreChainBackIfPending();
         isWordSelectMode = false;
         navigator.reset();
         requestUpdate();

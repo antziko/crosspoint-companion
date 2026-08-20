@@ -77,6 +77,9 @@ class DictionaryDefinitionActivity final : public Activity {
   // popup. Without it the footer would name dictionary B while the body still shows
   // dictionary A's definition.
   std::string prevSessionDict_;
+  // Whether prevSessionDict_ was a transient fallback promotion rather than an explicit
+  // choice, so undoing the switch restores it with the lifetime it had.
+  bool prevSessionDictWasPromotion_ = false;
   // Swallows the Confirm release that follows the long-press switch, so it doesn't
   // also fall through and open word-select. Same shape as
   // WordSelectNavigator::handleMultiSelectInput's confirmReleaseConsumed.
@@ -215,5 +218,11 @@ class DictionaryDefinitionActivity final : public Activity {
   // pending — an ordinary word lookup that comes back not-found must not clear an
   // override the user set earlier.
   void revertDictSwitchIfPending();
+  // Undo a back-navigation that never produced a definition. The chain entry is popped
+  // before the re-lookup starts, so a miss or a cancel would otherwise consume that level
+  // AND leave chainBackNavInProgress set — which makes the next forward lookup restore
+  // this entry's stale page and history index instead of opening at page 0. No-op unless
+  // a back-navigation is pending. Same shape as revertDictSwitchIfPending() above.
+  void restoreChainBackIfPending();
   int getLineHeight() const;
 };

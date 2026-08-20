@@ -126,14 +126,19 @@ struct CountCtx {
   const std::string* dropWord;  // nullptr = count every line
   int count;
   bool dupSeen = false;  // set when a line matching dropWord is encountered
+  int lines = 0;         // every line, dropWord included
+  int dupAt = -1;        // file index (oldest = 0) of the last dropWord line
 };
 
 bool countLine(void* ctx, const char* line, int len) {
   auto* c = static_cast<CountCtx*>(ctx);
-  if (!c->dropWord || !lineWordEquals(line, len, *c->dropWord))
+  const int ordinal = c->lines++;
+  if (!c->dropWord || !lineWordEquals(line, len, *c->dropWord)) {
     c->count++;
-  else
+  } else {
     c->dupSeen = true;
+    c->dupAt = ordinal;  // last wins: the newest copy is the one being replaced
+  }
   return true;
 }
 
@@ -255,12 +260,13 @@ void LookupHistory::observeVersion(const std::string& cachePath, uint32_t v) {
   if (v > loadCounter(cachePath)) writeCounterFile(verFilePath(cachePath), v);
 }
 
-int LookupHistory::addWord(const std::string& cachePath, const std::string& word, Status status) {
+int LookupHistory::addWord(const std::string& cachePath, const std::string& word, Status status, int* outPrevIndex) {
   if (word.empty()) return 0;
-  return addWordVer(cachePath, word, status, nextVersion(cachePath));
+  return addWordVer(cachePath, word, status, nextVersion(cachePath), outPrevIndex);
 }
 
-int LookupHistory::addWordVer(const std::string& cachePath, const std::string& word, Status status, uint32_t version) {
+int LookupHistory::addWordVer(const std::string& cachePath, const std::string& word, Status status, uint32_t version,
+                              int* outPrevIndex) {
   if (word.empty()) return 0;
 
   const std::string path = filePath(cachePath);
@@ -270,6 +276,9 @@ int LookupHistory::addWordVer(const std::string& cachePath, const std::string& w
   // note whether `word` is already present.
   CountCtx cc{&word, 0};
   forEachLine(path, countLine, &cc);  // missing file -> 0 survivors
+  // Free: pass 1 already walked every line. Newest-first, so callers tracking positions
+  // (LookupChain) can tell a move from an append without a second read.
+  if (outPrevIndex) *outPrevIndex = cc.dupSeen ? cc.lines - 1 - cc.dupAt : -1;
 
   const bool unlimited = SETTINGS.isLookupHistoryUnlimited();
   const int cap = SETTINGS.getLookupHistoryCapValue();
@@ -346,10 +355,19 @@ int LookupHistory::addWordVer(const std::string& cachePath, const std::string& w
   return cc.count - evictSkip + 1;
 }
 
-void LookupHistory::addWordIf(const std::string& cachePath, const std::string& word, Status status, bool enabled) {
-  if (!enabled || word.empty() || cachePath.empty()) return;
-  if (DictStopwords::isStopword(word)) return;  // skip common closed-class words (see DictStopwords.h)
-  addWord(cachePath, word, status);
+LookupHistory::WriteResult LookupHistory::addWordIf(const std::string& cachePath, const std::string& word,
+                                                    Status status, bool enabled) {
+  WriteResult result;
+  if (!enabled || word.empty() || cachePath.empty()) return result;
+  if (DictStopwords::isStopword(word)) return result;  // skip common closed-class words (see DictStopwords.h)
+  int prevIndex = -1;
+  // >0 on success (the new entry count); -1 on I/O failure, where the log is unchanged
+  // and a caller must NOT re-index.
+  if (addWord(cachePath, word, status, &prevIndex) > 0) {
+    result.wrote = true;
+    result.prevIndex = prevIndex;
+  }
+  return result;
 }
 
 std::vector<LookupHistory::Entry> LookupHistory::load(const std::string& cachePath) {

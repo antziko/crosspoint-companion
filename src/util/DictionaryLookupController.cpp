@@ -53,8 +53,15 @@ void DictionaryLookupController::startLookup(const std::string& word, bool recor
   lookupCancelled = false;
   lookupCancelRequested = false;
   recordHistory_ = recordHistory;
+  historyWrite_ = {};
+  // A fallback promotion is scoped to the entry it answered: this lookup runs against the
+  // dictionary the user actually configured (or explicitly switched to), not against
+  // whatever a previous miss happened to land on. Held, not discarded — if this lookup
+  // fails, the promoted entry stays on screen and setNotFound() puts its promotion back.
+  suspendedPromotion_ = Dictionary::takeFallbackPromotion();
   fallbackDictPath_.clear();
   fallbackHops_ = 0;
+  stemWord_.clear();
   state = LookupState::LookingUp;
   // CLEANUP: on Auto-only commit, delete only this line (gate below stays — it's the Auto check)
   const bool showPopup = shouldShowPopup();
@@ -103,7 +110,17 @@ void DictionaryLookupController::startLookupAsSuggestion(const std::string& word
   startLookup(word);
 }
 
+void DictionaryLookupController::restoreSuspendedPromotion() {
+  if (suspendedPromotion_.empty()) return;
+  Dictionary::promoteFallbackDictPath(suspendedPromotion_.c_str());
+  suspendedPromotion_.clear();
+}
+
 void DictionaryLookupController::setNotFound() {
+  // Nothing new reaches the screen, so the definition still on it is the promoted
+  // dictionary's. Put that promotion back, or the header would name one dictionary while
+  // the body shows another's entry — the disagreement the promotion exists to prevent.
+  restoreSuspendedPromotion();
   state = LookupState::NotFound;
   owner.requestUpdate();
 }
@@ -137,24 +154,36 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
 
       if (lookupCancelled) {
         nextIsSuggestion = false;
+        restoreSuspendedPromotion();  // same reason as setNotFound(): the old entry stays on screen
         logLookupOutcome("cancelled");
         return LookupEvent::Cancelled;
       }
 
       if (foundLocation.found) {
-        foundWord = lookupWord;
-        foundStatus = nextIsSuggestion ? FoundStatus::Suggestion : FoundStatus::Direct;
+        // stemWord_ is set only when the exact word missed and a stem variant answered — see
+        // runLookup(). A suggestion the user picked from the list keeps its own status either
+        // way: they chose that spelling, so reporting it as a stem would be wrong.
+        const bool viaStem = !stemWord_.empty();
+        foundWord = viaStem ? stemWord_ : lookupWord;
+        foundStatus = nextIsSuggestion ? FoundStatus::Suggestion : (viaStem ? FoundStatus::Stem : FoundStatus::Direct);
         nextIsSuggestion = false;
-        // A same-category fallback answered: promote that dictionary to the session one, exactly
-        // as a long-press switch does. The definition itself streams from foundLocation.folderPath
-        // either way, but the header name, the long-press cycle origin and the dictionary a
-        // flashcard records each re-read activeDictPath() independently — without this they would
-        // all name the configured dictionary while showing another one's entry.
+        // A same-category fallback answered: promote that dictionary while its entry is on
+        // screen. The definition itself streams from foundLocation.folderPath either way, but
+        // the header name, the long-press cycle origin and the dictionary a flashcard records
+        // each re-read activeDictPath() independently — without this they would all name the
+        // configured dictionary while showing another one's entry.
+        //
+        // Scoped to THIS entry, not to the reading session: the next startLookup takes it back
+        // so a search the user starts afterwards runs against the dictionary they configured.
+        // A long-press switch is the opposite — an explicit choice, and it persists.
         //
         // UI task, and the lookup task is already joined by the task.reset() above: that is the
-        // no-lookup-in-flight invariant setSessionDictPath requires (Dictionary.h).
-        if (!fallbackDictPath_.empty()) Dictionary::setSessionDictPath(fallbackDictPath_.c_str());
-        logLookupOutcome(fallbackDictPath_.empty() ? "direct" : "fallback");
+        // no-lookup-in-flight invariant the session-path setters require (Dictionary.h).
+        if (!fallbackDictPath_.empty()) Dictionary::promoteFallbackDictPath(fallbackDictPath_.c_str());
+        // A promotion suspended for this lookup belonged to the entry just replaced; the one
+        // above (or no promotion at all) stands from here.
+        suspendedPromotion_.clear();
+        logLookupOutcome(!fallbackDictPath_.empty() ? "fallback" : (viaStem ? "stem" : "direct"));
         return LookupEvent::FoundDefinition;
       }
 
@@ -170,27 +199,7 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
         return LookupEvent::None;
       }
 
-      // Try stem variants (locate only — no definition loaded into RAM).
-      // One ctx for the whole probe sequence: opening per stem cost four SD opens and ~six
-      // transient path strings each, which is heap churn this screen cannot afford. The ctx
-      // is local to this UI-task call and never shared with the lookup task.
-      auto stems = Dictionary::getStemVariants(lookupWord);
-      if (!stems.empty()) {
-        Dictionary::LookupCtx ctx;
-        if (Dictionary::openLookupCtx(ctx, cachePath.c_str())) {
-          for (const auto& stem : stems) {
-            auto loc = Dictionary::locateIn(ctx, stem);
-            if (loc.found) {
-              foundWord = stem;
-              foundLocation = std::move(loc);
-              foundStatus = nextIsSuggestion ? FoundStatus::Suggestion : FoundStatus::Stem;
-              nextIsSuggestion = false;
-              logLookupOutcome("stem");
-              return LookupEvent::FoundDefinition;
-            }
-          }
-        }
-      }
+      // Stem variants ran on the lookup task, before the group sweep — see runLookup().
 
       // Try alt forms
       if (Dictionary::hasAltForms(cachePath.c_str())) {
@@ -376,7 +385,9 @@ void DictionaryLookupController::handleLookupFailed() {
   setNotFound();
   // Record after setNotFound() so the popup's requestUpdate() has kicked the render task —
   // the SD write below overlaps the e-ink refresh on the main task.
-  LookupHistory::addWordIf(cachePath, lookupWord, LookupHistory::Status::NotFound, recordHistory_);
+  // Captured, not discarded: this write moves every position in the log, and the owner's
+  // back-navigation chain addresses the log by position (see takeHistoryWrite).
+  historyWrite_ = LookupHistory::addWordIf(cachePath, lookupWord, LookupHistory::Status::NotFound, recordHistory_);
 }
 
 void DictionaryLookupController::progressCallback(void* ctx, int percent) {
@@ -412,8 +423,10 @@ DictLocation DictionaryLookupController::sweepGroup(Dictionary::LookupCtx& ctx, 
   if (startIdx < 0) return primary;
 
   const auto& entries = dictionaryRegistry.getEntries();
+  const uint32_t sweepStartMs = millis();
   int idx = startIdx;
   int hops = 0;
+  int skipped = 0;
   while (true) {
     if (cbs.shouldCancel && cbs.shouldCancel(cbs.ctx)) return primary;
     idx = dictionaryRegistry.nextEntryIndexInGroup(idx);
@@ -422,17 +435,43 @@ DictLocation DictionaryLookupController::sweepGroup(Dictionary::LookupCtx& ctx, 
     // Reuses the caller's ctx: openLookupCtxAt resets it first, so the previous hop's handles are
     // released before this one opens and only ever one dictionary is open at a time.
     if (!Dictionary::openLookupCtxAt(ctx, entries[idx].basePath.c_str())) continue;
+    // openLookupCtxAt tries .idx.oft.cspt then .idx.oft, so no page index here proves neither
+    // sidecar exists — and without one, locateIn's bounds stay at 0..idxFileSize
+    // (Dictionary.cpp: resolveScanBoundsIn returns immediately) and it scans the entire index.
+    // That measured 7.5-10.2s per lookup on a ~1.4MB .idx, on the critical path of every miss,
+    // and logged nothing because the widened-retry line only fires when widening widens.
+    //
+    // A fallback hop is opportunistic, so decline it rather than pay that. The active
+    // dictionary is deliberately NOT protected this way: scanning the one the user configured
+    // is correct behaviour. The fix for the skipped dictionary is Prepare, which builds both
+    // sidecars — hence naming it in the summary below.
+    if (!ctx.hasPageIndex) {
+      skipped++;
+      continue;
+    }
+    const uint32_t hopStartMs = millis();
     DictLocation loc = Dictionary::locateIn(ctx, lookupWord, cbs);
+    const uint32_t hopMs = millis() - hopStartMs;
+    // Only slow hops, so this stays quiet in normal use. An indexed dictionary answers a probe
+    // in tens of milliseconds; anything near a second means that dictionary is the reason a
+    // lookup felt slow, and naming it is what turns "the dictionary is slow" into one line.
+    if (hopMs >= SLOW_HOP_LOG_MS) {
+      SdDebugLog::log("DICT", "sweep: slow hop %s %lums", entries[idx].name.c_str(), static_cast<unsigned long>(hopMs));
+    }
     if (!loc.found) continue;
     fallbackDictPath_ = entries[idx].basePath;
     fallbackHops_ = hops;
     // To SD as well as serial: which dictionary answered, and whether it stayed in the right
     // group, is only diagnosable from a device session — same reason the long-press logs here.
-    SdDebugLog::log("DICT", "fallback: %s(%s) -> %s(%s) after %d", entries[startIdx].name.c_str(),
+    SdDebugLog::log("DICT", "fallback: %s(%s) -> %s(%s) after %d, %lums", entries[startIdx].name.c_str(),
                     entries[startIdx].nameIsSt ? "st" : "other", entries[idx].name.c_str(),
-                    entries[idx].nameIsSt ? "st" : "other", hops);
+                    entries[idx].nameIsSt ? "st" : "other", hops, static_cast<unsigned long>(millis() - sweepStartMs));
     return loc;
   }
+  // The sweep is the expensive half of a missed lookup and until now said nothing when it
+  // failed. skipped>0 is the actionable part: those dictionaries need Prepare run on them.
+  SdDebugLog::log("DICT", "sweep: miss hops=%d skipped=%d %lums", hops, skipped,
+                  static_cast<unsigned long>(millis() - sweepStartMs));
   return primary;
 }
 
@@ -447,10 +486,41 @@ void DictionaryLookupController::runLookup() {
   // path would cost a second open.
   const std::string activeBase = Dictionary::activeDictPath(cachePath.c_str());
 
+  // Stem probes get cancellation but not progress: onProgress would drive the bar back to 70
+  // on every extra probe, so a word with six variants would appear to restart six times.
+  DictLookupCallbacks probeCbs;
+  probeCbs.ctx = this;
+  probeCbs.shouldCancel = &DictionaryLookupController::cancelCallback;
+
   // One ctx for the active dictionary and every fallback hop — see sweepGroup.
   Dictionary::LookupCtx ctx;
   if (Dictionary::openLookupCtxAt(ctx, activeBase.c_str())) {
     foundLocation = Dictionary::locateIn(ctx, lookupWord, cbs);
+
+    // Stems BEFORE the group sweep, and against the ctx that is already open.
+    //
+    // The other order cost 8.5-11.1s per inflected word on device: "tarps" missed in all six
+    // dictionaries of the group — including one with no page index, whose locateIn degrades to
+    // a full linear scan — and only then found "tarp" on the first stem probe here, a probe the
+    // log prices at ~440ms. Trying the user's own dictionary's stems first answers those words
+    // in under a second.
+    //
+    // It also changes which answer wins: a stem hit in the configured dictionary now outranks
+    // an exact hit in a sibling. That is the better answer as well as the faster one — the
+    // sibling is a fallback, not a peer.
+    //
+    // Reusing ctx means zero extra SD opens (the old UI-task loop opened its own), and running
+    // here rather than in handleInput() makes the probes cancellable and stops them blocking
+    // the UI task.
+    if (!foundLocation.found && !lookupCancelRequested) {
+      for (const auto& stem : Dictionary::getStemVariants(lookupWord)) {
+        DictLocation loc = Dictionary::locateIn(ctx, stem, probeCbs);
+        if (!loc.found) continue;
+        stemWord_ = stem;
+        foundLocation = std::move(loc);
+        break;
+      }
+    }
   } else {
     foundLocation = DictLocation{};
     // base is filled only when the dictionary resolved but its .idx would not open, which is what

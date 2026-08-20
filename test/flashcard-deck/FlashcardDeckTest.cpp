@@ -171,6 +171,83 @@ TEST_F(FlashcardDeckTest, LookupCountIncrementsOnReEnroll) {
   EXPECT_EQ(at(0).excerpt, "second ctx");  // empty excerpt preserved old, count still bumped
 }
 
+// Enrollment is automatic on every lookup, so a re-lookup is not a failed recall: the card
+// keeps its box and due day. Only grading it wrong in review demotes a card. Matches what
+// updateRemoteCard already does when the same re-enroll arrives from a peer.
+TEST_F(FlashcardDeckTest, ReEnrollKeepsTheReviewSchedule) {
+  FlashcardDeck::enroll(cachePath, "alpha", "first ctx");
+  FlashcardDeck::grade(cachePath, "alpha", /*correct=*/true, /*today=*/10);
+  FlashcardDeck::grade(cachePath, "alpha", /*correct=*/true, /*today=*/12);
+  FlashcardDeck::Entry before;
+  ASSERT_TRUE(findCard(cachePath, "alpha", before));
+  ASSERT_EQ(before.box, 2);
+  ASSERT_GT(before.dueDay, 0u);
+
+  FlashcardDeck::enroll(cachePath, "alpha", "second ctx");
+  FlashcardDeck::Entry after;
+  ASSERT_TRUE(findCard(cachePath, "alpha", after));
+  EXPECT_EQ(after.box, before.box);  // schedule survives
+  EXPECT_EQ(after.dueDay, before.dueDay);
+  EXPECT_EQ(after.count, 2u);                // the lookup is still recorded
+  EXPECT_GT(after.version, before.version);  // and still propagates
+  EXPECT_EQ(after.excerpt, "second ctx");
+}
+
+// --------------------------------------------------------------------------
+// re-count cooldown
+// --------------------------------------------------------------------------
+
+// A re-lookup inside the window leaves the card completely alone — no count bump, and no
+// deck rewrite (the whole point: the rewrite is the expensive half).
+TEST_F(FlashcardDeckTest, ReEnrollInsideTheWindowIsANoOp) {
+  FlashcardDeck::clearEnrollCooldown();
+  constexpr uint32_t kWindow = 5 * 60 * 1000;
+  FlashcardDeck::enroll(cachePath, "alpha", "first ctx", "", 0, /*nowMs=*/1000, kWindow);
+  const uint32_t version = at(0).version;
+
+  EXPECT_TRUE(FlashcardDeck::enroll(cachePath, "alpha", "second ctx", "", 0, /*nowMs=*/60000, kWindow));
+  EXPECT_EQ(at(0).count, 1u);
+  EXPECT_EQ(at(0).version, version);      // nothing was written, so nothing propagates
+  EXPECT_EQ(at(0).excerpt, "first ctx");  // untouched, not refreshed
+}
+
+TEST_F(FlashcardDeckTest, ReEnrollPastTheWindowCountsAgain) {
+  FlashcardDeck::clearEnrollCooldown();
+  constexpr uint32_t kWindow = 5 * 60 * 1000;
+  FlashcardDeck::enroll(cachePath, "alpha", "first ctx", "", 0, /*nowMs=*/1000, kWindow);
+  FlashcardDeck::enroll(cachePath, "alpha", "second ctx", "", 0, /*nowMs=*/1000 + kWindow, kWindow);
+  EXPECT_EQ(at(0).count, 2u);
+  EXPECT_EQ(at(0).excerpt, "second ctx");
+}
+
+// The window is keyed by book as well as word: a word looked up in one book must never
+// suppress the card another book's deck does not have yet.
+TEST_F(FlashcardDeckTest, WindowDoesNotLeakAcrossBooks) {
+  FlashcardDeck::clearEnrollCooldown();
+  constexpr uint32_t kWindow = 5 * 60 * 1000;
+  const std::string other = makeDevice();
+  FlashcardDeck::enroll(cachePath, "alpha", "book one", "", 0, /*nowMs=*/1000, kWindow);
+  FlashcardDeck::enroll(other, "alpha", "book two", "", 0, /*nowMs=*/2000, kWindow);
+
+  FlashcardDeck::Entry e;
+  ASSERT_TRUE(findCard(other, "alpha", e));  // the second book got its own card
+  EXPECT_EQ(e.excerpt, "book two");
+}
+
+// Deleting a card drops the window with it, or an immediate re-lookup would be throttled
+// against a card that no longer exists and the word would silently not come back.
+TEST_F(FlashcardDeckTest, DeleteClearsTheWindow) {
+  FlashcardDeck::clearEnrollCooldown();
+  constexpr uint32_t kWindow = 5 * 60 * 1000;
+  FlashcardDeck::enroll(cachePath, "alpha", "first ctx", "", 0, /*nowMs=*/1000, kWindow);
+  ASSERT_TRUE(FlashcardDeck::remove(cachePath, "alpha"));
+  EXPECT_EQ(FlashcardDeck::count(cachePath), 0);
+
+  FlashcardDeck::enroll(cachePath, "alpha", "back again", "", 0, /*nowMs=*/2000, kWindow);
+  EXPECT_EQ(FlashcardDeck::count(cachePath), 1);
+  EXPECT_EQ(at(0).excerpt, "back again");
+}
+
 TEST_F(FlashcardDeckTest, LookupCountSurvivesGradeAndSuspend) {
   FlashcardDeck::enroll(cachePath, "alpha", "ctx");
   FlashcardDeck::enroll(cachePath, "alpha", "ctx2");  // count -> 2
@@ -285,15 +362,15 @@ TEST_F(FlashcardDeckTest, LegacyFourFieldLineUpgradesCleanly) {
 // --------------------------------------------------------------------------
 
 TEST_F(FlashcardDeckTest, LoadWindowNewestFirst) {
-  for (const char* w : {"a", "b", "c", "d"}) FlashcardDeck::enroll(cachePath, w, "");
+  for (const char* w : {"aa", "b", "c", "d"}) FlashcardDeck::enroll(cachePath, w, "");
   FlashcardDeck::Entry win[3];
   EXPECT_EQ(FlashcardDeck::loadWindow(cachePath, 0, 3, win), 3);
   EXPECT_EQ(win[0].word, "d");  // newest
   EXPECT_EQ(win[1].word, "c");
   EXPECT_EQ(win[2].word, "b");
 
-  EXPECT_EQ(FlashcardDeck::loadWindow(cachePath, 3, 3, win), 1);  // only "a" left
-  EXPECT_EQ(win[0].word, "a");
+  EXPECT_EQ(FlashcardDeck::loadWindow(cachePath, 3, 3, win), 1);  // only "aa" left
+  EXPECT_EQ(win[0].word, "aa");
   EXPECT_EQ(FlashcardDeck::loadWindow(cachePath, 4, 3, win), 0);  // past end
 }
 
@@ -321,20 +398,20 @@ TEST_F(FlashcardDeckTest, LoadWindowWordsOnlySkipsExcerptAndChapter) {
 }
 
 TEST_F(FlashcardDeckTest, RemoveAtByFileIndex) {
-  for (const char* w : {"a", "b", "c"}) FlashcardDeck::enroll(cachePath, w, "");
+  for (const char* w : {"aa", "b", "c"}) FlashcardDeck::enroll(cachePath, w, "");
   EXPECT_TRUE(FlashcardDeck::removeAt(cachePath, 1));  // oldest=0 -> removes "b"
   EXPECT_EQ(FlashcardDeck::count(cachePath), 2);
   EXPECT_EQ(at(0).word, "c");
-  EXPECT_EQ(at(1).word, "a");
+  EXPECT_EQ(at(1).word, "aa");
   EXPECT_FALSE(FlashcardDeck::removeAt(cachePath, 5));  // out of range
 }
 
 TEST_F(FlashcardDeckTest, RemoveByWordDropsMatchingRowPreservesOrder) {
-  for (const char* w : {"a", "b", "c"}) FlashcardDeck::enroll(cachePath, w, "");
+  for (const char* w : {"aa", "b", "c"}) FlashcardDeck::enroll(cachePath, w, "");
   EXPECT_TRUE(FlashcardDeck::remove(cachePath, "b"));
   EXPECT_EQ(FlashcardDeck::count(cachePath), 2);
   EXPECT_EQ(at(0).word, "c");  // newest-first order otherwise unchanged
-  EXPECT_EQ(at(1).word, "a");
+  EXPECT_EQ(at(1).word, "aa");
 }
 
 TEST_F(FlashcardDeckTest, RemoveAbsentWordIsNoOp) {
@@ -373,7 +450,7 @@ TEST_F(FlashcardDeckTest, GradeAbsentWordIsNoOp) {
 // --------------------------------------------------------------------------
 
 TEST_F(FlashcardDeckTest, BuildSessionAllNewSelectsNewestFirst) {
-  for (const char* w : {"a", "b", "c", "d"}) FlashcardDeck::enroll(cachePath, w, "");
+  for (const char* w : {"aa", "b", "c", "d"}) FlashcardDeck::enroll(cachePath, w, "");
   uint16_t out[8];
   // All cards are new (dueDay==0). DueFirst falls through to the New tier.
   EXPECT_EQ(FlashcardDeck::buildSession(cachePath, SessionScope::DueFirst, /*today=*/10, 8, out), 4);
@@ -384,7 +461,7 @@ TEST_F(FlashcardDeckTest, BuildSessionAllNewSelectsNewestFirst) {
 }
 
 TEST_F(FlashcardDeckTest, BuildSessionDueFirstOrdersScheduledThenNew) {
-  for (const char* w : {"a", "b", "c", "d"}) FlashcardDeck::enroll(cachePath, w, "");
+  for (const char* w : {"aa", "b", "c", "d"}) FlashcardDeck::enroll(cachePath, w, "");
   // Schedule b and c as due (graded at day 5 -> due day 7).
   FlashcardDeck::grade(cachePath, "b", true, 5);
   FlashcardDeck::grade(cachePath, "c", true, 5);
@@ -400,7 +477,7 @@ TEST_F(FlashcardDeckTest, BuildSessionDueFirstOrdersScheduledThenNew) {
 }
 
 TEST_F(FlashcardDeckTest, BuildSessionRespectsCap) {
-  for (const char* w : {"a", "b", "c", "d"}) FlashcardDeck::enroll(cachePath, w, "");
+  for (const char* w : {"aa", "b", "c", "d"}) FlashcardDeck::enroll(cachePath, w, "");
   FlashcardDeck::grade(cachePath, "b", true, 5);
   FlashcardDeck::grade(cachePath, "c", true, 5);
   uint16_t out[1];
@@ -409,9 +486,9 @@ TEST_F(FlashcardDeckTest, BuildSessionRespectsCap) {
 }
 
 TEST_F(FlashcardDeckTest, BuildSessionExcludesRetired) {
-  for (const char* w : {"a", "b"}) FlashcardDeck::enroll(cachePath, w, "");
-  // Graduate "a": 6 consecutive correct.
-  for (int i = 0; i < 6; i++) FlashcardDeck::grade(cachePath, "a", true, 1);
+  for (const char* w : {"aa", "b"}) FlashcardDeck::enroll(cachePath, w, "");
+  // Graduate "aa": 6 consecutive correct.
+  for (int i = 0; i < 6; i++) FlashcardDeck::grade(cachePath, "aa", true, 1);
   EXPECT_TRUE(FlashcardDeck::isMastered(at(1).box));
 
   uint16_t out[8];
@@ -421,7 +498,7 @@ TEST_F(FlashcardDeckTest, BuildSessionExcludesRetired) {
 }
 
 TEST_F(FlashcardDeckTest, BuildSessionClockUnavailableFallsBackToAll) {
-  for (const char* w : {"a", "b", "c"}) FlashcardDeck::enroll(cachePath, w, "");
+  for (const char* w : {"aa", "b", "c"}) FlashcardDeck::enroll(cachePath, w, "");
   FlashcardDeck::grade(cachePath, "b", true, 5);  // schedules b
   uint16_t out[8];
   // today==0 (clock unavailable): DueFirst falls back to non-retired newest-first.
@@ -437,11 +514,11 @@ TEST_F(FlashcardDeckTest, BuildSessionClockUnavailableFallsBackToAll) {
 // --------------------------------------------------------------------------
 
 TEST_F(FlashcardDeckTest, ComputeStatsTalliesBoxesDueMastered) {
-  for (const char* w : {"a", "b", "c", "d", "e", "f"}) FlashcardDeck::enroll(cachePath, w, "");
-  for (int i = 0; i < 6; i++) FlashcardDeck::grade(cachePath, "a", true, 1);  // graduate a -> RETIRED
-  FlashcardDeck::grade(cachePath, "b", true, 5);                              // box1, due 7
-  FlashcardDeck::grade(cachePath, "d", true, 5);                              // box1, due 7
-  FlashcardDeck::grade(cachePath, "f", true, 10);                             // box1, due 12 (future)
+  for (const char* w : {"aa", "b", "c", "d", "e", "f"}) FlashcardDeck::enroll(cachePath, w, "");
+  for (int i = 0; i < 6; i++) FlashcardDeck::grade(cachePath, "aa", true, 1);  // graduate aa -> RETIRED
+  FlashcardDeck::grade(cachePath, "b", true, 5);                               // box1, due 7
+  FlashcardDeck::grade(cachePath, "d", true, 5);                               // box1, due 7
+  FlashcardDeck::grade(cachePath, "f", true, 10);                              // box1, due 12 (future)
   // c, e remain new (box0, due0).
 
   const FlashcardDeck::Stats s = FlashcardDeck::computeStats(cachePath, /*today=*/10);
@@ -484,12 +561,12 @@ TEST_F(FlashcardDeckTest, SuspendSetsSentinelAndPreservesContext) {
 }
 
 TEST_F(FlashcardDeckTest, SuspendPreservesOrder) {
-  for (const char* w : {"a", "b", "c"}) FlashcardDeck::enroll(cachePath, w, "");
+  for (const char* w : {"aa", "b", "c"}) FlashcardDeck::enroll(cachePath, w, "");
   EXPECT_TRUE(FlashcardDeck::suspend(cachePath, "b"));  // middle card
   EXPECT_EQ(at(0).word, "c");
   EXPECT_EQ(at(1).word, "b");  // still in place, just suspended
   EXPECT_EQ(at(1).box, FlashcardDeck::SUSPENDED);
-  EXPECT_EQ(at(2).word, "a");
+  EXPECT_EQ(at(2).word, "aa");
 }
 
 TEST_F(FlashcardDeckTest, SuspendAbsentWordIsNoOp) {
@@ -517,7 +594,7 @@ TEST_F(FlashcardDeckTest, SuspendedCardIsNotDue) {
 }
 
 TEST_F(FlashcardDeckTest, ComputeStatsCountsSuspendedSeparately) {
-  for (const char* w : {"a", "b", "c"}) FlashcardDeck::enroll(cachePath, w, "");
+  for (const char* w : {"aa", "b", "c"}) FlashcardDeck::enroll(cachePath, w, "");
   FlashcardDeck::suspend(cachePath, "b");
 
   const FlashcardDeck::Stats s = FlashcardDeck::computeStats(cachePath, /*today=*/10);
@@ -529,7 +606,7 @@ TEST_F(FlashcardDeckTest, ComputeStatsCountsSuspendedSeparately) {
 }
 
 TEST_F(FlashcardDeckTest, BuildSessionExcludesSuspended) {
-  for (const char* w : {"a", "b", "c"}) FlashcardDeck::enroll(cachePath, w, "");
+  for (const char* w : {"aa", "b", "c"}) FlashcardDeck::enroll(cachePath, w, "");
   FlashcardDeck::suspend(cachePath, "b");
   uint16_t out[8];
   // newest-first: c=0, b=1, a=2. Suspended b is dropped from normal scopes.
@@ -540,7 +617,7 @@ TEST_F(FlashcardDeckTest, BuildSessionExcludesSuspended) {
 }
 
 TEST_F(FlashcardDeckTest, BuildSessionSuspendedScopeSelectsOnlySuspended) {
-  for (const char* w : {"a", "b", "c", "d"}) FlashcardDeck::enroll(cachePath, w, "");
+  for (const char* w : {"aa", "b", "c", "d"}) FlashcardDeck::enroll(cachePath, w, "");
   FlashcardDeck::suspend(cachePath, "b");
   FlashcardDeck::suspend(cachePath, "d");  // newest-first: d=0, c=1, b=2, a=3
   uint16_t out[8];
@@ -980,6 +1057,42 @@ TEST_F(FlashcardDeckTest, BlobWithoutDictLinesStillMerges) {
   ASSERT_TRUE(findCard(peer, "alpha", e));
   EXPECT_EQ(e.excerpt, "some excerpt");
   EXPECT_EQ(e.dictHash, 0u);
+}
+
+// --- Stopword filter -----------------------------------------------------------
+//
+// Enrollment is automatic on every in-book lookup, and LookupHistory::addWordIf drops
+// closed-class function words. Without the same filter here, tapping "a" was kept out of the
+// history log and still created a card — the two per-book lists disagreeing about one lookup.
+
+TEST_F(FlashcardDeckTest, StopwordsAreNotEnrolled) {
+  for (const char* w : {"a", "the", "of", "would", "themselves"}) {
+    EXPECT_FALSE(FlashcardDeck::enroll(cachePath, w, "some sentence")) << w;
+  }
+  EXPECT_EQ(FlashcardDeck::count(cachePath), 0);
+}
+
+TEST_F(FlashcardDeckTest, StopwordFilterIsCaseInsensitiveAndSparesContentWords) {
+  EXPECT_FALSE(FlashcardDeck::enroll(cachePath, "The", "capitalised at a sentence start"));
+  // Deliberately omitted from the list because their content sense is common (DictStopwords.h).
+  EXPECT_TRUE(FlashcardDeck::enroll(cachePath, "will", "a last will and testament"));
+  EXPECT_TRUE(FlashcardDeck::enroll(cachePath, "serendipity", "pure serendipity"));
+
+  FlashcardDeck::Entry e;
+  EXPECT_FALSE(findCard(cachePath, "the", e));
+  EXPECT_TRUE(findCard(cachePath, "will", e));
+  EXPECT_TRUE(findCard(cachePath, "serendipity", e));
+}
+
+// The filter guards automatic capture, not the sync merge: a peer on older firmware may still
+// send a stopword card, and dropping it here would break Lamport convergence. Mirrors the same
+// carve-out LookupHistory::mergeBlob makes.
+TEST_F(FlashcardDeckTest, StopwordFilterDoesNotApplyToTheSyncMerge) {
+  const std::string peer = makeDevice();
+  const char* blob = "Hthe|ChA|5|sent by an older device\n";
+  EXPECT_EQ(FlashcardDeck::mergeBlob(peer, reinterpret_cast<const uint8_t*>(blob), std::strlen(blob), nullptr), 1);
+  FlashcardDeck::Entry e;
+  EXPECT_TRUE(findCard(peer, "the", e));
 }
 
 }  // namespace

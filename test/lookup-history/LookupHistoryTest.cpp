@@ -202,6 +202,38 @@ TEST_F(LookupHistoryTest, AddWordIfShortCircuits) {
   EXPECT_EQ(LookupHistory::load(cachePath).size(), 1u);
 }
 
+// LookupChain addresses the log by distance-from-newest, so a write has to report whether
+// it APPENDED a new word or MOVED one the log already held: the two shift the stored
+// indices differently (LookupChain::shifted). The index is taken from the pass addWordVer
+// already makes, so this costs no extra read.
+TEST_F(LookupHistoryTest, AddWordIfReportsWhetherTheWordWasAlreadyLogged) {
+  const auto first = LookupHistory::addWordIf(cachePath, "alpha", Status::Direct, true);
+  EXPECT_TRUE(first.wrote);
+  EXPECT_EQ(first.prevIndex, -1);  // brand new -> a pure append
+
+  LookupHistory::addWordIf(cachePath, "beta", Status::Direct, true);
+  LookupHistory::addWordIf(cachePath, "gamma", Status::Direct, true);  // newest-first: gamma beta alpha
+
+  const auto moved = LookupHistory::addWordIf(cachePath, "alpha", Status::Stem, true);
+  EXPECT_TRUE(moved.wrote);
+  EXPECT_EQ(moved.prevIndex, 2);  // was the oldest of the three
+
+  const auto alreadyNewest = LookupHistory::addWordIf(cachePath, "alpha", Status::Stem, true);
+  EXPECT_TRUE(alreadyNewest.wrote);
+  EXPECT_EQ(alreadyNewest.prevIndex, 0);  // re-looking up the word already at the top
+  EXPECT_EQ(LookupHistory::load(cachePath).size(), 3u);
+}
+
+TEST_F(LookupHistoryTest, AddWordIfReportsSkippedWrites) {
+  // Nothing was written, so a caller tracking positions must not re-index.
+  EXPECT_FALSE(LookupHistory::addWordIf(cachePath, "alpha", Status::Direct, false).wrote);
+  EXPECT_FALSE(LookupHistory::addWordIf(cachePath, "", Status::Direct, true).wrote);
+  EXPECT_FALSE(LookupHistory::addWordIf("", "alpha", Status::Direct, true).wrote);
+  // The stopword filter lives inside addWordIf, so the log does not move for one either.
+  EXPECT_FALSE(LookupHistory::addWordIf(cachePath, "the", Status::Direct, true).wrote);
+  EXPECT_TRUE(LookupHistory::load(cachePath).empty());
+}
+
 TEST_F(LookupHistoryTest, WordContainingPipeKeepsLastSeparator) {
   // '|' in a word splits on the LAST separator -- the suffix becomes the status.
   writeRawFile("odd|word|D\n");
