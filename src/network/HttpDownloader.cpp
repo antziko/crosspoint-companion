@@ -664,27 +664,39 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       // convergence budget a truncated one gets.
       //
       // Charged to connectFailures, its own zero-byte budget, and not to the short-hop stalls
-      // or to either empty-hop counter: this
-      // hop carried nothing, which is the same event the truncation path handles when a
-      // connection opens and then dies before its first body byte. Any hop that carries a
-      // byte resets it, so a long download that hiccups once every twenty hops never
-      // accumulates toward the ceiling. resumeOffset > 0 keeps this off the first hop:
-      // there is no partial body to protect there, and a server refusing the very first
-      // connect should fail fast rather than after a ladder of backoffs.
-      if (resumeOffset > 0 && hopDeliveredNothing && connectFailures < MAX_EMPTY_HOPS &&
-          resumes < MAX_RESUME_ATTEMPTS && !(sink.cancelFlag && *sink.cancelFlag)) {
+      // or to either empty-hop counter: this hop carried nothing, which is the same event the
+      // truncation path handles when a connection opens and then dies before its first body
+      // byte. Any hop that carries a byte resets it, so a long download that hiccups once
+      // every twenty hops never accumulates toward the ceiling.
+      //
+      // This deliberately does NOT require resumeOffset > 0. It used to, on the reasoning
+      // that "a server refusing the very first connect should fail fast rather than after a
+      // ladder of backoffs" — and a capture on a weak link (rssi -70..-79) showed what that
+      // costs. Four font downloads across three families each got exactly two attempts, the
+      // initial connect and the one-shot retry above, both failing the TLS handshake after
+      // ~200ms, all four dead inside 400ms with the whole resume machinery untouched. The
+      // same session had just pulled the manifest from the SAME CDN host with
+      // handshake=931ms, i.e. more than four times the window those connects were given
+      // before being written off. A first hop is not special: it is a hop that carried
+      // nothing, and it should get the same bounded ladder every other such hop gets.
+      //
+      // Bounded without the offset guard because connectFailures is reset ONLY by a hop that
+      // carries a byte. On a first hop nothing carries a byte, so the limit alone bounds it —
+      // the same argument that makes freshRetries safe on the truncation path below.
+      if (hopDeliveredNothing && connectFailures < MAX_EMPTY_HOPS && resumes < MAX_RESUME_ATTEMPTS &&
+          !(sink.cancelFlag && *sink.cancelFlag)) {
         ++connectFailures;
         ++emptyHopsTotal;
-        ++resumes;
-        retriedConnect = false;  // the next hop gets its own one-shot immediate retry
+        if (resumeOffset > 0) ++resumes;  // a first-hop retry is not a resume; keep DONE's stat honest
+        retriedConnect = false;           // the next hop gets its own one-shot immediate retry
         // lastHopTlsErr is deliberately NOT touched: it records the error of the last hop
         // that actually moved bytes, which is what the range-restart decision reads. A
         // connect that never opened says nothing about record sizes.
         const uint32_t rawBackoffMs = 500u * static_cast<uint32_t>(connectFailures);
         const uint32_t backoffMs = rawBackoffMs > MAX_RESUME_BACKOFF_MS ? MAX_RESUME_BACKOFF_MS : rawBackoffMs;
-        SdDebugLog::log(
-            "HTTP", "connect failed on resume hop at %zu, backing off %lums (connectFail %d/%d, attempt %d/%d)",
-            resumeOffset, (unsigned long)backoffMs, connectFailures, MAX_EMPTY_HOPS, resumes, MAX_RESUME_ATTEMPTS);
+        SdDebugLog::log("HTTP", "connect failed at %zu bytes, backing off %lums (connectFail %d/%d, attempt %d/%d)",
+                        sink.downloaded, (unsigned long)backoffMs, connectFailures, MAX_EMPTY_HOPS, resumes,
+                        MAX_RESUME_ATTEMPTS);
         // Sliced, because nothing polls input during a backoff — the caller's progress
         // callback only runs on body chunks — and at the top of the range that would be a
         // 2s window with a dead Cancel button.
