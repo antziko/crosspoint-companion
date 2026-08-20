@@ -232,24 +232,33 @@ constexpr uint32_t EMPTY_HOP_WALL_DELAY_MS = 25;
 // SourceCodePro_12.cpfont spent all three retries and succeeded on the last one it was
 // allowed. Ten takes per-file failure to 0.02% and costs 3.5s of worst case.
 constexpr int MAX_FRESH_RETRIES = 3;
-// Free heap below which a wolfSSL handshake cannot be expected to complete.
-//
-// Measured, not guessed. In the 08-20 NotoSerifExtended capture every one of 54 failed
-// handshakes reported 29,640-35,504 bytes free, while the files that succeeded had started
-// from 41,376-41,456. SecureClient puts a TLS 1.3 handshake at ~35-43KB of small allocations,
-// and its MEMFIX-PORT note records the same failure from the other side: a keygen allocation
-// fails and the ClientHello is never sent.
+// Free heap below which a wolfSSL handshake is not worth another try.
 //
 // The signature is exact and worth learning: tcp>0 (the socket opened), tls=0 (the handshake
-// never completed), tlsErr=0 (no read error, because nothing was ever read). That is
-// starvation, not a peer or a link problem, and retrying does not fix it.
-constexpr uint32_t TLS_HANDSHAKE_MIN_FREE = 36 * 1024;
-// Connect attempts allowed once starvation is identified. Two, not MAX_EMPTY_HOPS: by then the
-// heap is all we are going to get, and each further attempt is measurably destructive — every
-// failed handshake costs ~190 bytes that do not come back, so an exhausted 8-rung ladder (18
-// attempts) burned ~3.4KB and dragged the NEXT file's GET start down with it (41,456 -> 38,100
-// -> 37,888). That ratchet is why the first starved file used to poison a whole session.
-constexpr int MAX_STARVED_CONNECTS = 2;
+// never completed), tlsErr=0 (nothing was ever read). SecureClient puts a TLS 1.3 handshake at
+// ~35-43KB of small allocations, and its MEMFIX-PORT note records the same failure from the
+// other side: a keygen allocation fails and the ClientHello is never sent.
+//
+// 36KB was the first value here and it was too high, because it was read off a capture where
+// the heap was RATCHETING: the TLS record slab fragmented every hop, each failed handshake
+// cost ~190 bytes that never came back, and GET start fell 41,456 -> 38,100 -> 37,888 across
+// files. Under those conditions "retrying does not fix it" was true. Dropping the slab removed
+// the ratchet, and the same signature is now transient. Six handshake failures in the 08-20b
+// capture, all at largest8=22516:
+//
+//   heap=37668, 37520  -> above the old floor, so retried -> BOTH files completed
+//   heap=36692, 36212, 35912, 36084 -> below it -> "giving up after 2 attempts", 2 files lost
+//
+// Identical heap, opposite outcome, and the only thing that differed was this constant. Worse,
+// consecutive attempts now go 36,692 -> 36,212 and 35,912 -> 36,084 -- down 480, then UP 172.
+// There is no ratchet left to protect against, so the floor drops to the level where failure
+// really was permanent (29,640 was the lowest ever observed) and retrying gets a real budget.
+constexpr uint32_t TLS_HANDSHAKE_MIN_FREE = 30 * 1024;
+// Connect attempts allowed once starvation is identified. Six, not two: with the ratchet gone
+// a starved handshake is a transient the next attempt usually wins, and the capture above shows
+// exactly that -- one retry was enough for both files that were allowed one. Six attempts cost
+// ~1.2s at the ~200ms these failures take, against a download worth ~15s.
+constexpr int MAX_STARVED_CONNECTS = 6;
 constexpr int MAX_FRESH_RETRIES_RECORD_WALL = 10;
 // Full restarts allowed when a server answers 200 to a Range request (i.e. it does
 // not support resuming at all). Two, because a restart is only worth attempting while
