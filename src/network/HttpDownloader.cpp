@@ -316,13 +316,21 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
   // Hops that advanced less than MIN_RESUME_HOP_BYTES, in a row. Reset by any hop that
   // makes real progress, so a converging transfer is never cut off by its own length.
   int stalledResumes = 0;
-  // Hops that delivered nothing at all, in a row. Reset by any hop that carries a byte.
-  // Separate from stalledResumes on purpose — see MAX_EMPTY_HOPS.
-  int emptyHops = 0;
-  // Every empty hop this request has seen, never reset. Purely for the logs: emptyHops is a
-  // CONSECUTIVE count, so by the time a transfer succeeds it has been zeroed by the winning
-  // hop and reporting it reads as "the record wall was never hit". A capture of four font
-  // files that took 258 empty hops between them printed empty=0 on all four DONE lines.
+  // Three ways a hop can carry nothing, counted SEPARATELY and each reset by any hop that
+  // carries a byte. One shared counter looks tidier and is wrong: the ceilings differ (40 for
+  // the record wall, 8 for the rest), so a shared count can reach a run of, say, 12
+  // legitimate wall retries and then fail the very next `< MAX_EMPTY_HOPS` test the moment
+  // the cause changes. A device capture (08-20, OpenDyslexic) has runs of 15 wall empties AND
+  // a WiFi dropout inside the same transfer; they merely did not overlap. Had they, a
+  // converging download with 25 wall retries still owed would have died telling the user the
+  // server had stopped responding.
+  int emptyWallHops = 0;    // opened, answered, delivered nothing, tlsErr == MEMORY_E
+  int emptyOtherHops = 0;   // opened, answered, delivered nothing, any other cause
+  int connectFailures = 0;  // never opened at all
+  // Every empty hop this request has seen, whatever the cause, never reset. Purely for the
+  // logs: the three counters above are CONSECUTIVE counts, so by the time a transfer succeeds it has been zeroed by the
+  // winning hop and reporting it reads as "the record wall was never hit". A capture of four font files that took 258
+  // empty hops between them printed empty=0 on all four DONE lines.
   int emptyHopsTotal = 0;
   // Re-issues of a fresh (unresumed) hop that opened and then delivered nothing. Never
   // reset: nothing advances between those attempts, so this counter is the only bound.
@@ -487,7 +495,9 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
             sink.downloaded = 0;
             lastXferLogBytes = 0;
             stalledResumes = 0;
-            emptyHops = 0;
+            emptyWallHops = 0;
+            emptyOtherHops = 0;
+            connectFailures = 0;
           }
           if (!loggedConnect) {
             loggedConnect = true;
@@ -653,27 +663,28 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       // the far end is doing after ~100s of range requests, so give the hop the same
       // convergence budget a truncated one gets.
       //
-      // Charged to emptyHops, the zero-byte budget, and not to the short-hop stalls: this
+      // Charged to connectFailures, its own zero-byte budget, and not to the short-hop stalls
+      // or to either empty-hop counter: this
       // hop carried nothing, which is the same event the truncation path handles when a
       // connection opens and then dies before its first body byte. Any hop that carries a
       // byte resets it, so a long download that hiccups once every twenty hops never
       // accumulates toward the ceiling. resumeOffset > 0 keeps this off the first hop:
       // there is no partial body to protect there, and a server refusing the very first
       // connect should fail fast rather than after a ladder of backoffs.
-      if (resumeOffset > 0 && hopDeliveredNothing && emptyHops < MAX_EMPTY_HOPS && resumes < MAX_RESUME_ATTEMPTS &&
-          !(sink.cancelFlag && *sink.cancelFlag)) {
-        ++emptyHops;
+      if (resumeOffset > 0 && hopDeliveredNothing && connectFailures < MAX_EMPTY_HOPS &&
+          resumes < MAX_RESUME_ATTEMPTS && !(sink.cancelFlag && *sink.cancelFlag)) {
+        ++connectFailures;
         ++emptyHopsTotal;
         ++resumes;
         retriedConnect = false;  // the next hop gets its own one-shot immediate retry
         // lastHopTlsErr is deliberately NOT touched: it records the error of the last hop
         // that actually moved bytes, which is what the range-restart decision reads. A
         // connect that never opened says nothing about record sizes.
-        const uint32_t rawBackoffMs = 500u * static_cast<uint32_t>(emptyHops);
+        const uint32_t rawBackoffMs = 500u * static_cast<uint32_t>(connectFailures);
         const uint32_t backoffMs = rawBackoffMs > MAX_RESUME_BACKOFF_MS ? MAX_RESUME_BACKOFF_MS : rawBackoffMs;
-        SdDebugLog::log("HTTP", "connect failed on resume hop at %zu, backing off %lums (empty %d/%d, attempt %d/%d)",
-                        resumeOffset, (unsigned long)backoffMs, emptyHops, MAX_EMPTY_HOPS, resumes,
-                        MAX_RESUME_ATTEMPTS);
+        SdDebugLog::log(
+            "HTTP", "connect failed on resume hop at %zu, backing off %lums (connectFail %d/%d, attempt %d/%d)",
+            resumeOffset, (unsigned long)backoffMs, connectFailures, MAX_EMPTY_HOPS, resumes, MAX_RESUME_ATTEMPTS);
         // Sliced, because nothing polls input during a backoff — the caller's progress
         // callback only runs on body chunks — and at the top of the range that would be a
         // 2s window with a dead Cancel button.
@@ -824,7 +835,9 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       if (sink.downloaded > resumeOffset && moreToFetch && resumes < MAX_RESUME_ATTEMPTS &&
           stalledResumes < MAX_RESUME_STALLS && !(sink.cancelFlag && *sink.cancelFlag)) {
         stalledResumes = hopBytes < MIN_RESUME_HOP_BYTES ? stalledResumes + 1 : 0;
-        emptyHops = 0;  // this hop carried bytes
+        emptyWallHops = 0;  // this hop carried bytes
+        emptyOtherHops = 0;
+        connectFailures = 0;
         ++resumes;
         resumeOffset = sink.downloaded;
         lastHopTlsErr = http.lastTlsError();  // the next hop's restart decision reads this
@@ -861,9 +874,10 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       // an empty hop from any other cause may well be the far end needing a moment.
       const bool hitRecordWall = http.lastTlsError() == WOLFSSL_MEMORY_E;
       const int emptyLimit = hitRecordWall ? MAX_EMPTY_HOPS_RECORD_WALL : MAX_EMPTY_HOPS;
-      if (resumeOffset > 0 && sink.downloaded == resumeOffset && moreToFetch && emptyHops < emptyLimit &&
+      const int emptyRun = hitRecordWall ? emptyWallHops : emptyOtherHops;
+      if (resumeOffset > 0 && sink.downloaded == resumeOffset && moreToFetch && emptyRun < emptyLimit &&
           resumes < MAX_RESUME_ATTEMPTS && !(sink.cancelFlag && *sink.cancelFlag)) {
-        ++emptyHops;
+        ++(hitRecordWall ? emptyWallHops : emptyOtherHops);
         ++emptyHopsTotal;
         ++resumes;
         retriedConnect = false;  // the next hop gets its own one-shot immediate retry
@@ -873,12 +887,13 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
         lastHopTlsErr = http.lastTlsError();
         uint32_t backoffMs = EMPTY_HOP_WALL_DELAY_MS;
         if (!hitRecordWall) {
-          const uint32_t rawBackoffMs = 500u * static_cast<uint32_t>(emptyHops);
+          const uint32_t rawBackoffMs = 500u * static_cast<uint32_t>(emptyOtherHops);
           backoffMs = rawBackoffMs > MAX_RESUME_BACKOFF_MS ? MAX_RESUME_BACKOFF_MS : rawBackoffMs;
         }
-        SdDebugLog::log("HTTP", "empty hop at %zu/%zu, waiting %lums (empty %d/%d, attempt %d/%d, tlsErr=%d)",
-                        resumeOffset, sink.total, (unsigned long)backoffMs, emptyHops, emptyLimit, resumes,
-                        MAX_RESUME_ATTEMPTS, lastHopTlsErr);
+        SdDebugLog::log("HTTP", "empty hop at %zu/%zu, waiting %lums (%s %d/%d, attempt %d/%d, tlsErr=%d)",
+                        resumeOffset, sink.total, (unsigned long)backoffMs, hitRecordWall ? "wall" : "empty",
+                        hitRecordWall ? emptyWallHops : emptyOtherHops, emptyLimit, resumes, MAX_RESUME_ATTEMPTS,
+                        lastHopTlsErr);
         // Sliced for the same reason as the connect ladder: nothing polls input during a
         // backoff, so an unsliced delay is a window with a dead Cancel button.
         for (uint32_t slept = 0; slept < backoffMs && !(sink.cancelFlag && *sink.cancelFlag); slept += 100) {
@@ -913,10 +928,10 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
         continue;
       }
       SdDebugLog::log("HTTP",
-                      "resume budget spent: got=%zu/%zu resumes=%d stalls=%d emptyRun=%d emptyAll=%d fresh=%d "
-                      "lastHop=%zu tlsErr=%d",
-                      sink.downloaded, sink.total, resumes, stalledResumes, emptyHops, emptyHopsTotal, freshRetries,
-                      hopBytes, http.lastTlsError());
+                      "resume budget spent: got=%zu/%zu resumes=%d stalls=%d wall=%d empty=%d connectFail=%d "
+                      "emptyAll=%d fresh=%d lastHop=%zu tlsErr=%d",
+                      sink.downloaded, sink.total, resumes, stalledResumes, emptyWallHops, emptyOtherHops,
+                      connectFailures, emptyHopsTotal, freshRetries, hopBytes, http.lastTlsError());
       // MEMORY_E means wolfSSL could not allocate the receive buffer for an incoming TLS
       // record — the server sends records larger than our biggest free block. Reporting
       // that as "incomplete" sends the user looking at their network, which is the one
@@ -936,7 +951,9 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
     if (sink.total > 0 && sink.downloaded < sink.total && sink.downloaded > resumeOffset &&
         resumes < MAX_RESUME_ATTEMPTS && stalledResumes < MAX_RESUME_STALLS && !(sink.cancelFlag && *sink.cancelFlag)) {
       stalledResumes = shortHopBytes < MIN_RESUME_HOP_BYTES ? stalledResumes + 1 : 0;
-      emptyHops = 0;  // this hop carried bytes
+      emptyWallHops = 0;  // this hop carried bytes
+      emptyOtherHops = 0;
+      connectFailures = 0;
       ++resumes;
       resumeOffset = sink.downloaded;
       retriedConnect = false;
