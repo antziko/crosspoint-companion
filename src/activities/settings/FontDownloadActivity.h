@@ -103,6 +103,7 @@ class FontDownloadActivity final : public UiListActivity {
   std::vector<freeink::ui::ListItem> rowItems_;
   bool rowsDirty_ = true;
   void rebuildRowItems();
+  void applyInstalledRowDim();
 
   int listCount() const override { return listItemCount(); }
   void buildScreen(UiScreen& screen) override;

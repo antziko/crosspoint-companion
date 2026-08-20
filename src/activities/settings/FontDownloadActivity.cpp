@@ -585,6 +585,7 @@ void FontDownloadActivity::buildScreen(UiScreen& screen) {
     rebuildRowItems();
     rowsDirty_ = false;
   }
+  applyInstalledRowDim();
 
   fui::ListProps props;
   props.items = rowItems_.data();
@@ -594,6 +595,32 @@ void FontDownloadActivity::buildScreen(UiScreen& screen) {
   props.valueInset = 8;               // air between the status and the row edge
   syncListViewport(screen, props, /*hasSubtitle=*/true);
   screen.list(props);
+}
+
+// Dims installed families, EXCEPT the one under the cursor.
+//
+// An installed row is drawn dimmed to say "nothing to download here" while
+// staying tappable (it opens the delete prompt). The obvious way to express
+// that is fui::StateDisabled on the ListItem, and it silently costs the row its
+// selection highlight: list() ORs StateSelected into the row's state, but
+// BoxStyle::resolve() (FreeInkUICore.h) tests StateDisabled FIRST and returns
+// the disabled style without ever looking at selected. Disabled is white-on-
+// black-free, selected is a full inversion, so an installed row rendered
+// identically whether or not it was the cursor — on a list where every row is
+// installed, nothing on screen showed where the cursor was.
+//
+// So the dim is a per-render decision, not a property of the row: every
+// installed family gets it except the selected one, which needs its inversion.
+// Cheap enough to redo on every paint (no allocation, one pass over rows that
+// already exist), which is why it lives here and not in rebuildRowItems() —
+// making the dim part of the rebuild would mean marking rowsDirty_ on every
+// cursor move, rebuilding all the label strings for a selection change.
+void FontDownloadActivity::applyInstalledRowDim() {
+  for (int i = specialRowCount(); i < listItemCount() && i < static_cast<int>(rowItems_.size()); i++) {
+    const auto& family = families_[familyIndexFromList(i)];
+    const bool dim = family.installed && !family.hasUpdate && i != nav.selected;
+    rowItems_[i].state = dim ? fui::StateDisabled : fui::StateNormal;
+  }
 }
 
 // Rebuilds rowLabels_/rowItems_ from families_. Only called when rowsDirty_ is
@@ -619,9 +646,8 @@ void FontDownloadActivity::rebuildRowItems() {
         item.value = tr(STR_UPDATE_AVAILABLE);
       } else if (family.installed) {
         item.value = tr(STR_INSTALLED);
-        // Dimmed but still tappable (opens the delete prompt): visual-only
-        // disabled state, the row stays enabled for hit registration.
-        item.state = fui::StateDisabled;
+        // The dim itself is applied per-render by applyInstalledRowDim(), not
+        // here: it has to come off whichever row is selected. See that function.
       }
     }
     item.actionValue = static_cast<int16_t>(i);
