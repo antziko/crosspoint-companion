@@ -33,6 +33,17 @@ namespace {
 // (>15s) and chunked catalogs stall mid-body, so 15s killed them. 60s gives
 // slow servers room.
 constexpr int HTTP_TIMEOUT_MS = 60000;
+// Idle deadline for a RESUMED hop, which is a different bet from the first one.
+//
+// _timeoutMs in SecureHttpClient is an IDLE deadline, restamped on every successful read
+// (readFixed/readUntilClose), not a total. The median productive hop in the 08-20 capture took
+// 150ms, so 60 seconds of silence is not a slow server, it is a dead socket -- and six of them
+// (five tlsErr=-397 SOCKET_PEER_CLOSED_E plus one silent hang) burned 182s, 26% of a 691s run.
+//
+// 15s rather than 5s because one hop in that same capture had ttfb=15833ms and DID deliver.
+// Losing a hop costs one window and is re-requested; hop 1 keeps the full 60s because it has
+// no offset to resume from and must learn Content-Length.
+constexpr int RESUME_TIMEOUT_MS = 15000;
 constexpr int MAX_REDIRECTS = 5;
 // wolfSSL's MEMORY_E, spelled out rather than including wolfSSL's error headers here just
 // to name one code. Reported by SecureHttpClient::lastTlsError() when an incoming record
@@ -88,6 +99,12 @@ constexpr int WOLFSSL_MEMORY_E = -125;
 // bound: MAX_EMPTY_HOPS_RECORD_WALL and MAX_RESUME_STALLS end a non-converging transfer long
 // before this ceiling is reached.
 constexpr int MAX_RESUME_ATTEMPTS = 1024;
+// ...but a flat ceiling IS a cap on file size, and a bounded Range window shrinks the bytes
+// per hop on purpose, so the ceiling has to follow the file. At a 12KB window a 24MB OPDS book
+// needs ~2,000 hops and 1024 would fail it at 51%. One attempt per 4KB plus the flat 1024
+// covers the floor case with margin (1.26MB -> 1,331; 24MB -> 7,168) and is still bounded.
+// Unknown length keeps the flat value, since there is nothing to derive from.
+constexpr int MAX_RESUME_ATTEMPTS_CAP = 16384;
 // 8KB, and it must stay BELOW what one TLS record's worth of body can deliver.
 //
 // This was 16 * 1024, which is above it, and that one kilobyte capped every https transfer
@@ -106,6 +123,37 @@ constexpr int MAX_RESUME_ATTEMPTS = 1024;
 // far above the few-hundred-byte hops that mean a server really is stuck.
 constexpr size_t MIN_RESUME_HOP_BYTES = 8 * 1024;
 constexpr int MAX_RESUME_STALLS = 4;
+// Bounded-Range window: how many bytes a resumed hop asks for, instead of "everything from
+// here". This is the lever that actually removes the TLS record wall, and it exists because
+// wolfSSL FREES its input buffer after every record it processes
+// (ShrinkInputBuffer(ssl, NO_FORCED_FREE), Arduino-wolfSSL internal.c:22107 and :22166,
+// unconditional when dynamicFlag is set). So every incoming record needs its own fresh
+// CONTIGUOUS allocation of the record's own size, and on this heap a 16,401-byte one almost
+// always fails.
+//
+// The peer picks the record size, but the record can never be bigger than what the peer has
+// to write. An open-ended `Range: bytes=N-` invites a 16KB stream; a bounded
+// `Range: bytes=N-M` makes the whole response headers+body, which for a small window is one
+// small record and one allocation this heap can serve.
+//
+// Measured on X3 against GitHub's release CDN (opds_debug.txt, 08-20): 1,478 resumed hops for
+// four fonts, of which 1,463 died with tlsErr=-125 having delivered NOTHING -- 87%. Empty hops
+// log no CONNECT line (CONNECT is emitted on the first body byte), so the 206 headers arrived
+// in their own small record and the FIRST BODY record is what failed. The productive hops are
+// the tell: 15,414-15,444 bytes, every single one, which is 16,384 minus ~944 of 206 headers.
+// Exactly one record per connection is all this heap sustains.
+//
+// 12KB to start: 12,288 + ~900 of headers = ~13,188 in one record, ~20% under the 16,401 that
+// is failing, without pretending to know the heap's true ceiling -- the adaptation below finds
+// it. 4KB floor still moves 29KB/s at the measured ~140ms per hop. 64KB ceiling because hop 1,
+// which never has a window, has been measured delivering 49,152-64,509 bytes on a fresh heap.
+constexpr size_t RANGE_WINDOW_START = 12 * 1024;
+constexpr size_t RANGE_WINDOW_MIN = 4 * 1024;
+constexpr size_t RANGE_WINDOW_MAX = 64 * 1024;
+// Consecutive full-window hops before the window grows. Growth is damped and shrink is not,
+// ON PURPOSE: success here is probabilistic, so a symmetric rule hunts across the boundary
+// forever instead of settling just under it. Halve on one failure, grow after four wins.
+constexpr int RANGE_WINDOW_GROW_RUN = 4;
 // Consecutive hops that delivered ZERO bytes, counted separately from the short-hop stalls
 // above and reset by any hop that carries even one byte.
 //
@@ -321,6 +369,46 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
   // Hops that advanced less than MIN_RESUME_HOP_BYTES, in a row. Reset by any hop that
   // makes real progress, so a converging transfer is never cut off by its own length.
   int stalledResumes = 0;
+  // Bytes a resumed hop asks for, or 0 for an open-ended `Range: bytes=N-`.
+  //
+  // Starts at 0 -- today's behaviour -- and is armed ONLY by a hop that came back empty with
+  // MEMORY_E. That single condition is what makes this incapable of regressing anything else:
+  // plain HTTP never enters wolfSSL (SecureHttpClient runs it over the WiFiClient transport),
+  // so it can never raise MEMORY_E, so it can never acquire a window and keeps streaming at the
+  // 233KB/s it already does. An OPDS feed finishes in hop 1 and never resumes at all.
+  size_t rangeWindow = 0;
+  // Full-window hops in a row. See RANGE_WINDOW_GROW_RUN for why growth is damped.
+  int windowWins = 0;
+  // Set by the first hop that actually delivers a whole window, i.e. proof the peer honours a
+  // range END and frames it in a record this heap can hold.
+  bool windowProved = false;
+  // Set when the window reached its floor without ever being proved, which means bounding the
+  // range did not change the peer's framing at all. The window is then abandoned for the rest
+  // of the request and never re-armed, so the worst case of this whole mechanism is a handful
+  // of wasted hops followed by EXACTLY today's open-ended behaviour -- never a download that
+  // used to finish slowly and now fails.
+  bool windowFutile = false;
+  // Attempt ceiling, re-derived whenever the resource size is learned. See
+  // MAX_RESUME_ATTEMPTS_CAP for why a flat number cannot serve both a 1MB font and a 24MB book
+  // once the window shrinks the bytes each hop carries.
+  int resumeBudget = MAX_RESUME_ATTEMPTS;
+
+  // A hop that carried the whole window is one win; RANGE_WINDOW_GROW_RUN of them in a row
+  // widen it. Anything short resets the run without shrinking -- only the record wall shrinks.
+  auto noteWindowWin = [&](size_t hopBytes) {
+    if (rangeWindow == 0) return;
+    if (hopBytes < rangeWindow) {
+      windowWins = 0;
+      return;
+    }
+    windowProved = true;
+    if (++windowWins < RANGE_WINDOW_GROW_RUN) return;
+    windowWins = 0;
+    const size_t before = rangeWindow;
+    rangeWindow = rangeWindow * 3 / 2 > RANGE_WINDOW_MAX ? RANGE_WINDOW_MAX : rangeWindow * 3 / 2;
+    if (rangeWindow != before)
+      SdDebugLog::log("HTTP", "range window %zu -> %zu (%d clean hops)", before, rangeWindow, RANGE_WINDOW_GROW_RUN);
+  };
   // Three ways a hop can carry nothing, counted SEPARATELY and each reset by any hop that
   // carries a byte. One shared counter looks tidier and is wrong: the ceilings differ (40 for
   // the record wall, 8 for the rest), so a shared count can reach a run of, say, 12
@@ -373,7 +461,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
 
   for (;;) {
     freeink::SecureHttpClient http;
-    http.setTimeout(HTTP_TIMEOUT_MS);
+    http.setTimeout(resumeOffset > 0 ? RESUME_TIMEOUT_MS : HTTP_TIMEOUT_MS);
     http.setInsecure();
     if (!http.begin(url)) {
       LOG_ERR("HTTP", "wolfSSL bad URL: %s", url.c_str());
@@ -381,7 +469,17 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       return HttpDownloader::HTTP_ERROR;
     }
     if (resumeOffset > 0) {
-      http.addHeader("Range", "bytes=" + std::to_string(resumeOffset) + "-");
+      if (rangeWindow > 0) {
+        // Clamp to the last byte of the resource when the length is known. A range END past
+        // the end is legal and servers clamp it themselves (RFC 9110 14.1.2), but asking for
+        // exactly what is left keeps the final hop's Content-Length honest and avoids relying
+        // on that behaviour.
+        size_t last = resumeOffset + rangeWindow - 1;
+        if (sink.total > 0 && last >= sink.total) last = sink.total - 1;
+        http.addHeader("Range", "bytes=" + std::to_string(resumeOffset) + "-" + std::to_string(last));
+      } else {
+        http.addHeader("Range", "bytes=" + std::to_string(resumeOffset) + "-");
+      }
     }
     // setUserAgent replaces SecureHttpClient's built-in UA; addHeader would append
     // a second User-Agent header, which strict servers reject.
@@ -461,7 +559,11 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
             // so never let it overwrite the full size learned on the first hop. The
             // sink.total == 0 guard already covers this (a resume only happens once
             // total is known); resumeOffset makes the intent explicit.
-            if (sink.total == 0 && resumeOffset == 0 && http.hasContentLength()) sink.total = http.getContentLength();
+            if (sink.total == 0 && resumeOffset == 0 && http.hasContentLength()) {
+              sink.total = http.getContentLength();
+              const size_t derived = MAX_RESUME_ATTEMPTS + sink.total / 4096;
+              resumeBudget = static_cast<int>(derived > MAX_RESUME_ATTEMPTS_CAP ? MAX_RESUME_ATTEMPTS_CAP : derived);
+            }
             const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
             // handshake= is the whole open, first byte to first byte. Split it: with
             // session tickets the TLS leg is ~90ms but the whole open measured ~1350ms on
@@ -677,7 +779,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       // Bounded without the offset guard because connectFailures is reset ONLY by a hop that
       // carries a byte. On a first hop nothing carries a byte, so the limit alone bounds it —
       // the same argument that makes freshRetries safe on the truncation path below.
-      if (hopDeliveredNothing && connectFailures < MAX_EMPTY_HOPS && resumes < MAX_RESUME_ATTEMPTS &&
+      if (hopDeliveredNothing && connectFailures < MAX_EMPTY_HOPS && resumes < resumeBudget &&
           !(sink.cancelFlag && *sink.cancelFlag)) {
         ++connectFailures;
         ++emptyHopsTotal;
@@ -690,7 +792,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
         const uint32_t backoffMs = rawBackoffMs > MAX_RESUME_BACKOFF_MS ? MAX_RESUME_BACKOFF_MS : rawBackoffMs;
         SdDebugLog::log("HTTP", "connect failed at %zu bytes, backing off %lums (connectFail %d/%d, attempt %d/%d)",
                         sink.downloaded, (unsigned long)backoffMs, connectFailures, MAX_EMPTY_HOPS, resumes,
-                        MAX_RESUME_ATTEMPTS);
+                        resumeBudget);
         // Sliced, because nothing polls input during a backoff — the caller's progress
         // callback only runs on body chunks — and at the top of the range that would be a
         // 2s window with a dead Cancel button.
@@ -835,9 +937,13 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       const bool lengthKnown = sink.total > 0;
       const size_t hopBytes = sink.downloaded - resumeOffset;
       const bool moreToFetch = !lengthKnown || sink.downloaded < sink.total;
-      if (sink.downloaded > resumeOffset && moreToFetch && resumes < MAX_RESUME_ATTEMPTS &&
+      if (sink.downloaded > resumeOffset && moreToFetch && resumes < resumeBudget &&
           stalledResumes < MAX_RESUME_STALLS && !(sink.cancelFlag && *sink.cancelFlag)) {
-        stalledResumes = hopBytes < MIN_RESUME_HOP_BYTES ? stalledResumes + 1 : 0;
+        // A window we chose is not a server dribbling. Score the stall against a quarter of
+        // the window instead: still catches a peer that answers a 12KB range with 200 bytes,
+        // but cannot kill a download for the crime of asking for less on purpose.
+        const size_t progressFloor = rangeWindow > 0 ? rangeWindow / 4 : MIN_RESUME_HOP_BYTES;
+        stalledResumes = hopBytes < progressFloor ? stalledResumes + 1 : 0;
         emptyWallHops = 0;  // this hop carried bytes
         emptyOtherHops = 0;
         connectFailures = 0;
@@ -846,7 +952,8 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
         lastHopTlsErr = http.lastTlsError();  // the next hop's restart decision reads this
         retriedConnect = false;               // each resumed hop gets its own one-shot connect retry
         SdDebugLog::log("HTTP", "resuming at %zu/%zu (attempt %d/%d, hop=%zu stalls=%d)", resumeOffset, sink.total,
-                        resumes, MAX_RESUME_ATTEMPTS, hopBytes, stalledResumes);
+                        resumes, resumeBudget, hopBytes, stalledResumes);
+        noteWindowWin(hopBytes);
         // Same teardown as the empty-hop path and worth the same: the server closed, so
         // there is no TIME_WAIT on our side to wait out. 200ms here was 40s of the 958s
         // that capture spent on four fonts, all of it blocking the UI.
@@ -882,11 +989,37 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       const int emptyLimit = hitRecordWall ? MAX_EMPTY_HOPS_RECORD_WALL : MAX_EMPTY_HOPS;
       const int emptyRun = hitRecordWall ? emptyWallHops : emptyOtherHops;
       if (resumeOffset > 0 && sink.downloaded == resumeOffset && moreToFetch && emptyRun < emptyLimit &&
-          resumes < MAX_RESUME_ATTEMPTS && !(sink.cancelFlag && *sink.cancelFlag)) {
+          resumes < resumeBudget && !(sink.cancelFlag && *sink.cancelFlag)) {
         ++(hitRecordWall ? emptyWallHops : emptyOtherHops);
         ++emptyHopsTotal;
         ++resumes;
         retriedConnect = false;  // the next hop gets its own one-shot immediate retry
+        // The record wall is the ONE signal that arms the bounded window, and the only way
+        // the window ever shrinks. Ask for less next time so the peer has less to write, and
+        // the record it writes is an allocation this heap can actually serve.
+        // sink.total > 0 is REQUIRED, not a nicety. A satisfied bounded range comes back
+        // responseComplete(), and the "is there more?" test for an unknown-length body is
+        // exactly responseComplete() -- so windowing a chunked or connection-delimited
+        // response would report the first window as the whole file and silently truncate it.
+        // The short-range branch that continues a window is itself guarded on sink.total > 0.
+        if (hitRecordWall && !windowFutile && sink.total > 0) {
+          const size_t before = rangeWindow;
+          if (rangeWindow == RANGE_WINDOW_MIN && !windowProved) {
+            // Floored, and not one whole window ever arrived: this peer frames its records the
+            // same way however little we ask for, so the window is not the lever here. Give it
+            // up rather than keep shrinking into a wall it cannot move.
+            rangeWindow = 0;
+            windowFutile = true;
+            SdDebugLog::log("HTTP", "range window abandoned at %zu — bounding the range did not help", resumeOffset);
+          } else {
+            rangeWindow = rangeWindow == 0 ? RANGE_WINDOW_START
+                                           : (rangeWindow / 2 < RANGE_WINDOW_MIN ? RANGE_WINDOW_MIN : rangeWindow / 2);
+          }
+          windowWins = 0;
+          if (rangeWindow != before && rangeWindow != 0) {
+            SdDebugLog::log("HTTP", "range window %zu -> %zu (record wall at %zu)", before, rangeWindow, resumeOffset);
+          }
+        }
         // Unlike the connect-failure ladder, this DOES record the error: the hop opened and
         // hit the record wall, which is precisely what the range-restart decision needs to
         // know to refuse a pointless full restart into the same wall.
@@ -898,7 +1031,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
         }
         SdDebugLog::log("HTTP", "empty hop at %zu/%zu, waiting %lums (%s %d/%d, attempt %d/%d, tlsErr=%d)",
                         resumeOffset, sink.total, (unsigned long)backoffMs, hitRecordWall ? "wall" : "empty",
-                        hitRecordWall ? emptyWallHops : emptyOtherHops, emptyLimit, resumes, MAX_RESUME_ATTEMPTS,
+                        hitRecordWall ? emptyWallHops : emptyOtherHops, emptyLimit, resumes, resumeBudget,
                         lastHopTlsErr);
         // Sliced for the same reason as the connect ladder: nothing polls input during a
         // backoff, so an unsliced delay is a window with a dead Cancel button.
@@ -954,9 +1087,10 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
     // convergence guard as the truncation path — this branch has no inter-hop delay, so
     // a server answering tiny ranges would otherwise spin through the whole budget.
     const size_t shortHopBytes = sink.downloaded - resumeOffset;
-    if (sink.total > 0 && sink.downloaded < sink.total && sink.downloaded > resumeOffset &&
-        resumes < MAX_RESUME_ATTEMPTS && stalledResumes < MAX_RESUME_STALLS && !(sink.cancelFlag && *sink.cancelFlag)) {
-      stalledResumes = shortHopBytes < MIN_RESUME_HOP_BYTES ? stalledResumes + 1 : 0;
+    if (sink.total > 0 && sink.downloaded < sink.total && sink.downloaded > resumeOffset && resumes < resumeBudget &&
+        stalledResumes < MAX_RESUME_STALLS && !(sink.cancelFlag && *sink.cancelFlag)) {
+      const size_t progressFloor = rangeWindow > 0 ? rangeWindow / 4 : MIN_RESUME_HOP_BYTES;
+      stalledResumes = shortHopBytes < progressFloor ? stalledResumes + 1 : 0;
       emptyWallHops = 0;  // this hop carried bytes
       emptyOtherHops = 0;
       connectFailures = 0;
@@ -964,7 +1098,8 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       resumeOffset = sink.downloaded;
       retriedConnect = false;
       SdDebugLog::log("HTTP", "short range, resuming at %zu/%zu (attempt %d/%d, hop=%zu stalls=%d)", resumeOffset,
-                      sink.total, resumes, MAX_RESUME_ATTEMPTS, shortHopBytes, stalledResumes);
+                      sink.total, resumes, resumeBudget, shortHopBytes, stalledResumes);
+      noteWindowWin(shortHopBytes);
       continue;
     }
     {
