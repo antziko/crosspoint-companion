@@ -592,8 +592,23 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       // associated — and without it a capture full of "failed after 4ms" is unreadable.
       // 4ms is far too fast for a TCP connect to have been attempted, so the radio, not
       // the peer, is the suspect; this is what turns that suspicion into a fact.
-      SdDebugLog::log("HTTP", "wolfSSL request failed after %lums heap=%u largest8=%u rssi=%d url=%s",
-                      (unsigned long)(millis() - openStartMs), s.heapFree, s.largest8Bit, (int)s.rssi, url.c_str());
+      // tcp/tls/tlsErr split the three ways GET() returns -1, which this line could not
+      // previously tell apart — and that ambiguity cost a whole debugging round. SecureClient
+      // sets _tcpMs only once the TCP connect (DNS included) has succeeded and _tlsMs only
+      // once the handshake has COMPLETED, so:
+      //   tcp=0 tls=0  -> DNS or the TCP SYN failed; the radio or the route is the suspect
+      //   tcp>0 tls=0  -> TCP is fine, the TLS handshake failed; read tlsErr
+      //   tcp>0 tls>0  -> both fine, so the peer accepted TLS and then refused or dropped
+      //                   the HTTP exchange — a server-side rejection, not a device problem
+      // The third case is invisible without this and looks identical to the first in a
+      // capture, which is exactly the confusion to avoid: on X3 a link-down failure returns
+      // in ~4ms while a post-handshake rejection takes ~180ms, and only the split says which.
+      SdDebugLog::log("HTTP",
+                      "wolfSSL request failed after %lums (tcp=%lums tls=%lums tlsErr=%d) heap=%u largest8=%u rssi=%d "
+                      "url=%s",
+                      (unsigned long)(millis() - openStartMs), (unsigned long)http.tcpConnectMs(),
+                      (unsigned long)http.tlsHandshakeMs(), http.lastTlsError(), s.heapFree, s.largest8Bit, (int)s.rssi,
+                      url.c_str());
       // "This hop delivered nothing" — the condition both recovery paths below need, and
       // NOT the same as "the transfer holds no bytes". resumeOffset and sink.downloaded
       // are set equal at the top of every hop (by both resume branches below and by the
@@ -716,6 +731,12 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
         setDetail(sink.detail, "WiFi connection lost at %zu bytes", sink.downloaded);
       } else if (resumeOffset > 0) {
         setDetail(sink.detail, "connection lost at %zu bytes; server stopped responding", sink.downloaded);
+      } else if (connectFailures > 0) {
+        // Reached only after the whole connect ladder was spent, so say so: "connect/read
+        // failed" reads as a one-off blip and sends the user to check a link that the
+        // rssi on the log line above shows was fine. Naming the attempt count also
+        // distinguishes this from a first-try failure at a glance.
+        setDetail(sink.detail, "no response after %d connection attempts", connectFailures + 1);
       } else {
         setDetail(sink.detail, "connect/read failed");
       }
