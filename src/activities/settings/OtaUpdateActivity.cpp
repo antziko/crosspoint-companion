@@ -78,6 +78,14 @@ void OtaUpdateActivity::onWifiSelectionComplete(const bool success) {
 void OtaUpdateActivity::onEnter() {
   Activity::onEnter();
 
+  // Reclaim before the radio comes up, for the same reason the picker's own arenas are
+  // released again after it returns: the Wi-Fi driver plus the scan list leave only a few
+  // KB free, and the picker started below still needs a contiguous block for its activity
+  // object. Failing that allocation leaves this screen doing nothing until a reboot.
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    fcm->releaseCache();
+  }
+
   // Turn on WiFi immediately
   LOG_DBG("OTA", "Turning on WiFi...");
   WiFi.mode(WIFI_STA);

@@ -54,6 +54,18 @@ void FontDownloadActivity::onEnter() {
   // (SETTINGS.sdCardLogging) is off — not the download path failing to reach any code.
   SdDebugLog::log("FONT", "screen enter, manifest=%s", FONT_MANIFEST_URL);
 
+  // Reclaim the font heap before the radio comes up. The Wi-Fi driver's own allocations
+  // plus the scan list leave only a few KB free, and the picker started below still needs
+  // a contiguous block for its activity object; a capture caught that allocation failing
+  // at 1112 bytes free / 628 largest, which is what makes this screen occasionally do
+  // nothing until a reboot. releaseCache() rather than the fuller unload done before the
+  // manifest fetch: the mini arenas and ~3KB kern tables it returns are already far more
+  // than that allocation needs, and it leaves the SD font resident so a CJK SSID still
+  // renders in the picker.
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    fcm->releaseCache();
+  }
+
   WiFi.mode(WIFI_STA);
   startActivityForResultNoThrow<WifiSelectionActivity>(
       [this](const ActivityResult& result) { onWifiSelectionComplete(!result.isCancelled); }, renderer, mappedInput);
