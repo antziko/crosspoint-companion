@@ -166,11 +166,19 @@ constexpr uint32_t EMPTY_HOP_WALL_DELAY_MS = 200;
 // hard because nothing advances between attempts -- there is no offset to move and no counter
 // to reset, so this is the only thing standing between an unlucky first hop and a spin.
 //
-// Three, because a fresh hop is exactly as stochastic as a resumed one and the user was
-// already retrying by hand: the capture shows Vollkorn_12.cpfont opened with 15473 bytes on
-// one attempt and `got 0 of 0` on two others, and both of those ended the download instantly
-// with the retry button as the only recourse. Same reasoning as MAX_RANGE_RESTARTS.
+// Three is right for a hop that failed for any reason OTHER than the record wall -- same
+// reasoning as MAX_RANGE_RESTARTS, where a couple of retries convert the user's manual "try
+// again" into one operation and more would just burn radio time.
+//
+// MEMORY_E gets ten, for the same reason the resumed ladder gets forty: it is not a broken
+// server, it is the record wall, and the budget has to be sized off the measured empty rate
+// rather than intuition. Fresh hops came up empty on 3 of 7 attempts across one four-file
+// family (p = 0.43), and at a ceiling of 3 that is a 7.9% chance of losing a file on its very
+// first hop -- 28% across a family. The capture shows exactly that near-miss:
+// SourceCodePro_12.cpfont spent all three retries and succeeded on the last one it was
+// allowed. Ten takes per-file failure to 0.02% and costs 3.5s of worst case.
 constexpr int MAX_FRESH_RETRIES = 3;
+constexpr int MAX_FRESH_RETRIES_RECORD_WALL = 10;
 // Full restarts allowed when a server answers 200 to a Range request (i.e. it does
 // not support resuming at all). Two, because a restart is only worth attempting while
 // a fresh connection still has a real chance: the same 130676-byte feed completed
@@ -311,6 +319,11 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
   // Hops that delivered nothing at all, in a row. Reset by any hop that carries a byte.
   // Separate from stalledResumes on purpose — see MAX_EMPTY_HOPS.
   int emptyHops = 0;
+  // Every empty hop this request has seen, never reset. Purely for the logs: emptyHops is a
+  // CONSECUTIVE count, so by the time a transfer succeeds it has been zeroed by the winning
+  // hop and reporting it reads as "the record wall was never hit". A capture of four font
+  // files that took 258 empty hops between them printed empty=0 on all four DONE lines.
+  int emptyHopsTotal = 0;
   // Re-issues of a fresh (unresumed) hop that opened and then delivered nothing. Never
   // reset: nothing advances between those attempts, so this counter is the only bound.
   int freshRetries = 0;
@@ -650,6 +663,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       if (resumeOffset > 0 && hopDeliveredNothing && emptyHops < MAX_EMPTY_HOPS && resumes < MAX_RESUME_ATTEMPTS &&
           !(sink.cancelFlag && *sink.cancelFlag)) {
         ++emptyHops;
+        ++emptyHopsTotal;
         ++resumes;
         retriedConnect = false;  // the next hop gets its own one-shot immediate retry
         // lastHopTlsErr is deliberately NOT touched: it records the error of the last hop
@@ -850,6 +864,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       if (resumeOffset > 0 && sink.downloaded == resumeOffset && moreToFetch && emptyHops < emptyLimit &&
           resumes < MAX_RESUME_ATTEMPTS && !(sink.cancelFlag && *sink.cancelFlag)) {
         ++emptyHops;
+        ++emptyHopsTotal;
         ++resumes;
         retriedConnect = false;  // the next hop gets its own one-shot immediate retry
         // Unlike the connect-failure ladder, this DOES record the error: the hop opened and
@@ -883,12 +898,13 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       // is the identical GET the caller would make if the user pressed the retry button.
       // What it is NOT is self-limiting — no offset advances and nothing resets
       // freshRetries — so the counter is the entire bound and is never reset anywhere.
-      if (resumeOffset == 0 && sink.downloaded == 0 && freshRetries < MAX_FRESH_RETRIES &&
+      const int freshLimit = hitRecordWall ? MAX_FRESH_RETRIES_RECORD_WALL : MAX_FRESH_RETRIES;
+      if (resumeOffset == 0 && sink.downloaded == 0 && freshRetries < freshLimit &&
           !(sink.cancelFlag && *sink.cancelFlag)) {
         ++freshRetries;
         retriedConnect = false;
-        SdDebugLog::log("HTTP", "first hop delivered nothing, retrying (%d/%d, tlsErr=%d)", freshRetries,
-                        MAX_FRESH_RETRIES, http.lastTlsError());
+        SdDebugLog::log("HTTP", "first hop delivered nothing, retrying (%d/%d, tlsErr=%d)", freshRetries, freshLimit,
+                        http.lastTlsError());
         for (uint32_t slept = 0; slept < EMPTY_HOP_WALL_DELAY_MS && !(sink.cancelFlag && *sink.cancelFlag);
              slept += 100) {
           delay(100);
@@ -896,9 +912,11 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
         if (sink.cancelFlag && *sink.cancelFlag) return HttpDownloader::ABORTED;
         continue;
       }
-      SdDebugLog::log(
-          "HTTP", "resume budget spent: got=%zu/%zu resumes=%d stalls=%d empty=%d fresh=%d lastHop=%zu tlsErr=%d",
-          sink.downloaded, sink.total, resumes, stalledResumes, emptyHops, freshRetries, hopBytes, http.lastTlsError());
+      SdDebugLog::log("HTTP",
+                      "resume budget spent: got=%zu/%zu resumes=%d stalls=%d emptyRun=%d emptyAll=%d fresh=%d "
+                      "lastHop=%zu tlsErr=%d",
+                      sink.downloaded, sink.total, resumes, stalledResumes, emptyHops, emptyHopsTotal, freshRetries,
+                      hopBytes, http.lastTlsError());
       // MEMORY_E means wolfSSL could not allocate the receive buffer for an incoming TLS
       // record — the server sends records larger than our biggest free block. Reporting
       // that as "incomplete" sends the user looking at their network, which is the one
@@ -950,7 +968,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
                       "bytes=%zu elapsed=%lums rate=%uB/s wait=%lums work=%lums resumes=%d empty=%d fresh=%d "
                       "slabHit=%lu slabMiss=%lu",
                       sink.downloaded, (unsigned long)totalElapsedMs, bytesPerSec, (unsigned long)waitAllMs,
-                      (unsigned long)workAllMs, resumes, emptyHops, freshRetries,
+                      (unsigned long)workAllMs, resumes, emptyHopsTotal, freshRetries,
                       (unsigned long)freeink::TlsRecordSlab::hits(), (unsigned long)freeink::TlsRecordSlab::misses());
     }
     return HttpDownloader::OK;
