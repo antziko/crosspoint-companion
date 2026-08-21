@@ -10,11 +10,16 @@
 
 #include "MappedInputManager.h"
 #include "RecentBooksStore.h"
+#include "components/UIScale.h"
 #include "components/themes/BaseTheme.h"
 #include "components/themes/lyra/Lyra3CoversTheme.h"
 #include "components/themes/lyra/LyraTheme.h"
 #include "components/themes/roundedraff/RoundedRaffTheme.h"
 #include "components/themes/vega/VegaTheme.h"
+
+// main.cpp's renderer singleton; the compact header height is a font metric, and
+// MappedInputManager.cpp reaches it the same way.
+extern GfxRenderer renderer;
 
 UITheme UITheme::instance;
 
@@ -64,16 +69,53 @@ void UITheme::setTheme(CrossPointSettings::UI_THEME type) {
   metricsValid = false;
 }
 
+UITheme::TopBarPolicyFn UITheme::topBarPolicy = nullptr;
+
+bool UITheme::isTopBarHidden() {
+  if (SETTINGS.topBarOtherScreens) return false;
+  // No policy installed yet (boot, before main.cpp wires the ActivityManager): keep the band,
+  // so nothing renders half-collapsed before the foreground screen is known.
+  return topBarPolicy != nullptr && !topBarPolicy();
+}
+
+int UITheme::compactHeaderHeight() {
+  // One title line plus symmetric breathing room. Derived from the font rather than tabled per
+  // theme so it cannot come out shorter than the glyphs it has to hold. Resolved once and kept:
+  // getMetrics() runs on every render path, and getLineHeight() both walks the font map and
+  // LOG_ERRs for a font that is not inserted yet. Until main.cpp inserts the UI fonts the floor
+  // applies; the metrics cache keys on the result, so the band grows to its real height the
+  // moment they are up.
+  constexpr int kTitlePadding = 4;
+  constexpr int kFallbackLineHeight = 20;
+  static int resolved = 0;
+  if (resolved == 0) {
+    const int lineHeight = renderer.getLineHeight(uiScaleSpec().titleFontId);
+    if (lineHeight <= 0) return kFallbackLineHeight + kTitlePadding * 2;
+    resolved = lineHeight + kTitlePadding * 2;
+  }
+  return resolved;
+}
+
 const ThemeMetrics& UITheme::getMetrics() const {
   // hasTouch() can flip once touch init completes after static construction, so the
   // cached copy is refreshed when the flag differs instead of copying the struct per call.
   const bool touch = gpio.hasTouch();
-  if (!metricsValid || touch != metricsForTouch) {
+  // Shrinking headerHeight is what reclaims the bar: every screen sizes its content from
+  // topPadding + headerHeight, so the layout closes up without per-screen arithmetic. The band
+  // does not vanish — it keeps the screen title; drawHeader() drops the battery, WiFi bars,
+  // clock and rule around it. 0 means "top bar shown", and doubles as the cache key.
+  const int compactHeader = isTopBarHidden() ? compactHeaderHeight() : 0;
+  if (!metricsValid || touch != metricsForTouch || compactHeader != metricsCompactHeader) {
     adjustedMetrics = *currentMetrics;
     if (touch) {
       adjustedMetrics.buttonHintsHeight = 0;
     }
+    // Never taller than the themed band: on a theme whose header is already tight this is a no-op.
+    if (compactHeader > 0 && compactHeader < adjustedMetrics.headerHeight) {
+      adjustedMetrics.headerHeight = compactHeader;
+    }
     metricsForTouch = touch;
+    metricsCompactHeader = compactHeader;
     metricsValid = true;
   }
   return adjustedMetrics;

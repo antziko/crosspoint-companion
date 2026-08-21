@@ -66,6 +66,10 @@ class Activity {
   // popups and every other screen keep normal polarity without managing the flag.
   virtual bool appliesNightMode() const { return false; }
   virtual bool isHomeActivity() const { return false; }
+  // True for screens that keep their header band even when the user has turned the top bar off
+  // outside Home. Home always keeps it (it IS the top bar); override elsewhere only when the
+  // header carries content rather than chrome, as the dictionary definition's headword does.
+  virtual bool keepsTopBar() const { return isHomeActivity(); }
   virtual bool handleHomeGesture() { return false; }
   virtual ScreenshotInfo getScreenshotInfo() const { return {}; }
 

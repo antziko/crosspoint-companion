@@ -132,6 +132,8 @@ class ActivityManager {
   // repaint differentially drop their stale state first.
   void notifyFramebufferInvalidated();
   bool isReaderActivity() const;
+  // Whether the foreground screen keeps its header band; see Activity::keepsTopBar().
+  bool foregroundKeepsTopBar() const;
   bool isInReaderContext() const;
   bool skipLoopDelay() const;
   ScreenshotInfo getScreenshotInfo() const;

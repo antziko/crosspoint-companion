@@ -560,6 +560,9 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
       SettingInfo::Enum(StrId::STR_DATE_FORMAT, &CrossPointSettings::homeTopBarDateFormat,
                         {StrId::STR_DATE_FMT_0, StrId::STR_DATE_FMT_1, StrId::STR_DATE_FMT_2, StrId::STR_DATE_FMT_3},
                         "homeTopBarDateFormat", StrId::STR_CUSTOMISE_TOP_BAR));
+  // Header band on every screen but Home. Off collapses the band and reclaims its height.
+  v.push_back(SettingInfo::Toggle(StrId::STR_TOP_BAR_OTHER_SCREENS, &CrossPointSettings::topBarOtherScreens,
+                                  "topBarOtherScreens", StrId::STR_CUSTOMISE_TOP_BAR));
 
 #if FREEINK_CAP_FRONTLIGHT
   // Frontlight quick-panel state: persisted and web-exposed, but deliberately

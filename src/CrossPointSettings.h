@@ -298,6 +298,9 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t homeTopBarDate = 0;
   // Home top bar date format: same codes as dateFormat
   uint8_t homeTopBarDateFormat = 0;
+  // Draw the header band (title, battery, WiFi, clock) on screens other than Home.
+  // 0 collapses it everywhere else, handing its height back to the content.
+  uint8_t topBarOtherScreens = 1;
   // Clock UTC offset in quarter-hour steps, biased by 48 so it fits in uint8_t.
   // Value 48 = UTC+0, 0 = UTC-12:00, 104 = UTC+14:00.
   // Quarter-hour granularity supports oddball zones like Nepal (+5:45) and Chatham (+12:45).

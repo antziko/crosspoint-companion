@@ -340,6 +340,11 @@ void ActivityManager::notifyFramebufferInvalidated() {
   if (currentActivity) currentActivity->onFramebufferInvalidated();
 }
 
+bool ActivityManager::foregroundKeepsTopBar() const {
+  // Nothing in the foreground yet (boot): keep the band rather than briefly collapsing it.
+  return !currentActivity || currentActivity->keepsTopBar();
+}
+
 bool ActivityManager::isReaderActivity() const {
   return std::any_of(stackActivities.begin(), stackActivities.end(),
                      [](const auto& activity) { return activity->isReaderActivity(); }) ||

@@ -19,6 +19,16 @@ class UITheme {
   static UITheme& getInstance() { return instance; }
 
   const ThemeMetrics& getMetrics() const;
+  // "Does the foreground screen keep its header band?" Supplied by main.cpp, which owns the
+  // ActivityManager; a raw function pointer keeps components/ from depending on activities/.
+  using TopBarPolicyFn = bool (*)();
+  static void setTopBarPolicy(TopBarPolicyFn fn) { topBarPolicy = fn; }
+  // True when this screen shows its title without the top bar: the user turned the top bar off
+  // outside Home and the foreground screen is not one that keeps it. The header band survives at
+  // compactHeaderHeight(), carrying the title alone — no battery, WiFi bars, clock or rule.
+  static bool isTopBarHidden();
+  // Band height that holds one title line and nothing else.
+  static int compactHeaderHeight();
   const BaseTheme& getTheme() const { return *currentTheme; }
   Rect getScreenSafeArea(const GfxRenderer& renderer, bool hasFrontButtonHints = false,
                          bool hasSideButtonHints = false);
@@ -44,6 +54,8 @@ class UITheme {
   mutable ThemeMetrics adjustedMetrics;
   mutable bool metricsValid = false;
   mutable bool metricsForTouch = false;
+  mutable int metricsCompactHeader = 0;
+  static TopBarPolicyFn topBarPolicy;
 };
 
 // Helper macro to access current theme

@@ -206,6 +206,7 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
     persisted::toggle("homeTopBarClock", &CrossPointSettings::homeTopBarClock),
     persisted::toggle("homeTopBarDate", &CrossPointSettings::homeTopBarDate),
     persisted::enumerated("homeTopBarDateFormat", &CrossPointSettings::homeTopBarDateFormat, 3),
+    persisted::toggle("topBarOtherScreens", &CrossPointSettings::topBarOtherScreens),
 
     // --- Touch ---
     persisted::enumerated("tiltPageTurn", &CrossPointSettings::tiltPageTurn,

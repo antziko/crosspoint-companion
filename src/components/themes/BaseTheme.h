@@ -308,4 +308,8 @@ class BaseTheme {
   // Draw top-bar clock/date centered at vertical position y if the user has enabled
   // them and time is available. Called from drawHeader() overrides in all themes.
   void drawTopBarClockDate(const GfxRenderer& renderer, int y) const;
+  // Title (and optional right label) alone, in the theme's title font, weight and alignment —
+  // no battery, WiFi bars, clock or underline. What drawHeader() paints when the user has turned
+  // the top bar off outside Home; the band is metrics.headerHeight tall either way.
+  void drawCompactHeader(const GfxRenderer& renderer, Rect rect, const char* title, const char* subtitle) const;
 };

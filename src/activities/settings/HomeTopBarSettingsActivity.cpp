@@ -10,12 +10,13 @@
 
 namespace {
 
-enum MenuItem { ITEM_CLOCK = 0, ITEM_DATE, ITEM_DATE_FORMAT, ITEM_COUNT };
+enum MenuItem { ITEM_CLOCK = 0, ITEM_DATE, ITEM_DATE_FORMAT, ITEM_OTHER_SCREENS, ITEM_COUNT };
 
 const StrId menuNames[ITEM_COUNT] = {
     StrId::STR_CLOCK,
     StrId::STR_DATE,
     StrId::STR_DATE_FORMAT,
+    StrId::STR_TOP_BAR_OTHER_SCREENS,
 };
 
 constexpr int DATE_FORMAT_ITEMS = 4;
@@ -83,6 +84,9 @@ void HomeTopBarSettingsActivity::handleSelection() {
     case ITEM_DATE_FORMAT:
       SETTINGS.homeTopBarDateFormat = (SETTINGS.homeTopBarDateFormat + 1) % DATE_FORMAT_ITEMS;
       break;
+    case ITEM_OTHER_SCREENS:
+      SETTINGS.topBarOtherScreens = (SETTINGS.topBarOtherScreens + 1) % 2;
+      break;
     default:
       return;
   }
@@ -114,6 +118,8 @@ void HomeTopBarSettingsActivity::render(RenderLock&&) {
             const uint8_t fmt = SETTINGS.homeTopBarDateFormat < DATE_FORMAT_ITEMS ? SETTINGS.homeTopBarDateFormat : 0;
             return std::string(I18N.get(dateFormatNames[fmt]));
           }
+          case ITEM_OTHER_SCREENS:
+            return SETTINGS.topBarOtherScreens ? tr(STR_SHOW) : tr(STR_HIDE);
           default:
             return tr(STR_HIDE);
         }

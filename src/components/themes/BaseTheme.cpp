@@ -404,7 +404,47 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
   }
 }
 
+void BaseTheme::drawCompactHeader(const GfxRenderer& renderer, Rect rect, const char* title,
+                                  const char* subtitle) const {
+  const ThemeMetrics& metrics = UITheme::getInstance().getMetrics();
+  const int titleFontId = uiScaleSpec().titleFontId;
+  const int pad = metrics.headerSidePadding;
+  const int y = rect.y + (rect.height - renderer.getLineHeight(titleFontId)) / 2;
+
+  // Right label (the version on Settings, a count elsewhere) keeps its corner in the small font.
+  constexpr int kLabelGap = 8;
+  int reserved = 0;
+  if (subtitle != nullptr && *subtitle != '\0') {
+    const int labelWidth = renderer.getTextWidth(SMALL_FONT_ID, subtitle);
+    const int labelY = rect.y + (rect.height - renderer.getLineHeight(SMALL_FONT_ID)) / 2;
+    renderer.drawText(SMALL_FONT_ID, rect.x + rect.width - pad - labelWidth, labelY, subtitle);
+    reserved = labelWidth + kLabelGap;
+  }
+  if (title == nullptr || *title == '\0') return;
+
+  // A centred title has to clear the right label on BOTH sides or it grows into it; a
+  // left/right-aligned one only loses the reserve once.
+  const bool centered = metrics.headerTitleAlign == 1;
+  const int available = rect.width - pad * 2 - (centered ? reserved * 2 : reserved);
+  if (available <= 0) return;
+  const std::string fitted = renderer.truncatedText(titleFontId, title, available, EpdFontFamily::BOLD);
+  const int textWidth = renderer.getTextWidth(titleFontId, fitted.c_str(), EpdFontFamily::BOLD);
+  int x = rect.x + pad;  // 0 = left
+  if (centered) {
+    x = rect.x + (rect.width - textWidth) / 2;
+  } else if (metrics.headerTitleAlign == 2) {
+    x = rect.x + rect.width - pad - reserved - textWidth;
+  }
+  renderer.drawText(titleFontId, x, y, fitted.c_str(), true, EpdFontFamily::BOLD);
+}
+
 void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* title, const char* subtitle) const {
+  if (rect.height <= 0) return;
+  // Top bar off outside Home: the screen keeps its title, loses the bar around it.
+  if (UITheme::isTopBarHidden()) {
+    drawCompactHeader(renderer, rect, title, subtitle);
+    return;
+  }
   // Every activity header renders through the FreeInkUI header + battery
   // indicator components, styled by the active theme's tokens (padding,
   // centering, underline). Non-interactive frame: no hit rects registered.

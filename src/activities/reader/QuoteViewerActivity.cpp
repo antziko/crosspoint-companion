@@ -148,20 +148,27 @@ void QuoteViewerActivity::render(RenderLock&&) {
   const size_t absIdx = quoteIndices_[currentPos_];
   const struct Bookmark& bm = bms[absIdx];
 
-  // Header: chapter title (left, bold) + "N / M" quote counter (right).
+  // Header: chapter title (left, bold) + "N / M" quote counter (right). Both are drawn here
+  // rather than passed to drawHeader, which only gets the empty title so it paints the band.
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, "");
-  const int headerY = metrics.topPadding + (metrics.headerHeight > 60 ? metrics.batteryBarHeight + 3 : 14);
+  // With the top bar off the band is one title line tall and holds no battery, so the labels
+  // centre in it and reclaim the reserve the battery group would have needed.
+  const bool compactBand = UITheme::isTopBarHidden();
+  constexpr int kBatteryReserve = 90;
+  const int batteryReserve = compactBand ? 0 : kBatteryReserve;
+  const int headerY = compactBand
+                          ? metrics.topPadding + (metrics.headerHeight - renderer.getLineHeight(kHeaderFontId)) / 2
+                          : metrics.topPadding + (metrics.headerHeight > 60 ? metrics.batteryBarHeight + 3 : 14);
   const char* chapter = bm.chapterTitle[0] != '\0' ? bm.chapterTitle : tr(STR_BOOKMARKS);
 
   char counter[24];
   std::snprintf(counter, sizeof(counter), "%d / %d", currentPos_ + 1, static_cast<int>(quoteIndices_.size()));
   const int counterW = renderer.getTextWidth(kHeaderFontId, counter, EpdFontFamily::REGULAR);
-  constexpr int kBatteryReserve = 90;
   constexpr int kCounterGap = 8;
-  const int chapterBudget = std::max(0, pageWidth - sidePad * 2 - kBatteryReserve - counterW - kCounterGap);
+  const int chapterBudget = std::max(0, pageWidth - sidePad * 2 - batteryReserve - counterW - kCounterGap);
   const std::string chapterTrunc = renderer.truncatedText(kHeaderFontId, chapter, chapterBudget);
   renderer.drawText(kHeaderFontId, sidePad, headerY, chapterTrunc.c_str(), true, EpdFontFamily::BOLD);
-  renderer.drawText(kHeaderFontId, pageWidth - sidePad - kBatteryReserve - counterW, headerY, counter, true,
+  renderer.drawText(kHeaderFontId, pageWidth - sidePad - batteryReserve - counterW, headerY, counter, true,
                     EpdFontFamily::REGULAR);
 
   // Body: wrapped preview, paginated by pageOffset_.

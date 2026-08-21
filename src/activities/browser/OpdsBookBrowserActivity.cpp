@@ -455,7 +455,9 @@ void OpdsBookBrowserActivity::screenHeader(UiScreen& screen, const bool withSear
   screen.spacer(static_cast<int16_t>(UITheme::getInstance().getMetrics().topPadding));
   fui::HeaderProps header;
   header.title = server.name.empty() ? tr(STR_OPDS_BROWSER) : server.name.c_str();
-  header.borderEdges = fui::EdgeBottom;
+  // The rule is top-bar chrome, so it goes with it; GUI.drawHeader's compact band drops its
+  // underline the same way. The band itself stays — it carries the feed name.
+  header.borderEdges = UITheme::isTopBarHidden() ? fui::EdgesNone : fui::EdgeBottom;
   if (withSearch && !searchTemplate.empty()) {
     header.trailingIcon = fui::bitmapFromIcon(icon_search_32);
     header.trailingAction = ACTION_SEARCH;

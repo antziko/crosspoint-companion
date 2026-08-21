@@ -296,6 +296,9 @@ void setupDisplayAndFonts(bool seamless = false) {
   display.begin(seamless);
   renderer.begin();
   activityManager.begin();
+  // Let the theme ask which screen is in the foreground without components/ including
+  // activities/ (captureless lambda -> plain function pointer, no std::function).
+  UITheme::setTopBarPolicy(+[]() { return activityManager.foregroundKeepsTopBar(); });
   LOG_DBG("MAIN", "Display initialized");
 
   // Initialize font decompressor for compressed reader fonts
