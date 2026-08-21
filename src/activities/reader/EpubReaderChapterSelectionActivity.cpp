@@ -147,6 +147,12 @@ void EpubReaderChapterSelectionActivity::buildScreen(UiScreen& screen) {
   props.count = static_cast<uint16_t>(listCount());
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
+  // Same row font as Settings and the reader menu this list is opened from; a chapter title
+  // that still overruns wraps onto a second line (list() grows only the rows that need it).
+  // maxLines also marks the style explicitly set — an all-default smallText fails
+  // textStyleUnset and list() would substitute bodyText back.
+  props.labelText = screen.theme().smallText;
+  props.labelText.maxLines = 2;
   syncListViewport(screen, props);
   // Materialize the row window for the FINAL viewport -- syncListViewport has just applied
   // follow/clamping to nav.top -- and hand list() the window with its absolute base index.
