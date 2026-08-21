@@ -717,12 +717,16 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       // The third case is invisible without this and looks identical to the first in a
       // capture, which is exactly the confusion to avoid: on X3 a link-down failure returns
       // in ~4ms while a post-handshake rejection takes ~180ms, and only the split says which.
+      // hsErr is what tlsErr could never carry: lastTlsError() is set from read(), so a
+      // handshake that never completed reported 0 and "out of memory", "the peer refused"
+      // and "the deadline expired" were one indistinguishable line. MEMORY_E (-125) or
+      // MP_MEM (-2) is this device; a fatal alert or a socket error is the far end.
       SdDebugLog::log("HTTP",
-                      "wolfSSL request failed after %lums (tcp=%lums tls=%lums tlsErr=%d) heap=%u largest8=%u rssi=%d "
-                      "url=%s",
+                      "wolfSSL request failed after %lums (tcp=%lums tls=%lums tlsErr=%d hsErr=%d) heap=%u "
+                      "largest8=%u rssi=%d url=%s",
                       (unsigned long)(millis() - openStartMs), (unsigned long)http.tcpConnectMs(),
-                      (unsigned long)http.tlsHandshakeMs(), http.lastTlsError(), s.heapFree, s.largest8Bit, (int)s.rssi,
-                      url.c_str());
+                      (unsigned long)http.tlsHandshakeMs(), http.lastTlsError(), http.lastHandshakeError(), s.heapFree,
+                      s.largest8Bit, (int)s.rssi, url.c_str());
       // A handshake that never completed, at a heap too small to run one, is starvation —
       // and it is the one connect failure that retrying makes actively WORSE.
       //
