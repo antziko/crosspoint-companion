@@ -284,6 +284,27 @@ constexpr uint32_t STARVED_RATCHET_BYTES = 1024;
 // starved handshake that is NOT ratcheting is a transient the next attempt usually wins, and
 // six attempts cost ~1.2s at the ~200ms these failures take, against a download worth ~15s.
 constexpr int MAX_STARVED_CONNECTS = 6;
+// Largest contiguous 8-bit block below which a failed handshake may be called starvation.
+//
+// The resource a handshake needs is a CONTIGUOUS block; free-heap level and slope are only
+// proxies for it, and on 08-21 both convicted an innocent run. Six refused handshakes logged
+// largest8=21492 EVERY time -- perfectly flat, nothing consumed -- while the free total drifted
+// 36,932 -> 35,612. The slope test read that 1,320-byte drift as "each attempt costing heap"
+// and abandoned the download after 3.2s. In the same capture, handshakes that COMPLETED were
+// logged at largest8 as low as 3,956: the heap could afford five of them.
+//
+// The fact that settles it: the file BEFORE the refused one started from heap=40424
+// largest8=21492 and ran a FULL handshake (resumed=0) to the same host, and the refused one
+// started from heap=40424 largest8=21492 -- identical to the byte. Same heap, opposite
+// outcome, twelve seconds apart, so the heap is not what decided it. What differed is that
+// the bounded Range window had just opened 21 connections to that CDN in 10.5s; the peer,
+// not this device, is refusing, and no heap test can be right about that.
+//
+// So scarcity gates the verdict now, and largest8 measures it directly. 8KB sits at twice the
+// deepest success on record and a quarter of the block that misfired. A floor set too low only
+// costs the bounded connect ladder below (~20s, then a correct error); set too high it abandons
+// downloads that would have worked, which is the failure being fixed. When in doubt, lower.
+constexpr uint32_t TLS_HANDSHAKE_MIN_LARGEST = 8 * 1024;
 constexpr int MAX_FRESH_RETRIES_RECORD_WALL = 10;
 // Full restarts allowed when a server answers 200 to a Range request (i.e. it does
 // not support resuming at all). Two, because a restart is only worth attempting while
@@ -725,13 +746,20 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
         ++starvedConnects;
         if (starvedHeapFirst == 0) starvedHeapFirst = s.heapFree;
         const bool ratcheting = s.heapFree + STARVED_RATCHET_BYTES < starvedHeapFirst;
-        const char* why = s.heapFree < TLS_HANDSHAKE_MIN_FREE       ? "heap below the floor"
+        // Counting stays on the signature -- gating the counter on the same quantity a
+        // threshold tests is the bug that made lowering TLS_HANDSHAKE_MIN_FREE disable the
+        // abort instead of loosening it. Only the VERDICT asks whether the heap is actually
+        // scarce, because a peer refusing a handshake the heap can plainly afford is a
+        // server-side transient and the bounded connect ladder below is what answers it.
+        const bool scarce = s.largest8Bit < TLS_HANDSHAKE_MIN_LARGEST;
+        const char* why = !scarce                                   ? nullptr
+                          : s.heapFree < TLS_HANDSHAKE_MIN_FREE     ? "heap below the floor"
                           : ratcheting                              ? "each attempt costing heap"
                           : starvedConnects >= MAX_STARVED_CONNECTS ? "retry budget spent"
                                                                     : nullptr;
         if (why != nullptr) {
-          SdDebugLog::log("HTTP", "handshake starved: %s (%u free, %u at first of %d attempts)", why, s.heapFree,
-                          starvedHeapFirst, starvedConnects);
+          SdDebugLog::log("HTTP", "handshake starved: %s (%u free, %u largest, %u at first of %d attempts)", why,
+                          s.heapFree, s.largest8Bit, starvedHeapFirst, starvedConnects);
           setDetail(sink.detail, "not enough memory for a secure connection (%u bytes free)", s.heapFree);
           return HttpDownloader::HTTP_ERROR;
         }
