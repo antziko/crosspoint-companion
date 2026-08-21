@@ -143,17 +143,47 @@ constexpr int MAX_RESUME_STALLS = 4;
 // the tell: 15,414-15,444 bytes, every single one, which is 16,384 minus ~944 of 206 headers.
 // Exactly one record per connection is all this heap sustains.
 //
-// 12KB to start: 12,288 + ~900 of headers = ~13,188 in one record, ~20% under the 16,401 that
-// is failing, without pretending to know the heap's true ceiling -- the adaptation below finds
-// it. 4KB floor still moves 29KB/s at the measured ~140ms per hop. 64KB ceiling because hop 1,
-// which never has a window, has been measured delivering 49,152-64,509 bytes on a fresh heap.
-constexpr size_t RANGE_WINDOW_START = 12 * 1024;
+// 12KB was the opening guess, made before the adaptation had ever been watched converge. It has
+// now converged the same way in every file of every capture -- 12288 -> 18432 -> 27648 -> 41472
+// -> 62208 -- and then run 6-8 clean hops at the top. That climb costs ~17 of the ~21 connections
+// a 603KB file opens, all of them spent rediscovering a window already known to work.
+//
+// Start at the answer instead. 56KB is below every window measured carrying a full hop (62,208
+// repeatedly, 65,536 once) and below what hop 1 delivers open-ended on a fresh connection
+// (62,636 / 78,080 / 79,296 before MEMORY_E) -- i.e. below the ~59,957-byte step where this CDN
+// ramps its record size, which is the wall the window exists to stay under. A 603KB file drops
+// from ~21 connections to ~11.
+//
+// Connection COUNT is the thing being bought, not throughput: after ~45 connections in 37s the
+// origin refuses every further handshake for 41+ seconds while github.com keeps handshaking fine
+// at the same heap in the same second (08-21b). Halving the count halves the rate of approach to
+// whatever that limit is.
+//
+// Starting high is safe because shrink is not damped: a wall hop halves the window immediately
+// (56 -> 28 -> 14 -> 7 -> 4KB floor) and windowProved abandons it entirely if the floor is
+// reached without one full window landing. Worst case is a few wasted hops per file and then
+// exactly the old behaviour. 4KB floor still moves 29KB/s at the measured ~140ms per hop. 64KB
+// ceiling because hop 1, which never has a window, has been measured delivering 49,152-64,509
+// bytes on a fresh heap.
+constexpr size_t RANGE_WINDOW_START = 56 * 1024;
 constexpr size_t RANGE_WINDOW_MIN = 4 * 1024;
 constexpr size_t RANGE_WINDOW_MAX = 64 * 1024;
 // Consecutive full-window hops before the window grows. Growth is damped and shrink is not,
 // ON PURPOSE: success here is probabilistic, so a symmetric rule hunts across the boundary
 // forever instead of settling just under it. Halve on one failure, grow after four wins.
 constexpr int RANGE_WINDOW_GROW_RUN = 4;
+// Bytes a hop must carry not to be scored a stall. A quarter of the window, so a window we
+// chose to make small is not mistaken for a server dribbling -- but never MORE than the
+// no-window floor, or raising RANGE_WINDOW_START would quietly tighten the stall test into a
+// stricter rule than the one that applied before windows existed. At a 56KB window an unclamped
+// quarter is 14,336, and an origin answering a bounded range with one ~15KB record (which is
+// exactly what the 08-20 capture showed against an open-ended range) would sit on the boundary
+// -- four such hops in a row and MAX_RESUME_STALLS ends a download that is converging fine.
+constexpr size_t windowProgressFloor(const size_t window) {
+  if (window == 0) return MIN_RESUME_HOP_BYTES;
+  const size_t quarter = window / 4;
+  return quarter < MIN_RESUME_HOP_BYTES ? quarter : MIN_RESUME_HOP_BYTES;
+}
 // Consecutive hops that delivered ZERO bytes, counted separately from the short-hop stalls
 // above and reset by any hop that carries even one byte.
 //
@@ -1021,7 +1051,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
         // A window we chose is not a server dribbling. Score the stall against a quarter of
         // the window instead: still catches a peer that answers a 12KB range with 200 bytes,
         // but cannot kill a download for the crime of asking for less on purpose.
-        const size_t progressFloor = rangeWindow > 0 ? rangeWindow / 4 : MIN_RESUME_HOP_BYTES;
+        const size_t progressFloor = windowProgressFloor(rangeWindow);
         stalledResumes = hopBytes < progressFloor ? stalledResumes + 1 : 0;
         emptyWallHops = 0;  // this hop carried bytes
         emptyOtherHops = 0;
@@ -1168,7 +1198,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
     const size_t shortHopBytes = sink.downloaded - resumeOffset;
     if (sink.total > 0 && sink.downloaded < sink.total && sink.downloaded > resumeOffset && resumes < resumeBudget &&
         stalledResumes < MAX_RESUME_STALLS && !(sink.cancelFlag && *sink.cancelFlag)) {
-      const size_t progressFloor = rangeWindow > 0 ? rangeWindow / 4 : MIN_RESUME_HOP_BYTES;
+      const size_t progressFloor = windowProgressFloor(rangeWindow);
       stalledResumes = shortHopBytes < progressFloor ? stalledResumes + 1 : 0;
       emptyWallHops = 0;  // this hop carried bytes
       emptyOtherHops = 0;
