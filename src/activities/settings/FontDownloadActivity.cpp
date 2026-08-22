@@ -379,6 +379,16 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
     char destPath[128];
     FontInstaller::buildFontPath(family.name.c_str(), file.name.c_str(), destPath, sizeof(destPath));
 
+    // Resume: a size already on disk with the manifest's CRC is not fetched again. Without this
+    // a family that failed on its last size re-downloaded every earlier size on the retry —
+    // megabytes, and a fresh set of TLS handshakes to lose — before reaching the one that
+    // failed. A stale or truncated file fails the CRC and is fetched normally.
+    uint32_t installedCrc = 0;
+    if (Storage.exists(destPath) && computeFileCrc32(destPath, installedCrc) && installedCrc == file.crc32) {
+      LOG_DBG("FONT", "Already installed, skipping: %s", file.name.c_str());
+      continue;
+    }
+
     std::string url = baseUrl_ + file.name;
 
     // Same heap reclaim as the manifest fetch: free the glyph cache AND the resident SD
@@ -446,8 +456,15 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
 
     if (result != HttpDownloader::OK) {
       LOG_ERR("FONT", "Download failed: %s (%d)", file.name.c_str(), result);
-      fontInstaller_.deleteFamily(family.name.c_str());
-      family.installed = false;
+      // Only the size that failed, never the whole family. The sizes already fetched are a
+      // usable family in their own right — SdCardFontRegistry::scanRoot admits any non-empty
+      // set — and discarding them meant a refused handshake on the last size threw away every
+      // earlier one, so no retry ever got further than the previous attempt did.
+      // The partial destination file must still go: a truncated .cpfont would be discovered
+      // as a real size.
+      Storage.remove(destPath);
+      fontInstaller_.refreshRegistry();
+      family.installed = fontInstaller_.isFamilyInstalled(family.name.c_str());
       family.hasUpdate = false;
       RenderLock lock(*this);
       state_ = ERROR;
