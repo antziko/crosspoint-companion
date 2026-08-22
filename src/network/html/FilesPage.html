@@ -4008,6 +4008,12 @@ function stripComments(xml) {
     { open: '<?', close: '?>' },
   ];
 
+  // Elements whose text content is not markup and must survive verbatim. <style> matters
+  // because the EPUB2 idiom wraps the rules themselves in a comment guard --
+  // <style><!-- p { ... } --></style> -- so stripping comments inside it deletes the whole
+  // stylesheet and the chapter renders unstyled.
+  const OPAQUE = ['style', 'script'];
+
   const encoder = new TextEncoder();
   const out = [];
   let i = 0;
@@ -4047,6 +4053,24 @@ function stripComments(xml) {
     if (skipped) {
       const close = xml.indexOf(skipped.close, next + skipped.open.length);
       const end = close < 0 ? xml.length : close + skipped.close.length;
+      out.push(xml.slice(next, end));
+      i = end;
+      continue;
+    }
+
+    const opaque = OPAQUE.find(tag => {
+      if (!xml.startsWith('<' + tag, next)) return false;
+      const after = xml[next + tag.length + 1];
+      return after === '>' || after === ' ' || after === '\t' || after === '\n' || after === '\r' || after === '/';
+    });
+    if (opaque) {
+      const tagEnd = xml.indexOf('>', next);
+      if (tagEnd < 0) { out.push(xml.slice(next)); i = xml.length; continue; }
+      // <style/> carries no content, so only the tag itself is opaque.
+      if (xml[tagEnd - 1] === '/') { out.push(xml.slice(next, tagEnd + 1)); i = tagEnd + 1; continue; }
+      const closeTag = '</' + opaque + '>';
+      const close = xml.indexOf(closeTag, tagEnd + 1);
+      const end = close < 0 ? xml.length : close + closeTag.length;
       out.push(xml.slice(next, end));
       i = end;
       continue;
