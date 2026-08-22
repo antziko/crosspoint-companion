@@ -87,6 +87,7 @@ class CssParser {
     // permanently silenced processRuleBlockWithStyle(), so every later inline <style> block was
     // discarded too -- loadFromCache() calls clear() at entry, so the latch outlived its cause.
     cssHeapBail_ = false;
+    styleGateBail_ = false;
   }
 
   /**
@@ -140,6 +141,11 @@ class CssParser {
   // rules so the book renders with partial CSS instead of crashing. Persists across the book's CSS
   // files (heap stays tight once exhausted).
   bool cssHeapBail_ = false;
+
+  // Set the first time resolveStyle() refused to resolve because free heap was under
+  // MIN_FREE_HEAP_FOR_CSS. Latched per load (cleared in clear()) purely so the log line fires
+  // once per chapter build rather than once per element -- see resolveStyle().
+  mutable bool styleGateBail_ = false;
 
   // Binary-search lookup into the sorted rules vector. Returns nullptr if absent.
   [[nodiscard]] const CssStyle* findRule(const std::string& key) const;

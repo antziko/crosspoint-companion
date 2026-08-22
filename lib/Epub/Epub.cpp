@@ -4,6 +4,7 @@
 #include <HalStorage.h>
 #include <JpegToBmpConverter.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <PngToBmpConverter.h>
 #include <SdDebugLog.h>
 #include <Utf8.h>
@@ -241,12 +242,21 @@ void Epub::discoverCssFilesFromZip() {
   }
 }
 
-void Epub::parseCssFiles() const {
+bool Epub::parseCssFiles() const {
   // Maximum CSS file size we'll attempt to parse (uncompressed)
   // Larger files risk memory exhaustion on ESP32
   constexpr size_t MAX_CSS_FILE_SIZE = 128 * 1024;  // 128KB
-  // Minimum heap required before attempting CSS parsing
-  constexpr size_t MIN_HEAP_FOR_CSS_PARSING = 64 * 1024;  // 64KB
+  // Minimum heap required before attempting CSS parsing.
+  //
+  // This was 64 KB, which is more than the device usually HAS: a book opened at 63,492 free
+  // (largest block 45,044 — heap that is objectively plentiful) had its only stylesheet skipped
+  // and rendered with rules=0, and because the empty result was then cached, permanently.
+  // The number was never a measurement of what the parse costs. CssParser budgets itself to
+  // CSS_CACHE_BYTE_BUDGET (12 KB), bails per-rule via processRuleBlockWithStyle when the store
+  // cannot grow, and has its own MIN_FREE_HEAP_FOR_CSS (4 KB) hard floor — three graceful
+  // degradations that this all-or-nothing gate pre-empted. It only needs to cover the temp
+  // extract plus the first rules; below that the inner guards do a better job.
+  constexpr size_t MIN_HEAP_FOR_CSS_PARSING = 24 * 1024;  // 24KB
 
   if (cssFiles.empty()) {
     LOG_DBG("EBP", "No CSS files to parse, but CssParser created for inline styles");
@@ -257,7 +267,10 @@ void Epub::parseCssFiles() const {
   // See if we have a cached version of the CSS rules
   if (cssParser->hasCache()) {
     LOG_DBG("EBP", "CSS cache exists, skipping parseCssFiles");
-    return;
+    // A cache written by an earlier, unluckier run is reused verbatim and never re-parsed, so
+    // its existence is itself diagnostic — record it alongside how many files it was built from.
+    SdDebugLog::log("CSS", "cache hit, skipping parse (files=%u)", (unsigned)cssFiles.size());
+    return false;
   }
 
   // No cache yet - parse CSS files. Trace heap to SD: a CSS-heavy book on the X3
@@ -291,6 +304,10 @@ void Epub::parseCssFiles() const {
   std::vector<uint64_t> seenKeys;
   seenKeys.reserve(cssFiles.size());
   size_t skippedDuplicates = 0;
+  // A stylesheet dropped for want of heap, size or I/O — as opposed to one parsed to few rules.
+  // The difference decides whether the result is worth caching: a transient shortage must not
+  // be frozen into a permanently unstyled book.
+  bool resourceSkip = false;
 
   // No cache yet - parse CSS files
   for (size_t cssIndex = 0; cssIndex < cssFiles.size(); cssIndex++) {
@@ -312,6 +329,7 @@ void Epub::parseCssFiles() const {
     if (freeHeap < MIN_HEAP_FOR_CSS_PARSING) {
       LOG_ERR("EBP", "Insufficient heap for CSS parsing (%u bytes free, need %zu), skipping: %s", freeHeap,
               MIN_HEAP_FOR_CSS_PARSING, cssPath.c_str());
+      resourceSkip = true;
       continue;
     }
 
@@ -321,6 +339,7 @@ void Epub::parseCssFiles() const {
       if (cssFileSize > MAX_CSS_FILE_SIZE) {
         LOG_ERR("EBP", "CSS file too large (%zu bytes > %zu max), skipping: %s", cssFileSize, MAX_CSS_FILE_SIZE,
                 cssPath.c_str());
+        resourceSkip = true;
         continue;
       }
     }
@@ -330,6 +349,7 @@ void Epub::parseCssFiles() const {
     HalFile tempCssFile;
     if (!Storage.openFileForWrite("EBP", tmpCssPath, tempCssFile)) {
       LOG_ERR("EBP", "Could not create temp CSS file");
+      resourceSkip = true;
       continue;
     }
     if (!readItemContentsToStream(cssPath, tempCssFile, 1024)) {
@@ -337,6 +357,7 @@ void Epub::parseCssFiles() const {
       // Explicitly close() file before calling Storage.remove()
       tempCssFile.close();
       Storage.remove(tmpCssPath.c_str());
+      resourceSkip = true;
       continue;
     }
     // Explicitly close() file before reopening for reading
@@ -346,6 +367,7 @@ void Epub::parseCssFiles() const {
     if (!Storage.openFileForRead("EBP", tmpCssPath, tempCssFile)) {
       LOG_ERR("EBP", "Could not open temp CSS file for reading");
       Storage.remove(tmpCssPath.c_str());
+      resourceSkip = true;
       continue;
     }
     cssParser->loadFromStream(tempCssFile);
@@ -354,14 +376,69 @@ void Epub::parseCssFiles() const {
     Storage.remove(tmpCssPath.c_str());
   }
 
+  // Caching nothing is better than caching a nothing. hasCache() is the only test that decides
+  // whether a stylesheet is ever parsed again, so an empty cache written after a resource skip
+  // makes a transient shortage permanent — the book stays unstyled through every reopen and
+  // every re-pagination. Leaving no cache costs a re-parse per open until one succeeds.
+  if (resourceSkip && cssParser->ruleCount() == 0) {
+    SdDebugLog::log("CSS", "not cached: every stylesheet skipped (files=%u) - will retry on next open",
+                    (unsigned)cssFiles.size());
+    LOG_ERR("EBP", "No CSS rules parsed and stylesheets were skipped - not caching");
+    cssParser->clear();
+    return false;
+  }
+
   // Save to cache for next time
   if (!cssParser->saveToCache()) {
     LOG_ERR("EBP", "Failed to save CSS rules to cache");
+    cssParser->clear();
+    return false;
   }
 
   LOG_DBG("EBP", "Loaded %zu CSS style rules from %zu files (%zu identical duplicates skipped)", cssParser->ruleCount(),
           cssFiles.size(), skippedDuplicates);
   cssParser->clear();
+  return true;
+}
+
+bool Epub::rebuildCssCache() {
+  if (!cssParser || !bookMetadataCache) {
+    LOG_ERR("EBP", "rebuildCssCache() before a successful load()");
+    return false;
+  }
+
+  cssParser->clear();
+  cssParser->deleteCache();
+
+  BookMetadataCache::BookMetadata cachedMetadata = bookMetadataCache->coreMetadata;
+  if (!parseContentOpf(cachedMetadata, /*writeSpineEntries=*/false)) {
+    LOG_ERR("EBP", "Could not parse content.opf from cached bookMetadata for CSS files");
+    // continue anyway - book will work without CSS and we'll still load any inline style CSS
+  } else {
+    discoverCssFilesFromZip();
+  }
+
+  // Hand the spine/TOC map back for the duration of the parse: building the rule store is the
+  // heap peak of the whole session, and the map is reloaded from the same cache file right after.
+  bookMetadataCache.reset();
+  const bool cssCached = parseCssFiles();
+  bookMetadataCache = makeUniqueNoThrow<BookMetadataCache>(cachePath);
+  if (!bookMetadataCache) {
+    LOG_ERR("EBP", "OOM: BookMetadataCache after CSS rebuild");
+    return false;
+  }
+  if (!bookMetadataCache->load()) {
+    LOG_ERR("EBP", "Failed to reload cache after CSS rebuild");
+    return false;
+  }
+
+  // Only when a new stylesheet actually landed. If the parse produced nothing cacheable the
+  // rules are unchanged, so discarding the pagination would re-flow every chapter to exactly
+  // the same result — on every open, since without a cache this path runs again next time.
+  if (cssCached) {
+    Storage.removeDir((cachePath + "/sections").c_str());
+  }
+  return true;
 }
 
 // load in the meta data for the epub file
@@ -379,24 +456,9 @@ bool Epub::load(const bool buildIfMissing, const bool skipLoadingCss) {
       // Rebuild CSS cache when missing or when cache version changed (loadFromCache removes stale file)
       if (!cssParser->hasCache() || !cssParser->loadFromCache()) {
         LOG_DBG("EBP", "CSS rules cache missing or stale, attempting to parse CSS files");
-        cssParser->deleteCache();
-
-        BookMetadataCache::BookMetadata cachedMetadata = bookMetadataCache->coreMetadata;
-        if (!parseContentOpf(cachedMetadata, /*writeSpineEntries=*/false)) {
-          LOG_ERR("EBP", "Could not parse content.opf from cached bookMetadata for CSS files");
-          // continue anyway - book will work without CSS and we'll still load any inline style CSS
-        } else {
-          discoverCssFilesFromZip();
-        }
-        bookMetadataCache.reset();
-        parseCssFiles();
-        bookMetadataCache.reset(new BookMetadataCache(cachePath));
-        if (!bookMetadataCache->load()) {
-          LOG_ERR("EBP", "Failed to reload cache after CSS rebuild");
+        if (!rebuildCssCache()) {
           return false;
         }
-        // Invalidate section caches so they are rebuilt with the new CSS
-        Storage.removeDir((cachePath + "/sections").c_str());
       }
     }
     // Release the resolved CSS rule map: it is only needed transiently while building

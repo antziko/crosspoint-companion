@@ -56,12 +56,18 @@ constexpr size_t CSS_GROWTH_HEAP_MARGIN = 6 * 1024;
 // a couple of short (SSO-eligible) std::strings plus a small splitWhitespace() vector
 // when the element carries a class attribute -- well under 1KB in practice. This gate
 // exists solely to skip that work before a genuine OOM-abort of those small strings
-// (bare `new` aborts under -fno-exceptions), NOT as a general low-heap proxy. Sized at
-// 16KB: 8-30x the real transient, same spirit as CSS_GROWTH_HEAP_MARGIN above, and low
-// enough to clear normal chapter builds (mid-build free heap now sits ~41-48KB once
-// resident RAM -- ruby, SD-font mini-data, dictionaries -- is loaded). A higher gate
-// silently dropped ALL local CSS whenever a build grazed just under it.
-constexpr size_t MIN_FREE_HEAP_FOR_CSS = 16 * 1024;
+// (bare `new` aborts under -fno-exceptions), NOT as a general low-heap proxy.
+//
+// Sized at 4KB: still 4x the real transient, and deliberately far below where a chapter build
+// actually runs. Every byte above the true requirement is harm, because tripping this gate does
+// not degrade gracefully -- resolveStyle() returns an EMPTY style for every element, the chapter
+// lays out completely unstyled, and Section then CACHES that layout, so one transient dip
+// unstyles the chapter permanently. The previous 16KB assumed "mid-build free heap sits
+// ~41-48KB"; an X3 with SD fonts installed sits far lower (observed: 62KB at BUILD-START, minus
+// the build's own ~28KB reserve, minus the SD-font mini-bitmap caches loading mid-build =
+// 10,960 free), so the gate tripped on ordinary books and every one of them rendered with no
+// CSS at all.
+constexpr size_t MIN_FREE_HEAP_FOR_CSS = 4 * 1024;
 
 // Heap the rule store may consume while loadFromCache() populates it. A CSS-heavy book's stylesheet
 // is 200+ large CssStyle entries (~60KB), and loadFromCache() runs INSIDE a section build
@@ -735,12 +741,17 @@ const CssStyle* CssParser::findRule(const std::string& key) const {
 }
 
 CssStyle CssParser::resolveStyle(const std::string& tagName, const std::string& classAttr) const {
-  static bool lowHeapWarningLogged = false;
-  if (ESP.getFreeHeap() < MIN_FREE_HEAP_FOR_CSS) {
-    if (!lowHeapWarningLogged) {
-      lowHeapWarningLogged = true;
-      LOG_DBG("CSS", "Warning: low heap (%u bytes) below MIN_FREE_HEAP_FOR_CSS (%u), returning empty style",
-              ESP.getFreeHeap(), static_cast<unsigned>(MIN_FREE_HEAP_FOR_CSS));
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  if (freeHeap < MIN_FREE_HEAP_FOR_CSS) {
+    // Latched per load, not per boot: this is the one bail that silently unstyles a whole
+    // chapter AND caches the result, so it has to be visible on every build it happens on --
+    // and on the SD log, since the X3 has no serial and LOG_DBG alone left it undiagnosable.
+    if (!styleGateBail_) {
+      styleGateBail_ = true;
+      SdDebugLog::log("CSS", "style gate bail: free=%u < %u largest=%u - chapter lays out unstyled", freeHeap,
+                      (unsigned)MIN_FREE_HEAP_FOR_CSS, (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+      LOG_ERR("CSS", "Low heap (%u B) below MIN_FREE_HEAP_FOR_CSS (%u) - returning empty style", freeHeap,
+              static_cast<unsigned>(MIN_FREE_HEAP_FOR_CSS));
     }
     return CssStyle{};
   }

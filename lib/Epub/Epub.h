@@ -35,7 +35,7 @@ class Epub {
   bool parseTocNcxFile() const;
   bool parseTocNavFile() const;
   void discoverCssFilesFromZip();
-  void parseCssFiles() const;
+  bool parseCssFiles() const;
 
  public:
   explicit Epub(std::string filepath, const std::string& cacheDir) : filepath(std::move(filepath)) {
@@ -45,6 +45,12 @@ class Epub {
   ~Epub() = default;
   std::string& getBasePath() { return contentBasePath; }
   bool load(bool buildIfMissing = true, bool skipLoadingCss = false);
+  // Throw the cached CSS rules away and parse the stylesheets out of the EPUB again. The
+  // section caches go with them: their pagination was flowed against the old rules, so keeping
+  // them would reproduce the old layout no matter how good the new stylesheet is.
+  // Callers holding an open section must release it first — SdFat cannot remove a directory
+  // while a file inside it is open.
+  bool rebuildCssCache();
   bool clearCache() const;
   void setupCacheDir() const;
   const std::string& getCachePath() const;

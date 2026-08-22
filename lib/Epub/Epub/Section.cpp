@@ -520,6 +520,12 @@ bool Section::startBuild(const int fontId, const float lineCompression, const bo
     if (ctx->cssParser && !ctx->cssParser->loadFromCache()) {
       LOG_ERR("SCT", "Failed to load CSS from cache");
     }
+    // The one number that says whether this chapter will be styled at all. Every other signal on
+    // this path is LOG_DBG/LOG_ERR, which the X3 cannot show — leaving "no CSS" undiagnosable.
+    SdDebugLog::log("SCT", "css spine=%u parser=%d rules=%u free=%u", (unsigned)spineIndex, ctx->cssParser ? 1 : 0,
+                    ctx->cssParser ? (unsigned)ctx->cssParser->ruleCount() : 0u, (unsigned)ESP.getFreeHeap());
+  } else {
+    SdDebugLog::log("SCT", "css spine=%u DISABLED (embeddedStyle=0)", (unsigned)spineIndex);
   }
 
   // Collect TOC anchors for this spine so the parser can insert page breaks at chapter boundaries
