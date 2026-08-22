@@ -42,11 +42,11 @@ void EpubReaderMenuActivity::buildMenuRowItems() {
 std::vector<EpubReaderMenuActivity::MenuItem> EpubReaderMenuActivity::buildMenuItems(bool hasFootnotes,
                                                                                      bool hasDictionary) {
   std::vector<MenuItem> items;
-  // 10 always-present rows + FOOTNOTES + the 3 dictionary rows + FRONTLIGHT on
-  // boards that have one = 15 worst case. This was 13, one short, so a fully
-  // populated menu reallocated once — and a vector growth that fails aborts
-  // here rather than returning null. Keep in step with MAX_MENU_ITEMS.
-  items.reserve(15);
+  // 11 always-present rows + FOOTNOTES + the 3 dictionary rows + FRONTLIGHT on
+  // boards that have one = 16 worst case. A fully populated menu that reallocates
+  // aborts here rather than returning null, so this must never be short. Keep in
+  // step with MAX_MENU_ITEMS.
+  items.reserve(16);
   items.push_back({MenuAction::READER_OPTIONS, StrId::STR_READER_OPTIONS});
   items.push_back({MenuAction::VIEW_BOOKMARKS, StrId::STR_BOOKMARKS});
   items.push_back({MenuAction::SELECT_CHAPTER, StrId::STR_SELECT_CHAPTER});
@@ -56,6 +56,7 @@ std::vector<EpubReaderMenuActivity::MenuItem> EpubReaderMenuActivity::buildMenuI
   }
   items.push_back({MenuAction::SET_BOOK_DICTIONARY, StrId::STR_BOOK_DICTIONARY});
   items.push_back({MenuAction::AUTO_PAGE_TURN, StrId::STR_AUTO_TURN_PAGES_PER_MIN});
+  items.push_back({MenuAction::REPAGINATE, StrId::STR_REPAGINATE_BOOK});
   items.push_back({MenuAction::DELETE_CACHE, StrId::STR_DELETE_CACHE});
   items.push_back({MenuAction::SCREENSHOT, StrId::STR_SCREENSHOT_BUTTON});
   items.push_back({MenuAction::DISPLAY_QR, StrId::STR_DISPLAY_QR});

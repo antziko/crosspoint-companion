@@ -28,17 +28,26 @@ void ClearCacheActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
   const bool prune = mode_ == Mode::PruneOrphans;
+  const bool repaginate = mode_ == Mode::RepaginateAll;
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
-                 prune ? tr(STR_REMOVE_ORPHANED_CACHES) : tr(STR_CLEAR_READING_CACHE));
+  GUI.drawHeader(
+      renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
+      prune ? tr(STR_REMOVE_ORPHANED_CACHES) : (repaginate ? tr(STR_REPAGINATE_BOOKS) : tr(STR_CLEAR_READING_CACHE)));
 
   if (state == WARNING) {
-    // Clear-all only; prune previews via SCANNING/PREVIEW instead.
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 60, tr(STR_CLEAR_CACHE_WARNING_1), true);
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 30, tr(STR_CLEAR_CACHE_WARNING_2), true,
-                              EpdFontFamily::BOLD);
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 10, tr(STR_CLEAR_CACHE_WARNING_3), true);
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 30, tr(STR_CLEAR_CACHE_WARNING_4), true);
+    // Clear-all and repaginate; prune previews via SCANNING/PREVIEW instead.
+    if (repaginate) {
+      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 45, tr(STR_REPAGINATE_WARNING_1), true);
+      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 15, tr(STR_REPAGINATE_WARNING_2), true,
+                                EpdFontFamily::BOLD);
+      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 25, tr(STR_REPAGINATE_WARNING_3), true);
+    } else {
+      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 60, tr(STR_CLEAR_CACHE_WARNING_1), true);
+      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 30, tr(STR_CLEAR_CACHE_WARNING_2), true,
+                                EpdFontFamily::BOLD);
+      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 10, tr(STR_CLEAR_CACHE_WARNING_3), true);
+      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 30, tr(STR_CLEAR_CACHE_WARNING_4), true);
+    }
 
     const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), tr(STR_CLEAR_BUTTON), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
@@ -78,8 +87,10 @@ void ClearCacheActivity::render(RenderLock&&) {
   }
 
   if (state == SUCCESS) {
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 20,
-                              prune ? tr(STR_ORPHANS_REMOVED) : tr(STR_CACHE_CLEARED), true, EpdFontFamily::BOLD);
+    renderer.drawCenteredText(
+        UI_10_FONT_ID, pageHeight / 2 - 20,
+        prune ? tr(STR_ORPHANS_REMOVED) : (repaginate ? tr(STR_PAGINATION_CLEARED) : tr(STR_CACHE_CLEARED)), true,
+        EpdFontFamily::BOLD);
     std::string resultText = std::to_string(clearedCount) + " " + std::string(tr(STR_ITEMS_REMOVED));
     if (failedCount > 0) {
       resultText += ", " + std::to_string(failedCount) + " " + std::string(tr(STR_FAILED_LOWER));
@@ -129,9 +140,27 @@ void ClearCacheActivity::clearCache() {
     // Only delete directories matching known book cache names.
     if (file.isDirectory() && isBookCacheDirectoryName(itemName.c_str())) {
       String fullPath = "/.crosspoint/" + itemName;
+      // RepaginateAll drops the cached stylesheet and page layout, leaving book.bin, progress.bin
+      // and the cover in place. A book that has never been opened has neither file; that is not a
+      // failure, so it is skipped rather than counted.
+      if (mode_ == Mode::RepaginateAll) {
+        file.close();
+        // css_rules.cache is written once and reused forever — Epub::load() re-parses the
+        // stylesheets only when it is absent, so dropping the pagination alone would re-flow
+        // each chapter against the very rules that produced the layout being discarded.
+        const String cssCache = fullPath + "/css_rules.cache";
+        const bool cssDropped = Storage.exists(cssCache.c_str()) && Storage.remove(cssCache.c_str());
+        fullPath += "/sections";
+        if (!Storage.exists(fullPath.c_str())) {
+          if (cssDropped) {
+            clearedCount++;
+          }
+          continue;
+        }
+      } else {
+        file.close();  // Close before attempting to delete
+      }
       LOG_DBG("CLEAR_CACHE", "Removing cache: %s", fullPath.c_str());
-
-      file.close();  // Close before attempting to delete
 
       if (Storage.removeDir(fullPath.c_str())) {
         clearedCount++;

@@ -86,6 +86,7 @@ void SettingsActivity::rebuildSettingsLists() {
     } else if (subCategory_ == StrId::STR_SYS_LIBRARY) {
       readerSettings.push_back(SettingInfo::Action(StrId::STR_CLEAR_READING_CACHE, SettingAction::ClearCache));
       readerSettings.push_back(SettingInfo::Action(StrId::STR_REMOVE_ORPHANED_CACHES, SettingAction::PruneCache));
+      readerSettings.push_back(SettingInfo::Action(StrId::STR_REPAGINATE_BOOKS, SettingAction::RepaginateCache));
     } else if (subCategory_ == StrId::STR_SYS_MAINTENANCE) {
       readerSettings.push_back(SettingInfo::Action(StrId::STR_CHECK_UPDATES, SettingAction::CheckForUpdates));
       readerSettings.push_back(SettingInfo::Action(StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate));
@@ -452,6 +453,10 @@ void SettingsActivity::toggleCurrentSetting() {
       case SettingAction::PruneCache:
         startActivityForResultNoThrow<ClearCacheActivity>(resultHandler, renderer, mappedInput,
                                                           ClearCacheActivity::Mode::PruneOrphans);
+        break;
+      case SettingAction::RepaginateCache:
+        startActivityForResultNoThrow<ClearCacheActivity>(resultHandler, renderer, mappedInput,
+                                                          ClearCacheActivity::Mode::RepaginateAll);
         break;
       case SettingAction::CheckForUpdates:
         startActivityForResultNoThrow<OtaUpdateActivity>(resultHandler, renderer, mappedInput);

@@ -56,6 +56,7 @@
 #include "util/BookCacheUtils.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
+#include "util/QuoteHighlight.h"
 #include "util/ScreenshotUtil.h"
 
 namespace {
@@ -1503,6 +1504,42 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       onGoHome();
       return;
     }
+    case EpubReaderMenuActivity::MenuAction::REPAGINATE: {
+      // Drop this book's cached stylesheet and pagination and re-flow in place. Unlike
+      // DELETE_CACHE the Epub object stays valid — book.bin, the cover and progress are all
+      // untouched — so there is no need to leave the book: the position is remembered and
+      // render() rebuilds the current chapter exactly as a settings change does.
+      startActivityForResultNoThrow<ConfirmationActivity>(
+          [this](const ActivityResult& confirmResult) {
+            if (confirmResult.isCancelled) {
+              return;
+            }
+            RenderLock lock(*this);
+            if (!epub) {
+              return;
+            }
+            // Preserve the reading position so applyDeferredReposition() can remap it onto the
+            // new pagination; the page count itself may change, which is the whole point.
+            if (section) {
+              rememberCurrentContentOffset();
+              cachedSpineIndex = currentSpineIndex;
+              cachedChapterTotalPageCount = section->pageCount;
+              nextPageNumber = section->currentPage;
+            }
+            // Before the rebuild, never after: the section holds an open HalFile on
+            // sections/<spine>.bin, and SdFat cannot remove a directory with a file open in it.
+            section.reset();
+            // The stylesheet goes too, not just the pagination. css_rules.cache is written once
+            // and reused forever, so a book whose rules were dropped under low heap stays
+            // unstyled through any number of pure re-paginations.
+            if (!epub->rebuildCssCache()) {
+              LOG_ERR("ERS", "CSS rebuild failed during re-pagination");
+            }
+            ignoreBackUntilRelease = true;
+          },
+          renderer, mappedInput, tr(STR_CONFIRM_REPAGINATE), "");
+      return;
+    }
     case EpubReaderMenuActivity::MenuAction::DELETE_CACHE: {
       startActivityForResultNoThrow<ConfirmationActivity>(
           [this](const ActivityResult& confirmResult) {
@@ -2410,6 +2447,19 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     section->currentPage = clamped;
   }
 
+  // Arriving at the page a session "return here" mark sits on consumes it, exactly as
+  // reopening it from the bookmark list does — paging back is still finding the way back.
+  // Done before the page is drawn so the status bar never shows a mark that is already
+  // gone; the page key below is the one renderStatusBar() uses for its indicator, so this
+  // removes precisely the mark that page would have shown. Skipped while the section is
+  // building or partial, where pageCount is only a watermark: the key would then name the
+  // wrong page, and getting that wrong deletes a mark the user still needs.
+  if (!section->isBuilding() && !section->isPartial()) {
+    BOOKMARKS.removeReturnMarkForPage(static_cast<uint16_t>(currentSpineIndex),
+                                      static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount),
+                                      section->pageCount);
+  }
+
   {
     // Unified page read: the in-progress build's in-RAM table if it has reached the page,
     // otherwise the on-disk file (finalized section, or a partial from a previous session).
@@ -2867,6 +2917,19 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     }
   };
 
+  // Saved highlights sit on top of the freshly drawn page, on every BW pass that paints it.
+  // The grayscale strips deliberately skip them, exactly as they skip the status bar: the mark
+  // is solid black in the BW frame and needs no grey plane. The page key is the one the quote
+  // was anchored with, so a chapter that has re-paginated since simply fails the match and
+  // draws nothing.
+  const auto drawQuoteHighlights = [&]() {
+    if (!section || section->pageCount <= 0) return;
+    QuoteHighlight::drawForPage(renderer, *page, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop,
+                                static_cast<uint16_t>(currentSpineIndex),
+                                static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount),
+                                section->pageCount);
+  };
+
   // No automatic ghost-clear flash on image page turns — the power-button manual
   // refresh (HALF clear + re-render) is the ghost-clear tool when the user wants it.
 
@@ -2875,12 +2938,14 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   // wipes the framebuffer; the normal render/grayscale flow below then repaints for real.
   if (pageHasImagesNeedingDecode) {
     page->renderWithImagePlaceholders(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);
+    drawQuoteHighlights();
     renderStatusBar();
     renderer.displayBuffer(HalDisplay::FAST_REFRESH);
     renderer.clearScreen();
   }
 
   page->render(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);
+  drawQuoteHighlights();
   renderStatusBar();
   const auto tBwRender = millis();
 
@@ -2912,6 +2977,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
       // Re-render page content to restore images into the blanked area
       // Status bar is not re-rendered here to avoid reading stale dynamic values (e.g. battery %)
       page->render(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);
+      drawQuoteHighlights();
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
     } else {
       // No image bounding box (e.g. full-page image): still use FAST_REFRESH, not

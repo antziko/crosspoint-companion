@@ -23,6 +23,7 @@ enum class SettingAction {
   Network,
   ClearCache,
   PruneCache,
+  RepaginateCache,
   CheckForUpdates,
   SdFirmwareUpdate,
   Language,
