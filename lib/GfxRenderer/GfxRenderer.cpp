@@ -1212,6 +1212,26 @@ void GfxRenderer::drawPixelDither<Color::DarkGray>(const int x, const int y) con
   drawPixel(x, y, (x + y) % 2 == 0);  // TODO: maybe find a better pattern?
 }
 
+// Additive counterpart of fillRectDither: lays the pattern over whatever is already in the
+// framebuffer instead of replacing it. White and Clear have nothing to add, so they are no-ops;
+// solid Black is already additive, so it reuses the plain fill.
+void GfxRenderer::washRectDither(const int x, const int y, const int width, const int height, Color color) const {
+  switch (color) {
+    case Color::Clear:
+    case Color::White:
+      break;
+    case Color::Black:
+      fillRectImpl<Color::Black>(x, y, width, height);
+      break;
+    case Color::LightGray:
+      fillRectImpl<Color::LightGray, true>(x, y, width, height);
+      break;
+    case Color::DarkGray:
+      fillRectImpl<Color::DarkGray, true>(x, y, width, height);
+      break;
+  }
+}
+
 void GfxRenderer::fillRectDither(const int x, const int y, const int width, const int height, Color color) const {
   switch (color) {
     case Color::Clear:
@@ -1231,7 +1251,7 @@ void GfxRenderer::fillRectDither(const int x, const int y, const int width, cons
   }
 }
 
-template <Color C>
+template <Color C, bool Additive>
 void GfxRenderer::fillRectImpl(const int x, const int y, const int width, const int height) const {
   if constexpr (C == Color::Clear) return;
   if (width <= 0 || height <= 0) return;
@@ -1376,14 +1396,28 @@ void GfxRenderer::fillRectImpl(const int x, const int y, const int width, const 
       const uint8_t blackMask = blackMasks[py & 1];
       const uint8_t whiteMask = static_cast<uint8_t>(~blackMask);
 
-      // Dither writes BOTH inks (the slow path called drawPixel for every
-      // pixel — setting or clearing — so we must do the same). Inside the
-      // rect mask: write whiteMask (1s where white, 0s where black). Outside
-      // the rect mask: leave the framebuffer untouched.
+      // A replacing dither writes BOTH inks (the slow path called drawPixel
+      // for every pixel — setting or clearing — so it must do the same).
+      // Inside the rect mask: write whiteMask (1s where white, 0s where
+      // black). Outside the rect mask: leave the framebuffer untouched.
+      //
+      // An additive one adds ink only where the pattern is black and never clears a pixel, so
+      // content already drawn underneath survives. 1 = white, so that is an AND — and the
+      // middle run becomes a byte loop rather than a memset, since it reads before it writes.
       uint8_t* row = target + static_cast<int32_t>(py - originY) * panelStride;
       if (byteStart == byteEnd) {
         const uint8_t rectMask = headMask & tailMask;
-        row[byteStart] = static_cast<uint8_t>((row[byteStart] & ~rectMask) | (rectMask & whiteMask));
+        if constexpr (Additive) {
+          row[byteStart] &= static_cast<uint8_t>(whiteMask | ~rectMask);
+        } else {
+          row[byteStart] = static_cast<uint8_t>((row[byteStart] & ~rectMask) | (rectMask & whiteMask));
+        }
+      } else if constexpr (Additive) {
+        row[byteStart] &= static_cast<uint8_t>(whiteMask | ~headMask);
+        for (int b = byteStart + 1; b < byteEnd; ++b) {
+          row[b] &= whiteMask;
+        }
+        row[byteEnd] &= static_cast<uint8_t>(whiteMask | ~tailMask);
       } else {
         row[byteStart] = static_cast<uint8_t>((row[byteStart] & ~headMask) | (headMask & whiteMask));
         if (byteEnd > byteStart + 1) {
@@ -1400,6 +1434,8 @@ template void GfxRenderer::fillRectImpl<Color::Black>(int, int, int, int) const;
 template void GfxRenderer::fillRectImpl<Color::White>(int, int, int, int) const;
 template void GfxRenderer::fillRectImpl<Color::LightGray>(int, int, int, int) const;
 template void GfxRenderer::fillRectImpl<Color::DarkGray>(int, int, int, int) const;
+template void GfxRenderer::fillRectImpl<Color::LightGray, true>(int, int, int, int) const;
+template void GfxRenderer::fillRectImpl<Color::DarkGray, true>(int, int, int, int) const;
 
 void GfxRenderer::maskRoundedRectOutsideCorners(const int x, const int y, const int width, const int height,
                                                 const int radius, const Color color) const {

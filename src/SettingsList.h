@@ -330,6 +330,12 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   v.push_back(SettingInfo::Enum(StrId::STR_IMAGES, &CrossPointSettings::imageRendering,
                                 {StrId::STR_IMAGES_DISPLAY, StrId::STR_IMAGES_PLACEHOLDER, StrId::STR_IMAGES_SUPPRESS},
                                 "imageRendering", StrId::STR_READER_TEXT));
+  // How saved quotes are marked on the page. Deliberately not .withTextSettings(): a highlight
+  // only exists where a quote was taken, so the Text Settings preview has nothing to show.
+  v.push_back(SettingInfo::Enum(
+      StrId::STR_QUOTE_STYLE, &CrossPointSettings::quoteHighlightStyle,
+      {StrId::STR_QUOTE_STYLE_OFF, StrId::STR_QUOTE_STYLE_UNDERLINE, StrId::STR_QUOTE_STYLE_HIGHLIGHT},
+      "quoteHighlightStyle", StrId::STR_READER_TEXT));
   // Night mode = inverted output polarity on the reading surfaces only (EPUB/TXT/XTC;
   // ActivityManager resolves the polarity per render), so it belongs with the reader
   // settings rather than with the system-wide display ones.

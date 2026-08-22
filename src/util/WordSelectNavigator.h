@@ -280,8 +280,16 @@ class WordSelectNavigator {
   bool confirmReleaseConsumed = false;
   int anchorFlatIndex = -1;
 
-  int findClosestWord(int targetRow) const;
+  // Centre X of one word — the coordinate every row-navigation comparison is made against.
+  int wordCenterX(int flatIdx) const { return words[flatIdx].screenX + words[flatIdx].width / 2; }
+
   int findClosestWordFromX(int targetRow, int refCenterX) const;
+
+  // Goal column for vertical navigation, in screen X. Held across row moves and cleared
+  // by any left/right step, so a row carrying a single short word (a heading, a
+  // paragraph's last line) cannot rewrite the reference to its own X and drag every
+  // later row move to the start of the line. -1 means "derive it from the cursor".
+  int rowNavGoalX = -1;
 
   // Flat index of the second half we snapped from on wordPrev. Allows subsequent
   // rowPrev/rowNext to reference that half's position rather than the first half's.

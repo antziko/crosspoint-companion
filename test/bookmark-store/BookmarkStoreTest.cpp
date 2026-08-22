@@ -264,6 +264,36 @@ TEST_F(BookmarkStoreTest, PageBookmarkToggleDoesNotRemoveQuote) {
   EXPECT_FALSE(store.hasPointBookmarkForPage(1, 0.50f, 10));
 }
 
+TEST_F(BookmarkStoreTest, ReturnMarkForPageIsConsumedOnlyOnItsOwnPage) {
+  const std::string book = "/books/return.epub";
+  auto& store = BookmarkStore::getInstance();
+  ASSERT_TRUE(store.loadForBook(book, "R", "A", "epub"));
+
+  // A return mark on page 5 of a 10-page chapter, plus a normal bookmark on page 2.
+  ASSERT_EQ(store.addBookmark(1, 0.50f, 10, "Ch1", UINT16_MAX, nullptr, /*returnMark=*/true, 5),
+            BookmarkStore::AddResult::Added);
+  ASSERT_EQ(store.addBookmark(1, 0.20f, 10, "Ch1", UINT16_MAX, nullptr, /*returnMark=*/false, 2),
+            BookmarkStore::AddResult::Added);
+  ASSERT_TRUE(store.isReturnMarkForPage(1, 0.50f, 10));
+
+  // Rendering any other page leaves it alone — including the page holding a normal bookmark,
+  // which must never be consumed by arriving at it.
+  EXPECT_FALSE(store.removeReturnMarkForPage(1, 0.40f, 10));
+  EXPECT_FALSE(store.removeReturnMarkForPage(1, 0.20f, 10));
+  EXPECT_FALSE(store.removeReturnMarkForPage(2, 0.50f, 10));
+  EXPECT_EQ(store.getBookmarks().size(), 2u);
+
+  // Arriving at its own page consumes it, once.
+  EXPECT_TRUE(store.removeReturnMarkForPage(1, 0.50f, 10));
+  EXPECT_FALSE(store.isReturnMarkForPage(1, 0.50f, 10));
+  EXPECT_FALSE(store.removeReturnMarkForPage(1, 0.50f, 10));
+
+  // The normal bookmark survives.
+  ASSERT_EQ(store.getBookmarks().size(), 1u);
+  EXPECT_FALSE(store.getBookmarks()[0].returnMark);
+  EXPECT_TRUE(store.hasPointBookmarkForPage(1, 0.20f, 10));
+}
+
 TEST_F(BookmarkStoreTest, EnforcesCombinedCap) {
   const std::string book = "/books/cap.epub";
   auto& store = BookmarkStore::getInstance();

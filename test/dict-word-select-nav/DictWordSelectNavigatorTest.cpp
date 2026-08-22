@@ -99,6 +99,37 @@ static WordSelectNavigator makeHyphenatedFixture() {
   return nav;
 }
 
+// Row 0:  alpha(10)  bravo(100)  charlie(200)  delta(300)
+// Row 1:  solo(10)                                            <- lone short word, far left
+// Row 2:  echo(10)   foxtrot(100) golf(200)     hotel(300)
+//
+// The one-word row is the shape that used to destroy the cursor's column: row navigation
+// re-derived its reference X from whatever it had just landed on, so every row move past
+// "solo" inherited x=10 and stuck to the start of the line.
+// load() starts the cursor on the middle row/word (row 1 -> solo, its only word).
+static WordSelectNavigator makeShortRowFixture() {
+  std::string pool;
+  const char* texts[] = {"alpha", "bravo", "charlie", "delta", "solo", "echo", "foxtrot", "golf", "hotel"};
+  const int16_t xs[] = {10, 100, 200, 300, 10, 10, 100, 200, 300};
+  const int16_t ys[] = {0, 0, 0, 0, 20, 40, 40, 40, 40};
+  const int rowOf[] = {0, 0, 0, 0, 1, 2, 2, 2, 2};
+
+  std::vector<WordSelectNavigator::WordInfo> words;
+  for (int i = 0; i < 9; i++) {
+    WordSelectNavigator::WordInfo w = mkWord(texts[i], xs[i], ys[i], 40, rowOf[i]);
+    w.textOffset = poolAppendString(pool, texts[i]);
+    w.lookupOffset = w.textOffset;
+    words.push_back(w);
+  }
+
+  std::vector<WordSelectNavigator::Row> rows;
+  WordSelectNavigator::organizeIntoRows(words, rows);
+
+  WordSelectNavigator nav;
+  nav.load(std::move(words), std::move(rows), std::move(pool));
+  return nav;
+}
+
 // Starting from the fixture's initial cursor (wordD), navigate to targetWord
 // using Left/Right presses.
 static void navigateTo(WordSelectNavigator& nav, MappedInputManager& input, GfxRenderer& renderer,
@@ -127,6 +158,27 @@ static void navigateTo(WordSelectNavigator& nav, MappedInputManager& input, GfxR
     const char* now = nav.getDisplay(*nav.getSelected());
     if (std::strcmp(now, targetWord) == 0) return;
   }
+}
+
+// Park the cursor on the hyphenated first half, reached with a Right step.
+// The route matters. Right leaves pendingSnapIdx unset (unlike the Left snap path), and
+// it clears the goal column, so a following Down is matched against the first half's own
+// X and lands on its partner below. Arriving by Up from wordD instead would carry wordD's
+// column into the Down and come straight back to wordD — the goal column working as
+// intended, but useless for staging a test on the second half.
+static void horizNavToFirstHalf(WordSelectNavigator& nav, MappedInputManager& input, GfxRenderer& renderer) {
+  navigateTo(nav, input, renderer, "wordB");
+  input.reset();
+  input.setReleased(MappedInputManager::Button::Right, true);
+  nav.handleNavigation(input, renderer);
+}
+
+// Continue from the first half onto the second half by row navigation.
+static void rowNavToSecondHalf(WordSelectNavigator& nav, MappedInputManager& input, GfxRenderer& renderer) {
+  horizNavToFirstHalf(nav, input, renderer);
+  input.reset();
+  input.setReleased(MappedInputManager::Button::Down, true);
+  nav.handleNavigation(input, renderer);
 }
 
 // --------------------------------------------------------------------------
@@ -298,14 +350,10 @@ static void testHyphenatedNavRowNavExempt() {
   GfxRenderer renderer;
 
   // Navigate to under- (first half, row 0) via row-nav (Up from wordD).
-  // Using Up avoids the wordPrev→snap path, which would leave pendingSnapIdx
-  // pointing at stand and cause the subsequent Down to mis-navigate.
-  input.reset();
-  input.setReleased(MappedInputManager::Button::Up, true);
-  nav.handleNavigation(input, renderer);
-  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "under-") == 0, "arrived at 'under-' via row-nav");
+  horizNavToFirstHalf(nav, input, renderer);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "under-") == 0, "arrived at 'under-'");
 
-  // Press Down -> findClosestWord on row 1 picks stand (same X=200).
+  // Press Down -> the closest word in row 1 to under-'s X=200 is stand.
   // Row navigation should NOT snap back to under-; cursor stays on stand.
   input.reset();
   input.setReleased(MappedInputManager::Button::Down, true);
@@ -512,13 +560,8 @@ static void testHyphenatedNavFromSecondHalfLeft() {
   MappedInputManager input;
   GfxRenderer renderer;
 
-  // Navigate to under- via Up (row-nav) to avoid leaving pendingSnapIdx set.
-  // If navigateTo were used, it would arrive via the wordPrev snap path and set
-  // pendingSnapIdx=stand, causing the subsequent Down to wrap back to row 0.
-  input.reset();
-  input.setReleased(MappedInputManager::Button::Up, true);
-  nav.handleNavigation(input, renderer);
-  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "under-") == 0, "arrived at 'under-' via row-nav");
+  horizNavToFirstHalf(nav, input, renderer);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "under-") == 0, "arrived at 'under-'");
 
   // Down: row nav from row 0 → row 1, closest X to under-(200) is stand(200).
   input.reset();
@@ -577,14 +620,7 @@ static void testRenderHighlightHyphenatedFromSecondHalf() {
   MappedInputManager input;
   GfxRenderer renderer;
 
-  // Row-nav Down from under- lands on stand (second half, same X).
-  // Navigate to under- via Up (row-nav) to avoid leaving pendingSnapIdx set.
-  input.reset();
-  input.setReleased(MappedInputManager::Button::Up, true);
-  nav.handleNavigation(input, renderer);
-  input.reset();
-  input.setReleased(MappedInputManager::Button::Down, true);
-  nav.handleNavigation(input, renderer);
+  rowNavToSecondHalf(nav, input, renderer);
   CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "stand") == 0, "cursor on 'stand' (second half)");
 
   renderer.resetCounters();
@@ -681,14 +717,7 @@ static void testRenderHighlightMultiSelectHyphenatedSecondHalf() {
   CHECK(nav.getSelected() != nullptr && std::strcmp(nav.getDisplay(*nav.getSelected()), "wordD") == 0,
         "fixture starts on 'wordD'");
 
-  // Row-nav Down from initial wordD position lands on stand (via row nav, exempt from snap).
-  // Navigate to wordD first, then Up to row 0, then Down to row 1 to land on stand.
-  input.reset();
-  input.setReleased(MappedInputManager::Button::Up, true);
-  nav.handleNavigation(input, renderer);
-  input.reset();
-  input.setReleased(MappedInputManager::Button::Down, true);
-  nav.handleNavigation(input, renderer);
+  rowNavToSecondHalf(nav, input, renderer);
   CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "stand") == 0, "cursor on 'stand' (second half)");
 
   // Enter multi-select with anchor on stand (index 3).
@@ -867,8 +896,7 @@ static void runHyphenNavSuite(const char* label, WordSelectNavigator (*make)(), 
     CHECK(sel && std::strcmp(nav.getDisplay(*sel), "wordD") == 0, "B: second Right skips second half -> wordD");
   }
 
-  // C: Up from wordD goes to first half; Down row-navigates to second half and
-  //    stays there (no snap back to first half).
+  // C: Up from wordD row-navigates to the first half.
   {
     WordSelectNavigator nav = make();
     MappedInputManager input;
@@ -877,11 +905,16 @@ static void runHyphenNavSuite(const char* label, WordSelectNavigator (*make)(), 
     input.setReleased(MappedInputManager::Button::Up, true);
     nav.handleNavigation(input, renderer);
     CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), firstHalf) == 0, "C: Up reaches first half");
-    input.reset();
-    input.setReleased(MappedInputManager::Button::Down, true);
-    nav.handleNavigation(input, renderer);
+  }
+
+  // C2: row navigation onto the second half stays there (no snap back to first half).
+  {
+    WordSelectNavigator nav = make();
+    MappedInputManager input;
+    GfxRenderer renderer;
+    rowNavToSecondHalf(nav, input, renderer);
     const WordSelectNavigator::WordInfo* sel = nav.getSelected();
-    CHECK(sel && std::strcmp(nav.getDisplay(*sel), secondHalf) == 0, "C: Down lands on second half, not snapped away");
+    CHECK(sel && std::strcmp(nav.getDisplay(*sel), secondHalf) == 0, "C2: Down lands on second half, not snapped away");
   }
 
   // D: after backward snap (Left from wordD -> first half), Up must stay on the
@@ -906,12 +939,7 @@ static void runHyphenNavSuite(const char* label, WordSelectNavigator (*make)(), 
     WordSelectNavigator nav = make();
     MappedInputManager input;
     GfxRenderer renderer;
-    input.reset();
-    input.setReleased(MappedInputManager::Button::Up, true);
-    nav.handleNavigation(input, renderer);
-    input.reset();
-    input.setReleased(MappedInputManager::Button::Down, true);
-    nav.handleNavigation(input, renderer);
+    rowNavToSecondHalf(nav, input, renderer);
     CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), secondHalf) == 0, "E: on second half via row-nav");
     input.reset();
     input.setReleased(MappedInputManager::Button::Left, true);
@@ -1025,6 +1053,57 @@ static void testMergeLookupBothHyphens() {
         "second-half lookup is 'understand', not 'under-stand'");
 }
 
+// Press one button and run a single navigation step.
+static void step(WordSelectNavigator& nav, MappedInputManager& input, GfxRenderer& renderer,
+                 MappedInputManager::Button button) {
+  input.reset();
+  input.setReleased(button, true);
+  nav.handleNavigation(input, renderer);
+}
+
+static void testGoalColumnSurvivesShortRow() {
+  std::printf("testGoalColumnSurvivesShortRow\n");
+
+  WordSelectNavigator nav = makeShortRowFixture();
+  GfxRenderer renderer;
+  MappedInputManager input;
+
+  // Cursor starts on solo. Go up to row 0 and walk right to charlie (x=200), the column
+  // the user is reading in.
+  step(nav, input, renderer, MappedInputManager::Button::Up);
+  step(nav, input, renderer, MappedInputManager::Button::Right);
+  step(nav, input, renderer, MappedInputManager::Button::Right);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "charlie") == 0, "walked right to charlie (x=200)");
+
+  step(nav, input, renderer, MappedInputManager::Button::Down);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "solo") == 0, "Down lands on the lone word, the only choice");
+
+  // solo sits at x=10, but charlie's column is what row 2 must be matched against.
+  step(nav, input, renderer, MappedInputManager::Button::Down);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "golf") == 0,
+        "column held across the lone-word row: row 2 picks golf (x=200), not echo (x=10)");
+}
+
+static void testHorizontalStepRedefinesGoalColumn() {
+  std::printf("testHorizontalStepRedefinesGoalColumn\n");
+
+  WordSelectNavigator nav = makeShortRowFixture();
+  GfxRenderer renderer;
+  MappedInputManager input;
+
+  // Seed a column at charlie (x=200), drop a row, then step right onto the next word.
+  step(nav, input, renderer, MappedInputManager::Button::Up);
+  step(nav, input, renderer, MappedInputManager::Button::Right);
+  step(nav, input, renderer, MappedInputManager::Button::Right);
+  step(nav, input, renderer, MappedInputManager::Button::Right);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "delta") == 0, "Right moves to delta (x=300)");
+
+  step(nav, input, renderer, MappedInputManager::Button::Down);
+  step(nav, input, renderer, MappedInputManager::Button::Down);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "hotel") == 0,
+        "left/right redefines the column: row 2 picks hotel (x=300), not golf (x=200)");
+}
+
 static void testHyphenEndOnly() {
   runHyphenNavSuite("testHyphenEndOnly (\"under-\" + \"stand\")", makeHyphenatedFixture, "under-", "stand");
 }
@@ -1056,6 +1135,8 @@ int main() {
   testBuildPhraseCjkJoinsWithoutSpaces();
   testHyphenBothEndsNotPaired();
   testMergeLookupBothHyphens();
+  testGoalColumnSurvivesShortRow();
+  testHorizontalStepRedefinesGoalColumn();
   testHyphenEndOnly();
   testHyphenBoth();
   std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

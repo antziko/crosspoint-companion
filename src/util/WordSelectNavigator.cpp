@@ -31,6 +31,7 @@ void WordSelectNavigator::load(std::vector<WordInfo> w, std::vector<Row> r, std:
   currentRow = std::clamp(targetRow, 0, rowCount > 0 ? rowCount - 1 : 0);
   currentWordInRow = (!rows.empty() && !rowEmpty(currentRow)) ? rowSize(currentRow) / 2 : 0;
   confirmReleaseConsumed = consumeInitialConfirm;
+  rowNavGoalX = -1;
 }
 
 void WordSelectNavigator::organizeIntoRows(std::vector<WordInfo>& words, std::vector<Row>& rows) {
@@ -92,6 +93,7 @@ void WordSelectNavigator::reset() {
   confirmReleaseConsumed = false;
   anchorFlatIndex = -1;
   pendingSnapIdx = -1;
+  rowNavGoalX = -1;
 }
 
 const WordSelectNavigator::WordInfo* WordSelectNavigator::getSelected() const {
@@ -150,21 +152,12 @@ std::string WordSelectNavigator::buildPhrase(int fromIdx, int toIdx) const {
   return phrase;
 }
 
-int WordSelectNavigator::findClosestWord(int targetRow) const {
-  if (rowEmpty(targetRow)) return 0;
-  const int wordIdx = wordAt(currentRow, currentWordInRow);
-  const int currentCenterX = words[wordIdx].screenX + words[wordIdx].width / 2;
-  return findClosestWordFromX(targetRow, currentCenterX);
-}
-
 int WordSelectNavigator::findClosestWordFromX(int targetRow, int refCenterX) const {
   if (rowEmpty(targetRow)) return 0;
   int bestMatch = 0;
   int bestDist = INT_MAX;
   for (int i = 0; i < rowSize(targetRow); i++) {
-    const int idx = wordAt(targetRow, i);
-    const int centerX = words[idx].screenX + words[idx].width / 2;
-    const int dist = std::abs(centerX - refCenterX);
+    const int dist = std::abs(wordCenterX(wordAt(targetRow, i)) - refCenterX);
     if (dist < bestDist) {
       bestDist = dist;
       bestMatch = i;
@@ -219,28 +212,41 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
   bool changed = false;
   const int prevFlatIdx = getCurrentFlatIndex();
 
-  // If the previous action was a wordPrev snap (second half → first half across
-  // rows), use the second half's position as the row-nav reference so that
-  // rowPrev/rowNext feels like it originates from where the user was.
-  // Any directional input clears this state.
+  // Row navigation aims at a reference column, freshest source first:
+  //  - the second half a wordPrev just snapped away from (across rows), so rowPrev/rowNext
+  //    feels like it originates from where the user was — this picks the base row too;
+  //  - the column carried over from the last left/right step;
+  //  - failing both, the cursor's own centre.
+  // Any directional input clears the snap.
   const bool hasPendingSnap = pendingSnapIdx >= 0;
   const int rowNavBase = hasPendingSnap ? words[pendingSnapIdx].row : currentRow;
-  const int rowNavRefX = hasPendingSnap ? words[pendingSnapIdx].screenX + words[pendingSnapIdx].width / 2 : -1;
+  int rowNavRefX;
+  if (hasPendingSnap) {
+    rowNavRefX = wordCenterX(pendingSnapIdx);
+  } else if (rowNavGoalX >= 0) {
+    rowNavRefX = rowNavGoalX;
+  } else {
+    rowNavRefX = rowEmpty(currentRow) ? 0 : wordCenterX(wordAt(currentRow, currentWordInRow));
+  }
   if (rowPrevPressed || rowNextPressed || wordPrevPressed || wordNextPressed) {
     pendingSnapIdx = -1;
   }
 
+  // Both row branches carry the reference column forward rather than the landed word's
+  // own X, so passing through a row that holds a single short word leaves it intact.
   if (rowPrevPressed) {
     const int targetRow = (rowNavBase > 0) ? rowNavBase - 1 : rowCount - 1;
-    currentWordInRow = (rowNavRefX >= 0) ? findClosestWordFromX(targetRow, rowNavRefX) : findClosestWord(targetRow);
+    currentWordInRow = findClosestWordFromX(targetRow, rowNavRefX);
     currentRow = targetRow;
+    rowNavGoalX = rowNavRefX;
     changed = true;
   }
 
   if (rowNextPressed) {
     const int targetRow = (rowNavBase < rowCount - 1) ? rowNavBase + 1 : 0;
-    currentWordInRow = (rowNavRefX >= 0) ? findClosestWordFromX(targetRow, rowNavRefX) : findClosestWord(targetRow);
+    currentWordInRow = findClosestWordFromX(targetRow, rowNavRefX);
     currentRow = targetRow;
+    rowNavGoalX = rowNavRefX;
     changed = true;
   }
 
@@ -319,6 +325,10 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
       }
     }
   }
+
+  // A left/right step redefines the column; the next row move re-derives it from wherever
+  // the cursor ended up, hyphenated-pair smoothing included.
+  if (wordPrevPressed || wordNextPressed) rowNavGoalX = -1;
 
   return changed;
 }

@@ -125,7 +125,9 @@ class GfxRenderer {
   // two opposing corners into physical-framebuffer space once, then walks each
   // physical row with head-mask / middle memset / tail-mask byte writes — no
   // per-pixel rotation, no per-pixel RMW.
-  template <Color color>
+  // Additive=true adds ink only where the dither pattern is black, leaving every
+  // already-set pixel alone (see washRectDither).
+  template <Color color, bool Additive = false>
   void fillRectImpl(int x, int y, int width, int height) const;
 
  public:
@@ -320,6 +322,11 @@ class GfxRenderer {
   // margin-overlapping rects).
   void clearRect(int x, int y, int width, int height) const;
   void fillRectDither(int x, int y, int width, int height, Color color) const;
+  // Lay a dither pattern over a region without erasing what is already drawn there: adds ink
+  // where the pattern is black, never clears a pixel. The additive mirror of
+  // dimRegionCheckerboard, and the only safe way to tint a region that already holds text —
+  // fillRectDither writes both inks and would wipe the glyphs.
+  void washRectDither(int x, int y, int width, int height, Color color) const;
   void fillRoundedRect(int x, int y, int width, int height, int cornerRadius, Color color) const;
   void fillRoundedRect(int x, int y, int width, int height, int cornerRadius, bool roundTopLeft, bool roundTopRight,
                        bool roundBottomLeft, bool roundBottomRight, Color color) const;

@@ -214,6 +214,11 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // flash). Antialiased: grey (AA) text + 4-level grey images. Sharp: true-black
   // text + 4-level grey images (grayscale pass runs only on pages with an image).
   enum TEXT_AA { TEXT_AA_OFF = 0, TEXT_AA_ANTIALIASED = 1, TEXT_AA_SHARP = 2, TEXT_AA_COUNT };
+
+  // How a saved quote is marked on the page it was taken from. Highlight lays a 25% dither
+  // band behind the words; Underline rules a 2px line under them, which leaves far less
+  // charge on the panel and is the fallback if the band ghosts.
+  enum QUOTE_STYLE { QUOTE_STYLE_OFF = 0, QUOTE_STYLE_UNDERLINE = 1, QUOTE_STYLE_HIGHLIGHT = 2, QUOTE_STYLE_COUNT };
   enum TOUCH_READER_CONTROLS { TOUCH_READER_OFF = 0, TOUCH_READER_ON = 1, TOUCH_READER_CONTROLS_COUNT };
 
   enum QUICK_RESUME_SLEEP_SCREEN {
@@ -312,7 +317,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t clockHasBeenSynced = 0;
   // Text rendering settings
   uint8_t extraParagraphSpacing = 1;
-  uint8_t textAntiAliasing = TEXT_AA_ANTIALIASED;  // TEXT_AA enum (0=Off,1=Antialiased,2=Sharp)
+  uint8_t textAntiAliasing = TEXT_AA_ANTIALIASED;       // TEXT_AA enum (0=Off,1=Antialiased,2=Sharp)
+  uint8_t quoteHighlightStyle = QUOTE_STYLE_HIGHLIGHT;  // QUOTE_STYLE enum
   // Short power button click behaviour
   uint8_t shortPwrBtn = IGNORE;
   // EPUB reading orientation settings

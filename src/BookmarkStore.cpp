@@ -354,6 +354,24 @@ bool BookmarkStore::removeReturnMarkAt(uint16_t spineIndex, uint16_t paragraphIn
   return true;
 }
 
+bool BookmarkStore::removeReturnMarkForPage(uint16_t spineIndex, float pageProgress, int pageCount) {
+  if (pageCount <= 0) return false;
+  const float pageSlice = 1.0f / static_cast<float>(pageCount);
+  const float pageStart = pageProgress;
+  const float pageEnd = pageProgress + pageSlice;
+
+  auto it = std::find_if(bookmarks.begin(), bookmarks.end(), [&](const Bookmark& b) {
+    return b.returnMark && b.spineIndex == spineIndex && b.progress >= pageStart && b.progress < pageEnd;
+  });
+  if (it == bookmarks.end()) return false;
+
+  // Device-only mark: it was never pushed, so no tombstone is needed to propagate a delete.
+  bookmarks.erase(it);
+  dirty = true;
+  saveToFile();
+  return true;
+}
+
 bool BookmarkStore::hasBookmarkForPage(uint16_t spineIndex, float pageProgress, int pageCount) {
   if (pageCount <= 0) return false;
   float pageSlice = 1.0f / static_cast<float>(pageCount);

@@ -127,8 +127,12 @@ class BookmarkStore {
   // Consume the session "return here" mark at this spot (matched like the merge key):
   // removes it only when the matching bookmark is a return mark. Used when the user
   // reopens it to navigate back — the one-shot aid has served its purpose. No-op (returns
-  // false) for a normal bookmark. Tombstones the delete so it also propagates on sync.
+  // false) for a normal bookmark. Return marks are device-only, so no tombstone is written.
   bool removeReturnMarkAt(uint16_t spineIndex, uint16_t paragraphIndex, float progress);
+  // Consume the session "return here" mark covering this page, whichever way the reader
+  // arrived — a page turn back to it counts as having found the way back, same as
+  // reopening it from the list. Returns true when one was removed.
+  bool removeReturnMarkForPage(uint16_t spineIndex, float pageProgress, int pageCount);
   bool hasBookmarkForPage(uint16_t spineIndex, float pageProgress, int pageCount);
   // Page-level presence split by mark type, for the reader's status-bar indicators (a page
   // may hold both — show both icons). "Point" excludes quotes; "Quote" is quotes only.

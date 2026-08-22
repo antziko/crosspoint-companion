@@ -25,6 +25,7 @@
 #include "util/DictionaryActivityUtils.h"
 #include "util/DictionaryRegistry.h"
 #include "util/FlashcardDeck.h"
+#include "util/PageTokenScan.h"
 
 // Per-move SD trace for the gloss peek. On for the first device pass — measuring what a probe
 // actually costs on the card is the whole point of it — and off once the numbers are in, at
@@ -102,76 +103,6 @@ bool endsSentence(const char* s) {
   const size_t n = strlen(s);
   const char c = s[n - 1];
   return c == '.' || c == '!' || c == '?';
-}
-
-// Soft-hyphen U+00AD encoded as 2 UTF-8 bytes. Layout (ParsedText.cpp:19)
-// strips these before measurement, so we mirror that here — otherwise
-// derived word widths include the soft-hyphen glyph's advance and the
-// highlight rectangle overruns into the inter-word gap.
-constexpr char SOFT_HYPHEN_UTF8[] = "\xC2\xAD";
-constexpr size_t SOFT_HYPHEN_BYTES = 2;
-
-int16_t measureWordAdvanceX(const GfxRenderer& renderer, int fontId, const std::string& word,
-                            EpdFontFamily::Style style) {
-  if (word.find(SOFT_HYPHEN_UTF8) == std::string::npos) {
-    return static_cast<int16_t>(renderer.getTextAdvanceX(fontId, word.c_str(), style));
-  }
-  std::string sanitized = word;
-  size_t pos = 0;
-  while ((pos = sanitized.find(SOFT_HYPHEN_UTF8, pos)) != std::string::npos) {
-    sanitized.erase(pos, SOFT_HYPHEN_BYTES);
-  }
-  return static_cast<int16_t>(renderer.getTextAdvanceX(fontId, sanitized.c_str(), style));
-}
-
-// True when the token carries at least one CJK letter (Han, Kana, Hangul, fullwidth
-// letters/digits) — i.e. content rather than CJK punctuation. utf8IsCjkBreakable is the
-// same predicate layout uses to split CJK runs (ParsedText.cpp:399), so what it accepts
-// here is exactly what arrives as one-character tokens.
-//
-// Takes pointer+length rather than std::string because the counting pass below runs it
-// over every token on the page before anything is allocated; a std::string per token
-// would put heap traffic in front of the very reserve the count exists to protect.
-bool containsCjkLetter(const char* text, size_t len) {
-  const auto* ptr = reinterpret_cast<const unsigned char*>(text);
-  const auto* end = ptr + len;
-  while (ptr < end) {
-    const uint32_t cp = utf8NextCodepoint(&ptr);
-    if (cp == 0) break;
-    if (utf8IsCjkBreakable(cp) && !utf8IsCjkPunctuation(cp)) return true;
-  }
-  return false;
-}
-
-// Paired with containsCjkLetter to decide whether a token is a selection stop. Kept a
-// pure byte test (it only ever matches ASCII), so the two together read as "carries a
-// letter or digit in either script family".
-bool containsAsciiAlnum(const char* text, size_t len) {
-  return std::any_of(text, text + len, [](unsigned char c) { return c < 0x80 && std::isalnum(c) != 0; });
-}
-
-// The single definition of "this token gets a cursor stop", shared by the counting pass
-// and the extraction pass. If these two ever disagree the reserve is wrong and the vector
-// grows — which is the crash this whole path exists to avoid — so they must not be two
-// copies of the same condition.
-bool isSelectableToken(const char* text, size_t len, bool& outIsCjk) {
-  outIsCjk = containsCjkLetter(text, len);
-  return outIsCjk || containsAsciiAlnum(text, len);
-}
-
-// En-dash (U+2013) and em-dash (U+2014), both E2 80 93/94 in UTF-8. Each one splits its
-// token into an extra WordInfo, so the counting pass needs the same tally the extraction
-// pass derives from splitStarts.
-size_t countDashes(const char* text, size_t len) {
-  size_t n = 0;
-  for (size_t i = 0; i + 2 < len; i++) {
-    if (static_cast<uint8_t>(text[i]) == 0xE2 && static_cast<uint8_t>(text[i + 1]) == 0x80 &&
-        (static_cast<uint8_t>(text[i + 2]) == 0x93 || static_cast<uint8_t>(text[i + 2]) == 0x94)) {
-      n++;
-      i += 2;
-    }
-  }
-  return n;
 }
 
 // Single-style prewarm/advance-table bitmask: bit 0 = REGULAR, 1 = BOLD,
@@ -320,13 +251,13 @@ void DictionaryWordSelectActivity::countTokens(size_t& outWords, size_t& outPool
       const char* text = block->wordText(i);
       const size_t len = block->wordTextLen(i);
       bool isCjk = false;
-      if (!isSelectableToken(text, len, isCjk)) continue;
+      if (!PageTokens::isSelectable(text, len, isCjk)) continue;
 
       // Upper bound: a token with d dashes yields at most d + 1 parts, and their bytes sum
       // to at most len (the dash bytes themselves are dropped). Exact for the overwhelming
       // majority — the existing code notes dash-split words run ~0-2 per page — and erring
       // high only costs a few spare entries in a reservation, never a re-allocation.
-      const size_t parts = countDashes(text, len) + 1;
+      const size_t parts = PageTokens::countDashes(text, len) + 1;
       outWords += parts;
       outPoolBytes += len + parts;  // one NUL terminator per part
 
@@ -407,7 +338,8 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
     if (blockWordCount >= 2 && block->wordTextLen(0) > 0) {
       const EpdFontFamily::Style firstStyle = block->wordStyle(0);
       const std::string firstWord(block->wordText(0), block->wordTextLen(0));
-      const int16_t firstWidth = measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), firstWord, firstStyle);
+      const int16_t firstWidth =
+          PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), firstWord, firstStyle);
       const int16_t derivedGap = static_cast<int16_t>(block->wordXpos(1) - block->wordXpos(0) - firstWidth);
       // When wordList[1] is a continuation (attached punctuation etc., ParsedText.cpp:537-544)
       // the layout inserts no inter-word gap, so derivedGap collapses to the kerning offset
@@ -442,7 +374,7 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
       // and via the same helper countTokens() used, so the reserve above cannot drift
       // out of step with what actually gets pushed.
       bool isCjkToken = false;
-      if (!isSelectableToken(block->wordText(wIdx), block->wordTextLen(wIdx), isCjkToken)) {
+      if (!PageTokens::isSelectable(block->wordText(wIdx), block->wordTextLen(wIdx), isCjkToken)) {
         continue;
       }
       // Page composition, reported in the gloss timing lines: CJK pages are the expensive case
@@ -454,24 +386,16 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
       if (isCjkToken) cjkTokenCount_++;
       const std::string wordText(block->wordText(wIdx), block->wordTextLen(wIdx));
 
-      // Split on en-dash (U+2013: E2 80 93) and em-dash (U+2014: E2 80 94)
-      std::vector<size_t> splitStarts;
-      splitStarts.reserve(4);
-      size_t partStart = 0;
-      for (size_t i = 0; i < wordText.size();) {
-        if (i + 2 < wordText.size() && static_cast<uint8_t>(wordText[i]) == 0xE2 &&
-            static_cast<uint8_t>(wordText[i + 1]) == 0x80 &&
-            (static_cast<uint8_t>(wordText[i + 2]) == 0x93 || static_cast<uint8_t>(wordText[i + 2]) == 0x94)) {
-          if (i > partStart) splitStarts.push_back(partStart);
-          i += 3;
-          partStart = i;
-        } else {
-          i++;
-        }
-      }
-      if (partStart < wordText.size()) splitStarts.push_back(partStart);
+      // En/em-dash split. The rule lives in PageTokenScan.h because the reader's quote
+      // underline has to resolve stored word indices against this same numbering. A stack
+      // array, not a vector: this runs per token, and the reserve(4) it replaces was one heap
+      // block per word on the page.
+      PageTokens::Part parts[PageTokens::kMaxTokenParts];
+      const size_t partCount =
+          PageTokens::collectParts(wordText.data(), wordText.size(), parts, PageTokens::kMaxTokenParts);
+      const bool unsplit = partCount == 1 && parts[0].start == 0 && parts[0].end == wordText.size();
 
-      if (splitStarts.size() <= 1 && partStart == 0) {
+      if (unsplit) {
         // width = (xPos[i+1] - xPos[i]) - lineGapWidth, which is the layout's
         // xpos diff with the trailing inter-word gap removed. Punctuation
         // tokens skipped above kept their xpos entries as boundary markers,
@@ -490,12 +414,12 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
           // land inside the box either. Measuring is exact and costs nothing here — CJK
           // tokens are single characters and prebuildAdvanceTable() already made this an
           // in-RAM advance-table hit.
-          wordWidth = measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), wordText, wordStyle);
+          wordWidth = PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), wordText, wordStyle);
         } else if (wIdx + 1 < blockWordCount) {
           const int16_t raw = static_cast<int16_t>(block->wordXpos(wIdx + 1) - block->wordXpos(wIdx));
           wordWidth = std::max(static_cast<int16_t>(1), static_cast<int16_t>(raw - lineGapWidth));
         } else {
-          wordWidth = measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), wordText, wordStyle);
+          wordWidth = PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), wordText, wordStyle);
         }
         {
           uint16_t off = WordSelectNavigator::poolAppend(textPool, wordText.c_str(), wordText.size());
@@ -511,30 +435,16 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
           words.push_back(wi);
         }
       } else {
-        for (size_t si = 0; si < splitStarts.size(); si++) {
-          size_t start = splitStarts[si];
-          size_t end = (si + 1 < splitStarts.size()) ? splitStarts[si + 1] : wordText.size();
-          size_t textEnd = end;
-          while (textEnd > start && textEnd <= wordText.size()) {
-            if (textEnd >= 3 && static_cast<uint8_t>(wordText[textEnd - 3]) == 0xE2 &&
-                static_cast<uint8_t>(wordText[textEnd - 2]) == 0x80 &&
-                (static_cast<uint8_t>(wordText[textEnd - 1]) == 0x93 ||
-                 static_cast<uint8_t>(wordText[textEnd - 1]) == 0x94)) {
-              textEnd -= 3;
-            } else {
-              break;
-            }
-          }
-          std::string part = wordText.substr(start, textEnd - start);
-          if (part.empty()) continue;
-
+        for (size_t si = 0; si < partCount; si++) {
+          const size_t start = parts[si].start;
+          std::string part = wordText.substr(start, parts[si].end - start);
           std::string prefix = wordText.substr(0, start);
           // Dash-split words are rare (~0-2 per page); per-part measurement
           // is fine here. Soft-hyphen stripping matches the rest of
           // extractWords and matches layout's preprocessor.
           int16_t offsetX =
-              prefix.empty() ? 0 : measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), prefix, wordStyle);
-          int16_t partWidth = measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), part, wordStyle);
+              prefix.empty() ? 0 : PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), prefix, wordStyle);
+          int16_t partWidth = PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), part, wordStyle);
           {
             uint16_t off = WordSelectNavigator::poolAppend(textPool, part.c_str(), part.size());
             WordSelectNavigator::WordInfo wi;
