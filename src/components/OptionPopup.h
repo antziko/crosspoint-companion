@@ -225,11 +225,15 @@ class OptionPopup {
 
   bool isActive() const { return active; }
 
- private:
   // The dialog has no scrolling, so options past MAX_OPTIONS would render off
   // screen anyway; a fixed cap keeps the DialogOption array on the stack and
   // the interaction table small. +1 slot for the chrome guard rect.
+  // Public because callers that GENERATE their option list (rather than passing a
+  // fixed enum) must check the count fits first -- past this cap the extra rows are
+  // silently unreachable, so such a setting has to keep its cycle-in-place fallback.
   static constexpr int MAX_OPTIONS = 16;
+
+ private:
   static constexpr size_t INTERACTION_CAPACITY = MAX_OPTIONS + 1;
   static constexpr freeink::ui::ActionId ACTION_OPTION = 1;
   static constexpr freeink::ui::ActionId ACTION_CHROME = 2;

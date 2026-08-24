@@ -237,6 +237,8 @@ class SettingsActivity final : public UiTabListActivity {
   bool handleCustomInput() override;
 
   static std::string settingValueText(const SettingInfo& setting);
+  // Format one candidate value of a VALUE setting (the row's own text, and each popup row).
+  static std::string settingValueOptionText(const SettingInfo& setting, uint8_t value);
   void selectCategory(int categoryIndex);
   void applyUiSettingChange(uint8_t CrossPointSettings::* valuePtr);
 

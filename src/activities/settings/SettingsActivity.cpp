@@ -406,6 +406,35 @@ void SettingsActivity::toggleCurrentSetting() {
   } else if (setting.type == SettingType::VALUE && setting.valuePtr != nullptr) {
     // uint8_t: int8_t overflows above 127, breaking dictionary history cap rollover
     const uint8_t currentValue = SETTINGS.*(setting.valuePtr);
+    // Same treatment as multi-option enums (#2358): show the choices instead of making the
+    // user press Confirm through them one at a time. The labels are generated here rather
+    // than being StrIds, so the stored value stays the raw number -- no index remapping, and
+    // nothing to migrate. Only when the whole range fits the popup: OptionPopup does not
+    // scroll, so a longer range (UTC offset at 105 steps, brightness/warmth at 21) would put
+    // values out of reach entirely. Those keep cycling until the popup can scroll.
+    const int step = setting.valueRange.step > 0 ? setting.valueRange.step : 1;
+    const int span = static_cast<int>(setting.valueRange.max) - static_cast<int>(setting.valueRange.min);
+    const int optionCount = span >= 0 ? (span / step) + 1 : 0;
+    if (optionCount > 2 && optionCount <= OptionPopup::MAX_OPTIONS) {
+      std::vector<std::string> labels;
+      labels.reserve(optionCount);
+      int currentIndex = 0;
+      for (int i = 0; i < optionCount; i++) {
+        const uint8_t v = static_cast<uint8_t>(setting.valueRange.min + i * step);
+        if (v <= currentValue) currentIndex = i;  // nearest option at or below a stale value
+        labels.push_back(settingValueOptionText(setting, v));
+      }
+      const auto valuePtr = setting.valuePtr;
+      const uint8_t minValue = setting.valueRange.min;
+      optionPopup.show(setting.nameId, labels, currentIndex, [this, valuePtr, minValue, step](int idx) {
+        SETTINGS.*valuePtr = static_cast<uint8_t>(minValue + idx * step);
+        SETTINGS.saveToFile();
+        rebuildSettingsLists();
+        applyUiSettingChange(valuePtr);
+      });
+      requestUpdate();
+      return;
+    }
     if (currentValue + setting.valueRange.step > setting.valueRange.max) {
       SETTINGS.*(setting.valuePtr) = setting.valueRange.min;
     } else {
@@ -544,6 +573,36 @@ void SettingsActivity::openSleepTimeoutPicker() {
       StrId::STR_SLEEP_TIMER_VALUE_FORMAT, false, true, StrId::STR_SLEEP_NEVER);
 }
 
+// Render ONE candidate value of a VALUE setting. Split out of settingValueText so the same
+// per-setting formatting (sentinels, units) labels both the row and every row of the
+// selection popup — a popup that showed raw numbers where the row says "Unlimited" / "Off"
+// would be a different setting as far as the user is concerned.
+std::string SettingsActivity::settingValueOptionText(const SettingInfo& setting, uint8_t value) {
+  if (setting.nameId == StrId::STR_TIME_TO_SLEEP) {
+    if (value >= CrossPointSettings::SLEEP_TIMEOUT_NEVER_MINUTES) {
+      return tr(STR_SLEEP_NEVER);
+    }
+    char valueBuffer[32];
+    snprintf(valueBuffer, sizeof(valueBuffer), tr(STR_SLEEP_TIMER_VALUE_FORMAT), static_cast<unsigned int>(value));
+    return valueBuffer;
+  }
+  // LOCAL(feat): the lookup-history cap renders as "Unlimited" past its
+  // sentinel rather than as a raw number. Upstream has no such row, so its
+  // settingValueText drops this.
+  if (setting.nameId == StrId::STR_LOOKUP_HIST_CAP && value >= CrossPointSettings::HIST_CAP_UNLIMITED) {
+    return tr(STR_UNLIMITED);
+  }
+  // The re-count window is a duration, and 0 means "no window" rather than "0 minutes".
+  // Shares the sleep timer's "%u min" format instead of adding a second one.
+  if (setting.nameId == StrId::STR_FC_RECOUNT_WINDOW) {
+    if (value == 0) return tr(STR_STATE_OFF);
+    char valueBuffer[32];
+    snprintf(valueBuffer, sizeof(valueBuffer), tr(STR_SLEEP_TIMER_VALUE_FORMAT), static_cast<unsigned int>(value));
+    return valueBuffer;
+  }
+  return std::to_string(value);
+}
+
 std::string SettingsActivity::settingValueText(const SettingInfo& setting) {
   if (setting.type == SettingType::TOGGLE && setting.valuePtr != nullptr) {
     return SETTINGS.*(setting.valuePtr) ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
@@ -568,32 +627,7 @@ std::string SettingsActivity::settingValueText(const SettingInfo& setting) {
     return "";
   }
   if (setting.type == SettingType::VALUE && setting.valuePtr != nullptr) {
-    if (setting.nameId == StrId::STR_TIME_TO_SLEEP) {
-      if (SETTINGS.sleepTimeoutMinutes >= CrossPointSettings::SLEEP_TIMEOUT_NEVER_MINUTES) {
-        return tr(STR_SLEEP_NEVER);
-      }
-      char valueBuffer[32];
-      snprintf(valueBuffer, sizeof(valueBuffer), tr(STR_SLEEP_TIMER_VALUE_FORMAT),
-               static_cast<unsigned int>(SETTINGS.*(setting.valuePtr)));
-      return valueBuffer;
-    }
-    // LOCAL(feat): the lookup-history cap renders as "Unlimited" past its
-    // sentinel rather than as a raw number. Upstream has no such row, so its
-    // settingValueText drops this.
-    if (setting.nameId == StrId::STR_LOOKUP_HIST_CAP &&
-        SETTINGS.*(setting.valuePtr) >= CrossPointSettings::HIST_CAP_UNLIMITED) {
-      return tr(STR_UNLIMITED);
-    }
-    // The re-count window is a duration, and 0 means "no window" rather than "0 minutes".
-    // Shares the sleep timer's "%u min" format instead of adding a second one.
-    if (setting.nameId == StrId::STR_FC_RECOUNT_WINDOW) {
-      if (SETTINGS.*(setting.valuePtr) == 0) return tr(STR_STATE_OFF);
-      char valueBuffer[32];
-      snprintf(valueBuffer, sizeof(valueBuffer), tr(STR_SLEEP_TIMER_VALUE_FORMAT),
-               static_cast<unsigned int>(SETTINGS.*(setting.valuePtr)));
-      return valueBuffer;
-    }
-    return std::to_string(SETTINGS.*(setting.valuePtr));
+    return settingValueOptionText(setting, SETTINGS.*(setting.valuePtr));
   }
   // LOCAL(feat): ACTION rows can carry a live value string (e.g. the current
   // language, the active dictionary). Upstream's settingValueText has no
