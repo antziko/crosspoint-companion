@@ -448,17 +448,30 @@ void StatsTimelineView::renderHeatmap(GfxRenderer& renderer, const Rect& rect, c
   renderer.drawCenteredText(SMALL_FONT_ID, rect.y + MARGIN, summary);
 
   // Month ticks along the top of the grid, drawn wherever a column's Monday
-  // crosses into a new calendar month.
+  // crosses into a new calendar month. A tick is only drawn if the label fits
+  // within that month's own columns, so it can never run into the next tick —
+  // the leading month is usually a single column wide (the range starts
+  // mid-month) and labelling it would smear into the month after it. Each tick
+  // is therefore held back until the following month change reveals its span.
+  const auto drawMonthTick = [&](int col, uint8_t month, int nextCol) {
+    const char* label = monthAbbr(month);
+    if (renderer.getTextWidth(SMALL_FONT_ID, label) > (nextCol - col) * cellSize) return;
+    renderer.drawText(SMALL_FONT_ID, gridX + col * cellSize, gridY - smallLineH - 2, label);
+  };
   int lastTickMonth = -1;
+  int pendingCol = -1;
+  uint8_t pendingMonth = 0;
   for (int col = 0; col < columns; ++col) {
     uint16_t y;
     uint8_t m, d;
     readingHistoryDateFromDayIndex(weekMonday(col), y, m, d);
-    if (m != lastTickMonth) {
-      lastTickMonth = m;
-      renderer.drawText(SMALL_FONT_ID, gridX + col * cellSize, gridY - smallLineH - 2, monthAbbr(m));
-    }
+    if (m == lastTickMonth) continue;
+    lastTickMonth = m;
+    if (pendingCol >= 0) drawMonthTick(pendingCol, pendingMonth, col);
+    pendingCol = col;
+    pendingMonth = m;
   }
+  if (pendingCol >= 0) drawMonthTick(pendingCol, pendingMonth, columns);
 
   // Day-of-week initials down the left edge — fixed Mon..Sun, one-to-one with
   // DAY_INITIAL and every column's row order.
