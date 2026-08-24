@@ -487,6 +487,18 @@ void setup() {
   // settings list for the comparison is free.
   verifySettingsPersistenceTable();
 
+#if FREEINK_CAP_TOUCH
+  // Boards with no Confirm key (X4 Pro) reach Confirm only through the power click, so
+  // PWR_CONFIRM is their factory default: without it a fresh device can move a list
+  // selection but never act on it — including in the SD firmware recovery picker, which
+  // has no touch path. Set BEFORE the load so an explicit choice still wins; fromJson()
+  // takes the current field value as each key's default.
+  if (BoardConfig::ACTIVE.input.confirm == BoardConfig::PIN_UNASSIGNED &&
+      !BoardConfig::ACTIVE.touch.synthesizeConfirm &&
+      BoardConfig::ACTIVE.inputStyle == BoardConfig::InputStyle::DigitalButtons) {
+    SETTINGS.shortPwrBtn = CrossPointSettings::SHORT_PWRBTN::PWR_CONFIRM;
+  }
+#endif
   SETTINGS.loadFromFile();
   // Apply the SD-logging toggle now that settings are loaded (default off). Governs
   // the boot-done MEM line below and all later SdDebugLog::log() calls.
