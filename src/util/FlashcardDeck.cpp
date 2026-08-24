@@ -694,6 +694,12 @@ bool FlashcardDeck::remove(const std::string& cachePath, const std::string& word
 
 bool FlashcardDeck::grade(const std::string& cachePath, const std::string& word, bool correct, uint32_t today) {
   if (word.empty() || cachePath.empty()) return false;
+  // No clock (today == 0): refuse to record the grade at all. Every interval this would write
+  // is measured from day 0, and buildSession has already dropped the due filter for the same
+  // reason (it falls back to NonRetired at today == 0) -- so nothing would stop the same card
+  // being re-drawn and promoted a box every session until it graduated, spacing be damned.
+  // A drill without a date is not spaced repetition; leave the schedule exactly as it was.
+  if (today == 0) return false;
   const std::string path = filePath(cachePath);
 
   // Scan first: skip the rewrite entirely if the word is absent.

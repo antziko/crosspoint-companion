@@ -439,6 +439,28 @@ TEST_F(FlashcardDeckTest, GradeMutatesRowPreservesExcerptAndOrder) {
   EXPECT_EQ(at(0).box, 0);  // untouched
 }
 
+// Grading with no clock (today == 0) must not touch the deck. buildSession drops the due
+// filter at today == 0, so a recorded grade would let the same card be re-drawn and promoted
+// every session until it graduated without ever being spaced.
+TEST_F(FlashcardDeckTest, GradeWithoutClockIsNoOp) {
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx");
+  FlashcardDeck::grade(cachePath, "alpha", true, 10);  // box 1, due 10 + BOX_INTERVAL_DAYS[1]
+  ASSERT_EQ(at(0).box, 1);
+  ASSERT_EQ(at(0).dueDay, 12u);
+
+  EXPECT_FALSE(FlashcardDeck::grade(cachePath, "alpha", true, 0));
+  EXPECT_EQ(at(0).box, 1);       // unchanged -- no promotion
+  EXPECT_EQ(at(0).dueDay, 12u);  // unchanged -- no epoch-relative date written
+}
+
+TEST_F(FlashcardDeckTest, GradeWithoutClockCannotGraduateACard) {
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx");
+  // Six correct grades is exactly what graduates a card when a clock is present.
+  for (int i = 0; i < 6; i++) EXPECT_FALSE(FlashcardDeck::grade(cachePath, "alpha", true, 0));
+  EXPECT_EQ(at(0).box, 0);
+  EXPECT_FALSE(FlashcardDeck::isMastered(at(0).box));
+}
+
 TEST_F(FlashcardDeckTest, GradeAbsentWordIsNoOp) {
   FlashcardDeck::enroll(cachePath, "alpha", "ctx");
   EXPECT_FALSE(FlashcardDeck::grade(cachePath, "ghost", true, 100));

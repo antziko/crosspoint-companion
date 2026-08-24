@@ -134,16 +134,21 @@ bool FlashcardReviewActivity::loadCurrentCard() {
 }
 
 void FlashcardReviewActivity::gradeAndAdvance(bool correctRecall) {
-  FlashcardDeck::grade(cachePath, card.word, correctRecall, today);
+  // grade() is a no-op without a clock, so this pass is drill-only: the cards are still
+  // shown and the session tally still reflects what the user answered, but no schedule is
+  // written and nothing can graduate. renderOverview says so up front.
+  const bool recorded = FlashcardDeck::grade(cachePath, card.word, correctRecall, today);
   reviewed++;
   if (correctRecall) correct++;
 
   // Recompute the post-grade box locally to count graduations this session
-  // (mirrors what grade() persisted).
-  uint8_t box = card.box;
-  uint32_t due = card.dueDay;
-  FlashcardDeck::applyGrade(box, due, correctRecall, today);
-  if (FlashcardDeck::isMastered(box)) mastered++;
+  // (mirrors what grade() persisted). Only meaningful when the grade was actually recorded.
+  if (recorded) {
+    uint8_t box = card.box;
+    uint32_t due = card.dueDay;
+    FlashcardDeck::applyGrade(box, due, correctRecall, today);
+    if (FlashcardDeck::isMastered(box)) mastered++;
+  }
 
   // A miss re-queues the card to the session tail for another pass. Never inline: the
   // user was promised a fixed number of cards before they get their page back, and a
@@ -543,12 +548,23 @@ void FlashcardReviewActivity::renderOverview(int contentTop, int contentBottom, 
   drawHalf(opt1, left + halfW, !clozeSel);
   y += rowH + metrics.verticalSpacing * 2;
 
-  // Cards due for review right now -- the only "do this now" number; New/Mastered
-  // are conveyed by the box ladder below. Same font (UI_10) as the progress row.
-  char stat[48];
-  snprintf(stat, sizeof(stat), "%s %d", tr(STR_FLASHCARD_STAT_DUE), stats.due);
-  renderer.drawCenteredText(UI_10_FONT_ID, y, stat);
-  y += rowH + metrics.verticalSpacing * 2;
+  if (!clockOk) {
+    // Without a date there is no schedule: grade() refuses to write, buildSession has
+    // dropped the due filter, and stats.due counts only never-scheduled cards. Showing
+    // "Due N" here would be a number that means nothing, so say what is actually going
+    // on instead -- the session still works as a drill, it just records nothing.
+    renderer.drawCenteredText(UI_10_FONT_ID, y, tr(STR_FLASHCARD_NO_CLOCK));
+    y += lh;
+    renderer.drawCenteredText(SMALL_FONT_ID, y, tr(STR_FLASHCARD_NO_CLOCK_HINT));
+    y += rowH + metrics.verticalSpacing;
+  } else {
+    // Cards due for review right now -- the only "do this now" number; New/Mastered
+    // are conveyed by the box ladder below. Same font (UI_10) as the progress row.
+    char stat[48];
+    snprintf(stat, sizeof(stat), "%s %d", tr(STR_FLASHCARD_STAT_DUE), stats.due);
+    renderer.drawCenteredText(UI_10_FONT_ID, y, stat);
+    y += rowH + metrics.verticalSpacing * 2;
+  }
 
   // Box-distribution ladder: one cell per Leitner stage -- New (box 0), boxes 1..5,
   // then Mastered -- each showing how many cards currently sit there. Cards march

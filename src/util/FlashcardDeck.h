@@ -187,6 +187,11 @@ class FlashcardDeck {
   // Grade the card for `word`: load its box/dueDay, apply applyGrade(), rewrite
   // the row in place (excerpt preserved, order unchanged). No-op if the word is
   // absent. Returns false on I/O failure.
+  //
+  // today == 0 (no clock) is a deliberate no-op returning false: with no date there is no
+  // schedule to write, and buildSession has already dropped the due filter for the same
+  // reason, so recording grades would let one card climb every box in a single sitting and
+  // graduate without ever being spaced. Callers should present such a session as drill-only.
   static bool grade(const std::string& cachePath, const std::string& word, bool correct, uint32_t today);
 
   // Set `word` aside: rewrite its row with box=SUSPENDED and dueDay=0 (excerpt,
