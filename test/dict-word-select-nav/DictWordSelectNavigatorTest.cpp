@@ -1068,12 +1068,13 @@ static void testGoalColumnSurvivesShortRow() {
   GfxRenderer renderer;
   MappedInputManager input;
 
-  // Cursor starts on solo. Go up to row 0 and walk right to charlie (x=200), the column
-  // the user is reading in.
+  // Cursor starts on solo, and the seeded column puts the first Up on charlie. Step off it
+  // and back so the column under test is the one a deliberate left/right left behind, not
+  // the load-time seed.
   step(nav, input, renderer, MappedInputManager::Button::Up);
+  step(nav, input, renderer, MappedInputManager::Button::Left);
   step(nav, input, renderer, MappedInputManager::Button::Right);
-  step(nav, input, renderer, MappedInputManager::Button::Right);
-  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "charlie") == 0, "walked right to charlie (x=200)");
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "charlie") == 0, "stepped back onto charlie (x=200)");
 
   step(nav, input, renderer, MappedInputManager::Button::Down);
   CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "solo") == 0, "Down lands on the lone word, the only choice");
@@ -1091,10 +1092,8 @@ static void testHorizontalStepRedefinesGoalColumn() {
   GfxRenderer renderer;
   MappedInputManager input;
 
-  // Seed a column at charlie (x=200), drop a row, then step right onto the next word.
+  // Up lands on charlie (x=200) via the seeded column; one Right moves on to delta.
   step(nav, input, renderer, MappedInputManager::Button::Up);
-  step(nav, input, renderer, MappedInputManager::Button::Right);
-  step(nav, input, renderer, MappedInputManager::Button::Right);
   step(nav, input, renderer, MappedInputManager::Button::Right);
   CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "delta") == 0, "Right moves to delta (x=300)");
 
@@ -1102,6 +1101,145 @@ static void testHorizontalStepRedefinesGoalColumn() {
   step(nav, input, renderer, MappedInputManager::Button::Down);
   CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "hotel") == 0,
         "left/right redefines the column: row 2 picks hotel (x=300), not golf (x=200)");
+}
+
+// The reported bug: the cursor starts on a row holding one short word, so the very first
+// row move used to take that word's own far-left centre as its reference and land on the
+// start of the next row -- and then keep doing it, because the row branch stores what it
+// aimed at. The load-time seed gives it the page's column instead.
+static void testFirstRowMoveFromLoneWordRowUsesPageColumn() {
+  std::printf("testFirstRowMoveFromLoneWordRowUsesPageColumn\n");
+
+  WordSelectNavigator nav = makeShortRowFixture();
+  GfxRenderer renderer;
+  MappedInputManager input;
+
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "solo") == 0, "cursor starts on the lone word (x=10)");
+
+  step(nav, input, renderer, MappedInputManager::Button::Down);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "golf") == 0,
+        "first Down lands mid-row on golf (x=200), not echo (x=10)");
+
+  // And the column persists, rather than being rewritten by the lone word each time.
+  step(nav, input, renderer, MappedInputManager::Button::Up);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "solo") == 0, "back onto the lone row, its only word");
+  step(nav, input, renderer, MappedInputManager::Button::Up);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "charlie") == 0,
+        "and on through it to charlie (x=200), still the page column");
+}
+
+// Row 0: the alpha bravo   Row 1: of gamma delta   Row 2: the a of  (all closed-class)
+// Column-wise the nearest word to x=100 is a stopword on every row; only row 2 has no
+// alternative.
+static WordSelectNavigator makeStopwordFixture() {
+  std::string pool;
+  const char* texts[] = {"the", "alpha", "bravo", "of", "gamma", "delta", "the", "a", "of"};
+  const int16_t xs[] = {10, 90, 180, 10, 90, 180, 10, 90, 180};
+  const int16_t ys[] = {0, 0, 0, 20, 20, 20, 40, 40, 40};
+  const int rowOf[] = {0, 0, 0, 1, 1, 1, 2, 2, 2};
+
+  std::vector<WordSelectNavigator::WordInfo> words;
+  for (int i = 0; i < 9; i++) {
+    WordSelectNavigator::WordInfo w = mkWord(texts[i], xs[i], ys[i], 40, rowOf[i]);
+    w.textOffset = poolAppendString(pool, texts[i]);
+    w.lookupOffset = w.textOffset;
+    words.push_back(w);
+  }
+
+  std::vector<WordSelectNavigator::Row> rows;
+  WordSelectNavigator::organizeIntoRows(words, rows);
+
+  WordSelectNavigator nav;
+  nav.load(std::move(words), std::move(rows), std::move(pool));
+  return nav;
+}
+
+static void testRowNavPrefersContentWords() {
+  std::printf("testRowNavPrefersContentWords\n");
+
+  WordSelectNavigator nav = makeStopwordFixture();
+  GfxRenderer renderer;
+  MappedInputManager input;
+
+  // Middle row, middle word by index is "gamma" -- already content, so the nudge is a no-op.
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "gamma") == 0, "cursor starts on the middle content word");
+
+  // Page column is (10 + 220) / 2 = 115, nearest to which on row 0 is "alpha" (c=110). Row 0
+  // also holds "the" at c=30, which the search must not prefer just for being closer to a
+  // shorter reference later on.
+  step(nav, input, renderer, MappedInputManager::Button::Up);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "alpha") == 0, "Up lands on alpha, a content word");
+
+  // Walk onto "the" deliberately: left/right never skips, so a stopword stays reachable.
+  step(nav, input, renderer, MappedInputManager::Button::Left);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "the") == 0, "Left still reaches 'the'");
+
+  // From "the" (c=30) the nearest word on row 1 is "of" (c=30); the preference takes gamma.
+  step(nav, input, renderer, MappedInputManager::Button::Down);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "gamma") == 0, "Down from 'the' skips 'of' for gamma");
+
+  // Row 2 is nothing but closed-class words, so the fallback must still land somewhere.
+  step(nav, input, renderer, MappedInputManager::Button::Down);
+  const auto* sel = nav.getSelected();
+  CHECK(sel != nullptr && sel->row == 2, "an all-stopword row still accepts the cursor");
+}
+
+// A row whose middle word by index is closed-class starts on its neighbour instead.
+static void testInitialCursorNudgedOffStopword() {
+  std::printf("testInitialCursorNudgedOffStopword\n");
+
+  std::string pool;
+  const char* texts[] = {"alpha", "bravo", "charlie", "delta", "the", "gamma"};
+  const int16_t xs[] = {10, 90, 180, 10, 90, 180};
+  const int16_t ys[] = {0, 0, 0, 20, 20, 20};
+  const int rowOf[] = {0, 0, 0, 1, 1, 1};
+
+  std::vector<WordSelectNavigator::WordInfo> words;
+  for (int i = 0; i < 6; i++) {
+    WordSelectNavigator::WordInfo w = mkWord(texts[i], xs[i], ys[i], 40, rowOf[i]);
+    w.textOffset = poolAppendString(pool, texts[i]);
+    w.lookupOffset = w.textOffset;
+    words.push_back(w);
+  }
+  std::vector<WordSelectNavigator::Row> rows;
+  WordSelectNavigator::organizeIntoRows(words, rows);
+
+  WordSelectNavigator nav;
+  nav.load(std::move(words), std::move(rows), std::move(pool));
+
+  // Row 1, index 1 is "the"; the nudge walks outward and takes the nearer neighbour.
+  const auto* sel = nav.getSelected();
+  CHECK(sel != nullptr && std::strcmp(nav.getDisplay(*sel), "delta") == 0, "initial cursor nudged off 'the'");
+}
+
+// Multi-select builds a contiguous range, so a row move inside it must not skip anything --
+// "man of the world" has to stay selectable.
+static void testMultiSelectRowNavDoesNotSkipStopwords() {
+  std::printf("testMultiSelectRowNavDoesNotSkipStopwords\n");
+
+  WordSelectNavigator nav = makeStopwordFixture();
+  GfxRenderer renderer;
+  MappedInputManager input;
+
+  // Park on "the" (row 0, x=10) with a horizontal step so the column comes from the cursor.
+  step(nav, input, renderer, MappedInputManager::Button::Up);
+  step(nav, input, renderer, MappedInputManager::Button::Left);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "the") == 0, "parked on 'the'");
+
+  input.reset();
+  input.setPressed(MappedInputManager::Button::Confirm, true);
+  input.setHeldTime(700);
+  std::string phrase;
+  nav.handleMultiSelectInput(input, phrase);
+  CHECK(nav.isMultiSelecting(), "entered multi-select mode");
+  input.reset();
+  input.setReleased(MappedInputManager::Button::Confirm, true);
+  nav.handleMultiSelectInput(input, phrase);
+
+  // Same Down that took gamma outside multi-select must now take the nearest word, "of".
+  step(nav, input, renderer, MappedInputManager::Button::Down);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "of") == 0,
+        "multi-select row nav takes the nearest word, stopword or not");
 }
 
 static void testHyphenEndOnly() {
@@ -1137,6 +1275,10 @@ int main() {
   testMergeLookupBothHyphens();
   testGoalColumnSurvivesShortRow();
   testHorizontalStepRedefinesGoalColumn();
+  testFirstRowMoveFromLoneWordRowUsesPageColumn();
+  testRowNavPrefersContentWords();
+  testInitialCursorNudgedOffStopword();
+  testMultiSelectRowNavDoesNotSkipStopwords();
   testHyphenEndOnly();
   testHyphenBoth();
   std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

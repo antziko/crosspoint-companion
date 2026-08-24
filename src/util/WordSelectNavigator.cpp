@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdlib>
 
+#include "DictStopwords.h"
 #include "MappedInputManager.h"
 #include "TextPool.h"
 
@@ -29,9 +30,14 @@ void WordSelectNavigator::load(std::vector<WordInfo> w, std::vector<Row> r, std:
       break;
   }
   currentRow = std::clamp(targetRow, 0, rowCount > 0 ? rowCount - 1 : 0);
-  currentWordInRow = (!rows.empty() && !rowEmpty(currentRow)) ? rowSize(currentRow) / 2 : 0;
+  currentWordInRow =
+      (!rows.empty() && !rowEmpty(currentRow)) ? contentWordNear(currentRow, rowSize(currentRow) / 2) : 0;
   confirmReleaseConsumed = consumeInitialConfirm;
-  rowNavGoalX = -1;
+  // Seed the aim column from the page's text block, not from the starting row: a row that
+  // holds a single short word would otherwise hand the first row move that word's own
+  // far-left X, and because both row branches store what they aimed at, every move after it
+  // would keep landing at the start of the line.
+  rowNavGoalX = textBlockCenterX();
 }
 
 void WordSelectNavigator::organizeIntoRows(std::vector<WordInfo>& words, std::vector<Row>& rows) {
@@ -152,18 +158,56 @@ std::string WordSelectNavigator::buildPhrase(int fromIdx, int toIdx) const {
   return phrase;
 }
 
-int WordSelectNavigator::findClosestWordFromX(int targetRow, int refCenterX) const {
+bool WordSelectNavigator::isStopwordAt(int flatIdx) const {
+  const WordInfo& w = words[flatIdx];
+  return DictStopwords::isStopword(textPool.data() + w.lookupOffset, w.lookupLen);
+}
+
+int WordSelectNavigator::contentWordNear(int row, int pos) const {
+  if (rowEmpty(row)) return 0;
+  const int n = rowSize(row);
+  pos = std::clamp(pos, 0, n - 1);
+  if (!isStopwordAt(wordAt(row, pos))) return pos;
+  // Walk outwards by index rather than by pixel: this only ever nudges the cursor off a
+  // closed-class word it happened to land on, so the nearest neighbour in either direction
+  // is the least surprising place to put it.
+  for (int d = 1; d < n; d++) {
+    if (pos - d >= 0 && !isStopwordAt(wordAt(row, pos - d))) return pos - d;
+    if (pos + d < n && !isStopwordAt(wordAt(row, pos + d))) return pos + d;
+  }
+  return pos;  // the whole row is closed-class
+}
+
+int WordSelectNavigator::textBlockCenterX() const {
+  if (words.empty()) return -1;
+  int minX = INT_MAX;
+  int maxX = INT_MIN;
+  for (const auto& w : words) {
+    minX = std::min<int>(minX, w.screenX);
+    maxX = std::max<int>(maxX, w.screenX + w.width);
+  }
+  return (minX + maxX) / 2;
+}
+
+int WordSelectNavigator::findClosestWordFromX(int targetRow, int refCenterX, bool preferContentWord) const {
   if (rowEmpty(targetRow)) return 0;
   int bestMatch = 0;
   int bestDist = INT_MAX;
+  int bestContent = -1;
+  int bestContentDist = INT_MAX;
   for (int i = 0; i < rowSize(targetRow); i++) {
-    const int dist = std::abs(wordCenterX(wordAt(targetRow, i)) - refCenterX);
+    const int flat = wordAt(targetRow, i);
+    const int dist = std::abs(wordCenterX(flat) - refCenterX);
     if (dist < bestDist) {
       bestDist = dist;
       bestMatch = i;
     }
+    if (preferContentWord && dist < bestContentDist && !isStopwordAt(flat)) {
+      bestContentDist = dist;
+      bestContent = i;
+    }
   }
-  return bestMatch;
+  return bestContent >= 0 ? bestContent : bestMatch;
 }
 
 bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, const GfxRenderer& renderer,
@@ -236,7 +280,7 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
   // own X, so passing through a row that holds a single short word leaves it intact.
   if (rowPrevPressed) {
     const int targetRow = (rowNavBase > 0) ? rowNavBase - 1 : rowCount - 1;
-    currentWordInRow = findClosestWordFromX(targetRow, rowNavRefX);
+    currentWordInRow = findClosestWordFromX(targetRow, rowNavRefX, !inMultiSelectMode);
     currentRow = targetRow;
     rowNavGoalX = rowNavRefX;
     changed = true;
@@ -244,7 +288,7 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
 
   if (rowNextPressed) {
     const int targetRow = (rowNavBase < rowCount - 1) ? rowNavBase + 1 : 0;
-    currentWordInRow = findClosestWordFromX(targetRow, rowNavRefX);
+    currentWordInRow = findClosestWordFromX(targetRow, rowNavRefX, !inMultiSelectMode);
     currentRow = targetRow;
     rowNavGoalX = rowNavRefX;
     changed = true;

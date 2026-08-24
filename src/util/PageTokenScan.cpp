@@ -35,9 +35,23 @@ bool containsAsciiAlnum(const char* text, size_t len) {
   return std::any_of(text, text + len, [](unsigned char c) { return c < 0x80 && std::isalnum(c) != 0; });
 }
 
-bool isDashAt(const char* text, size_t len, size_t i) {
-  return i + 2 < len && static_cast<uint8_t>(text[i]) == 0xE2 && static_cast<uint8_t>(text[i + 1]) == 0x80 &&
-         (static_cast<uint8_t>(text[i + 2]) == 0x93 || static_cast<uint8_t>(text[i + 2]) == 0x94);
+// Byte length of the dash separator starting at `i`, or 0 when there is none. En-dash
+// (U+2013) and em-dash (U+2014) are E2 80 93/94 in UTF-8 and are always 3 bytes. A run of
+// two or more ASCII hyphens is the typewriter em-dash ("word--word", the house style of
+// Gutenberg-sourced EPUBs) and separates just the same; a SINGLE '-' must not, or
+// "co-operate" would split in two and every line-break hyphen would stop merging with its
+// continuation. Returning the length lets the caller step over a run of any width.
+size_t dashLenAt(const char* text, size_t len, size_t i) {
+  if (i + 2 < len && static_cast<uint8_t>(text[i]) == 0xE2 && static_cast<uint8_t>(text[i + 1]) == 0x80 &&
+      (static_cast<uint8_t>(text[i + 2]) == 0x93 || static_cast<uint8_t>(text[i + 2]) == 0x94)) {
+    return 3;
+  }
+  if (text[i] == '-' && i + 1 < len && text[i + 1] == '-') {
+    size_t end = i + 2;
+    while (end < len && text[end] == '-') end++;
+    return end - i;
+  }
+  return 0;
 }
 
 }  // namespace
@@ -49,10 +63,13 @@ bool isSelectable(const char* text, size_t len, bool& outIsCjk) {
 
 size_t countDashes(const char* text, size_t len) {
   size_t n = 0;
-  for (size_t i = 0; i + 2 < len; i++) {
-    if (isDashAt(text, len, i)) {
+  for (size_t i = 0; i < len;) {
+    const size_t d = dashLenAt(text, len, i);
+    if (d > 0) {
       n++;
-      i += 2;
+      i += d;
+    } else {
+      i++;
     }
   }
   return n;
@@ -62,34 +79,25 @@ size_t collectParts(const char* text, size_t len, Part* out, size_t maxParts) {
   if (!out || maxParts == 0 || len == 0) return 0;
 
   size_t n = 0;
-  // A part's end is the next part's start, so emission always lags one start behind.
-  size_t prevStart = 0;
-  bool havePrev = false;
   size_t partStart = 0;
-
+  // The separator's own bytes belong to neither neighbour, so a part ends where its
+  // separator begins. A stretch that is nothing but separators contributes no index.
   const auto emit = [&](size_t start, size_t end) {
-    // The dash bytes sit at the tail of the part before them; they are a separator, not text.
-    while (end >= start + 3 && isDashAt(text, len, end - 3)) end -= 3;
-    if (end <= start) return;  // a part that was nothing but dashes contributes no index
+    if (end <= start) return;
     if (n < maxParts) out[n++] = Part{static_cast<uint16_t>(start), static_cast<uint16_t>(end)};
-  };
-  const auto pushStart = [&](size_t start) {
-    if (havePrev) emit(prevStart, start);
-    prevStart = start;
-    havePrev = true;
   };
 
   for (size_t i = 0; i < len;) {
-    if (isDashAt(text, len, i)) {
-      if (i > partStart) pushStart(partStart);
-      i += 3;
+    const size_t d = dashLenAt(text, len, i);
+    if (d > 0) {
+      emit(partStart, i);
+      i += d;
       partStart = i;
     } else {
       i++;
     }
   }
-  if (partStart < len) pushStart(partStart);
-  if (havePrev) emit(prevStart, len);
+  emit(partStart, len);
 
   return n;
 }

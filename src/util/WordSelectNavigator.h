@@ -283,12 +283,32 @@ class WordSelectNavigator {
   // Centre X of one word — the coordinate every row-navigation comparison is made against.
   int wordCenterX(int flatIdx) const { return words[flatIdx].screenX + words[flatIdx].width / 2; }
 
-  int findClosestWordFromX(int targetRow, int refCenterX) const;
+  // Position within targetRow of the word nearest refCenterX. With preferContentWord the
+  // search is run over non-stopwords first and only falls back to the whole row when it
+  // holds nothing else, so row navigation stops on "harbour" rather than the "the" beside
+  // it. Left/right stepping deliberately does NOT use this: it is the precise-adjustment
+  // gesture, and a phrase like "man of the world" has to be traversable word by word.
+  int findClosestWordFromX(int targetRow, int refCenterX, bool preferContentWord = true) const;
 
-  // Goal column for vertical navigation, in screen X. Held across row moves and cleared
-  // by any left/right step, so a row carrying a single short word (a heading, a
-  // paragraph's last line) cannot rewrite the reference to its own X and drag every
-  // later row move to the start of the line. -1 means "derive it from the cursor".
+  // True when the word's lookup text is a DictStopwords closed-class word.
+  bool isStopwordAt(int flatIdx) const;
+
+  // Position within `row` of the first non-stopword at or beside index `pos`. Returns pos
+  // unchanged when it is already a content word, or when the row holds nothing but
+  // stopwords.
+  int contentWordNear(int row, int pos) const;
+
+  // Centre X of the page's whole text block, or -1 when there are no words. Seeds
+  // rowNavGoalX so the first row move has a column to aim at that does not depend on which
+  // word the starting row happens to hold.
+  int textBlockCenterX() const;
+
+  // Goal column for vertical navigation, in screen X. Seeded by load() from the page's text
+  // block, held across row moves, and cleared by any left/right step, so a row carrying a
+  // single short word (a heading, a paragraph's last line) cannot rewrite the reference to
+  // its own X and drag every later row move to the start of the line -- not even when it is
+  // the row the cursor started on. -1 means "derive it from the cursor", which is the state
+  // a left/right step leaves behind.
   int rowNavGoalX = -1;
 
   // Flat index of the second half we snapped from on wordPrev. Allows subsequent

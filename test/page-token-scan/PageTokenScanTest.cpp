@@ -146,6 +146,73 @@ static void testUnsplitTokenIsWholeToken() {
 }
 
 // --------------------------------------------------------------------------
+// ASCII double hyphen
+//
+// A run of two or more '-' is the typewriter em-dash, and splits like one. The oracle above
+// is the ORIGINAL loop and deliberately does not know this rule, so these expectations are
+// written out by hand: they are the one place the page index space was moved on purpose.
+// A single '-' must keep behaving as a compound-word hyphen.
+// --------------------------------------------------------------------------
+static void testAsciiDoubleHyphenSplits() {
+  std::printf("a run of ASCII hyphens splits like an em-dash\n");
+
+  struct Case {
+    std::string token;
+    std::vector<std::pair<size_t, size_t>> expected;
+    const char* what;
+  };
+  const std::vector<Case> cases = {
+      {"east--west", {{0, 4}, {6, 10}}, "the reported case: two words, dashes owned by neither"},
+      {"east---west", {{0, 4}, {7, 11}}, "three hyphens are still one separator"},
+      {"word--", {{0, 4}}, "a trailing run yields the word alone, so it is not a line-break hyphen"},
+      {"--word", {{2, 6}}, "a leading run is skipped"},
+      {"a--b--c", {{0, 1}, {3, 4}, {6, 7}}, "several runs in one token"},
+      {"co-operate", {{0, 10}}, "a single hyphen is a compound word, not a separator"},
+      {"well-known--thing", {{0, 10}, {12, 17}}, "single and double hyphens in one token"},
+      {"--", {}, "nothing but separators yields no index"},
+  };
+
+  for (const auto& c : cases) {
+    PageTokens::Part got[PageTokens::kMaxTokenParts];
+    const size_t n = PageTokens::collectParts(c.token.data(), c.token.size(), got, PageTokens::kMaxTokenParts);
+
+    char msg[200];
+    std::snprintf(msg, sizeof(msg), "%s -- \"%s\": got %u parts, expected %u", c.what, c.token.c_str(), (unsigned)n,
+                  (unsigned)c.expected.size());
+    CHECK(n == c.expected.size(), msg);
+    if (n != c.expected.size()) continue;
+
+    for (size_t i = 0; i < n; i++) {
+      std::snprintf(msg, sizeof(msg), "part %u of \"%s\": got [%u,%u), expected [%u,%u)", (unsigned)i, c.token.c_str(),
+                    (unsigned)got[i].start, (unsigned)got[i].end, (unsigned)c.expected[i].first,
+                    (unsigned)c.expected[i].second);
+      CHECK(got[i].start == c.expected[i].first && got[i].end == c.expected[i].second, msg);
+    }
+  }
+
+  // The split token must not look unsplit, or extractWords takes the whole-token width.
+  const std::string t = "east--west";
+  PageTokens::Part parts[PageTokens::kMaxTokenParts];
+  const size_t n = PageTokens::collectParts(t.data(), t.size(), parts, PageTokens::kMaxTokenParts);
+  CHECK(n == 2 && !(parts[0].start == 0 && parts[0].end == t.size()), "a dashed token never looks unsplit");
+
+  // countDashes bounds the reservation: exact when the token has content on both sides of
+  // every separator, one high when a run trails, never low.
+  CHECK(PageTokens::countDashes("east--west", 10) == 1, "one separator counted for a two-hyphen run");
+  CHECK(PageTokens::countDashes("east---west", 11) == 1, "a three-hyphen run is still one separator");
+  CHECK(PageTokens::countDashes("a--b--c", 7) == 2, "two separators counted");
+  CHECK(PageTokens::countDashes("co-operate", 10) == 0, "a single hyphen is not counted");
+  CHECK(PageTokens::countDashes("word--", 6) >= 1, "a trailing run is counted, erring high is fine");
+
+  // The whole point of the trailing-run case: the part carries no hyphen, so the
+  // hyphenated-pair merge cannot mistake "word--" at a line end for a line-break hyphen.
+  const std::string trailing = "word--";
+  const size_t tn = PageTokens::collectParts(trailing.data(), trailing.size(), parts, PageTokens::kMaxTokenParts);
+  CHECK(tn == 1 && trailing.substr(parts[0].start, parts[0].end - parts[0].start) == "word",
+        "the emitted part is hyphen-free, so no bogus continuation merge");
+}
+
+// --------------------------------------------------------------------------
 // Selection predicate
 // --------------------------------------------------------------------------
 static void testSelectablePredicate() {
@@ -193,6 +260,7 @@ static void testMeasureStripsSoftHyphen() {
 int main() {
   testPartsMatchOriginalSplit();
   testUnsplitTokenIsWholeToken();
+  testAsciiDoubleHyphenSplits();
   testSelectablePredicate();
   testMeasureStripsSoftHyphen();
   std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

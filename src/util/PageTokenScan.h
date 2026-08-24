@@ -29,9 +29,12 @@ namespace PageTokens {
 // traffic in front of the very reserve that count exists to protect.
 bool isSelectable(const char* text, size_t len, bool& outIsCjk);
 
-// En-dash (U+2013) and em-dash (U+2014), both E2 80 93/94 in UTF-8. Each one splits its
-// token into an extra index, so a counting pass needs the same tally the extraction pass
-// derives from the parts below.
+// Number of dash separators in the token: en-dash (U+2013), em-dash (U+2014), and any run
+// of two or more ASCII hyphens, which is how a typewriter em-dash reaches an EPUB. Each one
+// splits its token into an extra index, so a counting pass needs the same tally the
+// extraction pass derives from the parts below. A token ending in a separator counts one
+// more than it yields parts; callers use this to size a reservation, where erring high is
+// free.
 size_t countDashes(const char* text, size_t len);
 
 // Cap on the parts one layout word can split into, sized for the stack arrays both walks
@@ -46,7 +49,10 @@ struct Part {
   uint16_t end;
 };
 
-// Split a selectable token on en/em-dashes into the parts that each become one word index.
+// Split a selectable token on its dash separators (see countDashes) into the parts that each
+// become one word index. Separator bytes belong to no part, so "east--west" yields "east"
+// and "west" and a trailing "word--" yields just "word" — which is also what stops the
+// hyphenated-pair merge from mistaking that dash for a line-break hyphen.
 // Writes at most maxParts entries and returns how many were written. A token containing no
 // dash yields exactly one part spanning the whole token, which callers detect (and treat as
 // the unsplit fast path) by checking for a single part covering [0, len).

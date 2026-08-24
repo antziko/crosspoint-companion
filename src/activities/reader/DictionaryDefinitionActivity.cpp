@@ -32,6 +32,7 @@
 #include "util/DictionaryRegistry.h"
 #include "util/IpaUtils.h"
 #include "util/LookupHistory.h"
+#include "util/PageTokenScan.h"
 #include "util/TextPool.h"
 
 static constexpr char kBullet[] = "- ";
@@ -984,20 +985,34 @@ void DictionaryDefinitionActivity::extractWordsFromLayout() {
         const size_t tokLen = static_cast<size_t>(p - tokStart);
         std::string tok(tokStart, tokLen);
 
-        const int tokVisualWidth = renderer.getTextWidth(segFontId, tok.c_str(), seg.style);
         const int tokAdvanceX = renderer.getTextAdvanceX(segFontId, tok.c_str(), seg.style);
-        std::string cleaned = Dictionary::cleanWord(tok);
-        if (!cleaned.empty()) {
-          uint16_t tokOff = WordSelectNavigator::poolAppend(textPool, tok.c_str(), tok.size());
+
+        // One cursor stop per part, on the same dash rule the reading page uses, so
+        // "word--word" is two selectable words here too. Unlike the reading page these
+        // indices are not persisted anywhere, so the split is free of anchor concerns.
+        PageTokens::Part parts[PageTokens::kMaxTokenParts];
+        const size_t partCount = PageTokens::collectParts(tok.data(), tok.size(), parts, PageTokens::kMaxTokenParts);
+
+        for (size_t pi = 0; pi < partCount; pi++) {
+          const size_t partStart = parts[pi].start;
+          const std::string part = tok.substr(partStart, parts[pi].end - partStart);
+          std::string cleaned = Dictionary::cleanWord(part);
+          if (cleaned.empty()) continue;
+          // Only a split token needs its prefix measured to place the part; the common case
+          // is one part at offset 0, where that measurement would be wasted work.
+          const int partOffsetX =
+              partStart == 0 ? 0 : renderer.getTextAdvanceX(segFontId, tok.substr(0, partStart).c_str(), seg.style);
+          const int partWidth = renderer.getTextWidth(segFontId, part.c_str(), seg.style);
+          uint16_t tokOff = WordSelectNavigator::poolAppend(textPool, part.c_str(), part.size());
           uint16_t cleanedOff = WordSelectNavigator::poolAppend(textPool, cleaned.c_str(), cleaned.size());
           WordSelectNavigator::WordInfo wi;
           wi.textOffset = tokOff;
-          wi.textLen = static_cast<uint16_t>(tok.size());
+          wi.textLen = static_cast<uint16_t>(part.size());
           wi.lookupOffset = cleanedOff;
           wi.lookupLen = static_cast<uint16_t>(cleaned.size());
-          wi.screenX = static_cast<int16_t>(x);
+          wi.screenX = static_cast<int16_t>(x + partOffsetX);
           wi.screenY = lineY;
-          wi.width = static_cast<int16_t>(tokVisualWidth);
+          wi.width = static_cast<int16_t>(partWidth);
           wi.style = seg.style;
           wi.isIpa = seg.isIpa;
           words.push_back(wi);
