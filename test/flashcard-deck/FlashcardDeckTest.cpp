@@ -544,6 +544,48 @@ TEST_F(FlashcardDeckTest, BuildSessionEmptyDeck) {
 }
 
 // --------------------------------------------------------------------------
+// hasDueCards -- the reader's inline-review gate. Must agree with computeStats().due > 0
+// while stopping at the first hit instead of reading the whole deck.
+// --------------------------------------------------------------------------
+
+TEST_F(FlashcardDeckTest, HasDueCardsMissingFile) { EXPECT_FALSE(FlashcardDeck::hasDueCards(cachePath, 10)); }
+
+TEST_F(FlashcardDeckTest, HasDueCardsTrueForNewCard) {
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx");  // new: dueDay 0 counts as due
+  EXPECT_TRUE(FlashcardDeck::hasDueCards(cachePath, 10));
+}
+
+TEST_F(FlashcardDeckTest, HasDueCardsFalseWhenAllScheduledAhead) {
+  for (const char* w : {"aa", "b"}) FlashcardDeck::enroll(cachePath, w, "");
+  FlashcardDeck::grade(cachePath, "aa", true, 10);  // box1 -> due 12
+  FlashcardDeck::grade(cachePath, "b", true, 10);   // box1 -> due 12
+  EXPECT_FALSE(FlashcardDeck::hasDueCards(cachePath, 11));
+  EXPECT_TRUE(FlashcardDeck::hasDueCards(cachePath, 12));  // due day arrives
+}
+
+TEST_F(FlashcardDeckTest, HasDueCardsFalseWhenAllRetiredOrSuspended) {
+  for (const char* w : {"aa", "b"}) FlashcardDeck::enroll(cachePath, w, "");
+  for (int i = 0; i < 6; i++) FlashcardDeck::grade(cachePath, "aa", true, 1);  // graduate -> RETIRED
+  FlashcardDeck::suspend(cachePath, "b");
+  EXPECT_FALSE(FlashcardDeck::hasDueCards(cachePath, 10));
+}
+
+TEST_F(FlashcardDeckTest, HasDueCardsAgreesWithComputeStats) {
+  for (const char* w : {"aa", "b", "c", "d", "e", "f"}) FlashcardDeck::enroll(cachePath, w, "");
+  for (int i = 0; i < 6; i++) FlashcardDeck::grade(cachePath, "aa", true, 1);
+  FlashcardDeck::grade(cachePath, "b", true, 5);
+  FlashcardDeck::grade(cachePath, "c", true, 5);
+  FlashcardDeck::grade(cachePath, "d", true, 5);
+  FlashcardDeck::grade(cachePath, "e", true, 5);
+  FlashcardDeck::grade(cachePath, "f", true, 5);
+  // Every non-retired card is now scheduled to day 7.
+  for (uint32_t today : {6u, 7u, 8u}) {
+    const bool expected = FlashcardDeck::computeStats(cachePath, today).due > 0;
+    EXPECT_EQ(FlashcardDeck::hasDueCards(cachePath, today), expected) << "today=" << today;
+  }
+}
+
+// --------------------------------------------------------------------------
 // suspend / unsuspend
 // --------------------------------------------------------------------------
 

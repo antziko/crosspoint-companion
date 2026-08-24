@@ -21,10 +21,16 @@
 // materialized.
 class FlashcardReviewActivity final : public Activity {
  public:
-  explicit FlashcardReviewActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string bookCachePath)
+  // inlineCards > 0 puts the activity in INLINE mode: it is being shown mid-page-turn by
+  // the reader rather than opened from the menu. That skips the overview, caps the session
+  // at inlineCards, and makes Back mean "back to the book" instead of "back to the
+  // overview". 0 (the default) is the normal full-screen review.
+  explicit FlashcardReviewActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string bookCachePath,
+                                   uint8_t inlineCards = 0)
       : Activity("FlashcardReview", renderer, mappedInput),
         cachePath(std::move(bookCachePath)),
-        controller(renderer, mappedInput, *this, cachePath) {}
+        controller(renderer, mappedInput, *this, cachePath),
+        inlineCap(inlineCards) {}
 
   void onEnter() override;
   void onExit() override;
@@ -69,6 +75,14 @@ class FlashcardReviewActivity final : public Activity {
   // aside): cards are always shown word+context, Pass/Fail are disabled, and the
   // Up button unsuspends instead of suspending.
   bool suspendedMode = false;
+
+  // Inline ("review while reading") mode: non-zero card cap set by the reader. See the
+  // constructor. Zero for the menu-launched full review.
+  uint8_t inlineCap = 0;
+  bool isInline() const { return inlineCap > 0; }
+  // Finish an inline session, handing the reader the skip flag (which picks the deferral) and
+  // the tally (which it renders as a toast over the page). No-op outside inline mode.
+  void finishInline(bool skipped);
 
   // Session tally (rendered on the summary screen).
   int reviewed = 0;

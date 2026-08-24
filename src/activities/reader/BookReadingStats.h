@@ -49,12 +49,22 @@ struct BookReadingStats {
   // 0 = never skipped (or pre-v6 stats). A real sync supersedes it via the max().
   uint32_t lastSyncPromptSkipSeconds = 0;
 
+  // Value of readingTotalSeconds() at the last inline flashcard review of this book
+  // (the reader's "review while reading" interruption). Gates the next one: it fires
+  // once another flashcardInlineMinutesIdx worth of reading has accrued past this.
+  // A Skip stamps it one interval into the FUTURE, so skipping buys two intervals of
+  // quiet instead of one -- that deferral is the "I'm in a rush" escape hatch, and it
+  // lives here rather than in RAM so it survives deep sleep (a chip reset, which wipes
+  // every reader member) and closing the book. 0 = never reviewed (or pre-v7 stats).
+  uint32_t lastInlineReviewSeconds = 0;
+
   // Total reading time across all devices (local counter + last-synced remote sum).
   uint32_t displayTotalSeconds() const { return totalReadingSeconds + remoteOtherSeconds; }
 
-  // Parses a raw stats.bin image: v6 native; v5 accepted with lastSyncPromptSkipSeconds
-  // zeroed; v4 accepted with that + lastSyncReadingSeconds zeroed; v3 accepted with the
-  // remote fields zeroed too (all lossless upgrades). Returns false on unknown version
+  // Parses a raw stats.bin image: v7 native; v6 accepted with lastInlineReviewSeconds
+  // zeroed; v5 accepted with that + lastSyncPromptSkipSeconds zeroed; v4 accepted with
+  // those + lastSyncReadingSeconds zeroed; v3 accepted with the remote fields zeroed too
+  // (all lossless upgrades). Returns false on unknown version
   // or size mismatch. Split out
   // from load() so host unit tests can cover the migration without SD I/O.
   static bool parse(const uint8_t* data, size_t len, BookReadingStats& out);

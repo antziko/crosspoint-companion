@@ -98,10 +98,21 @@ struct HighlightRangeResult {
   std::string previewText;
 };
 
+// Outcome of an INLINE flashcard review (the reader's "review while reading" interruption).
+// `skipped` distinguishes a Back-out from a finished pass, since the two defer the next review
+// by different amounts. The tally is carried so the reader can summarise it in a toast over the
+// page instead of the review screen spending a full refresh on a summary page.
+struct FlashcardReviewResult {
+  bool skipped = false;
+  uint8_t reviewed = 0;
+  uint8_t correct = 0;
+  uint8_t mastered = 0;
+};
+
 using ResultVariant =
     std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, IntervalResult,
                  PageResult, ProgressChangeResult, NetworkModeResult, FootnoteResult, WordResult, FilePathResult,
-                 BookmarkResult, FontSelectionResult, HighlightRangeResult, SyncScopeResult>;
+                 BookmarkResult, FontSelectionResult, HighlightRangeResult, SyncScopeResult, FlashcardReviewResult>;
 
 struct ActivityResult {
   bool isCancelled = false;

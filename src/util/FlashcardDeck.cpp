@@ -566,6 +566,24 @@ FlashcardDeck::Stats FlashcardDeck::computeStats(const std::string& cachePath, u
   return sc.s;
 }
 
+bool FlashcardDeck::hasDueCards(const std::string& cachePath, uint32_t today) {
+  struct DueCtx {
+    uint32_t today;
+    bool found;
+  } dc{today, false};
+  forEachLine(
+      filePath(cachePath),
+      [](void* ctx, const char* line, int len) {
+        auto* c = static_cast<DueCtx*>(ctx);
+        const Parsed p = parseLine(line, len);
+        if (!isDue(p.box, p.dueDay, c->today)) return true;
+        c->found = true;
+        return false;  // stop the scan at the first due card
+      },
+      &dc);
+  return dc.found;
+}
+
 int FlashcardDeck::loadWindow(const std::string& cachePath, int startNewest, int n, Entry* out, bool wordsOnly) {
   if (startNewest < 0 || n <= 0 || !out) return 0;
   const std::string path = filePath(cachePath);

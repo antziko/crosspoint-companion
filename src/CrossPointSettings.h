@@ -490,6 +490,19 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   static constexpr uint8_t FC_RECOUNT_STEP = 5;
   static constexpr uint8_t FC_RECOUNT_DEFAULT = 5;
   uint8_t flashcardRecountMins = FC_RECOUNT_DEFAULT;
+  // Inline flashcard review ("review while reading"): after this much reading time in a
+  // book, a forward page turn opens a short review of due cards before the next page.
+  // Index into FC_INLINE_MINUTES; index 0 is the Off sentinel, so the feature ships
+  // disabled and nothing interrupts reading until it is switched on.
+  static constexpr uint8_t FC_INLINE_MINUTES[] = {0, 1, 5, 10, 15, 20, 30};
+  uint8_t flashcardInlineMinutesIdx = 0;
+  // Cards per inline review. Deliberately small: this interrupts reading, so the point is a
+  // handful of cards, not a full session (the reader-menu review is still there for that).
+  // Index into FC_INLINE_CARDS, like the interval above -- an index-valued ENUM renders as a
+  // selection popup and keeps the index-based contract the web settings UI expects, which a
+  // raw 1..10 VALUE (cycled in place on Confirm) would not.
+  static constexpr uint8_t FC_INLINE_CARDS[] = {1, 2, 3, 5, 10};
+  uint8_t flashcardInlineCardsIdx = 2;  // default 3 cards
   // When the active dictionary misses, probe the exact word in each other dictionary of the same
   // category (DictionaryRegistry::nameIsStGroup) before falling back to stems / alt forms /
   // suggestions. Off by default: it only ever costs time on the miss path, which is already the

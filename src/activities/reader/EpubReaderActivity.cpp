@@ -56,6 +56,7 @@
 #include "util/BookCacheUtils.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
+#include "util/FlashcardDeck.h"
 #include "util/QuoteHighlight.h"
 #include "util/ScreenshotUtil.h"
 
@@ -742,6 +743,12 @@ void EpubReaderActivity::loop() {
   if (showNoDictionaryMessage && (millis() - noDictionaryMessageTime) >= ReaderUtils::DICTIONARY_MESSAGE_DURATION_MS) {
     showNoDictionaryMessage = false;
     requestUpdate();
+  }
+
+  if (showInlineReviewMessage &&
+      (millis() - inlineReviewMessageTime) >= ReaderUtils::INLINE_REVIEW_MESSAGE_DURATION_MS) {
+    showInlineReviewMessage = false;
+    requestUpdate();  // re-render clears the toast off the page content
   }
 
   // While the end screen suggestion menu is showing it owns Confirm/Back/navigation
@@ -2012,6 +2019,13 @@ void EpubReaderActivity::pageTurn(bool isForwardTurn) {
   }
   lastPageTurnTime = millis();
   requestUpdate();
+
+  // Inline flashcard review, after the page index has already advanced: returning from the
+  // review lands on the NEXT page, so the interruption doesn't cost the user a second turn.
+  // Forward turns only -- paging backwards is re-reading, not progress.
+  if (isForwardTurn) {
+    maybeStartInlineReview();
+  }
 }
 
 // TODO: Failure handling
@@ -2553,6 +2567,10 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   if (showNoDictionaryMessage) {
     GUI.drawPopup(renderer, tr(STR_DICT_NO_DICT_SET));
   }
+
+  if (showInlineReviewMessage) {
+    GUI.drawPopup(renderer, inlineReviewMessage_);
+  }
 }
 
 bool EpubReaderActivity::applyDeferredReposition() {
@@ -2728,6 +2746,89 @@ bool EpubReaderActivity::syncPromptThresholdReached() const {
   const uint32_t ref = std::max(readingStats.lastSyncReadingSeconds, readingStats.lastSyncPromptSkipSeconds);
   const uint32_t sinceRef = totalNow > ref ? totalNow - ref : 0;
   return sinceRef >= thresholdMinutes * 60UL;
+}
+
+uint16_t EpubReaderActivity::inlineReviewIntervalMinutes() const {
+  constexpr size_t kCount = sizeof(CrossPointSettings::FC_INLINE_MINUTES) / sizeof(uint8_t);
+  const uint8_t idx = SETTINGS.flashcardInlineMinutesIdx < kCount ? SETTINGS.flashcardInlineMinutesIdx : 0;
+  return CrossPointSettings::FC_INLINE_MINUTES[idx];  // index 0 is the Off sentinel (0 minutes)
+}
+
+bool EpubReaderActivity::inlineReviewThresholdReached() const {
+  const uint16_t minutes = inlineReviewIntervalMinutes();
+  if (minutes == 0) return false;
+  const uint32_t totalNow = readingTotalSeconds();
+  // A Skip stamps the baseline into the future, so it can legitimately exceed the odometer;
+  // the unsigned subtraction has to be guarded or it wraps and fires immediately.
+  const uint32_t ref = readingStats.lastInlineReviewSeconds;
+  if (totalNow <= ref) return false;
+  return (totalNow - ref) >= static_cast<uint32_t>(minutes) * 60UL;
+}
+
+void EpubReaderActivity::recordInlineReview(uint16_t deferIntervals) {
+  const uint32_t extra = static_cast<uint32_t>(deferIntervals) * inlineReviewIntervalMinutes() * 60UL;
+  readingStats.lastInlineReviewSeconds = readingTotalSeconds() + extra;
+  if (epub) {
+    readingStats.save(epub->getCachePath());
+  }
+}
+
+bool EpubReaderActivity::maybeStartInlineReview() {
+  // Cheapest gates first: the only cost paid on an ordinary page turn is the settings read
+  // and (once past it) one subtract-and-compare. The deck file is not touched until the
+  // interval has actually elapsed.
+  if (inlineReviewIntervalMinutes() == 0) return false;
+  if (automaticPageTurnActive) return false;  // hands-free reading is not interrupted
+  if (!epub || !section || pendingPageJump.has_value()) return false;
+  if (RenderLock::peek()) return false;
+  // No clock means no schedule: dueDay comparisons are meaningless and grading would write
+  // a year-2000 due date. Leave the deck alone and let the reader-menu review handle it.
+  if (!halClock.isAvailable()) return false;
+  if (!inlineReviewThresholdReached()) return false;
+
+  uint8_t dayOfWeek = 0, day = 0, month = 0, hour = 0, minute = 0;
+  uint16_t year = 0;
+  if (!halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, dayOfWeek, day, month, year, hour, minute)) return false;
+  const uint32_t today = readingHistoryDayIndex(year, month, day);
+
+  if (!FlashcardDeck::hasDueCards(epub->getCachePath(), today)) {
+    // Nothing to review. Stamp the baseline anyway, otherwise this re-reads the deck file on
+    // every subsequent page turn for as long as the deck stays empty of due cards.
+    recordInlineReview(0);
+    return false;
+  }
+
+  constexpr size_t kCardCount = sizeof(CrossPointSettings::FC_INLINE_CARDS) / sizeof(uint8_t);
+  const uint8_t cardIdx = SETTINGS.flashcardInlineCardsIdx < kCardCount ? SETTINGS.flashcardInlineCardsIdx : 0;
+  const uint8_t cards = CrossPointSettings::FC_INLINE_CARDS[cardIdx];
+  return startActivityForResultNoThrow<FlashcardReviewActivity>(
+      [this](const ActivityResult& res) {
+        // Skip defers by one EXTRA interval (two intervals of quiet from one Back press);
+        // a completed review just restarts the clock. A cancelled result should not happen
+        // (inline mode always sets a FlashcardReviewResult) but is treated as a Skip to be safe.
+        const auto* fc = std::get_if<FlashcardReviewResult>(&res.data);
+        const bool skipped = res.isCancelled || !fc || fc->skipped;
+        recordInlineReview(skipped ? 1 : 0);
+        // Report the tally as a toast over the page rather than a summary screen. Nothing to
+        // report if no card was actually graded (an immediate Back), so stay silent there.
+        if (fc && fc->reviewed > 0) {
+          if (fc->mastered > 0) {
+            snprintf(inlineReviewMessage_, sizeof(inlineReviewMessage_), tr(STR_FC_REVIEW_TALLY_MASTERED),
+                     static_cast<int>(fc->correct), static_cast<int>(fc->reviewed), static_cast<int>(fc->mastered));
+          } else {
+            snprintf(inlineReviewMessage_, sizeof(inlineReviewMessage_), tr(STR_FC_REVIEW_TALLY),
+                     static_cast<int>(fc->correct), static_cast<int>(fc->reviewed));
+          }
+          showInlineReviewMessage = true;
+          inlineReviewMessageTime = millis();
+        }
+        // Swallow the answering button's release so it doesn't bleed into a page turn / Back
+        // on the resumed reader (same guard the sync prompts use).
+        suppressPageTurnUntilRelease_ = true;
+        ignoreBackUntilRelease = true;
+        requestUpdate();
+      },
+      renderer, mappedInput, epub->getCachePath(), cards);
 }
 
 void EpubReaderActivity::recordSyncPromptSkip() {

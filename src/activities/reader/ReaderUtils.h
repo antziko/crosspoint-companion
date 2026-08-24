@@ -20,6 +20,9 @@ constexpr unsigned long SKIP_HOLD_MS = 700;
 constexpr unsigned long BOOKMARK_HOLD_MS = 400;
 constexpr unsigned long BOOKMARK_MESSAGE_DURATION_MS = 2500;
 constexpr unsigned long DICTIONARY_MESSAGE_DURATION_MS = 1500;
+// Inline flashcard-review tally toast. Longer than the others: it reports a result the
+// user may want to actually read, not just an acknowledgement of their own action.
+constexpr unsigned long INLINE_REVIEW_MESSAGE_DURATION_MS = 2500;
 
 enum ReaderTouchAction : freeink::ui::ActionId {
   READER_TOUCH_PREV = 1,

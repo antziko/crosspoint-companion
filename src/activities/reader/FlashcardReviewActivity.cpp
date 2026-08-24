@@ -50,7 +50,31 @@ void FlashcardReviewActivity::onEnter() {
   stats = FlashcardDeck::computeStats(cachePath, today);
   cardStyle = SETTINGS.flashcardCardStyle;  // start from the remembered default
   phase = Phase::Overview;                  // pre-session deck stats; the user picks style + scope here
+
+  if (isInline()) {
+    // Inline mode interrupts a page turn, so the overview would be a wasted refresh on a
+    // screen the user did not ask for: go straight to the first card in the remembered
+    // style + scope. startSession leaves phase at Overview if the scope yields no cards,
+    // which the reader's hasDueCards() gate makes unreachable in practice; bail out to the
+    // book rather than stranding the user on an overview they never navigated to.
+    const uint8_t scope =
+        SETTINGS.flashcardSessionScope < static_cast<uint8_t>(CrossPointSettings::FLASHCARD_SESSION_SCOPE_COUNT)
+            ? SETTINGS.flashcardSessionScope
+            : static_cast<uint8_t>(CrossPointSettings::FLASHCARD_SCOPE_DUE_FIRST);
+    startSession(static_cast<FlashcardDeck::SessionScope>(scope));
+    if (phase == Phase::Overview) finishInline(/*skipped=*/false);
+    return;
+  }
   requestUpdate();
+}
+
+void FlashcardReviewActivity::finishInline(bool skipped) {
+  if (!isInline()) return;
+  ActivityResult result;
+  result.data = FlashcardReviewResult{skipped, static_cast<uint8_t>(reviewed), static_cast<uint8_t>(correct),
+                                      static_cast<uint8_t>(mastered)};
+  setResult(std::move(result));
+  finish();
 }
 
 void FlashcardReviewActivity::startSession(FlashcardDeck::SessionScope scope) {
@@ -77,6 +101,12 @@ void FlashcardReviewActivity::startSession(FlashcardDeck::SessionScope scope) {
 
 void FlashcardReviewActivity::buildAndShuffleSession(FlashcardDeck::SessionScope scope) {
   uint16_t buf[SESSION_CAP];
+  // Always select the full SESSION_CAP window, even inline. buildSession's selection is
+  // deterministic (newest-first within each tier), so asking it for just `inlineCap` cards
+  // would hand back the SAME few cards every review until they were graded -- and a skipped
+  // review grades nothing, so the identical cards would come round again. Selecting the wide
+  // window and shuffling BEFORE truncating means each inline review draws a different sample
+  // from everything currently eligible.
   const int n = FlashcardDeck::buildSession(cachePath, scope, today, SESSION_CAP, buf);
 
   session.clear();
@@ -89,6 +119,12 @@ void FlashcardReviewActivity::buildAndShuffleSession(FlashcardDeck::SessionScope
   for (int i = n - 1; i > 0; i--) {
     const int j = static_cast<int>(xorshift32(s) % static_cast<uint32_t>(i + 1));
     std::swap(session[i], session[j]);
+  }
+
+  // Inline only: keep the first `inlineCap` of the shuffled window. Truncating after the
+  // shuffle is what makes the sample random rather than "the newest N".
+  if (isInline() && session.size() > inlineCap) {
+    session.resize(inlineCap);
   }
 }
 
@@ -109,8 +145,11 @@ void FlashcardReviewActivity::gradeAndAdvance(bool correctRecall) {
   FlashcardDeck::applyGrade(box, due, correctRecall, today);
   if (FlashcardDeck::isMastered(box)) mastered++;
 
-  // A miss re-queues the card to the session tail for another pass.
-  if (!correctRecall && session.size() < static_cast<size_t>(SESSION_CAP) * 2) {
+  // A miss re-queues the card to the session tail for another pass. Never inline: the
+  // user was promised a fixed number of cards before they get their page back, and a
+  // re-queue would silently stretch that. A missed card is reset to box 0 by grade()
+  // above, so it comes back tomorrow regardless -- nothing is lost by not repeating it.
+  if (!correctRecall && !isInline() && session.size() < static_cast<size_t>(SESSION_CAP) * 2) {
     session.push_back(session[cursor]);
   }
 
@@ -120,6 +159,13 @@ void FlashcardReviewActivity::gradeAndAdvance(bool correctRecall) {
 void FlashcardReviewActivity::advanceCard() {
   cursor++;
   if (cursor >= session.size() || !loadCurrentCard()) {
+    // Inline: no summary page. Hand the tally to the reader, which draws it as a toast over
+    // the page it is already repainting -- one refresh and no keypress, instead of a whole
+    // screen the user has to dismiss before getting back to the book.
+    if (isInline()) {
+      finishInline(/*skipped=*/false);
+      return;
+    }
     phase = Phase::Summary;
   } else {
     phase = Phase::Front;
@@ -268,6 +314,15 @@ void FlashcardReviewActivity::loop() {
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    // Inline: Back is the "I'm in a rush" escape hatch -- it drops straight back to the
+    // book from any phase, and reports skipped so the reader defers the next review by
+    // two intervals rather than one. Cards already graded this session keep their grades,
+    // and the tally still rides along, so the toast reports the partial pass honestly.
+    // (Phase::Summary is unreachable inline -- advanceCard finishes the session instead.)
+    if (isInline()) {
+      finishInline(/*skipped=*/true);
+      return;
+    }
     // Back from a card abandons the in-progress session and returns to the deck
     // overview (the flashcard "home" page) rather than exiting to the reader; from
     // the overview/summary Back exits the activity.
@@ -298,6 +353,7 @@ void FlashcardReviewActivity::loop() {
       }
       break;
     case Phase::Summary:
+      // Menu-launched only: an inline session never reaches this phase.
       if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
         setResult(ActivityResult{});
         finish();

@@ -90,6 +90,12 @@ class EpubReaderActivity final : public Activity {
   // from calling requestUpdate() and prevents the popup from drawing.
   bool bookmarkMessageLightRefresh = false;
   bool showNoDictionaryMessage = false;
+  // Inline-review tally toast, drawn over the page the reader repaints on return from a
+  // review. Pre-formatted into a fixed buffer at dismissal time rather than re-snprintf'd
+  // per render pass, and sized for "%d/%d correct, %d mastered" in any translation.
+  bool showInlineReviewMessage = false;
+  unsigned long inlineReviewMessageTime = 0UL;
+  char inlineReviewMessage_[64] = {};
   // Tracks whether this book is currently removed from Recent Books by the
   // removeReadBooksFromRecents feature (set at End-of-Book, cleared if paged back in).
   bool recentsEntryRemoved = false;
@@ -356,6 +362,22 @@ class EpubReaderActivity final : public Activity {
   // Show the "sync before continuing" prompt on open/wake (Sync runs KOReaderSyncActivity then
   // returns to the reader; Skip resumes reading). Called once after the first page render.
   void showOpenSyncPrompt();
+
+  // --- Inline flashcard review ("review while reading") ----------------------------
+  // Configured review interval in minutes, or 0 when the feature is off.
+  uint16_t inlineReviewIntervalMinutes() const;
+  // Reading accrued past lastInlineReviewSeconds meets the interval gate. Mirrors
+  // syncPromptThresholdReached(): the same odometer, so time inside sub-activities (the
+  // review screen itself included) and idle-page excess are already excluded.
+  bool inlineReviewThresholdReached() const;
+  // Stamp the inline-review baseline and persist it. `deferIntervals` shifts the baseline
+  // into the future so the next review waits that many EXTRA intervals: 0 after a completed
+  // review, 1 after a Skip (buying two intervals of quiet from one Back press).
+  void recordInlineReview(uint16_t deferIntervals);
+  // Called at the end of a forward page turn. Runs the gates cheapest-first and, if they all
+  // pass, opens a short capped flashcard review over the page just turned to. Returns true if
+  // a review was launched.
+  bool maybeStartInlineReview();
   // Returns true if sync acted (launched, or surfaced a save error); false if it was a no-op
   // because no KOReader credentials are stored.
   bool launchKOReaderSync();

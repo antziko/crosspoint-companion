@@ -160,6 +160,12 @@ class FlashcardDeck {
   // Deck-wide review stats in one streaming pass (for the pre-session overview).
   static Stats computeStats(const std::string& cachePath, uint32_t today);
 
+  // True if at least one card is due. Same streaming pass as computeStats but stops at
+  // the first hit, so it does not read the whole deck when a due card is near the front.
+  // For the reader's inline-review gate, which asks per review interval rather than per
+  // page turn -- computeStats' full histogram would be wasted work there.
+  static bool hasDueCards(const std::string& cachePath, uint32_t today);
+
   // Fill out[0..n) with up to `n` cards newest-first starting at newest-first
   // index `startNewest` (0 = most recently enrolled). One streaming pass.
   // Returns the number actually filled. When `wordsOnly` is true, only

@@ -76,6 +76,19 @@ std::vector<uint8_t> makeV6(uint32_t total, uint32_t unattributed, uint16_t pace
   return d;
 }
 
+// Builds a v7 (41-byte) image: v6 layout plus the lastInlineReviewSeconds field.
+std::vector<uint8_t> makeV7(uint32_t total, uint32_t unattributed, uint16_t pace, uint16_t samples, uint32_t lastDay,
+                            uint8_t lastHour, uint8_t lastMinute, uint32_t remoteSeconds, uint32_t remoteDay,
+                            uint8_t remoteHour, uint8_t remoteMinute, uint32_t lastSync, uint32_t lastSkip,
+                            uint32_t lastInlineReview) {
+  std::vector<uint8_t> d = makeV6(total, unattributed, pace, samples, lastDay, lastHour, lastMinute, remoteSeconds,
+                                  remoteDay, remoteHour, remoteMinute, lastSync, lastSkip);
+  d[0] = 7;
+  d.reserve(41);
+  putLe32(d, lastInlineReview);
+  return d;
+}
+
 }  // namespace
 
 TEST(BookReadingStatsParse, V3MigratesLosslesslyWithRemoteFieldsZeroed) {
@@ -141,6 +154,43 @@ TEST(BookReadingStatsParse, V6RoundTrip) {
   EXPECT_EQ(s.remoteOtherSeconds, 240u);
   EXPECT_EQ(s.lastSyncReadingSeconds, 250u);
   EXPECT_EQ(s.lastSyncPromptSkipSeconds, 280u);
+}
+
+TEST(BookReadingStatsParse, V7RoundTrip) {
+  const auto img = makeV7(300, 10, 7, 3, 9651, 6, 45, 240, 9650, 22, 5, 250, 280, 320);
+  BookReadingStats s;
+  ASSERT_TRUE(BookReadingStats::parse(img.data(), img.size(), s));
+  EXPECT_EQ(s.totalReadingSeconds, 300u);
+  EXPECT_EQ(s.remoteOtherSeconds, 240u);
+  EXPECT_EQ(s.lastSyncReadingSeconds, 250u);
+  EXPECT_EQ(s.lastSyncPromptSkipSeconds, 280u);
+  EXPECT_EQ(s.lastInlineReviewSeconds, 320u);
+}
+
+TEST(BookReadingStatsParse, V6MigratesToV7WithInlineReviewZeroed) {
+  // The common upgrade path: an existing book's stats.bin must keep every accumulated
+  // field and simply gain a zeroed inline-review baseline (so the first review fires
+  // once the interval's worth of reading has accrued from the odometer).
+  const auto img = makeV6(12345, 678, 42, 99, 9650, 21, 15, 240, 9649, 22, 5, 250, 280);
+  BookReadingStats s;
+  ASSERT_TRUE(BookReadingStats::parse(img.data(), img.size(), s));
+  EXPECT_EQ(s.totalReadingSeconds, 12345u);
+  EXPECT_EQ(s.lastSyncReadingSeconds, 250u);
+  EXPECT_EQ(s.lastSyncPromptSkipSeconds, 280u);
+  EXPECT_EQ(s.lastInlineReviewSeconds, 0u);
+}
+
+TEST(BookReadingStatsParse, V6ToV7MigrationDoesNotLeakPriorInlineReviewMarker) {
+  // A reused struct must not keep lastInlineReviewSeconds from a previously parsed
+  // v7 image when a v6 image (no inline field) is parsed into it.
+  const auto v7 = makeV7(100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 999);
+  const auto v6 = makeV6(200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  BookReadingStats s;
+  ASSERT_TRUE(BookReadingStats::parse(v7.data(), v7.size(), s));
+  ASSERT_EQ(s.lastInlineReviewSeconds, 999u);
+  ASSERT_TRUE(BookReadingStats::parse(v6.data(), v6.size(), s));
+  EXPECT_EQ(s.totalReadingSeconds, 200u);
+  EXPECT_EQ(s.lastInlineReviewSeconds, 0u);
 }
 
 TEST(BookReadingStatsParse, V5ToV6MigrationDoesNotLeakPriorSkipMarker) {
@@ -212,6 +262,7 @@ TEST(BookReadingStatsIo, SaveLoadRoundTripThroughFile) {
   s.remoteLastReadMinute = 59;
   s.lastSyncReadingSeconds = 180;
   s.lastSyncPromptSkipSeconds = 210;
+  s.lastInlineReviewSeconds = 240;
   s.save(dir);
 
   const BookReadingStats r = BookReadingStats::load(dir);
@@ -226,6 +277,7 @@ TEST(BookReadingStatsIo, SaveLoadRoundTripThroughFile) {
   EXPECT_EQ(r.remoteLastReadMinute, 59u);
   EXPECT_EQ(r.lastSyncReadingSeconds, 180u);
   EXPECT_EQ(r.lastSyncPromptSkipSeconds, 210u);
+  EXPECT_EQ(r.lastInlineReviewSeconds, 240u);
   EXPECT_EQ(r.displayTotalSeconds(), 540u);
 }
 

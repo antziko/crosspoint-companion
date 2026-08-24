@@ -354,6 +354,14 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
       StrId::STR_FC_RECOUNT_WINDOW, &CrossPointSettings::flashcardRecountMins,
       {CrossPointSettings::FC_RECOUNT_MIN, CrossPointSettings::FC_RECOUNT_MAX, CrossPointSettings::FC_RECOUNT_STEP},
       "flashcardRecountMins", StrId::STR_READER_DICTIONARY));
+  v.push_back(SettingInfo::Enum(StrId::STR_FC_INLINE_INTERVAL, &CrossPointSettings::flashcardInlineMinutesIdx,
+                                {StrId::STR_STATE_OFF, StrId::STR_MIN_1, StrId::STR_MIN_5, StrId::STR_MIN_10,
+                                 StrId::STR_MIN_15, StrId::STR_MIN_20, StrId::STR_MIN_30},
+                                "flashcardInlineMinutesIdx", StrId::STR_READER_DICTIONARY));
+  v.push_back(SettingInfo::Enum(
+      StrId::STR_FC_INLINE_CARDS, &CrossPointSettings::flashcardInlineCardsIdx,
+      {StrId::STR_CARDS_1, StrId::STR_CARDS_2, StrId::STR_CARDS_3, StrId::STR_CARDS_5, StrId::STR_CARDS_10},
+      "flashcardInlineCardsIdx", StrId::STR_READER_DICTIONARY));
   // flashcardCardStyle + flashcardSessionScope are NOT registered here: both are
   // chosen per-session on the FlashcardReviewActivity overview (Up/Down = card
   // style, Left/Right = due-first / shuffled) and the picks are persisted as the
