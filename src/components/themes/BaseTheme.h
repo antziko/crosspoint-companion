@@ -125,6 +125,13 @@ struct ThemeMetrics {
   // content area the pane occupies. previewHeightPercent == 0 disables the pane.
   int previewPadding;
   int previewHeightPercent;
+  // FreeInkUI control shape (the control center panel), same contract as the
+  // list fields above: quick-setting tiles and slider step buttons, the
+  // sheet's free-edge corners, and the capsule slider's corners (255 = full
+  // stadium, i.e. radius = half the control height).
+  int controlRadius;
+  int sheetRadius;
+  int capsuleRadius;
 };
 
 enum UIIcon {
@@ -228,7 +235,10 @@ constexpr ThemeMetrics values = {.batteryWidth = 15,
                                  .textFieldCursorThickness = 3,
                                  .textFieldLineEndOffset = 0,
                                  .previewPadding = 12,
-                                 .previewHeightPercent = 30};
+                                 .previewHeightPercent = 30,
+                                 .controlRadius = 0,
+                                 .sheetRadius = 0,
+                                 .capsuleRadius = 0};
 }
 
 class BaseTheme {

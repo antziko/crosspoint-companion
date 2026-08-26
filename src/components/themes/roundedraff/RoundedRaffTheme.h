@@ -87,7 +87,10 @@ constexpr ThemeMetrics values = {.batteryWidth = 15,
                                  .textFieldCursorThickness = 3,
                                  .textFieldLineEndOffset = -1,
                                  .previewPadding = 12,
-                                 .previewHeightPercent = 30};
+                                 .previewHeightPercent = 30,
+                                 .controlRadius = 18,
+                                 .sheetRadius = 18,
+                                 .capsuleRadius = 255};
 }
 
 class RoundedRaffTheme : public BaseTheme {

@@ -1990,11 +1990,20 @@ void GfxRenderer::invertScreen() const {
   }
 }
 
-void GfxRenderer::displayBuffer(const HalDisplay::RefreshMode refreshMode) const {
+HalDisplay::RefreshMode GfxRenderer::applyPromotedRefresh(const HalDisplay::RefreshMode refreshMode) const {
+  if (!promotedRefreshPending_) return refreshMode;
+  promotedRefreshPending_ = false;
+  return promotedRefresh_;
+}
+
+void GfxRenderer::displayBuffer(HalDisplay::RefreshMode refreshMode) const {
   auto elapsed = millis() - start_ms;
   LOG_DBG("GFX", "Time = %lu ms from clearScreen to displayBuffer", elapsed);
-  HalDisplay::RefreshMode mode = refreshMode;
+  HalDisplay::RefreshMode mode = applyPromotedRefresh(refreshMode);
   if (forceCleanRefreshOnce_) {
+    // Precedence when both one-shots are armed: this one wins, because it is the
+    // device-proven X3 path below and the promoted mode has already been consumed
+    // above, so it cannot leak into a later, unrelated paint.
     // SCRUB, not HALF: every caller of forceCleanRefreshNextPaint() is erasing a popup or toast
     // this code drew a moment ago (main.cpp:684, DictionaryDefinitionActivity.cpp:267/918,
     // DictionaryWordSelectActivity.cpp:1184/1269) — none is a cover-image transition, which is
@@ -2020,7 +2029,8 @@ void GfxRenderer::displayWindowRegion(int lx, int ly, int lw, int lh) const {
   display.displayWindow(mem.x, mem.y, mem.w, mem.h);
 }
 
-void GfxRenderer::displayBufferAsync(const HalDisplay::RefreshMode refreshMode) const {
+void GfxRenderer::displayBufferAsync(HalDisplay::RefreshMode refreshMode) const {
+  refreshMode = applyPromotedRefresh(refreshMode);
   // The async path has no turn-off-screen hook, which the sunlight fading fix
   // relies on; keep those users on the blocking path.
   if (fadingFix) {

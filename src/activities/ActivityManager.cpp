@@ -11,6 +11,7 @@
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
 #include "browser/OpdsBookBrowserActivity.h"
+#include "components/UITheme.h"
 #include "home/CrashActivity.h"
 #include "home/FileBrowserActivity.h"
 #include "home/HomeActivity.h"
@@ -92,10 +93,26 @@ void ActivityManager::loop() {
     }
 
 #if FREEINK_CAP_FRONTLIGHT
+    // Tap-first control-center entry: a tap on the header band of the top-level
+    // tab screens opens it, mirroring the top-edge swipe (which some panels'
+    // etched glass makes unreliable). The reader keeps its clean page — there is
+    // no header there to tap. Touch boards only, like the swipe itself.
+    // The band height comes from the theme rather than a literal, because it
+    // varies per theme here and the top bar can be turned off outside Home.
+    bool headerTap = false;
+    if (mappedInput.hasTouch() &&
+        (currentActivity->name == "Home" || currentActivity->name == "FileBrowser" ||
+         currentActivity->name == "Settings" || currentActivity->name == "NetworkModeSelection")) {
+      const auto& metrics = UITheme::getInstance().getMetrics();
+      const int bandBottom = metrics.topPadding + metrics.headerHeight;
+      int tx = 0;
+      int ty = 0;
+      headerTap = mappedInput.wasScreenTapped(tx, ty) && ty < bandBottom;
+    }
     // Top-edge down-swipe opens the frontlight panel, ahead of activity input so
     // it works from every screen. Suppressed while the panel itself is up, where
     // the same edge would immediately reopen it.
-    if (currentActivity->name != "FrontlightPanel" && mappedInput.wasLightPanelGesture()) {
+    if (currentActivity->name != "FrontlightPanel" && (headerTap || mappedInput.wasLightPanelGesture())) {
       pushActivity(std::make_unique<FrontlightPanelActivity>(renderer, mappedInput));
       return;
     }
