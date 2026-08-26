@@ -117,12 +117,30 @@ void HalGPIO::begin() {
 #if FREEINK_MCU_C3
   _deviceType = detectDeviceTypeWithFingerprint();
   BoardConfig::selectDevice(deviceIsX3() ? BoardConfig::Board::XteinkX3 : BoardConfig::Board::XteinkX4);
+#else
+  _deviceType = DeviceType::X4;
+#endif
 
   // Resolve the per-batch controller before SPI owns the display pins. FreeInk
   // checks the OEM hw_calib/screenType value first, then falls back to its
-  // two-pass display-bus probe. X3's facade keys panel selection off the sibling
-  // board profile, so preserve a detected UC8279 through setDisplayX3().
+  // two-pass display-bus probe. Runs on every MCU family: the probe reads its
+  // pins from BoardConfig::ACTIVE, so it covers the S3 X4 Pro (SSD1677 ->
+  // UC8179/UC8279 batches) as well as the C3 X3/X4, and is a no-op on builds
+  // without a probe-capable profile. Must follow selectDevice() above so the
+  // probe uses the running board's display pins.
   freeink::applyXteinkDisplayController();
+
+#ifdef CROSSPOINT_DISPLAY_SPI_HZ
+  // Bring-up lever for a panel that stalls on BUSY. The X4 Pro profile clocks the
+  // panel at 20 MHz where the OEM firmware uses 5 MHz; BoardConfig.h's own note
+  // says to drop back if artifacts appear. Set in platformio.local.ini to test a
+  // slower clock without editing the SDK.
+  BoardConfig::ACTIVE.displaySpiHz = CROSSPOINT_DISPLAY_SPI_HZ;
+#endif
+
+#if FREEINK_MCU_C3
+  // X3's facade keys panel selection off the sibling board profile, so preserve
+  // a detected UC8279 through setDisplayX3().
   if (deviceIsX3() && BoardConfig::ACTIVE.displayController == BoardConfig::DisplayController::UC8279) {
     BoardConfig::selectDevice(BoardConfig::Board::XteinkX3Uc8279);
   }
@@ -133,9 +151,9 @@ void HalGPIO::begin() {
     pinMode(BAT_GPIO0, INPUT);
     pinMode(UART0_RXD, INPUT);
   }
-#else
-  _deviceType = DeviceType::X4;
 #endif
+  LOG_INF("HW", "Display controller: %u (variant=%02X)", static_cast<unsigned>(BoardConfig::ACTIVE.displayController),
+          BoardConfig::ACTIVE.displayControllerVariant);
   inputMgr.begin();
 }
 

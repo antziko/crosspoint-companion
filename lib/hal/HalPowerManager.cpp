@@ -46,6 +46,11 @@ void HalPowerManager::begin() {
 }
 
 void HalPowerManager::setPowerSaving(bool enabled) {
+#ifdef CROSSPOINT_DISABLE_LIGHT_SLEEP
+  // Same diagnostic switch as lightSleep(): stay at full clock too, so one build
+  // rules out the whole idle power path (halt + downclock) in a single flash.
+  enabled = false;
+#endif
   if (normalFreq <= 0) {
     return;  // invalid state
   }
@@ -121,6 +126,12 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio) const {
 }
 
 bool HalPowerManager::lightSleep(const HalGPIO& gpio) const {
+#ifdef CROSSPOINT_DISABLE_LIGHT_SLEEP
+  // Diagnostic build: never halt the chip. Set when a board's panel controller
+  // does not survive a light-sleep slice (display bus pads are not held across
+  // it), which wedges every refresh after the first sleep until a hardware RST.
+  return false;
+#endif
   // A performance Lock means a render (or similar) task is mid-flight; light sleep
   // freezes the whole chip, so it would stall that task.
   // Note: like setPowerSaving(), read without the mutex — stale in either
@@ -205,6 +216,9 @@ bool HalPowerManager::lightSleep(const HalGPIO& gpio) const {
 }
 
 bool HalPowerManager::onEinkBusyWaitSlice(const int8_t busyPin, const uint8_t busyLevel) {
+#ifdef CROSSPOINT_DISABLE_LIGHT_SLEEP
+  return false;  // see lightSleep(): fall back to the SDK's plain busy poll
+#endif
   // Same exclusions as lightSleep(). No LOG here — this runs ~50x/s mid-refresh.
 #ifdef FREEINK_FRONTLIGHT_LS
   if (WiFi.getMode() != WIFI_MODE_NULL || gpio.isUsbConnectedCached()) {
