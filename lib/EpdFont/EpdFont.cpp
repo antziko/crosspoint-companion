@@ -119,6 +119,18 @@ void EpdFont::getInkExtents(const char* string, int* minX, int* maxX) const {
   *maxX = mxX;
 }
 
+// Split form: the search touches only the codepoint array. See EpdFontData::kernLeftCodepoints.
+static uint8_t lookupKernClassSplit(const uint16_t* codepoints, const uint8_t* classIds, const uint16_t count,
+                                    const uint32_t cp) {
+  if (!codepoints || count == 0 || cp > 0xFFFF) {
+    return 0;
+  }
+  const auto target = static_cast<uint16_t>(cp);
+  const uint16_t* end = codepoints + count;
+  const auto it = std::lower_bound(codepoints, end, target);
+  return (it != end && *it == target) ? classIds[it - codepoints] : 0;
+}
+
 static uint8_t lookupKernClass(const EpdKernClassEntry* entries, const uint16_t count, const uint32_t cp) {
   if (!entries || count == 0 || cp > 0xFFFF) {
     return 0;
@@ -143,31 +155,41 @@ int8_t EpdFont::getKerning(const uint32_t leftCp, const uint32_t rightCp) const 
   if (utf8IsCjkBreakable(leftCp) || utf8IsCjkBreakable(rightCp)) {
     return 0;
   }
-  if (!data->kernMatrix) {
+  if (!data->kernMatrix && !data->kernRowOffsets) {
     return 0;
   }
-  const uint8_t lc = lookupKernClass(data->kernLeftClasses, data->kernLeftEntryCount, leftCp);
+  if (!data->kernLeftClasses && !data->kernLeftCodepoints) {
+    return 0;
+  }
+  // Built-in fonts carry the split arrays, SD-card fonts the packed ones; never both.
+  const bool split = data->kernLeftCodepoints != nullptr;
+  const uint8_t lc =
+      split ? lookupKernClassSplit(data->kernLeftCodepoints, data->kernLeftClassIds, data->kernLeftEntryCount, leftCp)
+            : lookupKernClass(data->kernLeftClasses, data->kernLeftEntryCount, leftCp);
   if (lc == 0) return 0;
-  const uint8_t rc = lookupKernClass(data->kernRightClasses, data->kernRightEntryCount, rightCp);
+  const uint8_t rc = split ? lookupKernClassSplit(data->kernRightCodepoints, data->kernRightClassIds,
+                                                  data->kernRightEntryCount, rightCp)
+                           : lookupKernClass(data->kernRightClasses, data->kernRightEntryCount, rightCp);
   if (rc == 0) return 0;
-  if (!data->kernRowOffsets) {
-    return data->kernMatrix[(lc - 1) * data->kernRightClassCount + (rc - 1)];
-  }
-  // CSR: binary search the row's ascending column list. Rows average ~11 entries.
-  const uint8_t target = static_cast<uint8_t>(rc - 1);
-  uint16_t lo = data->kernRowOffsets[lc - 1];
-  uint16_t hi = data->kernRowOffsets[lc];
-  while (lo < hi) {
-    const uint16_t mid = static_cast<uint16_t>(lo + (hi - lo) / 2);
-    const uint8_t col = data->kernCols[mid];
-    if (col == target) return data->kernMatrix[mid];
-    if (col < target) {
-      lo = static_cast<uint16_t>(mid + 1);
-    } else {
-      hi = mid;
+
+  // Sparse (built-in fonts): scan the row. Linear rather than binary — rows hold ~15 entries on
+  // average, short enough that the scan measured faster (worst-case mix +11% over dense against
+  // +19% for std::lower_bound), and it should widen on hardware that reads these arrays through
+  // a flash cache, since the scan walks forwards through a cache line.
+  if (data->kernRowOffsets) {
+    const uint16_t begin = data->kernRowOffsets[lc - 1];
+    const uint16_t end = data->kernRowOffsets[lc];
+    const auto target = static_cast<uint8_t>(rc - 1);
+    const uint8_t* cols = data->kernSparseCols;
+    for (uint16_t i = begin; i < end; i++) {
+      if (cols[i] == target) return data->kernSparseValues[i];
+      if (cols[i] > target) break;  // sorted ascending, so past the target means absent
     }
+    return 0;
   }
-  return 0;  // absent from the row == no kerning for this pair
+
+  // Dense (SD-card fonts, mapped straight out of the .cpfont).
+  return data->kernMatrix[(lc - 1) * data->kernRightClassCount + (rc - 1)];
 }
 
 uint32_t EpdFont::getLigature(const uint32_t leftCp, const uint32_t rightCp) const {

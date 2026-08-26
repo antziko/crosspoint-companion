@@ -72,9 +72,13 @@ void buildFixture(KernFixture& f) {
   f.dense.kernRowOffsets = nullptr;  // selects the dense path (SD-card fonts)
 
   f.csr = f.dense;
-  f.csr.kernMatrix = f.values.data();
+  // Sparse form (built-in fonts): kernMatrix is null, and the values live in
+  // their own array parallel to kernSparseCols. getKerning() picks the
+  // representation by which pointer is non-null.
+  f.csr.kernMatrix = nullptr;
   f.csr.kernRowOffsets = f.rowOffsets.data();
-  f.csr.kernCols = f.cols.data();
+  f.csr.kernSparseCols = f.cols.data();
+  f.csr.kernSparseValues = f.values.data();
 }
 
 TEST(KerningCsr, CsrMatchesDenseForEveryClassPair) {

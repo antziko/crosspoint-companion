@@ -1380,12 +1380,17 @@ static const EpdFontData ipa_16_regular = {
     true,
     ipa_16_regularGroups,
     5,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
+    nullptr,  // glyphToGroup
+    nullptr,  // kernLeftClasses
+    nullptr,  // kernRightClasses
+    nullptr,  // kernLeftCodepoints
+    nullptr,  // kernLeftClassIds
+    nullptr,  // kernRightCodepoints
+    nullptr,  // kernRightClassIds
+    nullptr,  // kernMatrix
+    nullptr,  // kernRowOffsets
+    nullptr,  // kernSparseCols
+    nullptr,  // kernSparseValues
     0,
     0,
     0,
