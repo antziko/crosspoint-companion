@@ -85,6 +85,42 @@ class DictionaryDefinitionActivity final : public Activity {
   // WordSelectNavigator::handleMultiSelectInput's confirmReleaseConsumed.
   bool dictSwitchReleaseConsumed_ = false;
 
+  // The override in force when this screen opened, restored in onExit(). A dictionary
+  // chosen here is scoped to the word on screen: the next lookup resolves through the
+  // book's configured dictionary again.
+  //
+  // Deliberately NOT a Dictionary::SessionOverrideScope. Three of the four screens that
+  // open this one (FlashcardList, LookedUpWords, FlashcardReview) install a card's own
+  // dictionary via applyCardDict BEFORE constructing us, and that scope's destructor
+  // clears the override outright — which would drop the parent's choice on the way back.
+  // Saving and restoring what was actually in force is correct at every call site.
+  std::string enterSessionDict_;
+  // Whether enterSessionDict_ was a transient fallback promotion, so it is restored with
+  // the lifetime it had. Same distinction as prevSessionDictWasPromotion_ above.
+  bool enterSessionDictWasPromotion_ = false;
+
+  // Dictionary-select mode: the long press opens it and does the first hop, then the nav
+  // buttons keep stepping through the group until Confirm accepts or Back cancels. Without
+  // it, reaching the third dictionary costs three separate long presses.
+  //
+  // Both nav pairs step, deliberately: X3/X4 have Left/Right front buttons, but the X4 Pro
+  // profile (BoardConfig.h, XTEINK_X4_PRO) leaves back/confirm/left/right unassigned and
+  // wires its two physical keys to Up/Down, so Left/Right alone would make this mode
+  // unreachable there. Paging is suspended while the mode is active.
+  bool dictSelectMode_ = false;
+  // The override in force when the mode opened, so Back can undo the whole run of steps
+  // rather than just the last one. Distinct from enterSessionDict_: the mode can be opened
+  // more than once per screen, and cancelling should return to where THIS run started.
+  std::string selectModeEntryDict_;
+  bool selectModeEntryWasPromotion_ = false;
+  // Hit rectangle of the footer dictionary label, refreshed by render(). Tapping it opens
+  // the select mode — the entry path that matters on boards with no Confirm button to hold.
+  // Zero width means "not drawn this frame" (fewer than two dictionaries installed).
+  int dictLabelX_ = 0;
+  int dictLabelY_ = 0;
+  int dictLabelW_ = 0;
+  int dictLabelH_ = 0;
+
   // Resident page representation (Stage 2b-pool). Segments reference text by
   // {offset, len} into pagePool_ instead of owning a std::string each — the
   // Wrapper already merged same-style runs, so each segment is one pooled,
@@ -220,6 +256,17 @@ class DictionaryDefinitionActivity final : public Activity {
   // current headword against it. Returns true when the gesture fired or its trailing
   // release was consumed (caller must return from loop()).
   bool handleDictSwitch();
+  // Swallow the Confirm release still outstanding from the long press. Shared, because
+  // whichever of the two handlers runs first has to be the one that eats it.
+  bool consumeDictSwitchRelease();
+  // Input while dictSelectMode_ is active. Returns true when it consumed the frame.
+  bool handleDictSelectMode();
+  // Commit a hop from registry index curIdx to nextIdx: remember the outgoing override,
+  // install the new one and re-look-up the same headword. Shared by the long-press entry
+  // and every step, so all of them arm dictSwitchInProgress_ identically.
+  void applyDictSwitch(int curIdx, int nextIdx, const std::string& current);
+  // Leave the select mode, optionally restoring the dictionary the mode opened with.
+  void exitDictSelectMode(bool restore);
   // Undo a switch whose re-lookup failed or was cancelled, so the dictionary named in
   // the footer still matches the definition left on screen. No-op unless a switch is
   // pending — an ordinary word lookup that comes back not-found must not clear an

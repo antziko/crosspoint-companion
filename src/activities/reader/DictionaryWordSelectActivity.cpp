@@ -558,7 +558,9 @@ void DictionaryWordSelectActivity::loop() {
           // that one rather than whatever happens to be active at review time — the whole point
           // being that a word saved from a Chinese dictionary must not flip to an English
           // definition after a switch. activeDictPath() resolves the session override too, so a
-          // long-press dictionary switch is captured, not just the configured selection.
+          // dictionary chosen BEFORE this lookup is captured, not just the configured selection.
+          // A dictionary chosen AFTER it — in the definition screen's select mode — is written
+          // over this value there, by FlashcardDeck::setCardDict.
           // The last two arguments are the re-count window: the same word looked up again
           // within it leaves its card untouched (no count bump, no deck rewrite). This is the
           // only enroll call site with a clock, and the only one that passes a window.

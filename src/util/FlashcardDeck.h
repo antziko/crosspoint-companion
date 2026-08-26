@@ -154,6 +154,15 @@ class FlashcardDeck {
   // immediately re-creates it rather than being throttled against the card that no longer exists.
   static void clearEnrollCooldown();
 
+  // Set only the dictionary association for `word`, leaving its content and its local
+  // schedule untouched. Two callers: mergeBlob applying an incoming 'D' line, and the
+  // definition screen when the user picks a dictionary for the word on show.
+  //
+  // Scans before rewriting, so it is cheap to call speculatively: returns false without
+  // any I/O when the word has no card, and true without any I/O when the association is
+  // already what was asked for. Only a genuine change costs a deck rewrite.
+  static bool setCardDict(const std::string& cachePath, const std::string& word, uint32_t dictHash);
+
   // Total card count without materializing the deck (one streaming pass).
   static int count(const std::string& cachePath);
 
@@ -316,9 +325,6 @@ class FlashcardDeck {
                                int chapterLen, const char* excerpt, int excerptLen, uint32_t version);
   static bool updateRemoteCard(const std::string& cachePath, const std::string& word, const char* chapter,
                                int chapterLen, const char* excerpt, int excerptLen, uint32_t version);
-  // Apply a 'D' line: set only the dictionary association, leaving content and the local
-  // schedule untouched.
-  static bool setCardDict(const std::string& cachePath, const std::string& word, uint32_t dictHash);
   static void removeCardRow(const std::string& cachePath, const std::string& word);
   // Shared fixed-value row rewrite backing suspend()/unsuspend(): force `word`'s
   // box/dueDay, copying all other rows verbatim. No-op if the word is absent.

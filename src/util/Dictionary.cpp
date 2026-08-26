@@ -171,6 +171,8 @@ void Dictionary::promoteFallbackDictPath(const char* folderPath) {
 
 bool Dictionary::sessionPathIsFallbackPromotion() { return sessionPathIsFallback; }
 
+const char* Dictionary::sessionDictPath() { return sessionPath; }
+
 std::string Dictionary::takeFallbackPromotion() {
   if (!sessionPathIsFallback) return std::string();
   std::string promoted = sessionPath;

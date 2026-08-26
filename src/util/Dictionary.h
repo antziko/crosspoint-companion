@@ -123,6 +123,14 @@ class Dictionary {
   // back with the transiency it had, instead of promoting it to an explicit choice.
   static bool sessionPathIsFallbackPromotion();
 
+  // The raw session override, "" when none is installed. Distinct from activeDictPath(),
+  // which substitutes the configured dictionary when the override is empty: a caller that
+  // SAVES and RESTORES the override needs to tell "no override" apart from "an override
+  // that happens to name the configured dictionary". Restoring the latter for the former
+  // would pin the screen's dictionary into the parent and outlive the screen that chose it.
+  // Points at the static buffer — copy it if it must survive a setSessionDictPath call.
+  static const char* sessionDictPath();
+
   // The session override if one is set, otherwise the configured path for cachePath.
   // This is what every lookup resolves through; readDictPath() is the configured value.
   static std::string activeDictPath(const char* cachePath = nullptr);

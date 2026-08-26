@@ -140,6 +140,13 @@ int DictionaryRegistry::nextEntryIndexInGroup(int current) const {
       this);
 }
 
+int DictionaryRegistry::prevEntryIndexInGroup(int current) const {
+  return prevIndexInGroup(
+      current, count(),
+      [](const void* ctx, int index) { return static_cast<const DictionaryRegistry*>(ctx)->entries_[index].nameIsSt; },
+      this);
+}
+
 int DictionaryRegistry::indexOf(const std::string& basePath) const {
   if (basePath.empty()) return -1;
   for (size_t i = 0; i < entries_.size(); i++) {
