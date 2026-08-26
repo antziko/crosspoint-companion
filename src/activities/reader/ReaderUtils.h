@@ -152,13 +152,27 @@ inline TouchPageTurn detectTouchPageTurn(GfxRenderer& renderer, const MappedInpu
   return result;
 }
 
+// The reader-menu gesture actually in force on this board. Swipe Up is only
+// offered where the Home key frees the bottom edge; settings.json is
+// board-independent here, so a file written on an X4 Pro can carry SWIPE_UP
+// onto a board where that swipe is already Home. Resolving it back to Tap
+// keeps the menu reachable instead of silently stranding it.
+inline uint8_t resolveShowReaderMenu(const MappedInputManager& input) {
+  const uint8_t mode = SETTINGS.showReaderMenu;
+  if (mode == CrossPointSettings::READER_MENU_SWIPE_UP && !input.hasHomeKey()) {
+    return CrossPointSettings::READER_MENU_TAP;
+  }
+  return mode;
+}
+
 // Tap in the middle third of the screen: the tap path into the reader menu on
 // every touch board. The page-turn tap zones are the outer thirds, so the
-// middle is free in tap mode. The opt-out is only surfaced on home-key boards
-// (SettingsList), where the menu stays reachable through the key's hold.
+// middle is free in tap mode. The Off/Swipe Up alternatives are only surfaced
+// on home-key boards (SettingsList), where the menu stays reachable through
+// the key's hold.
 inline bool isTouchMenuTap(const GfxRenderer& renderer, const MappedInputManager& input) {
   if (!input.hasTouch()) return false;
-  if (!SETTINGS.tapForReaderMenu) return false;
+  if (resolveShowReaderMenu(input) != CrossPointSettings::READER_MENU_TAP) return false;
   int x = 0;
   int y = 0;
   if (!input.wasScreenTapped(x, y)) return false;
@@ -179,10 +193,17 @@ inline bool isTouchMenuGesture(const GfxRenderer& renderer, const MappedInputMan
   // A Home-key hold is board input, not a touch-reader control, so it stays
   // available with touch reader controls Off. On a frontlight board the
   // top-edge swipe belongs to the light panel, which makes this the reliable
-  // way in and is why tapForReaderMenu may be turned off there at all.
+  // way in and is why the menu gesture may be turned off there at all.
   if (input.wasHomeKeyHold()) return true;
   if (!SETTINGS.touchReaderControls) return false;
-  return (input.hasTouch() && input.wasMenuGesture()) || isTouchMenuTap(renderer, input);
+  if (!input.hasTouch()) return false;
+  if (input.wasMenuGesture()) return true;
+  // Bottom-edge up-swipe variant. wasReaderMenuSwipeUp() is already false
+  // without a Home key, so this cannot steal the Home gesture.
+  if (resolveShowReaderMenu(input) == CrossPointSettings::READER_MENU_SWIPE_UP && input.wasReaderMenuSwipeUp()) {
+    return true;
+  }
+  return isTouchMenuTap(renderer, input);
 }
 
 // One helper, blocking or deferred: the async form starts the refresh and

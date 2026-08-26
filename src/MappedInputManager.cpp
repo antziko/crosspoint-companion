@@ -131,6 +131,8 @@ constexpr unsigned long TOUCH_HELD_OVERRIDE_WINDOW_MS = 250;
 
 bool MappedInputManager::hasTouch() const { return gpio.hasTouch(); }
 
+bool MappedInputManager::hasHomeKey() const { return gpio.hasHomeKey(); }
+
 void MappedInputManager::rememberTouchHeldTime() const {
   touchHeldOverrideValid = true;
   touchHeldOverrideMs = gpio.lastTouchHeldMs();
@@ -312,24 +314,26 @@ bool MappedInputManager::wasMenuGesture() const {
   return hit;
 }
 
-bool MappedInputManager::wasHomeGesture() const {
-  // Home-key boards (X4 Pro) use a short Home-key tap; their bottom-edge swipe
-  // is intentionally left unused so it cannot fire the same action twice.
-  if (gpio.hasHomeKey()) return gpio.wasHomeKeyTapped();
-
+bool MappedInputManager::wasBottomEdgeUpSwipe() const {
   int sx = 0;
   int sy = 0;
   int ex = 0;
   int ey = 0;
-  if (decodeSwipe(sx, sy, ex, ey)) {
-    const int bottomEdgeTop =
-        renderer.getScreenHeight() - static_cast<int>(renderer.getScreenHeight() * BOTTOM_EDGE_BACK_GESTURE_FRAC_Y);
-    if (sy >= bottomEdgeTop && ey < sy && std::abs(ey - sy) > std::abs(ex - sx)) {
-      rememberTouchHeldTime();
-      return true;
-    }
-  }
-  return false;
+  if (!decodeSwipe(sx, sy, ex, ey)) return false;
+  const int bottomEdgeTop =
+      renderer.getScreenHeight() - static_cast<int>(renderer.getScreenHeight() * BOTTOM_EDGE_BACK_GESTURE_FRAC_Y);
+  const bool hit = sy >= bottomEdgeTop && ey < sy && std::abs(ey - sy) > std::abs(ex - sx);
+  if (hit) rememberTouchHeldTime();
+  return hit;
+}
+
+bool MappedInputManager::wasReaderMenuSwipeUp() const { return gpio.hasHomeKey() && wasBottomEdgeUpSwipe(); }
+
+bool MappedInputManager::wasHomeGesture() const {
+  // Home-key boards (X4 Pro) use a short Home-key tap; their bottom-edge swipe
+  // is free for the reader menu instead, so it cannot fire the same action twice.
+  if (gpio.hasHomeKey()) return gpio.wasHomeKeyTapped();
+  return wasBottomEdgeUpSwipe();
 }
 
 bool MappedInputManager::wasHomeKeyHold() const { return gpio.hasHomeKey() && gpio.wasHomeKeyLongPressed(); }

@@ -417,10 +417,13 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                          StrId::STR_LONG_PRESS_BEHAVIOR_ORIENTATION, StrId::STR_LONG_PRESS_BEHAVIOR_BOOKMARK_SYNC},
                         "sideLongPressButtonBehavior", StrId::STR_CAT_CONTROLS));
 
-  // Center-third tap into the reader menu. Removed below on boards without a
-  // Home key, where the tap is the only way in.
-  v.push_back(SettingInfo::Toggle(StrId::STR_TAP_FOR_READER_MENU, &CrossPointSettings::tapForReaderMenu,
-                                  "tapForReaderMenu", StrId::STR_CAT_CONTROLS));
+  // How the reader menu opens: off, centre-third tap, or bottom-edge up-swipe.
+  // Removed below on boards without a Home key, where the tap is the only way
+  // in and the bottom edge already belongs to the Home gesture. Persisted under
+  // the legacy "tapForReaderMenu" key, so an old save's 0/1 keeps Off/Tap.
+  v.push_back(SettingInfo::Enum(StrId::STR_SHOW_READER_MENU, &CrossPointSettings::showReaderMenu,
+                                {StrId::STR_STATE_OFF, StrId::STR_STATE_TAP, StrId::STR_STATE_SWIPE_UP},
+                                "tapForReaderMenu", StrId::STR_CAT_CONTROLS));
 
   // Power button (tiltPageTurn is inserted right after this row further below).
   // Confirm is offered only on touch boards: it exists for hardware whose front
@@ -626,12 +629,14 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
     }
   }
 
-  // The tap-for-menu opt-out only makes sense where the menu stays reachable
-  // without the tap (the capacitive Home key); everywhere else the tap is the
-  // primary path into the reader menu and stays on.
+  // The menu-gesture choice only makes sense where the menu stays reachable
+  // without the tap (the capacitive Home key) AND the bottom edge is free;
+  // everywhere else the tap is the primary path into the reader menu and the
+  // bottom edge is Home, so the row is hidden and resolveShowReaderMenu()
+  // treats a stored Swipe Up as Tap.
   if (!BoardConfig::hasHomeKey()) {
     v.erase(std::remove_if(v.begin(), v.end(),
-                           [](const SettingInfo& s) { return s.nameId == StrId::STR_TAP_FOR_READER_MENU; }),
+                           [](const SettingInfo& s) { return s.nameId == StrId::STR_SHOW_READER_MENU; }),
             v.end());
   }
 

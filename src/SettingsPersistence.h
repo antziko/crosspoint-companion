@@ -161,7 +161,10 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
 #else
     persisted::enumerated("shortPwrBtn", &CrossPointSettings::shortPwrBtn, CrossPointSettings::SHORT_PWRBTN::FOOTNOTES),
 #endif
-    persisted::toggle("tapForReaderMenu", &CrossPointSettings::tapForReaderMenu),
+    // Legacy key, widened from a toggle to a 3-value enum: a stored 0/1 still
+    // means Off/Tap, so old files migrate without a conversion step.
+    persisted::enumerated("tapForReaderMenu", &CrossPointSettings::showReaderMenu,
+                          CrossPointSettings::SHOW_READER_MENU_COUNT - 1),
     persisted::toggle("pwrBtnFootnoteBack", &CrossPointSettings::pwrBtnFootnoteBack),
     persisted::toggle("backShortToFileBrowser", &CrossPointSettings::backShortToFileBrowser),
 

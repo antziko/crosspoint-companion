@@ -27,6 +27,9 @@ class MappedInputManager {
   bool wasReleased(Button button, bool applySwap = true) const;
   bool isPressed(Button button, bool applySwap = true) const;
   bool hasTouch() const;
+  // True on boards with a capacitive Home key (X4 Pro), which frees the bottom
+  // screen edge for a gesture of its own.
+  bool hasHomeKey() const;
   bool wasScreenTapped(int& x, int& y) const;
   bool wasScreenTouchDown(int& x, int& y) const;
   // One-shot long-press from the SDK touch classifier, fired WHILE the finger
@@ -68,6 +71,14 @@ class MappedInputManager {
   // A Home-key hold, for surfaces that want a second action from the key.
   bool wasHomeKeyHold() const;
   bool wasMenuGesture() const;
+  // Upward swipe starting at the bottom edge. On boards with no Home key this
+  // IS the Home gesture; on home-key boards the edge is free and it can serve
+  // as the reader-menu gesture instead.
+  bool wasBottomEdgeUpSwipe() const;
+  // The bottom-edge up-swipe as the reader-menu gesture (SHOW_READER_MENU's
+  // Swipe Up option). Only meaningful on home-key boards; elsewhere the same
+  // swipe is Home and this returns false.
+  bool wasReaderMenuSwipeUp() const;
   // Top-edge down-swipe opens the light panel when the board has a frontlight.
   // ActivityManager consumes it before activity input.
   bool wasLightPanelGesture() const;

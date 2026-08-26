@@ -221,6 +221,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   enum QUOTE_STYLE { QUOTE_STYLE_OFF = 0, QUOTE_STYLE_UNDERLINE = 1, QUOTE_STYLE_HIGHLIGHT = 2, QUOTE_STYLE_COUNT };
   enum TOUCH_READER_CONTROLS { TOUCH_READER_OFF = 0, TOUCH_READER_ON = 1, TOUCH_READER_CONTROLS_COUNT };
 
+  // How the reader menu opens on touch boards. Persisted under the legacy
+  // "tapForReaderMenu" key, so an old save's 0/1 keeps its Off/Tap meaning.
+  // SWIPE_UP is only offered on home-key boards, where Home lives on the
+  // capacitive key and the bottom edge is free; see resolveShowReaderMenu().
+  enum SHOW_READER_MENU { READER_MENU_OFF = 0, READER_MENU_TAP = 1, READER_MENU_SWIPE_UP = 2, SHOW_READER_MENU_COUNT };
+
   enum QUICK_RESUME_SLEEP_SCREEN {
     QUICK_RESUME_NEVER = 0,
     QUICK_RESUME_AFTER_TIMEOUT = 1,
@@ -517,9 +523,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t tiltPageTurn = TILT_OFF;
   // Touch screen reader zones/gestures on boards with a touch controller.
   uint8_t touchReaderControls = TOUCH_READER_ON;
-  // Center-third tap opens the reader menu (0 = disabled, 1 = enabled). Only
-  // surfaced on home-key boards, where the menu stays reachable without it.
-  uint8_t tapForReaderMenu = 1;
+  // Reader menu open gesture (SHOW_READER_MENU: off / center tap / bottom-edge
+  // up-swipe). Only surfaced on home-key boards; elsewhere the bottom edge is
+  // already the Home gesture, so a stored SWIPE_UP resolves back to Tap rather
+  // than leaving the menu unreachable (settings.json is board-independent here,
+  // so a value written on one board really does travel to another).
+  uint8_t showReaderMenu = READER_MENU_TAP;
   // Frontlight quick-panel state, on boards that have a frontlight.
   uint8_t frontlightBrightness = 60;
   uint8_t frontlightWarmth = 50;  // 0 = cool .. 100 = warm
