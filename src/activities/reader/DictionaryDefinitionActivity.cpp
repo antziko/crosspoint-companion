@@ -1025,7 +1025,7 @@ void DictionaryDefinitionActivity::extractWordsFromLayout() {
   WordSelectNavigator::organizeIntoRows(words, rows);
   LOG_DBG("DDA", "extractWords: %u words in %lums", static_cast<unsigned>(words.size()), millis() - t0);
   // WordInfo carries only the isIpa flag; the navigator resolves it against these two.
-  navigator.setFonts(defFontId_, ipaFontId());
+  navigator.setFonts(defFontId_, ipaFontId(), ipaBaselineOffset());
   navigator.load(std::move(words), std::move(rows), std::move(textPool));
 }
 
@@ -1411,6 +1411,7 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   // Body: draw layout lines for the current page (BW pass). layoutLines holds
   // only the current page (Stage 2a streaming), so it is indexed from 0.
   const int lineHeight = getLineHeight();  // cached for loop + renderHighlight
+  const int ipaDy = ipaBaselineOffset();   // cached for loop; shares the body font's baseline
   auto renderBody = [&]() {
     for (int i = 0; i < linesPerPage && i < static_cast<int>(layoutLines.size()); i++) {
       const PooledLine& line = layoutLines[i];
@@ -1424,11 +1425,12 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
 
       for (const auto& seg : line.segments) {
         const int segFontId = seg.isIpa ? ipaFontId() : defFontId_;
+        const int segY = seg.isIpa ? y + ipaDy : y;
         const char* segText = pagePool_.data() + seg.offset;
-        renderer.drawText(segFontId, x, y, segText, true, seg.style);
+        renderer.drawText(segFontId, x, segY, segText, true, seg.style);
         if ((seg.style & EpdFontFamily::UNDERLINE) != 0) {
           const int segWidth = renderer.getTextWidth(segFontId, segText, seg.style);
-          const int underlineY = y + renderer.getFontAscenderSize(segFontId) + 2;
+          const int underlineY = segY + renderer.getFontAscenderSize(segFontId) + 2;
           renderer.drawLine(x, underlineY, x + segWidth, underlineY, true);
         }
         x += renderer.getTextAdvanceX(segFontId, segText, seg.style);

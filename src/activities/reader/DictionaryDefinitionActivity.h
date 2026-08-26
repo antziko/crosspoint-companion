@@ -151,6 +151,13 @@ class DictionaryDefinitionActivity final : public Activity {
   // Font the IPA segments are measured AND drawn with. Both must use this: picking the font
   // differently in the two passes lays out widths for glyphs that are never drawn.
   int ipaFontId() const { return ipaWarm_ ? IPA_FONT_ID : defFontId_; }
+  // drawText positions a run by the top of its cell, so its baseline lands at y + ascender.
+  // The IPA font is a fixed built-in whose ascender differs from the body font's, so drawing
+  // both runs at the same y puts them on two different baselines. Shift the IPA run by this
+  // to land it on the body baseline. Zero when the two ids are the same font.
+  int ipaBaselineOffset() const {
+    return renderer.getFontAscenderSize(defFontId_) - renderer.getFontAscenderSize(ipaFontId());
+  }
 
   // Orientation-aware layout gutters (computed in wrapText, used in render and extractWordsFromLayout)
   int leftPadding = 20;

@@ -107,11 +107,16 @@ class WordSelectNavigator {
   // font, and the IPA font the definition view uses for pronunciation runs — so they
   // live here once instead of costing 4 bytes in every WordInfo. Call before load();
   // ipa defaults to body, which is what word-select over book text wants.
-  void setFonts(int bodyFontId, int ipaFontId = 0) {
+  // ipaDy shifts an IPA word's draw y so it keeps the body font's baseline: drawText places a
+  // run by the top of its cell, so a font with a different ascender would otherwise sit on its
+  // own baseline. Pass the same value the caller draws the unhighlighted line with.
+  void setFonts(int bodyFontId, int ipaFontId = 0, int ipaDy = 0) {
     bodyFontId_ = bodyFontId;
     ipaFontId_ = ipaFontId != 0 ? ipaFontId : bodyFontId;
+    ipaDy_ = ipaFontId_ != bodyFontId_ ? ipaDy : 0;
   }
   int fontIdFor(const WordInfo& w) const { return w.isIpa ? ipaFontId_ : bodyFontId_; }
+  int drawYFor(const WordInfo& w) const { return w.screenY + (w.isIpa ? ipaDy_ : 0); }
 
   // Whether the cursor avoids DictStopwords closed-class words ("the", "a", "you"): it is
   // placed on a content word at load(), row navigation prefers one, and a left/right step
@@ -280,6 +285,10 @@ class WordSelectNavigator {
   std::string textPool;
   int bodyFontId_ = 0;
   int ipaFontId_ = 0;
+  // Baseline shift applied to IPA words (see setFonts). Also widens their highlight band so a
+  // raised glyph is neither clipped by the inverse fill nor left behind by a differential
+  // restore, which only repaints boundsForWord's rect.
+  int ipaDy_ = 0;
   bool skipStopwords_ = true;
   int currentRow = 0;
   int currentWordInRow = 0;

@@ -509,8 +509,10 @@ void WordSelectNavigator::renderHighlight(const GfxRenderer& renderer, int lineH
 void WordSelectNavigator::drawSingleHighlight(const GfxRenderer& renderer, int lineHeight, int wordIndex) const {
   const auto* w = getWordAt(wordIndex);
   if (!w) return;
-  renderer.fillRect(w->screenX - 2, w->screenY - 2, w->width + 4, lineHeight + 4, true);
-  renderer.drawText(fontIdFor(*w), w->screenX, w->screenY, getDisplay(*w), false, w->style);
+  // Same rect renderHighlightDifferential snapshots and restores — they must not diverge.
+  const Rect band = boundsForWord(wordIndex, lineHeight);
+  renderer.fillRect(band.x, band.y, band.width, band.height, true);
+  renderer.drawText(fontIdFor(*w), w->screenX, drawYFor(*w), getDisplay(*w), false, w->style);
 }
 
 void WordSelectNavigator::drawContinuationsIfOutside(const GfxRenderer& renderer, int lineHeight, const WordInfo* w,
@@ -527,8 +529,12 @@ void WordSelectNavigator::drawContinuationsIfOutside(const GfxRenderer& renderer
 WordSelectNavigator::Rect WordSelectNavigator::boundsForWord(int wordIndex, int lineHeight) const {
   const auto* w = getWordAt(wordIndex);
   if (!w) return Rect{};
-  return Rect{static_cast<int>(w->screenX) - 2, static_cast<int>(w->screenY) - 2, static_cast<int>(w->width) + 4,
-              lineHeight + 4};
+  // An IPA word is drawn ipaDy_ off the line top, so grow the band in that direction by the
+  // same amount rather than clipping the glyphs it moved.
+  const int dy = w->isIpa ? ipaDy_ : 0;
+  const int top = static_cast<int>(w->screenY) - 2 + std::min(dy, 0);
+  return Rect{static_cast<int>(w->screenX) - 2, top, static_cast<int>(w->width) + 4,
+              lineHeight + 4 + (dy < 0 ? -dy : dy)};
 }
 
 WordSelectNavigator::Rect WordSelectNavigator::computeDirtyRect(int prevWordIdx, int currWordIdx,
