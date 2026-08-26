@@ -5,10 +5,16 @@
 #include <MD5Builder.h>
 #include <ObfuscationUtils.h>
 #include <Serialization.h>
+#include <strings.h>
 
 namespace {
 // Default sync server URL
 constexpr char DEFAULT_SERVER_URL[] = "https://sync.koreader.rocks:443";
+
+// Host implementing the crosspoint-sync `position` extension. Matched as a host
+// rather than against DEFAULT_SERVER_URL so the test stays correct no matter
+// which server is the default, and so a URL with a port or path still resolves.
+constexpr char CROSSPOINT_SYNC_HOST[] = "sync.crosspointreader.com";
 
 // Legacy binary file (pre-JSON) — read once for migration, then renamed to .bak.
 constexpr uint8_t KOREADER_FILE_VERSION = 1;
@@ -349,6 +355,17 @@ std::string KOReaderCredentialStore::getBaseUrl() const {
     url.pop_back();
   }
   return url;
+}
+
+bool KOReaderCredentialStore::usesCrossPointSyncServer() const {
+  const std::string url = getBaseUrl();
+  const size_t scheme = url.find("://");
+  const size_t start = (scheme == std::string::npos) ? 0 : scheme + 3;
+  size_t end = url.find_first_of(":/", start);
+  if (end == std::string::npos) end = url.size();
+  const size_t hostLen = end - start;
+  if (hostLen != sizeof(CROSSPOINT_SYNC_HOST) - 1) return false;
+  return strncasecmp(url.c_str() + start, CROSSPOINT_SYNC_HOST, hostLen) == 0;
 }
 
 void KOReaderCredentialStore::setMatchMethod(DocumentMatchMethod method) {

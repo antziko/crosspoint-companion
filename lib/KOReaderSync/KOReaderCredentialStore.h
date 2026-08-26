@@ -104,6 +104,10 @@ class KOReaderCredentialStore : public PersistableStore<KOReaderCredentialStore>
   // Get base URL for API calls (protocol normalization + default fallback).
   std::string getBaseUrl() const;
 
+  // Whether API calls target the sync server that understands the CrossPoint
+  // `position` protocol extension.
+  bool usesCrossPointSyncServer() const;
+
   void setMatchMethod(DocumentMatchMethod method);
   DocumentMatchMethod getMatchMethod() const;
 

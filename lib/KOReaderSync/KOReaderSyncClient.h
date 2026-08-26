@@ -17,9 +17,10 @@ struct KOReaderMetadata {
 /**
  * Rich CrossPoint position sent alongside progress uploads. Maps 1:1 onto the
  * crosspoint-sync extended `position` object (see crosspoint-sync docs/API.md).
- * The official KOSync server ignores unknown fields; a crosspoint-sync server
- * stores them. These fields are layout-dependent compatibility hints only —
- * the standard XPath is the content anchor.
+ * Exchanged only with a crosspoint-sync server, which stores them; third-party
+ * kosync servers neither receive nor are trusted to supply them. These fields
+ * are layout-dependent compatibility hints only — the standard XPath is the
+ * content anchor.
  */
 struct KOReaderRichPosition {
   uint32_t pctQ = 0;                       // Percentage quantized 0..1,000,000 (metadata/fallback)

@@ -460,9 +460,10 @@ void KOReaderSyncActivity::performUpload() {
   progress.progress = localProgress.xpath;
   progress.percentage = localProgress.percentage;
 
-  // Rich CrossPoint position for crosspoint-sync servers (lossless CrossPoint<->
-  // CrossPoint sync); plain kosync servers ignore the extra field.
-  {
+  // Rich CrossPoint position for the crosspoint-sync server (lossless CrossPoint<->
+  // CrossPoint sync). Skipped entirely for third-party kosync servers; the HTTP
+  // client enforces the same boundary before serializing.
+  if (KOREADER_STORE.usesCrossPointSyncServer()) {
     KOReaderRichPosition pos;
     const float pct = localProgress.percentage < 0.0f   ? 0.0f
                       : localProgress.percentage > 1.0f ? 1.0f
