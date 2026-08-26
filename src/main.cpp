@@ -410,12 +410,17 @@ void setup() {
   // which configures the peripheral rails; this only holds the main latch.
   BoardConfig::holdPowerRails();
 #ifdef ENABLE_SERIAL_LOG
+#ifdef CROSSPOINT_WAIT_FOR_USB_SERIAL
   // Earliest possible Serial setup. The 250 ms stall before begin() lets the
   // USB Serial/JTAG peripheral finish power-on and lets the host complete USB
   // enumeration before we touch the CDC state — otherwise cold boot races
   // and the host has to be physically replugged for logs to flow. Warm reboot
   // worked without the delay because USB was already enumerated.
+  // Development builds only: it buys reliable early logs, and release builds
+  // should not pay a quarter second of boot for them. It also sits ahead of the
+  // power-button wake check, so a shorter boot samples a still-held button.
   delay(250);
+#endif
   Serial.begin(115200);
 #if LOG_SERIAL_HAS_TX_TIMEOUT
   logSerial.setTxTimeoutMs(1);  // This is a load-bearing 1. Do not modify.
@@ -451,6 +456,16 @@ void setup() {
 
   gpio.begin();
   powerManager.begin();
+
+  // Reject a spurious wake here, before SD mount and settings I/O. It has to be
+  // this early: the check asks whether the power button is STILL physically
+  // held, and behind Storage.begin() + loadFromFile() a real press has long
+  // since been released. startDeepSleep() touches only GPIO, power rails and
+  // serial, so it is safe to reach from this point.
+  if (gpio.getWakeupReason() == HalGPIO::WakeupReason::PowerButton && !gpio.verifyPowerButtonWakeup()) {
+    powerManager.startDeepSleep(gpio);
+  }
+
   halTiltSensor.begin();
   halClock.begin();
 
@@ -537,13 +552,8 @@ void setup() {
   const auto wakeupReason = gpio.getWakeupReason();
   switch (wakeupReason) {
     case HalGPIO::WakeupReason::PowerButton:
-      LOG_DBG("MAIN", "Verifying power button press duration");
-      // verify returns false when the button wasn't held long enough — go back to sleep via the
-      // one complete sleep routine (battery-latch + serial teardown), not a HAL-local duplicate.
-      if (!gpio.verifyPowerButtonWakeup(SETTINGS.getPowerButtonDuration(),
-                                        SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP)) {
-        powerManager.startDeepSleep(gpio);
-      }
+      // Verification already happened right after powerManager.begin(); a wake
+      // that failed it never reaches this point.
       wakePowerReleasePending = true;
       break;
     case HalGPIO::WakeupReason::AfterUSBPower:
