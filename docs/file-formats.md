@@ -90,7 +90,7 @@ if (parsedSize != fileSize) {
 
 ## `section.bin`
 
-### Version 47
+### Version 50
 
 Each file in `sections/*.bin` stores one laid-out spine section. The header is
 also the cache-busting key: if any layout-affecting setting differs from the
@@ -99,6 +99,15 @@ current reader settings, the section is discarded and rebuilt.
 > This document lags the code. `SECTION_FILE_VERSION` in
 > `lib/Epub/Epub/Section.cpp` is the source of truth; versions 31-43 are
 > described only by the changelog comment above that constant.
+
+Versions 48, 49 and 50 make no structural change; each exists only to force
+stale caches to rebuild after a layout-affecting change. v48 made a visible
+hyphen or dash inside a word a break opportunity and turned Focus Reading
+emphasis into a byte annotation on a whole token. v49 stopped ruby groups
+breaking across a line or a soft flush. v50 lays simple HTML table rows out as
+positioned columns instead of flattened paragraphs with synthetic row and cell
+labels. All three move where lines and pages break, so cached line and word
+positions from the previous version no longer match.
 
 Version 47 widens the fixed-size footnote href field from 96 to 256 bytes, so
 each serialized footnote record grows from 128 to 288 bytes. `Page::serialize`
@@ -148,7 +157,7 @@ import std.mem;
 import std.string;
 import std.core;
 
-#define EXPECTED_VERSION 47
+#define EXPECTED_VERSION 50
 #define MAX_STRING_LENGTH 65535
 #define FOOTNOTE_NUMBER_LEN 32
 #define FOOTNOTE_HREF_LEN 256

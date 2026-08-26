@@ -88,7 +88,11 @@ namespace {
 //      continuation words (the v48 boundary rework had left allowsBreak() true for them),
 //      and a text-block soft flush is deferred while inside a <ruby> element. Both change
 //      where lines and pages break around ruby. Covers upstream's #3102 (their v40).
-constexpr uint8_t SECTION_FILE_VERSION = 49;
+// v50: Simple HTML table rows are laid out as positioned columns instead of
+//      flattened paragraphs with synthetic row/cell labels, so v49 cached line
+//      and word positions inside a table no longer match. Covers upstream's
+//      #2654 (their v41).
+constexpr uint8_t SECTION_FILE_VERSION = 50;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
