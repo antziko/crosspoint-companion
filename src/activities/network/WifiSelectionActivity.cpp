@@ -520,9 +520,9 @@ void WifiSelectionActivity::promptPasswordEntry() {
         }
       },
       renderer, mappedInput, tr(STR_ENTER_WIFI_PASSWORD),
-      "",  // No initial text
-      64,  // Max password length
-      InputType::Password);
+      "",                // No initial text
+      64,                // Max password length
+      InputType::Text);  // shown as typed, per upstream #3080
 }
 
 void WifiSelectionActivity::promptHiddenSsid() {

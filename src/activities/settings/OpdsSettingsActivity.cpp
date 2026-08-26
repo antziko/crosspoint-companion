@@ -150,7 +150,7 @@ void OpdsSettingsActivity::handleSelection() {
       }
     };
     startActivityForResultNoThrow<KeyboardEntryActivity>(handler, renderer, mappedInput, tr(STR_PASSWORD),
-                                                         editServer.password, 63, InputType::Password);
+                                                         editServer.password, 63, InputType::Text);
   } else if (nav.selected == 4) {
     // Sort A-Z toggle: flip in place and persist.
     editServer.sortAlphabetical = !editServer.sortAlphabetical;

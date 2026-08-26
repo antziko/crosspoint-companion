@@ -158,7 +158,7 @@ void KOReaderSettingsActivity::handleSelection() {
             requestUpdate();
           }
         },
-        renderer, mappedInput, tr(STR_KOREADER_PASSWORD), editServer.password, 64, InputType::Password);
+        renderer, mappedInput, tr(STR_KOREADER_PASSWORD), editServer.password, 64, InputType::Text);
 
   } else if (nav.selected == ROW_URL) {
     const std::string prefillUrl = editServer.serverUrl.empty() ? "https://" : editServer.serverUrl;
