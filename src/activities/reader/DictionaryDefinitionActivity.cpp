@@ -240,12 +240,20 @@ void DictionaryDefinitionActivity::onEnter() {
   // through. See openStartMs_ / openMs_.
   openStartMs_ = millis();
   openMs_ = 0;
-  // Remember the dictionary in force on the way in so onExit() can put it back — a choice
-  // made in the select mode belongs to the word on screen, not to the reading session.
+  // Remember the dictionary in force on the way in so onExit() can put it back — a dictionary
+  // picked here belongs to the word on screen, not to the reading session.
   // The RAW override, not activeDictPath(): an empty capture must restore to "no override"
   // rather than pinning the configured dictionary in as an explicit one.
   enterSessionDict_ = Dictionary::sessionDictPath();
   enterSessionDictWasPromotion_ = Dictionary::sessionPathIsFallbackPromotion();
+  // The card's recorded dictionary, read once here rather than per render — cardDict() streams
+  // the deck off SD. Keyed on historyWord for the same reason the Set action is (see
+  // setCardDictToActive): it is the word the reader enrolled, which a switch does not change.
+  cardDictExists_ = false;
+  cardDictHash_ = 0;
+  if (!cachePath.empty() && !historyWord.empty()) {
+    cardDictExists_ = FlashcardDeck::cardDict(cachePath, historyWord, cardDictHash_);
+  }
   // Heap reclaim: this activity is PUSHED on top of a still-resident reader
   // (ActivityManager keeps the backgrounded activity alive — no onExit). On the
   // tight X3 heap that leaves little headroom for the dictionary's own layout +
@@ -1108,22 +1116,12 @@ bool DictionaryDefinitionActivity::consumeDictSwitchRelease() {
   return false;
 }
 
-bool DictionaryDefinitionActivity::handleDictSwitch() {
-  if (dictSwitchReleaseConsumed_ && consumeDictSwitchRelease()) return true;
-
+bool DictionaryDefinitionActivity::cycleDictionary() {
   // Nothing to cycle to with 0 or 1 dictionaries installed.
   if (dictionaryRegistry.count() < 2) return false;
 
-  // Fire at the threshold rather than on release, so the gesture is distinguishable
-  // from the short Confirm that opens word-select.
-  if (!mappedInput.isPressed(MappedInputManager::Button::Confirm) ||
-      mappedInput.getHeldTime() < Dictionary::LONG_PRESS_MS) {
-    return false;
-  }
-
   // Only mutate the session path while no lookup task is running — see the threading
-  // note on Dictionary::setSessionDictPath. The caller already returns early when the
-  // controller is active, so this is belt-and-braces for future call sites.
+  // note on Dictionary::setSessionDictPath.
   if (controller.isActive()) return false;
 
   const std::string current = Dictionary::activeDictPath(cachePath.empty() ? nullptr : cachePath.c_str());
@@ -1139,24 +1137,33 @@ bool DictionaryDefinitionActivity::handleDictSwitch() {
   // partition. Decline instead: crossing it is exactly what this gesture prevents.
   const int nextIdx = curIdx < 0 ? -1 : dictionaryRegistry.nextEntryIndexInGroup(curIdx);
   if (nextIdx < 0) {
-    // Swallow the release too. Falling through left `wasReleased(Confirm)` to open
-    // word-select below — no heldTime check there — so a declined long press acted like a
-    // short one instead of doing nothing, which is what the gesture documents.
     SdDebugLog::log("DDA", "dict switch declined: cur=%d group=%s count=%d", curIdx,
                     curIdx < 0 ? "?" : (dictionaryRegistry.getEntries()[curIdx].nameIsSt ? "st" : "other"),
                     dictionaryRegistry.count());
-    dictSwitchReleaseConsumed_ = true;
-    return true;
+    return false;
   }
 
-  // Opening the mode: remember where this run of steps began so Back can undo all of it.
-  if (!dictSelectMode_) {
-    selectModeEntryDict_ = Dictionary::sessionDictPath();
-    selectModeEntryWasPromotion_ = Dictionary::sessionPathIsFallbackPromotion();
-    dictSelectMode_ = true;
-  }
-  dictSwitchReleaseConsumed_ = true;
   applyDictSwitch(curIdx, nextIdx, current);
+  return true;
+}
+
+bool DictionaryDefinitionActivity::handleDictSwitch() {
+  if (dictSwitchReleaseConsumed_ && consumeDictSwitchRelease()) return true;
+
+  // Fire at the threshold rather than on release, so the gesture is distinguishable
+  // from the short Confirm that opens word-select.
+  if (!mappedInput.isPressed(MappedInputManager::Button::Confirm) ||
+      mappedInput.getHeldTime() < Dictionary::LONG_PRESS_MS) {
+    return false;
+  }
+  if (dictionaryRegistry.count() < 2 || controller.isActive()) return false;
+
+  // Swallow the trailing release either way. Falling through on a DECLINED hop left
+  // `wasReleased(Confirm)` to open word-select below — no heldTime check there — so a
+  // declined long press acted like a short one instead of doing nothing, which is what
+  // the gesture documents.
+  dictSwitchReleaseConsumed_ = true;
+  cycleDictionary();
   return true;
 }
 
@@ -1178,80 +1185,39 @@ void DictionaryDefinitionActivity::applyDictSwitch(const int curIdx, const int n
   controller.startLookup(headword, false);
 }
 
-void DictionaryDefinitionActivity::exitDictSelectMode(const bool restore) {
-  if (!dictSelectMode_) return;
-  dictSelectMode_ = false;
-  if (restore) {
-    // Undo every step of this run at once, with the transiency the override had.
-    if (selectModeEntryWasPromotion_ && !selectModeEntryDict_.empty()) {
-      Dictionary::promoteFallbackDictPath(selectModeEntryDict_.c_str());
-    } else {
-      Dictionary::setSessionDictPath(selectModeEntryDict_.c_str());
-    }
-  }
-  selectModeEntryDict_.clear();
-  selectModeEntryWasPromotion_ = false;
+bool DictionaryDefinitionActivity::setOfferStands(const uint32_t activeHash) const {
+  // No card to point anywhere, or no book to hold one.
+  if (!cardDictExists_ || cachePath.empty() || historyWord.empty()) return false;
+  // historyWord names the word the reader enrolled. It goes stale the moment the user chains
+  // forward to another word from inside a definition, and chained words were never enrolled
+  // (enrollment only happens at the reader's word-select gesture) — so offering here would
+  // repoint the ORIGINAL card. pop()/unpop() bring depth back to 0, which re-arms the offer.
+  if (chain_.depth() != 0) return false;
+  // Nothing to commit when the card already names this dictionary. A card recording 0 (a
+  // legacy card, or one enrolled before the association existed) DOES stand: that is the only
+  // way those cards ever get stamped.
+  return activeHash != 0 && activeHash != cardDictHash_;
 }
 
-bool DictionaryDefinitionActivity::handleDictSelectMode() {
-  // The long press that opened this mode has not been released yet. Swallow that release
-  // here -- this function runs before handleDictSwitch(), so its own swallow can no longer
-  // reach it, and without this the lift ending the long press would immediately read as the
-  // Confirm that accepts and closes the mode.
-  if (dictSwitchReleaseConsumed_ && consumeDictSwitchRelease()) return true;
-
-  // Back cancels the whole run. Checked before the step buttons so a board that maps Back
-  // onto a nav key still exits rather than stepping forever.
-  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-    const std::string current = Dictionary::activeDictPath(cachePath.empty() ? nullptr : cachePath.c_str());
-    const bool currentWasPromotion = Dictionary::sessionPathIsFallbackPromotion();
-    exitDictSelectMode(true);
-    // Only re-look-up when the restore actually changed the dictionary; cancelling without
-    // having stepped anywhere would otherwise cost a pointless lookup and full repaint.
-    const std::string restored = Dictionary::activeDictPath(cachePath.empty() ? nullptr : cachePath.c_str());
-    if (restored != current && !controller.isActive()) {
-      // Arm the same bookkeeping applyDictSwitch() would: if the restored dictionary cannot
-      // answer the word after all, revertDictSwitchIfPending() puts back what is on screen.
-      // Without these two lines it would restore an empty prevSessionDict_, dropping the
-      // override entirely instead of reverting one hop.
-      prevSessionDict_ = current;
-      prevSessionDictWasPromotion_ = currentWasPromotion;
-      dictSwitchInProgress_ = true;
-      controller.startLookup(headword, false);
-    } else {
-      requestUpdate();
-    }
-    return true;
-  }
-
-  // Confirm accepts: leave the chosen dictionary in force for the rest of this screen.
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    exitDictSelectMode(false);
+bool DictionaryDefinitionActivity::setCardDictToActive() {
+  const uint32_t activeHash = DictUtils::activeDictHash(cachePath.empty() ? nullptr : cachePath.c_str());
+  if (!setOfferStands(activeHash)) return false;
+  // Keyed on historyWord, NOT controller.getLookupWord(): the two are equal on the way in, but
+  // a switch re-looks-up `headword`, so afterwards getLookupWord() holds the FOUND word. Look
+  // "running" up, let a dictionary answer "run", and this would name "run" while the card is
+  // filed under "running" — setCardDict would silently miss.
+  if (!FlashcardDeck::setCardDict(cachePath, historyWord, activeHash)) {
+    // The card went away underneath us (deleted from the list or by a sync). Stop drawing an
+    // offer that can no longer land rather than reporting a success that did not happen.
+    LOG_ERR("DDA", "set card dict: no card for '%s'", historyWord.c_str());
+    cardDictExists_ = false;
     requestUpdate();
-    return true;
+    return true;  // the offer stood when pressed, so the press was still ours
   }
-
-  // Both nav pairs step. See dictSelectMode_ for why Up/Down is not optional.
-  const bool stepPrev = mappedInput.wasReleased(MappedInputManager::Button::Left) ||
-                        mappedInput.wasReleased(MappedInputManager::Button::Up);
-  const bool stepNext = mappedInput.wasReleased(MappedInputManager::Button::Right) ||
-                        mappedInput.wasReleased(MappedInputManager::Button::Down);
-  if (!stepPrev && !stepNext) return false;
-
-  // Same threading rule as the long-press entry: never mutate the session path with a
-  // lookup in flight (Dictionary.h).
-  if (controller.isActive()) return true;
-
-  const std::string current = Dictionary::activeDictPath(cachePath.empty() ? nullptr : cachePath.c_str());
-  const int curIdx = dictionaryRegistry.indexOf(current);
-  // curIdx < 0 has no group to match and would fall back to index 0, the one path that can
-  // cross the st-/other partition. Decline, exactly as the long-press entry does.
-  const int target = curIdx < 0 ? -1
-                                : (stepPrev ? dictionaryRegistry.prevEntryIndexInGroup(curIdx)
-                                            : dictionaryRegistry.nextEntryIndexInGroup(curIdx));
-  if (target < 0) return true;  // sole member of its group: consume, but do nothing
-
-  applyDictSwitch(curIdx, target, current);
+  cardDictHash_ = activeHash;
+  SdDebugLog::log("DDA", "card dict set: %s -> %lu", historyWord.c_str(), static_cast<unsigned long>(activeHash));
+  // The offer disappearing IS the confirmation — it is drawn from the state this just changed.
+  requestUpdate();
   return true;
 }
 
@@ -1279,24 +1245,6 @@ void DictionaryDefinitionActivity::loop() {
         dictSwitchInProgress_ = false;
         prevSessionDict_.clear();
         prevSessionDictWasPromotion_ = false;
-        // A dictionary the user picked here becomes the card's dictionary, so the back face
-        // is rendered from it at review time instead of the one that merely answered first.
-        //
-        // Keyed on historyWord, NOT controller.getLookupWord(): the two are equal on the way
-        // in, but a switch re-looks-up `headword`, so afterwards getLookupWord() holds the
-        // FOUND word. Look "running" up, let a dictionary answer "run", and it would name
-        // "run" while the card is filed under "running" -- setCardDict would silently miss.
-        //
-        // chain_.depth() == 0 because historyWord goes stale the moment the user chains
-        // forward to another word from inside a definition, and chained words were never
-        // enrolled (enrollment only happens at the reader's word-select gesture). Without
-        // the guard, switching after a chain-forward would repoint the ORIGINAL card.
-        //
-        // setCardDict scans before rewriting: no card, or the hash already correct, costs no
-        // I/O -- so stepping through a group is at most one deck rewrite per actual change.
-        if (wasDictSwitch && !cachePath.empty() && !historyWord.empty() && chain_.depth() == 0) {
-          FlashcardDeck::setCardDict(cachePath, historyWord, DictUtils::activeDictHash(cachePath.c_str()));
-        }
         headword = controller.getFoundWord();
         foundLocation = controller.getFoundLocation();
         // A chained lookup is a new definition, so it re-measures. The other stamp site is
@@ -1385,9 +1333,19 @@ void DictionaryDefinitionActivity::loop() {
   }
 
   // --- View mode ---
-  // Dictionary-select mode owns both nav pairs while it is open, so it must be checked
-  // before the paging block below — otherwise a step would also turn the page.
-  if (dictSelectMode_ && handleDictSelectMode()) return;
+  // Right doubles as "set this dictionary on the card" while the offer stands, so it is
+  // tested before the paging block below — otherwise the same release would also turn the
+  // page. Only the Right ALIAS is taken: the PageForward side button and the right-two-thirds
+  // tap still page, which is what keeps a multi-page definition navigable after a switch.
+  //
+  // Gated on the release FIRST: setCardDictToActive() resolves the active dictionary path,
+  // which allocates, and this runs on every frame of the input loop. It returns false when the
+  // offer does not stand — the common case, since a freshly looked-up word's card already names
+  // the dictionary on screen — and the press then falls through to page forward as usual.
+  if (mappedInput.wasReleased(MappedInputManager::Button::Right) && cardDictExists_ && chain_.depth() == 0 &&
+      setCardDictToActive()) {
+    return;
+  }
 
   const bool prevPage = mappedInput.wasReleased(MappedInputManager::Button::PageBack) ||
                         mappedInput.wasReleased(MappedInputManager::Button::Left);
@@ -1410,25 +1368,27 @@ void DictionaryDefinitionActivity::loop() {
   int tx = 0;
   int ty = 0;
   if (mappedInput.wasScreenTapped(tx, ty)) {
-    // The footer dictionary name is the touch entry into select mode. Tested before the
-    // page-turn thirds below, which would otherwise swallow it: the label sits bottom-left,
-    // inside the "previous page" third. This is the only entry path on a board with no
-    // Confirm button to hold (see dictSelectMode_).
-    if (dictLabelW_ > 0 && tx >= dictLabelX_ && tx < dictLabelX_ + dictLabelW_ && ty >= dictLabelY_ &&
-        ty < dictLabelY_ + dictLabelH_ && !controller.isActive()) {
-      const std::string current = Dictionary::activeDictPath(cachePath.empty() ? nullptr : cachePath.c_str());
-      const int curIdx = dictionaryRegistry.indexOf(current);
-      const int nextIdx = curIdx < 0 ? -1 : dictionaryRegistry.nextEntryIndexInGroup(curIdx);
-      if (nextIdx < 0) return;  // sole member of its group: nothing to open the mode for
-      selectModeEntryDict_ = Dictionary::sessionDictPath();
-      selectModeEntryWasPromotion_ = Dictionary::sessionPathIsFallbackPromotion();
-      dictSelectMode_ = true;
-      // Boards with touch.synthConfirm turn a tap into a Confirm as well. Swallow that one
-      // the same way the long-press entry does, so the tap that OPENS the mode cannot also
-      // be read as the Confirm that accepts and immediately closes it. Harmless where no
-      // synthetic Confirm follows: the latch clears on the first frame with none pending.
+    // Both footer controls are tested before the page-turn thirds below, which would
+    // otherwise swallow them: they sit bottom-left, inside the "previous page" third. These
+    // are the ONLY way either action is reachable on a board with no Confirm button to hold
+    // and no Right button to press (BoardConfig.h, XTEINK_X4_PRO).
+    //
+    // The Set chip is tested first because it is drawn to the right of the name and the two
+    // rectangles are padded generously enough to abut.
+    const auto hit = [&](int x, int y, int w, int h) {
+      return w > 0 && tx >= x && tx < x + w && ty >= y && ty < y + h;
+    };
+    if (!controller.isActive() && hit(setChipX_, setChipY_, setChipW_, setChipH_)) {
+      setCardDictToActive();
+      return;
+    }
+    if (!controller.isActive() && hit(dictLabelX_, dictLabelY_, dictLabelW_, dictLabelH_)) {
+      if (!cycleDictionary()) return;  // sole member of its group: consume the tap, do nothing
+      // Boards with touch.synthConfirm turn a tap into a Confirm as well. Swallow that one the
+      // same way the long-press gesture does, so the tap that cycles cannot also fall through
+      // and open word-select. Harmless where no synthetic Confirm follows: the latch clears on
+      // the first frame with none pending.
       dictSwitchReleaseConsumed_ = true;
-      applyDictSwitch(curIdx, nextIdx, current);
       return;
     }
     if (tx < renderer.getScreenWidth() / 3) {
@@ -1656,28 +1616,50 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
     renderer.drawText(SMALL_FONT_ID, renderer.getScreenWidth() - rightPadding - textWidth, footerY, pageInfo);
   }
 
-  // Active dictionary, bottom-left, mirroring the pagination indicator opposite it.
-  // Shown only when there is something to switch between: it is both the feedback for
-  // the long-press-Confirm switch and (the hint bar having no free slot to spell the
-  // gesture out) the only on-screen affordance for it.
+  // Active dictionary, bottom-left, mirroring the pagination indicator opposite it. Shown
+  // only when there is something to switch between: it is both the feedback for the
+  // long-press-Confirm cycle and the touch control for it.
+  const std::string activePath = Dictionary::activeDictPath(cachePath.empty() ? nullptr : cachePath.c_str());
+  // Hash the path already resolved above rather than calling activeDictHash(), which would
+  // resolve and allocate a second copy of it on every paint.
+  const bool offerSet = setOfferStands(DictUtils::dictHashOfPath(activePath));
+  constexpr int kTouchPad = 12;  // a small label; a finger is not
+  const int labelH = renderer.getTextHeight(SMALL_FONT_ID);
+  int cursorX = leftPadding;
   dictLabelW_ = 0;
+  setChipW_ = 0;
   if (dictionaryRegistry.count() > 1) {
-    const std::string dictName =
-        DictUtils::dictDisplayName(Dictionary::activeDictPath(cachePath.empty() ? nullptr : cachePath.c_str()));
-    renderer.drawText(SMALL_FONT_ID, leftPadding, footerY, dictName.c_str());
-    // Remember where it landed so a tap on it can open the select mode. Padded generously:
-    // this is a small label and a finger is not, and nothing else is drawn along that edge.
+    const std::string dictName = DictUtils::dictDisplayName(activePath);
+    renderer.drawText(SMALL_FONT_ID, cursorX, footerY, dictName.c_str());
+    // Remember where it landed so a tap on it can cycle. Padded generously: nothing else is
+    // drawn along that edge.
     const int labelW = renderer.getTextWidth(SMALL_FONT_ID, dictName.c_str());
-    const int labelH = renderer.getTextHeight(SMALL_FONT_ID);
-    constexpr int kTouchPad = 12;
-    dictLabelX_ = leftPadding - kTouchPad;
+    dictLabelX_ = cursorX - kTouchPad;
     dictLabelY_ = footerY - kTouchPad;
     dictLabelW_ = labelW + 2 * kTouchPad;
     dictLabelH_ = labelH + 2 * kTouchPad;
     // Underline it on touch boards so it reads as a control rather than a status line.
     if (mappedInput.hasTouch()) {
-      renderer.drawLine(leftPadding, footerY + labelH + 1, leftPadding + labelW, footerY + labelH + 1, true);
+      renderer.drawLine(cursorX, footerY + labelH + 1, cursorX + labelW, footerY + labelH + 1, true);
     }
+    cursorX += labelW + 2 * kTouchPad;
+  }
+
+  // The Set chip, drawn while the offer stands. It names the action the Right button performs,
+  // and is the only way to reach it on a board without one. Outside the count() > 1 block
+  // deliberately: with a single dictionary installed there is nothing to cycle to, but a legacy
+  // card recording no dictionary still needs a way to be stamped with the one in use.
+  if (offerSet) {
+    const char* setLabel = tr(STR_SET_CARD_DICT);
+    const int chipW = renderer.getTextWidth(SMALL_FONT_ID, setLabel);
+    renderer.drawText(SMALL_FONT_ID, cursorX, footerY, setLabel);
+    // Boxed rather than underlined: it has to read as a distinct control from the dictionary
+    // name beside it, on non-touch boards too.
+    renderer.drawRect(cursorX - 3, footerY - 2, chipW + 6, labelH + 4, true);
+    setChipX_ = cursorX - kTouchPad;
+    setChipY_ = footerY - kTouchPad;
+    setChipW_ = chipW + 2 * kTouchPad;
+    setChipH_ = labelH + 2 * kTouchPad;
   }
 
   // Confirm label only — Back and the Up/Down page labels are left empty so this
@@ -1685,11 +1667,10 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   // (DictionaryWordSelectActivity.cpp:587). The buttons themselves are unaffected:
   // Back still exits/chains back and Up/Down still page. Paging stays discoverable
   // via the "n/m" indicator drawn opposite the dictionary name above.
-  // In select mode the nav pair steps dictionaries instead of paging, so spell that out —
-  // the prev/next slots are free in view mode precisely because paging is left unlabelled.
-  const char* btn2 = dictSelectMode_ ? tr(STR_DONE) : (showLookupButton ? tr(STR_LOOKUP_SHORT) : "");
-  const auto labels = dictSelectMode_ ? mappedInput.mapLabels("", btn2, tr(STR_DICT_PREV), tr(STR_DICT_NEXT))
-                                      : mappedInput.mapLabels("", btn2, "", "");
+  // While the Set offer stands, Right performs it instead of paging, so name it in the "next"
+  // slot — that slot is free in view mode precisely because paging is left unlabelled.
+  const char* btn2 = showLookupButton ? tr(STR_LOOKUP_SHORT) : "";
+  const auto labels = mappedInput.mapLabels("", btn2, "", offerSet ? tr(STR_SET_CARD_DICT) : "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);

@@ -1031,6 +1031,40 @@ TEST_F(FlashcardDeckTest, LegacySevenFieldLineParsesWithoutDictHash) {
   EXPECT_EQ(e.excerpt, "seven field excerpt");
 }
 
+// cardDict(): the query the definition screen needs to tell "already this card's dictionary" from
+// "this card records none" -- setCardDict collapses both into a bool and cannot be asked.
+TEST_F(FlashcardDeckTest, CardDictReportsMissingCard) {
+  FlashcardDeck::enroll(cachePath, "present", "ctx", "", 4242u);
+  uint32_t hash = 0xDEADBEEF;
+  EXPECT_FALSE(FlashcardDeck::cardDict(cachePath, "absent", hash));
+  EXPECT_EQ(hash, 0xDEADBEEFu);  // untouched on the miss, so a caller can pre-seed it
+}
+
+TEST_F(FlashcardDeckTest, CardDictReturnsRecordedHash) {
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx", "", 4242u);
+  FlashcardDeck::enroll(cachePath, "beta", "ctx", "", 777u);
+  uint32_t hash = 0;
+  ASSERT_TRUE(FlashcardDeck::cardDict(cachePath, "alpha", hash));
+  EXPECT_EQ(hash, 4242u);
+  ASSERT_TRUE(FlashcardDeck::cardDict(cachePath, "beta", hash));
+  EXPECT_EQ(hash, 777u);
+}
+
+// A legacy 7-field line has no hash field at all. It must report FOUND with 0, not missing:
+// the two mean different things to the caller (0 = offer to stamp it, missing = no card).
+TEST_F(FlashcardDeckTest, CardDictReturnsZeroForLegacyLine) {
+  const std::string path = cachePath + "/dictionary_flashcards.txt";
+  std::FILE* f = std::fopen(path.c_str(), "wb");
+  ASSERT_NE(f, nullptr);
+  const char* lines = "old7|2|40|ChA|9|3|seven field excerpt\n";
+  std::fwrite(lines, 1, std::strlen(lines), f);
+  std::fclose(f);
+
+  uint32_t hash = 0xFFFFFFFF;
+  ASSERT_TRUE(FlashcardDeck::cardDict(cachePath, "old7", hash));
+  EXPECT_EQ(hash, 0u);
+}
+
 // The documented limit of the all-digits sniffing, pinned so a future change has to notice it: a
 // PRE-EXISTING line whose excerpt still contains a pipe after a numeric token is misread. Lines
 // this build writes cannot hit it -- enroll() strips '|' from excerpts (see

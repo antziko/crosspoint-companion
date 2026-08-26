@@ -13,6 +13,7 @@
 #include "fontIds.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
+#include "util/FlashcardDeck.h"
 #include "util/LookupHistory.h"
 
 const char* LookedUpWordsActivity::glyphFor(LookupHistory::Status s) {
@@ -168,7 +169,23 @@ void LookedUpWordsActivity::loop() {
   });
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    if (const auto* e = entryAt(selectedIndex)) controller.startLookup(e->word);
+    if (const auto* e = entryAt(selectedIndex)) {
+      // Open the word in the dictionary its flashcard was saved from, exactly as the review
+      // and list screens do. Without this the history list was the odd one out: it always
+      // resolved through the BOOK's dictionary, so the same word gave a different definition
+      // depending on which screen you opened it from -- the divergence
+      // FlashcardListActivity's comment already forbids between the other two.
+      //
+      // LookupHistory::Entry carries no dictHash (the log is not the deck), so the deck is the
+      // only source. Leaving `recorded` at 0 when there is no card is the point: applyCardDict(0)
+      // clears the override and falls back to the book's dictionary, silently, which is what a
+      // deleted card should do. Words that were never enrolled cannot appear here at all --
+      // enroll() and LookupHistory::addWordIf apply the same DictStopwords filter.
+      uint32_t recorded = 0;
+      FlashcardDeck::cardDict(cachePath, e->word, recorded);
+      DictUtils::applyCardDict(recorded);
+      controller.startLookup(e->word);
+    }
     return;
   }
 

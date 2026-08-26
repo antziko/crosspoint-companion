@@ -163,6 +163,17 @@ class FlashcardDeck {
   // already what was asked for. Only a genuine change costs a deck rewrite.
   static bool setCardDict(const std::string& cachePath, const std::string& word, uint32_t dictHash);
 
+  // Read the dictionary association recorded for `word`, without touching the deck.
+  //
+  // Returns false when the word has no card at all; true otherwise, with outDictHash set to the
+  // recorded value (0 = the card exists but records no dictionary, i.e. a legacy line or one
+  // enrolled before the association existed). outDictHash is left alone when this returns false.
+  //
+  // Callers need this to tell "this dictionary is already the card's" from "this card has none":
+  // setCardDict collapses both into a bool and cannot be used to ask. One streaming pass that
+  // stops at the match, so it is cheap enough to run before a lookup.
+  static bool cardDict(const std::string& cachePath, const std::string& word, uint32_t& outDictHash);
+
   // Total card count without materializing the deck (one streaming pass).
   static int count(const std::string& cachePath);
 

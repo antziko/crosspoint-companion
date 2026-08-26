@@ -122,25 +122,8 @@ class DictionaryRegistry {
     return -1;  // sole member of its group
   }
 
-  // nextIndexInGroup walked the other way, so a select mode can step both directions.
-  // Identical contract, including the -1 for a sole group member and the start-at-0
-  // fallback for an out-of-range `current`.
-  static int prevIndexInGroup(int current, int count, bool (*groupOf)(const void* ctx, int index), const void* ctx) {
-    if (count <= 0 || groupOf == nullptr) return -1;
-    if (current < 0 || current >= count) return 0;
-    const bool wanted = groupOf(ctx, current);
-    for (int i = 1; i < count; i++) {
-      const int candidate = ((current - i) % count + count) % count;
-      if (groupOf(ctx, candidate) == wanted) return candidate;
-    }
-    return -1;  // sole member of its group
-  }
-
   // nextIndexInGroup over the installed entries. No SD access — safe from an input path.
   int nextEntryIndexInGroup(int current) const;
-
-  // prevIndexInGroup over the installed entries. Same guarantees as the next() half.
-  int prevEntryIndexInGroup(int current) const;
 
   // Mark the registry as needing a re-scan. Thread-safe (callable from the web task).
   void markDirty() { dirty_.store(true, std::memory_order_release); }

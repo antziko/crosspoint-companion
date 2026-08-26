@@ -99,27 +99,31 @@ class DictionaryDefinitionActivity final : public Activity {
   // the lifetime it had. Same distinction as prevSessionDictWasPromotion_ above.
   bool enterSessionDictWasPromotion_ = false;
 
-  // Dictionary-select mode: the long press opens it and does the first hop, then the nav
-  // buttons keep stepping through the group until Confirm accepts or Back cancels. Without
-  // it, reaching the third dictionary costs three separate long presses.
+  // The dictionary recorded on this word's flashcard, read once in onEnter(). Together these
+  // distinguish the three states the Set offer depends on: no card at all (cardDictExists_
+  // false, no offer), a card recording nothing (hash 0 — a legacy card, which the offer DOES
+  // stand for so it can finally be stamped), and a card already naming a dictionary.
   //
-  // Both nav pairs step, deliberately: X3/X4 have Left/Right front buttons, but the X4 Pro
-  // profile (BoardConfig.h, XTEINK_X4_PRO) leaves back/confirm/left/right unassigned and
-  // wires its two physical keys to Up/Down, so Left/Right alone would make this mode
-  // unreachable there. Paging is suspended while the mode is active.
-  bool dictSelectMode_ = false;
-  // The override in force when the mode opened, so Back can undo the whole run of steps
-  // rather than just the last one. Distinct from enterSessionDict_: the mode can be opened
-  // more than once per screen, and cancelling should return to where THIS run started.
-  std::string selectModeEntryDict_;
-  bool selectModeEntryWasPromotion_ = false;
-  // Hit rectangle of the footer dictionary label, refreshed by render(). Tapping it opens
-  // the select mode — the entry path that matters on boards with no Confirm button to hold.
-  // Zero width means "not drawn this frame" (fewer than two dictionaries installed).
+  // Read once, never per render: FlashcardDeck::cardDict streams the deck off SD, and the offer
+  // is evaluated on every paint. The only thing that changes it here is our own Set action,
+  // which updates it in place.
+  uint32_t cardDictHash_ = 0;
+  bool cardDictExists_ = false;
+
+  // Hit rectangles of the two footer controls, refreshed by render(). Zero width means "not
+  // drawn this frame". The dictionary name cycles to the next dictionary in the group; the Set
+  // chip beside it commits the one on show to the card. Both exist because the X4 Pro profile
+  // (BoardConfig.h, XTEINK_X4_PRO) leaves back/confirm/left/right unassigned and wires its two
+  // physical keys to Up/Down — there is no Confirm to hold and no Right to press, so touch is
+  // the only way either action is reachable there.
   int dictLabelX_ = 0;
   int dictLabelY_ = 0;
   int dictLabelW_ = 0;
   int dictLabelH_ = 0;
+  int setChipX_ = 0;
+  int setChipY_ = 0;
+  int setChipW_ = 0;
+  int setChipH_ = 0;
 
   // Resident page representation (Stage 2b-pool). Segments reference text by
   // {offset, len} into pagePool_ instead of owning a std::string each — the
@@ -259,14 +263,23 @@ class DictionaryDefinitionActivity final : public Activity {
   // Swallow the Confirm release still outstanding from the long press. Shared, because
   // whichever of the two handlers runs first has to be the one that eats it.
   bool consumeDictSwitchRelease();
-  // Input while dictSelectMode_ is active. Returns true when it consumed the frame.
-  bool handleDictSelectMode();
   // Commit a hop from registry index curIdx to nextIdx: remember the outgoing override,
-  // install the new one and re-look-up the same headword. Shared by the long-press entry
-  // and every step, so all of them arm dictSwitchInProgress_ identically.
+  // install the new one and re-look-up the same headword. Shared by the long-press gesture
+  // and the footer tap, so both arm dictSwitchInProgress_ identically.
   void applyDictSwitch(int curIdx, int nextIdx, const std::string& current);
-  // Leave the select mode, optionally restoring the dictionary the mode opened with.
-  void exitDictSelectMode(bool restore);
+  // Advance one dictionary within the active one's st-/other group and re-look-up the
+  // headword. Returns false when there is nothing to cycle to (sole member of its group,
+  // fewer than two installed, or a lookup already in flight).
+  bool cycleDictionary();
+  // True when the dictionary on screen differs from the one recorded on this word's card,
+  // i.e. the Set offer stands. `activeHash` is the caller's already-computed active hash so
+  // render() does not resolve the path twice.
+  bool setOfferStands(uint32_t activeHash) const;
+  // Commit the dictionary on show to this word's flashcard. Deliberate and explicit —
+  // switching to read a second opinion must never rewrite the card by itself.
+  // Returns false without doing anything when the offer does not stand, so the Right press
+  // that reached it falls through and still turns the page.
+  bool setCardDictToActive();
   // Undo a switch whose re-lookup failed or was cancelled, so the dictionary named in
   // the footer still matches the definition left on screen. No-op unless a switch is
   // pending — an ordinary word lookup that comes back not-found must not clear an

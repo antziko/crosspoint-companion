@@ -223,6 +223,14 @@ void FlashcardReviewActivity::promptSuspendToggle() {
 }
 
 void FlashcardReviewActivity::flipToBackFace() {
+  // Re-read the association from the deck first. `card` is a resident copy taken by
+  // loadCurrentCard(), so it goes stale the moment the definition screen writes a new
+  // dictionary onto this card: without this, backing out to the grade prompt and flipping the
+  // SAME card again would re-install the old one, and the user would have to leave the card
+  // and come back. Also picks up a change that arrived by sync mid-session. One streaming pass,
+  // against a startLookup() that already costs far more.
+  uint32_t recorded = 0;
+  if (FlashcardDeck::cardDict(cachePath, card.word, recorded)) card.dictHash = recorded;
   // Returns false when the card records no dictionary (legacy card, or one synced from a device
   // whose dictionary set differs) or when the recorded one is not installed. Either way we leave
   // the active dictionary in place and look up there — a definition from the wrong dictionary

@@ -52,8 +52,10 @@ inline void releaseDefinitionFont(GfxRenderer& renderer) { sdFontSystem.releaseE
 //
 // The path is <root>/<folder>/<stem>; only <folder> is hashed, because that is the component
 // the user copies between devices — see DictionaryRegistry::nameHash.
-inline uint32_t activeDictHash(const char* cachePath) {
-  const std::string basePath = Dictionary::activeDictPath(cachePath);
+// Hash the <folder> component of a dictionary base path. Split out of activeDictHash so a
+// caller that has ALREADY resolved the active path (render(), which draws its name in the
+// footer) can hash that string instead of resolving and allocating a second one.
+inline uint32_t dictHashOfPath(const std::string& basePath) {
   if (basePath.empty()) return 0;
   const size_t lastSlash = basePath.rfind('/');
   if (lastSlash == std::string::npos || lastSlash == 0) return 0;
@@ -61,6 +63,8 @@ inline uint32_t activeDictHash(const char* cachePath) {
   if (prevSlash == std::string::npos) return 0;
   return DictionaryRegistry::nameHash(basePath.substr(prevSlash + 1, lastSlash - prevSlash - 1).c_str());
 }
+
+inline uint32_t activeDictHash(const char* cachePath) { return dictHashOfPath(Dictionary::activeDictPath(cachePath)); }
 
 // Point subsequent lookups at the dictionary a flashcard was saved from. Returns false — falling
 // back to the configured dictionary — when the card records none, or when the recorded one is not

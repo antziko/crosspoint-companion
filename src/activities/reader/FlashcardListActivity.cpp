@@ -136,6 +136,10 @@ void FlashcardListActivity::loop() {
       // screens must agree — opening the same card from the list and from a review should not
       // produce different definitions. Safe here for the same reason: loop() is the UI task and
       // the controller has nothing in flight (Dictionary.h:94-99).
+      // Re-read first, for the same reason the review screen does: `detail` is a resident copy
+      // and the definition screen may have written a new dictionary onto this card since.
+      uint32_t recorded = 0;
+      if (FlashcardDeck::cardDict(cachePath, detail.word, recorded)) detail.dictHash = recorded;
       DictUtils::applyCardDict(detail.dictHash);
       controller.startLookup(detail.word);
       return;

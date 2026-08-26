@@ -1196,6 +1196,34 @@ bool FlashcardDeck::appendRemoteCard(const std::string& cachePath, const std::st
   return ok;
 }
 
+bool FlashcardDeck::cardDict(const std::string& cachePath, const std::string& word, uint32_t& outDictHash) {
+  // Deliberately not CountCtx: that carries a 160-byte excerpt and an 80-byte chapter on the
+  // stack for fields this query never reads. Three words is enough, and the ESP32-C3 stack is
+  // small enough for the difference to matter on a path called before every flip.
+  struct Q {
+    const std::string* word;
+    uint32_t hash;
+    bool found;
+  } q{&word, 0, false};
+
+  const bool opened = forEachLine(
+      filePath(cachePath),
+      [](void* ctx, const char* line, int len) {
+        auto* c = static_cast<Q*>(ctx);
+        const Parsed p = parseLine(line, len);
+        if (static_cast<size_t>(p.wordLen) != c->word->size() || memcmp(line, c->word->c_str(), p.wordLen) != 0) {
+          return true;  // keep scanning
+        }
+        c->hash = p.dictHash;
+        c->found = true;
+        return false;  // stop at the match — the deck holds one line per word
+      },
+      &q);
+  if (!opened || !q.found) return false;  // no deck file, or no card for this word
+  outDictHash = q.hash;
+  return true;
+}
+
 // Apply a 'D' line: set the dictionary a card was saved from, leaving every other field alone.
 // Separate from updateRemoteCard because the association travels on its own line and may arrive
 // for a card this device already had (no content change) as well as one that just landed.
