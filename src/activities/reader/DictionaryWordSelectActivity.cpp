@@ -167,6 +167,9 @@ void DictionaryWordSelectActivity::onEnter() {
   const bool consumeInitialConfirm = mappedInput.isPressed(MappedInputManager::Button::Confirm);
   // Book text is all one font; no IPA runs here, so the second slot defaults to the first.
   navigator.setFonts(SETTINGS.getReaderFontId());
+  // A quote is saved verbatim, so highlight selection has to reach "the" and "of" like any
+  // other word; a lookup never wants them, so there the cursor walks past them.
+  navigator.setSkipStopwords(mode_ == Mode::Dictionary);
   navigator.load(std::move(words), std::move(rows), std::move(textPool), consumeInitialConfirm, initialMarker_);
   const unsigned long tLoad = millis();
   // Opened via the reader's hold-Back gesture? Back is still held — swallow its release once.

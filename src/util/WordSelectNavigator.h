@@ -113,6 +113,12 @@ class WordSelectNavigator {
   }
   int fontIdFor(const WordInfo& w) const { return w.isIpa ? ipaFontId_ : bodyFontId_; }
 
+  // Whether the cursor avoids DictStopwords closed-class words ("the", "a", "you"): it is
+  // placed on a content word at load(), row navigation prefers one, and a left/right step
+  // walks past them. On for lookup, where those words are never the target. Off for quote
+  // selection, which has to reach every word of the quote verbatim. Call before load().
+  void setSkipStopwords(bool enabled) { skipStopwords_ = enabled; }
+
   // Organise a flat word list into rows by Y coordinate (2px tolerance).
   // Sets each word's row field and populates the rows vector.
   static void organizeIntoRows(std::vector<WordInfo>& words, std::vector<Row>& rows);
@@ -274,6 +280,7 @@ class WordSelectNavigator {
   std::string textPool;
   int bodyFontId_ = 0;
   int ipaFontId_ = 0;
+  bool skipStopwords_ = true;
   int currentRow = 0;
   int currentWordInRow = 0;
   bool inMultiSelectMode = false;
@@ -286,9 +293,14 @@ class WordSelectNavigator {
   // Position within targetRow of the word nearest refCenterX. With preferContentWord the
   // search is run over non-stopwords first and only falls back to the whole row when it
   // holds nothing else, so row navigation stops on "harbour" rather than the "the" beside
-  // it. Left/right stepping deliberately does NOT use this: it is the precise-adjustment
-  // gesture, and a phrase like "man of the world" has to be traversable word by word.
+  // it.
   int findClosestWordFromX(int targetRow, int refCenterX, bool preferContentWord = true) const;
+
+  // One left/right step: move by a single word, wrapping at the page ends, then apply
+  // hyphenated-pair smoothing so both halves of a word broken across rows count as one
+  // stop. Split out of handleNavigation so the stopword skip can repeat a whole step,
+  // smoothing included, rather than re-implement it.
+  void advanceHorizontal(bool forward);
 
   // True when the word's lookup text is a DictStopwords closed-class word.
   bool isStopwordAt(int flatIdx) const;

@@ -1170,13 +1170,9 @@ static void testRowNavPrefersContentWords() {
   step(nav, input, renderer, MappedInputManager::Button::Up);
   CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "alpha") == 0, "Up lands on alpha, a content word");
 
-  // Walk onto "the" deliberately: left/right never skips, so a stopword stays reachable.
-  step(nav, input, renderer, MappedInputManager::Button::Left);
-  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "the") == 0, "Left still reaches 'the'");
-
-  // From "the" (c=30) the nearest word on row 1 is "of" (c=30); the preference takes gamma.
+  // Back down the same column.
   step(nav, input, renderer, MappedInputManager::Button::Down);
-  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "gamma") == 0, "Down from 'the' skips 'of' for gamma");
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "gamma") == 0, "Down returns to gamma on the same column");
 
   // Row 2 is nothing but closed-class words, so the fallback must still land somewhere.
   step(nav, input, renderer, MappedInputManager::Button::Down);
@@ -1221,11 +1217,7 @@ static void testMultiSelectRowNavDoesNotSkipStopwords() {
   GfxRenderer renderer;
   MappedInputManager input;
 
-  // Park on "the" (row 0, x=10) with a horizontal step so the column comes from the cursor.
-  step(nav, input, renderer, MappedInputManager::Button::Up);
-  step(nav, input, renderer, MappedInputManager::Button::Left);
-  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "the") == 0, "parked on 'the'");
-
+  // Starts on "gamma" (row 1, x=90).
   input.reset();
   input.setPressed(MappedInputManager::Button::Confirm, true);
   input.setHeldTime(700);
@@ -1236,10 +1228,155 @@ static void testMultiSelectRowNavDoesNotSkipStopwords() {
   input.setReleased(MappedInputManager::Button::Confirm, true);
   nav.handleMultiSelectInput(input, phrase);
 
-  // Same Down that took gamma outside multi-select must now take the nearest word, "of".
-  step(nav, input, renderer, MappedInputManager::Button::Down);
-  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "of") == 0,
+  // Left inside multi-select is a plain one-word step: "of" is part of the range being
+  // built, not something to walk past.
+  step(nav, input, renderer, MappedInputManager::Button::Left);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "of") == 0, "multi-select Left stops on 'of'");
+
+  // And from "of" (c=30) the row move takes row 0's nearest word rather than its nearest
+  // content word.
+  step(nav, input, renderer, MappedInputManager::Button::Up);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "the") == 0,
         "multi-select row nav takes the nearest word, stopword or not");
+}
+
+// Row 0: alpha(10)  the(90)   bravo(180)
+// Row 1: gamma(10)  of(90)    a(180)
+// Row 2: delta(10)  kappa(90) omega(180)
+// Every row mixes content words with closed-class ones, and the word load() picks by index
+// (row 1, index 1) is one of the closed-class ones.
+static WordSelectNavigator makeMixedStopwordFixture(bool skipStopwords) {
+  std::string pool;
+  const char* texts[] = {"alpha", "the", "bravo", "gamma", "of", "a", "delta", "kappa", "omega"};
+  const int16_t xs[] = {10, 90, 180, 10, 90, 180, 10, 90, 180};
+  const int16_t ys[] = {0, 0, 0, 20, 20, 20, 40, 40, 40};
+  const int rowOf[] = {0, 0, 0, 1, 1, 1, 2, 2, 2};
+
+  std::vector<WordSelectNavigator::WordInfo> words;
+  for (int i = 0; i < 9; i++) {
+    WordSelectNavigator::WordInfo w = mkWord(texts[i], xs[i], ys[i], 40, rowOf[i]);
+    w.textOffset = poolAppendString(pool, texts[i]);
+    w.lookupOffset = w.textOffset;
+    words.push_back(w);
+  }
+
+  std::vector<WordSelectNavigator::Row> rows;
+  WordSelectNavigator::organizeIntoRows(words, rows);
+
+  WordSelectNavigator nav;
+  nav.setSkipStopwords(skipStopwords);
+  nav.load(std::move(words), std::move(rows), std::move(pool));
+  return nav;
+}
+
+// A page holding nothing but closed-class words, so the skip can never succeed.
+static WordSelectNavigator makeAllStopwordFixture() {
+  std::string pool;
+  const char* texts[] = {"the", "a", "of", "and", "but", "for"};
+  const int16_t xs[] = {10, 90, 180, 10, 90, 180};
+  const int16_t ys[] = {0, 0, 0, 20, 20, 20};
+  const int rowOf[] = {0, 0, 0, 1, 1, 1};
+
+  std::vector<WordSelectNavigator::WordInfo> words;
+  for (int i = 0; i < 6; i++) {
+    WordSelectNavigator::WordInfo w = mkWord(texts[i], xs[i], ys[i], 40, rowOf[i]);
+    w.textOffset = poolAppendString(pool, texts[i]);
+    w.lookupOffset = w.textOffset;
+    words.push_back(w);
+  }
+
+  std::vector<WordSelectNavigator::Row> rows;
+  WordSelectNavigator::organizeIntoRows(words, rows);
+
+  WordSelectNavigator nav;
+  nav.load(std::move(words), std::move(rows), std::move(pool));
+  return nav;
+}
+
+// Left/right walks past closed-class words instead of stopping on them, in the row and
+// across the row boundary.
+static void testHorizontalSkipsStopwords() {
+  std::printf("testHorizontalSkipsStopwords\n");
+
+  WordSelectNavigator nav = makeMixedStopwordFixture(true);
+  GfxRenderer renderer;
+  MappedInputManager input;
+
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "gamma") == 0, "cursor starts on a content word");
+
+  // Right past "of" and "a", over the row boundary, onto row 2's first content word.
+  step(nav, input, renderer, MappedInputManager::Button::Right);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "delta") == 0, "Right skips 'of' and 'a' onto delta");
+
+  // And back the same way.
+  step(nav, input, renderer, MappedInputManager::Button::Left);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "gamma") == 0, "Left skips them again on the way back");
+
+  // Wrapping backward past the start of the row lands on row 0's last word, which is content.
+  step(nav, input, renderer, MappedInputManager::Button::Left);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "bravo") == 0, "Left wraps to the previous row's last word");
+
+  // Within one row, in both directions.
+  step(nav, input, renderer, MappedInputManager::Button::Left);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "alpha") == 0, "Left skips 'the' inside the row");
+  step(nav, input, renderer, MappedInputManager::Button::Right);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "bravo") == 0, "Right skips 'the' inside the row");
+}
+
+// Row navigation takes the nearest CONTENT word, not the nearest word.
+static void testRowNavPrefersContentWordOverNearerStopword() {
+  std::printf("testRowNavPrefersContentWordOverNearerStopword\n");
+
+  WordSelectNavigator nav = makeMixedStopwordFixture(true);
+  GfxRenderer renderer;
+  MappedInputManager input;
+
+  // Park on "bravo" (row 0, c=200) so the column comes from the cursor.
+  step(nav, input, renderer, MappedInputManager::Button::Left);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "bravo") == 0, "parked on bravo");
+
+  // Row 1's nearest word to c=200 is "a" (c=200); the only content word on it is gamma.
+  step(nav, input, renderer, MappedInputManager::Button::Down);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "gamma") == 0, "Down passes over 'a' for gamma");
+}
+
+// The skip is bounded: a page with no content word at all still moves one stop per press.
+static void testHorizontalSkipOnAllStopwordPage() {
+  std::printf("testHorizontalSkipOnAllStopwordPage\n");
+
+  WordSelectNavigator nav = makeAllStopwordFixture();
+  GfxRenderer renderer;
+  MappedInputManager input;
+
+  // Row 1, index 1 -> "but"; contentWordNear has nothing to nudge onto.
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "but") == 0, "cursor starts on the middle word");
+
+  step(nav, input, renderer, MappedInputManager::Button::Right);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "for") == 0, "Right still advances exactly one word");
+
+  step(nav, input, renderer, MappedInputManager::Button::Left);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "but") == 0, "Left still steps back exactly one word");
+}
+
+// Quote selection turns the whole preference off: a quote is saved verbatim, so every word
+// has to be reachable and the cursor must be able to start on one of them.
+static void testSkipDisabledReachesEveryWord() {
+  std::printf("testSkipDisabledReachesEveryWord\n");
+
+  WordSelectNavigator nav = makeMixedStopwordFixture(false);
+  GfxRenderer renderer;
+  MappedInputManager input;
+
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "of") == 0, "initial cursor is the plain index-middle word");
+
+  // Page column is (10 + 220) / 2 = 115, nearest to which on row 0 is "the" (c=110).
+  step(nav, input, renderer, MappedInputManager::Button::Up);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "the") == 0, "row nav takes the nearest word, stopword or not");
+
+  step(nav, input, renderer, MappedInputManager::Button::Left);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "alpha") == 0, "Left steps one word");
+  step(nav, input, renderer, MappedInputManager::Button::Right);
+  CHECK(std::strcmp(nav.getDisplay(*nav.getSelected()), "the") == 0, "Right stops on 'the' again");
 }
 
 static void testHyphenEndOnly() {
@@ -1279,6 +1416,10 @@ int main() {
   testRowNavPrefersContentWords();
   testInitialCursorNudgedOffStopword();
   testMultiSelectRowNavDoesNotSkipStopwords();
+  testHorizontalSkipsStopwords();
+  testRowNavPrefersContentWordOverNearerStopword();
+  testHorizontalSkipOnAllStopwordPage();
+  testSkipDisabledReachesEveryWord();
   testHyphenEndOnly();
   testHyphenBoth();
   std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

@@ -30,8 +30,13 @@ void WordSelectNavigator::load(std::vector<WordInfo> w, std::vector<Row> r, std:
       break;
   }
   currentRow = std::clamp(targetRow, 0, rowCount > 0 ? rowCount - 1 : 0);
-  currentWordInRow =
-      (!rows.empty() && !rowEmpty(currentRow)) ? contentWordNear(currentRow, rowSize(currentRow) / 2) : 0;
+  // Quote selection (skipStopwords_ off) keeps the plain index-middle: it has to be able to
+  // start on "the" like any other word.
+  currentWordInRow = 0;
+  if (!rows.empty() && !rowEmpty(currentRow)) {
+    const int middleOfRow = rowSize(currentRow) / 2;
+    currentWordInRow = skipStopwords_ ? contentWordNear(currentRow, middleOfRow) : middleOfRow;
+  }
   confirmReleaseConsumed = consumeInitialConfirm;
   // Seed the aim column from the page's text block, not from the starting row: a row that
   // holds a single short word would otherwise hand the first row move that word's own
@@ -210,6 +215,78 @@ int WordSelectNavigator::findClosestWordFromX(int targetRow, int refCenterX, boo
   return bestContent >= 0 ? bestContent : bestMatch;
 }
 
+void WordSelectNavigator::advanceHorizontal(const bool forward) {
+  const int rowCount = static_cast<int>(rows.size());
+  const int prevFlatIdx = getCurrentFlatIndex();
+
+  if (forward) {
+    if (currentWordInRow < rowSize(currentRow) - 1) {
+      currentWordInRow++;
+    } else if (rowCount > 1) {
+      currentRow = (currentRow < rowCount - 1) ? currentRow + 1 : 0;
+      currentWordInRow = 0;
+    } else {
+      currentWordInRow = 0;  // single-row wrap
+    }
+  } else {
+    if (currentWordInRow > 0) {
+      currentWordInRow--;
+    } else if (rowCount > 1) {
+      currentRow = (currentRow > 0) ? currentRow - 1 : rowCount - 1;
+      currentWordInRow = rowSize(currentRow) - 1;
+    }
+  }
+
+  // Hyphenated pair smoothing: the second half should not be a horizontal stop since both
+  // halves highlight together. Row navigation is exempt — the user may intend to land on the
+  // second half's row — so this lives here rather than in handleNavigation.
+  const int idx = getCurrentFlatIndex();
+  if (idx >= 0 && words[idx].continuationOf >= 0) {
+    if (forward) {
+      // Moving forward: skip past the second half to the next word.
+      if (currentWordInRow < rowSize(currentRow) - 1) {
+        currentWordInRow++;
+      } else if (rowCount > 1) {
+        currentRow = (currentRow < rowCount - 1) ? currentRow + 1 : 0;
+        currentWordInRow = 0;
+      } else {
+        currentWordInRow = 0;  // single-row wrap
+      }
+      // If the skip landed on yet another continuation, snap to its first half.
+      const int skippedIdx = getCurrentFlatIndex();
+      if (skippedIdx >= 0 && words[skippedIdx].continuationOf >= 0) {
+        const int firstIdx = words[skippedIdx].continuationOf;
+        currentRow = words[firstIdx].row;
+        currentWordInRow = posInRow(currentRow, firstIdx);
+      }
+    } else {
+      // Moving backward: snap to the first half.
+      // Record the second half's index so subsequent row navigation
+      // references its position rather than the first half's.
+      pendingSnapIdx = idx;
+      const int firstIdx = words[idx].continuationOf;
+      currentRow = words[firstIdx].row;
+      currentWordInRow = posInRow(currentRow, firstIdx);
+    }
+  }
+
+  // Symmetric with the forward skip: if we came directly from the second half and wrapped
+  // into its first half, skip backward past the first half so the pair is treated as a
+  // single navigation unit in both directions.
+  if (!forward) {
+    const int curIdx = getCurrentFlatIndex();
+    if (curIdx >= 0 && words[curIdx].continuationOf < 0 && words[curIdx].continuationIndex >= 0 &&
+        prevFlatIdx == words[curIdx].continuationIndex) {
+      if (currentWordInRow > 0) {
+        currentWordInRow--;
+      } else if (rowCount > 1) {
+        currentRow = (currentRow > 0) ? currentRow - 1 : rowCount - 1;
+        currentWordInRow = rowSize(currentRow) - 1;
+      }
+    }
+  }
+}
+
 bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, const GfxRenderer& renderer,
                                            const bool swapAxes) {
   if (rows.empty()) return false;
@@ -254,7 +331,6 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
 
   const int rowCount = static_cast<int>(rows.size());
   bool changed = false;
-  const int prevFlatIdx = getCurrentFlatIndex();
 
   // Row navigation aims at a reference column, freshest source first:
   //  - the second half a wordPrev just snapped away from (across rows), so rowPrev/rowNext
@@ -280,7 +356,7 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
   // own X, so passing through a row that holds a single short word leaves it intact.
   if (rowPrevPressed) {
     const int targetRow = (rowNavBase > 0) ? rowNavBase - 1 : rowCount - 1;
-    currentWordInRow = findClosestWordFromX(targetRow, rowNavRefX, !inMultiSelectMode);
+    currentWordInRow = findClosestWordFromX(targetRow, rowNavRefX, skipStopwords_ && !inMultiSelectMode);
     currentRow = targetRow;
     rowNavGoalX = rowNavRefX;
     changed = true;
@@ -288,85 +364,43 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
 
   if (rowNextPressed) {
     const int targetRow = (rowNavBase < rowCount - 1) ? rowNavBase + 1 : 0;
-    currentWordInRow = findClosestWordFromX(targetRow, rowNavRefX, !inMultiSelectMode);
+    currentWordInRow = findClosestWordFromX(targetRow, rowNavRefX, skipStopwords_ && !inMultiSelectMode);
     currentRow = targetRow;
     rowNavGoalX = rowNavRefX;
     changed = true;
   }
 
   if (wordPrevPressed) {
-    if (currentWordInRow > 0) {
-      currentWordInRow--;
-    } else if (rowCount > 1) {
-      currentRow = (currentRow > 0) ? currentRow - 1 : rowCount - 1;
-      currentWordInRow = rowSize(currentRow) - 1;
-    }
+    advanceHorizontal(false);
     changed = true;
   }
 
   if (wordNextPressed) {
-    if (currentWordInRow < rowSize(currentRow) - 1) {
-      currentWordInRow++;
-    } else if (rowCount > 1) {
-      currentRow = (currentRow < rowCount - 1) ? currentRow + 1 : 0;
-      currentWordInRow = 0;
-    } else {
-      currentWordInRow = 0;  // single-row wrap
-    }
+    advanceHorizontal(true);
     changed = true;
   }
 
-  // Hyphenated pair smoothing for horizontal navigation:
-  // the second half should not be a horizontal stop since both halves
-  // highlight together. Row navigation (up/down) is exempt — the user
-  // may intend to land on the second half's row.
-  if (changed) {
-    const int idx = getCurrentFlatIndex();
-    if (idx >= 0 && words[idx].continuationOf >= 0) {
-      if (wordNextPressed) {
-        // Moving forward: skip past the second half to the next word.
-        if (currentWordInRow < rowSize(currentRow) - 1) {
-          currentWordInRow++;
-        } else if (rowCount > 1) {
-          currentRow = (currentRow < rowCount - 1) ? currentRow + 1 : 0;
-          currentWordInRow = 0;
-        } else {
-          currentWordInRow = 0;  // single-row wrap
-        }
-        // If the skip landed on yet another continuation, snap to its first half.
-        const int skippedIdx = getCurrentFlatIndex();
-        if (skippedIdx >= 0 && words[skippedIdx].continuationOf >= 0) {
-          const int firstIdx = words[skippedIdx].continuationOf;
-          currentRow = words[firstIdx].row;
-          currentWordInRow = posInRow(currentRow, firstIdx);
-        }
-      } else if (wordPrevPressed) {
-        // Moving backward: snap to the first half.
-        // Record the second half's index so subsequent row navigation
-        // references its position rather than the first half's.
-        pendingSnapIdx = idx;
-        const int firstIdx = words[idx].continuationOf;
-        currentRow = words[firstIdx].row;
-        currentWordInRow = posInRow(currentRow, firstIdx);
-      }
-      // Row navigation leaves cursor on whichever half
-      // findClosestWord landed on. Both halves highlight regardless.
+  // Closed-class words are never what a lookup is after, so a left/right step keeps walking
+  // until it reaches a content word. Bounded by the word count, and the landing position is
+  // restored when the walk finds nothing else, so a page of nothing but stopwords still moves
+  // exactly one stop per press instead of spinning or feeling dead. Multi-select is excluded
+  // for the same reason row navigation excludes it: the range is contiguous, and a phrase like
+  // "man of the world" has to stay selectable.
+  if (skipStopwords_ && !inMultiSelectMode && (wordPrevPressed || wordNextPressed)) {
+    const bool forward = wordNextPressed;
+    const int landedRow = currentRow;
+    const int landedWordInRow = currentWordInRow;
+    const int landedSnapIdx = pendingSnapIdx;
+    for (int guard = static_cast<int>(words.size()); guard > 0; guard--) {
+      const int idx = getCurrentFlatIndex();
+      if (idx < 0 || !isStopwordAt(idx)) break;
+      advanceHorizontal(forward);
     }
-
-    // Symmetric with the wordNext skip: if we came directly from the second
-    // half and wrapped into its first half, skip backward past the first half
-    // so the pair is treated as a single navigation unit in both directions.
-    if (wordPrevPressed) {
-      const int curIdx = getCurrentFlatIndex();
-      if (curIdx >= 0 && words[curIdx].continuationOf < 0 && words[curIdx].continuationIndex >= 0 &&
-          prevFlatIdx == words[curIdx].continuationIndex) {
-        if (currentWordInRow > 0) {
-          currentWordInRow--;
-        } else if (rowCount > 1) {
-          currentRow = (currentRow > 0) ? currentRow - 1 : rowCount - 1;
-          currentWordInRow = rowSize(currentRow) - 1;
-        }
-      }
+    const int idx = getCurrentFlatIndex();
+    if (idx >= 0 && isStopwordAt(idx)) {
+      currentRow = landedRow;
+      currentWordInRow = landedWordInRow;
+      pendingSnapIdx = landedSnapIdx;
     }
   }
 
