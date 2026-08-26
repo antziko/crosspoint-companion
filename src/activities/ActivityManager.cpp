@@ -83,6 +83,10 @@ void ActivityManager::renderTaskLoop() {
 }
 
 void ActivityManager::loop() {
+  // A release pre-empted by a long press must not reach the activity, or the
+  // page would turn again on the way up. Only page buttons arm this today.
+  if (mappedInput.consumeSuppressedRelease()) return;
+
   if (currentActivity) {
     if (!currentActivity->isHomeActivity() && mappedInput.wasHomeGesture()) {
       if (currentActivity->handleHomeGesture()) {

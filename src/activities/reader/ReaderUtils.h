@@ -99,12 +99,19 @@ inline PageTurnResult detectPageTurn(const MappedInputManager& input) {
   const auto prevButton = MappedInputManager::Button::Left;
   const auto nextButton = MappedInputManager::Button::Right;
 
-  const bool sidePrev = usePress ? input.wasPressed(MappedInputManager::Button::PageBack)
-                                 : input.wasReleased(MappedInputManager::Button::PageBack);
-  const bool sideNext = usePress ? input.wasPressed(MappedInputManager::Button::PageForward)
-                                 : input.wasReleased(MappedInputManager::Button::PageForward);
-  const bool frontPrev = usePress ? input.wasPressed(prevButton) : input.wasReleased(prevButton);
-  const bool frontNext = usePress ? input.wasPressed(nextButton) : input.wasReleased(nextButton);
+  // On the release path, also fire the moment the hold crosses SKIP_HOLD_MS
+  // instead of waiting for the button to come up: the chapter skip is what that
+  // hold is for, and holding with no feedback until release reads as a dead
+  // button. wasLongPressed() swallows the release it pre-empts, so the page
+  // does not also turn on the way up.
+  const auto triggered = [&](const MappedInputManager::Button button) {
+    if (usePress) return input.wasPressed(button);
+    return input.wasLongPressed(button, SKIP_HOLD_MS) || input.wasReleased(button);
+  };
+  const bool sidePrev = triggered(MappedInputManager::Button::PageBack);
+  const bool sideNext = triggered(MappedInputManager::Button::PageForward);
+  const bool frontPrev = triggered(prevButton);
+  const bool frontNext = triggered(nextButton);
   const bool powerTurn = SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::PAGE_TURN &&
                          input.wasReleased(MappedInputManager::Button::Power);
 

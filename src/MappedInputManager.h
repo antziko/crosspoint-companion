@@ -19,13 +19,20 @@ class MappedInputManager {
 
   MappedInputManager(HalGPIO& gpio, const GfxRenderer& renderer) : gpio(gpio), renderer(renderer) {}
 
-  void update() const { gpio.update(); }
+  void update() const;
   // applySwap=false reads the raw logical button without the orient-front-buttons
   // Left/Right swap, for callers (e.g. WordSelectNavigator) that do their own
   // orientation mapping.
   bool wasPressed(Button button, bool applySwap = true) const;
   bool wasReleased(Button button, bool applySwap = true) const;
   bool isPressed(Button button, bool applySwap = true) const;
+  // Fires ONCE while the button is still down, as soon as it has been held for
+  // thresholdMs, and marks the button's eventual release to be swallowed. Without
+  // it a release-triggered action (page turn) would fire again on the way up.
+  bool wasLongPressed(Button button, unsigned long thresholdMs) const;
+  // True on the frame a suppressed release actually arrives; ActivityManager
+  // consumes it ahead of activity input.
+  bool consumeSuppressedRelease() const;
   bool hasTouch() const;
   // True on boards with a capacitive Home key (X4 Pro), which frees the bottom
   // screen edge for a gesture of its own.
@@ -120,8 +127,13 @@ class MappedInputManager {
   bool listItemFromPoint(int x, int y, int& index, int itemCount, int selectedIndex, int listTop, int listHeight,
                          bool hasSubtitle) const;
   void rememberTouchHeldTime() const;
+  void suppressNextRelease(Button button) const;
 
   mutable bool touchHeldOverrideValid = false;
   mutable unsigned long touchHeldOverrideMs = 0;
   mutable unsigned long touchHeldOverrideAt = 0;
+  // One bit per Button. `fired` stops a long press repeating while still held and
+  // is cleared on release; `suppressed` marks releases still owed a swallow.
+  mutable uint16_t longPressFiredButtons = 0;
+  mutable uint16_t suppressedReleaseButtons = 0;
 };

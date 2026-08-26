@@ -133,6 +133,17 @@ bool MappedInputManager::hasTouch() const { return gpio.hasTouch(); }
 
 bool MappedInputManager::hasHomeKey() const { return gpio.hasHomeKey(); }
 
+// Highest Button enum value, for the bitmask loops below.
+constexpr uint8_t LAST_BUTTON = static_cast<uint8_t>(MappedInputManager::Button::NavPrevious);
+
+void MappedInputManager::update() const {
+  gpio.update();
+  // A long press may fire only once per hold; clear the latch when the button is up.
+  for (uint8_t value = 0; value <= LAST_BUTTON; ++value) {
+    if (!isPressed(static_cast<Button>(value))) longPressFiredButtons &= ~(1u << value);
+  }
+}
+
 void MappedInputManager::rememberTouchHeldTime() const {
   touchHeldOverrideValid = true;
   touchHeldOverrideMs = gpio.lastTouchHeldMs();
@@ -367,6 +378,32 @@ bool MappedInputManager::wasReleased(const Button button, const bool applySwap) 
   if (button == Button::Confirm && wasPowerConfirmClick()) return true;
 #endif
   return mapButton(button, &HalGPIO::wasReleased, applySwap);
+}
+
+bool MappedInputManager::wasLongPressed(const Button button, const unsigned long thresholdMs) const {
+  if (!isPressed(button)) return false;
+  const uint16_t bit = 1u << static_cast<uint8_t>(button);
+  if ((longPressFiredButtons & bit) != 0 || getHeldTime() < thresholdMs) return false;
+  longPressFiredButtons |= bit;
+  suppressNextRelease(button);
+  return true;
+}
+
+void MappedInputManager::suppressNextRelease(const Button button) const {
+  suppressedReleaseButtons |= 1u << static_cast<uint8_t>(button);
+}
+
+bool MappedInputManager::consumeSuppressedRelease() const {
+  if (suppressedReleaseButtons == 0) return false;
+  uint16_t released = 0;
+  for (uint8_t value = 0; value <= LAST_BUTTON; ++value) {
+    const uint16_t bit = 1u << value;
+    if ((suppressedReleaseButtons & bit) != 0 && mapButton(static_cast<Button>(value), &HalGPIO::wasReleased)) {
+      released |= bit;
+    }
+  }
+  suppressedReleaseButtons &= ~released;
+  return released != 0;
 }
 
 bool MappedInputManager::isPressed(const Button button, const bool applySwap) const {

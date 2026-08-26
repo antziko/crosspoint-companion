@@ -816,7 +816,8 @@ void loop() {
   static unsigned long lastMemPrint = 0;
 
   gpio.setSharedConfirmPowerShortPressEmitsPower(SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP);
-  gpio.update();
+  // Through the mapped manager, not gpio directly: it clears the long-press latch.
+  mappedInputManager.update();
   halTiltSensor.update(SETTINGS.tiltPageTurn, APP_STATE.activeOrientation, activityManager.isReaderActivity());
 
   renderer.setFadingFix(SETTINGS.fadingFix);

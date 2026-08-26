@@ -178,7 +178,7 @@ void TxtReaderActivity::loop() {
   //   - side Up/Down held + sideLongPressButtonBehavior == ORIENTATION_CHANGE -> rotate
   //   - front Left held    + longPressButtonBehavior     == BOOKMARK_AND_SYNC -> toggle bookmark
   // (TXT has no chapters or sync, so CHAPTER_SKIP and the hold-right sync are not handled.)
-  const bool longPress = !fromTilt && mappedInput.getHeldTime() > ReaderUtils::SKIP_HOLD_MS;
+  const bool longPress = !fromTilt && mappedInput.getHeldTime() >= ReaderUtils::SKIP_HOLD_MS;
   const uint8_t lpBehavior = fromSide ? SETTINGS.sideLongPressButtonBehavior : SETTINGS.longPressButtonBehavior;
 
   if (longPress && lpBehavior == SETTINGS.ORIENTATION_CHANGE) {
