@@ -411,21 +411,40 @@ void BaseTheme::drawCompactHeader(const GfxRenderer& renderer, Rect rect, const 
   const int pad = metrics.headerSidePadding;
   const int y = rect.y + (rect.height - renderer.getLineHeight(titleFontId)) / 2;
 
-  // Right label (the version on Settings, a count elsewhere) keeps its corner in the small font.
+  const int content = rect.width - pad * 2;
+  if (content <= 0) return;
+  const bool centered = metrics.headerTitleAlign == 1;
+  const bool hasTitle = title != nullptr && *title != '\0';
+
+  // The screen's own title is claimed first: it is short by nature ("Book Stats",
+  // "Bookmarks") and the band is the only place a screen names itself. Whatever it leaves
+  // is what the right label gets, truncated to fit — a full-length one (the book title on
+  // the stats screen) otherwise spans the band and prints itself over the title. A centred
+  // title is flanked on both sides, so the label only gets half of what is left.
   constexpr int kLabelGap = 8;
+  const int titleNeed =
+      hasTitle ? std::min(renderer.getTextWidth(titleFontId, title, EpdFontFamily::BOLD), content) : 0;
+  const int labelAvail = (centered ? (content - titleNeed) / 2 : content - titleNeed) - kLabelGap;
+
+  // Right label (the version on Settings, a book title or count elsewhere) keeps its corner
+  // in the small font.
   int reserved = 0;
-  if (subtitle != nullptr && *subtitle != '\0') {
-    const int labelWidth = renderer.getTextWidth(SMALL_FONT_ID, subtitle);
-    const int labelY = rect.y + (rect.height - renderer.getLineHeight(SMALL_FONT_ID)) / 2;
-    renderer.drawText(SMALL_FONT_ID, rect.x + rect.width - pad - labelWidth, labelY, subtitle);
-    reserved = labelWidth + kLabelGap;
+  if (subtitle != nullptr && *subtitle != '\0' && labelAvail > 0) {
+    const std::string label = renderer.truncatedText(SMALL_FONT_ID, subtitle, labelAvail);
+    // truncatedText falls back to a bare ellipsis when not even one character fits; a lone
+    // "…" in the corner says nothing, so drop the label instead.
+    if (!label.empty() && label != "\xe2\x80\xa6") {
+      const int labelWidth = renderer.getTextWidth(SMALL_FONT_ID, label.c_str());
+      const int labelY = rect.y + (rect.height - renderer.getLineHeight(SMALL_FONT_ID)) / 2;
+      renderer.drawText(SMALL_FONT_ID, rect.x + rect.width - pad - labelWidth, labelY, label.c_str());
+      reserved = labelWidth + kLabelGap;
+    }
   }
-  if (title == nullptr || *title == '\0') return;
+  if (!hasTitle) return;
 
   // A centred title has to clear the right label on BOTH sides or it grows into it; a
   // left/right-aligned one only loses the reserve once.
-  const bool centered = metrics.headerTitleAlign == 1;
-  const int available = rect.width - pad * 2 - (centered ? reserved * 2 : reserved);
+  const int available = content - (centered ? reserved * 2 : reserved);
   if (available <= 0) return;
   const std::string fitted = renderer.truncatedText(titleFontId, title, available, EpdFontFamily::BOLD);
   const int textWidth = renderer.getTextWidth(titleFontId, fitted.c_str(), EpdFontFamily::BOLD);
