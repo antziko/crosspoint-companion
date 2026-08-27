@@ -233,32 +233,12 @@ void drawChapterFooter(GfxRenderer& renderer, int contentBottom, const std::stri
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int y = contentBottom - metrics.listRowHeight;
 
-  // The chapter field may carry a trailing in-chapter page token "X/Y" (appended
-  // at enroll in EpubReaderActivity::openWordSelect). Detect the token as the last
-  // space-delimited run of digits-and-'/'; when present the title goes flush-left
-  // and the token flush-right, otherwise the title is centered.
+  // The chapter field may carry a trailing in-chapter page token "X/Y". When present the
+  // title goes flush-left and the token flush-right, otherwise the title is centered.
   const char* ch = chapter.c_str();
   const int len = static_cast<int>(chapter.size());
   int sp = -1;
-  for (int i = len - 1; i >= 0; --i) {
-    if (ch[i] == ' ') {
-      sp = i;
-      break;
-    }
-  }
-  bool hasPage = false;
-  if (sp >= 0 && sp + 1 < len) {
-    bool slash = false, digitsOnly = true;
-    for (int i = sp + 1; i < len; ++i) {
-      if (ch[i] == '/')
-        slash = true;
-      else if (ch[i] < '0' || ch[i] > '9') {
-        digitsOnly = false;
-        break;
-      }
-    }
-    hasPage = slash && digitsOnly;
-  }
+  const bool hasPage = FlashcardDeck::parseChapterPage(ch, len, &sp, nullptr, nullptr);
 
   // Rendered to match the reader's status-bar chapter title: SMALL_FONT_ID,
   // ellipsis-truncated, then dimmed to a grey checkerboard stipple so the footer
@@ -331,9 +311,23 @@ void render(GfxRenderer& renderer, int contentTop, int contentBottom, int pageWi
   }
 
   if (!excerpt.empty()) {
+    // Mark the word as the page printed it, which is not always the headword: a "Did you mean?"
+    // lookup files the card under the suggestion ("pontificate") while the excerpt keeps the
+    // printed form ("pontifications"). Falls back to the headword when nothing is recovered.
+    char surfaceBuf[64];
+    const char* highlight = word.c_str();
+    int surfaceLen = 0;
+    const char* surface = FlashcardDeck::findSurfaceForm(word.c_str(), static_cast<int>(word.size()), excerpt.c_str(),
+                                                         static_cast<int>(excerpt.size()), &surfaceLen);
+    if (surface && surfaceLen > 0 && surfaceLen < static_cast<int>(sizeof(surfaceBuf))) {
+      memcpy(surfaceBuf, surface, static_cast<size_t>(surfaceLen));
+      surfaceBuf[surfaceLen] = '\0';
+      highlight = surfaceBuf;
+    }
+
     // Excerpt with the word underlined in context; masked (white-boxed) when hidden.
     drawWrappedCentered(renderer, bodyFont, contentTop + metrics.listRowHeight * 3, contentBottom, pageWidth,
-                        excerpt.c_str(), word.c_str(), /*maskHighlight=*/!showWord);
+                        excerpt.c_str(), highlight, /*maskHighlight=*/!showWord);
   } else if (!showWord) {
     // No excerpt to blank into: fall back to a centered "____" placeholder.
     renderer.drawCenteredText(bodyFont, contentTop + metrics.listRowHeight * 3, "____");

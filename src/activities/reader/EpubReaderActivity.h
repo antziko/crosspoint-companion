@@ -35,6 +35,11 @@ class EpubReaderActivity final : public Activity {
   // "Indexing" loop). Cleared when a chapter builds/loads OK.
   int buildFailedSpine = -1;
   int currentSpineIndex = 0;
+  // Hash of the current chapter's TOC title, memoised per spine item: it keys this page's
+  // looked-up words in LookupMarks, and the render path must not build a std::string per frame.
+  // -1 spine = not computed yet.
+  int chapterHashSpine = -1;
+  uint32_t chapterHash = 0;
   int nextPageNumber = 0;
   std::optional<uint16_t> pendingPageJump;
   // Set when navigating to a footnote href with a fragment (e.g. #note1).
@@ -216,6 +221,12 @@ class EpubReaderActivity final : public Activity {
   void renderContents(std::unique_ptr<Page> page, int orientedMarginTop, int orientedMarginRight,
                       int orientedMarginBottom, int orientedMarginLeft);
   void renderStatusBar() const;
+  // Hash of the current chapter's TOC title, recomputed only when the spine item changes.
+  // Keys the page's looked-up words; see LookupMarks.
+  uint32_t currentChapterHash();
+  // (Re)build the resident looked-up-word index from this book's flashcard deck. One streaming
+  // pass; called at book open and on return from any screen that can change the deck.
+  void reloadLookupMarks() const;
   // Pages laid out per incremental-build pump: on the render path (catching up to the page
   // being shown) and per loop() tick (background build of a large chapter). Kept small so a
   // background build chunk never noticeably delays input or a pending render.

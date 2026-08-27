@@ -242,6 +242,45 @@ class FlashcardDeck {
   // reuse the streaming primitive.
   static bool forEachLine(const std::string& path, bool (*fn)(void* ctx, const char* line, int len), void* ctx);
 
+  // Split the in-chapter page token off a chapter field. The field is stored as
+  // "<title> X/Y" (appended at enroll in EpubReaderActivity::openWordSelect); the token is
+  // the last space-delimited run of digits and '/'. Returns true when one is present, with
+  // *outTitleLen shortened to the bytes before the separating space.
+  // False leaves every out param untouched: a legacy card, one synced from a peer, or one
+  // whose title was long enough that the cap cut the token off.
+  static bool parseChapterPage(const char* chapter, int len, int* outTitleLen, int* outPage, int* outPageCount);
+
+  // The word as the page printed it — the excerpt token the card's headword came from.
+  //
+  // A "Did you mean?" lookup enrolls the card under the SUGGESTION (the controller overwrites
+  // its lookup word before the enroll site sees it), so a card can read "pontificate" while
+  // the page, and the card's own excerpt, read "pontifications". Both marks — the underline in
+  // the excerpt and the one on the reader page — have to land on the printed form, and it is
+  // already there in the excerpt, so it is recovered rather than stored: no deck format change,
+  // and cards already on disk are covered.
+  //
+  // Returns a pointer INTO `excerpt` (never a copy) with *outLen set, or nullptr when nothing
+  // qualifies. An exact occurrence of the headword always wins; failing that, and only for a
+  // headword with no CJK, the excerpt token sharing the longest normalised prefix is taken when
+  // that prefix is at least kSurfaceMinPrefix bytes and 70% of the shorter word.
+  static const char* findSurfaceForm(const char* word, int wordLen, const char* excerpt, int excerptLen, int* outLen);
+
+  // Shortest prefix that can carry a word family. Below this, "part"/"partition" style
+  // coincidences outnumber real inflections.
+  static constexpr int kSurfaceMinPrefix = 4;
+
+  // Stream every card's (word, chapter title, in-chapter page) in file order — oldest first.
+  // One pass, no materialization, nothing heap-allocated per card: for the reader's page
+  // underline index, which needs the anchor of every card and the text of none.
+  // `fn` returns false to stop early. Cards with no page token report page/pageCount 0. The
+  // excerpt comes along because that is where the printed form of the word is recovered from
+  // (findSurfaceForm), and re-reading the deck for it would be a second pass.
+  // Returns false iff the deck could not be opened.
+  static bool forEachCardAnchor(const std::string& cachePath,
+                                bool (*fn)(void* ctx, const char* word, int wordLen, const char* title, int titleLen,
+                                           int page, int pageCount, const char* excerpt, int excerptLen),
+                                void* ctx);
+
   // --- Cross-device sync ("fc" blob; mirrors LookupHistory's "dh") -----------
   //
   // Wire format (one line each, '\n'-terminated):

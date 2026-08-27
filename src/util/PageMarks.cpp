@@ -1,4 +1,4 @@
-#include "QuoteHighlight.h"
+#include "PageMarks.h"
 
 #include <Epub/Page.h>
 #include <GfxRenderer.h>
@@ -9,9 +9,10 @@
 
 #include "BookmarkStore.h"
 #include "CrossPointSettings.h"
+#include "LookupMarks.h"
 #include "PageTokenScan.h"
 
-namespace QuoteHighlight {
+namespace PageMarks {
 namespace {
 
 constexpr int kUnderlineThickness = 2;
@@ -25,6 +26,29 @@ constexpr int kBandPadX = 1;
 // skipped rather than grown into, so the whole walk stays on the stack — this runs on the
 // render task, whose depth is already budgeted for EPUB section indexing.
 constexpr size_t kMaxQuotesPerPage = 6;
+
+// Looked-up words marked on a single page. A page holds a handful of lookups at most; the
+// extras are skipped rather than grown into, for the same stack-only reason as the quote cap.
+constexpr size_t kMaxLookupsPerPage = 8;
+
+// A CJK word being matched across consecutive page tokens. CJK is laid out one token per
+// character, so a multi-character word is only ever a run: the run opens on a token whose hash
+// matches the word's first character, then accumulates each following token into the same
+// FNV until the word's normalised byte length is reached, and marks only if the accumulated
+// hash matches the whole word. Latin words are one token and never open a run.
+//
+// The run is a single forward pass with no backtracking: a word immediately preceded by its
+// own first character (中中国人) opens on the wrong character, accumulates to the wrong length
+// and drops the mark. That is the failure mode of a hash-only matcher with no text to re-scan,
+// and it fails toward drawing nothing.
+struct LookupRun {
+  uint32_t hash = 0;  // FNV accumulated over the run so far
+  uint16_t len = 0;   // normalised bytes accumulated so far
+  bool open = false;
+  int16_t y = 0;
+  int16_t x0 = 0;
+  int16_t x1 = 0;
+};
 
 // One quote being resolved, plus the marking run currently open for it. Runs are per visual
 // line: a quote crossing three lines draws three rectangles, and each one spans from its first
@@ -69,37 +93,56 @@ bool firstWordMatches(const char* snippet, const char* text, size_t len) {
 }  // namespace
 
 void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int marginLeft, int marginTop,
-                 uint16_t spineIndex, float pageProgress, int pageCount) {
+                 uint16_t spineIndex, float pageProgress, int pageCount, uint32_t chapterHash, int pageNumber) {
   if (pageCount <= 0) return;
   // markStyle, not style: the per-word EpdFontFamily::Style below would shadow it.
   const uint8_t markStyle = SETTINGS.quoteHighlightStyle;
-  if (markStyle == CrossPointSettings::QUOTE_STYLE_OFF) return;
 
   // Page match mirrors BookmarkStore::hasQuoteForPage: the quote's progress falls inside this
   // page's slice of the chapter.
-  const float pageSlice = 1.0f / static_cast<float>(pageCount);
   Range ranges[kMaxQuotesPerPage];
   size_t rangeCount = 0;
-  for (const auto& b : BOOKMARKS.getBookmarks()) {
-    if (!b.quote || b.spineIndex != spineIndex) continue;
-    if (b.progress < pageProgress || b.progress >= pageProgress + pageSlice) continue;
-    if (rangeCount >= kMaxQuotesPerPage) break;
-    Range& r = ranges[rangeCount++];
-    r.start = std::min(b.startWord, b.endWord);
-    r.end = std::max(b.startWord, b.endWord);
-    r.snippet = b.snippet;
+  if (markStyle != CrossPointSettings::QUOTE_STYLE_OFF) {
+    const float pageSlice = 1.0f / static_cast<float>(pageCount);
+    for (const auto& b : BOOKMARKS.getBookmarks()) {
+      if (!b.quote || b.spineIndex != spineIndex) continue;
+      if (b.progress < pageProgress || b.progress >= pageProgress + pageSlice) continue;
+      if (rangeCount >= kMaxQuotesPerPage) break;
+      Range& r = ranges[rangeCount++];
+      r.start = std::min(b.startWord, b.endWord);
+      r.end = std::max(b.startWord, b.endWord);
+      r.snippet = b.snippet;
+    }
   }
-  if (rangeCount == 0) return;  // the common case: nothing walked, nothing measured
+
+  // Looked-up words anchored here. Resolved against the resident table, not the page: the
+  // deck records where a lookup happened as the chapter and in-chapter page, so this costs
+  // one scan of a small array and no I/O.
+  const LookupMarks::Mark* lookups[kMaxLookupsPerPage] = {};
+  LookupRun runs[kMaxLookupsPerPage] = {};
+  size_t lookupCount = 0;
+  if (SETTINGS.lookupUnderline) {
+    lookupCount = static_cast<size_t>(
+        LookupMarks::getInstance().collectForPage(chapterHash, pageNumber, pageCount, lookups, kMaxLookupsPerPage));
+  }
+
+  if (rangeCount == 0 && lookupCount == 0) return;  // the common case: nothing walked, nothing measured
 
   const int lineHeight = renderer.getLineHeight(fontId);
   const int ascender = renderer.getFontAscenderSize(fontId);
+
+  // One rule under a span of a line, the mark a looked-up word gets and the one a quote gets
+  // when the user has chosen the underline style.
+  const auto underlineSpan = [&](int16_t x0, int width, int16_t rowY) {
+    if (width > 0) renderer.fillRect(x0, rowY + lineHeight - kUnderlineThickness, width, kUnderlineThickness, true);
+  };
 
   const auto flush = [&](Range& r) {
     if (!r.runOpen) return;
     const int width = r.runX1 - r.runX0;
     if (width > 0) {
       if (markStyle == CrossPointSettings::QUOTE_STYLE_UNDERLINE) {
-        renderer.fillRect(r.runX0, r.runY + lineHeight - kUnderlineThickness, width, kUnderlineThickness, true);
+        underlineSpan(r.runX0, width, r.runY);
       } else {
         // washRectDither, not fillRectDither: the text is already drawn here, and the plain
         // dither fill writes both inks and would wipe the glyphs out from under the band.
@@ -141,11 +184,21 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
         const size_t partStart = unsplit ? 0 : parts[pi].start;
         const size_t partLen = unsplit ? len : parts[pi].end - parts[pi].start;
 
-        // Everything outside a quote costs one predicate and an increment; geometry is measured
+        // Everything outside a mark costs one predicate and an increment; geometry is measured
         // only for the handful of tokens actually being marked.
         bool measured = false;
         int16_t x = 0;
         int16_t width = 0;
+        const auto measure = [&]() {
+          if (measured) return;
+          measured = true;
+          const EpdFontFamily::Style style = block->wordStyle(w);
+          x = static_cast<int16_t>(line->xPos + block->wordXpos(w) + marginLeft);
+          if (partStart > 0) x += PageTokens::measureAdvance(renderer, fontId, text, partStart, style);
+          // The whole-token form copies nothing; only a dash-split part needs the sub-range one.
+          width = unsplit ? PageTokens::measureAdvance(renderer, fontId, text, style)
+                          : PageTokens::measureAdvance(renderer, fontId, text + partStart, partLen, style);
+        };
 
         for (size_t i = 0; i < rangeCount; i++) {
           Range& r = ranges[i];
@@ -159,15 +212,7 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
               continue;
             }
           }
-          if (!measured) {
-            measured = true;
-            const EpdFontFamily::Style style = block->wordStyle(w);
-            x = static_cast<int16_t>(line->xPos + block->wordXpos(w) + marginLeft);
-            if (partStart > 0) x += PageTokens::measureAdvance(renderer, fontId, text, partStart, style);
-            // The whole-token form copies nothing; only a dash-split part needs the sub-range one.
-            width = unsplit ? PageTokens::measureAdvance(renderer, fontId, text, style)
-                            : PageTokens::measureAdvance(renderer, fontId, text + partStart, partLen, style);
-          }
+          measure();
           if (r.runOpen && r.runY != rowY) flush(r);  // the quote wrapped onto the next line
           if (!r.runOpen) {
             r.runOpen = true;
@@ -178,6 +223,47 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
             r.runX1 = std::max(r.runX1, static_cast<int16_t>(x + width));
           }
         }
+
+        if (lookupCount == 0) continue;
+
+        // One hash of the token's own bytes serves every mark on the page: a byte loop over a
+        // token that is already in cache, no allocation, no measurement.
+        uint16_t tokenLen = 0;
+        const uint32_t tokenHash =
+            LookupMarks::hashAppend(LookupMarks::FNV_OFFSET, text + partStart, partLen, &tokenLen);
+
+        for (size_t i = 0; i < lookupCount; i++) {
+          const LookupMarks::Mark* m = lookups[i];
+          LookupRun& r = runs[i];
+
+          if (!isCjk) {  // one token, one word
+            if (tokenHash != m->wordHash || tokenLen != m->byteLen) continue;
+            measure();
+            underlineSpan(x, width, rowY);
+            continue;
+          }
+
+          if (r.open && r.y != rowY) r.open = false;  // the run wrapped: no mark, no guess
+          if (!r.open) {
+            if (tokenHash != m->headHash) continue;
+            measure();
+            r.open = true;
+            r.hash = tokenHash;
+            r.len = tokenLen;
+            r.y = rowY;
+            r.x0 = x;
+            r.x1 = static_cast<int16_t>(x + width);
+          } else {
+            measure();
+            r.hash = LookupMarks::hashAppend(r.hash, text + partStart, partLen, &r.len);
+            r.x1 = std::max(r.x1, static_cast<int16_t>(x + width));
+          }
+
+          if (r.len >= m->byteLen) {
+            if (r.len == m->byteLen && r.hash == m->wordHash) underlineSpan(r.x0, r.x1 - r.x0, r.y);
+            r.open = false;  // matched, or overshot the word's length — either way it is done
+          }
+        }
       }
     }
   }
@@ -185,4 +271,4 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
   for (size_t i = 0; i < rangeCount; i++) flush(ranges[i]);
 }
 
-}  // namespace QuoteHighlight
+}  // namespace PageMarks

@@ -336,6 +336,11 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
       StrId::STR_QUOTE_STYLE, &CrossPointSettings::quoteHighlightStyle,
       {StrId::STR_QUOTE_STYLE_OFF, StrId::STR_QUOTE_STYLE_UNDERLINE, StrId::STR_QUOTE_STYLE_HIGHLIGHT},
       "quoteHighlightStyle", StrId::STR_READER_TEXT));
+  // Words looked up in the dictionary are underlined on the page the lookup happened on. Same
+  // reason as above for not being a Text Settings preview row: the mark only exists where a
+  // word was actually looked up.
+  v.push_back(SettingInfo::Toggle(StrId::STR_LOOKUP_UNDERLINE, &CrossPointSettings::lookupUnderline, "lookupUnderline",
+                                  StrId::STR_READER_TEXT));
   // Night mode = inverted output polarity on the reading surfaces only (EPUB/TXT/XTC;
   // ActivityManager resolves the polarity per render), so it belongs with the reader
   // settings rather than with the system-wide display ones.

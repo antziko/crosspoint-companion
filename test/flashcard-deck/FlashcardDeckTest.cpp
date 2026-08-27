@@ -1211,4 +1211,140 @@ TEST_F(FlashcardDeckTest, StopwordFilterDoesNotApplyToTheSyncMerge) {
   EXPECT_TRUE(findCard(peer, "the", e));
 }
 
+// --- Page anchors ----------------------------------------------------------------------
+//
+// The chapter field doubles as the lookup's page anchor: enroll appends " X/Y" to the title,
+// and the reader's page underline resolves a card to a page from it. The parse is shared with
+// the card face's footer, so one rule covers both.
+
+TEST_F(FlashcardDeckTest, ParseChapterPageSplitsTitleFromToken) {
+  const char* ch = "Chapter 22: Sign of the Bident 11/27";
+  int titleLen = -1, page = -1, count = -1;
+  ASSERT_TRUE(FlashcardDeck::parseChapterPage(ch, static_cast<int>(std::strlen(ch)), &titleLen, &page, &count));
+  EXPECT_EQ(std::string(ch, titleLen), "Chapter 22: Sign of the Bident");
+  EXPECT_EQ(page, 11);
+  EXPECT_EQ(count, 27);
+}
+
+TEST_F(FlashcardDeckTest, ParseChapterPageRejectsWhatIsNotAToken) {
+  int titleLen = -1, page = -1, count = -1;
+  // A title with no token at all, and one whose last word is digits but carries no '/'.
+  const char* plain = "Chapter 22";
+  EXPECT_FALSE(FlashcardDeck::parseChapterPage(plain, static_cast<int>(std::strlen(plain)), &titleLen, &page, &count));
+  const char* noSlash = "Room 101";
+  EXPECT_FALSE(
+      FlashcardDeck::parseChapterPage(noSlash, static_cast<int>(std::strlen(noSlash)), &titleLen, &page, &count));
+  // A token cut in half by the chapter cap is not a token either.
+  const char* truncated = "A very long chapter title 11/";
+  ASSERT_TRUE(
+      FlashcardDeck::parseChapterPage(truncated, static_cast<int>(std::strlen(truncated)), &titleLen, &page, &count));
+  EXPECT_EQ(count, 0);  // no denominator: the reader treats this as unanchored
+  EXPECT_EQ(titleLen, static_cast<int>(std::strlen("A very long chapter title")));
+  // Nothing at all.
+  EXPECT_FALSE(FlashcardDeck::parseChapterPage(nullptr, 0, &titleLen, &page, &count));
+}
+
+TEST_F(FlashcardDeckTest, ParseChapterPageKeepsATitleThatEndsInDigits) {
+  const char* ch = "Part 3 4/9";
+  int titleLen = -1, page = -1, count = -1;
+  ASSERT_TRUE(FlashcardDeck::parseChapterPage(ch, static_cast<int>(std::strlen(ch)), &titleLen, &page, &count));
+  EXPECT_EQ(std::string(ch, titleLen), "Part 3");
+  EXPECT_EQ(page, 4);
+  EXPECT_EQ(count, 9);
+}
+
+struct Anchor {
+  std::string word;
+  std::string title;
+  int page;
+  int pageCount;
+};
+
+TEST_F(FlashcardDeckTest, ForEachCardAnchorStreamsWordsWithTheirPages) {
+  EXPECT_TRUE(FlashcardDeck::enroll(cachePath, "pews", "lined with pews.", "Sign of the Bident 11/27"));
+  EXPECT_TRUE(FlashcardDeck::enroll(cachePath, "helix", "a double helix", "Sign of the Bident 12/27"));
+  // A card with no page token at all (a legacy card, or one synced from a peer).
+  EXPECT_TRUE(FlashcardDeck::enroll(cachePath, "vermiform", "nasty vermiform creature", "Sign of the Bident"));
+
+  std::vector<Anchor> got;
+  ASSERT_TRUE(FlashcardDeck::forEachCardAnchor(
+      cachePath,
+      [](void* ctx, const char* word, int wordLen, const char* title, int titleLen, int page, int pageCount,
+         const char* excerpt, int excerptLen) {
+        (void)excerpt;
+        (void)excerptLen;
+        static_cast<std::vector<Anchor>*>(ctx)->push_back(
+            Anchor{std::string(word, wordLen), std::string(title, titleLen > 0 ? titleLen : 0), page, pageCount});
+        return true;
+      },
+      &got));
+
+  ASSERT_EQ(got.size(), 3u);
+  EXPECT_EQ(got[0].word, "pews");
+  EXPECT_EQ(got[0].title, "Sign of the Bident");
+  EXPECT_EQ(got[0].page, 11);
+  EXPECT_EQ(got[0].pageCount, 27);
+  EXPECT_EQ(got[1].word, "helix");
+  EXPECT_EQ(got[1].page, 12);
+  // Unanchored card: the title survives whole, the page reports 0.
+  EXPECT_EQ(got[2].word, "vermiform");
+  EXPECT_EQ(got[2].title, "Sign of the Bident");
+  EXPECT_EQ(got[2].page, 0);
+  EXPECT_EQ(got[2].pageCount, 0);
+}
+
+// --- Surface form ----------------------------------------------------------------------
+//
+// A "Did you mean?" lookup files the card under the SUGGESTION, so the card word can differ
+// from the word the page printed. Both marks (the excerpt underline and the reader-page one)
+// have to land on the printed form, which is recovered from the card's own excerpt.
+
+static std::string surfaceOf(const std::string& word, const std::string& excerpt) {
+  int len = 0;
+  const char* p = FlashcardDeck::findSurfaceForm(word.c_str(), static_cast<int>(word.size()), excerpt.c_str(),
+                                                 static_cast<int>(excerpt.size()), &len);
+  return p ? std::string(p, static_cast<size_t>(len)) : std::string();
+}
+
+TEST_F(FlashcardDeckTest, SurfaceFormPrefersAnExactOccurrence) {
+  EXPECT_EQ(surfaceOf("helix", "in the form of a double helix that spiraled"), "helix");
+  // Case as printed, not as filed.
+  EXPECT_EQ(surfaceOf("citra", "Citra followed a stone path"), "Citra");
+  // An exact hit wins even when an inflected sibling sits in the same sentence.
+  EXPECT_EQ(surfaceOf("pontificate", "he would pontificate; his pontifications were tedious"), "pontificate");
+}
+
+TEST_F(FlashcardDeckTest, SurfaceFormRecoversTheInflectedPrintedWord) {
+  EXPECT_EQ(surfaceOf("pontificate", "Goddard's pontifications were"), "pontifications");
+  // Trailing punctuation belongs to the sentence, not the word.
+  EXPECT_EQ(surfaceOf("pontificate", "and so, pontifications, endlessly"), "pontifications");
+  // The headword inside a longer printed word is not an occurrence of it: the mark covers the
+  // word the page shows, not its first half.
+  EXPECT_EQ(surfaceOf("administer", "\"Gleaning is performed, not administered,\" Scythe Goddard"), "administered");
+  EXPECT_EQ(surfaceOf("helix", "a nasty vermiform creature and some helices"), "helices");
+}
+
+TEST_F(FlashcardDeckTest, SurfaceFormRejectsWhatIsMerelySimilar) {
+  // Four shared letters out of seven is a coincidence, not an inflection.
+  EXPECT_EQ(surfaceOf("pontificate", "he fell from the pontoon"), "");
+  // Short words cannot clear the minimum prefix — "ox" must not drag in "oxen".
+  EXPECT_EQ(surfaceOf("ox", "the oxen were slow"), "");
+  // Nothing in common at all.
+  EXPECT_EQ(surfaceOf("pontificate", "a stone fracturing and shooting forth bolts"), "");
+}
+
+TEST_F(FlashcardDeckTest, SurfaceFormIsExactOnlyForCjk) {
+  const std::string sentence = "\xE4\xBB\x96\xE6\x98\xAF\xE4\xB8\xAD\xE5\x9B\xBD\xE4\xBA\xBA";  // 他是中国人
+  EXPECT_EQ(surfaceOf("\xE4\xB8\xAD\xE5\x9B\xBD\xE4\xBA\xBA", sentence), "\xE4\xB8\xAD\xE5\x9B\xBD\xE4\xBA\xBA");
+  // A CJK headword absent from the excerpt gets no prefix-family fallback: 中国 must not be
+  // recovered from a sentence that only contains 中文.
+  const std::string other = "\xE4\xBB\x96\xE5\xAD\xA6\xE4\xB8\xAD\xE6\x96\x87";  // 他学中文
+  EXPECT_EQ(surfaceOf("\xE4\xB8\xAD\xE5\x9B\xBD", other), "");
+}
+
+TEST_F(FlashcardDeckTest, SurfaceFormHandlesEmptyInput) {
+  EXPECT_EQ(surfaceOf("pontificate", ""), "");
+  EXPECT_EQ(surfaceOf("", "Goddard's pontifications were"), "");
+}
+
 }  // namespace

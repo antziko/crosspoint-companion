@@ -117,6 +117,7 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
                           CrossPointSettings::IMAGE_RENDERING_COUNT - 1),
     persisted::enumerated("quoteHighlightStyle", &CrossPointSettings::quoteHighlightStyle,
                           CrossPointSettings::QUOTE_STYLE_COUNT - 1),
+    persisted::toggle("lookupUnderline", &CrossPointSettings::lookupUnderline),
     persisted::toggle("screenInverted", &CrossPointSettings::screenInverted),
 
     // --- Reader: dictionary ---

@@ -325,6 +325,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t extraParagraphSpacing = 1;
   uint8_t textAntiAliasing = TEXT_AA_ANTIALIASED;       // TEXT_AA enum (0=Off,1=Antialiased,2=Sharp)
   uint8_t quoteHighlightStyle = QUOTE_STYLE_HIGHLIGHT;  // QUOTE_STYLE enum
+  // Underline words looked up in the dictionary, on the page they were looked up on.
+  uint8_t lookupUnderline = 1;
   // Short power button click behaviour
   uint8_t shortPwrBtn = IGNORE;
   // EPUB reading orientation settings

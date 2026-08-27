@@ -57,7 +57,8 @@
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
 #include "util/FlashcardDeck.h"
-#include "util/QuoteHighlight.h"
+#include "util/LookupMarks.h"
+#include "util/PageMarks.h"
 #include "util/ScreenshotUtil.h"
 
 namespace {
@@ -332,6 +333,7 @@ void EpubReaderActivity::onEnter() {
   RECENT_BOOKS.addBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), epub->getThumbBmpPath());
 
   BOOKMARKS.loadForBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), "epub");
+  reloadLookupMarks();
 
   readingStats = BookReadingStats::load(epub->getCachePath());
   sessionStartMs = millis();
@@ -360,6 +362,9 @@ void EpubReaderActivity::onExit() {
   // The lazy-image extractor holds a raw pointer to this activity's epub; drop it
   // before the activity (and the shared_ptr) goes away (#2611).
   ImageBlock::setExtractor(nullptr, nullptr);
+
+  // The looked-up-word index is per book: hand its 2 KB back for the home screen.
+  LookupMarks::getInstance().clear();
 
   if (epub && sessionStartMs > 0) {
     // Account the page being viewed at exit: fold its final visible segment into the page's
@@ -441,6 +446,52 @@ void EpubReaderActivity::onResume() {
   if (sessionStartMs == 0 || sessionPauseStartMs == 0) return;
   sessionStartMs += millis() - sessionPauseStartMs;
   sessionPauseStartMs = 0UL;
+}
+
+uint32_t EpubReaderActivity::currentChapterHash() {
+  if (chapterHashSpine == currentSpineIndex) return chapterHash;
+  chapterHashSpine = currentSpineIndex;
+  // A chapter with no TOC entry stores an empty title on its cards, which hashes to the empty
+  // hash — not zero.
+  chapterHash = LookupMarks::hashChapter(nullptr, 0);
+  if (epub) {
+    const int tocIndex = epub->getTocIndexForSpineIndex(currentSpineIndex);
+    if (tocIndex != -1) {
+      // The live title, hashed raw: the deck stores it sanitized ('|' and control bytes turned
+      // into spaces), and the hash skips punctuation and spaces alike, so the two agree without
+      // this having to reproduce the sanitize. A title long enough to be cut by the chapter cap
+      // loses its " X/Y" token first, which leaves the card unanchored rather than mismatched.
+      const std::string title = epub->getTocItem(tocIndex).title;
+      chapterHash = LookupMarks::hashChapter(title.c_str(), title.size());
+    }
+  }
+  return chapterHash;
+}
+
+void EpubReaderActivity::reloadLookupMarks() const {
+  LookupMarks::getInstance().clear();
+  if (!epub || !SETTINGS.lookupUnderline) return;
+  int added = 0;
+  // Captureless lambda -> plain function pointer: no std::function, nothing allocated.
+  FlashcardDeck::forEachCardAnchor(
+      epub->getCachePath(),
+      [](void* ctx, const char* word, int wordLen, const char* title, int titleLen, int page, int pageCount,
+         const char* excerpt, int excerptLen) {
+        // Mark the word the PAGE prints, which a "Did you mean?" card does not carry as its
+        // headword — findSurfaceForm recovers it from the card's own excerpt.
+        int surfaceLen = 0;
+        const char* surface = FlashcardDeck::findSurfaceForm(word, wordLen, excerpt, excerptLen, &surfaceLen);
+        if (!surface || surfaceLen <= 0) {
+          surface = word;
+          surfaceLen = wordLen;
+        }
+        if (LookupMarks::getInstance().add(surface, surfaceLen, title, titleLen, page, pageCount)) {
+          (*static_cast<int*>(ctx))++;
+        }
+        return true;
+      },
+      &added);
+  LOG_DBG("EPUB", "Lookup marks: %d anchored", added);
 }
 
 void EpubReaderActivity::commitReadingTime(uint32_t minDeltaSecs) {
@@ -1210,6 +1261,9 @@ void EpubReaderActivity::openWordSelect(bool framebufferContainsPage) {
   }
   startActivityForResult(std::move(wordSelect), [this](const ActivityResult&) {
     ignoreBackUntilRelease = true;
+    // A lookup enrolls a flashcard, which is what anchors the page underline — so the word
+    // just looked up is underlined on the repaint below.
+    reloadLookupMarks();
     requestUpdate();
   });
 }
@@ -1640,6 +1694,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       }
       startActivityForResult(std::move(cards), [this](const ActivityResult&) {
         ignoreBackUntilRelease = true;
+        reloadLookupMarks();  // cards can be deleted here, dropping their page underline
         requestUpdate();
       });
       break;
@@ -3023,12 +3078,12 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   // is solid black in the BW frame and needs no grey plane. The page key is the one the quote
   // was anchored with, so a chapter that has re-paginated since simply fails the match and
   // draws nothing.
-  const auto drawQuoteHighlights = [&]() {
+  const auto drawPageMarks = [&]() {
     if (!section || section->pageCount <= 0) return;
-    QuoteHighlight::drawForPage(renderer, *page, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop,
-                                static_cast<uint16_t>(currentSpineIndex),
-                                static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount),
-                                section->pageCount);
+    PageMarks::drawForPage(renderer, *page, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop,
+                           static_cast<uint16_t>(currentSpineIndex),
+                           static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount),
+                           section->pageCount, currentChapterHash(), section->currentPage + 1);
   };
 
   // No automatic ghost-clear flash on image page turns — the power-button manual
@@ -3039,14 +3094,14 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   // wipes the framebuffer; the normal render/grayscale flow below then repaints for real.
   if (pageHasImagesNeedingDecode) {
     page->renderWithImagePlaceholders(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);
-    drawQuoteHighlights();
+    drawPageMarks();
     renderStatusBar();
     renderer.displayBuffer(HalDisplay::FAST_REFRESH);
     renderer.clearScreen();
   }
 
   page->render(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);
-  drawQuoteHighlights();
+  drawPageMarks();
   renderStatusBar();
   const auto tBwRender = millis();
 
@@ -3078,7 +3133,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
       // Re-render page content to restore images into the blanked area
       // Status bar is not re-rendered here to avoid reading stale dynamic values (e.g. battery %)
       page->render(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);
-      drawQuoteHighlights();
+      drawPageMarks();
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
     } else {
       // No image bounding box (e.g. full-page image): still use FAST_REFRESH, not

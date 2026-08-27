@@ -344,6 +344,206 @@ bool FlashcardDeck::forEachLine(const std::string& path, bool (*fn)(void* ctx, c
   return true;
 }
 
+bool FlashcardDeck::parseChapterPage(const char* chapter, const int len, int* outTitleLen, int* outPage,
+                                     int* outPageCount) {
+  if (!chapter || len <= 0) return false;
+
+  // The token is the last space-delimited run of digits and '/'.
+  int sp = -1;
+  for (int i = len - 1; i >= 0; --i) {
+    if (chapter[i] == ' ') {
+      sp = i;
+      break;
+    }
+  }
+  if (sp < 0 || sp + 1 >= len) return false;
+
+  bool slash = false;
+  for (int i = sp + 1; i < len; ++i) {
+    if (chapter[i] == '/') {
+      slash = true;
+    } else if (chapter[i] < '0' || chapter[i] > '9') {
+      return false;
+    }
+  }
+  if (!slash) return false;
+
+  int page = 0, pageCount = 0;
+  bool afterSlash = false;
+  for (int i = sp + 1; i < len; ++i) {
+    if (chapter[i] == '/') {
+      afterSlash = true;
+      continue;
+    }
+    const int d = chapter[i] - '0';
+    if (afterSlash)
+      pageCount = pageCount * 10 + d;
+    else
+      page = page * 10 + d;
+  }
+
+  if (outTitleLen) *outTitleLen = sp;
+  if (outPage) *outPage = page;
+  if (outPageCount) *outPageCount = pageCount;
+  return true;
+}
+
+namespace {
+
+// One byte of a word under the mark-hash normalisation: ASCII folded to lower case, ASCII
+// punctuation and spaces reported as "not part of the word". Non-ASCII passes through, so an
+// accented or CJK byte keeps its identity.
+bool wordByte(char c, unsigned char& out) {
+  auto b = static_cast<unsigned char>(c);
+  if (b >= 0x80) {
+    out = b;
+    return true;
+  }
+  if (b >= 'A' && b <= 'Z') b = static_cast<unsigned char>(b + ('a' - 'A'));
+  if ((b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')) {
+    out = b;
+    return true;
+  }
+  return false;
+}
+
+// Length of the shared prefix of two words, skipping bytes that carry no identity, plus each
+// word's normalised length. Both walks advance independently, so "pontificate" and
+// "pontifications," agree on "pontificat" despite the comma.
+int commonPrefixLen(const char* a, int alen, const char* b, int blen, int* outNormA, int* outNormB) {
+  int i = 0, j = 0, shared = 0;
+  bool diverged = false;
+  int normA = 0, normB = 0;
+  while (i < alen || j < blen) {
+    unsigned char ca = 0, cb = 0;
+    while (i < alen && !wordByte(a[i], ca)) i++;
+    while (j < blen && !wordByte(b[j], cb)) j++;
+    const bool haveA = i < alen, haveB = j < blen;
+    if (haveA) normA++;
+    if (haveB) normB++;
+    if (haveA && haveB && !diverged && ca == cb)
+      shared++;
+    else
+      diverged = true;
+    if (haveA) i++;
+    if (haveB) j++;
+  }
+  if (outNormA) *outNormA = normA;
+  if (outNormB) *outNormB = normB;
+  return shared;
+}
+
+bool hasCjk(const char* s, int len) {
+  for (int i = 0; i + 2 < len; i++) {
+    const auto b = static_cast<unsigned char>(s[i]);
+    // CJK, Kana, Hangul and fullwidth forms are all 3-byte sequences starting at 0xE3..0xEF,
+    // which is as much as this needs: it only decides whether the prefix rule may run.
+    if (b >= 0xE3 && b <= 0xEF) return true;
+  }
+  return false;
+}
+
+// Case-insensitive search for `needle` in `hay`. With `requireBoundary`, a hit that continues
+// into a longer word does not count: "administer" inside "administered" has to fall through to
+// the prefix rule, which returns the whole printed word instead of its first half. CJK is
+// written without spaces, so it passes false — there are no boundaries to test.
+const char* findNoCase(const char* hay, int haylen, const char* needle, int needleLen, bool requireBoundary) {
+  if (needleLen <= 0 || needleLen > haylen) return nullptr;
+  unsigned char tmp = 0;
+  for (int i = 0; i + needleLen <= haylen; i++) {
+    if (requireBoundary) {
+      if (i > 0 && wordByte(hay[i - 1], tmp)) continue;                           // starts mid-word
+      if (i + needleLen < haylen && wordByte(hay[i + needleLen], tmp)) continue;  // ends mid-word
+    }
+    int k = 0;
+    for (; k < needleLen; k++) {
+      unsigned char x = static_cast<unsigned char>(hay[i + k]);
+      unsigned char y = static_cast<unsigned char>(needle[k]);
+      if (x >= 'A' && x <= 'Z') x = static_cast<unsigned char>(x + ('a' - 'A'));
+      if (y >= 'A' && y <= 'Z') y = static_cast<unsigned char>(y + ('a' - 'A'));
+      if (x != y) break;
+    }
+    if (k == needleLen) return hay + i;
+  }
+  return nullptr;
+}
+
+struct AnchorCtx {
+  bool (*fn)(void*, const char*, int, const char*, int, int, int, const char*, int);
+  void* ctx;
+};
+
+bool anchorLine(void* vc, const char* line, int len) {
+  auto* c = static_cast<AnchorCtx*>(vc);
+  const Parsed p = parseLine(line, len);
+  int titleLen = p.chapterLen;
+  int page = 0, pageCount = 0;
+  FlashcardDeck::parseChapterPage(p.chapter, p.chapterLen, &titleLen, &page, &pageCount);
+  return c->fn(c->ctx, line, p.wordLen, p.chapter, titleLen, page, pageCount, p.excerpt, p.excerptLen);
+}
+
+}  // namespace
+
+const char* FlashcardDeck::findSurfaceForm(const char* word, const int wordLen, const char* excerpt,
+                                           const int excerptLen, int* outLen) {
+  if (!word || wordLen <= 0 || !excerpt || excerptLen <= 0) return nullptr;
+
+  const bool cjk = hasCjk(word, wordLen);
+
+  // The ordinary card: the headword is printed on the page verbatim.
+  if (const char* hit = findNoCase(excerpt, excerptLen, word, wordLen, /*requireBoundary=*/!cjk)) {
+    if (outLen) *outLen = wordLen;
+    return hit;
+  }
+
+  // CJK does not inflect, and a CJK excerpt has no spaces to split on — an exact miss is a miss.
+  if (cjk) return nullptr;
+
+  const char* best = nullptr;
+  int bestLen = 0, bestShared = 0;
+  int i = 0;
+  while (i < excerptLen) {
+    while (i < excerptLen && excerpt[i] == ' ') i++;
+    const int start = i;
+    while (i < excerptLen && excerpt[i] != ' ') i++;
+    int tokLen = i - start;
+    if (tokLen <= 0) continue;
+
+    // Trim edge punctuation so the mark covers the word, not the comma after it.
+    int s = start, e = start + tokLen;
+    unsigned char tmp = 0;
+    while (s < e && !wordByte(excerpt[s], tmp)) s++;
+    while (e > s && !wordByte(excerpt[e - 1], tmp)) e--;
+    tokLen = e - s;
+    if (tokLen <= 0) continue;
+
+    int normWord = 0, normTok = 0;
+    const int shared = commonPrefixLen(word, wordLen, excerpt + s, tokLen, &normWord, &normTok);
+    const int shorter = normWord < normTok ? normWord : normTok;
+    if (shared < kSurfaceMinPrefix || shorter <= 0) continue;
+    if (shared * 10 < shorter * 7) continue;  // < 70% of the shorter word
+    if (shared > bestShared) {
+      bestShared = shared;
+      best = excerpt + s;
+      bestLen = tokLen;
+    }
+  }
+
+  if (!best) return nullptr;
+  if (outLen) *outLen = bestLen;
+  return best;
+}
+
+bool FlashcardDeck::forEachCardAnchor(const std::string& cachePath,
+                                      bool (*fn)(void* ctx, const char* word, int wordLen, const char* title,
+                                                 int titleLen, int page, int pageCount, const char* excerpt,
+                                                 int excerptLen),
+                                      void* ctx) {
+  if (!fn) return false;
+  AnchorCtx c{fn, ctx};
+  return forEachLine(filePath(cachePath), anchorLine, &c);
+}
+
 // ---------------------------------------------------------------------------
 // rewriteDeck (shared atomic temp-file -> rename scaffold)
 // ---------------------------------------------------------------------------
