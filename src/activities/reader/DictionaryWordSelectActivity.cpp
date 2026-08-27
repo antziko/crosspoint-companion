@@ -498,9 +498,9 @@ void DictionaryWordSelectActivity::mergeHyphenatedWords(std::vector<WordSelectNa
 // Page-local sentence the current selection sits in, for the flashcard front
 // face. Walks outward from the selected word (or the anchor..cursor span for a
 // phrase) to the nearest sentence-ending token or page edge, bounded by word
-// count, then joins via the existing buildPhrase primitive. Page-clipped
-// sentences are accepted (the navigator only holds the current page). Returns
-// "" if there is no selection.
+// count, then windows that span around the selection to fit the deck's excerpt
+// cap. Page-clipped sentences are accepted (the navigator only holds the current
+// page). Returns "" if there is no selection.
 std::string DictionaryWordSelectActivity::buildLookupExcerpt() const {
   const int sel = navigator.getCurrentFlatIndex();
   if (sel < 0) return "";
@@ -514,23 +514,30 @@ std::string DictionaryWordSelectActivity::buildLookupExcerpt() const {
   }
 
   static constexpr int MAX_EXCERPT_WORDS = 40;  // bounds the joined string length
+  // Sentence bounds around the selection. Each side is scanned independently: sharing one
+  // budget let the left side spend all of it and starve the right, which is how the
+  // looked-up word ended up outside its own excerpt.
+  int sLo = lo, sHi = hi;
   // Extend left until the previous token ends a sentence (or page start).
-  while (lo > 0 && (hi - lo + 1) < MAX_EXCERPT_WORDS) {
-    const auto* prev = navigator.getWordAt(lo - 1);
+  while (sLo > 0 && (lo - sLo) < MAX_EXCERPT_WORDS) {
+    const auto* prev = navigator.getWordAt(sLo - 1);
     if (!prev || endsSentence(navigator.getDisplay(*prev))) break;
-    lo--;
+    sLo--;
   }
   // Extend right until the current token ends a sentence (or page end).
-  while ((hi - lo + 1) < MAX_EXCERPT_WORDS) {
-    const auto* cur = navigator.getWordAt(hi);
+  while ((sHi - hi) < MAX_EXCERPT_WORDS) {
+    const auto* cur = navigator.getWordAt(sHi);
     if (!cur || endsSentence(navigator.getDisplay(*cur))) break;
-    if (!navigator.getWordAt(hi + 1)) break;  // page edge
-    hi++;
+    if (!navigator.getWordAt(sHi + 1)) break;  // page edge
+    sHi++;
   }
 
-  std::string excerpt = navigator.buildPhrase(lo, hi);
-  // Trim to the deck's cap on a word boundary where possible (the deck also
-  // hard-caps, but this avoids storing a mid-word fragment).
+  // Window the sentence around the selection rather than trimming its tail: the card face
+  // underlines the word by finding it in the excerpt, so the word must survive the cap.
+  std::string excerpt = navigator.buildPhraseWindow(sLo, sHi, lo, hi, FlashcardDeck::EXCERPT_MAX, MAX_EXCERPT_WORDS);
+  // Backstop for the one case the window cannot fit: a multi-select phrase whose own text
+  // is over the cap. Trim on a word boundary where possible (the deck also hard-caps, but
+  // this avoids storing a mid-word fragment).
   if (static_cast<int>(excerpt.size()) > FlashcardDeck::EXCERPT_MAX) {
     excerpt.resize(FlashcardDeck::EXCERPT_MAX);
     const size_t sp = excerpt.find_last_of(' ');

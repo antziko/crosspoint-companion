@@ -163,6 +163,52 @@ std::string WordSelectNavigator::buildPhrase(int fromIdx, int toIdx) const {
   return phrase;
 }
 
+std::string WordSelectNavigator::buildPhraseWindow(int lo, int hi, int keepLo, int keepHi, int maxBytes,
+                                                   int maxWords) const {
+  const int last = static_cast<int>(words.size()) - 1;
+  if (last < 0) return "";
+  const int from = std::clamp(std::min(lo, hi), 0, last);
+  const int to = std::clamp(std::max(lo, hi), from, last);
+  const int keepFrom = std::clamp(std::min(keepLo, keepHi), from, to);
+  const int keepTo = std::clamp(std::max(keepLo, keepHi), keepFrom, to);
+
+  // Upper bound on a word's contribution to the join: its text plus the separator that
+  // may precede it.
+  auto cost = [this](int idx) {
+    const auto* w = getWordAt(idx);
+    return w ? static_cast<int>(w->lookupLen) + 1 : 0;
+  };
+
+  int wLo = keepFrom, wHi = keepTo;
+  int used = 0;
+  for (int i = wLo; i <= wHi; i++) used += cost(i);
+  int taken = wHi - wLo + 1;
+  int tookLeft = 0, tookRight = 0;
+
+  // Grow outward, alternating so the kept span stays near the middle. Neither candidate
+  // ever gets cheaper, so a side that no longer fits is closed for good -- but only that
+  // side; the other may still have room.
+  bool leftOpen = true, rightOpen = true;
+  while ((leftOpen || rightOpen) && taken < maxWords) {
+    const bool canLeft = leftOpen && wLo > from && used + cost(wLo - 1) <= maxBytes;
+    const bool canRight = rightOpen && wHi < to && used + cost(wHi + 1) <= maxBytes;
+    if (!canLeft) leftOpen = false;
+    if (!canRight) rightOpen = false;
+    if (!canLeft && !canRight) break;
+
+    if (canLeft && (!canRight || tookLeft <= tookRight)) {
+      used += cost(--wLo);
+      tookLeft++;
+    } else {
+      used += cost(++wHi);
+      tookRight++;
+    }
+    taken++;
+  }
+
+  return buildPhrase(wLo, wHi);
+}
+
 bool WordSelectNavigator::isStopwordAt(int flatIdx) const {
   const WordInfo& w = words[flatIdx];
   return DictStopwords::isStopword(textPool.data() + w.lookupOffset, w.lookupLen);

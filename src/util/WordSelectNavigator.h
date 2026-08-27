@@ -168,6 +168,19 @@ class WordSelectNavigator {
   // Returns raw joined string; caller should apply Dictionary::cleanWord() if needed.
   std::string buildPhrase(int fromIdx, int toIdx) const;
 
+  // Join words within [lo, hi] while ALWAYS keeping [keepLo, keepHi], growing outward one
+  // word at a time (the side that has taken fewer words goes first) for as long as the
+  // joined text stays within maxBytes and the window within maxWords words.
+  //
+  // The flashcard excerpt needs this: trimming a too-long sentence from either end drops
+  // the looked-up word itself, and the card face underlines the word by searching for it
+  // in the excerpt, so a dropped word is an un-underlined card.
+  //
+  // The budget counts lookupLen + 1 per word, which is an upper bound on what the join
+  // costs (it over-counts the separator CJK does not take, and a hyphenated second half
+  // buildPhrase skips), so the result never exceeds maxBytes.
+  std::string buildPhraseWindow(int lo, int hi, int keepLo, int keepHi, int maxBytes, int maxWords) const;
+
   // --- Multi-select support (shared by WordSelect and Definition activities) ---
 
   enum class MultiSelectAction { None, Consumed, PhraseReady, ExitedMultiSelect, EnteredMultiSelect };

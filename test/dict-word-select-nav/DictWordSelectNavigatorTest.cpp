@@ -853,6 +853,66 @@ static void testBuildPhraseCjkJoinsWithoutSpaces() {
   CHECK(fullwidth.buildPhrase(0, 1) == "\xEF\xBC\x91\xE6\x9C\x88", "fullwidth digit + Han join with no space (１月)");
 }
 
+// The flashcard excerpt is capped, and the card face underlines the word by finding it in
+// the excerpt — so a sentence longer than the cap must be windowed AROUND the selection.
+// Trimming either end drops the looked-up word itself (a word late in a long sentence used
+// to produce a card whose excerpt stopped just before it, with nothing underlined and no
+// cloze blank).
+static void testBuildPhraseWindowKeepsSelection() {
+  std::printf("testBuildPhraseWindowKeepsSelection\n");
+
+  // 14 five-letter words: each costs 6 budget bytes (text + separator), so a 40-byte
+  // budget holds the selected word plus five neighbours.
+  WordSelectNavigator nav = makeSingleRowFixture({"alpha", "bravo", "chess", "delta", "eagle", "forge", "gamma",
+                                                  "house", "india", "jolly", "kappa", "lemon", "mango", "novel"});
+  constexpr int kMaxBytes = 40;
+
+  // Selection in the middle: grows alternately, so the word keeps context on both sides.
+  const std::string mid = nav.buildPhraseWindow(0, 13, 6, 6, kMaxBytes, 40);
+  CHECK(mid == "delta eagle forge gamma house india", "middle selection is windowed with context on both sides");
+  CHECK(static_cast<int>(mid.size()) <= kMaxBytes, "middle window respects the byte budget");
+
+  // Selection at the end of the sentence: the whole budget goes to the run-up, and the
+  // word survives (the case the photos showed being cut off).
+  const std::string end = nav.buildPhraseWindow(0, 13, 13, 13, kMaxBytes, 40);
+  CHECK(end == "india jolly kappa lemon mango novel", "trailing selection keeps the word and grows leftward");
+
+  // Selection at the start: nothing to the left, so the budget goes rightward.
+  const std::string start = nav.buildPhraseWindow(0, 13, 0, 0, kMaxBytes, 40);
+  CHECK(start == "alpha bravo chess delta eagle forge", "leading selection keeps the word and grows rightward");
+
+  // A multi-select phrase longer than the budget is returned whole — the caller trims it,
+  // and there is nothing to window around.
+  const std::string over = nav.buildPhraseWindow(0, 13, 0, 5, 10, 40);
+  CHECK(over == nav.buildPhrase(0, 5), "an over-budget keep span is returned unchanged");
+
+  // CJK: the word cap binds long before the byte cap (one token per character), and the
+  // join stays space-free.
+  WordSelectNavigator han =
+      makeSingleRowFixture({"\xE4\xB8\x80", "\xE4\xBA\x8C", "\xE4\xB8\x89", "\xE5\x9B\x9B", "\xE4\xBA\x94",
+                            "\xE5\x85\xAD", "\xE4\xB8\x83", "\xE5\x85\xAB", "\xE4\xB9\x9D"});  // 一二三四五六七八九
+  const std::string cjk = han.buildPhraseWindow(0, 8, 4, 4, 200, 5);
+  CHECK(cjk == "\xE4\xB8\x89\xE5\x9B\x9B\xE4\xBA\x94\xE5\x85\xAD\xE4\xB8\x83",
+        "CJK window honours the word cap (三四五六七)");
+  CHECK(cjk.find(' ') == std::string::npos, "CJK window joins without spaces");
+}
+
+// A hyphenated pair inside the window is still emitted once, as its merged lookup text:
+// the window only picks the range, buildPhrase still owns the join.
+static void testBuildPhraseWindowHyphenatedPairNotDuplicated() {
+  std::printf("testBuildPhraseWindowHyphenatedPairNotDuplicated\n");
+
+  WordSelectNavigator nav = makeHyphenatedFixture();  // wordA wordB under-/stand wordD wordE
+  const std::string phrase = nav.buildPhraseWindow(0, 5, 4, 4, 200, 40);
+  CHECK(phrase == "wordA wordB understand wordD wordE", "pair inside the window appears once, merged");
+
+  // The budget counts the skipped second half too, so it is an upper bound: the result may
+  // come in under the cap, never over it.
+  const std::string tight = nav.buildPhraseWindow(0, 5, 4, 4, 24, 40);
+  CHECK(tight.size() <= 24, "tight budget is never exceeded");
+  CHECK(tight.find("wordD") != std::string::npos, "the selected word survives a tight budget");
+}
+
 // Run Tests A–E against any two-row fixture with the same layout as
 // makeHyphenatedFixture. firstHalf / secondHalf are the display strings of
 // the two pair members; the surrounding words are always wordA/wordB/wordD/wordE.
@@ -1408,6 +1468,8 @@ int main() {
   testRenderHighlightMultiSelectHyphenatedSecondHalf();
   testBuildPhraseHyphenatedPairNotDuplicated();
   testBuildPhraseCjkJoinsWithoutSpaces();
+  testBuildPhraseWindowKeepsSelection();
+  testBuildPhraseWindowHyphenatedPairNotDuplicated();
   testHyphenBothEndsNotPaired();
   testMergeLookupBothHyphens();
   testGoalColumnSurvivesShortRow();
