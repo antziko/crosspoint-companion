@@ -407,24 +407,26 @@ void DictionaryDefinitionActivity::wrapText() {
   // the two absolute dimensions come from getScreenWidth()/getScreenHeight(), which read the
   // runtime panel. Identical code path on both devices.
   //
-  // A constant, deliberately NOT SETTINGS.getReaderScreenMargin(): a definition is dense
-  // reference text read in short bursts, so screen width is worth more here than the breathing
-  // room a book page wants, and a reader configured for 40px margins should not squeeze it.
+  // The book's own margin, so a definition opened over a page keeps that page's gutters
+  // instead of running out to the bezel beside it. getReaderScreenMargin() resolves the
+  // per-book override before the global setting, which is what makes it the margin of the
+  // book actually being read. Its minimum is 5, so a default configuration lays out exactly
+  // as the fixed inset this replaced did; only a reader with widened margins sees a change.
   int bezelTop, bezelRight, bezelBottom, bezelLeft;
   renderer.getOrientedViewableTRBL(&bezelTop, &bezelRight, &bezelBottom, &bezelLeft);
-  constexpr int kScreenMargin = 5;
+  const int screenMargin = SETTINGS.getReaderScreenMargin();
 
   // The landscape hint gutters stay inside these, so the side button hints are never overrun.
-  contentX = bezelLeft + kScreenMargin + (isLandscapeCw ? hintGutterWidth : 0);
+  contentX = bezelLeft + screenMargin + (isLandscapeCw ? hintGutterWidth : 0);
   leftPadding = contentX;
-  rightPadding = bezelRight + kScreenMargin + (isLandscapeCcw ? hintGutterWidth : 0);
-  contentTop = hintGutterHeight + bezelTop + kScreenMargin + metrics.topPadding;
+  rightPadding = bezelRight + screenMargin + (isLandscapeCcw ? hintGutterWidth : 0);
+  contentTop = hintGutterHeight + bezelTop + screenMargin + metrics.topPadding;
   bodyStartY = contentTop + metrics.headerHeight + metrics.verticalSpacing;
 
   // Button hints are theme-owned chrome drawn at the panel edge on every screen in the app, so
   // they are not inset here; the margin instead keeps the last body line off them and off the
   // bottom bezel.
-  const int bottomArea = metrics.buttonHintsHeight + metrics.verticalSpacing + bezelBottom + kScreenMargin;
+  const int bottomArea = metrics.buttonHintsHeight + metrics.verticalSpacing + bezelBottom + screenMargin;
 
   linesPerPage = (renderer.getScreenHeight() - bodyStartY - bottomArea) / getLineHeight();
   if (linesPerPage < 1) linesPerPage = 1;
@@ -769,14 +771,14 @@ int DictionaryDefinitionActivity::getMixedWidth(std::vector<IpaTextSpan>& ipaRun
   // Mirrors DictLayout::Wrapper::getMixedWidth: text without IPA is one non-IPA run, so
   // measure it directly rather than copying it onto a heap that has a few KB left.
   if (!text || !text[0]) return 0;
-  if (!textHasIpa(text)) return renderer.getTextWidth(defFontId_, text, style);
+  if (!textHasIpa(text)) return renderer.getTextAdvanceX(defFontId_, text, style);
   ipaRuns.clear();
   if (!splitIpaRuns(text, ipaRuns)) {
     collectOom_ = true;
     return 0;
   }
   return std::accumulate(ipaRuns.begin(), ipaRuns.end(), 0, [&](int sum, const IpaTextSpan& run) {
-    return sum + renderer.getTextWidth(run.isIpa ? ipaFontId() : defFontId_, run.text.c_str(), style);
+    return sum + renderer.getTextAdvanceX(run.isIpa ? ipaFontId() : defFontId_, run.text.c_str(), style);
   });
 }
 
@@ -784,19 +786,27 @@ int DictionaryDefinitionActivity::getMixedWidth(std::vector<IpaTextSpan>& ipaRun
 // HTML path: run DictHtmlRenderer, lay out spans into LayoutLines
 // ---------------------------------------------------------------------------
 
+// Pen advance, NOT getTextWidth's ink extent -- renderBody() advances x by getTextAdvanceX, so
+// measuring anything else lets the drawn line outrun the width it was wrapped to. Ink extent
+// stops at the last inked pixel and drops the final glyph's right side bearing; the wrapper
+// measures token by token, so a line accumulates one dropped bearing per token and its last
+// word ends up hard against the right bezel. That also retires the single-space special case
+// this used to carry: a space has no ink at all (getTextWidth returns 0 for " "), while its
+// advance is exactly the gap the draw will step over.
 int DictionaryDefinitionActivity::measureWidthAdapter(void* ctx, const char* text, EpdFontFamily::Style style,
                                                       bool isIpa) {
   auto* self = static_cast<DictionaryDefinitionActivity*>(ctx);
   const int fontId = isIpa ? self->ipaFontId() : self->defFontId_;
-  if (!isIpa && text[0] == ' ' && text[1] == '\0') return self->renderer.getSpaceWidth(fontId, style);
-  return self->renderer.getTextWidth(fontId, text, style);
+  return self->renderer.getTextAdvanceX(fontId, text, style);
 }
 
 void DictionaryDefinitionActivity::wrapHtml() {
   const int maxWidth = renderer.getScreenWidth() - leftPadding - rightPadding;
-  // Indent step: 3 spaces worth of pixels at regular weight.
-  const int indentStep = renderer.getTextWidth(defFontId_, "   ");
-  const int bulletWidth = renderer.getTextWidth(defFontId_, kBullet);
+  // Indent step: 3 spaces worth of pixels at regular weight. Advance, not ink extent, for the
+  // reason measureWidthAdapter gives -- and spaces have no ink at all, so the ink form measured
+  // two space advances instead of three.
+  const int indentStep = renderer.getTextAdvanceX(defFontId_, "   ", EpdFontFamily::REGULAR);
+  const int bulletWidth = renderer.getTextAdvanceX(defFontId_, kBullet, EpdFontFamily::REGULAR);
 
   // Fully streamed: the renderer delivers spans one at a time to the Wrapper, the
   // Wrapper emits completed lines to the page collector, and the collector keeps
@@ -969,7 +979,7 @@ void DictionaryDefinitionActivity::extractWordsFromLayout() {
     return;
   }
 
-  const int indentStep = renderer.getTextWidth(defFontId_, "   ");
+  const int indentStep = renderer.getTextAdvanceX(defFontId_, "   ", EpdFontFamily::REGULAR);
 
   std::vector<WordSelectNavigator::WordInfo> words;
   // Sized from the real page shape rather than a flat 64, because reaching 128 entries by
@@ -991,7 +1001,7 @@ void DictionaryDefinitionActivity::extractWordsFromLayout() {
     int x = leftPadding + line.indentLevel * indentStep;
 
     if (line.isListItem) {
-      x += renderer.getTextWidth(defFontId_, kBullet);
+      x += renderer.getTextAdvanceX(defFontId_, kBullet, EpdFontFamily::REGULAR);
     }
 
     for (const auto& seg : line.segments) {
@@ -1487,7 +1497,7 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   }
 
   const auto metrics = UITheme::getInstance().getMetrics();
-  const int indentStep = renderer.getTextWidth(defFontId_, "   ");
+  const int indentStep = renderer.getTextAdvanceX(defFontId_, "   ", EpdFontFamily::REGULAR);
 
   // Header
   // Width spans between the two insets rather than the full screen, so the header band carries
@@ -1541,7 +1551,7 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
 
       if (line.isListItem) {
         renderer.drawText(defFontId_, x, y, kBullet);
-        x += renderer.getTextWidth(defFontId_, kBullet);
+        x += renderer.getTextAdvanceX(defFontId_, kBullet, EpdFontFamily::REGULAR);
       }
 
       for (const auto& seg : line.segments) {
