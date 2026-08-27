@@ -12,6 +12,10 @@ class ButtonNavigator final {
   const uint16_t continuousStartMs;
   const uint16_t continuousIntervalMs;
   uint32_t lastContinuousNavTime = 0;
+  // Buttons whose current hold started while THIS navigator was alive, one bit per
+  // MappedInputManager::Button. Continuous navigation may only run for those -- see
+  // onContinuous() for the hold-carried-in case this exists to stop.
+  uint16_t continuousArmed_ = 0;
   static const MappedInputManager* mappedInput;
 
   [[nodiscard]] bool shouldNavigateContinuously() const;

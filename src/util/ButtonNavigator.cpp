@@ -53,12 +53,34 @@ void ButtonNavigator::onRelease(const Buttons& buttons, const Callback& callback
   }
 }
 
+// Auto-repeat, but only for a hold this navigator saw begin.
+//
+// An activity opened BY a long press is entered with that button still down -- the reader's
+// hold-right = KOReader sync is the case that surfaced it. Its first frame would otherwise see
+// isPressed() true, getHeldTime() already past continuousStartMs (700ms of hold against a
+// 500ms threshold) and lastContinuousNavTime still 0, so the repeat fired immediately and
+// moved a selection the user never touched -- then again every interval until they let go.
+//
+// The release-suppression path (MappedInputManager::wasLongPressed -> consumeSuppressedRelease)
+// cannot cover this: it guards the release EDGE, and this fires from the held LEVEL well before
+// the button comes up.
+//
+// A button is armed by being seen up, or by a press edge — both mean the hold that follows
+// started here. A button already down on the navigator's first frame is neither, so it stays
+// disarmed until released. Nothing changes for a press made inside the activity: onPress()
+// still fires on the edge, and the hold that follows is armed by that same edge.
 void ButtonNavigator::onContinuous(const Buttons& buttons, const Callback& callback) {
-  const bool isPressed = std::any_of(buttons.begin(), buttons.end(), [this](const MappedInputManager::Button button) {
-    return mappedInput != nullptr && mappedInput->isPressed(button) && shouldNavigateContinuously();
-  });
+  if (mappedInput == nullptr) return;
 
-  if (isPressed) {
+  bool fire = false;
+  for (const MappedInputManager::Button button : buttons) {
+    const auto bit = static_cast<uint16_t>(1u << static_cast<uint8_t>(button));
+    const bool pressed = mappedInput->isPressed(button);
+    if (!pressed || mappedInput->wasPressed(button)) continuousArmed_ |= bit;
+    if (pressed && (continuousArmed_ & bit) != 0 && shouldNavigateContinuously()) fire = true;
+  }
+
+  if (fire) {
     callback();
     lastContinuousNavTime = millis();
   }
