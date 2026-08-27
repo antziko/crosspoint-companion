@@ -251,6 +251,28 @@ void HalGPIO::setSharedConfirmPowerShortPressEmitsPower(const bool enabled) {
   InputManager::setSharedConfirmPowerShortPressEmitsPower(enabled);
 }
 
+bool HalGPIO::hasButton(const uint8_t buttonIndex) const {
+  const auto& b = BoardConfig::ACTIVE.input;
+  switch (buttonIndex) {
+    case BTN_BACK:
+      return b.back != BoardConfig::PIN_UNASSIGNED;
+    case BTN_CONFIRM:
+      return b.confirm != BoardConfig::PIN_UNASSIGNED;
+    case BTN_LEFT:
+      return b.left != BoardConfig::PIN_UNASSIGNED;
+    case BTN_RIGHT:
+      return b.right != BoardConfig::PIN_UNASSIGNED;
+    case BTN_UP:
+      return b.up != BoardConfig::PIN_UNASSIGNED;
+    case BTN_DOWN:
+      return b.down != BoardConfig::PIN_UNASSIGNED;
+    case BTN_POWER:
+      return b.power != BoardConfig::PIN_UNASSIGNED;
+    default:
+      return false;
+  }
+}
+
 bool HalGPIO::hasEdgeSideButtons() const {
   return BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX3 ||
          BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX3Uc8279 ||

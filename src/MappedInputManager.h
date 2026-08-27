@@ -33,6 +33,10 @@ class MappedInputManager {
   // True on the frame a suppressed release actually arrives; ActivityManager
   // consumes it ahead of activity input.
   bool consumeSuppressedRelease() const;
+  // True when `button` resolves to a physical button that exists on this board. False on a
+  // touch-only board (X4 Pro wires none of Back/Confirm/Left/Right), where an action bound
+  // only to that button is unreachable and needs an on-screen target drawn for it instead.
+  bool isAvailable(Button button) const;
   bool hasTouch() const;
   // True on boards with a capacitive Home key (X4 Pro), which frees the bottom
   // screen edge for a gesture of its own.

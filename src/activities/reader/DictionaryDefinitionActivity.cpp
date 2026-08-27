@@ -1207,10 +1207,17 @@ bool DictionaryDefinitionActivity::setCardDictToActive() {
   // "running" up, let a dictionary answer "run", and this would name "run" while the card is
   // filed under "running" — setCardDict would silently miss.
   if (!FlashcardDeck::setCardDict(cachePath, historyWord, activeHash)) {
-    // The card went away underneath us (deleted from the list or by a sync). Stop drawing an
-    // offer that can no longer land rather than reporting a success that did not happen.
-    LOG_ERR("DDA", "set card dict: no card for '%s'", historyWord.c_str());
-    cardDictExists_ = false;
+    // Two different failures share that false: the card went away underneath us (deleted from
+    // the list, or by a sync), or the deck rewrite itself failed. Ask which. Retiring the offer
+    // on an I/O failure would look exactly like success -- the offer disappearing IS the
+    // confirmation -- so leave it standing to be retried, and only drop it when the card is
+    // genuinely gone.
+    uint32_t stillRecorded = 0;
+    cardDictExists_ = FlashcardDeck::cardDict(cachePath, historyWord, stillRecorded);
+    LOG_ERR("DDA", "set card dict failed for '%s' (card %s)", historyWord.c_str(),
+            cardDictExists_ ? "present" : "gone");
+    SdDebugLog::log("DDA", "card dict set FAILED: %s (card %s)", historyWord.c_str(),
+                    cardDictExists_ ? "present" : "gone");
     requestUpdate();
     return true;  // the offer stood when pressed, so the press was still ours
   }
@@ -1645,11 +1652,14 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
     cursorX += labelW + 2 * kTouchPad;
   }
 
-  // The Set chip, drawn while the offer stands. It names the action the Right button performs,
-  // and is the only way to reach it on a board without one. Outside the count() > 1 block
-  // deliberately: with a single dictionary installed there is nothing to cycle to, but a legacy
-  // card recording no dictionary still needs a way to be stamped with the one in use.
-  if (offerSet) {
+  // The Set chip, drawn only on a board with no Right button to press: there it is the sole
+  // way to reach the action. Where Right exists (X3, X4) the button-hint slot below already
+  // names it, and a second on-screen label for the same action is just clutter.
+  //
+  // Outside the count() > 1 block deliberately: with a single dictionary installed there is
+  // nothing to cycle to, but a legacy card recording no dictionary still needs a way to be
+  // stamped with the one in use.
+  if (offerSet && !mappedInput.isAvailable(MappedInputManager::Button::Right)) {
     const char* setLabel = tr(STR_SET_CARD_DICT);
     const int chipW = renderer.getTextWidth(SMALL_FONT_ID, setLabel);
     renderer.drawText(SMALL_FONT_ID, cursorX, footerY, setLabel);

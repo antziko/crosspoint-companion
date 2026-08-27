@@ -96,6 +96,11 @@ class HalGPIO {
   // Keyed off the active BoardConfig profile, not the X3/X4 runtime detection.
   bool hasEdgeSideButtons() const;
 
+  // True when hardware button `buttonIndex` (BTN_* below) exists on this board.
+  // Touch-only profiles (X4 Pro, M5Paper S3) wire none of the four front buttons,
+  // so any action reachable only through one needs an on-screen target instead.
+  bool hasButton(uint8_t buttonIndex) const;
+
   // Start button GPIO and setup SPI for screen and SD card
   void begin();
 

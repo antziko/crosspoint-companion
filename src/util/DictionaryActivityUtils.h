@@ -1,5 +1,6 @@
 #pragma once
 #include <I18n.h>
+#include <SdDebugLog.h>
 
 #include <cstdint>
 #include <string>
@@ -83,9 +84,16 @@ inline uint32_t activeDictHash(const char* cachePath) { return dictHashOfPath(Di
 inline bool applyCardDict(uint32_t dictHash) {
   const int idx = dictHash != 0 ? dictionaryRegistry.indexOfHash(dictHash) : -1;
   if (idx < 0) {
+    // To SD as well, for the same reason the fallback sweep logs there: "this card opened in
+    // the wrong dictionary" is only diagnosable from a device session, and the two causes --
+    // a card recording nothing, and one whose dictionary is not installed here -- are
+    // indistinguishable on screen.
+    SdDebugLog::log("DICT", "card dict apply: hash=%lu -> none", static_cast<unsigned long>(dictHash));
     Dictionary::setSessionDictPath("");
     return false;
   }
+  SdDebugLog::log("DICT", "card dict apply: hash=%lu -> %s", static_cast<unsigned long>(dictHash),
+                  dictionaryRegistry.getEntries()[idx].name.c_str());
   // basePath, not name: despite its parameter being called folderPath, setSessionDictPath stores
   // exactly what activeDictPath() returns, and that is consumed as a base path (Dictionary.cpp:669
   // feeds it to buildPath). The existing long-press switch passes basePath for the same reason

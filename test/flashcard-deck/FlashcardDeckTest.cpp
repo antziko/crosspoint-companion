@@ -996,10 +996,28 @@ TEST_F(FlashcardDeckTest, DictHashPreservedOnReEnrollWithoutContext) {
   EXPECT_EQ(at(0).dictHash, 999u);
 }
 
-TEST_F(FlashcardDeckTest, DictHashOverwrittenWhenReEnrolledFromAnotherDictionary) {
+// An existing association is the user's to change, via the definition screen's explicit "Set
+// Dict" -- never by a later lookup landing in some other dictionary. Without this a set choice
+// survives only until the next time the word is looked up.
+TEST_F(FlashcardDeckTest, DictHashNotOverwrittenByALaterLookupElsewhere) {
   FlashcardDeck::enroll(cachePath, "alpha", "ctx", "Ch1", 111u);
   FlashcardDeck::enroll(cachePath, "alpha", "ctx", "Ch1", 222u);
+  EXPECT_EQ(at(0).dictHash, 111u);
+  // ...and the explicit set is what does change it.
+  ASSERT_TRUE(FlashcardDeck::setCardDict(cachePath, "alpha", 222u));
   EXPECT_EQ(at(0).dictHash, 222u);
+  // A lookup after the set leaves the set value alone too.
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx", "Ch1", 111u);
+  EXPECT_EQ(at(0).dictHash, 222u);
+}
+
+// A card that records nothing yet is still stamped by the next lookup -- otherwise legacy
+// cards and cards synced from a peer that sent no 'D' line could never acquire one.
+TEST_F(FlashcardDeckTest, DictHashStampedOnACardThatRecordsNone) {
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx", "Ch1", 0u);
+  ASSERT_EQ(at(0).dictHash, 0u);
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx", "Ch1", 333u);
+  EXPECT_EQ(at(0).dictHash, 333u);
 }
 
 // The local schedule must survive a dictHash write, and the dictHash must survive a grade --

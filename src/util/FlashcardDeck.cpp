@@ -459,9 +459,17 @@ bool FlashcardDeck::enroll(const std::string& cachePath, const std::string& word
     newLen = cc.savedExcerptLen;
   }
 
-  // Same rule as excerpt/chapter: a re-enroll that carries no dictionary context (the history
-  // list re-lookup) must not erase the association the original in-book lookup recorded.
-  if (dictHash == 0 && cc.dupSeen) dictHash = cc.savedDictHash;
+  // The association is decided ONCE, by the lookup that created the card, and changed after
+  // that only by the user's explicit "Set Dict" (setCardDict). Every later lookup of the same
+  // word resolves through whatever dictionary happens to be active then, so taking its value
+  // here would silently undo that choice -- look the word up again tomorrow and the card
+  // quietly reverts to the book's dictionary.
+  //
+  // A card recording 0 (a legacy line, or one synced from a peer that sent no 'D' line) is
+  // still stamped: that is the only way those ever acquire an association. This also subsumes
+  // the older rule that a context-free re-enroll (the history-list re-lookup, which passes 0)
+  // must not erase what the original in-book lookup recorded.
+  if (cc.dupSeen && cc.savedDictHash != 0) dictHash = cc.savedDictHash;
 
   char newChapter[CHAPTER_MAX];
   int chapLen = sanitizeField(chapter, newChapter, CHAPTER_MAX, /*stripPipe=*/true);

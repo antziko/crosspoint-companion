@@ -129,6 +129,10 @@ constexpr unsigned long TOUCH_DOWN_SELECT_DELAY_MS = 90;
 constexpr unsigned long TOUCH_HELD_OVERRIDE_WINDOW_MS = 250;
 }  // namespace
 
+// Reuses mapButton's logical->hardware dispatch so availability answers for exactly the
+// button a press would read, remaps and orientation swaps included.
+bool MappedInputManager::isAvailable(const Button button) const { return mapButton(button, &HalGPIO::hasButton, true); }
+
 bool MappedInputManager::hasTouch() const { return gpio.hasTouch(); }
 
 bool MappedInputManager::hasHomeKey() const { return gpio.hasHomeKey(); }
