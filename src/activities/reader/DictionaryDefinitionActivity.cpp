@@ -458,17 +458,26 @@ void DictionaryDefinitionActivity::collectSpanForPrewarm(void* ctx, const Styled
 }
 
 void DictionaryDefinitionActivity::prewarmDefinitionFont() {
-  // Built-in body fonts decompress into a RAM cache on first use, so they never pay
-  // per-glyph SD I/O; the scan below would be pure overhead for them. This whole path —
-  // including the IPA prewarm — exists for the SD-font heap profile.
-  if (!renderer.isSdCardFont(defFontId_)) return;
   auto* fcm = renderer.getFontCacheManager();
   if (!fcm) return;
 
-  // From here the SD path starts pessimistic and has to earn ipaWarm_ back at the gate below.
-  // Every early return past this point (collector OOM, dictionary file unreadable) is itself
-  // evidence of a starved heap, which is exactly when the IPA font's per-glyph 11KB group
-  // inflation drops glyphs — so those paths should land on the body-font fallback too.
+  // Built-in body fonts decompress into a RAM cache on first use, so they never pay per-glyph
+  // SD I/O and the BODY half of this function is pure overhead for them.
+  //
+  // The IPA half is not. It used to sit behind an early return here, which meant a built-in
+  // body font skipped the IPA prewarm as well — and since ipaWarm_ defaults to true, the IPA
+  // font was still selected for drawing and every phonetic glyph came off the per-glyph
+  // hot-group path. That path inflates a whole ~11KB group per group touched, GROWING its
+  // buffer while still holding the previous one, and silently returns nullptr when the
+  // contiguous block is not there ("OOM hot group ... glyph skipped", FontDecompressor.cpp:195).
+  // The result is a phonetic transcription that renders correctly one time and drops a glyph
+  // the next, with nothing on screen or in the log to say why: [reɪθ] became [reɪ ].
+  const bool bodyIsSd = renderer.isSdCardFont(defFontId_);
+
+  // Pessimistic from here: ipaWarm_ has to be earned at the gate below. Every early return
+  // past this point (collector OOM, dictionary file unreadable) is itself evidence of a
+  // starved heap, which is exactly when the per-glyph group inflation drops glyphs — so those
+  // paths should land on the body-font fallback too.
   ipaWarm_ = false;
 
   const unsigned long t0 = millis();
@@ -568,11 +577,23 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   // then resurfaces at draw time as dropped glyphs. Same rule as the body-style gates below
   // and as FontCacheManager.cpp:93-98.
   constexpr size_t kIpaGroupReserve = 12 * 1024;  // one FontDecompressor group, with margin
+  // Without a body prewarm to budget against, the only requirement is that single inflate:
+  // prewarmCache mallocs group.uncompressedSize, extracts the glyphs it wants and frees it
+  // again (FontDecompressor.cpp:484-497), leaving a page buffer of just the glyph bitmaps.
+  // The IPA font's group is 11131 bytes, and an X3 sat at a steady largest=12276 -- so the
+  // 12KB round number above declined nearly every attempt for the sake of 12 bytes.
+  constexpr size_t kIpaGroupMin = 11 * 1024 + 512;
   const char* ipaOutcome = "none";
   if (collector->ipaLen != 0) {
     const size_t freeHeap = ESP.getFreeHeap();
     const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-    if (freeHeap >= kIpaGroupReserve + kMinFreeForFirstStyle && largestBlock >= kIpaGroupReserve) {
+    // Leave room for the body prewarm only when there is going to be one. With a built-in body
+    // font nothing downstream competes for this heap, so demanding the body's first-style
+    // reserve on top would decline the prewarm for no one's benefit — and declining is what
+    // drops the glyphs.
+    const size_t needFree = bodyIsSd ? kIpaGroupReserve + kMinFreeForFirstStyle : kIpaGroupMin;
+    const size_t needBlock = bodyIsSd ? kIpaGroupReserve : kIpaGroupMin;
+    if (freeHeap >= needFree && largestBlock >= needBlock) {
       // A prewarm that reports missed groups leaves those glyphs on the same failing
       // hot-group path, so only a clean 0 counts as warm.
       const int missed = fcm->prewarmCache(IPA_FONT_ID, collector->ipaUtf8, 0x01);
@@ -581,9 +602,19 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
     } else {
       ipaOutcome = "skip";
       LOG_DBG("DDA", "prewarm: skipping IPA (%u cp), free %u largest %u vs %u needed", collector->ipaCount,
-              static_cast<unsigned>(freeHeap), static_cast<unsigned>(largestBlock),
-              static_cast<unsigned>(kIpaGroupReserve));
+              static_cast<unsigned>(freeHeap), static_cast<unsigned>(largestBlock), static_cast<unsigned>(needBlock));
     }
+    // A BUILT-IN body font cannot stand in for the IPA font: it is a subset face carrying no
+    // phonetic block, so falling back to it replaces the transcription with U+FFFD marks. Draw
+    // from the IPA font whether or not the prewarm landed. Unwarmed it goes back through the
+    // hot group, which is what this build already did -- still strictly better than a row of
+    // question marks. The prewarm's value here is not permission to use the font, it is
+    // getting the IPA groups OUT of the single hot-group slot that body glyphs are competing
+    // for; that thrash is what fdcOom counts.
+    //
+    // An SD body font is the opposite case -- a full face that may well carry IPA itself -- so
+    // it keeps the pessimistic rule above.
+    if (!bodyIsSd) ipaWarm_ = true;
   }
   const unsigned long tIpa = millis();
 
@@ -601,7 +632,7 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   // SdCardFont::onGlyphMiss at ~26ms each and a 43-codepoint definition spent 2179ms of a
   // 2229ms wrap on SD I/O. Both fast paths skip kerning and ligatures; the styles the loop
   // below leaves cold now cost render time only, not measure time.
-  if (collector->utf8Len != 0) {
+  if (bodyIsSd && collector->utf8Len != 0) {
     renderer.ensureSdCardFontReady(defFontId_, collector->utf8, collector->styleMask);
   }
   const unsigned long tAdv = millis();
@@ -626,7 +657,10 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   }
 
   uint8_t warmedMask = 0;
-  if (collector->utf8Len != 0) {
+  // Built-in body fonts are deliberately left out: they cache on first use anyway, and each
+  // prewarmCache call consumes one of the decompressor's few page slots — which the IPA
+  // prewarm above needs more than they do.
+  if (bodyIsSd && collector->utf8Len != 0) {
     for (const uint8_t styleIdx : order) {
       const uint8_t bit = static_cast<uint8_t>(1u << styleIdx);
       if (!(collector->styleMask & bit)) continue;
@@ -650,15 +684,15 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
           tAdv - tIpa, millis() - tAdv, static_cast<unsigned>(ESP.getFreeHeap()),
           static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
   // warmed=0x00 here is the signature of a slow open: nothing prewarmed means every glyph
-  // is fetched individually downstream. ipaWarm= is the phonetics equivalent, and unlike
-  // warmed= it is a correctness signal rather than a speed one: anything but "ok" means the
-  // IPA segments are being drawn in the body font (see ipaFontId()).
+  // is fetched individually downstream. ipaWarm= is the phonetics equivalent. Read it with
+  // sd=: at sd=1 anything but "ok" means the IPA segments fell back to the body font (see
+  // ipaFontId()), while at sd=0 the IPA font is used regardless and a non-"ok" means those
+  // glyphs are on the hot-group path -- watch fdcOom= on the render line for dropped ones.
   SdDebugLog::log("DDA",
                   "prewarm sd=%d body=%u ipa=%u ipaWarm=%s mask=0x%02X warmed=0x%02X adv=%lums body=%lums free=%u "
                   "largest=%u",
-                  renderer.isSdCardFont(defFontId_) ? 1 : 0, collector->uniqueCount, collector->ipaCount, ipaOutcome,
-                  collector->styleMask, warmedMask, tAdv - tIpa, millis() - tAdv,
-                  static_cast<unsigned>(ESP.getFreeHeap()),
+                  bodyIsSd ? 1 : 0, collector->uniqueCount, collector->ipaCount, ipaOutcome, collector->styleMask,
+                  warmedMask, tAdv - tIpa, millis() - tAdv, static_cast<unsigned>(ESP.getFreeHeap()),
                   static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
 }
 
