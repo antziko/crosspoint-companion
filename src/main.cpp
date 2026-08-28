@@ -463,6 +463,7 @@ void setup() {
   // since been released. startDeepSleep() touches only GPIO, power rails and
   // serial, so it is safe to reach from this point.
   if (gpio.getWakeupReason() == HalGPIO::WakeupReason::PowerButton && !gpio.verifyPowerButtonWakeup()) {
+    LOG_DBG("MAIN", "Power-button wake not held through verification, sleeping");
     powerManager.startDeepSleep(gpio);
   }
 
@@ -559,8 +560,15 @@ void setup() {
     case HalGPIO::WakeupReason::AfterUSBPower:
       // If USB power caused a cold boot, go back to sleep
       LOG_DBG("MAIN", "Wakeup reason: After USB Power");
+#if FREEINK_DEVICE_X4PRO || FREEINK_DEVICE_PAPERMONO
+      // X4 Pro must stay awake so USB Serial/JTAG stays available after leaving USB Drive and
+      // reconnecting the cable; Paper Mono has no armable GPIO wake (its button is behind the
+      // PMIC). Sleeping either here strands the device in a USB-replug boot loop.
+      break;
+#else
       powerManager.startDeepSleep(gpio);
       break;
+#endif
     case HalGPIO::WakeupReason::AfterFlash:
       // After flashing, just proceed to boot
     case HalGPIO::WakeupReason::Other:
@@ -935,6 +943,7 @@ void loop() {
     if (gpio.isPressed(HalGPIO::BTN_BACK)) {
       return;
     }
+    LOG_DBG("MAIN", "Power button held %lums, sleeping", gpio.getPowerButtonHeldTime());
     // Offer the gesture to the active activity first. The reader may intercept it to show a
     // "sync before sleep" prompt instead of sleeping immediately. Release the still-held power
     // button before handing over so the prompt isn't dismissed by the same press, and re-arm
