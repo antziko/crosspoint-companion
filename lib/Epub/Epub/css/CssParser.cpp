@@ -326,6 +326,14 @@ void CssParser::parseDeclarationIntoStyle(const std::string& decl, CssStyle& sty
 
   if (propNameBuf.empty() || propValueBuf.empty()) return;
 
+  // Strip !important from EVERY value, not only display/direction as before. A declaration
+  // written "margin-top: 0 !important" otherwise reached tryInterpretLength() with the
+  // suffix attached, failed to parse, and left the margin at its inherited value -- which is
+  // how container spacing survived with extra paragraph spacing turned off (#3221).
+  const std::string_view stripped = stripTrailingImportant(propValueBuf);
+  if (stripped.size() != propValueBuf.size()) propValueBuf.resize(stripped.size());
+  if (propValueBuf.empty()) return;
+
   if (propNameBuf == "text-align") {
     style.textAlign = interpretAlignment(propValueBuf);
     style.defined.textAlign = 1;
@@ -397,15 +405,13 @@ void CssParser::parseDeclarationIntoStyle(const std::string& decl, CssStyle& sty
       style.defined.imageWidth = 1;
     }
   } else if (propNameBuf == "display") {
-    const std::string_view displayValue = stripTrailingImportant(propValueBuf);
-    style.display = (displayValue == "none") ? CssDisplay::None : CssDisplay::Block;
+    style.display = (propValueBuf == "none") ? CssDisplay::None : CssDisplay::Block;
     style.defined.display = 1;
   } else if (propNameBuf == "direction") {
-    const std::string_view directionValue = stripTrailingImportant(propValueBuf);
-    if (directionValue == "rtl") {
+    if (propValueBuf == "rtl") {
       style.direction = CssTextDirection::Rtl;
       style.defined.direction = 1;
-    } else if (directionValue == "ltr") {
+    } else if (propValueBuf == "ltr") {
       style.direction = CssTextDirection::Ltr;
       style.defined.direction = 1;
     }
