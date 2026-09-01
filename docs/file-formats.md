@@ -90,6 +90,13 @@ if (parsedSize != fileSize) {
 
 ## `section.bin`
 
+### Version 54
+
+Version 54 appends a link table to each serialized page: an href plus a tap
+rectangle for every on-page link span. The reader uses those rectangles for
+touch navigation, so a footnote or cross-reference can be followed by tapping
+it. Older caches carry no link geometry and are rebuilt.
+
 ### Version 53
 
 Version 53 keeps the version 52 serialized layout unchanged. It was bumped

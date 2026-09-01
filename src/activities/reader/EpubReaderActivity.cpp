@@ -831,6 +831,24 @@ void EpubReaderActivity::loop() {
     }
   }
 
+  // A tap that lands on a link follows it, ahead of both the reader-menu gesture below and
+  // the page-turn zones further down: a footnote marker usually sits in the middle third,
+  // which is the menu's own tap band, so checking later would make links unreachable.
+  // Gated on touchReaderControls because this IS a reading-surface touch control -- unlike
+  // the menu gesture, which #3319 deliberately decoupled from that setting.
+  if (!atEndOfBook && !currentPageLinks.empty() && SETTINGS.touchReaderControls && mappedInput.hasTouch()) {
+    int touchX = 0;
+    int touchY = 0;
+    if (mappedInput.wasScreenTapped(touchX, touchY)) {
+      const auto* link = EpubReaderUtils::linkAtPoint(currentPageLinks, touchX, touchY, currentPageLinkMarginLeft,
+                                                      currentPageLinkMarginTop);
+      if (link) {
+        navigateToHref(link->href, true);
+        return;
+      }
+    }
+  }
+
   // Enter reader menu activity on short-press Confirm, the board's menu edge-swipe, or a
   // middle-third tap (see ReaderUtils::isTouchMenuGesture). A long-press
   // that fired a bound function (bookmark or KOReader sync) sets ignoreNextConfirmRelease so the release
@@ -2092,6 +2110,10 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   // No indexing popup carried over from a previous pass; the build sites below re-arm it as needed.
   indexingPopupRect_ = Rect{};
   lastIndexingPct_ = -1;
+  // Drop the previous page's tap targets up front: every return path below leaves the screen
+  // showing something other than that page, and a stale rect would route a tap to a link the
+  // reader can no longer see.
+  currentPageLinks.clear();
 
   const auto showPendingSyncSaveError = [this]() {
     if (!pendingSyncSaveError) return;
@@ -2568,6 +2590,9 @@ void EpubReaderActivity::render(RenderLock&& lock) {
 
     // Collect footnotes from the loaded page
     currentPageFootnotes = std::move(p->footnotes);
+    currentPageLinks = std::move(p->links);
+    currentPageLinkMarginLeft = orientedMarginLeft;
+    currentPageLinkMarginTop = orientedMarginTop;
 
     const auto start = millis();
     renderContents(std::move(p), orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft);

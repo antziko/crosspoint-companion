@@ -105,7 +105,10 @@ namespace {
 //      handler used to overwrite the span style wholesale, dropping the sup/sub the
 //      surrounding element had set, so the marker rendered on the baseline at full size.
 //      Changes glyph size and baseline on those runs. Covers upstream's #3355.
-constexpr uint8_t SECTION_FILE_VERSION = 53;
+// v54: Pages persist a link table -- href plus a tap rectangle per on-page link span -- so a
+//      footnote or cross-reference can be followed by touch. New per-page section in the
+//      serialized layout, so v53 files have nothing to read it from. Covers upstream's #3296.
+constexpr uint8_t SECTION_FILE_VERSION = 54;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
