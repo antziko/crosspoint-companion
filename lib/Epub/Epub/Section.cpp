@@ -97,7 +97,11 @@ namespace {
 //      survive with extra paragraph spacing off is gone, and a block closing inside a
 //      styled parent restarts without the parent's vertical margins. Both move where
 //      lines and pages fall. Covers upstream's #3221 (their v51).
-constexpr uint8_t SECTION_FILE_VERSION = 51;
+// v52: An inline element no longer resets text direction to the document default when it
+//      carries no direction of its own -- it inherits the enclosing block's, so an <em> or
+//      <a> inside an RTL paragraph stays RTL. Bidi reordering moves where the words on
+//      those lines sit, so v51 cached positions no longer match. Covers upstream's #3198.
+constexpr uint8_t SECTION_FILE_VERSION = 52;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
