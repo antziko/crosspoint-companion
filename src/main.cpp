@@ -287,6 +287,7 @@ void enterDeepSleep(bool fromTimeout = false) {
 
   halTiltSensor.deepSleep();
   display.deepSleep();
+  Storage.prepareForDeepSleep();
   LOG_DBG("MAIN", "Entering deep sleep");
 
   powerManager.startDeepSleep(gpio);
@@ -457,15 +458,14 @@ void setup() {
   gpio.begin();
   powerManager.begin();
 
-  // Reject a spurious wake here, before SD mount and settings I/O. It has to be
-  // this early: the check asks whether the power button is STILL physically
-  // held, and behind Storage.begin() + loadFromFile() a real press has long
-  // since been released. startDeepSleep() touches only GPIO, power rails and
-  // serial, so it is safe to reach from this point.
-  if (gpio.getWakeupReason() == HalGPIO::WakeupReason::PowerButton && !gpio.verifyPowerButtonWakeup()) {
-    LOG_DBG("MAIN", "Power-button wake not held through verification, sleeping");
-    powerManager.startDeepSleep(gpio);
-  }
+  // SAMPLE the wake hold here and nowhere later. The check asks whether the power button is
+  // STILL physically held, and behind Storage.begin() + loadFromFile() a real press has long
+  // since been released -- keeping the call this early is what makes it mean anything.
+  // The DECISION is deferred to the wake switch below, once SETTINGS has loaded: with Short
+  // Power Button Press = Sleep a single click is a legitimate wake, and that is a setting.
+  const auto bootWakeupReason = gpio.getWakeupReason();
+  const bool wakeHoldVerified =
+      bootWakeupReason != HalGPIO::WakeupReason::PowerButton || gpio.verifyPowerButtonWakeup();
 
   halTiltSensor.begin();
   halClock.begin();
@@ -553,8 +553,15 @@ void setup() {
   const auto wakeupReason = gpio.getWakeupReason();
   switch (wakeupReason) {
     case HalGPIO::WakeupReason::PowerButton:
-      // Verification already happened right after powerManager.begin(); a wake
-      // that failed it never reaches this point.
+      // The hold was sampled right after powerManager.begin(); this is where it is judged.
+      // With Short Power Button Press = Sleep a single click wakes on any device, so a
+      // released press is legitimate there; otherwise the button must still have been held
+      // (the ghost-wake debounce).
+      if (!wakeHoldVerified && SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::SLEEP) {
+        LOG_DBG("MAIN", "Power-button wake not held through verification, sleeping");
+        Storage.prepareForDeepSleep();
+        powerManager.startDeepSleep(gpio);
+      }
       wakePowerReleasePending = true;
       break;
     case HalGPIO::WakeupReason::AfterUSBPower:
@@ -566,6 +573,7 @@ void setup() {
       // PMIC). Sleeping either here strands the device in a USB-replug boot loop.
       break;
 #else
+      Storage.prepareForDeepSleep();
       powerManager.startDeepSleep(gpio);
       break;
 #endif
