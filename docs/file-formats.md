@@ -90,6 +90,26 @@ if (parsedSize != fileSize) {
 
 ## `section.bin`
 
+### Version 53
+
+Version 53 keeps the version 52 serialized layout unchanged. It was bumped
+because a superscript/subscript footnote link now keeps its vertical-align
+styling, changing those runs' cached word-style flags and page layout.
+
+### Version 52
+
+Version 52 keeps the version 51 serialized layout unchanged. It was bumped
+because an inline element with no direction of its own now inherits the
+enclosing block's instead of resetting to the document default, so bidi
+reordering moves the words on those lines.
+
+### Version 51
+
+Version 51 keeps the version 50 serialized layout unchanged. It was bumped
+because `!important` is now stripped from every CSS declaration value rather
+than only `display` and `direction`, so declarations such as
+`margin: 0 !important` take effect and change where lines and pages fall.
+
 ### Version 50
 
 Each file in `sections/*.bin` stores one laid-out spine section. The header is

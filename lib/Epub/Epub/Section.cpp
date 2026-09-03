@@ -101,7 +101,11 @@ namespace {
 //      carries no direction of its own -- it inherits the enclosing block's, so an <em> or
 //      <a> inside an RTL paragraph stays RTL. Bidi reordering moves where the words on
 //      those lines sit, so v51 cached positions no longer match. Covers upstream's #3198.
-constexpr uint8_t SECTION_FILE_VERSION = 52;
+// v53: A superscript/subscript footnote link keeps its vertical-align styling. The link
+//      handler used to overwrite the span style wholesale, dropping the sup/sub the
+//      surrounding element had set, so the marker rendered on the baseline at full size.
+//      Changes glyph size and baseline on those runs. Covers upstream's #3355.
+constexpr uint8_t SECTION_FILE_VERSION = 53;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
