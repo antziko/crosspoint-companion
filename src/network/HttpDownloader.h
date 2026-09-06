@@ -57,15 +57,10 @@ class HttpDownloader {
    * verify on the X4 (github.com -> USERTrust ECC, then release-assets CDN -> ISRG
    * Root X1). Only honoured when caPemOverride is also set; when null, redirects are
    * followed on the same connection/cert exactly as before (OPDS/KOSync path).
-   *
-   * downgradeRedirectsToHttp (default false) rewrites a followed redirect target from
-   * https to http, so the BULK hop runs without TLS. Only for a transfer whose bytes are
-   * verified some other way afterwards -- font downloads check the CRC32 the manifest
-   * carries, and the manifest itself is fetched over TLS. Off for everything else.
    */
   static DownloadError downloadToFile(const std::string& url, const std::string& destPath,
                                       ProgressCallback progress = nullptr, bool* cancelFlag = nullptr,
                                       const std::string& username = "", const std::string& password = "",
                                       std::string* errorDetail = nullptr, const char* caPemOverride = nullptr,
-                                      const char* caPemRedirect = nullptr, bool downgradeRedirectsToHttp = false);
+                                      const char* caPemRedirect = nullptr);
 };

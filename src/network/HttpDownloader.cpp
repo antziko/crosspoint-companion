@@ -429,7 +429,7 @@ struct NoWifiSleep {
 // for the esp_http_client fallback below, which still verifies against them.
 HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::string& username,
                                      const std::string& password, Sink& sink, const char* caPemOverride = nullptr,
-                                     const char* caPemRedirect = nullptr, bool downgradeRedirectsToHttp = false) {
+                                     const char* caPemRedirect = nullptr) {
   // Hold WiFi out of modem-sleep for the whole transfer (see NoWifiSleep).
   const NoWifiSleep noWifiSleep;
   (void)caPemOverride;
@@ -940,18 +940,6 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
         setDetail(sink.detail, "redirect %d: no Location", status);
         return HttpDownloader::HTTP_ERROR;
       }
-      if (downgradeRedirectsToHttp && url.rfind("https://", 0) == 0) {
-        // Run the BULK hop without TLS. GitHub's release-asset CDN serves its signed URLs
-        // on both schemes, and that second handshake is where font downloads fail: 22b in
-        // the network playbook proved the refusal is origin-side, not heap -- a full
-        // handshake to github.com completed at the same instant and the same heap that
-        // release-assets refused at. Dropping TLS for the hop sidesteps it entirely, and
-        // removes its ~17KB record buffer as a bonus.
-        // Integrity still holds: the caller checks each file against the CRC32 in the
-        // manifest, and the manifest is fetched over TLS. Only ever set by the font
-        // downloader (see downloadToFile's parameter doc).
-        url.replace(0, 8, "http://");
-      }
       SdDebugLog::log("HTTP", "redirect %d -> %s", status, url.c_str());
       continue;
     }
@@ -1439,10 +1427,7 @@ HttpDownloader::DownloadError resolveRedirectViaTls(const std::string& url, cons
 // large/slow files and surfaces a short read directly.
 HttpDownloader::DownloadError runGet(const std::string& url, const std::string& username, const std::string& password,
                                      Sink& sink, const char* caPemOverride = nullptr,
-                                     const char* caPemRedirect = nullptr, bool downgradeRedirectsToHttp = false) {
-  // esp_http_client follows redirects internally, so there is no Location URL to rewrite
-  // here. The downgrade only exists on the wolfSSL path above, which hops manually.
-  (void)downgradeRedirectsToHttp;
+                                     const char* caPemRedirect = nullptr) {
   // Hold WiFi out of modem-sleep for the whole transfer (see NoWifiSleep). Scoped
   // to runGet so it covers the handshake, body read loop, and every early return.
   const NoWifiSleep noWifiSleep;
@@ -1808,7 +1793,7 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
                                                              ProgressCallback progress, bool* cancelFlag,
                                                              const std::string& username, const std::string& password,
                                                              std::string* errorDetail, const char* caPemOverride,
-                                                             const char* caPemRedirect, bool downgradeRedirectsToHttp) {
+                                                             const char* caPemRedirect) {
   LOG_DBG("HTTP", "Downloading: %s -> %s", url.c_str(), destPath.c_str());
 
   if (Storage.exists(destPath.c_str())) {
@@ -1843,8 +1828,7 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
     return false;
   };
 
-  const DownloadError result =
-      runGet(url, username, password, sink, caPemOverride, caPemRedirect, downgradeRedirectsToHttp);
+  const DownloadError result = runGet(url, username, password, sink, caPemOverride, caPemRedirect);
   // Close before any remove() on the same path; DESTRUCTOR_CLOSES_FILE would
   // otherwise close only after the remove.
   file.close();
