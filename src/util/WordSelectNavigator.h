@@ -350,6 +350,18 @@ class WordSelectNavigator {
   // -1 means inactive.
   int pendingSnapIdx = -1;
 
+  // --- Word-step auto-repeat (horizontal axis only) ---
+  // Buttons whose CURRENT hold began while this navigator was alive, one bit per
+  // MappedInputManager::Button. Repeat may only run for those. Without it, a word-select
+  // screen opened BY a long press starts with that button already down and getHeldTime()
+  // already past the threshold, so the repeat would fire on the first frame and walk a
+  // selection the user never touched. Same hazard 69bf1d55 fixed in ButtonNavigator; the
+  // release-suppression path cannot cover it, because that guards the release EDGE while
+  // this fires from the held LEVEL.
+  uint16_t wordRepeatArmed_ = 0;
+  // millis() of the last repeat-driven step; 0 = none this hold.
+  unsigned long lastWordRepeatMs_ = 0;
+
   // Snapshot of pixels under the most recently drawn highlight. Used by
   // renderHighlightDifferential to restore the framebuffer before drawing the
   // next highlight, so a cursor move repaints only the affected regions.

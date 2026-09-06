@@ -10,11 +10,14 @@ class MappedInputManager {
   // Test-controlled state setters.
   void setReleased(Button btn, bool released) { released_[static_cast<int>(btn)] = released; }
   void setPressed(Button btn, bool pressed) { pressed_[static_cast<int>(btn)] = pressed; }
+  // The press EDGE, distinct from the held level above: the word-step auto-repeat arms on it.
+  void setJustPressed(Button btn, bool justPressed) { justPressed_[static_cast<int>(btn)] = justPressed; }
   void setHeldTime(unsigned long ms) { heldTime_ = ms; }
   void reset() {
     for (int i = 0; i < 9; ++i) {
       released_[i] = false;
       pressed_[i] = false;
+      justPressed_[i] = false;
     }
     heldTime_ = 0;
   }
@@ -25,9 +28,11 @@ class MappedInputManager {
   // no navigator test depends on the swapped mapping.
   bool wasReleased(Button button, bool /*applySwap*/ = true) const { return released_[static_cast<int>(button)]; }
   bool isPressed(Button button, bool /*applySwap*/ = true) const { return pressed_[static_cast<int>(button)]; }
+  bool wasPressed(Button button, bool /*applySwap*/ = true) const { return justPressed_[static_cast<int>(button)]; }
   unsigned long getHeldTime() const { return heldTime_; }
 
  private:
+  bool justPressed_[9] = {false};
   bool released_[9] = {false};
   bool pressed_[9] = {false};
   unsigned long heldTime_ = 0;

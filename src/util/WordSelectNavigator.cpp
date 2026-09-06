@@ -1,5 +1,6 @@
 #include "WordSelectNavigator.h"
 
+#include <Arduino.h>  // millis(), for the word-step auto-repeat interval
 #include <GfxRenderer.h>
 #include <Utf8.h>
 
@@ -10,11 +11,23 @@
 #include "MappedInputManager.h"
 #include "TextPool.h"
 
+namespace {
+// Word-step auto-repeat, horizontal axis only. Scanning a line one press per word is the
+// slowest part of picking a word mid-paragraph; row navigation is deliberately excluded
+// because it carries a goal column that a fast repeat would smear across rows.
+constexpr unsigned long WORD_REPEAT_START_MS = 500;
+constexpr unsigned long WORD_REPEAT_INTERVAL_MS = 250;
+}  // namespace
+
 void WordSelectNavigator::load(std::vector<WordInfo> w, std::vector<Row> r, std::string pool,
                                bool consumeInitialConfirm, InitialMarker initialMarker) {
   words = std::move(w);
   rows = std::move(r);
   textPool = std::move(pool);
+  // A reload is a fresh screen as far as the repeat is concerned: disarm, so a button still
+  // held from whatever opened it cannot start stepping before it has been released once.
+  wordRepeatArmed_ = 0;
+  lastWordRepeatMs_ = 0;
   const int rowCount = static_cast<int>(rows.size());
   int targetRow;
   switch (initialMarker) {
@@ -105,6 +118,8 @@ void WordSelectNavigator::reset() {
   anchorFlatIndex = -1;
   pendingSnapIdx = -1;
   rowNavGoalX = -1;
+  wordRepeatArmed_ = 0;
+  lastWordRepeatMs_ = 0;
 }
 
 const WordSelectNavigator::WordInfo* WordSelectNavigator::getSelected() const {
@@ -343,36 +358,75 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
   const bool isInverted = orient == GfxRenderer::Orientation::PortraitInverted;
   const bool landscape = isLandscapeCw || isLandscapeCcw;
 
-  bool rowPrevPressed, rowNextPressed, wordPrevPressed, wordNextPressed;
+  // Which physical button drives each direction, carried alongside the edge result so the
+  // auto-repeat below can re-read the same button at LEVEL. applySwap is false for the front
+  // Left/Right reads because this class does its own mapping.
+  struct Bound {
+    MappedInputManager::Button button;
+    bool applySwap;
+  };
+  Bound rowPrev, rowNext, wordPrev, wordNext;
 
   if (isLandscapeCw) {
-    rowPrevPressed = input.wasReleased(MappedInputManager::Button::Left, false);
-    rowNextPressed = input.wasReleased(MappedInputManager::Button::Right, false);
-    wordPrevPressed = input.wasReleased(MappedInputManager::Button::Down);
-    wordNextPressed = input.wasReleased(MappedInputManager::Button::Up);
+    rowPrev = {MappedInputManager::Button::Left, false};
+    rowNext = {MappedInputManager::Button::Right, false};
+    wordPrev = {MappedInputManager::Button::Down, true};
+    wordNext = {MappedInputManager::Button::Up, true};
   } else if (landscape) {
-    rowPrevPressed = input.wasReleased(MappedInputManager::Button::Right, false);
-    rowNextPressed = input.wasReleased(MappedInputManager::Button::Left, false);
-    wordPrevPressed = input.wasReleased(MappedInputManager::Button::Up);
-    wordNextPressed = input.wasReleased(MappedInputManager::Button::Down);
+    rowPrev = {MappedInputManager::Button::Right, false};
+    rowNext = {MappedInputManager::Button::Left, false};
+    wordPrev = {MappedInputManager::Button::Up, true};
+    wordNext = {MappedInputManager::Button::Down, true};
   } else if (isInverted) {
-    rowPrevPressed = input.wasReleased(MappedInputManager::Button::Down);
-    rowNextPressed = input.wasReleased(MappedInputManager::Button::Up);
-    wordPrevPressed = input.wasReleased(MappedInputManager::Button::Right, false);
-    wordNextPressed = input.wasReleased(MappedInputManager::Button::Left, false);
+    rowPrev = {MappedInputManager::Button::Down, true};
+    rowNext = {MappedInputManager::Button::Up, true};
+    wordPrev = {MappedInputManager::Button::Right, false};
+    wordNext = {MappedInputManager::Button::Left, false};
   } else {
-    rowPrevPressed = input.wasReleased(MappedInputManager::Button::Up);
-    rowNextPressed = input.wasReleased(MappedInputManager::Button::Down);
-    wordPrevPressed = input.wasReleased(MappedInputManager::Button::Left, false);
-    wordNextPressed = input.wasReleased(MappedInputManager::Button::Right, false);
+    rowPrev = {MappedInputManager::Button::Up, true};
+    rowNext = {MappedInputManager::Button::Down, true};
+    wordPrev = {MappedInputManager::Button::Left, false};
+    wordNext = {MappedInputManager::Button::Right, false};
   }
 
   // Trade the axes AFTER the orientation chain has resolved which physical button means
-  // which direction, so each pair keeps its own direction sense in all four orientations
-  // and the front reads keep their applySwap=false (this class does its own mapping).
+  // which direction, so each pair keeps its own direction sense in all four orientations.
+  // Swapping the bindings rather than the results keeps the repeat pointed at whichever
+  // button now drives the word axis.
   if (swapAxes) {
-    std::swap(rowPrevPressed, wordPrevPressed);
-    std::swap(rowNextPressed, wordNextPressed);
+    std::swap(rowPrev, wordPrev);
+    std::swap(rowNext, wordNext);
+  }
+
+  bool rowPrevPressed = input.wasReleased(rowPrev.button, rowPrev.applySwap);
+  bool rowNextPressed = input.wasReleased(rowNext.button, rowNext.applySwap);
+  bool wordPrevPressed = input.wasReleased(wordPrev.button, wordPrev.applySwap);
+  bool wordNextPressed = input.wasReleased(wordNext.button, wordNext.applySwap);
+
+  // Auto-repeat the word axis while it is held. Navigation here fires on RELEASE, so the
+  // repeat is a separate LEVEL read: hold past WORD_REPEAT_START_MS and the cursor keeps
+  // stepping every WORD_REPEAT_INTERVAL_MS. The button must be armed first -- see
+  // wordRepeatArmed_ for the hold-carried-in case that guards against. getHeldTime() is
+  // global rather than per-button, which is precisely why arming is per-button.
+  const unsigned long nowMs = millis();
+  for (const Bound& bound : {wordPrev, wordNext}) {
+    const auto bit = static_cast<uint16_t>(1u << static_cast<uint8_t>(bound.button));
+    const bool pressed = input.isPressed(bound.button, bound.applySwap);
+    if (!pressed || input.wasPressed(bound.button, bound.applySwap)) wordRepeatArmed_ |= bit;
+    if (!pressed) continue;
+    if ((wordRepeatArmed_ & bit) == 0) continue;
+    if (input.getHeldTime() < WORD_REPEAT_START_MS) continue;
+    if (lastWordRepeatMs_ != 0 && nowMs - lastWordRepeatMs_ < WORD_REPEAT_INTERVAL_MS) continue;
+    lastWordRepeatMs_ = nowMs;
+    if (bound.button == wordPrev.button)
+      wordPrevPressed = true;
+    else
+      wordNextPressed = true;
+  }
+  // Reset the interval once nothing on the word axis is down, so the next hold waits out
+  // WORD_REPEAT_START_MS again instead of repeating from its first frame.
+  if (!input.isPressed(wordPrev.button, wordPrev.applySwap) && !input.isPressed(wordNext.button, wordNext.applySwap)) {
+    lastWordRepeatMs_ = 0;
   }
 
   const int rowCount = static_cast<int>(rows.size());

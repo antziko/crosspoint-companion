@@ -7,6 +7,7 @@
 //
 // Build/run: test/word-select-nav/run.sh
 
+#include <Arduino.h>  // stub clock: stubSetMillis / stubAdvanceMillis drive the repeat tests
 #include <GfxRenderer.h>
 #include <MappedInputManager.h>
 
@@ -1121,6 +1122,98 @@ static void step(WordSelectNavigator& nav, MappedInputManager& input, GfxRendere
   nav.handleNavigation(input, renderer);
 }
 
+// --- Word-step auto-repeat -------------------------------------------------------------
+// Holding Left/Right walks the cursor along the line. Navigation itself fires on RELEASE,
+// so the repeat is a separate held-LEVEL read; these cover the arming rule that keeps a
+// hold carried in from whatever opened the screen from stepping on its own.
+
+// Drive one frame at the held level, without a release edge.
+static void holdFrame(WordSelectNavigator& nav, MappedInputManager& input, GfxRenderer& renderer,
+                      MappedInputManager::Button button, bool pressEdge, unsigned long heldMs) {
+  input.reset();
+  input.setPressed(button, true);
+  input.setJustPressed(button, pressEdge);
+  input.setHeldTime(heldMs);
+  nav.handleNavigation(input, renderer);
+}
+
+static void testWordRepeatStepsWhileHeld() {
+  std::printf("testWordRepeatStepsWhileHeld\n");
+
+  WordSelectNavigator nav = makeSingleRowFixture({"alpha", "bravo", "charlie", "delta", "echo"});
+  GfxRenderer renderer;
+  MappedInputManager input;
+  stubSetMillis(10000);
+
+  // Arm the button by pressing it: the press edge says this hold started here.
+  const int startIdx = nav.getCurrentFlatIndex();
+  holdFrame(nav, input, renderer, MappedInputManager::Button::Right, /*pressEdge=*/true, 0);
+  CHECK(nav.getCurrentFlatIndex() == startIdx, "no step before the hold threshold");
+
+  // Past the threshold the first repeat fires.
+  stubAdvanceMillis(600);
+  holdFrame(nav, input, renderer, MappedInputManager::Button::Right, false, 600);
+  CHECK(nav.getCurrentFlatIndex() == startIdx + 1, "first repeat steps one word");
+
+  // Inside the interval, nothing more.
+  stubAdvanceMillis(50);
+  holdFrame(nav, input, renderer, MappedInputManager::Button::Right, false, 650);
+  CHECK(nav.getCurrentFlatIndex() == startIdx + 1, "no step inside the repeat interval");
+
+  // Past the interval, the next one.
+  stubAdvanceMillis(300);
+  holdFrame(nav, input, renderer, MappedInputManager::Button::Right, false, 950);
+  CHECK(nav.getCurrentFlatIndex() == startIdx + 2, "second repeat steps again");
+}
+
+// The regression this exists to prevent: a screen opened BY a long press starts with that
+// button still down and getHeldTime() already past the threshold. Without arming, the very
+// first frame repeats and walks a selection the user never touched.
+static void testWordRepeatIgnoresHoldCarriedIn() {
+  std::printf("testWordRepeatIgnoresHoldCarriedIn\n");
+
+  WordSelectNavigator nav = makeSingleRowFixture({"alpha", "bravo", "charlie", "delta", "echo"});
+  GfxRenderer renderer;
+  MappedInputManager input;
+  stubSetMillis(20000);
+
+  const int startIdx = nav.getCurrentFlatIndex();
+  // Already held, well past the threshold, and NO press edge -- the hold began elsewhere.
+  for (int frame = 0; frame < 5; frame++) {
+    stubAdvanceMillis(300);
+    holdFrame(nav, input, renderer, MappedInputManager::Button::Right, /*pressEdge=*/false, 900);
+  }
+  CHECK(nav.getCurrentFlatIndex() == startIdx, "a hold carried in never repeats");
+
+  // Releasing arms it; the next hold behaves normally.
+  input.reset();
+  nav.handleNavigation(input, renderer);
+  stubAdvanceMillis(10);
+  holdFrame(nav, input, renderer, MappedInputManager::Button::Right, true, 0);
+  stubAdvanceMillis(600);
+  holdFrame(nav, input, renderer, MappedInputManager::Button::Right, false, 600);
+  CHECK(nav.getCurrentFlatIndex() == startIdx + 1, "after a release, the next hold repeats");
+}
+
+// Row navigation carries a goal column that a fast repeat would smear, so Up/Down are
+// deliberately excluded.
+static void testWordRepeatDoesNotApplyToRows() {
+  std::printf("testWordRepeatDoesNotApplyToRows\n");
+
+  WordSelectNavigator nav = makeShortRowFixture();
+  GfxRenderer renderer;
+  MappedInputManager input;
+  stubSetMillis(30000);
+
+  const int startIdx = nav.getCurrentFlatIndex();
+  holdFrame(nav, input, renderer, MappedInputManager::Button::Down, true, 0);
+  for (int frame = 0; frame < 4; frame++) {
+    stubAdvanceMillis(400);
+    holdFrame(nav, input, renderer, MappedInputManager::Button::Down, false, 1600);
+  }
+  CHECK(nav.getCurrentFlatIndex() == startIdx, "holding Down never repeats a row move");
+}
+
 static void testGoalColumnSurvivesShortRow() {
   std::printf("testGoalColumnSurvivesShortRow\n");
 
@@ -1484,6 +1577,9 @@ int main() {
   testSkipDisabledReachesEveryWord();
   testHyphenEndOnly();
   testHyphenBoth();
+  testWordRepeatStepsWhileHeld();
+  testWordRepeatIgnoresHoldCarriedIn();
+  testWordRepeatDoesNotApplyToRows();
   std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }
