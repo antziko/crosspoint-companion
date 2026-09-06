@@ -161,22 +161,34 @@ void KOReaderSyncActivity::onWifiSelectionComplete(const bool success) {
     LOG_DBG("KOSync", "Released font caches for TLS (heap: %u -> %u)", (unsigned)before, (unsigned)ESP.getFreeHeap());
   }
 
+  // NTP only when the clock is actually unusable. The Wi-Fi connect this activity just came
+  // through already syncs on the board's own schedule (WifiSelectionActivity: once ever on the
+  // X3's DS3231, every connect on the X4, which loses time to deep sleep), so the sync that used
+  // to run here unconditionally cost up to 5s and stood up a second SNTP lifecycle immediately
+  // before the TLS handshake. Not removed outright, unlike upstream #3185: the payload here
+  // carries day-indexed reading stats and flashcard schedules, so a device that reached this
+  // point with no valid time still has to fix that before it writes any of them.
+  //
+  // Delegate to HalClock: it drives SNTP via the framework's configTzTime() (correct TCPIP
+  // core-lock handling), unlike the old inline esp_sntp_* sequence which deadlocked —
+  // esp_sntp_setservername() self-locks the (non-recursive) core mutex, so wrapping it in a
+  // manual LOCK_TCPIP_CORE() blocked forever. We own the WiFi connection here, so give SNTP the
+  // full 5s budget; a late packet is still adopted asynchronously by HalClock.
+  const bool clockNeedsSync =
+      halClock.hasHardwareRtc() ? !SETTINGS.clockHasBeenSynced : !halClock.isSystemTimeValid();
+  if (clockNeedsSync) {
+    {
+      RenderLock lock(*this);
+      state = SYNCING;
+      statusMessage = tr(STR_SYNCING_TIME);
+    }
+    requestUpdate(true);
+    halClock.syncFromNTP(5000);
+  }
+
   {
     RenderLock lock(*this);
     state = SYNCING;
-    statusMessage = tr(STR_SYNCING_TIME);
-  }
-  requestUpdate(true);
-
-  // Sync time with NTP before making API requests. Delegate to HalClock: it drives SNTP via the
-  // framework's configTzTime() (correct TCPIP core-lock handling), unlike the old inline esp_sntp_*
-  // sequence which deadlocked — esp_sntp_setservername() self-locks the (non-recursive) core mutex,
-  // so wrapping it in a manual LOCK_TCPIP_CORE() blocked forever. We own the WiFi connection here,
-  // so give SNTP the full 5s budget; a late packet is still adopted asynchronously by HalClock.
-  halClock.syncFromNTP(5000);
-
-  {
-    RenderLock lock(*this);
     statusMessage = tr(STR_CALC_HASH);
   }
   requestUpdate(true);
