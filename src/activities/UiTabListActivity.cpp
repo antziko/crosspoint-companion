@@ -9,6 +9,12 @@
 
 namespace fui = freeink::ui;
 
+namespace {
+// Minimum tab-band height on a touch board, in pixels. Sized for a fingertip rather than for
+// the label, so it is a floor applied over the theme's own tabBarHeight.
+constexpr int16_t TOUCH_TAB_BAR_HEIGHT = 50;
+}  // namespace
+
 UiTabListActivity::UiTabListActivity(const char* name, GfxRenderer& renderer, MappedInputManager& mappedInput)
     : UiListActivity(name, renderer, mappedInput) {}
 
@@ -163,8 +169,14 @@ void UiTabListActivity::buildTabBar(UiScreen& screen) {
     tabProps.contentInset = fui::Insets{2, 8, 2, 8};
   }
   const int16_t tabLineHeight = screen.target().lineHeight(tabProps.text.font);
+  // Touch boards get a floor of TOUCH_TAB_BAR_HEIGHT regardless of theme: Lyra's tabBarHeight
+  // is 40, which is a poor finger target, and on a board with no Confirm key (X4 Pro) tapping
+  // the tab IS the only way to change tab. Button boards keep the theme's denser band, where
+  // the tab is reached by the D-pad and height buys nothing.
+  const int16_t preferredTabHeight =
+      mappedInput.hasTouch() ? TOUCH_TAB_BAR_HEIGHT : static_cast<int16_t>(metrics.tabBarHeight);
   const int16_t tabBand =
-      static_cast<int16_t>(metrics.tabBarHeight > tabLineHeight + 10 ? metrics.tabBarHeight : tabLineHeight + 10);
+      static_cast<int16_t>(preferredTabHeight > tabLineHeight + 10 ? preferredTabHeight : tabLineHeight + 10);
   // Legacy Lyra two-state treatment: with the selection on the tab band, the
   // band fills gray and the active tab is a solid pill; with the selection
   // down in the list, the band is plain and the active tab keeps a gray box
