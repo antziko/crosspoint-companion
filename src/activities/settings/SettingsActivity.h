@@ -32,6 +32,7 @@ enum class SettingAction {
   // Rendered by a category-scoped SettingsActivity instance — see SettingInfo::SubScreen.
   OpenSubCategory,
   TextSettings,  // LOCAL(feat-dictionary): #2605 Text Settings screen
+  KeyboardLayouts,
 };
 
 struct SettingInfo {

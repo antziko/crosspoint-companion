@@ -3,6 +3,7 @@
 #include <GfxRenderer.h>
 #include <HalDisplay.h>
 #include <Logging.h>
+#include <Memory.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -15,6 +16,7 @@
 #include "FontDownloadActivity.h"
 #include "HomeTopBarSettingsActivity.h"
 #include "KOReaderServerListActivity.h"
+#include "KeyboardLayoutsActivity.h"
 #include "LanguageSelectActivity.h"
 #include "MappedInputManager.h"
 #include "OpdsServerListActivity.h"
@@ -88,6 +90,7 @@ void SettingsActivity::rebuildSettingsLists() {
       readerSettings.push_back(SettingInfo::Action(StrId::STR_CHECK_UPDATES, SettingAction::CheckForUpdates));
       readerSettings.push_back(SettingInfo::Action(StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate));
       readerSettings.push_back(SettingInfo::Action(StrId::STR_LANGUAGE, SettingAction::Language));
+      readerSettings.push_back(SettingInfo::Action(StrId::STR_KEYBOARD_LAYOUTS, SettingAction::KeyboardLayouts));
     }
     currentSettings = &readerSettings;
     settingsCount = static_cast<int>(currentSettings->size());
@@ -525,6 +528,13 @@ void SettingsActivity::toggleCurrentSetting() {
               rebuildSettingsLists();
             },
             renderer, mappedInput);
+        break;
+      case SettingAction::KeyboardLayouts:
+        if (auto activity = makeUniqueNoThrow<KeyboardLayoutsActivity>(renderer, mappedInput)) {
+          startActivityForResult(std::move(activity), nullptr);
+        } else {
+          LOG_ERR("SETTINGS", "OOM: KeyboardLayoutsActivity");
+        }
         break;
       case SettingAction::None:
         // Do nothing
