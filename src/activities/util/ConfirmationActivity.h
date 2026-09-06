@@ -19,6 +19,26 @@ class ConfirmationActivity : public Activity {
   const int margin = 20;
   const int spacing = 30;
   const int fontId = UI_10_FONT_ID;
+  // Vertical padding inside an on-screen button box, above and below the label.
+  static constexpr int touchButtonPaddingY = 12;
+
+  // On-screen Cancel / Confirm pair, laid out in onEnter() and hit-tested in loop().
+  // Drawn only where the physical button-hint strip is hidden (touch boards): the
+  // X4 Pro wires no front buttons at all, so a tap target is the only way to answer
+  // the prompt there.
+  struct TouchButton {
+    int x = 0;
+    int y = 0;
+    int w = 0;
+    int h = 0;
+  };
+  bool touchButtons = false;
+  TouchButton cancelButton;
+  TouchButton confirmButton;
+
+  void drawTouchButton(const TouchButton& button, const char* label, bool primary) const;
+  static bool hitTouchButton(const TouchButton& button, int x, int y);
+  void finishWith(bool cancelled);
 
   std::vector<std::string> headingLines;
   std::vector<std::string> bodyLines;
