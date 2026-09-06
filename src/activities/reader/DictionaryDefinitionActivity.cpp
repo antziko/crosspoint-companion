@@ -569,7 +569,7 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   // still leaves the top body style affordable. Declined IPA falls back to per-glyph
   // decompress — exactly what already happens whenever this prewarm fails.
   //
-  // The gate tests the largest free BLOCK as well as total free heap, because what it is
+  // That gate tests the largest free BLOCK as well as total free heap, because what it is
   // authorising is a single contiguous malloc of group.uncompressedSize (11131 bytes for the
   // IPA font, FontDecompressor.cpp:487). On this activity's heap the two numbers diverge
   // badly — device logs routinely show free=15492 largest=9716 and free=9964 largest=4084 —
@@ -577,32 +577,33 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   // then resurfaces at draw time as dropped glyphs. Same rule as the body-style gates below
   // and as FontCacheManager.cpp:93-98.
   constexpr size_t kIpaGroupReserve = 12 * 1024;  // one FontDecompressor group, with margin
-  // Without a body prewarm to budget against, the only requirement is that single inflate:
-  // prewarmCache mallocs group.uncompressedSize, extracts the glyphs it wants and frees it
-  // again (FontDecompressor.cpp:484-497), leaving a page buffer of just the glyph bitmaps.
-  // The IPA font's group is 11131 bytes, and an X3 sat at a steady largest=12276 -- so the
-  // 12KB round number above declined nearly every attempt for the sake of 12 bytes.
-  constexpr size_t kIpaGroupMin = 11 * 1024 + 512;
   const char* ipaOutcome = "none";
   if (collector->ipaLen != 0) {
-    const size_t freeHeap = ESP.getFreeHeap();
-    const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-    // Leave room for the body prewarm only when there is going to be one. With a built-in body
-    // font nothing downstream competes for this heap, so demanding the body's first-style
-    // reserve on top would decline the prewarm for no one's benefit — and declining is what
-    // drops the glyphs.
-    const size_t needFree = bodyIsSd ? kIpaGroupReserve + kMinFreeForFirstStyle : kIpaGroupMin;
-    const size_t needBlock = bodyIsSd ? kIpaGroupReserve : kIpaGroupMin;
-    if (freeHeap >= needFree && largestBlock >= needBlock) {
+    // Gate only when there is a body prewarm to protect this from. With a BUILT-IN body font
+    // the loop below never runs, so nothing competes for the block and there is no threshold
+    // worth setting: any number above the font's real group size declines a prewarm that would
+    // have succeeded, and declining is what drops the glyphs. Attempting costs one small malloc
+    // at worst — prewarmCache fails per group and keeps the glyphs it did extract, resets a
+    // page slot it could not fill before claiming it, and leaves the rest on the same per-glyph
+    // hot-group path that declining would have.
+    bool attempt = true;
+    if (bodyIsSd) {
+      const size_t freeHeap = ESP.getFreeHeap();
+      const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+      attempt = freeHeap >= kIpaGroupReserve + kMinFreeForFirstStyle && largestBlock >= kIpaGroupReserve;
+      if (!attempt) {
+        ipaOutcome = "skip";
+        LOG_DBG("DDA", "prewarm: skipping IPA (%u cp), free %u largest %u vs %u needed", collector->ipaCount,
+                static_cast<unsigned>(freeHeap), static_cast<unsigned>(largestBlock),
+                static_cast<unsigned>(kIpaGroupReserve));
+      }
+    }
+    if (attempt) {
       // A prewarm that reports missed groups leaves those glyphs on the same failing
       // hot-group path, so only a clean 0 counts as warm.
       const int missed = fcm->prewarmCache(IPA_FONT_ID, collector->ipaUtf8, 0x01);
       ipaWarm_ = (missed == 0);
       ipaOutcome = ipaWarm_ ? "ok" : "miss";
-    } else {
-      ipaOutcome = "skip";
-      LOG_DBG("DDA", "prewarm: skipping IPA (%u cp), free %u largest %u vs %u needed", collector->ipaCount,
-              static_cast<unsigned>(freeHeap), static_cast<unsigned>(largestBlock), static_cast<unsigned>(needBlock));
     }
     // A BUILT-IN body font cannot stand in for the IPA font: it is a subset face carrying no
     // phonetic block, so falling back to it replaces the transcription with U+FFFD marks. Draw
