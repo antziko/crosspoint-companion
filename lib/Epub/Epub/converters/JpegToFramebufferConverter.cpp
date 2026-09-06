@@ -146,10 +146,22 @@ int32_t jpegSeek(JPEGFILE* pFile, int32_t pos) {
   return pos;
 }
 
-// JPEGDEC object is ~17 KB due to internal decode buffers.
-// Heap-allocate on demand so memory is only used during active decode.
-constexpr size_t JPEG_DECODER_APPROX_SIZE = 20 * 1024;
-constexpr size_t MIN_FREE_HEAP_FOR_JPEG = JPEG_DECODER_APPROX_SIZE + 16 * 1024;
+// The JPEGDEC object carries all of its decode buffers inline and allocates nothing itself,
+// so the decoder's entire heap requirement is this one contiguous block. Heap-allocate on
+// demand so it is only held during an active decode.
+//
+// The BLOCK check is the load-bearing one: this allocation has no fallback, and on a
+// fragmented heap total-free says nothing about it (a device log shows free=55476 with
+// largest=11252 — a free-only gate waves that through, then the alloc fails). Sized from
+// sizeof rather than an estimate, because a guess set above the real 17884 bytes rejects
+// decodes that would have succeeded.
+constexpr size_t JPEG_DECODER_SIZE = sizeof(JPEGDEC);
+constexpr size_t MIN_BLOCK_FOR_JPEG = JPEG_DECODER_SIZE + 1024;  // allocator header + rounding
+// Headroom for the band/cache buffers the decode allocates after the decoder
+// (PixelCache.h). Modest on purpose: those already degrade gracefully — the streaming band
+// borrows the reserved inflate window when malloc fails, and PixelCache::allocate returns
+// false cleanly — so this is defence in depth, not the guarantee.
+constexpr size_t MIN_FREE_HEAP_FOR_JPEG = MIN_BLOCK_FOR_JPEG + 8 * 1024;
 
 // Mirror heap-related decode failures to SD: on an untethered X3 (no serial) these
 // lines are the only trace of why an image silently failed to render. `largest`
@@ -485,9 +497,11 @@ X4Tone jpegImageIsDark(const std::string& imagePath, bool& sharpUpscale) {
 }  // namespace
 
 bool JpegToFramebufferConverter::getDimensionsStatic(const std::string& imagePath, ImageDimensions& out) {
-  size_t freeHeap = ESP.getFreeHeap();
-  if (freeHeap < MIN_FREE_HEAP_FOR_JPEG) {
-    LOG_ERR("JPG", "Not enough heap for JPEG decoder (%u free, need %u)", freeHeap, MIN_FREE_HEAP_FOR_JPEG);
+  const size_t freeHeap = ESP.getFreeHeap();
+  const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (largestBlock < MIN_BLOCK_FOR_JPEG || freeHeap < MIN_FREE_HEAP_FOR_JPEG) {
+    LOG_ERR("JPG", "Not enough heap for JPEG decoder (%u free, %u largest; need %u free, %u block)", freeHeap,
+            largestBlock, MIN_FREE_HEAP_FOR_JPEG, MIN_BLOCK_FOR_JPEG);
     logHeapFailureToSd("dims heap-guard fail");
     return false;
   }
@@ -518,9 +532,11 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
                                                      const RenderConfig& config) {
   LOG_DBG("JPG", "Decoding JPEG: %s", imagePath.c_str());
 
-  size_t freeHeap = ESP.getFreeHeap();
-  if (freeHeap < MIN_FREE_HEAP_FOR_JPEG) {
-    LOG_ERR("JPG", "Not enough heap for JPEG decoder (%u free, need %u)", freeHeap, MIN_FREE_HEAP_FOR_JPEG);
+  const size_t freeHeap = ESP.getFreeHeap();
+  const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (largestBlock < MIN_BLOCK_FOR_JPEG || freeHeap < MIN_FREE_HEAP_FOR_JPEG) {
+    LOG_ERR("JPG", "Not enough heap for JPEG decoder (%u free, %u largest; need %u free, %u block)", freeHeap,
+            largestBlock, MIN_FREE_HEAP_FOR_JPEG, MIN_BLOCK_FOR_JPEG);
     logHeapFailureToSd("decode heap-guard fail");
     return false;
   }
