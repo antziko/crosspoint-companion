@@ -34,13 +34,12 @@ StrId opdsFormatLabel(uint8_t format) {
 
 int OpdsServerListActivity::getItemCount() const {
   int count = static_cast<int>(OPDS_STORE.getCount());
-  // In settings mode, append two virtual items: "Add Server" and "Filename format".
-  // (A-Z sort is a per-server toggle inside the server editor; the download folder is
-  // derived per-server from the server name, so there is no global folder item.) In
-  // picker mode, only real servers.
-  if (!pickerMode) {
-    count += 2;
-  }
+  // "Add Server" is offered in both modes: a user with no servers configured reached the
+  // picker with nothing on it and no way out but Back (upstream #3318). Settings mode adds
+  // "Filename format" on top. (A-Z sort is a per-server toggle inside the server editor; the
+  // download folder is derived per-server from the server name, so there is no global folder
+  // item.)
+  count += pickerMode ? 1 : 2;
   return count;
 }
 
@@ -93,12 +92,12 @@ void OpdsServerListActivity::rebuildRowItems() {
     item.actionValue = static_cast<int16_t>(i);
     rowItems_.push_back(item);
   }
-  if (!pickerMode) {
-    fui::ListItem addServer;
-    addServer.label = tr(STR_ADD_SERVER);
-    addServer.actionValue = static_cast<int16_t>(serverCount);
-    rowItems_.push_back(addServer);
+  fui::ListItem addServer;
+  addServer.label = tr(STR_ADD_SERVER);
+  addServer.actionValue = static_cast<int16_t>(serverCount);
+  rowItems_.push_back(addServer);
 
+  if (!pickerMode) {
     // LOCAL(feat): no global "Download folder" row. Upstream has one backed by
     // SETTINGS.opdsDownloadFolder, which does not exist here — feat derives the
     // download folder per-server from the server name (see getItemCount), so the
@@ -197,6 +196,18 @@ void OpdsServerListActivity::handleSelection() {
         }
         activityManager.replaceActivity(std::move(browser));
       }
+    } else {
+      // The "Add Server" row, the picker's only row when no server is configured yet.
+      auto editor = makeUniqueNoThrow<OpdsSettingsActivity>(renderer, mappedInput, -1);
+      if (!editor) {
+        LOG_ERR("OPDSLIST", "OOM: OpdsSettingsActivity");
+        return;
+      }
+      startActivityForResult(std::move(editor), [this](const ActivityResult&) {
+        OPDS_STORE.loadFromFile();
+        rebuildRowItems();
+        requestUpdate();
+      });
     }
     return;
   }
