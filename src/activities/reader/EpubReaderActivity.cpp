@@ -342,6 +342,10 @@ void EpubReaderActivity::onEnter() {
   sessionIdleExcessSecs = 0;
   sessionCommittedSecs = 0;
   statsCheckpointPending = false;
+  // Start the inline-review clock at this session's zero, with no skips carried in: the first
+  // review of a session is always a full interval away, however long the book has been read.
+  inlineReviewBaseSecs = readingTotalSeconds();
+  inlineReviewSkips = 0;
 
   // Arm the open/wake sync prompt if enough reading has accrued since the last sync. Evaluated
   // here (session just started, so the count is the prior unsynced reading), but shown only after
@@ -2834,23 +2838,38 @@ uint16_t EpubReaderActivity::inlineReviewIntervalMinutes() const {
   return CrossPointSettings::FC_INLINE_MINUTES[idx];  // index 0 is the Off sentinel (0 minutes)
 }
 
-bool EpubReaderActivity::inlineReviewThresholdReached() const {
+uint16_t EpubReaderActivity::inlineReviewEffectiveMinutes() const {
   const uint16_t minutes = inlineReviewIntervalMinutes();
-  if (minutes == 0) return false;
-  const uint32_t totalNow = readingTotalSeconds();
-  // A Skip stamps the baseline into the future, so it can legitimately exceed the odometer;
-  // the unsigned subtraction has to be guarded or it wraps and fires immediately.
-  const uint32_t ref = readingStats.lastInlineReviewSeconds;
-  if (totalNow <= ref) return false;
-  return (totalNow - ref) >= static_cast<uint32_t>(minutes) * 60UL;
+  if (minutes == 0) return 0;
+  const uint16_t mult = std::min<uint16_t>(inlineReviewSkips + 1, INLINE_REVIEW_MAX_MULTIPLIER);
+  return static_cast<uint16_t>(minutes * mult);
 }
 
-void EpubReaderActivity::recordInlineReview(uint16_t deferIntervals) {
-  const uint32_t extra = static_cast<uint32_t>(deferIntervals) * inlineReviewIntervalMinutes() * 60UL;
-  readingStats.lastInlineReviewSeconds = readingTotalSeconds() + extra;
-  if (epub) {
-    readingStats.save(epub->getCachePath());
+uint16_t EpubReaderActivity::inlineReviewSkippedMinutes() const {
+  const uint16_t minutes = inlineReviewIntervalMinutes();
+  if (minutes == 0) return 0;
+  const uint16_t mult = std::min<uint16_t>(inlineReviewSkips + 2, INLINE_REVIEW_MAX_MULTIPLIER);
+  return static_cast<uint16_t>(minutes * mult);
+}
+
+bool EpubReaderActivity::inlineReviewThresholdReached() const {
+  const uint16_t minutes = inlineReviewEffectiveMinutes();
+  if (minutes == 0) return false;
+  const uint32_t totalNow = readingTotalSeconds();
+  // The baseline is stamped from the same odometer, so it can never lead it; guard the
+  // unsigned subtraction anyway rather than rely on that invariant holding forever.
+  if (totalNow <= inlineReviewBaseSecs) return false;
+  return (totalNow - inlineReviewBaseSecs) >= static_cast<uint32_t>(minutes) * 60UL;
+}
+
+void EpubReaderActivity::recordInlineReview(bool skipped) {
+  if (skipped && inlineReviewSkips < INLINE_REVIEW_MAX_MULTIPLIER) {
+    inlineReviewSkips++;
   }
+  inlineReviewBaseSecs = readingTotalSeconds();
+  // Session-scoped state only -- nothing to persist. The stats field is kept current so a
+  // save triggered elsewhere still carries a truthful value for the v7 format.
+  readingStats.lastInlineReviewSeconds = inlineReviewBaseSecs;
 }
 
 bool EpubReaderActivity::maybeStartInlineReview() {
@@ -2872,9 +2891,10 @@ bool EpubReaderActivity::maybeStartInlineReview() {
   const uint32_t today = readingHistoryDayIndex(year, month, day);
 
   if (!FlashcardDeck::hasDueCards(epub->getCachePath(), today)) {
-    // Nothing to review. Stamp the baseline anyway, otherwise this re-reads the deck file on
-    // every subsequent page turn for as long as the deck stays empty of due cards.
-    recordInlineReview(0);
+    // Nothing to review. Restart the clock anyway, otherwise this re-reads the deck file on
+    // every subsequent page turn for as long as the deck stays empty of due cards. Not a skip:
+    // the user declined nothing, so the interval must not stretch.
+    recordInlineReview(/*skipped=*/false);
     return false;
   }
 
@@ -2883,12 +2903,13 @@ bool EpubReaderActivity::maybeStartInlineReview() {
   const uint8_t cards = CrossPointSettings::FC_INLINE_CARDS[cardIdx];
   return startActivityForResultNoThrow<FlashcardReviewActivity>(
       [this](const ActivityResult& res) {
-        // Skip defers by one EXTRA interval (two intervals of quiet from one Back press);
-        // a completed review just restarts the clock. A cancelled result should not happen
-        // (inline mode always sets a FlashcardReviewResult) but is treated as a Skip to be safe.
+        // A skip lengthens the interval for the rest of the session; a completed review --
+        // including a partial one, which the review screen reports as not-skipped -- just
+        // restarts the clock at the current length. A cancelled result should not happen
+        // (inline mode always sets a FlashcardReviewResult) but is treated as a skip to be safe.
         const auto* fc = std::get_if<FlashcardReviewResult>(&res.data);
         const bool skipped = res.isCancelled || !fc || fc->skipped;
-        recordInlineReview(skipped ? 1 : 0);
+        recordInlineReview(skipped);
         // Report the tally as a toast over the page rather than a summary screen. Nothing to
         // report if no card was actually graded (an immediate Back), so stay silent there.
         if (fc && fc->reviewed > 0) {
@@ -2908,7 +2929,7 @@ bool EpubReaderActivity::maybeStartInlineReview() {
         ignoreBackUntilRelease = true;
         requestUpdate();
       },
-      renderer, mappedInput, epub->getCachePath(), cards);
+      renderer, mappedInput, epub->getCachePath(), cards, inlineReviewEffectiveMinutes(), inlineReviewSkippedMinutes());
 }
 
 void EpubReaderActivity::recordSyncPromptSkip() {

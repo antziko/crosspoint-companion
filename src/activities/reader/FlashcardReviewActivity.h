@@ -25,12 +25,17 @@ class FlashcardReviewActivity final : public Activity {
   // the reader rather than opened from the menu. That skips the overview, caps the session
   // at inlineCards, and makes Back mean "back to the book" instead of "back to the
   // overview". 0 (the default) is the normal full-screen review.
+  // nextMinutes / skipMinutes are the reader's projected gap until the next inline review,
+  // for leaving now with at least one card graded and for skipping outright. Display only:
+  // the leave-confirmation names the cost, and only the reader knows the session's schedule.
   explicit FlashcardReviewActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string bookCachePath,
-                                   uint8_t inlineCards = 0)
+                                   uint8_t inlineCards = 0, uint16_t nextMinutes = 0, uint16_t skipMinutes = 0)
       : Activity("FlashcardReview", renderer, mappedInput),
         cachePath(std::move(bookCachePath)),
         controller(renderer, mappedInput, *this, cachePath),
-        inlineCap(inlineCards) {}
+        inlineCap(inlineCards),
+        inlineNextMinutes(nextMinutes),
+        inlineSkipMinutes(skipMinutes) {}
 
   void onEnter() override;
   void onExit() override;
@@ -50,7 +55,10 @@ class FlashcardReviewActivity final : public Activity {
   // Summary = session finished; show the tally.
   enum class Phase { Overview, Front, Revealed, AwaitingGrade, Summary };
 
-  static constexpr int SESSION_CAP = 30;  // bounded session; reserve()'d once
+  // Bounded selection window, reserve()'d once. Even: buildSession's due-first scope splits
+  // it across four equally weighted groups (see selectBalanced), so an odd cap would
+  // silently under-fill one of them.
+  static constexpr int SESSION_CAP = 32;
 
   std::string cachePath;
   DictionaryLookupController controller;
@@ -79,6 +87,8 @@ class FlashcardReviewActivity final : public Activity {
   // Inline ("review while reading") mode: non-zero card cap set by the reader. See the
   // constructor. Zero for the menu-launched full review.
   uint8_t inlineCap = 0;
+  uint16_t inlineNextMinutes = 0;  // gap if the user leaves having graded something
+  uint16_t inlineSkipMinutes = 0;  // gap if the user skips without grading anything
   bool isInline() const { return inlineCap > 0; }
   // Finish an inline session, handing the reader the skip flag (which picks the deferral) and
   // the tally (which it renders as a toast over the page). No-op outside inline mode.
@@ -111,6 +121,9 @@ class FlashcardReviewActivity final : public Activity {
   // "home" page). Resets the session + tallies and recomputes deck stats. Used by
   // Back from a card face, so the user lands on the overview instead of the reader.
   void returnToOverview();
+  // Inline mode only: confirm before Back leaves the review. Grading anything first makes
+  // this a partial review rather than a skip, which the prompt says and the reader honours.
+  void promptLeaveReview();
   // Prompt to suspend (active session) or unsuspend (suspendedMode) the resident
   // card via ConfirmationActivity; on confirm, mutate the deck and advance.
   void promptSuspendToggle();

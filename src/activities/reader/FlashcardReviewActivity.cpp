@@ -201,6 +201,28 @@ void FlashcardReviewActivity::returnToOverview() {
   requestUpdate();
 }
 
+void FlashcardReviewActivity::promptLeaveReview() {
+  // Back is the same button that leaves every other screen, so it is easy to hit by reflex --
+  // and leaving is not free, because a skip stretches every later review this session. Confirm
+  // first, and name the resulting gap so the choice is informed.
+  // Grading even one card makes this a PARTIAL review, not a skip: the work was done, the
+  // grades are already committed to the deck, and the schedule should not be penalised for it.
+  const bool partial = reviewed > 0;
+  char body[64];
+  snprintf(body, sizeof(body), tr(STR_FC_LEAVE_REVIEW_BODY),
+           static_cast<int>(partial ? inlineNextMinutes : inlineSkipMinutes));
+  startActivityForResultNoThrow<ConfirmationActivity>(
+      [this, partial](const ActivityResult& res) {
+        if (res.isCancelled) {
+          requestUpdate();  // stay in the review, on the same card
+          return;
+        }
+        finishInline(/*skipped=*/!partial);
+      },
+      renderer, mappedInput, partial ? tr(STR_FC_END_REVIEW_TITLE) : tr(STR_FC_SKIP_REVIEW_TITLE), body,
+      /*cancelLabel=*/"", partial ? tr(STR_FC_END_REVIEW_CONFIRM) : tr(STR_SKIP));
+}
+
 void FlashcardReviewActivity::promptSuspendToggle() {
   // Capture the word now -- `card` is overwritten as soon as we advance.
   const std::string word = card.word;
@@ -328,12 +350,12 @@ void FlashcardReviewActivity::loop() {
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     // Inline: Back is the "I'm in a rush" escape hatch -- it drops straight back to the
-    // book from any phase, and reports skipped so the reader defers the next review by
-    // two intervals rather than one. Cards already graded this session keep their grades,
-    // and the tally still rides along, so the toast reports the partial pass honestly.
+    // book from any phase, after a confirmation. Cards already graded this session keep
+    // their grades and the tally still rides along, so the toast reports the partial pass
+    // honestly -- and having graded any card makes this a partial review rather than a skip.
     // (Phase::Summary is unreachable inline -- advanceCard finishes the session instead.)
     if (isInline()) {
-      finishInline(/*skipped=*/true);
+      promptLeaveReview();
       return;
     }
     // Back from a card abandons the in-progress session and returns to the deck
@@ -574,14 +596,16 @@ void FlashcardReviewActivity::renderOverview(int contentTop, int contentBottom, 
     y += rowH + metrics.verticalSpacing * 2;
   }
 
-  // Box-distribution ladder: one cell per Leitner stage -- New (box 0), boxes 1..5,
-  // then Mastered -- each showing how many cards currently sit there. Cards march
-  // rightward as they are promoted, so the distribution visibly shifts session to
-  // session: progress you can see long before anything graduates. Counts come
-  // straight from boxHist[] + mastered, no new storage.
-  constexpr int LADDER_CELLS = 7;  // New, box1..box5, Mastered
-  const int counts[LADDER_CELLS] = {stats.boxHist[0], stats.boxHist[1], stats.boxHist[2], stats.boxHist[3],
-                                    stats.boxHist[4], stats.boxHist[5], stats.mastered};
+  // Box-distribution ladder: one cell per Leitner stage -- New (box 0), the boxes up to
+  // TOP_BOX, then Mastered -- each showing how many cards currently sit there. Cards
+  // march rightward as they are promoted, so the distribution visibly shifts session to
+  // session: progress you can see long before anything graduates. Counts come straight
+  // from boxHist[] + mastered, no new storage. Sized from TOP_BOX so shortening the
+  // ladder cannot leave dead cells that can never be reached.
+  constexpr int LADDER_CELLS = FlashcardDeck::TOP_BOX + 2;  // New, box1..TOP_BOX, Mastered
+  int counts[LADDER_CELLS] = {};
+  for (int b = 0; b <= FlashcardDeck::TOP_BOX; b++) counts[b] = stats.boxHist[b];
+  counts[LADDER_CELLS - 1] = stats.mastered;
   const int cellW = (countRight - left) / LADDER_CELLS;
   const int cellH = lh + 2;
   for (int i = 0; i < LADDER_CELLS; i++) {
@@ -605,17 +629,18 @@ void FlashcardReviewActivity::renderOverview(int contentTop, int contentBottom, 
   renderer.drawText(SMALL_FONT_ID, countRight - renderer.getTextWidth(SMALL_FONT_ID, mLabel), capY, mLabel, true);
   y += cellH + renderer.getLineHeight(SMALL_FONT_ID) + metrics.verticalSpacing * 2;
 
-  // Weighted learning-progress bar: every card contributes its box position toward
-  // the bar (box b of 6, Mastered = 6/6), so it advances on each promotion rather
+  // Weighted learning-progress bar: every card contributes its box position toward the
+  // bar (box b of TOP_BOX+1, Mastered = full), so it advances on each promotion rather
   // than only when a card graduates -- far more responsive than mastered/total. The
   // denominator is the active deck (suspended cards excluded).
+  constexpr long FULL = FlashcardDeck::TOP_BOX + 1L;
   int active = stats.mastered;
-  long weighted = stats.mastered * 6L;
-  for (int b = 0; b < 6; b++) {
+  long weighted = stats.mastered * FULL;
+  for (int b = 0; b <= FlashcardDeck::TOP_BOX; b++) {
     active += stats.boxHist[b];
     weighted += static_cast<long>(stats.boxHist[b]) * b;
   }
-  const int pct = active > 0 ? static_cast<int>(weighted * 100 / (active * 6L)) : 0;
+  const int pct = active > 0 ? static_cast<int>(weighted * 100 / (active * FULL)) : 0;
   renderer.drawText(UI_10_FONT_ID, left, y, tr(STR_FLASHCARD_PROGRESS));
   char pctBuf[8];
   snprintf(pctBuf, sizeof(pctBuf), "%d%%", pct);

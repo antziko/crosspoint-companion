@@ -161,6 +161,21 @@ class EpubReaderActivity final : public Activity {
   // (see commitReadingTime). onExit flushes only the remaining delta, so a crash
   // mid-session loses at most one checkpoint interval, not the whole session.
   uint32_t sessionCommittedSecs = 0;
+  // --- Inline flashcard review, session-scoped state --------------------------------
+  // The review clock counts from the moment this reading session began, not from the book's
+  // lifetime odometer: opening a book always buys a full interval of undisturbed reading.
+  // Both fields are deliberately RAM-only, so they reset on close and on the chip reset that
+  // ends a deep sleep -- that is exactly the session boundary the schedule is meant to track.
+  // Baseline is an odometer reading (readingTotalSeconds() at session start), which keeps the
+  // idle-page and sub-activity exclusions that accounting already applies.
+  uint32_t inlineReviewBaseSecs = 0;
+  // Skips taken this session. Each one permanently lengthens the interval for the rest of the
+  // session (interval x (1 + skips)), so "not now" keeps meaning "not this often" even after a
+  // review is completed. Capped by INLINE_REVIEW_MAX_MULTIPLIER.
+  uint16_t inlineReviewSkips = 0;
+  // Ceiling on 1 + inlineReviewSkips. At the longest configurable interval (30 min) this caps
+  // the effective gap at 3 hours, past which further stretching is indistinguishable from Off.
+  static constexpr uint16_t INLINE_REVIEW_MAX_MULTIPLIER = 6;
   // Set by the render task on full-refresh pages (the e-ink ghost-clear cadence,
   // SETTINGS.refreshFrequency); consumed by loop() on the main task -- the same
   // context as onExit -- so all session accounting stays single-task.
@@ -381,14 +396,17 @@ class EpubReaderActivity final : public Activity {
   // --- Inline flashcard review ("review while reading") ----------------------------
   // Configured review interval in minutes, or 0 when the feature is off.
   uint16_t inlineReviewIntervalMinutes() const;
-  // Reading accrued past lastInlineReviewSeconds meets the interval gate. Mirrors
-  // syncPromptThresholdReached(): the same odometer, so time inside sub-activities (the
-  // review screen itself included) and idle-page excess are already excluded.
+  // Configured interval scaled by the skips taken this session, in minutes; 0 when off.
+  uint16_t inlineReviewEffectiveMinutes() const;
+  // Same, projected for one MORE skip -- what the next gap becomes if the user skips now.
+  uint16_t inlineReviewSkippedMinutes() const;
+  // Reading accrued this session past inlineReviewBaseSecs meets the effective interval.
+  // Uses the same odometer as syncPromptThresholdReached(), so time inside sub-activities
+  // (the review screen itself included) and idle-page excess are already excluded.
   bool inlineReviewThresholdReached() const;
-  // Stamp the inline-review baseline and persist it. `deferIntervals` shifts the baseline
-  // into the future so the next review waits that many EXTRA intervals: 0 after a completed
-  // review, 1 after a Skip (buying two intervals of quiet from one Back press).
-  void recordInlineReview(uint16_t deferIntervals);
+  // Restart the session review clock. A skip also lengthens every later interval this
+  // session; a completed review (including a partial one) keeps the current length.
+  void recordInlineReview(bool skipped);
   // Called at the end of a forward page turn. Runs the gates cheapest-first and, if they all
   // pass, opens a short capped flashcard review over the page just turned to. Returns true if
   // a review was launched.
