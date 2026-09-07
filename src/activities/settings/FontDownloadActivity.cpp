@@ -6,8 +6,10 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <SdDebugLog.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 #include <esp_rom_crc.h>
 
 #include <algorithm>
@@ -24,6 +26,11 @@
 #include "network/HttpDownloader.h"
 
 namespace fui = freeink::ui;
+
+// The manifest is fetched to SD rather than held in RAM, and KEPT after parsing: the download
+// path releases the parsed tables to free the contiguous block the TLS handshake needs, then
+// re-parses from here instead of re-fetching. Removed in onExit().
+static constexpr const char* MANIFEST_TMP = "/fonts_manifest.tmp";
 
 FontDownloadActivity::FontDownloadActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
     : UiListActivity("FontDownload", renderer, mappedInput), fontInstaller_(sdFontSystem.registry()) {}
@@ -115,6 +122,9 @@ void FontDownloadActivity::onExit() {
   SdDebugLog::log("FONT", "screen exit");
   SdDebugLog::setEnabled(false);
 
+  // Kept for the duration of the screen so a download can re-parse it instead of re-fetching.
+  Storage.remove(MANIFEST_TMP);
+
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(false);
     delay(30);
@@ -160,10 +170,6 @@ void FontDownloadActivity::onWifiSelectionComplete(const bool success) {
 // --- Manifest fetching ---
 
 bool FontDownloadActivity::fetchAndParseManifest() {
-  // Download manifest to a temp file on SD card to avoid holding both
-  // TLS buffers and the full JSON string in RAM simultaneously.
-  static constexpr const char* MANIFEST_TMP = "/fonts_manifest.tmp";
-
   // Capture the real failure reason (HTTP code / connect error) so a USB-locked X3 —
   // which can't see the LOG_ERR serial output — can still diagnose "Manage Fonts" from
   // the SD debug log. The GitHub release URL 302-redirects to a CDN host; a second TLS
@@ -198,136 +204,182 @@ bool FontDownloadActivity::fetchAndParseManifest() {
     return false;
   }
 
-  // HTTP client is now closed — TLS buffers freed. Parse JSON from file.
-  HalFile manifestFile;
-  if (!Storage.openFileForRead("FONT", MANIFEST_TMP, manifestFile)) {
-    LOG_ERR("FONT", "Failed to open temp manifest");
-    SdDebugLog::log("FONT", "MANIFEST open FAILED: %s", MANIFEST_TMP);
-    Storage.remove(MANIFEST_TMP);
-    errorMessage_ = "Failed to read font list";
-    return false;
-  }
+  return parseManifestFile();
+}
 
-  const size_t manifestBytes = manifestFile.fileSize();
-  JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, manifestFile);
-  manifestFile.close();
-  Storage.remove(MANIFEST_TMP);
+bool FontDownloadActivity::parseManifestFile() {
+  // Scoped so the JsonDocument's variant pools — the largest single structure on this path —
+  // are returned BEFORE the row vectors below are sized. The document is dead weight by then:
+  // everything it holds has already been copied into families_/scriptGroupLabels_. Leaving it
+  // alive to the end of the function is what put a 1,960-byte reserve against a 1,268-byte
+  // largest block and abort()ed the device (X3, 09-07 capture).
+  {
+    // HTTP client is now closed — TLS buffers freed. Parse JSON from file.
+    HalFile manifestFile;
+    if (!Storage.openFileForRead("FONT", MANIFEST_TMP, manifestFile)) {
+      LOG_ERR("FONT", "Failed to open temp manifest");
+      SdDebugLog::log("FONT", "MANIFEST open FAILED: %s", MANIFEST_TMP);
+      Storage.remove(MANIFEST_TMP);
+      errorMessage_ = "Failed to read font list";
+      return false;
+    }
 
-  if (err) {
-    LOG_ERR("FONT", "Manifest parse error: %s", err.c_str());
-    SdDebugLog::log("FONT", "MANIFEST parse FAILED: %s (downloaded %u bytes)", err.c_str(),
-                    static_cast<unsigned>(manifestBytes));
-    errorMessage_ = "Invalid font manifest";
-    return false;
-  }
+    const size_t manifestBytes = manifestFile.fileSize();
+    // Second reclaim, after the transfer rather than before it: rendering the "Loading" frames
+    // between the pre-handshake reclaim above and this point repopulates the glyph arenas, and
+    // the pools deserializeJson is about to take need contiguous space. releaseCache() rather
+    // than the clearCache() used pre-handshake — that one is sized to leave the TLS record
+    // buffers room, a constraint that no longer applies once the client is closed.
+    if (auto* fcm = renderer.getFontCacheManager()) {
+      fcm->releaseCache();
+    }
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, manifestFile);
+    manifestFile.close();
 
-  int version = doc["version"] | 0;
-  if (version != FONTS_MANIFEST_VERSION) {
-    LOG_ERR("FONT", "Unsupported manifest version: %d", version);
-    SdDebugLog::log("FONT", "MANIFEST version mismatch: got=%d want=%d", version, FONTS_MANIFEST_VERSION);
-    errorMessage_ = "Unsupported manifest version";
-    return false;
-  }
-
-  baseUrl_ = doc["baseUrl"] | "";
-  families_.clear();
-  scriptGroupLabels_.clear();
-  filteredIndices_.clear();
-  fontInstaller_.refreshRegistry();
-
-  JsonArray groupsArr = doc["scriptGroups"].as<JsonArray>();
-  const size_t groupCount = std::min(groupsArr.size(), MAX_SCRIPT_GROUPS);
-  scriptGroupLabels_.reserve(groupCount);
-  if (groupsArr.size() > MAX_SCRIPT_GROUPS) {
-    LOG_ERR("FONT", "Manifest declares more than %zu script groups; extra groups ignored", MAX_SCRIPT_GROUPS);
-  }
-  for (size_t groupIndex = 0; groupIndex < groupCount; groupIndex++) {
-    JsonObject groupObj = groupsArr[groupIndex].as<JsonObject>();
-    const char* tag = groupObj["tag"] | "";
-    const char* label = groupObj["label"] | "";
-    if (*tag == '\0' || *label == '\0') {
-      LOG_ERR("FONT", "Malformed script group at index %zu", groupIndex);
+    if (err) {
+      Storage.remove(MANIFEST_TMP);
+      LOG_ERR("FONT", "Manifest parse error: %s", err.c_str());
+      SdDebugLog::log("FONT", "MANIFEST parse FAILED: %s (downloaded %u bytes)", err.c_str(),
+                      static_cast<unsigned>(manifestBytes));
       errorMessage_ = "Invalid font manifest";
       return false;
     }
-    scriptGroupLabels_.push_back(label);
-  }
 
-  JsonArray familiesArr = doc["families"].as<JsonArray>();
-  families_.reserve(familiesArr.size());
-  filteredIndices_.reserve(familiesArr.size());
-
-  for (JsonObject fObj : familiesArr) {
-    ManifestFamily family;
-    family.name = fObj["name"] | "";
-    family.description = fObj["description"] | "";
-
-    for (JsonVariant s : fObj["styles"].as<JsonArray>()) {
-      family.styles.push_back(s.as<std::string>());
+    int version = doc["version"] | 0;
+    if (version != FONTS_MANIFEST_VERSION) {
+      LOG_ERR("FONT", "Unsupported manifest version: %d", version);
+      SdDebugLog::log("FONT", "MANIFEST version mismatch: got=%d want=%d", version, FONTS_MANIFEST_VERSION);
+      errorMessage_ = "Unsupported manifest version";
+      return false;
     }
 
-    for (JsonVariant script : fObj["scripts"].as<JsonArray>()) {
-      const char* familyTag = script.as<const char*>();
-      if (!familyTag) continue;
-      for (size_t groupIndex = 0; groupIndex < scriptGroupLabels_.size(); groupIndex++) {
-        JsonObject groupObj = groupsArr[groupIndex].as<JsonObject>();
-        const char* groupTag = groupObj["tag"] | "";
-        if (std::strcmp(familyTag, groupTag) == 0) {
-          family.scriptMask |= uint32_t{1} << groupIndex;
-          break;
-        }
-      }
+    baseUrl_ = doc["baseUrl"] | "";
+    families_.clear();
+    scriptGroupLabels_.clear();
+    filteredIndices_.clear();
+    fontInstaller_.refreshRegistry();
+
+    JsonArray groupsArr = doc["scriptGroups"].as<JsonArray>();
+    const size_t groupCount = std::min(groupsArr.size(), MAX_SCRIPT_GROUPS);
+    // Every reserve on this path is nothrow: the radio is up, so the largest free block is
+    // structurally small, and a bare std::vector::reserve that cannot be met calls the throwing
+    // operator new -> abort(). Failing the parse shows "Out of memory" and keeps the device up.
+    if (!reserveNoThrow(scriptGroupLabels_, groupCount)) {
+      LOG_ERR("FONT", "OOM: %zu script group labels", groupCount);
+      errorMessage_ = tr(STR_MEMORY_ERROR);
+      return false;
     }
-
-    family.totalSize = 0;
-    for (JsonObject fileObj : fObj["files"].as<JsonArray>()) {
-      ManifestFile file;
-      file.name = fileObj["name"] | "";
-      file.size = fileObj["size"] | 0;
-
-      if (!fileObj["crc32"].is<uint32_t>()) {
-        LOG_ERR("FONT", "Malformed manifest file entry: missing or invalid crc32 for %s", file.name.c_str());
-        SdDebugLog::log("FONT", "MANIFEST malformed: missing crc32 for %s", file.name.c_str());
+    if (groupsArr.size() > MAX_SCRIPT_GROUPS) {
+      LOG_ERR("FONT", "Manifest declares more than %zu script groups; extra groups ignored", MAX_SCRIPT_GROUPS);
+    }
+    for (size_t groupIndex = 0; groupIndex < groupCount; groupIndex++) {
+      JsonObject groupObj = groupsArr[groupIndex].as<JsonObject>();
+      const char* tag = groupObj["tag"] | "";
+      const char* label = groupObj["label"] | "";
+      if (*tag == '\0' || *label == '\0') {
+        LOG_ERR("FONT", "Malformed script group at index %zu", groupIndex);
         errorMessage_ = "Invalid font manifest";
         return false;
       }
-      file.crc32 = fileObj["crc32"].as<uint32_t>();
-
-      family.totalSize += file.size;
-      family.files.push_back(std::move(file));
+      scriptGroupLabels_.push_back(label);
     }
 
-    family.installed = fontInstaller_.isFamilyInstalled(family.name.c_str());
+    JsonArray familiesArr = doc["families"].as<JsonArray>();
+    if (!reserveNoThrow(families_, familiesArr.size()) || !reserveNoThrow(filteredIndices_, familiesArr.size())) {
+      LOG_ERR("FONT", "OOM: %zu families", familiesArr.size());
+      errorMessage_ = tr(STR_MEMORY_ERROR);
+      return false;
+    }
 
-    // Detect updates by comparing manifest file sizes with files on disk.
-    // Not a checksum, but a size mismatch reliably indicates a rebuild in practice.
-    if (family.installed) {
-      for (const auto& file : family.files) {
-        char path[128];
-        FontInstaller::buildFontPath(family.name.c_str(), file.name.c_str(), path, sizeof(path));
-        HalFile f;
-        if (Storage.openFileForRead("FONT", path, f)) {
-          size_t actual = f.fileSize();
-          f.close();
-          if (actual != file.size) {
+    for (JsonObject fObj : familiesArr) {
+      ManifestFamily family;
+      family.name = fObj["name"] | "";
+      family.description = fObj["description"] | "";
+
+      // The manifest's "styles" array is deliberately not read. Nothing on this screen shows a
+      // family's style list, and parsing it cost one vector allocation per family held for the
+      // whole life of the screen — through every per-file TLS handshake, which needs contiguity
+      // more than it needs anything else here.
+
+      for (JsonVariant script : fObj["scripts"].as<JsonArray>()) {
+        const char* familyTag = script.as<const char*>();
+        if (!familyTag) continue;
+        for (size_t groupIndex = 0; groupIndex < scriptGroupLabels_.size(); groupIndex++) {
+          JsonObject groupObj = groupsArr[groupIndex].as<JsonObject>();
+          const char* groupTag = groupObj["tag"] | "";
+          if (std::strcmp(familyTag, groupTag) == 0) {
+            family.scriptMask |= uint32_t{1} << groupIndex;
+            break;
+          }
+        }
+      }
+
+      family.totalSize = 0;
+      const JsonArray filesArr = fObj["files"].as<JsonArray>();
+      if (!reserveNoThrow(family.files, filesArr.size())) {
+        LOG_ERR("FONT", "OOM: %zu files for %s", filesArr.size(), family.name.c_str());
+        errorMessage_ = tr(STR_MEMORY_ERROR);
+        return false;
+      }
+      for (JsonObject fileObj : filesArr) {
+        ManifestFile file;
+        file.name = fileObj["name"] | "";
+        file.size = fileObj["size"] | 0;
+
+        if (!fileObj["crc32"].is<uint32_t>()) {
+          LOG_ERR("FONT", "Malformed manifest file entry: missing or invalid crc32 for %s", file.name.c_str());
+          SdDebugLog::log("FONT", "MANIFEST malformed: missing crc32 for %s", file.name.c_str());
+          errorMessage_ = "Invalid font manifest";
+          return false;
+        }
+        file.crc32 = fileObj["crc32"].as<uint32_t>();
+
+        family.totalSize += file.size;
+        family.files.push_back(std::move(file));
+      }
+
+      family.installed = fontInstaller_.isFamilyInstalled(family.name.c_str());
+
+      // Detect updates by comparing manifest file sizes with files on disk.
+      // Not a checksum, but a size mismatch reliably indicates a rebuild in practice.
+      if (family.installed) {
+        for (const auto& file : family.files) {
+          char path[128];
+          FontInstaller::buildFontPath(family.name.c_str(), file.name.c_str(), path, sizeof(path));
+          HalFile f;
+          if (Storage.openFileForRead("FONT", path, f)) {
+            size_t actual = f.fileSize();
+            f.close();
+            if (actual != file.size) {
+              family.hasUpdate = true;
+              break;
+            }
+          } else {
+            // File missing on disk but family dir exists — treat as update
             family.hasUpdate = true;
             break;
           }
-        } else {
-          // File missing on disk but family dir exists — treat as update
-          family.hasUpdate = true;
-          break;
         }
       }
+
+      families_.push_back(std::move(family));
     }
+  }  // JsonDocument + HalFile released here
 
-    families_.push_back(std::move(family));
-  }
-
+  // Sized once here so the two rebuild*RowItems() paths, which run on every navigation, never
+  // have to grow. This pair is what abort()ed the X3 on 09-07: rowItems_ asked for
+  // 35 * sizeof(fui::ListItem) = 1,960 contiguous bytes against a 1,268-byte largest block,
+  // with the JsonDocument (now released above) still holding the heap down.
   const size_t rowCapacity = std::max(families_.size() + 2, scriptGroupLabels_.size() + 1);
-  rowLabels_.reserve(rowCapacity);
-  rowItems_.reserve(rowCapacity);
+  if (!reserveNoThrow(rowLabels_, rowCapacity) || !reserveNoThrow(rowItems_, rowCapacity)) {
+    LOG_ERR("FONT", "OOM: %zu list rows", rowCapacity);
+    SdDebugLog::log("FONT", "MANIFEST rows OOM: rows=%u free=%u largest=%u", static_cast<unsigned>(rowCapacity),
+                    static_cast<unsigned>(ESP.getFreeHeap()),
+                    static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+    errorMessage_ = tr(STR_MEMORY_ERROR);
+    return false;
+  }
 
   LOG_DBG("FONT", "Manifest loaded: %zu families, %zu script groups", families_.size(), scriptGroupLabels_.size());
   return true;
@@ -335,32 +387,139 @@ bool FontDownloadActivity::fetchAndParseManifest() {
 
 // --- Download ---
 
-void FontDownloadActivity::downloadAll() {
-  cancelRequested_ = false;
+void FontDownloadActivity::releaseManifestWorkingSet() {
+  // swap-with-empty, not clear(): clear() destroys the elements but keeps the capacity, and the
+  // capacity IS the block this exists to hand back.
+  std::vector<ManifestFamily>().swap(families_);
+  std::vector<int>().swap(filteredIndices_);
+  std::vector<std::string>().swap(scriptGroupLabels_);
+  std::vector<std::string>().swap(rowLabels_);
+  std::vector<fui::ListItem>().swap(rowItems_);
+  // Nothing may render a list row until reloadManifestFromCache() puts the tables back; the
+  // DOWNLOADING state draws from jobs_ instead, and its rows are rebuilt on the way out.
+  rowsDirty_ = true;
+
+  multi_heap_info_t info;
+  heap_caps_get_info(&info, MALLOC_CAP_8BIT);
+  SdDebugLog::log("FONT", "manifest released: free=%u largest=%u blocks=%u jobs=%u", (unsigned)info.total_free_bytes,
+                  (unsigned)info.largest_free_block, (unsigned)info.free_blocks, (unsigned)jobs_.size());
+}
+
+bool FontDownloadActivity::reloadManifestFromCache() {
+  // The just-written files change installed/hasUpdate, and the parse reads both.
+  fontInstaller_.refreshRegistry();
+  if (!parseManifestFile()) {
+    LOG_ERR("FONT", "Manifest reload failed after download");
+    return false;
+  }
+  // Unconditionally, and for the group the user is actually in: releaseManifestWorkingSet()
+  // emptied filteredIndices_, and only enterGroup() ever refills it. Skipping this when a group
+  // screen exists left the family list empty behind the "installed" screen.
+  buildFilteredIndices(currentGroupIndex_);
+  return true;
+}
+
+bool FontDownloadActivity::buildJobs(const bool wantUpdates) {
+  std::vector<DownloadJob>().swap(jobs_);
+  jobIndex_ = 0;
+  if (!reserveNoThrow(jobs_, filteredIndices_.size())) {
+    LOG_ERR("FONT", "OOM: %zu download jobs", filteredIndices_.size());
+    errorMessage_ = tr(STR_MEMORY_ERROR);
+    return false;
+  }
   for (const int familyIndex : filteredIndices_) {
-    if (families_[familyIndex].installed) continue;
-    downloadFamily(families_[familyIndex]);
-    if (state_ == ERROR || cancelRequested_) return;
+    const auto& family = families_[familyIndex];
+    if (wantUpdates ? !family.hasUpdate : family.installed) continue;
+    DownloadJob job;
+    job.name = family.name;
+    if (!reserveNoThrow(job.files, family.files.size())) {
+      LOG_ERR("FONT", "OOM: %zu job files for %s", family.files.size(), family.name.c_str());
+      errorMessage_ = tr(STR_MEMORY_ERROR);
+      std::vector<DownloadJob>().swap(jobs_);
+      return false;
+    }
+    job.files = family.files;
+    jobs_.push_back(std::move(job));
+  }
+  return true;
+}
+
+void FontDownloadActivity::runJobs() {
+  cancelRequested_ = false;
+  if (jobs_.empty()) {
+    RenderLock lock(*this);
+    state_ = COMPLETE;
+    return;
   }
 
+  // The whole point of the job snapshot: from here to the reload there is no parsed manifest in
+  // RAM, so the per-file handshakes see the largest free block the screen can offer.
+  releaseManifestWorkingSet();
+
+  bool aborted = false;
+  for (jobIndex_ = 0; jobIndex_ < jobs_.size(); jobIndex_++) {
+    downloadFamily(jobs_[jobIndex_]);
+    // The home gesture has already finished this activity from inside the download callback;
+    // there is no screen left to reload the tables for, and parsing into a dying activity
+    // would just delay the transition.
+    if (goHomeRequested_) return;
+    if (state_ == ERROR || cancelRequested_) {
+      aborted = true;
+      break;
+    }
+  }
+
+  // Unconditional: the ERROR state's retry and its Back both need the family list behind them,
+  // and leaving the tables empty would show an empty screen with no way back to a populated one.
+  if (!reloadManifestFromCache()) {
+    RenderLock lock(*this);
+    state_ = ERROR;
+    if (errorMessage_.empty()) errorMessage_ = "Failed to read font list";
+    return;
+  }
+
+  if (aborted) return;  // state_ already ERROR, or the user cancelled
   {
     RenderLock lock(*this);
     state_ = COMPLETE;
   }
 }
 
-void FontDownloadActivity::updateAll() {
-  cancelRequested_ = false;
-  for (const int familyIndex : filteredIndices_) {
-    if (!families_[familyIndex].hasUpdate) continue;
-    downloadFamily(families_[familyIndex]);
-    if (state_ == ERROR || cancelRequested_) return;
-  }
-
-  {
+void FontDownloadActivity::retryCurrentJob() {
+  if (jobIndex_ >= jobs_.size()) return;
+  // Reached from the ERROR screen, where runJobs() has already reloaded the manifest — so the
+  // working set is resident again and has to come back off before this handshake, exactly as
+  // it did for the first attempt.
+  releaseManifestWorkingSet();
+  downloadFamily(jobs_[jobIndex_]);
+  const bool failed = state_ == ERROR || cancelRequested_;
+  if (!reloadManifestFromCache()) {
     RenderLock lock(*this);
-    state_ = COMPLETE;
+    state_ = ERROR;
+    if (errorMessage_.empty()) errorMessage_ = "Failed to read font list";
+    return;
   }
+  if (failed) return;
+  RenderLock lock(*this);
+  state_ = COMPLETE;
+}
+
+void FontDownloadActivity::downloadAll() {
+  if (!buildJobs(/*wantUpdates=*/false)) {
+    RenderLock lock(*this);
+    state_ = ERROR;
+    return;
+  }
+  runJobs();
+}
+
+void FontDownloadActivity::updateAll() {
+  if (!buildJobs(/*wantUpdates=*/true)) {
+    RenderLock lock(*this);
+    state_ = ERROR;
+    return;
+  }
+  runJobs();
 }
 
 bool FontDownloadActivity::showDownloadAllRow() const {
@@ -425,7 +584,13 @@ int FontDownloadActivity::groupMemberCount(const int scriptGroupIndex) const {
 
 void FontDownloadActivity::buildFilteredIndices(const int groupListIndex) {
   filteredIndices_.clear();
-  filteredIndices_.reserve(families_.size());
+  // Normally a no-op — clear() keeps the capacity fetchAndParseManifest already took — so this
+  // only bites if that reserve was skipped. Leaving the list empty shows an empty family list,
+  // which is recoverable; growing into a throwing push_back loop is not.
+  if (!reserveNoThrow(filteredIndices_, families_.size())) {
+    LOG_ERR("FONT", "OOM: %zu filtered indices", families_.size());
+    return;
+  }
   if (groupListIndex <= 0) {
     for (int familyIndex = 0; familyIndex < static_cast<int>(families_.size()); familyIndex++) {
       filteredIndices_.push_back(familyIndex);
@@ -441,6 +606,7 @@ void FontDownloadActivity::buildFilteredIndices(const int groupListIndex) {
 
 void FontDownloadActivity::enterGroup(const int groupListIndex) {
   closeRouting();
+  currentGroupIndex_ = groupListIndex;
   buildFilteredIndices(groupListIndex);
   {
     RenderLock lock(*this);
@@ -484,11 +650,10 @@ bool FontDownloadActivity::computeFileCrc32(const char* path, uint32_t& outCrc) 
   return true;
 }
 
-void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
+void FontDownloadActivity::downloadFamily(const DownloadJob& family) {
   {
     RenderLock lock(*this);
     state_ = DOWNLOADING;
-    downloadingFamilyIndex_ = static_cast<int>(&family - families_.data());
     fileProgress_ = 0;
     fileTotal_ = 0;
     cancelRequested_ = false;
@@ -538,6 +703,20 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
     }
     sdFontSystem.unloadFonts(renderer);
 
+    // The reclaim above is measurably not the binding constraint on X3: a 09-07 capture shows
+    // largest8 pinned at 7,156 across eight consecutive files while free heap sat near 28 KB,
+    // and every handshake then failed with wolfSSL MEMORY_E (-125). Free-but-not-contiguous is
+    // a block-count problem, so log the count the same way HomeActivity's cover pass does —
+    // free/largest alone cannot distinguish "something big is held" from "the heap is in
+    // pieces", and that distinction decides whether the manifest working set has to move into
+    // an arena. Grep FRAG in opds_debug.txt.
+    {
+      multi_heap_info_t info;
+      heap_caps_get_info(&info, MALLOC_CAP_8BIT);
+      SdDebugLog::log("FRAG", "font-file free=%u largest=%u blocks=%u file=%s", (unsigned)info.total_free_bytes,
+                      (unsigned)info.largest_free_block, (unsigned)info.free_blocks, file.name.c_str());
+    }
+
     auto result = HttpDownloader::downloadToFile(
         url, destPath,
         [this](size_t downloaded, size_t total) {
@@ -578,8 +757,6 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
 
     if (result == HttpDownloader::ABORTED) {
       fontInstaller_.deleteFamily(family.name.c_str());
-      family.installed = false;
-      family.hasUpdate = false;
       if (goHomeRequested_) {
         onGoHome();
         return;
@@ -587,7 +764,9 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
       {
         RenderLock lock(*this);
         state_ = FAMILY_LIST;
-        rowsDirty_ = true;  // installed/hasUpdate just changed above
+        // The partial family was just deleted from disk; the reload in runJobs() re-derives
+        // installed/hasUpdate from what is actually there.
+        rowsDirty_ = true;
       }
       return;
     }
@@ -602,8 +781,6 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
       // as a real size.
       Storage.remove(destPath);
       fontInstaller_.refreshRegistry();
-      family.installed = fontInstaller_.isFamilyInstalled(family.name.c_str());
-      family.hasUpdate = false;
       RenderLock lock(*this);
       state_ = ERROR;
       errorMessage_ = "Download failed: " + file.name;
@@ -614,8 +791,6 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
     if (!computeFileCrc32(destPath, actualCrc)) {
       LOG_ERR("FONT", "Failed to open file for CRC check: %s", destPath);
       fontInstaller_.deleteFamily(family.name.c_str());
-      family.installed = false;
-      family.hasUpdate = false;
       RenderLock lock(*this);
       state_ = ERROR;
       errorMessage_ = "Failed to compute checksum: " + file.name;
@@ -624,8 +799,6 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
     if (actualCrc != file.crc32) {
       LOG_ERR("FONT", "CRC32 mismatch for %s: got %08x expected %08x", file.name.c_str(), actualCrc, file.crc32);
       fontInstaller_.deleteFamily(family.name.c_str());
-      family.installed = false;
-      family.hasUpdate = false;
       RenderLock lock(*this);
       state_ = ERROR;
       errorMessage_ = "Checksum mismatch: " + file.name;
@@ -636,8 +809,6 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
     if (!fontInstaller_.validateCpfontFile(destPath)) {
       LOG_ERR("FONT", "Invalid .cpfont: %s", destPath);
       fontInstaller_.deleteFamily(family.name.c_str());
-      family.installed = false;
-      family.hasUpdate = false;
       RenderLock lock(*this);
       state_ = ERROR;
       errorMessage_ = "Invalid font file: " + file.name;
@@ -647,8 +818,6 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
   }
 
   fontInstaller_.refreshRegistry();
-  family.installed = true;
-  family.hasUpdate = false;
 
   {
     RenderLock lock(*this);
@@ -732,7 +901,22 @@ void FontDownloadActivity::activateSelected() {
     if (!family.installed || family.hasUpdate) {
       currentFileIndex_ = 0;
       currentFileTotal_ = family.files.size();
-      downloadFamily(family);
+      // One-family session, through the same snapshot/release/reload path as the bulk rows:
+      // this is the common case, and the one where releasing the manifest buys the most.
+      std::vector<DownloadJob>().swap(jobs_);
+      jobIndex_ = 0;
+      DownloadJob job;
+      job.name = family.name;
+      if (!reserveNoThrow(job.files, family.files.size()) || !reserveNoThrow(jobs_, 1)) {
+        LOG_ERR("FONT", "OOM: download job for %s", family.name.c_str());
+        RenderLock lock(*this);
+        state_ = ERROR;
+        errorMessage_ = tr(STR_MEMORY_ERROR);
+        return;
+      }
+      job.files = family.files;
+      jobs_.push_back(std::move(job));
+      runJobs();
     } else {
       promptDeleteSelectedFamily();
       return;
@@ -824,9 +1008,17 @@ void FontDownloadActivity::rebuildRowItems() {
 
 void FontDownloadActivity::rebuildGroupRowItems() {
   const int listSize = groupListItemCount();
+  // Both are already at rowCapacity from the manifest parse, so these are no-ops in the normal
+  // case. Checked anyway because this runs on every navigation: assign() and reserve() are both
+  // throwing, and a screen that draws no rows beats one that reboots.
+  if (!reserveNoThrow(rowLabels_, listSize) || !reserveNoThrow(rowItems_, listSize)) {
+    LOG_ERR("FONT", "OOM: %d group rows", listSize);
+    rowLabels_.clear();
+    rowItems_.clear();
+    return;
+  }
   rowLabels_.assign(listSize, std::string());
   rowItems_.clear();
-  rowItems_.reserve(listSize);
   for (int rowIndex = 0; rowIndex < listSize; rowIndex++) {
     fui::ListItem item;
     item.label = rowIndex == 0 ? tr(STR_ALL_FONTS) : scriptGroupLabels_[rowIndex - 1].c_str();
@@ -840,9 +1032,15 @@ void FontDownloadActivity::rebuildGroupRowItems() {
 
 void FontDownloadActivity::rebuildFamilyRowItems() {
   const int listSize = listItemCount();
+  // See rebuildGroupRowItems: no-op in the normal case, guarded because it runs per navigation.
+  if (!reserveNoThrow(rowLabels_, listSize) || !reserveNoThrow(rowItems_, listSize)) {
+    LOG_ERR("FONT", "OOM: %d family rows", listSize);
+    rowLabels_.clear();
+    rowItems_.clear();
+    return;
+  }
   rowLabels_.assign(listSize, std::string());
   rowItems_.clear();
-  rowItems_.reserve(listSize);
   for (int i = 0; i < listSize; i++) {
     fui::ListItem item;
     if (isDownloadAllRow(i)) {
@@ -898,8 +1096,8 @@ bool FontDownloadActivity::handleCustomInput() {
       }
       requestUpdate();
     } else if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
-      if (downloadingFamilyIndex_ >= 0 && downloadingFamilyIndex_ < static_cast<int>(families_.size())) {
-        downloadFamily(families_[downloadingFamilyIndex_]);
+      if (jobIndex_ < jobs_.size()) {
+        retryCurrentJob();
         requestUpdateAndWait();
         return true;
       } else {
@@ -914,8 +1112,8 @@ bool FontDownloadActivity::handleCustomInput() {
       int x = 0;
       int y = 0;
       if (mappedInput.wasScreenTapped(x, y)) {
-        if (downloadingFamilyIndex_ >= 0 && downloadingFamilyIndex_ < static_cast<int>(families_.size())) {
-          downloadFamily(families_[downloadingFamilyIndex_]);
+        if (jobIndex_ < jobs_.size()) {
+          retryCurrentJob();
           requestUpdateAndWait();
           return true;
         }
@@ -1003,9 +1201,11 @@ void FontDownloadActivity::render(RenderLock&&) {
                                               hasVisibleFamilies ? tr(STR_DIR_DOWN) : "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   } else if (state_ == DOWNLOADING) {
-    const auto& family = families_[downloadingFamilyIndex_];
+    // jobs_ outlives the released manifest, which families_ does not.
+    static const std::string kNoFamily;
+    const std::string& familyName = jobIndex_ < jobs_.size() ? jobs_[jobIndex_].name : kNoFamily;
 
-    std::string statusText = std::string(tr(STR_DOWNLOADING)) + " " + family.name + " (" +
+    std::string statusText = std::string(tr(STR_DOWNLOADING)) + " " + familyName + " (" +
                              std::to_string(currentFileIndex_ + 1) + "/" + std::to_string(currentFileTotal_) + ")";
     renderer.drawCenteredText(UI_10_FONT_ID, centerY - lineHeight, statusText.c_str());
 
