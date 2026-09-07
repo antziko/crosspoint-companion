@@ -122,6 +122,10 @@ void DictionaryLookupController::setNotFound() {
   // the body shows another's entry — the disagreement the promotion exists to prevent.
   restoreSuspendedPromotion();
   state = LookupState::NotFound;
+  // Only a genuine miss toasts; a fault waits for a press. notFoundMsg_ is set by the
+  // caller before this runs, so it is the authority on which of the two this is.
+  notFoundIsToast_ = (notFoundMsg_ == StrId::STR_DICT_NOT_FOUND);
+  notFoundShownMs_ = millis();
   owner.requestUpdate();
 }
 
@@ -262,6 +266,14 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
       state = LookupState::Idle;
       return LookupEvent::NotFoundDismissedBack;
     }
+    // Toast expiry. Reported as a Back dismissal, which every caller reads as "stay where
+    // you are and repaint" -- the reader did not ask to leave, so Done would be wrong. The
+    // dismissal must still travel as an event: callers do real cleanup on it (the definition
+    // screen reverts a failed dictionary switch, word-select forces a full repaint).
+    if (notFoundIsToast_ && (millis() - notFoundShownMs_) >= NOT_FOUND_TOAST_MS) {
+      state = LookupState::Idle;
+      return LookupEvent::NotFoundDismissedBack;
+    }
     return LookupEvent::None;
   }
 
@@ -293,8 +305,12 @@ bool DictionaryLookupController::render() {
 
   if (state == LookupState::NotFound) {
     GUI.drawPopup(renderer, I18n::getInstance().get(notFoundMsg_));
-    const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_DONE), "", "");
-    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    // A toast dismisses itself, so hints promising Back/Done would be noise on a popup
+    // that is gone before they can be read. A fault still needs them.
+    if (!notFoundIsToast_) {
+      const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_DONE), "", "");
+      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    }
     renderer.displayBuffer(HalDisplay::FAST_REFRESH);
     return true;
   }

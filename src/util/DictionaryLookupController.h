@@ -151,6 +151,14 @@ class DictionaryLookupController {
   // dictionary says so instead, rather than sending the user hunting for a typo.
   StrId notFoundMsg_ = StrId::STR_DICT_NOT_FOUND;
 
+  // A genuine miss auto-dismisses as a toast: the word simply is not in the dictionary,
+  // there is nothing to decide, and making the reader press Back for that on every miss
+  // is the whole cost of the feature. The two dictionary FAULTS keep the press-to-dismiss
+  // popup -- they mean every later lookup will fail too, so they must not flash past.
+  static constexpr uint32_t NOT_FOUND_TOAST_MS = 1200;
+  bool notFoundIsToast_ = false;  // notFoundMsg_ is a miss, not a fault
+  uint32_t notFoundShownMs_ = 0;  // millis() when the popup went up
+
   // CLEANUP: on Auto-only commit, delete only this line (threshold/cache/method below drive Auto mode — keep)
   static constexpr uint32_t AUTO_POPUP_CSPT_ENTRY_THRESHOLD = 50000;
   uint32_t csptEntryCountCached = UINT32_MAX;  // sentinel: not yet read
