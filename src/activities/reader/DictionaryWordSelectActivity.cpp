@@ -150,6 +150,12 @@ void DictionaryWordSelectActivity::onEnter() {
   // `DICT: lookup` could not be split into code time and the user finding their word. onEnter
   // and the first render() are the code half; whatever is left over is the user.
   const unsigned long tEnter0 = millis();
+  // Remember the dictionary in force on the way in, before anything can install a per-word
+  // one, so every fallback below and onExit() put back exactly this. See enterSessionDict_.
+  enterSessionDict_ = Dictionary::sessionDictPath();
+  enterSessionDictWasPromotion_ = Dictionary::sessionPathIsFallbackPromotion();
+  // Quote selection looks nothing up, so it never needs the per-word dictionary.
+  if (mode_ == Mode::Dictionary) controller.setPreLookupHook(&preLookupTrampoline, this);
   std::vector<WordSelectNavigator::WordInfo> words;
   std::vector<WordSelectNavigator::Row> rows;
   std::string textPool;  // sized exactly inside extractWords, from its counting pass
@@ -187,6 +193,10 @@ void DictionaryWordSelectActivity::onEnter() {
 
 void DictionaryWordSelectActivity::onExit() {
   controller.onExit();
+  // Hand back the dictionary that was in force on entry, dropping any per-word one applied
+  // here. After controller.onExit(), deliberately: that stops and joins the lookup task, which
+  // is the condition setSessionDictPath requires (Dictionary.h:98-99).
+  DictUtils::restoreSessionDict(enterSessionDict_, enterSessionDictWasPromotion_);
   // Hand the box's refresh residue to the screen that replaces us, where the collapse is hidden
   // inside a screen change instead of interrupting a scan.
   clearGlossGhostOnNextPaint();
@@ -551,6 +561,36 @@ std::string DictionaryWordSelectActivity::buildLookupExcerpt() const {
     }
   }
   return excerpt;
+}
+
+void DictionaryWordSelectActivity::preLookupTrampoline(void* ctx, const std::string& cleanedWord) {
+  static_cast<DictionaryWordSelectActivity*>(ctx)->applyCardDictForLookup(cleanedWord);
+}
+
+void DictionaryWordSelectActivity::applyCardDictForLookup(const std::string& cleanedWord) {
+  if (cachePath.empty()) return;
+  const unsigned long t0 = millis();
+  uint32_t recorded = 0;
+  // Keyed on the CLEANED word because that is what enroll() files the card under (see the
+  // FoundDefinition case below, which passes controller.getLookupWord()).
+  const bool hasCard = FlashcardDeck::cardDict(cachePath, cleanedWord, recorded);
+  // recorded != 0 short-circuits before applyCardDict so the common no-card case does not log
+  // a "-> none" line on every lookup. A card naming a dictionary that is NOT installed here
+  // still reaches applyCardDict and still logs, because that is the case worth diagnosing.
+  const bool applied = hasCard && recorded != 0 && DictUtils::applyCardDict(recorded);
+  if (!applied) {
+    // No card, a card recording nothing (legacy line, or a peer that sent no 'D' line), or one
+    // naming a dictionary this device does not have -> the screen's entry dictionary, NOT a
+    // blanket clear. Restoring is also what stops the previous word's dictionary bleeding onto
+    // this one: the hook runs before EVERY lookup, so each starts from a known state.
+    DictUtils::restoreSessionDict(enterSessionDict_, enterSessionDictWasPromotion_);
+  }
+  // This probe adds an SD pass to every lookup (FlashcardDeck::forEachLine reads in 64-byte
+  // chunks, each taking the storage mutex), and it is a SECOND read of the same field —
+  // DictionaryDefinitionActivity::onEnter reads it again. Logged so the cost is measured
+  // against DICT: lookup rather than assumed.
+  SdDebugLog::log("DWS", "card dict probe: ms=%lu card=%d hash=%lu applied=%d", millis() - t0, hasCard ? 1 : 0,
+                  static_cast<unsigned long>(recorded), applied ? 1 : 0);
 }
 
 void DictionaryWordSelectActivity::loop() {

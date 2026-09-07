@@ -68,6 +68,27 @@ class DictionaryWordSelectActivity final : public Activity {
   WordSelectNavigator navigator;
   DictionaryLookupController controller;
 
+  // The session dictionary override in force when this screen opened, restored in onExit()
+  // and between lookups. A per-word card dictionary must not outlive the screen that applied
+  // it: initGloss() resolves activeDictPath() once at onEnter, so a leaked override would open
+  // the NEXT page's gloss box in the last looked-up word's dictionary. EpubReaderActivity's
+  // SessionOverrideScope only clears at book close, far too late for that.
+  //
+  // The RAW override, not activeDictPath(): an empty capture must restore to "no override"
+  // rather than pinning the configured dictionary in as an explicit one.
+  std::string enterSessionDict_;
+  // Whether enterSessionDict_ was a transient fallback promotion, so it is put back with the
+  // lifetime it had. Same distinction DictionaryDefinitionActivity draws on entry.
+  bool enterSessionDictWasPromotion_ = false;
+
+  // Point the lookup that is about to start at the dictionary this word's flashcard records,
+  // falling back to the screen's entry dictionary when it has none. Installed on the
+  // controller as a pre-lookup hook, so it covers Confirm, multi-select phrases and the
+  // "Did you mean?" re-lookup alike — the last of which matters because a suggestion-derived
+  // card is filed under the SUGGESTION, not the word the user pointed at.
+  static void preLookupTrampoline(void* ctx, const std::string& cleanedWord);
+  void applyCardDictForLookup(const std::string& cleanedWord);
+
   // Differential repaint state. The first render in a session always goes through
   // the full path (page->render + snapshot setup). After that, cursor moves use the
   // differential path: restore previous highlight pixels, snapshot new region, draw

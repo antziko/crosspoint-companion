@@ -358,11 +358,7 @@ void DictionaryDefinitionActivity::onExit() {
   // than clearing the override is what keeps a parent screen's per-card dictionary intact —
   // see enterSessionDict_. Safe here: the controller was stopped and joined at the top of this
   // function, so no lookup is in flight (Dictionary.h threading note).
-  if (enterSessionDictWasPromotion_ && !enterSessionDict_.empty()) {
-    Dictionary::promoteFallbackDictPath(enterSessionDict_.c_str());
-  } else {
-    Dictionary::setSessionDictPath(enterSessionDict_.c_str());
-  }
+  DictUtils::restoreSessionDict(enterSessionDict_, enterSessionDictWasPromotion_);
   Activity::onExit();
 }
 

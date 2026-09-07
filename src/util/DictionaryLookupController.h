@@ -56,6 +56,23 @@ class DictionaryLookupController {
   // Like startLookup but marks the result as Suggestion (word came from fuzzy suggestions list).
   void startLookupAsSuggestion(const std::string& word);
 
+  // Run `fn(ctx, cleanedWord)` at the top of every startLookup, before any dictionary is
+  // resolved. Lets an owner point the lookup at a per-word dictionary — the reader's word
+  // select uses it to honour the dictionary a word's flashcard records. Installed per owner
+  // rather than done here because the definition screen shares this class and must NOT get
+  // the behaviour: a card override would fight its own long-press dictionary switch, and on
+  // a chained word it would repoint the ORIGINAL word's card.
+  //
+  // The cleaned word is the one the deck is keyed on, which is why the hook lives here and
+  // not at the call sites: cleanWord() runs inside lookupOrPopup(), out of the owner's sight.
+  //
+  // Plain function pointer + ctx, never std::function: ~2-4 KB per signature plus a
+  // heap-allocated closure (CLAUDE.md).
+  void setPreLookupHook(void (*fn)(void*, const std::string&), void* ctx) {
+    preLookupFn_ = fn;
+    preLookupCtx_ = ctx;
+  }
+
   // Called by the activity after the suggestions path has been exhausted.
   // Transitions to NotFound state.
   void setNotFound();
@@ -111,6 +128,10 @@ class DictionaryLookupController {
   MappedInputManager& mappedInput;
   Activity& owner;
   std::string cachePath;
+
+  // See setPreLookupHook. Null on every owner but the reader's word select.
+  void (*preLookupFn_)(void*, const std::string&) = nullptr;
+  void* preLookupCtx_ = nullptr;
 
   LookupState state = LookupState::Idle;
   FoundStatus foundStatus = FoundStatus::Direct;

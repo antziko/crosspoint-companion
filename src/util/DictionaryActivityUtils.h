@@ -102,6 +102,20 @@ inline bool applyCardDict(uint32_t dictHash) {
   return true;
 }
 
+// Put a saved session override back with the lifetime it had. The counterpart of applyCardDict
+// for any screen that SAVES the override on entry instead of clearing it on exit: restoring a
+// fallback promotion through setSessionDictPath would promote a transient choice into an
+// explicit one that outlives the entry it answered (Dictionary.h:105-124).
+//
+// Same threading rule as setSessionDictPath — UI task only, no lookup in flight.
+inline void restoreSessionDict(const std::string& saved, bool wasPromotion) {
+  if (wasPromotion && !saved.empty()) {
+    Dictionary::promoteFallbackDictPath(saved.c_str());
+  } else {
+    Dictionary::setSessionDictPath(saved.c_str());
+  }
+}
+
 // D-006: Back-cancel pattern — sets isCancelled=true and finishes the activity.
 inline void cancelAndFinish(Activity& act) {
   ActivityResult r;

@@ -54,6 +54,15 @@ void DictionaryLookupController::startLookup(const std::string& word, bool recor
   lookupCancelRequested = false;
   recordHistory_ = recordHistory;
   historyWrite_ = {};
+  // Per-word dictionary selection, BEFORE takeFallbackPromotion() below — the ordering is
+  // load-bearing. The hook may call setSessionDictPath, which clears the promotion mark
+  // (Dictionary.h:111), so running it first means an explicit per-word dictionary simply
+  // outranks an automatic promotion and there is nothing left to suspend. Running it after
+  // would leave setNotFound() re-promoting the fallback OVER the word's own dictionary.
+  //
+  // Safe against the setSessionDictPath threading rule: this is the UI task, and the lookup
+  // task is not created until further down this function.
+  if (preLookupFn_) preLookupFn_(preLookupCtx_, word);
   // A fallback promotion is scoped to the entry it answered: this lookup runs against the
   // dictionary the user actually configured (or explicitly switched to), not against
   // whatever a previous miss happened to land on. Held, not discarded — if this lookup
