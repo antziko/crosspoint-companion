@@ -27,7 +27,8 @@ class DictionaryDefinitionActivity final : public Activity {
                                         const std::string& headword, const DictLocation& location,
                                         bool showLookupButton = false, std::string bookCachePath = "",
                                         bool recordHistory = false, std::string historyWord = "",
-                                        LookupHistory::Status historyStatus = LookupHistory::Status::NotFound)
+                                        LookupHistory::Status historyStatus = LookupHistory::Status::NotFound,
+                                        bool allowCardDelete = false)
       : Activity("DictionaryDefinition", renderer, mappedInput),
         headword(headword),
         foundLocation(location),
@@ -36,6 +37,7 @@ class DictionaryDefinitionActivity final : public Activity {
         recordHistory(recordHistory),
         historyWord(std::move(historyWord)),
         historyStatus(historyStatus),
+        allowCardDelete_(allowCardDelete),
         controller(renderer, mappedInput, *this, cachePath) {}
 
   void onEnter() override;
@@ -60,6 +62,12 @@ class DictionaryDefinitionActivity final : public Activity {
   bool recordHistory;
   std::string historyWord;
   LookupHistory::Status historyStatus;
+  // Whether front Left may delete this word's flashcard. True only for a lookup made from the
+  // reader page (DictionaryWordSelectActivity), which is where the page underline the delete
+  // removes actually lives. The history list and the flashcard list have their own delete, and
+  // a review session holds newest-first deck indices that a delete from here would not renumber
+  // (see FlashcardReviewActivity::promptDelete) -- so all three leave this false.
+  bool allowCardDelete_ = false;
   // Cross-definition back-navigation stack (compact: history-index + page per
   // entry, not owned strings). pendingBack_ carries the popped entry from the
   // Back keypress to the async FoundDefinition that completes the re-lookup.
@@ -271,10 +279,29 @@ class DictionaryDefinitionActivity final : public Activity {
   // headword. Returns false when there is nothing to cycle to (sole member of its group,
   // fewer than two installed, or a lookup already in flight).
   bool cycleDictionary();
+  // True when this screen may act on the word's flashcard at all: there is a card, a book to
+  // hold it, and the word on screen is still the one the card is filed under. Shared by the Set
+  // and Delete offers so the two cannot drift apart -- both would target the wrong card in
+  // exactly the same circumstances.
+  //
+  // chain_.depth() == 0 is the load-bearing clause: historyWord names the word the reader
+  // enrolled, and chaining forward to another word from inside a definition leaves it naming the
+  // ORIGINAL. Acting then would repoint or delete a card the user is not looking at. pop()/
+  // unpop() bring depth back to 0, which re-arms both offers.
+  bool cardActionable() const;
   // True when the dictionary on screen differs from the one recorded on this word's card,
   // i.e. the Set offer stands. `activeHash` is the caller's already-computed active hash so
   // render() does not resolve the path twice.
   bool setOfferStands(uint32_t activeHash) const;
+  // True when front Left deletes this word's card rather than turning the page back. Cheap
+  // enough to call from render() -- it reads fields only, unlike setOfferStands' caller, which
+  // has to resolve the active dictionary path first.
+  bool deleteOfferStands() const { return allowCardDelete_ && cardActionable(); }
+  // Confirm, then permanently delete this word's card. The card is what anchors the word's
+  // underline on the reader page (see LookupMarks), so this is how a reader removes that mark
+  // mid-read. The LookupHistory entry is deliberately left alone: the word stays in the
+  // looked-up list, and looking it up again re-enrolls a fresh card.
+  void promptDeleteCard();
   // Commit the dictionary on show to this word's flashcard. Deliberate and explicit —
   // switching to read a second opinion must never rewrite the card by itself.
   // Returns false without doing anything when the offer does not stand, so the Right press

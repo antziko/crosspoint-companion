@@ -585,7 +585,10 @@ void DictionaryWordSelectActivity::loop() {
         auto definition = makeUniqueNoThrow<DictionaryDefinitionActivity>(
             renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(), true, cachePath,
             controller.getRecordHistory(), controller.getLookupWord(),
-            DictionaryLookupController::toHistStatus(controller.getFoundStatus()));
+            DictionaryLookupController::toHistStatus(controller.getFoundStatus()),
+            // The only entry point that may delete the card: this is the lookup that created it,
+            // and the reader page behind us is where its underline is drawn.
+            /*allowCardDelete=*/true);
         if (!definition) {
           LOG_ERR("DWS", "OOM: DictionaryDefinitionActivity");
           forceFullRepaintOnNextRender();

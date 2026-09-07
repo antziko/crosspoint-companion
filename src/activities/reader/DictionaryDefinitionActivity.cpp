@@ -25,6 +25,7 @@
 #include "MappedInputManager.h"
 #include "ReaderUtils.h"
 #include "SdCardFontSystem.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/Dictionary.h"
@@ -1230,18 +1231,54 @@ void DictionaryDefinitionActivity::applyDictSwitch(const int curIdx, const int n
   controller.startLookup(headword, false);
 }
 
-bool DictionaryDefinitionActivity::setOfferStands(const uint32_t activeHash) const {
-  // No card to point anywhere, or no book to hold one.
+bool DictionaryDefinitionActivity::cardActionable() const {
+  // No card to act on, or no book to hold one.
   if (!cardDictExists_ || cachePath.empty() || historyWord.empty()) return false;
   // historyWord names the word the reader enrolled. It goes stale the moment the user chains
   // forward to another word from inside a definition, and chained words were never enrolled
-  // (enrollment only happens at the reader's word-select gesture) — so offering here would
-  // repoint the ORIGINAL card. pop()/unpop() bring depth back to 0, which re-arms the offer.
-  if (chain_.depth() != 0) return false;
+  // (enrollment only happens at the reader's word-select gesture) — so acting here would hit
+  // the ORIGINAL card. pop()/unpop() bring depth back to 0, which re-arms both offers.
+  return chain_.depth() == 0;
+}
+
+bool DictionaryDefinitionActivity::setOfferStands(const uint32_t activeHash) const {
+  if (!cardActionable()) return false;
   // Nothing to commit when the card already names this dictionary. A card recording 0 (a
   // legacy card, or one enrolled before the association existed) DOES stand: that is the only
   // way those cards ever get stamped.
   return activeHash != 0 && activeHash != cardDictHash_;
+}
+
+void DictionaryDefinitionActivity::promptDeleteCard() {
+  // Captured by value: the callback runs after this frame, and a deck rewrite or a chain
+  // navigation in between could leave historyWord naming something else by then. Same reason
+  // FlashcardReviewActivity::promptDelete copies the word out before prompting.
+  const std::string word = historyWord;
+  SdDebugLog::log("DDA", "delete prompt: %s free=%u largest=%u", word.c_str(), static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+  startActivityForResultNoThrow<ConfirmationActivity>(
+      [this, word](const ActivityResult& res) {
+        if (res.isCancelled) {
+          requestUpdate();  // back to the definition, card untouched
+          return;
+        }
+        FlashcardDeck::remove(cachePath, word);
+        // The re-count throttle keys on the word, not the card, so without this a lookup of the
+        // same word inside the window would be suppressed against a card that no longer exists
+        // and the underline would not come back.
+        FlashcardDeck::clearEnrollCooldown();
+        // Read once in onEnter() and never refreshed, so it has to be corrected here or both
+        // offers keep standing over a card that is gone. Retiring the Set offer too is right:
+        // there is nothing left to point at a dictionary.
+        cardDictExists_ = false;
+        cardDictHash_ = 0;
+        SdDebugLog::log("DDA", "card deleted: %s", word.c_str());
+        // Stay on the definition — the text is still worth reading, and Back exits as usual.
+        // The reader repaints its underlines when word-select finally returns to it
+        // (EpubReaderActivity's openWordSelect result handler calls reloadLookupMarks).
+        requestUpdate();
+      },
+      renderer, mappedInput, tr(STR_FLASHCARD_DELETE_TITLE), word);
 }
 
 bool DictionaryDefinitionActivity::setCardDictToActive() {
@@ -1396,6 +1433,20 @@ void DictionaryDefinitionActivity::loop() {
   // the dictionary on screen — and the press then falls through to page forward as usual.
   if (mappedInput.wasReleased(MappedInputManager::Button::Right) && cardDictExists_ && chain_.depth() == 0 &&
       setCardDictToActive()) {
+    return;
+  }
+
+  // Left is the mirror of that trade: it deletes this word's card while the offer stands, and
+  // otherwise falls through to page back below. Only the Left ALIAS is taken — the PageBack side
+  // button and the left-third tap still page, so a multi-page definition stays navigable either
+  // way. Tested before the paging block for the same reason as Right: one release must not both
+  // open the prompt and turn the page.
+  //
+  // Orientation needs nothing here. wasReleased defaults to applySwap=true, and mapButton()
+  // already trades the two front buttons in the orientations that flip them, so "Left" is always
+  // the button under the hint label render() drew.
+  if (mappedInput.wasReleased(MappedInputManager::Button::Left) && deleteOfferStands()) {
+    promptDeleteCard();
     return;
   }
 
@@ -1723,9 +1774,12 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   // Back still exits/chains back and Up/Down still page. Paging stays discoverable
   // via the "n/m" indicator drawn opposite the dictionary name above.
   // While the Set offer stands, Right performs it instead of paging, so name it in the "next"
-  // slot — that slot is free in view mode precisely because paging is left unlabelled.
+  // slot — that slot is free in view mode precisely because paging is left unlabelled. The
+  // "previous" slot carries Delete on the same terms: labelled means Left deletes, blank means
+  // Left pages, so the two states are told apart without the user having to try one.
   const char* btn2 = showLookupButton ? tr(STR_LOOKUP_SHORT) : "";
-  const auto labels = mappedInput.mapLabels("", btn2, "", offerSet ? tr(STR_SET_CARD_DICT) : "");
+  const auto labels =
+      mappedInput.mapLabels("", btn2, deleteOfferStands() ? tr(STR_DELETE) : "", offerSet ? tr(STR_SET_CARD_DICT) : "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);
