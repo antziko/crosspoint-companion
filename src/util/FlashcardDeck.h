@@ -53,10 +53,14 @@ class FlashcardDeck {
   static constexpr char FILE_NAME[] = "dictionary_flashcards.txt";
 
   // Leitner schedule: interval (days) applied when a card is promoted INTO each
-  // box. Boxes 0..5; the two 16-day reps at the top are the "2 stable reps"
-  // before graduation. constexpr -> flash (CLAUDE.md rule 6), integer-only.
-  static constexpr uint16_t BOX_INTERVAL_DAYS[6] = {1, 2, 4, 8, 16, 16};
-  static constexpr uint8_t TOP_BOX = 5;
+  // box. Box 0 is the new/relearn slot; its 1-day interval is what a lapse buys.
+  // A clean run is new -> +3d -> +7d -> mastered: three correct recalls over ten
+  // days, short enough that a word finishes while the book is still being read.
+  // Decks carrying cards in higher boxes from the older six-box ladder are handled
+  // by applyGrade's clamp -- they graduate on their next correct recall.
+  // constexpr -> flash (CLAUDE.md rule 6), integer-only.
+  static constexpr uint16_t BOX_INTERVAL_DAYS[3] = {1, 3, 7};
+  static constexpr uint8_t TOP_BOX = 2;
   static constexpr uint8_t RETIRED = 255;    // graduated; never scheduled again.
   static constexpr uint8_t SUSPENDED = 254;  // set aside by the user; never
                                              // scheduled until explicitly
@@ -93,8 +97,9 @@ class FlashcardDeck {
   };
 
   // Deck-wide review stats, computed in one streaming pass (no materialization).
-  // `boxHist[b]` counts cards currently in box b (0..5); retired cards are in
-  // `mastered`, suspended cards in `suspended` -- neither is in the histogram.
+  // `boxHist[b]` counts cards currently in box b (0..TOP_BOX); retired cards are in
+  // `mastered`, suspended cards in `suspended` -- neither is in the histogram. An
+  // over-range box from an older, longer ladder counts into the top bucket.
   // `due` counts isDue() cards; `nextDueDay` is the soonest future scheduled day
   // (> today, non-retired), 0 if none.
   struct Stats {
@@ -102,15 +107,24 @@ class FlashcardDeck {
     int due = 0;
     int mastered = 0;
     int suspended = 0;
-    int boxHist[6] = {0, 0, 0, 0, 0, 0};
+    int boxHist[TOP_BOX + 1] = {};
     uint32_t nextDueDay = 0;
   };
 
   // --- Leitner core (pure, no I/O -- directly unit-testable) ----------------
 
-  // Apply one graded recall in place. Miss -> box 0. Hit at the top box ->
-  // RETIRED (graduated). Otherwise promote one box. dueDay is re-scheduled to
+  // Apply one graded recall in place, re-scheduling dueDay to
   // `today + BOX_INTERVAL_DAYS[box]` (untouched on graduation).
+  //   miss           -> demote ONE box (0 stays 0), not a reset: on a three-step
+  //                     ladder a full reset would make one lapse cost the whole run.
+  //   hit at TOP_BOX -> RETIRED (graduated).
+  //   hit on a card being shown for the FIRST time (box 0, never scheduled)
+  //                  -> promote TWO boxes: the reader already knew the word, so it
+  //                     should not occupy three review slots to prove it.
+  //   any other hit  -> promote one box.
+  // A box above TOP_BOX (a card left over from the older six-box ladder) is clamped
+  // to TOP_BOX first, so it graduates on its next correct recall. RETIRED/SUSPENDED
+  // are returned untouched -- neither is ever scheduled, so neither should be graded.
   static void applyGrade(uint8_t& box, uint32_t& dueDay, bool correct, uint32_t today);
 
   // A card is due if it is not retired and either never scheduled (dueDay==0)

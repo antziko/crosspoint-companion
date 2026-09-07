@@ -601,11 +601,26 @@ bool FlashcardDeck::rewriteDeck(const std::string& cachePath, void* ctx,
 // ---------------------------------------------------------------------------
 
 void FlashcardDeck::applyGrade(uint8_t& box, uint32_t& dueDay, bool correct, uint32_t today) {
+  // Neither sentinel is ever scheduled, so grading one means a caller bug, not a lapse.
+  // Return untouched rather than let the clamp below read 254/255 as a box number.
+  if (box == RETIRED || box == SUSPENDED) return;
+  // A deck written by the older six-box ladder can hold boxes above TOP_BOX. Treat those
+  // as top-of-ladder: the reader has already put more reps into them than the current
+  // schedule asks for, so the next correct recall should graduate them.
+  if (box > TOP_BOX) box = TOP_BOX;
+
   if (!correct) {
-    box = 0;
+    // One step back, not a reset -- see the header. Box 0 has nowhere to fall to, and its
+    // 1-day interval is the relearn delay.
+    if (box > 0) box--;
   } else if (box >= TOP_BOX) {
-    box = RETIRED;  // graduated -- 2 stable reps passed; leave dueDay as-is
+    box = RETIRED;  // graduated; leave dueDay as-is
     return;
+  } else if (box == 0 && dueDay == 0) {
+    // First showing of a brand-new card answered correctly: the word was already known.
+    // Skip a rung, but never straight past the top box -- graduation still costs a recall
+    // at a real interval, so a lucky first guess cannot master a word on its own.
+    box = (TOP_BOX >= 2) ? static_cast<uint8_t>(box + 2) : TOP_BOX;
   } else {
     box++;
   }
@@ -978,24 +993,16 @@ bool FlashcardDeck::setBoxForWord(const std::string& cachePath, const std::strin
 
 namespace {
 
-enum class Tier { ScheduledDue, New, NonRetired, Suspended };
+// The due-first scope no longer selects by tier -- see selectBalanced below. What is left
+// here serves the two scopes that deliberately ignore the schedule: all-shuffled (also the
+// no-clock fallback) and the set-aside pass.
+enum class Tier { NonRetired, Suspended };
 
-bool qualifies(Tier t, uint8_t box, uint32_t dueDay, uint32_t today) {
-  // The Suspended tier deliberately selects only suspended cards; every other
-  // tier excludes both retired and suspended cards.
+bool qualifies(Tier t, uint8_t box) {
+  // The Suspended tier deliberately selects only suspended cards; NonRetired excludes both
+  // retired and suspended.
   if (t == Tier::Suspended) return box == FlashcardDeck::SUSPENDED;
-  if (box == FlashcardDeck::RETIRED || box == FlashcardDeck::SUSPENDED) return false;
-  switch (t) {
-    case Tier::ScheduledDue:
-      return dueDay != 0 && dueDay <= today;
-    case Tier::New:
-      return dueDay == 0;
-    case Tier::NonRetired:
-      return true;
-    case Tier::Suspended:
-      return false;  // handled above
-  }
-  return false;
+  return box != FlashcardDeck::RETIRED && box != FlashcardDeck::SUSPENDED;
 }
 
 // Collect the newest `cap` qualifying cards' newest-first indices into out,
@@ -1004,7 +1011,6 @@ bool qualifies(Tier t, uint8_t box, uint32_t dueDay, uint32_t today) {
 // the predicate; `total` converts file index -> newest-first index.
 struct SelectCtx {
   Tier tier;
-  uint32_t today;
   int total;
   int fileIdx;
   uint16_t* ring;  // size cap
@@ -1016,7 +1022,7 @@ bool selectLine(void* ctx, const char* line, int len) {
   auto* c = static_cast<SelectCtx*>(ctx);
   const int fileIdx = c->fileIdx++;
   const Parsed p = parseLine(line, len);
-  if (!qualifies(c->tier, p.box, p.dueDay, c->today)) return true;
+  if (!qualifies(c->tier, p.box)) return true;
   const uint16_t newestIdx = static_cast<uint16_t>(c->total - 1 - fileIdx);
   c->ring[c->seen % c->cap] = newestIdx;  // keep newest cap (overwrites oldest)
   c->seen++;
@@ -1029,13 +1035,13 @@ constexpr int SESSION_RING_MAX = 64;
 
 // Run a tier selection pass over `path`, appending up to (cap-written) results
 // to out (newest-first). Returns the new total written.
-int selectTier(const std::string& path, Tier tier, uint32_t today, int total, uint16_t* out, int written, int cap) {
+int selectTier(const std::string& path, Tier tier, int total, uint16_t* out, int written, int cap) {
   int budget = cap - written;
   if (budget <= 0) return written;
   if (budget > SESSION_RING_MAX) budget = SESSION_RING_MAX;
 
   uint16_t ring[SESSION_RING_MAX];
-  SelectCtx sc{tier, today, total, 0, ring, budget, 0};
+  SelectCtx sc{tier, total, 0, ring, budget, 0};
   FlashcardDeck::forEachLine(path, selectLine, &sc);
 
   // The ring retains the newest min(seen,budget) qualifying cards. Emit them
@@ -1043,6 +1049,116 @@ int selectTier(const std::string& path, Tier tier, uint32_t today, int total, ui
   const int m = std::min(sc.seen, budget);
   for (int k = 0; k < m; k++) out[written + k] = ring[(sc.seen - 1 - k) % budget];
   return written + m;
+}
+
+// --- Balanced due-first selection -----------------------------------------
+//
+// The plain newest-`cap` ring above answers "which cards did I look up most recently",
+// which is not a study order: a card overdue for weeks loses its slot to one looked up
+// yesterday purely because that row sits lower in the file, and once the due tier alone
+// fills the window a never-studied card can never appear at all.
+//
+// So the due-first scope fills FOUR equally weighted groups instead:
+//   most-overdue  - studied before, neglected longest   (smallest dueDay)
+//   recently-due  - studied before, looked up recently  (newest-first)
+//   oldest-new    - never studied, waiting longest      (oldest-first)
+//   newest-new    - never studied, just looked up       (newest-first)
+//
+// Each group collects up to cap/2 rather than cap/4 so an empty group hands its share to
+// the others: the two groups drawing on the same tier fill the window between them, which
+// is what keeps a fresh book (no due cards) or a finished one (no new cards) at a full
+// pool. Emission is round-robin across the groups, so truncating at `cap` leaves the pool
+// balanced instead of exhausting whichever group ran first. Selection stays deterministic
+// -- the caller shuffles for presentation.
+constexpr int GROUP_MAX = 16;  // per-group ceiling; cap/2 at the caller's 32-card window
+
+struct QuadCtx {
+  uint32_t today;
+  int total;
+  int fileIdx;
+  int k;  // per-group budget, 1..GROUP_MAX
+
+  uint16_t odIdx[GROUP_MAX];  // most overdue, kept sorted ascending by odDue
+  uint16_t odDue[GROUP_MAX];
+  int odCount;
+  uint16_t rdRing[GROUP_MAX];  // recently due: ring, retains the newest k
+  int rdSeen;
+  uint16_t onArr[GROUP_MAX];  // oldest new: the FIRST k seen, in file order
+  int onCount;
+  uint16_t nnRing[GROUP_MAX];  // newest new: ring, retains the newest k
+  int nnSeen;
+};
+
+// Insertion into the ascending most-overdue list. k is small (<= 16) and this runs once
+// per due card at review start, so the shift beats carrying a heap.
+void insertOverdue(QuadCtx* c, uint16_t idx, uint16_t due) {
+  if (c->odCount == c->k && due >= c->odDue[c->odCount - 1]) return;  // no better than the worst kept
+  int pos = (c->odCount < c->k) ? c->odCount : c->k - 1;              // append, or overwrite the worst
+  if (c->odCount < c->k) c->odCount++;
+  // Strict `>` keeps equal due days in file order, i.e. oldest lookup first.
+  while (pos > 0 && c->odDue[pos - 1] > due) {
+    c->odDue[pos] = c->odDue[pos - 1];
+    c->odIdx[pos] = c->odIdx[pos - 1];
+    pos--;
+  }
+  c->odDue[pos] = due;
+  c->odIdx[pos] = idx;
+}
+
+bool quadLine(void* ctx, const char* line, int len) {
+  auto* c = static_cast<QuadCtx*>(ctx);
+  const int fileIdx = c->fileIdx++;
+  const Parsed p = parseLine(line, len);
+  if (p.box == FlashcardDeck::RETIRED || p.box == FlashcardDeck::SUSPENDED) return true;
+  const uint16_t idx = static_cast<uint16_t>(c->total - 1 - fileIdx);
+
+  if (p.dueDay == 0) {  // never scheduled
+    if (c->onCount < c->k) c->onArr[c->onCount++] = idx;
+    c->nnRing[c->nnSeen % c->k] = idx;
+    c->nnSeen++;
+  } else if (p.dueDay <= c->today) {  // scheduled and due
+    // dueDay is days-since-2000, so it fits uint16 until 2179. Clamp anything beyond that
+    // to "least overdue" rather than let a corrupt row truncate into the front of the queue.
+    const uint16_t due = p.dueDay > 0xFFFFu ? 0xFFFFu : static_cast<uint16_t>(p.dueDay);
+    insertOverdue(c, idx, due);
+    c->rdRing[c->rdSeen % c->k] = idx;
+    c->rdSeen++;
+  }
+  return true;
+}
+
+// Append `idx` unless it is already in out. The groups overlap whenever a tier holds fewer
+// than 2k cards (most-overdue and recently-due then name some of the same rows), so the
+// duplicate check is load-bearing, not defensive.
+void tryAdd(uint16_t* out, int& written, int cap, uint16_t idx) {
+  if (written >= cap) return;
+  for (int i = 0; i < written; i++) {
+    if (out[i] == idx) return;
+  }
+  out[written++] = idx;
+}
+
+int selectBalanced(const std::string& path, uint32_t today, int total, uint16_t* out, int cap) {
+  QuadCtx c{};
+  c.today = today;
+  c.total = total;
+  c.k = cap / 2;
+  if (c.k < 1) c.k = 1;  // cap == 1 still needs a non-zero ring modulus
+  if (c.k > GROUP_MAX) c.k = GROUP_MAX;
+  FlashcardDeck::forEachLine(path, quadLine, &c);
+
+  const int rdCount = std::min(c.rdSeen, c.k);
+  const int nnCount = std::min(c.nnSeen, c.k);
+  int written = 0;
+  // Round-robin. Group order decides only who wins the last slot of a truncated pool;
+  // most-overdue leads because it is the one starvation actually harms.
+  for (int r = 0; r < c.k && written < cap; r++) {
+    if (r < c.odCount) tryAdd(out, written, cap, c.odIdx[r]);
+    if (r < rdCount) tryAdd(out, written, cap, c.rdRing[(c.rdSeen - 1 - r) % c.k]);
+    if (r < c.onCount) tryAdd(out, written, cap, c.onArr[r]);
+    if (r < nnCount) tryAdd(out, written, cap, c.nnRing[(c.nnSeen - 1 - r) % c.k]);
+  }
+  return written;
 }
 
 }  // namespace
@@ -1057,20 +1173,14 @@ int FlashcardDeck::buildSession(const std::string& cachePath, SessionScope scope
 
   // Suspended scope: a single pass over set-aside cards (no due ordering).
   if (scope == SessionScope::Suspended) {
-    return selectTier(path, Tier::Suspended, today, total, out, 0, cap);
+    return selectTier(path, Tier::Suspended, total, out, 0, cap);
   }
 
   // Clock unavailable -> due ordering is meaningless; fall back to all-shuffled.
   const bool dueFirst = (scope == SessionScope::DueFirst) && today > 0;
 
-  int written = 0;
-  if (dueFirst) {
-    written = selectTier(path, Tier::ScheduledDue, today, total, out, written, cap);
-    written = selectTier(path, Tier::New, today, total, out, written, cap);
-  } else {
-    written = selectTier(path, Tier::NonRetired, today, total, out, written, cap);
-  }
-  return written;
+  if (dueFirst) return selectBalanced(path, today, total, out, cap);
+  return selectTier(path, Tier::NonRetired, total, out, 0, cap);
 }
 
 // ===========================================================================

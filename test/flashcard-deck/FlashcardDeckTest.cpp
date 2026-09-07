@@ -90,19 +90,28 @@ class FlashcardDeckTest : public ::testing::Test {
 // Leitner core (pure, no I/O)
 // --------------------------------------------------------------------------
 
+// The full clean run for a card that was NOT known on sight: new -> +3d -> +7d -> mastered.
+// Three correct recalls over ten days.
 TEST_F(FlashcardDeckTest, GradeTablePromotesAndSchedules) {
   uint8_t box = 0;
   uint32_t due = 0;
   const uint32_t today = 100;
 
-  // Six consecutive correct recalls graduate (box 0 -> 5 -> RETIRED).
-  const uint16_t expectedInterval[5] = {2, 4, 8, 16, 16};  // intervals on promotion into box 1..5
-  for (int i = 0; i < 5; i++) {
-    FlashcardDeck::applyGrade(box, due, /*correct=*/true, today);
-    EXPECT_EQ(box, i + 1);
-    EXPECT_EQ(due, today + expectedInterval[i]);
-  }
-  // 6th correct at the top box graduates; dueDay left untouched.
+  // Missing the first showing is what puts the card on the ordinary one-rung-at-a-time
+  // path; the first-showing fast track is covered separately below.
+  FlashcardDeck::applyGrade(box, due, /*correct=*/false, today);
+  ASSERT_EQ(box, 0);
+  ASSERT_EQ(due, today + 1u);
+
+  FlashcardDeck::applyGrade(box, due, /*correct=*/true, today);
+  EXPECT_EQ(box, 1);
+  EXPECT_EQ(due, today + 3u);
+
+  FlashcardDeck::applyGrade(box, due, /*correct=*/true, today);
+  EXPECT_EQ(box, FlashcardDeck::TOP_BOX);
+  EXPECT_EQ(due, today + 7u);
+
+  // Correct at the top box graduates; dueDay left untouched.
   const uint32_t dueBefore = due;
   FlashcardDeck::applyGrade(box, due, true, today);
   EXPECT_EQ(box, FlashcardDeck::RETIRED);
@@ -110,13 +119,84 @@ TEST_F(FlashcardDeckTest, GradeTablePromotesAndSchedules) {
   EXPECT_TRUE(FlashcardDeck::isMastered(box));
 }
 
-TEST_F(FlashcardDeckTest, GradeMissResetsToBoxZeroWithRelearnInterval) {
-  uint8_t box = 4;
+// A word the reader already knew: right on the very first showing skips a rung, so it
+// masters in two recalls instead of three. Graduation still costs a real interval.
+TEST_F(FlashcardDeckTest, FirstShowingCorrectSkipsARung) {
+  uint8_t box = 0;
+  uint32_t due = 0;  // never scheduled == first showing
+  const uint32_t today = 100;
+
+  FlashcardDeck::applyGrade(box, due, /*correct=*/true, today);
+  EXPECT_EQ(box, FlashcardDeck::TOP_BOX);
+  EXPECT_EQ(due, today + 7u);
+  EXPECT_FALSE(FlashcardDeck::isMastered(box));  // never straight to mastered
+
+  FlashcardDeck::applyGrade(box, due, /*correct=*/true, today + 7);
+  EXPECT_EQ(box, FlashcardDeck::RETIRED);
+}
+
+// The fast track is keyed on "never scheduled", not on "box 0": a card that lapsed back to
+// box 0 has a real dueDay, and must climb one rung at a time like any other.
+TEST_F(FlashcardDeckTest, RelearningCardDoesNotGetTheFirstShowingSkip) {
+  uint8_t box = 1;
   uint32_t due = 200;
   const uint32_t today = 100;
+
+  FlashcardDeck::applyGrade(box, due, /*correct=*/false, today);
+  ASSERT_EQ(box, 0);
+  ASSERT_NE(due, 0u);  // scheduled, so no longer a first showing
+
+  FlashcardDeck::applyGrade(box, due, /*correct=*/true, today);
+  EXPECT_EQ(box, 1);  // one rung, not two
+  EXPECT_EQ(due, today + 3u);
+}
+
+// A miss costs one rung, not the whole run -- on a three-step ladder a reset would make a
+// single lapse as expensive as never having studied the word.
+TEST_F(FlashcardDeckTest, GradeMissDemotesOneBoxWithRelearnInterval) {
+  uint8_t box = FlashcardDeck::TOP_BOX;
+  uint32_t due = 200;
+  const uint32_t today = 100;
+
+  FlashcardDeck::applyGrade(box, due, /*correct=*/false, today);
+  EXPECT_EQ(box, FlashcardDeck::TOP_BOX - 1);
+  EXPECT_EQ(due, today + FlashcardDeck::BOX_INTERVAL_DAYS[FlashcardDeck::TOP_BOX - 1]);
+
+  // Box 0 has nowhere to fall to; the 1-day relearn interval is what a lapse there buys.
+  box = 0;
   FlashcardDeck::applyGrade(box, due, /*correct=*/false, today);
   EXPECT_EQ(box, 0);
   EXPECT_EQ(due, today + FlashcardDeck::BOX_INTERVAL_DAYS[0]);  // relearn = +1
+}
+
+// Decks written by the older six-box ladder can hold boxes above TOP_BOX. Those reps are
+// already more than the current schedule asks for, so the next correct recall graduates.
+TEST_F(FlashcardDeckTest, LegacyOverRangeBoxClampsToTopOfLadder) {
+  uint8_t box = 4;  // impossible under the current ladder
+  uint32_t due = 200;
+  const uint32_t today = 100;
+
+  FlashcardDeck::applyGrade(box, due, /*correct=*/true, today);
+  EXPECT_EQ(box, FlashcardDeck::RETIRED);
+
+  box = 5;
+  FlashcardDeck::applyGrade(box, due, /*correct=*/false, today);
+  EXPECT_EQ(box, FlashcardDeck::TOP_BOX - 1);  // clamped to TOP_BOX, then demoted one
+}
+
+// Neither sentinel is ever scheduled, so grading one is a caller bug. It must not be read
+// as a box number -- a clamp would silently turn 255 into a live, due card.
+TEST_F(FlashcardDeckTest, GradingASentinelBoxIsANoOp) {
+  uint32_t due = 200;
+  uint8_t box = FlashcardDeck::RETIRED;
+  FlashcardDeck::applyGrade(box, due, /*correct=*/false, 100);
+  EXPECT_EQ(box, FlashcardDeck::RETIRED);
+  EXPECT_EQ(due, 200u);
+
+  box = FlashcardDeck::SUSPENDED;
+  FlashcardDeck::applyGrade(box, due, /*correct=*/true, 100);
+  EXPECT_EQ(box, FlashcardDeck::SUSPENDED);
+  EXPECT_EQ(due, 200u);
 }
 
 TEST_F(FlashcardDeckTest, IsDueSemantics) {
@@ -176,11 +256,12 @@ TEST_F(FlashcardDeckTest, LookupCountIncrementsOnReEnroll) {
 // updateRemoteCard already does when the same re-enroll arrives from a peer.
 TEST_F(FlashcardDeckTest, ReEnrollKeepsTheReviewSchedule) {
   FlashcardDeck::enroll(cachePath, "alpha", "first ctx");
+  // One correct recall on the first showing puts the card on the top box with a real due
+  // day -- mid-ladder, not graduated, which is what this test needs to survive a re-enroll.
   FlashcardDeck::grade(cachePath, "alpha", /*correct=*/true, /*today=*/10);
-  FlashcardDeck::grade(cachePath, "alpha", /*correct=*/true, /*today=*/12);
   FlashcardDeck::Entry before;
   ASSERT_TRUE(findCard(cachePath, "alpha", before));
-  ASSERT_EQ(before.box, 2);
+  ASSERT_EQ(before.box, FlashcardDeck::TOP_BOX);
   ASSERT_GT(before.dueDay, 0u);
 
   FlashcardDeck::enroll(cachePath, "alpha", "second ctx");
@@ -339,7 +420,7 @@ TEST_F(FlashcardDeckTest, GradePreservesChapter) {
   FlashcardDeck::enroll(cachePath, "alpha", "ctx", "Chapter 5");
   EXPECT_TRUE(FlashcardDeck::grade(cachePath, "alpha", true, 100));
   EXPECT_EQ(at(0).chapter, "Chapter 5");
-  EXPECT_EQ(at(0).box, 1);
+  EXPECT_EQ(at(0).box, FlashcardDeck::TOP_BOX);
 }
 
 TEST_F(FlashcardDeckTest, LegacyFourFieldLineUpgradesCleanly) {
@@ -430,10 +511,11 @@ TEST_F(FlashcardDeckTest, GradeMutatesRowPreservesExcerptAndOrder) {
   FlashcardDeck::enroll(cachePath, "beta", "beta ctx");
   EXPECT_TRUE(FlashcardDeck::grade(cachePath, "alpha", /*correct=*/true, /*today=*/100));
 
-  // Order unchanged: alpha still oldest, beta still newest.
+  // Order unchanged: alpha still oldest, beta still newest. A first-showing hit skips a
+  // rung, so alpha lands on the top box rather than box 1.
   EXPECT_EQ(at(1).word, "alpha");
-  EXPECT_EQ(at(1).box, 1);
-  EXPECT_EQ(at(1).dueDay, 100u + FlashcardDeck::BOX_INTERVAL_DAYS[1]);
+  EXPECT_EQ(at(1).box, FlashcardDeck::TOP_BOX);
+  EXPECT_EQ(at(1).dueDay, 100u + FlashcardDeck::BOX_INTERVAL_DAYS[FlashcardDeck::TOP_BOX]);
   EXPECT_EQ(at(1).excerpt, "alpha ctx");  // excerpt preserved
   EXPECT_EQ(at(0).word, "beta");
   EXPECT_EQ(at(0).box, 0);  // untouched
@@ -444,13 +526,13 @@ TEST_F(FlashcardDeckTest, GradeMutatesRowPreservesExcerptAndOrder) {
 // every session until it graduated without ever being spaced.
 TEST_F(FlashcardDeckTest, GradeWithoutClockIsNoOp) {
   FlashcardDeck::enroll(cachePath, "alpha", "ctx");
-  FlashcardDeck::grade(cachePath, "alpha", true, 10);  // box 1, due 10 + BOX_INTERVAL_DAYS[1]
-  ASSERT_EQ(at(0).box, 1);
-  ASSERT_EQ(at(0).dueDay, 12u);
+  FlashcardDeck::grade(cachePath, "alpha", true, 10);  // first showing -> top box, due 10 + 7
+  ASSERT_EQ(at(0).box, FlashcardDeck::TOP_BOX);
+  ASSERT_EQ(at(0).dueDay, 17u);
 
   EXPECT_FALSE(FlashcardDeck::grade(cachePath, "alpha", true, 0));
-  EXPECT_EQ(at(0).box, 1);       // unchanged -- no promotion
-  EXPECT_EQ(at(0).dueDay, 12u);  // unchanged -- no epoch-relative date written
+  EXPECT_EQ(at(0).box, FlashcardDeck::TOP_BOX);  // unchanged -- no promotion
+  EXPECT_EQ(at(0).dueDay, 17u);                  // unchanged -- no epoch-relative date written
 }
 
 TEST_F(FlashcardDeckTest, GradeWithoutClockCannotGraduateACard) {
@@ -471,40 +553,96 @@ TEST_F(FlashcardDeckTest, GradeAbsentWordIsNoOp) {
 // buildSession
 // --------------------------------------------------------------------------
 
-TEST_F(FlashcardDeckTest, BuildSessionAllNewSelectsNewestFirst) {
-  for (const char* w : {"aa", "b", "c", "d"}) FlashcardDeck::enroll(cachePath, w, "");
-  uint16_t out[8];
-  // All cards are new (dueDay==0). DueFirst falls through to the New tier.
-  EXPECT_EQ(FlashcardDeck::buildSession(cachePath, SessionScope::DueFirst, /*today=*/10, 8, out), 4);
-  EXPECT_EQ(out[0], 0);  // d (newest)
-  EXPECT_EQ(out[1], 1);  // c
-  EXPECT_EQ(out[2], 2);  // b
-  EXPECT_EQ(out[3], 3);  // a
+// Membership helper: the due-first scope interleaves four groups, so which cards were
+// selected is the contract -- the caller shuffles, so their order in `out` is not.
+static bool selected(const uint16_t* out, int n, uint16_t idx) {
+  for (int i = 0; i < n; i++) {
+    if (out[i] == idx) return true;
+  }
+  return false;
 }
 
-TEST_F(FlashcardDeckTest, BuildSessionDueFirstOrdersScheduledThenNew) {
+TEST_F(FlashcardDeckTest, BuildSessionAllNewSelectsEveryCard) {
   for (const char* w : {"aa", "b", "c", "d"}) FlashcardDeck::enroll(cachePath, w, "");
-  // Schedule b and c as due (graded at day 5 -> due day 7).
+  uint16_t out[8];
+  // All cards are new (dueDay==0), so both due groups are empty and the two new-card
+  // groups fill the window between them. newest-first indices: d=0, c=1, b=2, a=3.
+  const int n = FlashcardDeck::buildSession(cachePath, SessionScope::DueFirst, /*today=*/10, 8, out);
+  EXPECT_EQ(n, 4);
+  for (uint16_t i = 0; i < 4; i++) EXPECT_TRUE(selected(out, n, i));
+}
+
+// The regression this design exists to prevent: due cards used to fill the whole window
+// first, so on a deck with enough due cards a never-studied card could never appear.
+TEST_F(FlashcardDeckTest, BuildSessionGivesDueAndNewCardsBothASlot) {
+  for (const char* w : {"aa", "b", "c", "d"}) FlashcardDeck::enroll(cachePath, w, "");
+  // Schedule b and c as due (graded at day 5 -> due day 12). a and d stay new.
   FlashcardDeck::grade(cachePath, "b", true, 5);
   FlashcardDeck::grade(cachePath, "c", true, 5);
 
   // newest-first indices: d=0, c=1, b=2, a=3.
   uint16_t out[8];
-  EXPECT_EQ(FlashcardDeck::buildSession(cachePath, SessionScope::DueFirst, /*today=*/10, 8, out), 4);
-  // Scheduled-due tier newest-first: c(1), b(2). Then new tier: d(0), a(3).
-  EXPECT_EQ(out[0], 1);
-  EXPECT_EQ(out[1], 2);
-  EXPECT_EQ(out[2], 0);
-  EXPECT_EQ(out[3], 3);
+  const int n = FlashcardDeck::buildSession(cachePath, SessionScope::DueFirst, /*today=*/12, 8, out);
+  EXPECT_EQ(n, 4);
+  EXPECT_TRUE(selected(out, n, 1));  // c, due
+  EXPECT_TRUE(selected(out, n, 2));  // b, due
+  EXPECT_TRUE(selected(out, n, 0));  // d, new
+  EXPECT_TRUE(selected(out, n, 3));  // a, new
 }
 
+// A window too small for one card per group is spent on the group starvation actually
+// harms: the card whose due day passed longest ago.
 TEST_F(FlashcardDeckTest, BuildSessionRespectsCap) {
   for (const char* w : {"aa", "b", "c", "d"}) FlashcardDeck::enroll(cachePath, w, "");
-  FlashcardDeck::grade(cachePath, "b", true, 5);
-  FlashcardDeck::grade(cachePath, "c", true, 5);
+  FlashcardDeck::grade(cachePath, "b", true, 5);  // due 12
+  FlashcardDeck::grade(cachePath, "c", true, 9);  // due 16
   uint16_t out[1];
-  EXPECT_EQ(FlashcardDeck::buildSession(cachePath, SessionScope::DueFirst, 10, 1, out), 1);
-  EXPECT_EQ(out[0], 1);  // most-recent scheduled-due card (c)
+  EXPECT_EQ(FlashcardDeck::buildSession(cachePath, SessionScope::DueFirst, 16, 1, out), 1);
+  EXPECT_EQ(out[0], 2);  // b -- due 12, overdue longer than c
+}
+
+// The most-neglected card gets in even when newer lookups outnumber it, and a recently
+// looked-up card still gets its own slot rather than the pool going all-overdue.
+TEST_F(FlashcardDeckTest, BuildSessionPairsTheMostOverdueWithTheMostRecent) {
+  for (const char* w : {"aa", "b", "c", "d"}) FlashcardDeck::enroll(cachePath, w, "");
+  FlashcardDeck::grade(cachePath, "aa", true, 1);  // due 8   (most overdue)
+  FlashcardDeck::grade(cachePath, "b", true, 5);   // due 12
+  FlashcardDeck::grade(cachePath, "c", true, 9);   // due 16
+  FlashcardDeck::grade(cachePath, "d", true, 12);  // due 19  (most recently looked up)
+
+  uint16_t out[2];
+  const int n = FlashcardDeck::buildSession(cachePath, SessionScope::DueFirst, /*today=*/20, 2, out);
+  EXPECT_EQ(n, 2);
+  EXPECT_TRUE(selected(out, n, 3));  // aa, longest overdue
+  EXPECT_TRUE(selected(out, n, 0));  // d, most recent
+}
+
+// The groups overlap whenever a tier holds fewer cards than two group budgets -- the same
+// row is then both "oldest new" and "newest new". It must occupy one slot, not two.
+TEST_F(FlashcardDeckTest, BuildSessionNeverSelectsACardTwice) {
+  for (const char* w : {"aa", "b", "c"}) FlashcardDeck::enroll(cachePath, w, "");
+  uint16_t out[8];
+  const int n = FlashcardDeck::buildSession(cachePath, SessionScope::DueFirst, /*today=*/10, 8, out);
+  ASSERT_EQ(n, 3);
+  for (int i = 0; i < n; i++) {
+    for (int j = i + 1; j < n; j++) EXPECT_NE(out[i], out[j]);
+  }
+}
+
+// An empty group hands its share to the others: with no due cards at all, the two
+// new-card groups must still fill the whole window, not half of it.
+TEST_F(FlashcardDeckTest, BuildSessionEmptyGroupsGiveTheirSlotsAway) {
+  char w[8];
+  for (int i = 0; i < 12; i++) {
+    snprintf(w, sizeof(w), "w%d", i);
+    FlashcardDeck::enroll(cachePath, w, "");
+  }
+  uint16_t out[8];
+  const int n = FlashcardDeck::buildSession(cachePath, SessionScope::DueFirst, /*today=*/10, 8, out);
+  EXPECT_EQ(n, 8);  // full window, not the 4 one group could supply alone
+  for (int i = 0; i < n; i++) {
+    for (int j = i + 1; j < n; j++) EXPECT_NE(out[i], out[j]);
+  }
 }
 
 TEST_F(FlashcardDeckTest, BuildSessionExcludesRetired) {
@@ -537,19 +675,21 @@ TEST_F(FlashcardDeckTest, BuildSessionClockUnavailableFallsBackToAll) {
 
 TEST_F(FlashcardDeckTest, ComputeStatsTalliesBoxesDueMastered) {
   for (const char* w : {"aa", "b", "c", "d", "e", "f"}) FlashcardDeck::enroll(cachePath, w, "");
-  for (int i = 0; i < 6; i++) FlashcardDeck::grade(cachePath, "aa", true, 1);  // graduate aa -> RETIRED
-  FlashcardDeck::grade(cachePath, "b", true, 5);                               // box1, due 7
-  FlashcardDeck::grade(cachePath, "d", true, 5);                               // box1, due 7
-  FlashcardDeck::grade(cachePath, "f", true, 10);                              // box1, due 12 (future)
+  // First hit fast-tracks aa to the top box, second graduates it.
+  FlashcardDeck::grade(cachePath, "aa", true, 1);
+  FlashcardDeck::grade(cachePath, "aa", true, 1);
+  FlashcardDeck::grade(cachePath, "b", true, 5);   // top box, due 12
+  FlashcardDeck::grade(cachePath, "d", true, 5);   // top box, due 12
+  FlashcardDeck::grade(cachePath, "f", true, 10);  // top box, due 17 (future)
   // c, e remain new (box0, due0).
 
-  const FlashcardDeck::Stats s = FlashcardDeck::computeStats(cachePath, /*today=*/10);
+  const FlashcardDeck::Stats s = FlashcardDeck::computeStats(cachePath, /*today=*/12);
   EXPECT_EQ(s.total, 6);
   EXPECT_EQ(s.mastered, 1);
-  EXPECT_EQ(s.boxHist[0], 2);    // c, e new
-  EXPECT_EQ(s.boxHist[1], 3);    // b, d, f
-  EXPECT_EQ(s.due, 4);           // c, e (new) + b, d (due 7 <= 10)
-  EXPECT_EQ(s.nextDueDay, 12u);  // f is the only future-scheduled card
+  EXPECT_EQ(s.boxHist[0], 2);                       // c, e new
+  EXPECT_EQ(s.boxHist[FlashcardDeck::TOP_BOX], 3);  // b, d, f
+  EXPECT_EQ(s.due, 4);                              // c, e (new) + b, d (due 12 <= 12)
+  EXPECT_EQ(s.nextDueDay, 17u);                     // f is the only future-scheduled card
 }
 
 TEST_F(FlashcardDeckTest, ComputeStatsEmptyDeck) {
@@ -579,10 +719,10 @@ TEST_F(FlashcardDeckTest, HasDueCardsTrueForNewCard) {
 
 TEST_F(FlashcardDeckTest, HasDueCardsFalseWhenAllScheduledAhead) {
   for (const char* w : {"aa", "b"}) FlashcardDeck::enroll(cachePath, w, "");
-  FlashcardDeck::grade(cachePath, "aa", true, 10);  // box1 -> due 12
-  FlashcardDeck::grade(cachePath, "b", true, 10);   // box1 -> due 12
-  EXPECT_FALSE(FlashcardDeck::hasDueCards(cachePath, 11));
-  EXPECT_TRUE(FlashcardDeck::hasDueCards(cachePath, 12));  // due day arrives
+  FlashcardDeck::grade(cachePath, "aa", true, 10);  // first showing -> top box, due 17
+  FlashcardDeck::grade(cachePath, "b", true, 10);   // first showing -> top box, due 17
+  EXPECT_FALSE(FlashcardDeck::hasDueCards(cachePath, 16));
+  EXPECT_TRUE(FlashcardDeck::hasDueCards(cachePath, 17));  // due day arrives
 }
 
 TEST_F(FlashcardDeckTest, HasDueCardsFalseWhenAllRetiredOrSuspended) {
@@ -641,7 +781,7 @@ TEST_F(FlashcardDeckTest, SuspendAbsentWordIsNoOp) {
 
 TEST_F(FlashcardDeckTest, UnsuspendRestoresAsNewCard) {
   FlashcardDeck::enroll(cachePath, "alpha", "ctx", "Ch1");
-  FlashcardDeck::grade(cachePath, "alpha", true, 5);  // box1
+  FlashcardDeck::grade(cachePath, "alpha", true, 5);  // promoted off the new pool
   FlashcardDeck::suspend(cachePath, "alpha");
   EXPECT_TRUE(FlashcardDeck::unsuspend(cachePath, "alpha"));
 
@@ -709,7 +849,7 @@ TEST_F(FlashcardDeckTest, EnrollBumpsVersionScheduleChangesPreserveIt) {
   FlashcardDeck::Entry cat;
   ASSERT_TRUE(findCard(cachePath, "cat", cat));
   EXPECT_EQ(cat.version, catV);
-  EXPECT_EQ(cat.box, 1);
+  EXPECT_EQ(cat.box, FlashcardDeck::TOP_BOX);
 
   // Suspend likewise preserves the version.
   FlashcardDeck::suspend(cachePath, "cat");
@@ -791,11 +931,11 @@ TEST_F(FlashcardDeckTest, FieldLevelMergePreservesSchedule) {
   FlashcardDeck::enroll(cachePath, "cat", "ctx", "Ch1");
   syncRound(cachePath, B);
 
-  // B grades "cat" up to box 4 (its own schedule).
-  for (int i = 0; i < 4; i++) FlashcardDeck::grade(B, "cat", /*correct=*/true, /*today=*/10);
+  // B grades "cat" onto the top box (its own schedule).
+  FlashcardDeck::grade(B, "cat", /*correct=*/true, /*today=*/10);
   FlashcardDeck::Entry e;
   ASSERT_TRUE(findCard(B, "cat", e));
-  ASSERT_EQ(e.box, 4);
+  ASSERT_EQ(e.box, FlashcardDeck::TOP_BOX);
   const uint32_t dueBefore = e.dueDay;
 
   // A re-enrolls "cat" with new content (higher version) and syncs to B.
@@ -803,9 +943,9 @@ TEST_F(FlashcardDeckTest, FieldLevelMergePreservesSchedule) {
   syncRound(cachePath, B);
 
   ASSERT_TRUE(findCard(B, "cat", e));
-  EXPECT_EQ(e.box, 4);                  // schedule preserved
-  EXPECT_EQ(e.dueDay, dueBefore);       // schedule preserved
-  EXPECT_EQ(e.excerpt, "updated ctx");  // content updated
+  EXPECT_EQ(e.box, FlashcardDeck::TOP_BOX);  // schedule preserved
+  EXPECT_EQ(e.dueDay, dueBefore);            // schedule preserved
+  EXPECT_EQ(e.excerpt, "updated ctx");       // content updated
   EXPECT_EQ(e.chapter, "Ch9");
 }
 
@@ -1028,7 +1168,7 @@ TEST_F(FlashcardDeckTest, DictHashSurvivesGradeAndScheduleSurvivesDictHash) {
   FlashcardDeck::Entry e;
   ASSERT_TRUE(findCard(cachePath, "alpha", e));
   EXPECT_EQ(e.dictHash, 777u);
-  EXPECT_EQ(e.box, 1);
+  EXPECT_EQ(e.box, FlashcardDeck::TOP_BOX);
 }
 
 // A card written before dictHash existed: 7 fields, no hash. Must parse with dictHash 0 and an
