@@ -2029,6 +2029,12 @@ void EpubReaderActivity::accumulateVisibleSegment() {
 }
 
 void EpubReaderActivity::pageTurn(bool isForwardTurn) {
+  // An inline flashcard review takes the forward press INSTEAD of the turn: the reader returns to
+  // the page it was already showing, and continuing is a second, deliberate press. Ahead of
+  // clearDeferredReposition() because no turn happens on this path -- the resume/reflow anchor is
+  // still valid and must not be dropped.
+  if (isForwardTurn && maybeStartInlineReview()) return;
+
   // A page turn is authoritative: it must not be undone by a resume/reflow anchor captured at
   // session start once the incremental build completes. Safe to lock here — every caller bails
   // out on RenderLock::peek() before reaching this point, so the lock is never already held.
@@ -2096,13 +2102,6 @@ void EpubReaderActivity::pageTurn(bool isForwardTurn) {
   }
   lastPageTurnTime = millis();
   requestUpdate();
-
-  // Inline flashcard review, after the page index has already advanced: returning from the
-  // review lands on the NEXT page, so the interruption doesn't cost the user a second turn.
-  // Forward turns only -- paging backwards is re-reading, not progress.
-  if (isForwardTurn) {
-    maybeStartInlineReview();
-  }
 }
 
 // TODO: Failure handling
@@ -2901,7 +2900,7 @@ bool EpubReaderActivity::maybeStartInlineReview() {
   constexpr size_t kCardCount = sizeof(CrossPointSettings::FC_INLINE_CARDS) / sizeof(uint8_t);
   const uint8_t cardIdx = SETTINGS.flashcardInlineCardsIdx < kCardCount ? SETTINGS.flashcardInlineCardsIdx : 0;
   const uint8_t cards = CrossPointSettings::FC_INLINE_CARDS[cardIdx];
-  return startActivityForResultNoThrow<FlashcardReviewActivity>(
+  const bool started = startActivityForResultNoThrow<FlashcardReviewActivity>(
       [this](const ActivityResult& res) {
         // A skip lengthens the interval for the rest of the session; a completed review --
         // including a partial one, which the review screen reports as not-skipped -- just
@@ -2930,6 +2929,16 @@ bool EpubReaderActivity::maybeStartInlineReview() {
         requestUpdate();
       },
       renderer, mappedInput, epub->getCachePath(), cards, inlineReviewEffectiveMinutes(), inlineReviewSkippedMinutes());
+  if (started) {
+    // Same-page round trip: freeze the marker dwell and fold the open visible segment, so the
+    // review's own time is excluded and the page keeps the reading time already accrued on it.
+    // The same pair the reader menu and word-select launches use. After the push, not before:
+    // an OOM failure falls through to an ordinary page turn, which must not find
+    // preserveMarkerDwell_ armed against a genuinely new page.
+    pauseMarkerDwell();
+    accumulateVisibleSegment();
+  }
+  return started;
 }
 
 void EpubReaderActivity::recordSyncPromptSkip() {

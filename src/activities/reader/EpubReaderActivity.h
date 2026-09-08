@@ -407,9 +407,10 @@ class EpubReaderActivity final : public Activity {
   // Restart the session review clock. A skip also lengthens every later interval this
   // session; a completed review (including a partial one) keeps the current length.
   void recordInlineReview(bool skipped);
-  // Called at the end of a forward page turn. Runs the gates cheapest-first and, if they all
-  // pass, opens a short capped flashcard review over the page just turned to. Returns true if
-  // a review was launched.
+  // Called at the START of a forward page turn. Runs the gates cheapest-first and, if they all
+  // pass, opens a short capped flashcard review over the page still on screen. Returns true if a
+  // review was launched -- in which case the caller must ABANDON the turn: the review takes the
+  // press, and the reader stays on its current page until the user presses forward again.
   bool maybeStartInlineReview();
   // Returns true if sync acted (launched, or surfaced a save error); false if it was a no-op
   // because no KOReader credentials are stored.
