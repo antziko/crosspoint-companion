@@ -488,6 +488,37 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
   }
 }
 
+bool VegaTheme::recentBookIndexFromPoint(const GfxRenderer&, const Rect rect, const int recentCount, const int x,
+                                         const int y, int& index) const {
+  if (recentCount <= 0) return false;
+
+  // Same geometry as drawRecentBookCover above, from the same constants.
+  const int padding = VegaMetrics::kHeroPadding;
+  const int heroAreaH = VegaMetrics::values.homeCoverHeight + 2 * padding;
+
+  // The whole hero band is book 0's target, not just its cover rect: the text
+  // block beside the cover is part of the same card and reads as tappable.
+  if (y >= rect.y && y < rect.y + heroAreaH) {
+    index = 0;
+    return true;
+  }
+
+  const int nextRowY = rect.y + heroAreaH + VegaMetrics::kSectionGap;
+  const int nextCount = std::min(recentCount - 1, 3);
+  if (nextCount <= 0 || y < nextRowY || y >= rect.y + rect.height) return false;
+
+  // Full slot width, and down to the band bottom so the caption under a
+  // thumbnail is tappable too — the thumbnail alone is a small target.
+  const int nextTileW = (rect.width - 2 * padding) / 3;
+  const int left = rect.x + padding;
+  if (nextTileW <= 0 || x < left) return false;
+
+  const int slot = (x - left) / nextTileW;
+  if (slot >= nextCount) return false;
+  index = slot + 1;  // book 0 is the hero
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Horizontal icon-only menu row, anchored to the bottom of the screen --
 // ported from CrossInk's LyraCarouselTheme::drawButtonMenu
@@ -573,4 +604,30 @@ void VegaTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
     renderer.drawText(kMenuLabelFontId, (renderer.getScreenWidth() - labelW) / 2, labelY + 2, centeredLabel.c_str(),
                       true);
   }
+}
+
+bool VegaTheme::menuIndexFromPoint(const GfxRenderer& renderer, Rect, const int buttonCount, const int x, const int y,
+                                   int& index) const {
+  if (buttonCount <= 0) return false;
+
+  // Same geometry as drawButtonMenu above, which ignores the passed-in rect
+  // and anchors to the screen bottom instead.
+  const int tileH = kMenuIconPad + kMenuIconSize + kMenuIconPad;
+  const int labelLineH = renderer.getLineHeight(kMenuLabelFontId);
+  const int rowY =
+      renderer.getScreenHeight() - VegaMetrics::values.buttonHintsHeight - tileH - kMenuLabelTopGap - labelLineH;
+  const int labelY = rowY - kMenuLabelTopGap - labelLineH;
+
+  // From the top of the shared label line through the bottom of the icon
+  // tiles: the label names the selected entry, so it belongs to the row.
+  if (y < labelY || y >= rowY + tileH) return false;
+
+  const int tileW = renderer.getScreenWidth() / buttonCount;
+  if (tileW <= 0 || x < 0) return false;
+
+  const int tile = x / tileW;
+  // The last tile absorbs the remainder columns that integer division leaves
+  // on the right edge, so no dead strip when width % buttonCount != 0.
+  index = std::min(tile, buttonCount - 1);
+  return true;
 }

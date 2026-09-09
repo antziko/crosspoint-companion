@@ -291,6 +291,21 @@ class BaseTheme {
   virtual void drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                               const std::function<std::string(int index)>& buttonLabel,
                               const std::function<UIIcon(int index)>& rowIcon) const;
+  // Hit-test counterparts of the two draw calls above: the recent-book tile /
+  // menu entry at (x, y), or false when the point hits neither. Callers MUST
+  // pass the same rect they gave the matching draw call, so the hit bands
+  // cannot drift from the visuals. `index` is local to the band (cover 0..n-1,
+  // menu 0..buttonCount-1), not a HomeActivity selector index.
+  //
+  // The base implementations model a horizontal cover strip and a vertical
+  // menu stack, which is what every theme but Vega draws. Vega overrides both:
+  // its menu is a horizontal row anchored to the screen bottom, and its covers
+  // are one hero card above a 3-tile row. getMenuRowHeight() alone cannot
+  // express that — it abstracts row height, not row axis or anchor.
+  virtual bool recentBookIndexFromPoint(const GfxRenderer& renderer, Rect rect, int recentCount, int x, int y,
+                                        int& index) const;
+  virtual bool menuIndexFromPoint(const GfxRenderer& renderer, Rect rect, int buttonCount, int x, int y,
+                                  int& index) const;
   virtual Rect drawPopup(const GfxRenderer& renderer, const char* message) const;
   virtual void drawOptionPopup(const GfxRenderer& renderer, const char* title, const std::vector<std::string>& options,
                                int selectedIndex) const;

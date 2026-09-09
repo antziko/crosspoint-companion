@@ -64,4 +64,13 @@ class VegaTheme : public LyraTheme {
   void drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                       const std::function<std::string(int index)>& buttonLabel,
                       const std::function<UIIcon(int index)>& rowIcon) const override;
+  // Both draw calls above lay out on axes the base hit-test cannot express:
+  // the hero card sits ABOVE the "next 3" row (two bands, not one strip), and
+  // the menu is a horizontal row anchored to the screen bottom. Without these
+  // the base grid maps every menu icon to entry 0 and every cover tap to the
+  // wrong book.
+  bool recentBookIndexFromPoint(const GfxRenderer& renderer, Rect rect, int recentCount, int x, int y,
+                                int& index) const override;
+  bool menuIndexFromPoint(const GfxRenderer& renderer, Rect rect, int buttonCount, int x, int y,
+                          int& index) const override;
 };

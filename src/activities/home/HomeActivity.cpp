@@ -430,51 +430,67 @@ void HomeActivity::loop() {
     return;
   }
 
-  // Touch: the recent-book cover strip, then the menu rows below it. Ported
-  // from upstream #2957 — feat's home screen had no touch path at all, so on a
+  // Touch: the recent-book cover band, then the menu below it. Ported from
+  // upstream #2957 — feat's home screen had no touch path at all, so on a
   // touch board the whole screen was button-only.
-  const int coverColumnCount = std::max(1, metrics.homeRecentBooksCount);
-  const int recentCount = std::min(static_cast<int>(recentBooks.size()), coverColumnCount);
-  const int coverColumnWidth = (renderer.getScreenWidth() - 2 * metrics.contentSidePadding) / coverColumnCount;
-  int touchedBook = -1;
-  const auto coverTouch = mappedInput.colTouch(touchedBook, metrics.contentSidePadding, coverColumnWidth, recentCount,
-                                               metrics.homeTopPadding,
-                                               metrics.homeTopPadding + metrics.homeCoverTileHeight, coverColumnWidth);
-  if (coverTouch != MappedInputManager::RowTouch::None) {
-    if (coverTouch == MappedInputManager::RowTouch::Down) {
-      if (selectorIndex != touchedBook) {
-        selectorIndex = touchedBook;
-        requestUpdate();
-      }
-    } else {
-      selectorIndex = touchedBook;
-      activateSelection();
-    }
-    return;
-  }
+  //
+  // Hit-testing is delegated to the theme, against the SAME rects render()
+  // hands the matching draw calls, so the bands cannot drift from the visuals.
+  // A metrics-derived grid here only ever matched themes that draw a vertical
+  // menu stack; Vega's is a horizontal row anchored to the screen bottom.
+  // Down and Tap are read independently: one frame can carry both (a held
+  // contact plus a completed tap), and each reports its own coordinates.
+  int downX = 0;
+  int downY = 0;
+  const bool haveDown = mappedInput.wasScreenTouchDown(downX, downY);
+  int tapX = 0;
+  int tapY = 0;
+  const bool haveTap = mappedInput.wasScreenTapped(tapX, tapY);
 
-  const int menuTop = metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset;
-  const int renderedMenuCount =
-      menuCount - (metrics.homeContinueReadingInMenu ? 0 : static_cast<int>(recentBooks.size()));
-  int menuRow = -1;
-  // Row height from the theme, not the metrics table: RoundedRaff draws
-  // font-derived rows and the touch grid must match the visuals exactly.
-  const int menuRowHeight = GUI.getMenuRowHeight(renderer);
-  const auto menuTouch = mappedInput.rowTouch(menuRow, menuTop, menuRowHeight + metrics.menuSpacing, renderedMenuCount,
-                                              0, INT32_MAX, menuRowHeight);
-  if (menuTouch != MappedInputManager::RowTouch::None) {
-    const int touchedIndex =
-        metrics.homeContinueReadingInMenu ? menuRow : menuRow + static_cast<int>(recentBooks.size());
-    if (menuTouch == MappedInputManager::RowTouch::Down) {
-      if (selectorIndex != touchedIndex) {
-        selectorIndex = touchedIndex;
+  if (haveDown || haveTap) {
+    // Down moves the selector so the press is visible; Tap activates through
+    // activateSelection(), so touch and the Confirm release cannot diverge.
+    const auto moveSelector = [this](const int index) {
+      if (selectorIndex != index) {
+        selectorIndex = index;
         requestUpdate();
       }
-    } else {
-      selectorIndex = touchedIndex;
+    };
+    const auto activate = [this](const int index) {
+      selectorIndex = index;
       activateSelection();
+    };
+    // Theme indices are local to their band; selectorIndex counts the
+    // recent-book tiles first unless the theme folds Continue Reading in.
+    const auto menuSelector = [this, &metrics](const int row) {
+      return metrics.homeContinueReadingInMenu ? row : row + static_cast<int>(recentBooks.size());
+    };
+
+    const int recentCount = std::min(static_cast<int>(recentBooks.size()), std::max(1, metrics.homeRecentBooksCount));
+    const int renderedMenuCount =
+        menuCount - (metrics.homeContinueReadingInMenu ? 0 : static_cast<int>(recentBooks.size()));
+    const Rect covers = coverRect();
+    const Rect menu = menuRect();
+
+    // Covers before menu, Down before Tap within each band — the order the
+    // colTouch/rowTouch pair this replaced resolved in.
+    int index = -1;
+    if (haveDown && GUI.recentBookIndexFromPoint(renderer, covers, recentCount, downX, downY, index)) {
+      moveSelector(index);
+      return;
     }
-    return;
+    if (haveTap && GUI.recentBookIndexFromPoint(renderer, covers, recentCount, tapX, tapY, index)) {
+      activate(index);
+      return;
+    }
+    if (haveDown && GUI.menuIndexFromPoint(renderer, menu, renderedMenuCount, downX, downY, index)) {
+      moveSelector(menuSelector(index));
+      return;
+    }
+    if (haveTap && GUI.menuIndexFromPoint(renderer, menu, renderedMenuCount, tapX, tapY, index)) {
+      activate(menuSelector(index));
+      return;
+    }
   }
 
   buttonNavigator.onNext([this, menuCount] {
@@ -501,6 +517,19 @@ void HomeActivity::loop() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     activateSelection();
   }
+}
+
+Rect HomeActivity::coverRect() const {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  return Rect{0, metrics.homeTopPadding, renderer.getScreenWidth(), metrics.homeCoverTileHeight};
+}
+
+Rect HomeActivity::menuRect() const {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  return Rect{0, metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset,
+              renderer.getScreenWidth(),
+              renderer.getScreenHeight() - (metrics.headerHeight + metrics.homeTopPadding + metrics.verticalSpacing +
+                                            metrics.homeMenuTopOffset + metrics.buttonHintsHeight)};
 }
 
 // Open whatever selectorIndex currently points at: a recent-book cover tile
@@ -539,7 +568,6 @@ void HomeActivity::activateSelection() {
 void HomeActivity::render(RenderLock&&) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const auto pageWidth = renderer.getScreenWidth();
-  const auto pageHeight = renderer.getScreenHeight();
 
   // Paint timing, split draw vs panel. A whole-screen render is normally dominated by the e-ink
   // refresh, so a single elapsed number would hide what we are actually chasing here: with a CJK
@@ -564,14 +592,14 @@ void HomeActivity::render(RenderLock&&) {
   // Record the tile rect so storeCoverBuffer (called from the theme) knows
   // which sub-region of the framebuffer to snapshot. ~16 KB in Portrait
   // instead of the 48 KB full framebuffer the previous bind captured.
-  coverRectX = 0;
-  coverRectY = metrics.homeTopPadding;
-  coverRectW = pageWidth;
-  coverRectH = metrics.homeCoverTileHeight;
+  const Rect coverBand = coverRect();
+  coverRectX = coverBand.x;
+  coverRectY = coverBand.y;
+  coverRectW = coverBand.width;
+  coverRectH = coverBand.height;
 
-  GUI.drawRecentBookCover(renderer, Rect{0, metrics.homeTopPadding, pageWidth, metrics.homeCoverTileHeight},
-                          recentBooks, selectorIndex, coverRendered, coverBufferStored, bufferRestored,
-                          std::bind(&HomeActivity::storeCoverBuffer, this));
+  GUI.drawRecentBookCover(renderer, coverBand, recentBooks, selectorIndex, coverRendered, coverBufferStored,
+                          bufferRestored, std::bind(&HomeActivity::storeCoverBuffer, this));
 
   // Build menu items dynamically
   std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_MENU_RECENT_BOOKS), tr(STR_FILE_TRANSFER),
@@ -596,11 +624,7 @@ void HomeActivity::render(RenderLock&&) {
   }
 
   GUI.drawButtonMenu(
-      renderer,
-      Rect{0, metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset, pageWidth,
-           pageHeight - (metrics.headerHeight + metrics.homeTopPadding + metrics.verticalSpacing +
-                         metrics.homeMenuTopOffset + metrics.buttonHintsHeight)},
-      static_cast<int>(menuItems.size()),
+      renderer, menuRect(), static_cast<int>(menuItems.size()),
       metrics.homeContinueReadingInMenu ? selectorIndex : selectorIndex - recentBooks.size(),
       [&menuItems](int index) { return std::string(menuItems[index]); },
       [&menuIcons](int index) { return menuIcons[index]; });

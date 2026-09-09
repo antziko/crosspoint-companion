@@ -116,6 +116,13 @@ class HomeActivity final : public Activity {
   // shared by the Confirm release and the touch paths.
   void activateSelection();
 
+  // The two rects the theme lays out against. render() passes these to
+  // drawRecentBookCover/drawButtonMenu and loop() passes the same ones to
+  // recentBookIndexFromPoint/menuIndexFromPoint, so a theme's hit bands and
+  // its visuals are derived from identical geometry.
+  Rect coverRect() const;
+  Rect menuRect() const;
+
   // Convert HomeMenuItem to menu index (used in onEnter)
   static int menuItemToIndex(HomeMenuItem item, bool hasOpdsUrl, bool hasReadingStats) {
     int i = 0;

@@ -688,6 +688,45 @@ bool BaseTheme::tabIndexFromPoint(const GfxRenderer& renderer, const Rect rect, 
   return false;
 }
 
+bool BaseTheme::recentBookIndexFromPoint(const GfxRenderer&, const Rect rect, const int recentCount, const int x,
+                                         const int y, int& index) const {
+  if (recentCount <= 0) return false;
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  if (y < rect.y || y >= rect.y + rect.height) return false;
+
+  // Equal-width columns across the tile band, laid out like Lyra-3-Covers'
+  // tiles (Lyra3CoversTheme.cpp:24,37). A single-cover theme is the same
+  // formula with one column.
+  const int columns = std::max(1, metrics.homeRecentBooksCount);
+  const int columnWidth = (rect.width - 2 * metrics.contentSidePadding) / columns;
+  const int left = rect.x + metrics.contentSidePadding;
+  if (columnWidth <= 0 || x < left) return false;
+
+  const int column = (x - left) / columnWidth;
+  if (column >= recentCount) return false;
+  index = column;
+  return true;
+}
+
+bool BaseTheme::menuIndexFromPoint(const GfxRenderer& renderer, const Rect rect, const int buttonCount, int,
+                                   const int y, int& index) const {
+  if (buttonCount <= 0) return false;
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  // Row height as DRAWN, not the metrics value: RoundedRaff derives it from
+  // the font (RoundedRaffTheme.cpp:181) and its gap happens to equal
+  // menuSpacing, so one formula covers both.
+  const int rowHeight = getMenuRowHeight(renderer);
+  const int rowStep = rowHeight + metrics.menuSpacing;
+  if (rowStep <= 0 || y < rect.y) return false;
+
+  const int row = (y - rect.y) / rowStep;
+  if (row >= buttonCount) return false;
+  // The inter-row gap is dead space, not the row above it.
+  if ((y - rect.y) % rowStep >= rowHeight) return false;
+  index = row;
+  return true;
+}
+
 // Draw the "Recent Book" cover card on the home screen
 // TODO: Refactor method to make it cleaner, split into smaller methods
 void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std::vector<RecentBook>& recentBooks,
