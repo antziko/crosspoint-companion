@@ -421,6 +421,14 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   char pinnedFonts[256] = "";
   // Show hidden files/directories (starting with '.') in the file browser (0 = hidden, 1 = show)
   uint8_t showHiddenFiles = 0;
+  // How the Recent Books screen renders: a list, or a bookshelf of cover
+  // thumbnails at the given column count. The shelf column count is folded into
+  // this one enum so the Settings row and the on-screen picker share it.
+  static constexpr uint8_t RECENT_VIEW_LIST = 0;
+  static constexpr uint8_t RECENT_VIEW_SHELF_2COL = 1;
+  static constexpr uint8_t RECENT_VIEW_SHELF_3COL = 2;
+  static constexpr uint8_t RECENT_VIEW_COUNT = 3;
+  uint8_t recentBooksView = RECENT_VIEW_LIST;
   // Remove a book from the Recent Books list when its End-of-Book screen is reached (0 = off, 1 = on)
   uint8_t removeReadBooksFromRecents = 0;
   // Move epub to /Read/ folder on SD card when finished (0 = disabled, 1 = enabled)

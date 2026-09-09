@@ -471,6 +471,9 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                                   StrId::STR_SYS_LIBRARY));
   v.push_back(SettingInfo::Toggle(StrId::STR_REMOVE_READ_FROM_RECENTS, &CrossPointSettings::removeReadBooksFromRecents,
                                   "removeReadBooksFromRecents", StrId::STR_SYS_LIBRARY));
+  v.push_back(SettingInfo::Enum(StrId::STR_RECENT_BOOKS_VIEW, &CrossPointSettings::recentBooksView,
+                                {StrId::STR_VIEW_LIST, StrId::STR_VIEW_SHELF_2, StrId::STR_VIEW_SHELF_3},
+                                "recentBooksView", StrId::STR_SYS_LIBRARY));
   v.push_back(SettingInfo::Toggle(StrId::STR_MOVE_FINISHED_TO_READ, &CrossPointSettings::moveFinishedToReadFolder,
                                   "moveFinishedToReadFolder", StrId::STR_SYS_LIBRARY));
   v.push_back(SettingInfo::Toggle(StrId::STR_SD_LOGGING, &CrossPointSettings::sdCardLogging, "sdCardLogging",

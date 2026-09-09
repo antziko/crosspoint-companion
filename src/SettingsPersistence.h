@@ -187,6 +187,8 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
 
     // --- Library ---
     persisted::toggle("showHiddenFiles", &CrossPointSettings::showHiddenFiles),
+    persisted::enumerated("recentBooksView", &CrossPointSettings::recentBooksView,
+                          CrossPointSettings::RECENT_VIEW_COUNT - 1),
     persisted::toggle("removeReadBooksFromRecents", &CrossPointSettings::removeReadBooksFromRecents),
     persisted::toggle("moveFinishedToReadFolder", &CrossPointSettings::moveFinishedToReadFolder),
     persisted::toggle("sdCardLogging", &CrossPointSettings::sdCardLogging),
