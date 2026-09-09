@@ -411,9 +411,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                                 {StrId::STR_PREV_NEXT, StrId::STR_NEXT_PREV, StrId::STR_DISABLED}, "sideButtonLayout",
                                 StrId::STR_CAT_CONTROLS));
   // Touch reader controls (#2481). Filtered out below on non-touch boards.
-  v.push_back(SettingInfo::Enum(StrId::STR_TOUCH_READER_CONTROLS, &CrossPointSettings::touchReaderControls,
-                                {StrId::STR_STATE_OFF, StrId::STR_STATE_ON}, "touchReaderControls",
-                                StrId::STR_CAT_CONTROLS));
+  v.push_back(SettingInfo::Enum(
+      StrId::STR_TOUCH_READER_CONTROLS, &CrossPointSettings::touchReaderControls,
+      {StrId::STR_STATE_OFF, StrId::STR_STATE_TAP, StrId::STR_STATE_SWIPE, StrId::STR_STATE_INVERTED_TAP},
+      "touchReaderControls", StrId::STR_CAT_CONTROLS));
   v.push_back(SettingInfo::Toggle(StrId::STR_SWAP_SIDE_BTN_CW, &CrossPointSettings::swapSideButtonsCW,
                                   "swapSideButtonsCW", StrId::STR_CAT_CONTROLS));
   v.push_back(

@@ -133,6 +133,18 @@ inline TouchPageTurn detectTouchPageTurn(GfxRenderer& renderer, const MappedInpu
     return result;
   }
 
+  if (SETTINGS.touchReaderControls == CrossPointSettings::TOUCH_READER_SWIPE) {
+    // Horizontal swipes turn pages; taps stay free for the middle-third
+    // reader-menu zone. A slow swipe never becomes a long-press chapter skip.
+    const auto dir = input.wasSwipe();
+    if (dir == MappedInputManager::SwipeDir::Left) {
+      result.next = true;
+    } else if (dir == MappedInputManager::SwipeDir::Right) {
+      result.prev = true;
+    }
+    return result;
+  }
+
   int x = 0;
   int y = 0;
   if (!input.wasScreenTapped(x, y)) {
@@ -144,9 +156,11 @@ inline TouchPageTurn detectTouchPageTurn(GfxRenderer& renderer, const MappedInpu
   // Outer thirds only: the middle third is the reader-menu tap
   // (isTouchMenuTap below), so it must not double as a page turn.
   const int16_t zoneWidth = width / 3;
+  const bool inverted = SETTINGS.touchReaderControls == CrossPointSettings::TOUCH_READER_INVERTED_TAP;
   const freeink::ui::TapZone zones[] = {
-      {freeink::ui::Rect{0, 0, zoneWidth, height}, READER_TOUCH_PREV},
-      {freeink::ui::Rect{static_cast<int16_t>(width - zoneWidth), 0, zoneWidth, height}, READER_TOUCH_NEXT},
+      {freeink::ui::Rect{0, 0, zoneWidth, height}, inverted ? READER_TOUCH_NEXT : READER_TOUCH_PREV},
+      {freeink::ui::Rect{static_cast<int16_t>(width - zoneWidth), 0, zoneWidth, height},
+       inverted ? READER_TOUCH_PREV : READER_TOUCH_NEXT},
   };
 
   for (const auto& zone : zones) {
@@ -157,6 +171,17 @@ inline TouchPageTurn detectTouchPageTurn(GfxRenderer& renderer, const MappedInpu
   }
   result.heldMs = gpio.lastTouchHeldMs();
   return result;
+}
+
+// A left-edge left-to-right swipe is the Back gesture (MappedInputManager::
+// wasBackGesture) AND, in swipe page-turn mode, the previous-page swipe --
+// and wasReleased(Button::Back) reports the gesture, so without this the
+// gesture would close the book instead of paging back. On the reading surface
+// the page turn wins; the physical Back button and the bottom-edge up-swipe
+// still exit. handleBackNavigation() drops the gesture unconditionally, so
+// only the Epub reader (which does not use it) needs this.
+inline bool backGestureIsPageTurn(const MappedInputManager& input) {
+  return SETTINGS.touchReaderControls == CrossPointSettings::TOUCH_READER_SWIPE && input.wasBackGesture();
 }
 
 // The reader-menu gesture actually in force on this board. Swipe Up is only

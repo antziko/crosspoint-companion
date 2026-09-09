@@ -219,7 +219,17 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // band behind the words; Underline rules a 2px line under them, which leaves far less
   // charge on the panel and is the fallback if the band ghosts.
   enum QUOTE_STYLE { QUOTE_STYLE_OFF = 0, QUOTE_STYLE_UNDERLINE = 1, QUOTE_STYLE_HIGHLIGHT = 2, QUOTE_STYLE_COUNT };
-  enum TOUCH_READER_CONTROLS { TOUCH_READER_OFF = 0, TOUCH_READER_ON = 1, TOUCH_READER_CONTROLS_COUNT };
+  // How touch turns pages in the reader. Persisted by index, so 0/1 must keep
+  // meaning Off/Tap: any further mode is APPENDED. Every consumer outside
+  // detectTouchPageTurn() only asks "is this off?", so the extra modes need no
+  // handling there.
+  enum TOUCH_READER_CONTROLS {
+    TOUCH_READER_OFF = 0,
+    TOUCH_READER_ON = 1,  // outer-third taps: left = previous, right = next
+    TOUCH_READER_SWIPE = 2,
+    TOUCH_READER_INVERTED_TAP = 3,  // the tap zones, mirrored
+    TOUCH_READER_CONTROLS_COUNT
+  };
 
   // How the reader menu opens on touch boards. Persisted under the legacy
   // "tapForReaderMenu" key, so an old save's 0/1 keeps its Off/Tap meaning.
