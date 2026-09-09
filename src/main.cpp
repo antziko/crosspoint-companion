@@ -515,6 +515,13 @@ void setup() {
     SETTINGS.shortPwrBtn = CrossPointSettings::SHORT_PWRBTN::PWR_CONFIRM;
   }
 #endif
+  // Touch boards default the reader menu to the toolbar overlay instead of the
+  // full-screen list. Seeded before the load: fromJson() falls back to the
+  // in-memory value only when the file carries no readerMenuStyle key, so a
+  // user's saved choice (either style) still wins.
+  if (gpio.hasTouch()) {
+    SETTINGS.readerMenuStyle = CrossPointSettings::READER_MENU_TOOLBAR;
+  }
   SETTINGS.loadFromFile();
   // Apply the SD-logging toggle now that settings are loaded (default off). Governs
   // the boot-done MEM line below and all later SdDebugLog::log() calls.

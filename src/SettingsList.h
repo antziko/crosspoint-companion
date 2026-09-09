@@ -330,6 +330,13 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   v.push_back(SettingInfo::Enum(StrId::STR_IMAGES, &CrossPointSettings::imageRendering,
                                 {StrId::STR_IMAGES_DISPLAY, StrId::STR_IMAGES_PLACEHOLDER, StrId::STR_IMAGES_SUPPRESS},
                                 "imageRendering", StrId::STR_READER_TEXT));
+  // Toolbar is a touch-first overlay (tap targets, a drag scrub bar), so the
+  // row is offered only where those work; button boards stay on the list.
+  if (BoardConfig::hasTouch()) {
+    v.push_back(SettingInfo::Enum(StrId::STR_READER_MENU_STYLE, &CrossPointSettings::readerMenuStyle,
+                                  {StrId::STR_MENU_STYLE_LIST, StrId::STR_MENU_STYLE_TOOLBAR}, "readerMenuStyle",
+                                  StrId::STR_READER_TEXT));
+  }
   // How saved quotes are marked on the page. Deliberately not .withTextSettings(): a highlight
   // only exists where a quote was taken, so the Text Settings preview has nothing to show.
   v.push_back(SettingInfo::Enum(

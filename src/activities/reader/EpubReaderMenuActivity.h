@@ -44,7 +44,8 @@ class EpubReaderMenuActivity final : public UiListActivity {
   void render(RenderLock&&) override;
   bool handleHomeGesture() override;
 
- private:
+  // Public so the toolbar reader menu's "More" panel can reuse the same row set
+  // rather than maintaining a second copy of it (EpubReaderActivity::buildMoreActions).
   struct MenuItem {
     MenuAction action;
     StrId labelId;
@@ -57,6 +58,7 @@ class EpubReaderMenuActivity final : public UiListActivity {
   // upstream equivalent. Only upstream's FUI row plumbing is taken here.
   static std::vector<MenuItem> buildMenuItems(bool hasFootnotes, bool hasDictionary);
 
+ private:
   // Row storage: menuItems is at most MAX_MENU_ITEMS (11 always-present rows +
   // FOOTNOTES + the 3 dictionary rows in buildMenuItems() + FRONTLIGHT on
   // boards that have one), so a fixed-capacity array avoids any heap

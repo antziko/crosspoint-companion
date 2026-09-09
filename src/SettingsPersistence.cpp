@@ -99,9 +99,11 @@ void verifySettingsPersistenceTable() {
   // (FREEINK_CAP_FRONTLIGHT), and tapForReaderMenu is dropped on boards with no
   // Home key. Same reasoning: the value travels, only the row is board-specific.
   static constexpr const char* kBoardConditionalKeys[] = {
-      "touchReaderControls", "frontButtonFollowOrientation", "fadingFix",
-      "tapForReaderMenu",    "frontlightBrightness",         "frontlightWarmth",
-      "frontlightOn",        "frontlightRestoreOnWake"};
+      "touchReaderControls", "frontButtonFollowOrientation", "fadingFix", "tapForReaderMenu", "frontlightBrightness",
+      "frontlightWarmth", "frontlightOn", "frontlightRestoreOnWake",
+      // The toolbar reader menu is touch-only, so its style row is absent on
+      // button boards; the stored value still travels with the file.
+      "readerMenuStyle"};
 
   // Rows with no counterpart: a setting removed from SettingsList but left here would keep
   // being written to settings.json forever.

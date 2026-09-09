@@ -115,6 +115,8 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
                           CrossPointSettings::TEXT_AA_COUNT - 1),
     persisted::enumerated("imageRendering", &CrossPointSettings::imageRendering,
                           CrossPointSettings::IMAGE_RENDERING_COUNT - 1),
+    persisted::enumerated("readerMenuStyle", &CrossPointSettings::readerMenuStyle,
+                          CrossPointSettings::READER_MENU_STYLE_COUNT - 1),
     persisted::enumerated("quoteHighlightStyle", &CrossPointSettings::quoteHighlightStyle,
                           CrossPointSettings::QUOTE_STYLE_COUNT - 1),
     persisted::toggle("lookupUnderline", &CrossPointSettings::lookupUnderline),

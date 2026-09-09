@@ -457,8 +457,17 @@ class GfxRenderer {
   bool oneBitImages() const { return oneBitImages_; }
   void setTextAntiAlias(bool v) { textAntiAlias_ = v; }
   bool textAntiAlias() const { return textAntiAlias_; }
-  bool storeBwBuffer();    // Returns true if buffer was stored successfully
-  void restoreBwBuffer();  // Restore and free the stored buffer
+  bool storeBwBuffer();  // Returns true if buffer was stored successfully
+  // Restore and free the stored buffer. resyncPanelBaseline rewrites the
+  // controller's differential baseline to the restored frame — correct after a
+  // grayscale render (the glass matches the stored BW plane), WRONG when the
+  // glass shows content painted after the store (overlay chrome): the next
+  // differential would treat that content as already erased and leave it on
+  // the glass. Such callers pass false so the baseline keeps tracking what was
+  // last pushed.
+  void restoreBwBuffer(bool resyncPanelBaseline = true);
+  // Free a stored buffer without restoring it (the page under it changed).
+  void discardStoredBwBuffer() { freeBwBufferChunks(); }
   void cleanupGrayscaleWithFrameBuffer() const;
 
   // Font helpers

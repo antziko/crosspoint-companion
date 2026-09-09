@@ -204,6 +204,11 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Image rendering in EPUB reader
   enum IMAGE_RENDERING { IMAGES_DISPLAY = 0, IMAGES_PLACEHOLDER = 1, IMAGES_SUPPRESS = 2, IMAGE_RENDERING_COUNT };
 
+  // How the reader menu opens: the classic full-screen list, or a toolbar
+  // overlay (a bottom sheet with Contents / Text / More panels) painted over
+  // the page.
+  enum READER_MENU_STYLE { READER_MENU_LIST = 0, READER_MENU_TOOLBAR = 1, READER_MENU_STYLE_COUNT };
+
   // 1-bit halftone dither algorithm (X3). Applies to all images: EPUB images,
   // sleep wallpaper, BMP viewer. Both options are stateless ordered dithers.
   enum IMAGE_DITHER { DITHER_BLUE_NOISE = 0, DITHER_BAYER = 1, DITHER_ERROR_DIFFUSION = 2, IMAGE_DITHER_COUNT };
@@ -423,6 +428,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t embeddedStyle = 1;
   // Focus Reading - emphasizes the first part of words with bold
   uint8_t focusReadingEnabled = 0;
+  uint8_t readerMenuStyle = READER_MENU_LIST;
   // SD card font family name (empty = use built-in fontFamily)
   char sdFontFamilyName[32] = "";
   // Pinned fonts in the Font Family picker: newline-separated set of font keys

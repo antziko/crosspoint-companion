@@ -12,8 +12,10 @@
 #include "EndOfBookOptions.h"
 #include "EpubReaderMenuActivity.h"
 #include "ProgressMapper.h"
+#include "ReaderToolbarUi.h"
 #include "SyncScope.h"
 #include "activities/Activity.h"
+#include "components/OptionPopup.h"
 #include "components/themes/BaseTheme.h"  // Rect (indexing popup progress bar)
 #include "util/Dictionary.h"              // Dictionary::SessionOverrideScope member
 #include "util/WordSelectNavigator.h"
@@ -110,6 +112,37 @@ class EpubReaderActivity final : public Activity {
   // Set when the reader is left at end-of-book and SETTINGS.moveFinishedToReadFolder is on.
   // Consumed in onExit() to relocate the finished book into /Read/.
   bool pendingReadFolderMove = false;
+
+  // Toolbar reader menu (SETTINGS.readerMenuStyle == READER_MENU_TOOLBAR): drawn
+  // over the page instead of pushing the full-screen list menu. Select opens the
+  // Toolbar; its tools open the Contents/Text/More bottom-sheet panels.
+  enum class Overlay { None, Toolbar, Contents, Text, More };
+  Overlay overlay = Overlay::None;
+  int focusedTool = 0;  // toolbar tool focus: 0=Contents, 1=Text, 2=More
+  int panelIndex = 0;   // selected row within the active panel
+  // Panel list navigation: a tap steps one row, a hold jumps PANEL_HOLD_STEP rows in one go
+  // (a contents list runs to hundreds of chapters). One jump per hold, not a repeat -- every
+  // step repaints the panel, so repeating is bounded by the e-ink refresh anyway and reads as
+  // sluggish. True once a hold has jumped, so the release that ends it is swallowed.
+  static constexpr unsigned long PANEL_HOLD_MS = 1500;
+  static constexpr int PANEL_HOLD_STEP = 10;
+  bool panelHoldJumped = false;
+  // Whether the panel draws its cursor row. Button boards always do; touch
+  // boards only once a button has moved it, so a tapped row is not left inverted.
+  bool panelCursorShown = false;
+  // FreeInkUI chrome + tap targets for the overlay; created when it opens,
+  // released when it closes.
+  std::unique_ptr<ReaderToolbarUi> toolbarUi;
+  // Modal option picker over the panel (same component the Settings screens
+  // use), for enum rows: font size / line spacing / alignment / orientation /
+  // auto page turn. Toggle rows stay one-tap toggles, as in Settings.
+  OptionPopup overlayPopup;
+  // True while a clean-page snapshot (renderer.storeBwBuffer) backs the open
+  // overlay, letting panel->toolbar steps restore the page without a full
+  // re-render. Discarded on close / whenever the page under the overlay changes.
+  bool overlayPageStored = false;
+  int autoTurnOption = 0;  // current auto page-turn rate index (More panel)
+  std::vector<EpubReaderMenuActivity::MenuItem> moreItems;
   // Armed in onEnter() when the "sync prompt on open" gate passes; consumed once in loop() after
   // the first page renders, to show the open/wake sync prompt without blocking the initial paint.
   bool openSyncPromptArmed_ = false;
@@ -355,6 +388,29 @@ class EpubReaderActivity final : public Activity {
   // Jump to a percentage of the book (0-100), mapping it to spine and page.
   void jumpToPercent(int percent);
   void openReaderMenu();
+  // Toolbar reader menu (see Overlay above).
+  bool usesToolbarMenu() const;
+  void openOverlay(Overlay target);
+  void closeOverlayToPage();
+  void discardOverlayPage();
+  void handleOverlayInput();
+  void renderOverlay();
+  std::string currentChapterTitle() const;
+  // Text panel rows (font, size, line spacing, alignment, focus reading).
+  std::string textRowName(int row) const;
+  std::string textRowValue(int row) const;
+  void showTextRowPopup(int row);
+  // Persist + re-paginate + re-render under the open panel (live preview).
+  void applyTextSettingLive();
+  void paintOverlayPopup();
+  // Persist the reader text settings, (re)load the selected SD font, and
+  // re-paginate the current chapter so changes apply without re-opening the book.
+  void applyReaderTextSettings();
+  // More panel rows.
+  void buildMoreActions();
+  std::string moreRowName(int row) const;
+  std::string moreRowValue(int row) const;
+  void activateMoreRow(int row);
   // framebufferContainsPage = true means the caller guarantees the framebuffer
   // currently shows the page at the renderer's oriented page margins. The
   // DictionaryWordSelectActivity will skip its initial clearScreen +
