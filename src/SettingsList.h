@@ -373,8 +373,15 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // defaults. Hand-persisted in CrossPointSettings::toJson/fromJson (like dictMarker).
   v.push_back(SettingInfo::Toggle(StrId::STR_DICT_FALLBACK, &CrossPointSettings::dictFallbackGroup, "dictFallbackGroup",
                                   StrId::STR_READER_DICTIONARY));
+  // Also bound to the capacitive Home key's hold on boards that have one, so
+  // "Reader Menu" is a real choice there rather than a duplicate of the tap.
+  // Offered on every board (not gated like STR_SHOW_READER_MENU above): the
+  // persisted bound lives in a constexpr table that cannot hold a
+  // board-conditional value, and a gated list without a gated bound trips the
+  // CPSVFY verifier. On a button board the extra entry is redundant, not broken.
   v.push_back(SettingInfo::Enum(StrId::STR_HOLD_CONFIRM, &CrossPointSettings::holdConfirmAction,
-                                {StrId::STR_STATE_OFF, StrId::STR_HOLD_CONFIRM_BOOKMARK, StrId::STR_HOLD_CONFIRM_DICT},
+                                {StrId::STR_STATE_OFF, StrId::STR_HOLD_CONFIRM_BOOKMARK, StrId::STR_HOLD_CONFIRM_DICT,
+                                 StrId::STR_KOSYNC, StrId::STR_HOLD_CONFIRM_READER_MENU},
                                 "holdConfirmAction", StrId::STR_READER_DICTIONARY));
   // --- Reader > Reading Tracking sub-group (category STR_READER_TRACKING) ---
   v.push_back(SettingInfo::Enum(

@@ -761,29 +761,26 @@ void EpubReaderActivity::loop() {
     }
   }
 
-  // Hold-Confirm dispatch — mutually exclusive based on user setting.
-  // Both are 400 ms now: Dictionary::LONG_PRESS_MS and ReaderUtils::BOOKMARK_HOLD_MS. They are mutually
+  // Hold dispatch — one user-selected function, reachable from a Confirm hold
+  // and, on home-key boards, a Home-key hold. Dictionary::LONG_PRESS_MS and
+  // ReaderUtils::BOOKMARK_HOLD_MS are both 400 ms; the functions are mutually
   // exclusive by setting, so there is no reason for them to feel different.
-  if (section && mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
-    if (SETTINGS.holdConfirmAction == CrossPointSettings::HOLD_CONFIRM_DICTIONARY &&
-        mappedInput.getHeldTime() >= Dictionary::LONG_PRESS_MS) {
-      if (Dictionary::exists(epub->getCachePath().c_str())) {
-        ignoreNextConfirmRelease = true;
-        openWordSelect(/*framebufferContainsPage=*/true);
-        return;
-      }
-      if (!showNoDictionaryMessage) {
-        showNoDictionaryMessage = true;
-        ignoreNextConfirmRelease = true;
-        noDictionaryMessageTime = millis();
-        requestUpdate();
-      }
-    }
-    if (SETTINGS.holdConfirmAction == CrossPointSettings::HOLD_CONFIRM_BOOKMARK &&
-        mappedInput.getHeldTime() >= ReaderUtils::BOOKMARK_HOLD_MS && !showBookmarkMessage) {
+  if (section && mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
+      mappedInput.getHeldTime() >= Dictionary::LONG_PRESS_MS) {
+    if (runHoldAction()) {
       ignoreNextConfirmRelease = true;
-      addBookmark(false, /*lightRefresh=*/true);
+      return;
     }
+  }
+
+  // The X4 Pro's capacitive Home key runs the same function on a hold. Off and
+  // Reader Menu are left to isTouchMenuGesture() below, which already opens the
+  // menu for them, so this never double-fires. The SDK suppresses the key's tap
+  // event once a hold has fired (InputManager.h:180-183), so the release that
+  // ends this gesture cannot also trigger Home.
+  if (section && mappedInput.wasHomeKeyHold() && SETTINGS.holdConfirmAction != CrossPointSettings::HOLD_CONFIRM_OFF &&
+      SETTINGS.holdConfirmAction != CrossPointSettings::HOLD_CONFIRM_READER_MENU) {
+    if (runHoldAction()) return;
   }
 
   if (showBookmarkMessage && (millis() - bookmarkMessageTime) >= ReaderUtils::BOOKMARK_MESSAGE_DURATION_MS) {
@@ -1179,6 +1176,35 @@ void EpubReaderActivity::openReaderMenu() {
       renderer, mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent,
       APP_STATE.activeOrientation, !currentPageFootnotes.empty(), Dictionary::exists(epub->getCachePath().c_str()),
       std::move(activeDictName));
+}
+
+bool EpubReaderActivity::runHoldAction() {
+  switch (SETTINGS.holdConfirmAction) {
+    case CrossPointSettings::HOLD_CONFIRM_DICTIONARY:
+      if (Dictionary::exists(epub->getCachePath().c_str())) {
+        openWordSelect(/*framebufferContainsPage=*/true);
+        return true;
+      }
+      // Message already up: report unhandled so the caller stops returning
+      // early every frame and its timeout below can actually run.
+      if (showNoDictionaryMessage) return false;
+      showNoDictionaryMessage = true;
+      noDictionaryMessageTime = millis();
+      requestUpdate();
+      return true;
+    case CrossPointSettings::HOLD_CONFIRM_BOOKMARK:
+      if (showBookmarkMessage) return false;  // same reasoning as above
+      addBookmark(false, /*lightRefresh=*/true);
+      return true;
+    case CrossPointSettings::HOLD_CONFIRM_KOSYNC:
+      onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction::SYNC);
+      return true;
+    case CrossPointSettings::HOLD_CONFIRM_READER_MENU:
+      openReaderMenu();
+      return true;
+    default:
+      return false;
+  }
 }
 
 void EpubReaderActivity::openWordSelect(bool framebufferContainsPage) {

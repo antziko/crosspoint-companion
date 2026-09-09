@@ -537,7 +537,18 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Action triggered by holding Confirm in the reader.
   // OFF: no action (default). BOOKMARK: add bookmark @ BOOKMARK_HOLD_MS (400ms).
   // DICTIONARY: open word-select @ Dictionary::LONG_PRESS_MS (400ms, requires per-book dictionary).
-  enum HOLD_CONFIRM_ACTION : uint8_t { HOLD_CONFIRM_OFF = 0, HOLD_CONFIRM_BOOKMARK = 1, HOLD_CONFIRM_DICTIONARY = 2 };
+  // Function run by a hold of Confirm, or of the capacitive Home key on boards
+  // that have one. Persisted by index, so 0/1/2 keep their meaning and any new
+  // function is APPENDED. HOLD_CONFIRM_READER_MENU is offered only on home-key
+  // boards (SettingsList.h): elsewhere it would duplicate the Confirm tap.
+  enum HOLD_CONFIRM_ACTION : uint8_t {
+    HOLD_CONFIRM_OFF = 0,
+    HOLD_CONFIRM_BOOKMARK = 1,
+    HOLD_CONFIRM_DICTIONARY = 2,
+    HOLD_CONFIRM_KOSYNC = 3,
+    HOLD_CONFIRM_READER_MENU = 4,
+    HOLD_CONFIRM_ACTION_COUNT
+  };
   uint8_t holdConfirmAction = HOLD_CONFIRM_OFF;
   // Tilt-based page turning (X3 only — requires QMI8658 IMU)
   uint8_t tiltPageTurn = TILT_OFF;

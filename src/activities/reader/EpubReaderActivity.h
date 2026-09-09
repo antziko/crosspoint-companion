@@ -361,6 +361,11 @@ class EpubReaderActivity final : public Activity {
   // page->render in that case. Only the hold-to-lookup path can pass true;
   // the reader-menu → Lookup path must pass false because the menu has
   // overwritten the framebuffer.
+  // Run SETTINGS.holdConfirmAction. Shared by the Confirm hold and the
+  // Home-key hold so the two cannot drift. Returns false when the function did
+  // nothing this frame (Off, or a message it already put up is still showing),
+  // which tells the caller not to swallow the frame.
+  bool runHoldAction();
   void openWordSelect(bool framebufferContainsPage);
   // Highlight (hold-Back) entry point. If the current page already has a quote, shows a
   // confirm dialog (existing text + Delete/Add-new/Cancel) and acts on the choice; with

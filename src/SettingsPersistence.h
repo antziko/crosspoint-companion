@@ -131,7 +131,7 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
     persisted::enumerated("flashcardInlineCardsIdx", &CrossPointSettings::flashcardInlineCardsIdx,
                           lastIndex(CrossPointSettings::FC_INLINE_CARDS)),
     persisted::enumerated("holdConfirmAction", &CrossPointSettings::holdConfirmAction,
-                          CrossPointSettings::HOLD_CONFIRM_DICTIONARY),
+                          CrossPointSettings::HOLD_CONFIRM_ACTION_COUNT - 1),
     persisted::toggle("dictFallbackGroup", &CrossPointSettings::dictFallbackGroup),
 
     // --- Reader: stats ---

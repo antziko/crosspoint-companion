@@ -216,14 +216,18 @@ inline bool isTouchMenuTap(const GfxRenderer& renderer, const MappedInputManager
 }
 
 // Reader menu opens on the menu edge-swipe or a middle-third tap. On home-key
-// boards a long press of the capacitive key runs the user-selected long-press
-// function instead (SETTINGS.longPressMenuFunction), not the menu.
+// boards a hold of the capacitive key runs SETTINGS.holdConfirmAction instead;
+// only Off and "Reader Menu" leave the hold to the menu, and the reader
+// dispatches the other functions itself (EpubReaderActivity::runHoldAction).
 // Menu gestures honor showReaderMenu independently of touchReaderControls,
 // which only gates page-turn touch zones in detectTouchPageTurn().
 inline bool isTouchMenuGesture(const GfxRenderer& renderer, const MappedInputManager& input) {
   // A Home-key hold is board input, not a touch-reader control. On a frontlight board the
   // top-edge swipe belongs to the light panel, which makes this the reliable way in.
-  if (input.wasHomeKeyHold()) return true;
+  if (input.wasHomeKeyHold() && (SETTINGS.holdConfirmAction == CrossPointSettings::HOLD_CONFIRM_OFF ||
+                                 SETTINGS.holdConfirmAction == CrossPointSettings::HOLD_CONFIRM_READER_MENU)) {
+    return true;
+  }
   if (!input.hasTouch()) return false;
   if (input.wasMenuGesture()) return true;
   // Bottom-edge up-swipe variant. wasReaderMenuSwipeUp() is already false
