@@ -237,6 +237,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   v.push_back(SettingInfo::Enum(StrId::STR_SLEEP_COVER_FILTER, &CrossPointSettings::sleepScreenCoverFilter,
                                 {StrId::STR_NONE_OPT, StrId::STR_FILTER_CONTRAST, StrId::STR_INVERTED},
                                 "sleepScreenCoverFilter", StrId::STR_DISP_SLEEP));
+  v.push_back(SettingInfo::Enum(StrId::STR_WALLPAPER_TONE, &CrossPointSettings::wallpaperTone,
+                                {StrId::STR_TONE_DARKEST, StrId::STR_TONE_DARKER, StrId::STR_TONE_NORMAL,
+                                 StrId::STR_TONE_LIGHTER, StrId::STR_TONE_LIGHTEST},
+                                "wallpaperTone", StrId::STR_DISP_SLEEP));
   v.push_back(SettingInfo::Enum(StrId::STR_QUICK_RESUME_TIMEOUT, &CrossPointSettings::quickResumeSleepScreen,
                                 {StrId::STR_STATE_OFF, StrId::STR_STATE_ON}, "quickResumeSleepScreen",
                                 StrId::STR_DISP_SLEEP));
@@ -348,9 +352,9 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // word was actually looked up.
   v.push_back(SettingInfo::Toggle(StrId::STR_LOOKUP_UNDERLINE, &CrossPointSettings::lookupUnderline, "lookupUnderline",
                                   StrId::STR_READER_TEXT));
-  // Night mode = inverted output polarity on the reading surfaces only (EPUB/TXT/XTC;
-  // ActivityManager resolves the polarity per render), so it belongs with the reader
-  // settings rather than with the system-wide display ones.
+  // Night mode = inverted output polarity for the whole UI (ActivityManager resolves
+  // the polarity per render). It lives with the reader settings because reading in the
+  // dark is what it is for, not because its scope is reader-only.
   v.push_back(SettingInfo::Toggle(StrId::STR_NIGHT_MODE, &CrossPointSettings::screenInverted, "screenInverted",
                                   StrId::STR_READER_TEXT));
   // --- Reader > Dictionary sub-group (category STR_READER_DICTIONARY) ---
@@ -380,16 +384,6 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // defaults. Hand-persisted in CrossPointSettings::toJson/fromJson (like dictMarker).
   v.push_back(SettingInfo::Toggle(StrId::STR_DICT_FALLBACK, &CrossPointSettings::dictFallbackGroup, "dictFallbackGroup",
                                   StrId::STR_READER_DICTIONARY));
-  // Also bound to the capacitive Home key's hold on boards that have one, so
-  // "Reader Menu" is a real choice there rather than a duplicate of the tap.
-  // Offered on every board (not gated like STR_SHOW_READER_MENU above): the
-  // persisted bound lives in a constexpr table that cannot hold a
-  // board-conditional value, and a gated list without a gated bound trips the
-  // CPSVFY verifier. On a button board the extra entry is redundant, not broken.
-  v.push_back(SettingInfo::Enum(StrId::STR_HOLD_CONFIRM, &CrossPointSettings::holdConfirmAction,
-                                {StrId::STR_STATE_OFF, StrId::STR_HOLD_CONFIRM_BOOKMARK, StrId::STR_HOLD_CONFIRM_DICT,
-                                 StrId::STR_KOSYNC, StrId::STR_HOLD_CONFIRM_READER_MENU},
-                                "holdConfirmAction", StrId::STR_READER_DICTIONARY));
   // --- Reader > Reading Tracking sub-group (category STR_READER_TRACKING) ---
   v.push_back(SettingInfo::Enum(
       StrId::STR_MIN_SESSION_FOR_STATS, &CrossPointSettings::minSessionMinutes,
@@ -419,6 +413,17 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                         {StrId::STR_LONG_PRESS_BEHAVIOR_OFF, StrId::STR_LONG_PRESS_BEHAVIOR_SKIP,
                          StrId::STR_LONG_PRESS_BEHAVIOR_ORIENTATION, StrId::STR_LONG_PRESS_BEHAVIOR_BOOKMARK_SYNC},
                         "longPressButtonBehavior", StrId::STR_CAT_CONTROLS));
+  // What a long press runs: the Confirm hold in the reader, and the capacitive
+  // Home key's hold on boards that have one — so "Reader Menu" is a real choice
+  // there rather than a duplicate of the tap.
+  // Offered on every board (not gated like STR_SHOW_READER_MENU): the persisted
+  // bound lives in a constexpr table that cannot hold a board-conditional value,
+  // and a gated list without a gated bound trips the CPSVFY verifier. On a
+  // button board the extra entry is redundant, not broken.
+  v.push_back(SettingInfo::Enum(StrId::STR_LONG_PRESS_MENU, &CrossPointSettings::holdConfirmAction,
+                                {StrId::STR_STATE_OFF, StrId::STR_HOLD_CONFIRM_BOOKMARK, StrId::STR_HOLD_CONFIRM_DICT,
+                                 StrId::STR_KOSYNC, StrId::STR_HOLD_CONFIRM_READER_MENU},
+                                "holdConfirmAction", StrId::STR_CAT_CONTROLS));
 
   // Side buttons
   v.push_back(SettingInfo::Enum(StrId::STR_SIDE_BTN_LAYOUT, &CrossPointSettings::sideButtonLayout,

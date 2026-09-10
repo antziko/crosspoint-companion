@@ -2,6 +2,7 @@
 #include <string>
 
 #include "activities/Activity.h"
+#include "activities/TouchActionBar.h"
 
 // One-shot on-wake prompt: shows the wallpaper that was displayed entering the last
 // sleep and lets the user Keep, Remove, or Skip it before landing on Home/Reader.
@@ -31,4 +32,8 @@ class SleepImageReviewActivity final : public Activity {
   std::string imagePath;
   bool resumeToReader = false;
   std::string readerPath;
+
+  // On-screen answers for touch boards, which draw no button hints (see
+  // TouchActionBar): Skip / Keep / Remove.
+  TouchActionBar actionBar_;
 };

@@ -109,6 +109,31 @@ class Atkinson1BitDitherer {
 // 1/8 1/8 1/8
 //     1/8
 // Less error buildup = fewer artifacts than Floyd-Steinberg
+// --- 3-level quantization for panels whose two mid buckets are one tone --------
+// Black / the single gray / white, with the value each level ACTUALLY renders at
+// so error diffusion corrects against reality. The 4-level table below assumes
+// levels 1 and 2 land at 30 and 80; on a panel that drives both mid buckets with
+// the same waveform they both land on `grayValue`, and the diffusion never
+// notices -- which lifts every shadow and low midtone onto that one flat tone.
+//
+// grayValue is the assumed rendered luminance of that gray. It is not measured
+// (no reference exists for it), so it is a caller-supplied tuning knob: raising
+// it darkens the image (each gray dot is credited with more light, so fewer are
+// spent), lowering it brightens.
+struct ThreeLevelQuant {
+  uint8_t level;
+  int16_t value;
+};
+inline ThreeLevelQuant quantizeThreeLevel(int adjusted, int grayValue) {
+  // Midpoints between the three rendered values, so a pixel goes to whichever
+  // tone it is actually closest to.
+  const int loCut = (15 + grayValue) / 2;
+  const int hiCut = (grayValue + 210) / 2;
+  if (adjusted < loCut) return {0, 15};
+  if (adjusted < hiCut) return {1, static_cast<int16_t>(grayValue)};
+  return {3, 210};
+}
+
 class AtkinsonDitherer {
  public:
   explicit AtkinsonDitherer(int width) : width(width) {
@@ -133,11 +158,22 @@ class AtkinsonDitherer {
   // **2. EXPLICITLY DELETE THE COPY ASSIGNMENT OPERATOR**
   AtkinsonDitherer& operator=(const AtkinsonDitherer& other) = delete;
 
+  // Quantize to three real tones instead of four nominal ones. See
+  // quantizeThreeLevel: `grayValue` is the assumed rendered luminance of the
+  // panel's single gray. 0 (the default) keeps the 4-level behaviour.
+  void setThreeLevel(int grayValue) { threeLevelGray_ = grayValue; }
+
   uint8_t processPixel(int gray, int x) {
     // Add accumulated error
     int adjusted = gray + errorRow0[x + 2];
     if (adjusted < 0) adjusted = 0;
     if (adjusted > 255) adjusted = 255;
+
+    if (threeLevelGray_ > 0) {
+      const ThreeLevelQuant q = quantizeThreeLevel(adjusted, threeLevelGray_);
+      distributeError((adjusted - q.value) >> 3, x);
+      return q.level;
+    }
 
     // Quantize to 4 levels
     uint8_t quantized;
@@ -173,17 +209,19 @@ class AtkinsonDitherer {
     }
 
     // Calculate error (only distribute 6/8 = 75%)
-    int error = (adjusted - quantizedValue) >> 3;  // error/8
+    distributeError((adjusted - quantizedValue) >> 3, x);  // error/8
 
-    // Distribute 1/8 to each of 6 neighbors
+    return quantized;
+  }
+
+  // Distribute 1/8 of the error to each of 6 neighbors (Atkinson's 6/8 = 75%).
+  void distributeError(int error, int x) {
     errorRow0[x + 3] += error;  // Right
     errorRow0[x + 4] += error;  // Right+1
     errorRow1[x + 1] += error;  // Bottom-left
     errorRow1[x + 2] += error;  // Bottom
     errorRow1[x + 3] += error;  // Bottom-right
     errorRow2[x + 2] += error;  // Two rows down
-
-    return quantized;
   }
 
   void nextRow() {
@@ -206,6 +244,7 @@ class AtkinsonDitherer {
   int16_t* errorRow1;
   int16_t* errorRow2;
   bool ok_ = false;
+  int threeLevelGray_ = 0;  // >0 = quantize to 3 real tones (see setThreeLevel)
 };
 
 // Floyd-Steinberg error diffusion dithering with serpentine scanning
@@ -238,6 +277,10 @@ class FloydSteinbergDitherer {
   // **2. EXPLICITLY DELETE THE COPY ASSIGNMENT OPERATOR**
   FloydSteinbergDitherer& operator=(const FloydSteinbergDitherer& other) = delete;
 
+  // Quantize to three real tones instead of four nominal ones (see
+  // quantizeThreeLevel). 0 (the default) keeps the 4-level behaviour.
+  void setThreeLevel(int grayValue) { threeLevelGray_ = grayValue; }
+
   // Process a single pixel and return quantized 2-bit value
   // x is the logical x position (0 to width-1), direction handled internally
   uint8_t processPixel(int gray, int x) {
@@ -247,6 +290,12 @@ class FloydSteinbergDitherer {
     // Clamp to valid range
     if (adjusted < 0) adjusted = 0;
     if (adjusted > 255) adjusted = 255;
+
+    if (threeLevelGray_ > 0) {
+      const ThreeLevelQuant q = quantizeThreeLevel(adjusted, threeLevelGray_);
+      distributeError(adjusted - q.value, x);
+      return q.level;
+    }
 
     // Quantize to 4 levels (0, 85, 170, 255)
     uint8_t quantized;
@@ -282,8 +331,13 @@ class FloydSteinbergDitherer {
     }
 
     // Calculate error
-    int error = adjusted - quantizedValue;
+    distributeError(adjusted - quantizedValue, x);
 
+    return quantized;
+  }
+
+  // Distribute the error to neighbors (serpentine: direction-aware).
+  void distributeError(int error, int x) {
     // Distribute error to neighbors (serpentine: direction-aware)
     if (!isReverseRow()) {
       // Left to right: standard distribution
@@ -306,8 +360,6 @@ class FloydSteinbergDitherer {
       // Bottom-left: 1/16
       errorNextRow[x] += (error) >> 4;
     }
-
-    return quantized;
   }
 
   // Call at the end of each row to swap buffers
@@ -337,4 +389,5 @@ class FloydSteinbergDitherer {
   int16_t* errorCurRow;
   int16_t* errorNextRow;
   bool ok_ = false;
+  int threeLevelGray_ = 0;  // >0 = quantize to 3 real tones (see setThreeLevel)
 };

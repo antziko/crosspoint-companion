@@ -196,6 +196,13 @@ BmpReaderError Bitmap::parseHeaders() {
       // X4 ordered 4-level (blue noise or Bayer) — stateless, inline in packPixel.
       fourLevelOrdered = true;
     }
+    // The error-diffusion ditherers correct against the value each level RENDERS at, so
+    // the 3-tone target has to reach them too -- otherwise they keep diffusing against
+    // two mid levels the panel shows as one.
+    if (threeLevelGray > 0) {
+      if (atkinsonDitherer) atkinsonDitherer->setThreeLevel(threeLevelGray);
+      if (fsDitherer) fsDitherer->setThreeLevel(threeLevelGray);
+    }
   }
 
   return BmpReaderError::Ok;
@@ -220,12 +227,16 @@ BmpReaderError Bitmap::readNextRow(uint8_t* data, uint8_t* rowBuffer) const {
       // Stateless 1-bit ordered dither. Map true(white)/false(black) to the
       // 2bpp domain (3 / 0) so the BW render path's `val < 3` test draws black
       // for 0 and white for 3. prevRowY is the current output row. The X3 tone
-      // curve is applied inside orderedDither1Bit, so pass raw luminance.
+      // curve is applied inside orderedDither1Bit (halftoneTone picks which), so
+      // pass raw luminance.
       // Error-diffusion maps to blue noise on X3 (no 4-level path).
-      color = orderedDither1Bit(lum, currentX, prevRowY, ditherMode != IMG_DITHER_BAYER) ? 3 : 0;
+      color = orderedDither1Bit(lum, currentX, prevRowY, ditherMode != IMG_DITHER_BAYER, halftoneTone) ? 3 : 0;
     } else if (fourLevelOrdered) {
-      // X4 ordered 4-level: X4 tone curve + blue-noise or 8x8 Bayer field.
-      color = orderedDither4Level(lum, currentX, prevRowY, ditherMode == IMG_DITHER_BLUE_NOISE);
+      // X4 ordered: X4 tone curve + blue-noise or 8x8 Bayer field. Three tones where the
+      // panel only has three -- dithering to four would place tone between two levels that
+      // render identically, and lose it.
+      color = threeLevelGray > 0 ? orderedDither3Level(lum, currentX, prevRowY, ditherMode == IMG_DITHER_BLUE_NOISE)
+                                 : orderedDither4Level(lum, currentX, prevRowY, ditherMode == IMG_DITHER_BLUE_NOISE);
     } else if (atkinsonDitherer) {
       // X4 (4-level error diffusion): lift midtones with the X4 tone curve first
       // so e-ink dot gain doesn't leave grays muddy. Error diffusion then

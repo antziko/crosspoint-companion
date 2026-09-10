@@ -213,6 +213,23 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // sleep wallpaper, BMP viewer. Both options are stateless ordered dithers.
   enum IMAGE_DITHER { DITHER_BLUE_NOISE = 0, DITHER_BAYER = 1, DITHER_ERROR_DIFFUSION = 2, IMAGE_DITHER_COUNT };
 
+  // Midtone lift for the black-and-white wallpaper halftone, as an offset from the
+  // panel's own baseline curve (kHalftoneToneX3 / kHalftoneToneX4) -- so one setting
+  // means the same thing on every board and needs no board-conditional bound.
+  // The halftone fakes tone with dot density, so this trades midtone brightness
+  // against shadow detail; it does nothing on the 4-level grayscale render.
+  enum WALLPAPER_TONE {
+    WALLPAPER_TONE_DARKEST = 0,
+    WALLPAPER_TONE_DARKER = 1,
+    WALLPAPER_TONE_NORMAL = 2,  // the panel baseline
+    WALLPAPER_TONE_LIGHTER = 3,
+    WALLPAPER_TONE_LIGHTEST = 4,
+    WALLPAPER_TONE_COUNT
+  };
+  // Gamma offset (x100) applied to the baseline per step. Higher gamma = darker
+  // midtones, so the steps run downward from Darkest to Lightest.
+  static constexpr int8_t WALLPAPER_TONE_GAMMA_OFFSET[WALLPAPER_TONE_COUNT] = {16, 8, 0, -8, -16};
+
   enum TILT_PAGE_TURN { TILT_OFF = 0, TILT_NORMAL = 1, TILT_NVERTED = 2, TILT_PAGE_TURN_COUNT };
 
   // Text rendering on X4. Off: solid-black text + 1-bit images (fast, no two-stage
@@ -291,8 +308,9 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     uint8_t swapWordSelectAxes = 0;
   };
 
-  // Night mode: inverted output polarity on the reading surfaces only (resolved per
-  // render by ActivityManager via Activity::appliesNightMode).
+  // Night mode: inverted output polarity for the whole UI, resolved once per render
+  // by ActivityManager. The framebuffer stays in normal polarity — the panel driver
+  // inverts on the way out — so it costs no extra buffer.
   uint8_t screenInverted = 0;
 
   // Sleep screen settings
@@ -502,6 +520,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t imageRendering = IMAGES_DISPLAY;
   // 1-bit halftone dither algorithm for all images (X3): blue noise vs Bayer
   uint8_t imageDither = DITHER_BLUE_NOISE;
+  // Wallpaper halftone midtone lift, relative to the panel baseline
+  uint8_t wallpaperTone = WALLPAPER_TONE_NORMAL;
   // Lookup history entry cap (direct value)
   static constexpr uint8_t HIST_CAP_MIN = 25;
   static constexpr uint8_t HIST_CAP_MAX = 225;  // highest finite cap

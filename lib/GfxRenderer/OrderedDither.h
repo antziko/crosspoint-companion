@@ -55,22 +55,70 @@ inline constexpr int X3_BLACK_ANCHOR = 28;
 // Curve: inputs <= anchor -> 0 (pure black). Above the anchor, the remaining
 // range is renormalized to 0..255 and gamma-lifted, so true blacks stay black,
 // highlights stay white (255->255), and midtones are brightened.
+// Fill a 256-entry tone LUT. Inputs at or below `anchor` map to 0 (pure black);
+// above it the remaining range is renormalized to 0..255 and gamma-lifted, so
+// true blacks stay black, 255 stays white, and midtones are brightened.
+// Float maths runs 256 times per table build, never per pixel (the ESP32-C3 has
+// no FPU), which is why the result is cached by every caller below.
+inline void buildHalftoneToneLut(uint8_t* lut, int gammaX100, int anchor) {
+  const float span = 255.0f - static_cast<float>(anchor);
+  const float gamma = static_cast<float>(gammaX100) / 100.0f;
+  for (int i = 0; i < 256; i++) {
+    if (i <= anchor || span <= 0.0f) {
+      lut[i] = 0;
+      continue;
+    }
+    const float n = (i - anchor) / span;
+    const float c = (gammaX100 == 100) ? n : powf(n, gamma);
+    const int v = static_cast<int>(c * 255.0f + 0.5f);
+    lut[i] = v > 255 ? 255 : static_cast<uint8_t>(v);
+  }
+}
+
 inline uint8_t toneMapX3(uint8_t gray) {
   static uint8_t lut[256];
   static bool ready = false;
   if (!ready) {
-    const float span = 255.0f - X3_BLACK_ANCHOR;
-    for (int i = 0; i < 256; i++) {
-      if (i <= X3_BLACK_ANCHOR || span <= 0.0f) {
-        lut[i] = 0;
-        continue;
-      }
-      float n = (i - X3_BLACK_ANCHOR) / span;
-      float c = (X3_IMAGE_GAMMA == 1.0f) ? n : powf(n, X3_IMAGE_GAMMA);
-      int v = static_cast<int>(c * 255.0f + 0.5f);
-      lut[i] = v > 255 ? 255 : static_cast<uint8_t>(v);
-    }
+    buildHalftoneToneLut(lut, static_cast<int>(X3_IMAGE_GAMMA * 100.0f + 0.5f), X3_BLACK_ANCHOR);
     ready = true;
+  }
+  return lut[gray];
+}
+
+// --- Panel-specific halftone tone, for callers that pick their own curve -----
+// The halftone mechanism is the same on every panel -- dot density fakes tone --
+// but how much lift it needs is not: the correction fights the panel's dot gain,
+// and a higher-contrast panel over-brightens under the X3 numbers.
+//
+// gammaX100 is gamma * 100 (lower = brighter midtones / more shadow detail, and
+// 100 = no change); blackAnchor is the input at or below which a pixel is forced
+// to pure black, so the gamma can lift midtones WITHOUT graying out true blacks.
+struct HalftoneTone {
+  uint8_t gammaX100;
+  uint8_t blackAnchor;
+};
+
+// The X3 numbers, as constants for callers that select a tone explicitly.
+inline constexpr HalftoneTone kHalftoneToneX3{70, 28};
+// X4 / X4 Pro baseline. Deliberately gentler than the X3's: this panel holds a
+// deeper black and spreads dots less, so the X3 lift washes its midtones out and
+// its anchor throws away shadow detail the panel can actually hold.
+// TUNE ON DEVICE, exactly like the X3 pair above -- Settings' Wallpaper Tone row
+// shifts gammaX100 around this baseline so it can be dialled in without a build.
+inline constexpr HalftoneTone kHalftoneToneX4{85, 20};
+
+// Tone map for an explicitly chosen curve. Its own LUT, keyed on the tone, so the
+// fixed X3 table above is never rebuilt and that path stays byte-identical. The
+// cache assumes image rendering is single-threaded and that one image is dithered
+// with one tone -- both hold here (a full-image pass runs on one task), and it is
+// the same assumption toneMapX3's `ready` flag already makes.
+inline uint8_t toneMapHalftone(uint8_t gray, HalftoneTone tone) {
+  static uint8_t lut[256];
+  static uint16_t builtKey = 0xFFFFu;
+  const uint16_t key = static_cast<uint16_t>(tone.gammaX100) << 8 | tone.blackAnchor;
+  if (key != builtKey) {
+    buildHalftoneToneLut(lut, tone.gammaX100, tone.blackAnchor);
+    builtKey = key;
   }
   return lut[gray];
 }
@@ -85,16 +133,18 @@ inline uint8_t toneMapX3(uint8_t gray) {
 
 // 8x8 Bayer matrix pre-scaled to the 0..255 gray domain ((v * 255) / 63).
 inline const uint8_t bayer8x8Thresh[8][8] = {
-    {0, 130, 32, 162, 8, 138, 40, 170},     {194, 65, 226, 97, 202, 73, 234, 105},
-    {49, 178, 16, 146, 57, 186, 24, 154},   {243, 113, 210, 81, 251, 121, 218, 89},
-    {12, 142, 44, 174, 4, 134, 36, 166},    {206, 77, 238, 109, 198, 69, 230, 101},
-    {61, 190, 28, 158, 53, 182, 20, 150},   {255, 125, 222, 93, 247, 117, 214, 85},
+    {0, 130, 32, 162, 8, 138, 40, 170},   {194, 65, 226, 97, 202, 73, 234, 105},
+    {49, 178, 16, 146, 57, 186, 24, 154}, {243, 113, 210, 81, 251, 121, 218, 89},
+    {12, 142, 44, 174, 4, 134, 36, 166},  {206, 77, 238, 109, 198, 69, 230, 101},
+    {61, 190, 28, 158, 53, 182, 20, 150}, {255, 125, 222, 93, 247, 117, 214, 85},
 };
 
 // Returns true (white) / false (black). `gray` is the 8-bit luminance. The X3
 // tone curve is applied first so both dither fields share the same correction.
-inline bool orderedDither1Bit(uint8_t gray, int x, int y, bool blueNoise) {
-  gray = toneMapX3(gray);
+inline bool orderedDither1Bit(uint8_t gray, int x, int y, bool blueNoise, HalftoneTone tone = kHalftoneToneX3) {
+  gray = (tone.gammaX100 == kHalftoneToneX3.gammaX100 && tone.blackAnchor == kHalftoneToneX3.blackAnchor)
+             ? toneMapX3(gray)
+             : toneMapHalftone(gray, tone);
   int t = blueNoise ? blueNoise64[y & 63][x & 63] : bayer8x8Thresh[y & 7][x & 7];
   // The threshold fields span the full 0..255 range, so a cell holding 255 would
   // keep a black dot even on pure white (gray > 255 is never true) — a dotted
@@ -246,11 +296,41 @@ inline uint8_t toneMapX4DarkText(uint8_t gray) {
 //   DarkText : strong toneMapX4DarkText (grey text on dark background)
 inline uint8_t orderedDither4Level(uint8_t gray, int x, int y, bool blueNoise, X4Tone tone = X4Tone::Brighten) {
   switch (tone) {
-    case X4Tone::Brighten:  gray = toneMapX4(gray); break;
-    case X4Tone::DarkText:  gray = toneMapX4DarkText(gray); break;
-    case X4Tone::None:      break;
+    case X4Tone::Brighten:
+      gray = toneMapX4(gray);
+      break;
+    case X4Tone::DarkText:
+      gray = toneMapX4DarkText(gray);
+      break;
+    case X4Tone::None:
+      break;
   }
   const int thresh = blueNoise ? blueNoise64[y & 63][x & 63] : bayer8x8Thresh[y & 7][x & 7];
   const int level = (gray * 768 / 255 + thresh) / 256;  // 0..3
   return level > 3 ? 3 : static_cast<uint8_t>(level);
+}
+
+// --- 3-level ordered dither -------------------------------------------------
+// For panels whose AA waveform drives BOTH mid-tone buckets with the same table,
+// so the "4 levels" are physically three: black, one gray, white. Dithering to
+// four there is actively harmful -- two of the four render identically, and the
+// tone the dither placed between them is simply lost.
+//
+// Emits 0 / 1 / 3 only. Level 1 and level 2 are the same tone on such a panel, so
+// picking one of them consistently costs nothing and keeps the output alphabet
+// honest about what the hardware can show.
+inline uint8_t orderedDither3Level(uint8_t gray, int x, int y, bool blueNoise, X4Tone tone = X4Tone::Brighten) {
+  switch (tone) {
+    case X4Tone::Brighten:
+      gray = toneMapX4(gray);
+      break;
+    case X4Tone::DarkText:
+      gray = toneMapX4DarkText(gray);
+      break;
+    case X4Tone::None:
+      break;
+  }
+  const int thresh = blueNoise ? blueNoise64[y & 63][x & 63] : bayer8x8Thresh[y & 7][x & 7];
+  const int level = (gray * 512 / 255 + thresh) / 256;  // 0..2
+  return level >= 2 ? 3 : static_cast<uint8_t>(level);  // 0, 1, 3
 }

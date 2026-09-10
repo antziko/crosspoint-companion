@@ -77,6 +77,8 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
 
     // --- Display: e-ink ---
     persisted::enumerated("imageDither", &CrossPointSettings::imageDither, CrossPointSettings::IMAGE_DITHER_COUNT - 1),
+    persisted::enumerated("wallpaperTone", &CrossPointSettings::wallpaperTone,
+                          CrossPointSettings::WALLPAPER_TONE_COUNT - 1),
     persisted::enumerated("refreshFrequency", &CrossPointSettings::refreshFrequency,
                           CrossPointSettings::REFRESH_FREQUENCY_COUNT - 1),
     persisted::enumerated("refreshAction", &CrossPointSettings::refreshAction,

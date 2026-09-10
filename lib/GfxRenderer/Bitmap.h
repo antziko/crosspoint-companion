@@ -77,6 +77,17 @@ class Bitmap {
   //     to blue noise — X3 has no 4-level path).
   //   X4 (4-level): blue-noise/Bayer ordered, or Atkinson/FS error-diffusion.
   void setImageDitherMode(uint8_t mode) { ditherMode = mode; }
+  // Tone curve for the 1-bit halftone (setOneBitDither). How much midtone lift the
+  // halftone needs depends on the panel's dot gain, so the caller picks it -- see
+  // kHalftoneToneX3 / kHalftoneToneX4. Defaults to the X3 curve, which is what every
+  // caller that does not set it was already getting. No effect on the 4-level paths.
+  void setHalftoneTone(HalftoneTone tone) { halftoneTone = tone; }
+  // Quantize to the three tones the panel can actually show (black / one gray / white)
+  // instead of four nominal levels, when its AA waveform drives both mid buckets the
+  // same way. `grayValue` is that gray's assumed rendered luminance -- see
+  // quantizeThreeLevel. 0 (the default) keeps the 4-level behaviour everywhere.
+  // Call before parseHeaders(); ignored on the 1-bit halftone path.
+  void setThreeLevelGray(int grayValue) { threeLevelGray = grayValue; }
   BmpReaderError parseHeaders();
   BmpReaderError readNextRow(uint8_t* data, uint8_t* rowBuffer) const;
   BmpReaderError rewindToData() const;
@@ -94,9 +105,11 @@ class Bitmap {
 
   HalFile& file;
   bool dithering = false;
-  bool oneBitDither = false;          // 1-bit halftone instead of 4-level (X3)
-  uint8_t ditherMode = IMG_DITHER_BLUE_NOISE;  // IMG_DITHER_* (blue/bayer/error-diffusion)
-  bool fourLevelOrdered = false;      // X4 ordered 4-level (blue/bayer) vs error-diffusion
+  bool oneBitDither = false;                    // 1-bit halftone instead of 4-level (X3)
+  uint8_t ditherMode = IMG_DITHER_BLUE_NOISE;   // IMG_DITHER_* (blue/bayer/error-diffusion)
+  HalftoneTone halftoneTone = kHalftoneToneX3;  // 1-bit halftone tone curve (oneBitDither only)
+  int threeLevelGray = 0;                       // >0 = 3-tone output (see setThreeLevelGray)
+  bool fourLevelOrdered = false;                // X4 ordered 4-level (blue/bayer) vs error-diffusion
   int width = 0;
   int height = 0;
   bool topDown = false;

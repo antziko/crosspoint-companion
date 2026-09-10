@@ -16,6 +16,7 @@
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "SleepImageRender.h"
 #include "activities/reader/ReaderUtils.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -122,8 +123,7 @@ void SleepActivity::renderCustomSleepScreen() const {
   HalFile file;
   if (Storage.openFileForRead("SLP", "/sleep.bmp", file)) {
     Bitmap bitmap(file, true);
-    bitmap.setOneBitDither(renderer.isX3());          // X3: 1-bit halftone, avoids wash-out
-    bitmap.setImageDitherMode(SETTINGS.imageDither);  // blue/bayer/error-diffusion (X4)
+    configureSleepBitmap(bitmap, renderer);  // dither target + halftone tone
     if (bitmap.parseHeaders() == BmpReaderError::Ok) {
       LOG_DBG("SLP", "Loading: /sleep.bmp");
       renderBitmapSleepScreen(bitmap);
@@ -236,8 +236,7 @@ void SleepActivity::renderCustomSleepScreen() const {
         if (Storage.openFileForRead("SLP", filename, randFile)) {
           LOG_DBG("SLP", "Randomly loading: %s", filename.c_str());
           Bitmap bitmap(randFile, true);
-          bitmap.setOneBitDither(renderer.isX3());          // X3: 1-bit halftone, avoids wash-out
-          bitmap.setImageDitherMode(SETTINGS.imageDither);  // blue/bayer/error-diffusion (X4)
+          configureSleepBitmap(bitmap, renderer);  // dither target + halftone tone
           if (bitmap.parseHeaders() == BmpReaderError::Ok) {
             // Record the shown wallpaper so the on-wake review prompt can offer
             // keep/remove for it. Skipped implicitly for already-kept images (the
@@ -323,25 +322,23 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap) const {
 
   LOG_DBG("SLP", "drawing to %d x %d", x, y);
 
-  // Wipe ghosting from the previously displayed screen before drawing the
-  // wallpaper. Clear to white first, then a FULL refresh (full black/white
-  // flash) to completely clear prior content before showing the image.
+  // ONE panel activation, not two. There is no separate wipe pass: the paint below is
+  // Half, and Half drives EVERY pixel to its target ignoring the previous frame -- it
+  // seeds the OLD plane with the complement of the target on X4
+  // (Uc8279X4Driver.cpp:289) and loads the WW==BW / WB==BB scrub bank on X3
+  // (Uc8253X3Driver.cpp:188). Prior content cannot survive it, so a wipe before it only
+  // adds a second flash.
   //
-  // Keep this FULL. It was verified on device (2641ms — a genuine GC flash, not the
-  // ~300ms of a demoted differential) during the 08-15 hunt for a horizontal line on
-  // the wallpaper. That line turned out to be image sticking burned in elsewhere, by
-  // the themed header's solid black rule; this render was never at fault. Weakening
-  // the wipe would reintroduce ordinary ghosting on top of that.
-  renderer.clearScreen();
-  renderer.displayBuffer(HalDisplay::FULL_REFRESH);
-
+  // A Full wipe was in fact the WEAKER of the two: it seeds the OLD plane white, which
+  // redraws only black-target pixels and leaves background ghost parked in WW (the
+  // driver names this as the residual ghosting a white-seed Half once caused). Half is
+  // also what the reader uses as its periodic ghost purge and its manual force-refresh.
   renderer.clearScreen();
 
-  // X3's 4-level grayscale (gc) waveform washes out mid-tones a few seconds
-  // after the clean BW frame is shown, so skip the grayscale overlay there and
-  // keep the dithered BW render (which already reproduces the image well).
-  const bool hasGreyscale = bitmap.hasGreyscale() && !renderer.isX3() &&
-                            SETTINGS.sleepScreenCoverFilter == CrossPointSettings::SLEEP_SCREEN_COVER_FILTER::NO_FILTER;
+  // X3's 4-level grayscale (gc) waveform washes out mid-tones a few seconds after the clean
+  // BW frame is shown, so it keeps the dithered BW render instead. Same answer the dither
+  // target above was chosen from -- the two cannot be decided separately.
+  const bool hasGreyscale = bitmap.hasGreyscale() && sleepImageUsesGrayscale(renderer);
 
   renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, cropX, cropY);
 

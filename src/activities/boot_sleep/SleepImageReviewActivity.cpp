@@ -9,6 +9,7 @@
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "SleepImageRender.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -20,6 +21,9 @@ SleepImageReviewActivity::SleepImageReviewActivity(GfxRenderer& renderer, Mapped
       readerPath(std::move(readerPath)) {}
 
 void SleepImageReviewActivity::onEnter() {
+  // Sized to one line of the hint font. renderImage() letterboxes the wallpaper above it,
+  // so the strip it reserves has to be known before the first render.
+  actionBar_.layout(renderer, mappedInput.hasTouch(), UI_10_FONT_ID, 3);
   Activity::onEnter();
   renderImage();
 }
@@ -42,8 +46,7 @@ void SleepImageReviewActivity::renderImage() {
   }
 
   Bitmap bitmap(file, true);
-  bitmap.setOneBitDither(renderer.isX3());          // X3: 1-bit halftone, full tonal detail
-  bitmap.setImageDitherMode(SETTINGS.imageDither);  // blue/bayer/error-diffusion (X4)
+  configureSleepBitmap(bitmap, renderer);  // dither target + halftone tone
 
   if (bitmap.parseHeaders() != BmpReaderError::Ok) {
     file.close();
@@ -51,7 +54,14 @@ void SleepImageReviewActivity::renderImage() {
     return;
   }
 
-  const auto place = BitmapRenderUtils::centeredPlacement(bitmap.getWidth(), bitmap.getHeight(), pageWidth, pageHeight);
+  // Letterbox the wallpaper above the action bar rather than under it. The bar is the only
+  // control this screen has on a touch board, and the grayscale pass below repaints the gray
+  // planes across the WHOLE screen from the bitmap -- so a bar drawn over the image competes
+  // with photo gray whatever it fills itself with. 0 on button boards, where the bar is inert.
+  const int imageHeight = pageHeight - actionBar_.reservedHeight();
+
+  const auto place =
+      BitmapRenderUtils::centeredPlacement(bitmap.getWidth(), bitmap.getHeight(), pageWidth, imageHeight);
   const int x = place.x;
   const int y = place.y;
 
@@ -59,24 +69,25 @@ void SleepImageReviewActivity::renderImage() {
   // Remove and Keep change the file (see loop()).
   const auto labels = mappedInput.mapLabels(tr(STR_SKIP), tr(STR_KEEP), "", tr(STR_REMOVE));
 
-  // X4 (4-level grayscale) needs the multi-pass grayscale render to show grays; X3
-  // produces a 1-bit halftone so a single BW pass is correct.
-  const bool hasGreyscale = bitmap.hasGreyscale() && !renderer.isX3();
+  // The same answer the sleep render used, so this screen shows the image the user actually
+  // woke up to -- the cover filter suppresses the gray planes, and reviewing a filtered
+  // wallpaper through the unfiltered pipeline would show a different picture.
+  const bool hasGreyscale = bitmap.hasGreyscale() && sleepImageUsesGrayscale(renderer);
 
-  // Same two-step recipe as SleepActivity::renderBitmapSleepScreen — this screen shows the
-  // very image the panel is still retaining from sleep, so anything weaker ghosts:
-  //   - The wipe must be FULL. On X4 HALF and FAST are the same DU waveform
-  //     (Uc8279X4Driver.cpp:179 `fast = (mode != Full)`), so only FULL seeds the OLD plane
-  //     white and actually erases the retained frame.
-  //   - The paint must be HALF, never FAST. On X3 FAST is the `_fast` turbo differential
-  //     driven off the stale DTM1 plane (Uc8253X3Driver.cpp:191-206), while HALF loads the
-  //     `_half` scrub bank that drives every pixel to target regardless of prior state.
+  // Same single-activation recipe as SleepActivity::renderBitmapSleepScreen. This screen
+  // shows the very image the panel is still retaining from sleep, so the paint must be
+  // HALF, never FAST: FAST is the turbo differential driven off the stale plane
+  // (Uc8253X3Driver.cpp:191-206), while HALF loads the `_half` scrub bank on X3 and seeds
+  // the OLD plane with the complement of the target on X4 -- either way every pixel is
+  // driven to its target regardless of what the panel was holding. That is what erases the
+  // retained frame, so no separate wipe pass is needed ahead of it.
   renderer.clearScreen();
-  renderer.displayBuffer(HalDisplay::FULL_REFRESH);
-
-  renderer.clearScreen();
-  renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, 0, 0);
+  renderer.drawBitmap(bitmap, x, y, pageWidth, imageHeight, 0, 0);
   // Button hints (Skip / Keep / Remove) are self-explanatory; no heading prompt needed.
+  if (actionBar_.active()) {
+    const char* barLabels[] = {tr(STR_SKIP), tr(STR_KEEP), tr(STR_REMOVE)};
+    actionBar_.draw(renderer, UI_10_FONT_ID, barLabels, /*primaryIndex=*/1);
+  }
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   if (hasGreyscale) {
     // Must be displayGrayscaleBase, not displayBuffer: the gray nudge LUT applied by
@@ -88,7 +99,7 @@ void SleepImageReviewActivity::renderImage() {
   }
 
   if (hasGreyscale) {
-    BitmapRenderUtils::applyGrayscaleOverlay(renderer, bitmap, x, y, pageWidth, pageHeight);
+    BitmapRenderUtils::applyGrayscaleOverlay(renderer, bitmap, x, y, pageWidth, imageHeight);
   }
 
   file.close();
@@ -158,6 +169,24 @@ void SleepImageReviewActivity::onExit() {
 
 void SleepImageReviewActivity::loop() {
   Activity::loop();
+
+  int tapX = 0;
+  int tapY = 0;
+  if (mappedInput.wasScreenTapped(tapX, tapY)) {
+    switch (actionBar_.hitAt(tapX, tapY)) {
+      case 0:
+        finishToDestination();  // Skip
+        return;
+      case 1:
+        doKeep();
+        return;
+      case 2:
+        doRemove();
+        return;
+      default:
+        break;
+    }
+  }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     finishToDestination();  // Skip: leave the image unchanged
