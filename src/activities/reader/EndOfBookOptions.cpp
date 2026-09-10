@@ -2,7 +2,6 @@
 
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
-#include <HalGPIO.h>
 #include <I18n.h>
 
 #include "CrossPointSettings.h"
@@ -175,14 +174,14 @@ void EndOfBookOptions::buildListScreen(UiScreen& screen) {
   props.selectedIndex = static_cast<int16_t>(selector);
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in handleMenuInput()
-  if (!gpio.hasTouch()) {
-    // Non-touch hardware (X3/X4) keeps the original, denser row height
-    // instead of FreeInkUI's touch-target-sized default. This short, fixed
-    // menu never scrolls, so there's no viewport to resync here. No
-    // MappedInputManager reference here (this class isn't an Activity), so
-    // this reads the capability directly like BaseTheme's draw code does.
-    props.rowHeight = static_cast<int16_t>(metrics.listRowHeight);
-  }
+  // The theme's own row height and the Settings screens' label size, on every
+  // board -- the rule UiListActivity::resolveRowHeight() applies, so this menu
+  // reads like every other list. FreeInkUI's defaults are sized for a
+  // finger-height row carrying a subtitle, which these rows do not have. This
+  // short, fixed menu never scrolls, so there is no viewport to resync here.
+  props.rowHeight = static_cast<int16_t>(metrics.listRowHeight);
+  props.labelText = screen.theme().smallText;
+  props.labelText.maxLines = 2;
   screen.list(props);
 }
 

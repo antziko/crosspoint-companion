@@ -571,8 +571,10 @@ void VegaTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
 
   const int tileH = kMenuIconPad + kMenuIconSize + kMenuIconPad;
   const int labelLineH = renderer.getLineHeight(kMenuLabelFontId);
-  const int rowY =
-      renderer.getScreenHeight() - VegaMetrics::values.buttonHintsHeight - tileH - kMenuLabelTopGap - labelLineH;
+  // getMetrics(), not VegaMetrics::values: the hint band is zero-height on touch
+  // boards, and the menu row claims that space instead of floating above it.
+  const int rowY = renderer.getScreenHeight() - UITheme::getInstance().getMetrics().buttonHintsHeight - tileH -
+                   kMenuLabelTopGap - labelLineH;
   const int labelY = rowY - kMenuLabelTopGap - labelLineH;
   const int tileW = renderer.getScreenWidth() / buttonCount;
 
@@ -614,8 +616,8 @@ bool VegaTheme::menuIndexFromPoint(const GfxRenderer& renderer, Rect, const int 
   // and anchors to the screen bottom instead.
   const int tileH = kMenuIconPad + kMenuIconSize + kMenuIconPad;
   const int labelLineH = renderer.getLineHeight(kMenuLabelFontId);
-  const int rowY =
-      renderer.getScreenHeight() - VegaMetrics::values.buttonHintsHeight - tileH - kMenuLabelTopGap - labelLineH;
+  const int rowY = renderer.getScreenHeight() - UITheme::getInstance().getMetrics().buttonHintsHeight - tileH -
+                   kMenuLabelTopGap - labelLineH;
   const int labelY = rowY - kMenuLabelTopGap - labelLineH;
 
   // From the top of the shared label line through the bottom of the icon

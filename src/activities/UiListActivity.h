@@ -69,10 +69,15 @@ class UiListActivity : public Activity, protected UiAppHost {
   // Measure visibleRows for the screen band, apply follow-on-build, clamp the
   // viewport, and write selection/viewport into props. Call from buildScreen
   // right before screen.list(props).
-  // hasSubtitle: rows carry a second (subtitle) text line, so on non-touch
-  // hardware the denser override below uses the theme's *-with-subtitle row
-  // height instead of its single-line one (see syncListViewport()).
+  // hasSubtitle: rows carry a second (subtitle) text line, so the theme's
+  // *-with-subtitle row height applies instead of its single-line one (see
+  // resolveRowHeight()).
   void syncListViewport(UiScreen& screen, freeink::ui::ListProps& props, bool hasSubtitle = false);
+  // The row height every list in the app is laid out on, and the one place it is
+  // decided. Also writes props.rowHeight (screen.list() would otherwise fall
+  // back to the FreeInkUI theme token, not this value) and the minimum padding a
+  // row that grows for a subtitle keeps.
+  int16_t resolveRowHeight(freeink::ui::ListProps& props, bool hasSubtitle) const;
   // Move the selection to index and pull the viewport to it.
   void moveSelectionTo(int index);
   // Draw a list frame, repeating it while the list's layout feedback keeps

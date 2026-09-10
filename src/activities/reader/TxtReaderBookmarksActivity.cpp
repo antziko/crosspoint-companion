@@ -69,7 +69,14 @@ void TxtReaderBookmarksActivity::loop() {
     }
   }
 
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+  // A tap on a row opens that bookmark. A tap is never a hold, so it cannot reach
+  // the hold-to-delete branch above.
+  int tapX = 0;
+  int tapY = 0;
+  const int tappedRow = mappedInput.wasScreenTapped(tapX, tapY) ? listTouch_.indexAt(renderer, tapX, tapY) : -1;
+  if (tappedRow >= 0 && tappedRow < static_cast<int>(bookmarks.size())) selectorIndex = tappedRow;
+
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) || tappedRow >= 0) {
     if (bookmarks.empty()) {
       return;
     }
@@ -159,7 +166,12 @@ void TxtReaderBookmarksActivity::render(RenderLock&&) {
                        tr(STR_CONFIRM_DELETE_BOOKMARK));
       GUI.drawList(renderer, Rect{contentX, pageHeight / 2, contentWidth, LINE_HEIGHT}, 1, 0, getBookmarkTitle,
                    getBookmarkSubtitle, getBookmarkIcon);
+      // The confirm view's single row is a preview of what is about to be deleted,
+      // not something to pick.
+      listTouch_.clear();
     } else {
+      listTouch_.record(Rect{contentX, listY, contentWidth, listHeight}, numBookmarks, selectorIndex,
+                        /*hasSubtitle=*/true);
       GUI.drawList(renderer, Rect{contentX, listY, contentWidth, listHeight}, numBookmarks, selectorIndex,
                    getBookmarkTitle, getBookmarkSubtitle, getBookmarkIcon);
       GUI.drawHelpText(renderer, Rect{contentX, pageHeight - hintGutterBottom, contentWidth, LINE_HEIGHT},
@@ -168,6 +180,7 @@ void TxtReaderBookmarksActivity::render(RenderLock&&) {
   } else {
     GUI.drawHelpText(renderer, Rect{contentX, LINE_HEIGHT * 2, contentWidth, LINE_HEIGHT},
                      tr(STR_BOOKMARK_INSTRUCTIONS));
+    listTouch_.clear();
   }
 
   const auto backLabel = confirmingDelete >= DELETE_MODE_DISPLAY ? tr(STR_CANCEL) : tr(STR_BACK);

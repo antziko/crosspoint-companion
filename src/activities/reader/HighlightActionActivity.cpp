@@ -22,8 +22,10 @@ void HighlightActionActivity::onEnter() {
 
   // Line budget = screen minus top/bottom margins, the heading/body gap, and the bottom
   // button-hint strip, so the wrapped quote can't ride under the hints.
+  actionBar_.layout(renderer, mappedInput.hasTouch(), fontId, 2);
   const int buttonHintsHeight = UITheme::getInstance().getMetrics().buttonHintsHeight;
-  const int available = renderer.getScreenHeight() - (margin * 2) - buttonHintsHeight - spacing;
+  const int available =
+      renderer.getScreenHeight() - (margin * 2) - buttonHintsHeight - actionBar_.reservedHeight() - spacing;
   const int maxLines = std::max(1, available / lineHeight);
 
   headingLines = renderer.wrappedText(fontId, tr(STR_HIGHLIGHT_EXISTS), maxWidth, maxLines, EpdFontFamily::BOLD);
@@ -58,6 +60,10 @@ void HighlightActionActivity::render(RenderLock&& lock) {
   // Back = Cancel, Left = Delete, Right = Add new highlight.
   const auto labels = mappedInput.mapLabels(I18N.get(StrId::STR_CANCEL), "", I18N.get(StrId::STR_DELETE),
                                             I18N.get(StrId::STR_ADD_HIGHLIGHT));
+  if (actionBar_.active()) {
+    const char* barLabels[] = {I18N.get(StrId::STR_DELETE), I18N.get(StrId::STR_ADD_HIGHLIGHT)};
+    actionBar_.draw(renderer, fontId, barLabels, /*primaryIndex=*/1);
+  }
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer(HalDisplay::RefreshMode::FAST_REFRESH);
@@ -82,6 +88,20 @@ void HighlightActionActivity::loop() {
     finish();
     return;
   }
+  int tapX = 0;
+  int tapY = 0;
+  if (mappedInput.wasScreenTapped(tapX, tapY)) {
+    const int hit = actionBar_.hitAt(tapX, tapY);
+    if (hit == 0) {
+      finishWith(ACTION_DELETE);
+      return;
+    }
+    if (hit == 1) {
+      finishWith(ACTION_ADD_NEW);
+      return;
+    }
+  }
+
   if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
     finishWith(ACTION_DELETE);
     return;

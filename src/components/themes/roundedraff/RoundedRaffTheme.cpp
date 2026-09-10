@@ -249,6 +249,31 @@ int RoundedRaffTheme::getListPageItems(int contentHeight, bool hasSubtitle) cons
   return std::max(1, contentHeight / getListRowStep(hasSubtitle));
 }
 
+bool RoundedRaffTheme::listIndexFromPoint(const GfxRenderer& renderer, const Rect rect, const int itemCount,
+                                          const int selectedIndex, const bool hasSubtitle, const int x, const int y,
+                                          int& index) const {
+  if (itemCount <= 0) return false;
+  // Mirrors drawList's row metrics, including the subtitle row built from the two
+  // font line heights rather than from a metrics constant.
+  const int titleLineHeight = renderer.getLineHeight(kTitleFontId);
+  const int subtitleLineHeight = renderer.getLineHeight(kSubtitleFontId);
+  const int subtitleRowHeight = 10 + titleLineHeight + 4 + subtitleLineHeight + 10;
+  const int rowHeight = hasSubtitle ? subtitleRowHeight : RoundedRaffMetrics::values.listRowHeight;
+  const int rowStep = rowHeight + kSelectableRowGap;
+  if (rowStep <= 0) return false;
+  const int pageItems = std::max(1, rect.height / rowStep);
+  const int sidePadding = RoundedRaffMetrics::values.contentSidePadding;
+  if (x < rect.x + sidePadding || x >= rect.x + rect.width - sidePadding || y < rect.y) return false;
+  const int row = (y - rect.y) / rowStep;
+  if (row >= pageItems) return false;
+  // The gap between two pills belongs to neither.
+  if ((y - rect.y) % rowStep >= rowHeight) return false;
+  const int hit = std::max(0, selectedIndex) / pageItems * pageItems + row;
+  if (hit >= itemCount) return false;
+  index = hit;
+  return true;
+}
+
 void RoundedRaffTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,
                                 const std::function<std::string(int index)>& rowTitle,
                                 const std::function<std::string(int index)>& rowSubtitle,
@@ -273,7 +298,11 @@ void RoundedRaffTheme::drawList(const GfxRenderer& renderer, Rect rect, int item
   const int pageItems = std::max(1, rect.height / rowStep);
   const int pageStartIndex = std::max(0, selectedIndex / pageItems) * pageItems;
 
-  const int sidePadding = RoundedRaffMetrics::values.contentSidePadding;
+  // getMetrics().listInset, not the theme's contentSidePadding: the row band
+  // follows the reader's Screen Margin at runtime, and it is the same token the
+  // FreeInkUI lists lay their band out on (uiThemeTokens), so both renderers
+  // move together.
+  const int sidePadding = UITheme::getInstance().getMetrics().listInset;
   const int rowX = rect.x + sidePadding;
   const int rowWidth = rect.width - sidePadding * 2;
 

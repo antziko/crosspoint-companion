@@ -200,6 +200,21 @@ int LyraTheme::getListPageItems(int contentHeight, bool hasSubtitle) const {
   return std::max(1, contentHeight / rowStep);
 }
 
+bool LyraTheme::listIndexFromPoint(const GfxRenderer&, const Rect rect, const int itemCount, const int selectedIndex,
+                                   const bool hasSubtitle, const int x, const int y, int& index) const {
+  if (itemCount <= 0) return false;
+  const int rowHeight = hasSubtitle ? LyraMetrics::values.listWithSubtitleRowHeight : LyraMetrics::values.listRowHeight;
+  if (rowHeight <= 0) return false;
+  const int pageItems = std::max(1, rect.height / rowHeight);
+  if (x < rect.x || x >= rect.x + rect.width || y < rect.y) return false;
+  const int row = (y - rect.y) / rowHeight;
+  if (row >= pageItems) return false;
+  const int hit = std::max(0, selectedIndex) / pageItems * pageItems + row;
+  if (hit >= itemCount) return false;
+  index = hit;
+  return true;
+}
+
 void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,
                          const std::function<std::string(int index)>& rowTitle,
                          const std::function<std::string(int index)>& rowSubtitle,
@@ -208,38 +223,44 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
                          const std::function<bool(int index)>& rowDimmed, bool valueSmallFont,
                          const std::function<bool(int index)>& rowSubtitleLarge) const {
   const auto valueFont = valueSmallFont ? SMALL_FONT_ID : UI_10_FONT_ID;
+  // The row band's inset, from getMetrics() rather than the theme's own constant:
+  // it follows the reader's Screen Margin at runtime, and it is the same token
+  // FreeInkUI lists lay their band out on (uiThemeTokens) -- so a legacy list and
+  // a FUI one sit at one indent and one setting moves both.
+  const int listInset = UITheme::getInstance().getMetrics().listInset;
   int rowHeight =
       (rowSubtitle != nullptr) ? LyraMetrics::values.listWithSubtitleRowHeight : LyraMetrics::values.listRowHeight;
   int pageItems = rowHeight > 0 ? std::max(1, rect.height / rowHeight) : 1;
 
   const int totalPages = (itemCount + pageItems - 1) / pageItems;
+  // Scroll track geometry mirrors FreeInkUI's drawListScrollIndicator: the track
+  // hugs the band's right edge at listScrollWidth, and the rows give up only the
+  // width the band inset does not already clear (the track plus 2px of air). Both
+  // renderers therefore end their rows -- and the selection pill -- at the same x.
+  constexpr int kScrollAir = 2;
+  const int scrollWidth = LyraMetrics::values.listScrollWidth;
+  const int scrollCut = std::max(0, scrollWidth + kScrollAir - listInset);
   if (totalPages > 1) {
     const int scrollAreaHeight = rect.height;
-
-    // Draw scroll bar
     const int scrollBarHeight = (scrollAreaHeight * pageItems) / itemCount;
     const int currentPage = selectedIndex / pageItems;
     const int scrollBarY = rect.y + ((scrollAreaHeight - scrollBarHeight) * currentPage) / (totalPages - 1);
-    const int scrollBarX = rect.x + rect.width - LyraMetrics::values.scrollBarRightOffset;
-    renderer.drawLine(scrollBarX, rect.y, scrollBarX, rect.y + scrollAreaHeight, true);
-    renderer.fillRect(scrollBarX - LyraMetrics::values.scrollBarWidth, scrollBarY, LyraMetrics::values.scrollBarWidth,
-                      scrollBarHeight, true);
+    const int scrollBarX = rect.x + rect.width - scrollWidth;
+    renderer.fillRect(scrollBarX, scrollBarY, scrollWidth, scrollBarHeight, true);
   }
 
   // Draw selection
-  int contentWidth =
-      rect.width -
-      (totalPages > 1 ? (LyraMetrics::values.scrollBarWidth + LyraMetrics::values.scrollBarRightOffset) : 1);
+  int contentWidth = rect.width - (totalPages > 1 ? scrollCut : 0);
   if (selectedIndex >= 0) {
-    renderer.fillRoundedRect(
-        rect.x + LyraMetrics::values.contentSidePadding, rect.y + selectedIndex % pageItems * rowHeight,
-        contentWidth - LyraMetrics::values.contentSidePadding * 2, rowHeight, cornerRadius, Color::LightGray);
+    renderer.fillRoundedRect(rect.x + listInset, rect.y + selectedIndex % pageItems * rowHeight,
+                             contentWidth - listInset * 2, rowHeight, cornerRadius, Color::LightGray);
   }
 
+  //
   // Icon column is reserved per-row: a row whose icon is None lets its title use
   // the full width, while a row with an icon indents past it.
-  const int baseTextX = rect.x + LyraMetrics::values.contentSidePadding + hPaddingInSelection;
-  const int baseTextWidth = contentWidth - LyraMetrics::values.contentSidePadding * 2 - hPaddingInSelection * 2;
+  const int baseTextX = rect.x + listInset + hPaddingInSelection;
+  const int baseTextWidth = contentWidth - listInset * 2 - hPaddingInSelection * 2;
   const int iconSize = (rowIcon != nullptr) ? ((rowSubtitle != nullptr) ? mainMenuIconSize : listIconSize) : 0;
 
   // Draw all items
@@ -253,13 +274,16 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
     int rowTextWidth = baseTextWidth - rowIndent;
 
     // Draw name
-    int valueWidth = 0;
+    // The value's own width, kept apart from what the title gives up for it: the
+    // title also yields a gap, but the value is POSITIONED off its text width
+    // alone, or the gap is spent twice and it sits a padding short of the edge.
+    int valueTextWidth = 0;
     std::string valueText = "";
     if (rowValue != nullptr) {
       valueText = rowValue(i);
       valueText = renderer.truncatedText(valueFont, valueText.c_str(), maxListValueWidth);
-      valueWidth = renderer.getTextWidth(valueFont, valueText.c_str()) + hPaddingInSelection;
-      rowTextWidth -= valueWidth;
+      valueTextWidth = renderer.getTextWidth(valueFont, valueText.c_str());
+      rowTextWidth -= valueTextWidth + hPaddingInSelection;
     }
 
     auto itemName = rowTitle(i);
@@ -278,8 +302,7 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
     if (rowIconValue != None) {
       const uint8_t* iconBitmap = iconForName(rowIconValue, iconSize);
       if (iconBitmap != nullptr) {
-        renderer.drawIcon(iconBitmap, rect.x + LyraMetrics::values.contentSidePadding + hPaddingInSelection,
-                          itemY + iconY, iconSize);
+        renderer.drawIcon(iconBitmap, rect.x + listInset + hPaddingInSelection, itemY + iconY, iconSize);
       }
     }
 
@@ -291,20 +314,21 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
       renderer.drawText(subFont, textX, itemY + 30, subtitle.c_str(), true);
     }
 
-    // Draw value
+    // Draw value. Inset from the row's edge by hPaddingInSelection, the same
+    // padding the title gets on the left and that FreeInkUI lists apply as
+    // listSidePadding -- so both sides of a row, and both renderers, agree.
     if (!valueText.empty()) {
+      const int valueX = rect.x + contentWidth - listInset - hPaddingInSelection - valueTextWidth;
       if (i == selectedIndex && highlightValue) {
-        renderer.fillRoundedRect(
-            rect.x + contentWidth - LyraMetrics::values.contentSidePadding - hPaddingInSelection - valueWidth, itemY,
-            valueWidth + hPaddingInSelection, rowHeight, cornerRadius, Color::Black);
+        renderer.fillRoundedRect(valueX - hPaddingInSelection, itemY, valueTextWidth + hPaddingInSelection * 2,
+                                 rowHeight, cornerRadius, Color::Black);
       }
 
       int valueY = itemY + 6;
       if (rowSubtitle != nullptr) {
         valueY = itemY + 16;
       }
-      renderer.drawText(valueFont, rect.x + contentWidth - LyraMetrics::values.contentSidePadding - valueWidth, valueY,
-                        valueText.c_str(), !(i == selectedIndex && highlightValue));
+      renderer.drawText(valueFont, valueX, valueY, valueText.c_str(), !(i == selectedIndex && highlightValue));
     }
   }
 }

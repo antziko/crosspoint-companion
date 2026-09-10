@@ -37,6 +37,16 @@ class CrossPointState : public PersistableStore<CrossPointState> {
   // Everywhere else: mirrors SETTINGS.orientation (global default). 0 == PORTRAIT.
   uint8_t activeOrientation = 0;
 
+  // One-shot orientation request from the control-center orientation tile. The panel
+  // cannot rotate the renderer itself (that would crop the sheet and the screen under
+  // it), and it cannot just write activeOrientation either, because the readers need to
+  // reflow. So it parks the request here and the resumed activity adopts it; a rotation
+  // made inside a reader is per-book and never goes through this. ActivityManager clears
+  // it after the resume, so a request never leaks into the next screen.
+  // Runtime only — NOT serialized.
+  static constexpr uint8_t NO_ORIENTATION_REQUEST = 0xFF;
+  uint8_t pendingOrientation = NO_ORIENTATION_REQUEST;
+
   // Set by an activity to ask the main loop to enter a *manual* deep sleep (fromTimeout=false)
   // on its next iteration. Used by the reader's "sync before sleep" flow to defer the sleep
   // gesture across a confirmation prompt / sync activity. Runtime only — NOT serialized.

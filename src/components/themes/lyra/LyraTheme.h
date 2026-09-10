@@ -17,7 +17,11 @@ constexpr ThemeMetrics values = {.batteryWidth = 16,
                                  .listWithSubtitleRowHeight = 60,
                                  .listRowGap = 0,
                                  .listRowRadius = 6,
-                                 .listInset = 20,
+                                 // Non-zero declares that this theme draws a row BAND, which is what
+                                 // makes its inset follow the reader's Screen Margin at runtime
+                                 // (UITheme::getMetrics()). The value here is only the pre-settings
+                                 // fallback; read getMetrics().listInset, never this constant.
+                                 .listInset = 10,
                                  .listSidePadding = 8,
                                  .listSelectionStyle = 1,  // light pill
                                  .listScrollWidth = 4,
@@ -116,6 +120,8 @@ class LyraTheme : public BaseTheme {
                          int& index) const override;
   int getListRowStep(bool hasSubtitle) const override;
   int getListPageItems(int contentHeight, bool hasSubtitle) const override;
+  bool listIndexFromPoint(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex, bool hasSubtitle,
+                          int x, int y, int& index) const override;
   void drawList(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,
                 const std::function<std::string(int index)>& rowTitle,
                 const std::function<std::string(int index)>& rowSubtitle,

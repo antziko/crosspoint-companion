@@ -79,6 +79,15 @@ void FontSelectionActivity::loop() {
       requestUpdate();
     }
   }
+  // A tap picks a row and commits it, the touch counterpart of the Confirm release
+  // below. Never the pin hold: a tap carries no hold time.
+  int tapX = 0;
+  int tapY = 0;
+  if (mappedInput.wasScreenTapped(tapX, tapY) && pane_.selectAtPoint(renderer, tapX, tapY)) {
+    handleSelection();
+    return;
+  }
+
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     const bool armed = confirmArmed_;
     const bool wasPin = pinFiredThisHold_;

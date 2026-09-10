@@ -7,6 +7,7 @@
 #include <algorithm>
 
 #include "CrossPointSettings.h"
+#include "CrossPointState.h"
 #include "OpdsServerStore.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
@@ -62,10 +63,11 @@ void ActivityManager::renderTaskLoop() {
     RenderLock lock;
     if (currentActivity) {
       HalPowerManager::Lock powerLock;  // Ensure we don't go into low-power mode while rendering
-      // Night mode inverts only the reading surfaces (appliesNightMode): resolving the
-      // output polarity here, per render, means menus, popups and every other activity
-      // revert to normal automatically without touching the flag themselves.
-      display.setInverted(SETTINGS.screenInverted != 0 && currentActivity->appliesNightMode());
+      // Night mode inverts the whole UI. Resolving the output polarity here, once
+      // per render, means no activity manages the flag itself; SleepActivity is the
+      // one exception (it paints from onEnter, outside this resolution) and clears
+      // it explicitly.
+      display.setInverted(SETTINGS.screenInverted != 0);
       renderInProgress_ = true;
       currentActivity->render(std::move(lock));
       renderInProgress_ = false;
@@ -155,6 +157,9 @@ void ActivityManager::loop() {
         LOG_DBG("ACT", "Popped from activity stack, new size = %zu", stackActivities.size());
         // Resume before the handler so a handler that immediately pushes again re-pauses cleanly.
         currentActivity->onResume();
+        // One-shot: the resumed screen has had its chance to adopt a control-center
+        // orientation change, so it must not reach the screen after it.
+        APP_STATE.pendingOrientation = CrossPointState::NO_ORIENTATION_REQUEST;
         // Handle result if necessary
         if (currentActivity->resultHandler) {
           LOG_DBG("ACT", "Handling result for popped activity");

@@ -99,6 +99,13 @@ void ReaderOptionsActivity::loop() {
         return;
       }
     }
+    // A tap picks a font and commits it in one go, matching the Confirm release above.
+    int tapX = 0;
+    int tapY = 0;
+    if (mappedInput.wasScreenTapped(tapX, tapY) && fontPane_.selectAtPoint(renderer, tapX, tapY)) {
+      commitInlineFont();
+      return;
+    }
     // Gate up/down until render() has loaded the requested preview font (clears the nav-lock),
     // so held/rapid input can't outrun the slow SD load.
     if (fontPane_.navLocked()) return;
@@ -118,7 +125,14 @@ void ReaderOptionsActivity::loop() {
     return;
   }
 
-  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+  // A tap on a row selects and activates it in one go, like the FUI list screens.
+  // A tap is never a hold, so it cannot reach the long-press branch above.
+  int tapX = 0;
+  int tapY = 0;
+  const int tappedRow = mappedInput.wasScreenTapped(tapX, tapY) ? listTouch_.indexAt(renderer, tapX, tapY) : -1;
+  if (tappedRow >= 0) selectedIndex = tappedRow;
+
+  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm) || tappedRow >= 0) {
     if (selectedIndex == FONT_FAMILY) {
       openInlineFontList();
     } else {
@@ -434,6 +448,7 @@ void ReaderOptionsActivity::render(RenderLock&&) {
     renderer.clearRect(0, listTop, pageWidth, listHeight);
   }
 
+  listTouch_.record(Rect{0, listTop, pageWidth, listHeight}, itemCount(), selectedIndex);
   GUI.drawList(
       renderer, Rect{0, listTop, pageWidth, listHeight}, itemCount(), selectedIndex,
       [](int index) { return std::string(getItemName(index)); }, nullptr, nullptr,

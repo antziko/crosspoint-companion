@@ -194,6 +194,8 @@ int FontComparePane::loadHighlightedFontId(GfxRenderer& renderer) {
 
 void FontComparePane::renderList(GfxRenderer& renderer, int listTop, int listHeight) const {
   const int committedIndex = committedIndex_;
+  listTouch_.record(Rect{0, listTop, renderer.getScreenWidth(), listHeight}, static_cast<int>(fonts_.size()),
+                    selectedIndex_);
   GUI.drawList(
       renderer, Rect{0, listTop, renderer.getScreenWidth(), listHeight}, static_cast<int>(fonts_.size()),
       selectedIndex_,
@@ -217,4 +219,13 @@ void FontComparePane::restore(GfxRenderer& renderer) {
     sdFontSystem.ensureLoaded(renderer);
     didLoadPreview_ = false;
   }
+}
+
+bool FontComparePane::selectAtPoint(const GfxRenderer& renderer, const int x, const int y) {
+  const int hit = listTouch_.indexAt(renderer, x, y);
+  if (hit < 0) return false;
+  // setHighlight, not a bare assignment: it also takes the nav lock render() clears once
+  // the newly highlighted font has been loaded from SD, exactly as a button move does.
+  if (hit != selectedIndex_) setHighlight(hit);
+  return true;
 }

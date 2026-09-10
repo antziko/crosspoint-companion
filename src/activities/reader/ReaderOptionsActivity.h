@@ -7,6 +7,7 @@
 #include "../settings/TextSettingsPreview.h"
 #include "CrossPointSettings.h"
 #include "activities/Activity.h"
+#include "activities/ListTouchTarget.h"
 #include "util/ButtonNavigator.h"
 
 // In-reader per-book reader settings editor.
@@ -83,4 +84,7 @@ class ReaderOptionsActivity final : public Activity {
   // Font override saved on open, restored if the picker is cancelled (Back).
   uint8_t savedFontFamily_ = 0;
   char savedSdFontFamilyName_[sizeof(CrossPointSettings::ReaderOverride::sdFontFamilyName)] = "";
+
+  // Rows the last render drew, so a tap can pick one (see ListTouchTarget).
+  ListTouchTarget listTouch_;
 };

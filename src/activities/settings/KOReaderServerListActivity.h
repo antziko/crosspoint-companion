@@ -1,6 +1,7 @@
 #pragma once
 
 #include "activities/Activity.h"
+#include "activities/ListTouchTarget.h"
 #include "util/ButtonNavigator.h"
 
 /**
@@ -27,4 +28,7 @@ class KOReaderServerListActivity final : public Activity {
   int getItemCount() const;
   void handleSelection();
   void duplicateSelectedServer();
+
+  // Rows the last render drew, so a tap can pick one (see ListTouchTarget).
+  ListTouchTarget listTouch_;
 };

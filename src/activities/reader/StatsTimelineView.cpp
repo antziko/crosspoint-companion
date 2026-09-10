@@ -288,6 +288,50 @@ void StatsTimelineView::scrollToSelection(GfxRenderer& renderer, const Rect& rec
   scrollOffset = std::max(0, std::min(selectedMonthRow_ - 1, maxOffset(renderer, rect)));
 }
 
+bool StatsTimelineView::selectAtPoint(const ReadingTimeHistory& history, GfxRenderer& renderer, const Rect& rect,
+                                      const int x, const int y) {
+  if (rows.empty()) return false;
+  const int rowHeight = timelineRowHeight(renderer);
+  if (rowHeight <= 0 || y < rect.y) return false;
+  const int offsetRow = (y - rect.y) / rowHeight;
+  // Same bound renderList draws to: only fully-visible rows are on screen.
+  if (offsetRow >= rect.height / rowHeight) return false;
+  const size_t idx = static_cast<size_t>(scrollOffset) + offsetRow;
+  if (idx >= rows.size()) return false;
+  const Row& row = rows[idx];
+  if (row.kind != Row::Kind::Grid || row.count == 0) return false;
+
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int gridLeft = rect.x + metrics.contentSidePadding;
+  const int gridRight = rect.x + rect.width - metrics.contentSidePadding;
+  const int colWidth = std::max(1, (gridRight - gridLeft) / GRID_COLUMNS);
+  if (x < gridLeft) return false;
+  const int col = (x - gridLeft) / colWidth;
+  if (col >= row.count) return false;
+
+  // Cells are emitted in the same order moveYear()/moveMonth() walk their
+  // entries, so a cell's flat position within its section is the index they
+  // step to -- no second copy of the year/month ordering.
+  int target = 0;
+  int current = -1;
+  int seen = 0;
+  for (size_t i = 0; i < rows.size(); ++i) {
+    if (rows[i].kind != Row::Kind::Grid || rows[i].gridSection != row.gridSection) continue;
+    if (i == idx) target = seen + col;
+    if (rows[i].highlightCell >= 0) current = seen + rows[i].highlightCell;
+    seen += rows[i].count;
+  }
+
+  const Focus wanted = (row.gridSection == 1) ? Focus::Yearly : Focus::Monthly;
+  bool changed = focus_ != wanted;
+  focus_ = wanted;
+  if (current >= 0 && target != current) {
+    const int delta = target - current;
+    changed = ((row.gridSection == 1) ? moveYear(history, delta) : moveMonth(history, delta)) || changed;
+  }
+  return changed;
+}
+
 void StatsTimelineView::renderList(GfxRenderer& renderer, const Rect& rect) const {
   if (rows.empty()) {
     renderEmptyState(renderer, rect);

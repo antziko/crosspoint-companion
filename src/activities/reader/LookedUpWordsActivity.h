@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "../Activity.h"
+#include "activities/ListTouchTarget.h"
 #include "util/ButtonNavigator.h"
 #include "util/DictionaryLookupController.h"
 #include "util/LookupHistory.h"
@@ -60,4 +61,7 @@ class LookedUpWordsActivity final : public Activity {
   const LookupHistory::Entry* entryAt(int uiIndex);
 
   static const char* glyphFor(LookupHistory::Status s);
+
+  // Rows the last render drew, so a tap can pick one (see ListTouchTarget).
+  ListTouchTarget listTouch_;
 };

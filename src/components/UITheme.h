@@ -55,6 +55,7 @@ class UITheme {
   mutable bool metricsValid = false;
   mutable bool metricsForTouch = false;
   mutable int metricsCompactHeader = 0;
+  mutable int metricsListInset = -1;
   static TopBarPolicyFn topBarPolicy;
 };
 

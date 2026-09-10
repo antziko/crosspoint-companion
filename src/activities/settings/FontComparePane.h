@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "activities/ListTouchTarget.h"
+
 class GfxRenderer;
 
 // Reusable two-pane font comparison + pinnable font list.
@@ -55,6 +57,12 @@ class FontComparePane {
   void setHighlight(int index);
   bool navLocked() const { return navLocked_; }
 
+  // Move the highlight to the row under (x, y). Returns true when a row was hit, so
+  // the owning activity can decide whether the same tap also commits the choice.
+  // Both owners (Font Family, and the reader's inline picker) drive input themselves,
+  // so the pane only resolves the hit.
+  bool selectAtPoint(const GfxRenderer& renderer, int x, int y);
+
   // Pin/unpin the highlighted font, persist, re-sort pinned-first, keep the highlight on it.
   void togglePinSelected();
 
@@ -87,4 +95,9 @@ class FontComparePane {
   // Nav-lock: a navigation step arms this; renderPanes() clears it once the requested preview is
   // on screen. While armed the host must not advance the highlight (stops overshoot).
   bool navLocked_ = false;
+
+  // Rows the last render drew, so a tap can pick one (see ListTouchTarget). Mutable
+  // because render() is const here: this is a record of what was painted, not state
+  // the pane reasons about.
+  mutable ListTouchTarget listTouch_;
 };

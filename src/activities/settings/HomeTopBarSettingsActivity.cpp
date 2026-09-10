@@ -46,7 +46,13 @@ void HomeTopBarSettingsActivity::loop() {
     return;
   }
 
-  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+  // A tap on a row selects and activates it in one go, like the FUI list screens.
+  int tapX = 0;
+  int tapY = 0;
+  const int tappedRow = mappedInput.wasScreenTapped(tapX, tapY) ? listTouch_.indexAt(renderer, tapX, tapY) : -1;
+  if (tappedRow >= 0) selectedIndex = tappedRow;
+
+  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm) || tappedRow >= 0) {
     handleSelection();
     requestUpdate();
     return;
@@ -105,6 +111,7 @@ void HomeTopBarSettingsActivity::render(RenderLock&&) {
   const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
   const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
 
+  listTouch_.record(Rect{0, contentTop, pageWidth, contentHeight}, ITEM_COUNT, selectedIndex);
   GUI.drawList(
       renderer, Rect{0, contentTop, pageWidth, contentHeight}, ITEM_COUNT, selectedIndex,
       [](int index) { return std::string(I18N.get(menuNames[index])); }, nullptr, nullptr,

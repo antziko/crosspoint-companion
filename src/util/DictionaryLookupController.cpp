@@ -346,10 +346,14 @@ bool DictionaryLookupController::handleMultiSelect(WordSelectNavigator& navigato
 
 bool DictionaryLookupController::handleConfirmLookup(const WordSelectNavigator& navigator) {
   if (!mappedInput.wasReleased(MappedInputManager::Button::Confirm)) return false;
+  lookupSelected(navigator);
+  return true;  // consumed the input even if nothing was selected
+}
+
+void DictionaryLookupController::lookupSelected(const WordSelectNavigator& navigator) {
   const auto* sel = navigator.getSelected();
-  if (!sel) return true;  // consumed input even if nothing selected
+  if (!sel) return;
   lookupOrPopup(navigator.getLookup(*sel));
-  return true;
 }
 
 void DictionaryLookupController::lookupOrPopup(const std::string& rawWord) {

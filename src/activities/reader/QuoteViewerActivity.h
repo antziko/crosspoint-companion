@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "../Activity.h"
+#include "activities/TouchActionBar.h"
 
 // Full-screen reader for a saved quote ("highlight"). Launched from
 // EpubReaderBookmarksActivity when Confirm is pressed on a quote row; point
@@ -41,4 +42,9 @@ class QuoteViewerActivity final : public Activity {
   std::vector<std::string> wrappedLines_;
   int lineHeight_ = 0;
   int linesPerPage_ = 0;
+
+  // On-screen controls for touch boards, which draw no button hints (see
+  // TouchActionBar): previous quote / open / next quote. Paging within a long
+  // quote stays on Left/Right, which a touch board answers with a swipe.
+  TouchActionBar actionBar_;
 };

@@ -39,9 +39,14 @@ struct ThemeMetrics {
   // through FreeInkApp: the theme supplies geometry and selection style, the
   // uiScale fonts supply the sizes. Plain data by design — the eventual
   // SD-card theme files will provide exactly these values.
-  int listRowGap;          // vertical gap between rows
-  int listRowRadius;       // row corner radius (RoundedRaff cards, Lyra pill)
-  int listInset;           // horizontal inset of the whole list band
+  int listRowGap;     // vertical gap between rows
+  int listRowRadius;  // row corner radius (RoundedRaff cards, Lyra pill)
+  // Horizontal inset of the whole list band. Non-zero also declares that the
+  // theme HAS a band, which is what makes the inset follow the reader's Screen
+  // Margin at runtime -- so read UITheme::getMetrics().listInset, never a
+  // theme's own constant. 0 = no band: the row's whole indent is
+  // listSidePadding (text padding inside the row), which does not follow.
+  int listInset;
   int listSidePadding;     // text inset within a row
   int listSelectionStyle;  // 0=invert fill, 1=light pill, 2=underline, 3=triangle (fui::SelectionStyle order)
   int listScrollWidth;     // scroll indicator thickness
@@ -277,6 +282,14 @@ class BaseTheme {
                         const std::function<std::string(int index)>& rowValue = nullptr, bool highlightValue = false,
                         const std::function<bool(int index)>& rowDimmed = nullptr, bool valueSmallFont = false,
                         const std::function<bool(int index)>& rowSubtitleLarge = nullptr) const;
+  // Hit-test counterpart of drawList: the item index at (x, y), or false when the
+  // point falls outside the list body or past the last row of the visible page.
+  // Callers MUST pass the same rect, itemCount, selectedIndex and hasSubtitle they
+  // gave the draw call — the visible page is derived from selectedIndex exactly as
+  // drawList derives it, so the hit bands cannot drift from the visuals. Themes that
+  // step rows differently (RoundedRaff's inter-row gap) override this.
+  virtual bool listIndexFromPoint(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,
+                                  bool hasSubtitle, int x, int y, int& index) const;
   virtual void drawHeader(const GfxRenderer& renderer, Rect rect, const char* title,
                           const char* subtitle = nullptr) const;
   virtual void drawSubHeader(const GfxRenderer& renderer, Rect rect, const char* label,

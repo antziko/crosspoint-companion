@@ -7,6 +7,7 @@
 
 #include "RecentBooksStore.h"
 #include "activities/Activity.h"
+#include "activities/ListTouchTarget.h"
 #include "util/ButtonNavigator.h"
 #include "util/FileWindowSelect.h"
 
@@ -20,6 +21,8 @@ class FileBrowserActivity final : public Activity {
   bool removeDirFile(const std::string& fullPath);
 
   ButtonNavigator buttonNavigator;
+  // Rows the last render drew, so a tap can pick one (see ListTouchTarget).
+  ListTouchTarget listTouch_;
 
   size_t selectorIndex = 0;
 

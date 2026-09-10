@@ -43,9 +43,6 @@ class ReaderToolbarUi : public UiAppHost {
     // Pixels kept free along the screen's bottom edge under the panel sheet
     // (the button-hint row on boards without touch). 0 on touch boards.
     int bottomReserve = 0;
-    // Button boards keep the theme's denser list row height (as every other
-    // list does there); touch boards use FreeInkUI's finger-sized rows.
-    bool denseRows = false;
   };
 
   struct Routed {

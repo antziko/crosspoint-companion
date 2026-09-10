@@ -5,6 +5,7 @@
 
 #include "../../TxtBookmarkStore.h"
 #include "activities/Activity.h"
+#include "activities/ListTouchTarget.h"
 #include "util/ButtonNavigator.h"
 
 // Bookmark list for the plain-text (.txt) reader. Mirrors the EPUB bookmark
@@ -36,4 +37,7 @@ class TxtReaderBookmarksActivity final : public Activity {
 
   static int getGutterBottom(const GfxRenderer& renderer);
   int getListHeight(const GfxRenderer& renderer) const;
+
+  // Rows the last render drew, so a tap can pick one (see ListTouchTarget).
+  ListTouchTarget listTouch_;
 };

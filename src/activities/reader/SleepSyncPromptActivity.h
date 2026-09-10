@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "activities/Activity.h"
+#include "activities/TouchActionBar.h"
 #include "fontIds.h"
 
 // Shown on a manual power-button sleep gesture from the reader when a KOReader sync is
@@ -38,4 +39,8 @@ class SleepSyncPromptActivity final : public Activity {
   std::vector<std::string> bodyLines;
   int startY = 0;
   int lineHeight = 0;
+
+  // On-screen answers for touch boards, which draw no button hints (see
+  // TouchActionBar). Left/Right on a button board, these two boxes on a touch one.
+  TouchActionBar actionBar_;
 };

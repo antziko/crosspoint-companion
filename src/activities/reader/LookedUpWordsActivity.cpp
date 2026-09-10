@@ -168,7 +168,14 @@ void LookedUpWordsActivity::loop() {
     requestUpdate();
   });
 
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+  // A tap on a row selects and activates it in one go, like the FUI list screens.
+  // A tap is never a hold, so it cannot reach the long-press branch above.
+  int tapX = 0;
+  int tapY = 0;
+  const int tappedRow = mappedInput.wasScreenTapped(tapX, tapY) ? listTouch_.indexAt(renderer, tapX, tapY) : -1;
+  if (tappedRow >= 0) selectedIndex = tappedRow;
+
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) || tappedRow >= 0) {
     if (const auto* e = entryAt(selectedIndex)) {
       // Open the word in the dictionary its flashcard was saved from, exactly as the review
       // and list screens do. Without this the history list was the odd one out: it always
@@ -252,6 +259,7 @@ void LookedUpWordsActivity::render(RenderLock&&) {
   // the bottom button-hints band doesn't apply).
   const int contentHeight = pageItems * metrics.listRowHeight;
 
+  listTouch_.record(Rect{0, contentTop, pageWidth, contentHeight}, totalCount, selectedIndex);
   GUI.drawList(
       renderer, Rect{0, contentTop, pageWidth, contentHeight}, totalCount, selectedIndex,
       [this](int i) {

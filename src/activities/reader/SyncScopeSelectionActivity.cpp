@@ -40,7 +40,13 @@ void SyncScopeSelectionActivity::loop() {
     return;
   }
 
-  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+  // A tap on a row selects and activates it in one go, like the FUI list screens.
+  int tapX = 0;
+  int tapY = 0;
+  const int tappedRow = mappedInput.wasScreenTapped(tapX, tapY) ? listTouch_.indexAt(renderer, tapX, tapY) : -1;
+  if (tappedRow >= 0) selectedIndex = tappedRow;
+
+  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm) || tappedRow >= 0) {
     setResult(SyncScopeResult{kScopes[selectedIndex]});
     finish();
     return;
@@ -68,6 +74,8 @@ void SyncScopeSelectionActivity::render(RenderLock&&) {
   const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
   const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing * 2;
 
+  listTouch_.record(Rect{0, contentTop, pageWidth, contentHeight}, static_cast<int>(MENU_ITEM_COUNT), selectedIndex,
+                    /*hasSubtitle=*/true);
   GUI.drawList(
       renderer, Rect{0, contentTop, pageWidth, contentHeight}, static_cast<int>(MENU_ITEM_COUNT), selectedIndex,
       [](int index) { return std::string(I18N.get(kLabels[index])); },

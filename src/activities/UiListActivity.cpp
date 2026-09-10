@@ -9,6 +9,12 @@
 
 namespace fui = freeink::ui;
 
+namespace {
+// Minimum air a row that grows for a subtitle keeps around the pair, when the
+// row height it was laid out on cannot spare any of its own.
+constexpr int SUBTITLE_ROW_PADDING = 8;
+}  // namespace
+
 UiListActivity::UiListActivity(const char* name, GfxRenderer& renderer, MappedInputManager& mappedInput,
                                const bool wantsTouchLongPress)
     : Activity(name, renderer, mappedInput), UiAppHost(renderer), wantsTouchLongPress(wantsTouchLongPress) {}
@@ -144,18 +150,26 @@ void UiListActivity::navigateButtons() {
       [this, count, &n] { moveSelectionTo(ButtonNavigator::previousPageIndex(n.selected, count, n.pageRows())); });
 }
 
+int16_t UiListActivity::resolveRowHeight(fui::ListProps& props, const bool hasSubtitle) const {
+  // The theme's own row height, which is the number BaseTheme::drawList lays
+  // legacy lists out on -- so a FreeInkUI list and a legacy one (File Browser,
+  // the bookmark lists) read identically on the same screen, on every board.
+  // FreeInkUI's theme token is not used: it is sized for a label PLUS a
+  // subtitle (lineHeight * 2 + 8), which is a second text line most rows never
+  // draw. props.rowHeight must be written explicitly, or screen.list()
+  // substitutes that token back instead of taking this value.
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const auto rowHeight = static_cast<int16_t>(hasSubtitle ? metrics.listWithSubtitleRowHeight : metrics.listRowHeight);
+  props.rowHeight = rowHeight;
+  // A row is a MINIMUM, not a clip: list() sizes each row individually, so a row
+  // that carries a subtitle in an otherwise single-line list, or whose label
+  // wraps, grows past this on its own. Keep such a row off its neighbours.
+  if (props.subtitleRowPadding <= 0) props.subtitleRowPadding = SUBTITLE_ROW_PADDING;
+  return rowHeight;
+}
+
 void UiListActivity::syncListViewport(UiScreen& screen, fui::ListProps& props, const bool hasSubtitle) {
-  int16_t rowHeight = screen.theme().rowHeight;
-  if (!mappedInput.hasTouch()) {
-    // Non-touch hardware (X3/X4) keeps the original, denser per-theme row
-    // height instead of FreeInkUI's touch-target-sized default, so lists fit
-    // as many rows per screen as they did before the FreeInkUI migration.
-    // props.rowHeight must be set explicitly: screen.list() otherwise falls
-    // back to the (touch-friendly) theme token, not this local value.
-    const auto& metrics = UITheme::getInstance().getMetrics();
-    rowHeight = static_cast<int16_t>(hasSubtitle ? metrics.listWithSubtitleRowHeight : metrics.listRowHeight);
-    props.rowHeight = rowHeight;
-  }
+  const int16_t rowHeight = resolveRowHeight(props, hasSubtitle);
   activeNav().syncToProps(screen.body(), rowHeight, screen.theme().listRowGap, listCount(), props);
 }
 

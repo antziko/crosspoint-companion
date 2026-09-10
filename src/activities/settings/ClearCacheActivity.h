@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "activities/Activity.h"
+#include "activities/TouchActionBar.h"
 #include "util/BookCacheUtils.h"
 
 class ClearCacheActivity final : public Activity {
@@ -43,4 +44,9 @@ class ClearCacheActivity final : public Activity {
   std::vector<std::string> orphanDirs_;
   void scanOrphans();
   void removeScannedOrphans();
+
+  // Cancel / go-ahead boxes for touch boards, which draw no button hints (see
+  // TouchActionBar). Only the two states that ask a question use them; the terminal
+  // states need Back alone, which the left-edge back gesture already provides.
+  TouchActionBar actionBar_;
 };

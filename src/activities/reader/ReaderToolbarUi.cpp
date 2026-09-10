@@ -227,8 +227,11 @@ void ReaderToolbarUi::buildPanel(UiScreen& screen) {
   // the target share, grows one row when that still fits the cap, and shrinks
   // to the item count when the list is shorter than the space.
   const int16_t titleH = screen.target().lineHeight(tokens.titleText.font);
-  const int16_t rowH =
-      model_.denseRows ? static_cast<int16_t>(UITheme::getInstance().getMetrics().listRowHeight) : tokens.rowHeight;
+  // The theme's own list row height, on every board -- the same rule
+  // UiListActivity::resolveRowHeight() applies, so these rows read exactly like
+  // Settings and the File Browser. FreeInkUI's token is sized for a label PLUS a
+  // subtitle, which no panel row has.
+  const int16_t rowH = static_cast<int16_t>(UITheme::getInstance().getMetrics().listRowHeight);
   const int16_t rowStride = static_cast<int16_t>(rowH + tokens.listRowGap);
   const int16_t grabberBand =
       static_cast<int16_t>(sheetProps.grabberMargin + sheetProps.grabberHeight + sheetProps.grabberInset);
@@ -267,9 +270,14 @@ void ReaderToolbarUi::buildPanel(UiScreen& screen) {
   listProps_.inputMask = fui::InputTouch;  // physical buttons stay with the reader
   listProps_.rowHeight = rowH;
   // The label column starts flush with the panel title (no list-side padding
-  // on top of the sheet's own inset). Body-size text: small reads condensed
-  // and the taller row doubles as the tap target.
-  listProps_.labelText = tokens.bodyText;
+  // on top of the sheet's own inset).
+  // smallText, matching SettingsActivity: the list's default labelText is
+  // bodyText while its valueText is smallText, so the default leaves the two
+  // sides of a row at different sizes. maxLines also marks the style as
+  // explicitly set -- an all-default smallText fails textStyleUnset and the
+  // list would substitute bodyText straight back.
+  listProps_.labelText = tokens.smallText;
+  listProps_.labelText.maxLines = 2;
   listProps_.sidePadding = 0;
   // The list band spans the sheet's full width -- the scroll track hugs the
   // panel edge (theme bezel inset included) exactly like a full-screen list.
@@ -300,8 +308,9 @@ void ReaderToolbarUi::buildPanel(UiScreen& screen) {
   listProps_.items = windowItems_;
   listProps_.itemsWindowFirst = static_cast<uint16_t>(nav_.top);
   listProps_.itemsWindowCount = static_cast<uint16_t>(std::max(0, windowCount));
-  listProps_.valueText = tokens.bodyText;
-  listProps_.valueText.bold = true;
+  // Same style as the label, so the two halves of a row share a baseline and a size --
+  // Settings reaches the same place by leaving valueText at the list's smallText default.
+  listProps_.valueText = tokens.smallText;
   if (count > 0) {
     screen.list(listProps_);
   }

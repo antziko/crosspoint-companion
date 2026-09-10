@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "activities/Activity.h"
+#include "activities/ListTouchTarget.h"
 #include "util/ButtonNavigator.h"
 
 // In-reader menu for the plain-text (.txt) reader. A deliberately slim sibling
@@ -58,4 +59,7 @@ class TxtReaderMenuActivity final : public Activity {
   uint8_t selectedPageTurnOption = 0;
 
   const std::vector<const char*> pageTurnLabels = {I18N.get(StrId::STR_STATE_OFF), "1", "3", "6", "12"};
+
+  // Rows the last render drew, so a tap can pick one (see ListTouchTarget).
+  ListTouchTarget listTouch_;
 };

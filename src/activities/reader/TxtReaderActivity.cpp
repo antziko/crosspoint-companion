@@ -102,6 +102,14 @@ void TxtReaderActivity::onEnter() {
   requestUpdate();
 }
 
+void TxtReaderActivity::onResume() {
+  // Adopt an orientation parked by the control-center tile, which cannot turn the
+  // renderer while its sheet is up. applyOrientation() reflows and saves per file.
+  if (APP_STATE.pendingOrientation != CrossPointState::NO_ORIENTATION_REQUEST) {
+    applyOrientation(APP_STATE.pendingOrientation);
+  }
+}
+
 void TxtReaderActivity::onExit() {
   Activity::onExit();
 
@@ -457,7 +465,7 @@ void TxtReaderActivity::render(RenderLock&&) {
 
   if (pageOffsets.empty()) {
     renderer.clearScreen();
-    renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_EMPTY_FILE), true, EpdFontFamily::BOLD);
+    renderer.drawCenteredText(UI_10_FONT_ID, 300, tr(STR_EMPTY_FILE), true, EpdFontFamily::BOLD);
     renderer.displayBuffer();
     return;
   }

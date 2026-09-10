@@ -44,6 +44,12 @@ class StatsTimelineView {
   bool selectPrev(const ReadingTimeHistory& history);
   bool selectNext(const ReadingTimeHistory& history);
 
+  // Tap hit test over the drawn rows: a Yearly/Monthly cell under (x, y) drills
+  // the focus into that section and selects the cell. Headers, Weekly rows and
+  // empty space are ignored. Returns true when focus or selection moved (caller
+  // rescrolls and repaints), matching selectPrev/selectNext.
+  bool selectAtPoint(const ReadingTimeHistory& history, GfxRenderer& renderer, const Rect& rect, int x, int y);
+
   // Scrolls so the focused selection (and, at the Monthly level, the Weekly rows
   // below it) stay visible. No-op when the list fits. Call after build()/select*.
   void scrollToSelection(GfxRenderer& renderer, const Rect& rect);

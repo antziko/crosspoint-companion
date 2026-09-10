@@ -300,7 +300,9 @@ void StatusBarSettingsActivity::buildScreen(UiScreen& screen) {
   props.count = static_cast<uint16_t>(visibleItemCount);
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
-  props.valueInset = 8;               // air between the value and the row edge
+  // No valueInset: sidePadding already insets both edges of the row, so any
+  // extra here lands on the trailing side only and the value sits further
+  // from the edge than the label does.
   props.labelText = screen.theme().smallText;
   props.labelText.maxLines = 2;  // also the explicitly-set marker, see SettingsActivity
   syncListViewport(screen, props);

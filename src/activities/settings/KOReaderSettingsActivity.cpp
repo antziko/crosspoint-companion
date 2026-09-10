@@ -289,7 +289,9 @@ void KOReaderSettingsActivity::buildScreen(UiScreen& screen) {
   props.count = static_cast<uint16_t>(menuItems);
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
-  props.valueInset = 8;               // air between the value and the row edge
+  // No valueInset: sidePadding already insets both edges of the row, so any
+  // extra here lands on the trailing side only and the value sits further
+  // from the edge than the label does.
   // Row titles at the Settings screens' size (smallText) so every list in the
   // app reads at one size; labels that still don't fit wrap onto a second
   // line. maxLines=2 also marks the style explicitly set (an all-default

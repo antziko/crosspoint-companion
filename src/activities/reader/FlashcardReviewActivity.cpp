@@ -521,7 +521,7 @@ void FlashcardReviewActivity::render(RenderLock&&) {
 
   if (stats.total == 0) {
     const int midY = contentTop + (contentBottom - contentTop) / 2;
-    renderer.drawCenteredText(UI_12_FONT_ID, midY, tr(STR_FLASHCARDS_EMPTY));
+    renderer.drawCenteredText(UI_10_FONT_ID, midY, tr(STR_FLASHCARDS_EMPTY));
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     displayList();

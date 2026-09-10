@@ -61,10 +61,6 @@ class Activity {
   // sleep (e.g. show a confirmation prompt); false to let the main loop deep-sleep.
   virtual bool onManualSleepRequested() { return false; }
   virtual bool isReaderActivity() const { return false; }
-  // True for the reading surfaces night mode inverts (EPUB/TXT/XTC and the dictionary
-  // overlays drawn over them). Resolved per render by ActivityManager, so menus,
-  // popups and every other screen keep normal polarity without managing the flag.
-  virtual bool appliesNightMode() const { return false; }
   virtual bool isHomeActivity() const { return false; }
   // True for screens that keep their header band even when the user has turned the top bar off
   // outside Home. Home always keeps it (it IS the top bar); override elsewhere only when the

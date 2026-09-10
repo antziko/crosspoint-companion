@@ -3,6 +3,7 @@
 #include <string>
 
 #include "../Activity.h"
+#include "activities/ListTouchTarget.h"
 #include "util/ButtonNavigator.h"
 #include "util/DictionaryLookupController.h"
 #include "util/FlashcardDeck.h"
@@ -78,4 +79,7 @@ class FlashcardListActivity final : public Activity {
 
   // Single-char status glyph for the row (mastered/suspended/new/due/box digit).
   static const char* glyphFor(const FlashcardDeck::Entry& e, uint32_t today);
+
+  // Rows the last render drew, so a tap can pick one (see ListTouchTarget).
+  ListTouchTarget listTouch_;
 };

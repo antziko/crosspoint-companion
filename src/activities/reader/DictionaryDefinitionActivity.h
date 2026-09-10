@@ -46,7 +46,6 @@ class DictionaryDefinitionActivity final : public Activity {
   void render(RenderLock&&) override;
   // Part of the reading flow (opened from the page mid-read), so it follows the
   // reading surface's night-mode polarity like the word-select overlay.
-  bool appliesNightMode() const override { return true; }
   // The manual screen refresh blanks the framebuffer from the main loop, so the snapshot the
   // in-definition word-select path would restore describes pixels that are no longer there.
   void onFramebufferInvalidated() override {
@@ -132,6 +131,13 @@ class DictionaryDefinitionActivity final : public Activity {
   int setChipY_ = 0;
   int setChipW_ = 0;
   int setChipH_ = 0;
+  // Delete, on the same terms as the Set chip: drawn only where there is no Left button to
+  // press. Its hint-strip slot is zero-height on a touch board, so without this the offer is
+  // named nowhere and reachable by nothing.
+  int delChipX_ = 0;
+  int delChipY_ = 0;
+  int delChipW_ = 0;
+  int delChipH_ = 0;
 
   // Resident page representation (Stage 2b-pool). Segments reference text by
   // {offset, len} into pagePool_ instead of owning a std::string each — the
@@ -213,6 +219,13 @@ class DictionaryDefinitionActivity final : public Activity {
   int hintGutterHeight = 0;
   int contentX = 0;
   int hintGutterWidth = 0;
+  // Height the footer line (pagination + active dictionary) claims at the bottom
+  // of the panel. It is the button-hints strip on a button board, where the
+  // footer rides just above the hints; on a touch board that strip is
+  // zero-height, so the line reserves its own or it lays out past the bottom
+  // edge and is clipped. Shared by the layout and the draw.
+  int footerReserve() const;
+
   int contentTop = 0;  // top of the header band, i.e. below the hint gutter + bezel + margin
   int bodyStartY = 0;  // top of the text body (set in wrapText)
 

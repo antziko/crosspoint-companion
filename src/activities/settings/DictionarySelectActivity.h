@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "../Activity.h"
+#include "activities/ListTouchTarget.h"
 #include "util/ButtonNavigator.h"
 #include "util/Dictionary.h"
 
@@ -63,4 +64,7 @@ class DictionarySelectActivity final : public Activity {
 
   // Applies the currently highlighted selection to settings and Dictionary.
   void applySelection();
+
+  // Rows the last render drew, so a tap can pick one (see ListTouchTarget).
+  ListTouchTarget listTouch_;
 };

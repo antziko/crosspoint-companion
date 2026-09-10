@@ -41,6 +41,13 @@ static constexpr char kBullet[] = "- ";
 
 namespace {
 
+// Drawn box around the Set dict / Delete footer chips. Separate from the chips' TOUCH
+// rectangle (kTouchPad), which is sized for a finger and stays larger: this is only how much
+// air the outline keeps around the label. footerReserve() reserves kChipPadY below the footer
+// baseline so the box bottom cannot fall off the panel.
+constexpr int kChipPadX = 7;
+constexpr int kChipPadY = 5;
+
 // Scan-pass accumulator for prewarmDefinitionFont(): the deduped set of codepoints the
 // definition uses, as UTF-8, plus the styles it uses them in. Heap-allocated by the caller
 // — the tables exceed the 256-byte stack budget, same reason SdCardFont::prewarm()
@@ -370,6 +377,16 @@ int DictionaryDefinitionActivity::getLineHeight() const {
 // Layout helpers — shared setup
 // ---------------------------------------------------------------------------
 
+int DictionaryDefinitionActivity::footerReserve() const {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  if (metrics.buttonHintsHeight > 0) return metrics.buttonHintsHeight;
+  // No hints strip (touch board): one line of the footer font, plus room for whichever of the
+  // two things drawn under the baseline reaches lower -- the rule beneath the active-dictionary
+  // label, or the chip outlines beside it.
+  constexpr int kUnderlineSlack = 3;
+  return renderer.getLineHeight(SMALL_FONT_ID) + std::max(kUnderlineSlack, kChipPadY);
+}
+
 void DictionaryDefinitionActivity::wrapText() {
   isWordSelectMode = false;
   navigator.reset();
@@ -422,8 +439,9 @@ void DictionaryDefinitionActivity::wrapText() {
 
   // Button hints are theme-owned chrome drawn at the panel edge on every screen in the app, so
   // they are not inset here; the margin instead keeps the last body line off them and off the
-  // bottom bezel.
-  const int bottomArea = metrics.buttonHintsHeight + metrics.verticalSpacing + bezelBottom + screenMargin;
+  // bottom bezel. footerReserve(), not buttonHintsHeight: on a touch board the hints strip is
+  // zero-height and the footer line needs the space instead.
+  const int bottomArea = footerReserve() + metrics.verticalSpacing + bezelBottom + screenMargin;
 
   linesPerPage = (renderer.getScreenHeight() - bodyStartY - bottomArea) / getLineHeight();
   if (linesPerPage < 1) linesPerPage = 1;
@@ -1477,6 +1495,10 @@ void DictionaryDefinitionActivity::loop() {
     const auto hit = [&](int x, int y, int w, int h) {
       return w > 0 && tx >= x && tx < x + w && ty >= y && ty < y + h;
     };
+    if (!controller.isActive() && hit(delChipX_, delChipY_, delChipW_, delChipH_)) {
+      promptDeleteCard();
+      return;
+    }
     if (!controller.isActive() && hit(setChipX_, setChipY_, setChipW_, setChipH_)) {
       setCardDictToActive();
       return;
@@ -1707,7 +1729,7 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   prevHighlightIdx_ = -1;
 
   // Pagination indicator and button hints
-  const int footerY = renderer.getScreenHeight() - metrics.buttonHintsHeight - metrics.verticalSpacing;
+  const int footerY = renderer.getScreenHeight() - footerReserve() - metrics.verticalSpacing;
   if (totalPages > 1) {
     char pageInfo[16];
     snprintf(pageInfo, sizeof(pageInfo), "%d/%d", currentPage + 1, totalPages);
@@ -1727,8 +1749,40 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   int cursorX = leftPadding;
   dictLabelW_ = 0;
   setChipW_ = 0;
+  delChipW_ = 0;
+
+  // Both chips are drawn only where their button does not exist, so their slot in the hint
+  // strip cannot name the action.
+  const bool drawSetChip = offerSet && !mappedInput.isAvailable(MappedInputManager::Button::Right);
+  const bool drawDelChip = deleteOfferStands() && !mappedInput.isAvailable(MappedInputManager::Button::Left);
+
+  // The footer shares its line with the pagination indicator opposite. Reserve the chips'
+  // width first and let the dictionary NAME give way: the chips are controls, the name is
+  // feedback, and a name long enough to crowd them out would otherwise make Delete
+  // unreachable on a board where the chip is the only way to reach it.
+  const char* setLabel = tr(STR_SET_CARD_DICT);
+  const char* delLabel = tr(STR_DELETE);
+  const int setChipSpan = drawSetChip ? renderer.getTextWidth(SMALL_FONT_ID, setLabel) + 2 * kTouchPad : 0;
+  const int delChipSpan = drawDelChip ? renderer.getTextWidth(SMALL_FONT_ID, delLabel) + 2 * kTouchPad : 0;
+  int footerRight = renderer.getScreenWidth() - rightPadding;
+  if (totalPages > 1) {
+    char pageInfo[16];
+    snprintf(pageInfo, sizeof(pageInfo), "%d/%d", currentPage + 1, totalPages);
+    footerRight -= renderer.getTextWidth(SMALL_FONT_ID, pageInfo) + kTouchPad;
+  }
+  const int nameBudget = footerRight - setChipSpan - delChipSpan - leftPadding;
+
   if (dictionaryRegistry.count() > 1) {
-    const std::string dictName = DictUtils::dictDisplayName(activePath);
+    std::string dictName = DictUtils::dictDisplayName(activePath);
+    // Trim to the budget a character at a time; these names are short and this runs once a
+    // paint, so the linear walk costs nothing worth a binary search.
+    if (nameBudget > 0) {
+      while (!dictName.empty() && renderer.getTextWidth(SMALL_FONT_ID, dictName.c_str()) + 2 * kTouchPad > nameBudget) {
+        dictName.pop_back();
+      }
+    } else {
+      dictName.clear();
+    }
     renderer.drawText(SMALL_FONT_ID, cursorX, footerY, dictName.c_str());
     // Remember where it landed so a tap on it can cycle. Padded generously: nothing else is
     // drawn along that edge.
@@ -1751,17 +1805,29 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   // Outside the count() > 1 block deliberately: with a single dictionary installed there is
   // nothing to cycle to, but a legacy card recording no dictionary still needs a way to be
   // stamped with the one in use.
-  if (offerSet && !mappedInput.isAvailable(MappedInputManager::Button::Right)) {
-    const char* setLabel = tr(STR_SET_CARD_DICT);
+  if (drawSetChip) {
     const int chipW = renderer.getTextWidth(SMALL_FONT_ID, setLabel);
     renderer.drawText(SMALL_FONT_ID, cursorX, footerY, setLabel);
     // Boxed rather than underlined: it has to read as a distinct control from the dictionary
     // name beside it, on non-touch boards too.
-    renderer.drawRect(cursorX - 3, footerY - 2, chipW + 6, labelH + 4, true);
+    renderer.drawRect(cursorX - kChipPadX, footerY - kChipPadY, chipW + 2 * kChipPadX, labelH + 2 * kChipPadY, true);
     setChipX_ = cursorX - kTouchPad;
     setChipY_ = footerY - kTouchPad;
     setChipW_ = chipW + 2 * kTouchPad;
     setChipH_ = labelH + 2 * kTouchPad;
+    cursorX += chipW + 2 * kTouchPad;
+  }
+
+  // Delete last, so the destructive control sits furthest from the dictionary name a tap
+  // aims at most often.
+  if (drawDelChip) {
+    const int chipW = renderer.getTextWidth(SMALL_FONT_ID, delLabel);
+    renderer.drawText(SMALL_FONT_ID, cursorX, footerY, delLabel);
+    renderer.drawRect(cursorX - kChipPadX, footerY - kChipPadY, chipW + 2 * kChipPadX, labelH + 2 * kChipPadY, true);
+    delChipX_ = cursorX - kTouchPad;
+    delChipY_ = footerY - kTouchPad;
+    delChipW_ = chipW + 2 * kTouchPad;
+    delChipH_ = labelH + 2 * kTouchPad;
   }
 
   // Confirm label only — Back and the Up/Down page labels are left empty so this

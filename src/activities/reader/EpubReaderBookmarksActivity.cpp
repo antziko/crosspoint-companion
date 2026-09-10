@@ -248,7 +248,7 @@ void EpubReaderBookmarksActivity::buildScreen(UiScreen& screen) {
   screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
 
   if (bookmarks.empty()) {
-    screen.centeredText(tr(STR_BOOKMARK_INSTRUCTIONS), screen.theme().bodyText);
+    screen.centeredText(tr(STR_BOOKMARK_INSTRUCTIONS), screen.theme().smallText);
     return;
   }
 

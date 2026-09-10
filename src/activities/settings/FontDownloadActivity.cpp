@@ -933,7 +933,7 @@ void FontDownloadActivity::buildScreen(UiScreen& screen) {
   screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
 
   if (state_ == FAMILY_LIST && filteredIndices_.empty()) {
-    screen.centeredText(tr(STR_NO_FONTS_AVAILABLE), screen.theme().bodyText);
+    screen.centeredText(tr(STR_NO_FONTS_AVAILABLE), screen.theme().smallText);
     return;
   }
 
@@ -948,7 +948,15 @@ void FontDownloadActivity::buildScreen(UiScreen& screen) {
   props.count = static_cast<uint16_t>(rowItems_.size());
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
-  props.valueInset = 8;               // air between the status and the row edge
+  // No valueInset: sidePadding already insets both edges of the row, so any
+  // extra here lands on the trailing side only and the value sits further
+  // from the edge than the label does.
+  // Row titles at the Settings screens' size (smallText) so every list in the
+  // UI reads at one size. maxLines also marks the style explicitly set: an
+  // all-default smallText fails textStyleUnset and Screen::list() would
+  // substitute the larger bodyText back (FONT_SLOT_SMALL being 0).
+  props.labelText = screen.theme().smallText;
+  props.labelText.maxLines = 2;
   syncListViewport(screen, props, /*hasSubtitle=*/state_ == FAMILY_LIST);
   screen.list(props);
 }

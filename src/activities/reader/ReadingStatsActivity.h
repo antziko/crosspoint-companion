@@ -12,6 +12,7 @@
 #include "util/ButtonNavigator.h"
 
 struct Rect;
+struct TabInfo;
 
 // Home-screen global reading stats: total time read across all books (with a
 // dated/undated split on mixed-device libraries) plus a Timeline/Heatmap tab
@@ -59,6 +60,10 @@ class ReadingStatsActivity final : public Activity {
   // Swallow the Confirm release after a long-press has fired so it doesn't re-trigger.
   bool booksLongPressFired = false;
 
+  // On-screen tab order, shared by the Left/Right cycle and the touch hit test.
+  static constexpr Tab TAB_ORDER[] = {Tab::Timeline, Tab::Heatmap, Tab::Books};
+  static constexpr int TAB_COUNT = static_cast<int>(sizeof(TAB_ORDER) / sizeof(TAB_ORDER[0]));
+
   Tab selectedTab = Tab::Timeline;
   // Shared Timeline/Heatmap presentation (stacked Yearly/Monthly/Weekly + scroll).
   StatsTimelineView timeline;
@@ -68,6 +73,18 @@ class ReadingStatsActivity final : public Activity {
   // Area below the tab bar shared by all tabs; single source of truth so loop()'s
   // scroll clamping and render()'s drawing always agree on available height.
   Rect contentRect() const;
+  // Band the tab labels are drawn in. contentRect() starts below it, and the
+  // touch hit test measures against it, so both follow the summary block.
+  Rect tabBarRect() const;
+  // Tab labels + which one is selected, shared by the draw and the hit test so
+  // the touch bands cannot drift from the painted labels.
+  std::vector<TabInfo> buildTabs() const;
+  // Switch to the tab at `index` in the on-screen order, resetting the per-tab
+  // cursors the same way the Left/Right cycle does.
+  void selectTab(int index);
+  // Tab taps, Books row taps/holds and Timeline cell taps. Returns true when the
+  // pass is consumed. Touch boards only.
+  bool handleTouch();
 
   // Scans /.crosspoint for book caches with reading time and fills bookRows +
   // booksSumSeconds. Device-only (uses Storage); no-op result on host/empty card.

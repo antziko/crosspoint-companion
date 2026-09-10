@@ -36,19 +36,58 @@ void BookStatsActivity::onEnter() {
 
 void BookStatsActivity::onExit() { Activity::onExit(); }
 
+Rect BookStatsActivity::tabBarRect() const {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int summaryHeight = summaryLineCount() * (renderer.getLineHeight(SMALL_FONT_ID) + 2);
+  const int y =
+      metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing + summaryHeight + metrics.verticalSpacing;
+  return Rect{0, y, renderer.getScreenWidth(), metrics.tabBarHeight};
+}
+
 Rect BookStatsActivity::contentRect() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const int pageWidth = renderer.getScreenWidth();
-  const int pageHeight = renderer.getScreenHeight();
-  const int summaryHeight = summaryLineCount() * (renderer.getLineHeight(SMALL_FONT_ID) + 2);
+  const Rect tabs = tabBarRect();
+  const int top = tabs.y + tabs.height + metrics.verticalSpacing;
+  const int height = renderer.getScreenHeight() - top - metrics.buttonHintsHeight - metrics.verticalSpacing;
+  return Rect{0, top, renderer.getScreenWidth(), std::max(0, height)};
+}
 
-  const int top = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing + summaryHeight +
-                  metrics.verticalSpacing + metrics.tabBarHeight + metrics.verticalSpacing;
-  const int height = pageHeight - top - metrics.buttonHintsHeight - metrics.verticalSpacing;
-  return Rect{0, top, pageWidth, std::max(0, height)};
+std::vector<TabInfo> BookStatsActivity::buildTabs() const {
+  return {{tr(STR_STATS_TIMELINE), selectedTab == Tab::Timeline}, {tr(STR_STATS_HEATMAP), selectedTab == Tab::Heatmap}};
+}
+
+bool BookStatsActivity::handleTouch() {
+  int tx = 0;
+  int ty = 0;
+  if (!mappedInput.wasScreenTapped(tx, ty)) return false;
+
+  // Tab bar: a tap picks a tab outright instead of stepping towards it.
+  int tab = 0;
+  if (GUI.tabIndexFromPoint(renderer, tabBarRect(), buildTabs(), tx, ty, tab)) {
+    const Tab next = (tab == 0) ? Tab::Timeline : Tab::Heatmap;
+    if (next == selectedTab) return true;
+    selectedTab = next;
+    timeline.resetFocus();  // leaving Timeline: drop any year/month cursor
+    requestUpdate();
+    return true;
+  }
+
+  // Timeline: a tap on a year/month cell drills the focus into that section and
+  // selects the cell, the touch counterpart of Down-then-Left/Right.
+  if (selectedTab == Tab::Timeline && history) {
+    const Rect content = contentRect();
+    if (timeline.selectAtPoint(*history, renderer, content, tx, ty)) {
+      timeline.scrollToSelection(renderer, content);
+      requestUpdate();
+      return true;
+    }
+  }
+  return false;
 }
 
 void BookStatsActivity::loop() {
+  if (mappedInput.hasTouch() && handleTouch()) return;
+
   // Left/Right: at the tab bar (focus None) switch Timeline/Heatmap; inside a
   // focused section move the year/month selection.
   if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
@@ -172,11 +211,7 @@ void BookStatsActivity::render(RenderLock&&) {
     y += lineHeight;
   }
 
-  y += metrics.verticalSpacing;
-
-  const std::vector<TabInfo> tabs = {{tr(STR_STATS_TIMELINE), selectedTab == Tab::Timeline},
-                                     {tr(STR_STATS_HEATMAP), selectedTab == Tab::Heatmap}};
-  GUI.drawTabBar(renderer, Rect{0, y, pageWidth, metrics.tabBarHeight}, tabs, true);
+  GUI.drawTabBar(renderer, tabBarRect(), buildTabs(), true);
 
   const Rect content = contentRect();
   if (selectedTab == Tab::Timeline) {

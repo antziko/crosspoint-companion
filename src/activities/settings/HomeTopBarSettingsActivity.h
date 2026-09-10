@@ -1,6 +1,7 @@
 #pragma once
 
 #include "activities/Activity.h"
+#include "activities/ListTouchTarget.h"
 #include "util/ButtonNavigator.h"
 
 // Home screen top bar clock/date configuration (independent from reader status bar)
@@ -19,4 +20,7 @@ class HomeTopBarSettingsActivity final : public Activity {
   int selectedIndex = 0;
 
   void handleSelection();
+
+  // Rows the last render drew, so a tap can pick one (see ListTouchTarget).
+  ListTouchTarget listTouch_;
 };

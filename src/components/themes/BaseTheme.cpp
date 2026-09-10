@@ -457,6 +457,21 @@ void BaseTheme::drawCompactHeader(const GfxRenderer& renderer, Rect rect, const 
   renderer.drawText(titleFontId, x, y, fitted.c_str(), true, EpdFontFamily::BOLD);
 }
 
+bool BaseTheme::listIndexFromPoint(const GfxRenderer&, const Rect rect, const int itemCount, const int selectedIndex,
+                                   const bool hasSubtitle, const int x, const int y, int& index) const {
+  if (itemCount <= 0) return false;
+  const int rowHeight = hasSubtitle ? BaseMetrics::values.listWithSubtitleRowHeight : BaseMetrics::values.listRowHeight;
+  if (rowHeight <= 0) return false;
+  const int pageItems = std::max(1, rect.height / rowHeight);
+  if (x < rect.x || x >= rect.x + rect.width || y < rect.y) return false;
+  const int row = (y - rect.y) / rowHeight;
+  if (row >= pageItems) return false;
+  const int hit = std::max(0, selectedIndex) / pageItems * pageItems + row;
+  if (hit >= itemCount) return false;
+  index = hit;
+  return true;
+}
+
 void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* title, const char* subtitle) const {
   if (rect.height <= 0) return;
   // Top bar off outside Home: the screen keeps its title, loses the bar around it.
@@ -580,9 +595,10 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
 
   // LOCAL(feat): centred top-bar clock/date, the other feat-only header element
   // upstream's rewrite has no equivalent for (self-gates on the homeTopBar*
-  // settings and RTC availability). Same +5 offset off the band top as the
-  // pre-FUI headers used, so placement is unchanged.
-  drawTopBarClockDate(renderer, band.y + 5);
+  // settings and RTC availability). Sits on the line box batteryIndicator
+  // centres its percent label in -- same strip, same font -- so the clock and
+  // the battery group share one baseline instead of the clock riding high.
+  drawTopBarClockDate(renderer, band.y + (batteryH - renderer.getLineHeight(SMALL_FONT_ID)) / 2);
 
   if (manualRightLabel) {
     const fui::Size labelSize = ui.target.measureText(fui::GfxRendererTarget::FONT_SMALL, subtitle, tokens.smallText);

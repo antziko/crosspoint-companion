@@ -205,8 +205,17 @@ void DictionarySelectActivity::loop() {
   }
 
   // Short press Confirm: apply selection (or decompress if compressed) and exit.
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) && mappedInput.getHeldTime() < VIEW_INFO_MS) {
-    if (ignoreNextConfirmRelease) {
+  // A tap on a row selects and activates it in one go, like the FUI list screens.
+  // A tap is never a hold, so it cannot reach the long-press branch above.
+  int tapX = 0;
+  int tapY = 0;
+  const int tappedRow = mappedInput.wasScreenTapped(tapX, tapY) ? listTouch_.indexAt(renderer, tapX, tapY) : -1;
+  if (tappedRow >= 0) selectedIndex = tappedRow;
+
+  if ((mappedInput.wasReleased(MappedInputManager::Button::Confirm) && mappedInput.getHeldTime() < VIEW_INFO_MS) ||
+      tappedRow >= 0) {
+    // The release lock guards a button edge a tap did not come from.
+    if (ignoreNextConfirmRelease && tappedRow < 0) {
       ignoreNextConfirmRelease = false;
       return;
     }
@@ -427,6 +436,7 @@ void DictionarySelectActivity::render(RenderLock&&) {
     renderer.drawCenteredText(UI_10_FONT_ID, textY, tr(STR_DICT_NONE_FOUND));
   }
 
+  listTouch_.record(Rect{0, contentTop, pageWidth, contentHeight}, totalItems, selectedIndex);
   GUI.drawList(
       renderer, Rect{0, contentTop, pageWidth, contentHeight}, totalItems, selectedIndex,
       [this](int index) { return std::string(nameForIndex(index)); }, nullptr, nullptr,

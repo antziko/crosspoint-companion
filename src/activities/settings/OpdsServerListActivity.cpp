@@ -297,7 +297,7 @@ void OpdsServerListActivity::buildScreen(UiScreen& screen) {
 
   const int itemCount = getItemCount();
   if (itemCount == 0) {
-    screen.centeredText(tr(STR_NO_SERVERS), screen.theme().bodyText);
+    screen.centeredText(tr(STR_NO_SERVERS), screen.theme().smallText);
     return;
   }
 
@@ -319,17 +319,13 @@ void OpdsServerListActivity::buildScreen(UiScreen& screen) {
   props.count = static_cast<uint16_t>(rowItems_.size());
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
-  if (!mappedInput.hasTouch()) {
-    // Non-touch hardware (X3/X4): the Settings list's label size on the plain
-    // row height, which list() grows only for the rows that need it — a
-    // "name - url" label too long for one line wraps to two, everything that
-    // fits stays at the dense single-line height.
-    // maxLines = 2 also marks the style explicitly set — an all-default
-    // smallText fails textStyleUnset and Screen::list() would substitute
-    // bodyText back (see SettingsActivity).
-    props.labelText = screen.theme().smallText;
-    props.labelText.maxLines = 2;
-  }
+  // The Settings list's label size on every board, on the plain row height, which
+  // list() grows only for the rows that need it — a "name - url" label too long for
+  // one line wraps to two, everything that fits stays at the dense single-line height.
+  // maxLines = 2 also marks the style explicitly set — an all-default smallText fails
+  // textStyleUnset and Screen::list() would substitute bodyText back.
+  props.labelText = screen.theme().smallText;
+  props.labelText.maxLines = 2;
   syncListViewport(screen, props, /*hasSubtitle=*/false);
   screen.list(props);
 }

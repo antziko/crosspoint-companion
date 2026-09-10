@@ -11,6 +11,7 @@
 #include "util/BookCacheUtils.h"
 
 void ClearCacheActivity::onEnter() {
+  actionBar_.layout(renderer, mappedInput.hasTouch(), UI_10_FONT_ID, 2);
   Activity::onEnter();
 
   // Prune scans first and previews the result; clear-all warns before wiping.
@@ -49,6 +50,10 @@ void ClearCacheActivity::render(RenderLock&&) {
       renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 30, tr(STR_CLEAR_CACHE_WARNING_4), true);
     }
 
+    if (actionBar_.active()) {
+      const char* barLabels[] = {tr(STR_CANCEL), tr(STR_CLEAR_BUTTON)};
+      actionBar_.draw(renderer, UI_10_FONT_ID, barLabels, /*primaryIndex=*/1);
+    }
     const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), tr(STR_CLEAR_BUTTON), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer();
@@ -74,6 +79,10 @@ void ClearCacheActivity::render(RenderLock&&) {
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 15, foundText.c_str(), true, EpdFontFamily::BOLD);
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 20, tr(STR_PRUNE_CACHE_WARNING_3), true);
 
+    if (actionBar_.active()) {
+      const char* barLabels[] = {tr(STR_CANCEL), tr(STR_REMOVE_BUTTON)};
+      actionBar_.draw(renderer, UI_10_FONT_ID, barLabels, /*primaryIndex=*/1);
+    }
     const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), tr(STR_REMOVE_BUTTON), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer();
@@ -214,8 +223,17 @@ void ClearCacheActivity::loop() {
     return;
   }
 
+  // A tap on the on-screen boxes answers the two states that ask a question.
+  int tapX = 0;
+  int tapY = 0;
+  const int tappedButton = mappedInput.wasScreenTapped(tapX, tapY) ? actionBar_.hitAt(tapX, tapY) : -1;
+
   if (state == WARNING) {
-    if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+    if (tappedButton == 0) {
+      goBack();
+      return;
+    }
+    if (mappedInput.wasPressed(MappedInputManager::Button::Confirm) || tappedButton == 1) {
       LOG_DBG("CLEAR_CACHE", "User confirmed, starting cache clear");
       {
         RenderLock lock(*this);
@@ -234,7 +252,11 @@ void ClearCacheActivity::loop() {
   }
 
   if (state == PREVIEW) {
-    if (!orphanDirs_.empty() && mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+    if (tappedButton == 0) {
+      goBack();
+      return;
+    }
+    if (!orphanDirs_.empty() && (mappedInput.wasPressed(MappedInputManager::Button::Confirm) || tappedButton == 1)) {
       LOG_DBG("CLEAR_CACHE", "User confirmed, removing orphans");
       {
         RenderLock lock(*this);

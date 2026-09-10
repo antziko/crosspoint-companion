@@ -89,9 +89,9 @@ class TxtReaderActivity final : public Activity {
         pagesUntilFullRefresh(initialRefreshCountdown) {}
   void onEnter() override;
   void onExit() override;
+  void onResume() override;
   void loop() override;
   void render(RenderLock&&) override;
   bool isReaderActivity() const override { return true; }
-  bool appliesNightMode() const override { return true; }
   ScreenshotInfo getScreenshotInfo() const override;
 };

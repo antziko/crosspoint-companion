@@ -146,11 +146,14 @@ void BmpViewerActivity::renderImage() {
       const auto labels =
           mappedInput.mapLabels(tr(STR_BACK), confirmLabel, (hasPrevious ? "<" : ""), (hasNext ? ">" : ""));
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+      layoutActionBar(hasPrevious, hasNext, confirmLabel);
+      actionBar_.draw(renderer, UI_10_FONT_ID, barLabels_);
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
     } else {
       renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_FILE_OPEN_FAILED));
       const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+      layoutActionBar(false, false, nullptr);
       renderer.displayBuffer(HalDisplay::HALF_REFRESH);
     }
     return;
@@ -196,6 +199,8 @@ void BmpViewerActivity::renderImage() {
       renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, 0, 0);
       // Draw UI hints on the base (BW) layer
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+      layoutActionBar(hasPrevious, hasNext, confirmLabel);
+      actionBar_.draw(renderer, UI_10_FONT_ID, barLabels_);
       renderer.displayBuffer(hasGreyscale ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
 
       if (hasGreyscale) {
@@ -210,6 +215,7 @@ void BmpViewerActivity::renderImage() {
       renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_INVALID_BMP_FILE));
       const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+      layoutActionBar(false, false, nullptr);
       renderer.displayBuffer(HalDisplay::HALF_REFRESH);
     }
 
@@ -220,6 +226,7 @@ void BmpViewerActivity::renderImage() {
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_FILE_OPEN_FAILED));
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    layoutActionBar(false, false, nullptr);
     renderer.displayBuffer(HalDisplay::HALF_REFRESH);
   }
 }
@@ -300,23 +307,62 @@ void BmpViewerActivity::loop() {
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Left) ||
       mappedInput.wasReleased(MappedInputManager::Button::Up)) {
-    if (!prevName.empty()) {
-      std::string dirPath = FsHelpers::extractFolderPath(filePath);
-      if (dirPath.back() != '/') dirPath += "/";
-      filePath = dirPath + prevName;
-      onEnter();  // recomputes siblings for the new current image
-    }
+    showSibling(prevName);
     return;
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Right) ||
       mappedInput.wasReleased(MappedInputManager::Button::Down)) {
-    if (!nextName.empty()) {
-      std::string dirPath = FsHelpers::extractFolderPath(filePath);
-      if (dirPath.back() != '/') dirPath += "/";
-      filePath = dirPath + nextName;
-      onEnter();
-    }
+    showSibling(nextName);
     return;
   }
+
+  int tx = 0;
+  int ty = 0;
+  if (actionBar_.active() && mappedInput.wasScreenTapped(tx, ty)) {
+    const int hit = actionBar_.hitAt(tx, ty);
+    if (hit < 0) return;
+    switch (barActions_[hit]) {
+      case BarAction::Previous:
+        showSibling(prevName);
+        break;
+      case BarAction::Next:
+        showSibling(nextName);
+        break;
+      case BarAction::Cover:
+        if (coverExists) {
+          doClearSleepCover();
+        } else if (canSetSleepCover()) {
+          doSetSleepCover();
+        }
+        break;
+    }
+  }
+}
+
+void BmpViewerActivity::showSibling(const std::string& name) {
+  if (name.empty()) return;
+  std::string dirPath = FsHelpers::extractFolderPath(filePath);
+  if (dirPath.back() != '/') dirPath += "/";
+  filePath = dirPath + name;
+  onEnter();  // recomputes siblings for the new current image
+}
+
+void BmpViewerActivity::layoutActionBar(const bool hasPrevious, const bool hasNext, const char* coverLabel) {
+  barCount_ = 0;
+  if (mappedInput.hasTouch()) {
+    if (hasPrevious) {
+      barLabels_[barCount_] = "<";
+      barActions_[barCount_++] = BarAction::Previous;
+    }
+    if (coverLabel != nullptr && coverLabel[0] != '\0') {
+      barLabels_[barCount_] = coverLabel;
+      barActions_[barCount_++] = BarAction::Cover;
+    }
+    if (hasNext) {
+      barLabels_[barCount_] = ">";
+      barActions_[barCount_++] = BarAction::Next;
+    }
+  }
+  actionBar_.layout(renderer, mappedInput.hasTouch(), UI_10_FONT_ID, barCount_);
 }

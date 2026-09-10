@@ -1,11 +1,13 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
 
 #include "MappedInputManager.h"
 #include "activities/Activity.h"
+#include "activities/TouchActionBar.h"
 
 class BmpViewerActivity final : public Activity {
  public:
@@ -26,6 +28,12 @@ class BmpViewerActivity final : public Activity {
   // BMPs would OOM-abort if every name were materialised into a vector.
   void computeSiblings();
   void renderImage();
+  // Replaces the current image with a sibling and re-enters, so the neighbours
+  // and the cover state are recomputed for it. No-op on an empty name.
+  void showSibling(const std::string& name);
+  // Rebuild the on-screen answers for touch boards, which draw no button hints:
+  // the same "< / cover action / >" row, minus whatever is unavailable here.
+  void layoutActionBar(bool hasPrevious, bool hasNext, const char* coverLabel);
   // Decode and draw the current file through the PNG converter. Returns false when the
   // file cannot be read or has unusable dimensions; the caller then shows the error page.
   bool renderPngImage(int pageWidth, int pageHeight);
@@ -43,4 +51,13 @@ class BmpViewerActivity final : public Activity {
   // True while a sleep cover (/sleep.bmp) exists: the Confirm button then clears
   // it instead of setting one. Refreshed in onEnter().
   bool coverExists = false;
+
+  // On-screen answers for touch boards (see TouchActionBar). The bar is built
+  // per image, so its buttons -- and therefore these parallel arrays -- vary
+  // with what this image offers.
+  enum class BarAction : uint8_t { Previous, Cover, Next };
+  TouchActionBar actionBar_;
+  const char* barLabels_[TouchActionBar::kMaxButtons] = {};
+  BarAction barActions_[TouchActionBar::kMaxButtons] = {};
+  int barCount_ = 0;
 };

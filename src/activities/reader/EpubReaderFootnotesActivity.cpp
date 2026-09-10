@@ -65,7 +65,7 @@ void EpubReaderFootnotesActivity::buildScreen(UiScreen& screen) {
   screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
 
   if (footnotes.empty()) {
-    screen.centeredText(tr(STR_NO_FOOTNOTES), screen.theme().bodyText);
+    screen.centeredText(tr(STR_NO_FOOTNOTES), screen.theme().smallText);
     return;
   }
 
@@ -76,6 +76,12 @@ void EpubReaderFootnotesActivity::buildScreen(UiScreen& screen) {
   props.count = static_cast<uint16_t>(rowItems.size());
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
+  // Row titles at the Settings screens' size (smallText) so every list in the
+  // UI reads at one size. maxLines also marks the style explicitly set: an
+  // all-default smallText fails textStyleUnset and Screen::list() would
+  // substitute the larger bodyText back (FONT_SLOT_SMALL being 0).
+  props.labelText = screen.theme().smallText;
+  props.labelText.maxLines = 2;
   syncListViewport(screen, props);
   screen.list(props);
 }

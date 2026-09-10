@@ -19,8 +19,10 @@ void SleepSyncPromptActivity::onEnter() {
 
   // Line budget = screen minus top/bottom margins, the heading/body gap, and the bottom
   // button-hint strip, so the wrapped text can't ride under the hints.
+  actionBar_.layout(renderer, mappedInput.hasTouch(), fontId, 2);
   const int buttonHintsHeight = UITheme::getInstance().getMetrics().buttonHintsHeight;
-  const int available = renderer.getScreenHeight() - (margin * 2) - buttonHintsHeight - spacing;
+  const int available =
+      renderer.getScreenHeight() - (margin * 2) - buttonHintsHeight - actionBar_.reservedHeight() - spacing;
   const int maxLines = std::max(1, available / lineHeight);
 
   if (!heading.empty()) {
@@ -56,6 +58,10 @@ void SleepSyncPromptActivity::render(RenderLock&& lock) {
   // Back = Cancel (stay awake), Left = Skip (sleep, no sync), Right = Sync.
   const auto labels =
       mappedInput.mapLabels(I18N.get(StrId::STR_CANCEL), "", I18N.get(StrId::STR_SKIP), I18N.get(StrId::STR_SYNC));
+  if (actionBar_.active()) {
+    const char* barLabels[] = {I18N.get(StrId::STR_SKIP), I18N.get(StrId::STR_SYNC)};
+    actionBar_.draw(renderer, fontId, barLabels, /*primaryIndex=*/1);
+  }
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer(HalDisplay::RefreshMode::FAST_REFRESH);
@@ -74,6 +80,20 @@ void SleepSyncPromptActivity::loop() {
     finish();
     return;
   }
+  int tapX = 0;
+  int tapY = 0;
+  if (mappedInput.wasScreenTapped(tapX, tapY)) {
+    const int hit = actionBar_.hitAt(tapX, tapY);
+    if (hit == 0) {
+      finishWith(ACTION_SKIP);
+      return;
+    }
+    if (hit == 1) {
+      finishWith(ACTION_SYNC);
+      return;
+    }
+  }
+
   if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
     finishWith(ACTION_SKIP);
     return;

@@ -66,6 +66,20 @@ void KOReaderServerListActivity::loop() {
   }
 
   // Short tap: only act on releases whose press originated inside this activity
+  // A tap on a row selects and activates it in one go, like the FUI list screens.
+  // A tap is never a hold, so it cannot reach the long-press branch above.
+  int tapX = 0;
+  int tapY = 0;
+  const int tappedRow = mappedInput.wasScreenTapped(tapX, tapY) ? listTouch_.indexAt(renderer, tapX, tapY) : -1;
+  if (tappedRow >= 0) selectedIndex = tappedRow;
+
+  // confirmPressActive tracks a button press that began on this screen; a tap has no
+  // such edge, so it activates directly.
+  if (tappedRow >= 0) {
+    handleSelection();
+    return;
+  }
+
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     if (confirmPressActive) {
       confirmPressActive = false;
@@ -144,6 +158,7 @@ void KOReaderServerListActivity::render(RenderLock&&) {
   const auto& servers = KOREADER_STORE.getServers();
   const auto serverCount = static_cast<int>(servers.size());
 
+  listTouch_.record(Rect{0, contentTop, pageWidth, contentHeight}, itemCount, selectedIndex);
   GUI.drawList(
       renderer, Rect{0, contentTop, pageWidth, contentHeight}, itemCount, selectedIndex,
       [&servers, serverCount, activeIdx](int index) -> std::string {

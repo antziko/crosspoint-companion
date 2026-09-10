@@ -85,7 +85,9 @@ int UITheme::compactHeaderHeight() {
   // LOG_ERRs for a font that is not inserted yet. Until main.cpp inserts the UI fonts the floor
   // applies; the metrics cache keys on the result, so the band grows to its real height the
   // moment they are up.
-  constexpr int kTitlePadding = 4;
+  // Air above and below the title line. Enough that a compact band reads as a band
+  // and its title does not sit against the panel's top edge.
+  constexpr int kTitlePadding = 10;
   constexpr int kFallbackLineHeight = 20;
   static int resolved = 0;
   if (resolved == 0) {
@@ -105,7 +107,13 @@ const ThemeMetrics& UITheme::getMetrics() const {
   // does not vanish — it keeps the screen title; drawHeader() drops the battery, WiFi bars,
   // clock and rule around it. 0 means "top bar shown", and doubles as the cache key.
   const int compactHeader = isTopBarHidden() ? compactHeaderHeight() : 0;
-  if (!metricsValid || touch != metricsForTouch || compactHeader != metricsCompactHeader) {
+  // Lists follow the reader's Screen Margin, so one setting sets how close text
+  // sits to the bezel everywhere. Only on a theme that draws a row BAND
+  // (listInset > 0): a theme without one -- Classic -- carries its whole indent
+  // as listSidePadding, which is text padding inside the row, not a margin.
+  const int listInset = currentMetrics->listInset > 0 ? SETTINGS.screenMargin : currentMetrics->listInset;
+  if (!metricsValid || touch != metricsForTouch || compactHeader != metricsCompactHeader ||
+      listInset != metricsListInset) {
     adjustedMetrics = *currentMetrics;
     if (touch) {
       adjustedMetrics.buttonHintsHeight = 0;
@@ -114,8 +122,10 @@ const ThemeMetrics& UITheme::getMetrics() const {
     if (compactHeader > 0 && compactHeader < adjustedMetrics.headerHeight) {
       adjustedMetrics.headerHeight = compactHeader;
     }
+    adjustedMetrics.listInset = listInset;
     metricsForTouch = touch;
     metricsCompactHeader = compactHeader;
+    metricsListInset = listInset;
     metricsValid = true;
   }
   return adjustedMetrics;

@@ -107,6 +107,11 @@ class DictionaryLookupController {
   // (caller should return from loop). Gets the selected word and starts lookup or shows popup.
   bool handleConfirmLookup(const WordSelectNavigator& navigator);
 
+  // Look up whatever the navigator's cursor is on, with no button attached — the touch
+  // path taps a word directly rather than confirming a cursor it walked to. No-op when
+  // nothing is selected.
+  void lookupSelected(const WordSelectNavigator& navigator);
+
   const std::string& getLookupWord() const { return lookupWord; }
   const std::string& getFoundWord() const { return foundWord; }
   const DictLocation& getFoundLocation() const { return foundLocation; }

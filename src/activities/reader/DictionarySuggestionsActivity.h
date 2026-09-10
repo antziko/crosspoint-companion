@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "../Activity.h"
+#include "activities/ListTouchTarget.h"
 
 class DictionarySuggestionsActivity final : public Activity {
  public:
@@ -17,4 +18,7 @@ class DictionarySuggestionsActivity final : public Activity {
  private:
   std::vector<std::string> suggestions;
   int selectedIndex = 0;
+
+  // Rows the last render drew, so a tap can pick one (see ListTouchTarget).
+  ListTouchTarget listTouch_;
 };

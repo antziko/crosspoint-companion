@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "activities/Activity.h"
+#include "activities/TouchActionBar.h"
 #include "fontIds.h"
 
 // Shown when the user triggers "highlight" (hold-Back) on a reader page that already
@@ -40,4 +41,8 @@ class HighlightActionActivity final : public Activity {
   // Launched mid hold-Back: swallow the release that ends that launching hold so it
   // doesn't instantly cancel the dialog (mirrors DictionaryWordSelectActivity).
   bool swallowBackRelease = false;
+
+  // On-screen answers for touch boards, which draw no button hints (see
+  // TouchActionBar). Left/Right on a button board, these two boxes on a touch one.
+  TouchActionBar actionBar_;
 };

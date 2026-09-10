@@ -429,8 +429,18 @@ void FileBrowserActivity::loop() {
     return;
   }
 
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    if (lockNextConfirmRelease) {
+  // A tap on a row selects and opens it in one go, like the FUI list screens.
+  // Resolved before the Confirm branch so the two share one activation body.
+  int tapX = 0;
+  int tapY = 0;
+  const int tappedRow = mappedInput.wasScreenTapped(tapX, tapY) ? listTouch_.indexAt(renderer, tapX, tapY) : -1;
+  if (tappedRow >= 0 && tappedRow < static_cast<int>(files.size())) selectorIndex = tappedRow;
+
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) || tappedRow >= 0) {
+    // A tap is never a hold: it must not reach the long-press delete below, and the
+    // Confirm-release lock guards a button edge this did not come from.
+    const bool viaTouch = tappedRow >= 0;
+    if (lockNextConfirmRelease && !viaTouch) {
       lockNextConfirmRelease = false;
       return;
     }
@@ -453,7 +463,7 @@ void FileBrowserActivity::loop() {
       return;
     }
 
-    if (mode == Mode::Books && mappedInput.getHeldTime() >= GO_HOME_MS) {
+    if (mode == Mode::Books && !viaTouch && mappedInput.getHeldTime() >= GO_HOME_MS) {
       // --- LONG PRESS ACTION: DELETE FILE OR DIRECTORY ---
       std::string cleanBasePath = basepath;
       if (cleanBasePath.back() != '/') cleanBasePath += "/";
@@ -679,7 +689,10 @@ void FileBrowserActivity::render(RenderLock&&) {
   if (files.empty()) {
     const char* emptyMsg = (mode == Mode::PickFirmware) ? tr(STR_NO_BIN_FILES) : tr(STR_NO_FILES_FOUND);
     renderer.drawText(UI_10_FONT_ID, screen.x + metrics.contentSidePadding, contentTop + 20, emptyMsg);
+    listTouch_.clear();
   } else {
+    listTouch_.record(Rect{screen.x, contentTop, screen.width, contentHeight}, static_cast<int>(files.size()),
+                      selectorIndex);
     GUI.drawList(
         renderer, Rect{screen.x, contentTop, screen.width, contentHeight}, files.size(), selectorIndex,
         [this](int index) {

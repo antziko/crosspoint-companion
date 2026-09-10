@@ -38,6 +38,7 @@ QuoteViewerActivity::QuoteViewerActivity(GfxRenderer& renderer, MappedInputManag
 
 void QuoteViewerActivity::onEnter() {
   Activity::onEnter();
+  actionBar_.layout(renderer, mappedInput.hasTouch(), UI_10_FONT_ID, 3);
   if (quoteIndices_.empty()) {
     // Defensive: caller should only open this on a quote row.
     ActivityResult result;
@@ -91,7 +92,18 @@ void QuoteViewerActivity::loop() {
     return;
   }
 
-  if (mappedInput.wasReleased(B::Confirm)) {
+  int tapX = 0;
+  int tapY = 0;
+  const int tappedButton = mappedInput.wasScreenTapped(tapX, tapY) ? actionBar_.hitAt(tapX, tapY) : -1;
+  if (tappedButton == 0 || tappedButton == 2) {
+    const int count = static_cast<int>(quoteIndices_.size());
+    currentPos_ = (currentPos_ + (tappedButton == 0 ? -1 : 1) + count) % count;
+    loadCurrent();
+    requestUpdate();
+    return;
+  }
+
+  if (mappedInput.wasReleased(B::Confirm) || tappedButton == 1) {
     const auto& bms = BOOKMARKS.getBookmarks();
     const size_t absIdx = quoteIndices_[currentPos_];
     if (absIdx < bms.size()) {
@@ -186,6 +198,10 @@ void QuoteViewerActivity::render(RenderLock&&) {
   const bool hasMoreDown = pageOffset_ + linesPerPage_ < static_cast<int>(wrappedLines_.size());
   const char* leftHint = hasMoreUp ? tr(STR_DIR_UP) : "";
   const char* rightHint = hasMoreDown ? tr(STR_DIR_DOWN) : "";
+  if (actionBar_.active()) {
+    const char* barLabels[] = {tr(STR_PREVIOUS), tr(STR_OPEN), tr(STR_NEXT)};
+    actionBar_.draw(renderer, UI_10_FONT_ID, barLabels, /*primaryIndex=*/1);
+  }
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_OPEN), leftHint, rightHint);
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 

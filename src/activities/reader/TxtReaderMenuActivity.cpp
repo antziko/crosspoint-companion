@@ -51,7 +51,13 @@ void TxtReaderMenuActivity::loop() {
     requestUpdate();
   });
 
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+  // A tap on a row selects and activates it in one go, like the FUI list screens.
+  int tapX = 0;
+  int tapY = 0;
+  const int tappedRow = mappedInput.wasScreenTapped(tapX, tapY) ? listTouch_.indexAt(renderer, tapX, tapY) : -1;
+  if (tappedRow >= 0) selectedIndex = tappedRow;
+
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) || tappedRow >= 0) {
     const auto selectedAction = menuItems[selectedIndex].action;
     if (selectedAction == MenuAction::AUTO_PAGE_TURN) {
       selectedPageTurnOption = (selectedPageTurnOption + 1) % pageTurnLabels.size();
@@ -92,6 +98,8 @@ void TxtReaderMenuActivity::render(RenderLock&&) {
       screen.y + metrics.topPadding + metrics.headerHeight + metrics.tabBarHeight + metrics.verticalSpacing;
   const int contentHeight = screen.height - contentTop - metrics.verticalSpacing;
 
+  listTouch_.record(Rect{screen.x, contentTop, screen.width, contentHeight}, static_cast<int>(menuItems.size()),
+                    selectedIndex);
   GUI.drawList(
       renderer, Rect{screen.x, contentTop, screen.width, contentHeight}, menuItems.size(), selectedIndex,
       [this](int index) { return I18N.get(menuItems[index].labelId); }, nullptr, nullptr,

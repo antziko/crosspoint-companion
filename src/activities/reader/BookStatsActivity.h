@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "BookReadingStats.h"
 #include "ReadingTimeHistory.h"
@@ -12,6 +13,7 @@
 #include "util/ButtonNavigator.h"
 
 struct Rect;
+struct TabInfo;
 
 // Per-book reading stats screen, opened from the reader menu. Shows total time
 // read (with a dated/undated split on mixed-device libraries), an estimate of
@@ -66,5 +68,13 @@ class BookStatsActivity final : public Activity {
   // Area below the tab bar shared by both tabs; single source of truth so loop()'s
   // scroll clamping and render()'s drawing always agree on available height.
   Rect contentRect() const;
+  // Band the tab labels are drawn in; contentRect() starts below it and the
+  // touch hit test measures against it, so both follow the summary block.
+  Rect tabBarRect() const;
+  // Tab labels + which one is selected, shared by the draw and the hit test so
+  // the touch bands cannot drift from the painted labels.
+  std::vector<TabInfo> buildTabs() const;
+  // Tab taps and Timeline cell taps. True when the pass is consumed. Touch boards only.
+  bool handleTouch();
   void renderHeatmapTab(const Rect& rect) const;
 };
