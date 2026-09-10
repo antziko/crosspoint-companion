@@ -108,7 +108,13 @@ namespace {
 // v54: Pages persist a link table -- href plus a tap rectangle per on-page link span -- so a
 //      footnote or cross-reference can be followed by touch. New per-page section in the
 //      serialized layout, so v53 files have nothing to read it from. Covers upstream's #3296.
-constexpr uint8_t SECTION_FILE_VERSION = 54;
+// v55: No structural change -- forces stale caches to rebuild so page-alone image sizing
+//      takes effect. A large image that starts its own page is now fitted to the VIEWPORT
+//      rather than to the container the book's CSS shrank (an image width plus horizontal
+//      margins on its wrapper commonly cost a quarter of the page). Image geometry is baked
+//      into the .bin, so chapters laid out at v54 keep the squeezed size until they
+//      regenerate. Same situation as v40 and v45.
+constexpr uint8_t SECTION_FILE_VERSION = 55;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
