@@ -122,6 +122,32 @@ void WordSelectNavigator::reset() {
   lastWordRepeatMs_ = 0;
 }
 
+int WordSelectNavigator::wordIndexAtPoint(const int x, const int y, const int lineHeight, const int slop) const {
+  for (int i = 0; i < static_cast<int>(words.size()); i++) {
+    const WordInfo& w = words[i];
+    // drawYFor, not screenY: an IPA run is drawn on a shifted baseline, so its box is
+    // where it was painted rather than where the row nominally starts.
+    const int top = drawYFor(w);
+    if (x >= w.screenX - slop && x < w.screenX + w.width + slop && y >= top - slop && y < top + lineHeight + slop) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+bool WordSelectNavigator::selectFlatIndex(const int idx) {
+  if (idx < 0 || idx >= static_cast<int>(words.size())) return false;
+  const int row = words[idx].row;
+  if (row < 0 || row >= static_cast<int>(rows.size())) return false;
+  const int pos = posInRow(row, idx);
+  if (row == currentRow && pos == currentWordInRow) return false;
+  currentRow = row;
+  currentWordInRow = pos;
+  rowNavGoalX = -1;
+  pendingSnapIdx = -1;
+  return true;
+}
+
 const WordSelectNavigator::WordInfo* WordSelectNavigator::getSelected() const {
   if (rows.empty() || currentRow >= static_cast<int>(rows.size())) return nullptr;
   if (rowEmpty(currentRow)) return nullptr;
@@ -509,6 +535,14 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
   if (wordPrevPressed || wordNextPressed) rowNavGoalX = -1;
 
   return changed;
+}
+
+bool WordSelectNavigator::beginMultiSelectAt(const int flatIdx) {
+  if (flatIdx < 0 || flatIdx >= static_cast<int>(words.size())) return false;
+  selectFlatIndex(flatIdx);
+  inMultiSelectMode = true;
+  anchorFlatIndex = flatIdx;
+  return true;
 }
 
 WordSelectNavigator::MultiSelectAction WordSelectNavigator::handleMultiSelectInput(const MappedInputManager& input,

@@ -30,7 +30,7 @@ class DictionaryWordSelectActivity final : public Activity {
       const std::string& cachePath, const std::string& nextPageFirstWord = "", bool framebufferContainsPage = false,
       int reservedBottomHeight = 0, Mode mode = Mode::Dictionary,
       WordSelectNavigator::InitialMarker initialMarker = WordSelectNavigator::InitialMarker::Middle,
-      const std::string& chapterTitle = "")
+      const std::string& chapterTitle = "", int initialPointX = -1, int initialPointY = -1)
       : Activity("DictionaryWordSelect", renderer, mappedInput),
         page(std::move(page)),
         marginLeft(marginLeft),
@@ -42,7 +42,9 @@ class DictionaryWordSelectActivity final : public Activity {
         reservedBottomHeight_(reservedBottomHeight),
         mode_(mode),
         initialMarker_(initialMarker),
-        chapterTitle_(chapterTitle) {}
+        chapterTitle_(chapterTitle),
+        initialPointX_(initialPointX),
+        initialPointY_(initialPointY) {}
 
   void onEnter() override;
   void onExit() override;
@@ -50,7 +52,6 @@ class DictionaryWordSelectActivity final : public Activity {
   void render(RenderLock&&) override;
   // Redraws the reader's page (word boxes over it), so it follows the reading
   // surface's night-mode polarity; a normal-polarity flash mid-lookup jars.
-  bool appliesNightMode() const override { return true; }
   // The manual screen refresh blanks the framebuffer from the main loop, so the snapshot and
   // dirty-rect state the differential path would restore describes pixels that are no longer
   // there. Same reset the sub-activity returns take.
@@ -117,6 +118,18 @@ class DictionaryWordSelectActivity final : public Activity {
   // Initial marker band, chosen by the caller from current-page dwell (see CrossPointSettings
   // dictMarkerDwellEnabled). Defaults to Middle for callers that don't set it.
   WordSelectNavigator::InitialMarker initialMarker_ = WordSelectNavigator::InitialMarker::Middle;
+
+  // Screen point the caller pointed at (the reader's page long-press), or -1 for "none".
+  // onEnter resolves it to a word and starts there instead of at initialMarker_'s band; in
+  // HighlightRange that word also becomes the range anchor, so the user only has to tap the
+  // OTHER end. A point that hits no word falls back to the band.
+  int initialPointX_ = -1;
+  int initialPointY_ = -1;
+  // Set when initialPointX_/Y_ resolved to a word in Dictionary mode: the caller pointed at
+  // the word AND asked for a lookup (the reader's long-press menu), so the first loop tick
+  // runs it instead of parking the cursor there and waiting for a tap that would only name
+  // the word a second time.
+  bool autoLookupPending_ = false;
 
   // True when opened mid hold-Back (the reader's hold-Back → highlight gesture): swallow that
   // first Back release so it doesn't immediately cancel the selection. Other entry paths have

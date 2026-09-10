@@ -141,6 +141,16 @@ class EpubReaderActivity final : public Activity {
   // overlay, letting panel->toolbar steps restore the page without a full
   // re-render. Discarded on close / whenever the page under the overlay changes.
   bool overlayPageStored = false;
+  // Page long-press menu (Look Up / Highlight), drawn over the reading page. A separate
+  // instance from overlayPopup, which belongs to the toolbar overlay -- handleOverlayInput()
+  // early-returns without a toolbarUi, so the two can never be open at once anyway.
+  OptionPopup pageActionPopup;
+  int pageActionX_ = -1;  // the long-pressed point, handed to the activity the menu opens
+  int pageActionY_ = -1;
+  // Set by the menu's select callback, which has already pushed the chosen screen by the
+  // time OptionPopup calls back for a repaint. Only a dismissal repaints the page here; a
+  // choice leaves that to the screen it opened and to this activity's own result handler.
+  bool pageActionChose_ = false;
   int autoTurnOption = 0;  // current auto page-turn rate index (More panel)
   std::vector<EpubReaderMenuActivity::MenuItem> moreItems;
   // Armed in onEnter() when the "sync prompt on open" gate passes; consumed once in loop() after
@@ -400,6 +410,15 @@ class EpubReaderActivity final : public Activity {
   std::string textRowName(int row) const;
   std::string textRowValue(int row) const;
   void showTextRowPopup(int row);
+  // The reader lays out from the PER-BOOK override, which is active for the whole
+  // time a book is open (loadBook seeds it on first open). The Text panel therefore
+  // reads and writes that override, not the globals -- writing a global would save
+  // fine and change nothing on the page.
+  void commitBookOverride(CrossPointSettings::ReaderOverride& ov);
+  // Fold the render-relevant globals into this book's override, for the full
+  // Text Settings screen, which edits the globals. Same field set loadBook()
+  // snapshots on first open.
+  void syncBookOverrideFromGlobals();
   // Persist + re-paginate + re-render under the open panel (live preview).
   void applyTextSettingLive();
   void paintOverlayPopup();
@@ -422,14 +441,28 @@ class EpubReaderActivity final : public Activity {
   // nothing this frame (Off, or a message it already put up is still showing),
   // which tells the caller not to swallow the frame.
   bool runHoldAction();
-  void openWordSelect(bool framebufferContainsPage);
-  // Highlight (hold-Back) entry point. If the current page already has a quote, shows a
-  // confirm dialog (existing text + Delete/Add-new/Cancel) and acts on the choice; with
-  // no existing quote, launches the selection directly.
-  void openHighlightSelect();
+  void openWordSelect(bool framebufferContainsPage, int pointX = -1, int pointY = -1);
+  // Highlight entry point (hold-Back on button boards, the page long-press menu on touch
+  // ones). If the current page already has a quote, shows a confirm dialog (existing text +
+  // Delete/Add-new/Cancel) and acts on the choice; with no existing quote, launches the
+  // selection directly. pointX/Y is the screen point the user pointed at, or -1 for none.
+  //
+  // afterDelete marks a re-entry from the dialog's own Delete: a page can carry several
+  // quotes, so deleting one offers the next, and the next, until the page is clear or the
+  // user picks something else. It only changes what "no quote left" means -- entering with
+  // none is a request to make one, but ARRIVING at none by deleting the last is done, and
+  // must not drop the user into a new selection they never asked for.
+  void openHighlightSelect(int pointX = -1, int pointY = -1, bool afterDelete = false);
   // Launch word-select in HighlightRange mode; saves the returned range as a quote via
   // BookmarkStore::addQuote. Shared by the no-existing-quote path and the "Add new" choice.
-  void launchHighlightWordSelect();
+  void launchHighlightWordSelect(int pointX = -1, int pointY = -1);
+  // The page long-press menu (touch boards): offer Look Up / Highlight for the word at
+  // (x, y). The point is not resolved to a word here -- the activity the choice opens does
+  // that, against the page it re-renders itself -- so this cannot fail and always opens.
+  void openPageActionMenu(int x, int y);
+  // First paint of the page action menu, and its highlight repaints. Drawn over the page
+  // without clearing; the page comes back via requestUpdate() when the menu closes.
+  void paintPageActionPopup();
   void onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action);
   // Persist the current position, release the Epub/Section to free RAM for TLS, and hand off
   // to KOReaderSyncActivity. sleepWhenDone makes the sync deep-sleep the device on success
@@ -548,7 +581,6 @@ class EpubReaderActivity final : public Activity {
            (section->isPartial() || static_cast<int>(section->pageCount) < section->currentPage + BUILD_WINDOW_AHEAD);
   }
   bool isReaderActivity() const override { return true; }
-  bool appliesNightMode() const override { return true; }
   bool onManualSleepRequested() override;
   ScreenshotInfo getScreenshotInfo() const override;
   CrossPointPosition getCurrentPosition() const;

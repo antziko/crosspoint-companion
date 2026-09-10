@@ -461,6 +461,13 @@ void EpubReaderActivity::onPause() {
 }
 
 void EpubReaderActivity::onResume() {
+  // The control-center orientation tile cannot turn the renderer while its sheet is up,
+  // so it parks the new orientation and this book adopts it here. applyOrientation()
+  // reflows and saves it per book, exactly as a rotation from the reader menu would.
+  if (APP_STATE.pendingOrientation != CrossPointState::NO_ORIENTATION_REQUEST) {
+    applyOrientation(APP_STATE.pendingOrientation);
+  }
+
   // Returning from a sub-activity: shift the session anchor forward by the suspended gap so
   // every wall-clock delta (commitReadingTime, sync delta) excludes the in-sub-activity time.
   if (sessionStartMs == 0 || sessionPauseStartMs == 0) return;
@@ -750,6 +757,22 @@ void EpubReaderActivity::loop() {
     pendingReadFolderMove = false;
   }
 
+  // The page action menu is modal over the page and owns all input while up.
+  if (pageActionPopup.isActive()) {
+    pageActionPopup.handleInput(mappedInput, [this] {
+      if (pageActionPopup.isActive()) {
+        paintPageActionPopup();  // highlight moved
+        return;
+      }
+      // Dismissed with nothing chosen: repaint the page to clear the dialog off it --
+      // cheaper here than a storeBwBuffer() snapshot whose lifetime would have to be
+      // untangled from the overlay's own (overlayPageStored). A choice has already pushed
+      // its screen, which repaints the page itself, so leave the framebuffer to it.
+      if (!pageActionChose_) requestUpdate();
+    });
+    return;
+  }
+
   // The toolbar reader menu owns all input while shown. Placed after the
   // background build/prewarm ticks above so those keep running underneath it.
   if (overlay != Overlay::None) {
@@ -878,6 +901,22 @@ void EpubReaderActivity::loop() {
         navigateToHref(link->href, true);
         return;
       }
+    }
+  }
+
+  // A hold on the page opens the word action menu (Look Up / Highlight). On a touch-only
+  // board this is the only route to either: hold-Back below never fires without a Back
+  // button, and the Home-key hold runs one user-chosen function at a time.
+  // Deliberately NOT gated on touchReaderControls -- that setting owns the page-turn zones,
+  // and switching it off must not take highlighting away with them (same call #3319 made
+  // for the menu gesture). wasScreenLongPress suppresses the rest of the contact, so the
+  // finger lift cannot also tap through to the menu gesture or a page-turn zone below.
+  if (section && !atEndOfBook && mappedInput.hasTouch()) {
+    int holdX = 0;
+    int holdY = 0;
+    if (mappedInput.wasScreenLongPress(holdX, holdY)) {
+      openPageActionMenu(holdX, holdY);
+      return;
     }
   }
 
@@ -1263,7 +1302,7 @@ bool EpubReaderActivity::runHoldAction() {
   }
 }
 
-void EpubReaderActivity::openWordSelect(bool framebufferContainsPage) {
+void EpubReaderActivity::openWordSelect(const bool framebufferContainsPage, const int pointX, const int pointY) {
   auto pageForLookup = section ? section->loadPage(section->currentPage) : nullptr;
   if (!pageForLookup) {
     requestUpdate();
@@ -1356,7 +1395,7 @@ void EpubReaderActivity::openWordSelect(bool framebufferContainsPage) {
   auto wordSelect = makeUniqueNoThrow<DictionaryWordSelectActivity>(
       renderer, mappedInput, std::move(pageForLookup), orientedMarginLeft, orientedMarginTop, bookCachePath,
       nextPageFirstWord, framebufferContainsPage, reservedBottomHeight, DictionaryWordSelectActivity::Mode::Dictionary,
-      initialMarker, chapterTitle);
+      initialMarker, chapterTitle, pointX, pointY);
   if (!wordSelect) {
     LOG_ERR("EPUB", "OOM: DictionaryWordSelectActivity");
     // pauseMarkerDwell() above is safe to leave armed: preserveMarkerDwell_ makes the next
@@ -1373,7 +1412,39 @@ void EpubReaderActivity::openWordSelect(bool framebufferContainsPage) {
   });
 }
 
-void EpubReaderActivity::openHighlightSelect() {
+void EpubReaderActivity::openPageActionMenu(const int x, const int y) {
+  // Word-level actions for a board with no Confirm and no Back: a hold on the page names
+  // the word, this names what to do with it. Look Up needs a prepared dictionary; Highlight
+  // is always available, so the menu is never empty.
+  const bool hasDict = Dictionary::exists(epub->getCachePath().c_str());
+  const char* labels[2];
+  int count = 0;
+  if (hasDict) labels[count++] = tr(STR_LOOKUP_SHORT);
+  labels[count++] = tr(STR_ADD_HIGHLIGHT);
+
+  pageActionX_ = x;
+  pageActionY_ = y;
+  pageActionChose_ = false;
+  pageActionPopup.show(tr(STR_SELECT), labels, count, /*currentIndex=*/0, [this, hasDict](const int idx) {
+    pageActionChose_ = true;
+    // The popup is drawn over the page, so whichever screen this opens has to repaint it:
+    // both pass framebufferContainsPage = false and re-render from the Page themselves.
+    if (hasDict && idx == 0) {
+      openWordSelect(/*framebufferContainsPage=*/false, pageActionX_, pageActionY_);
+    } else {
+      openHighlightSelect(pageActionX_, pageActionY_);
+    }
+  });
+  paintPageActionPopup();
+}
+
+void EpubReaderActivity::paintPageActionPopup() {
+  RenderLock lock;
+  pageActionPopup.render(renderer);
+  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+}
+
+void EpubReaderActivity::openHighlightSelect(const int pointX, const int pointY, const bool afterDelete) {
   if (!section) {
     requestUpdate();
     return;
@@ -1393,9 +1464,15 @@ void EpubReaderActivity::openHighlightSelect() {
   const uint16_t spine = static_cast<uint16_t>(currentSpineIndex);
   const float progress = static_cast<float>(currentPage) / static_cast<float>(pageCount);
 
-  // No existing highlight on this page → straight to selection (original behaviour).
+  // No existing highlight on this page. Entering that way is a request to make one; but
+  // arriving here by deleting the last one means the page is now clear and the user is
+  // done, so go back to reading rather than opening a selection they did not ask for.
   if (!BOOKMARKS.hasQuoteForPage(spine, progress, pageCount)) {
-    launchHighlightWordSelect();
+    if (afterDelete) {
+      requestUpdate();
+      return;
+    }
+    launchHighlightWordSelect(pointX, pointY);
     return;
   }
 
@@ -1417,7 +1494,7 @@ void EpubReaderActivity::openHighlightSelect() {
   }
 
   startActivityForResultNoThrow<HighlightActionActivity>(
-      [this, spine, qStartWord, qEndWord](const ActivityResult& result) {
+      [this, spine, qStartWord, qEndWord, pointX, pointY](const ActivityResult& result) {
         ignoreBackUntilRelease = true;
         if (result.isCancelled) {
           requestUpdate();
@@ -1426,16 +1503,23 @@ void EpubReaderActivity::openHighlightSelect() {
         const int action = std::get<MenuResult>(result.data).action;
         if (action == HighlightActionActivity::ACTION_DELETE) {
           BOOKMARKS.removeQuoteByRange(spine, qStartWord, qEndWord);
-          requestUpdate();
+          // Offer whatever is still on the page. The scan below always takes the FIRST
+          // quote anchored here, so re-entering walks them one at a time without tracking
+          // an index that the erase would have invalidated anyway. Terminates on the
+          // afterDelete branch above once the page is clear.
+          openHighlightSelect(pointX, pointY, /*afterDelete=*/true);
         } else {
-          // ACTION_ADD_NEW: existing highlight kept, start a fresh selection.
-          launchHighlightWordSelect();
+          // ACTION_ADD_NEW: existing highlight kept, start a fresh selection. The dialog
+          // overwrote the page, so the long-pressed point no longer describes what is on
+          // screen -- but it still describes the same word on the same page, and the child
+          // resolves it against the page it re-renders itself.
+          launchHighlightWordSelect(pointX, pointY);
         }
       },
       renderer, mappedInput, std::move(quoteText));
 }
 
-void EpubReaderActivity::launchHighlightWordSelect() {
+void EpubReaderActivity::launchHighlightWordSelect(const int pointX, const int pointY) {
   auto pageForSelect = section ? section->loadPage(section->currentPage) : nullptr;
   if (!pageForSelect) {
     requestUpdate();
@@ -1476,7 +1560,7 @@ void EpubReaderActivity::launchHighlightWordSelect() {
   // Nothrow — see openWordSelect(); same heap conditions, same untouched-on-failure argument.
   auto highlightSelect = makeUniqueNoThrow<DictionaryWordSelectActivity>(
       renderer, mappedInput, std::move(pageForSelect), orientedMarginLeft, orientedMarginTop, epub->getCachePath(), "",
-      false, 0, DictionaryWordSelectActivity::Mode::HighlightRange, initialMarker);
+      false, 0, DictionaryWordSelectActivity::Mode::HighlightRange, initialMarker, "", pointX, pointY);
   if (!highlightSelect) {
     LOG_ERR("EPUB", "OOM: DictionaryWordSelectActivity (highlight)");
     return;
@@ -3492,7 +3576,11 @@ static_assert(std::size(kAlignIds) == CrossPointSettings::PARAGRAPH_ALIGNMENT_CO
 }  // namespace
 
 bool EpubReaderActivity::usesToolbarMenu() const {
+#if FREEINK_CAP_TOUCH
   return SETTINGS.readerMenuStyle == CrossPointSettings::READER_MENU_TOOLBAR;
+#else
+  return false;
+#endif
 }
 
 std::string EpubReaderActivity::currentChapterTitle() const {
@@ -3510,16 +3598,19 @@ std::string EpubReaderActivity::textRowName(int row) const {
 
 std::string EpubReaderActivity::textRowValue(int row) const {
   static constexpr StrId kFamily[] = {StrId::STR_NOTO_SERIF, StrId::STR_NOTO_SANS};
+  // Show what the PAGE is laid out from -- the per-book override -- so the panel
+  // can never display a global the book is not using.
+  const auto& ov = SETTINGS.getReaderOverride();
   switch (row) {
     case 0:
-      if (SETTINGS.sdFontFamilyName[0] != '\0') return SETTINGS.sdFontFamilyName;
-      return I18N.get(kFamily[SETTINGS.fontFamily % CrossPointSettings::FONT_FAMILY_COUNT]);
+      if (ov.sdFontFamilyName[0] != '\0') return ov.sdFontFamilyName;
+      return I18N.get(kFamily[ov.fontFamily % CrossPointSettings::FONT_FAMILY_COUNT]);
     case 1:
-      return std::to_string(SETTINGS.fontPointSize) + " pt";
+      return std::to_string(ov.fontPointSize) + " pt";
     case 2:
-      return I18N.get(kSpacingIds[SETTINGS.lineSpacing % CrossPointSettings::LINE_COMPRESSION_COUNT]);
+      return I18N.get(kSpacingIds[ov.lineSpacing % CrossPointSettings::LINE_COMPRESSION_COUNT]);
     case 3:
-      return I18N.get(kAlignIds[SETTINGS.paragraphAlignment % CrossPointSettings::PARAGRAPH_ALIGNMENT_COUNT]);
+      return I18N.get(kAlignIds[ov.paragraphAlignment % CrossPointSettings::PARAGRAPH_ALIGNMENT_COUNT]);
     case 4:
       return SETTINGS.focusReadingEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     default:
@@ -3537,6 +3628,31 @@ void EpubReaderActivity::applyTextSettingLive() {
 
 // Settings-style option pickers for the Text panel's enum rows. Every
 // selection applies immediately to the page under the sheet.
+// Persist a per-book override and make it live. Mirrors ReaderOptionsActivity::
+// persistAndApply(); the reader's other text editor writes through the same file.
+void EpubReaderActivity::commitBookOverride(CrossPointSettings::ReaderOverride& ov) {
+  ov.active = true;
+  SETTINGS.setReaderOverride(ov);
+  if (epub && !ReaderSettingsIO::write(epub->getCachePath(), ov)) {
+    LOG_ERR("EPUB", "Failed to persist per-book reader settings");
+  }
+}
+
+void EpubReaderActivity::syncBookOverrideFromGlobals() {
+  auto ov = SETTINGS.getReaderOverride();
+  ov.fontFamily = SETTINGS.fontFamily;
+  ov.fontPointSize = SETTINGS.fontPointSize;
+  ov.lineSpacing = SETTINGS.lineSpacing;
+  ov.paragraphAlignment = SETTINGS.paragraphAlignment;
+  ov.hyphenationEnabled = SETTINGS.hyphenationEnabled;
+  ov.extraParagraphSpacing = SETTINGS.extraParagraphSpacing;
+  ov.screenMargin = SETTINGS.screenMargin;
+  static_assert(sizeof(ov.sdFontFamilyName) == sizeof(SETTINGS.sdFontFamilyName), "sdFontFamilyName size mismatch");
+  strncpy(ov.sdFontFamilyName, SETTINGS.sdFontFamilyName, sizeof(ov.sdFontFamilyName) - 1);
+  ov.sdFontFamilyName[sizeof(ov.sdFontFamilyName) - 1] = '\0';
+  commitBookOverride(ov);
+}
+
 void EpubReaderActivity::showTextRowPopup(const int row) {
   switch (row) {
     case 1: {
@@ -3546,29 +3662,37 @@ void EpubReaderActivity::showTextRowPopup(const int row) {
       std::vector<std::string> labels;
       labels.reserve(sizes.size());
       for (const uint8_t size : sizes) labels.push_back(std::to_string(size) + " pt");
-      const uint8_t cur = snapToNearestPointSize(sizes, SETTINGS.fontPointSize);
+      const uint8_t cur = snapToNearestPointSize(sizes, SETTINGS.getReaderOverride().fontPointSize);
       int curIdx = 0;
       for (size_t i = 0; i < sizes.size(); ++i) {
         if (sizes[i] == cur) curIdx = static_cast<int>(i);
       }
       overlayPopup.show(StrId::STR_FONT_SIZE, labels, curIdx, [this, sizes](int idx) {
         if (idx < 0 || idx >= static_cast<int>(sizes.size())) return;
-        SETTINGS.fontPointSize = sizes[idx];
+        auto ov = SETTINGS.getReaderOverride();
+        ov.fontPointSize = sizes[idx];
+        commitBookOverride(ov);
         applyTextSettingLive();
       });
       break;
     }
     case 2:
       overlayPopup.show(StrId::STR_LINE_SPACING, kSpacingIds, static_cast<int>(std::size(kSpacingIds)),
-                        SETTINGS.lineSpacing % CrossPointSettings::LINE_COMPRESSION_COUNT, [this](int idx) {
-                          SETTINGS.lineSpacing = static_cast<uint8_t>(idx);
+                        SETTINGS.getReaderOverride().lineSpacing % CrossPointSettings::LINE_COMPRESSION_COUNT,
+                        [this](int idx) {
+                          auto ov = SETTINGS.getReaderOverride();
+                          ov.lineSpacing = static_cast<uint8_t>(idx);
+                          commitBookOverride(ov);
                           applyTextSettingLive();
                         });
       break;
     case 3:
       overlayPopup.show(StrId::STR_PARA_ALIGNMENT, kAlignIds, static_cast<int>(std::size(kAlignIds)),
-                        SETTINGS.paragraphAlignment % CrossPointSettings::PARAGRAPH_ALIGNMENT_COUNT, [this](int idx) {
-                          SETTINGS.paragraphAlignment = static_cast<uint8_t>(idx);
+                        SETTINGS.getReaderOverride().paragraphAlignment % CrossPointSettings::PARAGRAPH_ALIGNMENT_COUNT,
+                        [this](int idx) {
+                          auto ov = SETTINGS.getReaderOverride();
+                          ov.paragraphAlignment = static_cast<uint8_t>(idx);
+                          commitBookOverride(ov);
                           applyTextSettingLive();
                         });
       break;
@@ -3709,7 +3833,6 @@ void EpubReaderActivity::renderOverlay() {
   model.panel = true;
   if (!mappedInput.hasTouch()) {
     model.bottomReserve = UITheme::getInstance().getMetrics().buttonHintsHeight;
-    model.denseRows = true;
   }
   // Tap-first: the cursor is only drawn once a button has moved it, so a
   // tapped row does not stay inverted after its action.
@@ -3867,6 +3990,9 @@ void EpubReaderActivity::handleOverlayInput() {
         discardOverlayPage();
         startActivityForResultNoThrow<TextSettingsActivity>(
             [this](const ActivityResult&) {
+              // That screen edits the GLOBALS; the page is laid out from this
+              // book's override, so fold the two before re-paginating.
+              syncBookOverrideFromGlobals();
               applyReaderTextSettings();
               overlay = Overlay::Text;  // back to the Text panel
               panelIndex = 0;

@@ -148,6 +148,18 @@ class WordSelectNavigator {
   // so this file stays free of CrossPointSettings (see test/dict-word-select-nav).
   bool handleNavigation(const MappedInputManager& input, const GfxRenderer& renderer, bool swapAxes = false);
 
+  // Flat index of the word whose box contains (x, y) in screen coordinates, grown by
+  // `slop` on every side for finger error; -1 when the point hits no word. Word boxes
+  // never overlap once the slop is applied — at worst they touch — so first hit wins.
+  int wordIndexAtPoint(int x, int y, int lineHeight, int slop = 4) const;
+
+  // Put the cursor on flat index `idx`. Returns true when it actually moved, so the
+  // caller knows whether to repaint. For a pointing device, which addresses a word
+  // directly instead of stepping to it: the goal column is cleared exactly as a
+  // left/right step clears it, so the next row move aims from the word the finger
+  // picked rather than from wherever the cursor came from.
+  bool selectFlatIndex(int idx);
+
   // Currently highlighted word. nullptr if the word list is empty.
   const WordInfo* getSelected() const;
 
@@ -192,6 +204,12 @@ class WordSelectNavigator {
   // cleared there), so a caller can pair it with getCurrentFlatIndex() to recover the
   // confirmed [anchor, cursor] range. -1 when no range was started.
   int getAnchorFlatIndex() const { return anchorFlatIndex; }
+
+  // Start a ranged selection at `flatIdx` and put the cursor there, without the Confirm
+  // long-press handleMultiSelectInput waits for. For a pointing device, which names the
+  // anchor directly, and for a caller that already knows it. No Confirm hold is in flight,
+  // so there is no release to swallow. Returns false (changing nothing) when out of range.
+  bool beginMultiSelectAt(int flatIdx);
 
   // Process Confirm/Back for multi-select state machine.
   // Returns PhraseReady when a phrase range is confirmed (raw phrase in outPhrase).

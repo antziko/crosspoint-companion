@@ -177,6 +177,22 @@ void DictionaryWordSelectActivity::onEnter() {
   // other word; a lookup never wants them, so there the cursor walks past them.
   navigator.setSkipStopwords(mode_ == Mode::Dictionary);
   navigator.load(std::move(words), std::move(rows), std::move(textPool), consumeInitialConfirm, initialMarker_);
+  // Opened by pointing at a word (the reader's page long-press): start on that word rather
+  // than on initialMarker_'s band. In HighlightRange it is also the range anchor, so the
+  // user's next tap picks the other end and finishes. A point that hits no word (margin,
+  // inter-word gap) leaves the band selection as it is.
+  if (initialPointX_ >= 0 && initialPointY_ >= 0) {
+    const int hit =
+        navigator.wordIndexAtPoint(initialPointX_, initialPointY_, renderer.getLineHeight(SETTINGS.getReaderFontId()));
+    if (hit >= 0) {
+      if (mode_ == Mode::HighlightRange) {
+        navigator.beginMultiSelectAt(hit);
+      } else {
+        navigator.selectFlatIndex(hit);
+        autoLookupPending_ = true;
+      }
+    }
+  }
   const unsigned long tLoad = millis();
   // Opened via the reader's hold-Back gesture? Back is still held — swallow its release once.
   consumeInitialBackRelease_ = mappedInput.isPressed(MappedInputManager::Button::Back);
@@ -681,8 +697,62 @@ void DictionaryWordSelectActivity::loop() {
     return;
   }
 
+  // Pointed at a word and asked for a lookup in one gesture: run it. Fired here rather than
+  // from onEnter so it starts on the loop task, the same task every other lookup starts on,
+  // and after the controller gate above -- which means the controller owns the frame from
+  // this tick, and its overlay is what renders, so the word-select screen never flashes past.
+  if (autoLookupPending_) {
+    autoLookupPending_ = false;
+    controller.lookupSelected(navigator);
+    return;
+  }
+
   if (navigator.handleNavigation(mappedInput, renderer, SETTINGS.getReaderSwapWordSelectAxes())) {
     requestUpdate();
+  }
+
+  // Touch: a touch-down walks the cursor to the word under the finger (differential
+  // repaint, the same path a button step takes), and a tap on a word acts on it. On a
+  // board with no Confirm button this is the ONLY way to select anything.
+  //
+  // Dictionary mode stops at the multi-select boundary: there the two ends are walked with
+  // the cursor and a stray tap would silently move the anchor's far end. HighlightRange
+  // instead RANGES by tapping -- first tap anchors, second tap ends and saves -- because a
+  // touch-only board has no Confirm to long-press into multi-select with.
+  const bool tapRanging = mode_ == Mode::HighlightRange;
+  if (mappedInput.hasTouch() && (tapRanging || !navigator.isMultiSelecting())) {
+    const int lineHeight = renderer.getLineHeight(SETTINGS.getReaderFontId());
+    int tx = 0;
+    int ty = 0;
+    // Only before a range is open. renderHighlightDifferential declines in multi-select
+    // (WordSelectNavigator.cpp), so a touch-down preview there would cost a full page
+    // repaint for pixels the tap that follows is about to replace anyway.
+    if (!navigator.isMultiSelecting() && mappedInput.wasScreenTouchDown(tx, ty)) {
+      if (navigator.selectFlatIndex(navigator.wordIndexAtPoint(tx, ty, lineHeight))) requestUpdate();
+      return;
+    }
+    if (mappedInput.wasScreenTapped(tx, ty)) {
+      const int hit = navigator.wordIndexAtPoint(tx, ty, lineHeight);
+      if (hit >= 0) {
+        if (mode_ == Mode::Dictionary) {
+          navigator.selectFlatIndex(hit);
+          controller.lookupSelected(navigator);
+          return;
+        }
+        if (navigator.isMultiSelecting()) {
+          // Second tap: the range is [anchor, this word]. Tapping the anchor again is a
+          // legitimate one-word highlight, so no minimum length is enforced.
+          const int anchor = navigator.getAnchorFlatIndex();
+          navigator.selectFlatIndex(hit);
+          emitQuoteResult(anchor, hit, navigator.buildPhrase(anchor, hit));
+          return;
+        }
+        // First tap: anchor here and show it highlighted while the user picks the end.
+        navigator.beginMultiSelectAt(hit);
+        requestUpdate();
+        return;
+      }
+    }
   }
 
   // Check Back early when not in multi-select mode. This allows exit even when

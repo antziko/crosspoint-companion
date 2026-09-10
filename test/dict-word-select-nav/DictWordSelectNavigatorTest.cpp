@@ -1540,6 +1540,47 @@ static void testHyphenBoth() {
   runHyphenNavSuite("testHyphenBoth (\"under-\" + \"-stand\")", makeHyphenBothFixture, "under-", "-stand");
 }
 
+// A pointing device names the anchor directly, without the Confirm long-press
+// handleMultiSelectInput waits for -- the only entry a touch-only board has, since it has
+// no Confirm button to hold. The range it opens must behave like any other: cursor on the
+// anchor, and buildPhrase spanning anchor..cursor once the cursor has moved.
+static void testBeginMultiSelectAtOpensRangeWithoutConfirm() {
+  std::printf("testBeginMultiSelectAtOpensRangeWithoutConfirm\n");
+  WordSelectNavigator nav = makeSingleRowFixture({"the", "quick", "brown", "fox"});
+
+  CHECK(!nav.isMultiSelecting(), "starts outside multi-select");
+  CHECK(nav.beginMultiSelectAt(1), "beginMultiSelectAt(1) succeeds");
+  CHECK(nav.isMultiSelecting(), "range is open");
+  CHECK(nav.getAnchorFlatIndex() == 1, "anchor is the named word");
+  CHECK(nav.getCurrentFlatIndex() == 1, "cursor moved to the anchor too");
+
+  // The second tap: point at the far end, then build the phrase the activity emits.
+  CHECK(nav.selectFlatIndex(3), "cursor moves to the range end");
+  CHECK(nav.getAnchorFlatIndex() == 1, "anchor survives the cursor move");
+  CHECK(nav.buildPhrase(nav.getAnchorFlatIndex(), nav.getCurrentFlatIndex()) == "quick brown fox",
+        "phrase spans anchor..cursor");
+
+  // Tapping the anchor itself is a legitimate one-word selection.
+  WordSelectNavigator single = makeSingleRowFixture({"the", "quick", "brown", "fox"});
+  CHECK(single.beginMultiSelectAt(2), "anchor on 'brown'");
+  CHECK(single.buildPhrase(single.getAnchorFlatIndex(), single.getCurrentFlatIndex()) == "brown",
+        "anchor tapped twice yields the single word");
+}
+
+// Out of range must change nothing at all -- a tap that lands in a margin resolves to -1,
+// and the caller passes that straight through.
+static void testBeginMultiSelectAtRejectsOutOfRange() {
+  std::printf("testBeginMultiSelectAtRejectsOutOfRange\n");
+  WordSelectNavigator nav = makeSingleRowFixture({"the", "quick", "brown"});
+  const int before = nav.getCurrentFlatIndex();
+
+  CHECK(!nav.beginMultiSelectAt(-1), "-1 (no word under the finger) is rejected");
+  CHECK(!nav.beginMultiSelectAt(3), "past the last word is rejected");
+  CHECK(!nav.isMultiSelecting(), "no range was opened");
+  CHECK(nav.getAnchorFlatIndex() == -1, "anchor untouched");
+  CHECK(nav.getCurrentFlatIndex() == before, "cursor untouched");
+}
+
 int main() {
   std::printf("=== WordSelectNavigator host litmus ===\n");
   testOrganizeIntoRows();
@@ -1580,6 +1621,8 @@ int main() {
   testWordRepeatStepsWhileHeld();
   testWordRepeatIgnoresHoldCarriedIn();
   testWordRepeatDoesNotApplyToRows();
+  testBeginMultiSelectAtOpensRangeWithoutConfirm();
+  testBeginMultiSelectAtRejectsOutOfRange();
   std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }
