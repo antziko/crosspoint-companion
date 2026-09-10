@@ -587,11 +587,29 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
     uint32_t workTotalMs = 0;
 
     LOG_DBG("HTTP", "wolfSSL GET: %s", url.c_str());
+    // First bytes of an error body, kept so a 4xx/5xx can be named. A server's own error
+    // page says which side failed and why -- a CDN's page carries its error number and ray
+    // id, an origin's carries the application's message -- and the status code alone
+    // cannot distinguish "the CDN refused us" from "the app threw". Bounded and on the
+    // stack: only the prefix is wanted, and only on a path that is about to fail anyway.
+    char errorBody[192] = {};
+    size_t errorBodyLen = 0;
     const int status = http.GET(
         [&](const uint8_t* data, size_t len) {
           // Header parsing is done by the time the first body chunk arrives; skip
           // any body on a non-200/206 (a 30x body is drained by the caller loop below).
-          if (http.getStatus() != 200 && http.getStatus() != 206) return true;
+          if (http.getStatus() != 200 && http.getStatus() != 206) {
+            const size_t room = sizeof(errorBody) - 1 - errorBodyLen;
+            if (room > 0) {
+              const size_t take = len < room ? len : room;
+              // Newlines and control bytes would break the single log line this becomes.
+              for (size_t i = 0; i < take; i++) {
+                const uint8_t c = data[i];
+                errorBody[errorBodyLen++] = (c >= 0x20 && c < 0x7f) ? static_cast<char>(c) : ' ';
+              }
+            }
+            return true;
+          }
           // A resumed hop that answers 200 ignored our Range header and is restarting the
           // resource from byte 0. Appending it would duplicate what the sink already holds
           // (measured on X3 before this check existed: a 130676-byte feed grew to 217792
@@ -975,8 +993,8 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       return HttpDownloader::OK;
     }
     if (status != 200 && status != 206) {
-      LOG_ERR("HTTP", "wolfSSL unexpected status: %d", status);
-      SdDebugLog::log("HTTP", "unexpected status: %d", status);
+      LOG_ERR("HTTP", "wolfSSL unexpected status: %d, body: %s", status, errorBodyLen ? errorBody : "(empty)");
+      SdDebugLog::log("HTTP", "unexpected status: %d, body: %s", status, errorBodyLen ? errorBody : "(empty)");
       setDetail(sink.detail, "HTTP %d", status);
       return HttpDownloader::HTTP_ERROR;
     }

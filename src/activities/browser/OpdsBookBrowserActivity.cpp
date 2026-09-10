@@ -179,6 +179,7 @@ void purgeFeedCache() {
 constexpr fui::ActionId ACTION_ROW = 1;
 constexpr fui::ActionId ACTION_SEARCH = 2;
 constexpr fui::ActionId ACTION_CANCEL = 3;
+constexpr fui::ActionId ACTION_RETRY = 4;
 // Book-download progress cadence. Percent-stepped so the repaint count is bounded
 // at ~10 for any file size, with a hard floor between repaints. Both numbers are
 // about SPI contention, not looks: see the callback in downloadBook().
@@ -233,6 +234,7 @@ void OpdsBookBrowserActivity::onEnter() {
   app.on(ACTION_ROW, &OpdsBookBrowserActivity::onRowEvent, this);
   app.on(ACTION_SEARCH, &OpdsBookBrowserActivity::onSearchEvent, this);
   app.on(ACTION_CANCEL, &OpdsBookBrowserActivity::onCancelEvent, this);
+  app.on(ACTION_RETRY, &OpdsBookBrowserActivity::onRetryEvent, this);
   app.setScreen(&OpdsBookBrowserActivity::rootScreen, this);
   requestUpdate();
 
@@ -289,6 +291,27 @@ void OpdsBookBrowserActivity::onCancelEvent(const fui::ActionEvent&, void* user)
   self->cancelDownload = true;
 }
 
+void OpdsBookBrowserActivity::onRetryEvent(const fui::ActionEvent&, void* user) {
+  auto* self = static_cast<OpdsBookBrowserActivity*>(user);
+  if (self->state != BrowserState::ERROR) return;
+  // The screen this tap flashed is replaced by the loading state either way.
+  self->app.clearTapFlash();
+  self->retryFromError();
+}
+
+void OpdsBookBrowserActivity::retryFromError() {
+  // A retry with no link is not a retry: send the user to pick a network instead of
+  // spending the fetch's timeout to rediscover that the radio is down.
+  if (WiFi.status() != WL_CONNECTED || WiFi.localIP() == IPAddress(0, 0, 0, 0)) {
+    launchWifiSelection();
+    return;
+  }
+  state = BrowserState::LOADING;
+  statusMessage = tr(STR_LOADING);
+  requestUpdate();
+  fetchFeed(currentPath);
+}
+
 void OpdsBookBrowserActivity::loop() {
   if (state == BrowserState::WIFI_SELECTION || state == BrowserState::SEARCH_INPUT) {
     return;
@@ -318,16 +341,15 @@ void OpdsBookBrowserActivity::loop() {
 
   if (state == BrowserState::ERROR) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-      if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
-        state = BrowserState::LOADING;
-        statusMessage = tr(STR_LOADING);
-        requestUpdate();
-        fetchFeed(currentPath);
-      } else {
-        launchWifiSelection();
-      }
+      retryFromError();
     } else if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
       navigateBack();
+    } else {
+      // The screen draws "Tap to retry" on a touch board, so a tap has to reach
+      // ACTION_RETRY. Without this the X4 Pro dead-ends here: it has no Confirm
+      // button, so the only offer the screen makes cannot be taken and one
+      // transient failure ends the session. Back (a left-edge swipe) still exits.
+      routeTouch(mappedInput);
     }
     return;
   }
@@ -500,7 +522,7 @@ void OpdsBookBrowserActivity::buildBrowsingScreen(UiScreen& screen) {
   screenHeader(screen, true);
 
   if (entries.empty()) {
-    screen.centeredText(tr(STR_NO_ENTRIES), screen.theme().bodyText);
+    screen.centeredText(tr(STR_NO_ENTRIES), screen.theme().smallText);
     return;
   }
 
@@ -530,23 +552,15 @@ void OpdsBookBrowserActivity::buildBrowsingScreen(UiScreen& screen) {
   // which it cannot tell apart from "caller left this unset".
   props.textStylesExplicit = true;
 
-  int16_t rowHeight = screen.theme().rowHeight;
-  if (!mappedInput.hasTouch()) {
-    // Non-touch hardware (X3/X4) reads the browser at the Settings list's
-    // density instead of FreeInkUI's touch-target-sized default (see
-    // UiListActivity::syncListViewport; this screen predates that base and
-    // syncs its own viewport directly): settings-sized labels on the plain
-    // row height. Book rows carry a second line (see rebuildRowItems) and grow
-    // to fit it, so navigation rows stay at the dense height.
-    // The label stays single-line (the default maxLines) so a long title is
-    // ellipsized rather than wrapped: a book row is then exactly two lines,
-    // never three.
-    props.labelText = screen.theme().smallText;
-    rowHeight = static_cast<int16_t>(UITheme::getInstance().getMetrics().listRowHeight);
-    props.rowHeight = rowHeight;
-  } else {
-    props.labelText = screen.theme().bodyText;
-  }
+  // Settings-list density on every board (see UiListActivity::resolveRowHeight; this
+  // screen predates that base and syncs its own viewport directly): settings-sized labels
+  // on the plain row height. Book rows carry a second line (see rebuildRowItems) and grow
+  // to fit it, so navigation rows stay at the dense height.
+  // The label stays single-line (the default maxLines) so a long title is ellipsized
+  // rather than wrapped: a book row is then exactly two lines, never three.
+  props.labelText = screen.theme().smallText;
+  const int16_t rowHeight = static_cast<int16_t>(UITheme::getInstance().getMetrics().listRowHeight);
+  props.rowHeight = rowHeight;
   if (authorFirst) {
     props.labelText.bold = true;
   } else {
@@ -561,7 +575,7 @@ void OpdsBookBrowserActivity::buildDownloadScreen(UiScreen& screen) {
 
   // Centered block: status line, book title, progress bar, cancel button.
   const auto& theme = screen.theme();
-  fui::TextStyle centered = theme.bodyText;
+  fui::TextStyle centered = theme.smallText;
   centered.align = fui::TextAlign::Center;
   const int16_t lh = screen.target().lineHeight(centered.font);
   const int16_t gap = theme.spaceMd;
@@ -622,7 +636,7 @@ void OpdsBookBrowserActivity::buildDownloadScreen(UiScreen& screen) {
 void OpdsBookBrowserActivity::buildStatusScreen(UiScreen& screen) {
   screenHeader(screen, false);
 
-  fui::TextStyle centered = screen.theme().bodyText;
+  fui::TextStyle centered = screen.theme().smallText;
   centered.align = fui::TextAlign::Center;
   if (state == BrowserState::ERROR) {
     const int16_t lh = screen.target().lineHeight(centered.font);
@@ -646,7 +660,15 @@ void OpdsBookBrowserActivity::buildStatusScreen(UiScreen& screen) {
         screen.target().text(screen.takeTop(lh, i + 1 == errLines.size() ? gap : 0), errLines[i].c_str(), centered);
       }
     }
-    if (showTapHint) screen.target().text(screen.takeTop(lh), tr(STR_TAP_TO_RETRY), centered);
+    if (showTapHint) {
+      screen.target().text(screen.takeTop(lh), tr(STR_TAP_TO_RETRY), centered);
+      // The whole body, not just the hint line: the hint says "tap to retry", and a
+      // one-line target on an error screen the user is already squinting at is a worse
+      // offer than the words promise. `body` is the pre-spacer rect, so it covers the
+      // centred block wherever the wrapped message pushed it. Header excluded — its own
+      // targets live there.
+      screen.frame().hit(body, ACTION_RETRY, 0, fui::InputTouch);
+    }
     return;
   }
   // CHECK_WIFI / LOADING (and the brief child-activity handoff states).

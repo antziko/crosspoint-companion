@@ -149,8 +149,13 @@ void OpdsSettingsActivity::handleSelection() {
         requestUpdate();
       }
     };
-    startActivityForResultNoThrow<KeyboardEntryActivity>(handler, renderer, mappedInput, tr(STR_PASSWORD),
-                                                         editServer.password, 63, InputType::Text);
+    // Opens EMPTY, never prefilled with the stored password. Passwords are XOR'd with this
+    // chip's factory MAC (ObfuscationUtils.cpp:23), so a store copied from another device
+    // decodes to unprintable bytes -- and prefilling those made the field unfixable: the
+    // junk renders as blanks, the user types onto the end of it, and the save keeps both.
+    // An empty field also means a retype always fully replaces what is stored.
+    startActivityForResultNoThrow<KeyboardEntryActivity>(handler, renderer, mappedInput, tr(STR_PASSWORD), "", 63,
+                                                         InputType::Text);
   } else if (nav.selected == 4) {
     // Sort A-Z toggle: flip in place and persist.
     editServer.sortAlphabetical = !editServer.sortAlphabetical;
@@ -221,7 +226,9 @@ void OpdsSettingsActivity::buildScreen(UiScreen& screen) {
   props.count = static_cast<uint16_t>(getMenuItemCount());
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
-  props.valueInset = 8;               // air between the value and the row edge
+  // No valueInset: sidePadding already insets both edges of the row, so any
+  // extra here lands on the trailing side only and the value sits further
+  // from the edge than the label does.
   // Row titles at the Settings screens' size (smallText) so every list in the
   // app reads at one size; labels that still don't fit wrap onto a second
   // line. maxLines=2 also marks the style explicitly set (an all-default

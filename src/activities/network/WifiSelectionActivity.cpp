@@ -26,6 +26,29 @@ namespace {
 constexpr fui::ActionId ACTION_ROW = 1;
 constexpr fui::ActionId ACTION_SCAN = 2;
 constexpr fui::ActionId ACTION_PROMPT = 3;
+
+// Why the AP dropped us. arduino-esp32 maps only NO_AP_FOUND and a *repeated*
+// AUTH_FAIL onto a wl_status_t this screen can read (STA.cpp:137-148); every other
+// reason -- AUTH_EXPIRE, 4WAY_HANDSHAKE_TIMEOUT, ASSOC_EXPIRE, BEACON_TIMEOUT, and a
+// first-attempt AUTH_FAIL -- leaves the status at WL_DISCONNECTED, so the connect just
+// runs out the clock and reports a timeout that names nothing. The core does log the
+// reason, at log_w(), which is compiled out here: CORE_DEBUG_LEVEL is never defined.
+// Keep it ourselves so a failure says what actually happened.
+//
+// Written by the Network event task, read by the loop task: a byte, single writer,
+// no read-modify-write, so volatile is enough (a mutex is not callable from either
+// side of this pair without inverting who waits on whom).
+volatile uint8_t lastDisconnectReason = 0;
+
+void onStaDisconnected(arduino_event_t* event) {
+  if (!event || event->event_id != ARDUINO_EVENT_WIFI_STA_DISCONNECTED) return;
+  const uint8_t reason = event->event_info.wifi_sta_disconnected.reason;
+  lastDisconnectReason = reason;
+  LOG_ERR("WIFI", "STA disconnected: reason %u (%s)", static_cast<unsigned>(reason),
+          WiFi.STA.disconnectReasonName(static_cast<wifi_err_reason_t>(reason)));
+  SdDebugLog::log("WIFI", "disconnect reason=%u (%s)", static_cast<unsigned>(reason),
+                  WiFi.STA.disconnectReasonName(static_cast<wifi_err_reason_t>(reason)));
+}
 }  // namespace
 
 WifiSelectionActivity::WifiSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
@@ -107,6 +130,9 @@ void WifiSelectionActivity::onEnter() {
   // OtaUpdate — plus CalibreConnect. Every screen that brings the radio up needs this and
   // does not get it for free; owning it once is what stops the sixth copy being written.
   InflateReader::releaseWindow();
+
+  lastDisconnectReason = 0;
+  WiFi.onEvent(onStaDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
 
   // Load saved WiFi credentials - SD card operations need lock as we use SPI
   // for both
@@ -209,6 +235,10 @@ void WifiSelectionActivity::onExit() {
   Activity::onExit();
 
   LOG_DBG("WIFI", "Free heap at onExit start: %d bytes", ESP.getFreeHeap());
+
+  // The callback outlives this activity's heap block otherwise, and the radio
+  // stays up for the caller — so the next disconnect would run a dangling handler.
+  WiFi.removeEvent(onStaDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
 
   // Stop any ongoing WiFi scan
   LOG_DBG("WIFI", "Deleting WiFi scan...");
@@ -644,6 +674,7 @@ void WifiSelectionActivity::attemptConnection() {
   connectionStartTime = millis();
   connectedIP.clear();
   connectionError.clear();
+  lastDisconnectReason = 0;  // a reason left by the previous attempt must not be reported for this one
   requestUpdate();
 
   WiFi.persistent(false);  // Credentials are managed by WifiCredentialStore; suppress SDK NVS auto-connect
@@ -754,6 +785,18 @@ void WifiSelectionActivity::checkConnectionStatus() {
   if (millis() - connectionStartTime > timeoutMs) {
     WiFi.disconnect();
     connectionError = tr(STR_ERROR_CONNECTION_TIMEOUT);
+    // A bare "timeout" is the catch-all for every disconnect reason arduino-esp32 leaves at
+    // WL_DISCONNECTED, so it names nothing on its own — a wrong password, an AP that dropped
+    // the 4-way handshake and one out of range all read identically. Append what the radio
+    // reported (AUTH_FAIL, 4WAY_HANDSHAKE_TIMEOUT, ...) when there was a disconnect at all;
+    // its absence is itself the answer, meaning the association never got far enough to fail.
+    if (const uint8_t reason = lastDisconnectReason; reason != 0) {
+      connectionError += " (";
+      connectionError += WiFi.STA.disconnectReasonName(static_cast<wifi_err_reason_t>(reason));
+      connectionError += ")";
+    }
+    LOG_ERR("WIFI", "Connect timed out after %lums, last disconnect reason %u", timeoutMs,
+            static_cast<unsigned>(lastDisconnectReason));
     if (autoConnecting) {
       handleAutoConnectFailure();
       return;
@@ -1099,7 +1142,7 @@ void WifiSelectionActivity::buildListScreen(UiScreen& screen) {
   }
 
   if (networks.empty()) {
-    screen.centeredText(tr(STR_NO_NETWORKS), screen.theme().bodyText);
+    screen.centeredText(tr(STR_NO_NETWORKS), screen.theme().smallText);
     if (mappedInput.hasTouch()) {
       // Touch has no OK button to rescan with; offer the retry on screen instead
       // of the "Press OK" hint renderNetworkList draws for button boards.
@@ -1130,23 +1173,16 @@ void WifiSelectionActivity::buildListScreen(UiScreen& screen) {
   // Long SSIDs wrap onto a second line inside the row (two body lines always
   // fit the theme row height) instead of truncating; the trailing value is
   // just the short status glyphs, so skip the balanced 60%-band wrap cap.
-  props.labelText = screen.theme().bodyText;
+  // The theme's own row height and the Settings screens' label size, on every board
+  // (see UiListActivity::resolveRowHeight; this screen predates that base and syncs its
+  // own viewport directly). An SSID that would wrap at body size usually fits one line
+  // at this one, so rows stay at the dense height.
+  props.labelText = screen.theme().smallText;
   props.labelText.maxLines = 2;
   props.balanceWrappedLabelWithValue = false;
   listNav.selected = static_cast<int>(selectedNetworkIndex);
-  int16_t rowHeight = screen.theme().rowHeight;
-  if (!mappedInput.hasTouch()) {
-    // Non-touch hardware (X3/X4) keeps the original, denser row height
-    // instead of FreeInkUI's touch-target-sized default (see
-    // UiListActivity::syncListViewport; this screen predates that base and
-    // syncs its own viewport directly), with the Settings list's smaller
-    // label font to match — an SSID that wrapped at body size usually fits
-    // one line here, so rows stay at the dense height.
-    props.labelText = screen.theme().smallText;
-    props.labelText.maxLines = 2;
-    rowHeight = static_cast<int16_t>(metrics.listRowHeight);
-    props.rowHeight = rowHeight;
-  }
+  const int16_t rowHeight = static_cast<int16_t>(metrics.listRowHeight);
+  props.rowHeight = rowHeight;
   listNav.syncToProps(screen.body(), rowHeight, screen.theme().listRowGap, static_cast<int>(networks.size()), props);
   screen.list(props);
 }
@@ -1259,7 +1295,7 @@ void WifiSelectionActivity::renderConnecting(const Rect* screen, const ThemeMetr
   } else {
     const char* statusText = autoConnecting ? tr(STR_CONNECTING_SAVED_WIFI) : tr(STR_CONNECTING);
     const Rect statusBounds{statusX, screen->y, statusWidth, top - metrics->verticalSpacing - screen->y};
-    UITheme::drawCenteredWrappedText(renderer, statusBounds, UI_12_FONT_ID, statusText, MAX_STATUS_LINES, true,
+    UITheme::drawCenteredWrappedText(renderer, statusBounds, UI_10_FONT_ID, statusText, MAX_STATUS_LINES, true,
                                      EpdFontFamily::BOLD, UITheme::TextVerticalAlignment::BOTTOM);
 
     std::string ssidInfo = std::string(tr(STR_TO_PREFIX)) + selectedSSID;
@@ -1278,7 +1314,7 @@ void WifiSelectionActivity::renderConnected(const Rect* screen, const ThemeMetri
   const auto height = renderer.getLineHeight(UI_10_FONT_ID);
   const auto top = screen->y + (screen->height - height * 4) / 2;
 
-  UITheme::drawCenteredText(renderer, *screen, UI_12_FONT_ID, top - 30, tr(STR_CONNECTED), true, EpdFontFamily::BOLD);
+  UITheme::drawCenteredText(renderer, *screen, UI_10_FONT_ID, top - 30, tr(STR_CONNECTED), true, EpdFontFamily::BOLD);
 
   std::string ssidInfo = std::string(tr(STR_NETWORK_PREFIX)) + selectedSSID;
   if (ssidInfo.length() > 28) {
@@ -1298,7 +1334,7 @@ void WifiSelectionActivity::renderConnectionFailed(const Rect* screen, const The
   const auto height = renderer.getLineHeight(UI_10_FONT_ID);
   const auto top = screen->y + (screen->height - height * 2) / 2;
 
-  UITheme::drawCenteredText(renderer, *screen, UI_12_FONT_ID, top - 20, tr(STR_CONNECTION_FAILED), true,
+  UITheme::drawCenteredText(renderer, *screen, UI_10_FONT_ID, top - 20, tr(STR_CONNECTION_FAILED), true,
                             EpdFontFamily::BOLD);
   UITheme::drawCenteredText(renderer, *screen, UI_10_FONT_ID, top + 20, connectionError.c_str());
 
