@@ -288,7 +288,8 @@ void OpdsBookBrowserActivity::onCancelEvent(const fui::ActionEvent&, void* user)
   auto* self = static_cast<OpdsBookBrowserActivity*>(user);
   if (self->state != BrowserState::DOWNLOADING) return;
   self->app.clearTapFlash();
-  self->cancelDownload = true;
+  // cancelFetch is the flag handed to downloadToFile(); it is the only one it polls.
+  self->cancelFetch = true;
 }
 
 void OpdsBookBrowserActivity::onRetryEvent(const fui::ActionEvent&, void* user) {
@@ -1162,7 +1163,6 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   state = BrowserState::DOWNLOADING;
   statusMessage = bookTitle;
   downloadProgress = downloadTotal = 0;
-  cancelDownload = false;
   goHomeAfterCancel = false;
   // And-Wait, not requestUpdate(true). requestUpdate(true) only posts to the render task
   // (ActivityManager.cpp:349, xTaskNotify), so the repaint runs CONCURRENTLY with the code
