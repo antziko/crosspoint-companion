@@ -1,6 +1,7 @@
 #include "HttpDownloader.h"
 
 #include <Arduino.h>
+#include <HalFrontlight.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <SdDebugLog.h>
@@ -357,6 +358,23 @@ constexpr int LINK_WAIT_LIMIT = 3;
 // buffers can't allocate -> dropped frames -> TCP RTO) produced exactly this
 // shape of multi-second per-read gap. See SUMMARY.md Part B Appendix.
 constexpr uint32_t STALL_LOG_THRESHOLD_MS = 1000;
+
+// Idle gap that ends a hop once the body is already flowing, so a stalled connection
+// reconnects instead of sitting out the whole 60s/15s deadline delivering nothing.
+//
+// Boards without PSRAM get this for free: the contiguous-heap record wall ends every hop
+// after ~55-215KB, so no connection lives long enough to stall. With PSRAM there is no wall,
+// so one connection carries the whole file and is exposed for its entire duration.
+// Abandoning a silent socket only pays off when the silence outlasts a
+// reconnect, and a reconnect is not cheap on a degraded link: it costs a fresh TCP + TLS +
+// first byte, which runs to tens of seconds when the origin is the slow party. A threshold
+// below that cost turns every transient gap into a guaranteed loss.
+//
+// Armed only AFTER the first body byte: a slow first response keeps the full deadline,
+// because a slow first byte still delivers. RESUME_TIMEOUT_MS is the same deadline resumed
+// hops already run under, so this only shortens the first hop's 60s -- it never makes a hop
+// more eager to give up than the existing resume path.
+constexpr uint32_t STALL_ABANDON_MS = RESUME_TIMEOUT_MS;
 // Periodic transfer-progress summary cadence. Coarse on purpose: each
 // SdDebugLog::log() does two SD opens + a mutex lock, so logging every
 // chunk would itself perturb the transfer being measured.
@@ -437,8 +455,13 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
 
   {
     const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
-    SdDebugLog::log("HTTP", "GET start: heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d url=%s", s.heapFree,
-                    s.largest8Bit, s.internalFree, s.internalLargest, (int)s.rssi, startUrl.c_str());
+    // light= is the frontlight duty as this transfer starts (0 when off or absent). Stamped
+    // here rather than logged from the HAL on change: SdDebugLog includes HalGPIO, so logging
+    // from lib/hal/ would make hal depend on SdDebugLog and back, which PlatformIO's LDF
+    // cannot resolve. Carrying it per transfer also means no capture can lose it to a dropout.
+    SdDebugLog::log("HTTP", "GET start: heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d light=%u url=%s",
+                    s.heapFree, s.largest8Bit, s.internalFree, s.internalLargest, (int)s.rssi,
+                    Frontlight.isOn() ? Frontlight.brightness() : 0, startUrl.c_str());
   }
 
   std::string url = startUrl;
@@ -519,6 +542,15 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
   const uint32_t requestStartMs = millis();
   uint32_t waitAllMs = 0;
   uint32_t workAllMs = 0;
+  // work= splits into the SD write and the caller's progress callback: different problems
+  // with different fixes (batching writes vs throttling repaints), which one combined
+  // number cannot tell apart.
+  uint32_t sdAllMs = 0;
+  uint32_t progressAllMs = 0;
+  // Cumulative wait for each hop's FIRST byte. Behind a CDN or tunnel this is the only leg
+  // that reaches the origin -- tcp/tls terminate at the edge -- so it separates "the server
+  // was slow" from "the device was slow", which rate= alone cannot.
+  uint32_t ttfbAllMs = 0;
   // Full restarts spent because the server answered 200 to a Range request.
   int rangeRestarts = 0;
   // wolfSSL error that ended the PREVIOUS hop, 0 for a hop that ended cleanly. Read by the
@@ -689,6 +721,14 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
                             (unsigned long)openMs, (unsigned long)tcpMs, (unsigned long)tlsMs, (unsigned long)ttfbMs,
                             http.tlsSessionResumed() ? 1 : 0, snap.heapFree, snap.largest8Bit, snap.internalFree,
                             snap.internalLargest, (int)snap.rssi, sink.total, url.c_str());
+            ttfbAllMs += ttfbMs;
+            // Body is flowing, so from here a silent socket is a stall rather than a slow
+            // server. readFixed/readUntilClose re-arm their deadline from _timeoutMs after
+            // every chunk, so setting it now ends the hop at STALL_ABANDON_MS of silence.
+            // That truncates the body, which is exactly the case responseComplete()==false
+            // already handles below -- the hop resumes from resumeOffset on a fresh
+            // connection. No new control flow, and the resume is idempotent (Range).
+            http.setTimeout(STALL_ABANDON_MS);
           }
 
           // Time waiting on the socket since the PREVIOUS callback returned. lastChunkMs
@@ -707,11 +747,18 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
                             snap.internalLargest, (int)snap.rssi);
           }
 
+          // Bracketed from here, not from `now`: the STALL branch above can write its own SD
+          // log line, and charging that to the body write would overstate sd= on exactly the
+          // chunks a stall investigation cares about.
+          const uint32_t writeStartMs = millis();
           if (!sink.write(data, len)) return false;  // caller abort (e.g. SD write failed)
           sink.downloaded += len;
+          const uint32_t afterWrite = millis();
           // Report progress even when total is unknown (chunked / no Content-Length):
           // callers can show a byte count instead of a percentage bar.
           if (sink.progress) sink.progress(sink.downloaded, sink.total);
+          sdAllMs += afterWrite - writeStartMs;
+          progressAllMs += millis() - afterWrite;
 
           // Our own per-chunk cost: the SD write plus whatever the caller's progress
           // callback did (queueing an e-ink refresh, polling input). Logged separately
@@ -728,7 +775,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
           if (sink.downloaded - lastXferLogBytes >= XFER_LOG_BYTES) {
             lastXferLogBytes = sink.downloaded;
             const uint32_t elapsedMs = now - transferStartMs;
-            const unsigned bytesPerSec = elapsedMs > 0 ? (unsigned)(sink.downloaded * 1000UL / elapsedMs) : 0;
+            const unsigned bytesPerSec = elapsedMs > 0 ? (unsigned)((uint64_t)sink.downloaded * 1000U / elapsedMs) : 0;
             // largest8 is the number that decides whether an https body survives, and it was
             // the one this line did not print. wolfSSL sizes its receive buffer to each
             // incoming record and servers ramp record size as a connection warms, so the
@@ -744,6 +791,16 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
           return true;
         },
         [&sink]() { return sink.cancelFlag && *sink.cancelFlag; });
+
+    // The read that consumes the idle timeout never reaches the body callback, so without
+    // this its gap is missing from wait= and a hop that sat silent for the whole deadline
+    // reads as cheap. Gated on loggedConnect so a hop that never received a byte cannot fold
+    // its connect and handshake into wait=, which measures transfer-time socket wait only.
+    if (loggedConnect) {
+      const uint32_t trailingGapMs = millis() - lastChunkMs;
+      waitTotalMs += trailingGapMs;
+      waitAllMs += trailingGapMs;
+    }
 
     if (http.aborted()) return HttpDownloader::ABORTED;
     if (status < 0) {
@@ -1237,16 +1294,28 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       // actually ran 70.5 seconds. Anyone judging download health from that line was reading
       // a number three orders of magnitude wrong, so DONE now uses the request-wide clock.
       const uint32_t totalElapsedMs = millis() - requestStartMs;
-      const unsigned bytesPerSec = totalElapsedMs > 0 ? (unsigned)(sink.downloaded * 1000UL / totalElapsedMs) : 0;
+      const unsigned bytesPerSec =
+          totalElapsedMs > 0 ? (unsigned)((uint64_t)sink.downloaded * 1000U / totalElapsedMs) : 0;
       // wait= is time blocked on the socket, work= is our own per-chunk cost (SD write
       // plus the caller's progress callback). They should roughly sum to elapsed; a large
       // work= means we are the bottleneck, a large wait= with a small work= means the
       // link or the server is. On X3 a repaint shows up in wait=, not work=, because
       // requestUpdate() only posts to the render task — which then takes the SPI bus the
       // SD card shares, so the NEXT read blocks.
-      SdDebugLog::log("DONE", "bytes=%zu elapsed=%lums rate=%uB/s wait=%lums work=%lums resumes=%d empty=%d fresh=%d",
+      //
+      // ttfb= is the cumulative wait for each hop's FIRST byte; other= is everything the
+      // wait/work split does not cover: DNS, TCP, the TLS handshake, and any attempt that
+      // failed before delivering a byte. A hop that never gets a byte is charged to neither
+      // wait= nor ttfb=, so without other= the line does not reconcile. other= is derived,
+      // so the four terms always sum to elapsed.
+      const uint32_t accountedMs = waitAllMs + workAllMs;
+      const uint32_t otherMs = totalElapsedMs > accountedMs ? totalElapsedMs - accountedMs : 0;
+      SdDebugLog::log("DONE",
+                      "bytes=%zu elapsed=%lums rate=%uB/s wait=%lums work=%lums (sd=%lums progress=%lums) "
+                      "ttfb=%lums other=%lums resumes=%d empty=%d fresh=%d",
                       sink.downloaded, (unsigned long)totalElapsedMs, bytesPerSec, (unsigned long)waitAllMs,
-                      (unsigned long)workAllMs, resumes, emptyHopsTotal, freshRetries);
+                      (unsigned long)workAllMs, (unsigned long)sdAllMs, (unsigned long)progressAllMs,
+                      (unsigned long)ttfbAllMs, (unsigned long)otherMs, resumes, emptyHopsTotal, freshRetries);
     }
     return HttpDownloader::OK;
   }
@@ -1752,7 +1821,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
     if (sink.downloaded - lastXferLogBytes >= XFER_LOG_BYTES) {
       lastXferLogBytes = sink.downloaded;
       const uint32_t elapsedMs = now - transferStartMs;
-      const unsigned bytesPerSec = elapsedMs > 0 ? (unsigned)(sink.downloaded * 1000UL / elapsedMs) : 0;
+      const unsigned bytesPerSec = elapsedMs > 0 ? (unsigned)((uint64_t)sink.downloaded * 1000U / elapsedMs) : 0;
       SdDebugLog::log("XFER", "bytes=%zu elapsed=%lums rate=%uB/s heap=%u", sink.downloaded, (unsigned long)elapsedMs,
                       bytesPerSec, (unsigned)ESP.getFreeHeap());
     }
@@ -1763,7 +1832,8 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
 
   {
     const uint32_t totalElapsedMs = millis() - transferStartMs;
-    const unsigned bytesPerSec = totalElapsedMs > 0 ? (unsigned)(sink.downloaded * 1000UL / totalElapsedMs) : 0;
+    const unsigned bytesPerSec =
+        totalElapsedMs > 0 ? (unsigned)((uint64_t)sink.downloaded * 1000U / totalElapsedMs) : 0;
     SdDebugLog::log("DONE", "complete=%d bytes=%zu elapsed=%lums rate=%uB/s", (int)complete, sink.downloaded,
                     (unsigned long)totalElapsedMs, bytesPerSec);
   }
