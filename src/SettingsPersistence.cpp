@@ -103,7 +103,12 @@ void verifySettingsPersistenceTable() {
       "frontlightWarmth", "frontlightOn", "frontlightRestoreOnWake",
       // The toolbar reader menu is touch-only, so its style row is absent on
       // button boards; the stored value still travels with the file.
-      "readerMenuStyle"};
+      "readerMenuStyle",
+      // Tilt page turn needs the QMI8658 IMU, so getSettingsList() only inserts the row when
+      // halTiltSensor.isAvailable(). On a board without one the bound still matches the
+      // list's enum (TILT_PAGE_TURN_COUNT-1 == 2) and the value travels with the file, so
+      // its absence from the list is expected rather than drift.
+      "tiltPageTurn"};
 
   // Rows with no counterpart: a setting removed from SettingsList but left here would keep
   // being written to settings.json forever.
