@@ -14,6 +14,7 @@
 #include <algorithm>
 
 #include "CrossPointSettings.h"
+#include "activities/boot_sleep/SleepImageRender.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -162,13 +163,16 @@ void BmpViewerActivity::renderImage() {
   // 1. Open the file
   if (Storage.openFileForRead("BMP", filePath, file)) {
     Bitmap bitmap(file, true);
-    bitmap.setOneBitDither(renderer.isX3());          // X3: 1-bit halftone, full tonal detail
-    bitmap.setImageDitherMode(SETTINGS.imageDither);  // blue/bayer/error-diffusion (X4)
+    // A BMP is a wallpaper candidate (see canSetSleepCover), so preview it through the
+    // wallpaper pipeline -- dither target, three-tone quantization, Wallpaper Tone, crop
+    // and the inversion filter all included. What is on screen here is what the sleep
+    // screen will show, so choosing a cover is not a guess.
+    configureSleepBitmap(bitmap, renderer);
 
     // 2. Parse headers to get dimensions
     if (bitmap.parseHeaders() == BmpReaderError::Ok) {
-      const auto place =
-          BitmapRenderUtils::centeredPlacement(bitmap.getWidth(), bitmap.getHeight(), pageWidth, pageHeight);
+      const auto place = BitmapRenderUtils::centeredPlacement(bitmap.getWidth(), bitmap.getHeight(), pageWidth,
+                                                              pageHeight, sleepImageCrops());
       const int x = place.x;
       const int y = place.y;
 
@@ -187,8 +191,10 @@ void BmpViewerActivity::renderImage() {
       // X4 (4-level grayscale) needs the multi-pass grayscale render to actually
       // show grays; X3 produces a 1-bit halftone (0/3) so a single BW pass is
       // correct. Without this, X4 BMPs showed only the 1-bit BW plane — too dark,
-      // and the dithered grays were invisible.
-      const bool hasGreyscale = bitmap.hasGreyscale() && !renderer.isX3();
+      // and the dithered grays were invisible. A cover filter suppresses the gray
+      // planes, which is why the answer comes from the wallpaper pipeline and not
+      // from the board alone.
+      const bool hasGreyscale = bitmap.hasGreyscale() && sleepImageUsesGrayscale(renderer);
 
       // Wipe ghosting before drawing the image with a single mild HALF refresh
       // (not FULL's black-white-black-white flash).
@@ -196,7 +202,13 @@ void BmpViewerActivity::renderImage() {
       renderer.displayBuffer(HalDisplay::HALF_REFRESH);
 
       renderer.clearScreen();
-      renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, 0, 0);
+      renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, place.cropX, place.cropY);
+      // Before the hints below, not after: the inversion covers the whole framebuffer, so
+      // running it over them would leave white-on-black labels. Both the hint boxes and
+      // the action bar draw their own ground, so they stay legible on the inverted image.
+      if (sleepImageInverts()) {
+        renderer.invertScreen();
+      }
       // Draw UI hints on the base (BW) layer
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
       layoutActionBar(hasPrevious, hasNext, confirmLabel);
@@ -206,7 +218,8 @@ void BmpViewerActivity::renderImage() {
       if (hasGreyscale) {
         // Overlay the 4-level grayscale planes, then drive the panel with the
         // combined gray frame — same sequence as the sleep cover.
-        BitmapRenderUtils::applyGrayscaleOverlay(renderer, bitmap, x, y, pageWidth, pageHeight);
+        BitmapRenderUtils::applyGrayscaleOverlay(renderer, bitmap, x, y, pageWidth, pageHeight, place.cropX,
+                                                 place.cropY);
       }
 
     } else {

@@ -21,8 +21,8 @@ SleepImageReviewActivity::SleepImageReviewActivity(GfxRenderer& renderer, Mapped
       readerPath(std::move(readerPath)) {}
 
 void SleepImageReviewActivity::onEnter() {
-  // Sized to one line of the hint font. renderImage() letterboxes the wallpaper above it,
-  // so the strip it reserves has to be known before the first render.
+  // Sized to one line of the hint font. Laid out before the first render so the bar can
+  // be drawn over the wallpaper and hit-tested against the same boxes.
   actionBar_.layout(renderer, mappedInput.hasTouch(), UI_10_FONT_ID, 3);
   Activity::onEnter();
   renderImage();
@@ -54,14 +54,15 @@ void SleepImageReviewActivity::renderImage() {
     return;
   }
 
-  // Letterbox the wallpaper above the action bar rather than under it. The bar is the only
-  // control this screen has on a touch board, and the grayscale pass below repaints the gray
-  // planes across the WHOLE screen from the bitmap -- so a bar drawn over the image competes
-  // with photo gray whatever it fills itself with. 0 on button boards, where the bar is inert.
-  const int imageHeight = pageHeight - actionBar_.reservedHeight();
-
-  const auto place =
-      BitmapRenderUtils::centeredPlacement(bitmap.getWidth(), bitmap.getHeight(), pageWidth, imageHeight);
+  // Full screen, with the action bar drawn OVER the image (the arrangement the BMP viewer
+  // already uses). Reserving a strip for the bar instead would shrink the viewport, and any
+  // scale the sleep render did not use wrecks the picture: the bitmap is dithered in SOURCE
+  // pixels during decode (Bitmap.cpp packPixel) and drawBitmap resamples by nearest
+  // neighbour, so a wallpaper authored at panel size goes from "not scaled at all" to a
+  // ~0.92 decimation of the threshold field -- which prints as a grid. Same screen size as
+  // the sleep render means the same scale, and therefore the same pixels.
+  const auto place = BitmapRenderUtils::centeredPlacement(bitmap.getWidth(), bitmap.getHeight(), pageWidth, pageHeight,
+                                                          sleepImageCrops());
   const int x = place.x;
   const int y = place.y;
 
@@ -71,7 +72,8 @@ void SleepImageReviewActivity::renderImage() {
 
   // The same answer the sleep render used, so this screen shows the image the user actually
   // woke up to -- the cover filter suppresses the gray planes, and reviewing a filtered
-  // wallpaper through the unfiltered pipeline would show a different picture.
+  // wallpaper through the unfiltered pipeline would show a different picture. Crop and
+  // inversion are matched below for the same reason.
   const bool hasGreyscale = bitmap.hasGreyscale() && sleepImageUsesGrayscale(renderer);
 
   // Same single-activation recipe as SleepActivity::renderBitmapSleepScreen. This screen
@@ -82,8 +84,17 @@ void SleepImageReviewActivity::renderImage() {
   // driven to its target regardless of what the panel was holding. That is what erases the
   // retained frame, so no separate wipe pass is needed ahead of it.
   renderer.clearScreen();
-  renderer.drawBitmap(bitmap, x, y, pageWidth, imageHeight, 0, 0);
-  // Button hints (Skip / Keep / Remove) are self-explanatory; no heading prompt needed.
+  renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, place.cropX, place.cropY);
+  // Before the controls below, not after: the inversion covers the whole framebuffer, so
+  // running it over the bar and the hints would leave white-on-black labels. Both draw
+  // their own ground, so they stay legible on the inverted image.
+  if (sleepImageInverts()) {
+    renderer.invertScreen();
+  }
+  // Skip / Keep / Remove, on top of the wallpaper. Both the hint boxes and the bar paint
+  // their own ground, so they stay readable over a photo -- but the grayscale pass below
+  // repaints the gray planes across the whole screen, so on a grayscale render the photo's
+  // gray still tints them. That is the price of showing the wallpaper at its true scale.
   if (actionBar_.active()) {
     const char* barLabels[] = {tr(STR_SKIP), tr(STR_KEEP), tr(STR_REMOVE)};
     actionBar_.draw(renderer, UI_10_FONT_ID, barLabels, /*primaryIndex=*/1);
@@ -99,7 +110,9 @@ void SleepImageReviewActivity::renderImage() {
   }
 
   if (hasGreyscale) {
-    BitmapRenderUtils::applyGrayscaleOverlay(renderer, bitmap, x, y, pageWidth, imageHeight);
+    // Same crop as the BW base above: an uncropped gray pass would land its planes on
+    // different pixels than the image they are shading.
+    BitmapRenderUtils::applyGrayscaleOverlay(renderer, bitmap, x, y, pageWidth, pageHeight, place.cropX, place.cropY);
   }
 
   file.close();

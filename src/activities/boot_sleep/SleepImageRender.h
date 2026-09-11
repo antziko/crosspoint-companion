@@ -25,6 +25,19 @@ inline bool sleepImageUsesGrayscale(const GfxRenderer& renderer) {
          SETTINGS.sleepScreenCoverFilter == CrossPointSettings::SLEEP_SCREEN_COVER_FILTER::NO_FILTER;
 }
 
+// Fill the screen and trim the overflowing axis (Sleep Screen Cover Mode = Crop)
+// instead of letterboxing the whole image.
+inline bool sleepImageCrops() {
+  return SETTINGS.sleepScreenCoverMode == CrossPointSettings::SLEEP_SCREEN_COVER_MODE::CROP;
+}
+
+// Invert the painted framebuffer (Sleep Screen Cover Filter = Inverted B&W). Only ever
+// true alongside a 1-bit render: sleepImageUsesGrayscale() is false for every filter, so
+// this never has to invert the gray planes.
+inline bool sleepImageInverts() {
+  return SETTINGS.sleepScreenCoverFilter == CrossPointSettings::SLEEP_SCREEN_COVER_FILTER::INVERTED_BLACK_AND_WHITE;
+}
+
 // Dither target + tone for a wallpaper bitmap. Call before parseHeaders(), which is
 // why it takes none of the header-derived state: the decision above needs only the
 // board and the filter, both known upfront.
