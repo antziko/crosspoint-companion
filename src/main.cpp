@@ -41,6 +41,7 @@
 #include "fontIds.h"
 #include "images/LoadingIcon.h"
 #include "network/NtpBgState.h"
+#include "network/WifiEventLog.h"
 #include "util/ButtonNavigator.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryRegistry.h"
@@ -526,6 +527,10 @@ void setup() {
   // Apply the SD-logging toggle now that settings are loaded (default off). Governs
   // the boot-done MEM line below and all later SdDebugLog::log() calls.
   SdDebugLog::setMasterEnabled(SETTINGS.sdCardLogging != 0);
+  // Subscribe to STA disconnect events for the whole session: a drop during an OPDS
+  // transfer or a KOSync round is invisible otherwise, and every request after it
+  // spends ~29s in DNS timeouts and link-down waits before anything names the cause.
+  WifiEventLog::begin();
   APP_STATE.loadFromFile();
   RECENT_BOOKS.loadFromFile();
 

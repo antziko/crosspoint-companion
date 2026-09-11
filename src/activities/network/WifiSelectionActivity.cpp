@@ -19,6 +19,7 @@
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "network/WifiEventLog.h"
 
 namespace fui = freeink::ui;
 
@@ -27,28 +28,6 @@ constexpr fui::ActionId ACTION_ROW = 1;
 constexpr fui::ActionId ACTION_SCAN = 2;
 constexpr fui::ActionId ACTION_PROMPT = 3;
 
-// Why the AP dropped us. arduino-esp32 maps only NO_AP_FOUND and a *repeated*
-// AUTH_FAIL onto a wl_status_t this screen can read (STA.cpp:137-148); every other
-// reason -- AUTH_EXPIRE, 4WAY_HANDSHAKE_TIMEOUT, ASSOC_EXPIRE, BEACON_TIMEOUT, and a
-// first-attempt AUTH_FAIL -- leaves the status at WL_DISCONNECTED, so the connect just
-// runs out the clock and reports a timeout that names nothing. The core does log the
-// reason, at log_w(), which is compiled out here: CORE_DEBUG_LEVEL is never defined.
-// Keep it ourselves so a failure says what actually happened.
-//
-// Written by the Network event task, read by the loop task: a byte, single writer,
-// no read-modify-write, so volatile is enough (a mutex is not callable from either
-// side of this pair without inverting who waits on whom).
-volatile uint8_t lastDisconnectReason = 0;
-
-void onStaDisconnected(arduino_event_t* event) {
-  if (!event || event->event_id != ARDUINO_EVENT_WIFI_STA_DISCONNECTED) return;
-  const uint8_t reason = event->event_info.wifi_sta_disconnected.reason;
-  lastDisconnectReason = reason;
-  LOG_ERR("WIFI", "STA disconnected: reason %u (%s)", static_cast<unsigned>(reason),
-          WiFi.STA.disconnectReasonName(static_cast<wifi_err_reason_t>(reason)));
-  SdDebugLog::log("WIFI", "disconnect reason=%u (%s)", static_cast<unsigned>(reason),
-                  WiFi.STA.disconnectReasonName(static_cast<wifi_err_reason_t>(reason)));
-}
 }  // namespace
 
 WifiSelectionActivity::WifiSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
@@ -131,8 +110,7 @@ void WifiSelectionActivity::onEnter() {
   // does not get it for free; owning it once is what stops the sixth copy being written.
   InflateReader::releaseWindow();
 
-  lastDisconnectReason = 0;
-  WiFi.onEvent(onStaDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  WifiEventLog::clear();
 
   // Load saved WiFi credentials - SD card operations need lock as we use SPI
   // for both
@@ -235,10 +213,6 @@ void WifiSelectionActivity::onExit() {
   Activity::onExit();
 
   LOG_DBG("WIFI", "Free heap at onExit start: %d bytes", ESP.getFreeHeap());
-
-  // The callback outlives this activity's heap block otherwise, and the radio
-  // stays up for the caller — so the next disconnect would run a dangling handler.
-  WiFi.removeEvent(onStaDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
 
   // Stop any ongoing WiFi scan
   LOG_DBG("WIFI", "Deleting WiFi scan...");
@@ -674,7 +648,7 @@ void WifiSelectionActivity::attemptConnection() {
   connectionStartTime = millis();
   connectedIP.clear();
   connectionError.clear();
-  lastDisconnectReason = 0;  // a reason left by the previous attempt must not be reported for this one
+  WifiEventLog::clear();  // a reason left by the previous attempt must not be reported for this one
   requestUpdate();
 
   WiFi.persistent(false);  // Credentials are managed by WifiCredentialStore; suppress SDK NVS auto-connect
@@ -790,13 +764,13 @@ void WifiSelectionActivity::checkConnectionStatus() {
     // the 4-way handshake and one out of range all read identically. Append what the radio
     // reported (AUTH_FAIL, 4WAY_HANDSHAKE_TIMEOUT, ...) when there was a disconnect at all;
     // its absence is itself the answer, meaning the association never got far enough to fail.
-    if (const uint8_t reason = lastDisconnectReason; reason != 0) {
+    if (const uint8_t reason = WifiEventLog::lastDisconnectReason(); reason != 0) {
       connectionError += " (";
-      connectionError += WiFi.STA.disconnectReasonName(static_cast<wifi_err_reason_t>(reason));
+      connectionError += WifiEventLog::reasonName(reason);
       connectionError += ")";
     }
     LOG_ERR("WIFI", "Connect timed out after %lums, last disconnect reason %u", timeoutMs,
-            static_cast<unsigned>(lastDisconnectReason));
+            static_cast<unsigned>(WifiEventLog::lastDisconnectReason()));
     if (autoConnecting) {
       handleAutoConnectFailure();
       return;
