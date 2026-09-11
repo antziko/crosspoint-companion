@@ -65,6 +65,22 @@ void KOReaderServerListActivity::loop() {
     return;
   }
 
+  // Touch hold on a real server row = the Confirm hold above. The X4 Pro has no
+  // Confirm pin at all (BoardConfig.h, XTEINK_X4_PRO), so without this the
+  // duplicate gesture is unreachable there. Resolved before the tap:
+  // wasScreenLongPress suppresses the rest of the contact, so the finger lift
+  // cannot also open the row's editor.
+  int holdX = 0;
+  int holdY = 0;
+  if (mappedInput.wasScreenLongPress(holdX, holdY)) {
+    const int heldRow = listTouch_.indexAt(renderer, holdX, holdY);
+    if (heldRow >= 0 && heldRow < serverCount && KOREADER_STORE.getCount() < KOReaderCredentialStore::maxServers()) {
+      selectedIndex = heldRow;
+      duplicateSelectedServer();
+    }
+    return;
+  }
+
   // Short tap: only act on releases whose press originated inside this activity
   // A tap on a row selects and activates it in one go, like the FUI list screens.
   // A tap is never a hold, so it cannot reach the long-press branch above.

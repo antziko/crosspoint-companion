@@ -294,6 +294,46 @@ void FileBrowserActivity::onExit() {
   fileNameBuffer.reset();
 }
 
+// Delete prompt for files[selectorIndex]. Shared by the Confirm hold and the
+// touch hold, so both gestures ask the same question and take the same path.
+void FileBrowserActivity::promptDeleteSelectedEntry() {
+  if (selectorIndex >= files.size()) return;
+
+  std::string cleanBasePath = basepath;
+  if (cleanBasePath.back() != '/') cleanBasePath += "/";
+  // Own both strings before the prompt: `files` is rebuilt by the result handler,
+  // so a reference into it would dangle by the time the handler runs.
+  const std::string entry = files[selectorIndex].name;
+  const std::string fullPath = cleanBasePath + entry;
+
+  auto handler = [this, fullPath](const ActivityResult& res) {
+    if (!res.isCancelled) {
+      LOG_DBG("FileBrowser", "Attempting to delete: %s", fullPath.c_str());
+      if (removeDirFile(fullPath)) {
+        LOG_DBG("FileBrowser", "Deleted successfully");
+        // Drop any recent-books entry whose backing file is now gone -- the
+        // deleted book, or every book under a deleted folder. Same prune the
+        // Recent Books screen uses (RecentBooksActivity).
+        if (RECENT_BOOKS.pruneMissing()) {
+          RECENT_BOOKS.saveToFile();
+        }
+        {
+          RenderLock lock(*this);
+          reloadCurrentWindow();  // re-pull the window around the current position
+        }
+        requestUpdate(true);
+      } else {
+        LOG_ERR("FileBrowser", "Failed to delete: %s", fullPath.c_str());
+      }
+    } else {
+      LOG_DBG("FileBrowser", "Delete cancelled by user");
+    }
+  };
+
+  const std::string heading = tr(STR_DELETE) + std::string("? ");
+  startActivityForResultNoThrow<ConfirmationActivity>(handler, renderer, mappedInput, heading, entry);
+}
+
 // To avoid traversing directories twice (once for cache clearing, once for deletion),
 // we do both in one pass here, instead of using Storage.removeDir
 bool FileBrowserActivity::removeDirFile(const std::string& fullPath) {
@@ -429,6 +469,23 @@ void FileBrowserActivity::loop() {
     return;
   }
 
+  // Touch hold on a row = the Confirm hold below: prompt to delete it. The X4 Pro
+  // has no Confirm pin at all (BoardConfig.h, XTEINK_X4_PRO), so without this the
+  // delete gesture is unreachable there. Resolved before the tap: wasScreenLongPress
+  // suppresses the rest of the contact, so the finger lift cannot also open the row.
+  if (mode == Mode::Books) {
+    int holdX = 0;
+    int holdY = 0;
+    if (mappedInput.wasScreenLongPress(holdX, holdY)) {
+      const int heldRow = listTouch_.indexAt(renderer, holdX, holdY);
+      if (heldRow >= 0 && heldRow < static_cast<int>(files.size())) {
+        selectorIndex = heldRow;
+        promptDeleteSelectedEntry();
+      }
+      return;
+    }
+  }
+
   // A tap on a row selects and opens it in one go, like the FUI list screens.
   // Resolved before the Confirm branch so the two share one activation body.
   int tapX = 0;
@@ -465,37 +522,7 @@ void FileBrowserActivity::loop() {
 
     if (mode == Mode::Books && !viaTouch && mappedInput.getHeldTime() >= GO_HOME_MS) {
       // --- LONG PRESS ACTION: DELETE FILE OR DIRECTORY ---
-      std::string cleanBasePath = basepath;
-      if (cleanBasePath.back() != '/') cleanBasePath += "/";
-      const std::string fullPath = cleanBasePath + entry;
-
-      auto handler = [this, fullPath](const ActivityResult& res) {
-        if (!res.isCancelled) {
-          LOG_DBG("FileBrowser", "Attempting to delete: %s", fullPath.c_str());
-          if (removeDirFile(fullPath)) {
-            LOG_DBG("FileBrowser", "Deleted successfully");
-            // Drop any recent-books entry whose backing file is now gone -- the
-            // deleted book, or every book under a deleted folder. Same prune the
-            // Recent Books screen uses (RecentBooksActivity).
-            if (RECENT_BOOKS.pruneMissing()) {
-              RECENT_BOOKS.saveToFile();
-            }
-            {
-              RenderLock lock(*this);
-              reloadCurrentWindow();  // re-pull the window around the current position
-            }
-            requestUpdate(true);
-          } else {
-            LOG_ERR("FileBrowser", "Failed to delete: %s", fullPath.c_str());
-          }
-        } else {
-          LOG_DBG("FileBrowser", "Delete cancelled by user");
-        }
-      };
-
-      std::string heading = tr(STR_DELETE) + std::string("? ");
-
-      startActivityForResultNoThrow<ConfirmationActivity>(handler, renderer, mappedInput, heading, entry);
+      promptDeleteSelectedEntry();
       return;
     } else {
       // --- SHORT PRESS ACTION: OPEN/NAVIGATE ---

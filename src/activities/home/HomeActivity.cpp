@@ -430,6 +430,26 @@ void HomeActivity::loop() {
     return;
   }
 
+  // Touch hold on a recent-book tile = the Confirm hold above: prompt to remove
+  // it from the list. The X4 Pro has no Confirm pin at all (BoardConfig.h,
+  // XTEINK_X4_PRO), so without this the gesture is unreachable there. Resolved
+  // before the tap/down block: wasScreenLongPress suppresses the rest of the
+  // contact, so the finger lift cannot also open the book.
+  if (!recentBooks.empty()) {
+    int holdX = 0;
+    int holdY = 0;
+    if (mappedInput.wasScreenLongPress(holdX, holdY)) {
+      const int heldCount = std::min(static_cast<int>(recentBooks.size()), std::max(1, metrics.homeRecentBooksCount));
+      int heldIndex = -1;
+      if (GUI.recentBookIndexFromPoint(renderer, coverRect(), heldCount, holdX, holdY, heldIndex) && heldIndex >= 0 &&
+          heldIndex < static_cast<int>(recentBooks.size())) {
+        selectorIndex = heldIndex;
+        promptRemoveRecentBook(recentBooks[heldIndex].path, recentBooks[heldIndex].title);
+      }
+      return;
+    }
+  }
+
   // Touch: the recent-book cover band, then the menu below it. Ported from
   // upstream #2957 — feat's home screen had no touch path at all, so on a
   // touch board the whole screen was button-only.

@@ -45,7 +45,7 @@ int OpdsServerListActivity::getItemCount() const {
 
 OpdsServerListActivity::OpdsServerListActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                                const bool pickerMode)
-    : UiListActivity("OpdsServerList", renderer, mappedInput), pickerMode(pickerMode) {}
+    : UiListActivity("OpdsServerList", renderer, mappedInput, /*wantsTouchLongPress=*/true), pickerMode(pickerMode) {}
 
 void OpdsServerListActivity::onEnter() {
   UiListActivity::onEnter();
@@ -179,6 +179,20 @@ void OpdsServerListActivity::activateIndex(const int index) {
   app.clearTapFlash();
   handleSelection();
   requestUpdate();
+}
+
+// Touch equivalent of the Confirm hold in handleButtons(). The X4 Pro has no
+// Confirm pin at all (BoardConfig.h, XTEINK_X4_PRO), so without this the
+// duplicate gesture is unreachable there. Only real server rows duplicate: the
+// "Add Server" and filename-format rows share the list's long-press mask but
+// have nothing to clone.
+void OpdsServerListActivity::onRowLongPress(const int index) {
+  if (pickerMode) return;
+  if (index < 0 || index >= static_cast<int>(OPDS_STORE.getCount())) return;
+  if (OPDS_STORE.getCount() >= OpdsServerStore::maxServers()) return;  // at limit, same gate as the Confirm hold
+  nav.selected = index;
+  app.clearTapFlash();
+  duplicateSelectedServer();
 }
 
 void OpdsServerListActivity::handleSelection() {
@@ -318,7 +332,10 @@ void OpdsServerListActivity::buildScreen(UiScreen& screen) {
   props.items = rowItems_.data();
   props.count = static_cast<uint16_t>(rowItems_.size());
   props.action = ACTION_ROW;
-  props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
+  // Tap opens the row; a touch hold duplicates a server row (onRowLongPress).
+  // ListItem carries no per-row mask, so the non-server rows are filtered in the
+  // handler instead. Physical buttons stay in loop().
+  props.inputMask = fui::InputTouch | fui::InputLongPress;
   // The Settings list's label size on every board, on the plain row height, which
   // list() grows only for the rows that need it — a "name - url" label too long for
   // one line wraps to two, everything that fits stays at the dense single-line height.

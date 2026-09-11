@@ -19,6 +19,9 @@ class FileBrowserActivity final : public Activity {
  private:
   // Deletion
   bool removeDirFile(const std::string& fullPath);
+  // Confirm-then-delete for the currently selected entry. Shared by the Confirm
+  // hold and the touch hold (the only delete gesture a buttonless board has).
+  void promptDeleteSelectedEntry();
 
   ButtonNavigator buttonNavigator;
   // Rows the last render drew, so a tap can pick one (see ListTouchTarget).

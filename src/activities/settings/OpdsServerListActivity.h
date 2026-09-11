@@ -23,6 +23,9 @@ class OpdsServerListActivity final : public UiListActivity {
   int listCount() const override { return getItemCount(); }
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;
+  // Touch hold on a server row duplicates it — the buttonless boards' only
+  // route to the gesture handleButtons() offers on Confirm.
+  void onRowLongPress(int index) override;
   // Popup input goes first; while it is open it consumes the pass.
   bool handleCustomInput() override;
   // Picker mode backs out to the home menu rather than finishing.
