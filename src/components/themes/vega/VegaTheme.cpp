@@ -281,7 +281,12 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
   const int coverX = rect.x + padding;
   const int coverY = rect.y + padding;
   const int textX = coverX + coverW + kHeroTextGap;
-  const int textW = rect.x + rect.width - padding - textX;
+  // The text column stops kHeroTextGap short of the card edge, mirroring the gap it keeps
+  // from the cover on its left. The selection outline runs just outside that edge, and the
+  // progress bar is itself an outlined rect -- without this the two borders ran as a pair of
+  // near-touching lines. Applied whether or not the card is selected, so the block does not
+  // reflow when the selection moves onto it.
+  const int textW = rect.x + rect.width - padding - textX - kHeroTextGap;
 
   const RecentBook& hero = recentBooks[0];
 
@@ -476,8 +481,15 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
 
   // The only per-frame work: selection outlines, which must track selectorIndex.
   if (selectorIndex == 0) {
-    renderer.drawRoundedRect(coverX - kSelectionInset, coverY - kSelectionInset, coverW + 2 * kSelectionInset,
-                             coverH + 2 * kSelectionInset, kSelectionOutlineW, kCornerRadius, true);
+    // The whole hero card, cover AND the title/progress block beside it -- they are one item,
+    // and recentBookIndexFromPoint already treats the entire band as book 0's target, so an
+    // outline around the cover alone framed something smaller than what a press selects.
+    // Safe over the text because the cover snapshot carries that text (drawHeroText runs
+    // before storeCoverBuffer) and is blitted back before each frame's outline is drawn, so
+    // the previous frame's outline is erased rather than accumulating.
+    const int cardW = (rect.width - 2 * padding) + 2 * kSelectionInset;
+    renderer.drawRoundedRect(coverX - kSelectionInset, coverY - kSelectionInset, cardW, coverH + 2 * kSelectionInset,
+                             kSelectionOutlineW, kCornerRadius, true);
   }
   for (int i = 0; i < nextCount; i++) {
     if (selectorIndex != i + 1) continue;
