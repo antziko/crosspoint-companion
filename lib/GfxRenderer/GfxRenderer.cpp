@@ -7,6 +7,7 @@
 #include <HalGPIO.h>
 #include <InkExtent.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <SdCardFont.h>
 #include <Utf8.h>
 
@@ -1776,6 +1777,45 @@ void GfxRenderer::drawBitmap1Bit(const Bitmap& bitmap, const int x, const int y,
     return;
   }
 
+  // --- Byte-wise fast path ---------------------------------------------------------------
+  // drawPixel costs a rotate call, two bounds checks and a read-modify-write PER PIXEL --
+  // ~2.6us on an ESP32-C3, measured as 189ms for one 210x350 cover. A 1-bit source only ever
+  // ADDS black (white pixels are left alone), so a whole byte of pixels can be cleared in a
+  // single masked write, and a partial group needs no validity mask: bits we do not own are
+  // simply never set in the mask.
+  //
+  // Two orientations qualify, and they pack along different axes:
+  //   LandscapeCounterClockwise is the identity map, so a source row IS a panel row and the
+  //     mask is built across x.
+  //   Portrait maps phyX = y (see rotateCoordinates), so eight consecutive source ROWS at one
+  //     x share a single panel byte; the mask is built down y and flushed when the byte
+  //     column changes.
+  // Everything else -- the other two orientations, any scaling, grayscale strip rendering, a
+  // missing framebuffer, or an image reaching outside the screen -- keeps the general loop.
+  const bool fastEligible = !isScaled && !_stripActive && hasFrameBuffer() && x >= 0 && y >= 0 &&
+                            x + bitmap.getWidth() <= getScreenWidth() && y + bitmap.getHeight() <= getScreenHeight();
+  const bool identityFast = fastEligible && orientation == LandscapeCounterClockwise;
+
+  // Portrait accumulates one mask byte per source column before flushing. Allocation failure
+  // is not an error: the general loop below runs instead.
+  std::unique_ptr<uint8_t[]> pending;
+  if (fastEligible && orientation == Portrait) pending = makeUniqueNoThrow<uint8_t[]>(bitmap.getWidth());
+  const bool portraitFast = pending != nullptr;
+  int pendingByteCol = -1;
+
+  const auto flushPending = [&]() {
+    if (pendingByteCol < 0) return;
+    for (int bx = 0; bx < bitmap.getWidth(); bx++) {
+      const uint8_t mask = pending[bx];
+      if (mask == 0) continue;
+      const uint32_t idx =
+          static_cast<uint32_t>(panelHeight - 1 - (x + bx)) * panelWidthBytes + static_cast<uint32_t>(pendingByteCol);
+      frameBuffer[idx] &= static_cast<uint8_t>(~mask);
+      pending[bx] = 0;
+    }
+    pendingByteCol = -1;
+  };
+
   for (int bmpY = 0; bmpY < bitmap.getHeight(); bmpY++) {
     // Read rows sequentially using readNextRow
     if (bitmap.readNextRow(outputRow, rowBytes) != BmpReaderError::Ok) {
@@ -1792,6 +1832,42 @@ void GfxRenderer::drawBitmap1Bit(const Bitmap& bitmap, const int x, const int y,
       continue;  // Continue reading to keep row counter in sync
     }
     if (screenY < 0) {
+      continue;
+    }
+
+    if (portraitFast) {
+      // A bottom-up BMP walks y downward, so "the byte column changed" is the flush trigger
+      // rather than a fixed group of eight reads -- correct for either row order and for any
+      // destination y, aligned or not.
+      const int byteCol = screenY >> 3;
+      if (byteCol != pendingByteCol) {
+        flushPending();
+        pendingByteCol = byteCol;
+      }
+      const auto bit = static_cast<uint8_t>(1u << (7 - (screenY & 7)));
+      for (int bmpX = 0; bmpX < bitmap.getWidth(); bmpX++) {
+        const uint8_t val = outputRow[bmpX / 4] >> (6 - ((bmpX * 2) % 8)) & 0x3;
+        if (val < 3) pending[bmpX] |= bit;
+      }
+      continue;
+    }
+
+    if (identityFast) {
+      const uint32_t rowBase = static_cast<uint32_t>(screenY) * panelWidthBytes;
+      uint8_t mask = 0;
+      int currentByte = -1;
+      for (int bmpX = 0; bmpX < bitmap.getWidth(); bmpX++) {
+        const int phyX = x + bmpX;
+        const int byteIndex = phyX >> 3;
+        if (byteIndex != currentByte) {
+          if (mask != 0) frameBuffer[rowBase + currentByte] &= static_cast<uint8_t>(~mask);
+          currentByte = byteIndex;
+          mask = 0;
+        }
+        const uint8_t val = outputRow[bmpX / 4] >> (6 - ((bmpX * 2) % 8)) & 0x3;
+        if (val < 3) mask |= static_cast<uint8_t>(1u << (7 - (phyX & 7)));
+      }
+      if (mask != 0) frameBuffer[rowBase + currentByte] &= static_cast<uint8_t>(~mask);
       continue;
     }
 
@@ -1815,6 +1891,7 @@ void GfxRenderer::drawBitmap1Bit(const Bitmap& bitmap, const int x, const int y,
       // White pixels (val == 3) are not drawn (leave background)
     }
   }
+  flushPending();  // portrait fast path: the last byte column is still pending
 
   free(outputRow);
   free(rowBytes);
