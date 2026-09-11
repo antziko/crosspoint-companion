@@ -22,14 +22,25 @@ class OpdsSettingsActivity final : public UiListActivity {
   OpdsServer editServer;
   bool isNewServer = false;
   bool showSaveError = false;
+  // Password reveal. Shown only while the Password row is also the selected row, so moving
+  // off it hides the password again without any extra bookkeeping; cleared outright when a
+  // row is activated. Never persisted and never restored — a reveal dies with the screen.
+  bool revealPassword = false;
+  bool revealHoldFired = false;     // swallow the Confirm release that ended a reveal hold
+  bool confirmPressActive = false;  // true only when a Confirm press originated inside this activity
 
   int listCount() const override { return getMenuItemCount(); }
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;
+  // Hold the Password row to reveal the stored password (touch).
+  void onRowLongPress(int index) override;
+  // Hold Confirm on the Password row to do the same on a board with buttons.
+  bool handleButtons() override;
   const char* headerTitle() const override;
   void drawFooter() override;
 
   int getMenuItemCount() const;
+  void togglePasswordReveal();
   void handleSelection();
   bool saveServer();
 

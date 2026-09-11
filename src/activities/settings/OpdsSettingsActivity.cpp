@@ -16,11 +16,15 @@ namespace {
 // Editable fields: Name, URL, Username, Password, Sort A-Z, Extra query.
 // Existing servers also show a Delete option (BASE_ITEMS + 1).
 constexpr int BASE_ITEMS = 6;
+constexpr int PASSWORD_ROW = 3;
+// Same hold the sibling server list uses for its duplicate gesture, so the two screens
+// answer a hold at the same moment.
+constexpr unsigned long REVEAL_HOLD_MS = 1000;
 }  // namespace
 
 OpdsSettingsActivity::OpdsSettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                            const int serverIndex)
-    : UiListActivity("OpdsSettings", renderer, mappedInput), serverIndex(serverIndex) {
+    : UiListActivity("OpdsSettings", renderer, mappedInput, /*wantsTouchLongPress=*/true), serverIndex(serverIndex) {
   // Labels never change (unlike the values, which track editServer's fields
   // live), so they're set once here rather than every buildScreen() call.
   // LOCAL(feat): six fields, not upstream's four — feat adds the Sort A-Z toggle
@@ -66,7 +70,61 @@ void OpdsSettingsActivity::activateIndex(const int index) {
   // Activation opens a keyboard or leaves the screen; a lingering flash would
   // gray an unrelated row.
   app.clearTapFlash();
+  revealPassword = false;
   handleSelection();
+}
+
+// Show the stored password in place of "******". The editor still opens EMPTY (see the
+// Password branch in handleSelection): revealing is display-only, so it carries none of the
+// hazard prefilling does -- there is nothing to type onto and nothing to save back.
+void OpdsSettingsActivity::togglePasswordReveal() {
+  revealPassword = !revealPassword;
+  requestUpdate();
+}
+
+// Touch counterpart of the Confirm hold below. The X4 Pro has no Confirm pin at all
+// (BoardConfig.h, XTEINK_X4_PRO), so without this the reveal is unreachable there.
+void OpdsSettingsActivity::onRowLongPress(const int index) {
+  if (index != PASSWORD_ROW || editServer.password.empty()) return;
+  nav.selected = index;
+  app.clearTapFlash();
+  togglePasswordReveal();
+}
+
+// Confirm is overridden wholesale for the same reason the server list overrides it: a
+// BUTTON hold cannot come through onRowLongPress(), which fires only for touch contacts on
+// rows masked InputLongPress. The press-origin latch is kept here too, so a release left
+// behind by the screen that opened this one cannot activate row 0 on entry.
+bool OpdsSettingsActivity::handleButtons() {
+  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) confirmPressActive = true;
+
+  // After a reveal fires, swallow input until Confirm is physically released, or that
+  // release would also open the password keyboard.
+  if (revealHoldFired) {
+    if (!mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
+      revealHoldFired = false;
+      confirmPressActive = false;
+    }
+    return true;
+  }
+
+  if (confirmPressActive && nav.selected == PASSWORD_ROW && !editServer.password.empty() &&
+      mappedInput.isPressed(MappedInputManager::Button::Confirm) && mappedInput.getHeldTime() >= REVEAL_HOLD_MS) {
+    revealHoldFired = true;
+    confirmPressActive = false;
+    togglePasswordReveal();
+    return true;
+  }
+
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    if (confirmPressActive) {
+      confirmPressActive = false;
+      activateIndex(nav.selected);
+    }
+    return true;
+  }
+
+  return UiListActivity::handleButtons();
 }
 
 bool OpdsSettingsActivity::saveServer() {
@@ -139,7 +197,7 @@ void OpdsSettingsActivity::handleSelection() {
     };
     startActivityForResultNoThrow<KeyboardEntryActivity>(handler, renderer, mappedInput, tr(STR_USERNAME),
                                                          editServer.username, 63, InputType::Text);
-  } else if (nav.selected == 3) {
+  } else if (nav.selected == PASSWORD_ROW) {
     // Password
     auto handler = [this](const ActivityResult& result) {
       if (!result.isCancelled) {
@@ -215,7 +273,12 @@ void OpdsSettingsActivity::buildScreen(UiScreen& screen) {
   fieldRowItems[0].value = editServer.name.empty() ? tr(STR_NOT_SET) : editServer.name.c_str();
   fieldRowItems[1].value = editServer.url.empty() ? tr(STR_NOT_SET) : editServer.url.c_str();
   fieldRowItems[2].value = editServer.username.empty() ? tr(STR_NOT_SET) : editServer.username.c_str();
-  fieldRowItems[3].value = editServer.password.empty() ? tr(STR_NOT_SET) : "******";
+  // Revealed only while the Password row is ALSO the selected row: moving the selection
+  // away hides the password again, with no extra state to clear.
+  const bool showPassword = revealPassword && nav.selected == PASSWORD_ROW && !editServer.password.empty();
+  fieldRowItems[PASSWORD_ROW].value = editServer.password.empty() ? tr(STR_NOT_SET)
+                                      : showPassword              ? editServer.password.c_str()
+                                                                  : "******";
   // LOCAL(feat): the two feat-only rows. I18N.get() returns a stable pointer
   // and extraQuery is a member, so both outlive the row list.
   fieldRowItems[4].value = I18N.get(editServer.sortAlphabetical ? StrId::STR_STATE_ON : StrId::STR_STATE_OFF);
@@ -225,7 +288,10 @@ void OpdsSettingsActivity::buildScreen(UiScreen& screen) {
   props.items = fieldRowItems;
   props.count = static_cast<uint16_t>(getMenuItemCount());
   props.action = ACTION_ROW;
-  props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
+  // Tap opens the row; a touch hold on the Password row reveals it (onRowLongPress).
+  // ListItem carries no per-row mask, so the other rows are filtered in the handler
+  // instead. Physical buttons stay in loop().
+  props.inputMask = fui::InputTouch | fui::InputLongPress;
   // No valueInset: sidePadding already insets both edges of the row, so any
   // extra here lands on the trailing side only and the value sits further
   // from the edge than the label does.
