@@ -1,5 +1,6 @@
 #pragma once
 
+#include "TouchFeedback.h"
 #include "components/UITheme.h"
 
 class GfxRenderer;
@@ -35,12 +36,31 @@ class ListTouchTarget {
 
   // Item index at (x, y) in screen coordinates, or -1 when the point hits no row
   // (or nothing has been recorded yet, which is the state before the first paint).
-  int indexAt(const GfxRenderer& renderer, const int x, const int y) const {
+  int indexAt(const GfxRenderer& renderer, const int x, const int y, Rect* rowRect = nullptr) const {
     if (!valid_) return -1;
     int index = -1;
-    if (!GUI.listIndexFromPoint(renderer, rect_, itemCount_, selectedIndex_, hasSubtitle_, x, y, index)) {
+    if (!GUI.listIndexFromPoint(renderer, rect_, itemCount_, selectedIndex_, hasSubtitle_, x, y, index, rowRect)) {
       return -1;
     }
+    return index;
+  }
+
+  // Hit-test a tap AND acknowledge it: the row the finger landed on is tinted and pushed
+  // to the panel before the caller acts on it, so a tap that opens something is answered
+  // immediately instead of looking ignored until the next screen paints.
+  //
+  // Taps only. A hold that is polled frame by frame must keep using indexAt(), or it would
+  // re-flash the row on every pass of the loop.
+  int touchRow(const GfxRenderer& renderer, const int x, const int y) const {
+    Rect row{};
+    const int index = indexAt(renderer, x, y, &row);
+    if (index < 0) return -1;
+    // Deliberately does NOT reveal the navigation cursor (see ListCursor): the cursor marks
+    // where the BUTTONS are, and a finger needs no such marker. Revealing it here left the
+    // cursor on after a tap, so the File Browser drew row 0 highlighted in every folder the
+    // user tapped into -- the activity is not re-entered on a folder change, so nothing
+    // hid it again.
+    flashTouchedRow(renderer, row);
     return index;
   }
 

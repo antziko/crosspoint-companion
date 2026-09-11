@@ -5,6 +5,7 @@
 #include <esp_heap_caps.h>
 
 #include "ActivityManager.h"
+#include "components/ListCursor.h"
 
 namespace {
 // Heap profiling. onEnter() runs before an activity allocates (baseline), onExit()
@@ -28,6 +29,10 @@ void logHeap(const char* phase, const char* name) {
 
 void Activity::onEnter() {
   LOG_DBG("ACT", "Entering activity: %s", name.c_str());
+  // A freshly opened screen has a selection only because the buttons need one. Withhold its
+  // highlight until the user navigates (see ListCursor); a list that opens positioned on a
+  // later row is unaffected.
+  ListCursor::hide();
   logHeap("enter", name.c_str());
 }
 

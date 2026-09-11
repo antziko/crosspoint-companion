@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "RecentBooksStore.h"
+#include "components/ListCursor.h"
 #include "components/UITheme.h"
 #include "components/icons/cover.h"
 #include "fontIds.h"
@@ -251,7 +252,7 @@ int RoundedRaffTheme::getListPageItems(int contentHeight, bool hasSubtitle) cons
 
 bool RoundedRaffTheme::listIndexFromPoint(const GfxRenderer& renderer, const Rect rect, const int itemCount,
                                           const int selectedIndex, const bool hasSubtitle, const int x, const int y,
-                                          int& index) const {
+                                          int& index, Rect* rowRect) const {
   if (itemCount <= 0) return false;
   // Mirrors drawList's row metrics, including the subtitle row built from the two
   // font line heights rather than from a metrics constant.
@@ -271,6 +272,10 @@ bool RoundedRaffTheme::listIndexFromPoint(const GfxRenderer& renderer, const Rec
   const int hit = std::max(0, selectedIndex) / pageItems * pageItems + row;
   if (hit >= itemCount) return false;
   index = hit;
+  // The pill is inset from the band on both sides, and the gap below it belongs to no row.
+  if (rowRect) {
+    *rowRect = Rect{rect.x + sidePadding, rect.y + row * rowStep, rect.width - sidePadding * 2, rowHeight};
+  }
   return true;
 }
 
@@ -306,9 +311,13 @@ void RoundedRaffTheme::drawList(const GfxRenderer& renderer, Rect rect, int item
   const int rowX = rect.x + sidePadding;
   const int rowWidth = rect.width - sidePadding * 2;
 
+  // cursorIndex, not selectedIndex: a list the user has not navigated yet withholds the
+  // highlight (ListCursor), while pageStartIndex above keeps the real selection.
+  const int cursorIndex = ListCursor::suppressed(selectedIndex) ? -1 : selectedIndex;
+
   for (int i = pageStartIndex; i < itemCount && i < pageStartIndex + pageItems; i++) {
     const int rowY = rect.y + (i % pageItems) * rowStep;
-    const bool isSelected = i == selectedIndex;
+    const bool isSelected = i == cursorIndex;
     renderer.fillRoundedRect(rowX, rowY, rowWidth, rowHeight, kRowRadius, isSelected ? Color::Black : Color::White);
 
     constexpr int kMinTitleWidth = 40;

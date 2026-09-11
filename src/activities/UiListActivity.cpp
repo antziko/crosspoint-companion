@@ -4,6 +4,8 @@
 #include <I18n.h>
 
 #include "MappedInputManager.h"
+#include "TouchFeedback.h"
+#include "components/ListCursor.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -170,7 +172,38 @@ int16_t UiListActivity::resolveRowHeight(fui::ListProps& props, const bool hasSu
 
 void UiListActivity::syncListViewport(UiScreen& screen, fui::ListProps& props, const bool hasSubtitle) {
   const int16_t rowHeight = resolveRowHeight(props, hasSubtitle);
-  activeNav().syncToProps(screen.body(), rowHeight, screen.theme().listRowGap, listCount(), props);
+  const auto body = screen.body();
+  const int16_t rowGap = screen.theme().listRowGap;
+  listBand_ = Rect{body.x, body.y, body.width, body.height};
+  listRowHeight_ = rowHeight;
+  listRowStep_ = rowHeight + rowGap;
+  activeNav().syncToProps(body, rowHeight, rowGap, listCount(), props);
+  // Withhold the highlight on a list the user has not navigated yet. Applied after
+  // syncToProps so the viewport it just computed is untouched -- only what list() DRAWS as
+  // selected changes (-1 = no selected row).
+  if (ListCursor::suppressed(props.selectedIndex)) props.selectedIndex = -1;
+}
+
+void UiListActivity::onBeforeRoute(const fui::InputSnapshot& snap) {
+  // Acknowledge the tap on the row the finger landed on, before the dispatch this hook
+  // precedes can leave the screen. FreeInkApp's own tap flash already covers a row that
+  // STAYS put — it repaints that row with the focused style in the refresh that shows the
+  // tap's result, at no extra panel cost — but a row that opens something never gets that
+  // repaint, and that is the case this covers.
+  if (!snap.touchReleased || snap.longPress) return;
+  const auto& listNav = activeNav();
+  // Fixed-height rows only. visibleRows is the fixed-height estimate and drawnRows what
+  // the build actually laid out; when they disagree a row grew (a wrapped label, a
+  // subtitle), the uniform grid below no longer describes what is on screen, and a tint on
+  // the wrong band reads as a glitch. Skip the feedback rather than guess at the rect.
+  if (listRowStep_ <= 0 || listNav.drawnRows <= 0 || listNav.drawnRows != listNav.visibleRows) return;
+  if (snap.touchX < listBand_.x || snap.touchX >= listBand_.x + listBand_.width) return;
+  const int offset = snap.touchY - listBand_.y;
+  if (offset < 0) return;
+  const int row = offset / listRowStep_;
+  if (row >= listNav.drawnRows || offset % listRowStep_ >= listRowHeight_) return;  // gap: no row
+  if (listNav.top + row >= listCount()) return;
+  flashTouchedRow(renderer, Rect{listBand_.x, listBand_.y + row * listRowStep_, listBand_.width, listRowHeight_});
 }
 
 void UiListActivity::drawChrome() {

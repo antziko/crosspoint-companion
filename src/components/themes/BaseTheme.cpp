@@ -15,6 +15,7 @@
 
 #include "I18n.h"
 #include "RecentBooksStore.h"
+#include "components/ListCursor.h"
 #include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
@@ -345,10 +346,13 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
     }
   }
 
-  // Draw selection
+  // Draw selection. cursorIndex, not selectedIndex: a list the user has not navigated yet
+  // withholds the highlight (ListCursor), while every paging calculation below still uses
+  // the real selection.
+  const int cursorIndex = ListCursor::suppressed(selectedIndex) ? -1 : selectedIndex;
   int contentWidth = rect.width - 5;
-  if (selectedIndex >= 0) {
-    renderer.fillRect(rect.x, rect.y + selectedIndex % pageItems * rowHeight - 2, rect.width, rowHeight);
+  if (cursorIndex >= 0) {
+    renderer.fillRect(rect.x, rect.y + cursorIndex % pageItems * rowHeight - 2, rect.width, rowHeight);
   }
   constexpr int minValueGap = 10;
 
@@ -372,10 +376,10 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
     auto itemName = rowTitle(i);
     auto font = UI_10_FONT_ID;
     auto item = renderer.truncatedText(font, itemName.c_str(), rowTextWidth);
-    renderer.drawText(font, rect.x + BaseMetrics::values.contentSidePadding, itemY, item.c_str(), i != selectedIndex);
+    renderer.drawText(font, rect.x + BaseMetrics::values.contentSidePadding, itemY, item.c_str(), i != cursorIndex);
 
     // Apply checkerboard dither to create gray text effect for dimmed items
-    if (rowDimmed && rowDimmed(i) && i != selectedIndex) {
+    if (rowDimmed && rowDimmed(i) && i != cursorIndex) {
       const int titleWidth = renderer.getTextWidth(font, item.c_str());
       const int lineH = renderer.getLineHeight(font);
       const int tx = rect.x + BaseMetrics::values.contentSidePadding;
@@ -388,7 +392,7 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
         const auto subFont = (rowSubtitleLarge && rowSubtitleLarge(i)) ? UI_10_FONT_ID : SMALL_FONT_ID;
         auto subtitle = renderer.truncatedText(subFont, subtitleText.c_str(), rowTextWidth);
         renderer.drawText(subFont, rect.x + BaseMetrics::values.contentSidePadding, itemY + 22, subtitle.c_str(),
-                          i != selectedIndex);
+                          i != cursorIndex);
       }
     }
 
@@ -399,7 +403,7 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
         valueY = itemY + 10;
       }
       renderer.drawText(valueFont, rect.x + contentWidth - BaseMetrics::values.contentSidePadding - valueTextWidth,
-                        valueY, valueText.c_str(), i != selectedIndex);
+                        valueY, valueText.c_str(), i != cursorIndex);
     }
   }
 }
@@ -458,7 +462,7 @@ void BaseTheme::drawCompactHeader(const GfxRenderer& renderer, Rect rect, const 
 }
 
 bool BaseTheme::listIndexFromPoint(const GfxRenderer&, const Rect rect, const int itemCount, const int selectedIndex,
-                                   const bool hasSubtitle, const int x, const int y, int& index) const {
+                                   const bool hasSubtitle, const int x, const int y, int& index, Rect* rowRect) const {
   if (itemCount <= 0) return false;
   const int rowHeight = hasSubtitle ? BaseMetrics::values.listWithSubtitleRowHeight : BaseMetrics::values.listRowHeight;
   if (rowHeight <= 0) return false;
@@ -469,6 +473,7 @@ bool BaseTheme::listIndexFromPoint(const GfxRenderer&, const Rect rect, const in
   const int hit = std::max(0, selectedIndex) / pageItems * pageItems + row;
   if (hit >= itemCount) return false;
   index = hit;
+  if (rowRect) *rowRect = Rect{rect.x, rect.y + row * rowHeight, rect.width, rowHeight};
   return true;
 }
 

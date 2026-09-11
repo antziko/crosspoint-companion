@@ -1,6 +1,7 @@
 #pragma once
 
 #include "activities/Activity.h"
+#include "components/UITheme.h"  // Rect
 #include "components/UiAppHost.h"
 #include "util/ButtonNavigator.h"
 
@@ -99,6 +100,13 @@ class UiListActivity : public Activity, protected UiAppHost {
   // Selection + viewport (selected/top/visibleRows/followOnBuild). Access via
   // activeNav() in shared code; `nav` is the single-list default storage.
   freeink::ui::ListNav nav;
+  // Geometry of the rows the last build laid out, for the touch acknowledgment in
+  // onBeforeRoute(). Written by syncListViewport on the render task and read by the loop
+  // task — the same "record what render drew, never recompute it" discipline
+  // ListTouchTarget uses for the legacy list screens.
+  Rect listBand_{};
+  int listRowStep_ = 0;
+  int listRowHeight_ = 0;
   ButtonNavigator buttonNavigator;
 
  private:
@@ -107,6 +115,8 @@ class UiListActivity : public Activity, protected UiAppHost {
   // Named apart from UiAppHost::routeTouch so the host overload stays visible
   // (not name-hidden) to subclasses with extra touch surfaces.
   bool routeListTouch();
+  // Tint the row a tap landed on before the dispatch that may leave this screen.
+  void onBeforeRoute(const freeink::ui::InputSnapshot& snap) override;
 
   const bool wantsTouchLongPress;
   // Press-origin latches for the default handleButtons(): a release only acts when its

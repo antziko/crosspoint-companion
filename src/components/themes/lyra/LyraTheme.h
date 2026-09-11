@@ -121,7 +121,7 @@ class LyraTheme : public BaseTheme {
   int getListRowStep(bool hasSubtitle) const override;
   int getListPageItems(int contentHeight, bool hasSubtitle) const override;
   bool listIndexFromPoint(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex, bool hasSubtitle,
-                          int x, int y, int& index) const override;
+                          int x, int y, int& index, Rect* rowRect = nullptr) const override;
   void drawList(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,
                 const std::function<std::string(int index)>& rowTitle,
                 const std::function<std::string(int index)>& rowSubtitle,

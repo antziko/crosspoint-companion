@@ -16,7 +16,7 @@ void DictionarySuggestionsActivity::loop() {
   // A tap on a row selects and activates it in one go, like the FUI list screens.
   int tapX = 0;
   int tapY = 0;
-  const int tappedRow = mappedInput.wasScreenTapped(tapX, tapY) ? listTouch_.indexAt(renderer, tapX, tapY) : -1;
+  const int tappedRow = mappedInput.wasScreenTapped(tapX, tapY) ? listTouch_.touchRow(renderer, tapX, tapY) : -1;
   if (tappedRow >= 0) selectedIndex = tappedRow;
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) || tappedRow >= 0) {

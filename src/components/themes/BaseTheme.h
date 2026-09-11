@@ -288,8 +288,11 @@ class BaseTheme {
   // gave the draw call — the visible page is derived from selectedIndex exactly as
   // drawList derives it, so the hit bands cannot drift from the visuals. Themes that
   // step rows differently (RoundedRaff's inter-row gap) override this.
+  // `rowRect`, when given, receives the on-screen rect of the row that was hit — the
+  // geometry is already computed here, so a caller wanting to draw on that row (touch
+  // feedback) never has to re-derive it and cannot drift from the hit bands.
   virtual bool listIndexFromPoint(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,
-                                  bool hasSubtitle, int x, int y, int& index) const;
+                                  bool hasSubtitle, int x, int y, int& index, Rect* rowRect = nullptr) const;
   virtual void drawHeader(const GfxRenderer& renderer, Rect rect, const char* title,
                           const char* subtitle = nullptr) const;
   virtual void drawSubHeader(const GfxRenderer& renderer, Rect rect, const char* label,

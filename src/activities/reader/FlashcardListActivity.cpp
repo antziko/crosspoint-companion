@@ -217,7 +217,7 @@ void FlashcardListActivity::loop() {
   // A tap is never a hold, so it cannot reach the long-press branch above.
   int tapX = 0;
   int tapY = 0;
-  const int tappedRow = mappedInput.wasScreenTapped(tapX, tapY) ? listTouch_.indexAt(renderer, tapX, tapY) : -1;
+  const int tappedRow = mappedInput.wasScreenTapped(tapX, tapY) ? listTouch_.touchRow(renderer, tapX, tapY) : -1;
   if (tappedRow >= 0) selectedIndex = tappedRow;
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) || tappedRow >= 0) {

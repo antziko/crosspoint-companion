@@ -74,7 +74,7 @@ void TxtReaderBookmarksActivity::loop() {
   // the hold-to-delete branch above.
   int tapX = 0;
   int tapY = 0;
-  const int tappedRow = mappedInput.wasScreenTapped(tapX, tapY) ? listTouch_.indexAt(renderer, tapX, tapY) : -1;
+  const int tappedRow = mappedInput.wasScreenTapped(tapX, tapY) ? listTouch_.touchRow(renderer, tapX, tapY) : -1;
   if (tappedRow >= 0 && tappedRow < static_cast<int>(bookmarks.size())) selectorIndex = tappedRow;
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) || tappedRow >= 0) {

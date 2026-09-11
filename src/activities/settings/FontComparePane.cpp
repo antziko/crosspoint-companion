@@ -222,7 +222,7 @@ void FontComparePane::restore(GfxRenderer& renderer) {
 }
 
 bool FontComparePane::selectAtPoint(const GfxRenderer& renderer, const int x, const int y) {
-  const int hit = listTouch_.indexAt(renderer, x, y);
+  const int hit = listTouch_.touchRow(renderer, x, y);
   if (hit < 0) return false;
   // setHighlight, not a bare assignment: it also takes the nav lock render() clears once
   // the newly highlighted font has been loaded from SD, exactly as a button move does.

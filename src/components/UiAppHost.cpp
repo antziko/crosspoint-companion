@@ -27,6 +27,7 @@ UiAppHost::TouchRoute UiAppHost::routeTouch(const MappedInputManager& input, con
     return result;
   }
   result.routed = true;
+  onBeforeRoute(result.snap);
   result.event = app.route(result.snap);
   return result;
 }

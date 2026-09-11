@@ -12,6 +12,8 @@
 #include <vector>
 
 #include "RecentBooksStore.h"
+#include "components/ListCursor.h"
+#include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "components/icons/book.h"
 #include "components/icons/book24.h"
@@ -201,7 +203,7 @@ int LyraTheme::getListPageItems(int contentHeight, bool hasSubtitle) const {
 }
 
 bool LyraTheme::listIndexFromPoint(const GfxRenderer&, const Rect rect, const int itemCount, const int selectedIndex,
-                                   const bool hasSubtitle, const int x, const int y, int& index) const {
+                                   const bool hasSubtitle, const int x, const int y, int& index, Rect* rowRect) const {
   if (itemCount <= 0) return false;
   const int rowHeight = hasSubtitle ? LyraMetrics::values.listWithSubtitleRowHeight : LyraMetrics::values.listRowHeight;
   if (rowHeight <= 0) return false;
@@ -212,6 +214,7 @@ bool LyraTheme::listIndexFromPoint(const GfxRenderer&, const Rect rect, const in
   const int hit = std::max(0, selectedIndex) / pageItems * pageItems + row;
   if (hit >= itemCount) return false;
   index = hit;
+  if (rowRect) *rowRect = Rect{rect.x, rect.y + row * rowHeight, rect.width, rowHeight};
   return true;
 }
 
@@ -249,10 +252,12 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
     renderer.fillRect(scrollBarX, scrollBarY, scrollWidth, scrollBarHeight, true);
   }
 
-  // Draw selection
+  // Draw selection. cursorIndex, not selectedIndex: a list the user has not navigated yet
+  // withholds the highlight (ListCursor), while the paging maths keeps the real selection.
+  const int cursorIndex = ListCursor::suppressed(selectedIndex) ? -1 : selectedIndex;
   int contentWidth = rect.width - (totalPages > 1 ? scrollCut : 0);
-  if (selectedIndex >= 0) {
-    renderer.fillRoundedRect(rect.x + listInset, rect.y + selectedIndex % pageItems * rowHeight,
+  if (cursorIndex >= 0) {
+    renderer.fillRoundedRect(rect.x + listInset, rect.y + cursorIndex % pageItems * rowHeight,
                              contentWidth - listInset * 2, rowHeight, cornerRadius, Color::LightGray);
   }
 
@@ -291,7 +296,7 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
     renderer.drawText(UI_10_FONT_ID, textX, itemY + 7, item.c_str(), true);
 
     // Apply checkerboard dither to create gray text effect for dimmed items
-    if (rowDimmed && rowDimmed(i) && i != selectedIndex) {
+    if (rowDimmed && rowDimmed(i) && i != cursorIndex) {
       const int titleWidth = renderer.getTextWidth(UI_10_FONT_ID, item.c_str());
       const int lineH = renderer.getLineHeight(UI_10_FONT_ID);
       for (int py = itemY + 7; py < itemY + 7 + lineH; py++)
@@ -319,7 +324,7 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
     // listSidePadding -- so both sides of a row, and both renderers, agree.
     if (!valueText.empty()) {
       const int valueX = rect.x + contentWidth - listInset - hPaddingInSelection - valueTextWidth;
-      if (i == selectedIndex && highlightValue) {
+      if (i == cursorIndex && highlightValue) {
         renderer.fillRoundedRect(valueX - hPaddingInSelection, itemY, valueTextWidth + hPaddingInSelection * 2,
                                  rowHeight, cornerRadius, Color::Black);
       }
@@ -328,7 +333,7 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
       if (rowSubtitle != nullptr) {
         valueY = itemY + 16;
       }
-      renderer.drawText(valueFont, valueX, valueY, valueText.c_str(), !(i == selectedIndex && highlightValue));
+      renderer.drawText(valueFont, valueX, valueY, valueText.c_str(), !(i == cursorIndex && highlightValue));
     }
   }
 }

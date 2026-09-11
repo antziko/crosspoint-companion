@@ -7,6 +7,9 @@
 #include <cstdlib>
 
 #include "CrossPointSettings.h"
+#include "activities/Activity.h"
+#include "activities/ActivityManager.h"
+#include "components/ListCursor.h"
 #include "components/UITheme.h"
 
 // Global renderer (defined in main.cpp). Read the ACTUAL on-screen orientation
@@ -142,6 +145,18 @@ constexpr uint8_t LAST_BUTTON = static_cast<uint8_t>(MappedInputManager::Button:
 
 void MappedInputManager::update() const {
   gpio.update();
+  // The first press of a button that moves a selection reveals the list cursor, which
+  // Activity::onEnter hid on the way in (see ListCursor). One place, rather than a flag
+  // every list screen would have to remember to set: every screen polls through here.
+  for (const Button nav : {Button::Up, Button::Down, Button::Left, Button::Right, Button::PageBack, Button::PageForward,
+                           Button::NavNext, Button::NavPrevious}) {
+    if (wasPressed(nav)) {
+      // Repaint on the reveal itself: the same press may be a no-op for the selection (Up
+      // on the first row), and then nothing else would ask for the frame that shows it.
+      if (ListCursor::reveal()) activityManager.requestUpdate();
+      break;
+    }
+  }
   // A long press may fire only once per hold; clear the latch when the button is up.
   for (uint8_t value = 0; value <= LAST_BUTTON; ++value) {
     if (!isPressed(static_cast<Button>(value))) longPressFiredButtons &= ~(1u << value);

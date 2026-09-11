@@ -59,6 +59,17 @@ class UiAppHost {
   // held frames for InputDrag elements (sliders, drag-select fields).
   TouchRoute routeTouch(const MappedInputManager& input, bool withLongPress = false, bool routeHeld = false);
 
+ protected:
+  // Called with the snapshot that is about to be dispatched, before app.route()
+  // runs its handlers. The hook exists for touch acknowledgment: a handler is
+  // free to finish the activity or open another screen, so anything that wants
+  // to draw on the element the finger landed on has to do it first. Keeping it
+  // here rather than in the caller leaves the uiReady gate and the one-shot
+  // snapshot build in a single place (building the snapshot twice would consume
+  // the tap twice).
+  virtual void onBeforeRoute(const freeink::ui::InputSnapshot&) {}
+
+ public:
   // Gated route of a caller-built snapshot, for flows that need the snapshot
   // before dispatch (e.g. a handler that reads "was this a release" state).
   freeink::ui::ActionEvent route(const freeink::ui::InputSnapshot& snap);
