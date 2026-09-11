@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <utility>
 
+#include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "components/UiSliderDialog.h"
 #include "fontIds.h"
@@ -207,7 +208,7 @@ void IntervalSelectionActivity::buildIntervalScreen(UiScreen& screen) {
 void IntervalSelectionActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
-  renderer.drawCenteredText(UI_12_FONT_ID, 15, I18N.get(titleId), true, EpdFontFamily::BOLD);
+  renderer.drawCenteredText(uiScaleSpec().titleFontId, 15, I18N.get(titleId), true, EpdFontFamily::BOLD);
 
   // Value readout, slider, hints, and the touch Cancel/OK pair render through the
   // app so the interactive elements register touch hit rects.

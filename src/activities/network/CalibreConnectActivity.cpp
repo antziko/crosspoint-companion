@@ -11,6 +11,7 @@
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
 #include "WifiSelectionActivity.h"
+#include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/TaskWatchdog.h"
@@ -207,9 +208,10 @@ void CalibreConnectActivity::render(RenderLock&&) {
                       connectedSSID.c_str(), (std::string(tr(STR_IP_ADDRESS_PREFIX)) + connectedIP).c_str());
 
     int y = metrics.topPadding + metrics.headerHeight + metrics.tabBarHeight + metrics.verticalSpacing * 4;
-    const auto heightText12 = renderer.getTextHeight(UI_12_FONT_ID);
-    renderer.drawText(UI_12_FONT_ID, metrics.contentSidePadding, y, tr(STR_CALIBRE_SETUP), true, EpdFontFamily::BOLD);
-    y += heightText12 + metrics.verticalSpacing * 2;
+    const int headingFontId = uiScaleSpec().titleFontId;
+    const auto headingHeight = renderer.getTextHeight(headingFontId);
+    renderer.drawText(headingFontId, metrics.contentSidePadding, y, tr(STR_CALIBRE_SETUP), true, EpdFontFamily::BOLD);
+    y += headingHeight + metrics.verticalSpacing * 2;
 
     renderer.drawText(SMALL_FONT_ID, metrics.contentSidePadding, y, tr(STR_CALIBRE_INSTRUCTION_1));
     renderer.drawText(SMALL_FONT_ID, metrics.contentSidePadding, y + height, tr(STR_CALIBRE_INSTRUCTION_2));
@@ -217,8 +219,8 @@ void CalibreConnectActivity::render(RenderLock&&) {
     renderer.drawText(SMALL_FONT_ID, metrics.contentSidePadding, y + height * 3, tr(STR_CALIBRE_INSTRUCTION_4));
 
     y += height * 3 + metrics.verticalSpacing * 4;
-    renderer.drawText(UI_12_FONT_ID, metrics.contentSidePadding, y, tr(STR_CALIBRE_STATUS), true, EpdFontFamily::BOLD);
-    y += heightText12 + metrics.verticalSpacing * 2;
+    renderer.drawText(headingFontId, metrics.contentSidePadding, y, tr(STR_CALIBRE_STATUS), true, EpdFontFamily::BOLD);
+    y += headingHeight + metrics.verticalSpacing * 2;
 
     if (lastProgressTotal > 0 && lastProgressReceived <= lastProgressTotal) {
       std::string label = tr(STR_CALIBRE_RECEIVING);

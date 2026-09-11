@@ -14,6 +14,7 @@
 #include "MappedInputManager.h"
 #include "ReadingTimeHistory.h"  // readingHistoryDayIndex
 #include "activities/util/ConfirmationActivity.h"
+#include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/DictionaryActivityUtils.h"
@@ -777,23 +778,24 @@ void FlashcardReviewActivity::renderSummary(int contentTop, int contentBottom, i
   renderer.drawCenteredText(NOTOSERIF_16_FONT_ID, y, tr(STR_FLASHCARD_SUMMARY_TITLE), true, EpdFontFamily::BOLD);
   y += metrics.listRowHeight * 2;
 
+  const int statFontId = uiScaleSpec().bodyFontId;
   if (suspendedMode) {
     // Suspended review has no grading tally -- only the restored count is meaningful.
     snprintf(buf, sizeof(buf), "%s: %d", tr(STR_FLASHCARD_SUMMARY_UNSUSPENDED), suspended);
-    renderer.drawCenteredText(UI_12_FONT_ID, y, buf);
+    renderer.drawCenteredText(statFontId, y, buf);
   } else {
     snprintf(buf, sizeof(buf), "%s: %d", tr(STR_FLASHCARD_SUMMARY_REVIEWED), reviewed);
-    renderer.drawCenteredText(UI_12_FONT_ID, y, buf);
+    renderer.drawCenteredText(statFontId, y, buf);
     y += metrics.listRowHeight;
     snprintf(buf, sizeof(buf), "%s: %d", tr(STR_FLASHCARD_SUMMARY_CORRECT), correct);
-    renderer.drawCenteredText(UI_12_FONT_ID, y, buf);
+    renderer.drawCenteredText(statFontId, y, buf);
     y += metrics.listRowHeight;
     snprintf(buf, sizeof(buf), "%s: %d", tr(STR_FLASHCARD_SUMMARY_MASTERED), mastered);
-    renderer.drawCenteredText(UI_12_FONT_ID, y, buf);
+    renderer.drawCenteredText(statFontId, y, buf);
     if (suspended > 0) {
       y += metrics.listRowHeight;
       snprintf(buf, sizeof(buf), "%s: %d", tr(STR_FLASHCARD_SUMMARY_SUSPENDED), suspended);
-      renderer.drawCenteredText(UI_12_FONT_ID, y, buf);
+      renderer.drawCenteredText(statFontId, y, buf);
     }
   }
 

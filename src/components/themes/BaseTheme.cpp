@@ -645,8 +645,9 @@ void BaseTheme::drawSubHeader(const GfxRenderer& renderer, Rect rect, const char
   }
 
   if (labelWidth > 0) {
-    auto truncatedLabel = renderer.truncatedText(UI_12_FONT_ID, label, labelWidth, EpdFontFamily::REGULAR);
-    renderer.drawText(UI_12_FONT_ID, rect.x + BaseMetrics::values.contentSidePadding, rect.y, truncatedLabel.c_str(),
+    const int labelFontId = uiScaleSpec().titleFontId;
+    auto truncatedLabel = renderer.truncatedText(labelFontId, label, labelWidth, EpdFontFamily::REGULAR);
+    renderer.drawText(labelFontId, rect.x + BaseMetrics::values.contentSidePadding, rect.y, truncatedLabel.c_str(),
                       true, EpdFontFamily::REGULAR);
   }
 }
@@ -656,13 +657,16 @@ void BaseTheme::drawTabBar(const GfxRenderer& renderer, const Rect rect, const s
   constexpr int underlineHeight = 2;  // Height of selection underline
   constexpr int underlineGap = 4;     // Gap between text and underline
 
-  const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);
+  // Must stay the same font tabIndexFromPoint() measures with, or the tap
+  // targets drift off the drawn labels.
+  const int tabFontId = uiScaleSpec().titleFontId;
+  const int lineHeight = renderer.getLineHeight(tabFontId);
 
   int currentX = rect.x + BaseMetrics::values.contentSidePadding;
 
   for (const auto& tab : tabs) {
     const int textWidth =
-        renderer.getTextWidth(UI_12_FONT_ID, tab.label, tab.selected ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR);
+        renderer.getTextWidth(tabFontId, tab.label, tab.selected ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR);
 
     // Draw underline for selected tab
     if (tab.selected) {
@@ -674,7 +678,7 @@ void BaseTheme::drawTabBar(const GfxRenderer& renderer, const Rect rect, const s
     }
 
     // Draw tab label
-    renderer.drawText(UI_12_FONT_ID, currentX, rect.y, tab.label, !(tab.selected && selected),
+    renderer.drawText(tabFontId, currentX, rect.y, tab.label, !(tab.selected && selected),
                       tab.selected ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR);
 
     currentX += textWidth + BaseMetrics::values.tabSpacing;
@@ -687,11 +691,12 @@ bool BaseTheme::tabIndexFromPoint(const GfxRenderer& renderer, const Rect rect, 
     return false;
   }
 
+  const int tabFontId = uiScaleSpec().titleFontId;  // same tier drawTabBar() lays the labels out with
   int currentX = rect.x + BaseMetrics::values.contentSidePadding;
   for (size_t i = 0; i < tabs.size(); i++) {
     const auto& tab = tabs[i];
     const int textWidth =
-        renderer.getTextWidth(UI_12_FONT_ID, tab.label, tab.selected ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR);
+        renderer.getTextWidth(tabFontId, tab.label, tab.selected ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR);
     const int left = (i == 0) ? rect.x : currentX - BaseMetrics::values.tabSpacing / 2;
     const int right = currentX + textWidth + BaseMetrics::values.tabSpacing / 2;
     if (x >= left && x < right) {
@@ -966,10 +971,11 @@ void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
     }
   } else {
     // No book to continue reading
-    const int y =
-        bookY + (bookHeight - renderer.getLineHeight(UI_12_FONT_ID) - renderer.getLineHeight(UI_10_FONT_ID)) / 2;
-    renderer.drawCenteredText(UI_12_FONT_ID, y, "No open book");
-    renderer.drawCenteredText(UI_10_FONT_ID, y + renderer.getLineHeight(UI_12_FONT_ID), "Start reading below");
+    const int titleFontId = uiScaleSpec().titleFontId;
+    const int smallFontId = uiScaleSpec().smallFontId;
+    const int y = bookY + (bookHeight - renderer.getLineHeight(titleFontId) - renderer.getLineHeight(smallFontId)) / 2;
+    renderer.drawCenteredText(titleFontId, y, "No open book");
+    renderer.drawCenteredText(smallFontId, y + renderer.getLineHeight(titleFontId), "Start reading below");
   }
 }
 
@@ -1010,10 +1016,14 @@ Rect BaseTheme::drawPopup(const GfxRenderer& renderer, const char* message) cons
   const int marginY = metrics.popupMarginY;
   const int frameThickness = metrics.popupFrameThickness;
   const EpdFontFamily::Style popupFontFamily = metrics.popupTextBold ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR;
+  // The UI-spec small font: the tier Settings rows, option rows and the confirmation
+  // prompts draw at, so a toast reads at the same size as the screen behind it rather
+  // than at header size.
+  const int popupFontId = uiScaleSpec().smallFontId;
   // Scale y position proportionally to screen height
   const int y = static_cast<int>(renderer.getScreenHeight() * metrics.popupTopOffsetRatio);
-  const int textWidth = renderer.getTextWidth(UI_12_FONT_ID, message, popupFontFamily);
-  const int textHeight = renderer.getLineHeight(UI_12_FONT_ID);
+  const int textWidth = renderer.getTextWidth(popupFontId, message, popupFontFamily);
+  const int textHeight = renderer.getLineHeight(popupFontId);
   const int w = textWidth + marginX * 2;
   const int h = textHeight + marginY * 2;
   const int x = (renderer.getScreenWidth() - w) / 2;
@@ -1030,7 +1040,7 @@ Rect BaseTheme::drawPopup(const GfxRenderer& renderer, const char* message) cons
 
   const int textX = x + (w - textWidth) / 2;
   const int textY = y + marginY + metrics.popupTextBaselineOffsetY;
-  renderer.drawText(UI_12_FONT_ID, textX, textY, message, metrics.popupTextInverted, popupFontFamily);
+  renderer.drawText(popupFontId, textX, textY, message, metrics.popupTextInverted, popupFontFamily);
   renderer.displayBuffer();
   return Rect{x, y, w, h};
 }

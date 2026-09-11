@@ -30,6 +30,7 @@
 #include "SilentRestart.h"
 #include "activities/ActivityManager.h"
 #include "activities/network/WifiSelectionActivity.h"
+#include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/FlashcardDeck.h"
@@ -174,8 +175,7 @@ void KOReaderSyncActivity::onWifiSelectionComplete(const bool success) {
   // esp_sntp_setservername() self-locks the (non-recursive) core mutex, so wrapping it in a
   // manual LOCK_TCPIP_CORE() blocked forever. We own the WiFi connection here, so give SNTP the
   // full 5s budget; a late packet is still adopted asynchronously by HalClock.
-  const bool clockNeedsSync =
-      halClock.hasHardwareRtc() ? !SETTINGS.clockHasBeenSynced : !halClock.isSystemTimeValid();
+  const bool clockNeedsSync = halClock.hasHardwareRtc() ? !SETTINGS.clockHasBeenSynced : !halClock.isSystemTimeValid();
   if (clockNeedsSync) {
     {
       RenderLock lock(*this);
@@ -1566,12 +1566,13 @@ void KOReaderSyncActivity::render(RenderLock&&) {
   if (state == NO_REMOTE_PROGRESS) {
     const int sideX = screen.x + metrics.contentSidePadding;
     const int lhFoot = renderer.getLineHeight(UI_10_FONT_ID);
-    const int LABEL_ROW = renderer.getLineHeight(UI_12_FONT_ID) + 2;
+    const int LABEL_ROW = renderer.getLineHeight(uiScaleSpec().titleFontId) + 2;
     const int SECTION_GAP = 10;
 
-    // Centered prompt (UI_12 bold title to match SHOWING_RESULT's hierarchy).
+    // Centered bold title, matching SHOWING_RESULT's hierarchy.
     int y = top;
-    UITheme::drawCenteredText(renderer, screen, UI_12_FONT_ID, y, tr(STR_NO_REMOTE_MSG), true, EpdFontFamily::BOLD);
+    UITheme::drawCenteredText(renderer, screen, uiScaleSpec().titleFontId, y, tr(STR_NO_REMOTE_MSG), true,
+                              EpdFontFamily::BOLD);
     y += LABEL_ROW;
     UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, y, tr(STR_UPLOAD_PROMPT));
     y += renderer.getLineHeight(UI_10_FONT_ID) + SECTION_GAP;
@@ -1592,8 +1593,8 @@ void KOReaderSyncActivity::render(RenderLock&&) {
     const int sideX = screen.x + metrics.contentSidePadding;
     const int lhFoot = renderer.getLineHeight(UI_10_FONT_ID);
     int y = screen.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-    renderer.drawText(UI_12_FONT_ID, sideX, y, tr(STR_SYNC_FEATURE_DONE), true, EpdFontFamily::BOLD);
-    y += renderer.getLineHeight(UI_12_FONT_ID) + 4;
+    renderer.drawText(uiScaleSpec().titleFontId, sideX, y, tr(STR_SYNC_FEATURE_DONE), true, EpdFontFamily::BOLD);
+    y += renderer.getLineHeight(uiScaleSpec().titleFontId) + 4;
     // Single-feature sync: the feature is the main event, so skip the "Also synced:" header.
     drawAlsoSyncedFooter(sideX, y, lhFoot, /*showAlsoLabel=*/false);
 

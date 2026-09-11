@@ -186,7 +186,12 @@ class OptionPopup {
     props.titleText.font = fui::GfxRendererTarget::FONT_BODY;
     props.titleText.bold = true;
     props.titleText.align = fui::TextAlign::Center;
-    props.buttonText.font = fui::GfxRendererTarget::FONT_BODY;
+    // Option labels at the tier the theme asked for: base/Lyra/Vega put them at
+    // the Settings row size (FONT_SMALL), RoundedRaff keeps them at body size.
+    // The flag predates the FreeInkUI port, which drew every label at body size
+    // and left the picker one tier above the list that opened it.
+    props.buttonText.font =
+        metrics.optionPopupUseSmallFont ? fui::GfxRendererTarget::FONT_SMALL : fui::GfxRendererTarget::FONT_BODY;
     const int16_t innerPadding = static_cast<int16_t>(metrics.optionPopupInnerPadding);
     props.padding = fui::Insets{innerPadding, innerPadding, innerPadding, innerPadding};
     props.gap = static_cast<int16_t>(metrics.optionPopupItemSpacing);
@@ -202,6 +207,8 @@ class OptionPopup {
     props.styles.focused = props.styles.normal;
     props.styles.active = props.styles.normal;
     props.styles.disabled = props.styles.normal;
+    // Height stays on the body font regardless of the label tier: the rows are
+    // tap targets, and shrinking them with the text would cost touch accuracy.
     props.buttonHeight =
         fui::clampI16(target.lineHeight(fui::GfxRendererTarget::FONT_BODY) + metrics.optionPopupSelectionVPadding * 2);
 

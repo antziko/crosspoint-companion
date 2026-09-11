@@ -104,9 +104,11 @@ void TxtReaderActivity::onEnter() {
 
 void TxtReaderActivity::onResume() {
   // Adopt an orientation parked by the control-center tile, which cannot turn the
-  // renderer while its sheet is up. applyOrientation() reflows and saves per file.
+  // renderer while its sheet is up. Latched here and applied from loop(): ActivityManager
+  // calls onResume() holding the render lock, which applyOrientation() takes again — and
+  // RenderLock is not recursive.
   if (APP_STATE.pendingOrientation != CrossPointState::NO_ORIENTATION_REQUEST) {
-    applyOrientation(APP_STATE.pendingOrientation);
+    pendingOrientationAdopt = APP_STATE.pendingOrientation;
   }
 }
 
@@ -129,6 +131,15 @@ void TxtReaderActivity::onExit() {
 }
 
 void TxtReaderActivity::loop() {
+  // Adopt a control-center rotation latched by onResume(). Here, not there: this runs
+  // on the main task with no lock held, so applyOrientation() can take the render lock.
+  if (pendingOrientationAdopt != CrossPointState::NO_ORIENTATION_REQUEST) {
+    const uint8_t orientation = pendingOrientationAdopt;
+    pendingOrientationAdopt = CrossPointState::NO_ORIENTATION_REQUEST;
+    applyOrientation(orientation);
+    requestUpdate();
+  }
+
   // Suppress Back bleed-through after a sub-activity (menu, options, bookmarks)
   // exits on Back. Capture the flag BEFORE clearing it so the release frame
   // itself is gated.
@@ -446,6 +457,12 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
 
 void TxtReaderActivity::render(RenderLock&&) {
   if (!txt) {
+    return;
+  }
+
+  // A control-center rotation is latched and loop() is about to re-index for it: the frame
+  // this would paint is in the orientation being left. loop() requests its own update.
+  if (pendingOrientationAdopt != CrossPointState::NO_ORIENTATION_REQUEST) {
     return;
   }
 

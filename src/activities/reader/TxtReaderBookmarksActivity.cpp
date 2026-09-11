@@ -6,6 +6,7 @@
 #include <cstdio>
 
 #include "MappedInputManager.h"
+#include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -142,8 +143,9 @@ void TxtReaderBookmarksActivity::render(RenderLock&&) {
   const int numBookmarks = static_cast<int>(bookmarks.size());
 
   const int titleX =
-      contentX + (contentWidth - renderer.getTextWidth(UI_12_FONT_ID, tr(STR_BOOKMARKS), EpdFontFamily::BOLD)) / 2;
-  renderer.drawText(UI_12_FONT_ID, titleX, 15 + contentY, tr(STR_BOOKMARKS), true, EpdFontFamily::BOLD);
+      contentX +
+      (contentWidth - renderer.getTextWidth(uiScaleSpec().titleFontId, tr(STR_BOOKMARKS), EpdFontFamily::BOLD)) / 2;
+  renderer.drawText(uiScaleSpec().titleFontId, titleX, 15 + contentY, tr(STR_BOOKMARKS), true, EpdFontFamily::BOLD);
 
   const auto getBookmarkTitle = [this](int index) -> std::string {
     const TxtBookmark& bm =

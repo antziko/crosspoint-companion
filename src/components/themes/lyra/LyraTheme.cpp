@@ -541,10 +541,11 @@ void LyraTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
 
 void LyraTheme::drawEmptyRecents(const GfxRenderer& renderer, const Rect rect) const {
   constexpr int padding = 48;
-  renderer.drawText(UI_12_FONT_ID, rect.x + padding,
-                    rect.y + rect.height / 2 - renderer.getLineHeight(UI_12_FONT_ID) - 2, tr(STR_NO_OPEN_BOOK), true,
-                    EpdFontFamily::BOLD);
-  renderer.drawText(UI_10_FONT_ID, rect.x + padding, rect.y + rect.height / 2 + 2, tr(STR_START_READING), true);
+  const int titleFontId = uiScaleSpec().titleFontId;
+  renderer.drawText(titleFontId, rect.x + padding, rect.y + rect.height / 2 - renderer.getLineHeight(titleFontId) - 2,
+                    tr(STR_NO_OPEN_BOOK), true, EpdFontFamily::BOLD);
+  renderer.drawText(uiScaleSpec().smallFontId, rect.x + padding, rect.y + rect.height / 2 + 2, tr(STR_START_READING),
+                    true);
 }
 
 void LyraTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
@@ -565,7 +566,9 @@ void LyraTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
     std::string labelStr = buttonLabel(i);
     const char* label = labelStr.c_str();
     int textX = tileRect.x + 16;
-    const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);
+    // Menu rows read at the one UI size, like BaseTheme's tile labels.
+    const int labelFontId = uiScaleSpec().bodyFontId;
+    const int lineHeight = renderer.getLineHeight(labelFontId);
     const int textY = tileRect.y + (LyraMetrics::values.menuRowHeight - lineHeight) / 2;
 
     if (rowIcon != nullptr) {
@@ -577,6 +580,6 @@ void LyraTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
       }
     }
 
-    renderer.drawText(UI_12_FONT_ID, textX, textY, label, true);
+    renderer.drawText(labelFontId, textX, textY, label, true);
   }
 }

@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "CrossPointSettings.h"
+#include "CrossPointState.h"  // NO_ORIENTATION_REQUEST
 #include "TxtReaderMenuActivity.h"
 #include "activities/Activity.h"
 
@@ -25,6 +26,10 @@ class TxtReaderActivity final : public Activity {
   // re-index (viewport width may change). Reading position is preserved as a
   // fraction across the reflow. No-op if unchanged.
   void applyOrientation(uint8_t orientation);
+  // Control-center orientation parked by onResume() for loop() to adopt. onResume()
+  // runs with the render lock held (ActivityManager's pop path), and applyOrientation()
+  // takes that same non-recursive lock — calling it there deadlocks the main task.
+  uint8_t pendingOrientationAdopt = CrossPointState::NO_ORIENTATION_REQUEST;
   bool restorePendingFraction = false;
   float pendingProgressFraction = 0.0f;
 

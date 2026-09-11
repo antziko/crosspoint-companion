@@ -55,6 +55,7 @@
 #include "SleepSyncPromptActivity.h"
 #include "SyncScopeSelectionActivity.h"
 #include "activities/util/ConfirmationActivity.h"
+#include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/BookCacheUtils.h"
@@ -462,10 +463,11 @@ void EpubReaderActivity::onPause() {
 
 void EpubReaderActivity::onResume() {
   // The control-center orientation tile cannot turn the renderer while its sheet is up,
-  // so it parks the new orientation and this book adopts it here. applyOrientation()
-  // reflows and saves it per book, exactly as a rotation from the reader menu would.
+  // so it parks the new orientation and this book adopts it. Latch it here and apply it
+  // from loop(): ActivityManager calls onResume() holding the render lock, which
+  // applyOrientation() takes again — and RenderLock is not recursive.
   if (APP_STATE.pendingOrientation != CrossPointState::NO_ORIENTATION_REQUEST) {
-    applyOrientation(APP_STATE.pendingOrientation);
+    pendingOrientationAdopt = APP_STATE.pendingOrientation;
   }
 
   // Returning from a sub-activity: shift the session anchor forward by the suspended gap so
@@ -609,6 +611,15 @@ void EpubReaderActivity::loop() {
     // Should never happen
     finish();
     return;
+  }
+
+  // Adopt a control-center rotation latched by onResume(). Here, not there: this runs
+  // on the main task with no lock held, so applyOrientation() can take the render lock.
+  if (pendingOrientationAdopt != CrossPointState::NO_ORIENTATION_REQUEST) {
+    const uint8_t orientation = pendingOrientationAdopt;
+    pendingOrientationAdopt = CrossPointState::NO_ORIENTATION_REQUEST;
+    applyOrientation(orientation);
+    requestUpdate();
   }
 
   // Periodic reading-time checkpoint, requested by the render task on full-refresh
@@ -1660,21 +1671,16 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
                 section.reset();
               };
 
-              if (section && section->pageCount > 0 && chapterResult.spineIndex != currentSpineIndex) {
-                const float bmProgress =
-                    static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
-                if (!BOOKMARKS.hasPointBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
-                                                       section->pageCount)) {
-                  startActivityForResultNoThrow<ConfirmationActivity>(
-                      [this, doNavigate](const ActivityResult& confirmResult) {
-                        if (!confirmResult.isCancelled) {
-                          addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
-                        }
-                        doNavigate();
-                      },
-                      renderer, mappedInput, tr(STR_CONFIRM_ADD_RETURN_MARK), "");
-                  return;
-                }
+              if (chapterResult.spineIndex != currentSpineIndex && canOfferReturnMark()) {
+                startActivityForResultNoThrow<ConfirmationActivity>(
+                    [this, doNavigate](const ActivityResult& confirmResult) {
+                      if (!confirmResult.isCancelled) {
+                        addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
+                      }
+                      doNavigate();
+                    },
+                    renderer, mappedInput, tr(STR_CONFIRM_ADD_RETURN_MARK), "");
+                return;
               }
               doNavigate();
             }
@@ -1713,21 +1719,16 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
 
               auto doNavigate = [this, targetPercent]() { jumpToPercent(targetPercent); };
 
-              if (section && section->pageCount > 0 && targetPercent != initialPercent) {
-                const float bmProgress =
-                    static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
-                if (!BOOKMARKS.hasPointBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
-                                                       section->pageCount)) {
-                  startActivityForResultNoThrow<ConfirmationActivity>(
-                      [this, doNavigate](const ActivityResult& confirmResult) {
-                        if (!confirmResult.isCancelled) {
-                          addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
-                        }
-                        doNavigate();
-                      },
-                      renderer, mappedInput, tr(STR_CONFIRM_ADD_RETURN_MARK), "");
-                  return;
-                }
+              if (targetPercent != initialPercent && canOfferReturnMark()) {
+                startActivityForResultNoThrow<ConfirmationActivity>(
+                    [this, doNavigate](const ActivityResult& confirmResult) {
+                      if (!confirmResult.isCancelled) {
+                        addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
+                      }
+                      doNavigate();
+                    },
+                    renderer, mappedInput, tr(STR_CONFIRM_ADD_RETURN_MARK), "");
+                return;
               }
               doNavigate();
             }
@@ -2277,6 +2278,13 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     return;
   }
 
+  // A control-center rotation is latched and loop() is about to reflow for it: painting
+  // the page in the orientation being left would only put a frame on the panel that the
+  // rotation immediately replaces. loop() requests its own update once applied.
+  if (pendingOrientationAdopt != CrossPointState::NO_ORIENTATION_REQUEST) {
+    return;
+  }
+
   // No indexing popup carried over from a previous pass; the build sites below re-arm it as needed.
   indexingPopupRect_ = Rect{};
   lastIndexingPct_ = -1;
@@ -2311,10 +2319,10 @@ void EpubReaderActivity::render(RenderLock&& lock) {
         snprintf(dbg, sizeof(dbg), "[E2/%s spine=%d heap=%u]", Section::buildFailureTag(bf.reason), currentSpineIndex,
                  (unsigned)bf.failHeap);
       }
-      renderer.drawCenteredText(UI_12_FONT_ID, 330, dbg, true);
+      renderer.drawCenteredText(uiScaleSpec().smallFontId, 330, dbg, true);
       char dbg2[64];
       snprintf(dbg2, sizeof(dbg2), "floor=%u html=%u", (unsigned)bf.floor, (unsigned)bf.htmlSize);
-      renderer.drawCenteredText(UI_12_FONT_ID, 355, dbg2, true);
+      renderer.drawCenteredText(uiScaleSpec().smallFontId, 355, dbg2, true);
       renderer.displayBuffer();  // flush the appended diagnostics
     }
     automaticPageTurnActive = false;
@@ -2397,11 +2405,11 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     // "Indexing". Show an error; navigating to another chapter clears the flag.
     LOG_ERR("ERS", "Skipping rebuild of chapter %d that already failed to index", currentSpineIndex);
     renderer.clearScreen();
-    renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_OUT_OF_BOUNDS), true, EpdFontFamily::BOLD);
+    renderer.drawCenteredText(uiScaleSpec().titleFontId, 300, tr(STR_OUT_OF_BOUNDS), true, EpdFontFamily::BOLD);
     {
       char dbg[48];
       snprintf(dbg, sizeof(dbg), "[E1 spine=%d heap=%u]", currentSpineIndex, (unsigned)esp_get_free_heap_size());
-      renderer.drawCenteredText(UI_12_FONT_ID, 330, dbg, true);
+      renderer.drawCenteredText(uiScaleSpec().smallFontId, 330, dbg, true);
     }
     // No renderStatusBar(): section is null here, and it dereferences section->.
     renderer.displayBuffer();
@@ -2687,7 +2695,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
 
   if (section->pageCount == 0) {
     LOG_DBG("ERS", "No pages to render");
-    renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_EMPTY_CHAPTER), true, EpdFontFamily::BOLD);
+    renderer.drawCenteredText(uiScaleSpec().titleFontId, 300, tr(STR_EMPTY_CHAPTER), true, EpdFontFamily::BOLD);
     renderStatusBar();
     renderer.displayBuffer();
     automaticPageTurnActive = false;
@@ -2740,13 +2748,13 @@ void EpubReaderActivity::render(RenderLock&& lock) {
         LOG_ERR("ERS", "Page load retry limit reached, aborting");
         pageLoadRetryCount = 0;  // Reset so a later user-initiated navigation can try afresh
         renderer.clearScreen();
-        renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_PAGE_LOAD_ERROR), true, EpdFontFamily::BOLD);
+        renderer.drawCenteredText(uiScaleSpec().titleFontId, 300, tr(STR_PAGE_LOAD_ERROR), true, EpdFontFamily::BOLD);
         {
           // [E4] diagnostic: the page still won't load after abandoning the build, clearing the
           // cache, and exhausting retries. Reports spine + free heap for the USB-locked X3.
           char dbg[48];
           snprintf(dbg, sizeof(dbg), "[E4 spine=%d heap=%u]", currentSpineIndex, (unsigned)ESP.getFreeHeap());
-          renderer.drawCenteredText(UI_12_FONT_ID, 330, dbg, true);
+          renderer.drawCenteredText(uiScaleSpec().smallFontId, 330, dbg, true);
         }
         renderer.displayBuffer();
         showPendingSyncSaveError();
@@ -4010,17 +4018,38 @@ void EpubReaderActivity::handleOverlayInput() {
       }
     } else if (overlay == Overlay::Contents) {
       const auto item = epub->getTocItem(panelIndex);
-      if (item.spineIndex != -1) {
-        RenderLock lock;
-        clearDeferredReposition();
-        currentSpineIndex = item.spineIndex;
-        pendingAnchor = item.anchor;
-        nextPageNumber = 0;
-        section.reset();
-      }
+      // Same offer the list menu makes before a chapter jump: drop a "return here"
+      // mark on the page being left, unless it already carries a point bookmark.
+      const bool offerReturnMark =
+          item.spineIndex != -1 && item.spineIndex != currentSpineIndex && canOfferReturnMark();
+      // The prompt is its own activity, so the overlay has to come down first.
       overlay = Overlay::None;
       discardOverlayPage();
-      requestUpdate();
+
+      auto doNavigate = [this, spineIndex = static_cast<int>(item.spineIndex), anchor = item.anchor]() {
+        if (spineIndex != -1) {
+          RenderLock lock;
+          clearDeferredReposition();
+          currentSpineIndex = spineIndex;
+          pendingAnchor = anchor;
+          nextPageNumber = 0;
+          section.reset();
+        }
+        requestUpdate();
+      };
+
+      if (offerReturnMark) {
+        startActivityForResultNoThrow<ConfirmationActivity>(
+            [this, doNavigate](const ActivityResult& confirmResult) {
+              if (!confirmResult.isCancelled) {
+                addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
+              }
+              doNavigate();
+            },
+            renderer, mappedInput, tr(STR_CONFIRM_ADD_RETURN_MARK), "");
+        return;
+      }
+      doNavigate();
     } else if (overlay == Overlay::More) {
       activateMoreRow(panelIndex);
     }
@@ -4380,6 +4409,12 @@ void EpubReaderActivity::restoreSavedPosition() {
     section.reset();
   }
   requestUpdate();
+}
+
+bool EpubReaderActivity::canOfferReturnMark() const {
+  if (!section || section->pageCount == 0) return false;
+  const float progress = static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
+  return !BOOKMARKS.hasPointBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), progress, section->pageCount);
 }
 
 void EpubReaderActivity::addBookmark(bool returnMark, bool lightRefresh) {

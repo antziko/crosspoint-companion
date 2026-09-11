@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "MappedInputManager.h"
+#include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -129,8 +130,9 @@ void XtcReaderChapterSelectionActivity::drawChrome() {
   const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 
   // Centered title in the header band the content margin reserves.
-  const int titleWidth = renderer.getTextWidth(UI_12_FONT_ID, tr(STR_SELECT_CHAPTER), EpdFontFamily::BOLD);
+  const int titleFontId = uiScaleSpec().titleFontId;
+  const int titleWidth = renderer.getTextWidth(titleFontId, tr(STR_SELECT_CHAPTER), EpdFontFamily::BOLD);
   const int titleX = safe.x + (safe.width - titleWidth) / 2;
-  const int titleY = safe.y + metrics.topPadding + (metrics.headerHeight - renderer.getLineHeight(UI_12_FONT_ID)) / 2;
-  renderer.drawText(UI_12_FONT_ID, titleX, titleY, tr(STR_SELECT_CHAPTER), true, EpdFontFamily::BOLD);
+  const int titleY = safe.y + metrics.topPadding + (metrics.headerHeight - renderer.getLineHeight(titleFontId)) / 2;
+  renderer.drawText(titleFontId, titleX, titleY, tr(STR_SELECT_CHAPTER), true, EpdFontFamily::BOLD);
 }

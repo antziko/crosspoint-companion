@@ -9,6 +9,7 @@
 #include <optional>
 
 #include "BookReadingStats.h"
+#include "CrossPointState.h"  // NO_ORIENTATION_REQUEST
 #include "EndOfBookOptions.h"
 #include "EpubReaderMenuActivity.h"
 #include "ProgressMapper.h"
@@ -48,6 +49,10 @@ class EpubReaderActivity final : public Activity {
   // Set when navigating to a footnote href with a fragment (e.g. #note1).
   // Cleared on the next render after the new section loads and resolves it to a page.
   std::string pendingAnchor;
+  // Control-center orientation parked by onResume() for loop() to adopt. onResume()
+  // runs with the render lock held (ActivityManager's pop path), and applyOrientation()
+  // takes that same non-recursive lock — calling it there deadlocks the main task.
+  uint8_t pendingOrientationAdopt = CrossPointState::NO_ORIENTATION_REQUEST;
   int pagesUntilFullRefresh = 0;
   int cachedSpineIndex = 0;
   int cachedChapterTotalPageCount = 0;
@@ -541,6 +546,9 @@ class EpubReaderActivity final : public Activity {
   // lightRefresh=true performs a status-bar-only windowed panel update instead of a
   // full page re-render (use for interactive same-page toggles on image/AA pages).
   void addBookmark(bool returnMark = false, bool lightRefresh = false);
+  // True when jumping away from the current page should offer a return mark: there is a
+  // paginated page to mark and it does not already carry a point bookmark.
+  bool canOfferReturnMark() const;
 
   // Redraw only the status-bar strip and push it via a windowed sub-rectangle
   // refresh, leaving the page content (including any AA images) untouched on the

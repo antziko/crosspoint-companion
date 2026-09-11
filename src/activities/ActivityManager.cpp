@@ -441,12 +441,24 @@ void ActivityManager::requestUpdateAndWait() {
 
 // RenderLock
 
+// The rendering mutex is a plain (non-recursive) FreeRTOS mutex: a second take from the
+// task that already holds it blocks forever, which surfaces as a silent hang rather than
+// a crash — so both constructors assert on it, the same guard requestUpdateAndWait()
+// carries. A reboot is recoverable; a hung main task is not. Code reached from a path that may already hold the lock
+// (ActivityManager calls onExit()/onResume() with it held) must park the work for a
+// context that does not, not lock again.
+#define ASSERT_RENDER_LOCK_NOT_HELD()                                                               \
+  assert(xSemaphoreGetMutexHolder(activityManager.renderingMutex) != xTaskGetCurrentTaskHandle() && \
+         "RenderLock is not recursive: this task already holds it")
+
 RenderLock::RenderLock() {
+  ASSERT_RENDER_LOCK_NOT_HELD();
   xSemaphoreTake(activityManager.renderingMutex, portMAX_DELAY);
   isLocked = true;
 }
 
 RenderLock::RenderLock([[maybe_unused]] Activity&) {
+  ASSERT_RENDER_LOCK_NOT_HELD();
   xSemaphoreTake(activityManager.renderingMutex, portMAX_DELAY);
   isLocked = true;
 }

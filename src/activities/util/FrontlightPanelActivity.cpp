@@ -142,6 +142,14 @@ void FrontlightPanelActivity::onTileEvent(const fui::ActionEvent& event, void* u
 }
 
 void FrontlightPanelActivity::runTile(const int idx) {
+  // Every tile either flips a setting the tile itself displays, or leaves the
+  // panel. The tap flash (FreeInkApp arms it after this handler returns, and it
+  // paints the tapped element with the focused style for the one repaint that
+  // follows) would sit on top of that: a tile switched OFF would still draw
+  // filled until something else repainted the panel, reading as though the
+  // setting were still on. The state change is the feedback here, so drop it.
+  app.clearTapFlash();
+
   switch (idx) {
     case 0:  // Night mode (inverted output polarity, applied to the whole UI)
       SETTINGS.screenInverted = SETTINGS.screenInverted ? 0 : 1;
