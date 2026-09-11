@@ -13,6 +13,7 @@
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "RecentBooksStore.h"
+#include "activities/TouchFeedback.h"
 #include "activities/reader/ReaderUtils.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
@@ -490,7 +491,27 @@ void FileBrowserActivity::loop() {
   // Resolved before the Confirm branch so the two share one activation body.
   int tapX = 0;
   int tapY = 0;
-  const int tappedRow = mappedInput.wasScreenTapped(tapX, tapY) ? listTouch_.indexAt(renderer, tapX, tapY) : -1;
+  // One read: wasScreenTapped consumes the tap, so the header and the rows have to be
+  // resolved from the same call rather than each asking for their own.
+  const bool tapped = mappedInput.wasScreenTapped(tapX, tapY);
+
+  // Tapping the header title ("SD Card", or the folder name) toggles show-hidden-files —
+  // the touch counterpart of the Back-hold gesture at the top of this function, and the
+  // only way to reach it on a board with no Back button at all.
+  if (tapped && tapX >= headerTouch_.x && tapX < headerTouch_.x + headerTouch_.width && tapY >= headerTouch_.y &&
+      tapY < headerTouch_.y + headerTouch_.height) {
+    flashTouchedRow(renderer, headerTouch_);
+    SETTINGS.showHiddenFiles = !SETTINGS.showHiddenFiles;
+    SETTINGS.saveToFile();
+    {
+      RenderLock lock(*this);
+      loadFirstWindow();  // the visible set changed; restart from the top
+    }
+    requestUpdate(true);
+    return;
+  }
+
+  const int tappedRow = tapped ? listTouch_.touchRow(renderer, tapX, tapY) : -1;
   if (tappedRow >= 0 && tappedRow < static_cast<int>(files.size())) selectorIndex = tappedRow;
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) || tappedRow >= 0) {
@@ -706,8 +727,8 @@ void FileBrowserActivity::render(RenderLock&&) {
   char countBuf[24];
   snprintf(countBuf, sizeof(countBuf), " (%u)", static_cast<unsigned>(totalFiles));
   folderName += countBuf;
-  GUI.drawHeader(renderer, Rect{screen.x, screen.y + metrics.topPadding, screen.width, metrics.headerHeight},
-                 folderName.c_str());
+  headerTouch_ = Rect{screen.x, screen.y + metrics.topPadding, screen.width, metrics.headerHeight};
+  GUI.drawHeader(renderer, headerTouch_, folderName.c_str());
 
   const int pathLineHeight = renderer.getLineHeight(SMALL_FONT_ID);
   const int contentTop = screen.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;

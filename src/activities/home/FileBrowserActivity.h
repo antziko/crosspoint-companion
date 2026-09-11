@@ -26,6 +26,10 @@ class FileBrowserActivity final : public Activity {
   ButtonNavigator buttonNavigator;
   // Rows the last render drew, so a tap can pick one (see ListTouchTarget).
   ListTouchTarget listTouch_;
+  // The header band the last render drew, so a tap on the title can toggle hidden files
+  // (the touch counterpart of the Back-hold gesture). Zero-width until the first paint,
+  // which is what makes the hit test fail safely before then.
+  Rect headerTouch_{};
 
   size_t selectorIndex = 0;
 
