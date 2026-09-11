@@ -72,6 +72,17 @@ class RecentBooksActivity final : public UiListActivity {
   void showViewPicker();
   OptionPopup optionPopup;
 
+  // Switch to `view` and do the bookkeeping a view change needs. No-op when
+  // already on it. Shared by the picker and the header tap -- the ordering
+  // inside is load-bearing, so there must be exactly one copy of it.
+  void applyView(int view);
+
+  // A tap anywhere on the header band cycles List -> 2x2 -> 3x3. The X4 Pro
+  // wires no Back button, so the Back hold that opens the picker is
+  // unreachable there and the title is the only in-screen way to switch view.
+  static constexpr freeink::ui::ActionId ACTION_HEADER = ACTION_USER;
+  static void headerActionTrampoline(const freeink::ui::ActionEvent& event, void* user);
+
   // Generates any missing cover thumbnails for the visible books. Runs from the
   // render tail on the render task — it takes a GfxRenderer::FrameBufferLoan,
   // which is legal only outside a frame build, and draws its own progress

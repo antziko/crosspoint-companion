@@ -39,18 +39,46 @@ constexpr unsigned long LONG_PRESS_MS = 1000;
 // pair of hardcoded heights renders 3x2 on some themes and 3x3 on others.
 // Epub::generateThumbBmp fixes the aspect at height * 0.6. There is no caption
 // band under the tiles, so the whole cell is cover.
-constexpr int SHELF_COVER_LADDER[] = {360, 320, 290, 260, 230, 210, 195, 180, 165, 150};
+// Stepped at 10px through the band the shelf actually lands in (a 480-wide
+// portrait panel fits 200-380 here): the coarse 30-40px steps this replaced
+// quantised so hard that freeing the button-hint strip bought no growth at all
+// -- 3x3 cleared the 230 rung by 2px and fell back to 210.
+constexpr int SHELF_COVER_LADDER[] = {380, 370, 360, 350, 340, 330, 320, 310, 300, 290, 280, 270,
+                                      260, 250, 240, 230, 220, 210, 200, 190, 180, 165, 150};
 
-// Clearance reserved around each cover for the selection ring: a white moat so
-// the ring stays visible against an all-black thumbnail, then the stroke
-// itself. Reserved as a cell inset, or the ring would be clipped by the cell.
-constexpr int16_t SHELF_RING_GAP = 5;
+// Selection ring geometry. The stroke is drawn INSIDE its rect
+// (GfxRenderer::drawRect), and coverGrid builds that rect as the cover grown by
+// selectedCoverFrameGap on each side -- so the ring's innermost pixel lands
+// SHELF_RING_GAP - SHELF_RING_WIDTH away from the cover. The gap must therefore
+// exceed the stroke width, or the ring sits directly on the cover edge and
+// vanishes against an all-black thumbnail. SHELF_RING_PAD is that surviving
+// white moat.
 constexpr int16_t SHELF_RING_WIDTH = 3;
-constexpr int16_t SHELF_CELL_INSET = SHELF_RING_GAP + SHELF_RING_WIDTH;
+constexpr int16_t SHELF_RING_PAD = 3;
+constexpr int16_t SHELF_RING_GAP = SHELF_RING_PAD + SHELF_RING_WIDTH;
+// The ring grows outward from the cover, so the cell must reserve the whole gap
+// or the stroke is clipped. Not gap + width: the stroke is drawn inward from
+// the frame rect and is already inside the gap.
+constexpr int16_t SHELF_CELL_INSET = SHELF_RING_GAP;
 
-// Rows are packed tighter than the horizontal theme gap allows, so a third row
-// of full-size covers still fits the portrait band.
-constexpr int16_t SHELF_ROW_GAP = 4;
+// Gap to hand coverGrid so that all `count + 1` white channels along one axis
+// -- the two outer margins and the `count - 1` between covers -- come out the
+// same width.
+//
+// The channel is `slot` wide. An interior one is built from the cell inset on
+// each of the two neighbouring cells plus the grid gap; an edge one from a
+// single inset plus the outer margin. Solving both for the same slot gives
+// gap = slot - 2 * inset, and centring the grid rect then yields the matching
+// margin = slot - inset for free.
+//
+// Zero when the covers already fill the axis, which reproduces the old
+// flush-packed layout rather than overlapping the cells.
+int16_t evenGap(const int available, const int coverExtent, const int count) {
+  if (count <= 0) return 0;
+  const int slot = (available - count * coverExtent) / (count + 1);
+  const int gap = slot - 2 * SHELF_CELL_INSET;
+  return gap > 0 ? static_cast<int16_t>(gap) : 0;
+}
 }  // namespace
 
 bool RecentBooksActivity::isShelf() const { return SETTINGS.recentBooksView != CrossPointSettings::RECENT_VIEW_LIST; }
@@ -64,12 +92,15 @@ int RecentBooksActivity::shelfColumns() const {
 // panels, rather than silently degrading to 3x2. Falls through to the ladder
 // floor when even that will not fit (landscape), where the grid pages instead
 // of shrinking the covers to stamps.
+//
+// Measured against zero inter-row gap: whatever the chosen height leaves over
+// becomes the gap, distributed by buildShelf(). Reserving a gap here instead
+// would come straight off the cover.
 int RecentBooksActivity::pickShelfCoverHeight(const int bodyHeight, const int cellWidth, const int columns) {
   const int rows = columns;  // 2 columns -> 2 rows, 3 columns -> 3 rows
   const int innerWidth = cellWidth - 2 * SHELF_CELL_INSET;
   for (const int height : SHELF_COVER_LADDER) {
-    const int rowHeight = height + 2 * SHELF_CELL_INSET;
-    const int needed = rows * rowHeight + (rows - 1) * SHELF_ROW_GAP;
+    const int needed = rows * (height + 2 * SHELF_CELL_INSET);
     if (needed <= bodyHeight && height * 3 / 5 <= innerWidth) return height;
   }
   return SHELF_COVER_LADDER[std::size(SHELF_COVER_LADDER) - 1];
@@ -187,6 +218,8 @@ void RecentBooksActivity::stepShelfSelection(const int delta) {
 
 void RecentBooksActivity::onEnter() {
   UiListActivity::onEnter();
+
+  app.on(ACTION_HEADER, &RecentBooksActivity::headerActionTrampoline, this);
 
   // One of the few non-reader screens that follows SETTINGS.displayOrientation
   // (the hold-to-rotate gesture is handled in loop(), see resolveSideNavAction).
@@ -385,36 +418,51 @@ void RecentBooksActivity::render(RenderLock&& lock) {
   }
 }
 
+// The one place a view change is applied. Both entry points -- the Back-hold
+// picker and the header tap -- come through here, because the ordering below is
+// load-bearing and a second copy would drift out of step with it.
+void RecentBooksActivity::applyView(const int view) {
+  if (view < 0 || view >= CrossPointSettings::RECENT_VIEW_COUNT) return;
+  if (SETTINGS.recentBooksView == static_cast<uint8_t>(view)) return;
+  {
+    // The published interaction table indexes the OLD view's hit rects; a tap
+    // arriving before the next render would activate by them. Same reason
+    // moveSelectedUp closes it.
+    RenderLock renderLock(*this);
+    SETTINGS.recentBooksView = static_cast<uint8_t>(view);
+    closeRouting();
+    // The new view wants its own cover pass (or none at all), and its own
+    // glyph prewarm.
+    shelfCoversLoaded = false;
+    shelfCoversLoading = false;
+    // rowItems' label pointers are what the render task dereferences, and the
+    // prewarm inside depends on the new view -- both must move under the lock,
+    // like moveSelectedUp's reload does.
+    rebuildRowItems();
+    nav.follow(listCount());
+    SETTINGS.saveToFile();
+  }
+  requestUpdate(true);
+}
+
 // List / Bookshelf 2x2 / Bookshelf 3x3. Opened by a Back hold; the same three
 // values are also on the Settings > Library & Storage row.
 void RecentBooksActivity::showViewPicker() {
   static constexpr StrId OPTIONS[] = {StrId::STR_VIEW_LIST, StrId::STR_VIEW_SHELF_2, StrId::STR_VIEW_SHELF_3};
   optionPopup.show(StrId::STR_RECENT_BOOKS_VIEW, OPTIONS, CrossPointSettings::RECENT_VIEW_COUNT,
-                   SETTINGS.recentBooksView, [this](const int idx) {
-                     if (idx < 0 || idx >= CrossPointSettings::RECENT_VIEW_COUNT) return;
-                     if (SETTINGS.recentBooksView == static_cast<uint8_t>(idx)) return;
-                     {
-                       // The published interaction table indexes the OLD view's
-                       // hit rects; a tap arriving before the next render would
-                       // activate by them. Same reason moveSelectedUp closes it.
-                       RenderLock renderLock(*this);
-                       SETTINGS.recentBooksView = static_cast<uint8_t>(idx);
-                       closeRouting();
-                       // The new view wants its own cover pass (or none at all),
-                       // and its own glyph prewarm.
-                       shelfCoversLoaded = false;
-                       shelfCoversLoading = false;
-                       // rowItems' label pointers are what the render task
-                       // dereferences, and the prewarm inside depends on the
-                       // new view -- both must move under the lock, like
-                       // moveSelectedUp's reload does.
-                       rebuildRowItems();
-                       nav.follow(listCount());
-                       SETTINGS.saveToFile();
-                     }
-                     requestUpdate(true);
-                   });
+                   SETTINGS.recentBooksView, [this](const int idx) { applyView(idx); });
   requestUpdate();
+}
+
+// Header tap: step to the next view and wrap. Cycling rather than opening the
+// picker keeps the switch to one tap, which matters on a panel where every
+// change costs a full refresh.
+void RecentBooksActivity::headerActionTrampoline(const fui::ActionEvent&, void* user) {
+  auto* self = static_cast<RecentBooksActivity*>(user);
+  // The flash is keyed to the header rect, which the next layout may not
+  // publish; clear it so it cannot gray an unrelated element after the switch.
+  self->app.clearTapFlash();
+  self->applyView((SETTINGS.recentBooksView + 1) % CrossPointSettings::RECENT_VIEW_COUNT);
 }
 
 bool RecentBooksActivity::handleCustomInput() {
@@ -616,7 +664,13 @@ bool RecentBooksActivity::shelfCoverPainter(fui::DrawTarget&, const fui::Rect re
 void RecentBooksActivity::buildShelf(UiScreen& screen) {
   const fui::Rect body = screen.body();
   const int columns = shelfColumns();
-  const auto gap = static_cast<int16_t>(screen.theme().spaceMd);
+  fui::CoverGridProps props;
+
+  // Width coverGrid takes off the right for its scroll track once the shelf
+  // overflows. Held back from the cover sizing unconditionally: whether it is
+  // actually claimed depends on the row count, which is not known until the
+  // cover height has been chosen, and a cover sized over it would be clipped.
+  const auto scrollGutter = static_cast<int16_t>(props.scrollIndicatorWidth + props.scrollIndicatorGap);
 
   // Cover box, then the row that contains it. rowHeight follows the cover
   // constant rather than dividing the band by the column count: that is what
@@ -624,7 +678,10 @@ void RecentBooksActivity::buildShelf(UiScreen& screen) {
   // (landscape) instead of squeezing every tile into an unreadable stamp.
   // Both axes lose SHELF_CELL_INSET on each side to the selection ring.
   constexpr int16_t insetBoth = 2 * SHELF_CELL_INSET;
-  const auto cellWidth = static_cast<int16_t>((body.width - (columns - 1) * gap) / columns);
+  // Sized against the whole band bar the gutter: the inter-column gap is
+  // whatever the chosen cover leaves over, so it cannot be subtracted before
+  // the cover is known.
+  const auto cellWidth = static_cast<int16_t>((body.width - scrollGutter) / columns);
   // Measured, not assumed: the band depends on the theme's header/spacing and
   // on the bezel safe area, so it cannot be predicted from the panel size.
   const int picked = pickShelfCoverHeight(body.height, cellWidth, columns);
@@ -648,15 +705,12 @@ void RecentBooksActivity::buildShelf(UiScreen& screen) {
   auto coverW = static_cast<int16_t>(coverH * 3 / 5);
   if (coverW > cellWidth - insetBoth) coverW = static_cast<int16_t>(cellWidth - insetBoth);
 
-  fui::CoverGridProps props;
   props.itemProvider = &RecentBooksActivity::shelfItemProvider;
   props.itemProviderUserData = this;
   props.count = static_cast<uint16_t>(recentBooks.size());
   props.columns = static_cast<uint8_t>(columns);
   props.coverSize = fui::Size{coverW, coverH};
   props.rowHeight = rowHeight;
-  props.gap = gap;
-  props.rowGap = SHELF_ROW_GAP;
   props.cellInset = fui::Insets{SHELF_CELL_INSET, SHELF_CELL_INSET, SHELF_CELL_INSET, SHELF_CELL_INSET};
   // No caption band: the tile is all cover. A book with no usable cover is
   // identified by its title drawn inside the empty frame (see the painter).
@@ -685,10 +739,63 @@ void RecentBooksActivity::buildShelf(UiScreen& screen) {
   cellStyles.active = cellStyles.selected;
   props.cellStyles = cellStyles;
 
+  // Spread the leftover band evenly instead of banking it all as an outer
+  // margin, which lumped the covers together in the middle of the screen.
+  //
+  // Treat the row as `n` covers separated by `n + 1` equal slots -- one at each
+  // edge, one between each pair -- so every visible white channel is the same
+  // width. Each slot already contains the cell inset the selection ring needs:
+  // an interior slot carries two of them (one per neighbouring cell) and an
+  // edge slot one, so the gap handed to coverGrid is the slot minus the inset
+  // it already spends, and the outer margin falls out of centring the result.
+  //
+  // coverGrid centres each cover inside its cell (cover-grid.h: coverRect.x =
+  // content.x + (content.width - coverSize.width) / 2), so a cell wider than
+  // coverW would put its own surplus BETWEEN the covers on top of the gap and
+  // desynchronise the two axes. Sizing the grid rect to exactly
+  // columns * tightCell + gaps keeps cellW == tightCell.
+  //
+  // Order matters: coverH was chosen against the FULL-width cellWidth above, so
+  // the surplus is known only now.
+  const auto tightCell = static_cast<int16_t>(coverW + insetBoth);
+
+  // Rows first: the row count decides whether the shelf overflows, and that
+  // decides whether coverGrid claims a scrollbar gutter off the right. Not
+  // always `columns` rows -- in landscape the ladder bottoms out and fewer fit,
+  // and distributing over a row count the band cannot hold would push the last
+  // row off the bottom.
+  const int fitRows = rowHeight > 0 ? std::max(1, body.height / rowHeight) : 1;
+  props.rowGap = evenGap(body.height, coverH, fitRows);
+
+  // coverGrid takes its scroll track out of the rect it was handed, which would
+  // shave the last column and pull every cover off the pitch computed here.
+  // Reserve it instead, so the covers keep an exact cell and the track sits in
+  // its own gutter.
+  const bool overflows = static_cast<int>(recentBooks.size()) > fitRows * columns;
+  const auto gutter = static_cast<int16_t>(overflows ? scrollGutter : 0);
+  props.gap = evenGap(body.width - gutter, coverW, columns);
+
+  // Exactly the cells laid out above, then centred. Sizing the rect to the
+  // content (rather than handing over the whole band) is what makes
+  // coverGridVisibleCells return fitRows * columns exactly and leaves the
+  // residue as a matching outer margin.
+  fui::Rect grid = body;
+  const auto gridWidth = static_cast<int16_t>(columns * tightCell + (columns - 1) * props.gap);
+  const auto claimedWidth = static_cast<int16_t>(gridWidth + gutter);
+  if (gridWidth > 0 && claimedWidth < body.width) {
+    grid.x = static_cast<int16_t>(body.x + (body.width - claimedWidth) / 2);
+    grid.width = claimedWidth;
+  }
+  const auto gridHeight = static_cast<int16_t>(fitRows * rowHeight + (fitRows - 1) * props.rowGap);
+  if (gridHeight > 0 && gridHeight < body.height) {
+    grid.y = static_cast<int16_t>(body.y + (body.height - gridHeight) / 2);
+    grid.height = gridHeight;
+  }
+
   // The shelf owns its own viewport: syncListViewport() is row-height based and
   // would fight this. topIndex is derived from the selection, so stepping past
   // the last visible cell pages the shelf for free.
-  const uint16_t pageItems = fui::coverGridVisibleCells(body, props.columns, props.rowHeight, props.rowGap);
+  const uint16_t pageItems = fui::coverGridVisibleCells(grid, props.columns, props.rowHeight, props.rowGap);
   shelfPageItems = pageItems > 0 ? static_cast<int>(pageItems) : 1;
   props.topIndex = fui::coverGridTopIndexFor(static_cast<uint16_t>(nav.selected), props.count, props.columns,
                                              pageItems > 0 ? pageItems : props.columns);
@@ -696,15 +803,36 @@ void RecentBooksActivity::buildShelf(UiScreen& screen) {
   props.coverPainter = &RecentBooksActivity::shelfCoverPainter;
   props.coverPainterUserData = this;
 
-  fui::coverGrid(screen.frame(), body, props);
+  fui::coverGrid(screen.frame(), grid, props);
 }
 
 void RecentBooksActivity::buildScreen(UiScreen& screen) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  // Content below the GUI.drawHeader band, above the button hints.
-  screen.setContentMargin(fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0,
-                                      static_cast<int16_t>(metrics.buttonHintsHeight), 0});
-  screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
+  // Content below the GUI.drawHeader band, above the button hints -- except on
+  // the shelf, which draws no hints (drawFooter) and takes the strip as cover
+  // height instead. Already 0 on a touch board: UITheme::getMetrics() zeroes
+  // buttonHintsHeight whenever the panel has touch.
+  const auto bottomReserve = static_cast<int16_t>(isShelf() ? 0 : metrics.buttonHintsHeight);
+  screen.setContentMargin(
+      fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0, bottomReserve, 0});
+  // The shelf skips the theme's leading spacer too: the covers are their own
+  // separation, and on a tall-header theme those pixels are a whole ladder rung.
+  if (!isShelf()) screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
+
+  // Tap the title to cycle List -> 2x2 -> 3x3. drawChrome() paints the header
+  // straight to the renderer, outside the frame, so the band carries no hit
+  // rect of its own -- this publishes one over exactly the rect drawChrome()
+  // draws into. Registered before the empty-list return so the view is still
+  // switchable with no books on the shelf.
+  //
+  // Touch only: a button board reaches the picker through the Back hold, and an
+  // unreachable rect would just spend one of the frame's interaction slots.
+  if (mappedInput.hasTouch()) {
+    screen.frame().hit(
+        fui::Rect{0, static_cast<int16_t>(metrics.topPadding), static_cast<int16_t>(renderer.getScreenWidth()),
+                  static_cast<int16_t>(metrics.headerHeight)},
+        ACTION_HEADER, 0, fui::InputTouch);
+  }
 
   if (recentBooks.empty()) {
     screen.centeredText(tr(STR_NO_RECENT_BOOKS), screen.theme().smallText);
@@ -745,11 +873,15 @@ void RecentBooksActivity::buildScreen(UiScreen& screen) {
 }
 
 void RecentBooksActivity::drawFooter() {
+  // The shelf trades the whole hint strip for cover height; buildScreen() stops
+  // reserving the band to match. The gestures are unchanged -- only the on-screen
+  // reminder goes. List view keeps its hints: it has the room, and they are the
+  // only place the Left/Right reorder gesture is advertised.
+  if (isShelf()) return;
+
   // No rows: blank the row-action hints, same as FileBrowserActivity.
   const bool empty = recentBooks.empty();
-  const bool shelf = isShelf();
-  const auto labels = mappedInput.mapLabels(tr(STR_HOME), empty ? "" : tr(STR_OPEN),
-                                            empty ? "" : (shelf ? tr(STR_DIR_LEFT) : tr(STR_DIR_UP)),
-                                            empty ? "" : (shelf ? tr(STR_DIR_RIGHT) : tr(STR_DIR_DOWN)));
+  const auto labels = mappedInput.mapLabels(tr(STR_HOME), empty ? "" : tr(STR_OPEN), empty ? "" : tr(STR_DIR_UP),
+                                            empty ? "" : tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
