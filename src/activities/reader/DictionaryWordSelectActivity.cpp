@@ -651,14 +651,14 @@ void DictionaryWordSelectActivity::loop() {
           requestUpdate();
           break;
         }
-        startActivityForResult(std::move(definition), [this](const ActivityResult& result) {
-          if (!result.isCancelled) {
-            setResult(ActivityResult{});
-            finish();
-          } else {
-            forceFullRepaintOnNextRender();
-            requestUpdate();
-          }
+        // Closing the definition ends the whole lookup, however it was closed: one Back on
+        // the definition puts the reader's page back rather than dropping the user onto the
+        // word-select overlay they have to dismiss a second time. It also saves the
+        // full-page repaint that returning to the overlay would cost, since the reader
+        // repaints on the way out anyway.
+        startActivityForResult(std::move(definition), [this](const ActivityResult&) {
+          setResult(ActivityResult{});
+          finish();
         });
         break;
       }
