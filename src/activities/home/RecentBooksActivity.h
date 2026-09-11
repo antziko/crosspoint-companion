@@ -94,6 +94,24 @@ class RecentBooksActivity final : public UiListActivity {
   // on the render task in buildScreen, read on the loop task under RenderLock.
   int shelfPageItems = 1;
 
+  // Cover rects the last shelf build actually drew, recorded BY the painter as it paints
+  // rather than recomputed from coverGrid's layout maths -- so the targeted repaint below
+  // cannot drift from what is on screen if that layout ever changes. Written on the render
+  // task, read on the loop task under RenderLock, like shelfPageItems above.
+  // 24 slots (192 bytes) covers the densest rung of SHELF_COVER_LADDER with room spare; a
+  // build that somehow lays out more simply stops recording and falls back to a full render.
+  static constexpr int MAX_SHELF_CELLS = 24;
+  freeink::ui::Rect shelfCellRects[MAX_SHELF_CELLS]{};
+  int shelfCellFirst = -1;  // absolute book index of shelfCellRects[0]; -1 = nothing recorded
+  int shelfCellCount = 0;
+
+  // Repaint ONLY the two covers a selection step touches and push them to the panel,
+  // returning false when that is not possible (nothing recorded yet, or the step pages the
+  // shelf) so the caller can fall back to a full render.
+  bool repaintShelfSelection(int previous, int next);
+  // One cell: clear the ring band, redraw the cover, stroke the ring when selected.
+  void paintShelfCell(int index, bool selected);
+
   // The shelf half of buildScreen(): lays out fui::coverGrid over the whole
   // content band. Deliberately does NOT call syncListViewport() -- that helper
   // is row-height based; the shelf derives its own page from the SDK's

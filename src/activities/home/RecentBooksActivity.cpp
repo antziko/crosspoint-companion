@@ -19,6 +19,7 @@
 #include "RecentBooksStore.h"
 #include "activities/reader/ReaderUtils.h"
 #include "activities/util/ConfirmationActivity.h"
+#include "components/ListCursor.h"
 #include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
@@ -207,13 +208,103 @@ bool RecentBooksActivity::moveSelectedDown() {
   return true;
 }
 
+// One row of covers per press, wrapping at the ends the way list mode already does
+// (ButtonNavigator::nextIndex/previousIndex are modulo). Clamping instead turned a vertical
+// press into a sideways one -- Up on the top row slid to the first cover and stopped -- so
+// the last page was unreachable without stepping through every row.
+//
+// The COLUMN is carried across the wrap so the cursor stays in its lane, and a partial last
+// row that has no cover in that column takes its last one instead. `delta` is +/- the column
+// count, which is where the grid width comes from.
 void RecentBooksActivity::stepShelfSelection(const int delta) {
   const int count = listCount();
-  if (count <= 0) return;
+  if (count <= 0 || delta == 0) return;
+  const int columns = delta < 0 ? -delta : delta;
+  const int lastRow = (count - 1) / columns;
+  const int currentRow = nav.selected / columns;
+  const int column = nav.selected % columns;
+
   int target = nav.selected + delta;
-  if (target < 0) target = 0;
-  if (target >= count) target = count - 1;
-  if (target != nav.selected) moveSelectionTo(target);
+  if (target >= count) {
+    // Down past the end: a partial last row may still hold a cover in another column, so
+    // reach that first and only wrap once the cursor is already standing on it.
+    target = (currentRow < lastRow) ? count - 1 : std::min(column, count - 1);
+  } else if (target < 0) {
+    // Up past the top: same column on the last row, which pages the shelf to the end.
+    target = std::min(lastRow * columns + column, count - 1);
+  }
+  if (target == nav.selected) return;
+  // A full render re-opens and re-decodes EVERY visible cover from the SD card and then
+  // refreshes the whole panel, when all that changed is which cover wears the ring.
+  if (!repaintShelfSelection(nav.selected, target)) moveSelectionTo(target);
+}
+
+void RecentBooksActivity::paintShelfCell(const int index, const bool selected) {
+  const fui::Rect cover = shelfCellRects[index - shelfCellFirst];
+  const int ringX = cover.x - SHELF_RING_GAP;
+  const int ringY = cover.y - SHELF_RING_GAP;
+  const int ringW = cover.width + SHELF_RING_GAP * 2;
+  const int ringH = cover.height + SHELF_RING_GAP * 2;
+
+  // ONLY the ring band is touched. coverGrid strokes the ring inside the cover grown by
+  // SHELF_RING_GAP, leaving SHELF_RING_PAD of white between stroke and cover, so the cover's
+  // own pixels are identical selected or not -- and coverGrid resolves the cell background
+  // from a state with StateSelected masked out, so that does not change either. Re-decoding
+  // the thumbnail to redraw pixels that cannot have changed cost ~85ms per cell on an X3
+  // (measured: draw=165 for two cells, against ~1 here).
+  //
+  // The stroke only adds ink, so the band is cleared first or a ring being removed would
+  // stay on screen. Four strips around the cover rather than one fill over it.
+  renderer.fillRect(ringX, ringY, ringW, SHELF_RING_GAP, false);                           // above
+  renderer.fillRect(ringX, cover.y + cover.height, ringW, SHELF_RING_GAP, false);          // below
+  renderer.fillRect(ringX, cover.y, SHELF_RING_GAP, cover.height, false);                  // left
+  renderer.fillRect(cover.x + cover.width, cover.y, SHELF_RING_GAP, cover.height, false);  // right
+
+  if (selected) renderer.drawRect(ringX, ringY, ringW, ringH, SHELF_RING_WIDTH, true);
+}
+
+bool RecentBooksActivity::repaintShelfSelection(const int previous, const int next) {
+  if (!isShelf()) return false;
+
+  // Taken before the geometry is read, not just around the drawing: shelfCellRects and the
+  // window bounds are written by the render task, and a build landing between the check and
+  // the paint would leave this drawing into last frame's layout.
+  RenderLock lock(*this);
+  if (shelfCellFirst < 0 || shelfCellCount <= 0) return false;  // nothing recorded yet
+  // A removal can shrink the list before its re-render lands, leaving the recording wider
+  // than the data. The painter and the provider both bound-check, so this is not a safety
+  // gate -- it stops the fast path drawing a blank cell where a full build would reflow.
+  const int count = listCount();
+  if (previous >= count || next >= count || previous < 0 || next < 0) return false;
+  const int previousSlot = previous - shelfCellFirst;
+  const int nextSlot = next - shelfCellFirst;
+  // Either end off the current page means the viewport moves, which only a full build can
+  // lay out.
+  if (previousSlot < 0 || previousSlot >= shelfCellCount) return false;
+  if (nextSlot < 0 || nextSlot >= shelfCellCount) return false;
+
+  const unsigned long drawStart = millis();
+  nav.selected = next;
+  paintShelfCell(previous, false);
+  paintShelfCell(next, true);
+  const unsigned long drawMs = millis() - drawStart;
+
+  const fui::Rect& from = shelfCellRects[previousSlot];
+  const fui::Rect& to = shelfCellRects[nextSlot];
+  constexpr int ring = SHELF_RING_GAP;
+  const unsigned long displayStart = millis();
+  if (renderer.isX3()) {
+    // The X3 panel has no windowed refresh -- HalDisplay::displayWindow falls back to a full
+    // FAST one -- so asking for two windows would cost two full-frame refreshes. One is
+    // strictly better, and the saved cover decodes are the win on that board.
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+  } else {
+    renderer.displayWindowRegion(from.x - ring, from.y - ring, from.width + ring * 2, from.height + ring * 2);
+    renderer.displayWindowRegion(to.x - ring, to.y - ring, to.width + ring * 2, to.height + ring * 2);
+  }
+  SdDebugLog::log("RBA", "shelf step %d->%d draw=%lu display=%lu windowed=%d", previous, next, drawMs,
+                  millis() - displayStart, renderer.isX3() ? 0 : 1);
+  return true;
 }
 
 void RecentBooksActivity::onEnter() {
@@ -407,7 +498,14 @@ void RecentBooksActivity::navigateButtons() {}
 void RecentBooksActivity::render(RenderLock&& lock) {
   if (optionPopup.processRender(renderer, mappedInput)) return;
 
+  // Timed against the "shelf step" line below, which is the same screen change done
+  // incrementally: this path redraws every visible cover from SD and refreshes the whole
+  // panel, that one touches two cells.
+  const unsigned long renderStart = millis();
   UiListActivity::render(std::move(lock));
+  if (isShelf()) {
+    SdDebugLog::log("RBA", "shelf full ms=%lu cells=%d sel=%d", millis() - renderStart, shelfCellCount, nav.selected);
+  }
 
   // Cover generation runs AFTER the first paint, so the shelf appears
   // immediately with empty frames and fills in behind the progress popup,
@@ -614,6 +712,15 @@ bool RecentBooksActivity::shelfCoverPainter(fui::DrawTarget&, const fui::Rect re
                                             const uint16_t index, void* userData) {
   auto* self = static_cast<RecentBooksActivity*>(userData);
   const GfxRenderer& renderer = self->renderer;
+  // Record where this cover landed, for repaintShelfSelection(). Recorded here, at the one
+  // place that knows the real rect, so it can never disagree with what was drawn.
+  if (self->shelfCellFirst >= 0) {
+    const int slot = static_cast<int>(index) - self->shelfCellFirst;
+    if (slot >= 0 && slot < MAX_SHELF_CELLS) {
+      self->shelfCellRects[slot] = rect;
+      if (slot >= self->shelfCellCount) self->shelfCellCount = slot + 1;
+    }
+  }
   // drawBitmap composites dark-only (white never overwrites), so clear first or
   // a previous pass's ink ghosts through the light areas of the cover.
   renderer.fillRect(rect.x, rect.y, rect.width, rect.height, false);
@@ -724,7 +831,11 @@ void RecentBooksActivity::buildShelf(UiScreen& screen) {
   props.selectionIndicator = fui::CoverGridSelectionIndicator::CoverFrame;
   props.selectedCoverFrameGap = SHELF_RING_GAP;
   props.selectedCoverFrameWidth = SHELF_RING_WIDTH;
-  props.selectedIndex = static_cast<int16_t>(nav.selected);
+  // Withheld until the user navigates, like every other list (ListCursor). The shelf needs
+  // its own line because it bypasses syncListViewport (see the viewport note below), and -1
+  // is coverGrid's "no selection" — props.topIndex below is derived from nav.selected
+  // directly, so paging is unaffected.
+  props.selectedIndex = ListCursor::suppressed(nav.selected) ? -1 : static_cast<int16_t>(nav.selected);
   // Every cell paints solid white first, selected or not: that white moat
   // between cover and ring is what keeps the selection readable on an
   // all-black thumbnail. Selected cells must NOT take a gray wash — it would
@@ -803,6 +914,9 @@ void RecentBooksActivity::buildShelf(UiScreen& screen) {
   props.coverPainter = &RecentBooksActivity::shelfCoverPainter;
   props.coverPainterUserData = this;
 
+  // Begin a fresh recording for this build (see shelfCellRects).
+  shelfCellFirst = static_cast<int>(props.topIndex);
+  shelfCellCount = 0;
   fui::coverGrid(screen.frame(), grid, props);
 }
 
