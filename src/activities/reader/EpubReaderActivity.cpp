@@ -74,6 +74,21 @@ namespace {
 // fresh page needs the HALF ghost-cleanup and closing re-renders the page.
 bool xteinkClassPanel() { return gpio.isXteinkDevice() || BoardConfig::isX4Pro(); }
 
+// Boards that render images as a 1-bit halftone instead of 4-level grayscale.
+//
+// X3: its 4-level grayscale waveform is too weak to carry an image.
+//
+// X4 Pro: grouped here on MEASURED BEHAVIOUR, not on a known hardware limit. A tone
+// ramp photographed on device came back with source grays 0..170 all flat black and
+// only 255 white -- levels 1 and 2 move no charge, so two thirds of the tone range is
+// spent on levels that never reach the panel. Note this board shares the X4's
+// controller, panel and grayscale LUT, so the root cause is more likely an X4 Pro
+// init/waveform defect than a panel property; SettingsActivity drops fadingFix here
+// for a related reason ("plain OTP waveform, no custom grayscale LUT"). Revisit this
+// entry if the grayscale planes are ever made to drive on this board -- 4 working
+// levels would beat the halftone.
+bool oneBitImagePanel(const GfxRenderer& renderer) { return renderer.isX3() || BoardConfig::isX4Pro(); }
+
 // pagesPerRefresh now comes from SETTINGS.getRefreshFrequency()
 // pages per minute, first item is 1 to prevent division by zero if accessed
 constexpr int PAGE_TURN_RATES[] = {1, 1, 3, 6, 12};
@@ -3258,7 +3273,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   // grey (AA) text; Sharp = grey images + true-black text. Images are 1-bit only in
   // Off mode; text contributes grey to the grayscale planes only in Antialiased mode.
   const uint8_t aaMode = SETTINGS.textAntiAliasing;
-  renderer.setOneBitImages(renderer.isX3() || aaMode == CrossPointSettings::TEXT_AA_OFF);
+  renderer.setOneBitImages(oneBitImagePanel(renderer) || aaMode == CrossPointSettings::TEXT_AA_OFF);
   renderer.setTextAntiAlias(aaMode == CrossPointSettings::TEXT_AA_ANTIALIASED);
 
   // Font prewarm: scan pass accumulates text, then prewarm, then real render
@@ -3291,7 +3306,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   const bool hasLargeImage = page->hasLargeImages(IMAGE_LARGE_MIN_PX);
 
   lastPageHadImages = hasLargeImage;  // gates the bookmark light-refresh (see header)
-  const bool grayImages = page->hasImages() && !renderer.isX3() && aaMode != CrossPointSettings::TEXT_AA_OFF;
+  const bool grayImages = page->hasImages() && !oneBitImagePanel(renderer) && aaMode != CrossPointSettings::TEXT_AA_OFF;
   // Antialiased always runs the gray pass (text AA, even text-only pages). Sharp runs
   // it only for image pages — pure-text Sharp pages stay single-pass solid black.
   const bool doGrayscalePass = (aaMode == CrossPointSettings::TEXT_AA_ANTIALIASED) || grayImages;
@@ -3403,10 +3418,11 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
       statsCheckpointPending = true;
     }
     ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
-    // X3 halftone image residue: 1-bit halftone dots leave charge that FAST_REFRESH
+    // Halftone image residue: 1-bit halftone dots leave charge that FAST_REFRESH
     // can't fully clear on the next page. Force HALF on the next page to drive every
-    // pixel to its target — same fix as the X4 grayscale residue path above.
-    if (hasLargeImage && renderer.isX3()) {
+    // pixel to its target — same fix as the X4 grayscale residue path above. Applies
+    // to every panel that renders images as a halftone, not just the X3.
+    if (hasLargeImage && oneBitImagePanel(renderer)) {
       pagesUntilFullRefresh = CrossPointSettings::REFRESH_COUNTDOWN_FORCE_FULL;
     }
   }
