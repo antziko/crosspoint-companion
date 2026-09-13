@@ -527,6 +527,19 @@ void setup() {
   // Apply the SD-logging toggle now that settings are loaded (default off). Governs
   // the boot-done MEM line below and all later SdDebugLog::log() calls.
   SdDebugLog::setMasterEnabled(SETTINGS.sdCardLogging != 0);
+
+  // Judge the wake hold HERE, at the first point SETTINGS is readable and before anything
+  // user-visible is brought up: a press that did not survive verifyPowerButtonWakeup()'s
+  // hold is a tap, and a tap must cost nothing the user can see. Deciding this further
+  // down (after Frontlight.begin()) is what made an accidental click flash the frontlight
+  // for the length of an aborted boot. With Short Power Button Press = Sleep a single
+  // click is a legitimate wake, which is the one thing here that needs the settings load.
+  if (bootWakeupReason == HalGPIO::WakeupReason::PowerButton && !wakeHoldVerified &&
+      SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::SLEEP) {
+    LOG_DBG("MAIN", "Power-button wake not held through verification, sleeping");
+    Storage.prepareForDeepSleep();
+    powerManager.startDeepSleep(gpio);
+  }
   // Subscribe to STA disconnect events for the whole session: a drop during an OPDS
   // transfer or a KOSync round is invisible otherwise, and every request after it
   // spends ~29s in DNS timeouts and link-down waits before anything names the cause.
@@ -565,15 +578,8 @@ void setup() {
   const auto wakeupReason = gpio.getWakeupReason();
   switch (wakeupReason) {
     case HalGPIO::WakeupReason::PowerButton:
-      // The hold was sampled right after powerManager.begin(); this is where it is judged.
-      // With Short Power Button Press = Sleep a single click wakes on any device, so a
-      // released press is legitimate there; otherwise the button must still have been held
-      // (the ghost-wake debounce).
-      if (!wakeHoldVerified && SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::SLEEP) {
-        LOG_DBG("MAIN", "Power-button wake not held through verification, sleeping");
-        Storage.prepareForDeepSleep();
-        powerManager.startDeepSleep(gpio);
-      }
+      // The hold was sampled right after powerManager.begin() and judged right after the
+      // settings load above; a wake that reaches here passed it.
       wakePowerReleasePending = true;
       break;
     case HalGPIO::WakeupReason::AfterUSBPower:

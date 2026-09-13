@@ -300,22 +300,30 @@ bool HalGPIO::verifyPowerButtonWakeup() {
 #if defined(FREEINK_DEVICE_M5PAPER) && FREEINK_DEVICE_M5PAPER
   return true;
 #endif
-  // Sample the pad directly, settle the debouncer, then sample again. The old
-  // version polled isPressed() for up to a second and then measured a hold
-  // duration against a boot-time calibration -- but this runs early enough that
-  // a released tap is still visible, and the calibration made the duration
-  // check inert anyway once the call sat behind SD mount. Requiring the pad to
-  // read pressed on both sides of the debounce window is what rejects the
-  // tap-then-tap wake the old TODO described.
-  constexpr unsigned long POWER_WAKE_STABILITY_MS = 10;
-  const bool heldAtFirstSample = inputMgr.isPowerButtonPhysicallyPressed();
-  const unsigned long sampleStart = millis();
-  inputMgr.update();
-  while (millis() - sampleStart < POWER_WAKE_STABILITY_MS || inputMgr.isDebouncePending()) {
-    delay(1);
-    inputMgr.update();
+  // Waking takes a deliberate HOLD, not a tap: poll the pad until POWER_WAKE_HOLD_MS of
+  // unbroken press has passed, and report false the moment it reads released. The caller
+  // runs this before the frontlight and the panel come up, so a tap (in a bag, in a
+  // pocket) returns to deep sleep without lighting anything.
+  //
+  // The threshold mirrors the hold the sleep gesture asks for
+  // (CrossPointSettings::getPowerButtonDuration()), so one press length means "change
+  // power state" in both directions; it is a constant because settings are not loaded
+  // this early. The physical press is longer than this by the pre-setup() boot time,
+  // which is already part of the hold from the user's side.
+  constexpr unsigned long POWER_WAKE_HOLD_MS = 400;
+  // One released sample mid-hold can be contact bounce; confirm it before giving up.
+  constexpr unsigned long RELEASE_CONFIRM_MS = 8;
+  if (!inputMgr.isPowerButtonPhysicallyPressed()) return false;  // already released: a tap
+  const unsigned long holdStart = millis();
+  while (millis() - holdStart < POWER_WAKE_HOLD_MS) {
+    delay(2);
+    inputMgr.update();  // keep the debouncer (and the power-button press timestamps) warm
+    if (!inputMgr.isPowerButtonPhysicallyPressed()) {
+      delay(RELEASE_CONFIRM_MS);
+      if (!inputMgr.isPowerButtonPhysicallyPressed()) return false;
+    }
   }
-  return heldAtFirstSample && inputMgr.isPowerButtonPhysicallyPressed();
+  return inputMgr.isPowerButtonPhysicallyPressed();
 }
 
 bool HalGPIO::isUsbConnected() const {
