@@ -137,6 +137,57 @@ class FlashcardReviewActivity final : public Activity {
   void flipToBackFace();
   void displayList();  // push with the list refresh policy (FAST + landscape scrub)
 
+  // --- on-screen action bar --------------------------------------------------
+  // BaseTheme::drawButtonHints draws nothing on a touch board, and the X4 Pro wires no
+  // front buttons at all -- so without this the review is unreachable there: flip, Got it
+  // and Missed all hang off Left/Right/Confirm, and only suspend/commit (the side buttons)
+  // would work. One bar of equal buttons along the bottom, each firing exactly what the
+  // physical button it stands in for fires.
+  enum class Tap : uint8_t {
+    None,
+    Pass,
+    Fail,
+    Flip,
+    Commit,  // Revealed: commit the picked grade and advance ("next" side button)
+    Prev,
+    Next,
+    Done,
+    StartDue,
+    StartShuffled,
+    StartSuspended
+  };
+  static constexpr int MAX_TAP_ACTIONS = 4;
+  static constexpr int TAP_BUTTON_PADDING_Y = 12;
+  static constexpr int TAP_BUTTON_GAP = 10;
+  // Touch board: the bar is drawn and hit-tested. Seeded in onEnter().
+  bool tapBar = false;
+  // The current phase's actions in bar order -- the order the X3's button-hint strip puts
+  // them in (Flip, Got it, Missed), so the two boards read the same, minus Back, which has
+  // the left-edge swipe. With their labels. The ONE source both the
+  // render and the hit test read, so a tap can never mean something other than the label
+  // it landed on. Returns the count (0 = no bar this phase).
+  int buildTapActions(Tap* actions, const char** labels);
+  // "Set aside (3)": the overview's badge for that count is drawn over a button-hint slot,
+  // which a touch board has none of, so the count rides on the button label instead.
+  char tapSuspendLabel[40] = "";
+  // Bar geometry, recomputed identically on the render task and the loop task. Its own
+  // struct rather than the theme's Rect, which this header does not pull in (BaseTheme.h).
+  struct TapBarRect {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+  };
+  TapBarRect tapBarRect() const;
+  void drawTapBar();
+  // True when a tap was consumed. handleStyleTap covers the overview's card-style pair,
+  // which is drawn as two boxes already and only had Up/Down to switch it.
+  bool handleTapBar();
+  bool handleStyleTap();
+  void runTapAction(Tap action);
+  // Top of the content band. Shared by render() and the overview's hit test.
+  int contentTopY() const;
+
   // Render helpers.
   void renderOverview(int contentTop, int contentBottom, int pageWidth);
   void renderFront(int contentTop, int contentBottom, int pageWidth);
@@ -152,8 +203,8 @@ class FlashcardReviewActivity final : public Activity {
   // / PageBack button) and, when showNextHint is true (cloze reveal), the "Next"
   // clue ("next" / PageForward button) are placed at the physical position of the
   // side button that triggers them, folding in the Side Button Layout + CW swap (via
-  // usesUpButton) and the per-device button geometry: X3 side-by-side along the top
-  // (Up=top-left, Down=top-right); X4 stacked on the right (Up=top-right,
-  // Down=bottom-right -- hence contentBottom is needed).
+  // usesUpButton) and the per-device button geometry: edge-button boards (X3, X4 Pro)
+  // side-by-side along the top (Up=top-left, Down=top-right); the X4's off-screen rocker
+  // stacked on the right (Up=top-right, Down=bottom-right -- hence contentBottom is needed).
   void drawSuspendHint(int contentTop, int contentBottom, bool showNextHint = false);
 };

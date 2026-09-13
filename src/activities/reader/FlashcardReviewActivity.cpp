@@ -49,6 +49,9 @@ void FlashcardReviewActivity::onEnter() {
   today = clockOk ? readingHistoryDayIndex(year, month, day) : 0;
 
   stats = FlashcardDeck::computeStats(cachePath, today);
+  // Touch boards draw no button-hint strip (BaseTheme::drawButtonHints returns early), so
+  // the card's actions get on-screen buttons of their own.
+  tapBar = mappedInput.hasTouch();
   cardStyle = SETTINGS.flashcardCardStyle;  // start from the remembered default
   phase = Phase::Overview;                  // pre-session deck stats; the user picks style + scope here
 
@@ -349,6 +352,10 @@ void FlashcardReviewActivity::loop() {
     return;
   }
 
+  // The on-screen buttons first: on a touch-only board they are the only route to flip and
+  // grade, and they are drawn over the card face this phase is showing.
+  if (handleTapBar() || handleStyleTap()) return;
+
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     // Inline: Back is the "I'm in a rush" escape hatch -- it drops straight back to the
     // book from any phase, after a confirmation. Cards already graded this session keep
@@ -517,8 +524,11 @@ void FlashcardReviewActivity::render(RenderLock&&) {
   }
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, titleBuf);
 
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int contentBottom = pageHeight - metrics.buttonHintsHeight;
+  const int contentTop = contentTopY();
+  // The card face stops above the on-screen buttons where there are any; with none (button
+  // boards) this is the hint strip's top edge, exactly as before.
+  const TapBarRect bar = tapBarRect();
+  const int contentBottom = bar.height > 0 ? bar.y - metrics.verticalSpacing : pageHeight - metrics.buttonHintsHeight;
 
   if (stats.total == 0) {
     const int midY = contentTop + (contentBottom - contentTop) / 2;
@@ -546,7 +556,189 @@ void FlashcardReviewActivity::render(RenderLock&&) {
       renderSummary(contentTop, contentBottom, pageWidth);
       break;
   }
+  drawTapBar();
   displayList();
+}
+
+int FlashcardReviewActivity::contentTopY() const {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  return metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+}
+
+int FlashcardReviewActivity::buildTapActions(Tap* actions, const char** labels) {
+  if (!tapBar || stats.total == 0) return 0;
+  int count = 0;
+  const auto add = [&](const Tap action, const char* label) {
+    if (count >= MAX_TAP_ACTIONS) return;
+    actions[count] = action;
+    labels[count] = label;
+    ++count;
+  };
+  switch (phase) {
+    case Phase::Overview:
+      // Hint-strip order again: the set-aside pass is the Confirm slot, ahead of the two
+      // scope choices on Left and Right.
+      if (stats.suspended > 0) {
+        snprintf(tapSuspendLabel, sizeof(tapSuspendLabel), "%s (%d)", tr(STR_FLASHCARD_SCOPE_SUSPENDED),
+                 stats.suspended);
+        add(Tap::StartSuspended, tapSuspendLabel);
+      }
+      add(Tap::StartDue, tr(STR_FLASHCARD_SCOPE_DUE_FIRST));
+      add(Tap::StartShuffled, tr(STR_FLASHCARD_SCOPE_ALL_SHUFFLED));
+      break;
+    case Phase::Summary:
+      add(Tap::Done, tr(STR_DONE));
+      break;
+    case Phase::Revealed:
+      // The answer is up and the grade is picked: Got it / Missed re-pick it. "Next" commits
+      // and advances -- on the X3 that is the "next" side button, clued in the corner by
+      // drawSuspendHint; touch gets a button for it because a finger has nothing else to
+      // press. It goes last, after the three the hint strip carries.
+      add(Tap::Flip, tr(STR_FLASHCARD_FLIP));
+      add(Tap::Pass, tr(STR_FLASHCARD_PASS));
+      add(Tap::Fail, tr(STR_FLASHCARD_FAIL));
+      add(Tap::Commit, tr(STR_FLASHCARD_NEXT));
+      break;
+    case Phase::Front:
+    case Phase::AwaitingGrade:
+      add(Tap::Flip, tr(STR_FLASHCARD_FLIP));
+      if (suspendedMode) {
+        // No grading in a set-aside pass: the pair browses it instead. Restore and delete
+        // stay on the side buttons, which every touch board has (drawSuspendHint clues them).
+        add(Tap::Prev, tr(STR_FLASHCARD_PREV));
+        add(Tap::Next, tr(STR_FLASHCARD_NEXT));
+      } else {
+        add(Tap::Pass, tr(STR_FLASHCARD_PASS));
+        add(Tap::Fail, tr(STR_FLASHCARD_FAIL));
+      }
+      break;
+  }
+  return count;
+}
+
+FlashcardReviewActivity::TapBarRect FlashcardReviewActivity::tapBarRect() const {
+  if (!tapBar) return TapBarRect{};
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int height = renderer.getLineHeight(UI_10_FONT_ID) + TAP_BUTTON_PADDING_Y * 2;
+  const int inset = metrics.contentSidePadding;
+  const int y = renderer.getScreenHeight() - metrics.buttonHintsHeight - metrics.verticalSpacing - height;
+  return TapBarRect{inset, y, renderer.getScreenWidth() - inset * 2, height};
+}
+
+void FlashcardReviewActivity::drawTapBar() {
+  Tap actions[MAX_TAP_ACTIONS];
+  const char* labels[MAX_TAP_ACTIONS];
+  const int count = buildTapActions(actions, labels);
+  if (count <= 0) return;
+  const TapBarRect bar = tapBarRect();
+  const int step = bar.width / count;
+  const int width = step - TAP_BUTTON_GAP;
+  const int radius = UITheme::getInstance().getMetrics().controlRadius;
+  const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  for (int i = 0; i < count; ++i) {
+    const int x = bar.x + step * i;
+    if (radius > 0) {
+      renderer.drawRoundedRect(x, bar.y, width, bar.height, 1, radius, true);
+    } else {
+      renderer.drawRect(x, bar.y, width, bar.height);
+    }
+    const int textWidth = renderer.getTextWidth(UI_10_FONT_ID, labels[i]);
+    renderer.drawText(UI_10_FONT_ID, x + (width - textWidth) / 2, bar.y + (bar.height - lineHeight) / 2, labels[i],
+                      true);
+  }
+}
+
+bool FlashcardReviewActivity::handleTapBar() {
+  Tap actions[MAX_TAP_ACTIONS];
+  const char* labels[MAX_TAP_ACTIONS];
+  const int count = buildTapActions(actions, labels);
+  if (count <= 0) return false;
+  const TapBarRect bar = tapBarRect();
+  const int step = bar.width / count;
+  int column = 0;
+  // colWidth is the drawn width, not the step: the gap between two buttons belongs to
+  // neither, so a tap that lands in it does nothing rather than grading a card.
+  if (mappedInput.colTouch(column, bar.x, step, count, bar.y, bar.y + bar.height, step - TAP_BUTTON_GAP) !=
+      MappedInputManager::RowTouch::Tap) {
+    return false;
+  }
+  if (column < 0 || column >= count) return false;
+  runTapAction(actions[column]);
+  return true;
+}
+
+bool FlashcardReviewActivity::handleStyleTap() {
+  if (!tapBar || phase != Phase::Overview || stats.total == 0) return false;
+  // The two style boxes renderOverview draws at the top of the content band. Their own
+  // height is one text line, so the hit band is grown to a finger; the "Due N" line below
+  // is a whole row plus two spacings away.
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int left = metrics.contentSidePadding;
+  const int halfWidth = (renderer.getScreenWidth() - 2 * left) / 2;
+  const int boxTop = contentTopY() - 1;
+  const int boxHeight = renderer.getLineHeight(UI_10_FONT_ID) + 2;
+  constexpr int GROW = 8;
+  int column = 0;
+  if (mappedInput.colTouch(column, left, halfWidth, 2, boxTop - GROW, boxTop + boxHeight + GROW) !=
+      MappedInputManager::RowTouch::Tap) {
+    return false;
+  }
+  const uint8_t picked = column == 0 ? static_cast<uint8_t>(CrossPointSettings::FLASHCARD_STYLE_CLOZE)
+                                     : static_cast<uint8_t>(CrossPointSettings::FLASHCARD_STYLE_WORD_CONTEXT);
+  if (picked != cardStyle) {
+    cardStyle = picked;
+    requestUpdate();
+  }
+  return true;
+}
+
+void FlashcardReviewActivity::runTapAction(const Tap action) {
+  switch (action) {
+    case Tap::StartDue:
+      startSession(FlashcardDeck::SessionScope::DueFirst);
+      break;
+    case Tap::StartShuffled:
+      startSession(FlashcardDeck::SessionScope::AllShuffled);
+      break;
+    case Tap::StartSuspended:
+      startSession(FlashcardDeck::SessionScope::Suspended);
+      break;
+    case Tap::Done:
+      setResult(ActivityResult{});
+      finish();
+      break;
+    case Tap::Flip:
+      flipToBackFace();
+      break;
+    case Tap::Prev:
+      navigateCard(-1);
+      break;
+    case Tap::Next:
+      navigateCard(+1);
+      break;
+    case Tap::Commit:
+      gradeAndAdvance(pendingCorrect);
+      break;
+    case Tap::Pass:
+    case Tap::Fail: {
+      const bool correct = action == Tap::Pass;
+      if (phase == Phase::Revealed) {
+        // Re-pick, exactly like Left/Right here: the commit is the separate "Next" button.
+        pendingCorrect = correct;
+        requestUpdate();
+      } else if (phase == Phase::Front && cardStyle == CrossPointSettings::FLASHCARD_STYLE_CLOZE) {
+        // Cloze hides the word, so a front grade reveals the answer first and stays re-pickable.
+        pendingCorrect = correct;
+        phase = Phase::Revealed;
+        requestUpdate();
+      } else {
+        gradeAndAdvance(correct);
+      }
+      break;
+    }
+    case Tap::None:
+      break;
+  }
 }
 
 void FlashcardReviewActivity::renderOverview(int contentTop, int contentBottom, int pageWidth) {
@@ -658,7 +850,7 @@ void FlashcardReviewActivity::renderOverview(int contentTop, int contentBottom, 
   // When cards are set aside, centre a compact "(N)" directly above the Suspend
   // button (hint slot 1 == btn2). Ask the active theme for that slot's centre so
   // the badge lands correctly across themes and on both X3/X4 layouts.
-  if (stats.suspended > 0) {
+  if (stats.suspended > 0 && !tapBar) {
     const int buttonCenter = GUI.getButtonHintSlotCenterX(renderer, 1, tr(STR_FLASHCARD_SCOPE_SUSPENDED));
     char badge[12];
     snprintf(badge, sizeof(badge), "(%d)", stats.suspended);
@@ -721,20 +913,24 @@ void FlashcardReviewActivity::drawSuspendHint(int contentTop, int contentBottom,
   // they label, so each clue sits next to the button that triggers it. Suspend is
   // the "prev" (PageBack) button, Next the "next" (PageForward) button; which
   // physical button is which folds in the Side Button Layout + CW swap via
-  // usesUpButton(). The two devices arrange their side buttons differently:
-  //   X3: side-by-side along the top edge  -> UP=top-left,  DOWN=top-right
-  //   X4: stacked on the right edge        -> UP=top-right, DOWN=bottom-right
+  // usesUpButton(). Boards arrange their side buttons differently:
+  //   edge buttons (X3, X4 Pro): one per screen edge -> UP=top-left, DOWN=top-right
+  //   off-screen rocker (X4):    stacked on the right -> UP=top-right, DOWN=bottom-right
+  // hasEdgeSideButtons(), NOT deviceIsX4(): that is a RUNTIME X3/X4 probe which reports X4
+  // on every non-C3 board, the X4 Pro included (HalGPIO::begin) -- so the X4 Pro was being
+  // clued as a rocker. It has the X3's layout, and BaseTheme::drawSideButtonHints already
+  // splits on exactly this predicate.
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int leftX = metrics.contentSidePadding;
-  const bool x4 = gpio.deviceIsX4();
-  // On X4 the DOWN-button clue sits at the bottom-right, aligned to the centered
+  const bool stackedSideButtons = !gpio.hasEdgeSideButtons();
+  // On a rocker board the DOWN-button clue sits at the bottom-right, aligned to the centered
   // "Missed / Got it" grade line (renderRevealed draws it at this same row). That
   // row is one above the chapter footer (contentBottom - listRowHeight), so the clue
   // never overlaps / cuts the chapter title.
   const int bottomY = contentBottom - metrics.listRowHeight * 2;
   auto place = [&](const char* text, bool isUpButton) {
     int x, ypos;
-    if (x4) {
+    if (stackedSideButtons) {
       x = renderer.getScreenWidth() - metrics.contentSidePadding - renderer.getTextWidth(SMALL_FONT_ID, text);
       ypos = isUpButton ? contentTop : bottomY;
     } else {
