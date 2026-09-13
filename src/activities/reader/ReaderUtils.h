@@ -121,6 +121,19 @@ inline PageTurnResult detectPageTurn(const MappedInputManager& input) {
   return {prev, next, tiltPrev || tiltNext, fromSide};
 }
 
+// The reader-menu gesture actually in force on this board. Swipe Up is only
+// offered where the Home key frees the bottom edge; settings.json is
+// board-independent here, so a file written on an X4 Pro can carry SWIPE_UP
+// onto a board where that swipe is already Home. Resolving it back to Tap
+// keeps the menu reachable instead of silently stranding it.
+inline uint8_t resolveShowReaderMenu(const MappedInputManager& input) {
+  const uint8_t mode = SETTINGS.showReaderMenu;
+  if (mode == CrossPointSettings::READER_MENU_SWIPE_UP && !input.hasHomeKey()) {
+    return CrossPointSettings::READER_MENU_TAP;
+  }
+  return mode;
+}
+
 struct TouchPageTurn {
   bool prev;
   bool next;
@@ -134,13 +147,36 @@ inline TouchPageTurn detectTouchPageTurn(GfxRenderer& renderer, const MappedInpu
   }
 
   if (SETTINGS.touchReaderControls == CrossPointSettings::TOUCH_READER_SWIPE) {
-    // Horizontal swipes turn pages; taps stay free for the middle-third
-    // reader-menu zone. A slow swipe never becomes a long-press chapter skip.
+    // Swipes turn pages on either axis -- left or up = next, right or down = previous,
+    // the same sense the lists page in. Taps stay free for the middle-third reader-menu
+    // zone. A slow swipe never becomes a long-press chapter skip.
     const auto dir = input.wasSwipe();
-    if (dir == MappedInputManager::SwipeDir::Left) {
-      result.next = true;
-    } else if (dir == MappedInputManager::SwipeDir::Right) {
-      result.prev = true;
+    switch (dir) {
+      case MappedInputManager::SwipeDir::Left:
+        result.next = true;
+        break;
+      case MappedInputManager::SwipeDir::Right:
+        result.prev = true;
+        break;
+      case MappedInputManager::SwipeDir::Up:
+        // A bottom-edge up-swipe is the board's own gesture wherever one is live: Home on
+        // boards without a Home key, the reader menu where that variant is selected. The
+        // rest of the screen pages. (The left-edge Back gesture is the horizontal
+        // counterpart and is resolved the other way -- see backGestureIsPageTurn -- because
+        // it is the page turn that has no alternative there.)
+        if (!input.wasHomeGesture() && !(resolveShowReaderMenu(input) == CrossPointSettings::READER_MENU_SWIPE_UP &&
+                                         input.wasReaderMenuSwipeUp())) {
+          result.next = true;
+        }
+        break;
+      case MappedInputManager::SwipeDir::Down:
+        // Top edge pulls the light panel (or the reader menu on a lightless touch board)
+        // down; ActivityManager takes that one before the reader ever sees it on a
+        // frontlight board, and this keeps the two apart on every other.
+        if (!input.wasMenuGesture()) result.prev = true;
+        break;
+      default:
+        break;
     }
     return result;
   }
@@ -182,19 +218,6 @@ inline TouchPageTurn detectTouchPageTurn(GfxRenderer& renderer, const MappedInpu
 // only the Epub reader (which does not use it) needs this.
 inline bool backGestureIsPageTurn(const MappedInputManager& input) {
   return SETTINGS.touchReaderControls == CrossPointSettings::TOUCH_READER_SWIPE && input.wasBackGesture();
-}
-
-// The reader-menu gesture actually in force on this board. Swipe Up is only
-// offered where the Home key frees the bottom edge; settings.json is
-// board-independent here, so a file written on an X4 Pro can carry SWIPE_UP
-// onto a board where that swipe is already Home. Resolving it back to Tap
-// keeps the menu reachable instead of silently stranding it.
-inline uint8_t resolveShowReaderMenu(const MappedInputManager& input) {
-  const uint8_t mode = SETTINGS.showReaderMenu;
-  if (mode == CrossPointSettings::READER_MENU_SWIPE_UP && !input.hasHomeKey()) {
-    return CrossPointSettings::READER_MENU_TAP;
-  }
-  return mode;
 }
 
 // Tap in the middle third of the screen: the tap path into the reader menu on
