@@ -2047,6 +2047,23 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       const unsigned long liveDwellMs = currentPageVisibleMs + (pageShownAtMs > 0 ? millis() - pageShownAtMs : 0UL);
       const uint32_t reducible = sessionIdleExcessSecs + computeIdleExcessSecs(liveDwellMs);
       session.elapsedSecs = sessionSecs > reducible ? sessionSecs - reducible : 0UL;
+      // TEMPORARY (idle-page-cap report, X4 Pro): every input the "This session" line is derived
+      // from, so a device run says which assumption is wrong -- the cap index not reaching the
+      // reader, the page dwell being reset before it can exceed the threshold, or neither.
+      // Needs SD Card Logging on; strip once the report is settled.
+      LOG_INF("STAT", "book-stats capIdx=%u sess=%us dwell=%ums shown=%d banked=%us red=%us line=%us",
+              (unsigned)SETTINGS.pageIdleCapSeconds, (unsigned)sessionSecs, (unsigned)liveDwellMs,
+              pageShownAtMs > 0 ? 1 : 0, (unsigned)sessionIdleExcessSecs, (unsigned)reducible,
+              (unsigned)session.elapsedSecs);
+      SdDebugLog::log("STAT",
+                      "book-stats capIdx=%u capSecs=%u sess=%us dwell=%ums shown=%d banked=%us red=%us line=%us",
+                      static_cast<unsigned>(SETTINGS.pageIdleCapSeconds),
+                      static_cast<unsigned>(SETTINGS.pageIdleCapSeconds < 5
+                                                ? CrossPointSettings::PAGE_IDLE_CAP_SECONDS[SETTINGS.pageIdleCapSeconds]
+                                                : 0),
+                      static_cast<unsigned>(sessionSecs), static_cast<unsigned>(liveDwellMs), pageShownAtMs > 0 ? 1 : 0,
+                      static_cast<unsigned>(sessionIdleExcessSecs), static_cast<unsigned>(reducible),
+                      static_cast<unsigned>(session.elapsedSecs));
       // Live reading pace (avg real reading seconds per forward page) from the in-progress stats,
       // shown on the Book Stats summary. Fresher than the on-disk copy the activity reloads.
       session.pacePerPageSecs = readingStats.avgSecondsPerForwardPage;
@@ -2845,13 +2862,22 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   // word-select is excluded), giving a paused-then-resumed dwell on the same page. The idle-page
   // accumulator follows the same rule: on a genuine new page, apply the cap to the page just
   // left and reset; on a resume, keep accumulating into the same page.
+  // TEMPORARY (idle-page-cap report): says on every page paint whether this render preserved or
+  // reset the page's accumulated dwell, and what the reset banked. A reset seen while the user is
+  // idle is the bug; no line at all during an idle means no render happened. Strip once settled.
+  const unsigned long traceDwellMs = currentPageVisibleMs;
   if (preserveMarkerDwell_) {
     preserveMarkerDwell_ = false;
     markerDwellStartMs = millis() - markerDwellPausedElapsedMs;
+    LOG_INF("STAT", "page-anchor PRESERVE spine=%d page=%d dwell=%ums banked=%us", currentSpineIndex,
+            section ? section->currentPage : -1, (unsigned)traceDwellMs, (unsigned)sessionIdleExcessSecs);
   } else {
     accountIdleExcess(currentPageVisibleMs);
     currentPageVisibleMs = 0UL;
     markerDwellStartMs = millis();
+    LOG_INF("STAT", "page-anchor RESET spine=%d page=%d dwell=%ums excess=%us banked=%us", currentSpineIndex,
+            section ? section->currentPage : -1, (unsigned)traceDwellMs, (unsigned)computeIdleExcessSecs(traceDwellMs),
+            (unsigned)sessionIdleExcessSecs);
   }
 
   showPendingSyncSaveError();
