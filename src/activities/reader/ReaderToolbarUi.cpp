@@ -235,21 +235,37 @@ void ReaderToolbarUi::buildPanel(UiScreen& screen) {
   const int16_t rowStride = static_cast<int16_t>(rowH + tokens.listRowGap);
   const int16_t grabberBand =
       static_cast<int16_t>(sheetProps.grabberMargin + sheetProps.grabberHeight + sheetProps.grabberInset);
-  const int16_t chrome = static_cast<int16_t>(grabberBand + titleH + tokens.spaceMd + tokens.spaceSm +
-                                              std::max(0, model_.bottomReserve) + kToolRowH + tokens.spaceSm);
+  const int16_t titleBand = static_cast<int16_t>(titleH + tokens.spaceMd);
+  const int16_t chromeSansTitle = static_cast<int16_t>(grabberBand + tokens.spaceSm +
+                                                       std::max(0, model_.bottomReserve) + kToolRowH + tokens.spaceSm);
   const int16_t target = static_cast<int16_t>((safe.height * kPanelHeightPercent) / 100);
   const int16_t cap = static_cast<int16_t>((safe.height * kPanelHeightMaxPercent) / 100);
-  int sheetRows = (target - chrome + tokens.listRowGap) / rowStride;
-  if (static_cast<int16_t>(chrome + (sheetRows + 1) * rowStride - tokens.listRowGap) <= cap) ++sheetRows;
-  if (model_.itemCount > 0 && sheetRows > model_.itemCount) sheetRows = model_.itemCount;
-  if (sheetRows < 1) sheetRows = 1;
+  const int count = std::max(0, model_.itemCount);
+  const auto rowsForChrome = [&](const int16_t chromeH) {
+    int rows = (target - chromeH + tokens.listRowGap) / rowStride;
+    if (static_cast<int16_t>(chromeH + (rows + 1) * rowStride - tokens.listRowGap) <= cap) ++rows;
+    if (count > 0 && rows > count) rows = count;
+    return rows < 1 ? 1 : rows;
+  };
+  // The title line is only worth its height while it carries the page position: the
+  // switcher's pill already names the open panel, so on a list that fits in one page
+  // "Contents" is a word the reader has just tapped for, and the band it sits in is
+  // better spent on another row. Measured rows when the last build described THIS list
+  // (a wrapped chapter title takes two lines, so fewer fit than the fixed-height
+  // estimate), the estimate before the first build.
+  const int rowsWithTitle = rowsForChrome(static_cast<int16_t>(chromeSansTitle + titleBand));
+  const bool showTitle = count > (nav_.trusts(count) ? nav_.drawnRows : rowsWithTitle);
+  const int16_t chrome = showTitle ? static_cast<int16_t>(chromeSansTitle + titleBand) : chromeSansTitle;
+  const int sheetRows = showTitle ? rowsWithTitle : rowsForChrome(chromeSansTitle);
   screen.sheet(sheetProps, static_cast<int16_t>(chrome + sheetRows * rowStride - tokens.listRowGap));
   // No blanket side inset: Screen::list() draws in the content band, and the
   // scroll track must reach the sheet's edge like a full-screen list's does.
   // The title insets itself; the rows inset via rowInset below.
 
-  // Title line: panel name left, page position right when the list spans pages.
-  {
+  // Title line: panel name left, page position right. Only on a list that spans pages
+  // (see showTitle); an empty rect below is the "no line was laid out" marker.
+  pageIndicatorRect_ = fui::Rect{};
+  if (showTitle) {
     fui::TextStyle titleStyle = tokens.titleText;
     titleStyle.bold = true;
     const fui::Rect line =
@@ -284,7 +300,6 @@ void ReaderToolbarUi::buildPanel(UiScreen& screen) {
   // rowInset pulls the rows back to the title's spaceLg alignment.
   listProps_.rowInset = tokens.spaceLg;
   const fui::Rect listRect = screen.body();
-  const int count = std::max(0, model_.itemCount);
   // The nav owns selection + viewport (same fui::ListNav idiom as the list
   // menu screens). A shown cursor re-follows into view on every build; a
   // hidden one (-1, touch) leaves the viewport where scrolling put it.
@@ -317,7 +332,10 @@ void ReaderToolbarUi::buildPanel(UiScreen& screen) {
 
   const int pageRows = nav_.pageRows();
   const int totalPages = pageRows > 0 ? (count + pageRows - 1) / pageRows : 0;
-  if (totalPages > 1) {
+  // pageIndicatorRect_ is empty when the estimate said one page but the measured layout
+  // spans two (a wrapped row); the build after this one shows the line, having then got
+  // the measurement to decide on.
+  if (totalPages > 1 && !pageIndicatorRect_.empty()) {
     char buf[16];
     snprintf(buf, sizeof(buf), "%d/%d", nav_.top / pageRows + 1, totalPages);
     fui::TextStyle pageStyle = tokens.smallText;
