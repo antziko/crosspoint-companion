@@ -349,9 +349,93 @@ void RecentBooksActivity::activateIndex(const int index) {
 
 void RecentBooksActivity::onRowLongPress(const int index) {
   if (index < 0 || index >= listCount()) return;
-  // Long-press prompts removal from the list (mirrors the Confirm-button hold).
   app.clearTapFlash();
-  promptRemoveBook(recentBooks[index].path, recentBooks[index].title);
+  promptBookActions(index);
+}
+
+// Left/Right reorder on any board that has them, so a hold there keeps meaning exactly one
+// thing (remove) and needs no menu in front of it. A touch-only board wires neither, which
+// leaves the hold as the only way in to either action.
+bool RecentBooksActivity::holdOffersReorder() const {
+  return !mappedInput.isAvailable(MappedInputManager::Button::Left);
+}
+
+void RecentBooksActivity::promptBookActions(const int index) {
+  if (index < 0 || index >= listCount()) return;
+  const std::string path = recentBooks[index].path;
+  const std::string title = recentBooks[index].title;
+  if (!holdOffersReorder()) {
+    promptRemoveBook(path, title);
+    return;
+  }
+  // The book's own title is the dialog title: the two actions read as a sentence about it,
+  // and the removal prompt that may follow names it again anyway.
+  const char* options[] = {tr(STR_MOVE_BOOK), tr(STR_REMOVE_BUTTON)};
+  optionPopup.show(title.c_str(), options, 2, 0, [this, index, path, title](const int choice) {
+    if (choice == 0) {
+      if (index >= listCount()) return;
+      // Move what the user held, not whatever the cursor was on: on a touch board the
+      // cursor is still withheld (ListCursor) and sits wherever the last button press left it.
+      moveSelectionTo(index);
+      reorderMode = true;
+      requestUpdate();
+      return;
+    }
+    promptRemoveBook(path, title);
+  });
+  requestUpdate();
+}
+
+void RecentBooksActivity::endReorder() {
+  reorderMode = false;
+  // The side presses that moved the book revealed the cursor for every list
+  // (MappedInputManager::update): withhold it again. They were moving a book, not choosing
+  // one, and a finger that opens a book by tapping it needs no highlight afterwards.
+  ListCursor::hide();
+  requestUpdate();
+}
+
+// Move mode owns every input while it is on: the side buttons move the book, and anything
+// else the user can reach on a touch-only board (a tap, the Back edge-swipe) leaves the mode
+// rather than acting on the list underneath it.
+bool RecentBooksActivity::handleReorderInput() {
+  if (recentBooks.empty()) {
+    endReorder();
+    return true;
+  }
+  int tapX = 0;
+  int tapY = 0;
+  if (mappedInput.wasScreenTapped(tapX, tapY) || mappedInput.wasReleased(MappedInputManager::Button::Confirm) ||
+      mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    endReorder();
+    return true;
+  }
+
+  // resolveSideNavAction, not a bare release: the side buttons keep the hold-to-rotate
+  // gesture here, and that is what decides whether a step fires on press or on release.
+  switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Up)) {
+    case ReaderUtils::SideNavAction::STEP:
+      moveSelectedUp();
+      break;
+    case ReaderUtils::SideNavAction::ROTATE:
+      ReaderUtils::cycleDisplayOrientation(renderer, 1);
+      requestUpdate();
+      break;
+    case ReaderUtils::SideNavAction::NONE:
+      break;
+  }
+  switch (ReaderUtils::resolveSideNavAction(mappedInput, MappedInputManager::Button::Down)) {
+    case ReaderUtils::SideNavAction::STEP:
+      moveSelectedDown();
+      break;
+    case ReaderUtils::SideNavAction::ROTATE:
+      ReaderUtils::cycleDisplayOrientation(renderer, -1);
+      requestUpdate();
+      break;
+    case ReaderUtils::SideNavAction::NONE:
+      break;
+  }
+  return true;
 }
 
 bool RecentBooksActivity::handleButtons() {
@@ -408,7 +492,7 @@ bool RecentBooksActivity::handleButtons() {
   if (!recentBooks.empty() && nav.selected < listCount() &&
       mappedInput.isPressed(MappedInputManager::Button::Confirm) && mappedInput.getHeldTime() >= LONG_PRESS_MS) {
     longPressFired = true;
-    promptRemoveBook(recentBooks[nav.selected].path, recentBooks[nav.selected].title);
+    promptBookActions(nav.selected);
     return true;
   }
 
@@ -572,6 +656,10 @@ bool RecentBooksActivity::handleCustomInput() {
     return true;
   }
 
+  // Ahead of the touch routing in the base loop(), so a tap ends the mode instead of
+  // opening the book it lands on.
+  if (reorderMode) return handleReorderInput();
+
   // Shelf paging. The base tail scrolls nav.top on a swipe, but the shelf
   // derives its viewport from the SELECTION, so nav.top moves nothing there --
   // page the selection instead. Guarded by isShelf() so list mode never sees
@@ -587,8 +675,10 @@ bool RecentBooksActivity::handleCustomInput() {
     const int delta = swipe == MappedInputManager::SwipeDir::Up ? shelfPageItems : -shelfPageItems;
     target = nav.selected + delta;
   }
-  if (target < 0) target = 0;
-  if (target >= count) target = count - 1;
+  // Park on the last (first) book first, and wrap only on the swipe after that -- the same
+  // two-step the paged lists have, so no book is skipped past on the way to the edge.
+  if (target >= count) target = nav.selected >= count - 1 ? 0 : count - 1;
+  if (target < 0) target = nav.selected <= 0 ? count - 1 : 0;
   if (target != nav.selected) moveSelectionTo(target);
   return true;
 }
@@ -771,6 +861,11 @@ bool RecentBooksActivity::shelfCoverPainter(fui::DrawTarget&, const fui::Rect re
 void RecentBooksActivity::buildShelf(UiScreen& screen) {
   const fui::Rect body = screen.body();
   const int columns = shelfColumns();
+  // No row band: cells are laid out by coverGrid, not by syncListViewport, so the base's
+  // tapped-row tint has no geometry to clamp against. Cleared rather than left alone
+  // because the header toggles list <-> shelf inside one activity, and a band recorded by
+  // the list build would otherwise still be standing here.
+  listBand_ = Rect{};
   fui::CoverGridProps props;
 
   // Width coverGrid takes off the right for its scroll track once the shelf
@@ -831,11 +926,15 @@ void RecentBooksActivity::buildShelf(UiScreen& screen) {
   props.selectionIndicator = fui::CoverGridSelectionIndicator::CoverFrame;
   props.selectedCoverFrameGap = SHELF_RING_GAP;
   props.selectedCoverFrameWidth = SHELF_RING_WIDTH;
-  // Withheld until the user navigates, like every other list (ListCursor). The shelf needs
-  // its own line because it bypasses syncListViewport (see the viewport note below), and -1
-  // is coverGrid's "no selection" — props.topIndex below is derived from nav.selected
+  // Withheld until the user navigates with the BUTTONS (ListCursor). ListCursor::hidden(),
+  // not suppressed(): the shelf scrolls by moving the selection, so a touch swipe walks it
+  // off row 0 and suppressed() would start ringing a cover the user never selected — on a
+  // shelf a tap opens the book outright, so the finger never needs the ring. The shelf needs
+  // its own line at all because it bypasses syncListViewport (see the viewport note below),
+  // and -1 is coverGrid's "no selection" — props.topIndex below is derived from nav.selected
   // directly, so paging is unaffected.
-  props.selectedIndex = ListCursor::suppressed(nav.selected) ? -1 : static_cast<int16_t>(nav.selected);
+  // Move mode rings the cover being moved even with the cursor withheld (see the list build).
+  props.selectedIndex = (reorderMode || !ListCursor::hidden()) ? static_cast<int16_t>(nav.selected) : -1;
   // Every cell paints solid white first, selected or not: that white moat
   // between cover and ring is what keeps the selection readable on an
   // all-black thumbnail. Selected cells must NOT take a gray wash — it would
@@ -983,6 +1082,16 @@ void RecentBooksActivity::buildScreen(UiScreen& screen) {
   // none of its own (see ListProps::subtitleRowPadding).
   props.subtitleRowPadding = screen.theme().spaceMd;
   syncListViewport(screen, props, /*hasSubtitle=*/true);
+  // The row being moved has to be visible whatever the cursor rule says: it was picked with
+  // a finger, so ListCursor is still withholding the highlight syncListViewport just cleared.
+  // Outside the mode the highlight is withheld at ANY row -- hidden(), not the suppressed()
+  // syncListViewport applied, whose "only while the selection still sits on row 0" qualifier
+  // stops applying the moment a move has walked it down the list.
+  if (reorderMode) {
+    props.selectedIndex = static_cast<int16_t>(nav.selected);
+  } else if (ListCursor::hidden()) {
+    props.selectedIndex = -1;
+  }
   screen.list(props);
 }
 

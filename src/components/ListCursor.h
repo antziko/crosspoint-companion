@@ -43,4 +43,11 @@ inline bool reveal() {
 // the real selectedIndex for their paging maths -- only the highlight is withheld.
 inline bool suppressed(const int selectedIndex) { return hiddenUntilNavigation && selectedIndex <= 0; }
 
+// True while the cursor is still unrevealed, WHATEVER row the selection sits on. For a view
+// whose selection doubles as the scroll anchor: the Recent Books shelf pages by moving the
+// selection, so a touch swipe walks it off the default row and suppressed()'s "only while
+// still on row 0" qualifier would hand back a ring the user never asked for. A finger that
+// opens a book by tapping it needs no cursor at any scroll position.
+inline bool hidden() { return hiddenUntilNavigation; }
+
 }  // namespace ListCursor

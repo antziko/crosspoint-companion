@@ -38,7 +38,10 @@ class RecentBooksActivity final : public UiListActivity {
   // "Recent Books (7)". Formatted into a fixed buffer by rebuildRowItems()
   // whenever the list changes, so the header shows the count without building a
   // std::string on every repaint.
-  const char* headerTitle() const override { return headerTitleBuf; }
+  // Move mode renames the header: the count is not what the user needs to read while the
+  // side buttons are moving a book, and on a touch board the hint strip that would
+  // otherwise say so has no height (UITheme::getMetrics zeroes it).
+  const char* headerTitle() const override { return reorderMode ? tr(STR_MOVE_BOOK) : headerTitleBuf; }
   char headerTitleBuf[64] = "";
   void drawFooter() override;
 
@@ -147,4 +150,17 @@ class RecentBooksActivity final : public UiListActivity {
 
   // Show an OK/Cancel prompt to remove the given book from the Recent Books list.
   void promptRemoveBook(const std::string& path, const std::string& title);
+
+  // What a hold on a book offers. Where Left/Right exist they already reorder, so a hold
+  // goes straight to the removal prompt as it always has; on a board with no front buttons
+  // (X4 Pro) the hold is the ONLY way to reach either action, so it asks which one first.
+  void promptBookActions(int index);
+  bool holdOffersReorder() const;
+
+  // Move mode: the side buttons move the selected book through the list instead of moving
+  // the cursor, and a tap (or Confirm/Back) leaves. Entered from promptBookActions(); the
+  // only reorder route on a board with no Left/Right.
+  bool reorderMode = false;
+  bool handleReorderInput();
+  void endReorder();
 };
