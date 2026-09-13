@@ -130,6 +130,16 @@ void DictionarySelectActivity::scanDictionaries() {
 // Helpers
 // ---------------------------------------------------------------------------
 
+void DictionarySelectActivity::showInfoForSelected() {
+  std::string folder = folderForIndex(selectedIndex);
+  // Straight into the member: the by-value form would put a 608-byte DictInfo temporary
+  // in this frame just to copy-assign it away.
+  Dictionary::readInfoInto(folder.c_str(), currentInfo);
+  showingInfo = true;
+  showingRaw = false;
+  requestUpdate();
+}
+
 std::string DictionarySelectActivity::folderForIndex(int index) const {
   if (index <= 0 || index > static_cast<int>(dictFolders.size())) return "";
   return dictRoot + "/" + dictFolders[index - 1] + "/" + dictStems[index - 1];
@@ -194,13 +204,22 @@ void DictionarySelectActivity::loop() {
   // Long press Confirm: show dictionary metadata (only when a real dictionary is highlighted).
   if (mappedInput.isPressed(MappedInputManager::Button::Confirm) && mappedInput.getHeldTime() >= VIEW_INFO_MS &&
       selectedIndex > 0) {
-    std::string folder = folderForIndex(selectedIndex);
-    // Straight into the member: the by-value form would put a 608-byte DictInfo temporary
-    // in this frame just to copy-assign it away.
-    Dictionary::readInfoInto(folder.c_str(), currentInfo);
-    showingInfo = true;
-    showingRaw = false;
-    requestUpdate();
+    showInfoForSelected();
+    return;
+  }
+
+  // Touch hold on a dictionary row = the Confirm hold above. The X4 Pro has no Confirm pin
+  // at all (BoardConfig.h, XTEINK_X4_PRO), so without this the metadata view is unreachable
+  // there. Resolved before the tap: wasScreenLongPress suppresses the rest of the contact,
+  // so the finger lift cannot also apply the dictionary and leave.
+  int holdX = 0;
+  int holdY = 0;
+  if (mappedInput.wasScreenLongPress(holdX, holdY)) {
+    const int heldRow = listTouch_.indexAt(renderer, holdX, holdY);
+    if (heldRow > 0) {
+      selectedIndex = heldRow;
+      showInfoForSelected();
+    }
     return;
   }
 

@@ -179,8 +179,12 @@ void TxtReaderActivity::loop() {
     }
   }
 
-  // Short Confirm release opens the reader menu.
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+  // Short Confirm release opens the reader menu, as does the touch menu gesture
+  // (middle-third tap / top-edge swipe / Home-key hold, per the setting). Without
+  // the gesture a touch-only board has no way in, and the TXT menu is the only
+  // route to bookmarks and the chapter jump.
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) ||
+      ReaderUtils::isTouchMenuGesture(renderer, mappedInput)) {
     openReaderMenu();
     return;
   }

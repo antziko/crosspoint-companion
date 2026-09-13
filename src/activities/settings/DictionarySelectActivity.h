@@ -58,6 +58,9 @@ class DictionarySelectActivity final : public Activity {
 
   // Returns the folder path for a given list index (0 = None → empty string).
   std::string folderForIndex(int index) const;
+  // Read the highlighted dictionary's metadata and switch to the info view. Shared by the
+  // Confirm hold and the touch hold, which must open the same view from the same state.
+  void showInfoForSelected();
 
   // Returns the display name for a given list index.
   const char* nameForIndex(int index) const;

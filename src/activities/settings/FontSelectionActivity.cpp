@@ -79,8 +79,23 @@ void FontSelectionActivity::loop() {
       requestUpdate();
     }
   }
+  // Touch hold on a row = the Confirm hold above. The X4 Pro has no Confirm pin at all
+  // (BoardConfig.h, XTEINK_X4_PRO), so without this the pin gesture is unreachable there.
+  // Resolved before the tap: wasScreenLongPress suppresses the rest of the contact, so the
+  // finger lift cannot also commit the font and leave the screen.
+  int holdX = 0;
+  int holdY = 0;
+  if (mappedInput.wasScreenLongPress(holdX, holdY)) {
+    if (pane_.selectAtPoint(renderer, holdX, holdY)) {
+      pane_.togglePinSelected();
+      requestUpdate();
+    }
+    return;
+  }
+
   // A tap picks a row and commits it, the touch counterpart of the Confirm release
-  // below. Never the pin hold: a tap carries no hold time.
+  // below. Never the pin hold: a tap carries no hold time, so it lands here and not
+  // in the long-press branch above.
   int tapX = 0;
   int tapY = 0;
   if (mappedInput.wasScreenTapped(tapX, tapY) && pane_.selectAtPoint(renderer, tapX, tapY)) {

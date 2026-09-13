@@ -272,6 +272,21 @@ bool TextSettingsActivity::handleFamilyTouch() {
   // Tab-bar taps stay live because FUI routes them before this runs.
   if (fontPane_.navLocked()) return false;
 
+  // Touch hold on a row = the Confirm hold in handleButtons() (pin/unpin). The X4 Pro has
+  // no Confirm pin at all (BoardConfig.h, XTEINK_X4_PRO), so without this the pin gesture is
+  // unreachable there. Resolved before handleListTouch: wasScreenLongPress suppresses the
+  // rest of the contact, so the finger lift cannot also commit the font.
+  int holdX = 0;
+  int holdY = 0;
+  if (mappedInput.wasScreenLongPress(holdX, holdY)) {
+    if (fontPane_.selectAtPoint(renderer, holdX, holdY)) {
+      fontPane_.togglePinSelected();
+      activeNav().selected = fontPane_.highlightedIndex() + 1;  // pin re-sort moved the highlighted row
+      requestUpdate();
+    }
+    return true;
+  }
+
   const auto geo = paneGeometry();
   const int count = listCount();
 
