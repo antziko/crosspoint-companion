@@ -20,6 +20,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/WifiEventLog.h"
+#include "util/ListSwipeScroll.h"
 
 namespace fui = freeink::ui;
 
@@ -990,14 +991,13 @@ void WifiSelectionActivity::loop() {
     if (route) return;  // dispatched to onRowEvent
 
     if (!networks.empty()) {
-      // Swipes scroll the viewport; the selection stays put and button
-      // navigation pulls the view back to it.
+      // Swipes page the viewport (wrapping at both ends); the selection stays put and
+      // button navigation pulls the view back to it.
       const auto swipe = mappedInput.wasSwipe();
       if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
-        // pageRows(), not visibleRows: a wrapped SSID row is taller than the
-        // fixed-height estimate, so paging by the estimate skips rows.
-        const int delta = swipe == MappedInputManager::SwipeDir::Up ? listNav.pageRows() : -listNav.pageRows();
-        if (listNav.scrollBy(delta, static_cast<int>(networks.size()))) requestUpdate();
+        if (listSwipeScroll(listNav, swipe == MappedInputManager::SwipeDir::Up, static_cast<int>(networks.size()))) {
+          requestUpdate();
+        }
         return;
       }
     }

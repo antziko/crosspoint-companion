@@ -100,13 +100,10 @@ class UiListActivity : public Activity, protected UiAppHost {
   // Selection + viewport (selected/top/visibleRows/followOnBuild). Access via
   // activeNav() in shared code; `nav` is the single-list default storage.
   freeink::ui::ListNav nav;
-  // Geometry of the rows the last build laid out, for the touch acknowledgment in
-  // onBeforeRoute(). Written by syncListViewport on the render task and read by the loop
-  // task — the same "record what render drew, never recompute it" discipline
-  // ListTouchTarget uses for the legacy list screens.
+  // Band the last build drew the list in, so the touch acknowledgment in onBeforeRoute()
+  // can clamp a hit rect that ensureMinTouchRect grew past its row. Written by
+  // syncListViewport on the render task and read by the loop task.
   Rect listBand_{};
-  int listRowStep_ = 0;
-  int listRowHeight_ = 0;
   ButtonNavigator buttonNavigator;
 
  private:

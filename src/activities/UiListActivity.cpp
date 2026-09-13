@@ -3,11 +3,14 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 
+#include <algorithm>
+
 #include "MappedInputManager.h"
 #include "TouchFeedback.h"
 #include "components/ListCursor.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/ListSwipeScroll.h"
 
 namespace fui = freeink::ui;
 
@@ -114,8 +117,8 @@ void UiListActivity::loop() {
   if (handleButtons()) return;
   if (routeListTouch()) return;
 
-  // Swipes scroll the viewport; the selection stays put (it may scroll
-  // off-screen) and button navigation pulls the view back to it.
+  // Swipes page the viewport (wrapping at both ends); the selection stays put (it may
+  // scroll off-screen) and button navigation pulls the view back to it.
   const auto swipe = mappedInput.wasSwipe();
   if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
     bool moved = false;
@@ -123,9 +126,7 @@ void UiListActivity::loop() {
       // Same nav-vs-render race as moveSelectionTo: the render task writes
       // top/drawnRows mid-build, so read and mutate under one lock.
       RenderLock lock(*this);
-      auto& n = activeNav();
-      const int delta = swipe == MappedInputManager::SwipeDir::Up ? n.pageRows() : -n.pageRows();
-      moved = n.scrollBy(delta, listCount());
+      moved = listSwipeScroll(activeNav(), swipe == MappedInputManager::SwipeDir::Up, listCount());
     }
     if (moved) requestUpdate();
     return;
@@ -175,8 +176,6 @@ void UiListActivity::syncListViewport(UiScreen& screen, fui::ListProps& props, c
   const auto body = screen.body();
   const int16_t rowGap = screen.theme().listRowGap;
   listBand_ = Rect{body.x, body.y, body.width, body.height};
-  listRowHeight_ = rowHeight;
-  listRowStep_ = rowHeight + rowGap;
   activeNav().syncToProps(body, rowHeight, rowGap, listCount(), props);
   // Withhold the highlight on a list the user has not navigated yet. Applied after
   // syncToProps so the viewport it just computed is untouched -- only what list() DRAWS as
@@ -191,19 +190,22 @@ void UiListActivity::onBeforeRoute(const fui::InputSnapshot& snap) {
   // tap's result, at no extra panel cost — but a row that opens something never gets that
   // repaint, and that is the case this covers.
   if (!snap.touchReleased || snap.longPress) return;
-  const auto& listNav = activeNav();
-  // Fixed-height rows only. visibleRows is the fixed-height estimate and drawnRows what
-  // the build actually laid out; when they disagree a row grew (a wrapped label, a
-  // subtitle), the uniform grid below no longer describes what is on screen, and a tint on
-  // the wrong band reads as a glitch. Skip the feedback rather than guess at the rect.
-  if (listRowStep_ <= 0 || listNav.drawnRows <= 0 || listNav.drawnRows != listNav.visibleRows) return;
-  if (snap.touchX < listBand_.x || snap.touchX >= listBand_.x + listBand_.width) return;
-  const int offset = snap.touchY - listBand_.y;
-  if (offset < 0) return;
-  const int row = offset / listRowStep_;
-  if (row >= listNav.drawnRows || offset % listRowStep_ >= listRowHeight_) return;  // gap: no row
-  if (listNav.top + row >= listCount()) return;
-  flashTouchedRow(renderer, Rect{listBand_.x, listBand_.y + row * listRowStep_, listBand_.width, listRowHeight_});
+  // The row comes from the interaction table the dispatch itself hit-tests, never from a
+  // uniform grid laid out over the band: rows are variable height (a wrapped label, a
+  // subtitle row in an otherwise single-line list), so any grid drifts from the visuals
+  // row by row and tints one the finger never touched.
+  const auto* hit = app.publishedHitAt(snap.touchX, snap.touchY);
+  if (!hit || hit->action != ACTION_ROW) return;
+  // The table holds hit rects, which ensureMinTouchRect may have grown past the row's
+  // visual bounds (a row shorter than the board's minimum touch size, an edge snap).
+  // Clamp to the band the list was drawn in so the tint stays inside the list.
+  if (listBand_.width <= 0 || listBand_.height <= 0) return;
+  const int left = std::max<int>(hit->rect.x, listBand_.x);
+  const int top = std::max<int>(hit->rect.y, listBand_.y);
+  const int right = std::min<int>(hit->rect.x + hit->rect.width, listBand_.x + listBand_.width);
+  const int bottom = std::min<int>(hit->rect.y + hit->rect.height, listBand_.y + listBand_.height);
+  if (right <= left || bottom <= top) return;
+  flashTouchedRow(renderer, Rect{left, top, right - left, bottom - top});
 }
 
 void UiListActivity::drawChrome() {

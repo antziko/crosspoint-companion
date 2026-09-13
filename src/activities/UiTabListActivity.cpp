@@ -93,7 +93,11 @@ void UiTabListActivity::syncTabListViewport(UiScreen& screen, fui::ListProps& pr
   // keep a stale ring selection from indexing past the new row count.
   if (n.selected > count) n.selected = count;
   const int16_t rowHeight = resolveRowHeight(props, hasSubtitle);
-  const uint16_t rows = fui::listVisibleRows(screen.body(), rowHeight, screen.theme().listRowGap);
+  const auto body = screen.body();
+  // Same record-what-render-drew note as UiListActivity::syncListViewport: the band is
+  // what onBeforeRoute() clamps a tapped row's hit rect to.
+  listBand_ = Rect{body.x, body.y, body.width, body.height};
+  const uint16_t rows = fui::listVisibleRows(body, rowHeight, screen.theme().listRowGap);
   n.visibleRows = rows > 0 ? rows : 1;
   if (n.followOnBuild) {
     // Screen entry / tab switch: show the tab's remembered selection, or the

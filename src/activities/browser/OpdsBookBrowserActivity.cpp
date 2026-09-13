@@ -29,6 +29,7 @@
 #include "fontIds.h"
 #include "network/HttpDownloader.h"
 #include "util/BookCacheUtils.h"
+#include "util/ListSwipeScroll.h"
 #include "util/OpdsFilename.h"
 #include "util/StringUtils.h"
 #include "util/UrlUtils.h"
@@ -387,12 +388,13 @@ void OpdsBookBrowserActivity::loop() {
     }
 
     if (!entries.empty()) {
-      // Swipes scroll the viewport; the selection stays put (it may scroll
-      // off-screen) and button navigation pulls the view back to it.
+      // Swipes page the viewport (wrapping at both ends); the selection stays put (it may
+      // scroll off-screen) and button navigation pulls the view back to it.
       const auto swipe = mappedInput.wasSwipe();
       if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
-        const int delta = swipe == MappedInputManager::SwipeDir::Up ? listNav.pageRows() : -listNav.pageRows();
-        if (listNav.scrollBy(delta, static_cast<int>(entries.size()))) requestUpdate();
+        if (listSwipeScroll(listNav, swipe == MappedInputManager::SwipeDir::Up, static_cast<int>(entries.size()))) {
+          requestUpdate();
+        }
         return;
       }
 

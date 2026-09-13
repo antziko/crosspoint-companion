@@ -16,6 +16,7 @@
 #include "activities/TouchFeedback.h"
 #include "activities/reader/ReaderUtils.h"
 #include "activities/util/ConfirmationActivity.h"
+#include "components/ListCursor.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/BookCacheUtils.h"
@@ -622,6 +623,31 @@ void FileBrowserActivity::loop() {
     }
     requestUpdate();
   };
+
+  // Swipe up/down turns the page, the touch counterpart of HOLDING Left/Right. Without it a
+  // folder longer than one window can only be walked a row at a time on the X4 Pro: it has no
+  // Left/Right keys at all (BoardConfig.h, XTEINK_X4_PRO) and its side keys single-step, their
+  // hold being reserved for the orientation gesture. Read after the Back/tap handling above:
+  // a contact is classified as exactly one of tap / long press / swipe, so no gesture is
+  // taken twice.
+  const auto swipe = mappedInput.wasSwipe();
+  if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
+    {
+      RenderLock lock(*this);
+      if (swipe == MappedInputManager::SwipeDir::Up) {
+        pageDown();
+      } else {
+        pageUp();
+        // pageUp() parks the selection on the last row so button navigation continues upward
+        // from there. With the cursor still withheld (a finger opens a row by tapping it and
+        // never needs a cursor) that would put a highlight on a row the user never chose, so
+        // send it back to the row the hidden cursor is assumed to be on.
+        if (ListCursor::hidden()) selectorIndex = 0;
+      }
+    }
+    requestUpdate();
+    return;
+  }
 
   // Front Left/Right: single-step on release + continuous page-jump (whole window) while held.
   buttonNavigator.onRelease({MappedInputManager::Button::Right}, navigateNext);
