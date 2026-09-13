@@ -491,3 +491,8 @@ int MappedInputManager::getPressedFrontButton() const {
   }
   return -1;
 }
+
+bool MappedInputManager::hasFrontButtons() const {
+  return gpio.hasButton(HalGPIO::BTN_BACK) || gpio.hasButton(HalGPIO::BTN_CONFIRM) ||
+         gpio.hasButton(HalGPIO::BTN_LEFT) || gpio.hasButton(HalGPIO::BTN_RIGHT);
+}

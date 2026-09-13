@@ -128,11 +128,15 @@ void SettingsActivity::rebuildSettingsLists() {
     }
   }
 
-  // Append device-only ACTION items
-  controlsSettings.insert(controlsSettings.begin(),
-                          SettingInfo::Action(StrId::STR_REMAP_FRONT_BUTTONS, SettingAction::RemapFrontButtons));
-  controlsSettings.insert(controlsSettings.begin() + 1,
-                          SettingInfo::Action(StrId::STR_REMAP_FRONT_BUTTONS_CW, SettingAction::RemapFrontButtonsCW));
+  // Append device-only ACTION items. The remap rows are skipped on a board with no
+  // front buttons (X4 Pro): ButtonRemapActivity captures raw front presses to assign
+  // the four roles, so there it can never get past its first step.
+  if (mappedInput.hasFrontButtons()) {
+    controlsSettings.insert(controlsSettings.begin(),
+                            SettingInfo::Action(StrId::STR_REMAP_FRONT_BUTTONS, SettingAction::RemapFrontButtons));
+    controlsSettings.insert(controlsSettings.begin() + 1,
+                            SettingInfo::Action(StrId::STR_REMAP_FRONT_BUTTONS_CW, SettingAction::RemapFrontButtonsCW));
+  }
   // System top level: keep the frequently-used Wi-Fi / Time to Sleep / KOReader Sync flat (Time to
   // Sleep arrives from the category loop as the first systemSettings entry); the rest of the System
   // items live one level down. OPDS / Clear Cache / Updates / SD Firmware / Language are appended

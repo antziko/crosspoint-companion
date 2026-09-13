@@ -108,6 +108,11 @@ class MappedInputManager {
   Labels mapLabels(const char* back, const char* confirm, const char* previous, const char* next) const;
   // Returns the raw front button index that was pressed this frame (or -1 if none).
   int getPressedFrontButton() const;
+  // True when the board wires any of the four raw front buttons -- the exact set
+  // getPressedFrontButton() scans, so it answers for the remap screen rather than
+  // for the remapped roles. False on a touch-only board (X4 Pro), where anything
+  // that asks the user to press a front button can never complete.
+  bool hasFrontButtons() const;
 
   // True when the given logical button currently resolves to the physical UP side
   // button (BTN_UP). Meaningful for Up / Down / PageBack / PageForward (it folds in
