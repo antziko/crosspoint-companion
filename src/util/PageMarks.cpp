@@ -3,8 +3,10 @@
 #include <Epub/Page.h>
 #include <GfxRenderer.h>
 #include <Logging.h>
+#include <Utf8.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 #include "BookmarkStore.h"
@@ -269,6 +271,107 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
   }
 
   for (size_t i = 0; i < rangeCount; i++) flush(ranges[i]);
+}
+
+bool invertWordAtPoint(const GfxRenderer& renderer, const Page& page, const int fontId, const int marginLeft,
+                       const int marginTop, const int x, const int y, WordHit& out) {
+  // Same slop as WordSelectNavigator::wordIndexAtPoint's default, so a tap that lands in the
+  // padding of a box here lands in the same box there.
+  constexpr int kSlop = 4;
+  // Band padding, and therefore the pushed rect: WordSelectNavigator::boundsForWord.
+  constexpr int kBandPad = 2;
+
+  const int lineHeight = renderer.getLineHeight(fontId);
+  const int ascender = renderer.getFontAscenderSize(fontId);
+  // Fallback for blocks with no derivable per-line gap, as in extractWords.
+  const int16_t naturalSpaceWidth = static_cast<int16_t>(renderer.getTextAdvanceX(fontId, " ", EpdFontFamily::REGULAR));
+
+  for (const auto& element : page.elements) {
+    if (element->getTag() != TAG_PageLine) continue;
+    const auto* line = static_cast<const PageLine*>(element.get());
+    const auto& block = line->getBlock();
+    if (!block) continue;
+
+    const uint16_t blockWordCount = block->wordCount();
+    // Ruby-annotated lines shift their base text down, and extractWords moves the tap boxes
+    // with them, so the band has to follow too.
+    const int16_t rowY = static_cast<int16_t>(line->yPos + marginTop + block->getRubyShift(ascender));
+    if (y < rowY - kSlop || y >= rowY + lineHeight + kSlop) continue;  // wrong row: no measuring
+
+    // Per-line inter-word gap, derived from the first word's xpos diff; a justified line
+    // stretches it, so it cannot be a global space width. The half-space threshold separates a
+    // real gap from a continuation token's kerning. Verbatim from extractWords, because an
+    // undersized gap widens every box on the line and swallows the space after the word.
+    int16_t lineGapWidth = naturalSpaceWidth;
+    if (blockWordCount >= 2 && block->wordTextLen(0) > 0) {
+      const int16_t firstWidth = PageTokens::measureAdvance(renderer, fontId, block->wordText(0), block->wordStyle(0));
+      const int16_t derivedGap = static_cast<int16_t>(block->wordXpos(1) - block->wordXpos(0) - firstWidth);
+      if (derivedGap > naturalSpaceWidth / 2) lineGapWidth = derivedGap;
+    }
+
+    for (uint16_t w = 0; w < blockWordCount; w++) {
+      const char* text = block->wordText(w);
+      const size_t len = block->wordTextLen(w);
+      bool isCjk = false;
+      if (!PageTokens::isSelectable(text, len, isCjk)) continue;  // no cursor stop, no tap target
+
+      const EpdFontFamily::Style style = block->wordStyle(w);
+      const int16_t screenX = static_cast<int16_t>(line->xPos + block->wordXpos(w) + marginLeft);
+
+      PageTokens::Part parts[PageTokens::kMaxTokenParts];
+      const size_t partCount = PageTokens::collectParts(text, len, parts, PageTokens::kMaxTokenParts);
+      const bool unsplit = partCount == 1 && parts[0].start == 0 && parts[0].end == len;
+
+      for (size_t pi = 0; pi < partCount; pi++) {
+        const size_t partStart = unsplit ? 0 : parts[pi].start;
+        const size_t partLen = unsplit ? len : parts[pi].end - parts[pi].start;
+        int16_t boxX = screenX;
+        int16_t boxWidth;
+        if (!unsplit) {
+          if (partStart > 0) boxX += PageTokens::measureAdvance(renderer, fontId, text, partStart, style);
+          boxWidth = PageTokens::measureAdvance(renderer, fontId, text + partStart, partLen, style);
+        } else if (isCjk) {
+          // CJK carries no inter-word gap for the xpos diff to subtract, and a justified CJK
+          // line hides justifyExtra in it; measuring is exact and the glyph is already cached.
+          boxWidth = PageTokens::measureAdvance(renderer, fontId, text, style);
+        } else if (w + 1 < blockWordCount) {
+          // The layout's xpos diff with the trailing inter-word gap removed. Punctuation
+          // tokens keep their xpos entry as a boundary marker, so the next token's is always
+          // there to subtract from.
+          const int16_t raw = static_cast<int16_t>(block->wordXpos(w + 1) - block->wordXpos(w));
+          boxWidth = std::max(static_cast<int16_t>(1), static_cast<int16_t>(raw - lineGapWidth));
+        } else {
+          boxWidth = PageTokens::measureAdvance(renderer, fontId, text, style);  // no next xpos
+        }
+
+        if (x < boxX - kSlop || x >= boxX + boxWidth + kSlop) continue;
+
+        // The band is redrawn from the token's own bytes, not from out.text, so an over-long
+        // token still gets its glyphs back in white after the fill.
+        char partBuf[64];
+        const char* glyphs = text;
+        if (!unsplit) {
+          const int n = snprintf(partBuf, sizeof(partBuf), "%.*s", static_cast<int>(partLen), text + partStart);
+          partBuf[utf8SafeTruncateBuffer(partBuf, std::min(n, static_cast<int>(sizeof(partBuf) - 1)))] = '\0';
+          glyphs = partBuf;
+        }
+
+        out.x = boxX - kBandPad;
+        out.y = rowY - kBandPad;
+        out.width = boxWidth + 2 * kBandPad;
+        out.height = lineHeight + 2 * kBandPad;
+        const int copied = snprintf(out.text, sizeof(out.text), "%.*s", static_cast<int>(partLen), text + partStart);
+        // snprintf truncates by bytes; cut back to the last whole codepoint so a CJK token can
+        // never end in a partial sequence.
+        out.text[utf8SafeTruncateBuffer(out.text, std::min(copied, static_cast<int>(sizeof(out.text) - 1)))] = '\0';
+
+        renderer.fillRect(out.x, out.y, out.width, out.height, true);
+        renderer.drawText(fontId, boxX, rowY, glyphs, false, style);
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 }  // namespace PageMarks

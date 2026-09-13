@@ -1448,10 +1448,41 @@ void EpubReaderActivity::openPageActionMenu(const int x, const int y) {
   if (hasDict) labels[count++] = tr(STR_LOOKUP_SHORT);
   labels[count++] = tr(STR_ADD_HIGHLIGHT);
 
+  // Answer the hold before asking what to do with it: invert the word the finger landed on and
+  // push just that rect, so the user sees which word they got while the dialog is still being
+  // drawn. The point is resolved a second time by whichever screen the dialog opens (each takes
+  // pageActionX_/Y_ and hit-tests the page it re-renders), so this is feedback only -- it holds
+  // no state either screen depends on.
+  char title[48];
+  const char* titleText = tr(STR_SELECT);
+  PageMarks::WordHit hit;
+  if (section) {
+    int marginTop, marginRight, marginBottom, marginLeft;
+    renderer.getOrientedViewableTRBL(&marginTop, &marginRight, &marginBottom, &marginLeft);
+    marginTop += SETTINGS.getReaderScreenMargin();
+    marginLeft += SETTINGS.getReaderScreenMargin();
+    // One scope: the band lives in the framebuffer the render task also paints into, so the
+    // page read, the band and its push have to happen without a repaint landing between them.
+    // Closed before paintPageActionPopup(), which takes the same non-recursive lock.
+    RenderLock lock;
+    if (const auto page = section->loadPage(section->currentPage)) {
+      if (PageMarks::invertWordAtPoint(renderer, *page, SETTINGS.getReaderFontId(), marginLeft, marginTop, x, y, hit)) {
+        renderer.displayWindowRegion(hit.x, hit.y, hit.width, hit.height);
+      }
+    }
+  }
+  // The centred dialog covers the middle of the page, so a word there is hidden the moment it
+  // appears -- naming it in the title keeps it readable. Book text, not UI text, like the quote
+  // preview openHighlightSelect hands to HighlightActionActivity.
+  if (hit.text[0] != '\0') {
+    snprintf(title, sizeof(title), "\"%s\"", hit.text);
+    titleText = title;
+  }
+
   pageActionX_ = x;
   pageActionY_ = y;
   pageActionChose_ = false;
-  pageActionPopup.show(tr(STR_SELECT), labels, count, /*currentIndex=*/0, [this, hasDict](const int idx) {
+  pageActionPopup.show(titleText, labels, count, /*currentIndex=*/0, [this, hasDict](const int idx) {
     pageActionChose_ = true;
     // The popup is drawn over the page, so whichever screen this opens has to repaint it:
     // both pass framebufferContainsPage = false and re-render from the Page themselves.

@@ -26,4 +26,28 @@ namespace PageMarks {
 void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int marginLeft, int marginTop,
                  uint16_t spineIndex, float pageProgress, int pageCount, uint32_t chapterHash, int pageNumber);
 
+// The token a page long-press landed on: the rect actually inked, so the caller can push just
+// that region, and the token's own text for whatever names it on screen. `text` is
+// NUL-terminated and cut on a codepoint boundary, so it is safe at a C-string boundary.
+struct WordHit {
+  int x = 0;
+  int y = 0;
+  int width = 0;
+  int height = 0;
+  char text[40] = {};
+};
+
+// Inverts the token whose tap box contains (x, y) — black band, word redrawn white, which is
+// exactly what DictionaryWordSelectActivity shows for the same word — and reports it in `out`.
+// Draws nothing and returns false when the point hits no token (a margin or an inter-word gap).
+//
+// The tap boxes are the ones extractWords derives, not the token widths drawForPage measures:
+// the point is resolved a second time by the word-select screen this feedback precedes, and a
+// box derived by a different rule would let the two disagree about a boundary tap and mark a
+// different word than the one that then gets selected.
+//
+// Call with the page still in the framebuffer; the band is drawn over the glyphs already there.
+bool invertWordAtPoint(const GfxRenderer& renderer, const Page& page, int fontId, int marginLeft, int marginTop, int x,
+                       int y, WordHit& out);
+
 }  // namespace PageMarks
