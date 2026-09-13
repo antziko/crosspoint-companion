@@ -174,7 +174,12 @@ void KOReaderServerListActivity::render(RenderLock&&) {
   const auto& servers = KOREADER_STORE.getServers();
   const auto serverCount = static_cast<int>(servers.size());
 
-  listTouch_.record(Rect{0, contentTop, pageWidth, contentHeight}, itemCount, selectedIndex);
+  // hasSubtitle: the drawList call below passes a subtitle provider, so every row is laid
+  // out on the taller with-subtitle height (drawList keys on the provider being present,
+  // not on any row actually returning text). Recording it as a single-line list made the
+  // hit bands 20px short of the rows, so a tap opened a row further down the list.
+  listTouch_.record(Rect{0, contentTop, pageWidth, contentHeight}, itemCount, selectedIndex,
+                    /*hasSubtitle=*/true);
   GUI.drawList(
       renderer, Rect{0, contentTop, pageWidth, contentHeight}, itemCount, selectedIndex,
       [&servers, serverCount, activeIdx](int index) -> std::string {
