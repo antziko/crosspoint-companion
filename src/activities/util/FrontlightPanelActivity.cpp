@@ -74,6 +74,10 @@ void FrontlightPanelActivity::onEnter() {
     touchModeRestore = SETTINGS.touchReaderControls;
   }
 
+  // The orientation actually in force: inside an open book that is the book's own, and
+  // everywhere else activeOrientation mirrors the global default anyway.
+  orientationShown = static_cast<uint8_t>(APP_STATE.activeOrientation % CrossPointSettings::ORIENTATION_COUNT);
+
   resetUi();
   app.on(ACTION_BRIGHTNESS, &FrontlightPanelActivity::onBrightnessEvent, this);
   app.on(ACTION_WARMTH, &FrontlightPanelActivity::onWarmthEvent, this);
@@ -167,9 +171,19 @@ void FrontlightPanelActivity::runTile(const int idx) {
       close();
       break;
     case 2: {  // Cycle the reading orientation
-      const uint8_t next = static_cast<uint8_t>((SETTINGS.orientation + 1) % CrossPointSettings::ORIENTATION_COUNT);
-      SETTINGS.orientation = next;
-      SETTINGS.saveToFile();
+      const uint8_t next = static_cast<uint8_t>((orientationShown + 1) % CrossPointSettings::ORIENTATION_COUNT);
+      orientationShown = next;
+      // Over an open book the rotation belongs to that book alone, the same as the reader
+      // menu's own rotate and the side-button hold gesture: the global default is left
+      // untouched so this book's choice cannot follow the user into the next one. The
+      // reader persists it per book when it adopts the request below. Off the reader
+      // there is no book to own it, so the tile is the global default (and the mirror
+      // activeOrientation keeps of it outside a book).
+      if (!SETTINGS.getReaderOverride().active) {
+        SETTINGS.orientation = next;
+        APP_STATE.activeOrientation = next;
+        SETTINGS.saveToFile();
+      }
       // The renderer is deliberately NOT turned here: that would crop the sheet
       // and the portrait-only screens the panel opens over. Readers lay out
       // against APP_STATE.activeOrientation (saved per book), so the new value
@@ -239,6 +253,17 @@ bool FrontlightPanelActivity::handleHomeGesture() {
 }
 
 void FrontlightPanelActivity::loop() {
+  // The light can be switched from outside the sheet while it is open: the X4 Pro's
+  // power-button double click drives the hardware straight from main.cpp (and skips the
+  // activity loop on the frame it fires). Follow the hardware, so the lamp button never
+  // contradicts the light the user is looking at. lightOnChanged stays where it is --
+  // that path saved SETTINGS.frontlightOn itself, and this is not the user reaching for
+  // the panel's own control. Brightness and warmth have no such outside writer.
+  if (lightOn != Frontlight.isOn()) {
+    lightOn = Frontlight.isOn();
+    requestUpdate();
+  }
+
   const auto touch = routeTouch(mappedInput, false, /*routeHeld=*/true);
   if (touch.routed) {
     if (app.invalidated()) requestUpdate();
@@ -382,7 +407,7 @@ void FrontlightPanelActivity::buildPanelScreen(UiScreen& screen) {
         StrId::STR_PORTRAIT, StrId::STR_LANDSCAPE_CW, StrId::STR_ORIENTATION_INVERTED, StrId::STR_LANDSCAPE_CCW};
     // The orientation tile is labelled with just the current mode ("Portrait"):
     // the mode names say what the tile is about on their own.
-    const char* orientLabel = I18N.get(kOrientNames[SETTINGS.orientation % CrossPointSettings::ORIENTATION_COUNT]);
+    const char* orientLabel = I18N.get(kOrientNames[orientationShown % CrossPointSettings::ORIENTATION_COUNT]);
     // "Touch On" / "Touch Off", from the existing state strings: the label
     // names the current state of the touch-reader-controls setting.
     const bool touchOn = SETTINGS.touchReaderControls != CrossPointSettings::TOUCH_READER_OFF;

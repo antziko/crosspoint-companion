@@ -33,6 +33,11 @@ class FrontlightPanelActivity final : public Activity, private UiAppHost {
   // remembered mode, so a Swipe or Inverted Tap user gets their mode back
   // rather than the Tap default. Seeded from the setting in onEnter().
   uint8_t touchModeRestore = CrossPointSettings::TOUCH_READER_ON;
+  // Reading orientation the tile shows and cycles from. Held here because the tile does
+  // not always write SETTINGS.orientation: over an open book the rotation is the book's
+  // own, so the global default it would otherwise read back stays on the old value.
+  // Seeded from APP_STATE.activeOrientation in onEnter().
+  uint8_t orientationShown = 0;
   int panelBottom = 0;
 
   // Quick-setting tiles, in grid order (2 columns): night mode, refresh,
