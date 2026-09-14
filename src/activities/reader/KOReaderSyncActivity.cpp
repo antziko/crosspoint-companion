@@ -1555,6 +1555,7 @@ void KOReaderSyncActivity::render(RenderLock&&) {
 
     // Choice 0 lives in the card it acts on.
     drawOption(y, tr(STR_APPLY_REMOTE), selectedOption == 0);
+    resultOptionRect_[0] = Rect{sideX, y, contentW, OPTION_H};  // hit-tested in handleInput
     y += OPTION_H + CARD_GAP;
 
     // --- LOCAL card ---
@@ -1568,6 +1569,7 @@ void KOReaderSyncActivity::render(RenderLock&&) {
     y += DATA_ROW + 2;
 
     drawOption(y, tr(STR_UPLOAD_LOCAL), selectedOption == 1);
+    resultOptionRect_[1] = Rect{sideX, y, contentW, OPTION_H};
     y += OPTION_H + SECTION_GAP;
 
     // --- "Also synced" footer: bookmarks + reading stats always merge, so they are
@@ -1682,22 +1684,24 @@ void KOReaderSyncActivity::loop() {
       }
     };
 
-    {
-      const auto& metrics = UITheme::getInstance().getMetrics();
-      const Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
-      const int top = screen.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-      constexpr int optionHeight = 30;
-      int touchedOption = -1;
-      const auto touch = mappedInput.rowTouch(touchedOption, top + 230 - 2, optionHeight, 2);
+    // Hit-test the two choice buttons where render() actually drew them. They are not a
+    // uniform band -- the local card sits between them -- so each is probed on its own as a
+    // one-row band bounded to its own box. render() runs before any input can reach this
+    // state, so the rects are always populated here.
+    for (int i = 0; i < 2; i++) {
+      const Rect& box = resultOptionRect_[i];
+      if (box.height <= 0 || box.width <= 0) continue;
+      int hitRow = -1;
+      const auto touch = mappedInput.rowTouch(hitRow, box.y, box.height, 1, box.x, box.x + box.width);
       if (touch == MappedInputManager::RowTouch::Down) {
-        if (selectedOption != touchedOption) {
-          selectedOption = touchedOption;
+        if (selectedOption != i) {
+          selectedOption = i;
           requestUpdate();
         }
         return;
       }
       if (touch == MappedInputManager::RowTouch::Tap) {
-        selectedOption = touchedOption;
+        selectedOption = i;
         chooseSelected();
         return;
       }

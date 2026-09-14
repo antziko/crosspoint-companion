@@ -9,6 +9,7 @@
 #include "ProgressMapper.h"
 #include "SyncScope.h"
 #include "activities/Activity.h"
+#include "components/UITheme.h"  // Rect
 
 /**
  * Activity for syncing reading progress with KOReader sync server.
@@ -64,6 +65,14 @@ class KOReaderSyncActivity final : public Activity {
   std::shared_ptr<Epub> epub;  // null until lazy-loaded after TLS in performSync()
   std::string epubPath;
   std::string localChapterName;
+  // Hit rects for the two SHOWING_RESULT choice buttons, recorded by render() where they are
+  // actually drawn. They are NOT a uniform row band: a whole card (label + chapter + page)
+  // is drawn between them, so any grid re-derived in the input handler drifts off both —
+  // which is exactly how the previous fixed `top + 230` band ended up below them, leaving
+  // the screen untappable on a board with no buttons. Same record-what-was-drawn rule as
+  // UiListActivity::listBand_.
+  Rect resultOptionRect_[2] = {};
+
   // The local position as the reader mapped it, carried whole through the handoff so the
   // comparison below can trust its spine/page/offset rather than re-deriving from percentage.
   CrossPointPosition localPosition;
