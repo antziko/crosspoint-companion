@@ -5,6 +5,7 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Memory.h>
+#include <Utf8.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -333,7 +334,8 @@ void FileBrowserActivity::promptDeleteSelectedEntry() {
   };
 
   const std::string heading = tr(STR_DELETE) + std::string("? ");
-  startActivityForResultNoThrow<ConfirmationActivity>(handler, renderer, mappedInput, heading, entry);
+  // Compose the display copy; `entry` stays raw for the delete path itself.
+  startActivityForResultNoThrow<ConfirmationActivity>(handler, renderer, mappedInput, heading, utf8ComposeNfc(entry));
 }
 
 // To avoid traversing directories twice (once for cache clearing, once for deletion),
@@ -703,6 +705,11 @@ void FileBrowserActivity::loop() {
 
 std::string getFileName(std::string filename) {
   if (filename.empty()) return filename;
+  // Display copy only — `files[]` keeps the raw directory-entry bytes, because
+  // FAT long-filename lookup is byte-exact: an NFC-normalized path would fail
+  // to open the NFD entry macOS wrote. Composing here fixes rendering (fonts
+  // carry precomposed syllables / letters only) without touching paths.
+  filename = utf8ComposeNfc(filename);
   if (filename.back() == '/') {
     filename.pop_back();
     if (!UITheme::getInstance().getTheme().showsFileIcons()) {
