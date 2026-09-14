@@ -2084,9 +2084,11 @@ bool EpubReaderActivity::launchKOReaderSync() {
   const int currentPage = section ? section->currentPage : nextPageNumber;
   const int totalPages = section ? section->estimatedTotalPages() : cachedChapterTotalPageCount;
 
-  // Pre-compute local KO position and chapter name while Epub is still in RAM.
+  // Pre-compute local KO position and chapter name while Epub is still in RAM. The XPath
+  // resolution itself is deferred to the release block below, where the section is already
+  // gone and the framebuffer can be lent to it.
   CrossPointPosition localPos = getCurrentPosition();
-  SavedProgressPosition localKoPos = ProgressMapper::toSavedProgress(epub, localPos);
+  SavedProgressPosition localKoPos;
   const int tocIdx = epub->getTocIndexForSpineIndex(currentSpineIndex);
   std::string localChapterName = (tocIdx >= 0) ? epub->getTocItem(tocIdx).title : "";
   const std::string savedEpubPath = epub->getPath();
@@ -2108,6 +2110,13 @@ bool EpubReaderActivity::launchKOReaderSync() {
       nextPageNumber = section->currentPage;
     }
     section.reset();
+    // Resolving the upload XPath streams and inflates the spine item; with the section
+    // already freed, lend it the framebuffer too (upstream #3412). No rendering may run
+    // while the loan is held.
+    {
+      GfxRenderer::FrameBufferLoan loan(renderer);
+      localKoPos = ProgressMapper::toSavedProgress(epub, localPos);
+    }
     epub.reset();
   }
   LOG_DBG("KOSync", "Epub released (heap after: %u)", (unsigned)ESP.getFreeHeap());
@@ -3000,9 +3009,11 @@ bool EpubReaderActivity::launchKoSync(bool sleepWhenDone, SyncScope scope) {
   const int currentPage = section ? section->currentPage : nextPageNumber;
   const int totalPages = section ? section->pageCount : cachedChapterTotalPageCount;
 
-  // Pre-compute local KO position and chapter name while Epub is still in RAM.
+  // Pre-compute local KO position and chapter name while Epub is still in RAM. The XPath
+  // resolution itself is deferred to the release block below, where the section is already
+  // gone and the framebuffer can be lent to it.
   CrossPointPosition localPos = getCurrentPosition();
-  SavedProgressPosition localKoPos = ProgressMapper::toSavedProgress(epub, localPos);
+  SavedProgressPosition localKoPos;
   const int tocIdx = epub->getTocIndexForSpineIndex(currentSpineIndex);
   std::string localChapterName = (tocIdx >= 0) ? epub->getTocItem(tocIdx).title : "";
   const std::string savedEpubPath = epub->getPath();
@@ -3024,6 +3035,13 @@ bool EpubReaderActivity::launchKoSync(bool sleepWhenDone, SyncScope scope) {
       nextPageNumber = section->currentPage;
     }
     section.reset();
+    // Resolving the upload XPath streams and inflates the spine item; with the section
+    // already freed, lend it the framebuffer too (upstream #3412). No rendering may run
+    // while the loan is held.
+    {
+      GfxRenderer::FrameBufferLoan loan(renderer);
+      localKoPos = ProgressMapper::toSavedProgress(epub, localPos);
+    }
     epub.reset();
   }
   LOG_DBG("KOSync", "Epub released (heap after: %u)", (unsigned)ESP.getFreeHeap());

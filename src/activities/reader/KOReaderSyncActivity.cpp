@@ -415,12 +415,20 @@ void KOReaderSyncActivity::performSync() {
   // The standard KOReader progress XPath is the authoritative content anchor, so it
   // resolves for plain kosync servers too. The crosspoint-sync rich position's page
   // hints remain a legacy fallback for when the XPath yields no content offset.
-  SavedProgressPosition koPos = {remoteProgress.progress, remoteProgress.percentage};
-  remotePosition =
-      ProgressMapper::toCrossPoint(epub, koPos, renderer, localPosition.spineIndex, localPosition.totalPages);
-  if (!remotePosition.hasVisibleTextOffset && remoteProgress.position.has_value()) {
-    if (const auto richMapped = ProgressMapper::fromRichPosition(epub, *remoteProgress.position, renderer)) {
-      remotePosition = *richMapped;
+  //
+  // Mapping streams the spine item and inflates it, which wants a large contiguous block.
+  // Lend the 48KB framebuffer for the duration (upstream #3412) — the status screen above
+  // is already on the panel and e-ink holds it, and no rendering may run while it is lent.
+  {
+    RenderLock lock(*this);
+    GfxRenderer::FrameBufferLoan loan(renderer);
+    SavedProgressPosition koPos = {remoteProgress.progress, remoteProgress.percentage};
+    remotePosition =
+        ProgressMapper::toCrossPoint(epub, koPos, renderer, localPosition.spineIndex, localPosition.totalPages);
+    if (!remotePosition.hasVisibleTextOffset && remoteProgress.position.has_value()) {
+      if (const auto richMapped = ProgressMapper::fromRichPosition(epub, *remoteProgress.position, renderer)) {
+        remotePosition = *richMapped;
+      }
     }
   }
 
