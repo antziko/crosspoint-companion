@@ -1264,11 +1264,15 @@ void EpubReaderActivity::openReaderMenu() {
     requestUpdate();
     return;
   }
-  const int currentPage = section ? section->currentPage + 1 : 0;
-  const int totalPages = section ? section->pageCount : 0;
+  // Fall back to the cached position when a child screen released the section, the same
+  // pattern the other three position readers use. Without it, re-entering the menu from a
+  // submenu showed page 0 of 0 at 0% (upstream #3437).
+  const int currentPageIndex = section ? section->currentPage : nextPageNumber;
+  const int totalPages = section ? section->pageCount : cachedChapterTotalPageCount;
+  const int currentPage = currentPageIndex + 1;
   float bookProgress = 0.0f;
-  if (epub->getBookSize() > 0 && section && section->pageCount > 0) {
-    const float chapterProgress = static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
+  if (epub->getBookSize() > 0 && totalPages > 0) {
+    const float chapterProgress = static_cast<float>(currentPageIndex) / static_cast<float>(totalPages);
     bookProgress = epub->calculateProgress(currentSpineIndex, chapterProgress) * 100.0f;
   }
   const int bookProgressPercent = clampPercent(static_cast<int>(bookProgress + 0.5f));
