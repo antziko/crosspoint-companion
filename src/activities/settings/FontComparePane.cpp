@@ -205,9 +205,13 @@ void FontComparePane::renderList(GfxRenderer& renderer, int listTop, int listHei
         return f.pinned ? ("* " + f.name) : f.name;
       },
       nullptr, nullptr,
-      [committedIndex](int index) -> std::string {
-        // Preview is live (highlight = previewed), so only tag the committed selection.
-        return index == committedIndex ? tr(STR_SELECTED) : "";
+      [committedIndex, highlighted = selectedIndex_, hint = tapToApplyHint_](int index) -> std::string {
+        // Preview is live (highlight = previewed), so the committed selection is tagged...
+        if (index == committedIndex) return tr(STR_SELECTED);
+        // ...and, where the host commits on a SECOND tap, the highlighted row says so. Without
+        // it the first tap reads as a dead press: it only redraws the bottom compare pane.
+        if (hint && index == highlighted) return tr(STR_TAP_TO_APPLY);
+        return "";
       },
       true);
 }

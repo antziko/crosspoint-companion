@@ -69,6 +69,12 @@ class FontComparePane {
   // Mark the highlighted font as committed (host has applied it) — moves the top pane onto it.
   void commitHighlighted() { committedIndex_ = selectedIndex_; }
 
+  // Opt-in: tag the highlighted row "Tap to apply" while it is not the committed font.
+  // Only the Text Settings Font tab sets this — it previews on the first tap and commits
+  // on the second, so the row needs to say that the first tap was not a no-op. The
+  // per-book picker (FontSelectionActivity) commits on a single tap and must not show it.
+  void setTapToApplyHint(const bool on) { tapToApplyHint_ = on; }
+
   // Restore the user's actual resident SD font. Call from the host's onExit().
   void restore(GfxRenderer& renderer);
 
@@ -87,6 +93,7 @@ class FontComparePane {
   std::vector<FontEntry> fonts_;
   uint8_t currentBuiltinFamily_ = 0;
   std::string currentSdFamilyName_;
+  bool tapToApplyHint_ = false;
   int selectedIndex_ = 0;   // highlighted row (bottom pane / list cursor)
   int committedIndex_ = 0;  // committed row (top pane / [Selected] tag)
   // Set once a preview has loaded a non-resident SD family into the font manager, so restore()

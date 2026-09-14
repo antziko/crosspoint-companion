@@ -62,6 +62,9 @@ void TextSettingsActivity::onEnter() {
 
   // LOCAL(feat): the shared compare pane owns the font list (built-in + SD, pinned-first).
   fontPane_.build(registry_, SETTINGS.fontFamily, SETTINGS.sdFontFamilyName);
+  // Touch commits on the SECOND tap here (see handleFamilyTouch), so the highlighted row
+  // has to say so. Button boards commit on Confirm and never show the hint.
+  fontPane_.setTapToApplyHint(mappedInput.hasTouch());
 
   rebuildSizeList();  // populates sizes_ and currentSizeIndex_ from the active family's point sizes
 
@@ -291,13 +294,27 @@ bool TextSettingsActivity::handleFamilyTouch() {
   const int count = listCount();
 
   int row = std::max(0, ringPos() - 1);
+  const int rowBefore = row;
   switch (handleListTouch(row, count, geo.listTop, geo.listHeight, /*hasSubtitle=*/false)) {
-    case ListTouchResult::Activated:
+    case ListTouchResult::Activated: {
       activeNav().selected = row + 1;
       syncFamilyPaneHighlight();
+      // Two-tap commit. The first tap on a row only moves the highlight, which reloads the
+      // bottom compare pane so the font can be read against the committed one above it;
+      // committing applies a global render setting and re-paginates the open book, which is
+      // too much to hang off one stray touch on a screen with no physical buttons.
+      const bool previewOnly = familyTapMovedHighlight_;
+      familyTapMovedHighlight_ = false;
+      if (previewOnly) {
+        requestUpdate();
+        return true;
+      }
       activateRow(row);
       return true;
+    }
     case ListTouchResult::Consumed:
+      // Touchdown. Record whether it moved the highlight; the release consults this.
+      familyTapMovedHighlight_ = row != rowBefore;
       activeNav().selected = row + 1;
       syncFamilyPaneHighlight();
       requestUpdate();
@@ -479,6 +496,10 @@ void TextSettingsActivity::applyFamily() {
 void TextSettingsActivity::activateRow(int row) {
   switch (tab_) {
     case Tab::Family:
+      // Re-applying the font already in use costs a settings write and a re-pagination for
+      // no visible change, so skip it — the same guard Tab::Size carries below. applyFamily()
+      // ends in commitHighlighted(), so the pane's committed entry is what is really in use.
+      if (fontPane_.empty() || fontPane_.highlighted().key == fontPane_.committed().key) break;
       // LOCAL(feat): `row` is the pane's highlighted index; apply it live.
       applyFamily();
       // Persist immediately (#2806): the parent's result callback only fires on a normal
