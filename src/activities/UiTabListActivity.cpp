@@ -100,8 +100,8 @@ void UiTabListActivity::syncTabListViewport(UiScreen& screen, fui::ListProps& pr
   const uint16_t rows = fui::listVisibleRows(body, rowHeight, screen.theme().listRowGap);
   n.visibleRows = rows > 0 ? rows : 1;
   if (n.followOnBuild) {
-    // Screen entry / tab switch: show the tab's remembered selection, or the
-    // top when the tab bar holds the focus.
+    // Screen entry, tab switch, or a ring move: show the tab's remembered
+    // selection, or the top when the tab bar holds the focus.
     n.followOnBuild = false;
     n.top = n.selected > 0 ? static_cast<int>(fui::listTopIndexFor(
                                  static_cast<int16_t>(n.selected - 1), static_cast<uint16_t>(n.top < 0 ? 0 : n.top),
