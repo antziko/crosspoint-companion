@@ -63,6 +63,9 @@ class HalDisplay {
   // True when displayBufferAsync() genuinely overlaps (panel driver defers);
   // false where it falls back to a blocking refresh.
   bool supportsAsyncRefresh() const;
+  // True when an ordinary deferred B/W refresh is suitable as the base for a
+  // grayscale pass. X3 needs its controller-specific grayscale base waveform.
+  bool supportsAsyncGrayscaleBase() const;
   void refreshDisplay(RefreshMode mode = RefreshMode::FAST_REFRESH, bool turnOffScreen = false);
   // Push only the rectangle (x,y,w,h) — native panel coordinates, x and w must
   // be multiples of 8. On X4 this is a true sub-rectangle refresh that leaves the

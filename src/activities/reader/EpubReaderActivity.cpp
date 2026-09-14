@@ -3474,7 +3474,10 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     if (pagesUntilFullRefresh <= 1) {
       statsCheckpointPending = true;
     }
-    ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
+    // The strip grayscale pass below writes planes over this base, so tell the
+    // helper when the panel needs its controller-specific grayscale base (X3).
+    ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh, /*async=*/false,
+                                         /*grayscaleFollows=*/doGrayscalePass && renderer.supportsStripGrayscale());
     // Halftone image residue: 1-bit halftone dots leave charge that FAST_REFRESH
     // can't fully clear on the next page. Force HALF on the next page to drive every
     // pixel to its target — same fix as the X4 grayscale residue path above. Applies

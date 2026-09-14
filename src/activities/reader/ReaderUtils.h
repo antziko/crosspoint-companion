@@ -266,7 +266,12 @@ inline bool isTouchMenuGesture(const GfxRenderer& renderer, const MappedInputMan
 // Async callers must not touch the framebuffer until
 // renderer.waitRefreshComplete() and must rebuild the differential baseline
 // before the next page turn (the tiled grayscale cleanup does).
-inline void displayWithRefreshCycle(const GfxRenderer& renderer, int& pagesUntilFullRefresh, bool async = false) {
+inline void displayWithRefreshCycle(const GfxRenderer& renderer, int& pagesUntilFullRefresh, bool async = false,
+                                    bool grayscaleFollows = false) {
+  // On a panel whose grayscale planes need the controller's own base waveform
+  // (X3: supportsAsyncGrayscaleBase() is false), an ordinary B/W refresh is not
+  // a valid base — the gray pass that follows fades or speckles. Upstream #3439.
+  const bool needsGrayscaleBase = grayscaleFollows && !renderer.supportsAsyncGrayscaleBase();
   // "Never": getRefreshFrequency() returns the DISABLED sentinel, parking the
   // counter negative. Guard it so a negative counter is never read as "due".
   const bool disabled = (pagesUntilFullRefresh == CrossPointSettings::REFRESH_COUNTDOWN_DISABLED);
@@ -295,10 +300,16 @@ inline void displayWithRefreshCycle(const GfxRenderer& renderer, int& pagesUntil
       renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
     } else {
       renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+      // The cleanup settles correctly only when the grayscale preconditioning
+      // waveform runs after it and before the planes are written.
+      if (needsGrayscaleBase) renderer.preconditionGrayscale();
     }
     pagesUntilFullRefresh = SETTINGS.getRefreshFrequency();
   } else {
-    if (async) {
+    if (needsGrayscaleBase) {
+      // Synchronous by design: displayGrayscaleBase has no async form.
+      renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
+    } else if (async) {
       renderer.displayBufferAsync(HalDisplay::FAST_REFRESH);
     } else {
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
