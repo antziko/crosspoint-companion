@@ -1,5 +1,7 @@
 #include "Section.h"
 
+#include <FontCacheManager.h>
+#include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
@@ -372,6 +374,13 @@ bool Section::startBuild(const int fontId, const float lineCompression, const bo
     return false;
   }
   buildFailure_ = BuildFailure{};  // reset so lastBuildFailure() reflects this attempt
+  // Reclaim rebuildable font caches before the CSS and layout allocations. Both want large
+  // contiguous blocks and the mini glyph/kern arenas sit right where they need them; a CSS
+  // parse that loses that race bails and bakes an unstyled chapter into section.bin.
+  // Everything here faults back in from SD on the next prewarm.
+  if (auto* fontCache = renderer.getFontCacheManager()) {
+    fontCache->releaseCache();
+  }
   buildComplete_ = false;
   builtPageCount_ = 0;
   // Pages from a loaded partial stay readable (from filePath) while this build writes
