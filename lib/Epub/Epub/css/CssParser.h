@@ -35,7 +35,9 @@ class CssParser {
   // v8: interpretDecoration also detects line-through (upstream #2397 text-decoration)
   // v9: !important is stripped from every declaration value, not only display/direction, so a
   //     declaration written "margin: 0 !important" is no longer discarded (upstream #3221)
-  static constexpr uint8_t CSS_CACHE_VERSION = 9;
+  // v10: list-style-type is parsed and serialized (defined bit 18), so the style wire record
+  //      grew by one byte (upstream #3500)
+  static constexpr uint8_t CSS_CACHE_VERSION = 10;
 
   explicit CssParser(std::string cachePath) : cachePath(std::move(cachePath)) {}
   ~CssParser() = default;

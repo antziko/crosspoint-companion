@@ -424,6 +424,10 @@ void CssParser::parseDeclarationIntoStyle(const std::string& decl, CssStyle& sty
       style.verticalAlign = CssVerticalAlign::Sub;
       style.defined.verticalAlign = 1;
     }
+  } else if (propNameBuf == "list-style-type") {
+    // propValueBuf is already normalized and !important-stripped (see normalizedInto).
+    style.listStyleType = (propValueBuf == "none") ? CssListStyleType::None : CssListStyleType::Disc;
+    style.defined.listStyleType = 1;
   }
 }
 
@@ -862,6 +866,7 @@ bool CssParser::saveToCache() const {
     writeLength(style.imageWidth);
     file.write(static_cast<uint8_t>(style.display));
     file.write(static_cast<uint8_t>(style.verticalAlign));
+    file.write(static_cast<uint8_t>(style.listStyleType));
 
     // Write defined flags as uint32_t
     uint32_t definedBits = 0;
@@ -883,6 +888,7 @@ bool CssParser::saveToCache() const {
     if (style.defined.display) definedBits |= 1 << 15;
     if (style.defined.direction) definedBits |= 1 << 16;
     if (style.defined.verticalAlign) definedBits |= 1 << 17;
+    if (style.defined.listStyleType) definedBits |= 1 << 18;
     file.write(reinterpret_cast<const uint8_t*>(&definedBits), sizeof(definedBits));
   }
 
@@ -1068,6 +1074,14 @@ bool CssParser::loadFromCache() {
     }
     style.verticalAlign = static_cast<CssVerticalAlign>(verticalAlignVal);
 
+    // Read listStyleType value
+    uint8_t listStyleTypeVal;
+    if (file.read(&listStyleTypeVal, 1) != 1) {
+      rulesBySelector_.clear();
+      return false;
+    }
+    style.listStyleType = static_cast<CssListStyleType>(listStyleTypeVal);
+
     // Read defined flags
     uint32_t definedBits = 0;
     if (file.read(&definedBits, sizeof(definedBits)) != sizeof(definedBits)) {
@@ -1092,6 +1106,7 @@ bool CssParser::loadFromCache() {
     style.defined.display = (definedBits & 1 << 15) != 0;
     style.defined.direction = (definedBits & 1 << 16) != 0;
     style.defined.verticalAlign = (definedBits & 1 << 17) != 0;
+    style.defined.listStyleType = (definedBits & 1 << 18) != 0;
 
     // Defend against caches that still carry empty rules (see store-time note):
     // an empty style contributes nothing to resolveStyle, so don't hold its heap.

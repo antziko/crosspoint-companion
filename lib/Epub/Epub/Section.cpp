@@ -116,7 +116,12 @@ namespace {
 //      margins on its wrapper commonly cost a quarter of the page). Image geometry is baked
 //      into the .bin, so chapters laid out at v54 keep the squeezed size until they
 //      regenerate. Same situation as v40 and v45.
-constexpr uint8_t SECTION_FILE_VERSION = 55;
+// v56: Ordered lists number their items (1. 2. 3.), list-style-type: none suppresses the
+//      marker entirely, and <ul>/<ol> containers contribute their own margins and padding to
+//      their children's insets instead of being ignored. Marker text and indents both move
+//      where lines wrap, so v55 cached line and word positions no longer match. Covers
+//      upstream's #3500 (their v46).
+constexpr uint8_t SECTION_FILE_VERSION = 56;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
