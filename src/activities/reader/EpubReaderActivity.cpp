@@ -2083,14 +2083,6 @@ bool EpubReaderActivity::launchKOReaderSync() {
 
   const int currentPage = section ? section->currentPage : nextPageNumber;
   const int totalPages = section ? section->estimatedTotalPages() : cachedChapterTotalPageCount;
-  std::optional<uint16_t> paragraphIndex;
-  if (section && currentPage >= 0 && currentPage < section->pageCount) {
-    const uint16_t paragraphPage =
-        currentPage > 0 ? static_cast<uint16_t>(currentPage - 1) : static_cast<uint16_t>(currentPage);
-    if (const auto pIdx = section->getParagraphIndexForPage(paragraphPage)) {
-      paragraphIndex = *pIdx;
-    }
-  }
 
   // Pre-compute local KO position and chapter name while Epub is still in RAM.
   CrossPointPosition localPos = getCurrentPosition();
@@ -2122,9 +2114,8 @@ bool EpubReaderActivity::launchKOReaderSync() {
 
   // Nothrow, and home is the only honest fallback: the epub was released just above, so there
   // is no reader left to return to if this allocation fails.
-  auto sync = makeUniqueNoThrow<KOReaderSyncActivity>(renderer, mappedInput, savedEpubPath, currentSpineIndex,
-                                                      currentPage, totalPages, std::move(localKoPos),
-                                                      std::move(localChapterName), paragraphIndex);
+  auto sync = makeUniqueNoThrow<KOReaderSyncActivity>(renderer, mappedInput, savedEpubPath, localPos,
+                                                      std::move(localKoPos), std::move(localChapterName));
   if (!sync) {
     LOG_ERR("KOSync", "OOM: KOReaderSyncActivity; returning home");
     activityManager.goHome();
@@ -3008,14 +2999,6 @@ void EpubReaderActivity::silentIndexNextChapterIfNeeded(const uint16_t viewportW
 bool EpubReaderActivity::launchKoSync(bool sleepWhenDone, SyncScope scope) {
   const int currentPage = section ? section->currentPage : nextPageNumber;
   const int totalPages = section ? section->pageCount : cachedChapterTotalPageCount;
-  std::optional<uint16_t> paragraphIndex;
-  if (section && currentPage >= 0 && currentPage < section->pageCount) {
-    const uint16_t paragraphPage =
-        currentPage > 0 ? static_cast<uint16_t>(currentPage - 1) : static_cast<uint16_t>(currentPage);
-    if (const auto pIdx = section->getParagraphIndexForPage(paragraphPage)) {
-      paragraphIndex = *pIdx;
-    }
-  }
 
   // Pre-compute local KO position and chapter name while Epub is still in RAM.
   CrossPointPosition localPos = getCurrentPosition();
@@ -3046,9 +3029,9 @@ bool EpubReaderActivity::launchKoSync(bool sleepWhenDone, SyncScope scope) {
   LOG_DBG("KOSync", "Epub released (heap after: %u)", (unsigned)ESP.getFreeHeap());
 
   // Nothrow; see launchKOReaderSync() — the epub is already released by this point.
-  auto sync = makeUniqueNoThrow<KOReaderSyncActivity>(
-      renderer, mappedInput, savedEpubPath, currentSpineIndex, currentPage, totalPages, std::move(localKoPos),
-      std::move(localChapterName), paragraphIndex, sleepWhenDone, scope);
+  auto sync =
+      makeUniqueNoThrow<KOReaderSyncActivity>(renderer, mappedInput, savedEpubPath, localPos, std::move(localKoPos),
+                                              std::move(localChapterName), sleepWhenDone, scope);
   if (!sync) {
     LOG_ERR("KOSync", "OOM: KOReaderSyncActivity; returning home");
     activityManager.goHome();
@@ -4595,6 +4578,8 @@ CrossPointPosition EpubReaderActivity::getCurrentPosition() const {
   }
 
   CrossPointPosition localPos = {currentSpineIndex, currentPage, totalPages};
+  localPos.hasResolvedSpineIndex = true;
+  localPos.hasMappedPage = true;
   if (section && currentPage >= 0 && currentPage < section->pageCount) {
     if (const auto offset = section->getVisibleTextOffsetForPage(static_cast<uint16_t>(currentPage))) {
       localPos.visibleTextOffset = *offset;

@@ -23,16 +23,12 @@
 class KOReaderSyncActivity final : public Activity {
  public:
   explicit KOReaderSyncActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const std::string& epubPath,
-                                int currentSpineIndex, int currentPage, int totalPagesInSpine,
-                                SavedProgressPosition localKoPos, std::string localChapterName,
-                                std::optional<uint16_t> currentParagraphIndex = std::nullopt,
-                                bool sleepWhenDone = false, SyncScope scope = SyncScope::All)
+                                CrossPointPosition localPosition, SavedProgressPosition localKoPos,
+                                std::string localChapterName, bool sleepWhenDone = false,
+                                SyncScope scope = SyncScope::All)
       : Activity("KOReaderSync", renderer, mappedInput),
         epubPath(epubPath),
-        currentSpineIndex(currentSpineIndex),
-        currentPage(currentPage),
-        totalPagesInSpine(totalPagesInSpine),
-        currentParagraphIndex(currentParagraphIndex),
+        localPosition(localPosition),
         localChapterName(std::move(localChapterName)),
         remoteProgress{},
         remotePosition{},
@@ -68,10 +64,9 @@ class KOReaderSyncActivity final : public Activity {
   std::shared_ptr<Epub> epub;  // null until lazy-loaded after TLS in performSync()
   std::string epubPath;
   std::string localChapterName;
-  int currentSpineIndex;
-  int currentPage;
-  int totalPagesInSpine;
-  std::optional<uint16_t> currentParagraphIndex;
+  // The local position as the reader mapped it, carried whole through the handoff so the
+  // comparison below can trust its spine/page/offset rather than re-deriving from percentage.
+  CrossPointPosition localPosition;
 
   State state = WIFI_SELECTION;
   std::string statusMessage;

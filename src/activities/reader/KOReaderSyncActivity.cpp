@@ -15,7 +15,6 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cmath>
 
 #include "BookReadingStats.h"
 #include "BookmarkStore.h"
@@ -26,6 +25,7 @@
 #include "KOReaderCredentialStore.h"
 #include "KOReaderDocumentId.h"
 #include "MappedInputManager.h"
+#include "ProgressComparison.h"
 #include "ReaderUtils.h"
 #include "SilentRestart.h"
 #include "activities/ActivityManager.h"
@@ -416,44 +416,51 @@ void KOReaderSyncActivity::performSync() {
   // resolves for plain kosync servers too. The crosspoint-sync rich position's page
   // hints remain a legacy fallback for when the XPath yields no content offset.
   SavedProgressPosition koPos = {remoteProgress.progress, remoteProgress.percentage};
-  remotePosition = ProgressMapper::toCrossPoint(epub, koPos, renderer, currentSpineIndex, totalPagesInSpine);
+  remotePosition =
+      ProgressMapper::toCrossPoint(epub, koPos, renderer, localPosition.spineIndex, localPosition.totalPages);
   if (!remotePosition.hasVisibleTextOffset && remoteProgress.position.has_value()) {
     if (const auto richMapped = ProgressMapper::fromRichPosition(epub, *remoteProgress.position, renderer)) {
       remotePosition = *richMapped;
     }
   }
 
+  // Compare mapped positions, not percentages. CrossPoint and KOReader paginate differently,
+  // so a position can be physically later in the book and still report a LOWER percentage --
+  // which made the percentage-only rule below sync the wrong way (upstream #3111). Falls back
+  // to percentage only when neither side resolved a trustworthy spine/page/offset.
+  const ProgressComparison comparison =
+      compareProgress(localPosition, localProgress.percentage, remotePosition, remoteProgress.percentage);
+
   // localProgress was pre-computed in EpubReaderActivity before the Epub was released.
   if (smartSyncEnabled()) {
     // Smart sync: auto-resolve on the furthest-progress-wins rule (CrossPoint has no local
     // progress timestamps to do true LWW). No alternate-hash probe here — uploads/reads stay on
     // the user's configured match method, keeping the progress leg to a single handshake.
-    static constexpr float SAME_PROGRESS_EPSILON = 0.001f;  // 0.1 percentage points
-    const float delta = localProgress.percentage - remoteProgress.percentage;
-    LOG_DBG("KOSync", "Smart decision: local=%.6f remote=%.6f delta=%.6f mapped=%d/%d", localProgress.percentage,
-            remoteProgress.percentage, delta, remotePosition.spineIndex, remotePosition.pageNumber);
-    if (std::fabs(delta) <= SAME_PROGRESS_EPSILON) {
-      completeAlreadySynced();
-      return;
+    LOG_DBG("KOSync", "Smart decision: cmp=%d local=%.6f remote=%.6f mapped=%d/%d", static_cast<int>(comparison),
+            localProgress.percentage, remoteProgress.percentage, remotePosition.spineIndex, remotePosition.pageNumber);
+    switch (comparison) {
+      case ProgressComparison::Synchronized:
+        completeAlreadySynced();
+        return;
+      case ProgressComparison::LocalAhead:
+        performUpload();  // local ahead: push it up
+        return;
+      case ProgressComparison::RemoteAhead:
+        saveProgressAndReturn(remotePosition.spineIndex, remotePosition.pageNumber);  // remote ahead: apply it
+        return;
+      case ProgressComparison::Unknown:
+        // Nothing trustworthy to compare (no mapped position, no finite percentage).
+        // Fall through to the manual selection screen rather than guessing.
+        LOG_DBG("KOSync", "Smart sync comparison unknown; opening manual selection");
+        break;
     }
-    if (delta > 0) {
-      performUpload();  // local ahead: push it up
-      return;
-    }
-    saveProgressAndReturn(remotePosition.spineIndex, remotePosition.pageNumber);  // remote ahead: apply it
-    return;
   }
 
   {
     RenderLock lock(*this);
     state = SHOWING_RESULT;
 
-    // Default to the option that corresponds to the furthest progress
-    if (localProgress.percentage > remoteProgress.percentage) {
-      selectedOption = 1;  // Upload local progress
-    } else {
-      selectedOption = 0;  // Apply remote progress
-    }
+    selectedOption = comparison == ProgressComparison::LocalAhead ? 1 : 0;
   }
   requestUpdate(true);
 }
@@ -481,10 +488,12 @@ void KOReaderSyncActivity::performUpload() {
                       : localProgress.percentage > 1.0f ? 1.0f
                                                         : localProgress.percentage;
     pos.pctQ = static_cast<uint32_t>(pct * 1000000.0f + 0.5f);
-    pos.spineIndex = static_cast<uint16_t>(currentSpineIndex);
-    pos.pageNumber = static_cast<uint16_t>(currentPage);
-    pos.totalPages = static_cast<uint16_t>(totalPagesInSpine > 0 ? totalPagesInSpine : 1);
-    pos.paragraphIndex = currentParagraphIndex;
+    pos.spineIndex = static_cast<uint16_t>(localPosition.spineIndex);
+    pos.pageNumber = static_cast<uint16_t>(localPosition.pageNumber);
+    pos.totalPages = static_cast<uint16_t>(localPosition.totalPages > 0 ? localPosition.totalPages : 1);
+    if (localPosition.hasParagraphIndex) {
+      pos.paragraphIndex = localPosition.paragraphIndex;
+    }
     pos.xpath = localProgress.xpath;
     progress.position = std::move(pos);
   }
@@ -1493,8 +1502,9 @@ void KOReaderSyncActivity::render(RenderLock&&) {
         (remoteTocIndex >= 0) ? epub->getTocItem(remoteTocIndex).title
                               : (std::string(tr(STR_SECTION_PREFIX)) + std::to_string(remotePosition.spineIndex + 1));
     const std::string localChapter =
-        !localChapterName.empty() ? localChapterName
-                                  : (std::string(tr(STR_SECTION_PREFIX)) + std::to_string(currentSpineIndex + 1));
+        !localChapterName.empty()
+            ? localChapterName
+            : (std::string(tr(STR_SECTION_PREFIX)) + std::to_string(localPosition.spineIndex + 1));
 
     char buf[128];
 
@@ -1544,8 +1554,8 @@ void KOReaderSyncActivity::render(RenderLock&&) {
     y += LABEL_ROW;
     renderer.drawText(UI_10_FONT_ID, detailX, y, localChapter.c_str());
     y += DATA_ROW;
-    snprintf(buf, sizeof(buf), tr(STR_PAGE_TOTAL_OVERALL_FORMAT), currentPage + 1, totalPagesInSpine,
-             localProgress.percentage * 100);
+    snprintf(buf, sizeof(buf), tr(STR_PAGE_TOTAL_OVERALL_FORMAT), localPosition.pageNumber + 1,
+             localPosition.totalPages, localProgress.percentage * 100);
     renderer.drawText(UI_10_FONT_ID, detailX, y, buf);
     y += DATA_ROW + 2;
 
