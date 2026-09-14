@@ -95,6 +95,9 @@ void WifiSelectionActivity::onPromptEvent(const fui::ActionEvent& event, void* u
 void WifiSelectionActivity::onEnter() {
   Activity::onEnter();
 
+  // Back / Retry for the failure screen; inert on button boards.
+  failedBar_.layout(renderer, mappedInput.hasTouch(), UI_10_FONT_ID, 2);
+
   // Reclaim the 32KB inflate window (reserved at boot, main.cpp:419) before anything here
   // touches the radio. This is arithmetic, not tuning: the X3's free heap peaks at ~71KB
   // with the window held (opds_debug.txt "enter Boot free=71368"), while esp_wifi + lwip
@@ -924,8 +927,25 @@ void WifiSelectionActivity::loop() {
 
   // Handle connection failed state
   if (state == WifiSelectionState::CONNECTION_FAILED) {
-    if (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
-        mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+    // 0 = Back, 1 = Retry. -1 when the tap missed the bar or the bar is inert.
+    int tapX = 0;
+    int tapY = 0;
+    const int tappedButton = mappedInput.wasScreenTapped(tapX, tapY) ? failedBar_.hitAt(tapX, tapY) : -1;
+
+    // Retry re-attempts the SAME credential. attemptConnection() bypasses the
+    // hasAttemptedAutoSsid() guard by design: that guard exists to stop the automatic
+    // sweep looping, not to stop the user asking again. A retry is the whole point of
+    // this screen when the saved network was simply out of range or slow to appear.
+    if (tappedButton == 1 || mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+      if (!lowMemoryAbort) {
+        attemptConnection();
+        return;
+      }
+      // Out of heap, not out of signal — retrying cannot help. Fall through to leave.
+    }
+
+    if (tappedButton == 0 || mappedInput.wasPressed(MappedInputManager::Button::Back) ||
+        (lowMemoryAbort && mappedInput.wasPressed(MappedInputManager::Button::Confirm))) {
       // A low-heap abort is not the network's fault: leave rather than offer to
       // forget a credential that works, and hand the failure to the caller so
       // the sync/browse screen behind us can report it.
@@ -1312,9 +1332,17 @@ void WifiSelectionActivity::renderConnectionFailed(const Rect* screen, const The
                             EpdFontFamily::BOLD);
   UITheme::drawCenteredText(renderer, *screen, UI_10_FONT_ID, top + 20, connectionError.c_str());
 
-  // Use centralized button hints
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_DONE), "", "");
+  // Confirm retries the same credential rather than repeating Back: the two used to do
+  // the identical thing here, which left the screen with no way to re-attempt at all.
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_RETRY), "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+
+  // Touch boards get no hint strip (BaseTheme::drawButtonHints early-returns), so draw
+  // the same two actions as real on-screen buttons.
+  if (failedBar_.active()) {
+    const char* barLabels[] = {tr(STR_BACK), tr(STR_RETRY)};
+    failedBar_.draw(renderer, UI_10_FONT_ID, barLabels, /*primaryIndex=*/1);
+  }
 }
 
 void WifiSelectionActivity::onComplete(const bool connected) {

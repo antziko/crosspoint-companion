@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "activities/Activity.h"
+#include "activities/TouchActionBar.h"
 #include "components/UiAppHost.h"
 #include "util/ButtonNavigator.h"
 
@@ -84,6 +85,12 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
 
   // Whether to attempt auto-connect on entry
   const bool allowAutoConnect;
+
+  // On-screen Back/Retry for the CONNECTION_FAILED screen. BaseTheme::drawButtonHints
+  // early-returns on touch boards, so that screen's hint strip renders BLANK there and
+  // the X4 Pro, which wires no front buttons, had no visible way to answer it at all.
+  // Inert on button boards (layout() with enabled=false).
+  TouchActionBar failedBar_;
 
   // Whether we are attempting to auto-connect or auto-scan saved networks.
   bool autoConnecting = false;
