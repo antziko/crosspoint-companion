@@ -259,10 +259,35 @@ void SleepActivity::renderCustomSleepScreen() const {
   renderDefaultSleepScreen();
 }
 
-// Sleep screens paint with a single HALF refresh (stock parity): the OEM X4
-// firmware's only clean refresh in normal operation is the single-pass 0xD7
-// sequence, used once for the sleep image. It never runs the multi-flash GC
-// waveform (0xF7) that FULL_REFRESH selects (#2471's blinking complaint).
+// Paint the finished sleep frame, then settle it with a second identical pass.
+//
+// The sleep frame is the one frame that has to hold for hours with the panel unpowered.
+// A single pass parks the pigment short of fully packed, and across that hold it relaxes
+// far enough for the previous screen's history to surface through it -- which is why the
+// wallpaper is clean when it appears and the ghost grows afterwards. That timing is the
+// tell: an under-cleaned panel would show the ghost immediately, and the deepCleanPanel in
+// onEnter has already wiped it. Driving the same target a second time packs the pigment
+// deeper, the same reason stock e-readers flash a screensaver more than once.
+//
+// A repeat, not a heavier waveform, because HALF is not the same primitive on every
+// controller this board ships with: on the UltraChip batches it is the charge SCRUB (OLD
+// plane = complement of the target, so every pixel transitions, Uc8279X4Driver.cpp:404-413)
+// and a FULL there would white-seed and leave the white background parked untouched, while
+// on SSD1677 both are absolute and FULL merely flashes longer. Repeating HALF is the one
+// dose that is correct on all of them.
+//
+// X3 opts out: its HALF is already a forced three-pass resync (~3.2s), so it scrubs harder
+// per pass and costs far too much to repeat.
+void SleepActivity::paintSleepFrame() const {
+  renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+  if (!gpio.deviceIsX3()) renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+}
+
+// Sleep screens paint with the HALF refresh (stock parity): the OEM X4 firmware's only
+// clean refresh in normal operation is the single-pass 0xD7 sequence, used for the sleep
+// image. It never runs the multi-flash GC waveform (0xF7) that FULL_REFRESH selects
+// (#2471's blinking complaint). paintSleepFrame() repeats it -- see there for why the dose
+// is a second pass rather than a heavier waveform.
 void SleepActivity::renderDefaultSleepScreen() const {
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
@@ -277,7 +302,7 @@ void SleepActivity::renderDefaultSleepScreen() const {
     renderer.invertScreen();
   }
 
-  renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+  paintSleepFrame();
 }
 
 void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap) const {
@@ -325,7 +350,7 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap) const {
     // the differential nudge then lands unevenly (blotchy noise in gray areas).
     renderer.displayGrayscaleBase(HalDisplay::HALF_REFRESH);
   } else {
-    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    paintSleepFrame();
   }
 
   if (hasGreyscale) {
@@ -426,5 +451,5 @@ void SleepActivity::renderLastScreenSleepScreen() const {
 
 void SleepActivity::renderBlankSleepScreen() const {
   renderer.clearScreen();
-  renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+  paintSleepFrame();
 }
