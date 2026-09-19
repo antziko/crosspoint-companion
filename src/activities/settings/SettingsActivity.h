@@ -33,6 +33,7 @@ enum class SettingAction {
   OpenSubCategory,
   TextSettings,  // LOCAL(feat-dictionary): #2605 Text Settings screen
   KeyboardLayouts,
+  About,
 };
 
 struct SettingInfo {

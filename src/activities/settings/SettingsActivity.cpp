@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include "AboutActivity.h"
+#include "AboutActivity.h"
 #include "ButtonRemapActivity.h"
 #include "ClearCacheActivity.h"
 #include "CrossPointSettings.h"
@@ -93,6 +95,7 @@ void SettingsActivity::rebuildSettingsLists() {
       readerSettings.push_back(SettingInfo::Action(StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate));
       readerSettings.push_back(SettingInfo::Action(StrId::STR_LANGUAGE, SettingAction::Language));
       readerSettings.push_back(SettingInfo::Action(StrId::STR_KEYBOARD_LAYOUTS, SettingAction::KeyboardLayouts));
+      readerSettings.push_back(SettingInfo::Action(StrId::STR_ABOUT, SettingAction::About));
     }
     currentSettings = &readerSettings;
     settingsCount = static_cast<int>(currentSettings->size());
@@ -559,6 +562,9 @@ void SettingsActivity::toggleCurrentSetting() {
         } else {
           LOG_ERR("SETTINGS", "OOM: KeyboardLayoutsActivity");
         }
+        break;
+      case SettingAction::About:
+        startActivityForResultNoThrow<AboutActivity>([](const ActivityResult&) {}, renderer, mappedInput);
         break;
       case SettingAction::None:
         // Do nothing
