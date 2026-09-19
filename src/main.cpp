@@ -149,6 +149,11 @@ EpdFontFamily ui12FontFamily(&ui12MediumFont, &ui12BoldFont);
 RTC_NOINIT_ATTR uint32_t silentRebootMagic;
 RTC_NOINIT_ATTR uint32_t silentRebootTarget;
 RTC_NOINIT_ATTR uint32_t silentRebootSettingsCategory;  // category index for SETTINGS target
+// LIVE frontlight state carried across the reboot. SETTINGS.frontlightOn is the saved
+// PREFERENCE and legitimately diverges from the live state — a wake with Restore Light on
+// Wake off leaves the light off while the saved "was on" preference is kept — so the live
+// bit rides here instead of being re-derived. Cleared with the magic in setup().
+RTC_NOINIT_ATTR uint32_t silentRebootPayload;
 // Sleep-frame dwell marker for the ghosting trace. RTC_DATA is zeroed on a cold boot and
 // retained across deep sleep, and POSIX time is RTC-backed so it keeps advancing while the
 // chip is off -- together they answer the one question a sleep frame raises: it is painted in
@@ -160,6 +165,7 @@ constexpr uint32_t SILENT_REBOOT_MAGIC = 0xC1EAB007;
 constexpr uint32_t SILENT_REBOOT_TARGET_HOME = 0;
 constexpr uint32_t SILENT_REBOOT_TARGET_READER = 1;
 constexpr uint32_t SILENT_REBOOT_TARGET_SETTINGS = 2;  // settings list (category in silentRebootSettingsCategory)
+constexpr uint32_t SILENT_REBOOT_LIGHT_ON = 1U << 0;   // bit 0 of silentRebootPayload
 
 // How the device is coming back to life, resolved once at boot. Both resume
 // flows suppress the splash and leave the panel holding its pre-boot frame; a
@@ -191,11 +197,18 @@ static void wifiPowerDownForReboot() {
   }
 }
 
+// Every silent-restart entry point arms the reboot through here, so the modem teardown
+// and the live-light capture cannot drift apart as targets are added.
+static void armSilentReboot(const uint32_t target) {
+  wifiPowerDownForReboot();
+  silentRebootTarget = target;
+  silentRebootPayload = Frontlight.isOn() ? SILENT_REBOOT_LIGHT_ON : 0;
+  silentRebootMagic = SILENT_REBOOT_MAGIC;
+}
+
 void silentRestart() {
   if (deepSleepInProgress) return;  // sleeping supersedes the heap-defrag reboot
-  wifiPowerDownForReboot();
-  silentRebootTarget = SILENT_REBOOT_TARGET_HOME;
-  silentRebootMagic = SILENT_REBOOT_MAGIC;
+  armSilentReboot(SILENT_REBOOT_TARGET_HOME);
   LOG_DBG("MAIN", "Silent restart (target=home)");
   // E-ink retains the previous frame until Home's first paint lands (~2-3s).
   // Without an overlay, users don't see the reboot and fire input through to
@@ -209,9 +222,7 @@ void silentRestart() {
 
 void silentRestartToReader() {
   if (deepSleepInProgress) return;  // sleeping supersedes the heap-defrag reboot
-  wifiPowerDownForReboot();
-  silentRebootTarget = SILENT_REBOOT_TARGET_READER;
-  silentRebootMagic = SILENT_REBOOT_MAGIC;
+  armSilentReboot(SILENT_REBOOT_TARGET_READER);
   LOG_DBG("MAIN", "Silent restart (target=reader)");
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
   halClock.persistTimeAcrossReboot();  // X4: carry NTP-synced time across the soft reset
@@ -221,10 +232,8 @@ void silentRestartToReader() {
 
 void silentRestartToSettings(int category) {
   if (deepSleepInProgress) return;  // sleeping supersedes the heap-defrag reboot
-  wifiPowerDownForReboot();
-  silentRebootTarget = SILENT_REBOOT_TARGET_SETTINGS;
+  armSilentReboot(SILENT_REBOOT_TARGET_SETTINGS);
   silentRebootSettingsCategory = static_cast<uint32_t>(category);
-  silentRebootMagic = SILENT_REBOOT_MAGIC;
   LOG_DBG("MAIN", "Silent restart (target=settings,cat=%d)", category);
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
   halClock.persistTimeAcrossReboot();  // X4: carry NTP-synced time across the soft reset
@@ -469,9 +478,11 @@ void setup() {
   static constexpr uint32_t SETTINGS_CATEGORY_COUNT = 4;
   const uint32_t snapshotSettingsCategory =
       (isSilentReboot && silentRebootSettingsCategory < SETTINGS_CATEGORY_COUNT) ? silentRebootSettingsCategory : 0;
+  const bool silentRebootLightOn = isSilentReboot && (silentRebootPayload & SILENT_REBOOT_LIGHT_ON) != 0;
   silentRebootMagic = 0;
   silentRebootTarget = 0;
   silentRebootSettingsCategory = 0;
+  silentRebootPayload = 0;
 
   gpio.begin();
   powerManager.begin();
@@ -602,10 +613,13 @@ void setup() {
   APP_STATE.activeOrientation = SETTINGS.orientation;
 
   // Brightness and warmth are always restored. A normal wake starts with the light off
-  // unless Restore Light on Wake is enabled; a silent maintenance reboot preserves the
-  // live state so the screen does not unexpectedly go dark mid-session. Inert on boards
-  // without a frontlight.
-  const bool restoreLightOn = SETTINGS.frontlightOn != 0 && (SETTINGS.frontlightRestoreOnWake != 0 || isSilentReboot);
+  // unless Restore Light on Wake is enabled; a silent maintenance reboot replays the LIVE
+  // state captured at restart, so it neither goes dark mid-session nor lights up against
+  // the user's wake preference. Reading SETTINGS.frontlightOn here instead would get the
+  // saved preference, which diverges from the live state after a no-restore wake. Inert on
+  // boards without a frontlight.
+  const bool restoreLightOn =
+      isSilentReboot ? silentRebootLightOn : (SETTINGS.frontlightOn != 0 && SETTINGS.frontlightRestoreOnWake != 0);
   Frontlight.begin(SETTINGS.frontlightBrightness, SETTINGS.frontlightWarmth, restoreLightOn);
 
   // Clamp lookup history cap to a valid step in [MIN, UNLIMITED] (UNLIMITED is the
