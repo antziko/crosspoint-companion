@@ -210,7 +210,12 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // first block — two contiguous allocations and a copy where one would do. The 8640-byte
   // growth allocation is what aborted (and rebooted the device) when settings were saved at
   // low heap; see SettingsPersistence.h. Keep headroom above the real count.
-  constexpr size_t kSettingCount = 88;
+  //
+  // Derived, not guessed: 86 rows compile unconditionally, plus up to 6 behind
+  // FREEINK_CAP_TOUCH / _FRONTLIGHT / _WARMLIGHT — 92 on a board with all three, which is
+  // the X4 Pro. 88 was already under that, so X4 Pro was paying the growth realloc on every
+  // call. 104 keeps headroom for the next few rows.
+  constexpr size_t kSettingCount = 104;
   v.reserve(kSettingCount);
 
   // --- Display ---
@@ -466,6 +471,12 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
       {StrId::STR_IGNORE, StrId::STR_SLEEP, StrId::STR_PAGE_TURN, StrId::STR_FORCE_REFRESH, StrId::STR_FOOTNOTES},
       "shortPwrBtn", StrId::STR_CAT_CONTROLS));
 #endif
+  // Erased below unless the QMI8658 IMU is present (X3). Pushed here rather than
+  // inserted afterwards: insert() into a vector at capacity reallocates at 2x and
+  // copies, which is the allocation pattern this list's reserve exists to avoid.
+  v.push_back(SettingInfo::Enum(StrId::STR_TILT_PAGE_TURN, &CrossPointSettings::tiltPageTurn,
+                                {StrId::STR_STATE_OFF, StrId::STR_NORMAL, StrId::STR_INVERTED}, "tiltPageTurn",
+                                StrId::STR_CAT_CONTROLS));
   v.push_back(SettingInfo::Toggle(StrId::STR_PWR_BTN_FOOTNOTE_BACK, &CrossPointSettings::pwrBtnFootnoteBack,
                                   "pwrBtnFootnoteBack", StrId::STR_CAT_CONTROLS));
   v.push_back(SettingInfo::Toggle(StrId::STR_BACK_SHORT_TO_FILE_BROWSER, &CrossPointSettings::backShortToFileBrowser,
@@ -631,17 +642,12 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   v.push_back(SettingInfo::Toggle(StrId::STR_FRONTLIGHT, &CrossPointSettings::frontlightOn, "frontlightOn"));
 #endif
 
-  // Only show tilt page turn setting when the QMI8658 IMU is present (X3)
-  if (halTiltSensor.isAvailable()) {
-    // Insert after the short power button setting (end of Controls section)
-    for (auto it = v.begin(); it != v.end(); ++it) {
-      if (it->nameId == StrId::STR_SHORT_PWR_BTN) {
-        v.insert(it + 1, SettingInfo::Enum(StrId::STR_TILT_PAGE_TURN, &CrossPointSettings::tiltPageTurn,
-                                           {StrId::STR_STATE_OFF, StrId::STR_NORMAL, StrId::STR_INVERTED},
-                                           "tiltPageTurn", StrId::STR_CAT_CONTROLS));
-        break;
-      }
-    }
+  // Tilt page turn needs the QMI8658 IMU (X3). Erasing keeps the list at its
+  // initial allocation; the row was pushed in position above.
+  if (!halTiltSensor.isAvailable()) {
+    v.erase(std::remove_if(v.begin(), v.end(),
+                           [](const SettingInfo& s) { return s.nameId == StrId::STR_TILT_PAGE_TURN; }),
+            v.end());
   }
 
   if (dictRegistry) {
