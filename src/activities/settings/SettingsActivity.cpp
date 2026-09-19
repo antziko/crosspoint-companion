@@ -4,6 +4,7 @@
 #include <HalDisplay.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <WiFi.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -24,6 +25,7 @@
 #include "SdCardFontSystem.h"
 #include "SdFirmwareUpdateActivity.h"
 #include "SettingsList.h"
+#include "SilentRestart.h"
 #include "StatusBarSettingsActivity.h"
 #include "TextSettingsActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
@@ -484,13 +486,28 @@ void SettingsActivity::toggleCurrentSetting() {
         startActivityForResultNoThrow<OpdsServerListActivity>(resultHandler, renderer, mappedInput);
         break;
       case SettingAction::Network:
-        // No-op result handler (NOT the shared one that calls SETTINGS.saveToFile()).
-        // WiFi credentials live in WIFI_STORE — persisted by WifiSelectionActivity
-        // itself — so there is nothing in SETTINGS to save here. The shared handler's
-        // saveToFile() builds a JsonDocument, and on X3 the WiFi scan can leave heap
-        // as low as ~10KB, where that allocation throws bad_alloc -> abort() (observed
-        // crash on entering then cancelling the WiFi network picker).
-        startActivityForResultNoThrow<WifiSelectionActivity>([](const ActivityResult&) {}, renderer, mappedInput);
+        // NOT the shared result handler: it calls SETTINGS.saveToFile(). WiFi credentials
+        // live in WIFI_STORE — persisted by WifiSelectionActivity itself — so there is
+        // nothing in SETTINGS to save here. The shared handler's saveToFile() builds a
+        // JsonDocument, and on X3 the WiFi scan can leave heap as low as ~10KB, where that
+        // allocation throws bad_alloc -> abort() (observed crash on entering then
+        // cancelling the WiFi network picker).
+        startActivityForResultNoThrow<WifiSelectionActivity>(
+            [](const ActivityResult&) {
+              // Every other WiFi consumer hands the radio to a session that owns it and
+              // tears it down in its own onExit(). This picker is a CHILD of Settings, so
+              // that parent exit never happens and nothing releases the driver's heap —
+              // scanning alone brings the radio up, so tear down whether or not the user
+              // joined anything.
+              if (WiFi.getMode() == WIFI_MODE_NULL) return;
+              WiFi.disconnect(false);
+              delay(30);
+              // Unlike the onExit() teardowns this runs from the loop task with no lock
+              // held, so the restart popup needs one to paint.
+              RenderLock lock;
+              silentRestartToSettings(/*System=*/3);
+            },
+            renderer, mappedInput);
         break;
       case SettingAction::ClearCache:
         startActivityForResultNoThrow<ClearCacheActivity>(resultHandler, renderer, mappedInput);
