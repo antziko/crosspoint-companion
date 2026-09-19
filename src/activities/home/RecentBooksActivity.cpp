@@ -588,7 +588,8 @@ void RecentBooksActivity::render(RenderLock&& lock) {
   const unsigned long renderStart = millis();
   UiListActivity::render(std::move(lock));
   if (isShelf()) {
-    SdDebugLog::log("RBA", "shelf full ms=%lu cells=%d sel=%d", millis() - renderStart, shelfCellCount, nav.selected.load());
+    SdDebugLog::log("RBA", "shelf full ms=%lu cells=%d sel=%d", millis() - renderStart, shelfCellCount,
+                    nav.selected.load());
   }
 
   // Cover generation runs AFTER the first paint, so the shelf appears

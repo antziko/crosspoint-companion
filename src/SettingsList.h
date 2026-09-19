@@ -645,9 +645,9 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // Tilt page turn needs the QMI8658 IMU (X3). Erasing keeps the list at its
   // initial allocation; the row was pushed in position above.
   if (!halTiltSensor.isAvailable()) {
-    v.erase(std::remove_if(v.begin(), v.end(),
-                           [](const SettingInfo& s) { return s.nameId == StrId::STR_TILT_PAGE_TURN; }),
-            v.end());
+    v.erase(
+        std::remove_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_TILT_PAGE_TURN; }),
+        v.end());
   }
 
   if (dictRegistry) {

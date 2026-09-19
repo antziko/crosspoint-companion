@@ -11,7 +11,6 @@
 #include <cstring>
 
 #include "AboutActivity.h"
-#include "AboutActivity.h"
 #include "ButtonRemapActivity.h"
 #include "ClearCacheActivity.h"
 #include "CrossPointSettings.h"
