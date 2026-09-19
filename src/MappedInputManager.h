@@ -104,6 +104,20 @@ class MappedInputManager {
   bool wasAnyPressed() const;
   bool wasAnyReleased() const;
   unsigned long getHeldTime() const;
+
+  // True when the ACTIVE SCREEN has already consulted a hold this frame -- it called
+  // getHeldTime(), wasScreenLongPress() or wasHomeKeyHold(). Cleared by update(), so it
+  // describes one input frame.
+  //
+  // Exists so main.cpp's global "hold = Refresh Screen" can stand down on a screen that owns
+  // the gesture for something else, without every such screen having to remember to declare
+  // it. Roughly a dozen do -- hold-to-delete on both bookmark lists, hold-to-pin in Font
+  // Family and Text Settings, hold-for-info in Dictionary Select, duplicate-entry holds in the
+  // OPDS and KOSync server lists, Home and Recent Books -- and a flag they each had to set
+  // would fail by silently turning one of those into a screen refresh. Derived from the query
+  // instead, it fails the safe way: a screen that looks at holds simply doesn't get the
+  // global refresh.
+  bool holdWasQueried() const { return holdQueried; }
   const GfxRenderer& getRenderer() const { return renderer; }
   Labels mapLabels(const char* back, const char* confirm, const char* previous, const char* next) const;
   // Returns the raw front button index that was pressed this frame (or -1 if none).
@@ -122,6 +136,12 @@ class MappedInputManager {
   // buttons are disabled.
   bool usesUpButton(Button button) const;
 
+  // Swallow the release that ends a hold this code has already acted on, so the screen
+  // underneath does not also read it as a tap. Public for the global hold handler in
+  // main.cpp's loop, which acts outside any activity and so has no other way to say the
+  // gesture was consumed; the touch path calls it internally from wasScreenLongPress().
+  void suppressNextRelease(Button button) const;
+
  private:
   HalGPIO& gpio;
   const GfxRenderer& renderer;
@@ -136,7 +156,6 @@ class MappedInputManager {
   bool listItemFromPoint(int x, int y, int& index, int itemCount, int selectedIndex, int listTop, int listHeight,
                          bool hasSubtitle) const;
   void rememberTouchHeldTime() const;
-  void suppressNextRelease(Button button) const;
 
   mutable bool touchHeldOverrideValid = false;
   mutable unsigned long touchHeldOverrideMs = 0;
@@ -145,4 +164,5 @@ class MappedInputManager {
   // is cleared on release; `suppressed` marks releases still owed a swallow.
   mutable uint16_t longPressFiredButtons = 0;
   mutable uint16_t suppressedReleaseButtons = 0;
+  mutable bool holdQueried = false;  // see holdWasQueried(); cleared every update()
 };

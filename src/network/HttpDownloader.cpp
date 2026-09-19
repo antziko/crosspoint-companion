@@ -5,6 +5,7 @@
 #include <Logging.h>
 #include <Memory.h>
 #include <SdDebugLog.h>
+#include <WiFi.h>
 #include <base64.h>
 #include <esp_wifi.h>
 
@@ -351,6 +352,14 @@ constexpr int MAX_RANGE_RESTARTS = 2;
 // bytes in the X3 capture. See the link-down branch in runGet.
 constexpr uint32_t LINK_WAIT_MS = 15000;
 constexpr int LINK_WAIT_LIMIT = 3;
+// Re-association is not a usable link: the station is back on the AP but has no lease yet,
+// and every connect made in that gap fails in ~4ms. Measured on X3 — `link back` at rssi
+// -48, then four such failures and the 500/1000/1500ms backoff ladder, 5.4s and 3 of the 8
+// connectFailures spent before the first good CONNECT. So wait for the lease too, but on a
+// SHORT separate budget rather than by folding it into LINK_WAIT_MS: a link where DHCP
+// never completes must not be able to spend 15s per recovery discovering that, having
+// already spent up to 15s on the association.
+constexpr uint32_t LEASE_WAIT_MS = 3000;
 
 // X3 HTTPS troubleshooting instrumentation (SdDebugLog "STALL"/"XFER"): a
 // per-chunk read taking longer than this is logged with a heap+RSSI snapshot —
@@ -610,6 +619,10 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
     uint32_t transferStartMs = openStartMs;
     uint32_t lastChunkMs = openStartMs;
     size_t lastXferLogBytes = 0;
+    // Byte count this hop started from. transferStartMs is restamped per hop while
+    // sink.downloaded stays cumulative, so the XFER line needs both to report a rate and a
+    // log cadence that belong to the same interval.
+    size_t hopStartBytes = 0;
     bool loggedConnect = false;
     // Running split of the transfer: time blocked on the socket vs time inside our own
     // per-chunk work. Totals (not just the >1s outliers) so a transfer that is slow in
@@ -693,6 +706,12 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
             loggedConnect = true;
             transferStartMs = millis();
             lastChunkMs = transferStartMs;
+            // sink.downloaded == resumeOffset at the top of every hop, so this is where the
+            // hop's own byte origin is settled. Seeding lastXferLogBytes from it is what
+            // makes the first XFER of a resumed hop fire after 32KB of THIS hop instead of
+            // immediately, on a cumulative total that is already past the threshold.
+            hopStartBytes = sink.downloaded;
+            lastXferLogBytes = sink.downloaded;
             // A 206's Content-Length is the length of the RANGE, not of the resource,
             // so never let it overwrite the full size learned on the first hop. The
             // sink.total == 0 guard already covers this (a resume only happens once
@@ -775,7 +794,8 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
           if (sink.downloaded - lastXferLogBytes >= XFER_LOG_BYTES) {
             lastXferLogBytes = sink.downloaded;
             const uint32_t elapsedMs = now - transferStartMs;
-            const unsigned bytesPerSec = elapsedMs > 0 ? (unsigned)((uint64_t)sink.downloaded * 1000U / elapsedMs) : 0;
+            const size_t hopBytes = sink.downloaded - hopStartBytes;
+            const unsigned bytesPerSec = elapsedMs > 0 ? (unsigned)((uint64_t)hopBytes * 1000U / elapsedMs) : 0;
             // largest8 is the number that decides whether an https body survives, and it was
             // the one this line did not print. wolfSSL sizes its receive buffer to each
             // incoming record and servers ramp record size as a connection warms, so the
@@ -785,8 +805,10 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
             // the free figure. Printing it per 32KB shows the trajectory instead of the
             // post-mortem, which is what says whether that gap is closable at all.
             const SdDebugLog::NetSnapshot xs = SdDebugLog::captureNetSnapshot();
-            SdDebugLog::log("XFER", "bytes=%zu elapsed=%lums rate=%uB/s heap=%u largest8=%u", sink.downloaded,
-                            (unsigned long)elapsedMs, bytesPerSec, xs.heapFree, xs.largest8Bit);
+            // bytes= stays cumulative (it is the progress figure a reader wants); hop= and
+            // rate= are the per-hop pair that elapsed= actually measures.
+            SdDebugLog::log("XFER", "bytes=%zu hop=%zu elapsed=%lums rate=%uB/s heap=%u largest8=%u", sink.downloaded,
+                            hopBytes, (unsigned long)elapsedMs, bytesPerSec, xs.heapFree, xs.largest8Bit);
           }
           return true;
         },
@@ -913,6 +935,19 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
         }
         SdDebugLog::log("HTTP", "link %s", linkBack ? "back" : "still down");
         if (linkBack) {
+          // Same online test the Wi-Fi picker and the OPDS browser use
+          // (WifiSelectionActivity.cpp, OpdsBookBrowserActivity.cpp): associated AND
+          // holding an address. Bounded and cancel-polled like the association wait above;
+          // falling through without a lease is not a failure, it just hands the hop to the
+          // retry ladder below exactly as before.
+          uint32_t leaseWaited = 0;
+          while (leaseWaited < LEASE_WAIT_MS && WiFi.localIP() == IPAddress(0, 0, 0, 0)) {
+            if (sink.cancelFlag && *sink.cancelFlag) return HttpDownloader::ABORTED;
+            delay(250);
+            leaseWaited += 250;
+          }
+          SdDebugLog::log("HTTP", "lease %s after %lums", WiFi.localIP() == IPAddress(0, 0, 0, 0) ? "absent" : "up",
+                          (unsigned long)leaseWaited);
           retriedConnect = false;  // the recovered hop gets its own one-shot immediate retry
           continue;
         }

@@ -9,7 +9,14 @@ class HalClock;
 extern HalClock halClock;  // Singleton
 
 class HalClock {
+  // X3's DS3231, driven by the bespoke Wire code in this class. Gates the whole
+  // read/write path below, so it must stay false on every other board.
   bool _available = false;
+  // Any other board's battery-backed RTC (X4 Pro's BM8563 at 0x51), driven through freeink::Rtc.
+  // It is a SOURCE for the POSIX clock, not a read path, which is why it is a separate
+  // flag: setting _available would route getTime()/getDate()/syncFromNTP() into the
+  // DS3231 code. Only hasHardwareRtc() folds the two together.
+  bool _hwRtcPresent = false;
   bool _ntpConfigured = false;  // set when configTzTime() called; SNTP runs async after this
   mutable uint8_t _cachedHour = 0;
   mutable uint8_t _cachedMinute = 0;
@@ -28,6 +35,13 @@ class HalClock {
   // Call after gpio.begin() and powerManager.begin() (I2C already initialised for X3)
   void begin();
 
+  // Optional SD-log sink for the clock path. HalClock cannot call SdDebugLog directly --
+  // that would close a lib/hal -> SdDebugLog -> lib/hal dependency cycle -- so the owner
+  // installs one instead, and the NTP flow stops being the only one with no on-device
+  // evidence. Receives one already-formatted line, no tag and no newline. Serial logging
+  // is unaffected; this is purely additional.
+  static void setTraceSink(void (*sink)(const char* line));
+
   // X4 only: stash the current POSIX epoch in RTC_NOINIT before a software reset
   // (the heap-defrag silent restart) so begin() can restore it on the way back up.
   // No-op if the system clock isn't NTP-valid yet, or on X3 (DS3231 persists itself).
@@ -38,8 +52,11 @@ class HalClock {
   // True if time is available: DS3231 (X3) or NTP-synced POSIX clock (X4)
   bool isAvailable() const { return _available || isPosixTimeValid(); }
 
-  // True if a hardware DS3231 RTC is present (X3 only)
-  bool hasHardwareRtc() const { return _available; }
+  // True if a battery-backed RTC keeps time across a power cycle: X3's DS3231 or another
+  // board's own chip. Callers use it to pick a sync policy -- with an RTC the clock only
+  // needs NTP once (SETTINGS.clockHasBeenSynced); without one it needs it whenever the
+  // system clock reads invalid.
+  bool hasHardwareRtc() const { return _available || _hwRtcPresent; }
 
   // True if the POSIX system clock has been synced via NTP (X4 only; in-memory, lost on deep sleep)
   bool isSystemTimeValid() const { return isPosixTimeValid(); }

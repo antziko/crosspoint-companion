@@ -52,7 +52,7 @@ void SdCardFontSystem::begin(GfxRenderer& renderer) {
 
   // If user has a saved SD font selection, load it
   if (SETTINGS.sdFontFamilyName[0] != '\0') {
-    const auto* family = registry_.findFamily(SETTINGS.sdFontFamilyName);
+    const auto* family = registry_.familyWithFiles(SETTINGS.sdFontFamilyName);
     if (family) {
       if (manager_.loadFamily(*family, renderer, SETTINGS.fontPointSize)) {
         snapFontPointSizeTo(manager_.currentPointSize());
@@ -118,7 +118,7 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
   // just rediscovered (file may have been replaced on disk).
   bool familyMatches = (currentFamily == wantedFamily);
   if (familyMatches) {
-    const auto* family = registry_.findFamily(wantedFamily);
+    const auto* family = registry_.familyWithFiles(wantedFamily);
     if (!family) {
       LOG_DBG("SDFS", "SD font family disappeared: %s (clearing)", wantedFamily);
       manager_.unloadAll(renderer);
@@ -139,7 +139,7 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
     manager_.unloadAll(renderer);
   }
 
-  const auto* family = registry_.findFamily(wantedFamily);
+  const auto* family = registry_.familyWithFiles(wantedFamily);
   if (family) {
     if (manager_.loadFamily(*family, renderer, wantedPointSize)) {
       snapFontPointSizeTo(manager_.currentPointSize());
@@ -159,7 +159,7 @@ void SdCardFontSystem::setupUiFallbacks(GfxRenderer& renderer) {
   const std::string& familyName = manager_.currentFamilyName();
   if (familyName.empty()) return;  // no SD family loaded — nothing to fall back to
 
-  const auto* family = registry_.findFamily(familyName);
+  const auto* family = registry_.familyWithFiles(familyName);
   if (!family) return;
 
   // Probe the already-loaded reader-size font before paying for the UI sizes:
@@ -217,7 +217,7 @@ int SdCardFontSystem::ensureFontSize(const char* familyName, const uint8_t point
   // unload the reader's (loadFamily unloads first).
   if (manager_.currentFamilyName() != familyName) return 0;
 
-  const auto* family = registry_.findFamily(familyName);
+  const auto* family = registry_.familyWithFiles(familyName);
   if (!family) return 0;
 
   // The dictionary asks in 12/14/16/18 point slots, but a family ships whatever sizes it was
@@ -273,7 +273,7 @@ int SdCardFontSystem::loadFamilyForPreview(const char* familyName, uint8_t point
   const int existing = manager_.getFontId(familyName);
   if (existing != 0) return existing;
 
-  const auto* family = registry_.findFamily(familyName);
+  const auto* family = registry_.familyWithFiles(familyName);
   if (!family) {
     LOG_DBG("SDFS", "Preview family not found: %s", familyName);
     return 0;

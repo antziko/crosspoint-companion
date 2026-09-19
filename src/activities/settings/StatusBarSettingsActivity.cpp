@@ -32,6 +32,7 @@ enum MenuItem {
   ITEM_CLOCK_FORMAT,      // clock-capable only
   ITEM_CLOCK_UTC_OFFSET,  // clock-capable only, launches ClockOffsetActivity
   ITEM_CLOCK_SYNC,        // clock-capable only, launches ClockSyncActivity
+  ITEM_CLOCK_RESYNC,      // clock-capable only, RTC boards only (see buildScreen note)
   ITEM_DATE,              // clock-capable only
   ITEM_DATE_FORMAT,       // clock-capable only
   ITEM_COUNT
@@ -54,12 +55,17 @@ const StrId menuNames[FULL_MENU_ITEMS] = {
     StrId::STR_CLOCK_FORMAT,
     StrId::STR_CLOCK_UTC_OFFSET,
     StrId::STR_CLOCK_SYNC_NOW,
+    StrId::STR_CLOCK_RESYNC_EVERY,
     StrId::STR_DATE,
     StrId::STR_DATE_FORMAT,
 };
 
 constexpr int CLOCK_FORMAT_ITEMS = 2;
 const StrId clockFormatNames[CLOCK_FORMAT_ITEMS] = {StrId::STR_CLOCK_FORMAT_24H, StrId::STR_CLOCK_FORMAT_12H};
+
+constexpr int CLOCK_RESYNC_ITEMS = CrossPointSettings::CLOCK_RESYNC_COUNT;
+const StrId clockResyncNames[CLOCK_RESYNC_ITEMS] = {StrId::STR_CLOCK_RESYNC_1D, StrId::STR_CLOCK_RESYNC_3D,
+                                                    StrId::STR_CLOCK_RESYNC_7D, StrId::STR_CLOCK_RESYNC_15D};
 
 constexpr int DATE_FORMAT_ITEMS = 4;
 const StrId dateFormatNames[DATE_FORMAT_ITEMS] = {
@@ -144,6 +150,10 @@ void StatusBarSettingsActivity::onEnter() {
     SETTINGS.clockFormat = 0;
   }
 
+  if (SETTINGS.clockResyncDays >= CLOCK_RESYNC_ITEMS) {
+    SETTINGS.clockResyncDays = 2;  // 7 days
+  }
+
   if (SETTINGS.dateFormat >= DATE_FORMAT_ITEMS) {
     SETTINGS.dateFormat = 0;
   }
@@ -221,6 +231,13 @@ void StatusBarSettingsActivity::handleSelection() {
     case ITEM_CLOCK_SYNC:
       startActivityForResultNoThrow<ClockSyncActivity>(nullptr, renderer, mappedInput);
       return;
+    case ITEM_CLOCK_RESYNC:
+      optionPopup.show(StrId::STR_CLOCK_RESYNC_EVERY, clockResyncNames, CLOCK_RESYNC_ITEMS, SETTINGS.clockResyncDays,
+                       [this](int idx) {
+                         SETTINGS.clockResyncDays = idx;
+                         SETTINGS.saveToFile();
+                       });
+      return;
     case ITEM_DATE:
       SETTINGS.statusBarDate = (SETTINGS.statusBarDate + 1) % 2;
       break;
@@ -259,6 +276,10 @@ std::string StatusBarSettingsActivity::rowValueText(const int index) {
       return formatUtcOffset(SETTINGS.clockUtcOffsetQ);
     case ITEM_CLOCK_SYNC:
       return SETTINGS.clockHasBeenSynced ? tr(STR_CLOCK_SYNCED) : tr(STR_NOT_SET);
+    case ITEM_CLOCK_RESYNC: {
+      const uint8_t idx = SETTINGS.clockResyncDays < CLOCK_RESYNC_ITEMS ? SETTINGS.clockResyncDays : 0;
+      return std::string(I18N.get(clockResyncNames[idx]));
+    }
     // LOCAL(feat): the two date rows have no upstream equivalent, so upstream's
     // rowValueText() omits them. Without these cases both fall to the default
     // below and render "Hide" no matter what the setting actually is.

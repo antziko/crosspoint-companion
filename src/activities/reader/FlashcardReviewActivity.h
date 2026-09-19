@@ -129,6 +129,11 @@ class FlashcardReviewActivity final : public Activity {
   void promptSuspendToggle();
   // Suspended-review only: confirm + permanently delete the current set-aside card.
   void promptDelete();
+  // The deck row named by session[cursor] is already gone. Drop it and renumber the survivors --
+  // a newest-first index shifts down for every card OLDER than the removed one -- then land on
+  // whatever slid into this slot. Removing the row itself stays at the call site: a delete
+  // performed on the back-face definition has already done it by the time we get here.
+  void dropCurrentCardFromSession();
   // Flip to the back face: look the word up in the dictionary the card was SAVED from, falling
   // back to the active one when that dictionary is not installed here. Every flip goes through
   // this rather than calling startLookup directly, so the override is applied in exactly one

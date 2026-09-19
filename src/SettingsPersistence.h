@@ -215,6 +215,8 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
     persisted::ranged("clockUtcOffsetQ", &CrossPointSettings::clockUtcOffsetQ, 0, 104),
     persisted::enumerated("clockFormat", &CrossPointSettings::clockFormat, 1),
     persisted::toggle("clockHasBeenSynced", &CrossPointSettings::clockHasBeenSynced),
+    persisted::enumerated("clockResyncDays", &CrossPointSettings::clockResyncDays,
+                          lastIndex(CrossPointSettings::CLOCK_RESYNC_DAYS)),
     persisted::toggle("statusBarDate", &CrossPointSettings::statusBarDate),
     persisted::enumerated("dateFormat", &CrossPointSettings::dateFormat, 3),
 

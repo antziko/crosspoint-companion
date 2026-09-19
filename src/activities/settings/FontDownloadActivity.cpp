@@ -5,6 +5,7 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <InflateReader.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <SdDebugLog.h>
@@ -95,17 +96,26 @@ void FontDownloadActivity::onEnter() {
   // (SETTINGS.sdCardLogging) is off — not the download path failing to reach any code.
   SdDebugLog::log("FONT", "screen enter, manifest=%s", FONT_MANIFEST_URL);
 
-  // Reclaim the font heap before the radio comes up. The Wi-Fi driver's own allocations
-  // plus the scan list leave only a few KB free, and the picker started below still needs
-  // a contiguous block for its activity object; a capture caught that allocation failing
-  // at 1112 bytes free / 628 largest, which is what makes this screen occasionally do
-  // nothing until a reboot. releaseCache() rather than the fuller unload done before the
-  // manifest fetch: the mini arenas and ~3KB kern tables it returns are already far more
-  // than that allocation needs, and it leaves the SD font resident so a CJK SSID still
-  // renders in the picker.
+  // Reclaim the font heap before the radio comes up. releaseCache() rather than the fuller
+  // unload done before the manifest fetch: the mini arenas and ~3KB kern tables it returns
+  // are enough for what runs between here and the picker, and it leaves the SD font
+  // resident so a CJK SSID still renders there.
   if (auto* fcm = renderer.getFontCacheManager()) {
     fcm->releaseCache();
   }
+
+  // Hand back the 32KB inflate window before the radio takes its ~53KB. The picker releases
+  // it too (WifiSelectionActivity::onEnter), but pushActivity() is deferred: the picker's
+  // onEnter does not run until the next loop tick, so its release lands AFTER the
+  // makeUniqueNoThrow<WifiSelectionActivity> below, which allocates here, against this
+  // heap. Without this the picker's activity object is asked for at ~1.9KB free / ~900
+  // largest and the screen does nothing until a reboot.
+  //
+  // Idempotent and borrower-safe (InflateReader.cpp refuses while an inflate holds it), so
+  // the picker's own call becomes a no-op. Nothing between here and onExit() inflates —
+  // font bodies use the non-streaming decompressor — and onExit() reboots, which
+  // re-reserves the window on a fresh heap.
+  InflateReader::releaseWindow();
 
   WiFi.mode(WIFI_STA);
   startActivityForResultNoThrow<WifiSelectionActivity>(
@@ -412,6 +422,17 @@ bool FontDownloadActivity::reloadManifestFromCache() {
     LOG_ERR("FONT", "Manifest reload failed after download");
     return false;
   }
+
+  // The low-water mark of the whole screen, and the one the 09-17 abort died at: the
+  // registry, the ArduinoJson pools and the rebuilt row tables are all live across the
+  // parse above. Paired with `manifest released` (before the transfers) and the SDREG
+  // discover lines, this bounds how much room the reload actually had. minFree is what
+  // to read — the free figure here is post-parse, after the pools went back.
+  multi_heap_info_t info;
+  heap_caps_get_info(&info, MALLOC_CAP_8BIT);
+  SdDebugLog::log("FONT", "manifest reparsed: free=%u largest=%u blocks=%u minFree=%u families=%u",
+                  (unsigned)info.total_free_bytes, (unsigned)info.largest_free_block, (unsigned)info.free_blocks,
+                  (unsigned)ESP.getMinFreeHeap(), (unsigned)families_.size());
   // Unconditionally, and for the group the user is actually in: releaseManifestWorkingSet()
   // emptied filteredIndices_, and only enterGroup() ever refills it. Skipping this when a group
   // screen exists left the family list empty behind the "installed" screen.

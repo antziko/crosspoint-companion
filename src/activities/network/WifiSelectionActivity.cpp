@@ -20,6 +20,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/WifiEventLog.h"
+#include "util/ClockSyncPolicy.h"
 #include "util/ListSwipeScroll.h"
 
 namespace fui = freeink::ui;
@@ -709,16 +710,13 @@ void WifiSelectionActivity::checkConnectionStatus() {
             WiFi.RSSI());
 #endif
 
-    // X3: sync once (DS3231 persists across power cycles; ~2 ppm drift is negligible).
-    // X4: sync on every WiFi connect — no hardware RTC, so time is lost on each deep sleep.
-    {
-      const bool shouldSync = halClock.hasHardwareRtc() ? !SETTINGS.clockHasBeenSynced : !halClock.isSystemTimeValid();
-      if (shouldSync && halClock.syncFromNTP()) {
-        if (halClock.hasHardwareRtc()) {
-          SETTINGS.clockHasBeenSynced = 1;
-          SETTINGS.saveToFile();
-        }
-      }
+    // Piggyback an NTP sync on the connection the user just made, if the policy says one is
+    // due (see util/ClockSyncPolicy.h — validity on a board with no RTC, staleness on one
+    // that has). noteClockSynced() is called on every board, not just RTC boards: the epoch
+    // it records is what the staleness rule reads, and writing it costs nothing where the
+    // rule is not consulted.
+    if (clockNeedsNtpSync() && halClock.syncFromNTP()) {
+      noteClockSynced();
     }
 
     // Save this as the last connected network - SD card operations need lock as

@@ -33,6 +33,7 @@
 #include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/ClockSyncPolicy.h"
 #include "util/FlashcardDeck.h"
 #include "util/LookupHistory.h"
 
@@ -175,15 +176,16 @@ void KOReaderSyncActivity::onWifiSelectionComplete(const bool success) {
   // esp_sntp_setservername() self-locks the (non-recursive) core mutex, so wrapping it in a
   // manual LOCK_TCPIP_CORE() blocked forever. We own the WiFi connection here, so give SNTP the
   // full 5s budget; a late packet is still adopted asynchronously by HalClock.
-  const bool clockNeedsSync = halClock.hasHardwareRtc() ? !SETTINGS.clockHasBeenSynced : !halClock.isSystemTimeValid();
-  if (clockNeedsSync) {
+  // Shared policy (util/ClockSyncPolicy.h): validity on a board with no RTC, staleness on one
+  // that has. KOSync timestamps are one of the reasons a drifting RTC matters.
+  if (clockNeedsNtpSync()) {
     {
       RenderLock lock(*this);
       state = SYNCING;
       statusMessage = tr(STR_SYNCING_TIME);
     }
     requestUpdate(true);
-    halClock.syncFromNTP(5000);
+    if (halClock.syncFromNTP(5000)) noteClockSynced();
   }
 
   {
@@ -361,14 +363,30 @@ void KOReaderSyncActivity::performSync() {
   // never touches `epub`, and both are silent best-effort legs that leave `result` alone.
   // The phase counter is unaffected — the labels appear in the new order and the total is
   // still 1 + 3 + 2.
-  if (serverReachable) {
+  if (serverReachable && KOReaderSyncClient::linkOnline()) {
     syncStats(/*includeDict=*/true, /*includeGlobal=*/true, /*includeFlashcards=*/true);
   }
 
   // Bookmarks, sessionless at recovered heap — see syncBookmarks. Silent and best-effort:
   // it does not change the progress sync outcome below.
-  if (serverReachable) {
+  //
+  // The link check is re-read here rather than folded into serverReachable: the AP can drop
+  // us DURING a leg, and the observed capture is exactly that -- a 13s stats GET ending in
+  // `WIFI: disconnect reason=200 (BEACON_TIMEOUT)`, after which STATS_PUT, BOOKMARKS_GET and
+  // three BOOKMARKS_PUT attempts each failed in ~4ms at `rssi=0`. Nothing downstream of a
+  // dead station can succeed, so the remaining legs only cost time and muddy the log.
+  // `serverReachable` answers "did the server respond at the start", which is a different
+  // question and stays where it is.
+  //
+  // linkOnline() rather than linkUp() at both gates: these legs are one-shot, so an
+  // association that has not yet won a DHCP lease buys nothing and costs a misleading
+  // "server failed" in the log. The retry loop in updateBookmarks deliberately keeps the
+  // looser test — see linkOnline()'s contract.
+  if (serverReachable && KOReaderSyncClient::linkOnline()) {
     syncBookmarks();
+  } else if (serverReachable) {
+    SdDebugLog::log("KOSYNC", "link not online after stats -> bookmarks leg skipped");
+    LOG_ERR("KOSync", "Wi-Fi link not usable mid-sync; skipping bookmarks");
   }
 
   if (result == KOReaderSyncClient::NOT_FOUND) {

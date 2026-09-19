@@ -238,6 +238,37 @@ class KOReaderSyncClient {
   static int lastHttpCode;
 
   /**
+   * Is the station still associated with an AP?
+   *
+   * A round that loses the link mid-way has nothing left to talk to: every later leg
+   * fails in a few milliseconds against a dead socket, and a retry cannot recover what
+   * is not a transient transport error. Callers use this to stop early instead of
+   * burning legs and reporting a partial sync as a success.
+   *
+   * Same primitive the SD trace's `rssi=` reads (SdDebugLog::captureNetSnapshot), so a
+   * capture showing `rssi=0` on a failed leg is this returning false.
+   *
+   * Association only — see linkOnline() for the stricter test, and for why a retry loop
+   * wants this one rather than that one.
+   */
+  static bool linkUp();
+
+  /**
+   * Is the station associated AND holding an address?
+   *
+   * Association is not reachability. Auto-reconnect is on by default, so a dropped round
+   * runs re-associate -> DHCP -> usable, and linkUp() turns true at the middle step — a
+   * second or two before any request can succeed. A leg gated on linkUp() alone can
+   * therefore run into a stack with no route and report the server as having failed.
+   *
+   * Use this for a ONE-SHOT leg, where a false positive is pure waste. Do NOT use it to
+   * end a retry loop: the loop's settle delay is often exactly long enough for DHCP to
+   * finish, so a lease that is merely late would abandon a round that was about to
+   * recover. Same predicate the Wi-Fi picker and the OPDS browser use for "online".
+   */
+  static bool linkOnline();
+
+  /**
    * Cumulative transfer counters for the sync summary. resetByteCounters() zeroes
    * both at the start of a sync; bytesDown() sums GET response-body bytes, bytesUp()
    * sums PUT request-body bytes, across every leg run since the reset.

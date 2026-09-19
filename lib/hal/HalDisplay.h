@@ -81,6 +81,12 @@ class HalDisplay {
 
   // Power management
   void deepSleep();
+  // Park the panel's analog domain (its DC-DC / driver rails) while nothing is queued,
+  // leaving the controller's logic and RAM up so the next paint only pays a power-on.
+  // No-op on panels that already power down after each refresh. The image on the glass
+  // is unaffected -- e-ink holds without power; what it removes is the standing bias
+  // that sets image retention when one frame is displayed for a long time.
+  void controllerIdle();
 
   // Install the slice hook that replaces the BUSY poll delay on proven-long
   // waits (see EpdBus::setBusyWaitSliceHook for the contract)

@@ -6,6 +6,7 @@
 #include <Memory.h>
 #include <SdDebugLog.h>
 #include <SecureHttpClient.h>
+#include <WiFi.h>
 #include <esp_heap_caps.h>
 #include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
@@ -379,6 +380,13 @@ void KOReaderSyncClient::setHeartbeat(void (*fn)(void* ctx, uint32_t elapsedMs, 
 KOReaderSyncClient::SyncSession::SyncSession() { beginSession(); }
 KOReaderSyncClient::SyncSession::~SyncSession() { endSession(); }
 
+bool KOReaderSyncClient::linkUp() {
+  wifi_ap_record_t ap = {};
+  return esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+}
+
+bool KOReaderSyncClient::linkOnline() { return linkUp() && WiFi.localIP() != IPAddress(0, 0, 0, 0); }
+
 KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
   lastHttpCode = 0;
   if (!KOREADER_STORE.hasCredentials()) {
@@ -635,6 +643,15 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
     transportOk = resp.transportOk;
     LOG_DBG("KOSync", "Update bookmarks response: %d (attempt %d)", status, attempt + 1);
     if (transportOk) break;  // got an HTTP response — no point retrying the transport
+    if (!linkUp()) {
+      // The station lost the AP mid-round (a drop during the stats leg is the observed
+      // case). Every attempt from here fails in ~4ms against a dead socket, and the settle
+      // delay cannot re-associate us — that is the Wi-Fi stack's job, not this loop's.
+      SdDebugLog::log("KOSYNC", "BOOKMARKS_PUT: link down on attempt %d -> no retry", attempt + 1);
+      LOG_ERR("KOSync", "BOOKMARKS_PUT: Wi-Fi link down, retrying cannot help - giving up after attempt %d",
+              attempt + 1);
+      break;
+    }
     if (resp.heapAbort) {
       // Not a transient failure: the guards abandoned the transfer for want of contiguous
       // heap, and nothing between attempts changes that. Device logs show all three attempts

@@ -80,13 +80,6 @@ class TextSettingsActivity final : public UiTabListActivity {
   void switchTab(int direction = 1);
 
   // --- Font tab (compare pane) ---
-  // Font tab, touch only: true when the contact in progress MOVED the highlight, so the
-  // tap that ends it previews rather than commits. handleListTouch reports Consumed on
-  // touchdown and Activated on release, and the touchdown has already moved the highlight
-  // by the time Activated arrives — so "was this row already highlighted?" cannot be
-  // answered from the index at release time and has to be recorded at touchdown.
-  // Reassigned on every touchdown, so an abandoned contact (a swipe) cannot leave it stale.
-  bool familyTapMovedHighlight_ = false;
 
   bool onFamilyTab() const { return tab_ == Tab::Family; }
   // Vertical layout of the preview / tab-bar / pane-list regions. Only the Font

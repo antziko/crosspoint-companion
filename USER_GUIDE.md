@@ -226,6 +226,12 @@ The Settings screen allows you to configure the device's behavior. There are a f
   
   - "OFF" (default) - Disable the fix
   - "ON" - Enable the fix
+  
+  The fix powers the panel controller down after every refresh instead of leaving it energised
+  between page turns. Worth trying if a page you were reading faintly reappears on the sleep
+  screen minutes after the device went to sleep, which the same panel bias can cause. It rules
+  out the asynchronous refresh path, so page turns may feel slightly slower — except in Night
+  Mode, which already takes the blocking path.
 
 > [!NOTE]
 > A battery charging indicator is shown on the battery icon whenever the device is actively charging.

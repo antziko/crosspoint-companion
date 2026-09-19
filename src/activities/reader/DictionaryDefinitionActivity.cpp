@@ -28,6 +28,7 @@
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/ButtonNavigator.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
 #include "util/DictionaryRegistry.h"
@@ -262,6 +263,10 @@ void DictionaryDefinitionActivity::onEnter() {
   if (!cachePath.empty() && !historyWord.empty()) {
     cardDictExists_ = FlashcardDeck::cardDict(cachePath, historyWord, cardDictHash_);
   }
+  // On the way in the displayed word IS historyWord, so this second probe looks redundant -- it is
+  // not, because the two diverge on the first chain-forward and only this one follows the screen.
+  currentWord_ = historyWord;
+  probeCurrentCard();
   // Heap reclaim: this activity is PUSHED on top of a still-resident reader
   // (ActivityManager keeps the backgrounded activity alive — no onExit). On the
   // tight X3 heap that leaves little headroom for the dictionary's own layout +
@@ -1207,6 +1212,91 @@ bool DictionaryDefinitionActivity::cycleDictionary() {
   return true;
 }
 
+int DictionaryDefinitionActivity::collectDictGroup(const int curIdx, const char** names, int* registryIdx,
+                                                   const int cap) const {
+  if (curIdx < 0) return 0;
+  const auto& entries = dictionaryRegistry.getEntries();
+  if (curIdx >= static_cast<int>(entries.size())) return 0;
+  const bool wantSt = entries[curIdx].nameIsSt;
+  int count = 0;
+  for (int i = 0; i < static_cast<int>(entries.size()); ++i) {
+    if (entries[i].nameIsSt != wantSt) continue;
+    if (count < cap) {
+      // Borrowed, not copied: the registry outlives this screen, and building a
+      // vector<string> here would allocate a list OptionPopup::show is about to copy anyway.
+      names[count] = entries[i].name.c_str();
+      registryIdx[count] = i;
+    }
+    ++count;
+  }
+  return count;
+}
+
+bool DictionaryDefinitionActivity::openDictPicker() {
+  // Same gate as cycleDictionary: the session path may only be mutated with no lookup task
+  // running (see Dictionary::setSessionDictPath).
+  if (controller.isActive()) return false;
+  if (dictPicker_ && dictPicker_->isActive()) return true;
+
+  const std::string current = Dictionary::activeDictPath(cachePath.empty() ? nullptr : cachePath.c_str());
+  const int curIdx = dictionaryRegistry.indexOf(current);
+
+  const char* names[OptionPopup::MAX_OPTIONS];
+  int registryIdx[OptionPopup::MAX_OPTIONS];
+  // Returns the FULL group size even when it overruns the arrays, so the two rejections below
+  // can be told apart.
+  const int count = collectDictGroup(curIdx, names, registryIdx, OptionPopup::MAX_OPTIONS);
+  if (count > OptionPopup::MAX_OPTIONS) {
+    // The dialog does not scroll, so rows past the cap would be silently unreachable
+    // (OptionPopup.h). Keep the cycle for such a group: slower, but it reaches every member.
+    return cycleDictionary();
+  }
+  if (count < 2) {
+    // curIdx < 0, or the sole member of its group. cycleDictionary declines on exactly these
+    // terms -- crossing the st-/other partition is what both gestures exist to prevent -- so
+    // take the gesture and do nothing rather than fall through to word-select.
+    SdDebugLog::log("DDA", "dict picker declined: cur=%d group=%d installed=%d", curIdx, count,
+                    dictionaryRegistry.count());
+    return true;
+  }
+
+  // Allocated per use rather than held as a member the way every other OptionPopup host does
+  // (EpubReaderActivity, SettingsActivity, ...). An OptionPopup measures 636 bytes here, most of
+  // it the double-buffered InteractionBuffer<17>, and this is the object whose push has aborted
+  // the device on a stressed heap (SdCardFont.cpp:126) -- by value it would carry that on every
+  // definition ever opened, 5060 -> 5692 bytes. The gesture instead fires with the definition
+  // already painted and no lookup or glyph prewarm in flight, the calmest moment this screen
+  // has. On OOM fall back to the cycle -- the behaviour this replaces, so nothing is lost but
+  // the choice.
+  dictPicker_ = makeUniqueNoThrow<OptionPopup>();
+  if (!dictPicker_) {
+    LOG_ERR("DDA", "OOM: dict picker");
+    return cycleDictionary();
+  }
+
+  int selected = 0;
+  for (int i = 0; i < count; ++i)
+    if (registryIdx[i] == curIdx) selected = i;
+
+  dictPicker_->show(tr(STR_DICTIONARY), names, count, selected, [this](const int chosen) {
+    // Re-derive the list rather than capturing it: the row index only means anything against
+    // the same enumeration that drew it, and collectDictGroup is the one place that exists.
+    const std::string now = Dictionary::activeDictPath(cachePath.empty() ? nullptr : cachePath.c_str());
+    const int nowIdx = dictionaryRegistry.indexOf(now);
+    const char* pickNames[OptionPopup::MAX_OPTIONS];
+    int pickIdx[OptionPopup::MAX_OPTIONS];
+    const int n = collectDictGroup(nowIdx, pickNames, pickIdx, OptionPopup::MAX_OPTIONS);
+    if (chosen < 0 || chosen >= n || chosen >= OptionPopup::MAX_OPTIONS) return;
+    if (pickIdx[chosen] == nowIdx) {
+      requestUpdate();  // already in force: repaint over the dialog, change nothing
+      return;
+    }
+    applyDictSwitch(nowIdx, pickIdx[chosen], now);
+  });
+  requestUpdate();
+  return true;
+}
+
 bool DictionaryDefinitionActivity::handleDictSwitch() {
   if (dictSwitchReleaseConsumed_ && consumeDictSwitchRelease()) return true;
 
@@ -1222,8 +1312,14 @@ bool DictionaryDefinitionActivity::handleDictSwitch() {
   // `wasReleased(Confirm)` to open word-select below — no heldTime check there — so a
   // declined long press acted like a short one instead of doing nothing, which is what
   // the gesture documents.
+  //
+  // Still fired at the THRESHOLD rather than on release, so the gesture stays distinguishable
+  // from the short Confirm that opens word-select. The picker opens under a Confirm that is
+  // still physically down, but it selects on wasPressed — an EDGE — so the opening hold cannot
+  // pick a row, and the release that follows lands inside the controller-active window that
+  // consumeDictSwitchRelease (above) is built to swallow.
   dictSwitchReleaseConsumed_ = true;
-  cycleDictionary();
+  openDictPicker();
   return true;
 }
 
@@ -1253,6 +1349,37 @@ bool DictionaryDefinitionActivity::cardActionable() const {
   // (enrollment only happens at the reader's word-select gesture) — so acting here would hit
   // the ORIGINAL card. pop()/unpop() bring depth back to 0, which re-arms both offers.
   return chain_.depth() == 0;
+}
+
+void DictionaryDefinitionActivity::probeCurrentCard() {
+  currentHasCard_ = false;
+  currentCount_ = 1;
+  if (cachePath.empty() || currentWord_.empty()) return;
+  uint32_t ignoredHash = 0;
+  currentHasCard_ = FlashcardDeck::cardDict(cachePath, currentWord_, ignoredHash, &currentCount_);
+}
+
+bool DictionaryDefinitionActivity::addOfferStands() const {
+  return !cachePath.empty() && !currentWord_.empty() && !currentHasCard_ && !controller.isActive();
+}
+
+bool DictionaryDefinitionActivity::addCurrentCard() {
+  if (!addOfferStands()) return false;
+  // No re-count window, unlike the automatic enrol at the reader's word-select
+  // (DictionaryWordSelectActivity.cpp:630): that throttle exists to stop a re-LOOKUP of the same
+  // word inflating its tally, and swallowing a button the user deliberately pressed would look
+  // exactly like the press doing nothing.
+  if (!FlashcardDeck::enroll(cachePath, currentWord_, "", "", DictUtils::activeDictHash(cachePath.c_str()))) {
+    LOG_ERR("DDA", "add card failed for '%s'", currentWord_.c_str());
+    SdDebugLog::log("DDA", "card add FAILED: %s", currentWord_.c_str());
+    return false;  // offer stays up to be retried
+  }
+  SdDebugLog::log("DDA", "card added: %s", currentWord_.c_str());
+  probeCurrentCard();
+  // The offer disappearing and the "x1" badge arriving ARE the confirmation, drawn from the state
+  // this just changed -- the same argument setCardDictToActive() makes.
+  requestUpdate();
+  return true;
 }
 
 bool DictionaryDefinitionActivity::setOfferStands(const uint32_t activeHash) const {
@@ -1324,7 +1451,58 @@ bool DictionaryDefinitionActivity::setCardDictToActive() {
   return true;
 }
 
+void DictionaryDefinitionActivity::lookupWordAtPoint(const int x, const int y) {
+  // Chain forward from a held word. This is the only route into a second lookup on a board with
+  // no Confirm button: word-select mode is driven by handleNavigation/handleConfirmLookup, so
+  // entering it there would be a dead end. The three calls below are the same ones the reader's
+  // word-select makes for a tapped word (DictionaryWordSelectActivity.cpp:734-741).
+  //
+  // Extracted per hold rather than cached: the navigator is built from the page currently laid
+  // out, and paging or a dictionary switch replaces it. Rebuilding is what keeps it honest.
+  extractWordsFromLayout();
+  // Empty means the heap gate declined, and it has already drawn the memory toast -- saying
+  // anything more here would talk over it.
+  if (navigator.isEmpty()) return;
+
+  const int hit = navigator.wordIndexAtPoint(x, y, getLineHeight());
+  if (hit < 0 || !navigator.selectFlatIndex(hit)) {
+    // A hold on a margin or an inter-word gap means nothing; do not guess at the nearest word.
+    navigator.reset();
+    return;
+  }
+  // Show which word the hold grabbed before acting on it -- the reading page's gesture, beat for
+  // beat (EpubReaderActivity.cpp:1489-1493): invert the word's band, then push just that rectangle.
+  // On a tightly-spaced definition this is the difference between trusting the lookup and guessing
+  // at it. Nothing has to erase the band: the lookup popup and the new definition both repaint
+  // over it.
+  {
+    RenderLock lock;  // the band lands in the framebuffer the render task also paints into
+    navigator.renderHighlight(renderer, getLineHeight());
+    const WordSelectNavigator::Rect dirty = navigator.computeDirtyRect(/*prevWordIdx=*/-1, hit, getLineHeight());
+    renderer.displayWindowRegion(dirty.x, dirty.y, dirty.width, dirty.height);
+  }
+  // The framebuffer no longer matches any differential snapshot, so make the next render repaint
+  // in full rather than restoring stale pixels over the band.
+  nextRenderMode_ = RenderMode::FullPage;
+  prevHighlightIdx_ = -1;
+
+  controller.lookupSelected(navigator);
+  // lookupSelected copies the word out synchronously (DictionaryLookupController.cpp:353-357),
+  // so the words + rows + text pool go back to the heap before the chained definition wraps --
+  // which is the allocation that matters on the X3.
+  navigator.reset();
+}
+
 void DictionaryDefinitionActivity::loop() {
+  // --- Dictionary picker (modal over whatever is on screen) ---
+  // First, so nothing underneath can read the same frame. Released as soon as it closes: the
+  // popup is only allocated for as long as it is up (see openDictPicker).
+  if (dictPicker_) {
+    const bool took = dictPicker_->handleInput(mappedInput, [this] { requestUpdate(); });
+    if (!dictPicker_->isActive()) dictPicker_.reset();
+    if (took) return;
+  }
+
   // --- Controller active (LookingUp / AltFormPrompt / NotFound) ---
   if (controller.isActive()) {
     const DictionaryLookupController::LookupEvent event = controller.handleInput();
@@ -1363,6 +1541,15 @@ void DictionaryDefinitionActivity::loop() {
           if (currentPage > 0) loadPage(currentPage);
         }
         isWordSelectMode = false;
+        // Follow the word now on screen. NOT on a dictionary switch: that re-resolves the SAME
+        // word, and getLookupWord() holds the FOUND word afterwards -- using it as a card key
+        // there would file the card under whatever the new dictionary matched instead of what the
+        // user looked up. Chain-forward and chain-back both arrive here with getLookupWord() equal
+        // to the word being displayed, so one rule covers them.
+        if (!wasDictSwitch) {
+          currentWord_ = controller.getLookupWord();
+          probeCurrentCard();
+        }
         // immediate=true for the same reason as onEnter(): the history write below would
         // otherwise run in front of the render rather than beside it. Same safety argument —
         // every field render() reads is settled by wrapText()/loadPage() above, and the switch
@@ -1450,6 +1637,14 @@ void DictionaryDefinitionActivity::loop() {
     return;
   }
 
+  // Right's other job, on the same terms: with no card for the word on screen it adds one. Set and
+  // Add can never both stand -- one needs a card, the other needs none -- so the two tests above
+  // and below share the button without ambiguity, and neither takes the release unless its offer
+  // is up, which is what keeps page-forward working.
+  if (mappedInput.wasReleased(MappedInputManager::Button::Right) && addCurrentCard()) {
+    return;
+  }
+
   // Left is the mirror of that trade: it deletes this word's card while the offer stands, and
   // otherwise falls through to page back below. Only the Left ALIAS is taken — the PageBack side
   // button and the left-third tap still page, so a multi-page definition stays navigable either
@@ -1469,16 +1664,51 @@ void DictionaryDefinitionActivity::loop() {
   const bool nextPage = mappedInput.wasReleased(MappedInputManager::Button::PageForward) ||
                         mappedInput.wasReleased(MappedInputManager::Button::Right);
 
-  if (prevPage && currentPage > 0) {
-    currentPage--;
-    loadPage(currentPage);
-    requestUpdate();
+  // else-if, where the clamped version used two independent ifs: with wrapping neither branch
+  // is a no-op any more, so a frame that somehow saw both releases would re-parse the
+  // definition twice to land back where it started.
+  if (prevPage) {
+    turnPage(false);
+  } else if (nextPage) {
+    turnPage(true);
   }
 
-  if (nextPage && currentPage < totalPages - 1) {
-    currentPage++;
-    loadPage(currentPage);
-    requestUpdate();
+  // Swipe page-turn (view mode). Up = forward, Down = back, matching every other paged screen
+  // (UiListActivity::loop, EpubReaderActivity's panel list). This is the ONLY gesture that
+  // pages a definition on a board with no PageBack/PageForward and no Left/Right
+  // (BoardConfig.h, XTEINK_X4_PRO), where the tap thirds below were previously the only route.
+  //
+  // Placed after the Right/Left card-dictionary offers above so it cannot pre-empt them, and it
+  // collides with nothing else on this screen: the Back gesture aliased onto Button::Back is
+  // horizontal (wasBackGesture requires |dx| > |dy|), and a contact that travels past the 60px
+  // swipe slop is rejected by wasTouchTap, so a gesture is either a tap or a swipe, never both.
+  const auto swipe = mappedInput.wasSwipe();
+  if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
+    turnPage(swipe == MappedInputManager::SwipeDir::Up);
+    return;
+  }
+
+  // Hold the footer dictionary name to pick one, the touch counterpart of the Confirm hold
+  // below. The X4 Pro has no Confirm pin at all (BoardConfig.h, XTEINK_X4_PRO), so without this
+  // the picker would be unreachable there and the tap-to-cycle its only switch.
+  //
+  // Resolved before the tap block: wasScreenLongPress suppresses the rest of the contact, so the
+  // finger lift cannot also cycle the dictionary out from under the dialog. That suppression
+  // applies wherever the hold landed, so a long hold on the body no longer turns the page on its
+  // lift -- the same trade the reading page already makes for its own hold gesture
+  // (EpubReaderActivity.cpp:941-947).
+  int hx = 0;
+  int hy = 0;
+  if (mappedInput.wasScreenLongPress(hx, hy)) {
+    // The footer label first: a hold there opens the dictionary picker, and letting the body
+    // branch see it would look the dictionary's own NAME up instead.
+    if (dictLabelW_ > 0 && hx >= dictLabelX_ && hx < dictLabelX_ + dictLabelW_ && hy >= dictLabelY_ &&
+        hy < dictLabelY_ + dictLabelH_) {
+      openDictPicker();
+      return;
+    }
+    if (showLookupButton) lookupWordAtPoint(hx, hy);
+    return;
   }
 
   // Touch page-turn (view mode): tap left third = previous page, the rest = next.
@@ -1503,6 +1733,10 @@ void DictionaryDefinitionActivity::loop() {
       setCardDictToActive();
       return;
     }
+    if (!controller.isActive() && hit(addChipX_, addChipY_, addChipW_, addChipH_)) {
+      addCurrentCard();
+      return;
+    }
     if (!controller.isActive() && hit(dictLabelX_, dictLabelY_, dictLabelW_, dictLabelH_)) {
       if (!cycleDictionary()) return;  // sole member of its group: consume the tap, do nothing
       // Boards with touch.synthConfirm turn a tap into a Confirm as well. Swallow that one the
@@ -1512,21 +1746,11 @@ void DictionaryDefinitionActivity::loop() {
       dictSwitchReleaseConsumed_ = true;
       return;
     }
-    if (tx < renderer.getScreenWidth() / 3) {
-      if (currentPage > 0) {
-        currentPage--;
-        loadPage(currentPage);
-        requestUpdate();
-      }
-    } else if (currentPage < totalPages - 1) {
-      currentPage++;
-      loadPage(currentPage);
-      requestUpdate();
-    }
+    turnPage(tx >= renderer.getScreenWidth() / 3);
     return;
   }
 
-  // Long-press Confirm: cycle the session dictionary. Checked before the release
+  // Long-press Confirm: open the dictionary picker. Checked before the release
   // handler below so the switch wins over word-select on a held Confirm.
   if (handleDictSwitch()) return;
 
@@ -1566,11 +1790,28 @@ void DictionaryDefinitionActivity::loop() {
   }
 }
 
+bool DictionaryDefinitionActivity::turnPage(const bool forward) {
+  if (totalPages <= 1) return false;  // nothing to wrap to; see the header for why this matters
+  currentPage = forward ? ButtonNavigator::nextIndex(currentPage, totalPages)
+                        : ButtonNavigator::previousIndex(currentPage, totalPages);
+  loadPage(currentPage);
+  requestUpdate();
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------------
 
 void DictionaryDefinitionActivity::render(RenderLock&&) {
+  // The picker draws over the current framebuffer without clearing it, so the next paint has to
+  // be a whole one to erase the dialog -- same treatment the controller's overlay gets below.
+  if (dictPicker_ && dictPicker_->processRender(renderer, mappedInput)) {
+    nextRenderMode_ = RenderMode::FullPage;
+    prevHighlightIdx_ = -1;
+    return;
+  }
+
   // Differential fast path: only when we're already in word-select mode AND
   // we set it up on the previous frame AND the controller has nothing pending.
   if (isWordSelectMode && nextRenderMode_ == RenderMode::Differential && !controller.isActive()) {
@@ -1608,6 +1849,20 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   // the same margin as the body. In portrait both insets are equal, which keeps the band
   // symmetric about the screen-centred clock BaseTheme::drawTopBarClockDate draws into it.
   const char* headerText = headword.c_str();
+  // "x3" beside the headword: how many times this word has been looked up, the same badge the
+  // deck list row and the card face draw, so one number reads the same wherever the word appears.
+  // Keyed on currentWord_, so it follows the definition on screen: a chained word that already
+  // has a card shows its own tally, and one that has none shows nothing. That is why this does not
+  // use cardActionable(), which is deliberately pinned to the word the reader enrolled.
+  // Composed here and used by both branches below; snprintf must never take headerBuf as both
+  // destination and source.
+  char badge[16] = "";
+  char headerBuf[96];
+  if (currentCount_ > 1 && currentHasCard_) {
+    snprintf(badge, sizeof(badge), "  x%lu", static_cast<unsigned long>(currentCount_));
+    snprintf(headerBuf, sizeof(headerBuf), "%s%s", headword.c_str(), badge);
+    headerText = headerBuf;
+  }
 #if LOG_LEVEL >= 2
   // Diagnostic: annotate the searched word with what opening this definition cost. Pinned to the
   // open (see openStartMs_), so paging up/down does not overwrite it with a page turn's ~0.5 s.
@@ -1629,13 +1884,12 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   // no language. Dev builds only; release is LOG_LEVEL=1 and drops the whole thing.
   static unsigned long sPostHeaderMs = 0;
   const unsigned long tHeader = millis();
-  char headerBuf[96];
   if (openMs_ > 0 || sPostHeaderMs > 0) {
     const bool measured = openMs_ > 0;
     const unsigned long ms = measured ? openMs_ : (tHeader - openStartMs_) + sPostHeaderMs;
     const unsigned long cs = (ms + 5) / 10;  // hundredths, rounded: 4056ms -> 406 -> "4.06"
-    snprintf(headerBuf, sizeof(headerBuf), "%s (%s%lu.%02lus)", headword.c_str(), measured ? "" : "~", cs / 100,
-             cs % 100);
+    snprintf(headerBuf, sizeof(headerBuf), "%s%s (%s%lu.%02lus)", headword.c_str(), badge, measured ? "" : "~",
+             cs / 100, cs % 100);
     headerText = headerBuf;
   }
 #endif
@@ -1738,8 +1992,8 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   }
 
   // Active dictionary, bottom-left, mirroring the pagination indicator opposite it. Shown
-  // only when there is something to switch between: it is both the feedback for the
-  // long-press-Confirm cycle and the touch control for it.
+  // only when there is something to switch between: it is both the feedback for the switch and
+  // the touch control for it -- a tap cycles within the group, a hold opens the picker.
   const std::string activePath = Dictionary::activeDictPath(cachePath.empty() ? nullptr : cachePath.c_str());
   // Hash the path already resolved above rather than calling activeDictHash(), which would
   // resolve and allocate a second copy of it on every paint.
@@ -1749,11 +2003,15 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   int cursorX = leftPadding;
   dictLabelW_ = 0;
   setChipW_ = 0;
+  addChipW_ = 0;
   delChipW_ = 0;
 
   // Both chips are drawn only where their button does not exist, so their slot in the hint
   // strip cannot name the action.
   const bool drawSetChip = offerSet && !mappedInput.isAvailable(MappedInputManager::Button::Right);
+  // Same rule, same button, and mutually exclusive with the Set chip -- so the footer never grows a
+  // fourth control and the name budget below is unchanged.
+  const bool drawAddChip = addOfferStands() && !mappedInput.isAvailable(MappedInputManager::Button::Right);
   const bool drawDelChip = deleteOfferStands() && !mappedInput.isAvailable(MappedInputManager::Button::Left);
 
   // The footer shares its line with the pagination indicator opposite. Reserve the chips'
@@ -1761,8 +2019,10 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   // feedback, and a name long enough to crowd them out would otherwise make Delete
   // unreachable on a board where the chip is the only way to reach it.
   const char* setLabel = tr(STR_SET_CARD_DICT);
+  const char* addLabel = tr(STR_ADD_CARD);
   const char* delLabel = tr(STR_DELETE);
   const int setChipSpan = drawSetChip ? renderer.getTextWidth(SMALL_FONT_ID, setLabel) + 2 * kTouchPad : 0;
+  const int addChipSpan = drawAddChip ? renderer.getTextWidth(SMALL_FONT_ID, addLabel) + 2 * kTouchPad : 0;
   const int delChipSpan = drawDelChip ? renderer.getTextWidth(SMALL_FONT_ID, delLabel) + 2 * kTouchPad : 0;
   int footerRight = renderer.getScreenWidth() - rightPadding;
   if (totalPages > 1) {
@@ -1770,7 +2030,7 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
     snprintf(pageInfo, sizeof(pageInfo), "%d/%d", currentPage + 1, totalPages);
     footerRight -= renderer.getTextWidth(SMALL_FONT_ID, pageInfo) + kTouchPad;
   }
-  const int nameBudget = footerRight - setChipSpan - delChipSpan - leftPadding;
+  const int nameBudget = footerRight - setChipSpan - addChipSpan - delChipSpan - leftPadding;
 
   if (dictionaryRegistry.count() > 1) {
     std::string dictName = DictUtils::dictDisplayName(activePath);
@@ -1784,8 +2044,8 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
       dictName.clear();
     }
     renderer.drawText(SMALL_FONT_ID, cursorX, footerY, dictName.c_str());
-    // Remember where it landed so a tap on it can cycle. Padded generously: nothing else is
-    // drawn along that edge.
+    // Remember where it landed so a tap can cycle and a hold can open the picker. Padded
+    // generously: nothing else is drawn along that edge.
     const int labelW = renderer.getTextWidth(SMALL_FONT_ID, dictName.c_str());
     dictLabelX_ = cursorX - kTouchPad;
     dictLabelY_ = footerY - kTouchPad;
@@ -1818,6 +2078,19 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
     cursorX += chipW + 2 * kTouchPad;
   }
 
+  // Add takes the Set chip's slot -- the two are mutually exclusive, so this is the same position
+  // on screen, reading as "this word is not saved" where Set reads "this card's dictionary".
+  if (drawAddChip) {
+    const int chipW = renderer.getTextWidth(SMALL_FONT_ID, addLabel);
+    renderer.drawText(SMALL_FONT_ID, cursorX, footerY, addLabel);
+    renderer.drawRect(cursorX - kChipPadX, footerY - kChipPadY, chipW + 2 * kChipPadX, labelH + 2 * kChipPadY, true);
+    addChipX_ = cursorX - kTouchPad;
+    addChipY_ = footerY - kTouchPad;
+    addChipW_ = chipW + 2 * kTouchPad;
+    addChipH_ = labelH + 2 * kTouchPad;
+    cursorX += chipW + 2 * kTouchPad;
+  }
+
   // Delete last, so the destructive control sits furthest from the dictionary name a tap
   // aims at most often.
   if (drawDelChip) {
@@ -1840,8 +2113,10 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   // "previous" slot carries Delete on the same terms: labelled means Left deletes, blank means
   // Left pages, so the two states are told apart without the user having to try one.
   const char* btn2 = showLookupButton ? tr(STR_LOOKUP_SHORT) : "";
-  const auto labels =
-      mappedInput.mapLabels("", btn2, deleteOfferStands() ? tr(STR_DELETE) : "", offerSet ? tr(STR_SET_CARD_DICT) : "");
+  // The "next" slot names whichever of the two card actions Right is currently bound to, so the
+  // button and its label can never disagree about what a press will do.
+  const char* btn4 = offerSet ? tr(STR_SET_CARD_DICT) : (addOfferStands() ? tr(STR_ADD_CARD) : "");
+  const auto labels = mappedInput.mapLabels("", btn2, deleteOfferStands() ? tr(STR_DELETE) : "", btn4);
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);

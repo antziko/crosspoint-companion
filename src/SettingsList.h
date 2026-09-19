@@ -420,10 +420,11 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // bound lives in a constexpr table that cannot hold a board-conditional value,
   // and a gated list without a gated bound trips the CPSVFY verifier. On a
   // button board the extra entry is redundant, not broken.
-  v.push_back(SettingInfo::Enum(StrId::STR_LONG_PRESS_MENU, &CrossPointSettings::holdConfirmAction,
-                                {StrId::STR_STATE_OFF, StrId::STR_HOLD_CONFIRM_BOOKMARK, StrId::STR_HOLD_CONFIRM_DICT,
-                                 StrId::STR_KOSYNC, StrId::STR_HOLD_CONFIRM_READER_MENU},
-                                "holdConfirmAction", StrId::STR_CAT_CONTROLS));
+  v.push_back(
+      SettingInfo::Enum(StrId::STR_LONG_PRESS_MENU, &CrossPointSettings::holdConfirmAction,
+                        {StrId::STR_STATE_OFF, StrId::STR_HOLD_CONFIRM_BOOKMARK, StrId::STR_HOLD_CONFIRM_DICT,
+                         StrId::STR_KOSYNC, StrId::STR_HOLD_CONFIRM_READER_MENU, StrId::STR_HOLD_CONFIRM_REFRESH},
+                        "holdConfirmAction", StrId::STR_CAT_CONTROLS));
 
   // Side buttons
   v.push_back(SettingInfo::Enum(StrId::STR_SIDE_BTN_LAYOUT, &CrossPointSettings::sideButtonLayout,
@@ -589,6 +590,13 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // on next WiFi connect, which is useful when crossing time zones.
   v.push_back(SettingInfo::Toggle(StrId::STR_CLOCK_SYNCED, &CrossPointSettings::clockHasBeenSynced,
                                   "clockHasBeenSynced", StrId::STR_CUSTOMISE_STATUS_BAR));
+  // How stale a sync may get before the next WiFi connection refreshes it. Only consulted on
+  // boards with a battery-backed RTC; without one the clock dies with every deep sleep and is
+  // re-synced on validity instead (util/ClockSyncPolicy.h).
+  v.push_back(SettingInfo::Enum(
+      StrId::STR_CLOCK_RESYNC_EVERY, &CrossPointSettings::clockResyncDays,
+      {StrId::STR_CLOCK_RESYNC_1D, StrId::STR_CLOCK_RESYNC_3D, StrId::STR_CLOCK_RESYNC_7D, StrId::STR_CLOCK_RESYNC_15D},
+      "clockResyncDays", StrId::STR_CUSTOMISE_STATUS_BAR));
   // Date display (needs a clock: X3 DS3231 RTC, or X4 NTP over WiFi)
   v.push_back(SettingInfo::Toggle(StrId::STR_DATE, &CrossPointSettings::statusBarDate, "statusBarDate",
                                   StrId::STR_CUSTOMISE_STATUS_BAR));
@@ -668,19 +676,23 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
             v.end());
   }
 
-  // Touch-vs-button setting visibility (#2481, corrected per #2689). Non-touch
-  // boards (X3/X4) hide the touch-only control; touch boards hide the front-
-  // button orientation follow and the sunlight fading fix (frontlight devices).
+  // Touch-vs-button setting visibility (#2481, corrected per #2689). Non-touch boards (X3/X4)
+  // hide the touch-only control; touch boards hide the front-button orientation follow, having no
+  // front buttons to orient.
+  //
+  // The sunlight fading fix used to be dropped here too, as a frontlight-device irrelevance. It is
+  // not one: the flag is the `turnOffScreen` argument threaded through displayBuffer
+  // (GfxRenderer.cpp:2122 -> FreeInkDisplay.cpp:602), so with it off the panel's DC-DC stays
+  // energised between refreshes on any board. That bias is panel-wide, not a property of how the
+  // device is lit, and on the X4 Pro the erase made the one existing mitigation for it unreachable
+  // from both the device and the web settings API.
   if (!BoardConfig::hasTouch()) {
     v.erase(std::remove_if(v.begin(), v.end(),
                            [](const SettingInfo& s) { return s.nameId == StrId::STR_TOUCH_READER_CONTROLS; }),
             v.end());
   } else {
     v.erase(std::remove_if(v.begin(), v.end(),
-                           [](const SettingInfo& s) {
-                             return s.nameId == StrId::STR_FRONT_BTN_FOLLOW_ORIENTATION ||
-                                    s.nameId == StrId::STR_SUNLIGHT_FADING_FIX;
-                           }),
+                           [](const SettingInfo& s) { return s.nameId == StrId::STR_FRONT_BTN_FOLLOW_ORIENTATION; }),
             v.end());
   }
   return v;

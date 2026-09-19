@@ -3,6 +3,7 @@
 #include <GfxRenderer.h>
 #include <HalClock.h>
 #include <I18n.h>
+#include <InflateReader.h>
 #include <Logging.h>
 #include <WiFi.h>
 
@@ -14,11 +15,20 @@
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/ClockSyncPolicy.h"
 
 void ClockSyncActivity::onEnter() {
   Activity::onEnter();
   state = PICKING_WIFI;
   syncedTime[0] = '\0';
+  // Hand back the 32KB inflate window before the radio takes its ~53KB. The picker releases
+  // it too, but pushActivity() is deferred — its onEnter runs a tick later, so that release
+  // lands after the picker's own activity object has already been allocated here, against
+  // this heap. Without this that allocation meets ~2KB free and the screen does nothing
+  // until a reboot. Idempotent, so the picker's call is a no-op; nothing here inflates, and
+  // onExit() reboots, which re-reserves the window.
+  InflateReader::releaseWindow();
+
   // Bring up the radio and let the user pick a network first (saved networks
   // connect with one tap). Once connected we run the NTP sync.
   WiFi.mode(WIFI_STA);
@@ -59,16 +69,23 @@ void ClockSyncActivity::runSync() {
     return;
   }
 
-  const bool ok = halClock.syncFromNTP();
+  // 20 s, not the 5 s default. Two blocking WiFi.hostByName() calls run inside syncFromNTP()
+  // before its poll even starts, and SNTP's first packet can arrive after that -- at 5 s the
+  // screen declared FAILED while the sync was still in flight, then usually completed a moment
+  // later (syncFromNTP leaves _ntpConfigured set precisely so a late packet is still adopted).
+  // The user is watching a "Syncing..." screen here, so waiting is the honest behaviour; the
+  // background sync task already uses 20 s (main.cpp maybeStartBackgroundNtpSync).
+  static constexpr uint32_t kManualSyncTimeoutMs = 20000;
+  const bool ok = halClock.syncFromNTP(kManualSyncTimeoutMs);
   if (!ok) {
     state = FAILED;
     requestUpdate();
     return;
   }
 
-  // Mark as synced so the auto-sync hook stops firing on future WiFi connects.
-  SETTINGS.clockHasBeenSynced = 1;
-  SETTINGS.saveToFile();
+  // Stamp the sync so the staleness rule restarts from here (and the auto-sync hook stops
+  // firing on every WiFi connect).
+  noteClockSynced();
 
   // Read the freshly synced time back for the user-facing confirmation.
   char buf[9];

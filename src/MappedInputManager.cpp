@@ -145,6 +145,8 @@ constexpr uint8_t LAST_BUTTON = static_cast<uint8_t>(MappedInputManager::Button:
 
 void MappedInputManager::update() const {
   gpio.update();
+  // Per-frame: set again by the first hold query the active screen makes (see holdWasQueried).
+  holdQueried = false;
   // The first press of a button that moves a selection reveals the list cursor, which
   // Activity::onEnter hid on the way in (see ListCursor). One place, rather than a flag
   // every list screen would have to remember to set: every screen polls through here.
@@ -189,6 +191,7 @@ bool MappedInputManager::wasScreenTouchDown(int& x, int& y) const {
 }
 
 bool MappedInputManager::wasScreenLongPress(int& x, int& y) const {
+  holdQueried = true;
   float nx = 0.0f;
   float ny = 0.0f;
   if (!gpio.wasTouchLongPress(nx, ny)) return false;
@@ -366,7 +369,10 @@ bool MappedInputManager::wasHomeGesture() const {
   return wasBottomEdgeUpSwipe();
 }
 
-bool MappedInputManager::wasHomeKeyHold() const { return gpio.hasHomeKey() && gpio.wasHomeKeyLongPressed(); }
+bool MappedInputManager::wasHomeKeyHold() const {
+  holdQueried = true;
+  return gpio.hasHomeKey() && gpio.wasHomeKeyLongPressed();
+}
 
 bool MappedInputManager::wasLightPanelGesture() const {
   // On lightless boards the same edge stays with the reader menu.
@@ -434,6 +440,7 @@ bool MappedInputManager::wasAnyPressed() const { return gpio.wasAnyPressed(); }
 bool MappedInputManager::wasAnyReleased() const { return gpio.wasAnyReleased(); }
 
 unsigned long MappedInputManager::getHeldTime() const {
+  holdQueried = true;
   if (!gpio.wasAnyPressed() && !gpio.wasAnyReleased() && touchHeldOverrideValid &&
       millis() - touchHeldOverrideAt <= TOUCH_HELD_OVERRIDE_WINDOW_MS) {
     return touchHeldOverrideMs;

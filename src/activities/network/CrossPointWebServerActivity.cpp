@@ -159,6 +159,13 @@ void CrossPointWebServerActivity::onNetworkModeSelected(const NetworkMode mode) 
   }
 
   if (mode == NetworkMode::JOIN_NETWORK) {
+    // Hand back the 32KB inflate window before the radio takes its ~53KB, rather than
+    // waiting for startWebServer()'s reclaim. The picker releases it too, but
+    // pushActivity() is deferred — its onEnter runs a tick later, so that release lands
+    // after the picker's own activity object has already been allocated here, against this
+    // heap. Idempotent, so both later calls are no-ops.
+    InflateReader::releaseWindow();
+
     // STA mode - launch WiFi selection
     LOG_DBG("WEBACT", "Turning on WiFi (STA mode)...");
     WiFi.mode(WIFI_STA);

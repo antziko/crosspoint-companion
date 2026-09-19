@@ -9,6 +9,7 @@
 #include <Logging.h>
 #include <Memory.h>
 #include <SdCardFont.h>
+#include <SdDebugLog.h>
 #include <Utf8.h>
 
 #include <algorithm>
@@ -2048,11 +2049,41 @@ bool GfxRenderer::glyphIntersectsStrip(int x0, int y0, int x1, int y1) const {
 
 unsigned long GfxRenderer::deepCleanPanel(const uint8_t cycles) const {
   const unsigned long startMs = millis();
+  // Zeroed before the clean, not after: the clean's own passes then land in the fresh window and
+  // the counts a caller logs before calling still describe the session that preceded it.
+  for (uint16_t& count : paintCounts_) count = 0;
+  railsMs_ = 0;
+  parkCount_ = 0;
+  if (panelPoweredSinceMs_ != 0) panelPoweredSinceMs_ = millis();
   for (uint8_t i = 0; i < cycles; i++) {
+    // Per-phase durations, not just the total: a FULL that returns far short of its
+    // waveform's cost never drove the panel, and a total alone cannot tell that from a
+    // clean that ran and was simply too weak.
+    // Black phase: FULL is right here. Full seeds the OLD plane white and runs the
+    // absolute-from-white waveform, so against an all-black target every pixel takes a
+    // real white->black swing.
     clearScreen(0x00);  // 0x00 = all black (clearScreen memsets the 1bpp buffer; 0xFF is white)
+    unsigned long phaseMs = millis();
     displayBuffer(HalDisplay::FULL_REFRESH);
+    SdDebugLog::log("GFX", "deepclean cycle=%u black mode=FULL ms=%lu", static_cast<unsigned>(i), millis() - phaseMs);
+
+    // White phase: HALF, NOT Full. Full seeds OLD = white, so with a white target this is
+    // white->white — by construction the waveform's no-transition cell. The panel is left
+    // holding the black flash plus whatever charge imbalance the previous image wrote, and
+    // nothing drives those pixels back through a transition. Half seeds OLD = ~target =
+    // black, so every pixel takes a real black->white swing instead.
+    //
+    // This is the drivers' documented contract, not a guess. Uc8279X4Driver.cpp:403-412:
+    // "Half = charge SCRUB: OLD = complement of the target, so EVERY pixel (including white
+    // background) is forced through a transition cell and no WW/BB pixel idles with stale AA
+    // charge. A white-seed GC only redraws black-target pixels and leaves background ghost
+    // parked in WW." Uc8253X3Driver.cpp:182-188 has the same split. A white-seed GC against a
+    // white target redraws NOTHING, which is exactly the X4 Pro symptom: the pre-sleep reader
+    // page surviving the clean, within minutes, independent of how long the panel then holds.
     clearScreen(0xFF);
-    displayBuffer(HalDisplay::FULL_REFRESH);
+    phaseMs = millis();
+    displayBuffer(HalDisplay::HALF_REFRESH);
+    SdDebugLog::log("GFX", "deepclean cycle=%u white mode=HALF ms=%lu", static_cast<unsigned>(i), millis() - phaseMs);
   }
   // Duration is the tuning knob: if residue survives N cycles we raise N, and the
   // cost of doing so has to stay visible in the log.
@@ -2092,6 +2123,60 @@ void GfxRenderer::displayBuffer(HalDisplay::RefreshMode refreshMode) const {
     forceCleanRefreshOnce_ = false;
   }
   display.displayBuffer(mode, fadingFix);
+  notePaint(mode);
+}
+
+// Panel-activation history. Recorded after the activation, so lastPaintMs_ is when the frame
+// reached the glass rather than when the call started -- the sleep trace reads it as "how long
+// has this image been held", and a 1.5 s waveform is not part of that hold.
+void GfxRenderer::notePaint(const HalDisplay::RefreshMode mode) const {
+  lastPaintMs_ = millis();
+  // An activation always leaves the rails up on panels that do not power down per refresh; the
+  // ones that do report it by being parked already, and their next paint just restarts the clock.
+  if (panelPoweredSinceMs_ == 0) panelPoweredSinceMs_ = lastPaintMs_;
+  const size_t idx = static_cast<size_t>(mode);
+  if (idx < sizeof(paintCounts_) / sizeof(paintCounts_[0]) && paintCounts_[idx] != UINT16_MAX) {
+    paintCounts_[idx]++;
+  }
+}
+
+unsigned long GfxRenderer::msSinceLastPaint() const { return lastPaintMs_ ? millis() - lastPaintMs_ : 0; }
+
+// Park the panel's analog domain. The image stays: e-ink holds without power. What goes away is
+// the standing bias across a static frame, which is what sets image retention -- on the UC8279
+// the DC-DC would otherwise stay energised from the first paint after boot until deep sleep,
+// because powerOnIfNeeded() skips PON while the screen is already on and POF is issued only for
+// an explicit turn-off or at sleep.
+//
+// No-op on panels whose driver does not override controllerIdle(), and on those that already
+// power down after every refresh (fadingFix): they are parked the moment the waveform ends, so
+// panelPoweredSinceMs_ is the only thing this still has to settle.
+void GfxRenderer::parkPanelIdle() const {
+  if (panelPoweredSinceMs_ == 0) return;
+  const unsigned long now = millis();
+  railsMs_ += now - panelPoweredSinceMs_;
+  panelPoweredSinceMs_ = 0;
+  if (parkCount_ != UINT16_MAX) parkCount_++;
+  display.controllerIdle();
+}
+
+unsigned long GfxRenderer::railsMs() const {
+  return panelPoweredSinceMs_ ? railsMs_ + (millis() - panelPoweredSinceMs_) : railsMs_;
+}
+
+uint16_t GfxRenderer::paintCount(const HalDisplay::RefreshMode mode) const {
+  const size_t idx = static_cast<size_t>(mode);
+  return idx < sizeof(paintCounts_) / sizeof(paintCounts_[0]) ? paintCounts_[idx] : 0;
+}
+
+int GfxRenderer::frameInkPercent() const {
+  if (!frameBuffer || frameBufferSize == 0) return 0;
+  // 0 bits are black (clearScreen(0x00) is black), so count the zeroes.
+  uint32_t blackBits = 0;
+  for (uint32_t i = 0; i < frameBufferSize; i++) {
+    blackBits += __builtin_popcount(static_cast<uint8_t>(~frameBuffer[i]));
+  }
+  return static_cast<int>((blackBits * 100ULL) / (static_cast<uint64_t>(frameBufferSize) * 8));
 }
 
 void GfxRenderer::displayWindowRegion(int lx, int ly, int lw, int lh) const {
@@ -2100,10 +2185,14 @@ void GfxRenderer::displayWindowRegion(int lx, int ly, int lw, int lh) const {
     // Fallback: full-frame fast refresh so callers always get a panel update.
     LOG_DBG("GFX", "displayWindowRegion: invalid rect (%d,%d,%d,%d) — fallback to full refresh", lx, ly, lw, lh);
     display.displayBuffer(HalDisplay::FAST_REFRESH, fadingFix);
+    notePaint(HalDisplay::FAST_REFRESH);
     return;
   }
   LOG_DBG("GFX", "displayWindowRegion: native (%d,%d,%d,%d)", mem.x, mem.y, mem.w, mem.h);
   display.displayWindow(mem.x, mem.y, mem.w, mem.h);
+  // A windowed update drives only its rectangle, but it is still the moment the glass last
+  // changed, and it is differential -- which is exactly what the FAST count is counting.
+  notePaint(HalDisplay::FAST_REFRESH);
 }
 
 void GfxRenderer::displayBufferAsync(HalDisplay::RefreshMode refreshMode) const {
@@ -2112,9 +2201,11 @@ void GfxRenderer::displayBufferAsync(HalDisplay::RefreshMode refreshMode) const 
   // relies on; keep those users on the blocking path.
   if (fadingFix) {
     display.displayBuffer(refreshMode, fadingFix);
+    notePaint(refreshMode);
     return;
   }
   display.displayBufferAsync(refreshMode);
+  notePaint(refreshMode);
 }
 
 void GfxRenderer::waitRefreshComplete() const { display.waitRefreshComplete(); }

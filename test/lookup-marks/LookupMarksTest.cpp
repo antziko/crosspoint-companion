@@ -102,7 +102,7 @@ TEST_F(LookupMarksTest, CollectMatchesOnlyItsOwnPage) {
   const LookupMarks::Mark* out[4];
   EXPECT_EQ(marks.collectForPage(ch, 11, 27, out, 4), 1);
   EXPECT_EQ(out[0]->wordHash, hash("pews"));
-  EXPECT_EQ(marks.collectForPage(ch, 13, 27, out, 4), 0);                                 // no card here
+  EXPECT_EQ(marks.collectForPage(ch, 13, 27, out, 4), 0);                                    // no card here
   EXPECT_EQ(marks.collectForPage(LookupMarks::hashChapter("Other", 5), 11, 27, out, 4), 0);  // other chapter
 }
 
@@ -147,6 +147,117 @@ TEST_F(LookupMarksTest, UntitledChapterKeysOnTheEmptyHash) {
   EXPECT_EQ(marks.collectForPage(LookupMarks::hashChapter(nullptr, 0), 12, 27, out, 4), 1);
   EXPECT_EQ(marks.collectForPage(0, 12, 27, out, 4), 0);
   EXPECT_EQ(LookupMarks::hashChapter(nullptr, 0), LookupMarks::hashChapter("", 0));
+}
+
+// --------------------------------------------------------------------------------------
+// The run matcher (LookupMarks::step)
+//
+// This is the predicate BOTH page walks drive: the one that inks the underline
+// (PageMarks::drawForPage) and the one that answers which word a hold landed on
+// (PageMarks::lookupMarkAtPoint). If they ever disagreed, the page's hold menu would offer to
+// delete a card for a word that is not underlined, or refuse one that is. The walks are
+// device-tested; the arithmetic they share is pinned here.
+// --------------------------------------------------------------------------------------
+
+using Step = LookupMarks::Step;
+
+// Feed one page token to a mark, the way both walks do.
+Step feed(const LookupMarks::Mark& m, LookupMarks::RunState& r, bool isCjk, const char* token, int16_t rowY = 100) {
+  uint16_t len = 0;
+  const uint32_t h = LookupMarks::hashAppend(LookupMarks::FNV_OFFSET, token, std::strlen(token), &len);
+  return LookupMarks::step(m, r, isCjk, h, len, token, std::strlen(token), rowY);
+}
+
+// Build a mark the way add() does, without going through the table.
+LookupMarks::Mark markFor(const std::string& word, const std::string& head) {
+  LookupMarks::Mark m{};
+  uint16_t len = 0;
+  m.wordHash = LookupMarks::hashAppend(LookupMarks::FNV_OFFSET, word.c_str(), word.size(), &len);
+  m.byteLen = len;
+  m.headHash = LookupMarks::hashWord(head.c_str(), head.size());
+  return m;
+}
+
+// A Latin word is one page token: it settles on that token or not at all, and never touches the
+// run state.
+TEST_F(LookupMarksTest, StepMatchesWholeTokenWithoutOpeningARun) {
+  const LookupMarks::Mark m = markFor("forest", "f");
+  LookupMarks::RunState r;
+  EXPECT_EQ(feed(m, r, /*isCjk=*/false, "canopy"), Step::None);
+  EXPECT_FALSE(r.open);
+  EXPECT_EQ(feed(m, r, /*isCjk=*/false, "Forest,"), Step::MatchedToken);
+  EXPECT_FALSE(r.open);
+}
+
+// A longer word that merely STARTS with the mark must not match: byteLen is what stops
+// "forest" underlining the "forest" inside "forestry".
+TEST_F(LookupMarksTest, StepRejectsALongerTokenSharingThePrefix) {
+  const LookupMarks::Mark m = markFor("forest", "f");
+  LookupMarks::RunState r;
+  EXPECT_EQ(feed(m, r, /*isCjk=*/false, "forestry"), Step::None);
+}
+
+// CJK lays out one token per character, so a two-character word is a RUN: opened on the head
+// character, completed by the next. The caller seeds its span on Opened and inks it on
+// MatchedRun.
+TEST_F(LookupMarksTest, StepAccumulatesACjkRun) {
+  const LookupMarks::Mark m = markFor("森林", "森");
+  LookupMarks::RunState r;
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "森"), Step::Opened);
+  EXPECT_TRUE(r.open);
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "林"), Step::MatchedRun);
+  EXPECT_FALSE(r.open);  // consumed
+}
+
+// A one-character CJK word opens and completes on the SAME token, so there is no seeded span for
+// the caller to ink — it has to be told the span is this token. This is the case that makes
+// MatchedToken and MatchedRun separate states rather than one "Matched".
+TEST_F(LookupMarksTest, StepReportsASingleCharacterCjkWordAsAToken) {
+  const LookupMarks::Mark m = markFor("森", "森");
+  LookupMarks::RunState r;
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "森"), Step::MatchedToken);
+  EXPECT_FALSE(r.open);
+}
+
+// A run that reaches the mark's length with different bytes is done, not merely paused: leaving
+// it open would let the next character complete it and underline the wrong span.
+TEST_F(LookupMarksTest, StepClosesARunThatOvershootsOrMismatches) {
+  const LookupMarks::Mark m = markFor("森林", "森");
+  LookupMarks::RunState r;
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "森"), Step::Opened);
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "岛"), Step::Extended);  // 森岛 != 森林
+  EXPECT_FALSE(r.open);
+  // The next head character starts a fresh run rather than extending the dead one.
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "森"), Step::Opened);
+}
+
+// A word split across two visual lines is not marked. The run is abandoned on the row change
+// rather than closed and re-opened: half a word underlined is worse than none.
+TEST_F(LookupMarksTest, StepAbandonsARunThatWrapsToTheNextLine) {
+  const LookupMarks::Mark m = markFor("森林", "森");
+  LookupMarks::RunState r;
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "森", /*rowY=*/100), Step::Opened);
+  // Same second character, but a row down: the wrap discards the run, and "林" is not a head.
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "林", /*rowY=*/140), Step::None);
+  EXPECT_FALSE(r.open);
+}
+
+// A three-character word needs both intermediate steps before it settles.
+TEST_F(LookupMarksTest, StepCompletesAThreeCharacterRun) {
+  const LookupMarks::Mark m = markFor("图书馆", "图");
+  LookupMarks::RunState r;
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "图"), Step::Opened);
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "书"), Step::Extended);
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "馆"), Step::MatchedRun);
+}
+
+// A run only ever opens on the mark's head character, so a word starting elsewhere is skipped
+// outright — this is what keeps two marked words sharing a character on one page apart.
+TEST_F(LookupMarksTest, StepOnlyOpensOnTheHeadCharacter) {
+  const LookupMarks::Mark m = markFor("森林", "森");
+  LookupMarks::RunState r;
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "林"), Step::None);
+  EXPECT_FALSE(r.open);
 }
 
 }  // namespace

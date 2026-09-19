@@ -293,34 +293,31 @@ bool TextSettingsActivity::handleFamilyTouch() {
   const auto geo = paneGeometry();
   const int count = listCount();
 
-  int row = std::max(0, ringPos() - 1);
-  const int rowBefore = row;
-  switch (handleListTouch(row, count, geo.listTop, geo.listHeight, /*hasSubtitle=*/false)) {
-    case ListTouchResult::Activated: {
-      activeNav().selected = row + 1;
-      syncFamilyPaneHighlight();
-      // Two-tap commit. The first tap on a row only moves the highlight, which reloads the
-      // bottom compare pane so the font can be read against the committed one above it;
-      // committing applies a global render setting and re-paginates the open book, which is
-      // too much to hang off one stray touch on a screen with no physical buttons.
-      const bool previewOnly = familyTapMovedHighlight_;
-      familyTapMovedHighlight_ = false;
-      if (previewOnly) {
-        requestUpdate();
-        return true;
-      }
-      activateRow(row);
-      return true;
-    }
-    case ListTouchResult::Consumed:
-      // Touchdown. Record whether it moved the highlight; the release consults this.
-      familyTapMovedHighlight_ = row != rowBefore;
-      activeNav().selected = row + 1;
-      syncFamilyPaneHighlight();
+  const int highlighted = std::max(0, ringPos() - 1);
+
+  // Deliberately NOT handleListTouch(): that acts on touch-DOWN, and on this tab moving the
+  // highlight loads an SD font into the bottom compare pane and arms the pane's nav lock.
+  // A finger placed down to scroll therefore previewed whatever row it landed on ~90ms later
+  // (MappedInputManager's TOUCH_DOWN_SELECT_DELAY_MS, which only requires the contact to stay
+  // within the 28px stationary slop), and the armed lock then made handleFamilyTouch return
+  // early for the rest of the gesture — so the swipe below never ran and the list could not be
+  // scrolled at all on a touch-only board. Everything here happens on the lift instead, where
+  // wasTouchTap has already rejected anything that travelled past the 60px swipe slop.
+  int touched = -1;
+  if (mappedInput.wasListItemTapped(touched, count, highlighted, geo.listTop, geo.listHeight,
+                                    /*hasSubtitle=*/false)) {
+    activeNav().selected = touched + 1;
+    syncFamilyPaneHighlight();
+    // Two-tap commit. The first tap on a row only previews it, against the committed font
+    // shown above; committing applies a global render setting and re-paginates the open book,
+    // which is too much to hang off one stray touch on a screen with no physical buttons.
+    // "Already highlighted?" is answerable directly now that touch-down moves nothing.
+    if (touched != highlighted) {
       requestUpdate();
       return true;
-    case ListTouchResult::None:
-      break;
+    }
+    activateRow(touched);
+    return true;
   }
 
   const int pageItems = GUI.getListPageItems(geo.listHeight, /*hasSubtitle=*/false);

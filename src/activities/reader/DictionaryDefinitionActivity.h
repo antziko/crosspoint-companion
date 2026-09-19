@@ -3,10 +3,12 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "../Activity.h"
+#include "components/OptionPopup.h"
 #include "fontIds.h"  // IPA_FONT_ID, used by ipaFontId() below
 #include "util/DictLayout.h"
 #include "util/DictionaryLookupController.h"
@@ -61,11 +63,12 @@ class DictionaryDefinitionActivity final : public Activity {
   bool recordHistory;
   std::string historyWord;
   LookupHistory::Status historyStatus;
-  // Whether front Left may delete this word's flashcard. True only for a lookup made from the
-  // reader page (DictionaryWordSelectActivity), which is where the page underline the delete
-  // removes actually lives. The history list and the flashcard list have their own delete, and
-  // a review session holds newest-first deck indices that a delete from here would not renumber
-  // (see FlashcardReviewActivity::promptDelete) -- so all three leave this false.
+  // Whether front Left may delete this word's flashcard. True for a lookup made from the reader
+  // page (DictionaryWordSelectActivity), where the page underline the delete removes lives, and
+  // for a card's back face during a review (FlashcardReviewActivity), where the definition is
+  // what the user is judging. A review holds newest-first deck indices that FlashcardDeck::remove
+  // renumbers, so that caller repairs its session when it sees the card gone -- any new caller
+  // passing true owes the same check. The history and flashcard lists have their own delete.
   bool allowCardDelete_ = false;
   // Cross-definition back-navigation stack (compact: history-index + page per
   // entry, not owned strings). pendingBack_ carries the popped entry from the
@@ -117,12 +120,31 @@ class DictionaryDefinitionActivity final : public Activity {
   uint32_t cardDictHash_ = 0;
   bool cardDictExists_ = false;
 
-  // Hit rectangles of the two footer controls, refreshed by render(). Zero width means "not
-  // drawn this frame". The dictionary name cycles to the next dictionary in the group; the Set
-  // chip beside it commits the one on show to the card. Both exist because the X4 Pro profile
-  // (BoardConfig.h, XTEINK_X4_PRO) leaves back/confirm/left/right unassigned and wires its two
-  // physical keys to Up/Down — there is no Confirm to hold and no Right to press, so touch is
-  // the only way either action is reachable there.
+  // The word whose definition is ON SCREEN, and its card state. Distinct from historyWord, which
+  // names the word this activity was OPENED for and goes stale the moment the user chains forward
+  // -- that staleness is exactly why cardActionable() stands Set and Delete down at depth > 0.
+  // Add and the "xN" badge are about what is being displayed, so they need their own key, refreshed
+  // wherever the displayed word changes.
+  std::string currentWord_;
+  bool currentHasCard_ = false;
+  uint32_t currentCount_ = 1;  // deck lookup count; 1 means no badge
+  // Re-read currentHasCard_/currentCount_ for currentWord_. One streaming pass over the deck, the
+  // same one onEnter makes -- cheap enough per chain hop, which is a deliberate navigation.
+  void probeCurrentCard();
+  // True when the word on screen has no card and there is a deck to put one in. The Add offer:
+  // mutually exclusive with Set and Delete by construction, since those need a card to act on.
+  bool addOfferStands() const;
+  // Enrol currentWord_ with the dictionary now in force. Excerpt and chapter are empty by design:
+  // the sentence a word came from only exists on the reading page, and a chained word has no page.
+  // Returns false when the offer does not stand, so a Right release can fall through to paging.
+  bool addCurrentCard();
+
+  // Hit rectangles of the footer controls, refreshed by render(). Zero width means "not drawn
+  // this frame". Tapping the dictionary name cycles within its group and holding it opens the
+  // picker; the Set chip beside it commits the one on show to the card. All of them exist
+  // because the X4 Pro profile (BoardConfig.h, XTEINK_X4_PRO) leaves back/confirm/left/right
+  // unassigned and wires its two physical keys to Up/Down — there is no Confirm to hold and no
+  // Right to press, so touch is the only way any of these is reachable there.
   int dictLabelX_ = 0;
   int dictLabelY_ = 0;
   int dictLabelW_ = 0;
@@ -131,6 +153,10 @@ class DictionaryDefinitionActivity final : public Activity {
   int setChipY_ = 0;
   int setChipW_ = 0;
   int setChipH_ = 0;
+  int addChipX_ = 0;
+  int addChipY_ = 0;
+  int addChipW_ = 0;
+  int addChipH_ = 0;
   // Delete, on the same terms as the Set chip: drawn only where there is no Left button to
   // press. Its hint-strip slot is zero-height on a touch board, so without this the offer is
   // named nowhere and reachable by nothing.
@@ -230,6 +256,10 @@ class DictionaryDefinitionActivity final : public Activity {
   int bodyStartY = 0;  // top of the text body (set in wrapText)
 
   // Word-select mode (activated by pressing Look Up Word in view mode)
+  // Touch boards: look up the word under a held point, chaining forward without entering
+  // word-select mode. No-op when the point hits no word. See the definition for why the mode
+  // itself is not entered.
+  void lookupWordAtPoint(int x, int y);
   bool isWordSelectMode = false;
   WordSelectNavigator navigator;
   DictionaryLookupController controller;
@@ -261,6 +291,13 @@ class DictionaryDefinitionActivity final : public Activity {
   // Re-parse the definition and lay out ONLY page `page` into layoutLines,
   // discarding other pages as they are produced; also recomputes totalPages.
   void loadPage(int page);
+  // Single page-turn entry point for every input route on this screen (side buttons, the
+  // Left/Right aliases, the tap thirds and the vertical swipe), so they cannot drift apart.
+  // Wraps at both ends via ButtonNavigator's index helpers — the same wrap every list in the
+  // app uses. Returns false (having done nothing) when there is no second page: loadPage()
+  // re-parses the whole definition on every turn, so a "wrap" on a one-page definition would
+  // pay that plus a repaint for no visible change.
+  bool turnPage(bool forward);
   void wrapHtml();
   void wrapPlain();
   void extractWordsFromLayout();
@@ -285,13 +322,26 @@ class DictionaryDefinitionActivity final : public Activity {
   // whichever of the two handlers runs first has to be the one that eats it.
   bool consumeDictSwitchRelease();
   // Commit a hop from registry index curIdx to nextIdx: remember the outgoing override,
-  // install the new one and re-look-up the same headword. Shared by the long-press gesture
-  // and the footer tap, so both arm dictSwitchInProgress_ identically.
+  // install the new one and re-look-up the same headword. Shared by the footer tap's cycle and
+  // the picker, so both arm dictSwitchInProgress_ identically.
   void applyDictSwitch(int curIdx, int nextIdx, const std::string& current);
   // Advance one dictionary within the active one's st-/other group and re-look-up the
   // headword. Returns false when there is nothing to cycle to (sole member of its group,
-  // fewer than two installed, or a lookup already in flight).
+  // fewer than two installed, or a lookup already in flight). Still the footer tap's action,
+  // and the fallback for a group the picker cannot show.
   bool cycleDictionary();
+  // Fills `names` and `registryIdx` with every entry sharing curIdx's st-/other group, in
+  // registry order, and returns the count -- or 0 when there is no group to offer (curIdx < 0,
+  // or a lone member). `names[i]` borrows the registry entry's own string, which outlives any
+  // use here. Called once to populate the picker and again to resolve the row it returns, so
+  // the list can never be indexed differently than it was drawn.
+  int collectDictGroup(int curIdx, const char** names, int* registryIdx, int cap) const;
+  // Open the dictionary picker over the definition. Returns true when the gesture was taken --
+  // including the declines, which consume it and do nothing, exactly as cycleDictionary's do.
+  bool openDictPicker();
+  // Allocated only while the picker is up. See the note at its definition for why this one
+  // screen does not hold an OptionPopup by value the way every other host does.
+  std::unique_ptr<OptionPopup> dictPicker_;
   // True when this screen may act on the word's flashcard at all: there is a card, a book to
   // hold it, and the word on screen is still the one the card is filed under. Shared by the Set
   // and Delete offers so the two cannot drift apart -- both would target the wrong card in

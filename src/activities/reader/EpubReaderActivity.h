@@ -19,6 +19,7 @@
 #include "components/OptionPopup.h"
 #include "components/themes/BaseTheme.h"  // Rect (indexing popup progress bar)
 #include "util/Dictionary.h"              // Dictionary::SessionOverrideScope member
+#include "util/LookupMarks.h"             // LookupMarks::Mark member (the held word's card anchor)
 #include "util/WordSelectNavigator.h"
 
 class EpubReaderActivity final : public Activity {
@@ -156,6 +157,14 @@ class EpubReaderActivity final : public Activity {
   // time OptionPopup calls back for a repaint. Only a dismissal repaints the page here; a
   // choice leaves that to the screen it opened and to this activity's own result handler.
   bool pageActionChose_ = false;
+  // The looked-up word the menu was opened over, when there was one: it is what the Delete row
+  // acts on. A COPY of the mark rather than a pointer into the LookupMarks table, which is
+  // rebuilt wholesale by reloadLookupMarks(). pageActionHasMark_ false means the row was not
+  // offered. pageActionWord_ is the word as the PAGE prints it, for the confirmation body --
+  // the card may be filed under something else entirely (a "Did you mean?" suggestion).
+  LookupMarks::Mark pageActionMark_{};
+  bool pageActionHasMark_ = false;
+  char pageActionWord_[40] = {};
   int autoTurnOption = 0;  // current auto page-turn rate index (More panel)
   std::vector<EpubReaderMenuActivity::MenuItem> moreItems;
   // Armed in onEnter() when the "sync prompt on open" gate passes; consumed once in loop() after
@@ -294,6 +303,12 @@ class EpubReaderActivity final : public Activity {
   // (Re)build the resident looked-up-word index from this book's flashcard deck. One streaming
   // pass; called at book open and on return from any screen that can change the deck.
   void reloadLookupMarks() const;
+  // The word a card is anchored under as the PAGE prints it. A "Did you mean?" card is filed
+  // under the suggestion, so the printed form is recovered from the card's own excerpt; falls
+  // back to the headword when it cannot be. The one derivation shared by the mark table and the
+  // delete that resolves a mark back to its card -- if the two drift, the hold menu offers a
+  // Delete that then finds nothing.
+  static const char* cardSurfaceForm(const char* word, int wordLen, const char* excerpt, int excerptLen, int& outLen);
   // Pages laid out per incremental-build pump: on the render path (catching up to the page
   // being shown) and per loop() tick (background build of a large chapter). Kept small so a
   // background build chunk never noticeably delays input or a pending render.
@@ -462,9 +477,14 @@ class EpubReaderActivity final : public Activity {
   // BookmarkStore::addQuote. Shared by the no-existing-quote path and the "Add new" choice.
   void launchHighlightWordSelect(int pointX = -1, int pointY = -1);
   // The page long-press menu (touch boards): offer Look Up / Highlight for the word at
-  // (x, y). The point is not resolved to a word here -- the activity the choice opens does
-  // that, against the page it re-renders itself -- so this cannot fail and always opens.
+  // (x, y), plus Delete when that word is one this book already has a flashcard for. The point
+  // is not resolved to a word for the first two -- the activity each choice opens does that,
+  // against the page it re-renders itself -- so this cannot fail and always opens.
   void openPageActionMenu(int x, int y);
+  // Confirm, then delete the flashcard behind `pageActionMark_`, dropping the word's page
+  // underline with it. The mark carries hashes, not text, so the card's own key is recovered by
+  // streaming the deck -- see the definition for why it cannot simply be the printed word.
+  void promptDeleteMarkedCard();
   // First paint of the page action menu, and its highlight repaints. Drawn over the page
   // without clearing; the page comes back via requestUpdate() when the menu closes.
   void paintPageActionPopup();

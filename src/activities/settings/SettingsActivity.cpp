@@ -106,11 +106,14 @@ void SettingsActivity::rebuildSettingsLists() {
   // dropped here — they surface only inside their sub-screen, reached via the SubScreen rows below.
   for (auto& setting : getSettingsList(&sdFontSystem.registry(), &dictionaryRegistry)) {
     if (setting.category == StrId::STR_CAT_DISPLAY) {
-      // The sunlight fading fix is a grayscale-waveform compensation that does
-      // not apply on the X4 Pro (plain OTP waveform, no custom grayscale LUT).
-      if (setting.valuePtr == &CrossPointSettings::fadingFix && BoardConfig::isX4Pro()) {
-        continue;
-      }
+      // The sunlight fading fix is shown on every board, the X4 Pro included. It used to be
+      // dropped here as "a grayscale-waveform compensation with no custom grayscale LUT on this
+      // board", but that is not what the flag does: it is the `turnOffScreen` argument threaded
+      // through displayBuffer (GfxRenderer.cpp:2122 -> FreeInkDisplay.cpp:602), and the X4 Pro's
+      // actual controller honours it on the plain B/W path -- Uc8279X4Driver latches it as
+      // _pendingTurnOff and issues POWER_OFF once the refresh completes (Uc8279X4Driver.cpp:491,
+      // 510). With it off the panel's DC-DC stays energised between refreshes for a whole reading
+      // session, which is the bias this setting exists to remove.
       displaySettings.push_back(setting);
     } else if (setting.category == StrId::STR_CAT_READER) {
       // Settings merged into "Text Settings"

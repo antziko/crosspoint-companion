@@ -354,6 +354,21 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Set once an NTP sync succeeds. Used to skip re-syncing on every WiFi connect.
   // Resetting to 0 (e.g. via the web UI) forces a re-sync on next WiFi connect.
   uint8_t clockHasBeenSynced = 0;
+  // How stale a successful NTP sync may get before the next Wi-Fi connection refreshes it,
+  // as an index into CLOCK_RESYNC_DAYS.
+  //
+  // A board with a battery-backed RTC used to sync exactly once, ever. That rationale was
+  // written for the X3's DS3231, a TCXO good to ~2 ppm (about a minute a year). The X4 Pro's
+  // BM8563 has no temperature compensation and runs off a plain 32.768 kHz crystal -- tens of
+  // ppm, roughly a minute a month, worse away from room temperature -- so "once" leaves the
+  // clock visibly wrong after a season. Boards with no RTC ignore this: they already sync
+  // whenever the system clock reads invalid, which is every deep sleep.
+  static constexpr uint8_t CLOCK_RESYNC_DAYS[] = {1, 3, 7, 15};
+  static constexpr uint8_t CLOCK_RESYNC_COUNT = 4;
+  uint8_t clockResyncDays = 2;  // 7 days
+  // UTC epoch of the last successful NTP sync; 0 = never (or a pre-upgrade settings file).
+  // uint32_t, so it is persisted by hand in toJson/fromJson rather than the uint8_t table.
+  uint32_t clockLastSyncEpoch = 0;
   // Text rendering settings
   uint8_t extraParagraphSpacing = 1;
   uint8_t textAntiAliasing = TEXT_AA_ANTIALIASED;       // TEXT_AA enum (0=Off,1=Antialiased,2=Sharp)
@@ -573,6 +588,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     HOLD_CONFIRM_DICTIONARY = 2,
     HOLD_CONFIRM_KOSYNC = 3,
     HOLD_CONFIRM_READER_MENU = 4,
+    HOLD_CONFIRM_REFRESH_SCREEN = 5,
     HOLD_CONFIRM_ACTION_COUNT
   };
   uint8_t holdConfirmAction = HOLD_CONFIRM_OFF;

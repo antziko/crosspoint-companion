@@ -24,6 +24,7 @@
 #include <esp_heap_caps.h>
 
 #include <cstring>
+#include <ctime>
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
@@ -46,6 +47,7 @@
 #include "util/ButtonNavigator.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryRegistry.h"
+#include "util/ScreenRefresh.h"
 #include "util/ScreenshotUtil.h"
 
 GfxRenderer renderer(display);
@@ -61,6 +63,9 @@ FontCacheManager fontCacheManager(renderer.getFontMap(), renderer.getSdCardFonts
 // configured short-press action once the double-click window has passed.
 namespace {
 constexpr unsigned long X4PRO_POWER_DOUBLE_CLICK_MS = 500;
+// How long the frontlight toast stays up. Matches the other toast sites in the firmware
+// (DictionaryDefinitionActivity, EpubReaderActivity): long enough to read two words.
+constexpr unsigned long FRONTLIGHT_TOAST_MS = 900;
 constexpr unsigned long X4PRO_POWER_CLICK_MAX_HOLD_MS = 300;
 constexpr unsigned long X4PRO_RECOVERY_SETTLE_MS = 20;
 constexpr unsigned long DEFAULT_RECOVERY_SETTLE_MS = 500;
@@ -144,6 +149,13 @@ EpdFontFamily ui12FontFamily(&ui12MediumFont, &ui12BoldFont);
 RTC_NOINIT_ATTR uint32_t silentRebootMagic;
 RTC_NOINIT_ATTR uint32_t silentRebootTarget;
 RTC_NOINIT_ATTR uint32_t silentRebootSettingsCategory;  // category index for SETTINGS target
+// Sleep-frame dwell marker for the ghosting trace. RTC_DATA is zeroed on a cold boot and
+// retained across deep sleep, and POSIX time is RTC-backed so it keeps advancing while the
+// chip is off -- together they answer the one question a sleep frame raises: it is painted in
+// milliseconds but then has to hold for hours with the panel unpowered, and any ghost report
+// is only readable against how long it actually held. 0 = no sleep since power-on.
+RTC_DATA_ATTR uint32_t sleepFrameEpochS;
+
 constexpr uint32_t SILENT_REBOOT_MAGIC = 0xC1EAB007;
 constexpr uint32_t SILENT_REBOOT_TARGET_HOME = 0;
 constexpr uint32_t SILENT_REBOOT_TARGET_READER = 1;
@@ -288,7 +300,11 @@ void enterDeepSleep(bool fromTimeout = false) {
   }
 
   halTiltSensor.deepSleep();
+  const unsigned long panelOffStartMs = millis();
   display.deepSleep();
+  sleepFrameEpochS = static_cast<uint32_t>(time(nullptr));
+  SdDebugLog::log("SLP", "panel deepSleep ms=%lu epoch=%lu", millis() - panelOffStartMs,
+                  static_cast<unsigned long>(sleepFrameEpochS));
   Storage.prepareForDeepSleep();
   LOG_DBG("MAIN", "Entering deep sleep");
 
@@ -470,6 +486,15 @@ void setup() {
       bootWakeupReason != HalGPIO::WakeupReason::PowerButton || gpio.verifyPowerButtonWakeup();
 
   halTiltSensor.begin();
+  // Give the clock path an SD trace before it runs. HalClock cannot reach SdDebugLog itself
+  // (lib/hal -> SdDebugLog -> lib/hal), which is why an NTP failure used to leave nothing on
+  // the card and the failure screen could only say "check serial output".
+  //
+  // Installed here rather than at the SdDebugLog::setEnabled() below so the ordering stays
+  // right if that ever moves earlier. It does mean HalClock::begin()'s own boot line lands
+  // while logging is still disabled and is dropped -- the lines that matter (sync start / ok
+  // / timeout) all come from a user opening Clock Sync, long after setup.
+  HalClock::setTraceSink([](const char* line) { SdDebugLog::log("CLK", "%s", line); });
   halClock.begin();
 
   // First of two USB samples (second below, before display bring-up): the SOF
@@ -528,6 +553,30 @@ void setup() {
   // Apply the SD-logging toggle now that settings are loaded (default off). Governs
   // the boot-done MEM line below and all later SdDebugLog::log() calls.
   SdDebugLog::setMasterEnabled(SETTINGS.sdCardLogging != 0);
+
+  // Close the sleep trace from the other side. Read this against the paint durations the
+  // SLP lines recorded on the way in: a ghost that needs hours to appear is the frame
+  // relaxing, one that is there on a short dwell is a clean that never took.
+  //
+  // setEnabled() around it, and restored: SdDebugLog's per-context flag is still false here —
+  // nothing turns it on until line ~826, 278 lines further down this same setup(). Without
+  // this the line is silently dropped, which is exactly what happened: five X4 Pro sleeps
+  // produced `panel deepSleep ... epoch=` on the way in and not one `wake` on the way out.
+  // The master switch (SETTINGS.sdCardLogging, set immediately above) still gates it.
+  //
+  // Both epochs are printed, not just the difference, so the line is self-checking: POSIX time
+  // is RTC-backed and keeps running through deep sleep, but if it ever is not, a nonsense
+  // `now=` says so instead of a plausible-looking dwell.
+  if (sleepFrameEpochS != 0) {
+    const uint32_t nowS = static_cast<uint32_t>(time(nullptr));
+    const bool traceWasEnabled = SdDebugLog::isEnabled();
+    SdDebugLog::setEnabled(true);
+    SdDebugLog::log("SLP", "wake reason=%d dwellSec=%ld slept=%lu now=%lu", static_cast<int>(bootWakeupReason),
+                    static_cast<long>(nowS - sleepFrameEpochS), static_cast<unsigned long>(sleepFrameEpochS),
+                    static_cast<unsigned long>(nowS));
+    SdDebugLog::setEnabled(traceWasEnabled);
+    sleepFrameEpochS = 0;
+  }
 
   // Judge the wake hold HERE, at the first point SETTINGS is readable and before anything
   // user-visible is brought up: a press that did not survive verifyPowerButtonWakeup()'s
@@ -842,6 +891,27 @@ static bool handleX4ProFrontlightDoubleClick() {
   SETTINGS.frontlightOn = lightOn ? 1 : 0;
   SETTINGS.saveToFile();
   LOG_INF("LIGHT", "Frontlight toggled %s by power-button double-click", lightOn ? "on" : "off");
+
+  // Say which way it went. The lamp is the primary feedback, but it is easy to miss in daylight
+  // and this gesture has no other acknowledgement -- a double click that did nothing and one that
+  // toggled a light you cannot see look identical.
+  //
+  // Composed from the two existing strings rather than adding "Frontlight On" as one: same shape
+  // as the Touch toggle tile (FrontlightPanelActivity.cpp:415).
+  char msg[64];
+  snprintf(msg, sizeof(msg), "%s %s", tr(STR_FRONTLIGHT),
+           I18N.get(lightOn ? StrId::STR_STATE_ON : StrId::STR_STATE_OFF));
+  {
+    RenderLock lock;  // drawPopup refreshes internally; do not paint under the render task
+    GUI.drawPopup(renderer, msg);
+    delay(FRONTLIGHT_TOAST_MS);
+  }
+  // No forceCleanRefreshNextPaint() here, unlike the other toast sites: this gesture is used
+  // often, and a SCRUB per toggle would cost a full black/white flash every time the light goes
+  // on or off. The repaint below drives the popup's pixels back differentially, which is the same
+  // trade every page turn already makes.
+  activityManager.notifyFramebufferInvalidated();
+  activityManager.requestUpdate();
   return true;
 }
 
@@ -1013,45 +1083,13 @@ void loop() {
   if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::FORCE_REFRESH &&
       mappedInputManager.wasReleased(MappedInputManager::Button::Power)) {
     LOG_DBG("MAIN", "Manual screen refresh triggered");
-    // Whole-page ghost clear, then re-render (requestUpdate re-runs the active
-    // activity's render()). The clear is driven from a blanked framebuffer so it
-    // pushes the whole panel — not just changed pixels — clearing ghosting.
-    //
-    // Mode is user-selectable via SETTINGS.refreshScreenMode (Settings > Display
-    // > Refresh Screen Mode), default FAST. Note the panel tradeoff:
-    //   - FAST: grayscale-safe. A HALF/FULL clear firms the e-ink particles too
-    //     hard for the X4 grayscale LUT to darken back, washing AA/image/sleep
-    //     pages whitish. FAST avoids that (same trick as the image-blanking dance).
-    //   - HALF: stronger ghost clear. Safe on X3 (1-bit panel, no grayscale
-    //     image pass); on X4 may wash grayscale content whitish.
-    //   - FULL: multi-cycle deep clean (deepCleanPanel), for image sticking that a
-    //     single inversion cannot release — a black rule held at a fixed y for
-    //     minutes, e.g. the themed header underline through an SD firmware write.
-    //     Takes ~15s of visible black/white flashing and is the only way to clear
-    //     burn that is already set, so it is a deliberate user action, not a default.
-    if (SETTINGS.refreshScreenMode == CrossPointSettings::RSM_FULL) {
-      unsigned long cleanMs = 0;
-      {
-        RenderLock lock;
-        cleanMs = renderer.deepCleanPanel();
-      }
-      // On the SD log, not just serial: this is the one burn-in remedy the user can
-      // trigger by hand, and without a trace here a later "the line came back" report
-      // can't be told apart from "no clean was ever run".
-      SdDebugLog::setEnabled(true);
-      SdDebugLog::log("GFX", "deepclean manual cycles=3 ms=%lu", cleanMs);
-    } else {
-      const HalDisplay::RefreshMode clearMode = SETTINGS.refreshScreenMode == CrossPointSettings::RSM_HALF
-                                                    ? HalDisplay::HALF_REFRESH
-                                                    : HalDisplay::FAST_REFRESH;
-      RenderLock lock;
-      renderer.clearScreen();
-      renderer.displayBuffer(clearMode);
-    }
-    // Both branches leave the framebuffer blank — deepCleanPanel by contract (GfxRenderer.h),
-    // the else branch via clearScreen() — so any activity holding differential state must drop
-    // it before the re-render below, or that render restores pixels this just wiped instead of
-    // repainting. Outside the RenderLock scopes above: this only flips flags.
+    // Whole-page ghost clear, then re-render (requestUpdate re-runs the active activity's
+    // render()). Shared with the reader's Confirm/Home hold — see util/ScreenRefresh.h for the
+    // mode tradeoff and the render-lock contract.
+    refreshScreenNow(renderer);
+    // refreshScreenNow leaves the framebuffer blank, so any activity holding differential state
+    // must drop it before the re-render below, or that render restores pixels this just wiped
+    // instead of repainting. Outside any RenderLock: this only flips flags.
     activityManager.notifyFramebufferInvalidated();
     activityManager.requestUpdate();
   }
@@ -1065,6 +1103,70 @@ void loop() {
   const unsigned long activityStartTime = millis();
   activityManager.loop();
   const unsigned long activityDuration = millis() - activityStartTime;
+
+  // Global "hold = Refresh Screen", for every screen that does not run the hold itself.
+  //
+  // The reader has its own case in EpubReaderActivity::runHoldAction(), because it also has to
+  // suppress the page turn the release would otherwise make. Everywhere else -- Home, the file
+  // browser, settings, the browsers -- there was no way to clear ghosting short of the power
+  // button's short press, which on the X4 Pro is already contended (wake hold, sleep hold,
+  // frontlight double-click, optionally Confirm).
+  //
+  // Runs AFTER activityManager.loop() and stands down when the active screen has already
+  // consulted a hold this frame, so a screen that owns the gesture keeps it (hold-to-delete on
+  // the bookmark lists, hold-to-pin in Font Family, and the rest -- see holdWasQueried). Read
+  // the flag BEFORE getHeldTime() below, which would otherwise set it itself.
+  //
+  // On a home-key board (X4 Pro) the capacitive Home hold is the trigger and there is no
+  // conflict at all: wasHomeKeyHold() has exactly two other callers and both are in the reader.
+  // Elsewhere it is the Confirm hold. Latched so one hold fires once, and the release is
+  // swallowed so the screen underneath does not also take it as a tap.
+  static bool globalRefreshFired = false;
+  if (SETTINGS.holdConfirmAction == CrossPointSettings::HOLD_CONFIRM_REFRESH_SCREEN &&
+      !activityManager.isReaderActivity()) {
+    const bool screenOwnsHold = mappedInputManager.holdWasQueried();
+    const bool homeKeyHold = mappedInputManager.hasHomeKey() && mappedInputManager.wasHomeKeyHold();
+    const bool confirmHold = !mappedInputManager.hasHomeKey() &&
+                             mappedInputManager.isPressed(MappedInputManager::Button::Confirm) &&
+                             mappedInputManager.getHeldTime() >= Dictionary::LONG_PRESS_MS;
+    if (!screenOwnsHold && !globalRefreshFired && (homeKeyHold || confirmHold)) {
+      globalRefreshFired = true;
+      if (confirmHold) mappedInputManager.suppressNextRelease(MappedInputManager::Button::Confirm);
+      refreshScreenNow(renderer);
+      activityManager.notifyFramebufferInvalidated();
+      activityManager.requestUpdate();
+    }
+  }
+  // Re-arm on release. The home-key hold is an edge event and self-clears, but the Confirm one
+  // is a level test that would keep matching for as long as the finger stays down.
+  if (!mappedInputManager.isPressed(MappedInputManager::Button::Confirm)) globalRefreshFired = false;
+
+  // Stand the panel's analog rails down once the glass has been still for a moment.
+  //
+  // Nothing else ever does. On the UC8279 parts powerOnIfNeeded() is `if (_isScreenOn) return`
+  // and POF is issued only for an explicit turn-off (the sunlight fading fix) or at deep sleep,
+  // so the DC-DC stays energised from the first paint after boot until the device sleeps: a whole
+  // reading session of standing bias across one static frame, which is the stress that sets image
+  // retention. The vendor sequence powers down after every refresh for exactly that reason, and
+  // that is all `fadingFix` does -- at the price of the async refresh path
+  // (GfxRenderer::supportsAsyncRefresh is `!fadingFix`). Parking on idle instead buys the same
+  // DC hygiene for the 99% of a session that is idle, keeps async page turns, and costs one
+  // power-on on the next paint.
+  //
+  // 5 s, not longer: a burst of page turns is sub-second apart so it never thrashes, while a page
+  // actually being read parks almost immediately -- and it is the integral of rail-time over a
+  // static image that matters, so most of the win is in the first few seconds. Panels whose driver
+  // does not implement controllerIdle() no-op here.
+  //
+  // Under the render lock because the render task owns the panel bus; peek() first so a loop
+  // iteration never blocks behind a 1.5 s waveform just to issue a power-off.
+  static constexpr unsigned long kPanelIdleParkMs = 5000;
+  if (renderer.panelRailsUp() && renderer.msSinceLastPaint() >= kPanelIdleParkMs && !RenderLock::peek()) {
+    RenderLock lock;
+    const unsigned long parkStart = millis();
+    renderer.parkPanelIdle();
+    LOG_DBG("GFX", "Panel rails parked in %lu ms", millis() - parkStart);
+  }
 
   // Body complete: releases the slice hook's yield (see onEinkBusyWaitSlice).
   powerManager.noteMainLoopIteration();

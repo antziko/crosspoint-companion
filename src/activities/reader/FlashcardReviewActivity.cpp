@@ -276,28 +276,36 @@ void FlashcardReviewActivity::promptDelete() {
           requestUpdate();  // back to the card, unchanged
           return;
         }
-        if (cursor < session.size()) {
-          // The deck row is gone, which renumbers the newest-first
-          // indices held in `session`: every card OLDER than the
-          // removed one (a larger newest-first index) shifts down by
-          // one. Drop the current entry and fix the survivors so the
-          // header count (session.size()) and subsequent loads stay
-          // correct -- do NOT advance the cursor; the next card slides
-          // into this slot.
-          const uint16_t removed = session[cursor];
-          FlashcardDeck::remove(cachePath, word);
-          session.erase(session.begin() + cursor);
-          for (uint16_t& idx : session)
-            if (idx > removed) idx--;
-        }
-        if (cursor >= session.size() || !loadCurrentCard()) {
-          phase = Phase::Summary;
-        } else {
-          phase = Phase::Front;
-        }
-        requestUpdate();
+        if (cursor < session.size()) FlashcardDeck::remove(cachePath, word);
+        dropCurrentCardFromSession();
       },
       renderer, mappedInput, tr(STR_FLASHCARD_DELETE_TITLE), word);
+}
+
+void FlashcardReviewActivity::dropCurrentCardFromSession() {
+  if (cursor < session.size()) {
+    // Removing the deck row renumbers the newest-first indices held in `session`: every card
+    // OLDER than the removed one (a larger newest-first index) shifts down by one. Drop the
+    // current entry and fix the survivors so the header count (session.size()) and subsequent
+    // loads stay correct -- do NOT advance the cursor; the next card slides into this slot.
+    const uint16_t removed = session[cursor];
+    session.erase(session.begin() + cursor);
+    for (uint16_t& idx : session)
+      if (idx > removed) idx--;
+  }
+  if (cursor >= session.size() || !loadCurrentCard()) {
+    // Inline sessions have no summary page -- advanceCard hands the tally to the reader instead
+    // (see its isInline() branch), and deleting the last card has to take the same exit or the
+    // user is left on a screen this mode never draws.
+    if (isInline()) {
+      finishInline(/*skipped=*/false);
+      return;
+    }
+    phase = Phase::Summary;
+  } else {
+    phase = Phase::Front;
+  }
+  requestUpdate();
 }
 
 void FlashcardReviewActivity::onExit() {
@@ -324,7 +332,11 @@ void FlashcardReviewActivity::loop() {
         auto definition = makeUniqueNoThrow<DictionaryDefinitionActivity>(
             renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(), true, cachePath,
             controller.getRecordHistory(), controller.getLookupWord(),
-            DictionaryLookupController::toHistStatus(controller.getFoundStatus()));
+            DictionaryLookupController::toHistStatus(controller.getFoundStatus()),
+            // The back face is where a card gets thrown away mid-review: it is the one place the
+            // definition is in front of the user, so it is where "I don't need this word" lands.
+            // The result handler below repairs the session afterwards.
+            /*allowCardDelete=*/true);
         if (!definition) {
           LOG_ERR("FCR", "OOM: DictionaryDefinitionActivity");
           phase = Phase::AwaitingGrade;
@@ -332,6 +344,22 @@ void FlashcardReviewActivity::loop() {
           break;
         }
         startActivityForResult(std::move(definition), [this](const ActivityResult&) {
+          // The back face may have deleted this card, and FlashcardDeck::remove renumbers the
+          // newest-first deck indices held in `session`. This activity was suspended while that
+          // happened, so the survivors have to be fixed up here or the next card loaded -- and
+          // graded -- would not be the one on screen. cardDict() returns false exactly when the
+          // deck holds no line for the word (FlashcardDeck.cpp:1540); a card recording no
+          // dictionary still reads as present. flipToBackFace() probes with the same call on the
+          // way in, so this costs one more streaming pass of a file we already stream per flip.
+          //
+          // An unreadable deck file also reads as "gone". Nothing is destroyed by that -- the
+          // session just skips a card -- and a deck that cannot be opened has already ended the
+          // session in every other respect.
+          uint32_t ignored = 0;
+          if (!FlashcardDeck::cardDict(cachePath, card.word, ignored)) {
+            dropCurrentCardFromSession();
+            return;
+          }
           phase = Phase::AwaitingGrade;  // definition viewed -> prompt for grade
           requestUpdate();
         });

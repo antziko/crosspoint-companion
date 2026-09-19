@@ -1,14 +1,47 @@
 #include "HalClock.h"
 
 #include <Logging.h>
+#include <Rtc.h>
 #include <WiFi.h>
 #include <esp_sntp.h>
+#include <stdarg.h>
 #include <sys/time.h>
 #include <time.h>
 
 #include <cassert>
 
 HalClock halClock;  // Singleton instance
+
+// Battery-backed I2C RTC described by the board profile (X4 Pro's BM8563 at 0x51 on the
+// shared touch bus -- RtcType::Pcf8563 names the register family it speaks, not the part; other
+// boards carry a PCF8563/PCF85063/RX8130). X3's DS3231 keeps the bespoke Wire
+// path below instead, so this object is only ever brought up on other boards.
+//
+// It is a *source* for the POSIX system clock, not a second read path: seeded
+// once in begin() and written back after an NTP sync, which keeps getTime() and
+// getDate() free of I2C while still surviving a deep sleep (a chip reset, which
+// loses the system clock). Boards with no RTC have rtcAddr == 0, so begin()
+// returns false without touching the bus.
+static freeink::Rtc hwRtc;
+
+// SD-log sink, installed by the owner (main.cpp). Null until then, and null in builds that
+// never install one, so every trace call below is a single branch.
+static void (*clkTraceSink)(const char* line) = nullptr;
+
+void HalClock::setTraceSink(void (*sink)(const char* line)) { clkTraceSink = sink; }
+
+// Formats into a stack buffer and hands one line to the sink. 128 bytes: the longest line
+// here is the server list, and the resource protocol caps locals at 256.
+static void clkTrace(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+static void clkTrace(const char* fmt, ...) {
+  if (clkTraceSink == nullptr) return;
+  char line[128];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(line, sizeof(line), fmt, args);
+  va_end(args);
+  clkTraceSink(line);
+}
 
 // Earliest plausible "real" UTC epoch (2020-01-01). The system clock starts at
 // ~0 (1970) on a cold boot and only jumps past this once NTP delivers a packet.
@@ -30,10 +63,70 @@ static constexpr uint32_t HALCLOCK_EPOCH_MAGIC = 0x7B105AFE;
 static uint8_t bcdToDec(uint8_t bcd) { return ((bcd >> 4) * 10) + (bcd & 0x0F); }
 static uint8_t decToBcd(uint8_t dec) { return ((dec / 10) << 4) | (dec % 10); }
 
+// Adopt the hardware RTC's time as the POSIX system clock. Returns false when the
+// board has no RTC, the read fails, or the RTC reports its oscillator stopped --
+// i.e. it has never been set, so the value would be meaningless.
+static bool seedSystemClockFromHwRtc() {
+  freeink::Rtc::DateTime dt;
+  if (!hwRtc.present() || !hwRtc.now(dt)) return false;
+
+  // The RTC holds UTC (that is what the NTP write-back stores). Converted here by
+  // civil-date arithmetic rather than mktime(), whose result depends on TZ -- which
+  // is unset this early on a cold boot and UTC0 only once configTzTime() has run.
+  // (timegm() is not declared by this newlib.) Days-from-civil, epoch 1970-01-01.
+  int y = static_cast<int>(dt.year);
+  const unsigned m = dt.month;
+  y -= (m <= 2) ? 1 : 0;
+  const int era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = static_cast<unsigned>(y - era * 400);
+  const unsigned doy = (153U * (m + (m > 2 ? -3U : 9U)) + 2U) / 5U + dt.day - 1U;
+  const unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+  const int64_t days = static_cast<int64_t>(era) * 146097 + static_cast<int64_t>(doe) - 719468;
+  const time_t epoch =
+      static_cast<time_t>(days * 86400 + dt.hour * 3600 + static_cast<int64_t>(dt.minute) * 60 + dt.second);
+  if (epoch <= MIN_VALID_EPOCH) return false;
+
+  const struct timeval tv = {.tv_sec = epoch, .tv_usec = 0};
+  settimeofday(&tv, nullptr);
+  return true;
+}
+
+// Persist a freshly NTP-synced UTC time into the hardware RTC. Also clears the
+// oscillator-stopped flag, so a never-set RTC starts being trusted from here on.
+static void writeSystemClockToHwRtc(const struct tm& utc) {
+  if (!hwRtc.present()) return;
+
+  freeink::Rtc::DateTime dt;
+  dt.year = static_cast<uint16_t>(1900 + utc.tm_year);
+  dt.month = static_cast<uint8_t>(utc.tm_mon + 1);
+  dt.day = static_cast<uint8_t>(utc.tm_mday);
+  dt.hour = static_cast<uint8_t>(utc.tm_hour);
+  dt.minute = static_cast<uint8_t>(utc.tm_min);
+  dt.second = static_cast<uint8_t>(utc.tm_sec);
+  dt.weekday = static_cast<uint8_t>(utc.tm_wday);  // both are 0=Sunday
+  if (hwRtc.set(dt)) {
+    LOG_INF("CLK", "Hardware RTC set to %04u-%02u-%02u %02u:%02u:%02u UTC", (unsigned)dt.year, (unsigned)dt.month,
+            (unsigned)dt.day, (unsigned)dt.hour, (unsigned)dt.minute, (unsigned)dt.second);
+  } else {
+    LOG_ERR("CLK", "Hardware RTC write failed (time still valid until the next boot)");
+    clkTrace("hw rtc write FAILED");
+  }
+}
+
 void HalClock::begin() {
   if (!gpio.deviceIsX3()) {
     _available = false;
-    // X4: no RTC chip, but time can survive a software reset (e.g. the silent
+    // Every board but X3 keeps wall-clock time in the POSIX system clock. Bring the
+    // board's own RTC up first (a no-op where there isn't one) so an NTP sync later
+    // in the session has somewhere to write, then seed the system clock from the
+    // best source available.
+    hwRtc.begin();
+    // Separate from _available on purpose: _available gates the DS3231 read/write path
+    // below, which this chip is not on. hasHardwareRtc() folds the two, so the sync-policy
+    // callers (WifiSelectionActivity, KOReaderSyncActivity) see the RTC that is really here.
+    _hwRtcPresent = hwRtc.present();
+
+    // X4 has no RTC chip, but time can survive a software reset (e.g. the silent
     // heap-defrag restart taken when returning home from the network flow).
     // Prefer the IDF RTC-backed POSIX clock if it's still valid; otherwise fall
     // back to the epoch we stashed in RTC_NOINIT before the restart. Either way,
@@ -46,11 +139,19 @@ void HalClock::begin() {
       settimeofday(&tv, nullptr);
       _ntpConfigured = true;
       LOG_INF("CLK", "Restored system time from RTC_NOINIT after reset");
+    } else if (seedSystemClockFromHwRtc()) {
+      // X4 Pro and friends: a battery-backed RTC that kept running through deep
+      // sleep, so the clock is up immediately and offline -- no NTP sync needed
+      // (maybeStartBackgroundNtpSync() in main.cpp sees a valid clock and skips
+      // powering the radio).
+      _ntpConfigured = true;
+      LOG_INF("CLK", "Seeded system clock from the hardware RTC");
+      clkTrace("boot seeded from hw rtc epoch=%ld", (long)time(nullptr));
     }
     // Consume the stash so it's only valid for the immediate next boot (the ~2s
     // silent restart). A deep sleep can last hours — its elapsed time is unknown
-    // on X4 — so a leftover epoch must NOT be restored on a later wake; that path
-    // re-syncs NTP instead (see the QuickResume block in main.cpp).
+    // without an RTC — so a leftover epoch must NOT be restored on a later wake;
+    // that path re-syncs NTP instead (see the QuickResume block in main.cpp).
     halClockSavedMagic = 0;
     return;
   }
@@ -409,10 +510,13 @@ bool HalClock::writeDateToRTC(uint8_t dayOfWeek, uint8_t date, uint8_t month, ui
 bool HalClock::syncFromNTP(uint32_t maxWaitMs, const volatile bool* abortFlag) {
   if (WiFi.status() != WL_CONNECTED) {
     LOG_ERR("CLK", "WiFi not connected, cannot sync NTP");
+    clkTrace("sync abort: wifi not connected");
     return false;
   }
 
   LOG_INF("CLK", "Starting NTP sync...");
+  clkTrace("sync start waitMs=%lu hwRtc=%d valid=%d", (unsigned long)maxWaitMs, hasHardwareRtc() ? 1 : 0,
+           isPosixTimeValid() ? 1 : 0);
   // Resolve the servers HERE, on this task, and hand configTzTime() IP literals.
   //
   // Passing hostnames makes SNTP own a DNS query: sntp_request() calls dns_gethostbyname() and,
@@ -458,6 +562,7 @@ bool HalClock::syncFromNTP(uint32_t maxWaitMs, const volatile bool* abortFlag) {
       *slot.resolved = true;
     } else {
       LOG_ERR("CLK", "NTP host '%s' did not resolve; using the name", slot.name);
+      clkTrace("dns miss host=%s", slot.name);
     }
   }
   // Serial-only: SdDebugLog cannot be reached from lib/hal (it would close a dependency cycle,
@@ -465,6 +570,7 @@ bool HalClock::syncFromNTP(uint32_t maxWaitMs, const volatile bool* abortFlag) {
   // worked is the absence of the panic plus a completed KOSYNC leg in opds_debug.txt.
   LOG_INF("CLK", "NTP servers: %s (ip=%d), %s (ip=%d)", ntpPrimary, ntpPrimaryIsIp ? 1 : 0, ntpSecondary,
           ntpSecondaryIsIp ? 1 : 0);
+  clkTrace("servers %s(ip=%d) %s(ip=%d)", ntpPrimary, ntpPrimaryIsIp ? 1 : 0, ntpSecondary, ntpSecondaryIsIp ? 1 : 0);
   configTzTime("UTC0", ntpPrimary, ntpSecondary);
   // Mark configured so isPosixTimeValid() / getTime() / getDate() pick up the async SNTP
   // result even if we time out below before the first packet arrives.
@@ -477,6 +583,7 @@ bool HalClock::syncFromNTP(uint32_t maxWaitMs, const volatile bool* abortFlag) {
       // Caller requested teardown (e.g. user is opening a book). _ntpConfigured
       // stays set, so a late SNTP packet is still adopted by isPosixTimeValid().
       LOG_INF("CLK", "NTP sync aborted by caller");
+      clkTrace("sync aborted by caller after %dms", i * 100);
       return false;
     }
     if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
@@ -504,6 +611,10 @@ bool HalClock::syncFromNTP(uint32_t maxWaitMs, const volatile bool* abortFlag) {
       } else {
         // X4: POSIX system clock already set by configTzTime/SNTP
         LOG_INF("CLK", "System clock set to %02d:%02d:%02d UTC", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+        clkTrace("sync ok after %dms epoch=%ld", i * 100, (long)now);
+        // Push it into the board's battery-backed RTC (X4 Pro's BM8563) so the
+        // time outlives this power cycle. No-op on boards without one.
+        writeSystemClockToHwRtc(timeinfo);
       }
       return true;
     }
@@ -513,5 +624,6 @@ bool HalClock::syncFromNTP(uint32_t maxWaitMs, const volatile bool* abortFlag) {
   // SNTP not yet complete — _ntpConfigured is set so async completion will be
   // picked up by isPosixTimeValid() on the next clock read.
   LOG_INF("CLK", "NTP sync pending (SNTP still in progress)");
+  clkTrace("sync timeout after %lums, sntp still pending", (unsigned long)maxWaitMs);
   return false;
 }

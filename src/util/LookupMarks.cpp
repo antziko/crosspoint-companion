@@ -39,6 +39,37 @@ uint32_t LookupMarks::hashAppend(uint32_t h, const char* text, const size_t len,
   return h;
 }
 
+LookupMarks::Step LookupMarks::step(const Mark& m, RunState& r, const bool isCjk, const uint32_t tokenHash,
+                                    const uint16_t tokenLen, const char* text, const size_t len, const int16_t rowY) {
+  if (!isCjk) {
+    // One token, one word: the whole identity is here or it is not.
+    return (tokenHash == m.wordHash && tokenLen == m.byteLen) ? Step::MatchedToken : Step::None;
+  }
+
+  if (r.open && r.y != rowY) r.open = false;  // the run wrapped: no mark, no guess
+
+  const bool opening = !r.open;
+  if (opening) {
+    if (tokenHash != m.headHash) return Step::None;
+    r.open = true;
+    r.hash = tokenHash;
+    r.len = tokenLen;
+    r.y = rowY;
+  } else {
+    r.hash = hashAppend(r.hash, text, len, &r.len);
+  }
+
+  if (r.len < m.byteLen) return opening ? Step::Opened : Step::Extended;
+
+  // Complete, or overshot the word's length -- either way the run is done.
+  const bool matched = r.len == m.byteLen && r.hash == m.wordHash;
+  r.open = false;
+  if (!matched) return opening ? Step::Opened : Step::Extended;
+  // A one-character CJK word opens and completes on the same token, so its span is that token
+  // rather than a run the caller has had a chance to seed.
+  return opening ? Step::MatchedToken : Step::MatchedRun;
+}
+
 void LookupMarks::clear() {
   marks_.reset();
   count_ = 0;

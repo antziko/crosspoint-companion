@@ -33,21 +33,12 @@ constexpr size_t kMaxQuotesPerPage = 6;
 // extras are skipped rather than grown into, for the same stack-only reason as the quote cap.
 constexpr size_t kMaxLookupsPerPage = 8;
 
-// A CJK word being matched across consecutive page tokens. CJK is laid out one token per
-// character, so a multi-character word is only ever a run: the run opens on a token whose hash
-// matches the word's first character, then accumulates each following token into the same
-// FNV until the word's normalised byte length is reached, and marks only if the accumulated
-// hash matches the whole word. Latin words are one token and never open a run.
-//
-// The run is a single forward pass with no backtracking: a word immediately preceded by its
-// own first character (中中国人) opens on the wrong character, accumulates to the wrong length
-// and drops the mark. That is the failure mode of a hash-only matcher with no text to re-scan,
-// and it fails toward drawing nothing.
+// The screen span a mark covers so far, carried alongside the accumulator that decides whether
+// there is a mark at all. The matching itself is LookupMarks::step -- this side is only the
+// geometry that arithmetic has no business knowing about, which is what lets the same predicate
+// serve both drawForPage and lookupMarkAtPoint.
 struct LookupRun {
-  uint32_t hash = 0;  // FNV accumulated over the run so far
-  uint16_t len = 0;   // normalised bytes accumulated so far
-  bool open = false;
-  int16_t y = 0;
+  LookupMarks::RunState state;
   int16_t x0 = 0;
   int16_t x1 = 0;
 };
@@ -238,32 +229,27 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
           const LookupMarks::Mark* m = lookups[i];
           LookupRun& r = runs[i];
 
-          if (!isCjk) {  // one token, one word
-            if (tokenHash != m->wordHash || tokenLen != m->byteLen) continue;
-            measure();
-            underlineSpan(x, width, rowY);
-            continue;
-          }
-
-          if (r.open && r.y != rowY) r.open = false;  // the run wrapped: no mark, no guess
-          if (!r.open) {
-            if (tokenHash != m->headHash) continue;
-            measure();
-            r.open = true;
-            r.hash = tokenHash;
-            r.len = tokenLen;
-            r.y = rowY;
-            r.x0 = x;
-            r.x1 = static_cast<int16_t>(x + width);
-          } else {
-            measure();
-            r.hash = LookupMarks::hashAppend(r.hash, text + partStart, partLen, &r.len);
-            r.x1 = std::max(r.x1, static_cast<int16_t>(x + width));
-          }
-
-          if (r.len >= m->byteLen) {
-            if (r.len == m->byteLen && r.hash == m->wordHash) underlineSpan(r.x0, r.x1 - r.x0, r.y);
-            r.open = false;  // matched, or overshot the word's length — either way it is done
+          using Step = LookupMarks::Step;
+          const Step outcome =
+              LookupMarks::step(*m, r.state, isCjk, tokenHash, tokenLen, text + partStart, partLen, rowY);
+          if (outcome == Step::None) continue;
+          measure();
+          switch (outcome) {
+            case Step::Opened:
+              r.x0 = x;
+              r.x1 = static_cast<int16_t>(x + width);
+              break;
+            case Step::Extended:
+              r.x1 = std::max(r.x1, static_cast<int16_t>(x + width));
+              break;
+            case Step::MatchedRun:
+              underlineSpan(r.x0, std::max<int16_t>(r.x1, static_cast<int16_t>(x + width)) - r.x0, r.state.y);
+              break;
+            case Step::MatchedToken:
+              underlineSpan(x, width, rowY);
+              break;
+            case Step::None:
+              break;
           }
         }
       }
@@ -372,6 +358,108 @@ bool invertWordAtPoint(const GfxRenderer& renderer, const Page& page, const int 
     }
   }
   return false;
+}
+
+const LookupMarks::Mark* lookupMarkAtPoint(const GfxRenderer& renderer, const Page& page, const int fontId,
+                                           const int marginLeft, const int marginTop, const int x, const int y,
+                                           const uint32_t chapterHash, const int pageNumber, const int pageCount) {
+  // Same forgiveness the tap boxes carry, so a point on the edge of an underlined word still
+  // finds it.
+  constexpr int kSlop = 4;
+
+  if (!SETTINGS.lookupUnderline) return nullptr;
+  const LookupMarks::Mark* lookups[kMaxLookupsPerPage] = {};
+  LookupRun runs[kMaxLookupsPerPage] = {};
+  const size_t lookupCount = static_cast<size_t>(
+      LookupMarks::getInstance().collectForPage(chapterHash, pageNumber, pageCount, lookups, kMaxLookupsPerPage));
+  if (lookupCount == 0) return nullptr;
+
+  const int lineHeight = renderer.getLineHeight(fontId);
+  const int ascender = renderer.getFontAscenderSize(fontId);
+
+  // The point falls on a span drawn at rowY, within kSlop of both edges.
+  const auto covers = [&](const int16_t x0, const int16_t spanWidth, const int16_t rowY) {
+    if (spanWidth <= 0) return false;
+    if (y < rowY - kSlop || y >= rowY + lineHeight + kSlop) return false;
+    return x >= x0 - kSlop && x < x0 + spanWidth + kSlop;
+  };
+
+  // The lookup half of drawForPage's walk, asking which mark covers a point instead of inking
+  // every one of them. Separate rather than folded into invertWordAtPoint above: that stops at
+  // the token under the finger, while a CJK run needs the tokens on either side of it. Both
+  // drive LookupMarks::step, so this cannot name a word the underline did not mark.
+  for (const auto& element : page.elements) {
+    if (element->getTag() != TAG_PageLine) continue;
+    const auto* line = static_cast<const PageLine*>(element.get());
+    const auto& block = line->getBlock();
+    if (!block) continue;
+
+    const int16_t rowY = static_cast<int16_t>(line->yPos + marginTop + block->getRubyShift(ascender));
+    const uint16_t blockWordCount = block->wordCount();
+
+    for (uint16_t w = 0; w < blockWordCount; w++) {
+      const char* text = block->wordText(w);
+      const size_t len = block->wordTextLen(w);
+      bool isCjk = false;
+      if (!PageTokens::isSelectable(text, len, isCjk)) continue;
+
+      PageTokens::Part parts[PageTokens::kMaxTokenParts];
+      const size_t partCount = PageTokens::collectParts(text, len, parts, PageTokens::kMaxTokenParts);
+      const bool unsplit = partCount == 1 && parts[0].start == 0 && parts[0].end == len;
+
+      for (size_t pi = 0; pi < partCount; pi++) {
+        const size_t partStart = unsplit ? 0 : parts[pi].start;
+        const size_t partLen = unsplit ? len : parts[pi].end - parts[pi].start;
+
+        bool measured = false;
+        int16_t tokenX = 0;
+        int16_t tokenWidth = 0;
+        const auto measure = [&]() {
+          if (measured) return;
+          measured = true;
+          const EpdFontFamily::Style style = block->wordStyle(w);
+          tokenX = static_cast<int16_t>(line->xPos + block->wordXpos(w) + marginLeft);
+          if (partStart > 0) tokenX += PageTokens::measureAdvance(renderer, fontId, text, partStart, style);
+          tokenWidth = unsplit ? PageTokens::measureAdvance(renderer, fontId, text, style)
+                               : PageTokens::measureAdvance(renderer, fontId, text + partStart, partLen, style);
+        };
+
+        uint16_t tokenLen = 0;
+        const uint32_t tokenHash =
+            LookupMarks::hashAppend(LookupMarks::FNV_OFFSET, text + partStart, partLen, &tokenLen);
+
+        for (size_t i = 0; i < lookupCount; i++) {
+          const LookupMarks::Mark* m = lookups[i];
+          LookupRun& r = runs[i];
+          using Step = LookupMarks::Step;
+          const Step outcome =
+              LookupMarks::step(*m, r.state, isCjk, tokenHash, tokenLen, text + partStart, partLen, rowY);
+          if (outcome == Step::None) continue;
+          measure();
+          switch (outcome) {
+            case Step::Opened:
+              r.x0 = tokenX;
+              r.x1 = static_cast<int16_t>(tokenX + tokenWidth);
+              break;
+            case Step::Extended:
+              r.x1 = std::max(r.x1, static_cast<int16_t>(tokenX + tokenWidth));
+              break;
+            case Step::MatchedRun: {
+              const int16_t x1 = std::max(r.x1, static_cast<int16_t>(tokenX + tokenWidth));
+              if (covers(r.x0, static_cast<int16_t>(x1 - r.x0), r.state.y)) return m;
+              break;
+            }
+            case Step::MatchedToken:
+              if (covers(tokenX, tokenWidth, rowY)) return m;
+              break;
+            case Step::None:
+              break;
+          }
+        }
+      }
+    }
+  }
+  return nullptr;
 }
 
 }  // namespace PageMarks

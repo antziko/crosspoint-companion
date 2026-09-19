@@ -51,6 +51,20 @@ class GfxRenderer {
   Orientation orientation;
   bool fadingFix;
   mutable bool forceCleanRefreshOnce_ = false;  // one-shot HALF_REFRESH override (see forceCleanRefreshNextPaint)
+  // Panel-activation history, for the sleep-path ghost trace. Both halves answer a question the
+  // timing lines cannot: how long the frame now on the glass has been held (image sticking is set
+  // by dwell, not by frame count) and how many differential paints have accumulated since the last
+  // deep clean. Reset by deepCleanPanel, so the counts always describe one clean-to-clean span.
+  mutable unsigned long lastPaintMs_ = 0;
+  mutable uint16_t paintCounts_[4] = {0, 0, 0, 0};  // indexed by HalDisplay::RefreshMode
+  void notePaint(HalDisplay::RefreshMode mode) const;
+  // Rail accounting, same clean-to-clean window. The panel's analog domain is energised from a
+  // paint until parkPanelIdle() stands it down, so railsMs_ is the time-integral of DC across a
+  // static image -- the quantity image retention is set by, and the one the park exists to cut.
+  // panelPoweredSinceMs_ is 0 while parked.
+  mutable unsigned long panelPoweredSinceMs_ = 0;
+  mutable unsigned long railsMs_ = 0;
+  mutable uint16_t parkCount_ = 0;
   uint8_t* frameBuffer = nullptr;
   uint16_t panelWidth = HalDisplay::DISPLAY_WIDTH;
   uint16_t panelHeight = HalDisplay::DISPLAY_HEIGHT;
@@ -265,6 +279,13 @@ class GfxRenderer {
   bool supportsAsyncGrayscaleBase() const;
   void invertScreen() const;
   void clearScreen(uint8_t color = 0xFF) const;
+  // Output polarity currently in force. The framebuffer always holds normal polarity and the
+  // driver inverts on the way to the panel, so anything reasoning about what the GLASS will
+  // show -- rather than what the buffer says -- has to ask.
+  bool isInverted() const { return display.isInverted(); }
+  // Framebuffer value that paints the panel WHITE in the current polarity. In night mode a
+  // plain clearScreen() drives the panel black, which is the opposite of a ghost clear.
+  uint8_t panelWhiteFill() const { return display.isInverted() ? 0x00 : 0xFF; }
 
   // Multi-cycle ghost clear: drives every pixel through `cycles` complete
   // black -> white inversions, each half of a cycle a FULL_REFRESH.
@@ -285,6 +306,30 @@ class GfxRenderer {
   // log; GfxRenderer itself only logs to serial, which is not available on the
   // device runs this is being tuned against.
   unsigned long deepCleanPanel(uint8_t cycles = 3) const;
+
+  // --- panel-activation history (ghost diagnostics) --------------------------
+  // Milliseconds the current frame has been on the glass, i.e. since the last panel
+  // activation. 0 when nothing has been painted yet.
+  unsigned long msSinceLastPaint() const;
+  // Paints since the last deepCleanPanel, by refresh mode (FAST, HALF, FULL, SCRUB order —
+  // index with HalDisplay::RefreshMode). Saturating: a long session must not wrap the count.
+  uint16_t paintCount(HalDisplay::RefreshMode mode) const;
+  // Percentage of the framebuffer currently set to BLACK (0 bits — clearScreen(0x00) is black).
+  // This is the LOGICAL frame: night mode inverts on the way to the panel, so the panel's black
+  // coverage is 100 - this when SETTINGS.screenInverted is set. Cheap: one popcount pass over
+  // 48 KB, no allocation.
+  int frameInkPercent() const;
+  // Stand the panel's analog rails down while nothing is queued (no-op if already parked, or on
+  // a panel that powers down after every refresh anyway). The glass keeps its image -- e-ink
+  // needs no power to hold one. Call only from a context that holds the render lock.
+  void parkPanelIdle() const;
+  // True while the rails are up, i.e. a park would do something.
+  bool panelRailsUp() const { return panelPoweredSinceMs_ != 0; }
+  // Milliseconds the rails have been energised since the last deepCleanPanel, and how many times
+  // they were parked over that span. Rails still up are included up to now.
+  unsigned long railsMs() const;
+  uint16_t parkCount() const { return parkCount_; }
+
   void getOrientedViewableTRBL(int* outTop, int* outRight, int* outBottom, int* outLeft) const;
 
   // Tiled grayscale strip target. While active, drawPixel() and clearScreen()

@@ -1208,6 +1208,46 @@ TEST_F(FlashcardDeckTest, CardDictReturnsRecordedHash) {
   EXPECT_EQ(hash, 777u);
 }
 
+// The optional count out-param. The definition screen draws it as an "xN" badge beside the
+// headword, and it rides the pass cardDict already makes rather than costing a second read of the
+// deck file.
+TEST_F(FlashcardDeckTest, CardDictReportsLookupCount) {
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx", "", 4242u);
+  uint32_t hash = 0;
+  uint32_t count = 0;
+  ASSERT_TRUE(FlashcardDeck::cardDict(cachePath, "alpha", hash, &count));
+  EXPECT_EQ(count, 1u);  // a first lookup is 1, which is also the "draw no badge" value
+
+  FlashcardDeck::enroll(cachePath, "alpha", "ctx again", "", 4242u);
+  ASSERT_TRUE(FlashcardDeck::cardDict(cachePath, "alpha", hash, &count));
+  EXPECT_EQ(count, 2u);
+  EXPECT_EQ(hash, 4242u);  // still reports the dictionary; the count rides along
+}
+
+TEST_F(FlashcardDeckTest, CardDictLeavesCountAloneOnAMiss) {
+  FlashcardDeck::enroll(cachePath, "present", "ctx");
+  uint32_t hash = 0;
+  uint32_t count = 99;
+  EXPECT_FALSE(FlashcardDeck::cardDict(cachePath, "absent", hash, &count));
+  EXPECT_EQ(count, 99u);  // untouched, same contract as outDictHash
+}
+
+// A legacy line carries no count field; it must read as 1 rather than 0, so a caller comparing
+// against 1 to suppress the badge treats old cards and new ones alike.
+TEST_F(FlashcardDeckTest, CardDictCountDefaultsToOneForLegacyLine) {
+  const std::string path = cachePath + "/dictionary_flashcards.txt";
+  std::FILE* f = std::fopen(path.c_str(), "wb");
+  ASSERT_NE(f, nullptr);
+  const char* lines = "old5|2|40|ChA|no version no count excerpt\n";
+  std::fwrite(lines, 1, std::strlen(lines), f);
+  std::fclose(f);
+
+  uint32_t hash = 0;
+  uint32_t count = 0;
+  ASSERT_TRUE(FlashcardDeck::cardDict(cachePath, "old5", hash, &count));
+  EXPECT_EQ(count, 1u);
+}
+
 // A legacy 7-field line has no hash field at all. It must report FOUND with 0, not missing:
 // the two mean different things to the caller (0 = offer to stamp it, missing = no card).
 TEST_F(FlashcardDeckTest, CardDictReturnsZeroForLegacyLine) {

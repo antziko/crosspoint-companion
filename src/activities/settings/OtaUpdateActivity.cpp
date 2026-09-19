@@ -3,6 +3,7 @@
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <InflateReader.h>
 #include <WiFi.h>
 
 #include "MappedInputManager.h"
@@ -85,6 +86,14 @@ void OtaUpdateActivity::onEnter() {
   if (auto* fcm = renderer.getFontCacheManager()) {
     fcm->releaseCache();
   }
+
+  // Hand back the 32KB inflate window before the radio takes its ~53KB. The picker releases
+  // it too, but pushActivity() is deferred — its onEnter runs a tick later, so that release
+  // lands after the picker's own activity object has already been allocated here, against
+  // this heap. Without this that allocation meets ~2KB free and the screen does nothing
+  // until a reboot. Idempotent, so the picker's call is a no-op; neither this screen nor
+  // OtaUpdater inflates, and onExit() reboots, which re-reserves the window.
+  InflateReader::releaseWindow();
 
   // Turn on WiFi immediately
   LOG_DBG("OTA", "Turning on WiFi...");

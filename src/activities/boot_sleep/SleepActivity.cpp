@@ -1,6 +1,7 @@
 #include "SleepActivity.h"
 
 #include <BitmapRenderUtils.h>
+#include <BoardConfig.h>
 #include <Epub.h>
 #include <FontCacheManager.h>
 #include <FsHelpers.h>
@@ -22,6 +23,92 @@
 #include "fontIds.h"
 #include "images/Logo120.h"
 #include "images/MoonIcon.h"
+
+namespace {
+
+const char* refreshModeName(const HalDisplay::RefreshMode mode) {
+  switch (mode) {
+    case HalDisplay::FULL_REFRESH:
+      return "FULL";
+    case HalDisplay::HALF_REFRESH:
+      return "HALF";
+    case HalDisplay::SCRUB_REFRESH:
+      return "SCRUB";
+    default:
+      return "FAST";
+  }
+}
+
+// Every panel activation the sleep path makes goes through here, so the SD trace carries
+// one line per activation: which waveform, and how long the controller actually held BUSY.
+// The duration is the diagnostic -- a pass that returns far short of its waveform's cost
+// never drove the panel, which is the difference between "the dose is too weak" and "the
+// paint never reached the glass".
+unsigned long timedPaint(const GfxRenderer& renderer, const HalDisplay::RefreshMode mode, const char* what) {
+  const unsigned long startMs = millis();
+  renderer.displayBuffer(mode);
+  const unsigned long ms = millis() - startMs;
+  SdDebugLog::log("SLP", "paint %s mode=%s ms=%lu", what, refreshModeName(mode), ms);
+  return ms;
+}
+
+// Board and render-path identity, logged once per sleep. The controller is the load-bearing
+// field: HALF is a charge scrub on the UltraChip parts and a single-pass absolute waveform on
+// SSD1677, so the same firmware leaves a different amount of pigment packed on each, and the
+// trace is unreadable without knowing which silicon produced it. The settings row matters for
+// the same reason -- the cover filter alone decides whether the wallpaper takes the grayscale
+// pipeline or the 1-bit halftone one (SleepImageRender.h).
+void logSleepEntry(const GfxRenderer& renderer, const bool fromTimeout, const bool quickResume) {
+  SdDebugLog::log("SLP", "entry board=%s ctrl=%u var=%02X spiHz=%lu fromReader=%d fromTimeout=%d quickResume=%d",
+                  BoardConfig::ACTIVE.name, static_cast<unsigned>(BoardConfig::ACTIVE.displayController),
+                  BoardConfig::ACTIVE.displayControllerVariant,
+                  static_cast<unsigned long>(BoardConfig::ACTIVE.displaySpiHz), APP_STATE.lastSleepFromReader ? 1 : 0,
+                  fromTimeout ? 1 : 0, quickResume ? 1 : 0);
+  // inverted is in here because night mode decides how much of the panel the reader held BLACK,
+  // which is the load on the clean; it was absent for three rounds of this investigation and its
+  // absence sent one of them down the wrong pipeline.
+  //
+  // fadingFix is the other settings row that changes the panel's electrical history rather than
+  // its picture: it is the `turnOffScreen` argument threaded through displayBuffer
+  // (GfxRenderer.cpp:2122 -> FreeInkDisplay.cpp:602 -> Uc8279X4Driver.cpp:509), and with it OFF
+  // powerOnIfNeeded() never sees a POF, so the panel's DC-DC stays energised from the first paint
+  // after boot until deepSleep() -- a whole reading session of rails on a static image. Without
+  // this field the trace cannot say which of the two regimes produced a capture.
+  SdDebugLog::log("SLP", "cfg screen=%u filter=%u tone=%u dither=%u coverMode=%u gray=%d inverted=%u fadingFix=%u",
+                  SETTINGS.sleepScreen, SETTINGS.sleepScreenCoverFilter, SETTINGS.wallpaperTone, SETTINGS.imageDither,
+                  SETTINGS.sleepScreenCoverMode, sleepImageUsesGrayscale(renderer) ? 1 : 0,
+                  static_cast<unsigned>(SETTINGS.screenInverted), static_cast<unsigned>(SETTINGS.fadingFix));
+
+  // The frame about to be cleaned, and what the panel has been through since the last clean.
+  // These are the measurements the timing lines cannot make:
+  //   heldMs   how long this image has been on the glass. Image sticking is set by DWELL, and the
+  //            ghost that prompted this carried its own status-bar clock showing it came from a
+  //            page held ~13 minutes, not from the page shown 40 s before sleep.
+  //   ink      black coverage of the LOGICAL framebuffer; panelBlack folds in night mode, which
+  //            is what the panel actually held. A night-mode page is ~85% black, and that is the
+  //            load the clean has to lift.
+  //   paints   differential history since the previous deep clean. A session of FAST page turns
+  //            leaves a different residue than one that was fully repainted.
+  // Logged from here, before drawPopup(): that call paints over the framebuffer, and in night mode
+  // it repaints the whole page at flipped polarity, so anything measured after it describes the
+  // popup's frame and not the one the reader actually held.
+  //   railsMs  how long the panel's analog domain was energised over that same span, and parks
+  //            how many times the idle park stood it down. This is the DC-stress integral: with
+  //            no park and no fadingFix it equals the whole session, which is the condition
+  //            image retention is set by. parks=0 with a large railsMs means the park never
+  //            fired -- check it before reading anything else into a capture.
+  const int ink = renderer.frameInkPercent();
+  SdDebugLog::log("SLP", "frame heldMs=%lu ink=%d%% panelBlack=%d%% paints fast=%u half=%u full=%u scrub=%u",
+                  renderer.msSinceLastPaint(), ink, SETTINGS.screenInverted ? 100 - ink : ink,
+                  static_cast<unsigned>(renderer.paintCount(HalDisplay::FAST_REFRESH)),
+                  static_cast<unsigned>(renderer.paintCount(HalDisplay::HALF_REFRESH)),
+                  static_cast<unsigned>(renderer.paintCount(HalDisplay::FULL_REFRESH)),
+                  static_cast<unsigned>(renderer.paintCount(HalDisplay::SCRUB_REFRESH)));
+  SdDebugLog::log("SLP", "rails ms=%lu parks=%u up=%d", renderer.railsMs(), static_cast<unsigned>(renderer.parkCount()),
+                  renderer.panelRailsUp() ? 1 : 0);
+}
+
+}  // namespace
 
 void SleepActivity::onEnter() {
   Activity::onEnter();
@@ -46,33 +133,61 @@ void SleepActivity::onEnter() {
       (fromTimeout &&
        SETTINGS.quickResumeSleepScreen == CrossPointSettings::QUICK_RESUME_SLEEP_SCREEN::QUICK_RESUME_AFTER_TIMEOUT);
 
+  logSleepEntry(renderer, fromTimeout, renderQuickResume);
+
   if (renderQuickResume) {
+    // No deepclean line follows for this path -- quick resume keeps the last screen, which a
+    // panel wipe cannot coexist with. Its absence in the trace is the expected shape, not a
+    // missing write.
+    SdDebugLog::log("SLP", "path=quick-resume (deepclean skipped)");
     return renderLastScreenSleepScreen();
   }
 
-  // Show popup with reader orientation only when going to sleep from reader
+  // Blank the framebuffer before the popup, and never draw the popup over whatever was on it.
+  //
+  // drawPopup() pushes the WHOLE framebuffer, which at this point still holds the screen the user
+  // was on -- and setInverted(false) above has just flipped the output polarity, so on a night-mode
+  // reader this painted the entire page inverted: a full-page, page-shaped image written to the
+  // glass seconds before the clean. The clean's black phase then drives everything to black, where
+  // the already-dark text takes an impulse with nowhere to go optically while the light ground
+  // takes a real transition. That asymmetry is text-shaped and relaxes back out over the minutes
+  // the panel sits unpowered, which is the X4 Pro's "clean at sleep, ghost after a while" report
+  // (photo: the ghost is dark-on-light, the NEGATIVE of what night mode shows).
+  //
+  // Clearing first costs nothing: deepCleanPanel below leaves the framebuffer blank by contract
+  // anyway, and every sleep screen re-renders from scratch after it.
+  //
+  // Cleared to the polarity the panel is ALREADY in, not always to white. setInverted(false) above
+  // means a white clear would swing a night-mode panel from ~90% black to full white for the two
+  // seconds this popup is up, then straight back to black for the clean's first phase -- a whole
+  // extra full-panel reversal, visible as an extra flash, immediately before the panel is parked.
+  // Clearing to black there makes the popup frame continuous with both the page before it and the
+  // clean after it. drawPopup paints its own framed box, so it reads on either ground.
+  const uint8_t entryGround = SETTINGS.screenInverted ? 0x00 : 0xFF;
   if (APP_STATE.lastSleepFromReader) {
     ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
+    renderer.clearScreen(entryGround);
     GUI.drawPopup(renderer, tr(STR_ENTERING_SLEEP));
     renderer.setOrientation(GfxRenderer::Orientation::Portrait);
   } else {
+    renderer.clearScreen(entryGround);
     GUI.drawPopup(renderer, tr(STR_ENTERING_SLEEP));
   }
 
-  // Ghost clear before the sleep image goes down. Sleep is the one moment where a multi-cycle
-  // clean is affordable: the panel is about to change completely, the user is not interacting,
-  // and every sleep screen below re-renders from a cleared framebuffer anyway — which is what
-  // deepCleanPanel leaves behind. Runs after the popup so the flashing has an explanation on
-  // screen before it starts; the popup is wiped by the clean and replaced by the sleep screen.
+  // Ghost clear before the sleep image goes down. Sleep is the one moment where a clean is
+  // affordable: the panel is about to change completely, the user is not interacting, and every
+  // sleep screen below re-renders from a cleared framebuffer anyway — which is what deepCleanPanel
+  // leaves behind. Runs after the popup so the flashing has an explanation on screen before it
+  // starts; the popup is wiped by the clean and replaced by the sleep screen.
   //
   // The quick-resume path never reaches here: it returned above precisely because it keeps the
   // last screen, which a panel wipe cannot coexist with.
   //
-  // One cycle, not the 3 the manual remedy uses. That dose exists to release sticking already
-  // set by minutes of unbroken DC (GfxRenderer.h:238-244); cleaning at every sleep never lets it
-  // get there, so the recurring maintenance wants the small dose and the occasional manual
-  // refresh keeps the large one. Cleaning often and cleaning hard are alternatives, not
-  // partners — and this cost is paid on every single sleep, in time and in panel wear.
+  // One cycle. Three were tried on the X4 Pro's ghosting report and measurably did not help: the
+  // ghost is absent when the wallpaper appears and emerges over the following minutes, so it forms
+  // AFTER the clean, during the unpowered hold -- there is no image on the glass for a larger dose
+  // to remove. Cleaning at every sleep is still worth its ~3 s; cleaning harder is not, and the
+  // difference is ~6 s on every single sleep plus the panel wear.
   static constexpr uint8_t kSleepDeepCleanCycles = 1;
   const unsigned long cleanMs = renderer.deepCleanPanel(kSleepDeepCleanCycles);
   // Not force-enabled like the manual refresh's line: this runs on every sleep, and forcing an
@@ -126,6 +241,7 @@ void SleepActivity::renderCustomSleepScreen() const {
     configureSleepBitmap(bitmap, renderer);  // dither target + halftone tone
     if (bitmap.parseHeaders() == BmpReaderError::Ok) {
       LOG_DBG("SLP", "Loading: /sleep.bmp");
+      SdDebugLog::log("SLP", "wallpaper=/sleep.bmp");
       renderBitmapSleepScreen(bitmap);
       file.close();
       if (dir) dir.close();
@@ -243,6 +359,7 @@ void SleepActivity::renderCustomSleepScreen() const {
             // prompt ignores ".keep.bmp" picks on wake).
             APP_STATE.lastSleepImagePath = filename;
             APP_STATE.saveToFile();
+            SdDebugLog::log("SLP", "wallpaper=%s", filename.c_str());
             renderBitmapSleepScreen(bitmap);
             randFile.close();
             dir.close();
@@ -279,8 +396,8 @@ void SleepActivity::renderCustomSleepScreen() const {
 // X3 opts out: its HALF is already a forced three-pass resync (~3.2s), so it scrubs harder
 // per pass and costs far too much to repeat.
 void SleepActivity::paintSleepFrame() const {
-  renderer.displayBuffer(HalDisplay::HALF_REFRESH);
-  if (!gpio.deviceIsX3()) renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+  timedPaint(renderer, HalDisplay::HALF_REFRESH, "sleep-frame-1");
+  if (!gpio.deviceIsX3()) timedPaint(renderer, HalDisplay::HALF_REFRESH, "sleep-frame-2");
 }
 
 // Sleep screens paint with the HALF refresh (stock parity): the OEM X4 firmware's only
@@ -289,6 +406,7 @@ void SleepActivity::paintSleepFrame() const {
 // (#2471's blinking complaint). paintSleepFrame() repeats it -- see there for why the dose
 // is a second pass rather than a heavier waveform.
 void SleepActivity::renderDefaultSleepScreen() const {
+  SdDebugLog::log("SLP", "path=default");
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
 
@@ -297,7 +415,7 @@ void SleepActivity::renderDefaultSleepScreen() const {
   renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 70, tr(STR_CROSSPOINT), true, EpdFontFamily::BOLD);
   renderer.drawCenteredText(SMALL_FONT_ID, pageHeight / 2 + 95, tr(STR_SLEEPING));
 
-  // Make sleep screen dark unless light is selected in settings
+  // Make sleep screen dark unless light is selected in settings.
   if (SETTINGS.sleepScreen != CrossPointSettings::SLEEP_SCREEN_MODE::LIGHT) {
     renderer.invertScreen();
   }
@@ -336,6 +454,9 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap) const {
   // BW frame is shown, so it keeps the dithered BW render instead. Same answer the dither
   // target above was chosen from -- the two cannot be decided separately.
   const bool hasGreyscale = bitmap.hasGreyscale() && sleepImageUsesGrayscale(renderer);
+  SdDebugLog::log("SLP", "path=bitmap %dx%d at %d,%d crop=%d,%d bmpGray=%d gray=%d", bitmap.getWidth(),
+                  bitmap.getHeight(), x, y, static_cast<int>(cropX * 100), static_cast<int>(cropY * 100),
+                  bitmap.hasGreyscale() ? 1 : 0, hasGreyscale ? 1 : 0);
 
   renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, cropX, cropY);
 
@@ -348,13 +469,17 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap) const {
     // calibrated against the pixel state the single-pass HALF waveform leaves
     // behind. A FULL (GC) base parks pixels in a different charge state and
     // the differential nudge then lands unevenly (blotchy noise in gray areas).
+    const unsigned long baseStartMs = millis();
     renderer.displayGrayscaleBase(HalDisplay::HALF_REFRESH);
+    SdDebugLog::log("SLP", "paint gray-base mode=HALF ms=%lu", millis() - baseStartMs);
   } else {
     paintSleepFrame();
   }
 
   if (hasGreyscale) {
+    const unsigned long overlayStartMs = millis();
     BitmapRenderUtils::applyGrayscaleOverlay(renderer, bitmap, x, y, pageWidth, pageHeight, cropX, cropY);
+    SdDebugLog::log("SLP", "paint gray-overlay ms=%lu", millis() - overlayStartMs);
   }
 }
 
@@ -429,6 +554,7 @@ void SleepActivity::renderCoverSleepScreen() const {
     Bitmap bitmap(file);
     if (bitmap.parseHeaders() == BmpReaderError::Ok) {
       LOG_DBG("SLP", "Rendering sleep cover: %s", coverBmpPath.c_str());
+      SdDebugLog::log("SLP", "wallpaper=cover %s", coverBmpPath.c_str());
       renderBitmapSleepScreen(bitmap);
       return;
     }
@@ -445,11 +571,12 @@ void SleepActivity::renderLastScreenSleepScreen() const {
     // waveform can add the moon without a full-screen flash.
     renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
   } else {
-    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    timedPaint(renderer, HalDisplay::HALF_REFRESH, "quick-resume");
   }
 }
 
 void SleepActivity::renderBlankSleepScreen() const {
+  SdDebugLog::log("SLP", "path=blank");
   renderer.clearScreen();
   paintSleepFrame();
 }

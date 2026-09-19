@@ -80,6 +80,8 @@ void HalDisplay::waitRefreshComplete() { einkDisplay.waitRefreshComplete(); }
 
 bool HalDisplay::supportsAsyncRefresh() const { return einkDisplay.supportsAsyncRefresh(); }
 
+void HalDisplay::controllerIdle() { einkDisplay.controllerIdle(); }
+
 bool HalDisplay::supportsAsyncGrayscaleBase() const { return einkDisplay.supportsAsyncGrayscaleBase(); }
 
 void HalDisplay::refreshDisplay(HalDisplay::RefreshMode mode, bool turnOffScreen) {

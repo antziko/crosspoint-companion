@@ -3,6 +3,7 @@
 #include <FreeInkUIGfxRenderer.h>
 #include <GfxRenderer.h>
 #include <HalClock.h>
+#include <HalFrontlight.h>
 #include <HalGPIO.h>
 #include <HalPowerManager.h>
 #include <HalStorage.h>
@@ -28,6 +29,38 @@ namespace {
 constexpr int homeMenuMargin = 20;
 constexpr int homeMarginTop = 30;
 constexpr int subtitleY = 738;
+
+#if FREEINK_CAP_FRONTLIGHT
+// Status-bar frontlight indicator: an 11px filled sun, shown only while the light
+// is ON and omitted entirely when it is off -- at this size a filled-vs-outline
+// pair (the frontlight panel's convention) is too subtle to read at a glance.
+// Drawn from primitives rather than the icon bitmaps, whose smallest size (24px)
+// is twice the height of the bar's battery.
+constexpr int frontlightIconSize = 11;
+
+// x is the icon's left edge, cy its centre row.
+void drawFrontlightIcon(const GfxRenderer& renderer, const int x, const int cy) {
+  const int cx = x + frontlightIconSize / 2;
+
+  // Core: a filled 5x5 disc.
+  renderer.fillRect(cx - 1, cy - 2, 3, 1, true);
+  renderer.fillRect(cx - 1, cy + 2, 3, 1, true);
+  renderer.fillRect(cx - 2, cy - 1, 1, 3, true);
+  renderer.fillRect(cx + 2, cy - 1, 1, 3, true);
+  renderer.fillRect(cx - 1, cy - 1, 3, 3, true);
+
+  // Eight rays, each 2px long and each a clear pixel off the core: nothing in the
+  // glyph is a lone pixel, which a FAST refresh can dither away.
+  renderer.fillRect(cx, cy - 5, 1, 2, true);
+  renderer.fillRect(cx, cy + 4, 1, 2, true);
+  renderer.fillRect(cx - 5, cy, 2, 1, true);
+  renderer.fillRect(cx + 4, cy, 2, 1, true);
+  renderer.drawLine(cx - 3, cy - 3, cx - 4, cy - 4, true);
+  renderer.drawLine(cx + 3, cy - 3, cx + 4, cy - 4, true);
+  renderer.drawLine(cx - 3, cy + 3, cx - 4, cy + 4, true);
+  renderer.drawLine(cx + 3, cy + 3, cx + 4, cy + 4, true);
+}
+#endif
 }  // namespace
 
 void BaseTheme::drawBatteryOutline(const GfxRenderer& renderer, int x, int y, int battWidth, int rectHeight) {
@@ -1185,7 +1218,7 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
                         showBatteryPercentage);
   }
 
-  // Draw Date and Clock (X3 only — DS3231 RTC). Layout: [date] [clock] [progress%]
+  // Draw Date, frontlight state and Clock. Layout: [date] [light] [clock] [progress%]
   char dateBuf[12] = {};
   int dateTextWidth = 0;
   char timeBuf[9] = {};
@@ -1204,8 +1237,21 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
     }
   }
 
-  const int dateClockGap = (dateTextWidth > 0 && clockTextWidth > 0) ? 6 : 0;
-  const int totalDateClockWidth = dateTextWidth + dateClockGap + clockTextWidth;
+  // The frontlight indicator sits immediately left of the clock, and takes the
+  // clock's slot when the clock is hidden or has no time yet (on every board but
+  // X3 the clock needs an NTP sync in this power cycle). It reserves width only
+  // while the light is lit, so the cluster closes up when it goes out; boards
+  // without a frontlight never reserve any, leaving their layout unchanged.
+#if FREEINK_CAP_FRONTLIGHT
+  const int lightIconWidth = (Frontlight.present() && Frontlight.isOn()) ? frontlightIconSize : 0;
+#else
+  constexpr int lightIconWidth = 0;
+#endif
+
+  constexpr int clusterGap = 6;
+  const int clusterParts = (dateTextWidth > 0 ? 1 : 0) + (lightIconWidth > 0 ? 1 : 0) + (clockTextWidth > 0 ? 1 : 0);
+  const int totalDateClockWidth =
+      dateTextWidth + lightIconWidth + clockTextWidth + (clusterParts > 1 ? clusterGap * (clusterParts - 1) : 0);
 
   if (totalDateClockWidth > 0) {
     const int rightEdge = renderer.getScreenWidth() - metrics.statusBarHorizontalMargin - orientedMarginRight -
@@ -1213,8 +1259,16 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
     int x = rightEdge - totalDateClockWidth;
     if (dateTextWidth > 0) {
       renderer.drawText(SMALL_FONT_ID, x, textY, dateBuf);
-      x += dateTextWidth + dateClockGap;
+      x += dateTextWidth + clusterGap;
     }
+#if FREEINK_CAP_FRONTLIGHT
+    if (lightIconWidth > 0) {
+      // Centred on the band drawBatteryLeft() uses (it drops its icon 6px below
+      // the text origin), so the light and the battery share a centre line.
+      drawFrontlightIcon(renderer, x, textY + 6 + metrics.batteryHeight / 2);
+      x += lightIconWidth + clusterGap;
+    }
+#endif
     if (clockTextWidth > 0) {
       renderer.drawText(SMALL_FONT_ID, x, textY, timeBuf);
     }

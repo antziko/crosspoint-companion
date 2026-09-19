@@ -1,9 +1,13 @@
 #include "SdCardFontRegistry.h"
 
+#include <Arduino.h>
 #include <HalStorage.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
+#include <esp_heap_caps.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 // --- SdCardFontFamilyInfo helpers ---
@@ -32,13 +36,6 @@ const SdCardFontFileInfo* SdCardFontFamilyInfo::findNearestSize(const uint8_t po
     }
   }
   return best;
-}
-
-bool SdCardFontFamilyInfo::hasSize(uint8_t size) const {
-  for (const auto& f : files) {
-    if (f.pointSize == size) return true;
-  }
-  return false;
 }
 
 std::vector<uint8_t> SdCardFontFamilyInfo::availableSizes() const {
@@ -133,12 +130,45 @@ void SdCardFontRegistry::scanDirectory(const char* dirPath, SdCardFontFamilyInfo
       continue;
     }
 
-    SdCardFontFileInfo info;
-    info.path = std::string(dirPath) + "/" + nameBuffer;
+    // Bounded copy, and SKIP rather than truncate: a truncated name builds a path
+    // that either fails to open or names a different file.
+    if (strlen(nameBuffer) >= SD_FONT_FILENAME_MAX) {
+      LOG_ERR("SDREG", "Font name too long (%u >= %u), skipping: %s", (unsigned)strlen(nameBuffer),
+              (unsigned)SD_FONT_FILENAME_MAX, nameBuffer);
+      continue;
+    }
+
+    SdCardFontFileInfo info{};
+    std::strcpy(info.filename, nameBuffer);
     info.pointSize = size;
     info.style = style;
-    family.files.push_back(std::move(info));
+    family.files.push_back(info);
   }
+}
+
+// Discovery only needs to know whether a directory holds at least one admissible
+// .cpfont (scanRoot's admission rule). Answering that without materialising the
+// listing is what keeps the catalogue to a name and a root per family.
+bool SdCardFontRegistry::hasAnyFontFile(const char* dirPath) {
+  HalFile dir = Storage.open(dirPath);
+  if (!dir || !dir.isDirectory()) return false;
+
+  char nameBuffer[128];
+  while (true) {
+    HalFile entry = dir.openNextFile();
+    if (!entry) break;
+    if (entry.isDirectory()) {
+      entry.close();
+      continue;
+    }
+    entry.getName(nameBuffer, sizeof(nameBuffer));
+    entry.close();
+    if (nameBuffer[0] == '.' || nameBuffer[0] == '_') continue;
+    if (strlen(nameBuffer) >= SD_FONT_FILENAME_MAX) continue;
+    uint8_t size, style;
+    if (parseFilename(nameBuffer, size, style)) return true;
+  }
+  return false;
 }
 
 // Scan a single root (e.g. "/.fonts") and append its families to `out`.
@@ -176,16 +206,17 @@ void SdCardFontRegistry::scanRoot(const char* rootPath, std::vector<SdCardFontFa
       }
       if (exists) continue;
 
+      char subDirPath[192];
+      snprintf(subDirPath, sizeof(subDirPath), "%s/%s", rootPath, nameBuffer);
+      // The admission rule is unchanged (a directory with no usable .cpfont is not a
+      // family); only the listing is discarded rather than retained.
+      if (!hasAnyFontFile(subDirPath)) continue;
+
       SdCardFontFamilyInfo family;
       family.name = nameBuffer;
-      std::string subDirPath = std::string(rootPath) + "/" + nameBuffer;
-      SdCardFontRegistry::scanDirectory(subDirPath.c_str(), family);
-
-      if (!family.files.empty()) {
-        out.push_back(std::move(family));
-        LOG_DBG("SDREG", "Found family: %s (%d files) in %s", out.back().name.c_str(),
-                static_cast<int>(out.back().files.size()), rootPath);
-      }
+      family.hiddenRoot = (strcmp(rootPath, FONTS_DIR_HIDDEN) == 0);
+      out.push_back(std::move(family));
+      LOG_DBG("SDREG", "Found family: %s in %s", out.back().name.c_str(), rootPath);
     } else {
       entry.close();
     }
@@ -193,6 +224,16 @@ void SdCardFontRegistry::scanRoot(const char* rootPath, std::vector<SdCardFontFa
 }
 
 bool SdCardFontRegistry::discover() {
+  // Measurement, not decoration: the catalogue is resident for the whole session and
+  // grows with every family installed, so its true cost on a real card is the number
+  // that says whether the font screen's post-download reload has room. Blocks matter
+  // as much as bytes — the 09-17 abort died asking for 31 bytes with 1,436 free,
+  // because the free heap was in fragments of 28.
+  multi_heap_info_t before;
+  heap_caps_get_info(&before, MALLOC_CAP_8BIT);
+  const uint32_t startMs = millis();
+
+  invalidateFileCache();
   families_.clear();
   families_.reserve(MAX_SD_FAMILIES);
 
@@ -210,8 +251,51 @@ bool SdCardFontRegistry::discover() {
     families_.resize(MAX_SD_FAMILIES);
   }
 
+  multi_heap_info_t after;
+  heap_caps_get_info(&after, MALLOC_CAP_8BIT);
   LOG_DBG("SDREG", "Discovery complete: %d families", static_cast<int>(families_.size()));
+  // The per-context trace flag is off during setup() — no screen has opened yet — and the
+  // boot discovery is precisely the measurement that matters. Force it on for this one line
+  // and restore; the user's master switch (SETTINGS.sdCardLogging) still gates it.
+  const bool traceWasEnabled = SdDebugLog::isEnabled();
+  SdDebugLog::setEnabled(true);
+  SdDebugLog::log("SDREG", "discover families=%d ms=%lu free=%u->%u largest=%u->%u blocks=%u->%u",
+                  static_cast<int>(families_.size()), (unsigned long)(millis() - startMs),
+                  (unsigned)before.total_free_bytes, (unsigned)after.total_free_bytes,
+                  (unsigned)before.largest_free_block, (unsigned)after.largest_free_block, (unsigned)before.free_blocks,
+                  (unsigned)after.free_blocks);
+  SdDebugLog::setEnabled(traceWasEnabled);
   return !families_.empty();
+}
+
+void SdCardFontRegistry::invalidateFileCache() const {
+  fileCacheValid_ = false;
+  fileCache_.name.clear();
+  // swap-with-empty, not clear(): the capacity IS the block being handed back.
+  std::vector<SdCardFontFileInfo>().swap(fileCache_.files);
+}
+
+const SdCardFontFamilyInfo* SdCardFontRegistry::familyWithFiles(const std::string& name) const {
+  if (fileCacheValid_ && fileCache_.name == name) return &fileCache_;
+
+  const SdCardFontFamilyInfo* entry = findFamily(name);
+  if (!entry) return nullptr;
+
+  invalidateFileCache();
+  fileCache_.name = entry->name;
+  fileCache_.hiddenRoot = entry->hiddenRoot;
+
+  char dirPath[192];
+  snprintf(dirPath, sizeof(dirPath), "%s/%s", rootFor(entry->hiddenRoot), entry->name.c_str());
+  scanDirectory(dirPath, fileCache_);
+  if (fileCache_.files.empty()) {
+    // Admitted at discovery but empty now (deleted under us). Leave the cache invalid so
+    // the next call re-scans rather than serving an empty listing forever.
+    invalidateFileCache();
+    return nullptr;
+  }
+  fileCacheValid_ = true;
+  return &fileCache_;
 }
 
 const char* SdCardFontRegistry::findFamilyRoot(const char* familyName) {
@@ -222,6 +306,11 @@ const char* SdCardFontRegistry::findFamilyRoot(const char* familyName) {
   snprintf(path, sizeof(path), "%s/%s", FONTS_DIR_VISIBLE, familyName);
   if (Storage.exists(path)) return FONTS_DIR_VISIBLE;
   return nullptr;
+}
+
+void SdCardFontRegistry::buildPath(const SdCardFontFamilyInfo& family, const SdCardFontFileInfo& file, char* outBuf,
+                                   const size_t outBufSize) {
+  snprintf(outBuf, outBufSize, "%s/%s/%s", rootFor(family.hiddenRoot), family.name.c_str(), file.filename);
 }
 
 const char* SdCardFontRegistry::defaultWriteRoot() {
@@ -239,11 +328,4 @@ const SdCardFontFamilyInfo* SdCardFontRegistry::findFamily(const std::string& na
     if (f.name == name) return &f;
   }
   return nullptr;
-}
-
-int SdCardFontRegistry::getFamilyIndex(const std::string& name) const {
-  for (int i = 0; i < static_cast<int>(families_.size()); i++) {
-    if (families_[i].name == name) return i;
-  }
-  return -1;
 }

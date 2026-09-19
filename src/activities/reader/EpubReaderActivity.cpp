@@ -65,6 +65,7 @@
 #include "util/FlashcardDeck.h"
 #include "util/LookupMarks.h"
 #include "util/PageMarks.h"
+#include "util/ScreenRefresh.h"
 #include "util/ScreenshotUtil.h"
 
 namespace {
@@ -512,6 +513,16 @@ uint32_t EpubReaderActivity::currentChapterHash() {
   return chapterHash;
 }
 
+const char* EpubReaderActivity::cardSurfaceForm(const char* word, const int wordLen, const char* excerpt,
+                                                const int excerptLen, int& outLen) {
+  const char* surface = FlashcardDeck::findSurfaceForm(word, wordLen, excerpt, excerptLen, &outLen);
+  if (!surface || outLen <= 0) {
+    surface = word;
+    outLen = wordLen;
+  }
+  return surface;
+}
+
 void EpubReaderActivity::reloadLookupMarks() const {
   LookupMarks::getInstance().clear();
   if (!epub || !SETTINGS.lookupUnderline) return;
@@ -522,13 +533,9 @@ void EpubReaderActivity::reloadLookupMarks() const {
       [](void* ctx, const char* word, int wordLen, const char* title, int titleLen, int page, int pageCount,
          const char* excerpt, int excerptLen) {
         // Mark the word the PAGE prints, which a "Did you mean?" card does not carry as its
-        // headword — findSurfaceForm recovers it from the card's own excerpt.
+        // headword — cardSurfaceForm recovers it from the card's own excerpt.
         int surfaceLen = 0;
-        const char* surface = FlashcardDeck::findSurfaceForm(word, wordLen, excerpt, excerptLen, &surfaceLen);
-        if (!surface || surfaceLen <= 0) {
-          surface = word;
-          surfaceLen = wordLen;
-        }
+        const char* surface = cardSurfaceForm(word, wordLen, excerpt, excerptLen, surfaceLen);
         if (LookupMarks::getInstance().add(surface, surfaceLen, title, titleLen, page, pageCount)) {
           (*static_cast<int*>(ctx))++;
         }
@@ -1327,6 +1334,17 @@ bool EpubReaderActivity::runHoldAction() {
     case CrossPointSettings::HOLD_CONFIRM_READER_MENU:
       openReaderMenu();
       return true;
+    case CrossPointSettings::HOLD_CONFIRM_REFRESH_SCREEN:
+      // Exactly the power button's Refresh Screen action, honouring Settings > Display >
+      // Refresh Screen Mode -- not a private variant, so the two cannot drift apart.
+      // refreshScreenNow() takes the render lock itself and this runs from the input handler,
+      // which does not hold it.
+      refreshScreenNow(renderer);
+      // The clear blanks the framebuffer, so the page has to be repainted from scratch. The
+      // reader keeps no differential state across a render, so requestUpdate() is enough --
+      // unlike the popup paths above, which only ask for a light repaint.
+      requestUpdate();
+      return true;
     default:
       return false;
   }
@@ -1447,10 +1465,20 @@ void EpubReaderActivity::openPageActionMenu(const int x, const int y) {
   // the word, this names what to do with it. Look Up needs a prepared dictionary; Highlight
   // is always available, so the menu is never empty.
   const bool hasDict = Dictionary::exists(epub->getCachePath().c_str());
-  const char* labels[2];
+  // Parallel to `labels`, so a conditional row can never shift what an index means. The old
+  // two-row form did the mapping with index arithmetic against `hasDict`; a third conditional
+  // row makes that unreadable and one edit away from wrong.
+  enum class Act : uint8_t { LookUp, Highlight, DeleteCard };
+  const char* labels[3];
+  Act actions[3];
   int count = 0;
-  if (hasDict) labels[count++] = tr(STR_LOOKUP_SHORT);
-  labels[count++] = tr(STR_ADD_HIGHLIGHT);
+  const auto add = [&](const Act act, const char* label) {
+    labels[count] = label;
+    actions[count] = act;
+    ++count;
+  };
+  if (hasDict) add(Act::LookUp, tr(STR_LOOKUP_SHORT));
+  add(Act::Highlight, tr(STR_ADD_HIGHLIGHT));
 
   // Answer the hold before asking what to do with it: invert the word the finger landed on and
   // push just that rect, so the user sees which word they got while the dialog is still being
@@ -1460,7 +1488,9 @@ void EpubReaderActivity::openPageActionMenu(const int x, const int y) {
   char title[48];
   const char* titleText = tr(STR_SELECT);
   PageMarks::WordHit hit;
-  if (section) {
+  pageActionHasMark_ = false;
+  pageActionWord_[0] = '\0';
+  if (section && section->pageCount > 0) {
     int marginTop, marginRight, marginBottom, marginLeft;
     renderer.getOrientedViewableTRBL(&marginTop, &marginRight, &marginBottom, &marginLeft);
     marginTop += SETTINGS.getReaderScreenMargin();
@@ -1473,7 +1503,25 @@ void EpubReaderActivity::openPageActionMenu(const int x, const int y) {
       if (PageMarks::invertWordAtPoint(renderer, *page, SETTINGS.getReaderFontId(), marginLeft, marginTop, x, y, hit)) {
         renderer.displayWindowRegion(hit.x, hit.y, hit.width, hit.height);
       }
+      // Ask about the CENTRE of the token just inverted rather than the raw finger point: the
+      // tap boxes invertWordAtPoint resolves against are grown by the inter-word gap, so a point
+      // in that gap picks a word while sitting outside its underline. The centre of the band the
+      // user can see is unambiguously inside the span drawn for it.
+      const int probeX = hit.width > 0 ? hit.x + hit.width / 2 : x;
+      const int probeY = hit.height > 0 ? hit.y + hit.height / 2 : y;
+      if (const LookupMarks::Mark* mark = PageMarks::lookupMarkAtPoint(
+              renderer, *page, SETTINGS.getReaderFontId(), marginLeft, marginTop, probeX, probeY, currentChapterHash(),
+              section->currentPage + 1, section->pageCount)) {
+        pageActionMark_ = *mark;  // copied: reloadLookupMarks() rebuilds the table wholesale
+        pageActionHasMark_ = true;
+      }
     }
+  }
+  // Destructive row last, furthest from the one a finger aims at most -- the same ordering the
+  // definition screen's footer chips follow.
+  if (pageActionHasMark_) {
+    snprintf(pageActionWord_, sizeof(pageActionWord_), "%s", hit.text);
+    add(Act::DeleteCard, tr(STR_DELETE));
   }
   // The centred dialog covers the middle of the page, so a word there is hidden the moment it
   // appears -- naming it in the title keeps it readable. Book text, not UI text, like the quote
@@ -1486,17 +1534,99 @@ void EpubReaderActivity::openPageActionMenu(const int x, const int y) {
   pageActionX_ = x;
   pageActionY_ = y;
   pageActionChose_ = false;
-  pageActionPopup.show(titleText, labels, count, /*currentIndex=*/0, [this, hasDict](const int idx) {
+  // actions is 3 bytes, so the closure still fits std::function's inline buffer -- no allocation
+  // on a path the heap is already tight on.
+  const Act a0 = actions[0];
+  const Act a1 = count > 1 ? actions[1] : Act::Highlight;
+  const Act a2 = count > 2 ? actions[2] : Act::Highlight;
+  pageActionPopup.show(titleText, labels, count, /*currentIndex=*/0, [this, a0, a1, a2, count](const int idx) {
     pageActionChose_ = true;
-    // The popup is drawn over the page, so whichever screen this opens has to repaint it:
-    // both pass framebufferContainsPage = false and re-render from the Page themselves.
-    if (hasDict && idx == 0) {
-      openWordSelect(/*framebufferContainsPage=*/false, pageActionX_, pageActionY_);
-    } else {
-      openHighlightSelect(pageActionX_, pageActionY_);
+    if (idx < 0 || idx >= count) return;
+    const Act act = idx == 0 ? a0 : (idx == 1 ? a1 : a2);
+    // The popup is drawn over the page, so whatever this opens has to repaint it: the two
+    // selection screens pass framebufferContainsPage = false and re-render from the Page
+    // themselves, and the delete confirmation covers the dialog outright.
+    switch (act) {
+      case Act::LookUp:
+        openWordSelect(/*framebufferContainsPage=*/false, pageActionX_, pageActionY_);
+        break;
+      case Act::Highlight:
+        openHighlightSelect(pageActionX_, pageActionY_);
+        break;
+      case Act::DeleteCard:
+        promptDeleteMarkedCard();
+        break;
     }
   });
   paintPageActionPopup();
+}
+
+void EpubReaderActivity::promptDeleteMarkedCard() {
+  if (!pageActionHasMark_ || !epub) {
+    requestUpdate();
+    return;
+  }
+  // Captured by value: the confirmation runs a frame or more later, and the next hold would
+  // otherwise have replaced both.
+  const LookupMarks::Mark mark = pageActionMark_;
+  const std::string shown = pageActionWord_;
+  startActivityForResultNoThrow<ConfirmationActivity>(
+      [this, mark](const ActivityResult& res) {
+        if (res.isCancelled) {
+          requestUpdate();  // back to the page, card untouched
+          return;
+        }
+        // The mark carries hashes, not text, and the hash is of the word the PAGE prints -- the
+        // card may be filed under something else entirely (a "Did you mean?" suggestion). So the
+        // card's own key is recovered by streaming the deck and re-deriving each card's surface
+        // form exactly as reloadLookupMarks does, then matching the whole mark identity. One
+        // pass over a small file, on a deliberate action; nothing is allocated per card.
+        struct Ctx {
+          const LookupMarks::Mark* mark;
+          std::string found;
+        } ctx{&mark, {}};
+        FlashcardDeck::forEachCardAnchor(
+            epub->getCachePath(),
+            [](void* raw, const char* word, int wordLen, const char* title, int titleLen, int page, int pageCount,
+               const char* excerpt, int excerptLen) {
+              auto* c = static_cast<Ctx*>(raw);
+              if (page != c->mark->page || pageCount != c->mark->pageCount) return true;
+              if (LookupMarks::hashChapter(title, titleLen > 0 ? static_cast<size_t>(titleLen) : 0) !=
+                  c->mark->chapterHash) {
+                return true;
+              }
+              int surfaceLen = 0;
+              const char* surface = cardSurfaceForm(word, wordLen, excerpt, excerptLen, surfaceLen);
+              uint16_t byteLen = 0;
+              if (LookupMarks::hashAppend(LookupMarks::FNV_OFFSET, surface, static_cast<size_t>(surfaceLen),
+                                          &byteLen) != c->mark->wordHash ||
+                  byteLen != c->mark->byteLen) {
+                return true;
+              }
+              c->found.assign(word, static_cast<size_t>(wordLen));
+              return false;  // the deck holds one line per word
+            },
+            &ctx);
+
+        if (ctx.found.empty()) {
+          // The mark outlived its card (deleted from the flashcard list, or dropped by a sync
+          // while the menu was up). Rebuild the table so the stale underline goes too.
+          LOG_ERR("EPUB", "hold delete: no card behind the mark");
+          reloadLookupMarks();
+          requestUpdate();
+          return;
+        }
+
+        FlashcardDeck::remove(epub->getCachePath(), ctx.found);
+        // The re-count throttle keys on the word, not the card: without this a lookup of the
+        // same word inside the window is suppressed against a card that no longer exists, and
+        // the underline never comes back.
+        FlashcardDeck::clearEnrollCooldown();
+        SdDebugLog::log("EPUB", "hold delete: %s", ctx.found.c_str());
+        reloadLookupMarks();  // drops this word's underline
+        requestUpdate();
+      },
+      renderer, mappedInput, tr(STR_FLASHCARD_DELETE_TITLE), shown);
 }
 
 void EpubReaderActivity::paintPageActionPopup() {

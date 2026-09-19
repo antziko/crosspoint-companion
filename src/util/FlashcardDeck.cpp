@@ -1514,15 +1514,17 @@ bool FlashcardDeck::appendRemoteCard(const std::string& cachePath, const std::st
   return ok;
 }
 
-bool FlashcardDeck::cardDict(const std::string& cachePath, const std::string& word, uint32_t& outDictHash) {
+bool FlashcardDeck::cardDict(const std::string& cachePath, const std::string& word, uint32_t& outDictHash,
+                             uint32_t* outCount) {
   // Deliberately not CountCtx: that carries a 160-byte excerpt and an 80-byte chapter on the
-  // stack for fields this query never reads. Three words is enough, and the ESP32-C3 stack is
+  // stack for fields this query never reads. Four words is enough, and the ESP32-C3 stack is
   // small enough for the difference to matter on a path called before every flip.
   struct Q {
     const std::string* word;
     uint32_t hash;
+    uint32_t count;
     bool found;
-  } q{&word, 0, false};
+  } q{&word, 0, 1, false};
 
   const bool opened = forEachLine(
       filePath(cachePath),
@@ -1533,12 +1535,14 @@ bool FlashcardDeck::cardDict(const std::string& cachePath, const std::string& wo
           return true;  // keep scanning
         }
         c->hash = p.dictHash;
+        c->count = p.count;
         c->found = true;
         return false;  // stop at the match — the deck holds one line per word
       },
       &q);
   if (!opened || !q.found) return false;  // no deck file, or no card for this word
   outDictHash = q.hash;
+  if (outCount) *outCount = q.count;
   return true;
 }
 

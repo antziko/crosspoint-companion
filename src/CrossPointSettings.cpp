@@ -170,6 +170,12 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   if (s.keyboardLayouts != 0) {
     doc["keyboardLayouts"] = s.keyboardLayouts;
   }
+
+  // A uint32_t epoch, likewise outside the uint8_t table. Omitted until a sync has
+  // actually happened, so an untouched file stays free of a meaningless zero.
+  if (s.clockLastSyncEpoch != 0) {
+    doc["clockLastSyncEpoch"] = s.clockLastSyncEpoch;
+  }
 }
 
 bool CrossPointSettings::fromJson(JsonVariantConst doc) {
@@ -287,6 +293,10 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   // Absent means unconfigured, which is the default.
   if (doc["keyboardLayouts"].is<uint16_t>()) {
     keyboardLayouts = doc["keyboardLayouts"].as<uint16_t>();
+  }
+
+  if (doc["clockLastSyncEpoch"].is<uint32_t>()) {
+    clockLastSyncEpoch = doc["clockLastSyncEpoch"].as<uint32_t>();
   }
 
   if (needsResave) {

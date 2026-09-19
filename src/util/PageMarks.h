@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "LookupMarks.h"
+
 class GfxRenderer;
 class Page;
 
@@ -49,5 +51,21 @@ struct WordHit {
 // Call with the page still in the framebuffer; the band is drawn over the glyphs already there.
 bool invertWordAtPoint(const GfxRenderer& renderer, const Page& page, int fontId, int marginLeft, int marginTop, int x,
                        int y, WordHit& out);
+
+// The looked-up word covering (x, y) on this page, or nullptr. Answers "is the word under the
+// finger one this book has a flashcard for", which is the question the page's hold menu asks
+// before offering to delete that card.
+//
+// Walks the page exactly as drawForPage does and drives the same LookupMarks::step, so a mark is
+// reported here if and only if the underline was drawn for it -- including a CJK word, which is
+// a RUN of one-character tokens and so cannot be recognised from the held token alone. Returns
+// nullptr when SETTINGS.lookupUnderline is off: the table is empty then, and there is no mark on
+// screen to act on.
+//
+// `chapterHash`, `pageNumber` and `pageCount` are the page key drawForPage takes, and must be the
+// same values -- a chapter that has re-paginated matches nothing, by design.
+const LookupMarks::Mark* lookupMarkAtPoint(const GfxRenderer& renderer, const Page& page, int fontId, int marginLeft,
+                                           int marginTop, int x, int y, uint32_t chapterHash, int pageNumber,
+                                           int pageCount);
 
 }  // namespace PageMarks

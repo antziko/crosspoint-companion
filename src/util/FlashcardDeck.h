@@ -186,7 +186,12 @@ class FlashcardDeck {
   // Callers need this to tell "this dictionary is already the card's" from "this card has none":
   // setCardDict collapses both into a bool and cannot be used to ask. One streaming pass that
   // stops at the match, so it is cheap enough to run before a lookup.
-  static bool cardDict(const std::string& cachePath, const std::string& word, uint32_t& outDictHash);
+  //
+  // outCount, when given, also receives the card's lookup count -- the pass already parses the
+  // whole line, so the field is free here and a separate query would be a second read of the same
+  // file. Untouched when this returns false. A legacy line with no count field reads as 1.
+  static bool cardDict(const std::string& cachePath, const std::string& word, uint32_t& outDictHash,
+                       uint32_t* outCount = nullptr);
 
   // Total card count without materializing the deck (one streaming pass).
   static int count(const std::string& cachePath);
