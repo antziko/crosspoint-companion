@@ -1,9 +1,17 @@
 """
-PlatformIO pre-build script: inject the short SHA into
+PlatformIO pre-build script: inject the base version and short SHA into
 CROSSPOINT_VERSION for the default (dev) environment.
 
 Results in a version string like:  1.6.0-05c6cf8
-Release environments are unaffected; they set CROSSPOINT_VERSION in the ini.
+
+The base version is the HIGHER of [crosspoint] version in platformio.ini and the
+latest non-rc release tag reachable from upstream's develop. Deriving it keeps dev
+builds from under-reporting on a long-lived fork: OtaUpdater polls the UPSTREAM
+release feed and compares semver, so a stale number makes the device offer an OTA
+that would flash upstream firmware over the fork.
+
+Release environments are unaffected; they set CROSSPOINT_VERSION from the ini, so a
+release still needs the ini bumped by hand.
 """
 
 import configparser
@@ -53,7 +61,7 @@ def get_git_short_sha(project_dir):
     )
 
 
-def get_base_version(project_dir):
+def get_ini_version(project_dir):
     ini_path = os.path.join(project_dir, 'platformio.ini')
     if not os.path.isfile(ini_path):
         warn(f'platformio.ini not found at {ini_path}; base version will be "0.0.0"')
@@ -64,6 +72,70 @@ def get_base_version(project_dir):
         warn('No [crosspoint] version in platformio.ini; base version will be "0.0.0"')
         return '0.0.0'
     return config.get('crosspoint', 'version')
+
+
+def parse_semver(value):
+    """Leading MAJOR.MINOR.PATCH as a tuple, or None if absent.
+
+    Mirrors OtaUpdater::isUpdateNewer(), which sscanf's "%d.%d.%d" off the front
+    and ignores any suffix.
+    """
+    parts = value.lstrip('v').split('.')[:3]
+    if len(parts) < 3:
+        return None
+    out = []
+    for part in parts:
+        digits = ''
+        for c in part:
+            if not c.isdigit():
+                break
+            digits += c
+        if not digits:
+            return None
+        out.append(int(digits))
+    return tuple(out)
+
+
+def get_upstream_release_version(project_dir):
+    """Latest non-rc release tag reachable from upstream's develop, or None.
+
+    --match keeps junk tags (sd-fonts, _pre_*) out; --exclude drops release
+    candidates. A missing remote is normal (fresh clone, CI on the upstream repo
+    itself), so this falls through quietly rather than warning.
+    """
+    for ref in ('upstream/develop', 'origin/develop'):
+        try:
+            value = subprocess.check_output(
+                ['git', 'describe', '--tags', '--abbrev=0',
+                 '--match=[0-9]*.[0-9]*.[0-9]*', '--exclude=*rc*', ref],
+                text=True, stderr=subprocess.DEVNULL, cwd=project_dir
+            ).strip()
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        if parse_semver(value):
+            return value.lstrip('v')
+    return None
+
+
+def get_base_version(project_dir):
+    ini_version = get_ini_version(project_dir)
+    tag_version = get_upstream_release_version(project_dir)
+    if not tag_version:
+        return ini_version
+
+    ini_parsed = parse_semver(ini_version)
+    tag_parsed = parse_semver(tag_version)
+    if not ini_parsed or tag_parsed <= ini_parsed:
+        return ini_version
+
+    # Upstream released past the ini. Dev builds follow it now; release builds read
+    # the ini directly, so say so rather than letting them silently disagree.
+    print(
+        f'NOTE [git_branch.py]: upstream release tag {tag_version} is newer than '
+        f'[crosspoint] version {ini_version} in platformio.ini; using {tag_version} '
+        f'for this dev build. Bump the ini before cutting a release.'
+    )
+    return tag_version
 
 
 def inject_version(env):
