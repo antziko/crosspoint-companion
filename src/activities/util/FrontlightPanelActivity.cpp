@@ -167,7 +167,14 @@ void FrontlightPanelActivity::runTile(const int idx) {
       // Refreshing with the panel still up would clean a frame the user is
       // about to dismiss anyway: drop the panel first and let the repaint of
       // the screen underneath carry the clean waveform instead.
-      renderer.promoteNextRefresh(HalDisplay::FULL_REFRESH);
+      //
+      // HALF, not FULL. Half seeds the OLD plane with the complement of the target so EVERY
+      // pixel transitions; Full seeds it white and drives only the black-target pixels,
+      // leaving the rest parked in the no-transition cell with stale charge
+      // (Uc8279X4Driver.cpp:410-419, which names Half as what the manual force-refresh must
+      // use). Under night mode the population Full strands is the white text -- the page
+      // shape -- so the flash that is supposed to remove the ghost writes it instead.
+      renderer.promoteNextRefresh(HalDisplay::HALF_REFRESH);
       close();
       break;
     case 2: {  // Cycle the reading orientation
@@ -443,10 +450,11 @@ void FrontlightPanelActivity::render(RenderLock&&) {
   // renderUi(); nothing is hand-drawn around it any more.
   renderUi();
 
-  // A tile that rewrote the whole frame (night mode) re-drives every pixel
-  // once; ordinary repaints stay on the fast path. FULL, not HALF: HALF is the
-  // balanced-speed waveform and leaves some ghost behind, which is exactly what
-  // the tile that sets this flag is asked to remove.
-  renderer.displayBuffer(cleanRefreshPending ? HalDisplay::FULL_REFRESH : HalDisplay::FAST_REFRESH);
+  // A tile that rewrote the whole frame (night mode) re-drives every pixel once; ordinary
+  // repaints stay on the fast path. HALF is the mode that actually does that: it seeds the OLD
+  // plane with the complement of the target, so no pixel idles in the no-transition cell. FULL
+  // seeds white and skips every white-target pixel, which is the worst case here -- a polarity
+  // flip is exactly when the outgoing frame's shape must not be left behind as stale charge.
+  renderer.displayBuffer(cleanRefreshPending ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
   cleanRefreshPending = false;
 }

@@ -19,6 +19,22 @@
 
 namespace {
 
+// Short names for the promoted-refresh trace below. Kept local: the SD log is the only
+// consumer, and a panel mode has no other reason to be printable.
+const char* refreshModeName(const HalDisplay::RefreshMode mode) {
+  switch (mode) {
+    case HalDisplay::FULL_REFRESH:
+      return "FULL";
+    case HalDisplay::HALF_REFRESH:
+      return "HALF";
+    case HalDisplay::FAST_REFRESH:
+      return "FAST";
+    case HalDisplay::SCRUB_REFRESH:
+      return "SCRUB";
+  }
+  return "?";
+}
+
 /**
  * Resolves the requested style to the best available style in the given SD card font.
  * Falls back gracefully when the font lacks the requested variant.
@@ -2119,6 +2135,10 @@ HalDisplay::RefreshMode GfxRenderer::applyPromotedRefresh(const HalDisplay::Refr
 void GfxRenderer::displayBuffer(HalDisplay::RefreshMode refreshMode) const {
   auto elapsed = millis() - start_ms;
   LOG_DBG("GFX", "Time = %lu ms from clearScreen to displayBuffer", elapsed);
+  // A promotion is always a manual ghost clear (ScreenRefresh.h, the control centre's refresh
+  // tile). Remembered across the paint so the trace below can report it.
+  const bool promoted = promotedRefreshPending_;
+  const HalDisplay::RefreshMode asked = refreshMode;
   HalDisplay::RefreshMode mode = applyPromotedRefresh(refreshMode);
   if (forceCleanRefreshOnce_) {
     // Precedence when both one-shots are armed: this one wins, because it is the
@@ -2134,8 +2154,17 @@ void GfxRenderer::displayBuffer(HalDisplay::RefreshMode refreshMode) const {
     mode = HalDisplay::SCRUB_REFRESH;  // clear ghosting once (e.g. first paint after silent reboot)
     forceCleanRefreshOnce_ = false;
   }
+  const unsigned long paintStartMs = millis();
   display.displayBuffer(mode, fadingFix);
   notePaint(mode);
+  if (promoted) {
+    // Duration is the load-bearing field: a HALF that returns in a FAST's time never ran the
+    // GC waveform, and no other evidence of that exists after the fact. inverted+ink say which
+    // polarity regime produced it -- a white-seed FULL strands the minority population in the
+    // no-transition cell, which under night mode IS the page shape.
+    SdDebugLog::log("GFX", "refresh promoted mode=%s asked=%s ms=%lu inverted=%u ink=%d%%", refreshModeName(mode),
+                    refreshModeName(asked), millis() - paintStartMs, display.isInverted() ? 1u : 0u, frameInkPercent());
+  }
 }
 
 // Panel-activation history. Recorded after the activation, so lastPaintMs_ is when the frame
@@ -2208,7 +2237,15 @@ void GfxRenderer::displayWindowRegion(int lx, int ly, int lw, int lh) const {
 }
 
 void GfxRenderer::displayBufferAsync(HalDisplay::RefreshMode refreshMode) const {
+  const bool promoted = promotedRefreshPending_;
   refreshMode = applyPromotedRefresh(refreshMode);
+  if (promoted) {
+    // No duration here: the async paint has not finished when this returns. Night mode always
+    // lands on the blocking path above (FreeInkDisplay redirects while inverted), so the timed
+    // trace is the one that covers the ghosting case.
+    SdDebugLog::log("GFX", "refresh promoted async mode=%s inverted=%u ink=%d%%", refreshModeName(refreshMode),
+                    display.isInverted() ? 1u : 0u, frameInkPercent());
+  }
   // The async path has no turn-off-screen hook, which the sunlight fading fix
   // relies on; keep those users on the blocking path.
   if (fadingFix) {

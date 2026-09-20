@@ -1101,9 +1101,11 @@ void loop() {
     // render()). Shared with the reader's Confirm/Home hold — see util/ScreenRefresh.h for the
     // mode tradeoff and the render-lock contract.
     refreshScreenNow(renderer);
-    // refreshScreenNow leaves the framebuffer blank, so any activity holding differential state
-    // must drop it before the re-render below, or that render restores pixels this just wiped
-    // instead of repainting. Outside any RenderLock: this only flips flags.
+    // The re-render is mandatory in every mode, and load-bearing in the default one: HALF hands
+    // the scrub to the repaint rather than pushing a blank frame, so this IS the clean. The
+    // FAST and FULL branches blank the framebuffer instead, so any activity holding
+    // differential state must drop it first or that render restores pixels they just wiped.
+    // Outside any RenderLock: this only flips flags.
     activityManager.notifyFramebufferInvalidated();
     activityManager.requestUpdate();
   }

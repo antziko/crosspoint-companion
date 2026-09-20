@@ -177,10 +177,11 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   };
 
   // Manual "Refresh Screen" (power-button FORCE_REFRESH) clear mode. Drives the
-  // whole-panel ghost clear in main.cpp. FAST is grayscale-safe (X4 default);
-  // HALF/FULL give a stronger ghost clear but firm the e-ink particles too hard
-  // for the following grayscale pass, washing AA/image pages whitish on X4.
-  // FULL is the multi-cycle deep clean (GfxRenderer::deepCleanPanel, ~15s of
+  // whole-panel ghost clear (util/ScreenRefresh.h). HALF is the charge scrub and the only
+  // single pass that drives every pixel, so it is the default. FAST is differential and cannot
+  // clear a ghost at all; it stays as the escape hatch on grayscale pages, where a GC waveform
+  // firms the particles too hard for the following grayscale pass and washes AA/image pages
+  // whitish on X4. FULL is the multi-cycle deep clean (GfxRenderer::deepCleanPanel, ~15s of
   // black/white flashing) — the only thing that releases image sticking already
   // burned in, as opposed to plain differential ghosting.
   enum REFRESH_SCREEN_MODE { RSM_FAST = 0, RSM_HALF = 1, RSM_FULL = 2, REFRESH_SCREEN_MODE_COUNT };
@@ -435,8 +436,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t refreshFrequency = REFRESH_15;
   // Periodic maintenance action (default FULL; BW reinforcement is X3-only)
   uint8_t refreshAction = REFRESH_ACTION_FULL;
-  // Manual "Refresh Screen" clear mode (default FAST: grayscale-safe everywhere)
-  uint8_t refreshScreenMode = RSM_FAST;
+  // Manual "Refresh Screen" clear mode (default HALF: the only single pass that scrubs)
+  uint8_t refreshScreenMode = RSM_HALF;
   uint8_t hyphenationEnabled = 0;
 
   // Reader screen margin settings

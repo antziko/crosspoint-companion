@@ -1340,9 +1340,10 @@ bool EpubReaderActivity::runHoldAction() {
       // refreshScreenNow() takes the render lock itself and this runs from the input handler,
       // which does not hold it.
       refreshScreenNow(renderer);
-      // The clear blanks the framebuffer, so the page has to be repainted from scratch. The
-      // reader keeps no differential state across a render, so requestUpdate() is enough --
-      // unlike the popup paths above, which only ask for a light repaint.
+      // The page has to be repainted either way: in the default HALF mode the repaint is what
+      // carries the scrub waveform, and the other modes blank the framebuffer. The reader keeps
+      // no differential state across a render, so requestUpdate() is enough -- unlike the popup
+      // paths above, which only ask for a light repaint.
       requestUpdate();
       return true;
     default:
