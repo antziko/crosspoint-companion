@@ -98,6 +98,13 @@ class GfxRenderer {
   // Swap in (and clear) the promoted mode, if one is pending.
   HalDisplay::RefreshMode applyPromotedRefresh(HalDisplay::RefreshMode refreshMode) const;
 
+  // Anti-retention dwell scrub. A frame held this long biases the pigment in its own shape, and
+  // nothing at sleep can undo a multi-minute dwell with a ~1.5 s pass -- cleaning harder there is
+  // falsified five times over. Relieved at the moment the content changes instead, which costs
+  // only the duration of a paint that was happening anyway.
+  static constexpr unsigned long DWELL_SCRUB_MS = 180000;  // 3 minutes
+  HalDisplay::RefreshMode applyDwellScrub(HalDisplay::RefreshMode refreshMode) const;
+
   // Tiled grayscale strip target. When active, drawPixel()/clearScreen()
   // operate on a caller-owned scratch holding one horizontal band of physical
   // rows [_stripY0, _stripY0 + _stripRows) (panelWidthBytes wide) instead of

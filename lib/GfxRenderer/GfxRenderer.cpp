@@ -2132,6 +2132,25 @@ HalDisplay::RefreshMode GfxRenderer::applyPromotedRefresh(const HalDisplay::Refr
   return promotedRefresh_;
 }
 
+// Upgrade the paint that ENDS a long dwell, so the bias the held frame built is driven out in the
+// shape it was built in. Only FAST is upgraded: every other mode already drives at least this
+// hard, and an explicit promotion is a deliberate manual clear that must not be second-guessed.
+//
+// SCRUB, not HALF: identical panel waveform (HalDisplay.cpp:52-56 maps both to the driver's
+// complement-seed scrub) but without the X3 requestResync() that HALF fires, which costs three
+// panel passes -- 3203ms against 437ms. This runs unattended on every screen, so it must not
+// carry that.
+HalDisplay::RefreshMode GfxRenderer::applyDwellScrub(const HalDisplay::RefreshMode refreshMode) const {
+  if (refreshMode != HalDisplay::FAST_REFRESH || lastPaintMs_ == 0) return refreshMode;
+  const unsigned long heldMs = millis() - lastPaintMs_;
+  if (heldMs < DWELL_SCRUB_MS) return refreshMode;
+  // ink is the shape being driven out, and it is read BEFORE the paint, so it describes the
+  // OUTGOING frame -- the one that did the imprinting.
+  SdDebugLog::log("GFX", "dwell scrub heldMs=%lu inverted=%u ink=%d%%", heldMs, display.isInverted() ? 1u : 0u,
+                  frameInkPercent());
+  return HalDisplay::SCRUB_REFRESH;
+}
+
 void GfxRenderer::displayBuffer(HalDisplay::RefreshMode refreshMode) const {
   auto elapsed = millis() - start_ms;
   LOG_DBG("GFX", "Time = %lu ms from clearScreen to displayBuffer", elapsed);
@@ -2139,7 +2158,7 @@ void GfxRenderer::displayBuffer(HalDisplay::RefreshMode refreshMode) const {
   // tile). Remembered across the paint so the trace below can report it.
   const bool promoted = promotedRefreshPending_;
   const HalDisplay::RefreshMode asked = refreshMode;
-  HalDisplay::RefreshMode mode = applyPromotedRefresh(refreshMode);
+  HalDisplay::RefreshMode mode = applyDwellScrub(applyPromotedRefresh(refreshMode));
   if (forceCleanRefreshOnce_) {
     // Precedence when both one-shots are armed: this one wins, because it is the
     // device-proven X3 path below and the promoted mode has already been consumed
@@ -2238,7 +2257,7 @@ void GfxRenderer::displayWindowRegion(int lx, int ly, int lw, int lh) const {
 
 void GfxRenderer::displayBufferAsync(HalDisplay::RefreshMode refreshMode) const {
   const bool promoted = promotedRefreshPending_;
-  refreshMode = applyPromotedRefresh(refreshMode);
+  refreshMode = applyDwellScrub(applyPromotedRefresh(refreshMode));
   if (promoted) {
     // No duration here: the async paint has not finished when this returns. Night mode always
     // lands on the blocking path above (FreeInkDisplay redirects while inverted), so the timed
