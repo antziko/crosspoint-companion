@@ -2126,6 +2126,17 @@ void GfxRenderer::invertScreen() const {
   }
 }
 
+void GfxRenderer::promoteNextRefresh(const HalDisplay::RefreshMode mode, const char* reason) const {
+  promotedRefreshPending_ = true;
+  promotedRefresh_ = mode;
+  if (reason == nullptr) {
+    promotedRefreshReason_[0] = '\0';
+    return;
+  }
+  strncpy(promotedRefreshReason_, reason, PROMOTED_REASON_MAX - 1);
+  promotedRefreshReason_[PROMOTED_REASON_MAX - 1] = '\0';
+}
+
 HalDisplay::RefreshMode GfxRenderer::applyPromotedRefresh(const HalDisplay::RefreshMode refreshMode) const {
   if (!promotedRefreshPending_) return refreshMode;
   promotedRefreshPending_ = false;
@@ -2181,8 +2192,10 @@ void GfxRenderer::displayBuffer(HalDisplay::RefreshMode refreshMode) const {
     // GC waveform, and no other evidence of that exists after the fact. inverted+ink say which
     // polarity regime produced it -- a white-seed FULL strands the minority population in the
     // no-transition cell, which under night mode IS the page shape.
-    SdDebugLog::log("GFX", "refresh promoted mode=%s asked=%s ms=%lu inverted=%u ink=%d%%", refreshModeName(mode),
-                    refreshModeName(asked), millis() - paintStartMs, display.isInverted() ? 1u : 0u, frameInkPercent());
+    SdDebugLog::log("GFX", "refresh promoted mode=%s asked=%s why=%s ms=%lu inverted=%u ink=%d%%",
+                    refreshModeName(mode), refreshModeName(asked),
+                    promotedRefreshReason_[0] ? promotedRefreshReason_ : "-", millis() - paintStartMs,
+                    display.isInverted() ? 1u : 0u, frameInkPercent());
   }
 }
 
@@ -2262,8 +2275,9 @@ void GfxRenderer::displayBufferAsync(HalDisplay::RefreshMode refreshMode) const 
     // No duration here: the async paint has not finished when this returns. Night mode always
     // lands on the blocking path above (FreeInkDisplay redirects while inverted), so the timed
     // trace is the one that covers the ghosting case.
-    SdDebugLog::log("GFX", "refresh promoted async mode=%s inverted=%u ink=%d%%", refreshModeName(refreshMode),
-                    display.isInverted() ? 1u : 0u, frameInkPercent());
+    SdDebugLog::log("GFX", "refresh promoted async mode=%s why=%s inverted=%u ink=%d%%", refreshModeName(refreshMode),
+                    promotedRefreshReason_[0] ? promotedRefreshReason_ : "-", display.isInverted() ? 1u : 0u,
+                    frameInkPercent());
   }
   // The async path has no turn-off-screen hook, which the sunlight fading fix
   // relies on; keep those users on the blocking path.

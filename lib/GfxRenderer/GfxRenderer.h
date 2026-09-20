@@ -95,6 +95,8 @@ class GfxRenderer {
   // displayBuffer() is const but must consume the flag.
   mutable bool promotedRefreshPending_ = false;
   mutable HalDisplay::RefreshMode promotedRefresh_ = HalDisplay::FAST_REFRESH;
+  static constexpr size_t PROMOTED_REASON_MAX = 24;
+  mutable char promotedRefreshReason_[PROMOTED_REASON_MAX] = {};
   // Swap in (and clear) the promoted mode, if one is pending.
   HalDisplay::RefreshMode applyPromotedRefresh(HalDisplay::RefreshMode refreshMode) const;
 
@@ -231,10 +233,10 @@ class GfxRenderer {
   // Lets a closing overlay (the control center's refresh tile) hand a
   // ghost-cleanup waveform to the repaint of whatever screen is underneath,
   // which it cannot reach directly.
-  void promoteNextRefresh(const HalDisplay::RefreshMode mode) const {
-    promotedRefreshPending_ = true;
-    promotedRefresh_ = mode;
-  }
+  // `reason` is copied into a small fixed buffer and printed by the trace when the promotion is
+  // consumed, so a capture says WHICH promotion ran rather than just that one did. Keep it short
+  // (PROMOTED_REASON_MAX including the terminator) and free of spaces.
+  void promoteNextRefresh(HalDisplay::RefreshMode mode, const char* reason = nullptr) const;
   // Push only the logical rectangle (lx,ly,lw,lh) to the panel using a windowed
   // sub-rectangle refresh. The logical rect is mapped to byte-aligned native panel
   // coordinates via the current orientation transform. Falls back to a full

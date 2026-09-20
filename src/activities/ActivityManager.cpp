@@ -173,6 +173,7 @@ void ActivityManager::loop() {
 
         // Request an update to ensure the popped activity gets re-rendered
         if (pendingAction == PendingAction::None) {
+          armEntryScrub(currentActivity->name.c_str());
           requestUpdate();
         }
 
@@ -193,6 +194,7 @@ void ActivityManager::loop() {
         pendingAction = PendingAction::None;
         currentActivity = std::move(pendingActivity);
         lock.unlock();  // onEnter may acquire its own lock
+        armEntryScrub(currentActivity->name.c_str());
         currentActivity->onEnter();
       } else if (pendingAction == PendingAction::Push) {
         // Push MUST hold RenderLock across the pause/swap. Without it, the
@@ -216,6 +218,7 @@ void ActivityManager::loop() {
         pendingAction = PendingAction::None;
         currentActivity = std::move(pendingActivity);
         lock.unlock();  // onEnter may acquire its own lock / call requestUpdateAndWait
+        armEntryScrub(currentActivity->name.c_str());
         currentActivity->onEnter();
       }
 
@@ -231,6 +234,26 @@ void ActivityManager::loop() {
       xTaskNotify(renderTaskHandle, 1, eIncrement);
     }
   }
+}
+
+// Night mode paints ~90% of the panel black, and the default FAST is the DU partial: the black it
+// lays down is under-developed, relaxes over the following minutes and lets the previous screen
+// surface through it. A screen the user then sits on -- Settings and its option popups above all --
+// is where that becomes visible, so the frame that OPENS one is driven with the GC scrub instead.
+// Repaints within the screen stay FAST: moving a highlight must not cost a full waveform.
+//
+// Day mode is deliberately untouched. The same under-drive lands on a ~90% white panel, where it is
+// not visible, and the cost here is real -- roughly 686ms -> 1515ms per screen transition.
+//
+// SCRUB rather than HALF for the X3 reason in GfxRenderer::applyDwellScrub: same panel waveform,
+// without the three-pass resync HALF forces there.
+//
+// SETTINGS.screenInverted, not display.isInverted(): this runs before the render task resolves the
+// polarity for the incoming frame (ActivityManager.cpp:70), so the setting is what that frame will
+// actually be painted with.
+void ActivityManager::armEntryScrub(const char* screenName) const {
+  if (!SETTINGS.screenInverted) return;
+  renderer.promoteNextRefresh(HalDisplay::SCRUB_REFRESH, screenName);
 }
 
 void ActivityManager::exitActivity(const RenderLock& lock) {
@@ -251,6 +274,7 @@ void ActivityManager::replaceActivity(std::unique_ptr<Activity>&& newActivity) {
   } else {
     // No current activity, safe to launch immediately
     currentActivity = std::move(newActivity);
+    armEntryScrub(currentActivity->name.c_str());
     currentActivity->onEnter();
   }
 }

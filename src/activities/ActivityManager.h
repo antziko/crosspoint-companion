@@ -38,6 +38,9 @@ class ActivityManager {
 
  protected:
   GfxRenderer& renderer;
+  // Drive the frame that OPENS a screen with the GC scrub while night mode is on. See the
+  // definition for why only night mode, and only on entry.
+  void armEntryScrub(const char* screenName) const;
   MappedInputManager& mappedInput;
   std::vector<std::unique_ptr<Activity>> stackActivities;
   std::unique_ptr<Activity> currentActivity;

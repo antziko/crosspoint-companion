@@ -68,7 +68,7 @@ inline void refreshScreenNow(const GfxRenderer& renderer) {
     // Traced by GfxRenderer::displayBuffer when the promotion is consumed, which also records
     // whether the waveform actually ran -- the request on its own proves nothing.
     SdDebugLog::setEnabled(true);
-    renderer.promoteNextRefresh(HalDisplay::HALF_REFRESH);
+    renderer.promoteNextRefresh(HalDisplay::HALF_REFRESH, "manual");
     return;
   }
 

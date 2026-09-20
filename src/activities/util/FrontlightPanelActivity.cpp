@@ -174,7 +174,7 @@ void FrontlightPanelActivity::runTile(const int idx) {
       // (Uc8279X4Driver.cpp:410-419, which names Half as what the manual force-refresh must
       // use). Under night mode the population Full strands is the white text -- the page
       // shape -- so the flash that is supposed to remove the ghost writes it instead.
-      renderer.promoteNextRefresh(HalDisplay::HALF_REFRESH);
+      renderer.promoteNextRefresh(HalDisplay::HALF_REFRESH, "tile");
       close();
       break;
     case 2: {  // Cycle the reading orientation
