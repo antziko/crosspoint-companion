@@ -209,7 +209,11 @@ void OtaUpdateActivity::render(RenderLock&&) {
       renderer.deepCleanPanel();
     }
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_COMPLETE), true, EpdFontFamily::BOLD);
-    renderer.drawCenteredText(UI_10_FONT_ID, top + height + metrics.verticalSpacing, tr(STR_POWER_ON_HINT));
+    const int hintY = top + height + metrics.verticalSpacing;
+    const Rect hintBounds{metrics.contentSidePadding, hintY, pageWidth - metrics.contentSidePadding * 2,
+                          pageHeight - hintY};
+    UITheme::drawCenteredWrappedText(renderer, hintBounds, UI_10_FONT_ID, tr(STR_POWER_ON_HINT), 3, true,
+                                     EpdFontFamily::REGULAR, UITheme::TextVerticalAlignment::TOP);
   }
 
   // Terminal states get a full GC flash so the panel is left clean — FINISHED because the
