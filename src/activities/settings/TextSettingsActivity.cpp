@@ -415,11 +415,7 @@ const char* TextSettingsActivity::confirmLabelText() const {
   }
 }
 
-void TextSettingsActivity::render(RenderLock&&) {
-  if (optionPopup_.processRender(renderer, mappedInput)) return;  // picker draws over everything
-
-  renderer.clearScreen();
-
+void TextSettingsActivity::drawChrome() {
   const auto pageWidth = renderer.getScreenWidth();
 
   GUI.drawHeader(renderer, Rect{0, metrics_.topPadding, pageWidth, metrics_.headerHeight}, tr(STR_TEXT_SETTINGS));
@@ -436,16 +432,9 @@ void TextSettingsActivity::render(RenderLock&&) {
     textsettings::renderPreview(renderer, previewLayout_, metrics_.previewPadding, metrics_.verticalSpacing,
                                 afterHeader, previewHeight, familyName, sizeName);
   }
+}
 
-  // Tab bar + (on every tab but Font) the active tab's list draw inside the screen builder.
-  renderUi();
-
-  // LOCAL(feat): drawn after renderUi so it lands in the body region the FUI frame left empty.
-  if (onFamilyTab()) {
-    const auto geo = paneGeometry();
-    fontPane_.renderList(renderer, geo.listTop, geo.listHeight);
-  }
-
+void TextSettingsActivity::drawFooter() {
   if (focusedRowHasNoPreview()) {
     const int captionHeight = renderer.getTextHeight(UI_10_FONT_ID) + metrics_.verticalSpacing;
     const int capY = afterHeader + usableHeight - captionHeight + metrics_.verticalSpacing;
@@ -454,7 +443,32 @@ void TextSettingsActivity::render(RenderLock&&) {
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabelText(), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+}
 
+void TextSettingsActivity::render(RenderLock&&) {
+  if (optionPopup_.processRender(renderer, mappedInput)) return;  // picker draws over everything
+
+  // Not UiListActivity::render(): the Font tab's own list is drawn AFTER
+  // renderUi(), into the body region the FUI frame leaves empty, and the base
+  // frame has no hook there. renderListFrame() is what matters -- it repeats
+  // the build while onListRendered() is still correcting the viewport, which
+  // is what a single renderUi() call was missing.
+  renderListFrame(
+      [](void* ctx) {
+        auto* self = static_cast<TextSettingsActivity*>(ctx);
+        self->renderer.clearScreen();
+        self->drawChrome();
+        // Tab bar + (on every tab but Font) the active tab's list draw inside the screen builder.
+        self->renderUi();
+        // LOCAL(feat): drawn after renderUi so it lands in the body region the FUI frame left empty.
+        if (self->onFamilyTab()) {
+          const auto geo = self->paneGeometry();
+          self->fontPane_.renderList(self->renderer, geo.listTop, geo.listHeight);
+        }
+      },
+      this);
+
+  drawFooter();
   renderer.displayBuffer();
 }
 

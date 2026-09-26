@@ -41,6 +41,9 @@ class TextSettingsActivity final : public UiTabListActivity {
   void render(RenderLock&&) override;
 
  private:
+  void drawChrome() override;
+  void drawFooter() override;
+
   // Row indices per tab. enum class (not plain enum) so a LayoutRow can't be
   // silently confused with a StyleRow of equal value.
   enum class LayoutRow { LineSpacing, ParaSpacing, Alignment, ScreenMargin, Count };

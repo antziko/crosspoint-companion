@@ -733,11 +733,7 @@ void SettingsActivity::buildScreen(UiScreen& screen) {
   screen.list(props);
 }
 
-void SettingsActivity::render(RenderLock&&) {
-  if (optionPopup.processRender(renderer, mappedInput)) return;
-
-  renderer.clearScreen();
-
+void SettingsActivity::drawChrome() {
   const auto pageWidth = renderer.getScreenWidth();
   const auto& metrics = UITheme::getInstance().getMetrics();
 
@@ -748,9 +744,9 @@ void SettingsActivity::render(RenderLock&&) {
   // LOCAL(feat): a sub-screen shows its group name and no version.
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
                  isSubScreen() ? I18N.get(subTitle_) : tr(STR_SETTINGS_TITLE), isSubScreen() ? "" : CROSSPOINT_VERSION);
+}
 
-  renderUi();
-
+void SettingsActivity::drawFooter() {
   // Top-level ring position 0 is the tab switcher (the hint shows the next
   // category name); otherwise the Confirm label reflects the focused row:
   // "Select" for pickers and actions, else "Toggle".
@@ -771,7 +767,13 @@ void SettingsActivity::render(RenderLock&&) {
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+}
 
-  // Always use standard refresh for settings screen
-  renderer.displayBuffer();
+void SettingsActivity::render(RenderLock&& lock) {
+  if (optionPopup.processRender(renderer, mappedInput)) return;
+  // Through the base so the build runs inside renderListFrame's
+  // consumeRebuildNeeded() loop; drawing renderUi() once left a viewport that
+  // onListRendered had corrected unpainted, which is the settings list that
+  // would not scroll.
+  UiListActivity::render(std::move(lock));
 }

@@ -251,11 +251,14 @@ class SettingsActivity final : public UiTabListActivity {
   void rebuildSettingsLists();
   void syncQuickResumeTimeoutForSleepScreen(bool sleepScreenChanged, bool quickResumeTimeoutChanged);
 
+  void drawChrome() override;
+  void drawFooter() override;
+
  public:
   explicit SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, int initialCategory = 0);
   // Sub-screen constructor: render only the settings tagged `subCategory`, titled `subTitle`.
   SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, StrId subCategory, StrId subTitle);
   void onEnter() override;
   void onExit() override;
-  void render(RenderLock&&) override;
+  void render(RenderLock&& lock) override;
 };
