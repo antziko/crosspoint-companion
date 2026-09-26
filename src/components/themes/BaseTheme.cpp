@@ -552,6 +552,19 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
         batteryReserve + batteryPercentSpacing +
         ui.target.measureText(fui::GfxRendererTarget::FONT_SMALL, percentText, tokens.smallText).width);
   }
+  // Frontlight indicator, immediately before the percentage — the same sun the reader's status
+  // bar draws (drawStatusBar below), so the light reads the same wherever it is shown. Folded
+  // into the battery reserve so the title's clearance and the group's own x both account for it,
+  // and reserved only while the light is lit: off, or on a board with no light, the header lays
+  // out exactly as it did.
+#if FREEINK_CAP_FRONTLIGHT
+  const int16_t lightReserve = (Frontlight.present() && Frontlight.isOn())
+                                   ? static_cast<int16_t>(frontlightIconSize + batteryPercentSpacing)
+                                   : 0;
+#else
+  constexpr int16_t lightReserve = 0;
+#endif
+  batteryReserve = static_cast<int16_t>(batteryReserve + lightReserve);
 
   fui::HeaderProps props;
   props.title = title;
@@ -616,7 +629,20 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
   const int16_t batteryX = batteryLeft ? static_cast<int16_t>(band.x + batteryEdgeInset)
                                        : static_cast<int16_t>(band.right() - batteryEdgeInset - batteryReserve);
   const int16_t batteryH = static_cast<int16_t>(metrics.batteryBarHeight);
-  fui::batteryIndicator(ui.frame, fui::Rect{batteryX, band.y, batteryReserve, batteryH}, battery);
+  // The right-hand part of the reserve: batteryIndicator right-aligns its glyph in the rect it is
+  // given and puts the percentage left of it, so handing it everything past the sun keeps the
+  // battery group where it has always been and the sun lands in the gap that opened to its left.
+  fui::batteryIndicator(ui.frame,
+                        fui::Rect{static_cast<int16_t>(batteryX + lightReserve), band.y,
+                                  static_cast<int16_t>(batteryReserve - lightReserve), batteryH},
+                        battery);
+#if FREEINK_CAP_FRONTLIGHT
+  if (lightReserve > 0) {
+    // Centred on the strip batteryIndicator centres the battery glyph in, so the two sit on one
+    // line; the gap of the reserve is trailing, which is what separates the sun from the percent.
+    drawFrontlightIcon(renderer, batteryX, band.y + batteryH / 2);
+  }
+#endif
 
   // LOCAL(feat): WiFi signal bars immediately left of the battery group. This is
   // a feat-only header element — upstream has no drawWifiBars and its FUI header
