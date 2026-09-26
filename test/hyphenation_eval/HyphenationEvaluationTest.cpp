@@ -228,3 +228,4 @@ TEST(HyphenationEval, English) { runLanguageEval("english", "en", "english_hyphe
 TEST(HyphenationEval, French) { runLanguageEval("french", "fr", "french_hyphenation_tests.txt", 99.00); }
 TEST(HyphenationEval, Spanish) { runLanguageEval("spanish", "es", "spanish_hyphenation_tests.txt", 98.02); }
 TEST(HyphenationEval, Italian) { runLanguageEval("italian", "it", "italian_hyphenation_tests.txt", 98.99); }
+TEST(HyphenationEval, Portuguese) { runLanguageEval("portuguese", "pt", "portuguese_hyphenation_tests.txt", 98.21); }

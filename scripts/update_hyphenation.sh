@@ -26,4 +26,5 @@ process en
 process fr
 process es
 process it
+process pt
 process fi

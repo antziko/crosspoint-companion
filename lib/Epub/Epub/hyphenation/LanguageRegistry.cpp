@@ -9,6 +9,7 @@
 #include "generated/hyph-fi.trie.h"
 #include "generated/hyph-fr.trie.h"
 #include "generated/hyph-it.trie.h"
+#include "generated/hyph-pt.trie.h"
 
 namespace {
 
@@ -18,15 +19,17 @@ LanguageHyphenator frenchHyphenator(fr_patterns, isLatinLetter, toLowerLatin);
 LanguageHyphenator spanishHyphenator(es_patterns, isLatinLetter, toLowerLatin);
 LanguageHyphenator italianHyphenator(it_patterns, isLatinLetter, toLowerLatin);
 LanguageHyphenator finnishHyphenator(fi_patterns, isLatinLetter, toLowerLatin);
+LanguageHyphenator portugueseHyphenator(pt_patterns, isLatinLetter, toLowerLatin);
 
-using EntryArray = std::array<LanguageEntry, 5>;
+using EntryArray = std::array<LanguageEntry, 6>;
 
 const EntryArray& entries() {
   static const EntryArray kEntries = {{{"english", "en", &englishHyphenator},
                                        {"french", "fr", &frenchHyphenator},
                                        {"spanish", "es", &spanishHyphenator},
                                        {"italian", "it", &italianHyphenator},
-                                       {"finnish", "fi", &finnishHyphenator}}};
+                                       {"finnish", "fi", &finnishHyphenator},
+                                       {"portuguese", "pt", &portugueseHyphenator}}};
   return kEntries;
 }
 
