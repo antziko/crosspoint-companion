@@ -90,6 +90,15 @@ if (parsedSize != fileSize) {
 
 ## `section.bin`
 
+### Version 57
+
+Version 57 keeps the version 56 serialized layout unchanged. It was bumped because
+Hangul no longer carries an implicit line-break opportunity on either side: Korean
+words wrap at spaces (CSS `word-break: keep-all`), and with hyphenation enabled a
+Hangul word may still split at a line end wherever the CJK rules allow, without an
+inserted hyphen. Justification stretches word spaces only. Cached line breaks and word
+positions from version 56 no longer match.
+
 ### Version 54
 
 Version 54 appends a link table to each serialized page: an href plus a tap

@@ -121,7 +121,13 @@ namespace {
 //      their children's insets instead of being ignored. Marker text and indents both move
 //      where lines wrap, so v55 cached line and word positions no longer match. Covers
 //      upstream's #3500 (their v46).
-constexpr uint8_t SECTION_FILE_VERSION = 56;
+// v57: Hangul no longer carries an implicit break opportunity on either side -- Korean words
+//      wrap at spaces (CSS word-break: keep-all), and with hyphenation on a Hangul word may
+//      still split at a line end wherever the CJK rules allow, with no hyphen drawn.
+//      Justification stretches word spaces only, not the gaps between syllables. All three
+//      move where lines break, so v56 cached line and word positions no longer match. Covers
+//      upstream's #3700 (their v48).
+constexpr uint8_t SECTION_FILE_VERSION = 57;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
