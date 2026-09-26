@@ -4505,7 +4505,16 @@ void EpubReaderActivity::activateMoreRow(int row) {
   }
   // Leaf actions open their own screen / perform the action; close the overlay first.
   overlay = Overlay::None;
-  discardOverlayPage();
+  if (action == MA::GO_TO_PERCENT && overlayPageStored) {
+    // The percent dialog is a popup over the current frame: wipe the toolbar
+    // chrome back to the clean page first so the dialog draws over the page,
+    // not the sheet. No refresh push -- the dialog's first frame carries it.
+    RenderLock lock;
+    renderer.restoreBwBuffer(/*resyncPanelBaseline=*/false);
+    overlayPageStored = false;
+  } else {
+    discardOverlayPage();
+  }
   if (action == MA::BOOKMARK_TOGGLE) {
     // No child activity here to trigger the re-render the list menu relies on:
     // show the same confirmation popup the long-press path does.
