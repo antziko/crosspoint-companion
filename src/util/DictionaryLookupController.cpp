@@ -104,6 +104,7 @@ void DictionaryLookupController::startLookup(const std::string& word, bool recor
     // (BaseTheme.cpp:803) and no theme overrides it, so a second call here was a second
     // full-panel FAST refresh of pixels the panel had just been given.
     GUI.drawPopup(renderer, tr(STR_DICT_LOOKING_UP));
+    lookupToastDrawn_ = true;
     // No forceCleanRefreshNextPaint() for this box: whatever replaces this frame — the
     // definition, the "not found" popup, the word-select repaint after a cancel — erases it with
     // an ordinary differential, the same as every other full-content change on those screens
@@ -135,6 +136,14 @@ void DictionaryLookupController::setNotFound() {
   // caller before this runs, so it is the authority on which of the two this is.
   notFoundIsToast_ = (notFoundMsg_ == StrId::STR_DICT_NOT_FOUND);
   notFoundShownMs_ = millis();
+  // A miss never opens the definition, so nothing else drives the "Looking up" box's
+  // pixels again and its under-developed black is left to relax into the frame below.
+  // Only in night mode, and only when the box was actually drawn -- this cannot put the
+  // flash back on the dictionary-switch path, which finds an entry and never lands here.
+  if (lookupToastDrawn_ && SETTINGS.screenInverted) {
+    renderer.promoteNextRefresh(HalDisplay::SCRUB_REFRESH, "dict-miss");
+  }
+  lookupToastDrawn_ = false;
   owner.requestUpdate();
 }
 

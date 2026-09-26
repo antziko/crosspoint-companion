@@ -182,6 +182,11 @@ class DictionaryLookupController {
   // is the whole cost of the feature. The two dictionary FAULTS keep the press-to-dismiss
   // popup -- they mean every later lookup will fail too, so they must not flash past.
   static constexpr uint32_t NOT_FOUND_TOAST_MS = 1200;
+  // The "Looking up" box was painted over the caller's frame this lookup. In night mode
+  // that box is under-developed black (FAST/DU) and leaves residue unless something
+  // drives those pixels again -- opening the definition does (armEntryScrub), a miss
+  // does not, which is how the toast ends up imprinted on the reader page.
+  bool lookupToastDrawn_ = false;
   bool notFoundIsToast_ = false;  // notFoundMsg_ is a miss, not a fault
   uint32_t notFoundShownMs_ = 0;  // millis() when the popup went up
 
