@@ -57,8 +57,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.platformio
-          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
-          restore-keys: pio-${{ runner.os }}-
+          key: pio-v3-${{ runner.os }}-cppcheck-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-v3-${{ runner.os }}-cppcheck-
 
       - name: Run cppcheck
         run: pio check --fail-on-defect low --fail-on-defect medium --fail-on-defect high
@@ -88,8 +88,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.platformio
-          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
-          restore-keys: pio-${{ runner.os }}-
+          key: pio-v3-${{ runner.os }}-default-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-v3-${{ runner.os }}-default-
 
       - name: Build default firmware
         run: |
@@ -142,8 +142,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.platformio
-          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
-          restore-keys: pio-${{ runner.os }}-
+          key: pio-v3-${{ runner.os }}-sticky-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-v3-${{ runner.os }}-sticky-
 
       - name: Build sticky firmware
         run: |
