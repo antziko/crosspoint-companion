@@ -79,12 +79,23 @@ bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint
       // Power button bypasses remapping.
       return (gpio.*fn)(HalGPIO::BTN_POWER);
     case Button::PageBack:
-    case Button::PageForward:
+    case Button::PageForward: {
       // Reader page navigation uses side buttons and can be swapped via settings.
       if (sideLayout == CrossPointSettings::SIDE_BUTTONS_DISABLED) {
         return false;
       }
+      // One-handed layouts: both side buttons drive the same direction, and the
+      // opposite direction has no side button at all. Handled here rather than in
+      // usesUpButton(), which answers with a single button and cannot say "both".
+      const bool bothNext = sideLayout == CrossPointSettings::NEXT_NEXT;
+      const bool bothPrev = sideLayout == CrossPointSettings::PREV_PREV;
+      if (bothNext || bothPrev) {
+        const bool wantPageBack = (button == Button::PageBack);
+        if (wantPageBack != bothPrev) return false;  // the direction with no button
+        return (gpio.*fn)(HalGPIO::BTN_UP) || (gpio.*fn)(HalGPIO::BTN_DOWN);
+      }
       return (gpio.*fn)(usesUpButton(button) ? HalGPIO::BTN_UP : HalGPIO::BTN_DOWN);
+    }
     case Button::NavNext:
       // Logical "next item": side Down + front Right, with the control axis flipped in
       // INVERTED / LANDSCAPE_CCW (shouldSwapFrontButtons) so it matches the rotated hint labels.
@@ -116,6 +127,11 @@ bool MappedInputManager::usesUpButton(const Button button) const {
         return false;
       }
       const bool wantPageBack = (button == Button::PageBack);
+      // One-handed layouts: the live direction answers UP because both buttons work
+      // and callers placing a hint need one anchor; the dead direction answers false,
+      // same as SIDE_BUTTONS_DISABLED. mapButton() owns the real "both" dispatch.
+      if (SETTINGS.sideButtonLayout == CrossPointSettings::NEXT_NEXT) return !wantPageBack;
+      if (SETTINGS.sideButtonLayout == CrossPointSettings::PREV_PREV) return wantPageBack;
       const bool layoutInvert = (SETTINGS.sideButtonLayout == CrossPointSettings::NEXT_PREV);
       return (wantPageBack != layoutInvert) != swapSideButtons();
     }

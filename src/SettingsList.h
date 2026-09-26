@@ -432,9 +432,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                         "holdConfirmAction", StrId::STR_CAT_CONTROLS));
 
   // Side buttons
-  v.push_back(SettingInfo::Enum(StrId::STR_SIDE_BTN_LAYOUT, &CrossPointSettings::sideButtonLayout,
-                                {StrId::STR_PREV_NEXT, StrId::STR_NEXT_PREV, StrId::STR_DISABLED}, "sideButtonLayout",
-                                StrId::STR_CAT_CONTROLS));
+  v.push_back(SettingInfo::Enum(
+      StrId::STR_SIDE_BTN_LAYOUT, &CrossPointSettings::sideButtonLayout,
+      {StrId::STR_PREV_NEXT, StrId::STR_NEXT_PREV, StrId::STR_DISABLED, StrId::STR_NEXT_NEXT, StrId::STR_PREV_PREV},
+      "sideButtonLayout", StrId::STR_CAT_CONTROLS));
   // Touch reader controls (#2481). Filtered out below on non-touch boards.
   v.push_back(SettingInfo::Enum(
       StrId::STR_TOUCH_READER_CONTROLS, &CrossPointSettings::touchReaderControls,
