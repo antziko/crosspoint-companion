@@ -1414,10 +1414,13 @@ void DictionaryDefinitionActivity::promptDeleteCard() {
         cardDictExists_ = false;
         cardDictHash_ = 0;
         SdDebugLog::log("DDA", "card deleted: %s", word.c_str());
-        // Stay on the definition — the text is still worth reading, and Back exits as usual.
-        // The reader repaints its underlines when word-select finally returns to it
-        // (EpubReaderActivity's openWordSelect result handler calls reloadLookupMarks).
-        requestUpdate();
+        // Close the definition: the delete is the last thing the user came here to do, and the
+        // screen it would return to still describes a card that no longer exists. Exiting is
+        // also what repairs the callers -- word-select finishes with us and lets the reader
+        // repaint its underlines (openWordSelect's result handler calls reloadLookupMarks), and
+        // the review session re-probes the deck and drops the card it was about to grade
+        // (FlashcardReviewActivity.cpp:346-362). Both already run on the ordinary Back.
+        DictUtils::cancelAndFinish(*this);
       },
       renderer, mappedInput, tr(STR_FLASHCARD_DELETE_TITLE), word);
 }
