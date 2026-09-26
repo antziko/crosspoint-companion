@@ -53,4 +53,7 @@ class ConfirmationActivity : public Activity {
   void onEnter() override;
   void loop() override;
   void render(RenderLock&& lock) override;
+  // A prompt is answered in a couple of seconds, so night mode's entry scrub skips it and the
+  // return to the screen behind it: two full-panel flashes for a frame nobody looks at twice.
+  bool isTransientScreen() const override { return true; }
 };

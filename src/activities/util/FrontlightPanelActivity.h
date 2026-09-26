@@ -29,6 +29,9 @@ class FrontlightPanelActivity final : public Activity, private UiAppHost {
   // reflected user intent in the first place.
   bool lightOnChanged = false;
   bool draggingSlider = false;
+  // Night-mode polarity as the sheet opened. close() compares it: a flip rewrites every pixel of
+  // the screen underneath, which is the one exit from this sheet that has to scrub.
+  uint8_t enteredInverted = 0;
   // The touch tile toggles SETTINGS.touchReaderControls between off and this
   // remembered mode, so a Swipe or Inverted Tap user gets their mode back
   // rather than the Tap default. Seeded from the setting in onEnter().
@@ -91,4 +94,8 @@ class FrontlightPanelActivity final : public Activity, private UiAppHost {
   void loop() override;
   void render(RenderLock&&) override;
   bool handleHomeGesture() override;
+  // The sheet is a glance-and-dismiss overlay: night mode's entry scrub skips opening it and
+  // closing it. close() arms its own scrub for the two tiles that change the frame underneath
+  // wholesale (polarity, orientation).
+  bool isTransientScreen() const override { return true; }
 };

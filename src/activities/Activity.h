@@ -62,6 +62,12 @@ class Activity {
   virtual bool onManualSleepRequested() { return false; }
   virtual bool isReaderActivity() const { return false; }
   virtual bool isHomeActivity() const { return false; }
+  // True for a screen the user passes THROUGH rather than settles on: a modal prompt, the
+  // control-centre sheet, the reader's word-select overlay. Night mode's entry scrub
+  // (ActivityManager::armEntryScrub) skips both entering one of these and returning from one --
+  // the under-developed black it exists to drive out only becomes visible on a frame that is
+  // held for minutes, and the full-panel flash it costs is what the user actually sees.
+  virtual bool isTransientScreen() const { return false; }
   // True for screens that keep their header band even when the user has turned the top bar off
   // outside Home. Home always keeps it (it IS the top bar); override elsewhere only when the
   // header carries content rather than chrome, as the dictionary definition's headword does.

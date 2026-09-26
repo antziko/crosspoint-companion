@@ -63,6 +63,8 @@ void FrontlightPanelActivity::onEnter() {
   // A stored 0% predates the 1% floor (or came from the web settings): show it
   // as the floor rather than a level the slider can no longer produce. onExit
   // persists that, which is the intent — 0 is not a brightness any more.
+  enteredInverted = SETTINGS.screenInverted;
+
   brightness = std::max(MIN_BRIGHTNESS, Frontlight.brightness());
   warmth = Frontlight.warmth();
   lightOn = Frontlight.isOn();
@@ -252,7 +254,20 @@ void FrontlightPanelActivity::toggleLight() {
   requestUpdate();
 }
 
-void FrontlightPanelActivity::close() { finish(); }
+// The sheet is transient (isTransientScreen), so night mode's entry scrub covers neither opening
+// nor closing it -- except where a tile has changed what the frame underneath is going to look
+// like. A polarity flip rewrites every pixel and a rotation re-lays the whole screen out; either
+// one leaves the outgoing shape behind as stale charge unless the repaint drives every pixel from
+// scratch. The refresh tile arms its own promotion before calling here, and when nothing else
+// changed this leaves it alone.
+void FrontlightPanelActivity::close() {
+  const bool polarityChanged = (SETTINGS.screenInverted != 0) != (enteredInverted != 0);
+  const bool rotating = APP_STATE.pendingOrientation != CrossPointState::NO_ORIENTATION_REQUEST;
+  if (polarityChanged || rotating) {
+    renderer.promoteNextRefresh(HalDisplay::SCRUB_REFRESH, polarityChanged ? "polarity" : "rotate");
+  }
+  finish();
+}
 
 bool FrontlightPanelActivity::handleHomeGesture() {
   close();

@@ -140,6 +140,9 @@ void ActivityManager::loop() {
       }
 
       ActivityResult pendingResult = std::move(currentActivity->result);
+      // Read before exitActivity() destroys it: on a pop, the screen being left is what the
+      // panel is actually showing, so it decides whether the frame underneath needs driving.
+      const bool leftTransient = currentActivity->isTransientScreen();
 
       // Destroy the current activity
       exitActivity(lock);
@@ -173,7 +176,7 @@ void ActivityManager::loop() {
 
         // Request an update to ensure the popped activity gets re-rendered
         if (pendingAction == PendingAction::None) {
-          armEntryScrub(currentActivity->name.c_str());
+          armEntryScrub(*currentActivity, leftTransient);
           requestUpdate();
         }
 
@@ -194,7 +197,7 @@ void ActivityManager::loop() {
         pendingAction = PendingAction::None;
         currentActivity = std::move(pendingActivity);
         lock.unlock();  // onEnter may acquire its own lock
-        armEntryScrub(currentActivity->name.c_str());
+        armEntryScrub(*currentActivity, /*leftTransient=*/false);
         currentActivity->onEnter();
       } else if (pendingAction == PendingAction::Push) {
         // Push MUST hold RenderLock across the pause/swap. Without it, the
@@ -218,7 +221,7 @@ void ActivityManager::loop() {
         pendingAction = PendingAction::None;
         currentActivity = std::move(pendingActivity);
         lock.unlock();  // onEnter may acquire its own lock / call requestUpdateAndWait
-        armEntryScrub(currentActivity->name.c_str());
+        armEntryScrub(*currentActivity, /*leftTransient=*/false);
         currentActivity->onEnter();
       }
 
@@ -251,9 +254,23 @@ void ActivityManager::loop() {
 // SETTINGS.screenInverted, not display.isInverted(): this runs before the render task resolves the
 // polarity for the incoming frame (ActivityManager.cpp:70), so the setting is what that frame will
 // actually be painted with.
-void ActivityManager::armEntryScrub(const char* screenName) const {
+//
+// Transient screens are exempt (Activity::isTransientScreen): a modal prompt, the control-centre
+// sheet and the word-select overlay are passed through in seconds, far short of the dwell that
+// makes the under-drive visible, so scrubbing into them was pure flash. leftTransient is the same
+// exemption for the way out, and is set on a POP only -- there the screen being dropped is the
+// frame on the glass, so dismissing a prompt or the sheet restores what it covered rather than
+// changing the screen. On a push the outgoing screen merely pauses underneath and says nothing
+// about the incoming frame; reading it there would have swallowed the scrub that opens a
+// definition from the word-select overlay.
+//
+// One dictionary lookup cost six full-panel waveforms; it now costs two -- the definition opening
+// (here) and the page coming back (DictionaryDefinitionActivity::onExit, which arms the paint
+// that replaces the definition, because the overlay it pops through never repaints).
+void ActivityManager::armEntryScrub(const Activity& incoming, const bool leftTransient) const {
   if (!SETTINGS.screenInverted) return;
-  renderer.promoteNextRefresh(HalDisplay::SCRUB_REFRESH, screenName);
+  if (leftTransient || incoming.isTransientScreen()) return;
+  renderer.promoteNextRefresh(HalDisplay::SCRUB_REFRESH, incoming.name.c_str());
 }
 
 void ActivityManager::exitActivity(const RenderLock& lock) {
@@ -274,7 +291,7 @@ void ActivityManager::replaceActivity(std::unique_ptr<Activity>&& newActivity) {
   } else {
     // No current activity, safe to launch immediately
     currentActivity = std::move(newActivity);
-    armEntryScrub(currentActivity->name.c_str());
+    armEntryScrub(*currentActivity, /*leftTransient=*/false);
     currentActivity->onEnter();
   }
 }

@@ -285,18 +285,14 @@ void DictionaryDefinitionActivity::onEnter() {
     sdFontSystem.ensureFontSize(SETTINGS.getReaderSdFontFamilyName(), SETTINGS.getDefinitionPointSize(), renderer);
   }
   wrapText();
-  // No forceCleanRefreshNextPaint() here any more. The screen this replaces may be carrying the
-  // "Looking up" toast, whose box would otherwise sit under the incoming definition text — but
-  // that is the TOAST's cost, so DictionaryLookupController::startLookup now sets the flag when
-  // (and only when) it draws one. Doing it unconditionally here charged every definition for a
-  // box that was not always on the glass: a scrub is ~730ms against ~437ms for a plain
-  // differential, and the flag is one-shot, so an open with no toast now pays the difference back.
+  // No forceCleanRefreshNextPaint() here. The frame this replaces may be carrying the "Looking
+  // up" toast, but the box is erased by this paint like any other full-content change: the
+  // word-select highlight and a whole previous definition are already replaced with a plain FAST
+  // refresh on the dictionary-switch path (device logs: display=437ms, no ghosting reported). A
+  // scrub is ~730ms against that, and under night mode it is a visible full-panel flash, which is
+  // the one thing this screen must not spend on a repaint. Opening the definition over the reader
+  // still scrubs while night mode is on — ActivityManager::armEntryScrub promotes this very paint.
   //
-  // What this does NOT cover, deliberately: the word-select highlight and a previous definition
-  // being replaced. Both are ordinary full-content changes, and the dictionary-switch path
-  // already repaints over exactly that with a plain FAST refresh (device logs: display=437ms, no
-  // ghosting reported). Same hazard EpubReaderActivity::drawIndexingPopup() works around
-  // (:490-493) — and it too sets the flag at the popup, not at the screen that follows.
   // immediate=true, and it matters. The default requestUpdate() only sets an atomic flag
   // (ActivityManager.cpp:330-334); the render task is not notified until ActivityManager::loop()
   // reaches :182-188, which happens after onEnter() RETURNS. So the history write below was not
@@ -371,6 +367,18 @@ void DictionaryDefinitionActivity::onExit() {
   // see enterSessionDict_. Safe here: the controller was stopped and joined at the top of this
   // function, so no lookup is in flight (Dictionary.h threading note).
   DictUtils::restoreSessionDict(enterSessionDict_, enterSessionDictWasPromotion_);
+  // Night mode: drive the frame that REPLACES this one with the full waveform. It is the other
+  // half of ActivityManager::armEntryScrub, which cannot do it from here — the definition pops
+  // through the word-select overlay, which finishes in its own result handler without ever
+  // painting (DictionaryWordSelectActivity.cpp:655-658), so the paint that follows is the
+  // reader's page and the manager has already written the overlay off as transient. Without this
+  // a page of definition text is erased by a differential and left to relax under the book text
+  // the user then sits on for minutes, which is the ghost the entry scrub exists to prevent.
+  // Day mode is untouched, as there: the same under-drive lands on a ~90% white panel.
+  //
+  // Armed for every exit, not just the reader: a card screen or the review session is the frame
+  // underneath just as often, and each is read rather than passed through.
+  if (SETTINGS.screenInverted) renderer.promoteNextRefresh(HalDisplay::SCRUB_REFRESH, "dict-exit");
   Activity::onExit();
 }
 

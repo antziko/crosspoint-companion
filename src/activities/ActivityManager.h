@@ -39,8 +39,10 @@ class ActivityManager {
  protected:
   GfxRenderer& renderer;
   // Drive the frame that OPENS a screen with the GC scrub while night mode is on. See the
-  // definition for why only night mode, and only on entry.
-  void armEntryScrub(const char* screenName) const;
+  // definition for why only night mode, only on entry, and not across a transient screen.
+  // leftTransient describes the screen being dropped on a pop, which the caller must read before
+  // it destroys it; it is false everywhere else.
+  void armEntryScrub(const Activity& incoming, bool leftTransient) const;
   MappedInputManager& mappedInput;
   std::vector<std::unique_ptr<Activity>> stackActivities;
   std::unique_ptr<Activity> currentActivity;

@@ -104,13 +104,13 @@ void DictionaryLookupController::startLookup(const std::string& word, bool recor
     // (BaseTheme.cpp:803) and no theme overrides it, so a second call here was a second
     // full-panel FAST refresh of pixels the panel had just been given.
     GUI.drawPopup(renderer, tr(STR_DICT_LOOKING_UP));
-    // This box is why the next full paint has to scrub instead of taking a plain differential.
-    // Setting the flag HERE rather than in DictionaryDefinitionActivity::onEnter ties the cost to
-    // its cause: when the toast is suppressed the definition's first paint is an ordinary FAST
-    // refresh (~437ms) instead of a scrub (~730ms). The flag is one-shot and consumed by the next
-    // displayBuffer, which is whichever screen replaces this one — the definition, the
-    // "not found" popup, or the word-select repaint after a cancel. All three need the box gone.
-    renderer.forceCleanRefreshNextPaint();
+    // No forceCleanRefreshNextPaint() for this box: whatever replaces this frame — the
+    // definition, the "not found" popup, the word-select repaint after a cancel — erases it with
+    // an ordinary differential, the same as every other full-content change on those screens
+    // (DictionaryDefinitionActivity.cpp:288-300). The scrub it used to ask for was the flash the
+    // user saw on every dictionary switch, where the definition is already up and nothing else
+    // in the transition needs a full waveform. Opening the definition from the reader is still
+    // driven clean under night mode, by ActivityManager::armEntryScrub on the same paint.
   }
 }
 
