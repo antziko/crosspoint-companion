@@ -120,11 +120,13 @@ class OptionPopup {
       return true;
     } else if (input.wasPressed(MappedInputManager::Button::Confirm)) {
       active = false;
+      swallowClosingRelease(input, MappedInputManager::Button::Confirm);
       if (onSelectCallback) onSelectCallback(selectedIndex);
       requestUpdate();
       return true;
     } else if (input.wasPressed(MappedInputManager::Button::Back)) {
       active = false;
+      swallowClosingRelease(input, MappedInputManager::Button::Back);
       requestUpdate();
       return true;
     }
@@ -251,6 +253,19 @@ class OptionPopup {
   static constexpr size_t INTERACTION_CAPACITY = MAX_OPTIONS + 1;
   static constexpr freeink::ui::ActionId ACTION_OPTION = 1;
   static constexpr freeink::ui::ActionId ACTION_CHROME = 2;
+
+  // The popup closes on the button PRESS, so the matching release is still owed when the
+  // screen underneath resumes reading input on the next frame. Hosts that act on a release
+  // (Back exits, Confirm activates a row) would take it as their own -- dismissing the
+  // dictionary picker on the definition screen also left the reader. Hand the release to
+  // MappedInputManager's swallow list, which ActivityManager drains ahead of activity input.
+  //
+  // Only for a release that will actually arrive: Back is also aliased onto the left-edge
+  // touch gesture, which has no physical button behind it and so would never clear the bit.
+  // isPressed carries no such alias, which makes it the test for "a real button is down".
+  static void swallowClosingRelease(const MappedInputManager& input, MappedInputManager::Button button) {
+    if (input.isPressed(button)) input.suppressNextRelease(button);
+  }
 
   bool active = false;
   std::string title;
