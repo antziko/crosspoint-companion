@@ -105,10 +105,14 @@ void ActivityManager::loop() {
     // no header there to tap. Touch boards only, like the swipe itself.
     // The band height comes from the theme rather than a literal, because it
     // varies per theme here and the top bar can be turned off outside Home.
+    // A screen whose own header band is a control keeps it and stays off this
+    // list: this runs BEFORE currentActivity->loop(), so claiming the tap here
+    // means the activity never sees it. The File Browser's header is its
+    // show-hidden-files toggle (FileBrowserActivity::loop), so the panel is
+    // reached from there by the top-edge swipe below.
     bool headerTap = false;
-    if (mappedInput.hasTouch() &&
-        (currentActivity->name == "Home" || currentActivity->name == "FileBrowser" ||
-         currentActivity->name == "Settings" || currentActivity->name == "NetworkModeSelection")) {
+    if (mappedInput.hasTouch() && (currentActivity->name == "Home" || currentActivity->name == "Settings" ||
+                                   currentActivity->name == "NetworkModeSelection")) {
       const auto& metrics = UITheme::getInstance().getMetrics();
       const int bandBottom = metrics.topPadding + metrics.headerHeight;
       int tx = 0;
