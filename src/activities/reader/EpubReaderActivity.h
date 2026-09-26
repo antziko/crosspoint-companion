@@ -450,6 +450,11 @@ class EpubReaderActivity final : public Activity {
   std::string moreRowName(int row) const;
   std::string moreRowValue(int row) const;
   void activateMoreRow(int row);
+  // Footnote follow-up for the current page: none does nothing, one navigates straight
+  // through, several open EpubReaderFootnoteSelectActivity to pick a marker on the page
+  // itself. reopenMenuOnCancel returns to the reader menu on Back (the menu route) rather
+  // than to the page (the power-button route).
+  void openFootnoteSelect(bool reopenMenuOnCancel);
   // framebufferContainsPage = true means the caller guarantees the framebuffer
   // currently shows the page at the renderer's oriented page margins. The
   // DictionaryWordSelectActivity will skip its initial clearScreen +

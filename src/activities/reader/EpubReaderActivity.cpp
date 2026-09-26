@@ -31,7 +31,7 @@
 #include "DictionaryWordSelectActivity.h"
 #include "EpubReaderBookmarksActivity.h"
 #include "EpubReaderChapterSelectionActivity.h"
-#include "EpubReaderFootnotesActivity.h"
+#include "EpubReaderFootnoteSelectActivity.h"
 #include "EpubReaderPercentSelectionActivity.h"
 #include "EpubReaderUtils.h"
 #include "FlashcardListActivity.h"
@@ -628,6 +628,42 @@ void EpubReaderActivity::showBuildPopup() {
   buildPopupPending = false;
 }
 
+void EpubReaderActivity::openFootnoteSelect(const bool reopenMenuOnCancel) {
+  if (!section || currentPageFootnotes.empty()) return;
+  if (currentPageFootnotes.size() == 1) {
+    navigateToHref(currentPageFootnotes[0].href, true);
+    return;
+  }
+
+  auto page = section->loadPage(section->currentPage);
+  if (!page) return;
+
+  int orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft;
+  renderer.getOrientedViewableTRBL(&orientedMarginTop, &orientedMarginRight, &orientedMarginBottom,
+                                   &orientedMarginLeft);
+  orientedMarginTop += SETTINGS.screenMargin;
+  orientedMarginLeft += SETTINGS.screenMargin;
+  auto selector = makeUniqueNoThrow<EpubReaderFootnoteSelectActivity>(renderer, mappedInput, std::move(page),
+                                                                      orientedMarginLeft, orientedMarginTop);
+  if (!selector) {
+    LOG_ERR("ERA", "OOM: EpubReaderFootnoteSelectActivity");
+    return;
+  }
+  startActivityForResult(std::move(selector), [this, reopenMenuOnCancel](const ActivityResult& result) {
+    if (result.isCancelled) {
+      if (reopenMenuOnCancel) {
+        openReaderMenu();
+      } else {
+        requestUpdate();
+      }
+      return;
+    }
+    const auto& footnoteResult = std::get<FootnoteResult>(result.data);
+    navigateToHref(footnoteResult.href, true);
+    requestUpdate();
+  });
+}
+
 void EpubReaderActivity::loop() {
   if (!epub) {
     // Should never happen
@@ -1033,18 +1069,9 @@ void EpubReaderActivity::loop() {
       !mappedInput.wasReleased(MappedInputManager::Button::Down)) {
     if (footnoteDepth > 0) {
       restoreSavedPosition();
-    } else if (currentPageFootnotes.size() == 1) {
-      navigateToHref(currentPageFootnotes[0].href, true);
-    } else if (currentPageFootnotes.size() > 1) {
-      startActivityForResultNoThrow<EpubReaderFootnotesActivity>(
-          [this](const ActivityResult& result) {
-            if (!result.isCancelled) {
-              const auto& footnoteResult = std::get<FootnoteResult>(result.data);
-              navigateToHref(footnoteResult.href, true);
-            }
-            requestUpdate();
-          },
-          renderer, mappedInput, currentPageFootnotes);
+    } else {
+      // Single footnote follows straight through; several open the in-page selector.
+      openFootnoteSelect(/*reopenMenuOnCancel=*/false);
     }
     return;
   }
@@ -1871,17 +1898,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       break;
     }
     case EpubReaderMenuActivity::MenuAction::FOOTNOTES: {
-      startActivityForResultNoThrow<EpubReaderFootnotesActivity>(
-          [this](const ActivityResult& result) {
-            if (result.isCancelled) {
-              openReaderMenu();
-              return;
-            }
-            const auto& footnoteResult = std::get<FootnoteResult>(result.data);
-            navigateToHref(footnoteResult.href, true);
-            requestUpdate();
-          },
-          renderer, mappedInput, currentPageFootnotes);
+      openFootnoteSelect(/*reopenMenuOnCancel=*/true);
       break;
     }
     case EpubReaderMenuActivity::MenuAction::GO_TO_PERCENT: {
