@@ -573,12 +573,14 @@ void SleepActivity::renderCoverSleepScreen() const {
 void SleepActivity::renderLastScreenSleepScreen() const {
   const auto pageHeight = renderer.getScreenHeight();
   renderer.drawImage(MoonIcon, 0, pageHeight - MOONICON_HEIGHT, MOONICON_WIDTH, MOONICON_HEIGHT);
+  // Only the moon differs from the frame already on the glass, so a differential
+  // update adds it without a clean pass. HALF sweeps the panel through the inverse
+  // first, which on a night-mode page is a full white flash as the device sleeps --
+  // and this path now keeps night polarity rather than clearing it.
   if (gpio.deviceIsX3()) {
-    // The controller still holds the displayed page, so its differential base
-    // waveform can add the moon without a full-screen flash.
     renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
   } else {
-    timedPaint(renderer, HalDisplay::HALF_REFRESH, "quick-resume");
+    timedPaint(renderer, HalDisplay::FAST_REFRESH, "quick-resume");
   }
 }
 
