@@ -22,6 +22,7 @@
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
 #include "components/icons/bookmark.h"
+#include "components/icons/cover.h"
 #include "fontIds.h"
 
 // Internal constants
@@ -154,8 +155,42 @@ void BaseTheme::drawWifiBars(const GfxRenderer& renderer, const int rightX, cons
   }
 }
 
-void BaseTheme::drawProgressBar(const GfxRenderer& renderer, Rect rect, const size_t current,
-                                const size_t total) const {
+void BaseTheme::drawCoverPlaceholder(const GfxRenderer& renderer, Rect rect) {
+  if (rect.width <= 0 || rect.height <= 0) return;
+  const int topHeight = rect.height / 3;
+  renderer.fillRect(rect.x, rect.y, rect.width, rect.height, false);
+  renderer.fillRect(rect.x, rect.y + topHeight, rect.width, rect.height - topHeight, true);
+  renderer.drawRect(rect.x, rect.y, rect.width, rect.height, true);
+  constexpr int ICON_SIZE = 32;
+  if (rect.width >= ICON_SIZE + 4 && topHeight >= ICON_SIZE + 4) {
+    const int insetX = std::min(24, (rect.width - ICON_SIZE) / 2);
+    const int insetY = std::min(24, (topHeight - ICON_SIZE) / 2);
+    renderer.drawIcon(CoverIcon, rect.x + insetX, rect.y + insetY, ICON_SIZE);
+  }
+}
+
+bool BaseTheme::drawCoverThumbFill(const GfxRenderer& renderer, const Bitmap& bitmap, Rect slot) {
+  if (slot.width <= 0 || slot.height <= 0) return false;
+  const int bw = bitmap.getWidth();
+  const int bh = bitmap.getHeight();
+  if (bw <= 0 || bh <= 0) return false;
+
+  // 1:1, centred, overflow cropped -- rescaling a pre-dithered cover aliases badly.
+  // Upstream crops with a renderer clip rect; this fork has none (the accessors that
+  // commit adds have no backing members and nothing enforces them), so the crop is
+  // expressed in the bitmap's own terms: the visible box is min(slot, bitmap) and the
+  // centre-crop fractions make the cropped source exactly that size, which lands
+  // drawBitmap's fitScale on 1.0 so it does not resample.
+  const int visibleW = std::min(slot.width, bw);
+  const int visibleH = std::min(slot.height, bh);
+  const float cropX = bw > visibleW ? 1.0f - static_cast<float>(visibleW) / static_cast<float>(bw) : 0.0f;
+  const float cropY = bh > visibleH ? 1.0f - static_cast<float>(visibleH) / static_cast<float>(bh) : 0.0f;
+  renderer.drawBitmap(bitmap, slot.x + (slot.width - visibleW) / 2, slot.y + (slot.height - visibleH) / 2, visibleW,
+                      visibleH, cropX, cropY);
+  return true;
+}
+
+void BaseTheme::drawProgressBar(const GfxRenderer& renderer, Rect rect, const size_t current, const size_t total) {
   if (total == 0) {
     return;
   }
@@ -510,6 +545,11 @@ bool BaseTheme::listIndexFromPoint(const GfxRenderer&, const Rect rect, const in
   return true;
 }
 
+int BaseTheme::headerStatusInset() {
+  const ThemeMetrics& metrics = UITheme::getInstance().getMetrics();
+  return metrics.headerBatteryDetached ? 12 : metrics.headerSidePadding;
+}
+
 void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* title, const char* subtitle) const {
   if (rect.height <= 0) return;
   // Top bar off outside Home: the screen keeps its title, loses the bar around it.
@@ -625,7 +665,7 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
   // strip (batteryBarHeight) — the legacy shared-line headers drew the battery
   // at the top edge, and it keeps the lower-right corner free for the manual
   // right label below.
-  const int16_t batteryEdgeInset = batteryDetached ? 12 : tokens.headerSidePadding;
+  const int16_t batteryEdgeInset = static_cast<int16_t>(headerStatusInset());
   const int16_t batteryX = batteryLeft ? static_cast<int16_t>(band.x + batteryEdgeInset)
                                        : static_cast<int16_t>(band.right() - batteryEdgeInset - batteryReserve);
   const int16_t batteryH = static_cast<int16_t>(metrics.batteryBarHeight);
@@ -889,8 +929,9 @@ void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
         if (bitmap.parseHeaders() == BmpReaderError::Ok) {
           LOG_DBG("THEME", "Rendering bmp");
 
-          // Draw the cover image (bookWidth and bookHeight already match image aspect ratio)
-          renderer.drawBitmap(bitmap, bookX, bookY, bookWidth, bookHeight);
+          // The card matches the cover aspect except when width-capped; fill
+          // the card 1:1 and crop the overflow rather than rescale the dither.
+          drawCoverThumbFill(renderer, bitmap, Rect{bookX, bookY, bookWidth, bookHeight});
 
           // Draw border around the card
           renderer.drawRect(bookX, bookY, bookWidth, bookHeight);

@@ -4,12 +4,14 @@
 
 #include "./FileBrowserActivity.h"
 #include "activities/Activity.h"
+#include "components/CoverGridHomeUi.h"
 #include "util/ButtonNavigator.h"
 
 struct RecentBook;
 struct Rect;
 
 class HomeActivity final : public Activity {
+  std::unique_ptr<CoverGridHomeUi> coverGridUi;
   ButtonNavigator buttonNavigator;
   int selectorIndex = 0;
   bool recentsLoading = false;
@@ -167,6 +169,8 @@ class HomeActivity final : public Activity {
   void freeCoverBuffer();     // Free the stored cover buffer
   void loadRecentBooks(int maxBooks);
   void loadRecentCovers(int coverHeight);
+  void resolveGridCoverPaths();
+  void loadGridCover(RecentBook& book, int height, bool& showingLoading, Rect& popupRect);
 
  public:
   explicit HomeActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,

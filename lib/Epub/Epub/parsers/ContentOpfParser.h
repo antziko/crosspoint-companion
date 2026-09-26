@@ -29,6 +29,9 @@ class ContentOpfParser final : public Print {
   XML_Parser parser = nullptr;
   ParserState state = START;
   BookMetadataCache* cache;
+  // Stop after the metadata block: the cover-grid path wants title/author/cover href
+  // and never the manifest or spine, which is the expensive part of an OPF parse.
+  const bool metadataOnly = false;
   HalFile tempItemStore;
   std::string coverItemId;
   bool hasExplicitStartReference = false;
@@ -68,8 +71,12 @@ class ContentOpfParser final : public Print {
   std::vector<std::string> cssFiles;  // CSS stylesheet paths
 
   explicit ContentOpfParser(const std::string& cachePath, const std::string& baseContentPath, const size_t xmlSize,
-                            BookMetadataCache* cache)
-      : cachePath(cachePath), baseContentPath(baseContentPath), remainingSize(xmlSize), cache(cache) {}
+                            BookMetadataCache* cache, const bool metadataOnly = false)
+      : cachePath(cachePath),
+        baseContentPath(baseContentPath),
+        remainingSize(xmlSize),
+        cache(cache),
+        metadataOnly(metadataOnly) {}
   ~ContentOpfParser() override;
 
   bool setup();

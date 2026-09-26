@@ -17,6 +17,7 @@
 #include "ReaderFontSizes.h"
 #include "activities/settings/SettingsActivity.h"
 #include "util/Dictionary.h"
+#include "components/UITheme.h"
 #include "util/DictionaryRegistry.h"
 
 // Build the font size setting dynamically: the options are the point sizes the
@@ -187,6 +188,17 @@ inline SettingInfo buildDictionarySetting(const DictionaryRegistry* registry) {
   return s;
 }
 
+inline std::vector<StrId> homeThemeValues() {
+  // Ordered by UI_THEME value, not menu preference: SettingInfo::Enum maps the picker
+  // index straight to the persisted number. Cover Grid is last because it is 5 here.
+  static constexpr StrId VALUES[] = {StrId::STR_THEME_CLASSIC,     StrId::STR_THEME_LYRA,
+                                     StrId::STR_THEME_LYRA_EXTENDED, StrId::STR_THEME_ROUNDEDRAFF,
+                                     StrId::STR_THEME_VEGA,        StrId::STR_THEME_COVER_GRID};
+  // Cover Grid needs PSRAM, so it is simply absent from the picker on the C3 boards.
+  const size_t count = UITheme::supportsCoverGrid() ? std::size(VALUES) : std::size(VALUES) - 1;
+  return {VALUES, VALUES + count};
+}
+
 // Shared settings list used by both the device settings UI and the web settings API.
 // Each entry has a key (for JSON API) and category (for grouping).
 // ACTION-type entries and entries without a key are device-only.
@@ -269,9 +281,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   v.push_back(SettingInfo::Enum(StrId::STR_HIDE_BATTERY, &CrossPointSettings::hideBatteryPercentage,
                                 {StrId::STR_NEVER, StrId::STR_IN_READER, StrId::STR_ALWAYS}, "hideBatteryPercentage",
                                 StrId::STR_CAT_DISPLAY));
-  v.push_back(SettingInfo::Enum(StrId::STR_UI_THEME, &CrossPointSettings::uiTheme,
-                                {StrId::STR_THEME_CLASSIC, StrId::STR_THEME_LYRA, StrId::STR_THEME_LYRA_EXTENDED,
-                                 StrId::STR_THEME_ROUNDEDRAFF, StrId::STR_THEME_VEGA},
+  v.push_back(SettingInfo::Enum(StrId::STR_UI_THEME, &CrossPointSettings::uiTheme, homeThemeValues(),
                                 "uiTheme", StrId::STR_CAT_DISPLAY));
   v.push_back(
       SettingInfo::Enum(StrId::STR_DISPLAY_ORIENTATION, &CrossPointSettings::displayOrientation,
