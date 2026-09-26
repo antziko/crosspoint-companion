@@ -443,11 +443,30 @@ int CrossPointSettings::getRefreshFrequency() const {
   }
 }
 
+int CrossPointSettings::getNightRefreshFrequency() const {
+  switch (nightRefreshFrequency) {
+    case NIGHT_REFRESH_1:
+      return 1;
+    case NIGHT_REFRESH_3:
+      return 3;
+    case NIGHT_REFRESH_5:
+      return 5;
+    case NIGHT_REFRESH_10:
+      return 10;
+    case NIGHT_REFRESH_15:
+      return 15;
+    case NIGHT_REFRESH_SAME:
+    default:
+      return 0;
+  }
+}
+
 int CrossPointSettings::getEffectiveRefreshFrequency() const {
   const int base = getRefreshFrequency();
   // REFRESH_COUNTDOWN_DISABLED ("Never") is negative and must stay exactly that.
   if (!screenInverted || base <= 0) return base;
-  return std::min(base, NIGHT_MODE_MAX_REFRESH_PAGES);
+  const int night = getNightRefreshFrequency();
+  return night > 0 ? night : base;
 }
 
 uint8_t CrossPointSettings::getDefinitionPointSize() const {

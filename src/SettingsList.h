@@ -16,8 +16,8 @@
 #include "KOReaderCredentialStore.h"
 #include "ReaderFontSizes.h"
 #include "activities/settings/SettingsActivity.h"
-#include "util/Dictionary.h"
 #include "components/UITheme.h"
+#include "util/Dictionary.h"
 #include "util/DictionaryRegistry.h"
 
 // Build the font size setting dynamically: the options are the point sizes the
@@ -191,9 +191,9 @@ inline SettingInfo buildDictionarySetting(const DictionaryRegistry* registry) {
 inline std::vector<StrId> homeThemeValues() {
   // Ordered by UI_THEME value, not menu preference: SettingInfo::Enum maps the picker
   // index straight to the persisted number. Cover Grid is last because it is 5 here.
-  static constexpr StrId VALUES[] = {StrId::STR_THEME_CLASSIC,     StrId::STR_THEME_LYRA,
+  static constexpr StrId VALUES[] = {StrId::STR_THEME_CLASSIC,       StrId::STR_THEME_LYRA,
                                      StrId::STR_THEME_LYRA_EXTENDED, StrId::STR_THEME_ROUNDEDRAFF,
-                                     StrId::STR_THEME_VEGA,        StrId::STR_THEME_COVER_GRID};
+                                     StrId::STR_THEME_VEGA,          StrId::STR_THEME_COVER_GRID};
   // Cover Grid needs PSRAM, so it is simply absent from the picker on the C3 boards.
   const size_t count = UITheme::supportsCoverGrid() ? std::size(VALUES) : std::size(VALUES) - 1;
   return {VALUES, VALUES + count};
@@ -223,8 +223,8 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // growth allocation is what aborted (and rebooted the device) when settings were saved at
   // low heap; see SettingsPersistence.h. Keep headroom above the real count.
   //
-  // Derived, not guessed: 86 rows compile unconditionally, plus up to 6 behind
-  // FREEINK_CAP_TOUCH / _FRONTLIGHT / _WARMLIGHT — 92 on a board with all three, which is
+  // Derived, not guessed: 87 rows compile unconditionally, plus up to 6 behind
+  // FREEINK_CAP_TOUCH / _FRONTLIGHT / _WARMLIGHT — 93 on a board with all three, which is
   // the X4 Pro. 88 was already under that, so X4 Pro was paying the growth realloc on every
   // call. 104 keeps headroom for the next few rows.
   constexpr size_t kSettingCount = 104;
@@ -269,6 +269,11 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                                 {StrId::STR_PAGES_1, StrId::STR_PAGES_5, StrId::STR_PAGES_10, StrId::STR_PAGES_15,
                                  StrId::STR_PAGES_30, StrId::STR_PAGES_60, StrId::STR_PAGES_NEVER},
                                 "refreshFrequency", StrId::STR_DISP_EINK));
+  // Replaces Refresh Frequency for as long as night mode is on; "Same as above" defers to it.
+  v.push_back(SettingInfo::Enum(StrId::STR_NIGHT_REFRESH_FREQ, &CrossPointSettings::nightRefreshFrequency,
+                                {StrId::STR_SAME_AS_REFRESH, StrId::STR_PAGES_1, StrId::STR_PAGES_3, StrId::STR_PAGES_5,
+                                 StrId::STR_PAGES_10, StrId::STR_PAGES_15},
+                                "nightRefreshFrequency", StrId::STR_DISP_EINK));
   v.push_back(SettingInfo::Enum(StrId::STR_REFRESH_ACTION, &CrossPointSettings::refreshAction,
                                 {StrId::STR_REFRESH_ACTION_FULL, StrId::STR_REFRESH_ACTION_BW_REINFORCEMENT},
                                 "refreshAction", StrId::STR_DISP_EINK));
@@ -281,8 +286,8 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   v.push_back(SettingInfo::Enum(StrId::STR_HIDE_BATTERY, &CrossPointSettings::hideBatteryPercentage,
                                 {StrId::STR_NEVER, StrId::STR_IN_READER, StrId::STR_ALWAYS}, "hideBatteryPercentage",
                                 StrId::STR_CAT_DISPLAY));
-  v.push_back(SettingInfo::Enum(StrId::STR_UI_THEME, &CrossPointSettings::uiTheme, homeThemeValues(),
-                                "uiTheme", StrId::STR_CAT_DISPLAY));
+  v.push_back(SettingInfo::Enum(StrId::STR_UI_THEME, &CrossPointSettings::uiTheme, homeThemeValues(), "uiTheme",
+                                StrId::STR_CAT_DISPLAY));
   v.push_back(
       SettingInfo::Enum(StrId::STR_DISPLAY_ORIENTATION, &CrossPointSettings::displayOrientation,
                         {StrId::STR_PORTRAIT, StrId::STR_LANDSCAPE_CW, StrId::STR_INVERTED, StrId::STR_LANDSCAPE_CCW},

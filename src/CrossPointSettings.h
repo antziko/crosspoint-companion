@@ -164,6 +164,21 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     REFRESH_FREQUENCY_COUNT
   };
 
+  // Pages between maintenance refreshes while night mode is on. Night mode paints ~90%
+  // of the panel black and page turns are FAST, which under-develops that black, so the
+  // interval that suits day reading is usually too long here. SAME defers to
+  // REFRESH_FREQUENCY; every other value replaces it outright for as long as night mode
+  // is on.
+  enum NIGHT_REFRESH_FREQUENCY {
+    NIGHT_REFRESH_SAME = 0,
+    NIGHT_REFRESH_1 = 1,
+    NIGHT_REFRESH_3 = 2,
+    NIGHT_REFRESH_5 = 3,
+    NIGHT_REFRESH_10 = 4,
+    NIGHT_REFRESH_15 = 5,
+    NIGHT_REFRESH_FREQUENCY_COUNT
+  };
+
   // Periodic maintenance action. On X3, BW_REINFORCEMENT swaps the flashing HALF
   // scrub for the OEM AA-pre-BW(mid) no-flash reinforcement waveform. No effect on
   // X4 (SSD1677 has no reinforcement bank; displayGrayscaleBase falls back to FAST).
@@ -445,6 +460,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t syncPromptMinutesIdx = 1;
   // E-ink refresh frequency (default 15 pages)
   uint8_t refreshFrequency = REFRESH_15;
+  // Refresh frequency used instead while night mode is on (default 5 pages)
+  uint8_t nightRefreshFrequency = NIGHT_REFRESH_5;
   // Periodic maintenance action (default FULL; BW reinforcement is X3-only)
   uint8_t refreshAction = REFRESH_ACTION_FULL;
   // Manual "Refresh Screen" clear mode (default HALF: the only single pass that scrubs)
@@ -716,14 +733,15 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t getReaderScreenMargin() const;
   unsigned long getSleepTimeoutMs() const;
   int getRefreshFrequency() const;
-  // getRefreshFrequency() folded with night mode. Night-mode FAST under-develops black
-  // (see the screen-entry scrub), and a reading session is repaints WITHIN one screen,
-  // which stay FAST -- so the periodic maintenance page is the only thing that ever
-  // drives those pixels again. Capped tighter while inverted. "Never" is left alone:
-  // it is an explicit choice, not a default.
+  // Pages between maintenance refreshes in night mode, or 0 for "follow
+  // getRefreshFrequency()".
+  int getNightRefreshFrequency() const;
+  // The frequency a reader should actually count down from: getRefreshFrequency(), or the
+  // night-mode override in its place. Night-mode FAST under-develops black (see the
+  // screen-entry scrub), and a reading session is repaints WITHIN one screen, which stay
+  // FAST -- so the periodic maintenance page is the only thing that ever drives those
+  // pixels again. "Never" is left alone in both modes: it is an explicit choice.
   int getEffectiveRefreshFrequency() const;
-  // Longest run of FAST page turns allowed between maintenance pages in night mode.
-  static constexpr int NIGHT_MODE_MAX_REFRESH_PAGES = 5;
 };
 
 // Helper macro to access settings

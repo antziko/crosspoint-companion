@@ -81,6 +81,8 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
                           CrossPointSettings::WALLPAPER_TONE_COUNT - 1),
     persisted::enumerated("refreshFrequency", &CrossPointSettings::refreshFrequency,
                           CrossPointSettings::REFRESH_FREQUENCY_COUNT - 1),
+    persisted::enumerated("nightRefreshFrequency", &CrossPointSettings::nightRefreshFrequency,
+                          CrossPointSettings::NIGHT_REFRESH_FREQUENCY_COUNT - 1),
     persisted::enumerated("refreshAction", &CrossPointSettings::refreshAction,
                           CrossPointSettings::REFRESH_ACTION_COUNT - 1),
     persisted::enumerated("refreshScreenMode", &CrossPointSettings::refreshScreenMode,
