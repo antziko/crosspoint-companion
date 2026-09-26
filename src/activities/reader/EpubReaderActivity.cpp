@@ -1051,7 +1051,8 @@ void EpubReaderActivity::loop() {
 
   // Touch page-turn (#2481): left third = previous, right third = next; OR'd with
   // the button/tilt result. The middle third is the reader-menu tap.
-  const auto touch = ReaderUtils::detectTouchPageTurn(renderer, mappedInput);
+  const auto touch =
+      ReaderUtils::detectTouchPageTurn(renderer, mappedInput, ReaderUtils::isRtlBookLanguage(epub->getLanguage()));
 
   // Manual turns can't outrun the panel, so the guard further down refuses to
   // start a turn while a render is in flight or inside a short post-turn gap.

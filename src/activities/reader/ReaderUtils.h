@@ -9,6 +9,9 @@
 #include <SdDebugLog.h>
 #include <components/bars/tap-zones.h>
 
+#include <cctype>
+#include <string_view>
+
 #include "MappedInputManager.h"
 #include "activities/ActivityManager.h"
 
@@ -28,6 +31,18 @@ enum ReaderTouchAction : freeink::ui::ActionId {
   READER_TOUCH_PREV = 1,
   READER_TOUCH_NEXT = 3,
 };
+
+// Page progression follows the book's script, not the UI language: an RTL book
+// pages the other way round, so its touch zones and swipe senses mirror. Matches
+// the language tag's leading subtag only (he/iw/ar/fa), so "ar-EG" counts and
+// "arn" (Mapudungun) does not.
+inline bool isRtlBookLanguage(std::string_view tag) {
+  if (tag.size() < 2 || (tag.size() > 2 && tag[2] != '-' && tag[2] != '_')) return false;
+  const auto first = std::tolower(static_cast<unsigned char>(tag[0]));
+  const auto second = std::tolower(static_cast<unsigned char>(tag[1]));
+  return (first == 'h' && second == 'e') || (first == 'i' && second == 'w') || (first == 'a' && second == 'r') ||
+         (first == 'f' && second == 'a');
+}
 
 inline void applyOrientation(GfxRenderer& renderer, const uint8_t orientation) {
   switch (orientation) {
@@ -140,7 +155,8 @@ struct TouchPageTurn {
   unsigned long heldMs;
 };
 
-inline TouchPageTurn detectTouchPageTurn(GfxRenderer& renderer, const MappedInputManager& input) {
+inline TouchPageTurn detectTouchPageTurn(GfxRenderer& renderer, const MappedInputManager& input,
+                                         const bool rtlBook = false) {
   TouchPageTurn result{false, false, 0};
   if (!SETTINGS.touchReaderControls || !input.hasTouch()) {
     return result;
@@ -153,10 +169,12 @@ inline TouchPageTurn detectTouchPageTurn(GfxRenderer& renderer, const MappedInpu
     const auto dir = input.wasSwipe();
     switch (dir) {
       case MappedInputManager::SwipeDir::Left:
-        result.next = true;
+        // Horizontal only: an RTL book pages the other way. The vertical cases
+        // below follow the scroll sense, which reading direction does not flip.
+        (rtlBook ? result.prev : result.next) = true;
         break;
       case MappedInputManager::SwipeDir::Right:
-        result.prev = true;
+        (rtlBook ? result.next : result.prev) = true;
         break;
       case MappedInputManager::SwipeDir::Up:
         // A bottom-edge up-swipe is the board's own gesture wherever one is live: Home on
@@ -192,7 +210,8 @@ inline TouchPageTurn detectTouchPageTurn(GfxRenderer& renderer, const MappedInpu
   // Outer thirds only: the middle third is the reader-menu tap
   // (isTouchMenuTap below), so it must not double as a page turn.
   const int16_t zoneWidth = width / 3;
-  const bool inverted = SETTINGS.touchReaderControls == CrossPointSettings::TOUCH_READER_INVERTED_TAP;
+  // RTL and Inverted Tap each mirror the zones, so both together cancel out.
+  const bool inverted = (SETTINGS.touchReaderControls == CrossPointSettings::TOUCH_READER_INVERTED_TAP) != rtlBook;
   const freeink::ui::TapZone zones[] = {
       {freeink::ui::Rect{0, 0, zoneWidth, height}, inverted ? READER_TOUCH_NEXT : READER_TOUCH_PREV},
       {freeink::ui::Rect{static_cast<int16_t>(width - zoneWidth), 0, zoneWidth, height},
