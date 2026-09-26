@@ -76,7 +76,7 @@ int ReaderActivity::initialRefreshCountdown() const {
   // flash on every open.
   if (!allowFastInitialRefresh) return CrossPointSettings::REFRESH_COUNTDOWN_FORCE_FULL;
 
-  const int refreshFrequency = SETTINGS.getRefreshFrequency();
+  const int refreshFrequency = SETTINGS.getEffectiveRefreshFrequency();
   return refreshFrequency > 1 ? refreshFrequency : 2;
 }
 

@@ -716,6 +716,14 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t getReaderScreenMargin() const;
   unsigned long getSleepTimeoutMs() const;
   int getRefreshFrequency() const;
+  // getRefreshFrequency() folded with night mode. Night-mode FAST under-develops black
+  // (see the screen-entry scrub), and a reading session is repaints WITHIN one screen,
+  // which stay FAST -- so the periodic maintenance page is the only thing that ever
+  // drives those pixels again. Capped tighter while inverted. "Never" is left alone:
+  // it is an explicit choice, not a default.
+  int getEffectiveRefreshFrequency() const;
+  // Longest run of FAST page turns allowed between maintenance pages in night mode.
+  static constexpr int NIGHT_MODE_MAX_REFRESH_PAGES = 5;
 };
 
 // Helper macro to access settings

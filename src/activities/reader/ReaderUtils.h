@@ -323,7 +323,7 @@ inline void displayWithRefreshCycle(const GfxRenderer& renderer, int& pagesUntil
       // waveform runs after it and before the planes are written.
       if (needsGrayscaleBase) renderer.preconditionGrayscale();
     }
-    pagesUntilFullRefresh = SETTINGS.getRefreshFrequency();
+    pagesUntilFullRefresh = SETTINGS.getEffectiveRefreshFrequency();
   } else {
     if (needsGrayscaleBase) {
       // Synchronous by design: displayGrayscaleBase has no async form.

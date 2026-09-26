@@ -4,6 +4,7 @@
 #include <Logging.h>
 #include <SdDebugLog.h>
 
+#include <algorithm>
 #include <cstring>
 #include <iterator>
 
@@ -440,6 +441,13 @@ int CrossPointSettings::getRefreshFrequency() const {
     case REFRESH_NEVER:
       return REFRESH_COUNTDOWN_DISABLED;
   }
+}
+
+int CrossPointSettings::getEffectiveRefreshFrequency() const {
+  const int base = getRefreshFrequency();
+  // REFRESH_COUNTDOWN_DISABLED ("Never") is negative and must stay exactly that.
+  if (!screenInverted || base <= 0) return base;
+  return std::min(base, NIGHT_MODE_MAX_REFRESH_PAGES);
 }
 
 uint8_t CrossPointSettings::getDefinitionPointSize() const {
