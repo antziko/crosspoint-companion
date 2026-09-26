@@ -113,11 +113,6 @@ void logSleepEntry(const GfxRenderer& renderer, const bool fromTimeout, const bo
 void SleepActivity::onEnter() {
   Activity::onEnter();
 
-  // Sleep screens always use normal polarity. This activity paints directly from
-  // onEnter, outside ActivityManager's per-render polarity resolution, so clear any
-  // inversion left over from a night-mode reader render.
-  display.setInverted(false);
-
   // Drop any wallpaper recorded for a previous sleep. Only renderCustomSleepScreen's
   // random folder pick re-sets it below; every other sleep screen (blank/cover/
   // quick-resume/fixed /sleep.bmp) leaves it empty so the on-wake review prompt does
@@ -142,6 +137,18 @@ void SleepActivity::onEnter() {
     SdDebugLog::log("SLP", "path=quick-resume (deepclean skipped)");
     return renderLastScreenSleepScreen();
   }
+
+  // Every sleep screen below this point draws fresh content, which is authored in
+  // normal polarity. This activity paints directly from onEnter, outside
+  // ActivityManager's per-render polarity resolution, so clear any inversion left
+  // over from a night-mode reader render.
+  //
+  // Deliberately AFTER the quick-resume return: that path keeps the frame the panel
+  // is already showing, so it must keep the driver's inversion state too. A
+  // night-mode page sleeps in night polarity and the moon inverts with it at
+  // transfer, like any other draw. Clearing inversion first pushed a night page out
+  // at normal polarity -- the whole screen flipped as the device went to sleep.
+  display.setInverted(false);
 
   // Blank the framebuffer before the popup, and never draw the popup over whatever was on it.
   //
