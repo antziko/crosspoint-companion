@@ -86,6 +86,12 @@ TextBlock::TextBlock(const std::vector<std::string>& words, const std::vector<in
   const size_t size = arenaSize(numWords, focusPresent, textBytes);
   arena = makeUniqueNoThrow<uint8_t[]>(size);
   if (!arena) {
+    // Shed rebuildable caches (SD-font mini data, render glyph cache) and retry once before
+    // declaring the line lost. They re-fault from SD/flash on the next glyph access.
+    reclaimHeap(size + 4 * 1024);
+    arena = makeUniqueNoThrow<uint8_t[]>(size);
+  }
+  if (!arena) {
     LOG_ERR("TXB", "OOM: arena %u bytes", static_cast<uint32_t>(size));
     numWords = 0;
     textBytes = 0;

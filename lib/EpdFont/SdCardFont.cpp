@@ -1986,6 +1986,55 @@ int SdCardFont::buildAdvanceTable(const std::deque<std::string>& words, bool inc
   return buildAdvanceTableRange(words.begin(), words.end(), words.size() > 1, includeHyphen, styleMask, extraText);
 }
 
+namespace {
+// Forward iterator over the NUL-terminated words packed into a paragraph's word-arena
+// chunks. Dereferences to const char*, so buildAdvanceTableRange consumes it unchanged and
+// the whole paragraph is scanned without materializing one std::string per word.
+class PackedWordIter {
+ public:
+  PackedWordIter(const char* const* segments, const size_t* lens, const size_t count, const size_t seg)
+      : segments_(segments), lens_(lens), count_(count), seg_(seg) {
+    if (seg_ < count_) {
+      cursor_ = segments_[seg_];
+      settle();
+    }
+  }
+  const char* operator*() const { return cursor_; }
+  PackedWordIter& operator++() {
+    cursor_ += strlen(cursor_) + 1;
+    settle();
+    return *this;
+  }
+  bool operator!=(const PackedWordIter& other) const { return seg_ != other.seg_ || cursor_ != other.cursor_; }
+
+ private:
+  // Step past exhausted segments so cursor_ always points at a real word, or the iterator
+  // lands exactly on the end sentinel (seg_ == count_, cursor_ == nullptr).
+  void settle() {
+    while (seg_ < count_ && cursor_ >= segments_[seg_] + lens_[seg_]) {
+      if (++seg_ >= count_) {
+        cursor_ = nullptr;
+        return;
+      }
+      cursor_ = segments_[seg_];
+    }
+  }
+  const char* const* segments_;
+  const size_t* lens_;
+  size_t count_;
+  size_t seg_;
+  const char* cursor_ = nullptr;
+};
+}  // namespace
+
+int SdCardFont::buildAdvanceTablePacked(const char* const* segments, const size_t* segmentLens,
+                                        const size_t segmentCount, const bool includeSpace, const bool includeHyphen,
+                                        const uint8_t styleMask, const char* extraText) {
+  const PackedWordIter begin(segments, segmentLens, segmentCount, 0);
+  const PackedWordIter end(segments, segmentLens, segmentCount, segmentCount);
+  return buildAdvanceTableRange(begin, end, includeSpace, includeHyphen, styleMask, extraText);
+}
+
 // --- Stats ---
 
 void SdCardFont::logStats(const char* label) {

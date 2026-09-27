@@ -8,21 +8,30 @@
 #include <string>
 #include <vector>
 
+#include "WordStore.h"
 #include "blocks/BlockStyle.h"
 #include "blocks/TextBlock.h"
 
 class GfxRenderer;
 
 class ParsedText {
-  // words/rubyTexts are std::deque, not std::vector: a paragraph can hold thousands of
-  // tokens (CJK splits every character), and a vector grows by reallocating its whole
-  // element array into one contiguous block (24 B/std::string -> tens of KB at a few
-  // thousand tokens). On the ESP32-C3 that single large contiguous request fails under a
-  // fragmented heap and the throwing operator new abort()s the firmware (fresh-open CJK
-  // crash). A deque grows in fixed ~512 B nodes, so the largest contiguous alloc stays
-  // small regardless of token count. The parallel arrays below stay vectors: 1 byte / 1 bit
-  // each, they never approach the contiguous-block ceiling.
-  std::deque<std::string> words;
+  // Word text lives in wordStore (chunked bump arena, NUL-terminated entries); words holds
+  // 8-byte handles into it. This replaces a std::deque<std::string>: per-word string
+  // objects, their SSO spills, and every hyphenation/NFC temporary were the layout path's
+  // dominant small-allocation churn, and any failed implicit allocation abort()s under
+  // -fno-exceptions. On arena OOM the word is dropped and hadDroppedWords() latches so the
+  // section build fails readably instead of committing a cache with holes in the text.
+  //
+  // Handles stay in a std::deque, and rubyTexts stays a deque of strings, for the original
+  // reason: a paragraph can hold thousands of tokens (CJK splits every character), and a
+  // vector grows by reallocating its whole element array into one contiguous block. On the
+  // ESP32-C3 that single large request fails under a fragmented heap and the throwing
+  // operator new abort()s the firmware (fresh-open CJK crash). A deque grows in fixed
+  // ~512 B nodes, so the largest contiguous alloc stays small regardless of token count.
+  // The parallel arrays below stay vectors: 1 byte / 1 bit each, they never approach the
+  // contiguous-block ceiling.
+  WordStore wordStore;
+  std::deque<WordStore::StoredWord> words;
   std::vector<EpdFontFamily::Style> wordStyles;
   // Boundary flags use all four combinations:
   //   continues=false, noSpace=false: ordinary breakable word gap
@@ -61,6 +70,7 @@ class ParsedText {
   bool focusReadingEnabled;
   bool isNaturalAlign;
   bool hasRtlWord;
+  bool droppedWords = false;
   std::vector<std::string> reorderedWordsScratch;
   std::vector<EpdFontFamily::Style> reorderedStylesScratch;
   std::vector<uint16_t> reorderedWidthsScratch;
@@ -72,6 +82,9 @@ class ParsedText {
   int calculateRubyExtraStartOffset(size_t wordIdx, size_t maxWordIdx, const GfxRenderer& renderer, int fontId) const;
   int calculateRubyExtraEndOffset(size_t lineStartIdx, size_t lineBreakIdx, const GfxRenderer& renderer,
                                   int fontId) const;
+  // NUL-terminated view of a stored word. Valid until that word is released.
+  std::string_view wordAt(const size_t i) const { return wordStore.view(words[i]); }
+  bool storeWord(std::string_view text, WordStore::StoredWord& out);
   uint32_t visibleOffsetBaseAt(size_t wordIndex) const;
   uint32_t visibleOffsetAt(size_t wordIndex) const;
   void pushVisibleOffset(uint32_t offset);
@@ -119,6 +132,9 @@ class ParsedText {
   BlockStyle& getBlockStyle() { return blockStyle; }
   size_t size() const { return words.size(); }
   bool isEmpty() const { return words.empty(); }
+  // True once any word or line was dropped because an allocation failed. Callers must treat
+  // the block as incomplete and fail the section build rather than cache text with holes.
+  bool hadDroppedWords() const { return droppedWords; }
   void layoutAndExtractLines(const GfxRenderer& renderer, int fontId, uint16_t viewportWidth,
                              const std::function<void(std::shared_ptr<TextBlock>, uint32_t)>& processLine,
                              bool includeLastLine = true, int8_t characterSpacing = 0,

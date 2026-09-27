@@ -73,6 +73,11 @@ class SdCardFont {
   // (e.g. shaped Arabic presentation forms the measurement path will look up).
   // Returns number of codepoints not found in font coverage.
   int buildAdvanceTable(const char* utf8Text, uint8_t styleMask = 0x0F, const char* extraText = nullptr);
+  // Packed variant: each segment holds consecutive NUL-terminated words (paragraph
+  // word-arena chunks), scanned without per-word string objects.
+  int buildAdvanceTablePacked(const char* const* segments, const size_t* segmentLens, size_t segmentCount,
+                              bool includeSpace, bool includeHyphen, uint8_t styleMask = 0x0F,
+                              const char* extraText = nullptr);
   int buildAdvanceTable(const std::deque<std::string>& words, bool includeHyphen, uint8_t styleMask = 0x0F,
                         const char* extraText = nullptr);
 

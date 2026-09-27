@@ -334,6 +334,16 @@ void setupDisplayAndFonts(bool seamless = false) {
   }
   fontCacheManager.setFontDecompressor(&fontDecompressor);
   renderer.setFontCacheManager(&fontCacheManager);
+  // Layout's OOM choke points (the word arena, the TextBlock arena) call reclaimHeap() and
+  // retry once before dropping content. releaseCache() is the variant that actually gives the
+  // heap back -- it frees the SD fonts' mini arenas and kern/ligature tables, which is exactly
+  // the block size a layout allocation is short of. Both it and clearCache() deliberately
+  // PRESERVE the per-font advance table: evicting that mid-paragraph would make the rest of
+  // the same layout pass measure 0-width advances. Skipped while the font cache is scanning,
+  // since that pass is accumulating the very data it would drop.
+  heapReclaimHook = [](size_t) {
+    if (!fontCacheManager.isScanning()) fontCacheManager.releaseCache();
+  };
   renderer.insertFont(NOTOSERIF_14_FONT_ID, notoserif14FontFamily);
 #ifndef OMIT_FONTS
   renderer.insertFont(NOTOSERIF_12_FONT_ID, notoserif12FontFamily);

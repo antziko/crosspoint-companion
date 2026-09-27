@@ -101,8 +101,9 @@ TEST_F(ChapterHtmlSlimParserTest, SpanWithHiddenAttributeShouldBeSkipped) {
   ChapterHtmlSlimParser::characterData(&parser, " After ", 7);
 
   ASSERT_EQ(parser.currentTextBlock->size(), 2);
-  ASSERT_EQ(parser.currentTextBlock->words[0], "Before");
-  ASSERT_EQ(parser.currentTextBlock->words[1], "After");
+  // wordAt(): word text lives in the WordStore arena now, words[] holds handles.
+  ASSERT_EQ(parser.currentTextBlock->wordAt(0), "Before");
+  ASSERT_EQ(parser.currentTextBlock->wordAt(1), "After");
 }
 
 TEST_F(ChapterHtmlSlimParserTest, DivWithHiddenAttributeContentShouldBeSkipped) {

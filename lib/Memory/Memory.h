@@ -85,6 +85,23 @@ template <typename T>
   return true;
 }
 
+// Optional heap-reclaim hook, installed once by the app (main.cpp) to point at whatever
+// holds rebuildable caches -- here FontCacheManager::releaseCache(). Layout allocates per
+// word and per line, and on this fork the SD-font mini/glyph arenas sit exactly where those
+// blocks need to be, so evicting them turns a dropped paragraph into a merely slower one.
+//
+// A raw function pointer, not std::function: this is reachable from the layout hot path and
+// must not heap-allocate a closure. Null by default, so lib/ code calling reclaimHeap() stays
+// usable in the host test suites with no app wiring.
+using HeapReclaimFn = void (*)(size_t bytesWanted);
+inline HeapReclaimFn heapReclaimHook = nullptr;
+
+// Ask the app to free at least `bytesWanted`. No-op when no hook is installed. Callers must
+// re-attempt their allocation and still handle failure: this is best effort, never a promise.
+inline void reclaimHeap(const size_t bytesWanted) {
+  if (heapReclaimHook) heapReclaimHook(bytesWanted);
+}
+
 // Helper struct to call a cleanup function on exit from any scope.
 // Use with a lambda to avoid unnecessary allocations from std::function/std::bind:
 // Example:

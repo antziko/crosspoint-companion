@@ -137,6 +137,31 @@ void GfxRenderer::ensureSdCardFontReady(int fontId, const char* utf8Text, uint8_
   }
 }
 
+void GfxRenderer::ensureSdCardFontReady(const int fontId, const char* const* segments, const size_t* segmentLens,
+                                        const size_t segmentCount, const bool includeSpace, const bool includeHyphen,
+                                        const uint8_t styleMask) const {
+  auto it = sdCardFonts_.find(fontId);
+  if (it == sdCardFonts_.end()) return;
+  // Augment the persistent advance-only table for layout measurement. The table survives
+  // across paragraphs/sections (capped per font), so repeated indexing of the same SD font
+  // amortizes glyph-metric SD reads.
+  std::string shaped;
+  for (size_t seg = 0; seg < segmentCount; seg++) {
+    const char* p = segments[seg];
+    const char* const end = p + segmentLens[seg];
+    while (p < end) {
+      appendShapedRtlTokens(p, shaped);
+      p += strlen(p) + 1;
+    }
+  }
+  const int missed =
+      it->second->buildAdvanceTablePacked(segments, segmentLens, segmentCount, includeSpace, includeHyphen, styleMask,
+                                          shaped.empty() ? nullptr : shaped.c_str());
+  if (missed > 0) {
+    LOG_DBG("GFX", "ensureSdCardFontReady: %d glyph(s) not found", missed);
+  }
+}
+
 void GfxRenderer::ensureSdCardFontReady(int fontId, const std::deque<std::string>& words, bool includeHyphen,
                                         uint8_t styleMask) const {
   auto it = sdCardFonts_.find(fontId);

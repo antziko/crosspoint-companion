@@ -468,6 +468,10 @@ void ChapterHtmlSlimParser::flushLongTextBlockIfNeeded() {
         this->addLineToPage(textBlock, offset);
       },
       false, characterSpacing, wordSpacingPercent);
+  // A dropped word means the arena could not allocate. Route it through the existing
+  // out-of-heap path so the build is abandoned rather than committing a cache whose text
+  // has holes in it.
+  if (currentTextBlock->hadDroppedWords()) signalOutOfMemory("layout: word arena");
 }
 
 // start a new text block if needed
@@ -708,6 +712,7 @@ void ChapterHtmlSlimParser::finishTableRow() {
           tableLineVisibleOffsets[lineIndex] = std::min(tableLineVisibleOffsets[lineIndex], offset);
         },
         true, characterSpacing, wordSpacingPercent);
+    if (tableRowCells[column]->hadDroppedWords()) signalOutOfMemory("layout: word arena (table cell)");
     maxLineCount = std::max(maxLineCount, lines.size());
   }
   tableRowCells.clear();
@@ -2317,7 +2322,9 @@ bool ChapterHtmlSlimParser::finishParse() {
     currentTextBlock.reset();
   }
 
-  return true;
+  // makePages() above can latch outOfMemory_ for the trailing block. Report it: the XML
+  // parser is already torn down here, so parseStep() will never see this one.
+  return !outOfMemory_;
 }
 
 bool ChapterHtmlSlimParser::parseAndBuildPages() {
@@ -2448,6 +2455,7 @@ void ChapterHtmlSlimParser::makePages() {
       renderer, fontId, effectiveWidth,
       [this](const std::shared_ptr<TextBlock>& textBlock, const uint32_t offset) { addLineToPage(textBlock, offset); },
       true, characterSpacing, wordSpacingPercent);
+  if (currentTextBlock->hadDroppedWords()) signalOutOfMemory("layout: word arena");
 
   // Fallback: transfer any remaining pending footnotes to current page.
   // Normally addLineToPage handles this via word-index tracking, but this catches
