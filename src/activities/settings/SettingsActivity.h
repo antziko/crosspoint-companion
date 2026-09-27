@@ -34,6 +34,7 @@ enum class SettingAction {
   TextSettings,  // LOCAL(feat-dictionary): #2605 Text Settings screen
   KeyboardLayouts,
   About,
+  HomeButton,
 };
 
 struct SettingInfo {

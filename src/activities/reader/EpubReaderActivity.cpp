@@ -849,6 +849,18 @@ void EpubReaderActivity::loop() {
     return;
   }
 
+  switch (mappedInput.homeButtonAction()) {
+    case HomeButtonAction::ReaderMenu:
+    case HomeButtonAction::Bookmark:
+    case HomeButtonAction::Sync:
+    case HomeButtonAction::Dictionary:
+    case HomeButtonAction::Footnotes:
+      automaticPageTurnActive = false;
+      break;
+    default:
+      break;
+  }
+
   if (automaticPageTurnActive) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) ||
         mappedInput.wasReleased(MappedInputManager::Button::Back) ||
@@ -888,15 +900,10 @@ void EpubReaderActivity::loop() {
     }
   }
 
-  // The X4 Pro's capacitive Home key runs the same function on a hold. Off and
-  // Reader Menu are left to isTouchMenuGesture() below, which already opens the
-  // menu for them, so this never double-fires. The SDK suppresses the key's tap
-  // event once a hold has fired (InputManager.h:180-183), so the release that
-  // ends this gesture cannot also trigger Home.
-  if (section && mappedInput.wasHomeKeyHold() && SETTINGS.holdConfirmAction != CrossPointSettings::HOLD_CONFIRM_OFF &&
-      SETTINGS.holdConfirmAction != CrossPointSettings::HOLD_CONFIRM_READER_MENU) {
-    if (runHoldAction()) return;
-  }
+  // The X4 Pro's capacitive Home key no longer routes through holdConfirmAction: its
+  // hold is homeButtonLongPressAction, dispatched with the tap and double-tap below.
+  // wasHomeKeyHold() stays true only while that action is the reader menu, which
+  // isTouchMenuGesture() then opens.
 
   if (showBookmarkMessage && (millis() - bookmarkMessageTime) >= ReaderUtils::BOOKMARK_MESSAGE_DURATION_MS) {
     showBookmarkMessage = false;
@@ -905,6 +912,24 @@ void EpubReaderActivity::loop() {
       requestUpdate();
     }
     bookmarkMessageLightRefresh = false;
+  }
+
+  // Configured Home-key actions. Ahead of the end-of-book menu, which owns input while
+  // it is up, so a remapped key cannot fire behind it.
+  if (!(atEndOfBook && endOfBookOptionsReady.load(std::memory_order_acquire) && endOfBookOptions &&
+        endOfBookOptions->menuActive())) {
+    // Refresh is deliberately absent: main.cpp runs it for every activity, and handling
+    // it here as well would scrub the panel twice.
+    switch (const auto action = mappedInput.homeButtonAction()) {
+      case HomeButtonAction::Bookmark:
+      case HomeButtonAction::Sync:
+      case HomeButtonAction::Dictionary:
+      case HomeButtonAction::ReaderMenu:
+        if (section && runReaderAction(action)) return;
+        break;
+      default:
+        break;
+    }
   }
 
   if (showNoDictionaryMessage && (millis() - noDictionaryMessageTime) >= ReaderUtils::DICTIONARY_MESSAGE_DURATION_MS) {
@@ -1058,9 +1083,10 @@ void EpubReaderActivity::loop() {
   // mapped the power button to FOOTNOTES. Down-press combo is excluded so the
   // power+down gesture (handled elsewhere) isn't swallowed. In a footnote, the
   // same press returns to the saved reading position.
-  if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::FOOTNOTES &&
-      mappedInput.wasReleased(MappedInputManager::Button::Power) &&
-      !mappedInput.wasReleased(MappedInputManager::Button::Down)) {
+  if (mappedInput.homeButtonAction() == HomeButtonAction::Footnotes ||
+      (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::FOOTNOTES &&
+       mappedInput.wasReleased(MappedInputManager::Button::Power) &&
+       !mappedInput.wasReleased(MappedInputManager::Button::Down))) {
     if (footnoteDepth > 0) {
       restoreSavedPosition();
     } else {
@@ -1333,8 +1359,28 @@ void EpubReaderActivity::openReaderMenu() {
 }
 
 bool EpubReaderActivity::runHoldAction() {
+  // holdConfirmAction still owns the Confirm hold on boards without a Home key, and is
+  // the only route to REFRESH_SCREEN. Map it onto the shared action set rather than
+  // keeping a second copy of the dispatch.
   switch (SETTINGS.holdConfirmAction) {
     case CrossPointSettings::HOLD_CONFIRM_DICTIONARY:
+      return runReaderAction(HomeButtonAction::Dictionary);
+    case CrossPointSettings::HOLD_CONFIRM_BOOKMARK:
+      return runReaderAction(HomeButtonAction::Bookmark);
+    case CrossPointSettings::HOLD_CONFIRM_KOSYNC:
+      return runReaderAction(HomeButtonAction::Sync);
+    case CrossPointSettings::HOLD_CONFIRM_READER_MENU:
+      return runReaderAction(HomeButtonAction::ReaderMenu);
+    case CrossPointSettings::HOLD_CONFIRM_REFRESH_SCREEN:
+      return runReaderAction(HomeButtonAction::Refresh);
+    default:
+      return false;
+  }
+}
+
+bool EpubReaderActivity::runReaderAction(const HomeButtonAction action) {
+  switch (action) {
+    case HomeButtonAction::Dictionary:
       if (Dictionary::exists(epub->getCachePath().c_str())) {
         openWordSelect(/*framebufferContainsPage=*/true);
         return true;
@@ -1346,17 +1392,17 @@ bool EpubReaderActivity::runHoldAction() {
       noDictionaryMessageTime = millis();
       requestUpdate();
       return true;
-    case CrossPointSettings::HOLD_CONFIRM_BOOKMARK:
+    case HomeButtonAction::Bookmark:
       if (showBookmarkMessage) return false;  // same reasoning as above
       addBookmark(false, /*lightRefresh=*/true);
       return true;
-    case CrossPointSettings::HOLD_CONFIRM_KOSYNC:
+    case HomeButtonAction::Sync:
       onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction::SYNC);
       return true;
-    case CrossPointSettings::HOLD_CONFIRM_READER_MENU:
+    case HomeButtonAction::ReaderMenu:
       openReaderMenu();
       return true;
-    case CrossPointSettings::HOLD_CONFIRM_REFRESH_SCREEN:
+    case HomeButtonAction::Refresh:
       // Exactly the power button's Refresh Screen action, honouring Settings > Display >
       // Refresh Screen Mode -- not a private variant, so the two cannot drift apart.
       // refreshScreenNow() takes the render lock itself and this runs from the input handler,
@@ -3951,6 +3997,7 @@ void EpubReaderActivity::discardOverlayPage() {
 }
 
 void EpubReaderActivity::openOverlay(Overlay target) {
+  mappedInput.resetHomeButtonInput();
   const Overlay previous = overlay;
   overlay = target;
   // makeUniqueNoThrow, not make_unique: with -fno-exceptions a failed new
@@ -4028,6 +4075,7 @@ void EpubReaderActivity::openOverlay(Overlay target) {
 // grayscale-AA pass restore the page snapshot and push one FAST refresh -- no
 // re-render, no flash; Xteink boards re-render to restore the AA planes.
 void EpubReaderActivity::closeOverlayToPage() {
+  mappedInput.resetHomeButtonInput();
   overlay = Overlay::None;
   overlayPopup.dismiss();  // an option picker cannot outlive its panel
   toolbarUi.reset();       // ~1 KB of interaction table + props, only needed while open

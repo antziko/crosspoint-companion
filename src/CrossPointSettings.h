@@ -1,4 +1,5 @@
 #pragma once
+
 #include <ArduinoJson.h>
 #include <Epub/ReaderRenderSpec.h>
 #include <HalStorage.h>
@@ -6,6 +7,8 @@
 
 #include <cstdint>
 #include <iosfwd>
+
+#include "util/HomeButtonInput.h"
 
 class CrossPointSettings : public PersistableStore<CrossPointSettings> {
  private:
@@ -413,6 +416,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t lookupUnderline = 1;
   // Short power button click behaviour
   uint8_t shortPwrBtn = IGNORE;
+  // X4 Pro: double-click power toggles the frontlight. Disabling frees the
+  // power button for shortPwrBtn actions without the double-click wait.
+  uint8_t doubleClickPwrLight = 1;
+  uint8_t homeButtonTapAction = static_cast<uint8_t>(HomeButtonAction::Home);
+  uint8_t homeButtonDoubleTapAction = static_cast<uint8_t>(HomeButtonAction::ToggleFrontlight);
+  uint8_t homeButtonLongPressAction = static_cast<uint8_t>(HomeButtonAction::ReaderMenu);
   // EPUB reading orientation settings
   // 0 = portrait (default), 1 = landscape clockwise, 2 = inverted, 3 = landscape counter-clockwise
   uint8_t orientation = PORTRAIT;
@@ -664,7 +673,6 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t frontlightRestoreOnWake = 1;
   // X4 Pro: a double click of POWER toggles the frontlight. On by default -- this was
   // the unconditional behaviour before the setting existed.
-  uint8_t doubleClickPwrLight = 1;
   // Language setting (Language enum index, default 0 = EN)
   uint8_t language = 0;
   // Keyboard layouts the user can reach, using keyboard_layouts::ALL table bits.

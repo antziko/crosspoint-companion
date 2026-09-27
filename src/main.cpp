@@ -910,6 +910,17 @@ static void delayWallClock(const unsigned long ms) {
 // X4 Pro: a double click of POWER toggles the frontlight. Returns true when the
 // release was consumed as the second click, so the caller skips the configured
 // short-press action for it.
+// Returns the new state, which the power-button path shows in a toast.
+static bool toggleFrontlight() {
+  if (!Frontlight.present()) return false;
+  const bool lightOn = !Frontlight.isOn();
+  Frontlight.setOn(lightOn);
+  SETTINGS.frontlightOn = lightOn ? 1 : 0;
+  SETTINGS.saveToFile();
+  LOG_INF("LIGHT", "Frontlight toggled %s", lightOn ? "on" : "off");
+  return lightOn;
+}
+
 static bool handleX4ProFrontlightDoubleClick() {
   if (!BoardConfig::isX4Pro() || !SETTINGS.doubleClickPwrLight || !gpio.wasReleased(HalGPIO::BTN_POWER)) {
     return false;
@@ -928,11 +939,7 @@ static bool handleX4ProFrontlightDoubleClick() {
   }
 
   lastX4ProPowerClickAt = 0;
-  const bool lightOn = !Frontlight.isOn();
-  Frontlight.setOn(lightOn);
-  SETTINGS.frontlightOn = lightOn ? 1 : 0;
-  SETTINGS.saveToFile();
-  LOG_INF("LIGHT", "Frontlight toggled %s by power-button double-click", lightOn ? "on" : "off");
+  const bool lightOn = toggleFrontlight();
 
   // Say which way it went. The lamp is the primary feedback, but it is easy to miss in daylight
   // and this gesture has no other acknowledgement -- a double click that did nothing and one that
@@ -1177,8 +1184,12 @@ void loop() {
   }
 
   // Refresh screen when power button is short-pressed with FORCE_REFRESH setting.
-  if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::FORCE_REFRESH &&
-      mappedInputManager.wasReleased(MappedInputManager::Button::Power)) {
+  if (mappedInputManager.homeButtonAction() == HomeButtonAction::ToggleFrontlight) {
+    toggleFrontlight();
+  }
+  if (mappedInputManager.homeButtonAction() == HomeButtonAction::Refresh ||
+      (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::FORCE_REFRESH &&
+       mappedInputManager.wasReleased(MappedInputManager::Button::Power))) {
     LOG_DBG("MAIN", "Manual screen refresh triggered");
     // Whole-page ghost clear, then re-render (requestUpdate re-runs the active activity's
     // render()). Shared with the reader's Confirm/Home hold — see util/ScreenRefresh.h for the

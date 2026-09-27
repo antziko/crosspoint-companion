@@ -142,7 +142,8 @@ inline PageTurnResult detectPageTurn(const MappedInputManager& input) {
                          input.wasReleased(MappedInputManager::Button::Power);
 
   const bool prev = tiltPrev || sidePrev || frontPrev;
-  const bool next = tiltNext || sideNext || frontNext || powerTurn;
+  const bool next =
+      tiltNext || sideNext || frontNext || powerTurn || input.homeButtonAction() == HomeButtonAction::NextPage;
   const bool fromSide = sidePrev || sideNext;
   return {prev, next, tiltPrev || tiltNext, fromSide};
 }
@@ -295,9 +296,9 @@ inline bool isTouchMenuTap(const GfxRenderer& renderer, const MappedInputManager
 }
 
 // Reader menu opens on the menu edge-swipe or a middle-third tap. On home-key
-// boards a hold of the capacitive key runs SETTINGS.holdConfirmAction instead;
-// only Off and "Reader Menu" leave the hold to the menu, and the reader
-// dispatches the other functions itself (EpubReaderActivity::runHoldAction).
+// boards the key's own gestures are configured separately (Settings > Controls >
+// Home Button); wasHomeKeyHold() is true only while the hold resolves to the menu,
+// and the reader dispatches every other action itself.
 // Menu gestures honor showReaderMenu independently of touchReaderControls,
 // which only gates page-turn touch zones in detectTouchPageTurn().
 inline bool isTouchMenuGesture(const GfxRenderer& renderer, const MappedInputManager& input) {

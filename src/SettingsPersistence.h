@@ -146,6 +146,15 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
                           lastIndex(CrossPointSettings::FC_INLINE_CARDS)),
     persisted::enumerated("holdConfirmAction", &CrossPointSettings::holdConfirmAction,
                           CrossPointSettings::HOLD_CONFIRM_ACTION_COUNT - 1),
+    // Home-key gestures (X4 Pro). Board-conditional rows need a board-conditional BOUND
+    // too, not just a kBoardConditionalKeys entry -- a file written elsewhere must still
+    // clamp into range here.
+    persisted::enumerated("homeButtonTapAction", &CrossPointSettings::homeButtonTapAction,
+                          static_cast<uint8_t>(HomeButtonAction::Count) - 1),
+    persisted::enumerated("homeButtonDoubleTapAction", &CrossPointSettings::homeButtonDoubleTapAction,
+                          static_cast<uint8_t>(HomeButtonAction::Count) - 1),
+    persisted::enumerated("homeButtonLongPressAction", &CrossPointSettings::homeButtonLongPressAction,
+                          static_cast<uint8_t>(HomeButtonAction::Count) - 1),
     persisted::toggle("dictFallbackGroup", &CrossPointSettings::dictFallbackGroup),
 
     // --- Reader: stats ---

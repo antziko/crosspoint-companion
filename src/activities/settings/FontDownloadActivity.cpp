@@ -745,14 +745,13 @@ void FontDownloadActivity::downloadFamily(const DownloadJob& family) {
           // Keep the manifest-provided size if the server sends no Content-Length
           // (total==0); progress now fires for unknown-size downloads too.
           if (total > 0) fileTotal_ = total;
-          mappedInput.update();
+          mappedInput.update(/*deferHomeButtonAction=*/true);
           if (mappedInput.isPressed(MappedInputManager::Button::Back) ||
               mappedInput.wasPressed(MappedInputManager::Button::Back)) {
             cancelRequested_ = true;
           }
-          // This update() consumes the one-shot home event before the central
-          // ActivityManager dispatch can see it, so honor it here: abort the
-          // download, then exit to home once the abort unwinds.
+          // Home cancels immediately; other configured actions are deferred to
+          // the next main-loop pass by the transfer input pump.
           if (mappedInput.wasHomeGesture()) {
             cancelRequested_ = true;
             goHomeRequested_ = true;

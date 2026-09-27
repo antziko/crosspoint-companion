@@ -473,6 +473,11 @@ class EpubReaderActivity final : public Activity {
   // nothing this frame (Off, or a message it already put up is still showing),
   // which tells the caller not to swallow the frame.
   bool runHoldAction();
+  // Shared by the Confirm/Home hold (holdConfirmAction) and the Home key's configured
+  // gestures. Returns false when the action is not one the reader owns, or when its
+  // message is already showing -- the caller must then stop returning early so the
+  // message's own timeout can run.
+  bool runReaderAction(HomeButtonAction action);
   void openWordSelect(bool framebufferContainsPage, int pointX = -1, int pointY = -1);
   // Highlight entry point (hold-Back on button boards, the page long-press menu on touch
   // ones). If the current page already has a quote, shows a confirm dialog (existing text +

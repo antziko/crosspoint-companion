@@ -160,10 +160,30 @@ bool MappedInputManager::hasHomeKey() const { return gpio.hasHomeKey(); }
 // Highest Button enum value, for the bitmask loops below.
 constexpr uint8_t LAST_BUTTON = static_cast<uint8_t>(MappedInputManager::Button::NavPrevious);
 
-void MappedInputManager::update() const {
+void MappedInputManager::update(const bool deferHomeButtonAction) const {
   gpio.update();
   // Per-frame: set again by the first hold query the active screen makes (see holdWasQueried).
   holdQueried = false;
+  // Resolve the Home key's tap / double-tap / long-press into one configured action for
+  // this frame. Boards without the capacitive key never produce one.
+  homeAction = HomeButtonAction::Ignore;
+  if (gpio.hasHomeKey()) {
+    homeAction = homeButtonInput.update(millis(), gpio.wasHomeKeyTapped(), gpio.wasHomeKeyLongPressed(),
+                                        wasSwipe() != SwipeDir::None, gpio.wasHomeKeyPressed(),
+                                        static_cast<HomeButtonAction>(SETTINGS.homeButtonTapAction),
+                                        static_cast<HomeButtonAction>(SETTINGS.homeButtonDoubleTapAction),
+                                        static_cast<HomeButtonAction>(SETTINGS.homeButtonLongPressAction));
+  }
+  if (deferHomeButtonAction) {
+    // Keep the first action observed during a synchronous transfer. Home must still be
+    // visible now so the transfer can cancel and unwind promptly.
+    if (homeAction != HomeButtonAction::Ignore && deferredHomeAction == HomeButtonAction::Ignore) {
+      deferredHomeAction = homeAction;
+    }
+  } else if (deferredHomeAction != HomeButtonAction::Ignore) {
+    homeAction = deferredHomeAction;
+    deferredHomeAction = HomeButtonAction::Ignore;
+  }
   // The first press of a button that moves a selection reveals the list cursor, which
   // Activity::onEnter hid on the way in (see ListCursor). One place, rather than a flag
   // every list screen would have to remember to set: every screen polls through here.
@@ -389,15 +409,17 @@ bool MappedInputManager::wasBottomEdgeUpSwipe() const {
 bool MappedInputManager::wasReaderMenuSwipeUp() const { return gpio.hasHomeKey() && wasBottomEdgeUpSwipe(); }
 
 bool MappedInputManager::wasHomeGesture() const {
-  // Home-key boards (X4 Pro) use a short Home-key tap; their bottom-edge swipe
-  // is free for the reader menu instead, so it cannot fire the same action twice.
-  if (gpio.hasHomeKey()) return gpio.wasHomeKeyTapped();
-  return wasBottomEdgeUpSwipe();
+  // Home-key boards (X4 Pro) go through the configured action, so a key the user has
+  // remapped no longer also goes Home. Their bottom-edge swipe stays free for the
+  // reader menu, which is why it cannot fire the same action twice.
+  return gpio.hasHomeKey() ? homeAction == HomeButtonAction::Home : wasBottomEdgeUpSwipe();
 }
 
 bool MappedInputManager::wasHomeKeyHold() const {
   holdQueried = true;
-  return gpio.hasHomeKey() && gpio.wasHomeKeyLongPressed();
+  // Only while the key's action resolves to the menu: any other mapping is dispatched by
+  // the reader itself, and answering true here would open the menu on top of it.
+  return gpio.hasHomeKey() && homeAction == HomeButtonAction::ReaderMenu;
 }
 
 bool MappedInputManager::wasLightPanelGesture() const {
@@ -409,13 +431,15 @@ bool MappedInputManager::wasLightPanelGesture() const {
 bool MappedInputManager::wasPowerConfirmClick() const {
   if (!gpio.hasTouch() || SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::PWR_CONFIRM) return false;
   // Wait out the X4 Pro's frontlight double-click window before treating its
-  // first release as Confirm; main.cpp supplies that one-frame event.
-  if (BoardConfig::isX4Pro()) return powerConfirmClickFrame;
+  // first release as Confirm; main.cpp supplies that one-frame event. With the frontlight
+  // shortcut off there is no window to wait for, so the release counts directly.
+  if (BoardConfig::isX4Pro() && SETTINGS.doubleClickPwrLight) return powerConfirmClickFrame;
   return gpio.wasReleased(HalGPIO::BTN_POWER) && gpio.getPowerButtonHeldTime() <= SETTINGS.getPowerButtonDuration();
 }
 #endif
 
 bool MappedInputManager::wasPressed(const Button button, const bool applySwap) const {
+  if (button == Button::Confirm && homeAction == HomeButtonAction::Confirm) return true;
   if (button == Button::Back && wasBackGesture()) return true;
 #if FREEINK_CAP_TOUCH
   if (button == Button::Confirm && wasPowerConfirmClick()) return true;
@@ -424,6 +448,7 @@ bool MappedInputManager::wasPressed(const Button button, const bool applySwap) c
 }
 
 bool MappedInputManager::wasReleased(const Button button, const bool applySwap) const {
+  if (button == Button::Confirm && homeAction == HomeButtonAction::Confirm) return true;
   if (button == Button::Back && wasBackGesture()) return true;
 #if FREEINK_CAP_TOUCH
   if (button == Button::Confirm && wasPowerConfirmClick()) return true;
@@ -467,6 +492,8 @@ bool MappedInputManager::wasAnyReleased() const { return gpio.wasAnyReleased(); 
 
 unsigned long MappedInputManager::getHeldTime() const {
   holdQueried = true;
+  // A mapped action has its own meaning, independent of the contact duration.
+  if (homeAction != HomeButtonAction::Ignore) return 0;
   if (!gpio.wasAnyPressed() && !gpio.wasAnyReleased() && touchHeldOverrideValid &&
       millis() - touchHeldOverrideAt <= TOUCH_HELD_OVERRIDE_WINDOW_MS) {
     return touchHeldOverrideMs;

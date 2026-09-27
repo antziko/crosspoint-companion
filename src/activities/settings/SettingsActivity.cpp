@@ -16,6 +16,7 @@
 #include "CrossPointSettings.h"
 #include "DictionarySelectActivity.h"
 #include "FontDownloadActivity.h"
+#include "HomeButtonSettingsActivity.h"
 #include "HomeTopBarSettingsActivity.h"
 #include "KOReaderServerListActivity.h"
 #include "KeyboardLayoutsActivity.h"
@@ -109,6 +110,7 @@ void SettingsActivity::rebuildSettingsLists() {
   // category (STR_READER_TEXT / _DICTIONARY / _TRACKING) match none of these and are intentionally
   // dropped here — they surface only inside their sub-screen, reached via the SubScreen rows below.
   for (auto& setting : getSettingsList(&sdFontSystem.registry(), &dictionaryRegistry)) {
+    if (home_button::isSetting(setting.valuePtr)) continue;
     if (setting.category == StrId::STR_CAT_DISPLAY) {
       // The sunlight fading fix is shown on every board, the X4 Pro included. It used to be
       // dropped here as "a grayscale-waveform compensation with no custom grayscale LUT on this
@@ -125,6 +127,7 @@ void SettingsActivity::rebuildSettingsLists() {
       if (setting.inTextSettings) continue;
       readerSettings.push_back(setting);
     } else if (setting.category == StrId::STR_CAT_CONTROLS) {
+      if (BoardConfig::hasHomeKey() && setting.valuePtr == &CrossPointSettings::holdConfirmAction) continue;
       if (setting.valuePtr == &CrossPointSettings::pwrBtnFootnoteBack &&
           SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::FOOTNOTES) {
         continue;
@@ -143,6 +146,10 @@ void SettingsActivity::rebuildSettingsLists() {
                             SettingInfo::Action(StrId::STR_REMAP_FRONT_BUTTONS, SettingAction::RemapFrontButtons));
     controlsSettings.insert(controlsSettings.begin() + 1,
                             SettingInfo::Action(StrId::STR_REMAP_FRONT_BUTTONS_CW, SettingAction::RemapFrontButtonsCW));
+  }
+  if (BoardConfig::hasHomeKey()) {
+    controlsSettings.insert(controlsSettings.begin(),
+                            SettingInfo::Action(StrId::STR_HOME_BUTTON, SettingAction::HomeButton));
   }
   // System top level: keep the frequently-used Wi-Fi / Time to Sleep / KOReader Sync flat (Time to
   // Sleep arrives from the category loop as the first systemSettings entry); the rest of the System
@@ -354,6 +361,7 @@ bool SettingsActivity::handleButtons() {
 }
 
 void SettingsActivity::toggleCurrentSetting() {
+  mappedInput.resetHomeButtonInput();
   int selectedSetting = ringPos() - 1;
   if (selectedSetting < 0 || selectedSetting >= settingsCount) {
     return;
@@ -374,10 +382,11 @@ void SettingsActivity::toggleCurrentSetting() {
     SETTINGS.*(setting.valuePtr) = !currentValue;
   } else if (setting.type == SettingType::ENUM && setting.valuePtr != nullptr) {
     const uint8_t currentValue = SETTINGS.*(setting.valuePtr);
-    if (setting.enumValues.size() > 2) {
+    const auto& enumLabels = setting.enumValues;
+    if (enumLabels.size() > 2) {
       const auto valuePtr = setting.valuePtr;
-      optionPopup.show(setting.nameId, setting.enumValues.data(), static_cast<int>(setting.enumValues.size()),
-                       currentValue, [this, valuePtr, sleepScreenChanged, quickResumeTimeoutChanged](int idx) {
+      optionPopup.show(setting.nameId, enumLabels.data(), static_cast<int>(enumLabels.size()), currentValue,
+                       [this, valuePtr, sleepScreenChanged, quickResumeTimeoutChanged](int idx) {
                          SETTINGS.*valuePtr = idx;
                          syncQuickResumeTimeoutForSleepScreen(sleepScreenChanged, quickResumeTimeoutChanged);
                          SETTINGS.saveToFile();
@@ -416,7 +425,8 @@ void SettingsActivity::toggleCurrentSetting() {
       if (!setting.enumStringValues.empty()) {
         optionPopup.show(setting.nameId, setting.enumStringValues, cur, std::move(onSelect));
       } else {
-        optionPopup.show(setting.nameId, setting.enumValues.data(), static_cast<int>(setting.enumValues.size()), cur,
+        const auto& enumLabels = setting.enumValues;
+        optionPopup.show(setting.nameId, enumLabels.data(), static_cast<int>(enumLabels.size()), cur,
                          std::move(onSelect));
       }
       requestUpdate();
@@ -464,6 +474,16 @@ void SettingsActivity::toggleCurrentSetting() {
     auto resultHandler = [this](const ActivityResult&) { SETTINGS.saveToFile(); };
 
     switch (setting.action) {
+      case SettingAction::HomeButton: {
+        // Activities must outlive this call and are owned by the activity stack.
+        auto activity = makeUniqueNoThrow<HomeButtonSettingsActivity>(renderer, mappedInput);
+        if (!activity) {
+          LOG_ERR("SET", "OOM: Home button settings");
+          return;
+        }
+        startActivityForResult(std::move(activity), [this](const ActivityResult&) { requestUpdate(); });
+        return;
+      }
       case SettingAction::RemapFrontButtons:
         startActivityForResultNoThrow<ButtonRemapActivity>(resultHandler, renderer, mappedInput);
         break;
@@ -649,6 +669,7 @@ std::string SettingsActivity::settingValueOptionText(const SettingInfo& setting,
 }
 
 std::string SettingsActivity::settingValueText(const SettingInfo& setting) {
+  if (setting.action == SettingAction::HomeButton) return tr(STR_CONFIGURE);
   if (setting.type == SettingType::TOGGLE && setting.valuePtr != nullptr) {
     return SETTINGS.*(setting.valuePtr) ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
   }
@@ -656,8 +677,9 @@ std::string SettingsActivity::settingValueText(const SettingInfo& setting) {
     // Guard like the valueGetter branch below: a corrupt/migrated settings
     // byte must not index past the enum table.
     const uint8_t value = SETTINGS.*(setting.valuePtr);
-    if (value >= setting.enumValues.size()) return "";
-    return I18N.get(setting.enumValues[value]);
+    const auto& enumLabels = setting.enumValues;
+    if (value >= enumLabels.size()) return "";
+    return I18N.get(enumLabels[value]);
   }
   // LOCAL(feat): the runtime getters live in the optional `dyn` sub-struct
   // here, not inline on SettingInfo as upstream has them.
@@ -666,8 +688,9 @@ std::string SettingsActivity::settingValueText(const SettingInfo& setting) {
     if (!setting.enumStringValues.empty() && value < setting.enumStringValues.size()) {
       return setting.enumStringValues[value];
     }
-    if (value < setting.enumValues.size()) {
-      return I18N.get(setting.enumValues[value]);
+    const auto& enumLabels = setting.enumValues;
+    if (value < enumLabels.size()) {
+      return I18N.get(enumLabels[value]);
     }
     return "";
   }

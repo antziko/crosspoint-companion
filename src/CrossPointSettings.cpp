@@ -1,5 +1,6 @@
 #include "CrossPointSettings.h"
 
+#include <BoardConfig.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <SdDebugLog.h>
@@ -270,6 +271,21 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   const uint8_t storedFontFamily = doc["fontFamily"] | (uint8_t)0;
   s.fontFamily = clamp(storedFontFamily, BUILTIN_FONT_COUNT, 0);
   // SD card font family name — not in SettingsList, load manually.
+
+  // The Home key's long press used to run holdConfirmAction. Carry that choice into the
+  // new per-gesture setting once, so an X4 Pro keeps the hold it was configured with.
+  // holdConfirmAction itself stays: it still owns the Confirm hold on boards without a
+  // Home key, and carries REFRESH_SCREEN, which has no Home-key equivalent.
+  if (BoardConfig::hasHomeKey() && doc["homeButtonLongPressAction"].isNull() && !doc["holdConfirmAction"].isNull()) {
+    static constexpr HomeButtonAction LEGACY[] = {HomeButtonAction::Ignore,     HomeButtonAction::Bookmark,
+                                                  HomeButtonAction::Dictionary, HomeButtonAction::Sync,
+                                                  HomeButtonAction::ReaderMenu, HomeButtonAction::Refresh};
+    static_assert(sizeof(LEGACY) / sizeof(LEGACY[0]) == HOLD_CONFIRM_ACTION_COUNT);
+    if (s.holdConfirmAction < HOLD_CONFIRM_ACTION_COUNT) {
+      s.homeButtonLongPressAction = static_cast<uint8_t>(LEGACY[s.holdConfirmAction]);
+      needsResave = true;
+    }
+  }
   const char* sfn = doc["sdFontFamilyName"] | "";
   strncpy(s.sdFontFamilyName, sfn, sizeof(s.sdFontFamilyName) - 1);
   s.sdFontFamilyName[sizeof(s.sdFontFamilyName) - 1] = '\0';

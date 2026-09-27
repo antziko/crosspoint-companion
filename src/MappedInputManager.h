@@ -3,6 +3,8 @@
 #include <BoardConfig.h>
 #include <HalGPIO.h>
 
+#include "util/HomeButtonInput.h"
+
 class GfxRenderer;
 
 class MappedInputManager {
@@ -19,7 +21,10 @@ class MappedInputManager {
 
   MappedInputManager(HalGPIO& gpio, const GfxRenderer& renderer) : gpio(gpio), renderer(renderer) {}
 
-  void update() const;
+  // Blocking transfer loops pump physical input themselves. Defer configured
+  // Home-key actions so the next main-loop pass can dispatch them, while the
+  // current action remains available for immediate Home cancellation.
+  void update(bool deferHomeButtonAction = false) const;
   // applySwap=false reads the raw logical button without the orient-front-buttons
   // Left/Right swap, for callers (e.g. WordSelectNavigator) that do their own
   // orientation mapping.
@@ -79,8 +84,15 @@ class MappedInputManager {
   // ReaderUtils::handleBackNavigation).
   bool wasBackGesture() const;
   bool wasHomeGesture() const;
-  // A Home-key hold, for surfaces that want a second action from the key.
+  // A Home-key hold, for surfaces that want a second action from the key. Reads the
+  // resolved action, so it stays true only while the hold is still mapped to a menu.
   bool wasHomeKeyHold() const;
+  // Configured one-frame action, independent of the gesture that triggered it.
+  HomeButtonAction homeButtonAction() const { return homeAction; }
+  void resetHomeButtonInput() const {
+    homeButtonInput.reset();
+    deferredHomeAction = HomeButtonAction::Ignore;
+  }
   bool wasMenuGesture() const;
   // Upward swipe starting at the bottom edge. On boards with no Home key this
   // IS the Home gesture; on home-key boards the edge is free and it can serve
@@ -157,6 +169,9 @@ class MappedInputManager {
                          bool hasSubtitle) const;
   void rememberTouchHeldTime() const;
 
+  mutable HomeButtonInput homeButtonInput;
+  mutable HomeButtonAction homeAction = HomeButtonAction::Ignore;
+  mutable HomeButtonAction deferredHomeAction = HomeButtonAction::Ignore;
   mutable bool touchHeldOverrideValid = false;
   mutable unsigned long touchHeldOverrideMs = 0;
   mutable unsigned long touchHeldOverrideAt = 0;

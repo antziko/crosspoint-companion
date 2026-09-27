@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "CrossPointSettings.h"
+#include "HomeButtonSettings.h"
 #include "KOReaderCredentialStore.h"
 #include "ReaderFontSizes.h"
 #include "activities/settings/SettingsActivity.h"
@@ -692,6 +693,18 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
     auto it = std::find_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_DICTIONARY; });
     if (it != v.end()) {
       *it = buildDictionarySetting(dictRegistry);
+    }
+
+    // Home-key gestures. Built with this fork's vector-backed Enum rather than upstream's
+    // StaticEnum/span, which would mean threading a second representation through every
+    // SettingInfo consumer.
+    if (BoardConfig::hasHomeKey()) {
+      const std::vector<StrId> actions(std::begin(home_button::ACTION_LABELS), std::end(home_button::ACTION_LABELS));
+      v.reserve(v.size() + 3);
+      for (unsigned i = 0; i < 3; ++i) {
+        v.push_back(SettingInfo::Enum(home_button::GESTURE_LABELS[i], home_button::FIELDS[i], actions,
+                                      home_button::KEYS[i], StrId::STR_CAT_CONTROLS));
+      }
     }
   }
   if (registry && registry->getFamilyCount() > 0) {

@@ -421,7 +421,7 @@ void CrossPointWebServerActivity::loop() {
           yield();
           // Force trigger an update of which buttons are being pressed so be have accurate state
           // for back button checking
-          mappedInput.update();
+          mappedInput.update(/*deferHomeButtonAction=*/true);
           // Check for exit button inside loop for responsiveness
           if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
             onGoHome();
