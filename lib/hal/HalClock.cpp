@@ -126,12 +126,31 @@ void HalClock::begin() {
     // callers (WifiSelectionActivity, KOReaderSyncActivity) see the RTC that is really here.
     _hwRtcPresent = hwRtc.present();
 
-    // X4 has no RTC chip, but time can survive a software reset (e.g. the silent
-    // heap-defrag restart taken when returning home from the network flow).
-    // Prefer the IDF RTC-backed POSIX clock if it's still valid; otherwise fall
-    // back to the epoch we stashed in RTC_NOINIT before the restart. Either way,
-    // adopt it so the home top-bar clock keeps showing instead of vanishing.
-    if (time(nullptr) > MIN_VALID_EPOCH) {
+    // Source priority, best-kept time first.
+    //
+    // The battery-backed RTC wins whenever there is one (X4 Pro's BM8563). It is
+    // the only source here that genuinely kept time: the IDF's POSIX clock rides
+    // RTC_SLOW_CLK, which is the internal ~150kHz RC oscillator on these boards --
+    // several percent off and temperature-dependent. Auto-sleep is a deep sleep,
+    // i.e. a chip reset, so begin() re-runs on every wake; adopting the POSIX
+    // clock there re-seeds from the previous already-drifted value and the error
+    // compounds across a reading session. Every successful NTP sync writes back
+    // into the chip (writeSystemClockToHwRtc), so it stays current.
+    //
+    // seedSystemClockFromHwRtc() is a no-op returning false where no such chip
+    // exists (X4, and the C3 boards generally), so those fall through to the two
+    // software-reset paths below unchanged: prefer the IDF RTC-backed POSIX clock
+    // if it is still valid, otherwise the epoch stashed in RTC_NOINIT before the
+    // silent heap-defrag restart. Either way the home top-bar clock keeps showing
+    // instead of vanishing.
+    if (seedSystemClockFromHwRtc()) {
+      // Clock is up immediately and offline -- no NTP sync needed
+      // (maybeStartBackgroundNtpSync() in main.cpp sees a valid clock and skips
+      // powering the radio).
+      _ntpConfigured = true;
+      LOG_INF("CLK", "Seeded system clock from the hardware RTC");
+      clkTrace("boot seeded from hw rtc epoch=%ld", (long)time(nullptr));
+    } else if (time(nullptr) > MIN_VALID_EPOCH) {
       _ntpConfigured = true;
       LOG_INF("CLK", "Adopted RTC-preserved system time after reset");
     } else if (halClockSavedMagic == HALCLOCK_EPOCH_MAGIC && halClockSavedEpoch > MIN_VALID_EPOCH) {
@@ -139,14 +158,6 @@ void HalClock::begin() {
       settimeofday(&tv, nullptr);
       _ntpConfigured = true;
       LOG_INF("CLK", "Restored system time from RTC_NOINIT after reset");
-    } else if (seedSystemClockFromHwRtc()) {
-      // X4 Pro and friends: a battery-backed RTC that kept running through deep
-      // sleep, so the clock is up immediately and offline -- no NTP sync needed
-      // (maybeStartBackgroundNtpSync() in main.cpp sees a valid clock and skips
-      // powering the radio).
-      _ntpConfigured = true;
-      LOG_INF("CLK", "Seeded system clock from the hardware RTC");
-      clkTrace("boot seeded from hw rtc epoch=%ld", (long)time(nullptr));
     }
     // Consume the stash so it's only valid for the immediate next boot (the ~2s
     // silent restart). A deep sleep can last hours — its elapsed time is unknown
