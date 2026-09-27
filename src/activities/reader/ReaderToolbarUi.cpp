@@ -38,6 +38,8 @@ constexpr int kToolCount = 3;
 constexpr int kPanelHeightPercent = 62;
 // Cap the sheet may grow to when rounding the list area up to a whole row.
 constexpr int kPanelHeightMaxPercent = 72;
+// Landscape has less vertical room; leave a narrow page strip for tap-to-dismiss.
+constexpr int kLandscapePanelHeightPercent = 88;
 }  // namespace
 
 ReaderToolbarUi::ReaderToolbarUi(GfxRenderer& renderer) : UiAppHost(renderer) {}
@@ -238,8 +240,15 @@ void ReaderToolbarUi::buildPanel(UiScreen& screen) {
   const int16_t titleBand = static_cast<int16_t>(titleH + tokens.spaceMd);
   const int16_t chromeSansTitle = static_cast<int16_t>(grabberBand + tokens.spaceSm +
                                                        std::max(0, model_.bottomReserve) + kToolRowH + tokens.spaceSm);
-  const int16_t target = static_cast<int16_t>((safe.height * kPanelHeightPercent) / 100);
-  const int16_t cap = static_cast<int16_t>((safe.height * kPanelHeightMaxPercent) / 100);
+  // Landscape has far less vertical room, and the portrait percentages leave a sheet too
+  // short to be worth opening. Take almost the whole height there, keeping only a narrow
+  // page strip for the tap that dismisses it; target and cap coincide, so the
+  // round-up-to-a-whole-row below cannot push past it.
+  const bool landscape = safe.width > safe.height;
+  const int16_t target =
+      static_cast<int16_t>((safe.height * (landscape ? kLandscapePanelHeightPercent : kPanelHeightPercent)) / 100);
+  const int16_t cap =
+      static_cast<int16_t>((safe.height * (landscape ? kLandscapePanelHeightPercent : kPanelHeightMaxPercent)) / 100);
   const int count = std::max(0, model_.itemCount);
   const auto rowsForChrome = [&](const int16_t chromeH) {
     int rows = (target - chromeH + tokens.listRowGap) / rowStride;
