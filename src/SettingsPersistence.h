@@ -115,6 +115,12 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
     persisted::toggle("embeddedStyle", &CrossPointSettings::embeddedStyle),
     persisted::toggle("focusReadingEnabled", &CrossPointSettings::focusReadingEnabled),
     persisted::toggle("hyphenationEnabled", &CrossPointSettings::hyphenationEnabled),
+    // RANGED, not enumerated: these are numeric ranges, so an out-of-range stored value should
+    // be pulled to the nearest bound rather than reset to the default.
+    persisted::ranged("wordSpacing", &CrossPointSettings::wordSpacing, CrossPointSettings::WORD_SPACING_MIN,
+                      CrossPointSettings::WORD_SPACING_MAX),
+    persisted::ranged("characterSpacing", &CrossPointSettings::characterSpacing, 0,
+                      CrossPointSettings::CHARACTER_SPACING_MAX),
     persisted::enumerated("orientation", &CrossPointSettings::orientation, CrossPointSettings::ORIENTATION_COUNT - 1),
     persisted::toggle("extraParagraphSpacing", &CrossPointSettings::extraParagraphSpacing),
     persisted::enumerated("textAntiAliasing", &CrossPointSettings::textAntiAliasing,

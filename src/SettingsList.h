@@ -223,8 +223,8 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // growth allocation is what aborted (and rebooted the device) when settings were saved at
   // low heap; see SettingsPersistence.h. Keep headroom above the real count.
   //
-  // Derived, not guessed: 87 rows compile unconditionally, plus up to 6 behind
-  // FREEINK_CAP_TOUCH / _FRONTLIGHT / _WARMLIGHT — 93 on a board with all three, which is
+  // Derived, not guessed: 89 rows compile unconditionally, plus up to 6 behind
+  // FREEINK_CAP_TOUCH / _FRONTLIGHT / _WARMLIGHT — 95 on a board with all three, which is
   // the X4 Pro. 88 was already under that, so X4 Pro was paying the growth realloc on every
   // call. 104 keeps headroom for the next few rows.
   constexpr size_t kSettingCount = 104;
@@ -325,6 +325,17 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                                  {CrossPointSettings::SCREEN_MARGIN_MIN, CrossPointSettings::SCREEN_MARGIN_MAX,
                                   CrossPointSettings::SCREEN_MARGIN_STEP},
                                  "screenMargin", StrId::STR_CAT_READER)
+                  .withTextSettings());
+  v.push_back(SettingInfo::Value(StrId::STR_WORD_SPACING, &CrossPointSettings::wordSpacing,
+                                 {CrossPointSettings::WORD_SPACING_MIN, CrossPointSettings::WORD_SPACING_MAX,
+                                  CrossPointSettings::WORD_SPACING_STEP},
+                                 "wordSpacing", StrId::STR_CAT_READER)
+                  .withTextSettings());
+  // Stored 0..4, displayed -2..+2 px: an Enum row, so the picker labels carry the sign.
+  v.push_back(SettingInfo::Enum(StrId::STR_CHARACTER_SPACING, &CrossPointSettings::characterSpacing,
+                                {StrId::STR_SPACING_MINUS_2, StrId::STR_SPACING_MINUS_1, StrId::STR_SPACING_ZERO,
+                                 StrId::STR_SPACING_PLUS_1, StrId::STR_SPACING_PLUS_2},
+                                "characterSpacing", StrId::STR_CAT_READER)
                   .withTextSettings());
   v.push_back(SettingInfo::Enum(StrId::STR_PARA_ALIGNMENT, &CrossPointSettings::paragraphAlignment,
                                 {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, StrId::STR_CENTER, StrId::STR_ALIGN_RIGHT,

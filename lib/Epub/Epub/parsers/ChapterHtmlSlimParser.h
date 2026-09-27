@@ -56,6 +56,10 @@ class ChapterHtmlSlimParser {
   uint16_t viewportHeight;
   bool hyphenationEnabled;
   bool focusReadingEnabled;
+  // Reader text-spacing, applied to every block this parser lays out. Set through
+  // setTextSpacing() rather than the constructor, whose argument list is already long.
+  int8_t characterSpacing = 0;
+  uint8_t wordSpacingPercent = 100;
   const CssParser* cssParser;
   bool embeddedStyle;
   uint8_t imageRendering;
@@ -224,6 +228,11 @@ class ChapterHtmlSlimParser {
   ~ChapterHtmlSlimParser();
 
   // One-shot parse: builds every page before returning (begin + step* + finish).
+  // Must be called before parseAndBuildPages(); the values are read per block during layout.
+  void setTextSpacing(const int8_t character, const uint8_t wordPercent) {
+    characterSpacing = character;
+    wordSpacingPercent = wordPercent;
+  }
   bool parseAndBuildPages();
 
   // Resumable parse, for the incremental section builder. Drive as:

@@ -467,7 +467,7 @@ void ChapterHtmlSlimParser::flushLongTextBlockIfNeeded() {
       [this](const std::shared_ptr<TextBlock>& textBlock, const uint32_t offset) {
         this->addLineToPage(textBlock, offset);
       },
-      false);
+      false, characterSpacing, wordSpacingPercent);
 }
 
 // start a new text block if needed
@@ -698,14 +698,16 @@ void ChapterHtmlSlimParser::finishTableRow() {
       lines.reserve(MAX_GRID_TABLE_CELL_WORDS * 2);
     }
     tableRowCells[column]->layoutAndExtractLines(
-        renderer, fontId, textWidth, [this, &lines](const std::shared_ptr<TextBlock>& line, const uint32_t offset) {
+        renderer, fontId, textWidth,
+        [this, &lines](const std::shared_ptr<TextBlock>& line, const uint32_t offset) {
           const size_t lineIndex = lines.size();
           lines.push_back(line);
           if (tableLineVisibleOffsets.size() <= lineIndex) {
             tableLineVisibleOffsets.resize(lineIndex + 1, UINT32_MAX);
           }
           tableLineVisibleOffsets[lineIndex] = std::min(tableLineVisibleOffsets[lineIndex], offset);
-        });
+        },
+        true, characterSpacing, wordSpacingPercent);
     maxLineCount = std::max(maxLineCount, lines.size());
   }
   tableRowCells.clear();
@@ -2444,7 +2446,8 @@ void ChapterHtmlSlimParser::makePages() {
 
   currentTextBlock->layoutAndExtractLines(
       renderer, fontId, effectiveWidth,
-      [this](const std::shared_ptr<TextBlock>& textBlock, const uint32_t offset) { addLineToPage(textBlock, offset); });
+      [this](const std::shared_ptr<TextBlock>& textBlock, const uint32_t offset) { addLineToPage(textBlock, offset); },
+      true, characterSpacing, wordSpacingPercent);
 
   // Fallback: transfer any remaining pending footnotes to current page.
   // Normally addLineToPage handles this via word-index tracking, but this catches

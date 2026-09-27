@@ -31,6 +31,10 @@ struct BlockStyle {
   bool textAlignDefined = false;   // true if text-align was explicitly set in CSS
   bool isRtl = false;              // true if resolved direction is RTL
   bool directionDefined = false;   // true if direction was explicitly set in CSS/HTML
+  // Extra pixels between glyphs during layout and drawing. Not a CSS property: stamped from
+  // the reader setting by ParsedText::layoutAndExtractLines, and serialized with the block so
+  // a cached line renders with the tracking it was laid out at.
+  int8_t characterSpacing = 0;
 
   // Set when this block was created by a <br> element. Used by startNewTextBlock to inject
   // a full line-height gap when the <br> block stays empty (section-break use case).

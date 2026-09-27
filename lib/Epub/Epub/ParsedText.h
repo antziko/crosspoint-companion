@@ -53,6 +53,9 @@ class ParsedText {
   std::vector<VisibleOffsetRebase> visibleOffsetRebases;
   std::deque<std::string> rubyTexts;  // per-word ruby annotation; empty when no <ruby> in this block
   BlockStyle blockStyle;
+  // Reader word spacing as a percent of the font's natural space advance. Character spacing
+  // lives on blockStyle instead, because it has to survive into the serialized block.
+  uint8_t wordSpacingPercent = 100;
   bool extraParagraphSpacing;
   bool hyphenationEnabled;
   bool focusReadingEnabled;
@@ -118,5 +121,6 @@ class ParsedText {
   bool isEmpty() const { return words.empty(); }
   void layoutAndExtractLines(const GfxRenderer& renderer, int fontId, uint16_t viewportWidth,
                              const std::function<void(std::shared_ptr<TextBlock>, uint32_t)>& processLine,
-                             bool includeLastLine = true);
+                             bool includeLastLine = true, int8_t characterSpacing = 0,
+                             uint8_t wordSpacingPercent = 100);
 };

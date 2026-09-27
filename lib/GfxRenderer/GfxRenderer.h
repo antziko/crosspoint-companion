@@ -423,6 +423,8 @@ class GfxRenderer {
   void fillPolygon(const int* xPoints, const int* yPoints, int numPoints, bool state = true) const;
 
   // Text
+  // Layout may use advance-only SD font tables; rendered measurement includes kerning and ligatures.
+  enum class TextMeasureMode { Layout, Rendered };
   int getTextWidth(int fontId, const char* text, EpdFontFamily::Style style = EpdFontFamily::REGULAR,
                    BidiUtils::BidiBaseDir baseDir = BidiUtils::BidiBaseDir::AUTO) const;
   // Pen advance width (cursor end position), NOT the ink bounding box getTextWidth
@@ -438,9 +440,11 @@ class GfxRenderer {
   void drawCenteredText(int fontId, int y, const char* text, bool black = true,
                         EpdFontFamily::Style style = EpdFontFamily::REGULAR,
                         BidiUtils::BidiBaseDir baseDir = BidiUtils::BidiBaseDir::AUTO) const;
+  /// `tracking` is extra pixels inserted between adjacent glyphs. It is never applied before
+  /// the first glyph or across a space -- see trackingBetween in the .cpp.
   void drawText(int fontId, int x, int y, const char* text, bool black = true,
                 EpdFontFamily::Style style = EpdFontFamily::REGULAR,
-                BidiUtils::BidiBaseDir baseDir = BidiUtils::BidiBaseDir::AUTO) const;
+                BidiUtils::BidiBaseDir baseDir = BidiUtils::BidiBaseDir::AUTO, int8_t tracking = 0) const;
   /// Draw ONE codepoint with every glyph pixel replicated `scale` times in both axes, from
   /// `yTop` (the top of the scaled text cell, matching drawText's y convention). Returns the
   /// scaled pen advance, or 0 when the glyph is unavailable.
@@ -460,9 +464,11 @@ class GfxRenderer {
   /// Using a single snap avoids the +/-1 px rounding error that arises when space advance and kern are
   /// snapped separately and then added as integers.
   int getSpaceAdvance(int fontId, uint32_t leftCp, uint32_t rightCp, EpdFontFamily::Style style) const;
-  /// Returns the kerning adjustment between two adjacent codepoints.
-  int getKerning(int fontId, uint32_t leftCp, uint32_t rightCp, EpdFontFamily::Style style) const;
-  int getTextAdvanceX(int fontId, const char* text, EpdFontFamily::Style style) const;
+  /// Returns kerning plus optional tracking between two adjacent codepoints.
+  int getKerning(int fontId, uint32_t leftCp, uint32_t rightCp, EpdFontFamily::Style style, int8_t tracking = 0) const;
+  int getTextAdvanceX(int fontId, const char* text, EpdFontFamily::Style style, int8_t tracking = 0,
+                      BidiUtils::BidiBaseDir baseDir = BidiUtils::BidiBaseDir::AUTO,
+                      TextMeasureMode mode = TextMeasureMode::Layout) const;
   int getFontAscenderSize(int fontId) const;
   int getLineHeight(int fontId) const;
   int getLineHeight(int fontId, float compression) const;

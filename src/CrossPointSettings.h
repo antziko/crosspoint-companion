@@ -468,6 +468,16 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Manual "Refresh Screen" clear mode (default HALF: the only single pass that scrubs)
   uint8_t refreshScreenMode = RSM_HALF;
   uint8_t hyphenationEnabled = 0;
+  // Reader word spacing, a percent of the font's natural space advance.
+  static constexpr uint8_t WORD_SPACING_MIN = 50;
+  static constexpr uint8_t WORD_SPACING_MAX = 200;
+  static constexpr uint8_t WORD_SPACING_STEP = 25;
+  uint8_t wordSpacing = 100;
+  // Reader letter tracking. Stored unsigned so it persists like every other setting;
+  // 0..4 maps to -2..+2 px through getCharacterSpacing().
+  static constexpr uint8_t CHARACTER_SPACING_OFFSET = 2;
+  static constexpr uint8_t CHARACTER_SPACING_MAX = 4;
+  uint8_t characterSpacing = CHARACTER_SPACING_OFFSET;
 
   // Reader screen margin settings
   // LOCAL(feat-dictionary): margin bounds from #2605; screenMargin default unchanged (== MIN)
@@ -704,6 +714,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t getReaderParagraphAlignment() const;
   uint8_t getReaderHyphenationEnabled() const;
   uint8_t getReaderExtraParagraphSpacing() const;
+  // Stored 0..4 as signed -2..+2 px of tracking.
+  int8_t getCharacterSpacing() const { return static_cast<int8_t>(characterSpacing - CHARACTER_SPACING_OFFSET); }
   // The layout configuration the section cache is keyed on, with every per-book
   // override already resolved. The viewport is the caller's because it is the one
   // field the store cannot know.
