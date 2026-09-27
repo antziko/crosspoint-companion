@@ -617,6 +617,28 @@ uint8_t CrossPointSettings::getReaderExtraParagraphSpacing() const {
   return readerOverride.active ? readerOverride.extraParagraphSpacing : extraParagraphSpacing;
 }
 
+ReaderRenderSpec CrossPointSettings::readerRenderSpec(const uint16_t viewportWidth,
+                                                      const uint16_t viewportHeight) const {
+  ReaderRenderSpec spec;
+  // Every field with a per-book counterpart goes through its getReader* accessor.
+  // Reading the raw member here is what silently invalidates a cache: the load path
+  // compares against the override, so a build that wrote the global value can never
+  // match and the section is rebuilt on every open.
+  spec.fontId = getReaderFontId();
+  spec.lineCompression = getReaderLineCompression();
+  spec.extraParagraphSpacing = getReaderExtraParagraphSpacing() != 0;
+  spec.paragraphAlignment = getReaderParagraphAlignment();
+  spec.viewportWidth = viewportWidth;
+  spec.viewportHeight = viewportHeight;
+  spec.hyphenationEnabled = getReaderHyphenationEnabled() != 0;
+  // No per-book counterpart: readerOverride carries no embeddedStyle, imageRendering
+  // or focusReadingEnabled, so the global value is the resolved one.
+  spec.embeddedStyle = embeddedStyle != 0;
+  spec.imageRendering = imageRendering;
+  spec.focusReadingEnabled = focusReadingEnabled != 0;
+  return spec;
+}
+
 bool CrossPointSettings::getReaderSwapWordSelectAxes() const {
   return readerOverride.active && readerOverride.swapWordSelectAxes != 0;
 }

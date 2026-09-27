@@ -741,10 +741,7 @@ void EpubReaderActivity::loop() {
       !partialRebuildStartFailed &&
       section->currentPage + PARTIAL_REBUILD_START_MARGIN >= static_cast<int>(section->pageCount)) {
     RenderLock lock;
-    if (!section->startBuild(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
-                             SETTINGS.extraParagraphSpacing, SETTINGS.paragraphAlignment, buildViewportWidth,
-                             buildViewportHeight, SETTINGS.hyphenationEnabled, SETTINGS.embeddedStyle,
-                             SETTINGS.imageRendering, SETTINGS.focusReadingEnabled)) {
+    if (!section->startBuild(SETTINGS.readerRenderSpec(buildViewportWidth, buildViewportHeight))) {
       // Not fatal: the partial keeps serving its pages; crossing the watermark falls back to
       // the blocking extension in render(). Don't retry every tick.
       partialRebuildStartFailed = true;
@@ -2645,10 +2642,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     // previous session) serves its pages instantly too, but a build must still run to lay
     // out the rest -- it re-parses from the top in the background (HTML already cached,
     // pages are deterministic) and finalizes, so the partial machinery retires itself.
-    const bool cacheLoaded = section->loadSectionFile(
-        SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(), SETTINGS.getReaderExtraParagraphSpacing(),
-        SETTINGS.getReaderParagraphAlignment(), viewportWidth, viewportHeight, SETTINGS.getReaderHyphenationEnabled(),
-        SETTINGS.embeddedStyle, SETTINGS.imageRendering, SETTINGS.focusReadingEnabled);
+    const bool cacheLoaded = section->loadSectionFile(SETTINGS.readerRenderSpec(viewportWidth, viewportHeight));
     if (cacheLoaded) {
       // Matching render params means identical pagination, so the saved page number is valid
       // as-is: consume any pending settings-change reposition. Without this, a chapter total
@@ -2690,11 +2684,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
         // Lend the framebuffer's 48 KB to the blocking full build; restored
         // (white) at scope exit, and the page render below redraws everything.
         GfxRenderer::FrameBufferLoan loan(renderer);
-        if (!section->createSectionFile(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
-                                        SETTINGS.getReaderExtraParagraphSpacing(),
-                                        SETTINGS.getReaderParagraphAlignment(), viewportWidth, viewportHeight,
-                                        SETTINGS.getReaderHyphenationEnabled(), SETTINGS.embeddedStyle,
-                                        SETTINGS.imageRendering, SETTINGS.focusReadingEnabled, popupFn)) {
+        if (!section->createSectionFile(SETTINGS.readerRenderSpec(viewportWidth, viewportHeight), popupFn)) {
           LOG_ERR("ERS", "Failed to persist page data to SD");
           loan.end();  // restore before failBuild() draws the error overlay
           failBuild();
@@ -2757,11 +2747,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
             // draw mid-build; the background buildSomeMore chunks in loop() never had
             // the loan either, so per-chunk layout is already known to fit.
             GfxRenderer::FrameBufferLoan loan(renderer);
-            started =
-                section->startBuild(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
-                                    SETTINGS.getReaderExtraParagraphSpacing(), SETTINGS.getReaderParagraphAlignment(),
-                                    viewportWidth, viewportHeight, SETTINGS.getReaderHyphenationEnabled(),
-                                    SETTINGS.embeddedStyle, SETTINGS.imageRendering, SETTINGS.focusReadingEnabled);
+            started = section->startBuild(SETTINGS.readerRenderSpec(viewportWidth, viewportHeight));
           }
           if (!started) {
             LOG_ERR("ERS", "Failed to start section build");
@@ -2859,11 +2845,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   }
   while (section->isPartial() && section->currentPage >= static_cast<int>(section->pageCount)) {
     // Start a build to extend a partial toward the requested page.
-    if (!section->isBuilding() &&
-        !section->startBuild(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
-                             SETTINGS.extraParagraphSpacing, SETTINGS.paragraphAlignment, viewportWidth, viewportHeight,
-                             SETTINGS.hyphenationEnabled, SETTINGS.embeddedStyle, SETTINGS.imageRendering,
-                             SETTINGS.focusReadingEnabled)) {
+    if (!section->isBuilding() && !section->startBuild(SETTINGS.readerRenderSpec(viewportWidth, viewportHeight))) {
       LOG_ERR("ERS", "Failed to start partial extension build");
       section.reset();
       showBuildError();
@@ -3142,18 +3124,12 @@ void EpubReaderActivity::silentIndexNextChapterIfNeeded(const uint16_t viewportW
   }
 
   Section nextSection(epub, nextSpineIndex, renderer);
-  if (nextSection.loadSectionFile(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
-                                  SETTINGS.getReaderExtraParagraphSpacing(), SETTINGS.getReaderParagraphAlignment(),
-                                  viewportWidth, viewportHeight, SETTINGS.getReaderHyphenationEnabled(),
-                                  SETTINGS.embeddedStyle, SETTINGS.imageRendering, SETTINGS.focusReadingEnabled)) {
+  if (nextSection.loadSectionFile(SETTINGS.readerRenderSpec(viewportWidth, viewportHeight))) {
     return;
   }
 
   LOG_DBG("ERS", "Silently indexing next chapter: %d", nextSpineIndex);
-  if (!nextSection.createSectionFile(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
-                                     SETTINGS.getReaderExtraParagraphSpacing(), SETTINGS.getReaderParagraphAlignment(),
-                                     viewportWidth, viewportHeight, SETTINGS.getReaderHyphenationEnabled(),
-                                     SETTINGS.embeddedStyle, SETTINGS.imageRendering, SETTINGS.focusReadingEnabled)) {
+  if (!nextSection.createSectionFile(SETTINGS.readerRenderSpec(viewportWidth, viewportHeight))) {
     LOG_ERR("ERS", "Failed silent indexing for chapter: %d", nextSpineIndex);
   }
 }

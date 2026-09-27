@@ -1,5 +1,6 @@
 #pragma once
 #include <ArduinoJson.h>
+#include <Epub/ReaderRenderSpec.h>
 #include <HalStorage.h>
 #include <PersistableStore.h>
 
@@ -703,6 +704,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t getReaderParagraphAlignment() const;
   uint8_t getReaderHyphenationEnabled() const;
   uint8_t getReaderExtraParagraphSpacing() const;
+  // The layout configuration the section cache is keyed on, with every per-book
+  // override already resolved. The viewport is the caller's because it is the one
+  // field the store cannot know.
+  ReaderRenderSpec readerRenderSpec(uint16_t viewportWidth, uint16_t viewportHeight) const;
   // True when the active book asked for the word-select axis swap. Off whenever no
   // override is active (non-reader screens, XTC), since the field is per-book only.
   bool getReaderSwapWordSelectAxes() const;
