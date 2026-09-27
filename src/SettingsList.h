@@ -466,11 +466,18 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
       StrId::STR_SIDE_BTN_LAYOUT, &CrossPointSettings::sideButtonLayout,
       {StrId::STR_PREV_NEXT, StrId::STR_NEXT_PREV, StrId::STR_DISABLED, StrId::STR_NEXT_NEXT, StrId::STR_PREV_PREV},
       "sideButtonLayout", StrId::STR_CAT_CONTROLS));
-  // Touch reader controls (#2481). Filtered out below on non-touch boards.
-  v.push_back(SettingInfo::Enum(
-      StrId::STR_TOUCH_READER_CONTROLS, &CrossPointSettings::touchReaderControls,
-      {StrId::STR_STATE_OFF, StrId::STR_STATE_TAP, StrId::STR_STATE_SWIPE, StrId::STR_STATE_INVERTED_TAP},
-      "touchReaderControls", StrId::STR_CAT_CONTROLS));
+  // Touch reader controls (#2481, split per direction by #3586). All three rows are
+  // filtered out below on non-touch boards.
+  v.push_back(SettingInfo::Toggle(StrId::STR_TOUCH_READER_CONTROLS, &CrossPointSettings::touchReaderControls,
+                                  "touchReaderControls", StrId::STR_CAT_CONTROLS));
+  v.push_back(SettingInfo::Enum(StrId::STR_NEXT_PAGE_GESTURE, &CrossPointSettings::pageTurnGesture,
+                                {StrId::STR_TAP_AND_SWIPE, StrId::STR_TAP_ONLY, StrId::STR_SWIPE_ONLY,
+                                 StrId::STR_INVERTED_TAP, StrId::STR_DISABLED},
+                                "pageTurnGesture", StrId::STR_CAT_CONTROLS));
+  v.push_back(SettingInfo::Enum(StrId::STR_PREV_PAGE_GESTURE, &CrossPointSettings::previousPageGesture,
+                                {StrId::STR_TAP_AND_SWIPE, StrId::STR_TAP_ONLY, StrId::STR_SWIPE_ONLY,
+                                 StrId::STR_INVERTED_TAP, StrId::STR_DISABLED},
+                                "previousPageGesture", StrId::STR_CAT_CONTROLS));
   v.push_back(SettingInfo::Toggle(StrId::STR_SWAP_SIDE_BTN_CW, &CrossPointSettings::swapSideButtonsCW,
                                   "swapSideButtonsCW", StrId::STR_CAT_CONTROLS));
   v.push_back(
@@ -725,7 +732,11 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // from both the device and the web settings API.
   if (!BoardConfig::hasTouch()) {
     v.erase(std::remove_if(v.begin(), v.end(),
-                           [](const SettingInfo& s) { return s.nameId == StrId::STR_TOUCH_READER_CONTROLS; }),
+                           [](const SettingInfo& s) {
+                             return s.nameId == StrId::STR_TOUCH_READER_CONTROLS ||
+                                    s.nameId == StrId::STR_NEXT_PAGE_GESTURE ||
+                                    s.nameId == StrId::STR_PREV_PAGE_GESTURE;
+                           }),
             v.end());
   } else {
     v.erase(std::remove_if(v.begin(), v.end(),

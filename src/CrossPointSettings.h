@@ -273,12 +273,20 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // meaning Off/Tap: any further mode is APPENDED. Every consumer outside
   // detectTouchPageTurn() only asks "is this off?", so the extra modes need no
   // handling there.
-  enum TOUCH_READER_CONTROLS {
-    TOUCH_READER_OFF = 0,
-    TOUCH_READER_ON = 1,  // outer-third taps: left = previous, right = next
-    TOUCH_READER_SWIPE = 2,
-    TOUCH_READER_INVERTED_TAP = 3,  // the tap zones, mirrored
-    TOUCH_READER_CONTROLS_COUNT
+  // Master reader-touch switch. The gesture choice per direction lives in
+  // PAGE_TURN_GESTURE below; this only decides whether the reader listens at all.
+  enum TOUCH_READER_CONTROLS { TOUCH_READER_OFF = 0, TOUCH_READER_ON = 1, TOUCH_READER_CONTROLS_COUNT };
+
+  // Which gestures turn the page, chosen independently for each direction.
+  // INVERTED_TAP is tap-only: either direction set to it mirrors the shared tap
+  // zones (see ReaderUtils::detectTouchPageTurn).
+  enum PAGE_TURN_GESTURE {
+    TAP_AND_SWIPE = 0,
+    TAP_ONLY = 1,
+    SWIPE_ONLY = 2,
+    INVERTED_TAP = 3,
+    PAGE_TURN_GESTURE_DISABLED = 4,
+    PAGE_TURN_GESTURE_COUNT
   };
 
   // How the reader menu opens on touch boards. Persisted under the legacy
@@ -636,6 +644,11 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t tiltPageTurn = TILT_OFF;
   // Touch screen reader zones/gestures on boards with a touch controller.
   uint8_t touchReaderControls = TOUCH_READER_ON;
+  // Per-direction page-turn gestures (PAGE_TURN_GESTURE). Both default to
+  // Tap & Swipe: taps alone were the old TOUCH_READER_ON behaviour, and the
+  // swipes are additive on top of them.
+  uint8_t pageTurnGesture = TAP_AND_SWIPE;
+  uint8_t previousPageGesture = TAP_AND_SWIPE;
   // Reader menu open gesture (SHOW_READER_MENU: off / center tap / bottom-edge
   // up-swipe). Only surfaced on home-key boards; elsewhere the bottom edge is
   // already the Home gesture, so a stored SWIPE_UP resolves back to Tap rather

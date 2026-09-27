@@ -27,6 +27,17 @@ constexpr unsigned long DICTIONARY_MESSAGE_DURATION_MS = 1500;
 // user may want to actually read, not just an acknowledgement of their own action.
 constexpr unsigned long INLINE_REVIEW_MESSAGE_DURATION_MS = 2500;
 
+// A direction's gesture setting decides which inputs may turn the page that way.
+// INVERTED_TAP is a tap mode that also mirrors the shared zones.
+inline bool gestureAllowsSwipe(const uint8_t gesture) {
+  return gesture == CrossPointSettings::TAP_AND_SWIPE || gesture == CrossPointSettings::SWIPE_ONLY;
+}
+
+inline bool gestureAllowsTap(const uint8_t gesture) {
+  return gesture == CrossPointSettings::TAP_AND_SWIPE || gesture == CrossPointSettings::TAP_ONLY ||
+         gesture == CrossPointSettings::INVERTED_TAP;
+}
+
 enum ReaderTouchAction : freeink::ui::ActionId {
   READER_TOUCH_PREV = 1,
   READER_TOUCH_NEXT = 3,
@@ -162,7 +173,9 @@ inline TouchPageTurn detectTouchPageTurn(GfxRenderer& renderer, const MappedInpu
     return result;
   }
 
-  if (SETTINGS.touchReaderControls == CrossPointSettings::TOUCH_READER_SWIPE) {
+  const bool nextSwipes = gestureAllowsSwipe(SETTINGS.pageTurnGesture);
+  const bool prevSwipes = gestureAllowsSwipe(SETTINGS.previousPageGesture);
+  if (nextSwipes || prevSwipes) {
     // Swipes turn pages on either axis -- left or up = next, right or down = previous,
     // the same sense the lists page in. Taps stay free for the middle-third reader-menu
     // zone. A slow swipe never becomes a long-press chapter skip.
@@ -171,10 +184,10 @@ inline TouchPageTurn detectTouchPageTurn(GfxRenderer& renderer, const MappedInpu
       case MappedInputManager::SwipeDir::Left:
         // Horizontal only: an RTL book pages the other way. The vertical cases
         // below follow the scroll sense, which reading direction does not flip.
-        (rtlBook ? result.prev : result.next) = true;
+        (rtlBook ? result.prev : result.next) = rtlBook ? prevSwipes : nextSwipes;
         break;
       case MappedInputManager::SwipeDir::Right:
-        (rtlBook ? result.next : result.prev) = true;
+        (rtlBook ? result.next : result.prev) = rtlBook ? nextSwipes : prevSwipes;
         break;
       case MappedInputManager::SwipeDir::Up:
         // A bottom-edge up-swipe is the board's own gesture wherever one is live: Home on
@@ -184,20 +197,27 @@ inline TouchPageTurn detectTouchPageTurn(GfxRenderer& renderer, const MappedInpu
         // it is the page turn that has no alternative there.)
         if (!input.wasHomeGesture() && !(resolveShowReaderMenu(input) == CrossPointSettings::READER_MENU_SWIPE_UP &&
                                          input.wasReaderMenuSwipeUp())) {
-          result.next = true;
+          result.next = nextSwipes;
         }
         break;
       case MappedInputManager::SwipeDir::Down:
         // Top edge pulls the light panel (or the reader menu on a lightless touch board)
         // down; ActivityManager takes that one before the reader ever sees it on a
         // frontlight board, and this keeps the two apart on every other.
-        if (!input.wasMenuGesture()) result.prev = true;
+        if (!input.wasMenuGesture()) result.prev = prevSwipes;
         break;
       default:
         break;
     }
-    return result;
+    // Only a swipe that actually paged ends the lookup. A swipe this direction pair
+    // does not accept must fall through untouched, so the reader's own swipe handlers
+    // (menu, panel paging) still see it -- wasSwipe() reads state, it consumes nothing.
+    if (result.next || result.prev) return result;
   }
+
+  const bool nextTaps = gestureAllowsTap(SETTINGS.pageTurnGesture);
+  const bool prevTaps = gestureAllowsTap(SETTINGS.previousPageGesture);
+  if (!nextTaps && !prevTaps) return result;
 
   int x = 0;
   int y = 0;
@@ -207,36 +227,53 @@ inline TouchPageTurn detectTouchPageTurn(GfxRenderer& renderer, const MappedInpu
 
   const int16_t width = static_cast<int16_t>(renderer.getScreenWidth());
   const int16_t height = static_cast<int16_t>(renderer.getScreenHeight());
-  // Outer thirds only: the middle third is the reader-menu tap
-  // (isTouchMenuTap below), so it must not double as a page turn.
   const int16_t zoneWidth = width / 3;
-  // RTL and Inverted Tap each mirror the zones, so both together cancel out.
-  const bool inverted = (SETTINGS.touchReaderControls == CrossPointSettings::TOUCH_READER_INVERTED_TAP) != rtlBook;
-  const freeink::ui::TapZone zones[] = {
-      {freeink::ui::Rect{0, 0, zoneWidth, height}, inverted ? READER_TOUCH_NEXT : READER_TOUCH_PREV},
-      {freeink::ui::Rect{static_cast<int16_t>(width - zoneWidth), 0, zoneWidth, height},
-       inverted ? READER_TOUCH_PREV : READER_TOUCH_NEXT},
-  };
+  // Either direction set to Inverted Tap mirrors the shared zones; RTL mirrors them
+  // too, so both together cancel out.
+  const bool invertedSetting = SETTINGS.pageTurnGesture == CrossPointSettings::INVERTED_TAP ||
+                               SETTINGS.previousPageGesture == CrossPointSettings::INVERTED_TAP;
+  const bool inverted = invertedSetting != rtlBook;
 
-  for (const auto& zone : zones) {
-    if (!zone.enabled || !zone.rect.contains(static_cast<int16_t>(x), static_cast<int16_t>(y))) continue;
-    result.prev = zone.action == READER_TOUCH_PREV;
-    result.next = zone.action == READER_TOUCH_NEXT;
-    break;
+  if (nextTaps && prevTaps) {
+    // Outer thirds only: the middle third is the reader-menu tap (isTouchMenuTap
+    // below), so it must not double as a page turn.
+    const freeink::ui::TapZone zones[] = {
+        {freeink::ui::Rect{0, 0, zoneWidth, height}, inverted ? READER_TOUCH_NEXT : READER_TOUCH_PREV},
+        {freeink::ui::Rect{static_cast<int16_t>(width - zoneWidth), 0, zoneWidth, height},
+         inverted ? READER_TOUCH_PREV : READER_TOUCH_NEXT},
+    };
+    for (const auto& zone : zones) {
+      if (!zone.enabled || !zone.rect.contains(static_cast<int16_t>(x), static_cast<int16_t>(y))) continue;
+      result.prev = zone.action == READER_TOUCH_PREV;
+      result.next = zone.action == READER_TOUCH_NEXT;
+      break;
+    }
+  } else {
+    // One direction only: give it both outer thirds rather than stranding half the
+    // screen on a gesture nothing listens for. The middle third stays the menu's.
+    const bool outerThird = x < zoneWidth || x >= width - zoneWidth;
+    result.next = nextTaps && outerThird;
+    result.prev = prevTaps && outerThird;
   }
   result.heldMs = gpio.lastTouchHeldMs();
   return result;
 }
 
 // A left-edge left-to-right swipe is the Back gesture (MappedInputManager::
-// wasBackGesture) AND, in swipe page-turn mode, the previous-page swipe --
+// wasBackGesture) AND, where that direction accepts swipes, a page turn --
 // and wasReleased(Button::Back) reports the gesture, so without this the
-// gesture would close the book instead of paging back. On the reading surface
+// gesture would close the book instead of paging. On the reading surface
 // the page turn wins; the physical Back button and the bottom-edge up-swipe
 // still exit. handleBackNavigation() drops the gesture unconditionally, so
 // only the Epub reader (which does not use it) needs this.
-inline bool backGestureIsPageTurn(const MappedInputManager& input) {
-  return SETTINGS.touchReaderControls == CrossPointSettings::TOUCH_READER_SWIPE && input.wasBackGesture();
+//
+// The swipe travels left-to-right, which pages back in an LTR book and forward
+// in an RTL one -- so it is that direction's gesture setting that decides, and
+// Back keeps working when only the other direction is on swipes.
+inline bool backGestureIsPageTurn(const MappedInputManager& input, const bool rtlBook = false) {
+  if (!SETTINGS.touchReaderControls) return false;
+  return gestureAllowsSwipe(rtlBook ? SETTINGS.pageTurnGesture : SETTINGS.previousPageGesture) &&
+         input.wasBackGesture();
 }
 
 // Tap in the middle third of the screen: the tap path into the reader menu on
