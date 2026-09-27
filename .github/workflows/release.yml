@@ -35,6 +35,12 @@ jobs:
       - name: Build CrossPoint
         run: pio run -e gh_release
 
+      # X4 Pro is a different MCU family (ESP32-S3), so it cannot share the C3
+      # binary and needs its own asset — without one, OTA on an X4 Pro has
+      # nothing to download.
+      - name: Build CrossPoint (X4 Pro)
+        run: pio run -e x4pro-gh_release
+
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -45,3 +51,14 @@ jobs:
             .pio/build/gh_release/firmware.elf
             .pio/build/gh_release/firmware.map
             .pio/build/gh_release/partitions.bin
+
+      - name: Upload Artifacts (X4 Pro)
+        uses: actions/upload-artifact@v4
+        with:
+          name: CrossPoint-x4pro-${{ github.ref_name }}
+          path: |
+            .pio/build/x4pro-gh_release/bootloader.bin
+            .pio/build/x4pro-gh_release/firmware.bin
+            .pio/build/x4pro-gh_release/firmware.elf
+            .pio/build/x4pro-gh_release/firmware.map
+            .pio/build/x4pro-gh_release/partitions.bin
