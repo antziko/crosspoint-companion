@@ -586,6 +586,12 @@ class EpubReaderActivity final : public Activity {
   // True when jumping away from the current page should offer a return mark: there is a
   // paginated page to mark and it does not already carry a point bookmark.
   bool canOfferReturnMark() const;
+  // True when a contents jump to (spineIndex, anchor) would actually land on a different page.
+  // Mirrors the Go-to-% path's targetPercent != initialPercent test. A spine-index comparison
+  // alone is not enough: nested TOCs and multi-chapter XHTML files put several entries in one
+  // spine item, and re-selecting the current chapter jumps to its start from wherever you were.
+  // Takes the render lock while resolving the anchor, so never call it holding one.
+  bool chapterJumpLeavesPage(int spineIndex, const std::string& anchor) const;
 
   // Redraw only the status-bar strip and push it via a windowed sub-rectangle
   // refresh, leaving the page content (including any AA images) untouched on the

@@ -1919,7 +1919,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
                 section.reset();
               };
 
-              if (chapterResult.spineIndex != currentSpineIndex && canOfferReturnMark()) {
+              if (chapterJumpLeavesPage(chapterResult.spineIndex, chapterResult.anchor) && canOfferReturnMark()) {
                 startActivityForResultNoThrow<ConfirmationActivity>(
                     [this, doNavigate](const ActivityResult& confirmResult) {
                       if (!confirmResult.isCancelled) {
@@ -4301,8 +4301,7 @@ void EpubReaderActivity::handleOverlayInput() {
       const auto item = epub->getTocItem(panelIndex);
       // Same offer the list menu makes before a chapter jump: drop a "return here"
       // mark on the page being left, unless it already carries a point bookmark.
-      const bool offerReturnMark =
-          item.spineIndex != -1 && item.spineIndex != currentSpineIndex && canOfferReturnMark();
+      const bool offerReturnMark = chapterJumpLeavesPage(item.spineIndex, item.anchor) && canOfferReturnMark();
       // The prompt is its own activity, so the overlay has to come down first.
       overlay = Overlay::None;
       discardOverlayPage();
@@ -4705,6 +4704,23 @@ bool EpubReaderActivity::canOfferReturnMark() const {
   if (!section || section->pageCount == 0) return false;
   const float progress = static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
   return !BOOKMARKS.hasPointBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), progress, section->pageCount);
+}
+
+bool EpubReaderActivity::chapterJumpLeavesPage(const int spineIndex, const std::string& anchor) const {
+  if (spineIndex == -1) return false;  // no destination -- both callers skip the navigation too
+  if (spineIndex != currentSpineIndex) return true;
+  if (!section) return false;
+  // Same spine, so the section that answers this is the one already loaded. Resolve the
+  // destination the way the navigation will: both callers set nextPageNumber = 0, then the
+  // anchor overrides it when it resolves (see the pendingAnchor block in render()).
+  // findAnchor, not getPageForAnchor: it covers the in-progress build as well as the on-disk
+  // map, which is what the jump itself uses.
+  RenderLock lock;
+  int destinationPage = 0;
+  if (!anchor.empty()) {
+    if (const auto page = section->findAnchor(anchor)) destinationPage = *page;
+  }
+  return destinationPage != section->currentPage;
 }
 
 void EpubReaderActivity::addBookmark(bool returnMark, bool lightRefresh) {
