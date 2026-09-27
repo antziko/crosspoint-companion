@@ -56,6 +56,9 @@ class Activity {
 
   virtual bool skipLoopDelay() { return false; }
   virtual bool preventAutoSleep() { return false; }
+  // Exclusive-storage activities (USB Drive) suspend global controls and activity
+  // transitions, so no filesystem code races a raw SD-card owner.
+  virtual bool requiresExclusiveStorageLoop() const { return false; }
   // Called by the main loop when the user makes a *manual* power-button sleep gesture
   // (never on auto-sleep timeout). Return true to take over the gesture and abort the
   // sleep (e.g. show a confirmation prompt); false to let the main loop deep-sleep.

@@ -44,6 +44,7 @@
 #include "fontIds.h"
 #include "network/NtpBgState.h"
 #include "network/WifiEventLog.h"
+#include "platform/UsbSerialJtagHandoff.h"
 #include "util/ButtonNavigator.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryRegistry.h"
@@ -237,6 +238,21 @@ void silentRestartToReader() {
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
   halClock.persistTimeAcrossReboot();  // X4: carry NTP-synced time across the soft reset
   delay(50);
+  ESP.restart();
+}
+
+void restartToHomeAfterStorageHandoff() {
+  if (deepSleepInProgress) return;  // sleeping supersedes the storage handoff reboot
+  // Deliberately not armSilentReboot(): that tears the modem down and captures the live
+  // light for an invisible reboot. Here the panel has already been handed a popup and the
+  // USB peripheral is about to be switched back, so only the target matters.
+  silentRebootTarget = SILENT_REBOOT_TARGET_HOME;
+  silentRebootMagic = SILENT_REBOOT_MAGIC;
+  LOG_DBG("MAIN", "Restart after storage handoff (target=home)");
+  GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+  halClock.persistTimeAcrossReboot();  // X4: carry NTP-synced time across the soft reset
+  delay(50);
+  handoffUsbOtgToSerialJtag();
   ESP.restart();
 }
 
@@ -949,6 +965,24 @@ void loop() {
   gpio.setSharedConfirmPowerShortPressEmitsPower(SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP);
   // Through the mapped manager, not gpio directly: it clears the long-press latch.
   mappedInputManager.update();
+
+  if (activityManager.requiresExclusiveStorageLoop()) {
+    // USB Drive handed the raw SD card to the host: its filesystem is detached, so nothing
+    // below may run. Screenshots, the sleep path, shortcuts and the tilt sensor all reach a
+    // storage user eventually, and the volume they would open no longer exists.
+    activityManager.loop();
+    if (activityManager.preventAutoSleep()) {
+      powerManager.setPowerSaving(false);
+      delay(10);
+    } else {
+      // No host attached, so a slower loop is safe. The activity times the handoff out
+      // itself rather than letting deep sleep happen with storage detached.
+      powerManager.setPowerSaving(true);
+      delay(50);
+    }
+    return;
+  }
+
   halTiltSensor.update(SETTINGS.tiltPageTurn, APP_STATE.activeOrientation, activityManager.isReaderActivity());
 
   renderer.setFadingFix(SETTINGS.fadingFix);

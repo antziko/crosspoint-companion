@@ -97,6 +97,8 @@ inline freeink::ui::BitmapRef listIconFor(const UIIcon icon, const int size = 24
         return freeink::ui::bitmapFromIcon(icon_library_32);
       case UIIcon::Hotspot:
         return freeink::ui::bitmapFromIcon(icon_radio_tower_32);
+      case UIIcon::Usb:
+        return freeink::ui::bitmapFromIcon(icon_usb_32);
       // LOCAL(feat): upstream's UIIcon::Bookmark is BookmarkRibbon here (renamed to
       // avoid colliding with struct Bookmark; see BaseTheme.h). feat's extra
       // BookmarkReturn/Highlight are also mapped — the bookmark list needs all
@@ -129,6 +131,8 @@ inline freeink::ui::BitmapRef listIconFor(const UIIcon icon, const int size = 24
       return freeink::ui::bitmapFromIcon(icon_library_24);
     case UIIcon::Hotspot:
       return freeink::ui::bitmapFromIcon(icon_radio_tower_24);
+    case UIIcon::Usb:
+      return freeink::ui::bitmapFromIcon(icon_usb_24);
     case UIIcon::BookmarkRibbon:
       return freeink::ui::bitmapFromIcon(icon_bookmark_filled_24);
     case UIIcon::BookmarkReturn:

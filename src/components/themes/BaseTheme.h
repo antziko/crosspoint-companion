@@ -162,7 +162,8 @@ enum UIIcon {
                    // Not "BookmarkIcon" — that name is the icon bitmap array in icons/bookmark.h.
   BookmarkReturn,  // hollow bookmark for the session "return here" mark
   Chart,
-  Highlight  // quotation-marks glyph for saved quotes (vs the bookmark ribbon)
+  Highlight,  // quotation-marks glyph for saved quotes (vs the bookmark ribbon)
+  Usb
 };
 
 // Default theme implementation (Classic Theme)

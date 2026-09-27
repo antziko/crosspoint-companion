@@ -10,12 +10,32 @@
 namespace fui = freeink::ui;
 
 namespace {
+// Row order IS the NetworkMode enum order — activateIndex casts the index straight
+// across, so a row added here needs its enumerator in the same position.
 constexpr StrId menuItems[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
-    StrId::STR_JOIN_NETWORK, StrId::STR_CALIBRE_WIRELESS, StrId::STR_CREATE_HOTSPOT};
+    StrId::STR_JOIN_NETWORK,
+    StrId::STR_CALIBRE_WIRELESS,
+    StrId::STR_CREATE_HOTSPOT,
+#if FREEINK_CAP_USB_MSC
+    StrId::STR_USB_DRIVE,
+#endif
+};
 constexpr StrId menuDescs[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
-    StrId::STR_JOIN_DESC, StrId::STR_CALIBRE_DESC, StrId::STR_HOTSPOT_DESC};
-constexpr UIIcon menuIcons[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {UIIcon::Wifi, UIIcon::Library,
-                                                                             UIIcon::Hotspot};
+    StrId::STR_JOIN_DESC,
+    StrId::STR_CALIBRE_DESC,
+    StrId::STR_HOTSPOT_DESC,
+#if FREEINK_CAP_USB_MSC
+    StrId::STR_USB_DRIVE_DESC,
+#endif
+};
+constexpr UIIcon menuIcons[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
+    UIIcon::Wifi,
+    UIIcon::Library,
+    UIIcon::Hotspot,
+#if FREEINK_CAP_USB_MSC
+    UIIcon::Usb,
+#endif
+};
 }  // namespace
 
 NetworkModeSelectionActivity::NetworkModeSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
@@ -44,13 +64,8 @@ void NetworkModeSelectionActivity::activateIndex(const int index) {
   app.clearTapFlash();
   nav.selected = index;
 
-  NetworkMode mode = NetworkMode::JOIN_NETWORK;
-  if (index == 1) {
-    mode = NetworkMode::CONNECT_CALIBRE;
-  } else if (index == 2) {
-    mode = NetworkMode::CREATE_HOTSPOT;
-  }
-  onModeSelected(mode);
+  // Rows are laid out in enum order (see the tables above).
+  onModeSelected(static_cast<NetworkMode>(index));
 }
 
 void NetworkModeSelectionActivity::buildScreen(UiScreen& screen) {

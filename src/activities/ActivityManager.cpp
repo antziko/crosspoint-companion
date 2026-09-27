@@ -20,6 +20,7 @@
 #include "home/HomeActivity.h"
 #include "home/RecentBooksActivity.h"
 #include "network/CrossPointWebServerActivity.h"
+#include "network/UsbDriveActivity.h"
 #include "reader/ReaderActivity.h"
 #include "reader/ReadingStatsActivity.h"
 #include "settings/OpdsServerListActivity.h"
@@ -99,6 +100,17 @@ void ActivityManager::loop() {
   // A release pre-empted by a long press must not reach the activity, or the
   // page would turn again on the way up. Only page buttons arm this today.
   if (mappedInput.consumeSuppressedRelease()) return;
+
+  if (currentActivity && currentActivity->requiresExclusiveStorageLoop()) {
+    // USB Drive owns the raw SD card. Run only its loop: every branch below can
+    // reach a filesystem user (home gesture, frontlight sheet, pending activity
+    // transitions), and the volume they would touch is detached.
+    currentActivity->loop();
+    if (requestedUpdate.exchange(false) && renderTaskHandle) {
+      xTaskNotify(renderTaskHandle, 1, eIncrement);
+    }
+    return;
+  }
 
   if (currentActivity) {
     if (!currentActivity->isHomeActivity() && mappedInput.wasHomeGesture()) {
@@ -337,6 +349,14 @@ void ActivityManager::goToFileTransfer() {
   replaceActivityNoThrow<CrossPointWebServerActivity>("CrossPointWebServer", renderer, mappedInput);
 }
 
+void ActivityManager::goToUsbDrive() {
+#if FREEINK_CAP_USB_MSC
+  replaceActivityNoThrow<UsbDriveActivity>("UsbDrive", renderer, mappedInput);
+#else
+  LOG_ERR("ACT", "USB Drive requested in a build without USB Drive capability");
+#endif
+}
+
 void ActivityManager::goToSettings(int initialCategory) {
   replaceActivityNoThrow<SettingsActivity>("Settings", renderer, mappedInput, initialCategory);
 }
@@ -423,6 +443,10 @@ void ActivityManager::popActivity() {
 }
 
 bool ActivityManager::preventAutoSleep() const { return currentActivity && currentActivity->preventAutoSleep(); }
+
+bool ActivityManager::requiresExclusiveStorageLoop() const {
+  return currentActivity && currentActivity->requiresExclusiveStorageLoop();
+}
 
 bool ActivityManager::onManualSleepRequested() { return currentActivity && currentActivity->onManualSleepRequested(); }
 

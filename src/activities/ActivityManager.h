@@ -98,6 +98,7 @@ class ActivityManager {
 
   // goTo... functions are convenient wrapper for replaceActivity()
   void goToFileTransfer();
+  void goToUsbDrive();
   void goToSettings(int initialCategory = 0);
   void goToFileBrowser(std::string path = {});
   void goToRecentBooks();
@@ -128,6 +129,7 @@ class ActivityManager {
   void popActivity();
 
   bool preventAutoSleep() const;
+  bool requiresExclusiveStorageLoop() const;
   // Offer a *manual* sleep gesture to the active activity. Returns true if the activity
   // took it over (e.g. the reader showed a "sync before sleep" prompt), meaning the main
   // loop must NOT deep-sleep this iteration. Default activities return false → sleep proceeds.
