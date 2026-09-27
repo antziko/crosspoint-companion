@@ -295,6 +295,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
 #if FREEINK_CAP_FRONTLIGHT
   v.push_back(SettingInfo::Toggle(StrId::STR_RESTORE_LIGHT_ON_WAKE, &CrossPointSettings::frontlightRestoreOnWake,
                                   "frontlightRestoreOnWake", StrId::STR_CAT_DISPLAY));
+  // The gesture itself is X4 Pro only (BoardConfig::isX4Pro in main.cpp); the row is
+  // offered wherever a frontlight exists, like the rest of this block.
+  v.push_back(SettingInfo::Toggle(StrId::STR_DBL_CLICK_PWR_LIGHT, &CrossPointSettings::doubleClickPwrLight,
+                                  "doubleClickPwrLight", StrId::STR_CAT_DISPLAY));
 #endif
 
   // --- Reader ---

@@ -192,6 +192,7 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
     persisted::ranged("frontlightWarmth", &CrossPointSettings::frontlightWarmth, 0, 100),
     persisted::toggle("frontlightOn", &CrossPointSettings::frontlightOn),
     persisted::toggle("frontlightRestoreOnWake", &CrossPointSettings::frontlightRestoreOnWake),
+    persisted::toggle("doubleClickPwrLight", &CrossPointSettings::doubleClickPwrLight),
 
     // --- Sync ---
     persisted::toggle("syncPromptOnSleep", &CrossPointSettings::syncPromptOnSleep),

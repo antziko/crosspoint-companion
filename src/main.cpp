@@ -895,7 +895,9 @@ static void delayWallClock(const unsigned long ms) {
 // release was consumed as the second click, so the caller skips the configured
 // short-press action for it.
 static bool handleX4ProFrontlightDoubleClick() {
-  if (!BoardConfig::isX4Pro() || !gpio.wasReleased(HalGPIO::BTN_POWER)) return false;
+  if (!BoardConfig::isX4Pro() || !SETTINGS.doubleClickPwrLight || !gpio.wasReleased(HalGPIO::BTN_POWER)) {
+    return false;
+  }
 
   const unsigned long now = millis();
   // A long hold is the sleep gesture, never half of a double click.
@@ -1052,15 +1054,14 @@ void loop() {
   }
 
   // True while the power-button double-click can toggle the frontlight, which is
-  // what the deferrals below exist to protect. Upstream also gates this on its
-  // SETTINGS.doubleClickPwrLight toggle; that setting does not exist here and
-  // handleX4ProFrontlightDoubleClick() runs unconditionally on X4 Pro, so the
-  // board check alone is the equivalent predicate.
+  // what the deferrals below exist to protect. Mirrors the predicate at the top of
+  // handleX4ProFrontlightDoubleClick(): with the setting off there is no click window
+  // to keep open, so a short press sleeps immediately as on any other board.
   //
   // Declared here rather than beside the click handling because this fork
   // evaluates the sleep-hold guard below BEFORE it calls
   // handleX4ProFrontlightDoubleClick(); upstream calls the handler first.
-  const bool x4ProDoubleClickPwrLight = BoardConfig::isX4Pro();
+  const bool x4ProDoubleClickPwrLight = BoardConfig::isX4Pro() && SETTINGS.doubleClickPwrLight;
 
   const unsigned long sleepTimeoutMs = SETTINGS.getSleepTimeoutMs();
   if (sleepTimeoutMs > 0 && millis() - lastActivityTime >= sleepTimeoutMs) {
