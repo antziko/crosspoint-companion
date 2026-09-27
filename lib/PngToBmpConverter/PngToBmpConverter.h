@@ -11,5 +11,8 @@ class PngToBmpConverter {
  public:
   static bool pngFileToBmpStream(HalFile& pngFile, Print& bmpOut, bool crop = true);
   static bool pngFileToBmpStreamWithSize(HalFile& pngFile, Print& bmpOut, int targetMaxWidth, int targetMaxHeight);
-  static bool pngFileTo1BitBmpStreamWithSize(HalFile& pngFile, Print& bmpOut, int targetMaxWidth, int targetMaxHeight);
+  // crop=false fits the image inside the box instead of filling it; see the JPEG converter's
+  // note on why a contain-fit thumbnail lets a tile avoid downscaling a 1-bit dithered bitmap.
+  static bool pngFileTo1BitBmpStreamWithSize(HalFile& pngFile, Print& bmpOut, int targetMaxWidth, int targetMaxHeight,
+                                             bool crop = true);
 };

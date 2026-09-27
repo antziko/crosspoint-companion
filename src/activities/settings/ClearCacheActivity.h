@@ -16,7 +16,12 @@ class ClearCacheActivity final : public Activity {
   // so every book re-flows on next open while progress, metadata and covers survive. That is
   // the recovery path when a chapter was laid out wrongly (e.g. a mid-build heap dip left it
   // unstyled) and the layout, not the book, is what needs discarding.
-  enum class Mode { ClearAll, PruneOrphans, RepaginateAll };
+  // RebuildCovers deletes only each book's thumb_*.bmp files. Thumbnails are cached per
+  // requested size, so a theme (or a theme change) that asks for a size nobody has generated
+  // yet simply makes a new file and the stale ones linger; this reclaims them and lets the
+  // next Home paint regenerate at the current theme's sizes. Progress, pagination and
+  // metadata are untouched, so it costs one cover decode per recent book and nothing else.
+  enum class Mode { ClearAll, PruneOrphans, RepaginateAll, RebuildCovers };
 
   explicit ClearCacheActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, Mode mode = Mode::ClearAll)
       : Activity("ClearCache", renderer, mappedInput), mode_(mode) {}

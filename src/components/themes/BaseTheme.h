@@ -353,6 +353,20 @@ class BaseTheme {
   // Themes with slots wider than 0.6 aspect override this so covers still fill.
   virtual int homeCoverThumbHeight(const GfxRenderer&) const { return 0; }
 
+  // Per-recent-slot thumbnail request. width == 0 is the default shape every theme has used:
+  // a cover-fit thumb keyed by height alone, which fills its box and overflows it on one axis
+  // (so the tile crops). width > 0 asks for a contain-fit thumb of exactly that box, holding
+  // the WHOLE cover, which the tile then draws uncropped and unscaled -- the only way to show
+  // a full cover without a downscale, and a downscale darkens a 1-bit dithered bitmap.
+  struct CoverThumbSpec {
+    int width = 0;
+    int height = 0;
+  };
+  virtual CoverThumbSpec homeCoverThumbSpec(const GfxRenderer&, int slotIndex, const int defaultHeight) const {
+    (void)slotIndex;
+    return {0, defaultHeight};
+  }
+
   // Shared constants and helpers for battery drawing (used by all themes)
   static constexpr int batteryPercentSpacing = 4;
   static constexpr int wifiBatterySpacing = 6;  // gap between WiFi bars and the battery group

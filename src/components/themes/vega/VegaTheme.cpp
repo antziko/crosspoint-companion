@@ -191,11 +191,24 @@ HeroDetails cachedHeroDetails;
 // (coverless) -- in which case the title below the tile is suppressed.
 bool cachedNextHasCover[3] = {false, false, false};
 
+// Row thumbnail box. Derived from the PORTRAIT width (the panel's short edge) rather than the
+// current screen width so the thumbnail's cache key does not move when the device rotates --
+// keying it on the live width would regenerate all three covers on every rotation. In landscape
+// the row slot is wider than this and drawCoverTile centres the cover inside it.
+int nextThumbWidthFor(const GfxRenderer& renderer) {
+  const int portraitWidth = std::min(renderer.getScreenWidth(), renderer.getScreenHeight());
+  return (portraitWidth - 2 * VegaMetrics::kHeroPadding) / 3 - kNextThumbGap;
+}
+
 // Shared cover-tile drawing for the hero card and the "next 3" row. Reuses the
-// single cached thumbnail (UITheme::getCoverThumbPath at the theme's configured
-// homeCoverHeight -- the only resolution HomeActivity::loadRecentCovers ever
-// generates) and crops it into whatever tile size is requested (no scaling, see
-// crop comment below), so no extra per-size thumbnail generation is needed.
+// cached thumbnail and fits it to the requested tile without ever scaling it (see the crop
+// comment below). Two thumbnail shapes are accepted:
+//   fitW > 0  -- a contain-fit thumb of exactly fitW x fitH holding the WHOLE cover, drawn
+//                centred with neither a crop nor a downscale. What the "next 3" row asks for.
+//   otherwise -- the cover-fit thumb keyed by sourceHeight, which overflows its box on one
+//                axis and is cropped to the tile. What the hero card uses, and the fallback
+//                whenever a contain-fit thumb is absent (XTC books never generate one, and
+//                generation can fail transiently on a tight heap).
 // Mirrors Lyra3CoversTheme::drawRecentBookCover's load-or-placeholder pattern
 // (Lyra3CoversTheme.cpp:42-81).
 // A tile with a cover shows just the photo; the frame is drawn only for the
@@ -204,8 +217,8 @@ bool cachedNextHasCover[3] = {false, false, false};
 // coverless book is identifiable from the tile itself; the generic cover icon is
 // the fallback when no title is given.
 // Returns true if a real cover bitmap was drawn (false = placeholder).
-bool drawCoverTile(const GfxRenderer& renderer, const std::string& coverBmpPath, int sourceHeight, int tileX, int tileY,
-                   int tileW, int tileH, const std::string& title = "") {
+bool drawCoverTile(const GfxRenderer& renderer, const std::string& coverBmpPath, int sourceHeight, int fitW, int fitH,
+                   int tileX, int tileY, int tileW, int tileH, const std::string& title = "") {
   // White-fill the tile first: this redraw happens over a restored cover-buffer
   // snapshot that may hold the previous pass's placeholder icon, and drawBitmap
   // composites dark-only (white pixels never overwrite), so without the clear
@@ -213,29 +226,47 @@ bool drawCoverTile(const GfxRenderer& renderer, const std::string& coverBmpPath,
   renderer.fillRect(tileX, tileY, tileW, tileH, false);
   bool hasCover = false;
   if (!coverBmpPath.empty()) {
-    const std::string coverThumbPath = UITheme::getCoverThumbPath(coverBmpPath, sourceHeight);
+    bool containFit = false;
+    std::string coverThumbPath;
+    if (fitW > 0) {
+      coverThumbPath = UITheme::getCoverThumbFitPath(coverBmpPath, fitW, fitH);
+      containFit = Storage.exists(coverThumbPath.c_str());
+    }
+    if (!containFit) {
+      coverThumbPath = UITheme::getCoverThumbPath(coverBmpPath, sourceHeight);
+    }
     HalFile file;
     if (Storage.openFileForRead("HOME", coverThumbPath, file)) {
       Bitmap bitmap(file);
       if (bitmap.parseHeaders() == BmpReaderError::Ok) {
-        const float coverWidth = static_cast<float>(bitmap.getWidth());
-        const float coverHeight = static_cast<float>(bitmap.getHeight());
-        // Crop (never scale) the thumbnail to the tile on both axes so
-        // drawBitmap's fitScale stays at 1.0: the hero tile matches the
-        // thumbnail's generation height (no vertical crop), the "next 3"
-        // tiles are shorter and trim symmetric top/bottom slivers instead of
-        // downscaling (which darkens the pre-dithered 1-bit bitmap). A
-        // negative crop (tile larger than cover on that axis) is clamped to
-        // no-crop by drawBitmap.
-        const float cropX = 1.0f - static_cast<float>(tileW) / coverWidth;
-        const float cropY = 1.0f - static_cast<float>(tileH) / coverHeight;
-        // A cover narrower than the tile (cropX < 0, so no horizontal crop)
-        // would sit flush-left. Center it within the tile.
-        int drawX = tileX;
-        if (bitmap.getWidth() < tileW) {
-          drawX = tileX + (tileW - bitmap.getWidth()) / 2;
+        if (containFit) {
+          // The whole cover already fits the tile, so pass no crop: drawBitmap takes its
+          // byte-wise 1-bit fast path and fitScale stays at 1.0. Centred on both axes --
+          // a contain fit leaves slack on whichever axis the cover is shorter, and the
+          // caption below sits at a fixed y, so splitting the slack reads as deliberate
+          // rather than as a cover that slid up.
+          const int drawX = tileX + (tileW - bitmap.getWidth()) / 2;
+          const int drawY = tileY + (tileH - bitmap.getHeight()) / 2;
+          renderer.drawBitmap(bitmap, drawX, drawY, tileW, tileH, 0.0f, 0.0f);
+        } else {
+          const float coverWidth = static_cast<float>(bitmap.getWidth());
+          const float coverHeight = static_cast<float>(bitmap.getHeight());
+          // Crop (never scale) the thumbnail to the tile on both axes so
+          // drawBitmap's fitScale stays at 1.0: the hero tile matches the
+          // thumbnail's generation height (no vertical crop), a shorter tile
+          // trims symmetric top/bottom slivers instead of downscaling (which
+          // darkens the pre-dithered 1-bit bitmap). A negative crop (tile larger
+          // than cover on that axis) is clamped to no-crop by drawBitmap.
+          const float cropX = 1.0f - static_cast<float>(tileW) / coverWidth;
+          const float cropY = 1.0f - static_cast<float>(tileH) / coverHeight;
+          // A cover narrower than the tile (cropX < 0, so no horizontal crop)
+          // would sit flush-left. Center it within the tile.
+          int drawX = tileX;
+          if (bitmap.getWidth() < tileW) {
+            drawX = tileX + (tileW - bitmap.getWidth()) / 2;
+          }
+          renderer.drawBitmap(bitmap, drawX, tileY, tileW, tileH, cropX, cropY);
         }
-        renderer.drawBitmap(bitmap, drawX, tileY, tileW, tileH, cropX, cropY);
         hasCover = true;
       }
       file.close();
@@ -455,15 +486,16 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
   // so the snapshot carries it too; HomeActivity::restoreCoverBuffer() then blits both back on
   // every later frame and nothing here has to redraw them.
   if (!coverRendered) {
-    drawCoverTile(renderer, hero.coverBmpPath, coverH, coverX, coverY, coverW, coverH);
+    drawCoverTile(renderer, hero.coverBmpPath, coverH, 0, 0, coverX, coverY, coverW, coverH);
     cachedHeroDetails = loadHeroDetails(hero);
 
     for (int i = 0; i < nextCount; i++) {
       const int slotX = rect.x + padding + i * nextTileW;
       const int thumbX = slotX + (nextTileW - nextThumbW) / 2;
       const RecentBook& next = recentBooks[i + 1];
-      cachedNextHasCover[i] = drawCoverTile(renderer, next.coverBmpPath, coverH, thumbX, nextRowY, nextThumbW,
-                                            nextThumbH, next.title.empty() ? next.path : next.title);
+      cachedNextHasCover[i] =
+          drawCoverTile(renderer, next.coverBmpPath, coverH, nextThumbWidthFor(renderer), nextThumbH, thumbX, nextRowY,
+                        nextThumbW, nextThumbH, next.title.empty() ? next.path : next.title);
     }
 
     drawHeroText();
@@ -498,6 +530,12 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
     renderer.drawRoundedRect(thumbX - kSelectionInset, nextRowY - kSelectionInset, nextThumbW + 2 * kSelectionInset,
                              nextThumbH + 2 * kSelectionInset, kSelectionOutlineW, kCornerRadius, true);
   }
+}
+
+BaseTheme::CoverThumbSpec VegaTheme::homeCoverThumbSpec(const GfxRenderer& renderer, const int slotIndex,
+                                                        const int defaultHeight) const {
+  if (slotIndex <= 0) return {0, defaultHeight};  // hero: cover-fit, drawn at its native height
+  return {nextThumbWidthFor(renderer), VegaMetrics::kNextRowCoverHeight};
 }
 
 bool VegaTheme::recentBookIndexFromPoint(const GfxRenderer&, const Rect rect, const int recentCount, const int x,

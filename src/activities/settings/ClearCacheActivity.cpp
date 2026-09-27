@@ -1,5 +1,6 @@
 #include "ClearCacheActivity.h"
 
+#include <Epub.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
@@ -30,14 +31,20 @@ void ClearCacheActivity::render(RenderLock&&) {
 
   const bool prune = mode_ == Mode::PruneOrphans;
   const bool repaginate = mode_ == Mode::RepaginateAll;
+  const bool covers = mode_ == Mode::RebuildCovers;
 
-  GUI.drawHeader(
-      renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
-      prune ? tr(STR_REMOVE_ORPHANED_CACHES) : (repaginate ? tr(STR_REPAGINATE_BOOKS) : tr(STR_CLEAR_READING_CACHE)));
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
+                 prune        ? tr(STR_REMOVE_ORPHANED_CACHES)
+                 : repaginate ? tr(STR_REPAGINATE_BOOKS)
+                 : covers     ? tr(STR_REBUILD_COVERS)
+                              : tr(STR_CLEAR_READING_CACHE));
 
   if (state == WARNING) {
-    // Clear-all and repaginate; prune previews via SCANNING/PREVIEW instead.
-    if (repaginate) {
+    // Clear-all, repaginate and rebuild-covers; prune previews via SCANNING/PREVIEW instead.
+    if (covers) {
+      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 30, tr(STR_REBUILD_COVERS_WARNING_1), true);
+      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 10, tr(STR_REBUILD_COVERS_WARNING_2), true);
+    } else if (repaginate) {
       renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 45, tr(STR_REPAGINATE_WARNING_1), true);
       renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 15, tr(STR_REPAGINATE_WARNING_2), true,
                                 EpdFontFamily::BOLD);
@@ -96,10 +103,12 @@ void ClearCacheActivity::render(RenderLock&&) {
   }
 
   if (state == SUCCESS) {
-    renderer.drawCenteredText(
-        UI_10_FONT_ID, pageHeight / 2 - 20,
-        prune ? tr(STR_ORPHANS_REMOVED) : (repaginate ? tr(STR_PAGINATION_CLEARED) : tr(STR_CACHE_CLEARED)), true,
-        EpdFontFamily::BOLD);
+    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 20,
+                              prune        ? tr(STR_ORPHANS_REMOVED)
+                              : repaginate ? tr(STR_PAGINATION_CLEARED)
+                              : covers     ? tr(STR_COVERS_CLEARED)
+                                           : tr(STR_CACHE_CLEARED),
+                              true, EpdFontFamily::BOLD);
     std::string resultText = std::to_string(clearedCount) + " " + std::string(tr(STR_ITEMS_REMOVED));
     if (failedCount > 0) {
       resultText += ", " + std::to_string(failedCount) + " " + std::string(tr(STR_FAILED_LOWER));
@@ -122,6 +131,43 @@ void ClearCacheActivity::render(RenderLock&&) {
     renderer.displayBuffer();
     return;
   }
+}
+
+// Delete every thumb_*.bmp in one book cache dir. Returns how many went, or -1 if the
+// directory could not be opened. Collect-then-delete: removing an entry while the same
+// directory handle is mid-iteration is what openNextFile() cannot be asked to survive.
+static int removeThumbsIn(const String& bookCacheDir) {
+  auto dir = Storage.open(bookCacheDir.c_str());
+  if (!dir || !dir.isDirectory()) {
+    if (dir) dir.close();
+    return -1;
+  }
+
+  std::vector<std::string> thumbs;
+  char name[128];
+  for (auto file = dir.openNextFile(); file; file = dir.openNextFile()) {
+    file.getName(name, sizeof(name));
+    const bool isDir = file.isDirectory();
+    file.close();
+    if (isDir) continue;
+    const std::string entry(name);
+    // thumb_<h>.bmp (cover-fit) and thumb_<w>x<h>.bmp (contain-fit) alike.
+    if (entry.rfind("thumb_", 0) == 0 && entry.size() > 4 && entry.compare(entry.size() - 4, 4, ".bmp") == 0) {
+      thumbs.push_back(entry);
+    }
+  }
+  dir.close();
+
+  int removed = 0;
+  for (const auto& thumb : thumbs) {
+    const String path = bookCacheDir + "/" + String(thumb.c_str());
+    if (Storage.remove(path.c_str())) {
+      removed++;
+    } else {
+      LOG_ERR("CLEAR_CACHE", "Failed to remove thumb: %s", path.c_str());
+    }
+  }
+  return removed;
 }
 
 void ClearCacheActivity::clearCache() {
@@ -152,6 +198,17 @@ void ClearCacheActivity::clearCache() {
       // RepaginateAll drops the cached stylesheet and page layout, leaving book.bin, progress.bin
       // and the cover in place. A book that has never been opened has neither file; that is not a
       // failure, so it is skipped rather than counted.
+      if (mode_ == Mode::RebuildCovers) {
+        file.close();
+        const int removed = removeThumbsIn(fullPath);
+        if (removed < 0) {
+          failedCount++;
+        } else if (removed > 0) {
+          // A book with no thumbnails yet is not a failure, just nothing to do.
+          clearedCount += removed;
+        }
+        continue;
+      }
       if (mode_ == Mode::RepaginateAll) {
         file.close();
         // css_rules.cache is written once and reused forever — Epub::load() re-parses the
@@ -184,6 +241,12 @@ void ClearCacheActivity::clearCache() {
   root.close();
 
   LOG_DBG("CLEAR_CACHE", "Cache cleared: %d removed, %d failed", clearedCount, failedCount);
+
+  if (mode_ == Mode::RebuildCovers) {
+    // A cover that failed to decode earlier this session is blocklisted by thumb path; the
+    // paths just went, so drop the blocklist too or the rebuild skips those very books.
+    Epub::forgetFailedThumbs();
+  }
 
   state = SUCCESS;
   requestUpdate();

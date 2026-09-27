@@ -12,8 +12,8 @@
 
 #include "MappedInputManager.h"
 #include "RecentBooksStore.h"
-#include "components/UIScale.h"
 #include "components/CoverGridHomeUi.h"
+#include "components/UIScale.h"
 #include "components/themes/BaseTheme.h"
 #include "components/themes/lyra/Lyra3CoversTheme.h"
 #include "components/themes/lyra/LyraTheme.h"
@@ -207,6 +207,14 @@ std::string UITheme::getCoverThumbPath(std::string coverBmpPath, int coverHeight
   size_t pos = coverBmpPath.find("[HEIGHT]", 0);
   if (pos != std::string::npos) {
     coverBmpPath.replace(pos, 8, std::to_string(coverHeight));
+  }
+  return coverBmpPath;
+}
+
+std::string UITheme::getCoverThumbFitPath(std::string coverBmpPath, const int width, const int height) {
+  const size_t pos = coverBmpPath.find("[HEIGHT]", 0);
+  if (pos != std::string::npos) {
+    coverBmpPath.replace(pos, 8, std::to_string(width) + "x" + std::to_string(height));
   }
   return coverBmpPath;
 }

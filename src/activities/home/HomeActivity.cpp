@@ -168,10 +168,19 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
       continue;
     }
     if (!book.coverBmpPath.empty()) {
-      std::string coverPath = UITheme::getCoverThumbPath(book.coverBmpPath, coverHeight);
+      // Per-slot thumbnail shape. A theme may ask a slot for a contain-fit thumb (the whole
+      // cover inside an exact box) instead of the default cover-fit one, so the tile can draw
+      // it without the crop a cover-fit thumb forces. EPUB only: XTC has its own bespoke
+      // scaler, so an XTC book in such a slot keeps the cover-fit thumb and its crop.
+      const auto thumbSpec = GUI.homeCoverThumbSpec(renderer, progress, coverHeight);
+      const bool isEpub = FsHelpers::hasEpubExtension(book.path);
+      const bool wantFitThumb = thumbSpec.width > 0 && isEpub;
+      const std::string coverPath =
+          wantFitThumb ? UITheme::getCoverThumbFitPath(book.coverBmpPath, thumbSpec.width, thumbSpec.height)
+                       : UITheme::getCoverThumbPath(book.coverBmpPath, coverHeight);
       if (Storage.exists(coverPath.c_str())) {
         // Thumb already present — drawCoverTile renders it.
-      } else if (FsHelpers::hasEpubExtension(book.path)) {
+      } else if (isEpub) {
         Epub epub(book.path, "/.crosspoint");
         // Skip loading css since we only need metadata here
         epub.load(false, true);
@@ -196,7 +205,8 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
         bool ok;
         {
           GfxRenderer::FrameBufferLoan loan(renderer);
-          ok = epub.generateThumbBmp(coverHeight);
+          ok = wantFitThumb ? epub.generateThumbFitBmp(thumbSpec.width, thumbSpec.height)
+                            : epub.generateThumbBmp(coverHeight);
         }
         SdDebugLog::log("COVER", "epub thumb %s: free=%u largest=%u path=%s", ok ? "ok" : "FAILED",
                         (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),

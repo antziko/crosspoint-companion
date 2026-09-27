@@ -33,7 +33,10 @@ class Epub {
   bool findContentOpfFile(std::string* contentOpfFile, ZipFile* sharedZip = nullptr) const;
   bool parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata, bool writeSpineEntries = true,
                        bool metadataOnly = false, ZipFile* sharedZip = nullptr);
-  bool generateThumbBmpForCover(int height, const std::string& coverImageHref) const;
+  // thumbPath / targetWidth / targetHeight / crop are resolved by the public entry points
+  // below, so the cover-fit and contain-fit variants share one decode path.
+  bool generateThumbBmpForCover(const std::string& thumbPath, int targetWidth, int targetHeight, bool crop,
+                                const std::string& coverImageHref) const;
   bool parseTocNcxFile() const;
   bool parseTocNavFile() const;
   void discoverCssFilesFromZip();
@@ -65,6 +68,16 @@ class Epub {
   std::string getThumbBmpPath() const;
   std::string getThumbBmpPath(int height) const;
   bool generateThumbBmp(int height) const;
+  // Contain-fit thumbnail: the WHOLE cover scaled to fit inside width x height, so a tile of
+  // that size draws it with neither a crop nor a downscale. Distinct cache file
+  // (thumb_<w>x<h>.bmp) from the cover-fit thumb_<h>.bmp, which fills its box and overflows
+  // it on one axis -- the two are not interchangeable and must not share a name.
+  std::string getThumbFitBmpPath(int width, int height) const;
+  bool generateThumbFitBmp(int width, int height) const;
+  // Forget this session's failed-thumbnail blocklist so a cover that could not be decoded
+  // under heap pressure is attempted again. Needed when the user explicitly asks to rebuild
+  // covers: without it a rebuild silently skips exactly the books that most need one.
+  static void forgetFailedThumbs();
   // Locate the cover without building spine, TOC, or reading caches.
   bool generateThumbBmpFromSource(int height);
   uint8_t* readItemContentsToBytes(const std::string& itemHref, size_t* size = nullptr,

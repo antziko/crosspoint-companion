@@ -49,6 +49,10 @@ class UITheme {
   static int getNumberOfItemsPerPage(const GfxRenderer& renderer, bool hasHeader, bool hasTabBar, bool hasButtonHints,
                                      bool hasSubtitle, int extraReservedHeight = 0);
   static std::string getCoverThumbPath(std::string coverBmpPath, int coverHeight);
+  // Path of the contain-fit thumbnail (Epub::getThumbFitBmpPath): the whole cover scaled to
+  // fit inside width x height, so a tile that size draws it with no crop and no downscale.
+  // Substitutes the same [HEIGHT] placeholder the store keeps, with "<w>x<h>".
+  static std::string getCoverThumbFitPath(std::string coverBmpPath, int width, int height);
   static UIIcon getFileIcon(const std::string& filename);
   static int getStatusBarHeight();
   static int getProgressBarHeight();

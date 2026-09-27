@@ -73,4 +73,8 @@ class VegaTheme : public LyraTheme {
                                 int& index) const override;
   bool menuIndexFromPoint(const GfxRenderer& renderer, Rect rect, int buttonCount, int x, int y,
                           int& index) const override;
+  // Slot 0 is the hero card, which draws the cover-fit thumb at its native height. Slots 1-3
+  // are the "next 3" row, which asks for a contain-fit thumb of exactly its tile so the whole
+  // cover is shown without the ~11% horizontal crop a cover-fit thumb forces at this width.
+  CoverThumbSpec homeCoverThumbSpec(const GfxRenderer& renderer, int slotIndex, int defaultHeight) const override;
 };
