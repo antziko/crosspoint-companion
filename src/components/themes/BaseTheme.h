@@ -302,8 +302,10 @@ class BaseTheme {
   // feedback) never has to re-derive it and cannot drift from the hit bands.
   virtual bool listIndexFromPoint(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,
                                   bool hasSubtitle, int x, int y, int& index, Rect* rowRect = nullptr) const;
-  virtual void drawHeader(const GfxRenderer& renderer, Rect rect, const char* title,
-                          const char* subtitle = nullptr) const;
+  // On touch boards a tappable back button leads the band (see HeaderBackTapTarget); root
+  // screens that own the bottom of the stack pass backButton = false.
+  virtual void drawHeader(const GfxRenderer& renderer, Rect rect, const char* title, const char* subtitle = nullptr,
+                          bool backButton = true) const;
   // Edge inset drawHeader uses for the clock/battery status line (detached
   // layouts hug the corner with a legacy 12px inset instead of the padding).
   static int headerStatusInset();

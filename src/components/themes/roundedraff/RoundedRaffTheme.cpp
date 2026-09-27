@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "RecentBooksStore.h"
+#include "components/HeaderBackTapTarget.h"
 #include "components/ListCursor.h"
 #include "components/UITheme.h"
 #include "components/icons/cover.h"
@@ -48,14 +49,17 @@ void drawScrollBar(const GfxRenderer& renderer, Rect rect, int itemCount, int pa
 }  // namespace
 int coverWidth = 0;
 
-void RoundedRaffTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* title,
-                                  const char* subtitle) const {
+void RoundedRaffTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* title, const char* subtitle,
+                                  const bool backButton) const {
   // Home screen header is custom-rendered in drawRecentBookCover.
   if (title == nullptr) {
+    // No band drawn here, so any rect a previous screen recorded must go: otherwise a tap
+    // in the same spot on Home would route to Back.
+    HeaderBackTapTarget::clear();
     drawTopBarClockDate(renderer, rect.y + 14);
     return;
   }
-  BaseTheme::drawHeader(renderer, rect, title, subtitle);
+  BaseTheme::drawHeader(renderer, rect, title, subtitle, backButton);
 }
 
 void RoundedRaffTheme::drawTabBar(const GfxRenderer& renderer, Rect rect, const std::vector<TabInfo>& tabs,

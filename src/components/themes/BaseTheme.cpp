@@ -16,6 +16,7 @@
 
 #include "I18n.h"
 #include "RecentBooksStore.h"
+#include "components/HeaderBackTapTarget.h"
 #include "components/ListCursor.h"
 #include "components/UIScale.h"
 #include "components/UITheme.h"
@@ -23,6 +24,7 @@
 #include "components/UiAppHelpers.h"
 #include "components/icons/bookmark.h"
 #include "components/icons/cover.h"
+#include "components/icons/headerIcons.h"
 #include "fontIds.h"
 
 // Internal constants
@@ -550,10 +552,13 @@ int BaseTheme::headerStatusInset() {
   return metrics.headerBatteryDetached ? 12 : metrics.headerSidePadding;
 }
 
-void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* title, const char* subtitle) const {
+void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* title, const char* subtitle,
+                           const bool backButton) const {
   if (rect.height <= 0) return;
-  // Top bar off outside Home: the screen keeps its title, loses the bar around it.
+  // Top bar off outside Home: the screen keeps its title, loses the bar around it. The
+  // compact band draws no back button, so drop any rect a previous screen recorded.
   if (UITheme::isTopBarHidden()) {
+    HeaderBackTapTarget::clear();
     drawCompactHeader(renderer, rect, title, subtitle);
     return;
   }
@@ -621,6 +626,20 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
   if (manualRightLabel) {
     props.rightLabel = nullptr;
   }
+  // Tappable back button on touch boards. The header's FUI frame registers no hit rects, so
+  // the geometry is mirrored into HeaderBackTapTarget and MappedInputManager folds taps on it
+  // into Button::Back -- every screen with a titled header gets it without its own routing.
+  // Sized to the title line rather than the band: a tall (detached-battery) header would
+  // otherwise get a 76px arrow. Capped at the icon's own 32px plus a touch margin.
+  const bool showBackButton = backButton && title != nullptr && gpio.hasTouch();
+  const int16_t backBtnSize = std::min<int16_t>(static_cast<int16_t>(band.height - 8), 40);
+  if (showBackButton) {
+    props.leadingIcon = fui::bitmapFromIcon(icon_header_back_32);
+    props.leadingAction = 1;  // any non-NO_ACTION id: paints the button; routing is by tap rect
+    props.leadingSize = backBtnSize;
+    // props.minTouchSize keeps the SDK default (44): it only grows the BUTTON's own hit rect,
+    // which this fork does not consume -- routing is the recorded rect below.
+  }
   props.borderEdges = fui::EdgeBottom;
   props.titleText = tokens.titleText;
   props.titleText.align = tokens.headerTitleAlign;
@@ -649,6 +668,21 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
   if (title != nullptr && props.styles.normal.border.kind == fui::PaintKind::None && tokens.headerUnderline > 0) {
     props.styles.normal.border = fui::Paint::solid(fui::Color::Black);
     props.styles.normal.borderWidth = tokens.headerUnderline;
+  }
+  if (showBackButton) {
+    // Detached layouts put the title on the lower sub-band; the arrow follows it so the two
+    // read as one line. Shared-line layouts already sit on the title's own line.
+    if (batteryDetached) {
+      const int titleLineHeight = ui.target.lineHeight(fui::GfxRendererTarget::FONT_TITLE);
+      const int titleTop = static_cast<int>(band.height) - tokens.headerUnderline - tokens.spaceMd - titleLineHeight;
+      const int centred = titleTop + titleLineHeight / 2 - backBtnSize / 2 - 4;
+      props.actionOffsetY = static_cast<int16_t>(centred < 0 ? 0 : centred);
+    }
+    // Same geometry the FUI header uses for the leading slot, so the recorded rect matches
+    // the drawn button exactly.
+    HeaderBackTapTarget::set(band.x + 4, band.y + 4 + props.actionOffsetY, backBtnSize, backBtnSize);
+  } else {
+    HeaderBackTapTarget::clear();
   }
   fui::header(ui.frame, band, props);
 

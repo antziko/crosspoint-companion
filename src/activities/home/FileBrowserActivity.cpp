@@ -17,6 +17,7 @@
 #include "activities/TouchFeedback.h"
 #include "activities/reader/ReaderUtils.h"
 #include "activities/util/ConfirmationActivity.h"
+#include "components/HeaderBackTapTarget.h"
 #include "components/ListCursor.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -501,7 +502,10 @@ void FileBrowserActivity::loop() {
   // Tapping the header title ("SD Card", or the folder name) toggles show-hidden-files —
   // the touch counterpart of the Back-hold gesture at the top of this function, and the
   // only way to reach it on a board with no Back button at all.
-  if (tapped && tapX >= headerTouch_.x && tapX < headerTouch_.x + headerTouch_.width && tapY >= headerTouch_.y &&
+  // headerTouch_ is the whole band, which now also holds the back button on touch boards;
+  // its taps must stay Back (handled below via wasReleased) rather than toggling hidden files.
+  if (tapped && !HeaderBackTapTarget::contains(tapX, tapY) && tapX >= headerTouch_.x &&
+      tapX < headerTouch_.x + headerTouch_.width && tapY >= headerTouch_.y &&
       tapY < headerTouch_.y + headerTouch_.height) {
     flashTouchedRow(renderer, headerTouch_);
     SETTINGS.showHiddenFiles = !SETTINGS.showHiddenFiles;

@@ -13,6 +13,7 @@
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
 #include "browser/OpdsBookBrowserActivity.h"
+#include "components/HeaderBackTapTarget.h"
 #include "components/UITheme.h"
 #include "home/CrashActivity.h"
 #include "home/FileBrowserActivity.h"
@@ -127,7 +128,9 @@ void ActivityManager::loop() {
       const int bandBottom = metrics.topPadding + metrics.headerHeight;
       int tx = 0;
       int ty = 0;
-      headerTap = mappedInput.wasScreenTapped(tx, ty) && ty < bandBottom;
+      // The header back button shares this band on Settings / NetworkModeSelection; its taps
+      // stay Back rather than opening the frontlight panel.
+      headerTap = mappedInput.wasScreenTapped(tx, ty) && ty < bandBottom && !HeaderBackTapTarget::contains(tx, ty);
     }
     // Top-edge down-swipe opens the frontlight panel, ahead of activity input so
     // it works from every screen. Suppressed while the panel itself is up, where
@@ -289,6 +292,9 @@ void ActivityManager::armEntryScrub(const Activity& incoming, const bool leftTra
 
 void ActivityManager::exitActivity(const RenderLock& lock) {
   // Note: lock must be held by the caller
+  // The outgoing screen's header back rect must not eat taps on the next screen; the next
+  // header draw re-records it.
+  HeaderBackTapTarget::clear();
   if (currentActivity) {
     currentActivity->onExit();
     currentActivity.reset();
@@ -400,6 +406,9 @@ void ActivityManager::pushActivity(std::unique_ptr<Activity>&& activity) {
     LOG_ERR("ACT", "pendingActivity while pushActivity is not expected");
     pendingActivity.reset();
   }
+  // The parent's header back rect must not route taps on the pushed screen, which may draw
+  // no header of its own.
+  HeaderBackTapTarget::clear();
   pendingActivity = std::move(activity);
   pendingAction = PendingAction::Push;
 }

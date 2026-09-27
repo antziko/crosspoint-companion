@@ -85,6 +85,7 @@ class OpdsBookBrowserActivity final : public Activity, private UiAppHost {
   static void onRowEvent(const freeink::ui::ActionEvent& event, void* user);
   static void onSearchEvent(const freeink::ui::ActionEvent& event, void* user);
   static void onCancelEvent(const freeink::ui::ActionEvent& event, void* user);
+  static void onBackEvent(const freeink::ui::ActionEvent& event, void* user);
   static void onRetryEvent(const freeink::ui::ActionEvent& event, void* user);
   // What the ERROR screen's retry does, shared by the Confirm press and the body tap.
   void retryFromError();

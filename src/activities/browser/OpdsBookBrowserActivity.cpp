@@ -25,6 +25,7 @@
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UIScale.h"
 #include "components/UITheme.h"
+#include "components/icons/headerIcons.h"
 #include "components/icons/search32.h"
 #include "fontIds.h"
 #include "network/HttpDownloader.h"
@@ -181,6 +182,7 @@ constexpr fui::ActionId ACTION_ROW = 1;
 constexpr fui::ActionId ACTION_SEARCH = 2;
 constexpr fui::ActionId ACTION_CANCEL = 3;
 constexpr fui::ActionId ACTION_RETRY = 4;
+constexpr fui::ActionId ACTION_BACK = 5;
 // Book-download progress cadence. Percent-stepped so the repaint count is bounded
 // at ~10 for any file size, with a hard floor between repaints. Both numbers are
 // about SPI contention, not looks: see the callback in downloadBook().
@@ -236,6 +238,7 @@ void OpdsBookBrowserActivity::onEnter() {
   app.on(ACTION_SEARCH, &OpdsBookBrowserActivity::onSearchEvent, this);
   app.on(ACTION_CANCEL, &OpdsBookBrowserActivity::onCancelEvent, this);
   app.on(ACTION_RETRY, &OpdsBookBrowserActivity::onRetryEvent, this);
+  app.on(ACTION_BACK, &OpdsBookBrowserActivity::onBackEvent, this);
   app.setScreen(&OpdsBookBrowserActivity::rootScreen, this);
   requestUpdate();
 
@@ -283,6 +286,13 @@ void OpdsBookBrowserActivity::onSearchEvent(const fui::ActionEvent&, void* user)
   if (self->state != BrowserState::BROWSING) return;
   self->app.clearTapFlash();
   self->launchSearch();
+}
+
+void OpdsBookBrowserActivity::onBackEvent(const fui::ActionEvent&, void* user) {
+  auto* self = static_cast<OpdsBookBrowserActivity*>(user);
+  if (self->state != BrowserState::BROWSING) return;
+  self->app.clearTapFlash();
+  self->navigateBack();
 }
 
 void OpdsBookBrowserActivity::onCancelEvent(const fui::ActionEvent&, void* user) {
@@ -498,14 +508,25 @@ void OpdsBookBrowserActivity::screenHeader(UiScreen& screen, const bool withSear
   // The rule is top-bar chrome, so it goes with it; GUI.drawHeader's compact band drops its
   // underline the same way. The band itself stays — it carries the feed name.
   header.borderEdges = UITheme::isTopBarHidden() ? fui::EdgesNone : fui::EdgeBottom;
-  if (withSearch && !searchTemplate.empty()) {
-    header.trailingIcon = fui::bitmapFromIcon(icon_search_32);
-    header.trailingAction = ACTION_SEARCH;
-    // Optically align the icon with the title glyphs: text hangs low in its
-    // line cell by the font's internal leading; drop the button to match.
+  // Only the browsing state routes header taps, and only there does back mean anything; the
+  // loading/downloading/status headers stay passive. This screen draws its own INTERACTIVE
+  // FUI header, so it routes a real action rather than going through HeaderBackTapTarget
+  // (which exists for the non-interactive GUI.drawHeader band).
+  const bool showBack = state == BrowserState::BROWSING && mappedInput.hasTouch();
+  if (showBack) {
+    header.leadingIcon = fui::bitmapFromIcon(icon_header_back_32);
+    header.leadingAction = ACTION_BACK;
+  }
+  if (showBack || (withSearch && !searchTemplate.empty())) {
+    // Optically align the icons with the title glyphs: text hangs low in its
+    // line cell by the font's internal leading; drop the buttons to match.
     const int titleFontId = uiScaleSpec().titleFontId;
     header.actionOffsetY =
         static_cast<int16_t>((renderer.getLineHeight(titleFontId) - renderer.getTextHeight(titleFontId)) / 2);
+  }
+  if (withSearch && !searchTemplate.empty()) {
+    header.trailingIcon = fui::bitmapFromIcon(icon_search_32);
+    header.trailingAction = ACTION_SEARCH;
   }
   const auto& tokens = screen.theme();
   // Entry count for the feed on screen, right-aligned in the header band. It
