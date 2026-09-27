@@ -19,6 +19,7 @@
 #include <Logging.h>
 #include <SPI.h>
 #include <SdDebugLog.h>
+#include <VectorFontSupport.h>
 #include <WiFi.h>
 #include <builtinFonts/all.h>
 #include <esp_heap_caps.h>
@@ -55,7 +56,17 @@ ActivityManager activityManager(renderer, mappedInputManager);
 FontDecompressor fontDecompressor;
 SdCardFontSystem sdFontSystem;
 DictionaryRegistry dictionaryRegistry;
-FontCacheManager fontCacheManager(renderer.getFontMap(), renderer.getSdCardFonts());
+#if CROSSPOINT_VECTOR_FONTS
+// Rendering (incl. FreeType TTF rasterization) also runs on the Arduino loop task. The
+// default 8 KB stack overflows inside FreeType's FT_Open_Face / variable-font parsing. This
+// runtime override applies even with the prebuilt (dio_opi) core, where
+// CONFIG_ARDUINO_LOOP_STACK_SIZE from sdkconfig is baked in and ignored. Vector-font boards
+// only: without TTF the stock loop stack has always sufficed, and non-PSRAM boards need the
+// 16KB back in DRAM.
+SET_LOOP_TASK_STACK_SIZE(24 * 1024)
+#endif
+
+FontCacheManager fontCacheManager(renderer.getFontMap(), renderer.getSdCardFonts(), renderer.getTtfFonts());
 
 // X4 Pro power-button timing. The board has no dedicated light key, so a double
 // click of POWER toggles the frontlight; a single click still runs the

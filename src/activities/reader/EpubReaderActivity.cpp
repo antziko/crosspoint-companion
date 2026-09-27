@@ -2739,6 +2739,16 @@ void EpubReaderActivity::render(RenderLock&& lock) {
           // the deadline). buildPopupPending gates it to this blocking phase so a
           // background build in loop() can never draw over a displayed page.
           buildPopupPending = !showPopup;
+          // Section (re)builds are the heap-hungriest path (arena + parallel arrays for a
+          // whole section). Under TTF heap pressure, shed every rebuildable font cache
+          // first — dropped glyphs re-fault on demand after the build. Skipped for
+          // cpfont/builtin reading: releaseCache() there drops the mini tables and forces
+          // SD metric re-reads on every fresh chapter for no gain.
+          if (!renderer.getTtfFonts().empty()) {
+            if (auto* fcm = renderer.getFontCacheManager()) {
+              fcm->releaseCache();
+            }
+          }
           const unsigned long buildStartMs = millis();
           bool started;
           {

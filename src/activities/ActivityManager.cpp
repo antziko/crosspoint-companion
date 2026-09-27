@@ -3,6 +3,7 @@
 #include <FontCacheManager.h>
 #include <HalDisplay.h>
 #include <HalPowerManager.h>
+#include <VectorFontSupport.h>
 
 #include <algorithm>
 
@@ -35,15 +36,24 @@ void ActivityManager::begin() {
 #else
   constexpr BaseType_t renderTaskCore = 0;
 #endif
+#if CROSSPOINT_VECTOR_FONTS
+  // FreeType rasterization also runs on this task, and the deepest observed chain is a glyph
+  // fault DURING LAYOUT: expat + parser + line-layout frames (~3.5KB on Xtensa) with the scan
+  // converter's FT_RENDER_POOL_SIZE (4KB) stack-resident band pool on top — a measured ~8KB
+  // peak on top of the indexing depth below. Vector-font boards all have PSRAM-class RAM.
+  constexpr uint32_t renderTaskStackBytes = 20480;
+#else
+  constexpr uint32_t renderTaskStackBytes = 12288;
+#endif
   xTaskCreatePinnedToCore(&renderTaskTrampoline, "ActivityManagerRender",
                           // EPUB section indexing (createSectionFile: expat parse + block
                           // layout + hyphenation + text measurement) runs on this task and
                           // is a deep call chain. 8192 left almost no margin and could
                           // corrupt/crash on complex chapters; 12288 gives headroom.
-                          12288,              // Stack size
-                          this,               // Parameters
-                          1,                  // Priority
-                          &renderTaskHandle,  // Task handle
+                          renderTaskStackBytes,  // Stack size
+                          this,                  // Parameters
+                          1,                     // Priority
+                          &renderTaskHandle,     // Task handle
                           renderTaskCore  // Keep long renders/cover decodes off CPU 0's idle watchdog when available
 
   );

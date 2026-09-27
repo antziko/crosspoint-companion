@@ -31,6 +31,8 @@ struct Frame;
 // 0 = transparent, 1-16 = gray levels (white to black)
 enum Color : uint8_t { Clear = 0x00, White = 0x01, LightGray = 0x05, DarkGray = 0x0A, Black = 0x10 };
 
+class TtfEpdFont;
+
 class GfxRenderer {
  public:
   enum RenderMode { BW, GRAYSCALE_LSB, GRAYSCALE_MSB };
@@ -90,6 +92,9 @@ class GfxRenderer {
   // allocation inside the SdCardFont objects. Same pragmatic compromise as
   // fontCacheManager_ below.
   mutable std::map<int, SdCardFont*> sdCardFonts_;
+  // TTF (vector) fonts. Mutable for the same reason as sdCardFonts_: the const layout path
+  // faults glyphs in through them.
+  mutable std::map<int, TtfEpdFont*> ttfFonts_;
 
   // Mutable because drawText() is const but needs to delegate scan-mode
   // recording to the (non-const) FontCacheManager. Same pragmatic compromise
@@ -218,6 +223,12 @@ class GfxRenderer {
   // (which holds a const GfxRenderer&) before measuring word widths. Safe to call on non-SD fonts (no-op).
   // styleMask: bitmask of styles to prepare (bit 0=regular, 1=bold, 2=italic, 3=bold-italic).
   void ensureSdCardFontReady(int fontId, const char* utf8Text, uint8_t styleMask = 0x0F) const;
+  // TTF (vector) fonts rendered via TtfEpdFont/FreeInkFont. Registered like an ordinary
+  // EpdFontFamily (insertFont), plus tracked here so the reclaim hook can shed their glyph
+  // arenas. The TtfEpdFont is owned by the caller (SdCardFontSystem).
+  void registerTtfFont(int fontId, TtfEpdFont* font) { ttfFonts_[fontId] = font; }
+  void unregisterTtfFont(int fontId) { ttfFonts_.erase(fontId); }
+  const std::map<int, TtfEpdFont*>& getTtfFonts() const { return ttfFonts_; }
   // Packed variant for the paragraph layout path: each segment holds consecutive
   // NUL-terminated words (WordStore chunks), so a whole paragraph is prewarmed without
   // materializing one std::string per word.
