@@ -92,8 +92,10 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
     // --- Display ---
     persisted::enumerated("hideBatteryPercentage", &CrossPointSettings::hideBatteryPercentage,
                           CrossPointSettings::HIDE_BATTERY_PERCENTAGE_COUNT - 1),
-    // UI_THEME has no _COUNT member; VEGA is its highest value.
-    persisted::enumerated("uiTheme", &CrossPointSettings::uiTheme, CrossPointSettings::VEGA),
+    // UI_THEME has no _COUNT member; COVER_GRID is its highest value. The bound must track the
+    // enum: a stored value above it is silently reset to the default on load, so a theme added
+    // to SettingsList.h without widening this here would never survive a reboot.
+    persisted::enumerated("uiTheme", &CrossPointSettings::uiTheme, CrossPointSettings::COVER_GRID),
     persisted::enumerated("displayOrientation", &CrossPointSettings::displayOrientation,
                           CrossPointSettings::ORIENTATION_COUNT - 1),
 
