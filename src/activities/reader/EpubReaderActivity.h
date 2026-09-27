@@ -329,6 +329,9 @@ class EpubReaderActivity final : public Activity {
   // any single allocation can actually have it. 16 KB also keeps the advance-table
   // batch path (16 KB scratch) viable during builds.
   static constexpr size_t BACKGROUND_BUILD_MIN_MAX_ALLOC = 16 * 1024;
+  // True when the section still owes pages the reader is about to need. Says nothing
+  // about heap admission — buildTickHeapGate() decides that separately.
+  bool backgroundBuildWanted() const;
   // Gate for a background build tick: true when the heap can take parse allocations.
   // Updates buildHeapPaused as a side effect.
   bool buildTickHeapGate();
@@ -602,17 +605,13 @@ class EpubReaderActivity final : public Activity {
   // it from page 0. Reverts to normal power behavior the moment the build finishes,
   // and while the build is heap-paused (no work is happening, so spinning at full
   // speed would only burn battery; the paused gate still retries every loop pass).
-  // The watermark window below MUST mirror the background-build gate in loop() (the
-  // isPartial()/BUILD_WINDOW_AHEAD test): once a first-open build has laid out its
-  // look-ahead window it parks (isBuilding() stays true but loop() stops pumping it),
-  // so keying only on isBuilding() would spin at full clock indefinitely while idle on
-  // a page -- doing no build work and blocking idle light-sleep. Gate on "a build tick
-  // will actually run this pass" instead. Read unlocked like the other power heuristics
-  // (setPowerSaving/lightSleep): a stale read costs at most one loop pass either way.
-  bool skipLoopDelay() override {
-    return section && section->isBuilding() && !buildHeapPaused &&
-           (section->isPartial() || static_cast<int>(section->pageCount) < section->currentPage + BUILD_WINDOW_AHEAD);
-  }
+  // Shares backgroundBuildWanted() with the build tick in loop() so the two can never
+  // disagree: once a first-open build has laid out its look-ahead window it parks
+  // (isBuilding() stays true but loop() stops pumping it), and keying only on
+  // isBuilding() would spin at full clock indefinitely while idle on a page -- doing no
+  // build work and blocking idle light-sleep. The main loop queries this under the
+  // render lock, so the section cannot change underneath it.
+  bool skipLoopDelay() override { return !buildHeapPaused && backgroundBuildWanted(); }
   bool isReaderActivity() const override { return true; }
   bool onManualSleepRequested() override;
   ScreenshotInfo getScreenshotInfo() const override;

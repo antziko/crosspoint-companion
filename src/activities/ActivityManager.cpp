@@ -539,17 +539,13 @@ void ActivityManager::requestUpdateAndWait() {
   assert(xSemaphoreGetMutexHolder(activityManager.renderingMutex) != xTaskGetCurrentTaskHandle() && \
          "RenderLock is not recursive: this task already holds it")
 
-RenderLock::RenderLock() {
+RenderLock::RenderLock(const Mode mode) {
   ASSERT_RENDER_LOCK_NOT_HELD();
-  xSemaphoreTake(activityManager.renderingMutex, portMAX_DELAY);
-  isLocked = true;
+  isLocked = xSemaphoreTake(activityManager.renderingMutex, mode == Mode::Try ? 0 : portMAX_DELAY) == pdTRUE;
+  assert((mode == Mode::Try || isLocked) && "Blocking render lock acquisition failed");
 }
 
-RenderLock::RenderLock([[maybe_unused]] Activity&) {
-  ASSERT_RENDER_LOCK_NOT_HELD();
-  xSemaphoreTake(activityManager.renderingMutex, portMAX_DELAY);
-  isLocked = true;
-}
+RenderLock::RenderLock([[maybe_unused]] Activity&) : RenderLock(Mode::Blocking) {}
 
 RenderLock::~RenderLock() {
   if (isLocked) {

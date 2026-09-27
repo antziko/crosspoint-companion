@@ -705,14 +705,14 @@ void EpubReaderActivity::loop() {
   // floor. Cross-chapter prewarm is deliberately out of scope (next spine's
   // section isn't loaded).
   constexpr unsigned long IDLE_PREWARM_DEBOUNCE_MS = 400;
-  if (section && !section->isBuilding() && !RenderLock::peek() && renderer.hasFrameBuffer() &&
-      lastRenderCompleteMs != 0 && millis() - lastRenderCompleteMs > IDLE_PREWARM_DEBOUNCE_MS &&
-      ESP.getFreeHeap() > RENDER_MIN_FREE_HEAP && ESP.getMaxAllocHeap() > BACKGROUND_BUILD_MIN_MAX_ALLOC &&
-      (idlePrewarmSpine != currentSpineIndex || idlePrewarmPage != section->currentPage)) {
-    RenderLock lock;  // the page table must not change under the scan
-    // Re-check under the lock: peek() and acquisition are not atomic, so the render
-    // task may have reset/replaced the section or moved the page in between.
-    if (section && !section->isBuilding() &&
+  {
+    // Try-lock, never block: this is optional work on the main loop, and the page table
+    // must not change under the scan. A failed take means the render task owns the
+    // section right now, which is exactly when the prewarm should stand down.
+    RenderLock lock(RenderLock::Mode::Try);
+    if (lock.ownsLock() && section && !section->isBuilding() && renderer.hasFrameBuffer() &&
+        lastRenderCompleteMs != 0 && millis() - lastRenderCompleteMs > IDLE_PREWARM_DEBOUNCE_MS &&
+        ESP.getFreeHeap() > RENDER_MIN_FREE_HEAP && ESP.getMaxAllocHeap() > BACKGROUND_BUILD_MIN_MAX_ALLOC &&
         (idlePrewarmSpine != currentSpineIndex || idlePrewarmPage != section->currentPage)) {
       idlePrewarmSpine = currentSpineIndex;
       idlePrewarmPage = section->currentPage;
@@ -737,18 +737,21 @@ void EpubReaderActivity::loop() {
   // render()); crossing this margin is the signal that the reader will actually need pages
   // past the watermark soon. Uses the last render's viewport so pagination matches the
   // partial being extended.
-  if (section && !section->isBuilding() && section->isPartial() && !RenderLock::peek() && buildViewportWidth > 0 &&
-      !partialRebuildStartFailed &&
-      section->currentPage + PARTIAL_REBUILD_START_MARGIN >= static_cast<int>(section->pageCount)) {
-    RenderLock lock;
-    if (!section->startBuild(SETTINGS.readerRenderSpec(buildViewportWidth, buildViewportHeight))) {
-      // Not fatal: the partial keeps serving its pages; crossing the watermark falls back to
-      // the blocking extension in render(). Don't retry every tick.
-      partialRebuildStartFailed = true;
-      LOG_ERR("ERS", "Failed to start deferred partial extension build");
-    } else {
-      LOG_DBG("ERS", "Reader near partial watermark (%d/%d), resuming extension build", section->currentPage,
-              section->pageCount);
+  {
+    RenderLock lock(RenderLock::Mode::Try);
+    if (lock.ownsLock() && section && !section->isBuilding() && section->isPartial() && buildViewportWidth > 0 &&
+        !partialRebuildStartFailed &&
+        section->currentPage + PARTIAL_REBUILD_START_MARGIN >= static_cast<int>(section->pageCount)) {
+      const ReaderRenderSpec buildSpec = SETTINGS.readerRenderSpec(buildViewportWidth, buildViewportHeight);
+      if (!section->startBuild(buildSpec)) {
+        // Not fatal: the partial keeps serving its pages; crossing the watermark falls back to
+        // the blocking extension in render(). Don't retry every tick.
+        partialRebuildStartFailed = true;
+        LOG_ERR("ERS", "Failed to start deferred partial extension build");
+      } else {
+        LOG_DBG("ERS", "Reader near partial watermark (%d/%d), resuming extension build", section->currentPage,
+                section->pageCount);
+      }
     }
   }
 
@@ -756,24 +759,12 @@ void EpubReaderActivity::loop() {
   // but only within a small window ahead of the reader: an unbounded build monopolized the
   // RenderLock and locked out page turns. The build follows the reader instead, and instant
   // reopen comes from suspendBuild() persisting the laid-out pages as a partial on exit.
-  // Skip while the render mutex is busy so we never delay a pending render; re-check
-  // isBuilding() under the lock since render() may have just finished it.
-  // While extending a partial (rebuild from a previous session), pageCount is pinned at the
-  // partial's watermark until the build catches up, so the window check would wrongly read
-  // "far enough ahead" and stall the build at 0 pages -- then the first turn past the
-  // watermark re-parses the whole chapter synchronously. Keep ticking until it finalizes.
-  if (section && section->isBuilding() && !RenderLock::peek() &&
-      (section->isPartial() || static_cast<int>(section->pageCount) < section->currentPage + BUILD_WINDOW_AHEAD) &&
-      buildTickHeapGate()) {
-    RenderLock lock;
-    // Re-check under the lock: render() (which also holds the RenderLock) may have finalized the
-    // build between the outer isBuilding() check and acquiring the lock here, in which case
-    // buildSomeMore() would fail and wrongly reset the section. The heap gate must be re-read
-    // too: a render that won the lock race can expand retained glyph buffers, invalidating the
-    // pre-lock heap reading. cppcheck can't see the cross-task mutation, so it flags this as
-    // always true.
-    // cppcheck-suppress knownConditionTrueFalse
-    if (section->isBuilding() && buildTickHeapGate()) {
+  // The try-lock is what keeps it off a pending render: every predicate below is evaluated
+  // with the lock already held, so there is no window in which the render task can finalize
+  // the build or expand retained glyph buffers between the test and the tick.
+  {
+    RenderLock lock(RenderLock::Mode::Try);
+    if (lock.ownsLock() && backgroundBuildWanted() && buildTickHeapGate()) {
       if (!section->buildSomeMore(BACKGROUND_BUILD_PAGES_PER_TICK)) {
         LOG_ERR("ERS", "Background section build failed");
         section.reset();
@@ -2488,6 +2479,15 @@ void EpubReaderActivity::pageTurn(bool isForwardTurn) {
 }
 
 // TODO: Failure handling
+bool EpubReaderActivity::backgroundBuildWanted() const {
+  // While extending a partial (rebuild from a previous session), pageCount is pinned at the
+  // partial's watermark until the build catches up, so the window check would wrongly read
+  // "far enough ahead" and stall the build at 0 pages -- then the first turn past the
+  // watermark re-parses the whole chapter synchronously. Keep ticking until it finalizes.
+  return section && section->isBuilding() &&
+         (section->isPartial() || static_cast<int>(section->pageCount) < section->currentPage + BUILD_WINDOW_AHEAD);
+}
+
 void EpubReaderActivity::render(RenderLock&& lock) {
   if (!epub) {
     return;
