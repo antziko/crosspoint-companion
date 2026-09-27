@@ -8,6 +8,7 @@
 #include "RecentBooksStore.h"
 #include "activities/Activity.h"
 #include "activities/ListTouchTarget.h"
+#include "components/OptionPopup.h"
 #include "util/ButtonNavigator.h"
 #include "util/FileWindowSelect.h"
 
@@ -22,6 +23,19 @@ class FileBrowserActivity final : public Activity {
   // Confirm-then-delete for the currently selected entry. Shared by the Confirm
   // hold and the touch hold (the only delete gesture a buttonless board has).
   void promptDeleteSelectedEntry();
+  // Hold menu for the selected entry: Open/Delete/Rename on a file, Open/Delete on a
+  // directory. Both hold gestures route here, so every action stays reachable on a
+  // board with no Confirm pin.
+  void showEntryActions();
+  // Opens a file or descends into a directory. Extracted from loop() so a row tap and
+  // the hold menu's Open row share one activation body.
+  void openSelectedEntry();
+  void startRename();
+  // Renames files[selectorIndex] to `newStem` + its original extension and re-keys the
+  // book's sidecar state. Every argument is an owned copy: the keyboard result arrives
+  // long after `files` has been rebuilt, so a reference into it would dangle.
+  void renameSelectedEntry(const std::string& oldPath, const std::string& oldEntry, const std::string& newStem,
+                           const std::string& extension);
 
   ButtonNavigator buttonNavigator;
   // Rows the last render drew, so a tap can pick one (see ListTouchTarget).
@@ -30,6 +44,8 @@ class FileBrowserActivity final : public Activity {
   // (the touch counterpart of the Back-hold gesture). Zero-width until the first paint,
   // which is what makes the hit test fail safely before then.
   Rect headerTouch_{};
+  // Hold menu over the current list (Open/Delete/Rename).
+  OptionPopup optionPopup;
 
   size_t selectorIndex = 0;
 
@@ -38,6 +54,11 @@ class FileBrowserActivity final : public Activity {
   // True when this activity was entered while Confirm was already held; we must swallow the next
   // release so we don't immediately auto-open the first entry.
   bool lockNextConfirmRelease = false;
+  // OptionPopup acts on button PRESS edges; this screen activates on Confirm RELEASE.
+  // Without this latch the release that ends the press which chose a menu option falls
+  // straight through and opens the selected entry. Armed when the popup closes, cleared
+  // once both buttons are observed up.
+  bool swallowReleaseAfterPopup = false;
 
   Mode mode = Mode::Books;
 

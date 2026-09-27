@@ -17,6 +17,7 @@
 #include "activities/TouchFeedback.h"
 #include "activities/reader/ReaderUtils.h"
 #include "activities/util/ConfirmationActivity.h"
+#include "activities/util/KeyboardEntryActivity.h"
 #include "components/HeaderBackTapTarget.h"
 #include "components/ListCursor.h"
 #include "components/UITheme.h"
@@ -42,6 +43,9 @@ bool entryNameLess(const std::string& a, const std::string& b) {
   return a < b;
 }
 }  // namespace
+
+// Defined below, beside the other row-formatting helpers.
+std::string getFileExtension(const std::string& filename);
 
 bool FileBrowserActivity::accepts(const char* name, bool isDir) const {
   if ((!SETTINGS.showHiddenFiles && name[0] == '.') || strcmp(name, "System Volume Information") == 0) {
@@ -339,6 +343,117 @@ void FileBrowserActivity::promptDeleteSelectedEntry() {
   startActivityForResultNoThrow<ConfirmationActivity>(handler, renderer, mappedInput, heading, utf8ComposeNfc(entry));
 }
 
+// Hold menu for files[selectorIndex]. Directories get no Rename row: renaming one would
+// have to re-key every book cache beneath it, which relocateBookSidecars does per file.
+void FileBrowserActivity::showEntryActions() {
+  if (mode != Mode::Books || optionPopup.isActive() || selectorIndex >= files.size()) return;
+
+  const bool isDirectory = files[selectorIndex].name.back() == '/';
+  // The entry's own name titles the dialog, so each action reads as a sentence about it.
+  // Composed for display only -- files[] keeps the raw directory bytes.
+  const std::string title = utf8ComposeNfc(files[selectorIndex].name);
+  const char* fileOptions[] = {tr(STR_OPEN), tr(STR_RENAME), tr(STR_DELETE)};
+  const char* dirOptions[] = {tr(STR_OPEN), tr(STR_DELETE)};
+  optionPopup.show(title.c_str(), isDirectory ? dirOptions : fileOptions, isDirectory ? 2 : 3, 0,
+                   [this, isDirectory](const int choice) {
+                     if (choice == 0) {
+                       openSelectedEntry();
+                     } else if (isDirectory || choice == 2) {
+                       promptDeleteSelectedEntry();
+                     } else {
+                       startRename();
+                     }
+                   });
+  requestUpdate();
+}
+
+void FileBrowserActivity::openSelectedEntry() {
+  if (selectorIndex >= files.size()) return;
+  const std::string& entry = files[selectorIndex].name;
+
+  if (entry.back() == '/') {
+    {
+      RenderLock lock(*this);
+      // `entry` is a reference INTO files[], which loadFirstWindow() clears
+      // -- read it into basepath before the load, never after.
+      if (basepath.back() != '/') basepath += "/";
+      basepath += entry.substr(0, entry.length() - 1);
+      loadFirstWindow();
+    }
+    requestUpdate();
+    return;
+  }
+
+  std::string fullPath;
+  {
+    RenderLock lock(*this);
+    if (basepath.back() != '/') basepath += "/";
+    fullPath = basepath + entry;  // own the string: `entry` points into files[]
+  }
+  onSelectBook(fullPath);  // launches an activity: never under the lock
+}
+
+// Opens the keyboard on the name's stem. The extension is withheld from the field and
+// re-attached on commit, so a rename cannot change the file's type -- which would orphan
+// the cache dir its prefix is derived from.
+void FileBrowserActivity::startRename() {
+  if (selectorIndex >= files.size()) return;
+  const std::string oldEntry = files[selectorIndex].name;
+  if (oldEntry.back() == '/') return;
+
+  std::string cleanBasePath = basepath;
+  if (cleanBasePath.back() != '/') cleanBasePath += "/";
+  const std::string oldPath = cleanBasePath + oldEntry;
+  const std::string extension = getFileExtension(oldEntry);
+  const std::string initialStem = utf8ComposeNfc(oldEntry.substr(0, oldEntry.size() - extension.size()));
+  const size_t maxStemLength = NAME_BUFFER_SIZE - extension.size() - 1;
+
+  auto handler = [this, oldPath, oldEntry, extension](const ActivityResult& result) {
+    if (result.isCancelled) return;
+    renameSelectedEntry(oldPath, oldEntry, std::get<KeyboardResult>(result.data).text, extension);
+  };
+  startActivityForResultNoThrow<KeyboardEntryActivity>(handler, renderer, mappedInput, tr(STR_RENAME), initialStem,
+                                                       maxStemLength, InputType::Text);
+}
+
+void FileBrowserActivity::renameSelectedEntry(const std::string& oldPath, const std::string& oldEntry,
+                                              const std::string& newStem, const std::string& extension) {
+  const std::string newEntry = newStem + extension;
+  if (newStem.empty() || newEntry.size() >= NAME_BUFFER_SIZE || !FsHelpers::isSafePathComponent(newEntry)) {
+    LOG_ERR("FileBrowser", "Invalid rename target: %s", newEntry.c_str());
+    return;
+  }
+  // The field was seeded with the composed form, so compare against that: a user who
+  // opened the keyboard and pressed OK unchanged must not trigger a rename.
+  if (newEntry == utf8ComposeNfc(oldEntry)) return;
+
+  const std::string parentPath = FsHelpers::extractFolderPath(oldPath);
+  const std::string newPath = (parentPath == "/" ? parentPath : parentPath + "/") + newEntry;
+  if (Storage.exists(newPath.c_str())) {
+    LOG_ERR("FileBrowser", "Rename target already exists: %s", newPath.c_str());
+    return;
+  }
+
+  if (!Storage.rename(oldPath.c_str(), newPath.c_str())) {
+    LOG_ERR("FileBrowser", "Failed to rename: %s -> %s", oldPath.c_str(), newPath.c_str());
+    return;
+  }
+  // Only after the file itself moved: bookmarks, the path-hash cache dir and its label,
+  // the recents entry and the resume pointer all key off the path. Same call the web
+  // server's rename makes (CrossPointWebServer::handleRename).
+  relocateBookSidecars(oldPath, newPath);
+  LOG_DBG("FileBrowser", "Renamed: %s -> %s", oldPath.c_str(), newPath.c_str());
+
+  {
+    RenderLock lock(*this);
+    // Sort position changed with the name; re-anchor the window on the renamed entry so
+    // it stays on screen and selected.
+    loadWindowContaining(newEntry);
+    selectorIndex = 0;
+  }
+  requestUpdate(true);
+}
+
 // To avoid traversing directories twice (once for cache clearing, once for deletion),
 // we do both in one pass here, instead of using Storage.removeDir
 bool FileBrowserActivity::removeDirFile(const std::string& fullPath) {
@@ -437,6 +552,21 @@ bool FileBrowserActivity::removeDirFile(const std::string& fullPath) {
 // (non-recursive) mutex taken with portMAX_DELAY, so holding it across an
 // activity transition deadlocks rather than fails.
 void FileBrowserActivity::loop() {
+  if (optionPopup.isActive()) {
+    optionPopup.handleInput(mappedInput, [this] { requestUpdate(); });
+    // Closed this pass: the button that closed it is still down, and its release must
+    // not reach the activation below.
+    if (!optionPopup.isActive()) swallowReleaseAfterPopup = true;
+    return;
+  }
+  if (swallowReleaseAfterPopup) {
+    if (!mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
+        !mappedInput.isPressed(MappedInputManager::Button::Back)) {
+      swallowReleaseAfterPopup = false;
+    }
+    return;
+  }
+
   // Hold Back at root (button reads "Home") toggles show-hidden-files and reloads the list.
   if (mode == Mode::Books && basepath == "/" && !lockLongPressBack && !hiddenToggleFired &&
       mappedInput.isPressed(MappedInputManager::Button::Back) && mappedInput.getHeldTime() >= GO_HOME_MS) {
@@ -485,7 +615,7 @@ void FileBrowserActivity::loop() {
       const int heldRow = listTouch_.indexAt(renderer, holdX, holdY);
       if (heldRow >= 0 && heldRow < static_cast<int>(files.size())) {
         selectorIndex = heldRow;
-        promptDeleteSelectedEntry();
+        showEntryActions();
       }
       return;
     }
@@ -549,31 +679,12 @@ void FileBrowserActivity::loop() {
     }
 
     if (mode == Mode::Books && !viaTouch && mappedInput.getHeldTime() >= GO_HOME_MS) {
-      // --- LONG PRESS ACTION: DELETE FILE OR DIRECTORY ---
-      promptDeleteSelectedEntry();
+      // --- LONG PRESS ACTION: ENTRY ACTIONS MENU ---
+      showEntryActions();
       return;
-    } else {
-      // --- SHORT PRESS ACTION: OPEN/NAVIGATE ---
-      if (isDirectory) {
-        {
-          RenderLock lock(*this);
-          // `entry` is a reference INTO files[], which loadFirstWindow() clears
-          // — read it into basepath before the load, never after.
-          if (basepath.back() != '/') basepath += "/";
-          basepath += entry.substr(0, entry.length() - 1);
-          loadFirstWindow();
-        }
-        requestUpdate();
-      } else {
-        std::string fullPath;
-        {
-          RenderLock lock(*this);
-          if (basepath.back() != '/') basepath += "/";
-          fullPath = basepath + entry;  // own the string: `entry` points into files[]
-        }
-        onSelectBook(fullPath);  // launches an activity: never under the lock
-      }
     }
+    // --- SHORT PRESS ACTION: OPEN/NAVIGATE ---
+    openSelectedEntry();
     return;
   }
 
@@ -748,6 +859,8 @@ std::string formatFileSize(uint32_t bytes) {
 }
 
 void FileBrowserActivity::render(RenderLock&&) {
+  // Drawn over the list already on screen, so this must precede the clear.
+  if (optionPopup.processRender(renderer, mappedInput)) return;
   renderer.clearScreen();
 
   const auto& metrics = UITheme::getInstance().getMetrics();
