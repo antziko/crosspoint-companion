@@ -234,9 +234,16 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
     persisted::enumerated("xtcStatusBarMode", &CrossPointSettings::xtcStatusBarMode,
                           CrossPointSettings::XTC_STATUS_BAR_MODE_COUNT - 1),
     persisted::toggle("statusBarClock", &CrossPointSettings::statusBarClock),
-    // Quarter-hour UTC offset: 0..104 covers UTC-12:00 .. UTC+14:00 in 15-minute steps.
+    // LEGACY quarter-hour UTC offset: 0..104 covers UTC-12:00 .. UTC+14:00 in 15-minute
+    // steps. Still persisted so timezones::activeIndex() can migrate it into clockTimezone.
     persisted::ranged("clockUtcOffsetQ", &CrossPointSettings::clockUtcOffsetQ, 0, 104),
     persisted::enumerated("clockFormat", &CrossPointSettings::clockFormat, 1),
+    // Index into the append-only table in src/util/Timezones.cpp. The full uint8_t range is
+    // valid because 255 is the "never chosen" sentinel; timezones::activeIndex() rejects any
+    // index past the table's end.
+    persisted::ranged("clockTimezone", &CrossPointSettings::clockTimezone, 0, 255),
+    persisted::enumerated("clockDst", &CrossPointSettings::clockDst, CrossPointSettings::CLOCK_DST_MODE_COUNT - 1),
+    persisted::toggle("clockShowHeader", &CrossPointSettings::clockShowInHeader),
     persisted::toggle("clockHasBeenSynced", &CrossPointSettings::clockHasBeenSynced),
     persisted::enumerated("clockResyncDays", &CrossPointSettings::clockResyncDays,
                           lastIndex(CrossPointSettings::CLOCK_RESYNC_DAYS)),

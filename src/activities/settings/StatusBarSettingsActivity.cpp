@@ -7,8 +7,6 @@
 #include <cstring>
 #include <memory>
 
-#include "ClockOffsetActivity.h"
-#include "ClockSyncActivity.h"
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "components/UITheme.h"
@@ -17,9 +15,11 @@
 namespace fui = freeink::ui;
 
 namespace {
-// Menu items in their natural order. Clock entries are appended only when the
-// device can have a clock — X3 (DS3231 RTC) or X4 (NTP over WiFi). Devices that
-// can have neither don't see them at all (see deviceCanHaveClock in onEnter).
+// Menu items in their natural order. Clock/date entries are appended only when
+// the device can have a clock — X3 (DS3231 RTC) or X4 (NTP over WiFi). Devices
+// that can have neither don't see them at all (see deviceCanHaveClock in
+// onEnter). Timezone, DST, 12/24-hour format and manual sync live in
+// Settings > System > Clock (ClockSettingsActivity), not here.
 enum MenuItem {
   ITEM_CHAPTER_PAGE_COUNT = 0,
   ITEM_BOOK_PROGRESS_PERCENTAGE,
@@ -28,13 +28,10 @@ enum MenuItem {
   ITEM_TITLE,
   ITEM_BATTERY,
   ITEM_XTC_STATUS_BAR,
-  ITEM_CLOCK,             // clock-capable only
-  ITEM_CLOCK_FORMAT,      // clock-capable only
-  ITEM_CLOCK_UTC_OFFSET,  // clock-capable only, launches ClockOffsetActivity
-  ITEM_CLOCK_SYNC,        // clock-capable only, launches ClockSyncActivity
-  ITEM_CLOCK_RESYNC,      // clock-capable only, RTC boards only (see buildScreen note)
-  ITEM_DATE,              // clock-capable only
-  ITEM_DATE_FORMAT,       // clock-capable only
+  ITEM_CLOCK,         // clock-capable only
+  ITEM_CLOCK_RESYNC,  // clock-capable only, RTC boards only (see buildScreen note)
+  ITEM_DATE,          // clock-capable only
+  ITEM_DATE_FORMAT,   // clock-capable only
   ITEM_COUNT
 };
 
@@ -52,16 +49,10 @@ const StrId menuNames[FULL_MENU_ITEMS] = {
     StrId::STR_BATTERY,
     StrId::STR_XTC_STATUS_BAR,
     StrId::STR_CLOCK,
-    StrId::STR_CLOCK_FORMAT,
-    StrId::STR_CLOCK_UTC_OFFSET,
-    StrId::STR_CLOCK_SYNC_NOW,
     StrId::STR_CLOCK_RESYNC_EVERY,
     StrId::STR_DATE,
     StrId::STR_DATE_FORMAT,
 };
-
-constexpr int CLOCK_FORMAT_ITEMS = 2;
-const StrId clockFormatNames[CLOCK_FORMAT_ITEMS] = {StrId::STR_CLOCK_FORMAT_24H, StrId::STR_CLOCK_FORMAT_12H};
 
 constexpr int CLOCK_RESYNC_ITEMS = CrossPointSettings::CLOCK_RESYNC_COUNT;
 const StrId clockResyncNames[CLOCK_RESYNC_ITEMS] = {StrId::STR_CLOCK_RESYNC_1D, StrId::STR_CLOCK_RESYNC_3D,
@@ -75,18 +66,6 @@ const StrId dateFormatNames[DATE_FORMAT_ITEMS] = {
     StrId::STR_DATE_FMT_3,
 };
 
-std::string formatUtcOffset(uint8_t biasedQ) {
-  // biasedQ is in quarter-hour steps, biased by 48 (so 48 = UTC+0).
-  if (biasedQ > 104) biasedQ = 48;
-  int totalMinutes = (static_cast<int>(biasedQ) - 48) * 15;
-  bool neg = totalMinutes < 0;
-  int absMinutes = neg ? -totalMinutes : totalMinutes;
-  int hours = absMinutes / 60;
-  int mins = absMinutes % 60;
-  char buf[16];
-  snprintf(buf, sizeof(buf), "UTC%c%d:%02d", neg ? '-' : '+', hours, mins);
-  return buf;
-}
 constexpr int PROGRESS_BAR_ITEMS = 3;
 const StrId progressBarNames[PROGRESS_BAR_ITEMS] = {StrId::STR_BOOK, StrId::STR_CHAPTER, StrId::STR_HIDE};
 
@@ -140,14 +119,6 @@ void StatusBarSettingsActivity::onEnter() {
 
   if (SETTINGS.xtcStatusBarMode >= XTC_STATUS_BAR_ITEMS) {
     SETTINGS.xtcStatusBarMode = CrossPointSettings::XTC_STATUS_BAR_MODE::XTC_STATUS_BAR_HIDE;
-  }
-
-  if (SETTINGS.clockUtcOffsetQ > 104) {
-    SETTINGS.clockUtcOffsetQ = 48;  // Default to UTC+0
-  }
-
-  if (SETTINGS.clockFormat >= CLOCK_FORMAT_ITEMS) {
-    SETTINGS.clockFormat = 0;
   }
 
   if (SETTINGS.clockResyncDays >= CLOCK_RESYNC_ITEMS) {
@@ -221,16 +192,6 @@ void StatusBarSettingsActivity::handleSelection() {
     case ITEM_CLOCK:
       SETTINGS.statusBarClock = (SETTINGS.statusBarClock + 1) % 2;
       break;
-    case ITEM_CLOCK_FORMAT:
-      SETTINGS.clockFormat = (SETTINGS.clockFormat + 1) % CLOCK_FORMAT_ITEMS;
-      break;
-    case ITEM_CLOCK_UTC_OFFSET:
-      // Launch the dedicated offset picker. It saves on exit, no result handler needed.
-      startActivityForResultNoThrow<ClockOffsetActivity>(nullptr, renderer, mappedInput);
-      return;
-    case ITEM_CLOCK_SYNC:
-      startActivityForResultNoThrow<ClockSyncActivity>(nullptr, renderer, mappedInput);
-      return;
     case ITEM_CLOCK_RESYNC:
       optionPopup.show(StrId::STR_CLOCK_RESYNC_EVERY, clockResyncNames, CLOCK_RESYNC_ITEMS, SETTINGS.clockResyncDays,
                        [this](int idx) {
@@ -268,14 +229,6 @@ std::string StatusBarSettingsActivity::rowValueText(const int index) {
       return I18N.get(xtcStatusBarNames[SETTINGS.xtcStatusBarMode]);
     case ITEM_CLOCK:
       return SETTINGS.statusBarClock ? tr(STR_SHOW) : tr(STR_HIDE);
-    case ITEM_CLOCK_FORMAT: {
-      const uint8_t fmt = SETTINGS.clockFormat < CLOCK_FORMAT_ITEMS ? SETTINGS.clockFormat : 0;
-      return std::string(I18N.get(clockFormatNames[fmt]));
-    }
-    case ITEM_CLOCK_UTC_OFFSET:
-      return formatUtcOffset(SETTINGS.clockUtcOffsetQ);
-    case ITEM_CLOCK_SYNC:
-      return SETTINGS.clockHasBeenSynced ? tr(STR_CLOCK_SYNCED) : tr(STR_NOT_SET);
     case ITEM_CLOCK_RESYNC: {
       const uint8_t idx = SETTINGS.clockResyncDays < CLOCK_RESYNC_ITEMS ? SETTINGS.clockResyncDays : 0;
       return std::string(I18N.get(clockResyncNames[idx]));

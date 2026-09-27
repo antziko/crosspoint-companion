@@ -1,6 +1,7 @@
 #include "SettingsActivity.h"
 
 #include <GfxRenderer.h>
+#include <HalClock.h>
 #include <HalDisplay.h>
 #include <Logging.h>
 #include <Memory.h>
@@ -13,6 +14,7 @@
 #include "AboutActivity.h"
 #include "ButtonRemapActivity.h"
 #include "ClearCacheActivity.h"
+#include "ClockSettingsActivity.h"
 #include "CrossPointSettings.h"
 #include "DictionarySelectActivity.h"
 #include "FontDownloadActivity.h"
@@ -156,6 +158,13 @@ void SettingsActivity::rebuildSettingsLists() {
   // items live one level down. OPDS / Clear Cache / Updates / SD Firmware / Language are appended
   // inside their sub-screen branch above.
   systemSettings.insert(systemSettings.begin(), SettingInfo::Action(StrId::STR_WIFI_NETWORKS, SettingAction::Network));
+  // Clock configuration (timezone, DST, format, manual sync). Shown wherever the device CAN
+  // have a clock: a board with an RTC, or one that gets time from NTP over WiFi. Upstream
+  // gates on halClock.isAvailable(), which is false on an RTC-less board until the first
+  // sync — and this screen is where that sync is started, so that gate would hide itself.
+  if (halClock.isAvailable() || !halClock.hasHardwareRtc()) {
+    systemSettings.push_back(SettingInfo::Action(StrId::STR_CLOCK, SettingAction::ClockSettings));
+  }
   systemSettings.push_back(SettingInfo::Action(StrId::STR_KOREADER_SYNC, SettingAction::KOReaderSync));
   systemSettings.push_back(SettingInfo::Action(StrId::STR_OPDS_SERVERS, SettingAction::OPDSBrowser));
   systemSettings.push_back(SettingInfo::SubScreen(StrId::STR_SYS_SYNC_PROMPTS, StrId::STR_SYS_SYNC_PROMPTS));
@@ -500,6 +509,13 @@ void SettingsActivity::toggleCurrentSetting() {
         break;
       case SettingAction::CustomiseTopBar:
         startActivityForResultNoThrow<HomeTopBarSettingsActivity>(resultHandler, renderer, mappedInput);
+        break;
+      case SettingAction::ClockSettings:
+        if (auto activity = makeUniqueNoThrow<ClockSettingsActivity>(renderer, mappedInput)) {
+          startActivityForResult(std::move(activity), resultHandler);
+        } else {
+          LOG_ERR("SETTINGS", "OOM: ClockSettingsActivity");
+        }
         break;
       case SettingAction::KOReaderSync:
         startActivityForResultNoThrow<KOReaderServerListActivity>(resultHandler, renderer, mappedInput);

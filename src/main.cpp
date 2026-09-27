@@ -50,6 +50,7 @@
 #include "util/DictionaryRegistry.h"
 #include "util/ScreenRefresh.h"
 #include "util/ScreenshotUtil.h"
+#include "util/Timezones.h"
 
 GfxRenderer renderer(display);
 MappedInputManager mappedInputManager(gpio, renderer);
@@ -597,6 +598,9 @@ void setup() {
     SETTINGS.readerMenuStyle = CrossPointSettings::READER_MENU_TOOLBAR;
   }
   SETTINGS.loadFromFile();
+  // Push the saved timezone's POSIX rule into the clock (migrating the legacy
+  // UTC-offset setting on first boot after the update).
+  timezones::applyToClock();
   // Apply the SD-logging toggle now that settings are loaded (default off). Governs
   // the boot-done MEM line below and all later SdDebugLog::log() calls.
   SdDebugLog::setMasterEnabled(SETTINGS.sdCardLogging != 0);

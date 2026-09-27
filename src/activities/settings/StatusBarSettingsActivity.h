@@ -11,10 +11,10 @@ class StatusBarSettingsActivity final : public UiListActivity {
 
   // Must equal ITEM_COUNT in the .cpp (static_assert'd there) — the max
   // possible row count (clock-capable devices show all of them).
-  // 14, not upstream's 11: feat adds the XTC status-bar row, the two date rows
+  // 11, not upstream's 8: feat adds the XTC status-bar row, the two date rows
   // (ITEM_DATE, ITEM_DATE_FORMAT) and the clock re-sync interval, which upstream's
   // menu has no equivalent for. Undersizing this overruns rowItems_/rowValues_.
-  static constexpr int MAX_STATUS_BAR_ITEMS = 14;
+  static constexpr int MAX_STATUS_BAR_ITEMS = 11;
 
   void onEnter() override;
   void render(RenderLock&&) override;

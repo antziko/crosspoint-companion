@@ -44,8 +44,7 @@ void FlashcardReviewActivity::onEnter() {
   // all-shuffled inside buildSession.
   uint8_t dayOfWeek = 0, day = 0, month = 0, hour = 0, minute = 0;
   uint16_t year = 0;
-  clockOk = halClock.isAvailable() &&
-            halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, dayOfWeek, day, month, year, hour, minute);
+  clockOk = halClock.isAvailable() && halClock.getLocalDateTime(dayOfWeek, day, month, year, hour, minute);
   today = clockOk ? readingHistoryDayIndex(year, month, day) : 0;
 
   stats = FlashcardDeck::computeStats(cachePath, today);

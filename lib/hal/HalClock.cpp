@@ -202,7 +202,69 @@ void HalClock::persistTimeAcrossReboot() const {
   halClockSavedMagic = HALCLOCK_EPOCH_MAGIC;
 }
 
+namespace {
+// UTC calendar -> Unix epoch, no timezone involvement (newlib has no timegm).
+// Days-from-civil per Howard Hinnant's algorithm.
+time_t epochFromUtc(const struct tm& utc) {
+  int y = utc.tm_year + 1900;
+  const int m = utc.tm_mon + 1;
+  y -= m <= 2;
+  const int era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = static_cast<unsigned>(y - era * 400);
+  const unsigned doy = (153u * static_cast<unsigned>(m + (m > 2 ? -3 : 9)) + 2u) / 5u + utc.tm_mday - 1u;
+  const unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+  const long days = static_cast<long>(era) * 146097L + static_cast<long>(doe) - 719468L;
+  return static_cast<time_t>(days) * 86400 + utc.tm_hour * 3600L + utc.tm_min * 60L + utc.tm_sec;
+}
+}  // namespace
+
+void HalClock::setTimezone(const char* posixTz) {
+  setenv("TZ", posixTz && posixTz[0] != '\0' ? posixTz : "UTC0", 1);
+  tzset();
+  // Drop both read caches so the next read resolves under the new rule.
+  _lastPollMs = 0;
+  _lastDatePollMs = 0;
+}
+
+// Every board keeps UTC: the DS3231 is written from gmtime in syncFromNTP(), and the
+// POSIX clock is configured with UTC0. Local time is therefore purely a TZ question,
+// which is what lets a zone with DST be correct year-round.
+bool HalClock::utcEpoch(time_t& out) const {
+  if (!_available) {
+    if (!isPosixTimeValid()) return false;
+    out = time(nullptr);
+    return true;
+  }
+  uint8_t hour, minute;
+  uint8_t dayOfWeek, date, month;
+  uint16_t year;
+  if (!getUtcTime(hour, minute) || !getUtcDate(dayOfWeek, date, month, year)) return false;
+  struct tm utc = {};
+  utc.tm_year = static_cast<int>(year) - 1900;
+  utc.tm_mon = static_cast<int>(month) - 1;
+  utc.tm_mday = static_cast<int>(date);
+  utc.tm_hour = static_cast<int>(hour);
+  utc.tm_min = static_cast<int>(minute);
+  out = epochFromUtc(utc);
+  return true;
+}
+
+bool HalClock::localTime(struct tm& out) const {
+  time_t utc;
+  if (!utcEpoch(utc)) return false;
+  localtime_r(&utc, &out);
+  return true;
+}
+
 bool HalClock::getTime(uint8_t& hour, uint8_t& minute) const {
+  struct tm local;
+  if (!localTime(local)) return false;
+  hour = static_cast<uint8_t>(local.tm_hour);
+  minute = static_cast<uint8_t>(local.tm_min);
+  return true;
+}
+
+bool HalClock::getUtcTime(uint8_t& hour, uint8_t& minute) const {
   if (!_available) {
     if (!isPosixTimeValid()) return false;
     // X4: read POSIX system clock set by NTP (async SNTP may have completed after syncFromNTP() timed out)
@@ -264,29 +326,18 @@ bool HalClock::getTime(uint8_t& hour, uint8_t& minute) const {
   return true;
 }
 
-bool HalClock::formatTime(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHoursBiased, bool use12Hour) const {
+bool HalClock::formatTime(char* buf, size_t bufSize, bool use12Hour) const {
   if (bufSize < (use12Hour ? 9u : 6u)) return false;
-  uint8_t h, m;
-  if (!getTime(h, m)) return false;
+  struct tm local;
+  if (!localTime(local)) return false;
 
-  // Apply UTC offset: convert biased value to signed quarter-hours.
-  // Clamp against corrupted persisted values so display time can't drift outside [-12:00, +14:00].
-  if (utcOffsetQuarterHoursBiased > 104) utcOffsetQuarterHoursBiased = 104;
-  int offsetQuarterHours = static_cast<int>(utcOffsetQuarterHoursBiased) - 48;
-  int totalMinutes = static_cast<int>(h) * 60 + static_cast<int>(m) + offsetQuarterHours * 15;
-
-  // Wrap around 24 hours
-  totalMinutes = ((totalMinutes % 1440) + 1440) % 1440;
-
-  const int hour24 = totalMinutes / 60;
-  const int min = totalMinutes % 60;
   if (use12Hour) {
-    const bool pm = hour24 >= 12;
-    int hour12 = hour24 % 12;
+    const bool pm = local.tm_hour >= 12;
+    int hour12 = local.tm_hour % 12;
     if (hour12 == 0) hour12 = 12;
-    snprintf(buf, bufSize, "%d:%02d %s", hour12, min, pm ? "PM" : "AM");
+    snprintf(buf, bufSize, "%d:%02d %s", hour12, local.tm_min, pm ? "PM" : "AM");
   } else {
-    snprintf(buf, bufSize, "%02d:%02d", hour24, min);
+    snprintf(buf, bufSize, "%02d:%02d", local.tm_hour, local.tm_min);
   }
   return true;
 }
@@ -314,6 +365,16 @@ bool HalClock::writeTimeToRTC(uint8_t hour, uint8_t minute, uint8_t second) {
 }
 
 bool HalClock::getDate(uint8_t& dayOfWeek, uint8_t& date, uint8_t& month, uint16_t& year) const {
+  struct tm local;
+  if (!localTime(local)) return false;
+  dayOfWeek = static_cast<uint8_t>(local.tm_wday + 1);  // tm_wday: 0=Sunday; DS3231: 1=Sunday
+  date = static_cast<uint8_t>(local.tm_mday);
+  month = static_cast<uint8_t>(local.tm_mon + 1);
+  year = static_cast<uint16_t>(1900 + local.tm_year);
+  return true;
+}
+
+bool HalClock::getUtcDate(uint8_t& dayOfWeek, uint8_t& date, uint8_t& month, uint16_t& year) const {
   if (!_available) {
     if (!isPosixTimeValid()) return false;
     // X4: read POSIX system clock set by NTP (async SNTP may have completed after syncFromNTP() timed out)
@@ -376,109 +437,34 @@ bool HalClock::getDate(uint8_t& dayOfWeek, uint8_t& date, uint8_t& month, uint16
   return true;
 }
 
-static uint8_t daysInMonth(uint8_t month, uint16_t year) {
-  static const uint8_t kDays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-  if (month < 1 || month > 12) return 30;
-  uint8_t d = kDays[month - 1];
-  if (month == 2 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0)) d = 29;
-  return d;
-}
-
-bool HalClock::getLocalDateTime(uint8_t utcOffsetQuarterHoursBiased, uint8_t& dayOfWeek, uint8_t& date, uint8_t& month,
-                                uint16_t& year, uint8_t& hour, uint8_t& minute) const {
-  uint8_t dow, rawDate, mo, h, m;
-  uint16_t yr;
-  if (!getDate(dow, rawDate, mo, yr)) return false;
-  if (!getTime(h, m)) return false;
-  if (mo < 1 || mo > 12) return false;
-
-  // Same offset+rollover arithmetic as formatDate (HalClock.cpp:212-244) and
-  // VegaTheme::formatLastRead, factored out here so callers that need to *bucket*
-  // data by local day (not just display it) get one shared, tested implementation.
-  if (utcOffsetQuarterHoursBiased > 104) utcOffsetQuarterHoursBiased = 104;
-  const int offsetMins = (static_cast<int>(utcOffsetQuarterHoursBiased) - 48) * 15;
-  int localMins = static_cast<int>(h) * 60 + static_cast<int>(m) + offsetMins;
-
-  int d = static_cast<int>(rawDate);
-  uint8_t wd = dow;  // DS3231: 1=Sunday .. 7=Saturday
-
-  if (localMins < 0) {
-    localMins += 1440;
-    if (--d < 1) {
-      if (--mo < 1) {
-        mo = 12;
-        yr--;
-      }
-      d = daysInMonth(mo, yr);
-    }
-    wd = static_cast<uint8_t>(((static_cast<int>(wd) - 2 + 7) % 7) + 1);
-  } else if (localMins >= 1440) {
-    localMins -= 1440;
-    if (++d > daysInMonth(mo, yr)) {
-      d = 1;
-      if (++mo > 12) {
-        mo = 1;
-        yr++;
-      }
-    }
-    wd = static_cast<uint8_t>((wd % 7) + 1);
-  }
-
-  dayOfWeek = wd;
-  date = static_cast<uint8_t>(d);
-  month = mo;
-  year = yr;
-  hour = static_cast<uint8_t>(localMins / 60);
-  minute = static_cast<uint8_t>(localMins % 60);
+bool HalClock::getLocalDateTime(uint8_t& dayOfWeek, uint8_t& date, uint8_t& month, uint16_t& year, uint8_t& hour,
+                                uint8_t& minute) const {
+  struct tm local;
+  if (!localTime(local)) return false;
+  dayOfWeek = static_cast<uint8_t>(local.tm_wday + 1);  // tm_wday: 0=Sunday; DS3231: 1=Sunday
+  date = static_cast<uint8_t>(local.tm_mday);
+  month = static_cast<uint8_t>(local.tm_mon + 1);
+  year = static_cast<uint16_t>(1900 + local.tm_year);
+  hour = static_cast<uint8_t>(local.tm_hour);
+  minute = static_cast<uint8_t>(local.tm_min);
   return true;
 }
 
-bool HalClock::formatDate(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHoursBiased, uint8_t dateFormat) const {
+bool HalClock::formatDate(char* buf, size_t bufSize, uint8_t dateFormat) const {
   if (!buf || bufSize < 4) return false;
-  uint8_t dow, rawDate, month;
-  uint16_t year;
-  uint8_t h, m;
-  if (!getDate(dow, rawDate, month, year)) return false;
-  if (!getTime(h, m)) return false;
-  if (month < 1 || month > 12) return false;
+  struct tm local;
+  if (!localTime(local)) return false;
 
-  if (utcOffsetQuarterHoursBiased > 104) utcOffsetQuarterHoursBiased = 104;
-  const int offsetMins = (static_cast<int>(utcOffsetQuarterHoursBiased) - 48) * 15;
-  const int localMins = static_cast<int>(h) * 60 + static_cast<int>(m) + offsetMins;
-
-  int d = static_cast<int>(rawDate);
-  uint8_t mo = month;
-  uint16_t yr = year;
-  uint8_t wd = dow;  // DS3231: 1=Sunday .. 7=Saturday
-
-  if (localMins < 0) {
-    if (--d < 1) {
-      if (--mo < 1) {
-        mo = 12;
-        yr--;
-      }
-      d = daysInMonth(mo, yr);
-    }
-    wd = static_cast<uint8_t>(((static_cast<int>(wd) - 2 + 7) % 7) + 1);
-  } else if (localMins >= 1440) {
-    if (++d > daysInMonth(mo, yr)) {
-      d = 1;
-      if (++mo > 12) {
-        mo = 1;
-        yr++;
-      }
-    }
-    wd = static_cast<uint8_t>((wd % 7) + 1);
-  }
+  const unsigned ud = static_cast<unsigned>(local.tm_mday);
+  const unsigned umo = static_cast<unsigned>(local.tm_mon + 1);
+  const int wd = local.tm_wday;  // 0=Sunday
 
   static const char* const kMonthNames[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
   static const char* const kDowNames[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 
-  const char* mon = kMonthNames[mo - 1];
-  const char* dow3 = (wd >= 1 && wd <= 7) ? kDowNames[wd - 1] : "???";
-  const unsigned ud = static_cast<unsigned>(d);
-  const unsigned umo = static_cast<unsigned>(mo);
+  const char* mon = (umo >= 1 && umo <= 12) ? kMonthNames[umo - 1] : "???";
+  const char* dow3 = (wd >= 0 && wd <= 6) ? kDowNames[wd] : "???";
 
   switch (dateFormat) {
     default:
@@ -582,6 +568,11 @@ bool HalClock::syncFromNTP(uint32_t maxWaitMs, const volatile bool* abortFlag) {
   LOG_INF("CLK", "NTP servers: %s (ip=%d), %s (ip=%d)", ntpPrimary, ntpPrimaryIsIp ? 1 : 0, ntpSecondary,
           ntpSecondaryIsIp ? 1 : 0);
   clkTrace("servers %s(ip=%d) %s(ip=%d)", ntpPrimary, ntpPrimaryIsIp ? 1 : 0, ntpSecondary, ntpSecondaryIsIp ? 1 : 0);
+  // configTzTime overwrites the process TZ, and UTC0 is what the rest of this class
+  // expects the clock to keep -- but the display rule has to come back afterwards.
+  const char* tzBefore = getenv("TZ");
+  char savedTz[64] = {0};
+  if (tzBefore) snprintf(savedTz, sizeof(savedTz), "%s", tzBefore);
   configTzTime("UTC0", ntpPrimary, ntpSecondary);
   // Mark configured so isPosixTimeValid() / getTime() / getDate() pick up the async SNTP
   // result even if we time out below before the first packet arrives.
@@ -627,6 +618,7 @@ bool HalClock::syncFromNTP(uint32_t maxWaitMs, const volatile bool* abortFlag) {
         // time outlives this power cycle. No-op on boards without one.
         writeSystemClockToHwRtc(timeinfo);
       }
+      setTimezone(savedTz);
       return true;
     }
     delay(100);
@@ -636,5 +628,6 @@ bool HalClock::syncFromNTP(uint32_t maxWaitMs, const volatile bool* abortFlag) {
   // picked up by isPosixTimeValid() on the next clock read.
   LOG_INF("CLK", "NTP sync pending (SNTP still in progress)");
   clkTrace("sync timeout after %lums, sntp still pending", (unsigned long)maxWaitMs);
+  setTimezone(savedTz);  // the rule survives a sync that never landed
   return false;
 }

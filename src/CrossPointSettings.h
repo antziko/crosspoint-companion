@@ -73,6 +73,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     STATUS_BAR_CLOCK_MODE_COUNT
   };
 
+  // Auto follows the timezone's baked DST rule; On/Off override it — the
+  // escape hatch for a zone whose law changed before the firmware caught up.
+  enum CLOCK_DST_MODE { CLOCK_DST_AUTO = 0, CLOCK_DST_ON = 1, CLOCK_DST_OFF = 2, CLOCK_DST_MODE_COUNT };
+
   enum ORIENTATION {
     PORTRAIT = 0,       // 480x800 logical coordinates (current default)
     LANDSCAPE_CW = 1,   // 800x480 logical coordinates, rotated 180° (swap top/bottom)
@@ -384,12 +388,18 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Draw the header band (title, battery, WiFi, clock) on screens other than Home.
   // 0 collapses it everywhere else, handing its height back to the content.
   uint8_t topBarOtherScreens = 1;
-  // Clock UTC offset in quarter-hour steps, biased by 48 so it fits in uint8_t.
-  // Value 48 = UTC+0, 0 = UTC-12:00, 104 = UTC+14:00.
-  // Quarter-hour granularity supports oddball zones like Nepal (+5:45) and Chatham (+12:45).
+  // LEGACY, kept for migration only: quarter-hour UTC offset biased by 48 (48 = UTC+0).
+  // Superseded by clockTimezone; read once by timezones::activeIndex() when that is unset.
   uint8_t clockUtcOffsetQ = 48;
   // Clock display format: 0 = 24-hour, 1 = 12-hour
   uint8_t clockFormat = 0;
+  // Index into the timezone table (src/util/Timezones.cpp, append-only).
+  // 255 = never chosen; falls back to the legacy UTC offset, then UTC.
+  uint8_t clockTimezone = 255;
+  // CLOCK_DST_MODE: follow the zone's DST rule, or force it on/off.
+  uint8_t clockDst = CLOCK_DST_AUTO;
+  // Show the clock opposite the battery in every header band that draws one.
+  uint8_t clockShowInHeader = 0;
   // Set once an NTP sync succeeds. Used to skip re-syncing on every WiFi connect.
   // Resetting to 0 (e.g. via the web UI) forces a re-sync on next WiFi connect.
   uint8_t clockHasBeenSynced = 0;

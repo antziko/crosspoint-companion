@@ -611,6 +611,17 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
 #endif
   batteryReserve = static_cast<int16_t>(batteryReserve + lightReserve);
 
+  // Header clock, opposite the battery, on every screen that draws this
+  // header band (SETTINGS.clockShowInHeader).
+  char clockText[10] = {0};
+  int16_t clockWidth = 0;
+  if (SETTINGS.clockShowInHeader && halClock.isAvailable() &&
+      halClock.formatTime(clockText, sizeof(clockText), SETTINGS.clockFormat == 1)) {
+    clockWidth = ui.target.measureText(fui::GfxRendererTarget::FONT_SMALL, clockText, tokens.smallText).width;
+  } else {
+    clockText[0] = '\0';
+  }
+
   fui::HeaderProps props;
   props.title = title;
   props.rightLabel = subtitle;  // firmware headers right-align the secondary text
@@ -661,6 +672,16 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
       props.leftReserve = reserve;
     } else {
       props.rightReserve = reserve;
+    }
+    // The clock sits opposite the battery on the shared line; keep the title
+    // clear of it too.
+    if (clockText[0] != '\0') {
+      const int16_t clockReserve = static_cast<int16_t>(clockWidth + tokens.spaceMd);
+      if (batteryLeft) {
+        props.rightReserve = static_cast<int16_t>(props.rightReserve + clockReserve);
+      } else {
+        props.leftReserve = static_cast<int16_t>(props.leftReserve + clockReserve);
+      }
     }
   }
   // Underline only under a titled header: an untitled band (Lyra home screen)
@@ -738,6 +759,14 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
   // the battery group share one baseline instead of the clock riding high.
   drawTopBarClockDate(renderer, band.y + (batteryH - renderer.getLineHeight(SMALL_FONT_ID)) / 2);
 
+  if (clockText[0] != '\0') {
+    // Same top strip and edge inset as the battery, mirrored to the other
+    // side, so the two read as one balanced status line.
+    const int16_t clockX = batteryLeft ? static_cast<int16_t>(band.right() - batteryEdgeInset - clockWidth)
+                                       : static_cast<int16_t>(band.x + batteryEdgeInset);
+    ui.target.text(fui::Rect{clockX, band.y, clockWidth, batteryH}, clockText, tokens.smallText);
+  }
+
   if (manualRightLabel) {
     const fui::Size labelSize = ui.target.measureText(fui::GfxRendererTarget::FONT_SMALL, subtitle, tokens.smallText);
     const int16_t labelH = ui.target.lineHeight(fui::GfxRendererTarget::FONT_SMALL);
@@ -753,11 +782,9 @@ void BaseTheme::drawTopBarClockDate(const GfxRenderer& renderer, int y) const {
   char dateBuf[12] = {};
   char timeBuf[9] = {};
   const bool hasDate =
-      SETTINGS.homeTopBarDate &&
-      halClock.formatDate(dateBuf, sizeof(dateBuf), SETTINGS.clockUtcOffsetQ, SETTINGS.homeTopBarDateFormat);
+      SETTINGS.homeTopBarDate && halClock.formatDate(dateBuf, sizeof(dateBuf), SETTINGS.homeTopBarDateFormat);
   const bool hasTime =
-      SETTINGS.homeTopBarClock &&
-      halClock.formatTime(timeBuf, sizeof(timeBuf), SETTINGS.clockUtcOffsetQ, SETTINGS.clockFormat == 1);
+      SETTINGS.homeTopBarClock && halClock.formatTime(timeBuf, sizeof(timeBuf), SETTINGS.clockFormat == 1);
   if (!hasDate && !hasTime) return;
   char dtBuf[24] = {};
   if (hasDate && hasTime)
@@ -1327,12 +1354,12 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
 
   if (halClock.isAvailable()) {
     if (SETTINGS.statusBarDate) {
-      if (halClock.formatDate(dateBuf, sizeof(dateBuf), SETTINGS.clockUtcOffsetQ, SETTINGS.dateFormat)) {
+      if (halClock.formatDate(dateBuf, sizeof(dateBuf), SETTINGS.dateFormat)) {
         dateTextWidth = renderer.getTextWidth(SMALL_FONT_ID, dateBuf);
       }
     }
     if (SETTINGS.statusBarClock) {
-      if (halClock.formatTime(timeBuf, sizeof(timeBuf), SETTINGS.clockUtcOffsetQ, SETTINGS.clockFormat == 1)) {
+      if (halClock.formatTime(timeBuf, sizeof(timeBuf), SETTINGS.clockFormat == 1)) {
         clockTextWidth = renderer.getTextWidth(SMALL_FONT_ID, timeBuf);
       }
     }

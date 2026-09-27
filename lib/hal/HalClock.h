@@ -18,6 +18,12 @@ class HalClock {
   // DS3231 code. Only hasHardwareRtc() folds the two together.
   bool _hwRtcPresent = false;
   bool _ntpConfigured = false;  // set when configTzTime() called; SNTP runs async after this
+  // UTC epoch from whichever source this board keeps time on; localTime() resolves it
+  // through the TZ rule. Returns false while no source has valid time yet.
+  bool utcEpoch(time_t& out) const;
+  // Raw UTC readers: the RTC/system clock as stored, before the TZ rule.
+  bool getUtcTime(uint8_t& hour, uint8_t& minute) const;
+  bool getUtcDate(uint8_t& dayOfWeek, uint8_t& date, uint8_t& month, uint16_t& year) const;
   mutable uint8_t _cachedHour = 0;
   mutable uint8_t _cachedMinute = 0;
   mutable bool _hasCachedTime = false;
@@ -61,38 +67,43 @@ class HalClock {
   // True if the POSIX system clock has been synced via NTP (X4 only; in-memory, lost on deep sleep)
   bool isSystemTimeValid() const { return isPosixTimeValid(); }
 
-  // Get current hour (0-23) and minute (0-59).
+  // Set the POSIX TZ rule (e.g. "CET-1CEST,M3.5.0,M10.5.0/3") applied to every
+  // read. nullptr/empty falls back to UTC. Drops the read cache so the change
+  // shows immediately.
+  void setTimezone(const char* posixTz);
+
+  // Current wall-clock time in the configured timezone.
+  // Returns false if RTC is not available.
+  bool localTime(struct tm& out) const;
+
+  // Get current local hour (0-23) and minute (0-59).
   // Returns false if RTC is not available.
   bool getTime(uint8_t& hour, uint8_t& minute) const;
 
-  // Format time into a caller-provided buffer.
+  // Format the local time into a caller-provided buffer.
   // 24h mode produces "HH:MM" (needs >=6 bytes); 12h mode produces "H:MM AM"/"HH:MM PM" (needs >=9 bytes).
-  // utcOffsetQuarterHoursBiased: biased quarter-hour offset (48 = UTC+0, 0 = UTC-12, 104 = UTC+14).
-  // use12Hour: when true, format as 12-hour clock with AM/PM suffix.
   // Returns false if RTC is not available.
-  bool formatTime(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHoursBiased = 48, bool use12Hour = false) const;
+  bool formatTime(char* buf, size_t bufSize, bool use12Hour = false) const;
 
   // Get current date from DS3231. dayOfWeek is 1-7 (1=Sunday); month is 1-12.
   // Returns false if RTC is not available.
   bool getDate(uint8_t& dayOfWeek, uint8_t& date, uint8_t& month, uint16_t& year) const;
 
   // Format date into a caller-provided buffer. Needs >=12 bytes.
-  // utcOffsetQuarterHoursBiased: same encoding as formatTime() (48 = UTC+0).
   // dateFormat: 0="30 Jun", 1="Mon, 30 Jun", 2="30/06", 3="Mon, 30/06"
-  // Adjusts the displayed date by ±1 day when the offset crosses midnight.
+  // The date follows the TZ rule, so it rolls with local midnight, not UTC's.
   // Returns false if RTC is not available.
-  bool formatDate(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHoursBiased = 48, uint8_t dateFormat = 0) const;
+  bool formatDate(char* buf, size_t bufSize, uint8_t dateFormat = 0) const;
 
-  // Get the local calendar date/time: raw RTC reads with utcOffsetQuarterHoursBiased
-  // applied and the date/day-of-week rolled by ±1 day when the offset crosses midnight
-  // (same arithmetic as formatDate/formatTime, returned as fields instead of a string).
+  // Get the local calendar date/time: the UTC the clock keeps, resolved through the
+  // active POSIX TZ rule (same path as formatDate/formatTime, as fields not a string).
   // dayOfWeek is 1-7 (1=Sunday); month is 1-12; hour/minute are 0-23/0-59, already wrapped.
   // Use this -- not raw getDate()/getTime() -- for anything that buckets data by the
   // user's local calendar day (e.g. reading-history stats), so a session started just
   // after local midnight isn't attributed to the RTC's still-previous UTC day.
   // Returns false if RTC is not available.
-  bool getLocalDateTime(uint8_t utcOffsetQuarterHoursBiased, uint8_t& dayOfWeek, uint8_t& date, uint8_t& month,
-                        uint16_t& year, uint8_t& hour, uint8_t& minute) const;
+  bool getLocalDateTime(uint8_t& dayOfWeek, uint8_t& date, uint8_t& month, uint16_t& year, uint8_t& hour,
+                        uint8_t& minute) const;
 
   // Sync the DS3231 RTC from an NTP server. Requires WiFi to be connected.
   // Blocks up to maxWaitMs while waiting for SNTP (default 5s for UI callers;

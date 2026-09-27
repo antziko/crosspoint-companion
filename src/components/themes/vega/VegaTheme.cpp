@@ -67,7 +67,7 @@ constexpr const char* MONTH_ABBR[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun"
 
 void formatLastRead(uint32_t dayIndex, uint8_t hour, uint8_t minute, char* buf, size_t len) {
   // dayIndex/hour/minute are stored as local-calendar values -- EpubReaderActivity's
-  // onExit captures them via HalClock::getLocalDateTime(SETTINGS.clockUtcOffsetQ, ...),
+  // onExit captures them via HalClock::getLocalDateTime(...),
   // which already applies the UTC-offset+rollover arithmetic (HalClock.cpp) before
   // persisting (see BookReadingStats::lastReadDayIndex). No further correction here --
   // re-applying the offset at display time would double-shift the stamp.
@@ -167,7 +167,7 @@ HeroDetails loadHeroDetails(const RecentBook& book) {
       // heatmapAnchorDay by getLocalDateTime, so the "today" comparison must
       // use the same basis or the count vanishes whenever UTC and local dates
       // differ (e.g. local 00:00-08:00 at UTC+8).
-      if (halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, dow, day, month, year, hour, minute)) {
+      if (halClock.getLocalDateTime(dow, day, month, year, hour, minute)) {
         const uint32_t todayIdx = readingHistoryDayIndex(year, month, day);
         auto history = makeUniqueNoThrow<ReadingTimeHistory>();
         if (history) {

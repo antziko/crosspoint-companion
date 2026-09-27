@@ -574,16 +574,15 @@ void EpubReaderActivity::commitReadingTime(uint32_t minDeltaSecs) {
   const uint32_t deltaSecs = effectiveSecs - sessionCommittedSecs;
   if (deltaSecs < minDeltaSecs) return;
 
-  // Use the local calendar day (RTC raw date + SETTINGS.clockUtcOffsetQ), not the
-  // RTC's raw date -- a session that starts just after local midnight must be
+  // Use the local calendar day (the RTC's UTC resolved through the active timezone
+  // rule), not the RTC's raw date -- a session that starts just after local midnight must be
   // attributed to "today", not the RTC's still-previous UTC-ish day, or the
   // weekly/monthly/yearly/heatmap history buckets it under the wrong date.
   // Evaluated per commit: on X4 a mid-session NTP sync upgrades later deltas
   // from undated to dated.
   uint8_t dayOfWeek = 0, day = 0, month = 0, hour = 0, minute = 0;
   uint16_t year = 0;
-  const bool dated = halClock.isAvailable() &&
-                     halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, dayOfWeek, day, month, year, hour, minute);
+  const bool dated = halClock.isAvailable() && halClock.getLocalDateTime(dayOfWeek, day, month, year, hour, minute);
   recordReadingSession(epub->getCachePath(), readingStats, deltaSecs, dated, year, month, day, dayOfWeek, hour, minute);
   sessionCommittedSecs += deltaSecs;
 }
@@ -3352,7 +3351,7 @@ bool EpubReaderActivity::maybeStartInlineReview() {
 
   uint8_t dayOfWeek = 0, day = 0, month = 0, hour = 0, minute = 0;
   uint16_t year = 0;
-  if (!halClock.getLocalDateTime(SETTINGS.clockUtcOffsetQ, dayOfWeek, day, month, year, hour, minute)) return false;
+  if (!halClock.getLocalDateTime(dayOfWeek, day, month, year, hour, minute)) return false;
   const uint32_t today = readingHistoryDayIndex(year, month, day);
 
   if (!FlashcardDeck::hasDueCards(epub->getCachePath(), today)) {
