@@ -911,10 +911,7 @@ static void delayWallClock(const unsigned long ms) {
   }
 }
 
-// X4 Pro: a double click of POWER toggles the frontlight. Returns true when the
-// release was consumed as the second click, so the caller skips the configured
-// short-press action for it.
-// Returns the new state, which the power-button path shows in a toast.
+// Returns the new state, which toggleFrontlightWithFeedback() shows in a toast.
 static bool toggleFrontlight() {
   if (!Frontlight.present()) return false;
   const bool lightOn = !Frontlight.isOn();
@@ -925,28 +922,19 @@ static bool toggleFrontlight() {
   return lightOn;
 }
 
-static bool handleX4ProFrontlightDoubleClick() {
-  if (!BoardConfig::isX4Pro() || !SETTINGS.doubleClickPwrLight || !gpio.wasReleased(HalGPIO::BTN_POWER)) {
-    return false;
-  }
-
-  const unsigned long now = millis();
-  // A long hold is the sleep gesture, never half of a double click.
-  if (gpio.getPowerButtonHeldTime() > X4PRO_POWER_CLICK_MAX_HOLD_MS) {
-    lastX4ProPowerClickAt = 0;
-    return false;
-  }
-
-  if (lastX4ProPowerClickAt == 0 || now - lastX4ProPowerClickAt > X4PRO_POWER_DOUBLE_CLICK_MS) {
-    lastX4ProPowerClickAt = now;
-    return false;
-  }
-
-  lastX4ProPowerClickAt = 0;
+// Toggle plus the acknowledgement every gesture-driven toggle owes the user: a toast naming
+// the new state, and a repaint so the status bar / header frontlight indicator follows it
+// (BaseTheme reserves that icon only while the light is lit, so the layout only settles on a
+// re-render). Shared by the power double-click and the Home key's ToggleFrontlight action --
+// both are blind gestures with no on-screen control to look at.
+//
+// Must be called outside any RenderLock and from the main loop, not the render task.
+static void toggleFrontlightWithFeedback() {
+  if (!Frontlight.present()) return;
   const bool lightOn = toggleFrontlight();
 
   // Say which way it went. The lamp is the primary feedback, but it is easy to miss in daylight
-  // and this gesture has no other acknowledgement -- a double click that did nothing and one that
+  // and these gestures have no other acknowledgement -- a gesture that did nothing and one that
   // toggled a light you cannot see look identical.
   //
   // Composed from the two existing strings rather than adding "Frontlight On" as one: same shape
@@ -965,6 +953,30 @@ static bool handleX4ProFrontlightDoubleClick() {
   // trade every page turn already makes.
   activityManager.notifyFramebufferInvalidated();
   activityManager.requestUpdate();
+}
+
+// X4 Pro: a double click of POWER toggles the frontlight. Returns true when the
+// release was consumed as the second click, so the caller skips the configured
+// short-press action for it.
+static bool handleX4ProFrontlightDoubleClick() {
+  if (!BoardConfig::isX4Pro() || !SETTINGS.doubleClickPwrLight || !gpio.wasReleased(HalGPIO::BTN_POWER)) {
+    return false;
+  }
+
+  const unsigned long now = millis();
+  // A long hold is the sleep gesture, never half of a double click.
+  if (gpio.getPowerButtonHeldTime() > X4PRO_POWER_CLICK_MAX_HOLD_MS) {
+    lastX4ProPowerClickAt = 0;
+    return false;
+  }
+
+  if (lastX4ProPowerClickAt == 0 || now - lastX4ProPowerClickAt > X4PRO_POWER_DOUBLE_CLICK_MS) {
+    lastX4ProPowerClickAt = now;
+    return false;
+  }
+
+  lastX4ProPowerClickAt = 0;
+  toggleFrontlightWithFeedback();
   return true;
 }
 
@@ -1187,10 +1199,11 @@ void loop() {
     return;
   }
 
-  // Refresh screen when power button is short-pressed with FORCE_REFRESH setting.
   if (mappedInputManager.homeButtonAction() == HomeButtonAction::ToggleFrontlight) {
-    toggleFrontlight();
+    toggleFrontlightWithFeedback();
   }
+
+  // Refresh screen when power button is short-pressed with FORCE_REFRESH setting.
   if (mappedInputManager.homeButtonAction() == HomeButtonAction::Refresh ||
       (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::FORCE_REFRESH &&
        mappedInputManager.wasReleased(MappedInputManager::Button::Power))) {
