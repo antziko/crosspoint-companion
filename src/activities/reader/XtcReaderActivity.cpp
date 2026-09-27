@@ -42,10 +42,11 @@ void XtcReaderActivity::onEnter() {
   // Load saved progress
   loadProgress();
 
-  // Save current XTC as last opened book and add to recent books
-  APP_STATE.openEpubPath = xtc->getPath();
-  APP_STATE.saveToFile();
-  RECENT_BOOKS.addBook(xtc->getPath(), xtc->getTitle(), xtc->getAuthor(), xtc->getThumbBmpPath());
+  // Drop the remembered book until a page has rendered; see commitOpenBook().
+  if (!APP_STATE.openEpubPath.empty()) {
+    APP_STATE.openEpubPath.clear();
+    APP_STATE.saveToFile();
+  }
 
   // Trigger first update
   requestUpdate();
@@ -71,7 +72,15 @@ void XtcReaderActivity::openChapterSelection() {
   }
 }
 
+void XtcReaderActivity::commitOpenBook() {
+  if (!xtc || !openBookRecord.shouldCommit()) return;
+  APP_STATE.openEpubPath = xtc->getPath();
+  APP_STATE.saveToFile();
+  RECENT_BOOKS.addBook(xtc->getPath(), xtc->getTitle(), xtc->getAuthor(), xtc->getThumbBmpPath());
+}
+
 void XtcReaderActivity::loop() {
+  commitOpenBook();
   if (!xtc) {
     return;
   }
@@ -194,10 +203,12 @@ void XtcReaderActivity::render(RenderLock&&) {
       endOfBookOptions->render(renderer, mappedInput);
     }
     renderer.displayBuffer();
+    openBookRecord.markPageRendered();
     return;
   }
 
   renderPage();
+  openBookRecord.markPageRendered();
   saveProgress();
 }
 

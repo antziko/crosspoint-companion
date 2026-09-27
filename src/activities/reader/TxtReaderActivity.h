@@ -7,6 +7,7 @@
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"  // NO_ORIENTATION_REQUEST
+#include "OpenBookRecord.h"
 #include "TxtReaderMenuActivity.h"
 #include "activities/Activity.h"
 
@@ -95,6 +96,10 @@ class TxtReaderActivity final : public Activity {
   void onEnter() override;
   void onExit() override;
   void onResume() override;
+  // Records the open book once its first page has reached the panel.
+  OpenBookRecord openBookRecord;
+  void commitOpenBook();
+
   void loop() override;
   void render(RenderLock&&) override;
   bool isReaderActivity() const override { return true; }

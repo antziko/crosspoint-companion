@@ -15,6 +15,7 @@
 #include <utility>
 
 #include "EndOfBookOptions.h"
+#include "OpenBookRecord.h"
 #include "activities/Activity.h"
 
 class XtcReaderActivity final : public Activity {
@@ -55,6 +56,10 @@ class XtcReaderActivity final : public Activity {
         pagesUntilFullRefresh(initialRefreshCountdown) {}
   void onEnter() override;
   void onExit() override;
+  // Records the open book once its first page has reached the panel.
+  OpenBookRecord openBookRecord;
+  void commitOpenBook();
+
   void loop() override;
   void render(RenderLock&&) override;
   bool isReaderActivity() const override { return true; }

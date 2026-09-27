@@ -91,12 +91,11 @@ void TxtReaderActivity::onEnter() {
   // Reload any SD-card font at this book's (override) size before the first layout.
   sdFontSystem.ensureLoaded(renderer);
 
-  // Save current txt as last opened file and add to recent books
-  auto filePath = txt->getPath();
-  auto fileName = filePath.substr(filePath.rfind('/') + 1);
-  APP_STATE.openEpubPath = filePath;
-  APP_STATE.saveToFile();
-  RECENT_BOOKS.addBook(filePath, fileName, "", "");
+  // Drop the remembered book until a page has rendered; see commitOpenBook().
+  if (!APP_STATE.openEpubPath.empty()) {
+    APP_STATE.openEpubPath.clear();
+    APP_STATE.saveToFile();
+  }
 
   // Trigger first update
   requestUpdate();
@@ -130,7 +129,16 @@ void TxtReaderActivity::onExit() {
   txt.reset();
 }
 
+void TxtReaderActivity::commitOpenBook() {
+  if (!txt || !openBookRecord.shouldCommit()) return;
+  const auto filePath = txt->getPath();
+  APP_STATE.openEpubPath = filePath;
+  APP_STATE.saveToFile();
+  RECENT_BOOKS.addBook(filePath, filePath.substr(filePath.rfind('/') + 1), "", "");
+}
+
 void TxtReaderActivity::loop() {
+  commitOpenBook();
   // Adopt a control-center rotation latched by onResume(). Here, not there: this runs
   // on the main task with no lock held, so applyOrientation() can take the render lock.
   if (pendingOrientationAdopt != CrossPointState::NO_ORIENTATION_REQUEST) {
@@ -503,6 +511,7 @@ void TxtReaderActivity::render(RenderLock&&) {
 
   renderer.clearScreen();
   renderPage();
+  openBookRecord.markPageRendered();
 
   // Save progress
   saveProgress();

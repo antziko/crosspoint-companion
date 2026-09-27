@@ -12,6 +12,7 @@
 #include "CrossPointState.h"  // NO_ORIENTATION_REQUEST
 #include "EndOfBookOptions.h"
 #include "EpubReaderMenuActivity.h"
+#include "OpenBookRecord.h"
 #include "ProgressMapper.h"
 #include "ReaderToolbarUi.h"
 #include "SyncScope.h"
@@ -332,6 +333,9 @@ class EpubReaderActivity final : public Activity {
   // True when the section still owes pages the reader is about to need. Says nothing
   // about heap admission — buildTickHeapGate() decides that separately.
   bool backgroundBuildWanted() const;
+  // Records the open book once its first page has reached the panel.
+  OpenBookRecord openBookRecord;
+  void commitOpenBook();
   // Gate for a background build tick: true when the heap can take parse allocations.
   // Updates buildHeapPaused as a side effect.
   bool buildTickHeapGate();

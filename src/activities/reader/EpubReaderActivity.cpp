@@ -355,10 +355,13 @@ void EpubReaderActivity::onEnter() {
     }
   }
 
-  // Save current epub as last opened epub and add to recent books
-  APP_STATE.openEpubPath = epub->getPath();
-  APP_STATE.saveToFile();
-  RECENT_BOOKS.addBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), epub->getThumbBmpPath());
+  // Drop the remembered book before the first layout, and put it back only once a page
+  // has rendered (commitOpenBook). A book that cannot be indexed would otherwise be
+  // reopened on every wake, with no way out but pulling the card.
+  if (!APP_STATE.openEpubPath.empty()) {
+    APP_STATE.openEpubPath.clear();
+    APP_STATE.saveToFile();
+  }
 
   BOOKMARKS.loadForBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), "epub");
   reloadLookupMarks();
@@ -665,6 +668,7 @@ void EpubReaderActivity::openFootnoteSelect(const bool reopenMenuOnCancel) {
 }
 
 void EpubReaderActivity::loop() {
+  commitOpenBook();
   if (!epub) {
     // Should never happen
     finish();
@@ -2479,6 +2483,13 @@ void EpubReaderActivity::pageTurn(bool isForwardTurn) {
 }
 
 // TODO: Failure handling
+void EpubReaderActivity::commitOpenBook() {
+  if (!epub || !openBookRecord.shouldCommit()) return;
+  APP_STATE.openEpubPath = epub->getPath();
+  APP_STATE.saveToFile();
+  RECENT_BOOKS.addBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), epub->getThumbBmpPath());
+}
+
 bool EpubReaderActivity::backgroundBuildWanted() const {
   // While extending a partial (rebuild from a previous session), pageCount is pinned at the
   // partial's watermark until the build catches up, so the window check would wrongly read
@@ -2519,6 +2530,10 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   // clearScreen first so the error popup doesn't overlay the stale "Indexing" popup.
   const auto showBuildError = [this](const Section::BuildFailure& bf = Section::BuildFailure{}) {
     renderer.clearScreen();
+    // Hints, not just the popup: this screen is a dead end otherwise, and the book it was
+    // reached from is exactly the one that must not be reopened on the next wake.
+    const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     GUI.drawPopup(renderer, tr(STR_INDEX_FAILED));
     // Phase-A [E2] diagnostics: which build branch failed + the heap captured AT the failure point
     // (before the build's cleanup recovered it), so the number is real, not the post-reset heap.
@@ -2986,6 +3001,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     renderContents(std::move(p), orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft);
     LOG_DBG("ERS", "Rendered page in %dms", millis() - start);
     lastRenderCompleteMs = millis();
+    openBookRecord.markPageRendered();
     // EPUB steady-state heap profile (post-render, font cache already freed). Watch
     // `largest` for fragmentation and `minEver` for the worst-case low-water mark.
     LOG_DBG("MEM", "epub-page free=%u largest=%u minEver=%u", (unsigned)ESP.getFreeHeap(),
