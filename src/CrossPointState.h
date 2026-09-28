@@ -52,6 +52,14 @@ class CrossPointState : public PersistableStore<CrossPointState> {
   // gesture across a confirmation prompt / sync activity. Runtime only — NOT serialized.
   bool requestManualSleep = false;
 
+  // Home-key "Toggle Status Bar": blanks the reader status bar on demand, except the progress
+  // bar, which stays in both states (BaseTheme::drawStatusBar). Only the draw is skipped --
+  // UITheme::getStatusBarHeight() still reserves the strip, so the reader viewport
+  // is unchanged and nothing re-paginates. Reclaiming the strip instead would move
+  // viewportHeight, which section.bin keys on, and rebuild the chapter on every toggle.
+  // Runtime only -- NOT serialized, so the bar comes back after a deep sleep.
+  bool statusBarHidden = false;
+
   // Sleep deck helpers (see SLEEP_DECK_MAX above).
   bool isSleepShown(uint16_t idx) const;  // already shown this cycle?
   void markSleepShown(uint16_t idx);      // record idx as shown this cycle

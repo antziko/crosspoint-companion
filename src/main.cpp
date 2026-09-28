@@ -1203,6 +1203,18 @@ void loop() {
     toggleFrontlightWithFeedback();
   }
 
+  // Show/hide the reader status bar as the user has configured it -- one gesture for the whole
+  // band, rather than walking the individual Customise Status Bar rows. Handled here, not in
+  // EpubReaderActivity::runReaderAction(), so the EPUB, TXT and XTC readers share one dispatch;
+  // they all draw the band through BaseTheme::drawStatusBar, which is where the flag is read.
+  // Reader-gated because there is no status bar elsewhere: the bottom band on other screens is
+  // the button hints, whose height feeds getNumberOfItemsPerPage() and would reflow every list.
+  if (mappedInputManager.homeButtonAction() == HomeButtonAction::ToggleStatusBar &&
+      activityManager.isReaderActivity()) {
+    APP_STATE.statusBarHidden = !APP_STATE.statusBarHidden;
+    activityManager.requestUpdate();
+  }
+
   // Refresh screen when power button is short-pressed with FORCE_REFRESH setting.
   if (mappedInputManager.homeButtonAction() == HomeButtonAction::Refresh ||
       (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::FORCE_REFRESH &&

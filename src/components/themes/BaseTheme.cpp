@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <string>
 
+#include "CrossPointState.h"
 #include "I18n.h"
 #include "RecentBooksStore.h"
 #include "components/HeaderBackTapTarget.h"
@@ -1240,6 +1241,12 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
                               const int pageCount, std::string title, const int paddingBottom, const int textYOffset,
                               const bool fillMargin, const bool isPageBookmarked, const bool isReturnMark,
                               const bool isPageQuoted, const bool pageCountEstimated) const {
+  // Hidden by the Home-key "Toggle Status Bar" gesture. The progress bar is exempt (see the
+  // return below); everything else in the band is skipped. The strip stays reserved in the
+  // layout, so this costs one repaint and no re-pagination; the callers all clearScreen()
+  // before rendering the page, so no stale band ink survives.
+  const bool hidden = APP_STATE.statusBarHidden;
+
   auto metrics = UITheme::getInstance().getMetrics();
   int orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft;
   renderer.getOrientedViewableTRBL(&orientedMarginTop, &orientedMarginRight, &orientedMarginBottom,
@@ -1250,7 +1257,7 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
   auto textY = screenHeight - UITheme::getInstance().getStatusBarHeight() - orientedMarginBottom - paddingBottom - 4;
   int progressTextWidth = 0;
 
-  if (SETTINGS.statusBarBookProgressPercentage || SETTINGS.statusBarChapterPageCount) {
+  if (!hidden && (SETTINGS.statusBarBookProgressPercentage || SETTINGS.statusBarChapterPageCount)) {
     // Right aligned text for progress counter
     char progressStr[32];
 
@@ -1294,6 +1301,11 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
         ((SETTINGS.statusBarProgressBarThickness + 1) * 2) + (fillMargin ? orientedMarginBottom - 1 : 0);
     renderer.fillRect(barMarginLeft, progressBarY, barWidth, barHeight, true);
   }
+
+  // The progress bar above survives the hide gesture: it reads as page furniture rather than
+  // chrome, and it is what keeps a sense of position once the band is gone. It still honours
+  // Customise Status Bar > Progress Bar, so it draws nothing when that is set to Hide.
+  if (hidden) return;
 
   // Left-cluster indicators: bookmark tab and/or quote (highlight) glyph. Both can show
   // when a page holds a point bookmark AND a quote.
