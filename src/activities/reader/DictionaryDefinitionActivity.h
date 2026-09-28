@@ -11,6 +11,7 @@
 #include "components/OptionPopup.h"
 #include "fontIds.h"  // IPA_FONT_ID, used by ipaFontId() below
 #include "util/DictLayout.h"
+#include "util/DictNotes.h"
 #include "util/DictionaryLookupController.h"
 #include "util/IpaUtils.h"
 #include "util/LookupChain.h"
@@ -196,6 +197,14 @@ class DictionaryDefinitionActivity final : public Activity {
   // kept alive mid-parse; that is the won't-fixed 2c).
   DictHtmlRenderer htmlRenderer_;
 
+  // Where this definition's saved notes sit on the page now resident. Recomputed by loadPage()
+  // (a page turn), never per frame: the match is a scan of the page's text, and this screen
+  // repaints on every cursor move in word-select mode.
+  static constexpr int MAX_NOTE_SPANS = 16;
+  DictNotes::Span noteSpans_[MAX_NOTE_SPANS];
+  int noteSpanCount_ = 0;
+  void computeNoteSpans();
+
   // Page-collector state (used by collectLineSink during a wrap pass): keep only
   // collectTargetPage_'s lines into layoutLines, counting all lines produced.
   int collectTargetPage_ = 0;
@@ -256,11 +265,12 @@ class DictionaryDefinitionActivity final : public Activity {
   int bodyStartY = 0;  // top of the text body (set in wrapText)
 
   // Word-select mode (activated by pressing Look Up Word in view mode)
-  // Touch boards: look up the word under a held point, chaining forward without entering
-  // word-select mode. No-op when the point hits no word. See the definition for why the mode
-  // itself is not entered.
-  void lookupWordAtPoint(int x, int y);
   bool isWordSelectMode = false;
+  // What the selection is FOR. Lookup is the historical behaviour (Confirm looks the selection
+  // up and chains); Note keeps the selected text through DictNotes instead. One mode, two
+  // outcomes, so the navigator, the highlight and the differential repaint are shared.
+  enum class SelectPurpose : uint8_t { Lookup, Note };
+  SelectPurpose selectPurpose_ = SelectPurpose::Lookup;
   WordSelectNavigator navigator;
   DictionaryLookupController controller;
 
@@ -342,6 +352,21 @@ class DictionaryDefinitionActivity final : public Activity {
   // Allocated only while the picker is up. See the note at its definition for why this one
   // screen does not hold an OptionPopup by value the way every other host does.
   std::unique_ptr<OptionPopup> dictPicker_;
+  // Look Up / Highlight, offered where a selection has been made: on a touch hold over a word,
+  // and when a multi-select phrase is ready on a board with buttons. Allocated only while it is
+  // up, for the same reason dictPicker_ is.
+  std::unique_ptr<OptionPopup> wordMenu_;
+  // Open the Look Up / Highlight menu over the word at (x, y). Returns false when the point
+  // hits no word, leaving the gesture unconsumed.
+  bool openWordMenu(int x, int y);
+  // Offer the same two outcomes for a selection. rangeSettled says whether the user has already
+  // chosen both ends: false for the single word under a hold, where Highlight anchors a range
+  // for the next tap to close rather than saving a one-word note nobody asked for; true for a
+  // multi-select range that Confirm has just finished, where Highlight saves it as it stands.
+  void openPhraseMenu(int fromIdx, int toIdx, bool rangeSettled);
+  // Keep [fromIdx, toIdx] as a note and leave selection mode. Reports through a toast, because
+  // the mark it leaves is not visible until the page is repainted.
+  void saveNoteFromSelection(int fromIdx, int toIdx);
   // True when this screen may act on the word's flashcard at all: there is a card, a book to
   // hold it, and the word on screen is still the one the card is filed under. Shared by the Set
   // and Delete offers so the two cannot drift apart -- both would target the wrong card in

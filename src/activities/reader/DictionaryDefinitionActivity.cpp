@@ -49,6 +49,12 @@ namespace {
 constexpr int kChipPadX = 7;
 constexpr int kChipPadY = 5;
 
+// A saved note is marked the way a saved quote is on a book page, so both use the same two
+// numbers (PageMarks.cpp:20-25): a rule of this thickness under the span, or a dither band
+// padded this far either side of it.
+constexpr int kNoteUnderlineThickness = 2;
+constexpr int kNoteBandPadX = 1;
+
 // Scan-pass accumulator for prewarmDefinitionFont(): the deduped set of codepoints the
 // definition uses, as UTF-8, plus the styles it uses them in. Heap-allocated by the caller
 // — the tables exceed the 256-byte stack budget, same reason SdCardFont::prewarm()
@@ -776,8 +782,66 @@ void DictionaryDefinitionActivity::loadPage(int page) {
   // against the ~3.2 s that turn already spends in the panel refresh.
   htmlRenderer_.releaseParser();
 
+  // Where this page's saved notes sit. Here rather than in render(): this runs once per page
+  // turn, where the wrap above has already cost seconds, while render() runs on every cursor
+  // move in word-select mode.
+  computeNoteSpans();
+
   if (fcm) fcm->logStats("dict-wrap");
   logDictPhase(renderer, defFontId_, "wrap", millis() - t0);
+}
+
+void DictionaryDefinitionActivity::computeNoteSpans() {
+  noteSpanCount_ = 0;
+  if (currentWord_.empty() || layoutLines.empty()) return;
+  if (SETTINGS.quoteHighlightStyle == CrossPointSettings::QUOTE_STYLE_OFF) return;
+
+  // A mark is an adornment: skipping one costs a band, not a page, so this declines on a tight
+  // heap instead of competing with the wrap that just finished. Lower than the word-select gate
+  // (extractWordsFromLayout) because the allocations below are two small fixed arrays, not a
+  // page's worth of words.
+  constexpr size_t kMinFreeForMarks = 8 * 1024;
+  constexpr size_t kMinBlockForMarks = 3 * 1024;
+  if (ESP.getFreeHeap() < kMinFreeForMarks || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < kMinBlockForMarks) {
+    LOG_DBG("DDA", "note marks skipped: free=%u largest=%u", static_cast<unsigned>(ESP.getFreeHeap()),
+            static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+    return;
+  }
+
+  auto marks = makeUniqueNoThrow<DictNotes::Mark[]>(DictNotes::MAX_MARKS);
+  if (!marks) {
+    LOG_ERR("DDA", "OOM: note marks");
+    return;
+  }
+  const uint32_t dictHash = DictUtils::activeDictHash(cachePath.empty() ? nullptr : cachePath.c_str());
+  const int markCount = DictNotes::loadMarksForWord(currentWord_, dictHash, marks.get(), DictNotes::MAX_MARKS);
+  if (markCount == 0) return;  // the common case: this word has no notes, so nothing is scanned
+
+  // Segment view of the page in the order renderBody draws it -- that order IS the index the
+  // spans carry back, so the two walks must be bounded identically.
+  const int lineCount = std::min(linesPerPage, static_cast<int>(layoutLines.size()));
+  int segCount = 0;
+  for (int i = 0; i < lineCount; i++) segCount += static_cast<int>(layoutLines[i].segments.size());
+  if (segCount <= 0) return;
+  auto segs = makeUniqueNoThrow<DictNotes::Segment[]>(segCount);
+  if (!segs) {
+    LOG_ERR("DDA", "OOM: note segments (%d)", segCount);
+    return;
+  }
+  int n = 0;
+  for (int i = 0; i < lineCount; i++) {
+    for (const auto& seg : layoutLines[i].segments) {
+      segs[n].text = pagePool_.data() + seg.offset;
+      segs[n].len = seg.len;
+      n++;
+    }
+  }
+
+  for (int i = 0; i < markCount && noteSpanCount_ < MAX_NOTE_SPANS; i++) {
+    noteSpanCount_ += DictNotes::findSpans(segs.get(), segCount, marks[i].text, noteSpans_ + noteSpanCount_,
+                                           MAX_NOTE_SPANS - noteSpanCount_);
+  }
+  LOG_DBG("DDA", "note marks: %d note(s) -> %d span(s)", markCount, noteSpanCount_);
 }
 
 void DictionaryDefinitionActivity::collectLineSink(void* ctx, DictLayout::LayoutLine&& line) {
@@ -1462,30 +1526,29 @@ bool DictionaryDefinitionActivity::setCardDictToActive() {
   return true;
 }
 
-void DictionaryDefinitionActivity::lookupWordAtPoint(const int x, const int y) {
-  // Chain forward from a held word. This is the only route into a second lookup on a board with
-  // no Confirm button: word-select mode is driven by handleNavigation/handleConfirmLookup, so
-  // entering it there would be a dead end. The three calls below are the same ones the reader's
-  // word-select makes for a tapped word (DictionaryWordSelectActivity.cpp:734-741).
+bool DictionaryDefinitionActivity::openWordMenu(const int x, const int y) {
+  // The hold is the only route into a second lookup on a board with no Confirm button --
+  // word-select mode is driven by handleNavigation/handleConfirmLookup, so entering it there
+  // would be a dead end -- and for the same reason it is the only route into a note.
   //
   // Extracted per hold rather than cached: the navigator is built from the page currently laid
   // out, and paging or a dictionary switch replaces it. Rebuilding is what keeps it honest.
   extractWordsFromLayout();
   // Empty means the heap gate declined, and it has already drawn the memory toast -- saying
   // anything more here would talk over it.
-  if (navigator.isEmpty()) return;
+  if (navigator.isEmpty()) return false;
 
   const int hit = navigator.wordIndexAtPoint(x, y, getLineHeight());
   if (hit < 0 || !navigator.selectFlatIndex(hit)) {
     // A hold on a margin or an inter-word gap means nothing; do not guess at the nearest word.
     navigator.reset();
-    return;
+    return false;
   }
-  // Show which word the hold grabbed before acting on it -- the reading page's gesture, beat for
-  // beat (EpubReaderActivity.cpp:1489-1493): invert the word's band, then push just that rectangle.
-  // On a tightly-spaced definition this is the difference between trusting the lookup and guessing
-  // at it. Nothing has to erase the band: the lookup popup and the new definition both repaint
-  // over it.
+  // Show which word the hold grabbed before offering to act on it -- the reading page's gesture,
+  // beat for beat (EpubReaderActivity.cpp:1489-1493): invert the word's band, then push just that
+  // rectangle. On a tightly-spaced definition this is the difference between trusting the choice
+  // and guessing at it. Nothing has to erase the band: the menu, the lookup popup and the new
+  // definition all repaint over it.
   {
     RenderLock lock;  // the band lands in the framebuffer the render task also paints into
     navigator.renderHighlight(renderer, getLineHeight());
@@ -1497,11 +1560,100 @@ void DictionaryDefinitionActivity::lookupWordAtPoint(const int x, const int y) {
   nextRenderMode_ = RenderMode::FullPage;
   prevHighlightIdx_ = -1;
 
-  controller.lookupSelected(navigator);
-  // lookupSelected copies the word out synchronously (DictionaryLookupController.cpp:353-357),
-  // so the words + rows + text pool go back to the heap before the chained definition wraps --
-  // which is the allocation that matters on the X3.
+  openPhraseMenu(hit, hit, /*rangeSettled=*/false);
+  return true;
+}
+
+void DictionaryDefinitionActivity::openPhraseMenu(const int fromIdx, const int toIdx, const bool rangeSettled) {
+  // Allocated per use, exactly as dictPicker_ is and for the same reason -- see the note at
+  // openDictPicker(). On OOM do what the gesture did before this menu existed rather than eating
+  // it: look the selection up.
+  wordMenu_ = makeUniqueNoThrow<OptionPopup>();
+  if (!wordMenu_) {
+    LOG_ERR("DDA", "OOM: word menu");
+    isWordSelectMode = false;
+    controller.lookupOrPopup(navigator.buildPhrase(fromIdx, toIdx));
+    return;
+  }
+
+  // The dialog covers the middle of the page, so the band it is asking about may well be behind
+  // it; naming the selection in the title keeps it readable. Same reason the reading page's hold
+  // menu quotes its word (EpubReaderActivity.cpp:1594-1599).
+  std::string shown = navigator.buildDisplayPhrase(fromIdx, toIdx);
+  constexpr size_t kTitleTextMax = 36;
+  if (shown.size() > kTitleTextMax) {
+    size_t n = kTitleTextMax;
+    while (n > 0 && (static_cast<unsigned char>(shown[n]) & 0xC0) == 0x80) n--;  // never split a codepoint
+    shown.resize(n);
+    shown += "...";
+  }
+  char title[64];
+  snprintf(title, sizeof(title), "\"%s\"", shown.c_str());
+  const char* actions[] = {tr(STR_LOOKUP_SHORT), tr(STR_ADD_HIGHLIGHT)};
+
+  wordMenu_->show(title, actions, static_cast<int>(std::size(actions)), 0,
+                  [this, fromIdx, toIdx, rangeSettled](const int chosen) {
+                    if (chosen == 1) {
+                      if (rangeSettled) {
+                        saveNoteFromSelection(fromIdx, toIdx);
+                        return;
+                      }
+                      // Anchor here and let the next tap pick the other end. The band already
+                      // drawn over this word becomes the start of the range.
+                      selectPurpose_ = SelectPurpose::Note;
+                      isWordSelectMode = navigator.beginMultiSelectAt(fromIdx);
+                      requestUpdate();
+                      return;
+                    }
+                    if (chosen != 0) {
+                      // Dismissed. The words extracted to open this menu are a page's worth of
+                      // heap on the screen with least of it, so they go back now rather than
+                      // living until the next page turn.
+                      if (!isWordSelectMode) navigator.reset();
+                      requestUpdate();  // repaint over the dialog, change nothing else
+                      return;
+                    }
+                    // buildPhrase, not buildDisplayPhrase: a lookup wants the cleaned text, which
+                    // for a single word is exactly what lookupSelected would have used.
+                    isWordSelectMode = false;
+                    const std::string phrase = navigator.buildPhrase(fromIdx, toIdx);
+                    // The words + rows + text pool go back to the heap before the chained
+                    // definition wraps, which is the allocation that matters on the X3;
+                    // lookupOrPopup has copied what it needs by then.
+                    controller.lookupOrPopup(phrase);
+                    navigator.reset();
+                  });
+  requestUpdate();
+}
+
+void DictionaryDefinitionActivity::saveNoteFromSelection(const int fromIdx, const int toIdx) {
+  isWordSelectMode = false;
+  selectPurpose_ = SelectPurpose::Lookup;
+
+  // currentWord_, NOT historyWord: a note belongs to the definition ON SCREEN, and those two
+  // diverge on the first chain-forward. The opposite of the flashcard key, which has to stay on
+  // the word the reader enrolled (see cardActionable()).
+  //
+  // Filed under the DICTIONARY, not the book: the note marks this entry in whatever book it is
+  // opened from next. activeDictHash honours the session override, so a note taken after a
+  // long-press switch is filed under the dictionary actually on screen.
+  const std::string text = navigator.buildDisplayPhrase(fromIdx, toIdx);
+  const uint32_t dictHash = DictUtils::activeDictHash(cachePath.empty() ? nullptr : cachePath.c_str());
+  const bool saved = !text.empty() && DictNotes::add(currentWord_, dictHash, text);
+  if (!saved) LOG_ERR("DDA", "note save failed for '%s'", currentWord_.c_str());
+
   navigator.reset();
+  {
+    RenderLock lock;
+    GUI.drawPopup(renderer, saved ? tr(STR_NOTE_SAVED) : tr(STR_MEMORY_ERROR));  // refreshes internally
+  }
+  delay(700);
+  // The popup was drawn over the page, and the mark this note leaves only appears on the repaint.
+  renderer.forceCleanRefreshNextPaint();
+  nextRenderMode_ = RenderMode::FullPage;
+  prevHighlightIdx_ = -1;
+  computeNoteSpans();
+  requestUpdate();
 }
 
 void DictionaryDefinitionActivity::loop() {
@@ -1511,6 +1663,13 @@ void DictionaryDefinitionActivity::loop() {
   if (dictPicker_) {
     const bool took = dictPicker_->handleInput(mappedInput, [this] { requestUpdate(); });
     if (!dictPicker_->isActive()) dictPicker_.reset();
+    if (took) return;
+  }
+
+  // --- Look Up / Highlight menu (modal, same lifecycle as the picker above) ---
+  if (wordMenu_) {
+    const bool took = wordMenu_->handleInput(mappedInput, [this] { requestUpdate(); });
+    if (!wordMenu_->isActive()) wordMenu_.reset();
     if (took) return;
   }
 
@@ -1560,6 +1719,11 @@ void DictionaryDefinitionActivity::loop() {
         if (!wasDictSwitch) {
           currentWord_ = controller.getLookupWord();
           probeCurrentCard();
+          // wrapText() above marked the page while currentWord_ still named the word being left,
+          // so the spans it found belong to the wrong definition. A switch needs no second pass:
+          // it keeps the word and only changes which dictionary answered, which computeNoteSpans
+          // reads for itself.
+          computeNoteSpans();
         }
         // immediate=true for the same reason as onEnter(): the history write below would
         // otherwise run in front of the render rather than beside it. Same safety argument —
@@ -1615,7 +1779,69 @@ void DictionaryDefinitionActivity::loop() {
       requestUpdate();
     }
 
-    if (controller.handleMultiSelect(navigator)) return;
+    // Touch closes a note range on the second tap -- the first being the hold that opened the
+    // menu. The reading page's own highlight selection works exactly this way
+    // (DictionaryWordSelectActivity.cpp:745-752), and on a board with no Confirm it is the only
+    // way to finish one.
+    //
+    // BEFORE handleMultiSelectInput, not after: a board with touch.synthConfirm turns this very
+    // tap into a Confirm release as well, and that would be read there as "end the range" while
+    // the cursor is still on the anchor -- saving one word instead of the range the finger just
+    // drew.
+    if (selectPurpose_ == SelectPurpose::Note && navigator.isMultiSelecting()) {
+      int tx = 0;
+      int ty = 0;
+      if (mappedInput.wasScreenTapped(tx, ty)) {
+        const int hit = navigator.wordIndexAtPoint(tx, ty, getLineHeight());
+        if (hit >= 0) {
+          // Tapping the anchor again is a legitimate one-word note, so no minimum length.
+          const int anchor = navigator.getAnchorFlatIndex();
+          navigator.selectFlatIndex(hit);
+          saveNoteFromSelection(anchor, hit);
+          // Swallow the synthetic Confirm this tap may leave behind, or it falls through to view
+          // mode and re-opens word-select the moment the note is saved. Same latch the dictionary
+          // switch uses for the same reason (consumeDictSwitchRelease).
+          dictSwitchReleaseConsumed_ = true;
+        }
+        return;
+      }
+    }
+
+    // Driven here rather than through DictionaryLookupController::handleMultiSelect, which looks
+    // a finished phrase up unconditionally. That is still right for the reading page's
+    // word-select; on this screen a finished range is a choice between two outcomes, and in Note
+    // mode it is never a lookup.
+    {
+      // Read before handleMultiSelectInput: it clears the mode on PhraseReady, and the anchor is
+      // half of the range both outcomes need.
+      const int anchor = navigator.getAnchorFlatIndex();
+      std::string phrase;  // rebuilt from the range instead: a note keeps the text as drawn
+      switch (navigator.handleMultiSelectInput(mappedInput, phrase)) {
+        case WordSelectNavigator::MultiSelectAction::PhraseReady:
+          if (selectPurpose_ == SelectPurpose::Note) {
+            saveNoteFromSelection(anchor, navigator.getCurrentFlatIndex());
+          } else {
+            openPhraseMenu(anchor, navigator.getCurrentFlatIndex(), /*rangeSettled=*/true);
+          }
+          return;
+        case WordSelectNavigator::MultiSelectAction::ExitedMultiSelect:
+          // Backing out of a note range leaves the mode nothing to select for, so it goes too.
+          if (selectPurpose_ == SelectPurpose::Note) {
+            isWordSelectMode = false;
+            selectPurpose_ = SelectPurpose::Lookup;
+            navigator.reset();
+          }
+          requestUpdate();
+          return;
+        case WordSelectNavigator::MultiSelectAction::EnteredMultiSelect:
+          requestUpdate();
+          return;
+        case WordSelectNavigator::MultiSelectAction::Consumed:
+          return;
+        case WordSelectNavigator::MultiSelectAction::None:
+          break;
+      }
+    }
 
     if (!navigator.isMultiSelecting()) {
       if (controller.handleConfirmLookup(navigator)) return;
@@ -1718,7 +1944,7 @@ void DictionaryDefinitionActivity::loop() {
       openDictPicker();
       return;
     }
-    if (showLookupButton) lookupWordAtPoint(hx, hy);
+    if (showLookupButton) openWordMenu(hx, hy);
     return;
   }
 
@@ -1770,6 +1996,7 @@ void DictionaryDefinitionActivity::loop() {
       extractWordsFromLayout();
       if (!navigator.isEmpty()) {
         isWordSelectMode = true;
+        selectPurpose_ = SelectPurpose::Lookup;
         requestUpdate();
       }
     } else {
@@ -1818,6 +2045,11 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   // The picker draws over the current framebuffer without clearing it, so the next paint has to
   // be a whole one to erase the dialog -- same treatment the controller's overlay gets below.
   if (dictPicker_ && dictPicker_->processRender(renderer, mappedInput)) {
+    nextRenderMode_ = RenderMode::FullPage;
+    prevHighlightIdx_ = -1;
+    return;
+  }
+  if (wordMenu_ && wordMenu_->processRender(renderer, mappedInput)) {
     nextRenderMode_ = RenderMode::FullPage;
     prevHighlightIdx_ = -1;
     return;
@@ -1913,6 +2145,9 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   const int lineHeight = getLineHeight();  // cached for loop + renderHighlight
   const int ipaDy = ipaBaselineOffset();   // cached for loop; shares the body font's baseline
   auto renderBody = [&]() {
+    // Counts every segment drawn, in the order computeNoteSpans walked them: a span's segIndex
+    // is meaningless against any other numbering, so the two loops are bounded the same way.
+    int segIndex = 0;
     for (int i = 0; i < linesPerPage && i < static_cast<int>(layoutLines.size()); i++) {
       const PooledLine& line = layoutLines[i];
       const int y = bodyStartY + i * lineHeight;
@@ -1933,6 +2168,29 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
           const int underlineY = segY + renderer.getFontAscenderSize(segFontId) + 2;
           renderer.drawLine(x, underlineY, x + segWidth, underlineY, true);
         }
+        // Saved notes, marked AFTER the glyphs they cover, in the style the book's own quotes
+        // use. The band is drawn per segment because that is where x is known; a note spanning a
+        // line break arrives here as one span per segment (DictNotes::findSpans).
+        for (int m = 0; m < noteSpanCount_; m++) {
+          const DictNotes::Span& sp = noteSpans_[m];
+          if (sp.segIndex != segIndex) continue;
+          const int preW = sp.byteStart == 0 ? 0
+                                             : renderer.getTextAdvanceX(
+                                                   segFontId, std::string(segText, sp.byteStart).c_str(), seg.style);
+          const int spanW =
+              renderer.getTextAdvanceX(segFontId, std::string(segText + sp.byteStart, sp.byteLen).c_str(), seg.style);
+          if (spanW <= 0) continue;
+          if (SETTINGS.quoteHighlightStyle == CrossPointSettings::QUOTE_STYLE_UNDERLINE) {
+            renderer.fillRect(x + preW, y + lineHeight - kNoteUnderlineThickness, spanW, kNoteUnderlineThickness, true);
+          } else {
+            // washRectDither, not fillRectDither: the text is already drawn here, and the plain
+            // dither fill writes both inks and would wipe the glyphs out from under the band
+            // (PageMarks.cpp:140-141).
+            renderer.washRectDither(x + preW - kNoteBandPadX, y, spanW + 2 * kNoteBandPadX, lineHeight,
+                                    Color::LightGray);
+          }
+        }
+        segIndex++;
         x += renderer.getTextAdvanceX(segFontId, segText, seg.style);
       }
     }
@@ -1975,8 +2233,14 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
       navigator.renderHighlight(renderer, lineHeight);
     }
 
-    // Empty button hints in word-select mode (same convention as EPUB word-select)
-    const auto labels = mappedInput.mapLabels("", "", "", "");
+    // Empty button hints in word-select mode (same convention as EPUB word-select) -- except
+    // while a note range is open, which is a mode the user cannot otherwise tell they are in:
+    // the highlight looks the same as the lookup cursor, and the next press decides between
+    // keeping the text and throwing it away.
+    const auto labels =
+        selectPurpose_ == SelectPurpose::Note
+            ? mappedInput.mapLabels(tr(STR_CANCEL), tr(STR_ADD_HIGHLIGHT), tr(STR_DIR_UP), tr(STR_DIR_DOWN))
+            : mappedInput.mapLabels("", "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer(HalDisplay::FAST_REFRESH);
 

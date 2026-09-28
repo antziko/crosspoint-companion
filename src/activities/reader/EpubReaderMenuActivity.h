@@ -27,6 +27,7 @@ class EpubReaderMenuActivity final : public UiListActivity {
     REPAGINATE,
     LOOKUP,
     LOOKUP_HISTORY,
+    DICT_NOTES,
     REVIEW_FLASHCARDS,
     FLASHCARDS_LIST,
     SET_BOOK_DICTIONARY,
@@ -60,12 +61,12 @@ class EpubReaderMenuActivity final : public UiListActivity {
 
  private:
   // Row storage: menuItems is at most MAX_MENU_ITEMS (11 always-present rows +
-  // FOOTNOTES + the 3 dictionary rows in buildMenuItems() + FRONTLIGHT on
+  // FOOTNOTES + the 4 dictionary rows in buildMenuItems() + FRONTLIGHT on
   // boards that have one), so a fixed-capacity array avoids any heap
   // allocation for the row list. Labels are set once in the constructor
   // (buildMenuRowItems()); buildScreen() only refreshes the rows whose value
   // reflects live state (rotation, page-turn interval, dictionary, frontlight).
-  static constexpr size_t MAX_MENU_ITEMS = 16;
+  static constexpr size_t MAX_MENU_ITEMS = 17;
   freeink::ui::ListItem menuRowItems[MAX_MENU_ITEMS]{};
   void buildMenuRowItems();
 

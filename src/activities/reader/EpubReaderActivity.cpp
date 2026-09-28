@@ -28,6 +28,7 @@
 #include "BookmarkStore.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "DictNotesActivity.h"
 #include "DictionaryWordSelectActivity.h"
 #include "EpubReaderBookmarksActivity.h"
 #include "EpubReaderChapterSelectionActivity.h"
@@ -2095,6 +2096,25 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
         break;
       }
       startActivityForResult(std::move(history), [this](const ActivityResult&) {
+        ignoreBackUntilRelease = true;
+        requestUpdate();
+      });
+      break;
+    }
+    case EpubReaderMenuActivity::MenuAction::DICT_NOTES: {
+      // Notes belong to the dictionary, not to this book, so the list is opened for whichever
+      // dictionary a lookup would resolve through right now -- the book override included.
+      const std::string dictPath = Dictionary::activeDictPath(epub->getCachePath().c_str());
+      // The cache path travels too: a definition opened from a note then has the same flashcard
+      // offers and chained back-navigation it would have if opened from the page.
+      auto notes = makeUniqueNoThrow<DictNotesActivity>(renderer, mappedInput, DictUtils::dictHashOfPath(dictPath),
+                                                        DictUtils::dictDisplayName(dictPath), epub->getCachePath());
+      if (!notes) {
+        LOG_ERR("EPUB", "OOM: DictNotesActivity");
+        openReaderMenu();
+        break;
+      }
+      startActivityForResult(std::move(notes), [this](const ActivityResult&) {
         ignoreBackUntilRelease = true;
         requestUpdate();
       });

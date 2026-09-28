@@ -180,6 +180,13 @@ class WordSelectNavigator {
   // Returns raw joined string; caller should apply Dictionary::cleanWord() if needed.
   std::string buildPhrase(int fromIdx, int toIdx) const;
 
+  // Join the words in [fromIdx, toIdx] as they are DRAWN, not as they are looked up.
+  // buildPhrase joins getLookup(), which in the definition view is Dictionary::cleanWord()
+  // of the token -- right for a lookup, wrong for text the user asked to keep, because it
+  // drops the punctuation they can see. A dictionary note stores this instead, which is also
+  // what lets it be matched back against the page it came from (DictNotes::findSpans).
+  std::string buildDisplayPhrase(int fromIdx, int toIdx) const;
+
   // Join words within [lo, hi] while ALWAYS keeping [keepLo, keepHi], growing outward one
   // word at a time (the side that has taken fewer words goes first) for as long as the
   // joined text stays within maxBytes and the window within maxWords words.

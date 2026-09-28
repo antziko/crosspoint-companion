@@ -204,6 +204,23 @@ std::string WordSelectNavigator::buildPhrase(int fromIdx, int toIdx) const {
   return phrase;
 }
 
+std::string WordSelectNavigator::buildDisplayPhrase(int fromIdx, int toIdx) const {
+  const int lo = std::min(fromIdx, toIdx);
+  const int hi = std::max(fromIdx, toIdx);
+  std::string phrase;
+  for (int i = lo; i <= hi; i++) {
+    const auto* w = getWordAt(i);
+    if (!w) continue;
+    // Both halves of a hyphenated pair are joined here, unlike buildPhrase, which emits the
+    // merged lookup text once: a note is the text on screen, and on screen the pair is two
+    // words on two lines.
+    const char* display = getDisplay(*w);
+    if (utf8NeedsSpaceBetween(phrase, display)) phrase += ' ';
+    phrase += display;
+  }
+  return phrase;
+}
+
 std::string WordSelectNavigator::buildPhraseWindow(int lo, int hi, int keepLo, int keepHi, int maxBytes,
                                                    int maxWords) const {
   const int last = static_cast<int>(words.size()) - 1;

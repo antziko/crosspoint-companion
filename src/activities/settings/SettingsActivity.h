@@ -34,6 +34,7 @@ enum class SettingAction {
   // Rendered by a category-scoped SettingsActivity instance — see SettingInfo::SubScreen.
   OpenSubCategory,
   TextSettings,  // LOCAL(feat-dictionary): #2605 Text Settings screen
+  DictNotes,     // LOCAL(feat-dictionary): the active dictionary's saved highlights
   KeyboardLayouts,
   About,
   HomeButton,

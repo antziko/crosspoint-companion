@@ -33,12 +33,14 @@
 #include "StatusBarSettingsActivity.h"
 #include "TextSettingsActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
+#include "activities/reader/DictNotesActivity.h"
 #include "activities/util/IntervalSelectionActivity.h"
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
 #include "fontIds.h"
 #include "util/Dictionary.h"
+#include "util/DictionaryActivityUtils.h"
 #include "util/DictionaryRegistry.h"
 
 namespace fui = freeink::ui;
@@ -88,6 +90,9 @@ void SettingsActivity::rebuildSettingsLists() {
       readerSettings.push_back(
           SettingInfo::Enum(StrId::STR_DICT_MARKER_T2, &CrossPointSettings::dictMarkerT2Idx,
                             {StrId::STR_SEC_7, StrId::STR_SEC_9, StrId::STR_SEC_12, StrId::STR_SEC_15}));
+      // Notes are scoped to the dictionary, so they are reachable with no book open. The reader
+      // menu has the same row for the book's active dictionary.
+      readerSettings.push_back(SettingInfo::Action(StrId::STR_DICT_NOTES, SettingAction::DictNotes));
     } else if (subCategory_ == StrId::STR_SYS_LIBRARY) {
       readerSettings.push_back(SettingInfo::Action(StrId::STR_CLEAR_READING_CACHE, SettingAction::ClearCache));
       readerSettings.push_back(SettingInfo::Action(StrId::STR_REMOVE_ORPHANED_CACHES, SettingAction::PruneCache));
@@ -603,6 +608,25 @@ void SettingsActivity::toggleCurrentSetting() {
           LOG_ERR("SETTINGS", "OOM: KeyboardLayoutsActivity");
         }
         break;
+      case SettingAction::DictNotes: {
+        // No book here, so the GLOBAL selection (activeDictPath with no cache path) decides
+        // whose notes these are.
+        const std::string dictPath = Dictionary::activeDictPath(nullptr);
+        const uint32_t dictHash = DictUtils::dictHashOfPath(dictPath);
+        if (dictHash == 0) {
+          GUI.drawPopup(renderer, tr(STR_DICT_NONE));  // refreshes internally
+          delay(900);
+          requestUpdate();
+          break;
+        }
+        if (auto activity = makeUniqueNoThrow<DictNotesActivity>(renderer, mappedInput, dictHash,
+                                                                 DictUtils::dictDisplayName(dictPath))) {
+          startActivityForResult(std::move(activity), nullptr);
+        } else {
+          LOG_ERR("SETTINGS", "OOM: DictNotesActivity");
+        }
+        break;
+      }
       case SettingAction::About:
         startActivityForResultNoThrow<AboutActivity>([](const ActivityResult&) {}, renderer, mappedInput);
         break;
