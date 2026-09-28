@@ -1,5 +1,7 @@
 #include "ButtonNavigator.h"
 
+#include <algorithm>
+
 const MappedInputManager* ButtonNavigator::mappedInput = nullptr;
 
 void ButtonNavigator::onNext(const Callback& callback) {
@@ -73,11 +75,17 @@ void ButtonNavigator::onContinuous(const Buttons& buttons, const Callback& callb
   if (mappedInput == nullptr) return;
 
   bool fire = false;
+  bool edge = false;
   for (const MappedInputManager::Button button : buttons) {
     const auto bit = static_cast<uint16_t>(1u << static_cast<uint8_t>(button));
     const bool pressed = mappedInput->isPressed(button);
     if (!pressed || mappedInput->wasPressed(button)) continuousArmed_ |= bit;
+    if (mappedInput->wasPressed(button) || mappedInput->wasReleased(button)) edge = true;
     if (pressed && (continuousArmed_ & bit) != 0 && shouldNavigateContinuously()) fire = true;
+  }
+  if (edge) {
+    lastContinuousNavTime = 0;
+    return;  // A press already stepped once; a release must never repeat.
   }
 
   if (fire) {

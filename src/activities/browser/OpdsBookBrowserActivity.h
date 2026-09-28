@@ -65,6 +65,7 @@ class OpdsBookBrowserActivity final : public Activity, private UiAppHost {
   size_t lastAbortLargestBlock = 0;
   bool lockLongPressBack = false;  // swallow BACK release after long-press-to-home
   int selectorIndex = 0;
+  bool leftSearchPending = false;
   std::string errorMessage;
   std::string statusMessage;
   // Transfer progress, shared by the book download and the feed fetch: bytes so far, the

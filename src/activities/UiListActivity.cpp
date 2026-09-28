@@ -137,9 +137,9 @@ void UiListActivity::loop() {
 }
 
 void UiListActivity::navigateButtons() {
-  buttonNavigator.onNextRelease(
+  buttonNavigator.onNextPress(
       [this] { moveSelectionTo(ButtonNavigator::nextIndex(activeNav().selected, listCount())); });
-  buttonNavigator.onPreviousRelease(
+  buttonNavigator.onPreviousPress(
       [this] { moveSelectionTo(ButtonNavigator::previousIndex(activeNav().selected, listCount())); });
   // Page by the rows the last build actually drew (pageRows), not the
   // fixed-height visibleRows estimate: rows whose label wraps to a second line
