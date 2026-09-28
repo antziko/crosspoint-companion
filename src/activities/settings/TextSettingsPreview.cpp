@@ -57,9 +57,12 @@ void relayout(PreviewLayout& layout, const GfxRenderer& renderer, int fontId, in
     }
   }
 
+  // Word and character spacing have no per-book override field, so they are read as globals —
+  // the same two values readerRenderSpec() feeds the section build (CrossPointSettings.cpp).
   parsed.layoutAndExtractLines(
       renderer, fontId, static_cast<uint16_t>(textWidth),
-      [&layout](std::shared_ptr<TextBlock> line, uint32_t) { layout.lines.push_back(std::move(line)); });
+      [&layout](std::shared_ptr<TextBlock> line, uint32_t) { layout.lines.push_back(std::move(line)); },
+      /*includeLastLine=*/true, SETTINGS.getCharacterSpacing(), SETTINGS.wordSpacing);
 }
 
 // Cut the sample down to what the pane can physically show.
@@ -144,6 +147,8 @@ void renderPreview(GfxRenderer& renderer, PreviewLayout& layout, int previewPadd
                        .lineCompression = compression,
                        .alignment = SETTINGS.getReaderParagraphAlignment(),
                        .extraParagraphSpacing = SETTINGS.getReaderExtraParagraphSpacing() != 0,
+                       .characterSpacing = SETTINGS.getCharacterSpacing(),
+                       .wordSpacingPercent = SETTINGS.wordSpacing,
                        .focusReading = SETTINGS.focusReadingEnabled != 0,
                        .hyphenation = SETTINGS.getReaderHyphenationEnabled() != 0};
   if (key != layout.key) {
