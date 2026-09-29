@@ -94,6 +94,8 @@ class TextSettingsActivity final : public UiTabListActivity {
   void applyBook();
   // Saves the routed fields: the book's override file in a book mode, else the global settings.
   void persist();
+  static bool styleRowIsToggle(int row);
+  bool styleRowChecked(int row) const;
   // Button-hint label for Confirm at the current ring position.
   const char* confirmLabelText() const;
   // True when the focused list row is a setting the preview cannot reflect.

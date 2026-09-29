@@ -200,7 +200,7 @@ void EpubReaderMenuActivity::buildScreen(UiScreen& screen) {
   for (size_t i = 0; i < menuItems.size(); i++) {
     const auto action = menuItems[i].action;
     if (action == MenuAction::FRONTLIGHT) {
-      menuRowItems[i].value = I18N.get(Frontlight.isOn() ? StrId::STR_STATE_ON : StrId::STR_STATE_OFF);
+      GUI.setCheckboxRow(menuRowItems[i], Frontlight.isOn());
     } else if (action == MenuAction::ROTATE_SCREEN) {
       menuRowItems[i].value = I18N.get(orientationLabels[pendingOrientation]);
     } else if (action == MenuAction::AUTO_PAGE_TURN) {

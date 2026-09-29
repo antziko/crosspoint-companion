@@ -4469,8 +4469,6 @@ std::string EpubReaderActivity::textRowValue(int row) const {
       return I18N.get(kSpacingIds[ov.lineSpacing % CrossPointSettings::LINE_COMPRESSION_COUNT]);
     case 3:
       return I18N.get(kAlignIds[ov.paragraphAlignment % CrossPointSettings::PARAGRAPH_ALIGNMENT_COUNT]);
-    case 4:
-      return SETTINGS.focusReadingEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     case 5:
       // Names the pair that steps word by word; the other pair moves between rows.
       return ov.swapWordSelectAxes ? tr(STR_WORD_SELECT_SIDE) : tr(STR_WORD_SELECT_FRONT);
@@ -4713,11 +4711,21 @@ void EpubReaderActivity::renderOverlay() {
     model.itemCount = kTextRowCount;
     model.rowText = [this](int i) { return textRowName(i); };
     model.rowValue = [this](int i) { return textRowValue(i); };
+    model.rowCheckbox = [](void*, int i, freeink::ui::ListItem& item) {
+      if (i == 4) GUI.setCheckboxRow(item, SETTINGS.focusReadingEnabled);
+    };
   } else {
     model.panelTitle = tr(STR_TOOL_MORE);
     model.itemCount = static_cast<int>(moreItems.size());
     model.rowText = [this](int i) { return moreRowName(i); };
     model.rowValue = [this](int i) { return moreRowValue(i); };
+    model.rowCheckboxContext = this;
+    model.rowCheckbox = [](void* ctx, int i, freeink::ui::ListItem& item) {
+      const auto* self = static_cast<EpubReaderActivity*>(ctx);
+      using MA = EpubReaderMenuActivity::MenuAction;
+      const auto action = self->moreItems[i].action;
+      if (action == MA::FRONTLIGHT) GUI.setCheckboxRow(item, Frontlight.isOn());
+    };
   }
   toolbarUi->setModel(model);
   toolbarUi->render();
@@ -5100,9 +5108,7 @@ std::string EpubReaderActivity::moreRowValue(int row) const {
                  ? std::string(tr(STR_STATE_OFF))
                  : std::to_string(PAGE_TURN_RATES[autoTurnOption]);
     // No NIGHT_MODE row here: this fork's reader menu has none (it lives on the
-    // frontlight panel's tile grid instead).
-    case MA::FRONTLIGHT:
-      return Frontlight.isOn() ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+    // frontlight panel's tile grid instead). FRONTLIGHT draws a checkbox (rowCheckbox).
     default:
       return "";
   }

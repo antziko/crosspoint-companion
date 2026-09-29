@@ -176,6 +176,9 @@ int16_t UiListActivity::resolveRowHeight(fui::ListProps& props, const bool hasSu
 }
 
 void UiListActivity::syncListViewport(UiScreen& screen, fui::ListProps& props, const bool hasSubtitle) {
+  props.toggleCheckbox = true;
+  props.toggleWidth = 28;
+  props.toggleHeight = 28;
   const int16_t rowHeight = resolveRowHeight(props, hasSubtitle);
   const auto body = screen.body();
   const int16_t rowGap = screen.theme().listRowGap;

@@ -479,13 +479,19 @@ void TextSettingsActivity::buildScreen(UiScreen& screen) {
       case Tab::Layout:
         rowValues_[i] = layoutValueText(layoutRowAt(i));
         break;
-      case Tab::Style:
-        rowValues_[i] = styleValueText(styleRowAt(i));
+      case Tab::Style: {
+        const int row = styleRowAt(i);
+        rowValues_[i] = styleRowIsToggle(row) ? std::string() : styleValueText(row);
         break;
+      }
       default:
         break;
     }
     rowItems_[i].value = rowValues_[i].empty() ? nullptr : rowValues_[i].c_str();
+    rowItems_[i].toggle = false;  // rowItems_ slots are reused across tabs
+    if (tab_ == Tab::Style && styleRowIsToggle(styleRowAt(i))) {
+      GUI.setCheckboxRow(rowItems_[i], styleRowChecked(styleRowAt(i)));
+    }
   }
 
   fui::ListProps props;
@@ -787,12 +793,6 @@ void TextSettingsActivity::confirmStyleRow(int row) {
 
 std::string TextSettingsActivity::styleValueText(int row) const {
   switch (static_cast<StyleRow>(row)) {
-    case StyleRow::FocusReading:
-      return SETTINGS.focusReadingEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
-    case StyleRow::Hyphenation:
-      return *f_.hyphenationEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
-    case StyleRow::EmbeddedStyle:
-      return SETTINGS.embeddedStyle ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     case StyleRow::AntiAliasing: {
       const uint8_t v = SETTINGS.textAntiAliasing;
       return v < std::size(TEXT_AA_IDS) ? I18N.get(TEXT_AA_IDS[v]) : I18N.get(StrId::STR_TEXT_AA_ANTIALIASED);
@@ -800,6 +800,26 @@ std::string TextSettingsActivity::styleValueText(int row) const {
 
     default:
       return "";
+  }
+}
+
+// On/off Style rows draw a checkbox; the rest show their value text.
+bool TextSettingsActivity::styleRowIsToggle(int row) {
+  const auto r = static_cast<StyleRow>(row);
+  return r == StyleRow::FocusReading || r == StyleRow::Hyphenation || r == StyleRow::EmbeddedStyle;
+}
+
+bool TextSettingsActivity::styleRowChecked(int row) const {
+  switch (static_cast<StyleRow>(row)) {
+    case StyleRow::FocusReading:
+      return SETTINGS.focusReadingEnabled;
+    case StyleRow::Hyphenation:
+      return *f_.hyphenationEnabled;
+    case StyleRow::EmbeddedStyle:
+      return SETTINGS.embeddedStyle;
+
+    default:
+      return false;
   }
 }
 
