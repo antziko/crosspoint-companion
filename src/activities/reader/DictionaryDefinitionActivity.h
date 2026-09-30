@@ -22,8 +22,13 @@ class DictionaryDefinitionActivity final : public Activity {
  public:
   // showLookupButton=true:
   //   Confirm = enter word-select mode on the definition text (Look Up Word).
+  //   Confirm (long press) = open the dictionary picker for the current group.
   //   Back (short press) = return to caller (isCancelled=true).
-  //   Back (long press, >= LONG_PRESS_MS) = Done — exit to reader (isCancelled=false).
+  //   Back (long press, >= LONG_PRESS_MS) = advance to the next dictionary in the current
+  //     st-/non-st group. With nothing to advance to (one dictionary, a group of one, or a
+  //     lookup in flight) it falls back to Done — exit to reader (isCancelled=false) — so the
+  //     gesture is never dead. Inside word-select mode it is always Done: cycling there would
+  //     replace the page layout the mode is built from.
   // showLookupButton=false:
   //   Back/Confirm both return to caller (isCancelled=true). Unchanged from old behaviour.
   explicit DictionaryDefinitionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
@@ -323,6 +328,10 @@ class DictionaryDefinitionActivity final : public Activity {
   // Span sink for the prewarm scan pass: collects unique codepoints + styles instead
   // of measuring. ctx is a PrewarmCollector* (file-local to the .cpp).
   static void collectSpanForPrewarm(void* ctx, const StyledSpan& span);
+  // Finish with isCancelled=false — "Done, back to the book". The list parents
+  // (LookedUpWordsActivity, DictNotesActivity, FlashcardListActivity) read that as "unwind
+  // past me too", so it is the one exit that skips them rather than returning to them.
+  void exitAllToBook();
   bool handleLongPressExitAll(bool enabled);
   // Long-press Confirm in view mode: advance the session dictionary and re-run the
   // current headword against it. Returns true when the gesture fired or its trailing

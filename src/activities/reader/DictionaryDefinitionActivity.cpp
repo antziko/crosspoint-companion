@@ -1195,11 +1195,15 @@ void DictionaryDefinitionActivity::extractWordsFromLayout() {
 // Input loop
 // ---------------------------------------------------------------------------
 
+void DictionaryDefinitionActivity::exitAllToBook() {
+  setResult(ActivityResult{});
+  finish();
+}
+
 bool DictionaryDefinitionActivity::handleLongPressExitAll(bool enabled) {
   if (enabled && mappedInput.isPressed(MappedInputManager::Button::Back) &&
       mappedInput.getHeldTime() >= Dictionary::LONG_PRESS_MS) {
-    setResult(ActivityResult{});
-    finish();
+    exitAllToBook();
     return true;
   }
   return false;
@@ -2005,7 +2009,24 @@ void DictionaryDefinitionActivity::loop() {
     return;
   }
 
-  if (handleLongPressExitAll(showLookupButton)) return;
+  // Long-press Back: hop to the next dictionary in the group — the one-gesture switch, since the
+  // Confirm hold opens the picker and the footer label tap that also cycles exists only on a
+  // touch board (X3 and X4 are DigitalButtons + NO_TOUCH).
+  //
+  // wasLongPressed, NOT the isPressed + getHeldTime pair handleLongPressExitAll uses: it latches
+  // per hold AND marks the trailing release to be swallowed, which ActivityManager::loop drains
+  // ahead of activity input. Without that the lift would fall through to the chain-back handler
+  // below and pop a level out from under the switch. Same reasoning as
+  // RecentBooksActivity.cpp:506-511.
+  //
+  // Falls back to Done when cycleDictionary() declines — one dictionary installed, the sole
+  // member of its group, or a lookup already in flight — so the gesture is never dead and a
+  // single-dictionary device keeps the exit it had.
+  if (mappedInput.wasLongPressed(MappedInputManager::Button::Back, Dictionary::LONG_PRESS_MS)) {
+    if (cycleDictionary()) return;
+    if (showLookupButton) exitAllToBook();
+    return;  // consumed either way: a declined hop must not act like a short Back
+  }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Back) &&
       (!showLookupButton || mappedInput.getHeldTime() < Dictionary::LONG_PRESS_MS)) {
