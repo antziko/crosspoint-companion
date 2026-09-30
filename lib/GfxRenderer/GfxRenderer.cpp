@@ -747,6 +747,7 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
   if (text == nullptr || *text == '\0') {
     return 0;
   }
+  ++textWidthCalls_;
 
   // Measure with the same font drawText would render with (see resolveTextFontId)
   // so wrapping, truncation and centering of CJK strings stay consistent.
@@ -2348,11 +2349,39 @@ std::string GfxRenderer::truncatedText(const int fontId, const char* text, const
     return item;
   }
 
-  while (!item.empty() && getTextWidth(fontId, (item + ellipsis).c_str(), style) >= maxWidth) {
-    utf8RemoveLastChar(item);
+  // Longest codepoint prefix k whose "prefix + ellipsis" is narrower than maxWidth, by binary
+  // search. Width grows with k, so this finds the same k as trimming one codepoint at a time,
+  // in ~log2(n) measures instead of up to n. Each measure walks the whole candidate string, so
+  // the linear trim was quadratic, and a long CJK filename paid it on every list repaint.
+  // The full string (k = n) is known not to fit, so the answer lies in [0, n-1].
+  const auto prefixBytes = [&item](int codepoints) {
+    size_t pos = 0;
+    for (int seen = 0; pos < item.size(); ++pos) {
+      if ((static_cast<unsigned char>(item[pos]) & 0xC0) != 0x80 && seen++ == codepoints) break;
+    }
+    return pos;
+  };
+  int count = 0;
+  for (const char c : item) {
+    if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) ++count;
+  }
+  int lo = 0;
+  int hi = count - 1;
+  std::string candidate;
+  while (lo < hi) {
+    const int mid = (lo + hi + 1) / 2;
+    candidate.assign(item, 0, prefixBytes(mid));
+    candidate += ellipsis;
+    if (getTextWidth(fontId, candidate.c_str(), style) < maxWidth) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
   }
 
-  return item.empty() ? ellipsis : item + ellipsis;
+  if (lo == 0) return ellipsis;
+  item.resize(prefixBytes(lo));
+  return item + ellipsis;
 }
 
 std::vector<std::string> GfxRenderer::wrappedText(const int fontId, const char* text, const int maxWidth,

@@ -176,6 +176,13 @@ constexpr uint32_t PREWARM_MAX_ALLOC_RESERVE = 4 * 1024;
 constexpr size_t MINI_FREE_FLOOR = 24 * 1024;
 constexpr size_t MINI_FREE_FLOOR_TIGHT = 12 * 1024;
 constexpr uint32_t MINI_TIGHT_MAX_BUDGET = 4 * 1024;
+
+// Most uncovered glyphs a kern-free (UI) request may leave to the overflow ring when the
+// resident mini is already trimmed, rather than rebuilding it. A rebuild is one SD pass
+// (~85ms on X3) that trims again and evicts some other row's glyphs, so a chapter list or
+// file browser just over budget rebuilt ~40 times per repaint (2.8-4.7s). An overflow read is
+// ~3.7ms per glyph; 8 keeps the worst case well under one rebuild.
+constexpr uint32_t TRIMMED_MINI_MAX_OVERFLOW = 8;
 constexpr uint32_t MINI_BITMAP_MIN_BUDGET = 1536;
 
 // Keep-if-fits buffer reuse: only reallocate when the needed size exceeds the
@@ -209,6 +216,7 @@ void SdCardFont::freeStyleMiniData(PerStyle& s) {
   s.miniBitmap = nullptr;
   s.miniIntervalCount = 0;
   s.miniGlyphCount = 0;
+  s.miniTrimmed = false;
   s.miniIntervalCapacity = 0;
   s.miniGlyphCapacity = 0;
   s.miniBitmapCapacity = 0;
@@ -319,6 +327,7 @@ void SdCardFont::freeAll() {
 }
 
 void SdCardFont::clearOverflow() {
+  if (overflowCount_ > 0) stats_.overflowClears++;
   while (overflowCount_ > 0) {
     evictOldestOverflow();
   }
@@ -364,6 +373,7 @@ uint32_t SdCardFont::overflowByteBudget() const {
 
 void SdCardFont::evictOldestOverflow() {
   if (overflowCount_ == 0) return;
+  stats_.overflowEvictions++;
   OverflowEntry& oldest = overflow_[overflowHead_];
   overflowBytes_ -= oldest.glyph.dataLength;
   delete[] oldest.bitmap;
@@ -1162,9 +1172,9 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
   // page needs zero SD reads. A mini built metadata-only cannot serve a full
   // request (no bitmaps). Any uncovered codepoint falls through to the rebuild.
   if (s.miniGlyphCount > 0 && !(s.miniMetadataOnly && !metadataOnly)) {
-    bool covered = true;
+    uint32_t uncovered = 0;
     int missedInMini = 0;
-    for (uint32_t i = 0; i < cpCount && covered; i++) {
+    for (uint32_t i = 0; i < cpCount; i++) {
       const uint32_t cp = cpValue(codepoints[i]);
       bool inMini = false;
       for (uint32_t iv = 0; iv < s.miniIntervalCount; iv++) {
@@ -1177,11 +1187,11 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
       if (inMini) continue;
       if (findGlobalGlyphIndex(s, cp) < 0) {
         missedInMini++;  // not in font coverage: the rebuild couldn't load it either
-      } else {
-        covered = false;
+      } else if (++uncovered > TRIMMED_MINI_MAX_OVERFLOW) {
+        break;  // the rebuild below is taken either way; stop counting
       }
     }
-    if (covered) {
+    if (uncovered == 0) {
       // A kern-wanting request (the reader path) can subset-hit a mini that a kern-free UI
       // prewarm built. Top the matrix up for the requested codepoints rather than declining
       // the hit -- no glyph is re-read, only the class tables.
@@ -1192,7 +1202,15 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
       }
       return missedInMini;
     }
+    // Trimmed mini, UI request (kern-free), a few glyphs short: rebuilding would trim again
+    // and drop glyphs the next string needs. Leave these to the overflow ring.
+    if (s.miniTrimmed && !loadKernLig && uncovered <= TRIMMED_MINI_MAX_OVERFLOW) {
+      stats_.miniGuardSkips++;
+      return missedInMini + static_cast<int>(uncovered);
+    }
   }
+
+  stats_.miniRebuilds++;
 
   // Union the resident mini's codepoints into the request so the rebuild ACCUMULATES rather
   // than replaces. List screens draw several distinct fallback strings per refresh (browser
@@ -1499,6 +1517,8 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
                       validCount, spent, fullSize, budget, (unsigned)largest, (unsigned)ESP.getFreeHeap(), styleIdx);
     }
   }
+
+  s.miniTrimmed = keptCount < validCount;
 
   if (keptCount == 0) {
     delete[] readOrder;
@@ -2112,6 +2132,7 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
   for (uint32_t i = 0; i < self->overflowCount_; i++) {
     OverflowEntry& e = self->overflow_[(self->overflowHead_ + i) % OVERFLOW_CAPACITY];
     if (e.codepoint == codepoint && e.styleIdx == styleIdx) {
+      self->stats_.overflowHits++;
       return &e.glyph;
     }
   }
@@ -2126,11 +2147,16 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
   struct MissTimer {
     Stats& stats;
     unsigned long start;
+    uint32_t codepoint;
+    uint8_t styleIdx;
     ~MissTimer() {
+      stats.recentMissCps[stats.recentMissHead] = codepoint;
+      stats.recentMissHead = (stats.recentMissHead + 1) % Stats::RECENT_MISSES;
+      stats.lastMissStyle = styleIdx;
       stats.overflowMisses++;
       stats.overflowMissMs += static_cast<uint32_t>(millis() - start);
     }
-  } missTimer{self->stats_, millis()};
+  } missTimer{self->stats_, millis(), codepoint, styleIdx};
 
   // Read into temporaries first, so the ring is left untouched if any of the I/O below fails.
   // Eviction and bookkeeping happen once every read has succeeded.
@@ -2140,6 +2166,7 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
   HalFile& file = self->glyphFile_;
   if (!file.isOpen() && !Storage.openFileForRead("SDCF", self->filePath_, file)) {
     LOG_ERR("SDCF", "Overflow: failed to open .cpfont");
+    self->stats_.overflowIoFails++;
     file.close();
     return nullptr;
   }
@@ -2148,12 +2175,14 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
   uint32_t glyphFileOff = s.glyphsFileOffset + static_cast<uint32_t>(globalIdx) * CPFONT_GLYPH_RECORD_SIZE;
   if (!file.seekSet(glyphFileOff)) {
     LOG_ERR("SDCF", "Overflow: failed to seek to glyph for U+%04X style %u", codepoint, styleIdx);
+    self->stats_.overflowIoFails++;
     file.close();
     return nullptr;
   }
   uint8_t glyphRec[CPFONT_GLYPH_RECORD_SIZE];
   if (file.read(glyphRec, CPFONT_GLYPH_RECORD_SIZE) != static_cast<int>(CPFONT_GLYPH_RECORD_SIZE)) {
     LOG_ERR("SDCF", "Overflow: failed to read glyph metadata for U+%04X style %u", codepoint, styleIdx);
+    self->stats_.overflowIoFails++;
     file.close();
     return nullptr;
   }
@@ -2174,12 +2203,14 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
     }
     if (!file.seekSet(s.bitmapFileOffset + tempGlyph.dataOffset)) {
       LOG_ERR("SDCF", "Overflow: failed to seek to bitmap for U+%04X", codepoint);
+      self->stats_.overflowIoFails++;
       delete[] tempBitmap;
       file.close();
       return nullptr;
     }
     if (file.read(tempBitmap, tempGlyph.dataLength) != static_cast<int>(tempGlyph.dataLength)) {
       LOG_ERR("SDCF", "Overflow: failed to read bitmap for U+%04X", codepoint);
+      self->stats_.overflowIoFails++;
       delete[] tempBitmap;
       file.close();
       return nullptr;

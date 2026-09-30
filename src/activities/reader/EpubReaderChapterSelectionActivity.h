@@ -14,7 +14,7 @@ class EpubReaderChapterSelectionActivity final : public UiListActivity {
   // the rows around the viewport are materialized. Building all of them up front cost tens of
   // KB of labels and ListItems on a large TOC -- starving the CJK glyph arena into an SD read
   // per repaint -- for rows that were mostly never drawn. The window follows nav.top via
-  // fui::ListProps::itemsWindowFirst; refreshing it also batch-prewarms the window's fallback
+  // fui::ListProps::itemsWindowFirst; refreshing it also batch-prewarms the visible rows' fallback
   // glyphs, so each page of the list pays one bounded SD pass and repaints stay RAM-only.
   static constexpr int TOC_WINDOW = 24;
   std::string windowLabels[TOC_WINDOW];
@@ -37,4 +37,5 @@ class EpubReaderChapterSelectionActivity final : public UiListActivity {
   explicit EpubReaderChapterSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                               const std::shared_ptr<Epub>& epub, int currentSpineIndex);
   void onEnter() override;
+  void onExit() override;
 };

@@ -23,6 +23,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/BookCacheUtils.h"
+#include "util/PaintProbe.h"
 
 namespace {
 constexpr unsigned long GO_HOME_MS = 1000;
@@ -182,6 +183,7 @@ void FileBrowserActivity::loadWindow(filewindow::WindowSelector::Mode mode_, std
   // Rows draw in UI_10_FONT_ID (BaseTheme::drawList); the path band below them draws in
   // SMALL_FONT_ID and is warmed separately -- a different font id means a different arena, so
   // folding it into the row batch would not have covered it.
+  const unsigned long tPrewarm = millis();
   renderer.prewarmFallbackText(
       UI_10_FONT_ID,
       [](const void* ctx, uint32_t i) -> const char* {
@@ -189,6 +191,9 @@ void FileBrowserActivity::loadWindow(filewindow::WindowSelector::Mode mode_, std
       },
       &files, static_cast<uint32_t>(files.size()));
   renderer.prewarmFallbackText(SMALL_FONT_ID, basepath.c_str());
+  SdDebugLog::log("FBR", "window files=%u prewarm=%lums free=%u largest=%u", static_cast<unsigned>(files.size()),
+                  millis() - tPrewarm, static_cast<unsigned>(esp_get_free_heap_size()),
+                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
 }
 
 void FileBrowserActivity::loadFirstWindow() {
@@ -861,6 +866,7 @@ std::string formatFileSize(uint32_t bytes) {
 void FileBrowserActivity::render(RenderLock&&) {
   // Drawn over the list already on screen, so this must precede the clear.
   if (optionPopup.processRender(renderer, mappedInput)) return;
+  PaintProbe probe(renderer);
   renderer.clearScreen();
 
   const auto& metrics = UITheme::getInstance().getMetrics();
@@ -968,5 +974,7 @@ void FileBrowserActivity::render(RenderLock&&) {
     mode = HalDisplay::HALF_REFRESH;
     pagesUntilFullRefresh = std::max(1, SETTINGS.getRefreshFrequency());
   }
+  probe.markDrawn();
   renderer.displayBuffer(mode);
+  probe.log("FBR", mode == HalDisplay::HALF_REFRESH ? "paint(half)" : "paint");
 }

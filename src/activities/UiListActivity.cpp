@@ -11,6 +11,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/ListSwipeScroll.h"
+#include "util/PaintProbe.h"
 
 namespace fui = freeink::ui;
 
@@ -18,6 +19,7 @@ namespace {
 // Minimum air a row that grows for a subtitle keeps around the pair, when the
 // row height it was laid out on cannot spare any of its own.
 constexpr int SUBTITLE_ROW_PADDING = 8;
+
 }  // namespace
 
 UiListActivity::UiListActivity(const char* name, GfxRenderer& renderer, MappedInputManager& mappedInput,
@@ -231,6 +233,7 @@ void UiListActivity::renderListFrame(void (*drawFrame)(void*), void* ctx) {
 }
 
 void UiListActivity::render(RenderLock&&) {
+  PaintProbe probe(renderer);
   renderListFrame(
       [](void* ctx) {
         auto* self = static_cast<UiListActivity*>(ctx);
@@ -240,5 +243,7 @@ void UiListActivity::render(RenderLock&&) {
       },
       this);
   drawFooter();
+  probe.markDrawn();
   renderer.displayBuffer();
+  probe.log("ULA", name.c_str());
 }

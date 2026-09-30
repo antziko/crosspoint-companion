@@ -155,10 +155,31 @@ class SdCardFont {
     // because that symptom otherwise has to be inferred from a low largest-free-block in
     // the logs, and only ever appeared as a serial LOG_ERR the device is not attached for.
     uint32_t bitmapOom = 0;
+    // The last few codepoints that fell through to SD, newest at recentMissHead-1, and the
+    // style of the newest. Names WHICH glyphs a screen keeps re-reading.
+    static constexpr uint8_t RECENT_MISSES = 4;
+    uint32_t recentMissCps[RECENT_MISSES] = {};
+    // Overflow-ring bookkeeping: lookups served from the ring, entries evicted (by the slot or
+    // byte cap, or a clear), clears of a non-empty ring, and misses that failed SD I/O (open,
+    // seek or read) and so were never cached. A failed miss is retried on every draw.
+    uint32_t overflowHits = 0;
+    uint32_t overflowEvictions = 0;
+    uint32_t overflowClears = 0;
+    uint32_t overflowIoFails = 0;
+    // Mini rebuilds (full SD pass) and requests the trimmed-mini guard served from the ring.
+    uint32_t miniRebuilds = 0;
+    uint32_t miniGuardSkips = 0;
+    uint8_t recentMissHead = 0;
+    uint8_t lastMissStyle = 0;
   };
   void logStats(const char* label = "SDCF");
   void resetStats();
   const Stats& getStats() const { return stats_; }
+  const char* filePath() const { return filePath_; }
+  // Current overflow ring occupancy and the byte cap an insertion would see right now.
+  uint32_t overflowCount() const { return overflowCount_; }
+  uint32_t overflowBytesUsed() const { return overflowBytes_; }
+  uint32_t overflowBudgetNow() const { return overflowByteBudget(); }
 
   // Content hash of the file header + style TOC entries (computed during load).
   // Used to generate deterministic font IDs for section cache invalidation.
@@ -258,6 +279,10 @@ class SdCardFont {
     // True when the resident mini was built metadata-only (no bitmaps): it can
     // serve metadata requests but a full render request must rebuild.
     bool miniMetadataOnly = false;
+    // True when the resident mini was cut to its heap budget, so some requested glyphs were
+    // left out. A UI string missing a few of them is served from the overflow ring instead
+    // of rebuilding: every rebuild re-trims and drops another string's glyphs.
+    bool miniTrimmed = false;
     // Set by a rebuild, consumed by resetStyleMiniData: gates the underuse
     // hysteresis to one evaluation per rebuild (scopes reset twice, and subset
     // hits load nothing new to judge).

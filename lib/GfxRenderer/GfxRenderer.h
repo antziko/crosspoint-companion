@@ -92,6 +92,7 @@ class GfxRenderer {
   // allocation inside the SdCardFont objects. Same pragmatic compromise as
   // fontCacheManager_ below.
   mutable std::map<int, SdCardFont*> sdCardFonts_;
+  mutable uint32_t textWidthCalls_ = 0;
   // TTF (vector) fonts. Mutable for the same reason as sdCardFonts_: the const layout path
   // faults glyphs in through them.
   mutable std::map<int, TtfEpdFont*> ttfFonts_;
@@ -206,6 +207,8 @@ class GfxRenderer {
   void unregisterSdCardFont(int fontId) { removeFont(fontId); }
   void clearSdCardFonts() { sdCardFonts_.clear(); }
   const std::map<int, SdCardFont*>& getSdCardFonts() const { return sdCardFonts_; }
+  // getTextWidth() calls since boot; a paint diffs it to see how much measuring it did.
+  uint32_t textWidthCalls() const { return textWidthCalls_; }
   bool isSdCardFont(int fontId) const { return sdCardFonts_.count(fontId) > 0; }
   // Register/clear size-matched CJK UI fallbacks (see fallbackFontMap_).
   // setFallbackFont maps a primary UI font id to an SD font id of the same size.

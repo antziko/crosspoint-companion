@@ -1,9 +1,13 @@
 #include "EpubReaderChapterSelectionActivity.h"
 
+#include <Arduino.h>  // millis()
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <SdDebugLog.h>
+#include <esp_heap_caps.h>
 
+#include <algorithm>
 #include <string>
 
 #include "MappedInputManager.h"
@@ -23,15 +27,22 @@ EpubReaderChapterSelectionActivity::EpubReaderChapterSelectionActivity(GfxRender
 void EpubReaderChapterSelectionActivity::onEnter() {
   UiListActivity::onEnter();
 
-  // The reader underneath pins its page-render glyph arenas while this overlay is up.
-  // clearCache() is heap-adaptive: below the retention floor it frees them (the next page
-  // render's PrewarmScope rebuilds them at ordinary page-turn cost), which is what gives this
-  // list room to keep its own rows' fallback glyphs resident instead of re-reading them from
-  // SD on every cursor step. Safe without a RenderLock here: onEnter runs after the manager
-  // has swapped currentActivity, so the render task can only be painting this screen, which
-  // has not drawn anything yet.
+  // The reader underneath pins its page-render glyph arenas and its book font's kern/ligature
+  // tables while this overlay is up; none of it draws a chapter title. releaseCache() frees
+  // both (clearCache() keeps the kern tables, and keeps the arenas above 40KB free), and the
+  // next page render's PrewarmScope rebuilds them at ordinary page-turn cost. The heap this
+  // returns is what lets the list's own rows' fallback glyphs stay resident: over an open
+  // book the list otherwise ran at ~20KB free, where the mini and overflow caches together
+  // held fewer glyphs than one screen of Han titles, and every step re-read ~36 from SD.
+  // Safe without a RenderLock here: onEnter runs after the manager has swapped
+  // currentActivity, so the render task can only be painting this screen, which has not
+  // drawn anything yet.
   if (auto* fcm = renderer.getFontCacheManager()) {
-    fcm->clearCache();
+    const uint32_t freeBefore = esp_get_free_heap_size();
+    fcm->releaseCache();
+    SdDebugLog::log("CHS", "release free=%u->%u largest=%u", static_cast<unsigned>(freeBefore),
+                    static_cast<unsigned>(esp_get_free_heap_size()),
+                    static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
   }
 
   if (!epub) {
@@ -48,9 +59,24 @@ void EpubReaderChapterSelectionActivity::onEnter() {
   nav.selected = tocIndex;
 }
 
+void EpubReaderChapterSelectionActivity::onExit() {
+  // Hand the heap back before the reader repaints. The rows' fallback glyphs sized their
+  // cache to the room onEnter's release made (~7KB), and the reader's next page render has to
+  // rebuild its own arenas and kern tables on top of whatever is still resident; left in
+  // place, that page render dipped to ~9KB free. Runs under the manager's RenderLock.
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    const uint32_t freeBefore = esp_get_free_heap_size();
+    fcm->releaseCache();
+    SdDebugLog::log("CHS", "exit release free=%u->%u largest=%u", static_cast<unsigned>(freeBefore),
+                    static_cast<unsigned>(esp_get_free_heap_size()),
+                    static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+  }
+  UiListActivity::onExit();
+}
+
 // Materialize the ListItem/label window starting at `start` (clamped). TOC entries are SD LUT
 // reads (getTocItem), so this runs only when the viewport leaves the current window. Finishes
-// with a batch prewarm of the window's CJK fallback glyphs -- one bounded SD pass per list
+// with a batch prewarm of the visible rows' CJK fallback glyphs -- one bounded SD pass per list
 // page; repaints inside the window stay RAM-only.
 void EpubReaderChapterSelectionActivity::refreshTocWindow(const int start) {
   const int total = listCount();
@@ -71,17 +97,35 @@ void EpubReaderChapterSelectionActivity::refreshTocWindow(const int start) {
   }
   windowStart = clamped;
 
+  // Prewarm only the rows on screen, not the whole window. Over an open book the fallback's
+  // mini is capped near 4KB; a full 24-row window of Han titles ran just over it, so the trim
+  // dropped a few glyphs that every repaint then re-read from SD (~40 reads, ~110ms per step).
+  // visibleRows is the fixed-height estimate, which is never fewer than the rows list() draws.
+  // The window is pinned at the end of the TOC, so the viewport can start inside it.
+  const int prewarmFirst = std::clamp(nav.top - windowStart, 0, windowCount);
+  const int prewarmCount = std::min(windowCount - prewarmFirst, std::max(nav.visibleRows, 1));
   struct PrewarmCtx {
     const std::string* labels;
     int count;
-  } prewarmCtx{windowLabels, windowCount};
+  } prewarmCtx{windowLabels + prewarmFirst, prewarmCount};
+  // Drop the previous window's glyph cache before sizing the new one. The mini's budget is
+  // derived from free heap, so while the old arena is still allocated it counts against the
+  // new screen: a list moving to new titles got 4KB where the first screen got 7KB, and a
+  // screen of Han titles (~7.5KB) no longer fit. Freeing first keeps every floor unchanged and
+  // lowers the peak, since the two arenas never coexist. Runs inside the screen build, under
+  // the render lock and before any row draws, so no glyph pointer is held across it.
+  if (auto* fcm = renderer.getFontCacheManager()) fcm->releaseCache();
+  const unsigned long tPrewarm = millis();
   renderer.prewarmFallbackText(
       uiScaleSpec().bodyFontId,
       [](const void* ctx, uint32_t i) -> const char* {
         const auto* c = static_cast<const PrewarmCtx*>(ctx);
         return i < static_cast<uint32_t>(c->count) ? c->labels[i].c_str() : nullptr;
       },
-      &prewarmCtx, static_cast<uint32_t>(windowCount));
+      &prewarmCtx, static_cast<uint32_t>(prewarmCount));
+  SdDebugLog::log("CHS", "window start=%d count=%d prewarmed=%d prewarm=%lums free=%u largest=%u", windowStart,
+                  windowCount, prewarmCount, millis() - tPrewarm, static_cast<unsigned>(esp_get_free_heap_size()),
+                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
 }
 
 void EpubReaderChapterSelectionActivity::activateIndex(const int index) {
