@@ -34,7 +34,9 @@ constexpr StrId STYLE_ROW_NAME_IDS[] = {StrId::STR_FOCUS_READING, StrId::STR_HYP
 // LOCAL(feat): Hold Confirm this long on a Font-tab row to pin/unpin (vs a tap = commit).
 constexpr unsigned long kPinHoldMs = 600;
 
-constexpr StrId LINE_SPACING_IDS[] = {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_WIDE, StrId::STR_EXTRA_WIDE};
+constexpr StrId LINE_SPACING_IDS[] = {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_SEMI_WIDE, StrId::STR_WIDE,
+                                      StrId::STR_EXTRA_WIDE};
+static_assert(std::size(LINE_SPACING_IDS) == CrossPointSettings::LINE_COMPRESSION_COUNT, "line spacing labels");
 constexpr StrId WORD_SPACING_IDS[] = {StrId::STR_SPACING_50_PERCENT,  StrId::STR_SPACING_75_PERCENT,
                                       StrId::STR_SPACING_100_PERCENT, StrId::STR_SPACING_125_PERCENT,
                                       StrId::STR_SPACING_150_PERCENT, StrId::STR_SPACING_175_PERCENT,

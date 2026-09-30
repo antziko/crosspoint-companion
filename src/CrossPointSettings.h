@@ -140,7 +140,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // point size it meant (see LEGACY_FONT_SIZE_MAX).
   static constexpr uint8_t LEGACY_FONT_SIZE_MAX = 3;
   static constexpr uint8_t DEFAULT_FONT_POINT_SIZE = 14;
-  enum LINE_COMPRESSION { TIGHT = 0, NORMAL = 1, WIDE = 2, EXTRA_WIDE = 3, LINE_COMPRESSION_COUNT };
+  // SEMI_WIDE was inserted between NORMAL and WIDE, shifting the two above it. The old 0..3
+  // numbering is carried forward by remapLegacyLineSpacing() from both stores that hold an
+  // index: settings.json (via the lineSpacingV2 key) and per-book reader_settings.bin.
+  enum LINE_COMPRESSION { TIGHT = 0, NORMAL = 1, SEMI_WIDE = 2, WIDE = 3, EXTRA_WIDE = 4, LINE_COMPRESSION_COUNT };
+  // Old index -> new. Shared by the two migrations so they cannot disagree.
+  static uint8_t remapLegacyLineSpacing(uint8_t legacy);
   enum PARAGRAPH_ALIGNMENT {
     JUSTIFIED = 0,
     LEFT_ALIGN = 1,

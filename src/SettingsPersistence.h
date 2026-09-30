@@ -106,7 +106,7 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
                           CrossPointSettings::DICT_FONT_MATCH_READER),
     persisted::enumerated("dictionaryFontSize", &CrossPointSettings::dictionaryFontSize,
                           CrossPointSettings::FONT_SIZE_COUNT - 1),
-    persisted::enumerated("lineSpacing", &CrossPointSettings::lineSpacing,
+    persisted::enumerated("lineSpacingV2", &CrossPointSettings::lineSpacing,
                           CrossPointSettings::LINE_COMPRESSION_COUNT - 1),
     persisted::ranged("screenMargin", &CrossPointSettings::screenMargin, CrossPointSettings::SCREEN_MARGIN_MIN,
                       CrossPointSettings::SCREEN_MARGIN_MAX),

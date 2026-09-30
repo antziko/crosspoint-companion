@@ -322,9 +322,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   v.push_back(SettingInfo::Enum(StrId::STR_DICT_FONT_SIZE, &CrossPointSettings::dictionaryFontSize,
                                 {StrId::STR_SMALL, StrId::STR_MEDIUM, StrId::STR_LARGE, StrId::STR_X_LARGE},
                                 "dictionaryFontSize", StrId::STR_READER_DICTIONARY));
-  v.push_back(SettingInfo::Enum(StrId::STR_LINE_SPACING, &CrossPointSettings::lineSpacing,
-                                {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_WIDE, StrId::STR_EXTRA_WIDE},
-                                "lineSpacing", StrId::STR_CAT_READER)
+  v.push_back(SettingInfo::Enum(
+                  StrId::STR_LINE_SPACING, &CrossPointSettings::lineSpacing,
+                  {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_SEMI_WIDE, StrId::STR_WIDE, StrId::STR_EXTRA_WIDE},
+                  "lineSpacingV2", StrId::STR_CAT_READER)
                   .withTextSettings());
   v.push_back(SettingInfo::Value(StrId::STR_SCREEN_MARGIN, &CrossPointSettings::screenMargin,
                                  {CrossPointSettings::SCREEN_MARGIN_MIN, CrossPointSettings::SCREEN_MARGIN_MAX,

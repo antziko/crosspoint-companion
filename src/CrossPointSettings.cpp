@@ -228,6 +228,15 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
     }
   }
 
+  // Line spacing gained SEMI_WIDE between NORMAL and WIDE, which pushed WIDE and EXTRA_WIDE up by
+  // one. The key was renamed so its absence identifies a file written under the old numbering;
+  // remap once, or every upgrading reader silently loses a step of spacing AND re-paginates every
+  // book (the section cache keys on the resulting float — Section.cpp:271).
+  if (doc["lineSpacingV2"].isNull() && !doc["lineSpacing"].isNull()) {
+    s.lineSpacing = remapLegacyLineSpacing(doc["lineSpacing"] | (uint8_t)NORMAL);
+    needsResave = true;
+  }
+
   if (doc["sleepTimeoutMinutes"].isNull() && !doc["sleepTimeout"].isNull()) {
     const uint8_t legacyValue =
         clamp(doc["sleepTimeout"] | (uint8_t)SLEEP_10_MIN, SLEEP_TIMEOUT_COUNT, (uint8_t)SLEEP_10_MIN);
@@ -342,12 +351,25 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
 }
 
 // static
+uint8_t CrossPointSettings::remapLegacyLineSpacing(const uint8_t legacy) {
+  // Old numbering, before SEMI_WIDE was inserted at index 2.
+  static constexpr uint8_t LEGACY[] = {TIGHT, NORMAL, WIDE, EXTRA_WIDE};
+  static_assert(sizeof(LEGACY) / sizeof(LEGACY[0]) == LINE_COMPRESSION_COUNT - 1,
+                "legacy line spacing table must cover every pre-SEMI_WIDE value");
+  return legacy < sizeof(LEGACY) / sizeof(LEGACY[0]) ? LEGACY[legacy] : static_cast<uint8_t>(NORMAL);
+}
+
+// static
 float CrossPointSettings::computeLineCompression(const uint8_t family, const uint8_t lineSpacing,
                                                  const char* sdFontName) {
   // SD card and vector fonts get a wider scale than the built-ins: their faces carry their
   // own (often generous) natural line height, so the old Bookerly-tuned 1.1/1.2 steps were
   // visually near-indistinguishable. At 12pt in portrait (~760px viewport) this scale spans
-  // ~26/24/19/15 lines per page — each step reads as a clearly different density.
+  // ~26/24/20/19/15 lines per page — each step reads as a clearly different density.
+  //
+  // SEMI_WIDE sits deliberately close to WIDE rather than midway: this is the only ramp with
+  // room for a step (NORMAL->WIDE is +30% here against +10% and +5% for the built-ins), and the
+  // ask was for "slightly less than Wide".
   if (sdFontName && sdFontName[0] != '\0') {
     switch (lineSpacing) {
       case TIGHT:
@@ -355,6 +377,8 @@ float CrossPointSettings::computeLineCompression(const uint8_t family, const uin
       case NORMAL:
       default:
         return 1.0f;
+      case SEMI_WIDE:
+        return 1.22f;
       case WIDE:
         return 1.3f;
       case EXTRA_WIDE:
@@ -362,6 +386,12 @@ float CrossPointSettings::computeLineCompression(const uint8_t family, const uin
     }
   }
 
+  // The built-in steps are pinned by pixel rounding, not taste: getLineHeight() rounds
+  // advanceY * compression to whole pixels, and advanceY is 34/40/45/51 px at 12/14/16/18pt, so
+  // a step only reads as different if it lands on a different integer at EVERY size.
+  // NOTOSERIF 1.05 -> 36/42/47/54 between NORMAL's 34/40/45/51 and WIDE's 37/44/50/56; 1.08 would
+  // collide with WIDE at 12pt. NOTOSANS 0.975 -> 33/39/44/50 between 32/38/43/48 and 34/40/45/51.
+  // Do not "round" either value to something tidier without redoing that arithmetic.
   switch (family) {
     case NOTOSERIF:
     default:
@@ -371,6 +401,8 @@ float CrossPointSettings::computeLineCompression(const uint8_t family, const uin
         case NORMAL:
         default:
           return 1.0f;
+        case SEMI_WIDE:
+          return 1.05f;
         case WIDE:
           return 1.1f;
         case EXTRA_WIDE:
@@ -383,6 +415,8 @@ float CrossPointSettings::computeLineCompression(const uint8_t family, const uin
         case NORMAL:
         default:
           return 0.95f;
+        case SEMI_WIDE:
+          return 0.975f;
         case WIDE:
           return 1.0f;
         case EXTRA_WIDE:
