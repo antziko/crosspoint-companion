@@ -192,13 +192,12 @@ int FontComparePane::loadHighlightedFontId(GfxRenderer& renderer) {
   return id;
 }
 
-void FontComparePane::renderList(GfxRenderer& renderer, int listTop, int listHeight) const {
+void FontComparePane::renderList(GfxRenderer& renderer, int listTop, int listHeight, int listX, int listWidth) const {
   const int committedIndex = committedIndex_;
-  listTouch_.record(Rect{0, listTop, renderer.getScreenWidth(), listHeight}, static_cast<int>(fonts_.size()),
-                    selectedIndex_);
+  const Rect band{listX, listTop, listWidth < 0 ? renderer.getScreenWidth() : listWidth, listHeight};
+  listTouch_.record(band, static_cast<int>(fonts_.size()), selectedIndex_);
   GUI.drawList(
-      renderer, Rect{0, listTop, renderer.getScreenWidth(), listHeight}, static_cast<int>(fonts_.size()),
-      selectedIndex_,
+      renderer, band, static_cast<int>(fonts_.size()), selectedIndex_,
       [this](int index) -> std::string {
         // Mark pinned fonts (they sort to the top) with a leading bullet.
         const auto& f = fonts_[index];

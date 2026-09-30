@@ -368,9 +368,13 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
 }
 
 void ReaderOptionsActivity::render(RenderLock&&) {
-  const auto pageWidth = renderer.getScreenWidth();
-  const auto pageHeight = renderer.getScreenHeight();
   const auto& metrics = UITheme::getInstance().getMetrics();
+  // Everything is laid out inside the area the button hints leave free: a bottom band in
+  // portrait, but a side column in landscape (top band when inverted).
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const Rect headerRect{safe.x, safe.y + metrics.topPadding, safe.width, metrics.headerHeight};
+  const int contentTop = headerRect.y + metrics.headerHeight + metrics.verticalSpacing;
+  const int contentHeight = safe.y + safe.height - contentTop - metrics.verticalSpacing;
 
   // Embedded font-family picker: the font list replaces the settings list, and the book-text
   // preview above shows the highlighted font (no separate screen, no two-pane comparison).
@@ -384,32 +388,27 @@ void ReaderOptionsActivity::render(RenderLock&&) {
     fontPane_.loadHighlightedFontId(renderer);
     applyHighlightedFont();
 
-    GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_FONT_FAMILY));
-    const int fcTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-    const int fcHeight = pageHeight - fcTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
-    int fcListTop = fcTop;
-    int fcListHeight = fcHeight;
+    GUI.drawHeader(renderer, headerRect, tr(STR_FONT_FAMILY));
+    int fcListTop = contentTop;
+    int fcListHeight = contentHeight;
     if (metrics.previewHeightPercent > 0) {
       const int previewHeight =
-          enlargedPreviewHeight(fcHeight, metrics.listRowHeight, metrics.verticalSpacing, fontPane_.size());
+          enlargedPreviewHeight(contentHeight, metrics.listRowHeight, metrics.verticalSpacing, fontPane_.size());
       const std::string familyName = getItemValue(FONT_FAMILY);
       const std::string sizeName = getItemValue(FONT_SIZE);
-      textsettings::renderPreview(renderer, previewLayout_, metrics.previewPadding, metrics.verticalSpacing, fcTop,
+      textsettings::renderPreview(renderer, previewLayout_, metrics.previewPadding, metrics.verticalSpacing, contentTop,
                                   previewHeight, familyName.c_str(), sizeName.c_str(), sampleText.c_str(),
-                                  /*showLabel=*/false);
-      fcListTop = fcTop + previewHeight + metrics.verticalSpacing;
-      fcListHeight = fcHeight - previewHeight - metrics.verticalSpacing;
+                                  /*showLabel=*/false, safe.x, safe.width);
+      fcListTop = contentTop + previewHeight + metrics.verticalSpacing;
+      fcListHeight = contentHeight - previewHeight - metrics.verticalSpacing;
     }
-    fontPane_.renderList(renderer, fcListTop, fcListHeight);
+    fontPane_.renderList(renderer, fcListTop, fcListHeight, safe.x, safe.width);
 
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer();
     return;
   }
-
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
 
   // Live preview pane above the list (same shared component as the global Text Settings).
   // previewHeightPercent == 0 disables it; then the list uses the full content area.
@@ -436,7 +435,7 @@ void ReaderOptionsActivity::render(RenderLock&&) {
   // Adding a sub-screen or a touch handler here means setting fullRedraw_ alongside it.
   if (fullRedraw_) {
     renderer.clearScreen();
-    GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_READER_OPTIONS));
+    GUI.drawHeader(renderer, headerRect, tr(STR_READER_OPTIONS));
 
     if (metrics.previewHeightPercent > 0) {
       // familyName/sizeName reuse the list's own value formatting for the font rows.
@@ -444,21 +443,23 @@ void ReaderOptionsActivity::render(RenderLock&&) {
       const std::string sizeName = getItemValue(FONT_SIZE);
       textsettings::renderPreview(renderer, previewLayout_, metrics.previewPadding, metrics.verticalSpacing, contentTop,
                                   previewHeight, familyName.c_str(), sizeName.c_str(), sampleText.c_str(),
-                                  /*showLabel=*/false);
+                                  /*showLabel=*/false, safe.x, safe.width);
     }
 
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_TOGGLE), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     fullRedraw_ = false;
   } else {
-    renderer.clearRect(0, listTop, pageWidth, listHeight);
+    // Only the list band: the hints are drawn on full redraws alone, so clearing past the
+    // safe area would erase them.
+    renderer.clearRect(safe.x, listTop, safe.width, listHeight);
   }
 
-  listTouch_.record(Rect{0, listTop, pageWidth, listHeight}, itemCount(), selectedIndex);
+  const Rect listRect{safe.x, listTop, safe.width, listHeight};
+  listTouch_.record(listRect, itemCount(), selectedIndex);
   GUI.drawList(
-      renderer, Rect{0, listTop, pageWidth, listHeight}, itemCount(), selectedIndex,
-      [](int index) { return std::string(getItemName(index)); }, nullptr, nullptr,
-      [this](int index) -> std::string { return getItemValue(index); }, true);
+      renderer, listRect, itemCount(), selectedIndex, [](int index) { return std::string(getItemName(index)); },
+      nullptr, nullptr, [this](int index) -> std::string { return getItemValue(index); }, true);
 
   renderer.displayBuffer();
 }

@@ -38,8 +38,9 @@ class FontComparePane {
   // Loads the highlighted font on demand (may swap the resident SD family) and clears the nav-lock.
   void renderPanes(GfxRenderer& renderer, int top, int height);
   // The font list within [listTop, listTop+listHeight): pinned entries float to the top with a
-  // '*' marker; the committed font is tagged [Selected].
-  void renderList(GfxRenderer& renderer, int listTop, int listHeight) const;
+  // '*' marker; the committed font is tagged [Selected]. listX/listWidth bound it horizontally
+  // (listWidth < 0 = full screen width).
+  void renderList(GfxRenderer& renderer, int listTop, int listHeight, int listX = 0, int listWidth = -1) const;
 
   // Make the highlighted font resident (SD swap) and return its fontId WITHOUT drawing the
   // compare panes — for hosts that render their own single preview (e.g. the in-reader

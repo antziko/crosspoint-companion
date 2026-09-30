@@ -37,8 +37,10 @@ struct PreviewLayout {
 // and falls back to STR_FONT_PREVIEW_TEXT.
 // showLabel draws the 'Preview "family, size"' caption at the bottom; pass false to drop it
 // and let the sample text fill the whole pane (the in-reader picker uses this).
+// areaX/areaWidth bound the pane horizontally (areaWidth < 0 = full screen width), so a
+// landscape caller can keep it clear of the side button-hint column.
 void renderPreview(GfxRenderer& renderer, PreviewLayout& layout, int previewPadding, int labelGap, int top, int height,
                    const char* familyName, const char* sizeName, const char* sampleText = nullptr,
-                   bool showLabel = true);
+                   bool showLabel = true, int areaX = 0, int areaWidth = -1);
 
 }  // namespace textsettings

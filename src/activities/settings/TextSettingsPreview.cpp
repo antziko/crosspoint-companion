@@ -101,11 +101,12 @@ std::string clampToPane(const char* text, int visibleLines, int textWidth, int l
 }  // namespace
 
 void renderPreview(GfxRenderer& renderer, PreviewLayout& layout, int previewPadding, int labelGap, int top, int height,
-                   const char* familyName, const char* sizeName, const char* sampleText, bool showLabel) {
+                   const char* familyName, const char* sizeName, const char* sampleText, bool showLabel,
+                   const int areaX, const int areaWidth) {
   // The reader passes its current page text; everything else previews the pangram.
   const char* text = (sampleText && *sampleText) ? sampleText : I18N.get(StrId::STR_FONT_PREVIEW_TEXT);
-  const int left = previewPadding;
-  const int width = renderer.getScreenWidth() - (previewPadding * 2);
+  const int left = areaX + previewPadding;
+  const int width = (areaWidth < 0 ? renderer.getScreenWidth() : areaWidth) - (previewPadding * 2);
   if (width <= 0 || height <= 0) return;
 
   // Without the caption the sample text fills the whole pane (bar the bottom padding).
