@@ -46,6 +46,10 @@ class HalFile {
     if (!fp_) return false;
     return std::fseek(fp_, static_cast<long>(offset), SEEK_CUR) == 0;
   }
+  bool seekSet(size_t offset) {
+    if (!fp_) return false;
+    return std::fseek(fp_, static_cast<long>(offset), SEEK_SET) == 0;
+  }
   int available() {
     if (!fp_) return 0;
     const long cur = std::ftell(fp_);
@@ -76,7 +80,9 @@ class HalStorage {
 
   void setRoot(const std::string& root) { root_ = root; }
 
-  bool openFileForRead(const char*, const std::string& path, HalFile& file) { return file.openForRead(translate(path)); }
+  bool openFileForRead(const char*, const std::string& path, HalFile& file) {
+    return file.openForRead(translate(path));
+  }
   bool openFileForWrite(const char*, const std::string& path, HalFile& file) {
     ensureParent(translate(path));
     return file.openForWrite(translate(path));

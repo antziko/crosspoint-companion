@@ -114,6 +114,9 @@ ReadingSpan findReading(const char* s);
 // and the full definition screen always show the same thing.
 size_t readEntry(Dictionary::LookupCtx& ctx, HalFile& dictFile, const char* token, char* buf, size_t bufSize);
 
+// readEntry's read half, for a caller that already holds the entry's .dict location.
+size_t readEntryAt(HalFile& dictFile, uint32_t offset, uint32_t size, char* buf, size_t bufSize);
+
 // How the entry's fields are distributed across the rows. Both flags exist for the enlarged-
 // character layout, where the box is columns rather than a paragraph: the headword field is drawn
 // as its own column, and the reading gets a row to itself so the eye finds it in the same place on

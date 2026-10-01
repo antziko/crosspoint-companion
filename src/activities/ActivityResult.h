@@ -78,6 +78,9 @@ struct BookmarkResult {
   uint16_t spineIndex = 0;
   float progress = 0.0f;
   uint16_t paragraphIndex = std::numeric_limits<uint16_t>::max();
+  // Exact character position in the chapter, 0 when unknown. Preferred over the paragraph
+  // when set: see Bookmark::visibleTextOffset.
+  uint32_t visibleTextOffset = 0;
 };
 
 // Font picked in FontSelectionActivity. When isBuiltin, builtinIndex is the

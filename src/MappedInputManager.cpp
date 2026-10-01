@@ -412,7 +412,9 @@ bool MappedInputManager::wasHomeGesture() const {
   // Home-key boards (X4 Pro) go through the configured action, so a key the user has
   // remapped no longer also goes Home. Their bottom-edge swipe stays free for the
   // reader menu, which is why it cannot fire the same action twice.
-  return gpio.hasHomeKey() ? homeAction == HomeButtonAction::Home : wasBottomEdgeUpSwipe();
+  // A button board reaches the Home action through the power double click instead.
+  if (homeAction == HomeButtonAction::Home) return true;
+  return !gpio.hasHomeKey() && wasBottomEdgeUpSwipe();
 }
 
 bool MappedInputManager::wasHomeKeyHold() const {
@@ -467,6 +469,15 @@ bool MappedInputManager::wasLongPressed(const Button button, const unsigned long
 
 void MappedInputManager::suppressNextRelease(const Button button) const {
   suppressedReleaseButtons |= 1u << static_cast<uint8_t>(button);
+}
+
+bool MappedInputManager::powerDoubleClickEnabled() const {
+  return !gpio.hasHomeKey() && SETTINGS.powerDoubleClickAction != static_cast<uint8_t>(HomeButtonAction::Ignore) &&
+         SETTINGS.powerDoubleClickAction < static_cast<uint8_t>(HomeButtonAction::Count);
+}
+
+bool MappedInputManager::wasPowerShortPress() const {
+  return powerDoubleClickEnabled() ? powerShortPressFrame : wasReleased(Button::Power);
 }
 
 bool MappedInputManager::consumeSuppressedRelease() const {

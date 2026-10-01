@@ -140,12 +140,22 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // point size it meant (see LEGACY_FONT_SIZE_MAX).
   static constexpr uint8_t LEGACY_FONT_SIZE_MAX = 3;
   static constexpr uint8_t DEFAULT_FONT_POINT_SIZE = 14;
-  // SEMI_WIDE was inserted between NORMAL and WIDE, shifting the two above it. The old 0..3
-  // numbering is carried forward by remapLegacyLineSpacing() from both stores that hold an
-  // index: settings.json (via the lineSpacingV2 key) and per-book reader_settings.bin.
-  enum LINE_COMPRESSION { TIGHT = 0, NORMAL = 1, SEMI_WIDE = 2, WIDE = 3, EXTRA_WIDE = 4, LINE_COMPRESSION_COUNT };
-  // Old index -> new. Shared by the two migrations so they cannot disagree.
-  static uint8_t remapLegacyLineSpacing(uint8_t legacy);
+  // SEMI_WIDE and then RELAXED were each inserted at index 2, shifting the steps above them. The
+  // two older numberings are carried forward by remapLegacyLineSpacing() from both stores that
+  // hold an index: settings.json (via the lineSpacingV3 key) and per-book reader_settings.bin.
+  enum LINE_COMPRESSION {
+    TIGHT = 0,
+    NORMAL = 1,
+    RELAXED = 2,
+    SEMI_WIDE = 3,
+    WIDE = 4,
+    EXTRA_WIDE = 5,
+    LINE_COMPRESSION_COUNT
+  };
+  // Old index -> new. hadSemiWide selects the numbering: false for the original 0..3
+  // (Tight/Normal/Wide/Extra Wide), true for the 0..4 one that added Semi-Wide. Shared by the two
+  // migrations so they cannot disagree.
+  static uint8_t remapLegacyLineSpacing(uint8_t legacy, bool hadSemiWide);
   enum PARAGRAPH_ALIGNMENT {
     JUSTIFIED = 0,
     LEFT_ALIGN = 1,
@@ -437,6 +447,9 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t homeButtonTapAction = static_cast<uint8_t>(HomeButtonAction::Home);
   uint8_t homeButtonDoubleTapAction = static_cast<uint8_t>(HomeButtonAction::ToggleFrontlight);
   uint8_t homeButtonLongPressAction = static_cast<uint8_t>(HomeButtonAction::ReaderMenu);
+  // Boards without a Home key: a double click of POWER runs this HomeButtonAction. Ignore = off.
+  // While one is set, a single click's shortPwrBtn action waits out the double-click window.
+  uint8_t powerDoubleClickAction = static_cast<uint8_t>(HomeButtonAction::Ignore);
   // EPUB reading orientation settings
   // 0 = portrait (default), 1 = landscape clockwise, 2 = inverted, 3 = landscape counter-clockwise
   uint8_t orientation = PORTRAIT;

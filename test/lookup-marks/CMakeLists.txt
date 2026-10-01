@@ -6,6 +6,7 @@ add_executable(LookupMarksTest
 target_include_directories(LookupMarksTest PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/stubs
   ${REPO_ROOT}/src
+  ${REPO_ROOT}/lib/Utf8
 )
 
 target_link_libraries(LookupMarksTest PRIVATE

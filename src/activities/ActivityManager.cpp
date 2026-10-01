@@ -25,6 +25,7 @@
 #include "reader/ReadingStatsActivity.h"
 #include "settings/OpdsServerListActivity.h"
 #include "settings/SettingsActivity.h"
+#include "util/HangTrace.h"
 #if FREEINK_CAP_FRONTLIGHT
 #include "util/FrontlightPanelActivity.h"
 #endif
@@ -69,7 +70,9 @@ void ActivityManager::renderTaskTrampoline(void* param) {
 
 void ActivityManager::renderTaskLoop() {
   while (true) {
+    HangTrace::mark(HangTrace::Render, HangTrace::RenderWait);
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    HangTrace::mark(HangTrace::Render, HangTrace::RenderRun);
     // Acquire the lock before reading currentActivity to avoid a TOCTOU race
     // where the main task deletes the activity between the null-check and render().
     RenderLock lock;

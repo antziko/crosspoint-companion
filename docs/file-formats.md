@@ -90,6 +90,15 @@ if (parsedSize != fileSize) {
 
 ## `section.bin`
 
+### Version 59
+
+Version 59 adds one `u8 imageBleed` to the header, after `wordSpacingPercent` and before
+`pageCount`: the px a large image may extend past each side of the viewport (the reader's
+screen margin). Large images now fill the page width whatever CSS size the book gives
+them, capped by the page height, so cached image sizes and page breaks from version 58
+no longer match. Version 58 (word and character spacing in the header) is not documented
+here.
+
 ### Version 57
 
 Version 57 keeps the version 56 serialized layout unchanged. It was bumped because

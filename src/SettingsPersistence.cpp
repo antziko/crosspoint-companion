@@ -111,7 +111,9 @@ void verifySettingsPersistenceTable() {
       "tiltPageTurn",
       // Home-key gestures: the rows only exist on a board with the capacitive key, but
       // the stored values travel with the file.
-      "homeButtonTapAction", "homeButtonDoubleTapAction", "homeButtonLongPressAction"};
+      "homeButtonTapAction", "homeButtonDoubleTapAction", "homeButtonLongPressAction",
+      // Its button-board counterpart: the row is dropped where a Home key exists.
+      "powerDoubleClickAction"};
 
   // Rows with no counterpart: a setting removed from SettingsList but left here would keep
   // being written to settings.json forever.

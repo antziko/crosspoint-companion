@@ -30,4 +30,7 @@ struct ReaderRenderSpec {
   bool embeddedStyle = true;
   uint8_t imageRendering = 0;
   bool focusReadingEnabled = false;
+  // Px a large image may extend past each side of the viewport, into the reader's screen
+  // margin. Text keeps the margin.
+  uint8_t imageBleed = 0;
 };

@@ -325,8 +325,8 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
       // Must cover LINE_COMPRESSION_COUNT: the bound below is the enum's, so a short table is read
       // off the end (this array held three entries while the enum had four, so Extra Wide printed
       // whatever sat next to it on the stack).
-      const StrId labels[] = {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_SEMI_WIDE, StrId::STR_WIDE,
-                              StrId::STR_EXTRA_WIDE};
+      const StrId labels[] = {StrId::STR_TIGHT,     StrId::STR_NORMAL, StrId::STR_RELAXED,
+                              StrId::STR_SEMI_WIDE, StrId::STR_WIDE,   StrId::STR_EXTRA_WIDE};
       static_assert(std::size(labels) == CrossPointSettings::LINE_COMPRESSION_COUNT, "line spacing labels");
       const uint8_t sp =
           localOverride.lineSpacing < CrossPointSettings::LINE_COMPRESSION_COUNT ? localOverride.lineSpacing : 0;

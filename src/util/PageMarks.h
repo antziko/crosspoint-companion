@@ -22,11 +22,30 @@ namespace PageMarks {
 // exist as numbers — turning them back into pixels means walking the page's tokens in the same
 // order DictionaryWordSelectActivity::extractWords numbered them, which is why both walks share
 // PageTokenScan. A looked-up word is anchored instead by its chapter and in-chapter page (see
-// LookupMarks), so `chapterHash` and the 1-based `pageNumber` identify the page it belongs to.
+// LookupMarks), so `chapterHash`, the 1-based `pageNumber` and `markPageCount` (the chapter's
+// best-known total, Section::estimatedTotalPages -- the same figure the card recorded) identify
+// the page it belongs to.
 // The walk allocates nothing and is skipped entirely when neither kind of mark lands here,
 // which is nearly every page.
+// `bandTop`/`bandBottom` limit drawing to rows overlapping that screen band (the rest of the walk
+// still runs, so a word wrapped into the band is still recognised): for a repaint of one strip
+// of a page whose other rows already carry their marks -- or carry a selection highlight that a
+// mark drawn over it would spoil.
 void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int marginLeft, int marginTop,
-                 uint16_t spineIndex, float pageProgress, int pageCount, uint32_t chapterHash, int pageNumber);
+                 uint16_t spineIndex, float pageProgress, int pageCount, uint32_t chapterHash, int pageNumber,
+                 int markPageCount, int bandTop = INT16_MIN, int bandBottom = INT16_MAX);
+
+// The page identity drawForPage needs, for a screen that redraws the reader's page without the
+// reader's Section (the dictionary word-select overlay).
+struct PageKey {
+  bool valid = false;
+  uint16_t spineIndex = 0;
+  float pageProgress = 0;
+  int pageCount = 0;
+  uint32_t chapterHash = 0;
+  int pageNumber = 0;
+  int markPageCount = 0;
+};
 
 // The token a page long-press landed on: the rect actually inked, so the caller can push just
 // that region, and the token's own text for whatever names it on screen. `text` is
@@ -63,7 +82,7 @@ bool invertWordAtPoint(const GfxRenderer& renderer, const Page& page, int fontId
 // screen to act on.
 //
 // `chapterHash`, `pageNumber` and `pageCount` are the page key drawForPage takes, and must be the
-// same values -- a chapter that has re-paginated matches nothing, by design.
+// same values (`pageCount` here is drawForPage's `markPageCount`).
 const LookupMarks::Mark* lookupMarkAtPoint(const GfxRenderer& renderer, const Page& page, int fontId, int marginLeft,
                                            int marginTop, int x, int y, uint32_t chapterHash, int pageNumber,
                                            int pageCount);

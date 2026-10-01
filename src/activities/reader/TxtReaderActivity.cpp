@@ -27,6 +27,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/BookCacheUtils.h"
+#include "util/ReaderStatusBar.h"
 #include "util/ScreenshotUtil.h"
 
 namespace {
@@ -59,6 +60,7 @@ void TxtReaderActivity::onEnter() {
 
   // Load this book's saved orientation; fall back to the global default if none.
   loadOrientation();
+  ReaderStatusBar::load(txt->getCachePath());
   ReaderUtils::applyOrientation(renderer, APP_STATE.activeOrientation);
 
   // Cache bookmarked pages for the status-bar indicator.
@@ -121,6 +123,7 @@ void TxtReaderActivity::onExit() {
   // Reset orientation back to portrait for the rest of the UI
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
   APP_STATE.activeOrientation = SETTINGS.orientation;
+  ReaderStatusBar::unload();
 
   pageOffsets.clear();
   currentPageLines.clear();
@@ -476,6 +479,21 @@ void TxtReaderActivity::render(RenderLock&&) {
   // this would paint is in the orientation being left. loop() requests its own update.
   if (pendingOrientationAdopt != CrossPointState::NO_ORIENTATION_REQUEST) {
     return;
+  }
+
+  // The bottom reservation moved under the page index (the status bar hide toggle hands its
+  // strip to the page): re-index, keeping the reading position.
+  if (initialized) {
+    int top, right, bottom, left;
+    renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
+    bottom += std::max(cachedScreenMargin, static_cast<uint8_t>(UITheme::getInstance().getStatusBarHeight()));
+    if (bottom != cachedOrientedMarginBottom) {
+      pendingProgressFraction = totalPages > 1 ? static_cast<float>(currentPage) / (totalPages - 1) : 0.0f;
+      restorePendingFraction = true;
+      initialized = false;
+      pageOffsets.clear();
+      currentPageLines.clear();
+    }
   }
 
   // Initialize reader if not done

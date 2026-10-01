@@ -25,6 +25,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/BookCacheUtils.h"
+#include "util/ReaderStatusBar.h"
 
 void XtcReaderActivity::onEnter() {
   Activity::onEnter();
@@ -38,6 +39,7 @@ void XtcReaderActivity::onEnter() {
   tryRecoverBookCache(xtc->getPath());
   xtc->setupCacheDir();
   ensureCacheContentId(xtc->getPath(), xtc->getCachePath());
+  ReaderStatusBar::load(xtc->getCachePath());
 
   // Load saved progress
   loadProgress();
@@ -55,6 +57,7 @@ void XtcReaderActivity::onEnter() {
 void XtcReaderActivity::onExit() {
   Activity::onExit();
 
+  ReaderStatusBar::unload();
   APP_STATE.readerActivityLoadCount = 0;
   APP_STATE.saveToFile();
   xtc.reset();

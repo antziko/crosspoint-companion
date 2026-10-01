@@ -55,9 +55,12 @@ class LookupMarks {
   int size() const { return count_; }
   bool empty() const { return count_ == 0; }
 
-  // Marks anchored on this page, written to out[0..cap). Returns how many. A pageCount that
-  // does not match the chapter's current pagination returns none — the stored page numbers
-  // refer to a layout that no longer exists, and marking the wrong word is worse than none.
+  // Marks anchored on this page, written to out[0..cap). Returns how many. `pageCount` is the
+  // chapter's best-known total (an estimate while it is still being laid out). A mark matches
+  // its own page number -- right whenever the layout is unchanged -- and, after a re-layout
+  // (status bar toggle, font or margin change), every page whose slice of the chapter overlaps
+  // the slice its page covered, one or two pages. The word itself still has to be found on the
+  // page, so a stray match can only land on a nearby repeat of the same word.
   int collectForPage(uint32_t chapterHash, int page, int pageCount, const Mark** out, int cap) const;
 
   // --- Run matching ------------------------------------------------------------------------
@@ -74,6 +77,10 @@ class LookupMarks {
   // the mark. That is the failure mode of a hash-only matcher with no text to re-scan, and it
   // fails toward marking nothing.
   //
+  // A run may cross ONE line break (a word wrapped between two lines is still marked, in two
+  // segments); a second row change abandons it. `wrappedHere` tells the caller that the step it
+  // just took crossed the break, so it can close the first segment and start the second.
+  //
   // Deliberately free of geometry, GfxRenderer and Page: callers keep their own spans, and this
   // stays host-testable. It is the ONE place the predicate is written, so the underline
   // PageMarks::drawForPage paints and the mark PageMarks::lookupMarkAtPoint reports can never
@@ -81,8 +88,10 @@ class LookupMarks {
   struct RunState {
     uint32_t hash = 0;
     uint16_t len = 0;
-    int16_t y = 0;
+    int16_t y = 0;  // row of the segment the run is on now
     bool open = false;
+    bool wrapped = false;      // the run has already crossed its one allowed line break
+    bool wrappedHere = false;  // the last step crossed it
   };
 
   // None          nothing to do for this mark on this token.
@@ -98,17 +107,18 @@ class LookupMarks {
 
   // `tokenHash`/`tokenLen` are hashAppend(FNV_OFFSET, text, len) over this token, which the
   // caller computes once and reuses across every mark on the page. `text`/`len` are the same
-  // bytes, needed only to extend an open run. `rowY` abandons a run that wrapped onto a new
-  // line — a word split across two lines is not marked rather than marked wrongly.
+  // bytes, needed only to extend an open run. `rowY` detects a line break inside the run.
   static Step step(const Mark& m, RunState& r, bool isCjk, uint32_t tokenHash, uint16_t tokenLen, const char* text,
                    size_t len, int16_t rowY);
 
   // --- Hashing ---------------------------------------------------------------------------
   //
   // FNV-1a over normalised bytes: ASCII letters folded to lower case, ASCII punctuation and
-  // spaces skipped, everything else hashed verbatim. So "Fork," and "fork" agree, and so do
-  // "didn't" and "didnt" — the page carries the token as it was typeset, while the card holds
-  // whatever cleanWord() left of it.
+  // spaces skipped, CJK/fullwidth punctuation and general punctuation (U+2010-U+2027, U+00B7)
+  // skipped, everything else hashed verbatim. So "Fork," and "fork" agree, and so do "didn't"
+  // and "didnt" — the page carries the token as it was typeset, while the card holds whatever
+  // cleanWord() left of it. Layout keeps a CJK comma or full stop on the character before it
+  // (边， is one token), which is why the CJK set must be skipped too.
   static constexpr uint32_t FNV_OFFSET = 2166136261u;
 
   // Fold `len` bytes of `text` into `h`, adding the number of bytes that survived

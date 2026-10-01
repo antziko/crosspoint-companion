@@ -1514,6 +1514,23 @@ bool FlashcardDeck::appendRemoteCard(const std::string& cachePath, const std::st
   return ok;
 }
 
+bool FlashcardDeck::forEachCardDict(const std::string& cachePath,
+                                    bool (*fn)(void* ctx, const char* word, int wordLen, uint32_t dictHash),
+                                    void* ctx) {
+  struct C {
+    bool (*fn)(void*, const char*, int, uint32_t);
+    void* ctx;
+  } c{fn, ctx};
+  return forEachLine(
+      filePath(cachePath),
+      [](void* raw, const char* line, int len) {
+        auto* cc = static_cast<C*>(raw);
+        const Parsed p = parseLine(line, len);
+        return cc->fn(cc->ctx, line, p.wordLen, p.dictHash);
+      },
+      &c);
+}
+
 bool FlashcardDeck::cardDict(const std::string& cachePath, const std::string& word, uint32_t& outDictHash,
                              uint32_t* outCount) {
   // Deliberately not CountCtx: that carries a 160-byte excerpt and an 80-byte chapter on the

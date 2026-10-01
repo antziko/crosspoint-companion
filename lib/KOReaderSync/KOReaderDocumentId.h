@@ -61,8 +61,7 @@ class KOReaderDocumentId {
     std::string s = basename;
 
     // --- Leading "(X3) "/"(X4) " prefix (exact 5 chars) ---
-    if (s.size() >= 5 && s[0] == '(' && s[1] == 'X' && (s[2] == '3' || s[2] == '4') &&
-        s[3] == ')' && s[4] == ' ') {
+    if (s.size() >= 5 && s[0] == '(' && s[1] == 'X' && (s[2] == '3' || s[2] == '4') && s[3] == ')' && s[4] == ' ') {
       s.erase(0, 5);  // drop "(Xn) "
     }
 
@@ -71,8 +70,8 @@ class KOReaderDocumentId {
     const size_t stemEnd = (dot == std::string::npos) ? s.size() : dot;
     if (stemEnd >= 5) {
       const size_t p = stemEnd - 5;
-      if (s[p] == ' ' && s[p + 1] == '(' && s[p + 2] == 'X' &&
-          (s[p + 3] == '3' || s[p + 3] == '4') && s[p + 4] == ')') {
+      if (s[p] == ' ' && s[p + 1] == '(' && s[p + 2] == 'X' && (s[p + 3] == '3' || s[p + 3] == '4') &&
+          s[p + 4] == ')') {
         s = s.substr(0, p) + s.substr(stemEnd);  // drop " (Xn)", keep extension
       }
     }
@@ -103,13 +102,43 @@ class KOReaderDocumentId {
     const std::string stem = (dot == std::string::npos) ? basename : basename.substr(0, dot);
     const std::string ext = (dot == std::string::npos) ? "" : basename.substr(dot);
     const size_t first = stem.find(" - ");
-    if (first == std::string::npos) return basename;                       // no separator
+    if (first == std::string::npos) return basename;                        // no separator
     if (stem.find(" - ", first + 3) != std::string::npos) return basename;  // >1 separator
     std::string a = stem.substr(0, first);
     std::string b = stem.substr(first + 3);
     if (a.empty() || b.empty()) return basename;  // degenerate
-    if (b < a) std::swap(a, b);                    // canonical (lexicographic) order
+    if (b < a) std::swap(a, b);                   // canonical (lexicographic) order
     return a + " - " + b + ext;
+  }
+
+  /**
+   * The canonical name a filename-mode sync key is computed from.
+   *
+   * stripDeviceTag -> swapAuthorTitle, twice. The repeat is not redundant: a tag can sit
+   * on the title rather than on the whole name ("Author - (X4) Title.epub"), where it is
+   * at neither end of the filename and survives the first strip. Canonicalizing the order
+   * moves it to the front, the second strip removes it, and the second swap restores the
+   * ordering that removal changed:
+   *
+   *   "Author - (X4) Title.epub"
+   *     -> strip: unchanged        -> swap: "(X4) Title - Author.epub"
+   *     -> strip: "Title - Author.epub"  -> swap: canonical order
+   *
+   * Converges for a tag at the start of either component, and at the end of the name.
+   * A tag trailing the FIRST component ("Author (X4) - Title.epub") is still not
+   * recognized: it is at neither end and no reordering brings it to one. Stripping inside
+   * a component would need a wider tag rule than the deliberately narrow one above, so it
+   * is left alone until such a name is actually seen.
+   *
+   * Both sides of a sync must apply exactly this, or they key the same book differently
+   * and the failure is silent. The KOReader plugin's copy is koplugin/
+   * crosspointsync.koplugin/cp_docid.lua.
+   *
+   * @param basename A filename with no path component.
+   * @return Normalized filename.
+   */
+  static inline std::string canonicalFilename(const std::string& basename) {
+    return swapAuthorTitle(stripDeviceTag(swapAuthorTitle(stripDeviceTag(basename))));
   }
 
  private:

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <iterator>
 
@@ -480,6 +481,12 @@ int Dictionary::readWordInto(IdxScanner& scanner, char* buf, size_t bufSize) {
 // dictionaries (including wiktionary-derived ones) are sorted case-insensitively.
 // Using plain strcmp would cause the binary search to land on the wrong page for
 // any word whose alphabetic neighbourhood contains mixed-case page boundaries.
+// A .idx entry's 8-byte tail: big-endian .dict offset, then size.
+static uint32_t readBe32(const uint8_t* p) {
+  return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
+         (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
+}
+
 static int cistrcmp(const char* a, const char* b) {
   while (*a && *b) {
     int diff = std::tolower(static_cast<unsigned char>(*a)) - std::tolower(static_cast<unsigned char>(*b));
@@ -810,6 +817,60 @@ DictLocation Dictionary::locate(const std::string& word, const DictLookupCallbac
   return locateIn(ctx, word, cbs);
 }
 
+Dictionary::PrefixProbe Dictionary::probePrefixIn(LookupCtx& ctx, const char* text) {
+  PrefixProbe result;
+  if (!ctx.valid || text == nullptr || *text == '\0') return result;
+
+  uint32_t startByte = 0;
+  uint32_t endByte = ctx.idxSize;
+  resolveScanBoundsIn(ctx, text, &startByte, &endByte);
+  result.startByte = startByte;
+  result.endByte = endByte;
+  const size_t textLen = strlen(text);
+  const auto stopAt = [&](const char why) {
+    result.stop = why;
+    snprintf(result.stopWord, sizeof(result.stopWord), "%s", wordBuf);
+  };
+
+  // Allowed past endByte: when `text` sorts after its page's last headword, the first headword
+  // extending it is the next page's first, and a correctly sorted index puts nothing smaller
+  // there. Anything smaller past the page means the ordering assumption failed — stop.
+  IdxScanner scan(ctx.idx, startByte);
+  while (scan.position() < ctx.idxSize) {
+    const bool pastPage = scan.position() >= endByte;
+    if (readWordInto(scan, wordBuf, sizeof(wordBuf)) < 0) break;
+    uint8_t suffix[8];
+    if (!scan.readBytes(suffix, 8)) break;
+    result.scanned++;
+
+    const int cmp = cistrcmp(wordBuf, text);
+    if (cmp < 0) {
+      if (pastPage) {
+        stopAt('p');
+        break;
+      }
+      continue;
+    }
+    if (cmp == 0) {
+      stopAt('x');
+      result.exact = true;
+      result.isPrefix = true;
+      result.offset = readBe32(suffix);
+      result.size = readBe32(suffix + 4);
+      return result;
+    }
+    stopAt('n');
+    size_t i = 0;
+    while (i < textLen && wordBuf[i] != '\0' &&
+           std::tolower(static_cast<unsigned char>(wordBuf[i])) == std::tolower(static_cast<unsigned char>(text[i]))) {
+      i++;
+    }
+    result.isPrefix = i == textLen;
+    return result;
+  }
+  return result;
+}
+
 DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const DictLookupCallbacks& cbs) {
   DictLocation result;
   if (!ctx.valid) {
@@ -841,10 +902,8 @@ DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const
 
     int cmp = cistrcmp(wordBuf, word.c_str());
     if (cmp == 0) {
-      result.offset = (static_cast<uint32_t>(suffix[0]) << 24) | (static_cast<uint32_t>(suffix[1]) << 16) |
-                      (static_cast<uint32_t>(suffix[2]) << 8) | static_cast<uint32_t>(suffix[3]);
-      result.size = (static_cast<uint32_t>(suffix[4]) << 24) | (static_cast<uint32_t>(suffix[5]) << 16) |
-                    (static_cast<uint32_t>(suffix[6]) << 8) | static_cast<uint32_t>(suffix[7]);
+      result.offset = readBe32(suffix);
+      result.size = readBe32(suffix + 4);
       result.found = true;
       result.status = LookupStatus::Found;
       if (cbs.onProgress) cbs.onProgress(cbs.ctx, 100);
@@ -915,10 +974,8 @@ DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const
         if (!scan.readBytes(suffix, 8)) break;
         if (len == 0 || cistrcmp(wordBuf, word.c_str()) != 0) continue;
 
-        result.offset = (static_cast<uint32_t>(suffix[0]) << 24) | (static_cast<uint32_t>(suffix[1]) << 16) |
-                        (static_cast<uint32_t>(suffix[2]) << 8) | static_cast<uint32_t>(suffix[3]);
-        result.size = (static_cast<uint32_t>(suffix[4]) << 24) | (static_cast<uint32_t>(suffix[5]) << 16) |
-                      (static_cast<uint32_t>(suffix[6]) << 8) | static_cast<uint32_t>(suffix[7]);
+        result.offset = readBe32(suffix);
+        result.size = readBe32(suffix + 4);
         result.found = true;
         result.status = LookupStatus::Found;
         // Logged to SD because it is the signal that a dictionary's sort order disagrees with

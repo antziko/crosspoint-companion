@@ -349,3 +349,28 @@ TEST_F(DictGlossTest, ReadEntryCapsLongCjkEntryOnACodepointBoundary) {
   EXPECT_EQ(r.rowCount, DictGloss::GlossResult::kMaxRows);
   EXPECT_TRUE(r.truncated);
 }
+
+// --- probePrefixIn ---------------------------------------------------------------------
+
+TEST_F(DictGlossTest, ProbePrefixTellsAHeadwordFromTheStartOfOneFromNeither) {
+  // Byte order, as a CJK index is sorted: every extension of 中华 sits straight after it.
+  installSynthetic(
+      "/dictionaries/st-zh", "/dictionaries/st-zh/st-zh",
+      {{"中", "zhong"}, {"中华", "China (lit.)"}, {"中华人民共和国", "PRC"}, {"中国", "China"}, {"国", "guo"}});
+  Dictionary::LookupCtx ctx;
+  HalFile dict;
+  openSession("/dictionaries/st-zh/st-zh", ctx, dict);
+
+  const auto word = Dictionary::probePrefixIn(ctx, "中华");
+  EXPECT_TRUE(word.exact);
+  EXPECT_TRUE(word.isPrefix);
+  char buf[DictGloss::kPeekBytes];
+  EXPECT_STREQ((DictGloss::readEntryAt(dict, word.offset, word.size, buf, sizeof(buf)), buf), "China (lit.)");
+
+  const auto partial = Dictionary::probePrefixIn(ctx, "中华人民");
+  EXPECT_FALSE(partial.exact);
+  EXPECT_TRUE(partial.isPrefix);
+
+  EXPECT_FALSE(Dictionary::probePrefixIn(ctx, "中华人的").isPrefix);  // sorts between two headwords
+  EXPECT_FALSE(Dictionary::probePrefixIn(ctx, "国家").isPrefix);      // sorts past the last one
+}

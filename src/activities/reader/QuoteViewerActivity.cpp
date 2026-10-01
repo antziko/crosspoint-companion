@@ -107,8 +107,8 @@ void QuoteViewerActivity::loop() {
     const auto& bms = BOOKMARKS.getBookmarks();
     const size_t absIdx = quoteIndices_[currentPos_];
     if (absIdx < bms.size()) {
-      setResult(
-          ActivityResult{BookmarkResult{bms[absIdx].spineIndex, bms[absIdx].progress, bms[absIdx].paragraphIndex}});
+      setResult(ActivityResult{BookmarkResult{bms[absIdx].spineIndex, bms[absIdx].progress, bms[absIdx].paragraphIndex,
+                                              bms[absIdx].visibleTextOffset}});
     }
     finish();
     return;

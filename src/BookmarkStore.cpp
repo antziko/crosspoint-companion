@@ -4,11 +4,13 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <SdDebugLog.h>
 #include <Serialization.h>
 #include <esp_rom_crc.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 namespace {
@@ -16,25 +18,22 @@ constexpr uint8_t LEGACY_VERSION = 2;
 constexpr uint8_t COUNT_U16_VERSION = 3;
 constexpr uint8_t PARAGRAPH_ANCHOR_VERSION = 4;
 constexpr uint8_t SNIPPET_VERSION = 5;
-constexpr uint8_t RETURN_MARK_VERSION = 6;    // adds a per-bookmark "return here" flag byte
-constexpr uint8_t CHAPTER_PAGES_VERSION = 7;  // adds chapterCurrentPage + chapterPageCount (two uint16)
-constexpr uint8_t QUOTE_RANGE_VERSION = 8;    // adds quote flag + end anchor + start/end word (ranged quotes)
-constexpr uint8_t VERSION = 8;
+constexpr uint8_t RETURN_MARK_VERSION = 6;     // adds a per-bookmark "return here" flag byte
+constexpr uint8_t CHAPTER_PAGES_VERSION = 7;   // adds chapterCurrentPage + chapterPageCount (two uint16)
+constexpr uint8_t QUOTE_RANGE_VERSION = 8;     // adds quote flag + end anchor + start/end word (ranged quotes)
+constexpr uint8_t VISIBLE_OFFSET_VERSION = 9;  // adds visibleTextOffset (uint32), 0 when unknown
+constexpr uint8_t VERSION = 9;
 constexpr bool isKnownVersion(uint8_t v) {
   return v == LEGACY_VERSION || v == COUNT_U16_VERSION || v == PARAGRAPH_ANCHOR_VERSION || v == SNIPPET_VERSION ||
-         v == RETURN_MARK_VERSION || v == CHAPTER_PAGES_VERSION || v == QUOTE_RANGE_VERSION;
+         v == RETURN_MARK_VERSION || v == CHAPTER_PAGES_VERSION || v == QUOTE_RANGE_VERSION ||
+         v == VISIBLE_OFFSET_VERSION;
 }
-// Combined cap on point bookmarks + quotes per book. The resident vector is one
-// contiguous heap block (count * sizeof(Bookmark)); on the ESP32-C3 the max-contiguous
-// allocation is well under what 1024 records would need, so the cap is set to a size the
-// device can actually hold and load (128 * ~144 B ≈ 18 KB). Loads bound their reserve to
-// this (readFromFile) so an over-large/corrupt file truncates gracefully instead of
-// aborting on a failed allocation.
-constexpr uint16_t MAX_BOOKMARKS = 128;
 constexpr size_t INITIAL_BOOKMARK_RESERVE = 8;
 constexpr char BOOKMARKS_DIR[] = "/.crosspoint/bookmarks";
 // Parallel full-preview store; one append-only, identity-keyed entry per quote.
 constexpr uint8_t QTEXT_VERSION = 1;
+// Parallel KOReader-XPath store; one append-only, identity-keyed entry per bookmark.
+constexpr uint8_t XPATH_VERSION = 2;
 constexpr char HIGHLIGHTS_DIR[] = "/highlights";
 
 bool readBookmarkCount(HalFile& file, const uint8_t version, uint16_t& count) {
@@ -175,6 +174,10 @@ bool BookmarkStore::loadForBook(const std::string& filePath, const std::string& 
   // lazily one entry at a time via readPreviewAt.
   qtextFilePath = std::string(BOOKMARKS_DIR) + "/" + bookType + "_" + std::to_string(crc) + ".qtext";
 
+  // KOReader-XPath sidecar. Same lazy, identity-keyed treatment as .qtext — never loaded
+  // here, read one entry at a time via getXPath.
+  xpathFilePath = std::string(BOOKMARKS_DIR) + "/" + bookType + "_" + std::to_string(crc) + ".xpath";
+
   if (!Storage.exists(storeFilePath.c_str())) {
     LOG_DBG("BKS", "No bookmark file for this book");
     return true;
@@ -194,6 +197,7 @@ void BookmarkStore::unload() {
   storeFilePath.clear();
   tombFilePath.clear();
   qtextFilePath.clear();
+  xpathFilePath.clear();
   dirty = false;
   tombDirty = false;
 }
@@ -293,6 +297,7 @@ bool BookmarkStore::removeQuoteByRange(uint16_t spineIndex, uint16_t startWord, 
   dirty = true;
   saveToFile();
   compactPreviews();  // drop the orphaned preview entry (streamed, one at a time)
+  compactXPaths();
   exportTxt();
   return true;
 }
@@ -322,6 +327,123 @@ void BookmarkStore::removeBookmarkForPage(uint16_t spineIndex, float pageProgres
   bookmarks.erase(it);
   dirty = true;
   saveToFile();
+  compactXPaths();  // points carry an xpath too, unlike previews
+}
+
+bool BookmarkStore::isForeignMark(const Bookmark& bm) {
+  if (bm.quote) return bm.startWord >= FOREIGN_KEY_BASE;
+  return bm.paragraphIndex >= FOREIGN_KEY_BASE && bm.paragraphIndex != UINT16_MAX;
+}
+
+size_t BookmarkStore::countUnplacedForeign() const {
+  size_t n = 0;
+  for (const auto& bm : bookmarks) {
+    if (isUnplacedForeign(bm)) n++;
+  }
+  return n;
+}
+
+size_t BookmarkStore::indexOfMark(const bool quote, const uint16_t spineIndex, const uint16_t paragraphIndex,
+                                  const float progress, const uint16_t startWord, const uint16_t endWord) const {
+  for (size_t i = 0; i < bookmarks.size(); i++) {
+    const Bookmark& b = bookmarks[i];
+    if (keyMatchFull(quote, spineIndex, paragraphIndex, progress, startWord, endWord, b.quote, b.spineIndex,
+                     b.paragraphIndex, b.progress, b.startWord, b.endWord)) {
+      return i;
+    }
+  }
+  return SIZE_MAX;
+}
+
+bool BookmarkStore::adoptForeignMark(const size_t index, const uint16_t spineIndex, const float progress,
+                                     const uint16_t paragraphIndex, const char* chapterTitle, const std::string& xpath,
+                                     const std::string& endXPath, const uint16_t page, const uint16_t pageCount,
+                                     const uint32_t visibleTextOffset, const float endProgress) {
+  if (index >= bookmarks.size()) return false;
+  if (!isForeignMark(bookmarks[index])) return false;
+  const char* title = (chapterTitle && *chapterTitle) ? chapterTitle : bookmarks[index].chapterTitle;
+
+  if (bookmarks[index].quote) {
+    Bookmark& bm = bookmarks[index];
+    const bool moved = bm.progress != progress;
+    const bool retitled = strncmp(bm.chapterTitle, title, sizeof(bm.chapterTitle)) != 0;
+    // The peer sends no page numbers, so the list shows a mark with no "page X of Y"
+    // until this fills them in -- which is also how the pair is spotted on the device.
+    const bool repaged = pageCount > 0 && (bm.chapterCurrentPage != page || bm.chapterPageCount != pageCount);
+    const bool reoffset = visibleTextOffset != 0 && bm.visibleTextOffset != visibleTextOffset;
+    // A resolved end, or the start when none was resolved: a quote that ends where it
+    // begins is drawn on one page, which is the behaviour before ends were resolved.
+    const float end = endProgress >= 0.0f ? endProgress : progress;
+    const bool restretched = bm.endProgress != end;
+    if (!moved && !retitled && !repaged && !reoffset && !restretched) return false;  // already where it belongs
+    bm.progress = progress;
+    bm.endProgress = end;
+    if (visibleTextOffset != 0) bm.visibleTextOffset = visibleTextOffset;
+    if (pageCount > 0) {
+      bm.chapterCurrentPage = page;
+      bm.chapterPageCount = pageCount;
+    }
+    // Guarded: when no title was supplied, `title` aliases this very buffer.
+    if (retitled) snprintf(bm.chapterTitle, sizeof(bm.chapterTitle), "%s", title);
+    // Deliberately NOT nextVersion(). Adopting a quote changes no identity field -- a
+    // quote is keyed by (spine, startWord, endWord), and all three survive -- so there is
+    // nothing here a peer has to be told. What it does change is this device's own
+    // pagination: page numbers describe the font size, margins and screen that produced
+    // them, and every peer re-derives progress and offset in its own adoption pass,
+    // because a KOReader-born quote keeps its synthetic word range and so stays foreign.
+    // Bumping anyway would raise the record above the last version the peers published,
+    // and a peer's delete -- stamped one above what it could see -- then loses the
+    // tie-break in mergeFrom and the highlight comes back from the dead.
+    sortBookmarks();
+    dirty = true;
+    saveToFile();
+    LOG_DBG("BKS", "Adopted foreign quote at spine %u -> progress %.4f", spineIndex, static_cast<double>(progress));
+    return true;
+  }
+
+  // Copy what the re-add needs: removeBookmarkAt erases the record out from under it.
+  char snippet[BOOKMARK_SNIPPET_MAX];
+  snprintf(snippet, sizeof(snippet), "%s", bookmarks[index].snippet);
+  char keptTitle[BOOKMARK_CHAPTER_TITLE_MAX];
+  snprintf(keptTitle, sizeof(keptTitle), "%s", title);
+
+  // Tombstone first. addBookmark() drops any existing point bookmark on the same page,
+  // which would take the synthetic one with it and leave no tombstone — the peer would
+  // then re-send it on every sync. pageCount 0 below disables that same dedup for the
+  // record going in, so an unrelated mark sharing the page is not collateral.
+  removeBookmarkAt(index);
+  if (addBookmark(spineIndex, progress, 0, keptTitle, paragraphIndex, snippet, false, 0) != AddResult::Added) {
+    LOG_ERR("BKS", "Adopting a foreign bookmark failed: the limit was reached");
+    return false;
+  }
+
+  // Carry the anchor over rather than re-resolving it: the caller has already paid for
+  // the chapter stream that produced it, and compactXPaths() dropped the old entry with
+  // the synthetic record.
+  for (const auto& bm : bookmarks) {
+    // Progress as well as the anchor: when the XPath resolved to no paragraph the new
+    // record is keyed by progress alone, and the paragraph test would then match any
+    // other unanchored point bookmark in the same chapter.
+    if (!bm.quote && bm.spineIndex == spineIndex && bm.paragraphIndex == paragraphIndex && bm.progress == progress) {
+      setXPath(bm, xpath, endXPath);
+      if (visibleTextOffset != 0) {
+        const_cast<Bookmark&>(bm).visibleTextOffset = visibleTextOffset;
+        dirty = true;
+      }
+      if (pageCount > 0) {
+        // addBookmark took pageCount 0 to disable its same-page dedup, so the real page
+        // numbers go on here, where they cannot cost an unrelated mark its record.
+        Bookmark& placed = const_cast<Bookmark&>(bm);
+        placed.chapterCurrentPage = page;
+        placed.chapterPageCount = pageCount;
+        dirty = true;
+      }
+      if (dirty) saveToFile();
+      break;
+    }
+  }
+  LOG_DBG("BKS", "Adopted foreign bookmark at spine %u -> paragraph %u", spineIndex, paragraphIndex);
+  return true;
 }
 
 bool BookmarkStore::removeBookmarkAt(size_t index) {
@@ -336,6 +458,7 @@ bool BookmarkStore::removeBookmarkAt(size_t index) {
     compactPreviews();  // drop the orphaned preview entry
     exportTxt();
   }
+  compactXPaths();  // unlike previews, points hold xpaths as well
   return true;
 }
 
@@ -449,8 +572,9 @@ void BookmarkStore::clearAll() {
   saveTombstones();
   bookmarks.clear();
   dirty = false;
-  // No quotes remain — drop the preview sidecar and refresh the .txt export.
+  // Nothing remains — drop both sidecars and refresh the .txt export.
   if (!qtextFilePath.empty() && Storage.exists(qtextFilePath.c_str())) Storage.remove(qtextFilePath.c_str());
+  if (!xpathFilePath.empty() && Storage.exists(xpathFilePath.c_str())) Storage.remove(xpathFilePath.c_str());
   exportTxt();
 }
 
@@ -590,6 +714,15 @@ bool BookmarkStore::readFromFile() {
     } else {
       bm.quote = false;  // pre-v8 records are all point bookmarks
     }
+    if (version >= VISIBLE_OFFSET_VERSION) {
+      if (f.available() < static_cast<int>(sizeof(bm.visibleTextOffset))) {
+        LOG_ERR("BKS", "Bookmark file truncated at visible offset, record %u", i);
+        return false;
+      }
+      serialization::readPod(f, bm.visibleTextOffset);
+    } else {
+      bm.visibleTextOffset = 0;  // pre-v9: fall back to the paragraph anchor as before
+    }
     observeVersion(bm.version);  // rebuild the Lamport clock from stored versions
     bookmarks.push_back(bm);
   }
@@ -638,6 +771,7 @@ bool BookmarkStore::writeToFile() const {
     serialization::writePod(f, bm.endProgress);
     serialization::writePod(f, bm.startWord);
     serialization::writePod(f, bm.endWord);
+    serialization::writePod(f, bm.visibleTextOffset);
   }
 
   LOG_DBG("BKS", "Saved %u bookmark(s)", count);
@@ -656,11 +790,21 @@ bool BookmarkStore::writeToFile() const {
 //             q=quote  es=endSpineIndex  ep=endProgress  sw=startWord  ew=endWord
 //   tombstone:s=spineIndex  pi=paragraphIndex  p=progress  v=version
 //             q=quote  sw=startWord  ew=endWord
-std::string BookmarkStore::serializeToJson(const std::vector<Bookmark>& bms, const std::vector<Tombstone>& tombs,
-                                           size_t maxBodyBytes) {
+// One builder for both the plain and the anchored blob. `anchorStore`/`anchorOffsets`, when
+// given, name a sidecar and the per-bookmark offsets indexXPaths() found in it; each anchor
+// is read, copied into the document and released before the next, so the whole set is never
+// resident. Building the document twice (or building it and re-parsing it) would double the
+// peak on the one path where the heap is tightest, which is why this is shared rather than
+// layered.
+std::string BookmarkStore::serializeInternal(const std::vector<Bookmark>& bms, const std::vector<Tombstone>& tombs,
+                                             size_t maxBodyBytes, const BookmarkStore* anchorStore,
+                                             const uint32_t* anchorOffsets) {
   JsonDocument doc;
+  std::string anchorStart;
+  std::string anchorEnd;
   JsonArray arr = doc["b"].to<JsonArray>();
-  for (const auto& bm : bms) {
+  for (size_t i = 0; i < bms.size(); i++) {
+    const auto& bm = bms[i];
     if (bm.returnMark) continue;  // session "return here" mark is device-only — never synced
     JsonObject obj = arr.add<JsonObject>();
     obj["s"] = bm.spineIndex;
@@ -680,6 +824,14 @@ std::string BookmarkStore::serializeToJson(const std::vector<Bookmark>& bms, con
       obj["ep"] = bm.endProgress;
       obj["sw"] = bm.startWord;
       obj["ew"] = bm.endWord;
+    }
+    // The KOReader anchor: "xp" locates the mark, "xp1" the far end of a highlight. These
+    // are what a crengine client places an annotation from — CrossPoint's own spine/word
+    // coordinates mean nothing to it. Absent for a mark the device could not resolve.
+    if (anchorStore && anchorOffsets && anchorOffsets[i] != 0 &&
+        anchorStore->readXPathAt(anchorOffsets[i], anchorStart, anchorEnd)) {
+      obj["xp"] = anchorStart;
+      if (!anchorEnd.empty()) obj["xp1"] = anchorEnd;
     }
   }
   JsonArray tarr = doc["t"].to<JsonArray>();
@@ -724,9 +876,32 @@ std::string BookmarkStore::serializeToJson(const std::vector<Bookmark>& bms, con
   return out;
 }
 
-bool BookmarkStore::parseFromJson(const char* json, std::vector<Bookmark>& outBms, std::vector<Tombstone>& outTombs) {
+std::string BookmarkStore::serializeToJson(const std::vector<Bookmark>& bms, const std::vector<Tombstone>& tombs,
+                                           const size_t maxBodyBytes) {
+  return serializeInternal(bms, tombs, maxBodyBytes, nullptr, nullptr);
+}
+
+std::string BookmarkStore::serializeWithAnchors(const size_t maxBodyBytes) const {
+  const size_t n = std::min<size_t>(bookmarks.size(), MAX_BOOKMARKS);
+  if (n == 0 || n < bookmarks.size()) {
+    // Over the cap the offsets array cannot index every mark, and a partly anchored blob
+    // is not worth the risk of a mis-indexed one.
+    return serializeToJson(bookmarks, tombstones, maxBodyBytes);
+  }
+
+  // 512 bytes for the whole book, against ~18KB if every anchor were held resident.
+  uint32_t offsets[MAX_BOOKMARKS];
+  if (indexXPaths(offsets, n) == 0) {
+    return serializeToJson(bookmarks, tombstones, maxBodyBytes);  // nothing anchored yet
+  }
+  return serializeInternal(bookmarks, tombstones, maxBodyBytes, this, offsets);
+}
+
+bool BookmarkStore::parseFromJson(const char* json, std::vector<Bookmark>& outBms, std::vector<Tombstone>& outTombs,
+                                  bool* outTruncated) {
   outBms.clear();
   outTombs.clear();
+  if (outTruncated) *outTruncated = false;
   if (json == nullptr || json[0] == '\0') return true;  // empty blob = nothing stored
 
   JsonDocument doc;
@@ -781,6 +956,14 @@ bool BookmarkStore::parseFromJson(const char* json, std::vector<Bookmark>& outBm
     t.startWord = obj["sw"] | (obj["startWord"] | static_cast<uint16_t>(0));
     t.endWord = obj["ew"] | (obj["endWord"] | static_cast<uint16_t>(0));
     outTombs.push_back(t);
+  }
+
+  // Either cap hit means the server holds records this device cannot represent. The
+  // caller must not PUT back what it parsed — that blob would drop them for every peer.
+  if (outTruncated && (arr.size() > MAX_BOOKMARKS || tarr.size() > MAX_BOOKMARKS)) {
+    *outTruncated = true;
+    LOG_ERR("BKS", "Remote blob truncated: %u bookmarks / %u tombstones exceed cap %u", (unsigned)arr.size(),
+            (unsigned)tarr.size(), (unsigned)MAX_BOOKMARKS);
   }
   return true;
 }
@@ -1023,6 +1206,7 @@ size_t BookmarkStore::mergeFrom(const std::vector<Bookmark>& remoteBookmarks,
     // preview entries. Merged-in remote quotes carry no preview (snippet-only sync), so
     // their .qtext entry is simply absent and QuoteViewer falls back to the snippet.
     compactPreviews();
+    compactXPaths();  // same for anchors of bookmarks the merge dropped
     exportTxt();
   }
   if (tombsChanged) {
@@ -1279,6 +1463,372 @@ void BookmarkStore::compactPreviews() const {
   if (!ok) return;
   Storage.remove(qtextFilePath.c_str());
   Storage.rename(tmpPath.c_str(), qtextFilePath.c_str());
+}
+
+// --- KOReader XPath sidecar -------------------------------------------------
+// Record: [u8 quote][u16 spine][u16 para][f32 progress][u16 startWord][u16 endWord]
+//         [u16 len][u16 endLen][len bytes][endLen bytes]
+// The five key fields are exactly what keyMatchFull() compares, so a stored entry is
+// matched by the same rule the merge uses — an entry never binds to a different spot than
+// the one it was written for. The second path is a highlight's end anchor; a point
+// bookmark stores endLen 0.
+namespace {
+// Grouped in field order: quote | spine, para | progress | startWord, endWord, len, endLen.
+constexpr int kXPathHeaderBytes =
+    static_cast<int>(sizeof(uint8_t) + 2 * sizeof(uint16_t) + sizeof(float) + 4 * sizeof(uint16_t));
+
+struct XPathKey {
+  uint8_t quote;
+  uint16_t spine;
+  uint16_t para;
+  float progress;
+  uint16_t startWord;
+  uint16_t endWord;
+};
+
+void readXPathKey(HalFile& f, XPathKey& k, uint16_t& len, uint16_t& endLen) {
+  serialization::readPod(f, k.quote);
+  serialization::readPod(f, k.spine);
+  serialization::readPod(f, k.para);
+  serialization::readPod(f, k.progress);
+  serialization::readPod(f, k.startWord);
+  serialization::readPod(f, k.endWord);
+  serialization::readPod(f, len);
+  serialization::readPod(f, endLen);
+}
+
+void writeXPathKey(HalFile& f, const XPathKey& k, uint16_t len, uint16_t endLen) {
+  serialization::writePod(f, k.quote);
+  serialization::writePod(f, k.spine);
+  serialization::writePod(f, k.para);
+  serialization::writePod(f, k.progress);
+  serialization::writePod(f, k.startWord);
+  serialization::writePod(f, k.endWord);
+  serialization::writePod(f, len);
+  serialization::writePod(f, endLen);
+}
+
+// A record's payload is the two paths back to back; both lengths are validated before
+// either is trusted, so a corrupt tail ends the scan instead of seeking past the file.
+bool xpathLensValid(HalFile& f, const uint16_t len, const uint16_t endLen) {
+  return len <= BOOKMARK_XPATH_MAX && endLen <= BOOKMARK_XPATH_MAX &&
+         f.available() >= static_cast<int>(len) + static_cast<int>(endLen);
+}
+
+bool xpathKeyHits(const XPathKey& k, const Bookmark& b) {
+  return keyMatchFull(k.quote != 0, k.spine, k.para, k.progress, k.startWord, k.endWord, b.quote, b.spineIndex,
+                      b.paragraphIndex, b.progress, b.startWord, b.endWord);
+}
+
+// Anchors are a cache, so a sidecar written by another firmware version is dropped rather
+// than migrated. Without this, appending a current record to an older file would leave a
+// mixed one that every reader rejects and every write grows.
+void discardForeignXPathVersionAt(const std::string& path) {
+  if (path.empty() || !Storage.exists(path.c_str())) return;
+  uint8_t version = 0;
+  {
+    HalFile f;
+    if (!Storage.openFileForRead("BKS", path, f)) return;
+    serialization::readPod(f, version);
+  }  // must close before removing the same path
+  if (version == XPATH_VERSION) return;
+  LOG_DBG("BKS", "Dropping xpath sidecar written at version %u (current %u)", version, XPATH_VERSION);
+  Storage.remove(path.c_str());
+}
+
+XPathKey xpathKeyOf(const Bookmark& b) {
+  return XPathKey{
+      static_cast<uint8_t>(b.quote ? 1 : 0), b.spineIndex, b.paragraphIndex, b.progress, b.startWord, b.endWord};
+}
+
+// Every key the sidecar already holds, in one pass with the payloads skipped. Keyed off
+// the file rather than off getBookmarks() because adoptRemoteXPaths deliberately runs
+// before the bookmark set is loaded.
+size_t collectXPathKeys(const std::string& path, XPathKey* out, const size_t cap) {
+  if (path.empty() || !Storage.exists(path.c_str())) return 0;
+  HalFile f;
+  if (!Storage.openFileForRead("BKS", path, f)) return 0;
+  uint8_t version = 0;
+  serialization::readPod(f, version);
+  if (version != XPATH_VERSION) return 0;
+  size_t n = 0;
+  while (n < cap && f.available() >= kXPathHeaderBytes) {
+    uint16_t len = 0;
+    uint16_t endLen = 0;
+    readXPathKey(f, out[n], len, endLen);
+    if (!xpathLensValid(f, len, endLen)) break;  // truncated/corrupt
+    if (len || endLen) f.seekCur(static_cast<int64_t>(len) + static_cast<int64_t>(endLen));
+    n++;
+  }
+  return n;
+}
+}  // namespace
+
+bool BookmarkStore::setXPath(const Bookmark& bm, const std::string& xpath, const std::string& endXPath) const {
+  return appendXPathTo(xpathFilePath, bm, xpath, endXPath);
+}
+
+// Path-keyed rather than member-keyed: adoptRemoteXPaths writes a book's anchors with no
+// book loaded, so the sidecar it targets cannot come from the instance.
+bool BookmarkStore::appendXPathTo(const std::string& path, const Bookmark& bm, const std::string& xpath,
+                                  const std::string& endXPath) {
+  if (path.empty() || xpath.empty()) return false;
+  Storage.mkdir(BOOKMARKS_DIR);
+  discardForeignXPathVersionAt(path);
+  const bool existed = Storage.exists(path.c_str());
+  HalFile f;
+  if (!Storage.openFileForAppend("BKS", path.c_str(), f)) {
+    LOG_ERR("BKS", "Failed to open xpath file for append");
+    return false;
+  }
+  if (!existed) serialization::writePod(f, XPATH_VERSION);
+  const uint16_t len = static_cast<uint16_t>(std::min<size_t>(xpath.size(), BOOKMARK_XPATH_MAX));
+  const uint16_t endLen = static_cast<uint16_t>(std::min<size_t>(endXPath.size(), BOOKMARK_XPATH_MAX));
+  writeXPathKey(f, xpathKeyOf(bm), len, endLen);
+  f.write(xpath.data(), len);
+  if (endLen) f.write(endXPath.data(), endLen);
+  return true;
+}
+
+size_t BookmarkStore::adoptRemoteXPaths(const char* json, const std::string& filePath, const char* bookType) {
+  if (json == nullptr || json[0] == '\0') return 0;
+
+  const uint32_t crc =
+      esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(filePath.data()), static_cast<uint32_t>(filePath.size()));
+  // Built here rather than read off the instance: this runs with no book loaded, and must
+  // not depend on whether one happens to be.
+  const std::string sidecar = std::string(BOOKMARKS_DIR) + "/" + bookType + "_" + std::to_string(crc) + ".xpath";
+  discardForeignXPathVersionAt(sidecar);
+
+  // What is already anchored, so a re-sync does not append the same record again — the
+  // sidecar is append-only, so a duplicate is dead weight that never stops accumulating.
+  auto seen = makeUniqueNoThrow<XPathKey[]>(MAX_BOOKMARKS);
+  if (!seen) {
+    LOG_ERR("BKS", "OOM: %u bytes for the anchor key set", static_cast<unsigned>(MAX_BOOKMARKS * sizeof(XPathKey)));
+    return 0;
+  }
+  size_t seenCount = collectXPathKeys(sidecar, seen.get(), MAX_BOOKMARKS);
+
+  JsonDocument doc;
+  if (deserializeJson(doc, json)) return 0;  // parseFromJson logs the parse error already
+  JsonArray arr = doc.is<JsonArray>()        ? doc.as<JsonArray>()
+                  : doc["b"].is<JsonArray>() ? doc["b"].as<JsonArray>()
+                                             : doc["bookmarks"].as<JsonArray>();
+
+  size_t adopted = 0;
+  size_t index = 0;
+  for (JsonObject obj : arr) {
+    if (index++ >= MAX_BOOKMARKS) break;  // the same cap parseFromJson stops at
+    const char* xp = obj["xp"] | "";
+    if (xp[0] == '\0') continue;
+    // Dropped, not truncated: a cut XPath resolves to nothing, and storing one would hand
+    // the peer back a broken anchor with this device's authority behind it.
+    const size_t xpLen = strnlen(xp, BOOKMARK_XPATH_MAX + 1);
+    if (xpLen > BOOKMARK_XPATH_MAX) continue;
+
+    // Identity fields only: the anchor key reads nothing else, and the merge -- not this --
+    // decides whether the bookmark itself is kept.
+    Bookmark bm{};
+    bm.spineIndex = obj["s"] | (obj["spineIndex"] | static_cast<uint16_t>(0));
+    bm.progress = obj["p"] | (obj["progress"] | 0.0f);
+    bm.paragraphIndex = obj["pi"] | (obj["paragraphIndex"] | static_cast<uint16_t>(UINT16_MAX));
+    bm.quote = obj["q"] | (obj["quote"] | false);
+    bm.startWord = obj["sw"] | (obj["startWord"] | static_cast<uint16_t>(0));
+    bm.endWord = obj["ew"] | (obj["endWord"] | static_cast<uint16_t>(0));
+
+    bool have = false;
+    for (size_t i = 0; i < seenCount && !have; i++) have = xpathKeyHits(seen[i], bm);
+    if (have) continue;
+
+    const char* xp1 = obj["xp1"] | "";
+    const size_t xp1Len = strnlen(xp1, BOOKMARK_XPATH_MAX + 1);
+    const std::string endXPath = xp1Len > BOOKMARK_XPATH_MAX ? std::string() : std::string(xp1, xp1Len);
+    if (!appendXPathTo(sidecar, bm, std::string(xp, xpLen), endXPath)) continue;
+    // Remember it too, so a blob naming one spot twice appends once.
+    if (seenCount < MAX_BOOKMARKS) seen[seenCount++] = xpathKeyOf(bm);
+    adopted++;
+  }
+
+  if (adopted > 0) {
+    LOG_DBG("BKS", "Adopted %u anchor(s) from the remote blob", static_cast<unsigned>(adopted));
+    SdDebugLog::log("BKS", "adopted %u remote anchor(s)", static_cast<unsigned>(adopted));
+  }
+  return adopted;
+}
+
+void BookmarkStore::discardForeignXPathVersion() const { discardForeignXPathVersionAt(xpathFilePath); }
+
+bool BookmarkStore::getXPath(const Bookmark& bm, std::string& out, std::string* outEnd) const {
+  out.clear();
+  if (outEnd) outEnd->clear();
+  if (xpathFilePath.empty() || !Storage.exists(xpathFilePath.c_str())) return false;
+  HalFile f;
+  if (!Storage.openFileForRead("BKS", xpathFilePath, f)) return false;
+  uint8_t version = 0;
+  serialization::readPod(f, version);
+  if (version != XPATH_VERSION) return false;
+
+  bool found = false;
+  while (f.available() >= kXPathHeaderBytes) {
+    XPathKey k{};
+    uint16_t len = 0;
+    uint16_t endLen = 0;
+    readXPathKey(f, k, len, endLen);
+    if (!xpathLensValid(f, len, endLen)) break;  // truncated/corrupt
+    if (xpathKeyHits(k, bm)) {
+      out.resize(len);
+      if (len) f.read(&out[0], len);
+      if (outEnd) {
+        outEnd->resize(endLen);
+        if (endLen) f.read(&(*outEnd)[0], endLen);
+      } else if (endLen) {
+        f.seekCur(static_cast<int64_t>(endLen));
+      }
+      found = true;  // keep scanning — a later append for the same key supersedes this one
+    } else if (len || endLen) {
+      f.seekCur(static_cast<int64_t>(len) + static_cast<int64_t>(endLen));
+    }
+  }
+  return found;
+}
+
+size_t BookmarkStore::whichHaveXPaths(bool* outHas, const size_t count) const {
+  if (!outHas || count == 0) return 0;
+  for (size_t i = 0; i < count; i++) outHas[i] = false;
+  if (xpathFilePath.empty() || !Storage.exists(xpathFilePath.c_str())) return 0;
+  HalFile f;
+  if (!Storage.openFileForRead("BKS", xpathFilePath, f)) return 0;
+  uint8_t version = 0;
+  serialization::readPod(f, version);
+  if (version != XPATH_VERSION) return 0;
+
+  const size_t n = std::min(count, bookmarks.size());
+  size_t found = 0;
+  while (f.available() >= kXPathHeaderBytes) {
+    XPathKey k{};
+    uint16_t len = 0;
+    uint16_t endLen = 0;
+    readXPathKey(f, k, len, endLen);
+    if (!xpathLensValid(f, len, endLen)) break;                                              // truncated/corrupt
+    if (len || endLen) f.seekCur(static_cast<int64_t>(len) + static_cast<int64_t>(endLen));  // anchors not needed here
+    for (size_t i = 0; i < n; i++) {
+      if (outHas[i] || !xpathKeyHits(k, bookmarks[i])) continue;
+      outHas[i] = true;  // a key identifies one spot, so no other bookmark can also match
+      found++;
+      break;
+    }
+  }
+  return found;
+}
+
+size_t BookmarkStore::indexXPaths(uint32_t* outOffsets, const size_t count) const {
+  if (!outOffsets || count == 0) return 0;
+  for (size_t i = 0; i < count; i++) outOffsets[i] = 0;
+  if (xpathFilePath.empty() || !Storage.exists(xpathFilePath.c_str())) return 0;
+  HalFile f;
+  if (!Storage.openFileForRead("BKS", xpathFilePath, f)) return 0;
+  uint8_t version = 0;
+  serialization::readPod(f, version);
+  if (version != XPATH_VERSION) return 0;
+
+  const size_t n = std::min(count, bookmarks.size());
+  uint32_t at = static_cast<uint32_t>(sizeof(uint8_t));  // byte 0 is the version, so 0 is a safe "none"
+  while (f.available() >= kXPathHeaderBytes) {
+    XPathKey k{};
+    uint16_t len = 0;
+    uint16_t endLen = 0;
+    readXPathKey(f, k, len, endLen);
+    if (!xpathLensValid(f, len, endLen)) break;  // truncated/corrupt
+    if (len || endLen) f.seekCur(static_cast<int64_t>(len) + static_cast<int64_t>(endLen));
+    for (size_t i = 0; i < n; i++) {
+      if (!xpathKeyHits(k, bookmarks[i])) continue;
+      outOffsets[i] = at;  // a later append for the same key supersedes this one
+      break;               // a key identifies one spot, so no other bookmark can also match
+    }
+    at += static_cast<uint32_t>(kXPathHeaderBytes) + len + endLen;
+  }
+
+  size_t found = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (outOffsets[i] != 0) found++;
+  }
+  return found;
+}
+
+bool BookmarkStore::readXPathAt(const uint32_t offset, std::string& out, std::string& outEnd) const {
+  out.clear();
+  outEnd.clear();
+  if (offset == 0 || xpathFilePath.empty()) return false;
+  HalFile f;
+  if (!Storage.openFileForRead("BKS", xpathFilePath, f)) return false;
+  if (!f.seekSet(offset)) return false;
+  if (f.available() < kXPathHeaderBytes) return false;
+  XPathKey k{};
+  uint16_t len = 0;
+  uint16_t endLen = 0;
+  readXPathKey(f, k, len, endLen);
+  if (!xpathLensValid(f, len, endLen) || len == 0) return false;
+  out.resize(len);
+  f.read(&out[0], len);
+  if (endLen) {
+    outEnd.resize(endLen);
+    f.read(&outEnd[0], endLen);
+  }
+  return true;
+}
+
+void BookmarkStore::compactXPaths() const {
+  if (xpathFilePath.empty() || !Storage.exists(xpathFilePath.c_str())) return;
+
+  if (bookmarks.empty()) {
+    Storage.remove(xpathFilePath.c_str());  // nothing left to anchor — drop the sidecar
+    return;
+  }
+
+  // Both paths of one record, back to back — the copy is verbatim, so it never needs
+  // more than a single record's payload resident.
+  auto buf = makeUniqueNoThrow<uint8_t[]>(2 * BOOKMARK_XPATH_MAX);
+  if (!buf) {
+    LOG_ERR("BKS", "OOM: %u bytes for xpath compaction", static_cast<unsigned>(2 * BOOKMARK_XPATH_MAX));
+    return;
+  }
+
+  const std::string tmpPath = xpathFilePath + ".tmp";
+  bool ok = false;
+  {
+    HalFile in;
+    if (!Storage.openFileForRead("BKS", xpathFilePath, in)) return;
+    uint8_t version = 0;
+    serialization::readPod(in, version);
+    if (version != XPATH_VERSION) return;
+
+    HalFile out;
+    if (!Storage.openFileForWrite("BKS", tmpPath, out)) return;
+    serialization::writePod(out, XPATH_VERSION);
+
+    while (in.available() >= kXPathHeaderBytes) {
+      XPathKey k{};
+      uint16_t len = 0;
+      uint16_t endLen = 0;
+      readXPathKey(in, k, len, endLen);
+      if (!xpathLensValid(in, len, endLen)) break;  // truncated/corrupt
+      if (len) in.read(buf.get(), len);
+      if (endLen) in.read(buf.get() + len, endLen);
+      const bool live =
+          std::any_of(bookmarks.begin(), bookmarks.end(), [&](const Bookmark& b) { return xpathKeyHits(k, b); });
+      if (live) {
+        writeXPathKey(out, k, len, endLen);
+        if (len) out.write(buf.get(), len);
+        if (endLen) out.write(buf.get() + len, endLen);
+      }
+    }
+    in.close();  // must close both before remove/rename on the same paths
+    out.close();
+    ok = true;
+  }
+  if (!ok) return;
+  Storage.remove(xpathFilePath.c_str());
+  Storage.rename(tmpPath.c_str(), xpathFilePath.c_str());
 }
 
 void BookmarkStore::exportTxt() const {

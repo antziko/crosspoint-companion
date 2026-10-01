@@ -16,10 +16,9 @@ std::string getFilename(const std::string& path) {
 }  // namespace
 
 std::string KOReaderDocumentId::calculateFromFilename(const std::string& filePath) {
-  // Normalize away the optimizer device tag (e.g. "(X4) " prefix or " (X4)"
-  // suffix), then canonicalize author/title order, so optimized copies and
-  // order-swapped exports share one sync key.
-  const std::string filename = swapAuthorTitle(stripDeviceTag(getFilename(filePath)));
+  // Normalize away the optimizer device tag and canonicalize author/title order, so
+  // optimized copies and order-swapped exports share one sync key.
+  const std::string filename = canonicalFilename(getFilename(filePath));
   if (filename.empty()) {
     return "";
   }

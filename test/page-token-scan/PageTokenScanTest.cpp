@@ -17,6 +17,8 @@
 #include <vector>
 
 #include "util/PageTokenScan.h"
+#include "util/QuoteSpan.h"
+#include "util/SnippetMatch.h"
 
 // --------------------------------------------------------------------------
 // Tiny test harness
@@ -257,12 +259,279 @@ static void testMeasureStripsSoftHyphen() {
   CHECK(part == 3, "width of the given range");
 }
 
+// --------------------------------------------------------------------------
+// nextTextPart: the same two rules applied to a plain string, so a stored snippet can be
+// matched against a page token by token. A disagreement here means a highlight made on a
+// peer never draws -- the page hands over tokens the snippet walk is not expecting.
+// --------------------------------------------------------------------------
+static std::vector<std::string> textParts(const char* text) {
+  std::vector<std::string> out;
+  size_t from = 0, start = 0, len = 0, next = 0;
+  while (PageTokens::nextTextPart(text, from, start, len, next)) {
+    out.emplace_back(text + start, len);
+    from = next;
+  }
+  return out;
+}
+
+// The page walk's own sequence for the same text, one whitespace-delimited word at a
+// time, including the unsplit branch. This is what nextTextPart has to reproduce.
+static std::vector<std::string> pageParts(const char* text) {
+  std::vector<std::string> out;
+  const std::string s(text);
+  size_t i = 0;
+  while (i < s.size()) {
+    while (i < s.size() && s[i] == ' ') i++;
+    size_t e = i;
+    while (e < s.size() && s[e] != ' ') e++;
+    if (e == i) break;
+    const char* w = s.data() + i;
+    const size_t wlen = e - i;
+    bool isCjk = false;
+    if (PageTokens::isSelectable(w, wlen, isCjk)) {
+      PageTokens::Part parts[PageTokens::kMaxTokenParts];
+      const size_t n = PageTokens::collectParts(w, wlen, parts, PageTokens::kMaxTokenParts);
+      const bool unsplit = n == 1 && parts[0].start == 0 && parts[0].end == wlen;
+      for (size_t p = 0; p < n; p++) {
+        out.emplace_back(unsplit ? w : w + parts[p].start, unsplit ? wlen : parts[p].end - parts[p].start);
+      }
+    }
+    i = e;
+  }
+  return out;
+}
+
+static std::string join(const std::vector<std::string>& v) {
+  std::string out;
+  for (const auto& s : v) {
+    if (!out.empty()) out += "|";
+    out += s;
+  }
+  return out;
+}
+
+static void testTextPartsSkipUnselectableWords() {
+  std::printf("nextTextPart skips a word carrying no letter or digit\n");
+  // The defect this exists for: an en-dash standing between two words is a snippet
+  // "word" with no page token behind it, and matching on spaces alone stalled there.
+  CHECK(join(textParts("mkdir \xE2\x80\x93 Create Directories")) == "mkdir|Create|Directories",
+        "a standalone en-dash is skipped");
+  CHECK(join(textParts("one -- two")) == "one|two", "a standalone double hyphen is skipped");
+  CHECK(join(textParts("... !? one")) == "one", "pure punctuation is skipped");
+}
+
+static void testTextPartsSplitOnDashes() {
+  std::printf("nextTextPart splits a word on its dashes and drops the separator\n");
+  CHECK(join(textParts("east--west")) == "east|west", "ascii double hyphen splits");
+  CHECK(join(textParts("a\xE2\x80\x94"
+                       "b c")) == "a|b|c",
+        "em-dash splits");
+  CHECK(join(textParts("trailing--")) == "trailing", "a trailing separator yields no part");
+  CHECK(join(textParts("--leading")) == "leading", "a leading separator yields no part");
+}
+
+static void testTextPartsKeepEveryOtherMark() {
+  std::printf("nextTextPart keeps a single hyphen and every other mark inside its part\n");
+  CHECK(join(textParts("well-known")) == "well-known", "a single hyphen does not split");
+  CHECK(join(textParts("(parenthesised)")) == "(parenthesised)", "brackets stay in the part");
+  CHECK(join(textParts("don't \"quoted,\"")) == "don't|\"quoted,\"", "quotes and commas stay in the part");
+}
+
+static void testTextPartsExhaust() {
+  std::printf("nextTextPart yields nothing when there is nothing to index\n");
+  CHECK(textParts("").empty(), "empty string");
+  CHECK(textParts("  ").empty(), "whitespace only");
+  CHECK(textParts("\xE2\x80\x93 -- ...").empty(), "separators and punctuation only");
+}
+
+static void testTextPartsAgreeWithThePageWalk() {
+  std::printf("nextTextPart agrees with the page walk on every shape\n");
+  static const char* kCases[] = {"mkdir \xE2\x80\x93 Create Directories",
+                                 "east--west and well-known",
+                                 "don't stop",
+                                 "a -- b",
+                                 "trailing-- --leading",
+                                 "(one) [two] {three}",
+                                 "1996 - 2024",
+                                 "one",
+                                 "\xE4\xB8\xAD\xE6\x96\x87 mixed"};
+  for (const char* text : kCases) {
+    CHECK(join(textParts(text)) == join(pageParts(text)), text);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SnippetMatch: finding a stored quote among a page's words.
+// ---------------------------------------------------------------------------
+
+// Feed a snippet the page's words one at a time, as PageMarks does. Returns the word
+// index the match opened at, or -1 if it never completed.
+static int runMatch(const char* snippet, const std::vector<std::string>& words, const size_t cap) {
+  SnippetMatch::Matcher m;
+  m.snippet = snippet;
+  m.begin(cap);
+  uint16_t index = 0;
+  for (const auto& w : words) {
+    bool cjk = false;
+    if (!PageTokens::isSelectable(w.c_str(), w.size(), cjk)) continue;
+    PageTokens::Part parts[PageTokens::kMaxTokenParts];
+    const size_t partCount = PageTokens::collectParts(w.c_str(), w.size(), parts, PageTokens::kMaxTokenParts);
+    const bool unsplit = partCount == 1 && parts[0].start == 0 && parts[0].end == w.size();
+    for (size_t pi = 0; pi < partCount; pi++, index++) {
+      const size_t ps = unsplit ? 0 : parts[pi].start;
+      const size_t pl = unsplit ? w.size() : parts[pi].end - parts[pi].start;
+      if (m.offer(w.c_str() + ps, pl, index)) return static_cast<int>(m.start);
+    }
+  }
+  return -1;
+}
+
+static void testWholeSnippetMatchesItsWords() {
+  std::printf("a snippet matches the page words it names\n");
+  const std::vector<std::string> page = {"the", "quick", "brown", "fox", "jumps"};
+  CHECK(runMatch("quick brown fox", page, 64) == 1, "interior run matches at its first word");
+  CHECK(runMatch("the quick", page, 64) == 0, "run at the page start matches at 0");
+}
+
+static void testSnippetAbsentFromThePageDoesNotMatch() {
+  std::printf("a snippet not on the page does not match\n");
+  const std::vector<std::string> page = {"the", "quick", "brown", "fox"};
+  CHECK(runMatch("lazy dog", page, 64) == -1, "absent text does not match");
+  // Present as words, but not as a run.
+  CHECK(runMatch("quick fox", page, 64) == -1, "words present but not adjacent do not match");
+}
+
+// The device caps a snippet at its buffer and cuts wherever the cut falls, so a
+// highlight longer than the cap ends mid-word. Requiring the page's word to fit inside
+// that fragment failed EVERY such highlight: the mark landed on the right page and
+// simply never drew.
+static void testSnippetCutMidWordStillMatches() {
+  std::printf("a snippet cut mid-word by the cap still matches\n");
+  const std::vector<std::string> page = {"a", "playground,", "so", "let's", "play"};
+  // cap 16 => "playground, so l" fills the buffer: the tail is the head of "let's".
+  CHECK(runMatch("playground, so l", page, 17) == 1, "a snippet cut mid-word still matches");
+}
+
+// The relaxation is scoped to a snippet that actually reached the cap. A short one was
+// never cut, so its last word is whole and a page word that merely starts with it is a
+// different word.
+static void testShortSnippetTailMustBeAWholeWord() {
+  std::printf("an uncut snippet must match its tail whole\n");
+  const std::vector<std::string> page = {"so", "let's", "play"};
+  CHECK(runMatch("so l", page, 64) == -1, "an uncut snippet's tail must be a whole word");
+  CHECK(runMatch("so let's", page, 64) == 0, "the same snippet matches when the tail is whole");
+}
+
+// Only the LAST part may be a fragment; a cut cannot shorten anything before it.
+static void testInteriorWordMustStillMatchWhole() {
+  std::printf("only the final part of a snippet may be a fragment\n");
+  const std::vector<std::string> page = {"so", "let's", "play", "now"};
+  CHECK(runMatch("so l play", page, 10) == -1, "only the last part may be a fragment");
+}
+
+static void testHyphenatedPageWordRejoins() {
+  std::printf("a page word hyphenated across lines rejoins\n");
+  // The page splits a hyphenated word across lines; the snippet stores it merged.
+  const std::vector<std::string> page = {"a", "play-", "ground", "here"};
+  CHECK(runMatch("playground here", page, 64) == 1, "a hyphenated page word rejoins");
+}
+
+// The real failing case from the X4 Pro log, at the real cap.
+static void testTheLoggedFailureNowMatches() {
+  std::printf("the quote the X4 Pro log reported unmatched now matches\n");
+  const std::vector<std::string> page = {"passwd", "doesn't", "seem", "very",        "playful", "and",
+                                         "this",   "is",      "a",    "playground,", "so",      "let's",
+                                         "play",   "with",    "some", "of",          "its",     "options."};
+  const char* snippet = "passwd doesn't seem very playful and this is a playground, so l";
+  CHECK(std::strlen(snippet) == 63u, "the logged snippet is exactly the cap");
+  CHECK(runMatch(snippet, page, 64) == 0, "the X4 Pro log's unmatched quote now matches");
+}
+
+// ---------------------------------------------------------------------------
+// QuoteSpan: which part of a quote each page holds.
+// ---------------------------------------------------------------------------
+
+// A 4-page chapter: slice 0.25, pages at 0.00 / 0.25 / 0.50 / 0.75.
+static QuoteSpan::Role roleOn(const int page, const float start, const float end) {
+  const float slice = 0.25f;
+  return QuoteSpan::pageRole(start, end, static_cast<float>(page) * slice, slice);
+}
+
+static void testAQuoteOnOnePageIsWhole() {
+  std::printf("a quote that starts and ends on one page is Whole there and nowhere else\n");
+  // A mark made on this device: end == start, always.
+  CHECK(roleOn(1, 0.25f, 0.25f) == QuoteSpan::Role::Whole, "its own page");
+  CHECK(roleOn(0, 0.25f, 0.25f) == QuoteSpan::Role::NotHere, "the page before");
+  CHECK(roleOn(2, 0.25f, 0.25f) == QuoteSpan::Role::NotHere, "the page after");
+}
+
+static void testAQuoteAcrossTwoPagesSplits() {
+  std::printf("a quote crossing one break starts on the first page and ends on the second\n");
+  CHECK(roleOn(1, 0.25f, 0.50f) == QuoteSpan::Role::Starts, "the page it opens on");
+  CHECK(roleOn(2, 0.25f, 0.50f) == QuoteSpan::Role::Ends, "the page it closes on");
+  CHECK(roleOn(0, 0.25f, 0.50f) == QuoteSpan::Role::NotHere, "before it");
+  CHECK(roleOn(3, 0.25f, 0.50f) == QuoteSpan::Role::NotHere, "after it");
+}
+
+static void testAQuoteAcrossThreePagesFillsTheMiddle() {
+  std::printf("a quote spanning three pages highlights the middle one end to end\n");
+  CHECK(roleOn(1, 0.25f, 0.75f) == QuoteSpan::Role::Starts, "first");
+  CHECK(roleOn(2, 0.25f, 0.75f) == QuoteSpan::Role::Through, "middle");
+  CHECK(roleOn(3, 0.25f, 0.75f) == QuoteSpan::Role::Ends, "last");
+}
+
+static void testTheLastPageOfAChapterIsReachable() {
+  std::printf("a quote on the chapter's final page is found there\n");
+  // pageStart + slice is exactly 1.0 there, so a test written as `< pageEnd` must not
+  // exclude an end sitting at the last page's own fraction.
+  CHECK(roleOn(3, 0.75f, 0.75f) == QuoteSpan::Role::Whole, "final page");
+  CHECK(roleOn(3, 0.50f, 0.75f) == QuoteSpan::Role::Ends, "ending on the final page");
+}
+
+static void testAnInvertedEndIsTreatedAsNoSpan() {
+  std::printf("an end before the start collapses to a single page\n");
+  CHECK(roleOn(2, 0.50f, 0.25f) == QuoteSpan::Role::Whole, "its start page");
+  CHECK(roleOn(1, 0.50f, 0.25f) == QuoteSpan::Role::NotHere, "not the bogus end page");
+}
+
+static void testTheEndFractionAndStopIndex() {
+  std::printf("the end position within a page interpolates over its tokens\n");
+  // A quote ending a quarter of the way into page 2 (0.50 .. 0.75).
+  const uint8_t q = QuoteSpan::endFraction(0.5625f, 0.50f, 0.25f);
+  CHECK(q > 60 && q < 70, "a quarter of a page is ~64/255");
+  CHECK(QuoteSpan::stopIndex(q, 99) == 24 || QuoteSpan::stopIndex(q, 99) == 25, "~a quarter of 100 tokens");
+  // The ends must be exact, not interpolated: a full page keeps its last token.
+  CHECK(QuoteSpan::stopIndex(255, 99) == 99, "a full page stops at its last token");
+  CHECK(QuoteSpan::stopIndex(0, 99) == 0, "a zero fraction stops at the first token");
+  CHECK(QuoteSpan::stopIndex(255, 0) == 0, "a one-token page");
+  CHECK(QuoteSpan::endFraction(0.40f, 0.50f, 0.25f) == 0, "an end before the page clamps to 0");
+  CHECK(QuoteSpan::endFraction(0.90f, 0.50f, 0.25f) == 255, "an end past the page clamps to full");
+}
+
 int main() {
   testPartsMatchOriginalSplit();
   testUnsplitTokenIsWholeToken();
   testAsciiDoubleHyphenSplits();
   testSelectablePredicate();
   testMeasureStripsSoftHyphen();
+  testTextPartsSkipUnselectableWords();
+  testTextPartsSplitOnDashes();
+  testTextPartsKeepEveryOtherMark();
+  testTextPartsExhaust();
+  testTextPartsAgreeWithThePageWalk();
+  testWholeSnippetMatchesItsWords();
+  testSnippetAbsentFromThePageDoesNotMatch();
+  testSnippetCutMidWordStillMatches();
+  testShortSnippetTailMustBeAWholeWord();
+  testInteriorWordMustStillMatchWhole();
+  testHyphenatedPageWordRejoins();
+  testTheLoggedFailureNowMatches();
+  testAQuoteOnOnePageIsWhole();
+  testAQuoteAcrossTwoPagesSplits();
+  testAQuoteAcrossThreePagesFillsTheMiddle();
+  testTheLastPageOfAChapterIsReachable();
+  testAnInvertedEndIsTreatedAsNoSpan();
+  testTheEndFractionAndStopIndex();
   std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

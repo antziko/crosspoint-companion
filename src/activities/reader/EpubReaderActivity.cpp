@@ -60,14 +60,81 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/BookCacheUtils.h"
+#include "util/BookmarkAnchors.h"
 #include "util/ButtonNavigator.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
 #include "util/FlashcardDeck.h"
 #include "util/LookupMarks.h"
 #include "util/PageMarks.h"
+#include "util/ReaderStatusBar.h"
 #include "util/ScreenRefresh.h"
 #include "util/ScreenshotUtil.h"
+
+//[[
+// The page a stored fraction names.
+//
+// A mark records page / pageCount, so multiplying back must return that page -- but in
+// float it lands a hair under for about 4% of page/total pairs (13 of 22 comes back 12),
+// and a plain truncation then opens one page early. That reads as a bookmark landing
+// beside its own highlight, because PageMarks slices the page on >= and keeps the mark
+// where it belongs while the jump goes elsewhere. The epsilon is far below one page and
+// only ever snaps a fraction already within a rounding error of a page boundary.
+//]]
+static int pageFromFraction(const float fraction, const int pageCount) {
+  if (pageCount <= 0) return 0;
+  int page = static_cast<int>(fraction * static_cast<float>(pageCount) + 1e-4f);
+  if (page < 0) page = 0;
+  if (page >= pageCount) page = pageCount - 1;
+  return page;
+}
+
+// What the book's marks looked like when the book-open adoption pass last ran, so a wake
+// from sleep does not re-attempt work that already failed. onEnter runs on every wake,
+// and an anchor that does not resolve in this copy would otherwise cost a chapter stream
+// each time.
+//
+// BOTH halves are needed. The clock alone misses the case that matters: a sync merges in
+// marks whose versions are BELOW this book's clock -- which is normal, since adopting one
+// stamps a version above everything the peer has ever sent -- so observeVersion() does
+// not move it and a genuinely new mark looks like no change at all. The pending count
+// catches exactly that. The clock then catches the converse, a mark deleted and another
+// arriving between two opens, because a deletion stamps a tombstone above the clock.
+struct AdoptMarker {
+  uint32_t clock = UINT32_MAX;
+  uint16_t pending = UINT16_MAX;
+  bool operator==(const AdoptMarker& o) const { return clock == o.clock && pending == o.pending; }
+};
+static constexpr uint8_t ADOPT_MARKER_FILE_VERSION = 2;
+
+static AdoptMarker currentAdoptMarker() {
+  return AdoptMarker{BOOKMARKS.clock(), static_cast<uint16_t>(BOOKMARKS.countUnplacedForeign())};
+}
+
+// A missing, short or stale-versioned file reads as "never ran", which costs one pass.
+static AdoptMarker lastAdoptMarker(const std::string& cachePath) {
+  HalFile f;
+  if (!Storage.openFileForRead("ERS", cachePath + "/koadopt.bin", f)) return AdoptMarker{};
+  uint8_t data[7];
+  if (f.read(data, sizeof(data)) != static_cast<int>(sizeof(data)) || data[0] != ADOPT_MARKER_FILE_VERSION) {
+    return AdoptMarker{};
+  }
+  AdoptMarker m;
+  m.clock = static_cast<uint32_t>(data[1]) | (static_cast<uint32_t>(data[2]) << 8) |
+            (static_cast<uint32_t>(data[3]) << 16) | (static_cast<uint32_t>(data[4]) << 24);
+  m.pending = static_cast<uint16_t>(data[5]) | static_cast<uint16_t>(data[6] << 8);
+  return m;
+}
+
+static void writeAdoptMarker(const std::string& cachePath, const AdoptMarker& m) {
+  HalFile f;
+  if (!Storage.openFileForWrite("ERS", cachePath + "/koadopt.bin", f)) return;
+  const uint8_t data[7] = {ADOPT_MARKER_FILE_VERSION,           static_cast<uint8_t>(m.clock),
+                           static_cast<uint8_t>(m.clock >> 8),  static_cast<uint8_t>(m.clock >> 16),
+                           static_cast<uint8_t>(m.clock >> 24), static_cast<uint8_t>(m.pending),
+                           static_cast<uint8_t>(m.pending >> 8)};
+  f.write(data, sizeof(data));
+}
 
 namespace {
 // The X4 Pro carries the X4's panel but sits outside isXteinkDevice() (that
@@ -288,6 +355,9 @@ void EpubReaderActivity::onEnter() {
     }
   }
 
+  // Also layout math (the hidden band's strip goes to the page), so before any render too.
+  ReaderStatusBar::load(epub->getCachePath());
+
   // Configure screen orientation for this book.
   // NOTE: This affects layout math and must be applied before any render calls.
   ReaderUtils::applyOrientation(renderer, APP_STATE.activeOrientation);
@@ -365,6 +435,29 @@ void EpubReaderActivity::onEnter() {
   }
 
   BOOKMARKS.loadForBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), "epub");
+  // Place anything a sync pulled from a KOReader peer before the first page is drawn.
+  // Such a mark arrives carrying that peer's own estimate of where it is, which is not a
+  // page fraction of this pagination, so until it is placed it opens on the wrong page
+  // and PageMarks looks for its text on a page the text is not on. Adopting it here --
+  // rather than only at the start of the next sync -- is what makes it right on the sync
+  // that fetched it instead of the one after.
+  //
+  // Gated twice, because onEnter runs on every wake from sleep, not just a real open, and
+  // a mark whose anchor does not resolve in this copy of the book would otherwise cost a
+  // chapter stream every time. Both tests are free: a resident field, and 5 bytes.
+  if (BOOKMARKS.countUnplacedForeign() > 0 && !(currentAdoptMarker() == lastAdoptMarker(epub->getCachePath()))) {
+    // Same discipline as launchKoSync's release block: resolving an anchor re-streams and
+    // inflates the spine item. No section exists yet (the first is built by the render
+    // below) so there is only the framebuffer to lend, and nothing renders until then.
+    {
+      RenderLock lock(*this);
+      GfxRenderer::FrameBufferLoan loan(renderer);
+      BookmarkAnchors::adoptForeign(epub, renderer, /*onlyUnplaced=*/true);
+    }
+    // After the pass, so it records what the pass left behind: whatever is still unplaced
+    // now stays unplaced until something actually changes this book's marks.
+    writeAdoptMarker(epub->getCachePath(), currentAdoptMarker());
+  }
   reloadLookupMarks();
 
   readingStats = BookReadingStats::load(epub->getCachePath());
@@ -435,6 +528,7 @@ void EpubReaderActivity::onExit() {
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
   // Restore the global-default invariant for non-reader UI.
   APP_STATE.activeOrientation = SETTINGS.orientation;
+  ReaderStatusBar::unload();
 
   APP_STATE.readerActivityLoadCount = 0;
   APP_STATE.saveToFile();
@@ -1084,8 +1178,7 @@ void EpubReaderActivity::loop() {
   // power+down gesture (handled elsewhere) isn't swallowed. In a footnote, the
   // same press returns to the saved reading position.
   if (mappedInput.homeButtonAction() == HomeButtonAction::Footnotes ||
-      (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::FOOTNOTES &&
-       mappedInput.wasReleased(MappedInputManager::Button::Power) &&
+      (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::FOOTNOTES && mappedInput.wasPowerShortPress() &&
        !mappedInput.wasReleased(MappedInputManager::Button::Down))) {
     if (footnoteDepth > 0) {
       restoreSavedPosition();
@@ -1467,9 +1560,11 @@ void EpubReaderActivity::openWordSelect(const bool framebufferContainsPage, cons
   // Append in-chapter page position (X/Y) so an enrolled flashcard shows where in
   // the chapter the lookup happened. Stored inside the chapter field (deck format
   // unchanged); FlashcardReviewActivity's chapter footer renders it as-is.
+  // The total is the best-known one: mid-build pageCount only counts the pages laid out so far,
+  // which a later render would never match.
   if (section && section->pageCount > 0) {
     char pos[24];
-    snprintf(pos, sizeof(pos), " %d/%d", section->currentPage + 1, section->pageCount);
+    snprintf(pos, sizeof(pos), " %d/%d", section->currentPage + 1, section->estimatedTotalPages());
     chapterTitle += pos;  // enroll() caps the chapter field to CHAPTER_MAX (80)
   }
   // Choose the marker band from this page's dwell BEFORE the dwell is consumed/reset below.
@@ -1520,6 +1615,17 @@ void EpubReaderActivity::openWordSelect(const bool framebufferContainsPage, cons
     // round-trip that never happened. The page is still on screen, so nothing to repaint.
     return;
   }
+  // The gloss cursor is remembered for this page only: any other page (or the same page number
+  // after a re-layout) starts again from its first word outside a title.
+  if (glossCursorSpine_ != currentSpineIndex || glossCursorPage_ != section->currentPage ||
+      glossCursorPageCount_ != section->pageCount) {
+    glossCursorSpine_ = currentSpineIndex;
+    glossCursorPage_ = section->currentPage;
+    glossCursorPageCount_ = section->pageCount;
+    glossCursorWord_ = -1;
+  }
+  wordSelect->setGlossCursorMemory(glossCursorWord_, &glossCursorWord_);
+  wordSelect->setPageMarkKey(currentPageMarkKey());
   startActivityForResult(std::move(wordSelect), [this](const ActivityResult&) {
     ignoreBackUntilRelease = true;
     // A lookup enrolls a flashcard, which is what anchors the page underline — so the word
@@ -1527,6 +1633,19 @@ void EpubReaderActivity::openWordSelect(const bool framebufferContainsPage, cons
     reloadLookupMarks();
     requestUpdate();
   });
+}
+
+PageMarks::PageKey EpubReaderActivity::currentPageMarkKey() {
+  PageMarks::PageKey key;
+  if (!section || section->pageCount <= 0) return key;
+  key.valid = true;
+  key.spineIndex = static_cast<uint16_t>(currentSpineIndex);
+  key.pageProgress = static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
+  key.pageCount = section->pageCount;
+  key.chapterHash = currentChapterHash();
+  key.pageNumber = section->currentPage + 1;
+  key.markPageCount = section->estimatedTotalPages();
+  return key;
 }
 
 void EpubReaderActivity::openPageActionMenu(const int x, const int y) {
@@ -1580,7 +1699,7 @@ void EpubReaderActivity::openPageActionMenu(const int x, const int y) {
       const int probeY = hit.height > 0 ? hit.y + hit.height / 2 : y;
       if (const LookupMarks::Mark* mark = PageMarks::lookupMarkAtPoint(
               renderer, *page, SETTINGS.getReaderFontId(), marginLeft, marginTop, probeX, probeY, currentChapterHash(),
-              section->currentPage + 1, section->pageCount)) {
+              section->currentPage + 1, section->estimatedTotalPages())) {
         pageActionMark_ = *mark;  // copied: reloadLookupMarks() rebuilds the table wholesale
         pageActionHasMark_ = true;
       }
@@ -1825,6 +1944,7 @@ void EpubReaderActivity::launchHighlightWordSelect(const int pointX, const int p
     LOG_ERR("EPUB", "OOM: DictionaryWordSelectActivity (highlight)");
     return;
   }
+  highlightSelect->setPageMarkKey(currentPageMarkKey());
   startActivityForResult(std::move(highlightSelect), [this, spine, progress, pageCount, currentPage,
                                                       chapterTitle](const ActivityResult& result) {
     ignoreBackUntilRelease = true;
@@ -2213,8 +2333,10 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
                 pendingSpineProgress = bm.progress;
                 pendingPercentJump = true;
                 // Prefer the recorded paragraph over the progress fraction so the jump
-                // survives a re-layout; the fraction stays as the fallback.
+                // survives a re-layout; the fraction stays as the fallback. An exact
+                // character offset, when one was recorded, beats both.
                 pendingParagraphAnchor = bm.paragraphIndex;
+                pendingVisibleOffset = bm.visibleTextOffset;
                 section.reset();
               };
 
@@ -2690,6 +2812,15 @@ void EpubReaderActivity::render(RenderLock&& lock) {
 
   const uint16_t viewportWidth = renderer.getScreenWidth() - orientedMarginLeft - orientedMarginRight;
   const uint16_t viewportHeight = renderer.getScreenHeight() - orientedMarginTop - orientedMarginBottom;
+  // The viewport moved under a laid-out section (the status bar hide toggle hands its strip to
+  // the page): reflow, keeping the reading position.
+  if (section && (viewportWidth != buildViewportWidth || viewportHeight != buildViewportHeight)) {
+    rememberCurrentContentOffset();
+    cachedSpineIndex = currentSpineIndex;
+    cachedChapterTotalPageCount = section->pageCount;
+    nextPageNumber = section->currentPage;
+    section.reset();
+  }
   // Capture for loop()'s lazy partial-extension start (must match this render's layout params).
   buildViewportWidth = viewportWidth;
   buildViewportHeight = viewportHeight;
@@ -2897,6 +3028,24 @@ void EpubReaderActivity::render(RenderLock&& lock) {
       pendingAnchor.clear();
     }
 
+    // An exact character offset is the best anchor there is: like the paragraph it names
+    // the text rather than the layout, so it survives a re-flow, but it also keeps the
+    // position WITHIN the paragraph. A peer's page routinely begins mid-paragraph, and on
+    // a smaller screen that paragraph can span pages -- the paragraph anchor alone would
+    // then open a page before the text the peer had at the top.
+    if (pendingVisibleOffset != 0 && section->pageCount > 0) {
+      const auto offsetPage = section->getPageForVisibleTextOffset(pendingVisibleOffset);
+      if (offsetPage.has_value() && *offsetPage < section->pageCount) {
+        section->currentPage = *offsetPage;
+        pendingPercentJump = false;
+        pendingParagraphAnchor = UINT16_MAX;
+        LOG_DBG("ERS", "Bookmark offset %u -> page %u", pendingVisibleOffset, *offsetPage);
+      } else {
+        LOG_DBG("ERS", "Bookmark offset %u unresolved; using the paragraph", pendingVisibleOffset);
+      }
+      pendingVisibleOffset = 0;
+    }
+
     // Land on the bookmarked paragraph when one was recorded: it names the actual text, so
     // it stays correct across a re-layout that moved every page number. Falls through to
     // the percentage below when the section carries no page for it.
@@ -2914,11 +3063,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
 
     if (pendingPercentJump && section->pageCount > 0) {
       // Apply the pending percent jump now that we know the new section's page count.
-      int newPage = static_cast<int>(pendingSpineProgress * static_cast<float>(section->pageCount));
-      if (newPage >= section->pageCount) {
-        newPage = section->pageCount - 1;
-      }
-      section->currentPage = newPage;
+      section->currentPage = pageFromFraction(pendingSpineProgress, section->pageCount);
       pendingPercentJump = false;
     }
   }
@@ -3164,7 +3309,7 @@ bool EpubReaderActivity::applyDeferredReposition() {
     }
     if (!mappedOffset && cachedChapterTotalPageCount > 0 && section->pageCount != cachedChapterTotalPageCount) {
       const float progress = static_cast<float>(section->currentPage) / static_cast<float>(cachedChapterTotalPageCount);
-      newPage = static_cast<int>(progress * static_cast<float>(section->pageCount));
+      newPage = pageFromFraction(progress, section->pageCount);
     }
     if (newPage < 0) newPage = 0;
     if (section->pageCount > 0 && newPage >= static_cast<int>(section->pageCount)) {
@@ -3263,6 +3408,18 @@ bool EpubReaderActivity::launchKoSync(bool sleepWhenDone, SyncScope scope) {
     {
       GfxRenderer::FrameBufferLoan loan(renderer);
       localKoPos = ProgressMapper::toSavedProgress(epub, localPos);
+      // Same streaming cost and the same borrowed framebuffer, so the bookmarks get their
+      // KOReader anchors here too. Only for scopes that actually upload them — a
+      // progress-only sync would otherwise parse a chapter per bookmarked chapter for
+      // nothing. Must not move into KOReaderSyncActivity: that runs against a ~56KB
+      // post-WiFi ceiling and releases the epub before the PUT.
+      if (scope == SyncScope::All || scope == SyncScope::Bookmarks) {
+        BookmarkAnchors::backfill(epub);
+        // After the backfill, so a mark whose anchor only just reached the sidecar is
+        // not passed over. Re-files what a KOReader peer sent under this device's own
+        // coordinates, which is what puts it on the right page.
+        BookmarkAnchors::adoptForeign(epub, renderer);
+      }
     }
     epub.reset();
   }
@@ -3619,11 +3776,11 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   // was anchored with, so a chapter that has re-paginated since simply fails the match and
   // draws nothing.
   const auto drawPageMarks = [&]() {
-    if (!section || section->pageCount <= 0) return;
+    const PageMarks::PageKey key = currentPageMarkKey();
+    if (!key.valid) return;
     PageMarks::drawForPage(renderer, *page, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop,
-                           static_cast<uint16_t>(currentSpineIndex),
-                           static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount),
-                           section->pageCount, currentChapterHash(), section->currentPage + 1);
+                           key.spineIndex, key.pageProgress, key.pageCount, key.chapterHash, key.pageNumber,
+                           key.markPageCount);
   };
 
   // No automatic ghost-clear flash on image page turns — the power-button manual
@@ -3874,8 +4031,8 @@ void EpubReaderActivity::renderStatusBar() const {
 namespace {
 constexpr StrId kTextRowNames[] = {StrId::STR_FONT, StrId::STR_FONT_SIZE, StrId::STR_LINE_SPACING,
                                    StrId::STR_PARA_ALIGNMENT, StrId::STR_FOCUS_READING};
-constexpr StrId kSpacingIds[] = {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_SEMI_WIDE, StrId::STR_WIDE,
-                                 StrId::STR_EXTRA_WIDE};
+constexpr StrId kSpacingIds[] = {StrId::STR_TIGHT,     StrId::STR_NORMAL, StrId::STR_RELAXED,
+                                 StrId::STR_SEMI_WIDE, StrId::STR_WIDE,   StrId::STR_EXTRA_WIDE};
 constexpr StrId kAlignIds[] = {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, StrId::STR_CENTER, StrId::STR_ALIGN_RIGHT,
                                StrId::STR_BOOK_S_STYLE};
 constexpr int kTextRowCount = static_cast<int>(std::size(kTextRowNames));

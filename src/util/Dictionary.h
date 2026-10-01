@@ -218,6 +218,30 @@ class Dictionary {
   // to use when probing several candidate spellings for one word.
   static DictLocation locateIn(LookupCtx& ctx, const std::string& word, const DictLookupCallbacks& cbs = {});
 
+  // What probePrefixIn found for one string: whether it is a headword, and whether it is the
+  // start of one (a headword is the start of itself).
+  struct PrefixProbe {
+    bool isPrefix = false;
+    bool exact = false;
+    uint32_t offset = 0;  // .dict location of the exact entry, when `exact`
+    uint32_t size = 0;
+    // Diagnostics for the SD trace: the page the scan landed on, how many headwords it read,
+    // why it stopped (x exact, n next headword decided, p passed the page smaller, e end of
+    // file) and the headword it stopped on.
+    uint32_t startByte = 0;
+    uint32_t endByte = 0;
+    uint16_t scanned = 0;
+    char stop = 'e';
+    char stopWord[40] = "";
+  };
+
+  // One page scan answering both questions for `text`. Headwords extending `text` sort
+  // immediately after it, so the first headword at or past it decides isPrefix. Exact match
+  // only: no stems, no alt forms, and none of locateIn's wide retry on a miss, because this
+  // runs per cursor step. The ordering is cistrcmp's, as locateIn's; it agrees with byte order
+  // for CJK text, which is what the gloss range limit asks about.
+  static PrefixProbe probePrefixIn(LookupCtx& ctx, const char* text);
+
   // Search .idx for word (via .idx.oft if present). Returns file location without reading content.
   // Thin wrapper: opens a LookupCtx and calls locateIn(). Prefer the ctx form for probe loops.
   static DictLocation locate(const std::string& word, const DictLookupCallbacks& cbs = {},

@@ -106,14 +106,20 @@ TEST_F(LookupMarksTest, CollectMatchesOnlyItsOwnPage) {
   EXPECT_EQ(marks.collectForPage(LookupMarks::hashChapter("Other", 5), 11, 27, out, 4), 0);  // other chapter
 }
 
-// Page numbers only describe the pagination that produced them. After a font or margin change
-// the chapter has a different page count, and every stored page number is meaningless — better
-// no mark than a mark on the wrong word.
-TEST_F(LookupMarksTest, RepaginationDropsTheMarks) {
+// After a re-layout (status bar toggle, font, margins) the chapter has a different page count.
+// The mark follows its position in the chapter onto the one or two pages now covering it.
+TEST_F(LookupMarksTest, RepaginationMapsTheMarkByChapterPosition) {
   auto& marks = LookupMarks::getInstance();
-  ASSERT_TRUE(marks.add("pews", 4, "Bident", 6, 11, 27));
+  ASSERT_TRUE(marks.add("pews", 4, "Bident", 6, 11, 27));  // slice [10/27, 11/27) = [.370, .407)
   const LookupMarks::Mark* out[4];
-  EXPECT_EQ(marks.collectForPage(LookupMarks::hashChapter("Bident", 6), 11, 31, out, 4), 0);
+  const uint32_t ch = LookupMarks::hashChapter("Bident", 6);
+  EXPECT_EQ(marks.collectForPage(ch, 12, 31, out, 4), 1);  // [.355, .387) overlaps
+  EXPECT_EQ(marks.collectForPage(ch, 13, 31, out, 4), 1);  // [.387, .419) overlaps
+  EXPECT_EQ(marks.collectForPage(ch, 10, 31, out, 4), 0);  // [.290, .323) does not
+  EXPECT_EQ(marks.collectForPage(ch, 14, 31, out, 4), 0);  // [.419, .452) does not
+  // Its own page number always matches: a total recorded mid-build was an estimate, so the
+  // count drifting under an unchanged layout must not lose the mark.
+  EXPECT_EQ(marks.collectForPage(ch, 11, 31, out, 4), 1);
 }
 
 // The table is a fixed allocation; past its size the oldest lookups fall out, not the newest.
@@ -231,15 +237,40 @@ TEST_F(LookupMarksTest, StepClosesARunThatOvershootsOrMismatches) {
   EXPECT_EQ(feed(m, r, /*isCjk=*/true, "森"), Step::Opened);
 }
 
-// A word split across two visual lines is not marked. The run is abandoned on the row change
-// rather than closed and re-opened: half a word underlined is worse than none.
-TEST_F(LookupMarksTest, StepAbandonsARunThatWrapsToTheNextLine) {
-  const LookupMarks::Mark m = markFor("森林", "森");
+// A word wrapped between two lines is still one word: the run crosses the break, and the step
+// that crossed it says so, so the caller can close the first segment and start the second.
+TEST_F(LookupMarksTest, StepCarriesARunAcrossOneLineBreak) {
+  const LookupMarks::Mark m = markFor("邪门歪道", "邪");
   LookupMarks::RunState r;
-  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "森", /*rowY=*/100), Step::Opened);
-  // Same second character, but a row down: the wrap discards the run, and "林" is not a head.
-  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "林", /*rowY=*/140), Step::None);
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "邪", /*rowY=*/100), Step::Opened);
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "门", /*rowY=*/100), Step::Extended);
+  EXPECT_FALSE(r.wrappedHere);
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "歪", /*rowY=*/140), Step::Extended);
+  EXPECT_TRUE(r.wrappedHere);
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "道。", /*rowY=*/140), Step::MatchedRun);
+  EXPECT_FALSE(r.wrappedHere);
+}
+
+// Only one break: a run reaching a third row is abandoned, and the next run starts unwrapped.
+TEST_F(LookupMarksTest, StepAbandonsARunOnASecondLineBreak) {
+  const LookupMarks::Mark m = markFor("图书馆", "图");
+  LookupMarks::RunState r;
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "图", /*rowY=*/100), Step::Opened);
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "书", /*rowY=*/140), Step::Extended);
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "馆", /*rowY=*/180), Step::None);
   EXPECT_FALSE(r.open);
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "图", /*rowY=*/180), Step::Opened);
+  EXPECT_FALSE(r.wrapped);
+}
+
+// Layout keeps CJK closing punctuation on the character before it and opening punctuation on
+// the one after, so the page token is "边，" or "「沾". Neither may change the word's identity.
+TEST_F(LookupMarksTest, StepIgnoresCjkPunctuationGluedToAToken) {
+  const LookupMarks::Mark m = markFor("沾边", "沾");
+  LookupMarks::RunState r;
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "「沾"), Step::Opened);
+  EXPECT_EQ(feed(m, r, /*isCjk=*/true, "边，"), Step::MatchedRun);
+  EXPECT_EQ(LookupMarks::hashWord("“夫妇”", std::strlen("“夫妇”")), LookupMarks::hashWord("夫妇", 6));
 }
 
 // A three-character word needs both intermediate steps before it settles.

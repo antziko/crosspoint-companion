@@ -105,15 +105,11 @@ TEST(SwapAuthorTitle, DegenerateEmptyHalfUnchanged) {
 
 TEST(SwapAuthorTitle, NoExtensionStillSwaps) { EXPECT_EQ(swap("Smith - Dune"), "Dune - Smith"); }
 
-TEST(SwapAuthorTitle, PreservesArbitraryExtension) {
-  EXPECT_EQ(swap("Smith - Dune.pdf"), "Dune - Smith.pdf");
-}
+TEST(SwapAuthorTitle, PreservesArbitraryExtension) { EXPECT_EQ(swap("Smith - Dune.pdf"), "Dune - Smith.pdf"); }
 
-// --- End-to-end: stripDeviceTag then swapAuthorTitle converge across all combos ---
+// --- End-to-end: canonicalFilename converges across all tag placements and orders ---
 namespace {
-std::string norm(const std::string& s) {
-  return KOReaderDocumentId::swapAuthorTitle(KOReaderDocumentId::stripDeviceTag(s));
-}
+std::string norm(const std::string& s) { return KOReaderDocumentId::canonicalFilename(s); }
 }  // namespace
 
 TEST(NormalizePipeline, AllTagAndOrderCombosConverge) {
@@ -129,6 +125,50 @@ TEST(NormalizePipeline, AllTagAndOrderCombosConverge) {
   EXPECT_EQ(norm("(X3) Smith - Dune.epub"), canonical);
   EXPECT_EQ(norm("(X3) Dune - Smith.epub"), canonical);
   EXPECT_EQ(norm("(X4) Dune - Smith (X4).epub"), canonical);  // both tags present
+}
+
+// A tag on the title rather than on the whole name sits at neither end of the filename,
+// so one strip pass cannot see it. Canonicalizing the order brings it to the front.
+TEST(NormalizePipeline, TagLeadingEitherComponentConverges) {
+  const std::string canonical = norm("Smith - Dune.epub");
+  EXPECT_EQ(norm("Smith - (X4) Dune.epub"), canonical);
+  EXPECT_EQ(norm("Dune - (X4) Smith.epub"), canonical);
+  EXPECT_EQ(norm("Smith - (X3) Dune.epub"), canonical);
+  EXPECT_EQ(norm("(X4) Smith - (X4) Dune.epub"), canonical);  // both components tagged
+}
+
+// The second swap is load-bearing, not cosmetic: removing the tag changes which component
+// sorts first, so a name whose tagged half would lead after stripping must be reordered
+// again. Without it "Apple - (X4) Zed" would settle on "Zed - Apple".
+TEST(NormalizePipeline, ReorderingAfterTheSecondStripIsApplied) {
+  EXPECT_EQ(norm("Apple - (X4) Zed.epub"), "Apple - Zed.epub");
+  EXPECT_EQ(norm("Zed - (X4) Apple.epub"), "Apple - Zed.epub");
+  EXPECT_EQ(norm("Apple - Zed.epub"), "Apple - Zed.epub");
+}
+
+// The extra passes must not widen what counts as a tag.
+TEST(NormalizePipeline, NonDeviceTagsStillSurviveBothPasses) {
+  EXPECT_EQ(norm("Smith - (X12) Dune.epub"), "(X12) Dune - Smith.epub");
+  EXPECT_EQ(norm("(x4) Smith - Dune.epub"), "(x4) Smith - Dune.epub");  // case-sensitive
+  EXPECT_EQ(norm("Mac OS X (X11) - Smith.epub"), "Mac OS X (X11) - Smith.epub");
+  // Still exactly one " - ": a multi-dash name is left alone, tag or no tag.
+  EXPECT_EQ(norm("Smith - (X4) Dune - Extra.epub"), "Smith - (X4) Dune - Extra.epub");
+}
+
+// Known gap: a tag trailing the FIRST component is at neither end of the filename and no
+// reordering brings it to one. Recognizing it needs a wider tag rule than the narrow one
+// stripDeviceTag deliberately uses, so it is documented rather than silently half-handled.
+TEST(NormalizePipeline, TagTrailingTheFirstComponentIsNotRecognized) {
+  EXPECT_EQ(norm("Author (X4) - Title.epub"), "Author (X4) - Title.epub");
+  // ...but the same tag on the LAST component is, via the trailing-suffix rule.
+  EXPECT_EQ(norm("Title - Author (X4).epub"), norm("Title - Author.epub"));
+}
+
+TEST(NormalizePipeline, IsIdempotent) {
+  for (const auto* name : {"Smith - (X4) Dune.epub", "Apple - (X4) Zed.epub", "(X4) Dune.epub",
+                           "Author (X4) - Title.epub", "Dune.epub", " - Dune.epub"}) {
+    EXPECT_EQ(norm(norm(name)), norm(name)) << name;
+  }
 }
 
 }  // namespace

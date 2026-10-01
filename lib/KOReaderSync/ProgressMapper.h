@@ -30,6 +30,30 @@ struct SavedProgressPosition {
  */
 class ProgressMapper {
  public:
+  /** Where a KOReader XPath lands inside its own spine item. */
+  struct XPathAnchor {
+    int spineIndex = -1;
+    uint32_t visibleTextOffset = 0;
+    // 1-based, in the same counting the section cache uses. UINT16_MAX when the path
+    // named no paragraph (a chapter start, or a position inside some other element).
+    uint16_t paragraphIndex = UINT16_MAX;
+    float intraSpineProgress = 0.0f;
+  };
+
+  /**
+   * Resolve a KOReader XPath to the position it names inside its spine item.
+   *
+   * The inverse of ChapterXPathResolver::findXPathsForOffsets, and what lets a mark a
+   * KOReader peer made — which arrives with a correct anchor but only a guess at
+   * CrossPoint's own coordinates — be re-filed under this device's. Streams the spine
+   * item once; needs no renderer, no Section and no pagination, so it can run wherever
+   * the anchor backfill does.
+   *
+   * @return false when the path names no DocFragment, names one outside this book, or
+   *         resolves to no text within it.
+   */
+  static bool resolveXPathAnchor(const std::shared_ptr<Epub>& epub, const std::string& xpath, XPathAnchor& out);
+
   /**
    * Convert CrossPoint position to SavedProgress format.
    *

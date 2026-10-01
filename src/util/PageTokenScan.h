@@ -58,6 +58,27 @@ struct Part {
 // the unsplit fast path) by checking for a single part covering [0, len).
 size_t collectParts(const char* text, size_t len, Part* out, size_t maxParts);
 
+//[[
+// The next index-bearing part of a plain NUL-terminated string, scanning from `from`.
+//
+// The same two rules the page walk applies to a laid-out line, applied to a string that
+// was never laid out -- which is what lets a stored snippet be matched against a page
+// token by token. Whitespace separates words; a word carrying no letter or digit yields
+// nothing at all, so the lone dash in "mkdir - Create Directories" is skipped exactly as
+// the page skips it; and a dash inside a word separates parts and belongs to neither.
+// Everything else, brackets and apostrophes included, stays inside its part, because the
+// page keeps it there too.
+//
+// `from` may sit mid-word, at the separator a previous part ended on, so a caller walks
+// the whole string by feeding `outNext` back in.
+//
+// @param outStart byte offset of the part within `text`
+// @param outLen   its length
+// @param outNext  where to resume for the part after it
+// @return false when no part remains
+//]]
+bool nextTextPart(const char* text, size_t from, size_t& outStart, size_t& outLen, size_t& outNext);
+
 // Advance width of a token, with soft hyphens (U+00AD) removed first. Layout strips them
 // before measurement (ParsedText.cpp:19), so a measurement that kept them would overrun the
 // word into the inter-word gap. The std::string form is the allocation-free one when the

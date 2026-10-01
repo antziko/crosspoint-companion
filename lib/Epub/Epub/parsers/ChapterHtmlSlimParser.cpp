@@ -36,11 +36,6 @@ constexpr size_t PARSE_BUFFER_SIZE = 1024;
 // its natural size.
 constexpr float LARGE_IMAGE_WIDTH_FRAC = 0.4f;
 
-// A page-starting large image is treated as a full-page plate and fitted to the
-// viewport only when, once fitted, it covers at least this much of the page height.
-// Below it the image is not a plate -- a wide short banner or a chapter-opening
-// decoration -- and keeps the size the book asked for.
-constexpr float FULL_PAGE_IMAGE_HEIGHT_FRAC = 0.6f;
 // This number comes from PR #73
 // If we have this many words buffered, lay them out and consume all but the last line, freeing a
 // lot of memory. A buffered text block holds ~7 parallel std::vectors (words/styles/ruby) plus the
@@ -1229,6 +1224,25 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                   LOG_DBG("EHP", "Display size: %dx%d (scale %.2f)", displayWidth, displayHeight, scale);
                 }
 
+                // A large image fills the page width whatever size the book asked for: a CSS
+                // width, or insets on the wrapper around it, throw away width a 6" panel cannot
+                // spare. It bleeds into the screen margin, and is capped by the page height so
+                // it never splits. Small images (icons, emoji, rules) keep the size above.
+                const int fullImageWidth = self->viewportWidth + 2 * self->imageBleed;
+                if (dims.width > 0 && dims.height > 0 &&
+                    dims.width >= static_cast<int>(LARGE_IMAGE_WIDTH_FRAC * containerWidth)) {
+                  const float aspect = static_cast<float>(dims.height) / dims.width;
+                  displayWidth = fullImageWidth;
+                  displayHeight = static_cast<int>(fullImageWidth * aspect + 0.5f);
+                  if (displayHeight > self->viewportHeight) {
+                    displayHeight = self->viewportHeight;
+                    displayWidth = std::min(fullImageWidth, static_cast<int>(displayHeight / aspect + 0.5f));
+                  }
+                  if (displayWidth < 1) displayWidth = 1;
+                  if (displayHeight < 1) displayHeight = 1;
+                  LOG_DBG("EHP", "Display size (fill): %dx%d", displayWidth, displayHeight);
+                }
+
                 // Flush any pending text block so it appears before the image
                 if (self->partWordBufferIndex > 0) {
                   self->flushPartWordBuffer();
@@ -1304,44 +1318,6 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                 // Apply top margin from container block
                 self->currentPageNextY += imageMarginTop;
 
-                // A large image that starts its own page is a full-page plate, and it is
-                // laid out to FIT THE PAGE -- against the viewport, not the container.
-                // Both of the things that would otherwise shrink it are authored: a CSS
-                // width on the image, and horizontal margins on the wrapper around it
-                // (e.g. `.squeeze80 { margin: 0 10% }` with `img { width: 100% }`, which
-                // together yield 80% of the page). On a phone that reads as a considered
-                // margin; on a 6" e-ink panel it throws away a quarter of the only
-                // reproduction in the chapter.
-                //
-                // Guarded so this cannot touch anything but a plate:
-                //   - the image must START the page, so nothing shares it above;
-                //   - its natural width must clear the same LARGE_IMAGE_WIDTH_FRAC bar the
-                //     no-CSS path uses, which excludes icons, rules and emoji;
-                //   - the FITTED height must dominate the page, which excludes a wide
-                //     short banner (fitted to width it stays short, so it stays as
-                //     authored) and anything that would leave most of the page empty.
-                // Scaling it to fill also means following content no longer fits beside
-                // it, so the plate ends up alone on the page -- which is the intent.
-                if (imageStartsPage && dims.width > 0 && dims.height > 0 &&
-                    dims.width >= static_cast<int>(LARGE_IMAGE_WIDTH_FRAC * containerWidth)) {
-                  const int room = self->viewportHeight - self->currentPageNextY - imageMarginBottom;
-                  const float aspect = static_cast<float>(dims.height) / dims.width;
-                  int fitWidth = self->viewportWidth;
-                  int fitHeight = static_cast<int>(fitWidth * aspect + 0.5f);
-                  if (room > 0 && fitHeight > room) {
-                    fitHeight = room;
-                    fitWidth = static_cast<int>(fitHeight / aspect + 0.5f);
-                    if (fitWidth > self->viewportWidth) fitWidth = self->viewportWidth;
-                  }
-                  const bool dominatesPage =
-                      fitHeight >= static_cast<int>(FULL_PAGE_IMAGE_HEIGHT_FRAC * self->viewportHeight);
-                  if (dominatesPage && fitWidth > displayWidth && fitWidth >= 1 && fitHeight >= 1) {
-                    LOG_DBG("EHP", "Full-page image: %dx%d -> %dx%d", displayWidth, displayHeight, fitWidth, fitHeight);
-                    displayWidth = fitWidth;
-                    displayHeight = fitHeight;
-                  }
-                }
-
                 // Final fit clamp against the ACTUAL remaining page space below the
                 // image's top y. The page-break above only fires when the page
                 // already has elements; a full-height image sized to viewportHeight
@@ -1357,7 +1333,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                     displayWidth =
                         static_cast<int>(availHeight * (static_cast<float>(dims.width) / dims.height) + 0.5f);
                     if (displayWidth < 1) displayWidth = 1;
-                    if (displayWidth > self->viewportWidth) displayWidth = self->viewportWidth;
+                    if (displayWidth > fullImageWidth) displayWidth = fullImageWidth;
                   }
                   displayHeight = availHeight;
                   LOG_DBG("EHP", "Clamped image to remaining page space: %dx%d", displayWidth, displayHeight);

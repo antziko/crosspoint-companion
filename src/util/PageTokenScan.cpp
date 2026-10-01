@@ -75,6 +75,41 @@ size_t countDashes(const char* text, size_t len) {
   return n;
 }
 
+namespace {
+bool isSpaceByte(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
+}  // namespace
+
+bool nextTextPart(const char* text, size_t from, size_t& outStart, size_t& outLen, size_t& outNext) {
+  if (!text) return false;
+  size_t pos = from;
+  for (;;) {
+    while (isSpaceByte(text[pos])) pos++;
+    if (text[pos] == '\0') return false;
+    size_t end = pos;
+    while (text[end] != '\0' && !isSpaceByte(text[end])) end++;
+
+    bool isCjk = false;
+    if (isSelectable(text + pos, end - pos, isCjk)) {
+      // Separators belong to neither neighbour, so skip any leading run before measuring
+      // the part -- which is also how collectParts drops them.
+      while (pos < end) {
+        const size_t d = dashLenAt(text, end, pos);
+        if (d == 0) break;
+        pos += d;
+      }
+      if (pos < end) {
+        size_t stop = pos;
+        while (stop < end && dashLenAt(text, end, stop) == 0) stop++;
+        outStart = pos;
+        outLen = stop - pos;
+        outNext = stop;
+        return true;
+      }
+    }
+    pos = end;
+  }
+}
+
 size_t collectParts(const char* text, size_t len, Part* out, size_t maxParts) {
   if (!out || maxParts == 0 || len == 0) return 0;
 

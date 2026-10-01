@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <memory>
 
+#include "CrossPointState.h"
 #include "MappedInputManager.h"
 #include "RecentBooksStore.h"
 #include "components/CoverGridHomeUi.h"
@@ -228,11 +229,13 @@ UIIcon UITheme::getFileIcon(const std::string& filename) {
 int UITheme::getStatusBarHeight() {
   const ThemeMetrics metrics = UITheme::getInstance().getMetrics();
 
-  // Add status bar margin
+  // The Home-key "Toggle Status Bar" hides the text band, so its strip goes back to the page;
+  // the progress bar still draws and keeps its reservation.
   const bool showStatusBar =
-      SETTINGS.statusBarChapterPageCount || SETTINGS.statusBarBookProgressPercentage ||
-      SETTINGS.statusBarTitle != CrossPointSettings::STATUS_BAR_TITLE::HIDE_TITLE || SETTINGS.statusBarBattery ||
-      SETTINGS.statusBarClock != CrossPointSettings::STATUS_BAR_CLOCK_MODE::STATUS_BAR_CLOCK_HIDE;
+      !APP_STATE.statusBarHidden &&
+      (SETTINGS.statusBarChapterPageCount || SETTINGS.statusBarBookProgressPercentage ||
+       SETTINGS.statusBarTitle != CrossPointSettings::STATUS_BAR_TITLE::HIDE_TITLE || SETTINGS.statusBarBattery ||
+       SETTINGS.statusBarClock != CrossPointSettings::STATUS_BAR_CLOCK_MODE::STATUS_BAR_CLOCK_HIDE);
   const bool showProgressBar =
       SETTINGS.statusBarProgressBar != CrossPointSettings::STATUS_BAR_PROGRESS_BAR::HIDE_PROGRESS;
   return (showStatusBar ? (metrics.statusBarVerticalMargin) : 0) +

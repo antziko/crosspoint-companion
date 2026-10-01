@@ -1242,9 +1242,9 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
                               const bool fillMargin, const bool isPageBookmarked, const bool isReturnMark,
                               const bool isPageQuoted, const bool pageCountEstimated) const {
   // Hidden by the Home-key "Toggle Status Bar" gesture. The progress bar is exempt (see the
-  // return below); everything else in the band is skipped. The strip stays reserved in the
-  // layout, so this costs one repaint and no re-pagination; the callers all clearScreen()
-  // before rendering the page, so no stale band ink survives.
+  // return below); everything else in the band is skipped, and getStatusBarHeight() hands the
+  // band's strip to the page. The callers all clearScreen() before rendering the page, so no
+  // stale band ink survives.
   const bool hidden = APP_STATE.statusBarHidden;
 
   auto metrics = UITheme::getInstance().getMetrics();

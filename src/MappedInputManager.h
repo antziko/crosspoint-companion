@@ -89,6 +89,17 @@ class MappedInputManager {
   bool wasHomeKeyHold() const;
   // Configured one-frame action, independent of the gesture that triggered it.
   HomeButtonAction homeButtonAction() const { return homeAction; }
+
+  // Power double click (boards without a Home key; see powerDoubleClickAction). main.cpp
+  // tracks the clicks and reports through the two setters, once per frame after update().
+  bool powerDoubleClickEnabled() const;
+  // A short power press for the Short Power Button action. With a double-click action set it
+  // is the one-frame event main.cpp raises once the window passes without a second click;
+  // otherwise it is the plain release.
+  bool wasPowerShortPress() const;
+  void setPowerShortPressFrame(const bool on) const { powerShortPressFrame = on; }
+  // Runs `action` this frame as if the Home key had produced it, through the same dispatch.
+  void raiseHomeButtonAction(const HomeButtonAction action) const { homeAction = action; }
   void resetHomeButtonInput() const {
     homeButtonInput.reset();
     deferredHomeAction = HomeButtonAction::Ignore;
@@ -179,5 +190,6 @@ class MappedInputManager {
   // is cleared on release; `suppressed` marks releases still owed a swallow.
   mutable uint16_t longPressFiredButtons = 0;
   mutable uint16_t suppressedReleaseButtons = 0;
+  mutable bool powerShortPressFrame = false;
   mutable bool holdQueried = false;  // see holdWasQueried(); cleared every update()
 };

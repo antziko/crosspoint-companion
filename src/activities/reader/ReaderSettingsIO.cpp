@@ -20,7 +20,9 @@ namespace {
 // v7: lineSpacing renumbered by the insertion of SEMI_WIDE at index 2. The layout is unchanged,
 //     so v5/v6 files are still read -- load() remaps the field in place instead, the same way
 //     fontPointSize's pre-1.5 slots are folded up below.
-constexpr uint8_t READER_SETTINGS_FILE_VERSION = 7;
+// v8: lineSpacing renumbered again by the insertion of RELAXED at index 2; v7 files are remapped
+//     in place the same way.
+constexpr uint8_t READER_SETTINGS_FILE_VERSION = 8;
 // Oldest layout load() still understands; everything from here up is read field by field.
 constexpr uint8_t READER_SETTINGS_MIN_READABLE_VERSION = 5;
 
@@ -51,10 +53,10 @@ bool load(const std::string& cachePath, CrossPointSettings::ReaderOverride& out)
     out.fontPointSize = 12 + out.fontPointSize * 2;
   }
   serialization::readPod(f, out.lineSpacing);
-  // Written under the pre-SEMI_WIDE numbering; carry the book's choice across rather than letting
-  // it drop a step (and needlessly re-paginate).
-  if (version < 7) {
-    out.lineSpacing = CrossPointSettings::remapLegacyLineSpacing(out.lineSpacing);
+  // Written under an older numbering; carry the book's choice across rather than letting it shift
+  // a step (and needlessly re-paginate).
+  if (version < 8) {
+    out.lineSpacing = CrossPointSettings::remapLegacyLineSpacing(out.lineSpacing, version == 7);
   }
   serialization::readPod(f, out.paragraphAlignment);
   serialization::readPod(f, out.hyphenationEnabled);

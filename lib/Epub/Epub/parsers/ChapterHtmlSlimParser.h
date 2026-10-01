@@ -60,6 +60,7 @@ class ChapterHtmlSlimParser {
   // setTextSpacing() rather than the constructor, whose argument list is already long.
   int8_t characterSpacing = 0;
   uint8_t wordSpacingPercent = 100;
+  uint8_t imageBleed = 0;  // see setImageBleed()
   const CssParser* cssParser;
   bool embeddedStyle;
   uint8_t imageRendering;
@@ -233,6 +234,8 @@ class ChapterHtmlSlimParser {
     characterSpacing = character;
     wordSpacingPercent = wordPercent;
   }
+  // Px a large image may extend past each side of the viewport (the reader's screen margin).
+  void setImageBleed(const uint8_t px) { imageBleed = px; }
   bool parseAndBuildPages();
 
   // Resumable parse, for the incremental section builder. Drive as:

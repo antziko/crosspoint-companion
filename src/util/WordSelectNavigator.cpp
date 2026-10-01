@@ -17,6 +17,8 @@ namespace {
 // because it carries a goal column that a fast repeat would smear across rows.
 constexpr unsigned long WORD_REPEAT_START_MS = 500;
 constexpr unsigned long WORD_REPEAT_INTERVAL_MS = 250;
+// Hold time before a direction jumps to the row/page edge (setHoldJumps).
+constexpr unsigned long JUMP_HOLD_MS = 500;
 }  // namespace
 
 void WordSelectNavigator::load(std::vector<WordInfo> w, std::vector<Row> r, std::string pool,
@@ -451,8 +453,32 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
   // stepping every WORD_REPEAT_INTERVAL_MS. The button must be armed first -- see
   // wordRepeatArmed_ for the hold-carried-in case that guards against. getHeldTime() is
   // global rather than per-button, which is precisely why arming is per-button.
+  // Hold-to-jump replaces the word-axis repeat. Fired at the threshold, from the held LEVEL; the
+  // hold's own release is swallowed.
+  int jumpDir = -1;  // 0 rowPrev, 1 rowNext, 2 wordPrev, 3 wordNext
+  if (holdJumps_) {
+    const Bound bounds[4] = {rowPrev, rowNext, wordPrev, wordNext};
+    bool* released[4] = {&rowPrevPressed, &rowNextPressed, &wordPrevPressed, &wordNextPressed};
+    for (int d = 0; d < 4; d++) {
+      const Bound& bound = bounds[d];
+      const auto bit = static_cast<uint16_t>(1u << static_cast<uint8_t>(bound.button));
+      const bool pressed = input.isPressed(bound.button, bound.applySwap);
+      if ((jumpFired_ & bit) != 0) {
+        *released[d] = false;  // the end of a hold that already jumped
+        if (!pressed) jumpFired_ &= static_cast<uint16_t>(~bit);
+        continue;
+      }
+      if (!pressed || input.wasPressed(bound.button, bound.applySwap)) jumpArmed_ |= bit;
+      if (!pressed) continue;
+      if ((jumpArmed_ & bit) == 0 || input.getHeldTime() < JUMP_HOLD_MS) continue;
+      jumpFired_ |= bit;
+      jumpDir = d;
+    }
+  }
+
   const unsigned long nowMs = millis();
   for (const Bound& bound : {wordPrev, wordNext}) {
+    if (holdJumps_) break;
     const auto bit = static_cast<uint16_t>(1u << static_cast<uint8_t>(bound.button));
     const bool pressed = input.isPressed(bound.button, bound.applySwap);
     if (!pressed || input.wasPressed(bound.button, bound.applySwap)) wordRepeatArmed_ |= bit;
@@ -474,6 +500,28 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
 
   const int rowCount = static_cast<int>(rows.size());
   bool changed = false;
+
+  if (jumpDir >= 0) {
+    pendingSnapIdx = -1;
+    if (jumpDir <= 1) {
+      // First/last row holding a token, nearest the column the cursor is on.
+      const int refX = rowNavGoalX >= 0
+                           ? rowNavGoalX
+                           : (rowEmpty(currentRow) ? 0 : wordCenterX(wordAt(currentRow, currentWordInRow)));
+      int target = jumpDir == 0 ? 0 : rowCount - 1;
+      const int step = jumpDir == 0 ? 1 : -1;
+      while (target >= 0 && target < rowCount && rowEmpty(target)) target += step;
+      if (target < 0 || target >= rowCount) return false;
+      currentWordInRow = findClosestWordFromX(target, refX, false);
+      currentRow = target;
+      rowNavGoalX = refX;
+    } else {
+      if (rowEmpty(currentRow)) return false;
+      currentWordInRow = jumpDir == 2 ? 0 : rowSize(currentRow) - 1;
+      rowNavGoalX = -1;
+    }
+    return true;
+  }
 
   // Row navigation aims at a reference column, freshest source first:
   //  - the second half a wordPrev just snapped away from (across rows), so rowPrev/rowNext

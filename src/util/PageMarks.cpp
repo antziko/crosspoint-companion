@@ -3,6 +3,7 @@
 #include <Epub/Page.h>
 #include <GfxRenderer.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
 #include <Utf8.h>
 
 #include <algorithm>
@@ -13,6 +14,8 @@
 #include "CrossPointSettings.h"
 #include "LookupMarks.h"
 #include "PageTokenScan.h"
+#include "QuoteSpan.h"
+#include "SnippetMatch.h"
 
 namespace PageMarks {
 namespace {
@@ -39,8 +42,20 @@ constexpr size_t kMaxLookupsPerPage = 8;
 // serve both drawForPage and lookupMarkAtPoint.
 struct LookupRun {
   LookupMarks::RunState state;
+  // The segment the run is on now.
   int16_t x0 = 0;
   int16_t x1 = 0;
+  int16_t y = 0;
+  const PageLine* line = nullptr;
+  uint16_t wStart = 0;  // first and last block word of the segment, on `line`
+  uint16_t wLast = 0;
+  // The first segment of a run that crossed its one line break (state.wrapped), else unused.
+  int16_t headX0 = 0;
+  int16_t headX1 = 0;
+  int16_t headY = 0;
+  const PageLine* headLine = nullptr;
+  uint16_t headWStart = 0;
+  uint16_t headWLast = 0;
 };
 
 // One quote being resolved, plus the marking run currently open for it. Runs are per visual
@@ -53,6 +68,22 @@ struct Range {
   const char* snippet = nullptr;
   bool checked = false;
   bool rejected = false;
+  // A mark a KOReader peer made: its word range describes that reader's layout, so the
+  // range above is resolved from the quoted text instead (resolveForeignRanges).
+  bool foreign = false;
+  // Which part of the quote this page holds. A peer selects against a larger page, so one
+  // of its highlights routinely covers two or three here: the first page runs from the
+  // matched word to the page end, the last from the page start to where the quote stops,
+  // and any page between is highlighted whole.
+  bool startsHere = true;
+  bool endsHere = true;
+  // Where in this page the quote stops, in 255ths of the page, for the page that holds its
+  // end but not its start. There are no per-word character offsets to place it exactly --
+  // the section cache records one offset per PAGE -- so this interpolates over the page's
+  // tokens and can be a word or two out. Only ever shortens a run. A byte because six of
+  // these sit on a render-path frame, and 1/255 of a page is already finer than the
+  // interpolation it feeds.
+  uint8_t endFracInPage = 255;
   bool runOpen = false;
   int16_t runY = 0;
   int16_t runX0 = 0;
@@ -83,10 +114,130 @@ bool firstWordMatches(const char* snippet, const char* text, size_t len) {
   return firstLen >= len && std::strncmp(snippet + firstLen - len, text, len) == 0;
 }
 
+// Resolve the word range of every foreign quote on this page, in one walk. Measuring
+// nothing: this only needs the token sequence, and it has to complete before any band is
+// drawn, or a false partial match would paint one.
+void resolveForeignRanges(const Page& page, Range* ranges, size_t rangeCount) {
+  SnippetMatch::Matcher matchers[kMaxQuotesPerPage];
+  size_t pending = 0;
+  size_t continuing = 0;
+  for (size_t i = 0; i < rangeCount; i++) {
+    if (!ranges[i].foreign) continue;
+    if (!ranges[i].startsHere) {
+      // The quote began on an earlier page, so it covers this one from its first token.
+      // There is nothing to match: the snippet holds the quote's OPENING words, which are
+      // not on this page, and for a long highlight it never held its tail at all.
+      continuing++;
+      continue;
+    }
+    if (!ranges[i].snippet || !*ranges[i].snippet) {
+      ranges[i].rejected = true;
+      continue;
+    }
+    matchers[i].snippet = ranges[i].snippet;
+    matchers[i].begin(BOOKMARK_SNIPPET_MAX);
+    pending++;
+  }
+  if (pending == 0 && continuing == 0) return;
+
+  uint16_t index = 0;
+  uint16_t lastIndex = 0;
+  bool seenAny = false;
+  for (const auto& element : page.elements) {
+    if (element->getTag() != TAG_PageLine) continue;
+    const auto* line = static_cast<const PageLine*>(element.get());
+    const auto& block = line->getBlock();
+    if (!block) continue;
+    const uint16_t blockWordCount = block->wordCount();
+    for (uint16_t w = 0; w < blockWordCount; w++) {
+      const char* text = block->wordText(w);
+      const size_t len = block->wordTextLen(w);
+      bool isCjk = false;
+      if (!PageTokens::isSelectable(text, len, isCjk)) continue;
+
+      PageTokens::Part parts[PageTokens::kMaxTokenParts];
+      const size_t partCount = PageTokens::collectParts(text, len, parts, PageTokens::kMaxTokenParts);
+      const bool unsplit = partCount == 1 && parts[0].start == 0 && parts[0].end == len;
+      for (size_t pi = 0; pi < partCount; pi++, index++) {
+        const size_t partStart = unsplit ? 0 : parts[pi].start;
+        const size_t partLen = unsplit ? len : parts[pi].end - parts[pi].start;
+        lastIndex = index;
+        seenAny = true;
+        for (size_t i = 0; i < rangeCount; i++) {
+          if (!ranges[i].foreign || !ranges[i].startsHere || matchers[i].done || !matchers[i].snippet) continue;
+          if (matchers[i].offer(text + partStart, partLen, index)) {
+            ranges[i].start = matchers[i].start;
+            ranges[i].end = index;
+            // Already located by its text; the first-word check downstream would only
+            // repeat what this just proved.
+            ranges[i].checked = true;
+          }
+        }
+      }
+    }
+  }
+
+  for (size_t i = 0; i < rangeCount; i++) {
+    Range& r = ranges[i];
+    if (!r.foreign || r.rejected) continue;
+
+    // Where the quote stops on this page: its own end when it ends here, the last token
+    // otherwise. Interpolating over tokens is the best available -- the section cache
+    // records a visible-character offset per page, not per word -- and only ever pulls the
+    // end in, so an error shortens the band rather than marking text outside the quote.
+    const uint16_t pageLast = seenAny ? lastIndex : 0;
+    uint16_t stopAt = pageLast;
+    if (r.endsHere && seenAny) stopAt = QuoteSpan::stopIndex(r.endFracInPage, pageLast);
+
+    if (!r.startsHere) {
+      // Continuation: from the top of the page. Located by the quote's page span rather
+      // than by its text, so there is no first-word check to make.
+      if (!seenAny) {
+        r.rejected = true;
+        continue;
+      }
+      r.start = 0;
+      r.end = stopAt;
+      r.checked = true;
+      continue;
+    }
+
+    if (matchers[i].done) {
+      // Matched in full. It still runs to the page edge when the quote carries on past it.
+      if (!r.endsHere) r.end = pageLast;
+      continue;
+    }
+
+    // The snippet ran out of page mid-run. That is exactly what a quote crossing the break
+    // looks like from here, so accept it -- but only when the quote is independently known
+    // to continue. A quote that both starts and ends on this page must still match whole,
+    // or a page sharing the highlight's opening words would draw a band it has no text for.
+    if (!r.endsHere && matchers[i].open) {
+      r.start = matchers[i].start;
+      r.end = pageLast;
+      r.checked = true;
+      continue;
+    }
+
+    // No band: a partial one would claim a length the mark does not have.
+    r.rejected = true;
+    // A range only reaches here when the mark's progress already put it on this page, so a
+    // rejection means the text did not line up -- the one failure this walk can have that
+    // leaves nothing on screen and nothing in any other log. Deduped against the last one,
+    // since a page redraws far more often than its marks change.
+    static const char* lastReported = nullptr;
+    if (r.snippet && r.snippet != lastReported) {
+      lastReported = r.snippet;
+      SdDebugLog::log("PGM", "foreign quote unmatched: \"%.63s\"", r.snippet);
+    }
+  }
+}
+
 }  // namespace
 
 void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int marginLeft, int marginTop,
-                 uint16_t spineIndex, float pageProgress, int pageCount, uint32_t chapterHash, int pageNumber) {
+                 uint16_t spineIndex, float pageProgress, int pageCount, uint32_t chapterHash, int pageNumber,
+                 const int markPageCount, const int bandTop, const int bandBottom) {
   if (pageCount <= 0) return;
   // markStyle, not style: the per-word EpdFontFamily::Style below would shadow it.
   const uint8_t markStyle = SETTINGS.quoteHighlightStyle;
@@ -99,13 +250,21 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
     const float pageSlice = 1.0f / static_cast<float>(pageCount);
     for (const auto& b : BOOKMARKS.getBookmarks()) {
       if (!b.quote || b.spineIndex != spineIndex) continue;
-      if (b.progress < pageProgress || b.progress >= pageProgress + pageSlice) continue;
+      // endProgress equals progress for a quote made here -- a selection on this device
+      // cannot cross a page break -- so this reduces to the old start-page test for them.
+      const QuoteSpan::Role role = QuoteSpan::pageRole(b.progress, b.endProgress, pageProgress, pageSlice);
+      if (role == QuoteSpan::Role::NotHere) continue;
       if (rangeCount >= kMaxQuotesPerPage) break;
       Range& r = ranges[rangeCount++];
       r.start = std::min(b.startWord, b.endWord);
       r.end = std::max(b.startWord, b.endWord);
       r.snippet = b.snippet;
+      r.foreign = BookmarkStore::isForeignMark(b);
+      r.startsHere = role == QuoteSpan::Role::Whole || role == QuoteSpan::Role::Starts;
+      r.endsHere = role == QuoteSpan::Role::Whole || role == QuoteSpan::Role::Ends;
+      r.endFracInPage = QuoteSpan::endFraction(b.endProgress, pageProgress, pageSlice);
     }
+    resolveForeignRanges(page, ranges, rangeCount);
   }
 
   // Looked-up words anchored here. Resolved against the resident table, not the page: the
@@ -116,7 +275,7 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
   size_t lookupCount = 0;
   if (SETTINGS.lookupUnderline) {
     lookupCount = static_cast<size_t>(
-        LookupMarks::getInstance().collectForPage(chapterHash, pageNumber, pageCount, lookups, kMaxLookupsPerPage));
+        LookupMarks::getInstance().collectForPage(chapterHash, pageNumber, markPageCount, lookups, kMaxLookupsPerPage));
   }
 
   if (rangeCount == 0 && lookupCount == 0) return;  // the common case: nothing walked, nothing measured
@@ -126,8 +285,11 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
 
   // One rule under a span of a line, the mark a looked-up word gets and the one a quote gets
   // when the user has chosen the underline style.
+  const auto inBand = [&](const int rowY) { return rowY < bandBottom && rowY + lineHeight > bandTop; };
+
   const auto underlineSpan = [&](int16_t x0, int width, int16_t rowY) {
-    if (width > 0) renderer.fillRect(x0, rowY + lineHeight - kUnderlineThickness, width, kUnderlineThickness, true);
+    if (width > 0 && inBand(rowY))
+      renderer.fillRect(x0, rowY + lineHeight - kUnderlineThickness, width, kUnderlineThickness, true);
   };
 
   const auto flush = [&](Range& r) {
@@ -139,7 +301,9 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
       } else {
         // washRectDither, not fillRectDither: the text is already drawn here, and the plain
         // dither fill writes both inks and would wipe the glyphs out from under the band.
-        renderer.washRectDither(r.runX0 - kBandPadX, r.runY, width + 2 * kBandPadX, lineHeight, Color::LightGray);
+        if (inBand(r.runY)) {
+          renderer.washRectDither(r.runX0 - kBandPadX, r.runY, width + 2 * kBandPadX, lineHeight, Color::LightGray);
+        }
       }
     }
     r.runOpen = false;
@@ -156,6 +320,28 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
     // extractWords moves the selection boxes in lockstep with them.
     const int16_t rowY = static_cast<int16_t>(line->yPos + marginTop + block->getRubyShift(ascender));
     const uint16_t blockWordCount = block->wordCount();
+
+    // A looked-up CJK word is also thickened by redrawing its glyphs offset right, down and
+    // diagonally, which widens every stroke by a pixel in both axes. An overdraw rather than the
+    // BOLD face: a font without one silently falls back to regular (SdCardFont::resolveStyle).
+    // SUP/SUB tokens are left alone -- their baseline is shifted inside TextBlock::render and not
+    // reproduced here.
+    const auto emboldenCjk = [&](const PageLine* segLine, const uint16_t wFirst, const uint16_t wLast) {
+      const auto& segBlock = segLine->getBlock();
+      const int16_t segY = static_cast<int16_t>(segLine->yPos + marginTop + segBlock->getRubyShift(ascender));
+      if (!inBand(segY)) return;
+      for (uint16_t wi = wFirst; wi <= wLast; wi++) {
+        const char* t = segBlock->wordText(wi);
+        bool cjk = false;
+        if (!PageTokens::isSelectable(t, segBlock->wordTextLen(wi), cjk) || !cjk) continue;
+        const EpdFontFamily::Style style = segBlock->wordStyle(wi);
+        if ((style & (EpdFontFamily::SUP | EpdFontFamily::SUB)) != 0) continue;
+        const int x0 = segLine->xPos + segBlock->wordXpos(wi) + marginLeft;
+        renderer.drawText(fontId, x0 + 1, segY, t, true, style);
+        renderer.drawText(fontId, x0, segY + 1, t, true, style);
+        renderer.drawText(fontId, x0 + 1, segY + 1, t, true, style);
+      }
+    };
 
     for (uint16_t w = 0; w < blockWordCount; w++) {
       const char* text = block->wordText(w);
@@ -234,19 +420,44 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
               LookupMarks::step(*m, r.state, isCjk, tokenHash, tokenLen, text + partStart, partLen, rowY);
           if (outcome == Step::None) continue;
           measure();
+          if (r.state.wrappedHere) {
+            // The run just crossed its line break: what it held so far is the first segment.
+            r.headX0 = r.x0;
+            r.headX1 = r.x1;
+            r.headY = r.y;
+            r.headLine = r.line;
+            r.headWStart = r.wStart;
+            r.headWLast = r.wLast;
+            r.x0 = x;
+            r.x1 = x;
+            r.y = rowY;
+            r.line = line;
+            r.wStart = w;
+          }
           switch (outcome) {
             case Step::Opened:
               r.x0 = x;
               r.x1 = static_cast<int16_t>(x + width);
+              r.y = rowY;
+              r.line = line;
+              r.wStart = w;
+              r.wLast = w;
               break;
             case Step::Extended:
               r.x1 = std::max(r.x1, static_cast<int16_t>(x + width));
+              r.wLast = w;
               break;
             case Step::MatchedRun:
+              if (r.state.wrapped) {
+                underlineSpan(r.headX0, r.headX1 - r.headX0, r.headY);
+                emboldenCjk(r.headLine, r.headWStart, r.headWLast);
+              }
               underlineSpan(r.x0, std::max<int16_t>(r.x1, static_cast<int16_t>(x + width)) - r.x0, r.state.y);
+              emboldenCjk(line, r.wStart, w);
               break;
             case Step::MatchedToken:
               underlineSpan(x, width, rowY);
+              if (isCjk) emboldenCjk(line, w, w);
               break;
             case Step::None:
               break;
@@ -436,10 +647,19 @@ const LookupMarks::Mark* lookupMarkAtPoint(const GfxRenderer& renderer, const Pa
               LookupMarks::step(*m, r.state, isCjk, tokenHash, tokenLen, text + partStart, partLen, rowY);
           if (outcome == Step::None) continue;
           measure();
+          if (r.state.wrappedHere) {
+            r.headX0 = r.x0;
+            r.headX1 = r.x1;
+            r.headY = r.y;
+            r.x0 = tokenX;
+            r.x1 = tokenX;
+            r.y = rowY;
+          }
           switch (outcome) {
             case Step::Opened:
               r.x0 = tokenX;
               r.x1 = static_cast<int16_t>(tokenX + tokenWidth);
+              r.y = rowY;
               break;
             case Step::Extended:
               r.x1 = std::max(r.x1, static_cast<int16_t>(tokenX + tokenWidth));
@@ -447,6 +667,7 @@ const LookupMarks::Mark* lookupMarkAtPoint(const GfxRenderer& renderer, const Pa
             case Step::MatchedRun: {
               const int16_t x1 = std::max(r.x1, static_cast<int16_t>(tokenX + tokenWidth));
               if (covers(r.x0, static_cast<int16_t>(x1 - r.x0), r.state.y)) return m;
+              if (r.state.wrapped && covers(r.headX0, static_cast<int16_t>(r.headX1 - r.headX0), r.headY)) return m;
               break;
             }
             case Step::MatchedToken:

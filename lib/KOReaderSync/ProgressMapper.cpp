@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "ChapterXPathResolver.h"
+#include "DocFragmentPath.h"
 #include "Epub/Section.h"
 #include "Epub/VisibleTextUtils.h"
 #include "Epub/htmlEntities.h"
@@ -42,93 +43,17 @@ int parseCharOffset(const std::string& xpath) {
 }
 
 // Parse the N from text()[N] in the XPath (1-based; defaults to 1 if absent or 1).
-int parseTextNodeIndex(const std::string& xpath) {
-  const size_t textPos = xpath.rfind("text()[");
-  if (textPos == std::string::npos) return 1;
-  const size_t numStart = textPos + 7;  // strlen("text()[")
-  const size_t numEnd = xpath.find(']', numStart);
-  if (numEnd == std::string::npos || numEnd == numStart) return 1;
-  int val = 0;
-  for (size_t i = numStart; i < numEnd; i++) {
-    if (xpath[i] < '0' || xpath[i] > '9') return 1;
-    val = val * 10 + (xpath[i] - '0');
-  }
-  return val > 0 ? val : 1;
-}
-
-bool isChapterStartXPath(const std::string& xpath) {
-  if (xpath.find("/p[") != std::string::npos || xpath.find("/li[") != std::string::npos) {
-    return false;
-  }
-
-  static constexpr char kDocFragment[] = "/body/DocFragment[";
-  const size_t docFragPos = xpath.find(kDocFragment);
-  if (docFragPos == std::string::npos) {
-    return false;
-  }
-  const size_t docFragEnd = xpath.find(']', docFragPos + strlen(kDocFragment));
-  if (docFragEnd == std::string::npos) {
-    return false;
-  }
-  if (docFragEnd + 1 == xpath.size()) {
-    return true;
-  }
-  if (xpath[docFragEnd + 1] == '.') {
-    if (docFragEnd + 2 >= xpath.size()) {
-      return false;
-    }
-    for (size_t i = docFragEnd + 2; i < xpath.size(); i++) {
-      if (xpath[i] != '0') return false;
-    }
-    return true;
-  }
-
-  static constexpr char kDocBody[] = "]/body";
-  const size_t docBodyPos = xpath.find(kDocBody);
-  if (docBodyPos == std::string::npos) {
-    return false;
-  }
-  size_t bodyContentStart = docBodyPos + strlen(kDocBody);
-  if (bodyContentStart == xpath.size()) {
-    return true;
-  }
-  if (xpath[bodyContentStart] != '/') {
-    return false;
-  }
-  bodyContentStart++;
-  if (bodyContentStart == xpath.size()) {
-    return true;
-  }
-
-  const size_t dotPos = xpath.rfind('.');
-  if (dotPos == std::string::npos || dotPos <= bodyContentStart || dotPos + 1 >= xpath.size()) {
-    return false;
-  }
-  size_t terminalEnd = dotPos;
-  static constexpr char kTextNode[] = "/text()";
-  const size_t textNodePos = xpath.rfind(kTextNode, dotPos);
-  if (textNodePos != std::string::npos && textNodePos >= bodyContentStart) {
-    terminalEnd = textNodePos;
-  }
-  if (xpath.find('/', bodyContentStart) < terminalEnd) {
-    return false;
-  }
-
-  for (size_t i = dotPos + 1; i < xpath.size(); i++) {
-    if (xpath[i] != '0') return false;
-  }
-  return parseTextNodeIndex(xpath) <= 1;
-}
+int parseTextNodeIndex(const std::string& xpath) { return DocFragmentPath::textNodeIndex(xpath); }
 
 bool isBodyTextXPath(const std::string& xpath) {
-  static constexpr char kBodyFrag[] = "/body/DocFragment[";
-  const size_t fragPos = xpath.find(kBodyFrag);
-  if (fragPos == std::string::npos) return false;
-  const size_t afterBracket = xpath.find(']', fragPos + strlen(kBodyFrag));
-  if (afterBracket == std::string::npos) return false;
+  int fragIndex = 0;
+  size_t fragEnd = 0;
+  if (!DocFragmentPath::find(xpath, fragIndex, fragEnd)) return false;
   static constexpr char kBody[] = "/body/";
-  if (xpath.compare(afterBracket + 1, strlen(kBody), kBody) != 0) return false;
-  const size_t contentPos = afterBracket + 1 + strlen(kBody);
+  if (fragEnd + strlen(kBody) > xpath.size()) return false;
+  if (xpath.compare(fragEnd, strlen(kBody), kBody) != 0) return false;
+  const size_t contentPos = fragEnd + strlen(kBody);
+  if (contentPos + strlen("text()") > xpath.size()) return false;
   return xpath.compare(contentPos, strlen("text()"), "text()") == 0;
 }
 
@@ -145,14 +70,13 @@ static constexpr int MAX_XPATH_DEPTH = 16;
 // Example input: "/body/DocFragment[1]/body/div[1]/ul/li[4]/text()[1].51"
 // Fills steps with: {div,1}, {ul,1}, {li,4}
 int parseXPathSteps(const std::string& xpath, XPathStep steps[MAX_XPATH_DEPTH]) {
-  static const char kBodyFrag[] = "/body/DocFragment[";
-  const size_t fragPos = xpath.find(kBodyFrag);
-  if (fragPos == std::string::npos) return 0;
-  const size_t afterBracket = xpath.find(']', fragPos + strlen(kBodyFrag));
-  if (afterBracket == std::string::npos) return 0;
+  int fragIndex = 0;
+  size_t fragEnd = 0;
+  if (!DocFragmentPath::find(xpath, fragIndex, fragEnd)) return 0;
   static const char kBody[] = "/body/";
-  if (xpath.compare(afterBracket + 1, strlen(kBody), kBody) != 0) return 0;
-  size_t pos = afterBracket + 1 + strlen(kBody);
+  if (fragEnd + strlen(kBody) > xpath.size()) return 0;
+  if (xpath.compare(fragEnd, strlen(kBody), kBody) != 0) return 0;
+  size_t pos = fragEnd + strlen(kBody);
 
   size_t stepsEnd = xpath.rfind("/text()");
   if (stepsEnd == std::string::npos) {
@@ -778,6 +702,71 @@ SavedProgressPosition ProgressMapper::toSavedProgress(const std::shared_ptr<Epub
   return result;
 }
 
+bool ProgressMapper::resolveXPathAnchor(const std::shared_ptr<Epub>& epub, const std::string& xpath, XPathAnchor& out) {
+  out = XPathAnchor{};
+  if (!epub || xpath.empty()) return false;
+
+  const int docFrag = DocFragmentPath::index(xpath);
+  if (docFrag < 1) return false;
+  const int spine = docFrag - 1;
+  if (spine >= epub->getSpineItemsCount()) return false;
+  out.spineIndex = spine;
+
+  // The chapter start names no text node at all; it is offset 0 by definition, and
+  // streaming the item would only confirm that at the cost of a full parse.
+  if (DocFragmentPath::isChapterStart(xpath)) return true;
+
+  const int xpathChar = parseCharOffset(xpath);
+  const int xpathTextNode = parseTextNodeIndex(xpath);
+
+  const auto take = [&](const ParagraphStreamer& s) {
+    out.visibleTextOffset = static_cast<uint32_t>(std::min<size_t>(s.getTargetVisChars(), UINT32_MAX));
+    out.intraSpineProgress = s.progress();
+    const int p = s.getParagraphAtMatch();
+    if (p > 0) out.paragraphIndex = static_cast<uint16_t>(p);
+  };
+
+  // The same three ways of reading an XPath that toCrossPoint tries, in the same order
+  // and against the same streamer. They must stay in step: a mark placed by one and
+  // re-placed by the other would land in two different spots.
+  XPathStep steps[MAX_XPATH_DEPTH];
+  const int stepCount = parseXPathSteps(xpath, steps);
+  if (stepCount > 0) {
+    ParagraphStreamer strict(steps, stepCount, xpathChar, xpathTextNode);
+    if (streamSpine(epub, spine, strict) && strict.found()) {
+      take(strict);
+      return true;
+    }
+    // Some producers omit an unindexed wrapper from the ancestry (PR #2777); retry only
+    // once the structurally exact path has failed.
+    ParagraphStreamer relaxed(steps, stepCount, xpathChar, xpathTextNode, true);
+    if (streamSpine(epub, spine, relaxed) && relaxed.found()) {
+      take(relaxed);
+      return true;
+    }
+    return false;
+  }
+
+  if (isBodyTextXPath(xpath)) {
+    ParagraphStreamer s(true, xpathChar, xpathTextNode);
+    if (streamSpine(epub, spine, s) && s.found()) {
+      take(s);
+      return true;
+    }
+    return false;
+  }
+
+  const int xpathP = parseIndex(xpath, "/p[", true);
+  if (xpathP > 0) {
+    ParagraphStreamer s(xpathP, xpathChar, xpathTextNode);
+    if (streamSpine(epub, spine, s) && s.found()) {
+      take(s);
+      return true;
+    }
+  }
+  return false;
+}
+
 CrossPointPosition ProgressMapper::toCrossPoint(const std::shared_ptr<Epub>& epub, const SavedProgressPosition& koPos,
                                                 GfxRenderer& renderer, int currentSpineIndex,
                                                 int totalPagesInCurrentSpine, int fallbackTotalPages) {
@@ -789,7 +778,7 @@ CrossPointPosition ProgressMapper::toCrossPoint(const std::shared_ptr<Epub>& epu
   const float clampedPercentage = std::max(0.0f, std::min(1.0f, koPos.percentage));
   const size_t targetBytes = static_cast<size_t>(static_cast<float>(bookSize) * clampedPercentage);
 
-  const int docFrag = parseIndex(koPos.xpath, "/body/DocFragment[");
+  const int docFrag = DocFragmentPath::index(koPos.xpath);
   const int xpathP = parseIndex(koPos.xpath, "/p[", true);
   const int xpathChar = parseCharOffset(koPos.xpath);
   const int xpathTextNode = parseTextNodeIndex(koPos.xpath);
@@ -895,7 +884,7 @@ CrossPointPosition ProgressMapper::toCrossPoint(const std::shared_ptr<Epub>& epu
               s.progress() * 100, s.getTargetVisChars(), s.getTotalVisChars());
     }
   }
-  if (xpathSpine >= 0 && xpathSpine < spineCount && isChapterStartXPath(koPos.xpath)) {
+  if (xpathSpine >= 0 && xpathSpine < spineCount && DocFragmentPath::isChapterStart(koPos.xpath)) {
     result.visibleTextOffset = 0;
     result.hasVisibleTextOffset = true;
     LOG_DBG("PM", "Chapter-start XPath %s -> spine=%d page start", koPos.xpath.c_str(), result.spineIndex);
@@ -985,7 +974,7 @@ CrossPointPosition ProgressMapper::toCrossPoint(const std::shared_ptr<Epub>& epu
 }
 
 std::string ProgressMapper::generateXPath(const std::shared_ptr<Epub>& epub, int spineIndex, float intra) {
-  const std::string base = "/body/DocFragment[" + std::to_string(spineIndex + 1) + "]/body";
+  const std::string base = DocFragmentPath::body(spineIndex, epub->getSpineItemsCount() == 1);
   if (intra <= 0.0f) return base;
 
   size_t spineSize = 0;

@@ -21,6 +21,7 @@
 #include "components/themes/BaseTheme.h"  // Rect (indexing popup progress bar)
 #include "util/Dictionary.h"              // Dictionary::SessionOverrideScope member
 #include "util/LookupMarks.h"             // LookupMarks::Mark member (the held word's card anchor)
+#include "util/PageMarks.h"               // PageMarks::PageKey return type
 #include "util/WordSelectNavigator.h"
 
 class EpubReaderActivity final : public Activity {
@@ -78,6 +79,10 @@ class EpubReaderActivity final : public Activity {
   // (legacy bookmark, or a section whose cache carries no paragraph map) and the
   // percentage jump then applies unchanged.
   uint16_t pendingParagraphAnchor = UINT16_MAX;
+  // Exact character position to land on, 0 when unknown. Tried before the paragraph: a
+  // peer's mark can sit mid-paragraph, and the paragraph alone lands on the page that
+  // paragraph starts on.
+  uint32_t pendingVisibleOffset = 0;
   bool pendingScreenshot = false;
   bool pendingSyncSaveError = false;
   // Consecutive page-load failures. Each failure drops the section and rebuilds on the next render,
@@ -203,6 +208,12 @@ class EpubReaderActivity final : public Activity {
   // Reading ms accumulated on the current page at the moment word-select opened. On return the
   // dwell anchor is shifted so the time spent inside word-select (not reading) is excluded.
   unsigned long markerDwellPausedElapsedMs = 0UL;
+  // Where the gloss-box word select left its cursor, and the page that index belongs to
+  // (DictionaryWordSelectActivity::setGlossCursorMemory). RAM only: it matters for one page.
+  int glossCursorWord_ = -1;
+  int glossCursorSpine_ = -1;
+  int glossCursorPage_ = -1;
+  int glossCursorPageCount_ = -1;
   // Progress-save debounce state. lastSaved{Spine,Page}_ track what is currently persisted in
   // /progress.bin (-1 = unknown). turnsSinceProgressSave_ counts position changes since the last
   // write; when it reaches SETTINGS.PROGRESS_SAVE_PAGES[...] a write fires. onExit() flushes any
@@ -301,6 +312,8 @@ class EpubReaderActivity final : public Activity {
   // Hash of the current chapter's TOC title, recomputed only when the spine item changes.
   // Keys the page's looked-up words; see LookupMarks.
   uint32_t currentChapterHash();
+  // The page identity PageMarks::drawForPage takes, for this reader page; invalid with no section.
+  PageMarks::PageKey currentPageMarkKey();
   // (Re)build the resident looked-up-word index from this book's flashcard deck. One streaming
   // pass; called at book open and on return from any screen that can change the deck.
   void reloadLookupMarks() const;

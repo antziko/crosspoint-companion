@@ -700,9 +700,16 @@ void KOReaderSyncActivity::syncBookmarks() {
   std::vector<struct Bookmark> remoteBms;
   std::vector<Tombstone> remoteTombs;
   bool haveRemote = false;
-  if (getResult == KOReaderSyncClient::OK && BookmarkStore::parseFromJson(remoteJson.c_str(), remoteBms, remoteTombs)) {
+  if (getResult == KOReaderSyncClient::OK &&
+      BookmarkStore::parseFromJson(remoteJson.c_str(), remoteBms, remoteTombs, &bmRemoteTruncated)) {
     bmRemoteCount = static_cast<int>(remoteBms.size());
     haveRemote = true;
+    // Keep the peer's anchors while the blob is still here. parseFromJson cannot carry
+    // them, and re-deriving one needs a chapter streamed from an Epub this leg has no
+    // heap for — so without this the merged marks go back up stripped of anchors the
+    // peer had already resolved, and every reader loses them for a round. Runs with no
+    // book loaded, which is exactly what it wants.
+    BOOKMARKS.adoptRemoteXPaths(remoteJson.c_str(), epubPath, "epub");
   }
   std::string().swap(remoteJson);
 
@@ -745,14 +752,30 @@ void KOReaderSyncActivity::syncBookmarks() {
   bmMergedCount = countSyncable();
   bmSynced = true;
 
+  // The server held more records than MAX_BOOKMARKS, so the merged set is a subset of what
+  // other devices have. PUTting it would replace the whole server blob and delete the records
+  // this device could not hold. Merge locally, upload nothing, and say so. Checked before
+  // serializing: this is exactly the case where the body would be at its largest, and it
+  // would only be built to be thrown away.
+  if (bmRemoteTruncated) {
+    LOG_ERR("KOSync", "Bookmark upload skipped: remote set exceeds the %d-bookmark cap", MAX_BOOKMARKS);
+    SdDebugLog::log("KOSYNC", "bookmark PUT skipped: remote set truncated on parse");
+    BOOKMARKS.unload();  // flushes the merge to disk, as the normal path below does
+    bmUploadOk = false;
+    return;
+  }
+
   // --- Serialize the final (merged) upload body, then free the in-memory set for the PUT ---
   // Budget-cap so out.reserve() can't OOM-abort. An empty body would wipe the server set, so skip
   // the PUT if serialize fails/overflows — serializing the post-merge state directly means there
   // is no stale-subset risk (no pre-merge body to fall back to).
   const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   const size_t bodyBudget = largestBlock > 1024 ? largestBlock - 1024 : 0;
-  std::string localJson =
-      BookmarkStore::serializeToJson(BOOKMARKS.getBookmarks(), BOOKMARKS.getTombstones(), bodyBudget);
+  // Anchored form: each mark carries the KOReader XPath BookmarkAnchors resolved before the
+  // sync launched, which is the only thing a crengine client can place an annotation from.
+  // Anchors are read from the sidecar one at a time, so this costs the blob's own growth
+  // and nothing else resident.
+  std::string localJson = BOOKMARKS.serializeWithAnchors(bodyBudget);
 
   // Drop the in-memory bookmark/tombstone vectors now: the PUT needs only the serialized string
   // above. unload() flushes any dirty state to disk first, so this is non-destructive. This
@@ -1359,7 +1382,8 @@ int KOReaderSyncActivity::drawAlsoSyncedFooter(int sideX, int y, int lhFoot, boo
   // separate indented status row). The doc-id probe lives in the SD debug log, not here.
   const uint32_t xferDown = KOReaderSyncClient::bytesDown();
   const uint32_t xferUp = KOReaderSyncClient::bytesUp();
-  const bool anyFeature = bmSynced || statsSynced || dictSynced || dictSkippedLowHeap || fcSynced || fcSkippedLowHeap;
+  const bool anyFeature =
+      bmSynced || bmRemoteTruncated || statsSynced || dictSynced || dictSkippedLowHeap || fcSynced || fcSkippedLowHeap;
   if (!anyFeature && xferDown == 0 && xferUp == 0) return y;
 
   const int ROW = lhFoot + 6;  // breathing room between rows
@@ -1380,6 +1404,13 @@ int KOReaderSyncActivity::drawAlsoSyncedFooter(int sideX, int y, int lhFoot, boo
     snprintf(counts, sizeof(counts), tr(STR_BOOKMARK_DIFF_FORMAT), bmRemoteCount, bmLocalCount, bmMergedCount);
     snprintf(buf, sizeof(buf), "%s  %s  %s/%s", tr(STR_BOOKMARKS), counts, st(bmFetchOk), st(bmUploadOk));
     renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
+    y += ROW;
+  }
+
+  // Why the upload above reads "fail" without the server having failed: the remote set is
+  // larger than this device can hold, so it merged what it could and deliberately sent nothing.
+  if (bmRemoteTruncated) {
+    renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_SYNC_BM_TRUNCATED));
     y += ROW;
   }
 

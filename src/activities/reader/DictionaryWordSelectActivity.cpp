@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "CrossPointSettings.h"
@@ -25,6 +26,8 @@
 #include "util/DictionaryActivityUtils.h"
 #include "util/DictionaryRegistry.h"
 #include "util/FlashcardDeck.h"
+#include "util/HangTrace.h"
+#include "util/LookupMarks.h"
 #include "util/PageTokenScan.h"
 
 // Per-move SD trace for the gloss peek. On for the first device pass — measuring what a probe
@@ -181,10 +184,12 @@ void DictionaryWordSelectActivity::onEnter() {
   // than on initialMarker_'s band. In HighlightRange it is also the range anchor, so the
   // user's next tap picks the other end and finishes. A point that hits no word (margin,
   // inter-word gap) leaves the band selection as it is.
+  bool pointedAtWord = false;
   if (initialPointX_ >= 0 && initialPointY_ >= 0) {
     const int hit =
         navigator.wordIndexAtPoint(initialPointX_, initialPointY_, renderer.getLineHeight(SETTINGS.getReaderFontId()));
     if (hit >= 0) {
+      pointedAtWord = true;
       if (mode_ == Mode::HighlightRange) {
         navigator.beginMultiSelectAt(hit);
       } else {
@@ -199,6 +204,19 @@ void DictionaryWordSelectActivity::onEnter() {
   // After the word array and its text pool, never before: they are the big contiguous
   // requests, and the gloss is the optional extra.
   initGloss();
+  // With the gloss box up the cursor is read along the text rather than dropped where the eyes
+  // were, so the dwell band is ignored: resume where this page's last session left off, else
+  // start at its first paragraph. A pointed-at word still wins.
+  // With the gloss box up a hold jumps to the row or page edge instead of repeating: each repeat
+  // step would cost a full frame here.
+  navigator.setHoldJumps(gloss_ != nullptr);
+  glossTracksCursor_ = gloss_ && glossCursorOut_;
+  if (glossTracksCursor_ && !pointedAtWord) {
+    const int start =
+        glossResumeIdx_ >= 0 && navigator.getWordAt(glossResumeIdx_) ? glossResumeIdx_ : findFirstBodyWord();
+    if (start >= 0) navigator.selectFlatIndex(start);
+  }
+  maybeAutoSelectCardWord();
   // words= is the page's selectable-token count, which is what extract/merge/load all scale
   // with — without it a slow entry cannot be told from a dense page.
   SdDebugLog::log("DWS", "enter extract=%lums merge=%lums load=%lums gloss=%lums total=%lums words=%u free=%u",
@@ -208,6 +226,7 @@ void DictionaryWordSelectActivity::onEnter() {
 }
 
 void DictionaryWordSelectActivity::onExit() {
+  if (glossTracksCursor_) *glossCursorOut_ = navigator.getCurrentFlatIndex();
   controller.onExit();
   // Hand back the dictionary that was in force on entry, dropping any per-word one applied
   // here. After controller.onExit(), deliberately: that stops and joins the lookup task, which
@@ -495,6 +514,34 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
   WordSelectNavigator::organizeIntoRows(words, rows);
 }
 
+int DictionaryWordSelectActivity::findFirstBodyWord() const {
+  const int rubyAscender = renderer.getFontAscenderSize(SETTINGS.getReaderFontId());
+  for (const auto& element : page->elements) {
+    if (element->getTag() != TAG_PageLine) continue;
+    const auto* line = static_cast<const PageLine*>(element.get());
+    const auto& block = line->getBlock();
+    if (!block) continue;
+    // A title is centred (the header default, ChapterHtmlSlimParser.cpp:1559) or wholly bold.
+    bool anySelectable = false;
+    bool allBold = true;
+    for (uint16_t i = 0; i < block->wordCount(); i++) {
+      bool isCjk = false;
+      if (!PageTokens::isSelectable(block->wordText(i), block->wordTextLen(i), isCjk)) continue;
+      anySelectable = true;
+      if ((block->wordStyle(i) & EpdFontFamily::BOLD) == 0) allBold = false;
+    }
+    if (!anySelectable || allBold || block->getBlockStyle().alignment == CssTextAlign::Center) continue;
+    // Same screen-space y extractWords gives this line's words.
+    const int y = line->yPos + marginTop + block->getRubyShift(rubyAscender);
+    for (int i = 0;; i++) {
+      const auto* w = navigator.getWordAt(i);
+      if (!w) return -1;
+      if (std::abs(w->screenY - y) <= 2) return i;
+    }
+  }
+  return -1;
+}
+
 void DictionaryWordSelectActivity::mergeHyphenatedWords(std::vector<WordSelectNavigator::WordInfo>& words,
                                                         std::vector<WordSelectNavigator::Row>& rows,
                                                         std::string& textPool) {
@@ -627,9 +674,11 @@ void DictionaryWordSelectActivity::loop() {
           // The last two arguments are the re-count window: the same word looked up again
           // within it leaves its card untouched (no count bump, no deck rewrite). This is the
           // only enroll call site with a clock, and the only one that passes a window.
-          FlashcardDeck::enroll(cachePath, controller.getLookupWord(), buildLookupExcerpt(), chapterTitle_,
+          const std::string excerpt = buildLookupExcerpt();
+          FlashcardDeck::enroll(cachePath, controller.getLookupWord(), excerpt, chapterTitle_,
                                 DictUtils::activeDictHash(cachePath.c_str()), millis(),
                                 static_cast<uint32_t>(SETTINGS.flashcardRecountMins) * 60000UL);
+          addLookupMark(controller.getLookupWord(), excerpt);
         }
         // Nothrow because this push runs on the most stressed heap in the firmware: the popup
         // render's glyph prewarm has just taken its arena, and this object is ~4.8 KB. A bare
@@ -656,13 +705,29 @@ void DictionaryWordSelectActivity::loop() {
         // word-select overlay they have to dismiss a second time. It also saves the
         // full-page repaint that returning to the overlay would cost, since the reader
         // repaints on the way out anyway.
-        startActivityForResult(std::move(definition), [this](const ActivityResult&) {
+        // With the gloss box up, a plain Back (isCancelled) comes back here instead, box open on
+        // the same word, so the reading scan carries on from it. An explicit exit-to-book from
+        // the definition (Done, the declined Back hold) is not cancelled and still closes both.
+        startActivityForResult(std::move(definition), [this](const ActivityResult& result) {
+          if (result.isCancelled && gloss_) {
+            // The definition screen can re-file the card under another dictionary; re-read the
+            // table and re-peek, so the box follows the choice just made.
+            loadGlossCards();
+            gloss_->forFlatIdx = -1;
+            // A phrase lookup ends the range it looked up; put a card word back (the one just
+            // enrolled included).
+            maybeAutoSelectCardWord();
+            forceFullRepaintOnNextRender();
+            requestUpdate();
+            return;
+          }
           setResult(ActivityResult{});
           finish();
         });
         break;
       }
       case DictionaryLookupController::LookupEvent::NotFoundDismissedBack:
+        maybeAutoSelectCardWord();  // a phrase lookup ended the card word's range
         forceFullRepaintOnNextRender();
         requestUpdate();
         break;
@@ -671,6 +736,7 @@ void DictionaryWordSelectActivity::loop() {
         finish();
         break;
       case DictionaryLookupController::LookupEvent::Cancelled:
+        maybeAutoSelectCardWord();
         forceFullRepaintOnNextRender();
         requestUpdate();
         break;
@@ -707,7 +773,27 @@ void DictionaryWordSelectActivity::loop() {
     return;
   }
 
-  if (navigator.handleNavigation(mappedInput, renderer, SETTINGS.getReaderSwapWordSelectAxes())) {
+  HangTrace::mark(HangTrace::Loop, HangTrace::DwsLoopNav);
+  const bool wasAuto = autoRangeActive();
+  const int anchorBefore = navigator.isMultiSelecting() ? navigator.getAnchorFlatIndex() : -1;
+  const int cursorBefore = navigator.getCurrentFlatIndex();
+  const bool stepAllowed = !gloss_ || !stepFramePending_.load();
+  if (stepAllowed && navigator.handleNavigation(mappedInput, renderer, SETTINGS.getReaderSwapWordSelectAxes())) {
+    if (gloss_) stepFramePending_.store(true);
+    HangTrace::mark(HangTrace::Loop, HangTrace::DwsLoopAuto);
+    if (wasAuto) {
+      // The step moved the cursor of a range the user did not build: settle it as a plain
+      // single-token step instead of growing the range.
+      leaveAutoRange();
+    } else {
+      // With the gloss box up, a CJK range stops growing at kMaxGlossRangeChars. A refused step
+      // puts the cursor back; the repaint still runs so the box can say why.
+      const int cursor = navigator.getCurrentFlatIndex();
+      const bool grows = anchorBefore >= 0 && (std::min(anchorBefore, cursor) < std::min(anchorBefore, cursorBefore) ||
+                                               std::max(anchorBefore, cursor) > std::max(anchorBefore, cursorBefore));
+      if (grows && !glossRangeAllowed(anchorBefore, cursor)) navigator.selectFlatIndex(cursorBefore);
+    }
+    maybeAutoSelectCardWord();
     requestUpdate();
   }
 
@@ -719,22 +805,42 @@ void DictionaryWordSelectActivity::loop() {
   // the cursor and a stray tap would silently move the anchor's far end. HighlightRange
   // instead RANGES by tapping -- first tap anchors, second tap ends and saves -- because a
   // touch-only board has no Confirm to long-press into multi-select with.
+  HangTrace::mark(HangTrace::Loop, HangTrace::DwsLoopRest);
   const bool tapRanging = mode_ == Mode::HighlightRange;
-  if (mappedInput.hasTouch() && (tapRanging || !navigator.isMultiSelecting())) {
+  const bool autoRange = autoRangeActive();  // a card word picks like a single word
+  if (mappedInput.hasTouch() && (tapRanging || autoRange || !navigator.isMultiSelecting())) {
     const int lineHeight = renderer.getLineHeight(SETTINGS.getReaderFontId());
     int tx = 0;
     int ty = 0;
     // Only before a range is open. renderHighlightDifferential declines in multi-select
     // (WordSelectNavigator.cpp), so a touch-down preview there would cost a full page
     // repaint for pixels the tap that follows is about to replace anyway.
-    if (!navigator.isMultiSelecting() && mappedInput.wasScreenTouchDown(tx, ty)) {
-      if (navigator.selectFlatIndex(navigator.wordIndexAtPoint(tx, ty, lineHeight))) requestUpdate();
+    if ((autoRange || !navigator.isMultiSelecting()) && mappedInput.wasScreenTouchDown(tx, ty)) {
+      const int hit = navigator.wordIndexAtPoint(tx, ty, lineHeight);
+      if (hit >= 0 && autoRange && (hit < autoLo_ || hit > autoHi_)) {
+        navigator.endMultiSelect();
+        autoLo_ = autoHi_ = -1;
+      }
+      if (!autoRangeActive() && navigator.selectFlatIndex(hit)) {
+        maybeAutoSelectCardWord();
+        requestUpdate();
+      }
       return;
     }
     if (mappedInput.wasScreenTapped(tx, ty)) {
       const int hit = navigator.wordIndexAtPoint(tx, ty, lineHeight);
       if (hit >= 0) {
         if (mode_ == Mode::Dictionary) {
+          // A tap inside the auto-selected card word looks the whole word up.
+          if (autoRangeActive() && hit >= autoLo_ && hit <= autoHi_) {
+            const int lo = autoLo_;
+            const int hi = autoHi_;
+            navigator.endMultiSelect();
+            autoLo_ = autoHi_ = -1;
+            navigator.selectFlatIndex(hi);
+            controller.lookupOrPopup(navigator.buildPhrase(lo, hi));
+            return;
+          }
           navigator.selectFlatIndex(hit);
           controller.lookupSelected(navigator);
           return;
@@ -753,6 +859,13 @@ void DictionaryWordSelectActivity::loop() {
         return;
       }
     }
+  }
+
+  // An auto-selected card word is not a range the user opened, so Back leaves the screen as it
+  // would from a single word rather than first dropping the range.
+  if (autoRangeActive() && mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    DictUtils::cancelAndFinish(*this);
+    return;
   }
 
   // Check Back early when not in multi-select mode. This allows exit even when
@@ -783,6 +896,12 @@ void DictionaryWordSelectActivity::loop() {
 
 const char* DictionaryWordSelectActivity::confirmHintLabel() const {
   return mode_ == Mode::HighlightRange ? tr(STR_ADD_HIGHLIGHT) : tr(STR_LOOKUP_SHORT);
+}
+
+const char* DictionaryWordSelectActivity::backHintLabel() const {
+  // Back only has a job to label while a range is open: it drops back to single-word select.
+  // Outside one it leaves the screen, which needs no hint.
+  return navigator.isMultiSelecting() ? tr(STR_BACK) : "";
 }
 
 void DictionaryWordSelectActivity::handleHighlightInput() {
@@ -1048,6 +1167,7 @@ void DictionaryWordSelectActivity::initGloss() {
     return;
   }
 
+  state->bookDictHash = DictUtils::dictHashOfPath(dictPath);
   state->x = x;
   state->width = width;
   state->topY = topY;
@@ -1056,6 +1176,7 @@ void DictionaryWordSelectActivity::initGloss() {
   state->minTextRoom = 2 * lineHeight;
 
   gloss_ = std::move(state);
+  loadGlossCards();
   resolveGlossFont();
 
   // A page that cannot show the box plus two rows of text outside it gets no box at all, rather
@@ -1076,6 +1197,242 @@ void DictionaryWordSelectActivity::initGloss() {
 
   LOG_DBG("DGL", "on: w=%d h=%d top=%d bottom=%d cjk=%d/%d", width, gloss_->height, topY, bottomLimit, cjkTokenCount_,
           selectableTokenCount_);
+}
+
+bool DictionaryWordSelectActivity::rangeIsCjk(const int lo, const int hi) const {
+  for (int i = lo; i <= hi; i++) {
+    const auto* w = navigator.getWordAt(i);
+    if (!w) return false;
+    bool isCjk = false;
+    if (!PageTokens::isSelectable(navigator.getLookup(*w), w->lookupLen, isCjk) || !isCjk) return false;
+  }
+  return true;
+}
+
+bool DictionaryWordSelectActivity::glossRangeAllowed(const int anchor, const int cursor) {
+  if (!gloss_ || anchor == cursor) return true;
+  const int lo = std::min(anchor, cursor);
+  const int hi = std::max(anchor, cursor);
+  const int chars = hi - lo + 1;
+  if (!rangeIsCjk(lo, hi)) {
+    SdDebugLog::log("DGL", "range lo=%d hi=%d ok (not cjk)", lo, hi);
+    return true;
+  }
+  const std::string phrase = Dictionary::cleanWord(navigator.buildPhrase(lo, hi));
+  if (chars > kMaxGlossRangeChars || phrase.empty()) {
+    SdDebugLog::log("DGL", "range lo=%d hi=%d refused why=%s", lo, hi, phrase.empty() ? "empty" : "cap");
+    return false;
+  }
+  // Every step within the cap stands; a phrase no headword starts with is reported by the box
+  // as not found. Probed here for the trace — the peek that follows reads the cached answer.
+  const auto& probe = probeGlossRange(lo, hi, phrase);
+  SdDebugLog::log("DGL", "range '%s' why=%s page=%lu-%lu scanned=%u stop=%c at='%s'", phrase.c_str(),
+                  probe.isPrefix ? (probe.exact ? "word" : "prefix") : "none",
+                  static_cast<unsigned long>(probe.startByte), static_cast<unsigned long>(probe.endByte),
+                  static_cast<unsigned>(probe.scanned), probe.stop, probe.stopWord);
+  return true;
+}
+
+const Dictionary::PrefixProbe& DictionaryWordSelectActivity::probeGlossRange(const int lo, const int hi,
+                                                                             const std::string& phrase) {
+  if (lo != gloss_->probeLo || hi != gloss_->probeHi || gloss_->useAlt != gloss_->probeAlt) {
+    gloss_->probe = Dictionary::probePrefixIn(glossCtx(), phrase.c_str());
+    gloss_->probeLo = lo;
+    gloss_->probeHi = hi;
+    gloss_->probeAlt = gloss_->useAlt;
+  }
+  return gloss_->probe;
+}
+
+size_t DictionaryWordSelectActivity::readGlossPhraseEntry(const int lo, const int hi, const std::string& phrase,
+                                                          const bool cjk) {
+  // A partial match is marked by this prefix on the entry text itself, so fit() wraps it with the
+  // rest and no layout changes. ASCII: the definition fonts draw a missing glyph as a bare '?'.
+  static constexpr char kPartialMark[] = "~ ";
+  static constexpr size_t kPartialMarkLen = sizeof(kPartialMark) - 1;
+  // SSO-sized for up to five CJK characters; a longer range costs one short allocation per step.
+  std::string probe = phrase;
+  bool partial = false;
+  while (!probe.empty()) {
+    // The whole range was just probed by the step check; only the shorter fallbacks read SD.
+    const auto hit = partial ? Dictionary::probePrefixIn(glossCtx(), probe.c_str()) : probeGlossRange(lo, hi, probe);
+    // Nothing starts with the whole phrase: that is a miss, not a partial of a shorter word.
+    if (!partial && !hit.isPrefix) return 0;
+    if (hit.exact) {
+      const size_t lead = partial ? kPartialMarkLen : 0;
+      if (partial) memcpy(gloss_->raw, kPartialMark, kPartialMarkLen);
+      const size_t n =
+          DictGloss::readEntryAt(glossDictFile(), hit.offset, hit.size, gloss_->raw + lead, sizeof(gloss_->raw) - lead);
+      return n > 0 ? n + lead : 0;
+    }
+    // A Latin phrase that misses is simply a miss: trimming "ice cream" a letter at a time
+    // would only find unrelated words.
+    if (!cjk) return 0;
+    size_t cut = probe.size() - 1;
+    while (cut > 0 && (static_cast<unsigned char>(probe[cut]) & 0xC0) == 0x80) cut--;
+    probe.resize(cut);
+    partial = true;
+  }
+  return 0;
+}
+
+void DictionaryWordSelectActivity::loadGlossCards() {
+  gloss_->cardDictCount = 0;
+  cardRangeCount_ = 0;
+  if (cachePath.empty()) return;
+
+  // Each page token's normalised hash and kept length, so a card word is matched against the
+  // page by hash alone: open on a token equal to the word's first character, then chain the
+  // following tokens' bytes into the same FNV (the LookupMarks rule, punctuation skipped).
+  // 8 bytes a token, freed on return; without it the feature is simply off for this page.
+  struct TokenHash {
+    uint32_t hash;
+    uint16_t len;
+  };
+  const int n = navigator.wordCount();
+  auto tokens = makeUniqueNoThrow<TokenHash[]>(static_cast<size_t>(n > 0 ? n : 1));
+  if (!tokens) LOG_ERR("DGL", "OOM: token hashes (%d)", n);
+  for (int i = 0; tokens && i < n; i++) {
+    const auto* w = navigator.getWordAt(i);
+    tokens[i].len = 0;
+    tokens[i].hash =
+        LookupMarks::hashAppend(LookupMarks::FNV_OFFSET, navigator.getLookup(*w), w->lookupLen, &tokens[i].len);
+  }
+
+  struct Ctx {
+    DictionaryWordSelectActivity* self;
+    const TokenHash* tokens;
+    int n;
+    int next;  // ring cursor: past the cap, later cards replace earlier ones
+  } c{this, tokens.get(), tokens ? n : 0, 0};
+  FlashcardDeck::forEachCardDict(
+      cachePath,
+      [](void* raw, const char* word, const int wordLen, const uint32_t dictHash) {
+        auto* cc = static_cast<Ctx*>(raw);
+        auto* self = cc->self;
+        GlossState* g = self->gloss_.get();
+        if (wordLen <= 0) return true;
+        uint16_t byteLen = 0;
+        const uint32_t wordHash =
+            LookupMarks::hashAppend(LookupMarks::FNV_OFFSET, word, static_cast<size_t>(wordLen), &byteLen);
+        if (dictHash != 0 && dictHash != g->bookDictHash) {
+          GlossCardDict& e = g->cardDicts[cc->next];
+          e.wordHash = wordHash;
+          e.byteLen = byteLen;
+          e.dictHash = dictHash;
+          cc->next = (cc->next + 1) % kMaxGlossCardDicts;
+          if (g->cardDictCount < kMaxGlossCardDicts) g->cardDictCount++;
+        }
+
+        // Every place this word is printed on the page, as a flat token range of two or more.
+        const auto lead = static_cast<unsigned char>(word[0]);
+        const size_t headLen = lead < 0x80 ? 1 : (lead & 0xE0) == 0xC0 ? 2 : (lead & 0xF0) == 0xE0 ? 3 : 4;
+        const uint32_t headHash = LookupMarks::hashWord(word, std::min(headLen, static_cast<size_t>(wordLen)));
+        for (int i = 0; i < cc->n && self->cardRangeCount_ < kMaxCardRanges; i++) {
+          if (cc->tokens[i].hash != headHash) continue;
+          uint32_t h = cc->tokens[i].hash;
+          uint16_t len = cc->tokens[i].len;
+          int j = i;
+          while (len < byteLen && j + 1 < cc->n) {
+            j++;
+            const auto* w = self->navigator.getWordAt(j);
+            h = LookupMarks::hashAppend(h, self->navigator.getLookup(*w), w->lookupLen, &len);
+          }
+          if (j == i || len != byteLen || h != wordHash) continue;
+          self->cardRanges_[self->cardRangeCount_++] = {static_cast<int16_t>(i), static_cast<int16_t>(j)};
+          i = j;
+        }
+        return true;
+      },
+      &c);
+  SdDebugLog::log("DGL", "cards: dicts=%d ranges=%d", gloss_->cardDictCount, cardRangeCount_);
+}
+
+bool DictionaryWordSelectActivity::maybeAutoSelectCardWord() {
+  if (!gloss_ || cardRangeCount_ == 0 || navigator.isMultiSelecting()) return false;
+  const int cur = navigator.getCurrentFlatIndex();
+  if (cur < 0) return false;
+  if (suppressLo_ >= 0 && (cur < suppressLo_ || cur > suppressHi_)) suppressLo_ = suppressHi_ = -1;
+  if (suppressLo_ >= 0) return false;
+  int lo = -1;
+  int hi = -1;
+  for (int i = 0; i < cardRangeCount_; i++) {
+    const CardRange& r = cardRanges_[i];
+    if (cur < r.lo || cur > r.hi) continue;
+    if (lo < 0 || r.hi - r.lo > hi - lo) {  // the longest card word wins: 神秘古怪 over 神秘
+      lo = r.lo;
+      hi = r.hi;
+    }
+  }
+  if (lo < 0) return false;
+  navigator.beginMultiSelectAt(lo);
+  navigator.selectFlatIndex(hi);
+  autoLo_ = lo;
+  autoHi_ = hi;
+  return true;
+}
+
+void DictionaryWordSelectActivity::leaveAutoRange() {
+  const int cur = navigator.getCurrentFlatIndex();
+  const int lo = autoLo_;
+  const int hi = autoHi_;
+  navigator.endMultiSelect();
+  autoLo_ = autoHi_ = -1;
+  // A step that stayed inside the word -- the word axis backwards, or a row step landing on
+  // another line of the same wrapped word -- cancels the whole-word selection: its last token,
+  // alone, and no re-selecting it until the cursor leaves.
+  if (cur >= lo && cur < hi) {
+    navigator.selectFlatIndex(hi);
+    suppressLo_ = lo;
+    suppressHi_ = hi;
+  }
+}
+
+void DictionaryWordSelectActivity::selectGlossDict(const std::string& token) {
+  gloss_->useAlt = false;
+  if (gloss_->cardDictCount == 0 || token.empty()) return;
+  uint16_t len = 0;
+  const uint32_t h = LookupMarks::hashAppend(LookupMarks::FNV_OFFSET, token.c_str(), token.size(), &len);
+  for (int i = 0; i < gloss_->cardDictCount; i++) {
+    const GlossCardDict& e = gloss_->cardDicts[i];
+    if (e.wordHash != h || e.byteLen != len) continue;
+    gloss_->useAlt = openGlossAltDict(e.dictHash);
+    return;
+  }
+}
+
+bool DictionaryWordSelectActivity::openGlossAltDict(const uint32_t dictHash) {
+  if (gloss_->alt && gloss_->alt->hash == dictHash) return gloss_->alt->ok;
+  if (!gloss_->alt) {
+    gloss_->alt = makeUniqueNoThrow<GlossAltDict>();
+    if (!gloss_->alt) {
+      LOG_ERR("DGL", "OOM: GlossAltDict (%u bytes)", static_cast<unsigned>(sizeof(GlossAltDict)));
+      return false;
+    }
+  }
+  GlossAltDict& alt = *gloss_->alt;
+  alt.dict.close();  // a member handle being replaced: close before reopening
+  alt.hash = dictHash;
+  alt.ok = false;
+  const int idx = dictionaryRegistry.indexOfHash(dictHash);
+  if (idx < 0) return false;  // the card's dictionary is not installed here
+  const DictionaryEntry& entry = dictionaryRegistry.getEntries()[idx];
+  // The same plain-text gate initGloss applies to the book's dictionary. Not through the
+  // one-entry probe cache, which holds the book's answer for the next session.
+  if (!entry.nameIsSt) {
+    auto info = makeUniqueNoThrow<DictInfo>();
+    if (!info || !Dictionary::readInfoInto(entry.basePath.c_str(), *info) || info->sametypesequence[0] != 'm') {
+      SdDebugLog::log("DGL", "card dict %s: not plain text", entry.name.c_str());
+      return false;
+    }
+  }
+  if (!Dictionary::openLookupCtxAt(alt.ctx, entry.basePath.c_str()) || !alt.ctx.hasPageIndex) return false;
+  char dictFilePath[160];
+  snprintf(dictFilePath, sizeof(dictFilePath), "%s.dict", alt.ctx.base);
+  if (!Storage.openFileForRead("DGL", dictFilePath, alt.dict)) return false;
+  alt.ok = true;
+  SdDebugLog::log("DGL", "card dict %s: open free=%u", entry.name.c_str(), static_cast<unsigned>(ESP.getFreeHeap()));
+  return true;
 }
 
 bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHeight) {
@@ -1100,18 +1457,20 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
   // so a box within ~7 px of the highlight can be captured with it and pasted back stale later
   // (WordSelectNavigator.h:215-231). Keeping the gap here makes that unreachable by construction.
   //
-  // Multi-select is excluded outright: the highlight then spans a range of rows that the
-  // single-token peek does not describe, and that the box could be sitting inside.
-  //
   // Anchored to the ROW, not to the word: words are grouped into a row with a 2 px tolerance
   // (WordSelectNavigator.cpp:41), so anchoring to the word's own screenY would shift the box a
   // pixel or two on a plain left/right step — and every shift is a strip restore and a clean
   // refresh. Anchored to the row, a scan along one row leaves the box perfectly still.
+  // A range places against its whole extent — above its first row or below its last — so the
+  // box can never sit inside the highlight.
+  const int anchor = navigator.isMultiSelecting() ? navigator.getAnchorFlatIndex() : -1;
+  const bool ranged = anchor >= 0 && anchor != currIdx && navigator.getWordAt(anchor) != nullptr;
+  const auto* first = ranged ? navigator.getWordAt(std::min(anchor, currIdx)) : w;
+  const auto* last = ranged ? navigator.getWordAt(std::max(anchor, currIdx)) : w;
   gloss_->place = false;
-  if (gloss_->fits && !navigator.isMultiSelecting()) {
-    const int rowTop = navigator.rowY(w->row);
-    const int above = rowTop - kGlossClearance - gloss_->height;
-    const int below = rowTop + selectionLineHeight + kGlossClearance;
+  if (gloss_->fits) {
+    const int above = navigator.rowY(first->row) - kGlossClearance - gloss_->height;
+    const int below = navigator.rowY(last->row) + selectionLineHeight + kGlossClearance;
     if (above >= gloss_->topY) {
       gloss_->y = above;
       gloss_->place = true;
@@ -1121,18 +1480,31 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
     }
   }
 
-  if (currIdx != gloss_->forFlatIdx) {
+  const int keyAnchor = ranged ? anchor : -1;
+  if (currIdx != gloss_->forFlatIdx || keyAnchor != gloss_->forAnchorIdx) {
     gloss_->forFlatIdx = currIdx;
+    gloss_->forAnchorIdx = keyAnchor;
     const unsigned long t0 = millis();
     // Through cleanWord, exactly as the Confirm path does (DictionaryLookupController's
     // lookupOrPopup). Skipping it would make the box disagree with the screen Confirm opens on
     // the very tokens cleanWord exists for — attached CJK punctuation, quotes, trailing commas —
     // reporting "not found" for a word the full lookup then finds. Short tokens stay inside the
     // std::string SSO buffer, so a CJK character or an ordinary word costs no allocation.
-    const std::string token = Dictionary::cleanWord(navigator.getLookup(*w));
-    const size_t n = token.empty() ? 0
-                                   : DictGloss::readEntry(gloss_->ctx, gloss_->dict, token.c_str(), gloss_->raw,
-                                                          sizeof(gloss_->raw));
+    const std::string token =
+        Dictionary::cleanWord(ranged ? navigator.buildPhrase(anchor, currIdx) : navigator.getLookup(*w));
+    size_t n = 0;
+    // A range that misses is reported by name, so the user can see which phrase has no entry.
+    snprintf(gloss_->missPhrase, sizeof(gloss_->missPhrase), "%s", ranged ? token.c_str() : "");
+    selectGlossDict(token);
+    if (token.empty()) {
+      // nothing to look up
+    } else if (ranged) {
+      const int lo = std::min(anchor, currIdx);
+      const int hi = std::max(anchor, currIdx);
+      n = readGlossPhraseEntry(lo, hi, token, rangeIsCjk(lo, hi));
+    } else {
+      n = DictGloss::readEntry(glossCtx(), glossDictFile(), token.c_str(), gloss_->raw, sizeof(gloss_->raw));
+    }
     const unsigned long tProbe = millis();
     unsigned long tWarm = tProbe;
 
@@ -1251,6 +1623,35 @@ void DictionaryWordSelectActivity::renderPageStrip(int y, int height) {
     if (bottom <= y || top >= y + height) continue;
     el->render(renderer, fontId, marginLeft, marginTop);
   }
+  drawPageMarks(y, y + height);
+}
+
+void DictionaryWordSelectActivity::addLookupMark(const std::string& word, const std::string& excerpt) const {
+  // The reader reloads the whole table from the deck once this screen closes; this only makes
+  // the word just looked up show while it is still open. Same derivation as that reload: the
+  // surface form the page prints, and the card's chapter field (enroll caps it, cutting the page
+  // token off a long title, so a capped one gets no mark there either).
+  if (!markKey_.valid || !SETTINGS.lookupUnderline || chapterTitle_.size() > FlashcardDeck::CHAPTER_MAX) return;
+  int titleLen = 0, pageNo = 0, pageCount = 0;
+  if (!FlashcardDeck::parseChapterPage(chapterTitle_.c_str(), static_cast<int>(chapterTitle_.size()), &titleLen,
+                                       &pageNo, &pageCount)) {
+    return;
+  }
+  int surfaceLen = 0;
+  const char* surface = FlashcardDeck::findSurfaceForm(word.c_str(), static_cast<int>(word.size()), excerpt.c_str(),
+                                                       static_cast<int>(excerpt.size()), &surfaceLen);
+  if (!surface || surfaceLen <= 0) {
+    surface = word.c_str();
+    surfaceLen = static_cast<int>(word.size());
+  }
+  LookupMarks::getInstance().add(surface, surfaceLen, chapterTitle_.c_str(), titleLen, pageNo, pageCount);
+}
+
+void DictionaryWordSelectActivity::drawPageMarks(const int bandTop, const int bandBottom) const {
+  if (!markKey_.valid || !page) return;
+  PageMarks::drawForPage(renderer, *page, SETTINGS.getReaderFontId(), marginLeft, marginTop, markKey_.spineIndex,
+                         markKey_.pageProgress, markKey_.pageCount, markKey_.chapterHash, markKey_.pageNumber,
+                         markKey_.markPageCount, bandTop, bandBottom);
 }
 
 bool DictionaryWordSelectActivity::stripHasImage(int y, int height) const {
@@ -1287,7 +1688,7 @@ bool DictionaryWordSelectActivity::restoreVacatedGlossStrip() {
 // different size from the reader's. Placement (updateGloss) has already decided where it goes and
 // whether it goes anywhere at all.
 void DictionaryWordSelectActivity::drawGloss() {
-  // Nothing to show for this selection: no room on either side, multi-select, or no selection at
+  // Nothing to show for this selection: no room on either side, or no selection at
   // all. Whatever was on screen has already been dealt with — the differential path calls
   // restoreVacatedGlossStrip first, and the full-repaint path has just redrawn the page over it.
   if (!gloss_ || !gloss_->place) return;
@@ -1350,6 +1751,14 @@ void DictionaryWordSelectActivity::drawGloss() {
       }
       textY += gloss_->lineHeight;
     }
+  } else if (gloss_->missPhrase[0] != '\0') {
+    // A range names the phrase that missed: its characters are not in the box otherwise.
+    char line[96];
+    snprintf(line, sizeof(line), "%s: %s", gloss_->missPhrase, tr(STR_DICT_NOT_FOUND));
+    constexpr uint8_t kRegularOnly = styleToBitMask(EpdFontFamily::REGULAR);
+    renderer.ensureSdCardFontReady(gloss_->fontId, line, kRegularOnly);
+    if (auto* fcm = renderer.getFontCacheManager()) fcm->prewarmCache(gloss_->fontId, line, kRegularOnly);
+    renderer.drawText(gloss_->fontId, textX, textY, line, true);
   } else {
     // Say so rather than showing an empty frame: while scanning, "looked up, absent" is
     // information, and a blank box reads as a bug.
@@ -1369,12 +1778,18 @@ void DictionaryWordSelectActivity::clearGlossGhostOnNextPaint() {
 }
 
 void DictionaryWordSelectActivity::render(RenderLock&&) {
+  // Every return below ends the frame a gloss-box step is waiting on.
+  struct StepFrameDone {
+    std::atomic<bool>& pending;
+    ~StepFrameDone() { pending.store(false); }
+  } stepFrameDone{stepFramePending_};
   const unsigned long tRender0 = millis();
   const int lineHeight = renderer.getLineHeight(SETTINGS.getReaderFontId());
   const int currIdx = navigator.getCurrentFlatIndex();
 
   // Peek the selection and place its box before either repaint path runs. Placement is relative
   // to the selected row, so it changes on a row change, not on every keypress.
+  HangTrace::mark(HangTrace::Render, HangTrace::DwsGloss);
   const bool glossNeedsFullRepaint = updateGloss(currIdx, lineHeight);
 
   // Differential fast path. Only valid when:
@@ -1383,6 +1798,7 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
   //   - we have a current selection,
   //   - the strip the gloss box is vacating can be re-rendered without the page (no image in it).
   if (nextRenderMode_ == RenderMode::Differential && !controller.isActive() && currIdx >= 0 && !glossNeedsFullRepaint) {
+    HangTrace::mark(HangTrace::Render, HangTrace::DwsDiff);
     prewarmHighlightGlyphs(currIdx);
     // Before the highlight, never after: this re-renders page lines, and one redrawn over a
     // freshly drawn highlight would print black text across the inverted rectangle. It is also
@@ -1400,7 +1816,9 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
       // transition failures on consecutive fast partial refreshes, so it's intentionally not
       // wired up here. The savings come from skipping page->render, which dominates the
       // pre-optimization cost; the full push at the end is a hardware floor (~444ms).
+      HangTrace::mark(HangTrace::Render, HangTrace::DwsDiffDisplay);
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+      HangTrace::mark(HangTrace::Render, HangTrace::DwsDone);
       // One line per cursor move. This is the path that decides how long "the user finding
       // their word" really takes: every move ends in a full-panel push, so N moves to reach a
       // word cost N x this. If that product is most of the pre-lookup gap, the fix is here and
@@ -1455,7 +1873,7 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
         navigator.renderHighlight(renderer, lineHeight);
       }
       drawGloss();
-      const auto labels = mappedInput.mapLabels("", confirmHintLabel(), "", "");
+      const auto labels = mappedInput.mapLabels(backHintLabel(), confirmHintLabel(), "", "");
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
       // The cheap entry: the caller left the page in the framebuffer, so this skips BOTH page
@@ -1473,6 +1891,7 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
 
   // Full repaint path.
   const unsigned long tFull0 = millis();
+  HangTrace::mark(HangTrace::Render, HangTrace::DwsClear);
   renderer.clearScreen();
   if (controller.render()) {
     // Controller drew an overlay; framebuffer state is unknown.
@@ -1487,12 +1906,16 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
   // overflow ring and the page render serializes ~100+ individual SD reads.
   // Same pattern as EpubReaderActivity::renderContents().
   auto* fcm = renderer.getFontCacheManager();
+  HangTrace::mark(HangTrace::Render, HangTrace::DwsPrewarm);
   auto scope = fcm->createPrewarmScope();
   page->render(renderer, SETTINGS.getReaderFontId(), marginLeft, marginTop);  // scan pass
   const unsigned long tScan = millis();
   scope.endScanAndPrewarm();
   const unsigned long tPrewarm = millis();
+  HangTrace::mark(HangTrace::Render, HangTrace::DwsPage);
   page->render(renderer, SETTINGS.getReaderFontId(), marginLeft, marginTop);
+  HangTrace::mark(HangTrace::Render, HangTrace::DwsMarks);
+  drawPageMarks();  // before the highlight, which snapshots the pixels under it
   const unsigned long tDraw = millis();
 
   // Set up snapshot AND draw the highlight via the differential entry point with
@@ -1506,6 +1929,7 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
   // stale snapshot rather than restoring it on top of fresh pixels." This is the
   // only path that disturbs the framebuffer outside the differential cycle, so
   // it's also the only call site that must pass -1.
+  HangTrace::mark(HangTrace::Render, HangTrace::DwsHighlight);
   bool snapshotPrimed = false;
   if (currIdx >= 0) {
     auto setup = navigator.renderHighlightDifferential(renderer, lineHeight, /*prevWordIdx=*/-1, currIdx);
@@ -1519,12 +1943,15 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
   // The page has just been redrawn, so wherever the box was is page text again — no strip to
   // give back, and this is the frame that resolves a move the differential path declined.
   if (gloss_) gloss_->drawnY = kGlossNotDrawn;
+  HangTrace::mark(HangTrace::Render, HangTrace::DwsGlossDraw);
   drawGloss();
   const unsigned long tGloss = millis();
 
-  const auto labels = mappedInput.mapLabels("", confirmHintLabel(), "", "");
+  const auto labels = mappedInput.mapLabels(backHintLabel(), confirmHintLabel(), "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  HangTrace::mark(HangTrace::Render, HangTrace::DwsDisplay);
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+  HangTrace::mark(HangTrace::Render, HangTrace::DwsDone);
   const unsigned long tDisplay = millis();
 
   // The page is rendered TWICE here — a scan pass to collect glyphs, then the real draw — so

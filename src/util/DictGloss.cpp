@@ -166,15 +166,20 @@ size_t readEntry(Dictionary::LookupCtx& ctx, HalFile& dictFile, const char* toke
   if (!dictFile.isOpen()) return 0;
 
   const DictLocation loc = Dictionary::locateIn(ctx, token);
-  if (!loc.found || loc.size == 0) return 0;
-  if (!dictFile.seekSet(loc.offset)) return 0;
+  if (!loc.found) return 0;
+  return readEntryAt(dictFile, loc.offset, loc.size, buf, bufSize);
+}
 
-  const size_t want = std::min(static_cast<size_t>(loc.size), bufSize - 1);
+size_t readEntryAt(HalFile& dictFile, const uint32_t offset, const uint32_t size, char* buf, const size_t bufSize) {
+  if (buf == nullptr || bufSize < 2 || size == 0) return 0;
+  if (!dictFile.isOpen() || !dictFile.seekSet(offset)) return 0;
+
+  const size_t want = std::min(static_cast<size_t>(size), bufSize - 1);
   const int n = dictFile.read(reinterpret_cast<uint8_t*>(buf), static_cast<int>(want));
   if (n <= 0) return 0;
 
   size_t len = static_cast<size_t>(n);
-  if (len < loc.size) len = trimTrailingPartialUtf8(buf, len);
+  if (len < size) len = trimTrailingPartialUtf8(buf, len);
   buf[len] = '\0';
   return len;
 }

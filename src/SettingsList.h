@@ -224,11 +224,9 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // growth allocation is what aborted (and rebooted the device) when settings were saved at
   // low heap; see SettingsPersistence.h. Keep headroom above the real count.
   //
-  // Derived, not guessed: 89 rows compile unconditionally, plus up to 6 behind
-  // FREEINK_CAP_TOUCH / _FRONTLIGHT / _WARMLIGHT — 95 on a board with all three, which is
-  // the X4 Pro. 88 was already under that, so X4 Pro was paying the growth realloc on every
-  // call. 104 keeps headroom for the next few rows.
-  constexpr size_t kSettingCount = 104;
+  // Derived, not guessed: 102 push_back sites below, and the two shortPwrBtn branches never
+  // both compile, so at most 101 rows on any board. 108 keeps headroom for the next few rows.
+  constexpr size_t kSettingCount = 108;
   v.reserve(kSettingCount);
 
   // --- Display ---
@@ -322,10 +320,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   v.push_back(SettingInfo::Enum(StrId::STR_DICT_FONT_SIZE, &CrossPointSettings::dictionaryFontSize,
                                 {StrId::STR_SMALL, StrId::STR_MEDIUM, StrId::STR_LARGE, StrId::STR_X_LARGE},
                                 "dictionaryFontSize", StrId::STR_READER_DICTIONARY));
-  v.push_back(SettingInfo::Enum(
-                  StrId::STR_LINE_SPACING, &CrossPointSettings::lineSpacing,
-                  {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_SEMI_WIDE, StrId::STR_WIDE, StrId::STR_EXTRA_WIDE},
-                  "lineSpacingV2", StrId::STR_CAT_READER)
+  v.push_back(SettingInfo::Enum(StrId::STR_LINE_SPACING, &CrossPointSettings::lineSpacing,
+                                {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_RELAXED, StrId::STR_SEMI_WIDE,
+                                 StrId::STR_WIDE, StrId::STR_EXTRA_WIDE},
+                                "lineSpacingV3", StrId::STR_CAT_READER)
                   .withTextSettings());
   v.push_back(SettingInfo::Value(StrId::STR_SCREEN_MARGIN, &CrossPointSettings::screenMargin,
                                  {CrossPointSettings::SCREEN_MARGIN_MIN, CrossPointSettings::SCREEN_MARGIN_MAX,
@@ -511,6 +509,11 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
       {StrId::STR_IGNORE, StrId::STR_SLEEP, StrId::STR_PAGE_TURN, StrId::STR_FORCE_REFRESH, StrId::STR_FOOTNOTES},
       "shortPwrBtn", StrId::STR_CAT_CONTROLS));
 #endif
+  // Erased below on Home-key boards, whose key has its own double tap.
+  v.push_back(SettingInfo::Enum(
+      StrId::STR_DBL_CLICK_PWR, &CrossPointSettings::powerDoubleClickAction,
+      std::vector<StrId>(std::begin(home_button::ACTION_LABELS), std::end(home_button::ACTION_LABELS)),
+      "powerDoubleClickAction", StrId::STR_CAT_CONTROLS));
   // Erased below unless the QMI8658 IMU is present (X3). Pushed here rather than
   // inserted afterwards: insert() into a vector at capacity reallocates at 2x and
   // copies, which is the allocation pattern this list's reserve exists to avoid.
@@ -697,6 +700,11 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   if (!halTiltSensor.isAvailable()) {
     v.erase(
         std::remove_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_TILT_PAGE_TURN; }),
+        v.end());
+  }
+  if (BoardConfig::hasHomeKey()) {
+    v.erase(
+        std::remove_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_DBL_CLICK_PWR; }),
         v.end());
   }
 

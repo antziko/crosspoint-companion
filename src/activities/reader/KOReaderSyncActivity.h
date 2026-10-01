@@ -121,6 +121,9 @@ class KOReaderSyncActivity final : public Activity {
   int bmMergedCount = 0;    // Total after union merge
   bool bmFetchOk = false;   // GET reached the server (OK or NOT_FOUND) — remote set is trustworthy
   bool bmUploadOk = false;  // PUT succeeded — local set actually propagated to the server
+  // The server holds more bookmarks/tombstones than this device can represent, so the PUT was
+  // suppressed: uploading the truncated merge would delete the excess for every other device.
+  bool bmRemoteTruncated = false;
 
   // Reading-stats sync summary, captured in syncStats() for the result screen.
   bool statsSynced = false;           // True once a stats sync attempt completed

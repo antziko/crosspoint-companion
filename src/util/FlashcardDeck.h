@@ -193,6 +193,11 @@ class FlashcardDeck {
   static bool cardDict(const std::string& cachePath, const std::string& word, uint32_t& outDictHash,
                        uint32_t* outCount = nullptr);
 
+  // Every card's word and recorded dictionary (0 = none), in one streaming pass; `fn` returns
+  // false to stop. For the gloss box, which reads a card's word in the card's own dictionary.
+  static bool forEachCardDict(const std::string& cachePath,
+                              bool (*fn)(void* ctx, const char* word, int wordLen, uint32_t dictHash), void* ctx);
+
   // Total card count without materializing the deck (one streaming pass).
   static int count(const std::string& cachePath);
 

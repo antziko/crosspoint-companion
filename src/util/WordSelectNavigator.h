@@ -123,6 +123,10 @@ class WordSelectNavigator {
   // walks past them. On for lookup, where those words are never the target. Off for quote
   // selection, which has to reach every word of the quote verbatim. Call before load().
   void setSkipStopwords(bool enabled) { skipStopwords_ = enabled; }
+  // Holding a direction jumps instead of repeating: Left/Right to the first/last token of the
+  // row, Up/Down to the first/last row (nearest the current column). The hold's release is then
+  // swallowed rather than taken as one more step.
+  void setHoldJumps(bool enabled) { holdJumps_ = enabled; }
 
   // Organise a flat word list into rows by Y coordinate (2px tolerance).
   // Sets each word's row field and populates the rows vector.
@@ -169,6 +173,7 @@ class WordSelectNavigator {
   const WordInfo* getPairedHalf() const;
 
   bool isEmpty() const { return words.empty(); }
+  int wordCount() const { return static_cast<int>(words.size()); }
 
   // Flat index of the current cursor word. -1 if empty.
   int getCurrentFlatIndex() const;
@@ -217,6 +222,11 @@ class WordSelectNavigator {
   // anchor directly, and for a caller that already knows it. No Confirm hold is in flight,
   // so there is no release to swallow. Returns false (changing nothing) when out of range.
   bool beginMultiSelectAt(int flatIdx);
+  // Drop a range begun by beginMultiSelectAt, keeping the cursor where it is.
+  void endMultiSelect() {
+    inMultiSelectMode = false;
+    anchorFlatIndex = -1;
+  }
 
   // Process Confirm/Back for multi-select state machine.
   // Returns PhraseReady when a phrase range is confirmed (raw phrase in outPhrase).
@@ -384,6 +394,11 @@ class WordSelectNavigator {
   // release-suppression path cannot cover it, because that guards the release EDGE while
   // this fires from the held LEVEL.
   uint16_t wordRepeatArmed_ = 0;
+  bool holdJumps_ = false;
+  // Same arming rule as wordRepeatArmed_, for the four jump directions; and the directions whose
+  // jump has fired this hold, so its release is not also a step.
+  uint16_t jumpArmed_ = 0;
+  uint16_t jumpFired_ = 0;
   // millis() of the last repeat-driven step; 0 = none this hold.
   unsigned long lastWordRepeatMs_ = 0;
 

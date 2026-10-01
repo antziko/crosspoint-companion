@@ -3,6 +3,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -10,6 +11,7 @@
 #include "../Activity.h"
 #include "util/DictGloss.h"
 #include "util/DictionaryLookupController.h"
+#include "util/PageMarks.h"
 #include "util/WordSelectNavigator.h"
 
 class DictionaryWordSelectActivity final : public Activity {
@@ -45,6 +47,18 @@ class DictionaryWordSelectActivity final : public Activity {
         chapterTitle_(chapterTitle),
         initialPointX_(initialPointX),
         initialPointY_(initialPointY) {}
+
+  // Gloss-box sessions start at the page's first word outside a title, or at `resumeIdx` (a flat word index
+  // from an earlier session on this same page, -1 for none), and write the cursor's flat index
+  // back through `out` on exit. `out` belongs to the reader, which outlives this screen.
+  // The reader page's identity, so every repaint here draws the same looked-up-word underlines
+  // and quote marks the reader drew.
+  void setPageMarkKey(const PageMarks::PageKey& key) { markKey_ = key; }
+
+  void setGlossCursorMemory(const int resumeIdx, int* out) {
+    glossResumeIdx_ = resumeIdx;
+    glossCursorOut_ = out;
+  }
 
   void onEnter() override;
   void onExit() override;
@@ -137,6 +151,21 @@ class DictionaryWordSelectActivity final : public Activity {
   // the word a second time.
   bool autoLookupPending_ = false;
 
+  // See setGlossCursorMemory. glossCursorOut_ is written only for a session the gloss box ran in.
+  PageMarks::PageKey markKey_;
+  // Draw markKey_'s marks over the page just rendered, limited to rows in [bandTop, bandBottom).
+  void drawPageMarks(int bandTop = INT16_MIN, int bandBottom = INT16_MAX) const;
+  // Put a just-enrolled card's mark in the resident table, so this screen's next repaint shows it.
+  void addLookupMark(const std::string& word, const std::string& excerpt) const;
+  // With the gloss box up, a cursor step is taken only once the frame for the previous one is on
+  // the panel: presses that land while it is still drawing are dropped, so a burst of Left/Right
+  // costs one frame per step actually seen instead of a queue of moves racing the render.
+  // Set by the loop task when a step requests a frame, cleared by the render task as it returns.
+  std::atomic<bool> stepFramePending_{false};
+  int glossResumeIdx_ = -1;
+  int* glossCursorOut_ = nullptr;
+  bool glossTracksCursor_ = false;
+
   // True when opened mid hold-Back (the reader's hold-Back → highlight gesture): swallow that
   // first Back release so it doesn't immediately cancel the selection. Other entry paths have
   // already released Back, so this stays false and Back works on the first tap as usual.
@@ -152,6 +181,7 @@ class DictionaryWordSelectActivity final : public Activity {
   // user can tell the two near-identical selection modes apart: "Highlight" in
   // HighlightRange mode, "Look Up" in Dictionary mode.
   const char* confirmHintLabel() const;
+  const char* backHintLabel() const;
 
   // Page-local sentence around the current selection, captured at lookup time to
   // store as the flashcard front-face context. "" if there is no selection.
@@ -192,13 +222,45 @@ class DictionaryWordSelectActivity final : public Activity {
   // AFTER extractWords, because the word array is the largest contiguous request this screen
   // makes (WordSelectNavigator.h:28-63) and must have first claim; a failed allocation here
   // just leaves the feature off.
+  // A card's own dictionary, opened only when the selection is a card word saved from a
+  // dictionary other than the book's. One at a time: a different card dictionary replaces it.
+  struct GlossAltDict {
+    Dictionary::LookupCtx ctx;
+    HalFile dict;
+    uint32_t hash = 0;  // registry nameHash this holds (or failed to open)
+    bool ok = false;
+  };
+
+  // A card whose recorded dictionary is not the book's, keyed like LookupMarks (normalised FNV).
+  struct GlossCardDict {
+    uint32_t wordHash;
+    uint32_t dictHash;
+    uint16_t byteLen;
+  };
+  static constexpr int kMaxGlossCardDicts = 32;
+
   struct GlossState {
     Dictionary::LookupCtx ctx;  // .idx + page index, open for the whole session
     HalFile dict;               // .dict, ditto — a member handle, so closed in onExit()
+    uint32_t bookDictHash = 0;  // registry nameHash of ctx's dictionary
+    GlossCardDict cardDicts[kMaxGlossCardDicts] = {};
+    int cardDictCount = 0;
+    std::unique_ptr<GlossAltDict> alt;  // allocated on the first card that needs it
+    bool useAlt = false;                // the current peek reads `alt`, not ctx/dict
+    bool probeAlt = false;              // which dictionary `probe` below was read from
     DictGloss::GlossResult result;
     char raw[DictGloss::kPeekBytes] = {};
 
-    int forFlatIdx = -1;          // word `result` describes; -1 = nothing peeked yet
+    int forFlatIdx = -1;    // word `result` describes; -1 = nothing peeked yet
+    int forAnchorIdx = -1;  // other end of the range `result` describes; -1 = one word
+    // Last whole-range probe, keyed by its flat range: the step check and the peek that follows
+    // it ask about the same range, and this makes that one SD scan instead of two.
+    int probeLo = -1;
+    int probeHi = -1;
+    Dictionary::PrefixProbe probe;
+    // The range phrase `result` was peeked for, named in the box when it misses. Empty for a
+    // single word.
+    char missPhrase[40] = "";
     int y = 0;                    // top edge the box belongs at for the current selection
     bool place = false;           // false = neither side fits this selection; show no box
     int drawnY = kGlossNotDrawn;  // top edge of the box the framebuffer currently holds
@@ -242,6 +304,62 @@ class DictionaryWordSelectActivity final : public Activity {
   // Open the dictionary handles, compute the band geometry and allocate gloss_ — or leave it
   // null, which is the "feature off, behave exactly as before" state every gate falls back to.
   void initGloss();
+
+  // Longest a CJK range may grow to with the gloss box up. Real entries run to 7 (中华人民共和国).
+  static constexpr int kMaxGlossRangeChars = 8;
+
+  // True when every token in [lo, hi] is CJK: the only ranges the cap and the partial fallback
+  // apply to.
+  bool rangeIsCjk(int lo, int hi) const;
+
+  // Whether the multi-select range [anchor, cursor] may stand with the gloss box up: false only
+  // past kMaxGlossRangeChars on a CJK range. Logs the dictionary's verdict on every CJK step.
+  bool glossRangeAllowed(int anchor, int cursor);
+
+  // probePrefixIn for the whole range [lo, hi], served from GlossState's one-entry cache.
+  const Dictionary::PrefixProbe& probeGlossRange(int lo, int hi, const std::string& phrase);
+
+  // Read the entry for the multi-token range [lo, hi] (joined as `phrase`) into gloss_->raw. A CJK
+  // phrase that only begins a longer headword falls back to its longest leading headword, marked
+  // "~" as partial. 0 when nothing starts with the phrase.
+  size_t readGlossPhraseEntry(int lo, int hi, const std::string& phrase, bool cjk);
+
+  // One deck pass: cards saved from a dictionary other than the book's into gloss_->cardDicts,
+  // and every multi-token card word printed on this page into cardRanges_.
+  void loadGlossCards();
+
+  // --- Card-word auto-select (gloss box only) --------------------------------------------
+  // Landing on any token of a card word printed on this page selects the whole word, as a
+  // range the navigator holds like a manual one (so the highlight, the box's phrase peek and
+  // Confirm's phrase lookup all just work). A word-axis step back from it drops to its last
+  // token alone and leaves the word "suppressed" until the cursor walks out of it, so the
+  // tokens inside a card word stay reachable one by one.
+  struct CardRange {
+    int16_t lo;
+    int16_t hi;
+  };
+  static constexpr int kMaxCardRanges = 24;
+  CardRange cardRanges_[kMaxCardRanges] = {};
+  int cardRangeCount_ = 0;
+  int autoLo_ = -1;  // the auto-selected range, while the navigator still holds it
+  int autoHi_ = -1;
+  int suppressLo_ = -1;
+  int suppressHi_ = -1;
+  bool autoRangeActive() const {
+    return autoLo_ >= 0 && navigator.isMultiSelecting() && navigator.getAnchorFlatIndex() == autoLo_;
+  }
+  // After a navigation step taken out of an auto range: settle the cursor as single-token select.
+  void leaveAutoRange();
+  // Select the card word under the cursor, if any. True when it did.
+  bool maybeAutoSelectCardWord();
+  // Point the peek at the card's dictionary when `token` is such a card's word, else the book's.
+  void selectGlossDict(const std::string& token);
+  bool openGlossAltDict(uint32_t dictHash);
+  Dictionary::LookupCtx& glossCtx() { return gloss_->useAlt ? gloss_->alt->ctx : gloss_->ctx; }
+  HalFile& glossDictFile() { return gloss_->useAlt ? gloss_->alt->dict : gloss_->dict; }
+
+  // Flat index of the page's first word outside a title (a centred or wholly bold line), or -1.
+  int findFirstBodyWord() const;
 
   // Point the box at the definition font (family + the dictionary's own point size) and re-derive
   // everything that depends on its line height. Called on every peek, not once, because the size

@@ -2,6 +2,7 @@
 
 #include <Logging.h>
 #include <Memory.h>
+#include <Utf8.h>
 
 namespace {
 
@@ -17,6 +18,20 @@ size_t firstCodepointLen(const char* text, size_t len) {
   return 1;
 }
 
+// Codepoint of the multi-byte sequence at text[0..n), n from firstCodepointLen. 0 when n is 1
+// (a malformed lead byte), which no punctuation test matches.
+uint32_t decodeCodepoint(const char* text, const size_t n) {
+  const auto* b = reinterpret_cast<const unsigned char*>(text);
+  if (n == 2) return ((b[0] & 0x1Fu) << 6) | (b[1] & 0x3Fu);
+  if (n == 3) return ((b[0] & 0x0Fu) << 12) | ((b[1] & 0x3Fu) << 6) | (b[2] & 0x3Fu);
+  if (n == 4) return ((b[0] & 0x07u) << 18) | ((b[1] & 0x3Fu) << 12) | ((b[2] & 0x3Fu) << 6) | (b[3] & 0x3Fu);
+  return 0;
+}
+
+bool isSkippedPunctuation(const uint32_t cp) {
+  return utf8IsCjkPunctuation(cp) || (cp >= 0x2010 && cp <= 0x2027) || cp == 0x00B7;
+}
+
 }  // namespace
 
 uint32_t LookupMarks::hashAppend(uint32_t h, const char* text, const size_t len, uint16_t* inOutLen) {
@@ -24,7 +39,13 @@ uint32_t LookupMarks::hashAppend(uint32_t h, const char* text, const size_t len,
   uint16_t kept = 0;
   for (size_t i = 0; i < len; i++) {
     auto b = static_cast<unsigned char>(text[i]);
-    if (b < 0x80) {
+    if (b >= 0x80) {
+      const size_t n = firstCodepointLen(text + i, len - i);
+      if (n > 1 && isSkippedPunctuation(decodeCodepoint(text + i, n))) {
+        i += n - 1;
+        continue;
+      }
+    } else {
       if (b >= 'A' && b <= 'Z') {
         b = static_cast<unsigned char>(b + ('a' - 'A'));
       } else if (!((b >= 'a' && b <= 'z') || (b >= '0' && b <= '9'))) {
@@ -46,7 +67,16 @@ LookupMarks::Step LookupMarks::step(const Mark& m, RunState& r, const bool isCjk
     return (tokenHash == m.wordHash && tokenLen == m.byteLen) ? Step::MatchedToken : Step::None;
   }
 
-  if (r.open && r.y != rowY) r.open = false;  // the run wrapped: no mark, no guess
+  r.wrappedHere = false;
+  if (r.open && r.y != rowY) {
+    if (r.wrapped) {
+      r.open = false;  // a second line break: no mark, no guess
+    } else {
+      r.wrapped = true;
+      r.wrappedHere = true;
+      r.y = rowY;
+    }
+  }
 
   const bool opening = !r.open;
   if (opening) {
@@ -55,6 +85,7 @@ LookupMarks::Step LookupMarks::step(const Mark& m, RunState& r, const bool isCjk
     r.hash = tokenHash;
     r.len = tokenLen;
     r.y = rowY;
+    r.wrapped = false;
   } else {
     r.hash = hashAppend(r.hash, text, len, &r.len);
   }
@@ -111,11 +142,17 @@ bool LookupMarks::add(const char* word, const int wordLen, const char* chapterTi
 
 int LookupMarks::collectForPage(const uint32_t chapterHash, const int page, const int pageCount, const Mark** out,
                                 const int cap) const {
-  if (!marks_ || count_ == 0 || !out || cap <= 0 || page <= 0) return 0;
+  if (!marks_ || count_ == 0 || !out || cap <= 0 || page <= 0 || pageCount <= 0) return 0;
   int found = 0;
   for (int i = 0; i < count_ && found < cap; i++) {
     const Mark& m = marks_[i];
-    if (m.page != page || m.pageCount != pageCount || m.chapterHash != chapterHash) continue;
+    if (m.chapterHash != chapterHash) continue;
+    // The same page number, or slices of the chapter that overlap: [(m.page-1)/m.pageCount,
+    // m.page/m.pageCount) against the same for this page, cross-multiplied. The first holds
+    // whenever the layout is unchanged, even though a total recorded mid-build was an estimate;
+    // the second follows the word through a re-layout.
+    const uint32_t mp = m.page, mc = m.pageCount, p = static_cast<uint32_t>(page), c = static_cast<uint32_t>(pageCount);
+    if (mp != p && !((mp - 1) * c < p * mc && (p - 1) * mc < mp * c)) continue;
     out[found++] = &m;
   }
   return found;
