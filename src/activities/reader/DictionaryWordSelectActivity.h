@@ -157,7 +157,7 @@ class DictionaryWordSelectActivity final : public Activity {
   void drawPageMarks(int bandTop = INT16_MIN, int bandBottom = INT16_MAX) const;
   // Put a just-enrolled card's mark in the resident table, so this screen's next repaint shows it.
   void addLookupMark(const std::string& word, const std::string& excerpt) const;
-  // With the gloss box up, a cursor step is taken only once the frame for the previous one is on
+  // On a button board, or with the gloss box up, a cursor step is taken only once the frame for the previous one is on
   // the panel: presses that land while it is still drawing are dropped, so a burst of Left/Right
   // costs one frame per step actually seen instead of a queue of moves racing the render.
   // Set by the loop task when a step requests a frame, cleared by the render task as it returns.

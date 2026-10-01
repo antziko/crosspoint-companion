@@ -777,9 +777,11 @@ void DictionaryWordSelectActivity::loop() {
   const bool wasAuto = autoRangeActive();
   const int anchorBefore = navigator.isMultiSelecting() ? navigator.getAnchorFlatIndex() : -1;
   const int cursorBefore = navigator.getCurrentFlatIndex();
-  const bool stepAllowed = !gloss_ || !stepFramePending_.load();
+  // Button boards (X3/X4) always step one frame at a time; a touch board only with the gloss box.
+  const bool gateSteps = gloss_ || !mappedInput.hasTouch();
+  const bool stepAllowed = !gateSteps || !stepFramePending_.load();
   if (stepAllowed && navigator.handleNavigation(mappedInput, renderer, SETTINGS.getReaderSwapWordSelectAxes())) {
-    if (gloss_) stepFramePending_.store(true);
+    if (gateSteps) stepFramePending_.store(true);
     HangTrace::mark(HangTrace::Loop, HangTrace::DwsLoopAuto);
     if (wasAuto) {
       // The step moved the cursor of a range the user did not build: settle it as a plain
