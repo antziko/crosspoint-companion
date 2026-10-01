@@ -31,6 +31,8 @@ class SleepImageReviewActivity final : public Activity {
 
   std::string imagePath;
   bool resumeToReader = false;
+  // The wallpaper was shown with the grayscale overlay, so leaving needs the extra clean (onExit).
+  bool shownGrayscale_ = false;
   std::string readerPath;
 
   // On-screen answers for touch boards, which draw no button hints (see

@@ -6,6 +6,7 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <SdDebugLog.h>
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
@@ -109,6 +110,7 @@ void SleepImageReviewActivity::renderImage() {
     renderer.displayBuffer(HalDisplay::HALF_REFRESH);
   }
 
+  shownGrayscale_ = hasGreyscale;
   if (hasGreyscale) {
     // Same crop as the BW base above: an uncropped gray pass would land its planes on
     // different pixels than the image they are shading.
@@ -178,6 +180,13 @@ void SleepImageReviewActivity::onExit() {
   Activity::onExit();
   renderer.clearScreen();
   renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+  // One HALF leaves the grayscale overlay's mid-grays speckled on X4, and every paint after
+  // it is FAST, which never drives a pixel that is white in both frames. A second pass is
+  // what a manual refresh does, and it clears them.
+  if (shownGrayscale_) {
+    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    SdDebugLog::log("SLPR", "exit grayscale clean passes=2");
+  }
 }
 
 void SleepImageReviewActivity::loop() {
