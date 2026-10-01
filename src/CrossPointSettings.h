@@ -202,10 +202,17 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     NIGHT_REFRESH_FREQUENCY_COUNT
   };
 
-  // Periodic maintenance action. On X3, BW_REINFORCEMENT swaps the flashing HALF
-  // scrub for the OEM AA-pre-BW(mid) no-flash reinforcement waveform. No effect on
-  // X4 (SSD1677 has no reinforcement bank; displayGrayscaleBase falls back to FAST).
-  enum REFRESH_ACTION { REFRESH_ACTION_FULL = 0, REFRESH_ACTION_BW_REINFORCEMENT = 1, REFRESH_ACTION_COUNT };
+  // When the first frame of a new screen is driven with the scrub instead of FAST
+  // (ActivityManager::armEntryScrub, plus the dictionary's dict-exit / dict-miss scrubs).
+  // A FAST screen change leaves the previous screen behind; the scrub erases it. The
+  // default is per controller (main.cpp, before the settings load): ALWAYS where the
+  // scrub does not flash (UC8253 X3), NIGHT elsewhere, where it is a full-panel flash.
+  enum SCREEN_CHANGE_CLEAN {
+    SCREEN_CLEAN_OFF = 0,
+    SCREEN_CLEAN_NIGHT = 1,
+    SCREEN_CLEAN_ALWAYS = 2,
+    SCREEN_CHANGE_CLEAN_COUNT
+  };
 
   // pagesUntilFullRefresh sentinels (negative so they never collide with a count):
   static constexpr int REFRESH_COUNTDOWN_DISABLED = -1;    // "Never" — no periodic maintenance
@@ -225,14 +232,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   };
 
   // Manual "Refresh Screen" (power-button FORCE_REFRESH) clear mode. Drives the
-  // whole-panel ghost clear (util/ScreenRefresh.h). HALF is the charge scrub and the only
-  // single pass that drives every pixel, so it is the default. FAST is differential and cannot
-  // clear a ghost at all; it stays as the escape hatch on grayscale pages, where a GC waveform
-  // firms the particles too hard for the following grayscale pass and washes AA/image pages
-  // whitish on X4. FULL is the multi-cycle deep clean (GfxRenderer::deepCleanPanel, ~15s of
-  // black/white flashing) — the only thing that releases image sticking already
-  // burned in, as opposed to plain differential ghosting.
-  enum REFRESH_SCREEN_MODE { RSM_FAST = 0, RSM_HALF = 1, RSM_FULL = 2, REFRESH_SCREEN_MODE_COUNT };
+  // whole-panel ghost clear (util/ScreenRefresh.h). HALF is the single-pass clean and the
+  // default. FULL is the multi-cycle deep clean (GfxRenderer::deepCleanPanel, ~15s of
+  // black/white flashing) — the only thing that releases image sticking already burned in,
+  // as opposed to plain differential ghosting. Persisted under refreshScreenModeV2; the
+  // older key also had a FAST value, which could not clear a ghost (see fromJson).
+  enum REFRESH_SCREEN_MODE { RSM_HALF = 0, RSM_FULL = 1, REFRESH_SCREEN_MODE_COUNT };
 
   // Hide battery percentage
   enum HIDE_BATTERY_PERCENTAGE { HIDE_NEVER = 0, HIDE_READER = 1, HIDE_ALWAYS = 2, HIDE_BATTERY_PERCENTAGE_COUNT };
@@ -508,8 +513,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t refreshFrequency = REFRESH_15;
   // Refresh frequency used instead while night mode is on (default 5 pages)
   uint8_t nightRefreshFrequency = NIGHT_REFRESH_5;
-  // Periodic maintenance action (default FULL; BW reinforcement is X3-only)
-  uint8_t refreshAction = REFRESH_ACTION_FULL;
+  // Scrub the first frame of a new screen (seeded per controller in main.cpp)
+  uint8_t screenChangeClean = SCREEN_CLEAN_NIGHT;
   // Manual "Refresh Screen" clear mode (default HALF: the only single pass that scrubs)
   uint8_t refreshScreenMode = RSM_HALF;
   uint8_t hyphenationEnabled = 0;
@@ -811,6 +816,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // FAST -- so the periodic maintenance page is the only thing that ever drives those
   // pixels again. "Never" is left alone in both modes: it is an explicit choice.
   int getEffectiveRefreshFrequency() const;
+  // Whether a screen change should be scrubbed right now, per screenChangeClean and night mode.
+  bool cleanOnScreenChange() const {
+    return screenChangeClean == SCREEN_CLEAN_ALWAYS || (screenChangeClean == SCREEN_CLEAN_NIGHT && screenInverted);
+  }
 };
 
 // Helper macro to access settings

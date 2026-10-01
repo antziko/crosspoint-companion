@@ -254,7 +254,7 @@ void FrontlightPanelActivity::toggleLight() {
   requestUpdate();
 }
 
-// The sheet is transient (isTransientScreen), so night mode's entry scrub covers neither opening
+// The sheet is transient (isTransientScreen), so the entry scrub covers neither opening
 // nor closing it -- except where a tile has changed what the frame underneath is going to look
 // like. A polarity flip rewrites every pixel and a rotation re-lays the whole screen out; either
 // one leaves the outgoing shape behind as stale charge unless the repaint drives every pixel from

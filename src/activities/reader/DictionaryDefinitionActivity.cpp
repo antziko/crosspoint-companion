@@ -373,18 +373,17 @@ void DictionaryDefinitionActivity::onExit() {
   // see enterSessionDict_. Safe here: the controller was stopped and joined at the top of this
   // function, so no lookup is in flight (Dictionary.h threading note).
   DictUtils::restoreSessionDict(enterSessionDict_, enterSessionDictWasPromotion_);
-  // Night mode: drive the frame that REPLACES this one with the full waveform. It is the other
+  // Drive the frame that REPLACES this one with the scrub. It is the other
   // half of ActivityManager::armEntryScrub, which cannot do it from here — the definition pops
   // through the word-select overlay, which finishes in its own result handler without ever
   // painting (DictionaryWordSelectActivity.cpp:655-658), so the paint that follows is the
   // reader's page and the manager has already written the overlay off as transient. Without this
   // a page of definition text is erased by a differential and left to relax under the book text
   // the user then sits on for minutes, which is the ghost the entry scrub exists to prevent.
-  // Day mode is untouched, as there: the same under-drive lands on a ~90% white panel.
   //
   // Armed for every exit, not just the reader: a card screen or the review session is the frame
   // underneath just as often, and each is read rather than passed through.
-  if (SETTINGS.screenInverted) renderer.promoteNextRefresh(HalDisplay::SCRUB_REFRESH, "dict-exit");
+  if (SETTINGS.cleanOnScreenChange()) renderer.promoteNextRefresh(HalDisplay::SCRUB_REFRESH, "dict-exit");
   Activity::onExit();
 }
 

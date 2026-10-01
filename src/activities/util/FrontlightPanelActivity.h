@@ -94,7 +94,7 @@ class FrontlightPanelActivity final : public Activity, private UiAppHost {
   void loop() override;
   void render(RenderLock&&) override;
   bool handleHomeGesture() override;
-  // The sheet is a glance-and-dismiss overlay: night mode's entry scrub skips opening it and
+  // The sheet is a glance-and-dismiss overlay: the entry scrub skips opening it and
   // closing it. close() arms its own scrub for the two tiles that change the frame underneath
   // wholesale (polarity, orientation).
   bool isTransientScreen() const override { return true; }

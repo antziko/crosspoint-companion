@@ -2093,27 +2093,21 @@ unsigned long GfxRenderer::deepCleanPanel(const uint8_t cycles) const {
     // Per-phase durations, not just the total: a FULL that returns far short of its
     // waveform's cost never drove the panel, and a total alone cannot tell that from a
     // clean that ran and was simply too weak.
-    // Black phase: FULL is right here. Full seeds the OLD plane white and runs the
-    // absolute-from-white waveform, so against an all-black target every pixel takes a
-    // real white->black swing.
+    // Black phase: FULL, an absolute waveform on every controller, so against an all-black
+    // target every pixel is driven to black whatever the panel held.
     clearScreen(0x00);  // 0x00 = all black (clearScreen memsets the 1bpp buffer; 0xFF is white)
     unsigned long phaseMs = millis();
     displayBuffer(HalDisplay::FULL_REFRESH);
     SdDebugLog::log("GFX", "deepclean cycle=%u black mode=FULL ms=%lu", static_cast<unsigned>(i), millis() - phaseMs);
 
-    // White phase: HALF, NOT Full. Full seeds OLD = white, so with a white target this is
-    // white->white — by construction the waveform's no-transition cell. The panel is left
-    // holding the black flash plus whatever charge imbalance the previous image wrote, and
-    // nothing drives those pixels back through a transition. Half seeds OLD = ~target =
-    // black, so every pixel takes a real black->white swing instead.
-    //
-    // This is the drivers' documented contract, not a guess. Uc8279X4Driver.cpp:403-412:
-    // "Half = charge SCRUB: OLD = complement of the target, so EVERY pixel (including white
-    // background) is forced through a transition cell and no WW/BB pixel idles with stale AA
-    // charge. A white-seed GC only redraws black-target pixels and leaves background ghost
-    // parked in WW." Uc8253X3Driver.cpp:182-188 has the same split. A white-seed GC against a
-    // white target redraws NOTHING, which is exactly the X4 Pro symptom: the pre-sleep reader
-    // page surviving the clean, within minutes, independent of how long the panel then holds.
+    // White phase: HALF. What HALF drives depends on the controller:
+    //   * UC8279 (X4 Pro): OLD = ~target, so every pixel takes a real black->white swing
+    //     (Uc8279X4Driver.cpp, the `scrub` branch). A white-seed GC against a white target
+    //     would redraw nothing.
+    //   * UC8253 (X3): HalDisplay turns HALF into a forced full sync, the OEM _full bank
+    //     against the frame actually on the glass, so every pixel transitions from black.
+    //   * SSD1677 (X4): RED is bypassed, so the panel's OTP absolute waveform runs from the
+    //     BW plane alone; no OLD-plane seed is involved.
     clearScreen(0xFF);
     phaseMs = millis();
     displayBuffer(HalDisplay::HALF_REFRESH);
@@ -2146,17 +2140,19 @@ void GfxRenderer::promoteNextRefresh(const HalDisplay::RefreshMode mode, const c
 HalDisplay::RefreshMode GfxRenderer::applyPromotedRefresh(const HalDisplay::RefreshMode refreshMode) const {
   if (!promotedRefreshPending_) return refreshMode;
   promotedRefreshPending_ = false;
-  return promotedRefresh_;
+  // Upgrade only. A paint that already asked for more than FAST (the sleep deep clean's
+  // black FULL, a cover's HALF) keeps its own waveform; the screen-entry scrub armed just
+  // before it would otherwise replace that with a weaker one.
+  return refreshMode == HalDisplay::FAST_REFRESH ? promotedRefresh_ : refreshMode;
 }
 
 // Upgrade the paint that ENDS a long dwell, so the bias the held frame built is driven out in the
 // shape it was built in. Only FAST is upgraded: every other mode already drives at least this
 // hard, and an explicit promotion is a deliberate manual clear that must not be second-guessed.
 //
-// SCRUB, not HALF: identical panel waveform (HalDisplay.cpp:52-56 maps both to the driver's
-// complement-seed scrub) but without the X3 requestResync() that HALF fires, which costs three
-// panel passes -- 3203ms against 437ms. This runs unattended on every screen, so it must not
-// carry that.
+// SCRUB, not HALF: both map to the driver's Half (HalDisplay.cpp:52-56), but SCRUB skips the
+// X3 requestResync() that HALF fires, which costs three panel passes -- 3203ms against 437ms.
+// This runs unattended on every screen, so it must not carry that.
 HalDisplay::RefreshMode GfxRenderer::applyDwellScrub(const HalDisplay::RefreshMode refreshMode) const {
   if (refreshMode != HalDisplay::FAST_REFRESH || lastPaintMs_ == 0) return refreshMode;
   const unsigned long heldMs = millis() - lastPaintMs_;

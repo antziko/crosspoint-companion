@@ -71,7 +71,7 @@ class DictionaryWordSelectActivity final : public Activity {
   // there. Same reset the sub-activity returns take.
   void onFramebufferInvalidated() override { forceFullRepaintOnNextRender(); }
   // An overlay on the reader's own page, walked through on the way to a definition and on the
-  // way back. Night mode's entry scrub therefore skips it in both directions, which is what
+  // way back. The entry scrub therefore skips it in both directions, which is what
   // makes a lookup flash once on the definition and once on the page it returns to, instead of
   // at every step. The gloss box keeps its own scrubs (clearGlossGhostOnNextPaint): those pay
   // for a box that moves around inside one frame, not for a screen change.

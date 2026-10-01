@@ -271,21 +271,15 @@ void ActivityManager::loop() {
   }
 }
 
-// Night mode paints ~90% of the panel black, and the default FAST is the DU partial: the black it
-// lays down is under-developed, relaxes over the following minutes and lets the previous screen
-// surface through it. A screen the user then sits on -- Settings and its option popups above all --
-// is where that becomes visible, so the frame that OPENS one is driven with the GC scrub instead.
-// Repaints within the screen stay FAST: moving a highlight must not cost a full waveform.
-//
-// Day mode is deliberately untouched. The same under-drive lands on a ~90% white panel, where it is
-// not visible, and the cost here is real -- roughly 686ms -> 1515ms per screen transition.
+// The default FAST is a partial differential: a screen change drives the changed pixels too briefly
+// to erase the previous screen completely, and what is left surfaces under the screen the user then
+// sits on (the Home screen readable through a book's first page). So the frame that OPENS a screen
+// is driven with the scrub instead, when Clean on Screen Change asks for it. Repaints within the screen stay FAST:
+// moving a highlight must not cost a full waveform.
 //
 // SCRUB rather than HALF for the X3 reason in GfxRenderer::applyDwellScrub: same panel waveform,
-// without the three-pass resync HALF forces there.
-//
-// SETTINGS.screenInverted, not display.isInverted(): this runs before the render task resolves the
-// polarity for the incoming frame (ActivityManager.cpp:70), so the setting is what that frame will
-// actually be painted with.
+// without the three-pass resync HALF forces there. A screen whose first paint asks for more than
+// FAST keeps it (GfxRenderer::applyPromotedRefresh).
 //
 // Transient screens are exempt (Activity::isTransientScreen): a modal prompt, the control-centre
 // sheet and the word-select overlay are passed through in seconds, far short of the dwell that
@@ -300,7 +294,7 @@ void ActivityManager::loop() {
 // (here) and the page coming back (DictionaryDefinitionActivity::onExit, which arms the paint
 // that replaces the definition, because the overlay it pops through never repaints).
 void ActivityManager::armEntryScrub(const Activity& incoming, const bool leftTransient) const {
-  if (!SETTINGS.screenInverted) return;
+  if (!SETTINGS.cleanOnScreenChange()) return;
   if (leftTransient || incoming.isTransientScreen()) return;
   renderer.promoteNextRefresh(HalDisplay::SCRUB_REFRESH, incoming.name.c_str());
 }

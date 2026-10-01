@@ -335,32 +335,13 @@ inline void displayWithRefreshCycle(const GfxRenderer& renderer, int& pagesUntil
   const bool maintenanceDue = !disabled && pagesUntilFullRefresh <= 1;
 
   if (maintenanceDue) {
-    // X3 no-flash maintenance: instead of the full-screen HALF flash, fire the OEM
-    // AA-pre-BW(mid) differential waveform — changed pixels get the strong drive,
-    // unchanged black/white pixels a gentle same-polarity top-up, settling ghosting
-    // during the page turn itself. FAST_REFRESH is the driver's fallback when a clean
-    // differential base isn't available; it degrades to fast + settle, never to a HALF
-    // flash. Forced ghost-scrubs (image residue, popup/list wipe, initial paint) arrive
-    // via the FORCE_FULL sentinel and deliberately take the HALF path — a gentle
-    // reinforce can't clear that residue.
-    const bool useBwReinforcement = renderer.isX3() &&
-                                    pagesUntilFullRefresh != CrossPointSettings::REFRESH_COUNTDOWN_FORCE_FULL &&
-                                    SETTINGS.refreshAction == CrossPointSettings::REFRESH_ACTION_BW_REINFORCEMENT;
-    // Diagnostic (enable "SD Card Logging"): one line per maintenance page so the
-    // no-flash path can be confirmed untethered on X3. reinforce=1 => AA-pre-BW(mid)
-    // ran; reinforce=0 => HALF flash (check x3/action/countdown to see why).
-    SdDebugLog::log("RFRSH", "maint x3=%d action=%d countdown=%d reinforce=%d", (int)renderer.isX3(),
-                    (int)SETTINGS.refreshAction, pagesUntilFullRefresh, (int)useBwReinforcement);
-    if (useBwReinforcement) {
-      // Synchronous by design: displayGrayscaleBase has no async form, and the periodic
-      // scrub was already blocking. `async` only applies to plain fast page turns.
-      renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
-    } else {
-      renderer.displayBuffer(HalDisplay::HALF_REFRESH);
-      // The cleanup settles correctly only when the grayscale preconditioning
-      // waveform runs after it and before the planes are written.
-      if (needsGrayscaleBase) renderer.preconditionGrayscale();
-    }
+    // One line per maintenance page (enable "SD Card Logging"), so the cadence can be
+    // confirmed untethered. countdown=-2 is a forced scrub (residue, popup, first paint).
+    SdDebugLog::log("RFRSH", "maint x3=%d countdown=%d", (int)renderer.isX3(), pagesUntilFullRefresh);
+    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    // The cleanup settles correctly only when the grayscale preconditioning
+    // waveform runs after it and before the planes are written.
+    if (needsGrayscaleBase) renderer.preconditionGrayscale();
     pagesUntilFullRefresh = SETTINGS.getEffectiveRefreshFrequency();
   } else {
     if (needsGrayscaleBase) {

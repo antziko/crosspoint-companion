@@ -273,13 +273,12 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                                 {StrId::STR_SAME_AS_REFRESH, StrId::STR_PAGES_1, StrId::STR_PAGES_3, StrId::STR_PAGES_5,
                                  StrId::STR_PAGES_10, StrId::STR_PAGES_15},
                                 "nightRefreshFrequency", StrId::STR_DISP_EINK));
-  v.push_back(SettingInfo::Enum(StrId::STR_REFRESH_ACTION, &CrossPointSettings::refreshAction,
-                                {StrId::STR_REFRESH_ACTION_FULL, StrId::STR_REFRESH_ACTION_BW_REINFORCEMENT},
-                                "refreshAction", StrId::STR_DISP_EINK));
-  v.push_back(
-      SettingInfo::Enum(StrId::STR_REFRESH_SCREEN_MODE, &CrossPointSettings::refreshScreenMode,
-                        {StrId::STR_REFRESH_MODE_FAST, StrId::STR_REFRESH_MODE_HALF, StrId::STR_REFRESH_MODE_FULL},
-                        "refreshScreenMode", StrId::STR_DISP_EINK));
+  v.push_back(SettingInfo::Enum(StrId::STR_SCREEN_CHANGE_CLEAN, &CrossPointSettings::screenChangeClean,
+                                {StrId::STR_STATE_OFF, StrId::STR_NIGHT_ONLY, StrId::STR_ALWAYS}, "screenChangeClean",
+                                StrId::STR_DISP_EINK));
+  v.push_back(SettingInfo::Enum(StrId::STR_REFRESH_SCREEN_MODE, &CrossPointSettings::refreshScreenMode,
+                                {StrId::STR_REFRESH_MODE_HALF, StrId::STR_REFRESH_MODE_FULL}, "refreshScreenModeV2",
+                                StrId::STR_DISP_EINK));
   v.push_back(SettingInfo::Toggle(StrId::STR_SUNLIGHT_FADING_FIX, &CrossPointSettings::fadingFix, "fadingFix",
                                   StrId::STR_DISP_EINK));
   v.push_back(SettingInfo::Enum(StrId::STR_HIDE_BATTERY, &CrossPointSettings::hideBatteryPercentage,

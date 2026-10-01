@@ -138,9 +138,9 @@ void DictionaryLookupController::setNotFound() {
   notFoundShownMs_ = millis();
   // A miss never opens the definition, so nothing else drives the "Looking up" box's
   // pixels again and its under-developed black is left to relax into the frame below.
-  // Only in night mode, and only when the box was actually drawn -- this cannot put the
-  // flash back on the dictionary-switch path, which finds an entry and never lands here.
-  if (lookupToastDrawn_ && SETTINGS.screenInverted) {
+  // Only when the box was actually drawn -- this cannot put the flash back on the
+  // dictionary-switch path, which finds an entry and never lands here.
+  if (lookupToastDrawn_ && SETTINGS.cleanOnScreenChange()) {
     renderer.promoteNextRefresh(HalDisplay::SCRUB_REFRESH, "dict-miss");
   }
   lookupToastDrawn_ = false;

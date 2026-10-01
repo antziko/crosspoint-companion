@@ -83,9 +83,9 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
                           CrossPointSettings::REFRESH_FREQUENCY_COUNT - 1),
     persisted::enumerated("nightRefreshFrequency", &CrossPointSettings::nightRefreshFrequency,
                           CrossPointSettings::NIGHT_REFRESH_FREQUENCY_COUNT - 1),
-    persisted::enumerated("refreshAction", &CrossPointSettings::refreshAction,
-                          CrossPointSettings::REFRESH_ACTION_COUNT - 1),
-    persisted::enumerated("refreshScreenMode", &CrossPointSettings::refreshScreenMode,
+    persisted::enumerated("screenChangeClean", &CrossPointSettings::screenChangeClean,
+                          CrossPointSettings::SCREEN_CHANGE_CLEAN_COUNT - 1),
+    persisted::enumerated("refreshScreenModeV2", &CrossPointSettings::refreshScreenMode,
                           CrossPointSettings::REFRESH_SCREEN_MODE_COUNT - 1),
     persisted::toggle("fadingFix", &CrossPointSettings::fadingFix),
 

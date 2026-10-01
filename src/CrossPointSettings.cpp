@@ -242,6 +242,12 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
     }
   }
 
+  // refreshScreenMode was FAST/HALF/FULL. FAST cleared nothing, so it folds onto HALF.
+  if (doc["refreshScreenModeV2"].isNull() && !doc["refreshScreenMode"].isNull()) {
+    s.refreshScreenMode = (doc["refreshScreenMode"] | (uint8_t)1) == 2 ? RSM_FULL : RSM_HALF;
+    needsResave = true;
+  }
+
   if (doc["sleepTimeoutMinutes"].isNull() && !doc["sleepTimeout"].isNull()) {
     const uint8_t legacyValue =
         clamp(doc["sleepTimeout"] | (uint8_t)SLEEP_10_MIN, SLEEP_TIMEOUT_COUNT, (uint8_t)SLEEP_10_MIN);
