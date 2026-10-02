@@ -108,6 +108,25 @@ void logSleepEntry(const GfxRenderer& renderer, const bool fromTimeout, const bo
                   renderer.panelRailsUp() ? 1 : 0);
 }
 
+// X3 and X4: drive the outgoing frame's negative before the clean. The UC8253 Half and FAST banks
+// push a pixel that keeps its value further the same way (black blacker, white whiter), so a page
+// shown again and again leaves a text-shaped bias. The clean below cannot remove it: its black and
+// white phases push every pixel equally. Half passes of the negative push the text and the ground
+// the other way. The SSD1677 runs OTP waveforms whose balance cannot be read, so it gets the same
+// passes on trial, one at a time: its Half is the full-strength OTP waveform (~1.9 s, against
+// ~0.75 s on the X3). Runs before setInverted(false), so inverting the buffer under the driver's own
+// inversion still puts the negative of whatever the glass shows, in either polarity.
+void driveNegative(const GfxRenderer& renderer) {
+  const auto ctrl = BoardConfig::ACTIVE.displayController;
+  if (ctrl != BoardConfig::DisplayController::UC8253 && ctrl != BoardConfig::DisplayController::SSD1677) return;
+  const uint8_t passes = ctrl == BoardConfig::DisplayController::UC8253 ? 2 : 1;
+  if (!renderer.hasFrameBuffer() || renderer.frameInkPercent() == 0) return;
+  const unsigned long startMs = millis();
+  renderer.invertScreen();
+  for (uint8_t i = 0; i < passes; i++) renderer.displayBuffer(HalDisplay::SCRUB_REFRESH);
+  SdDebugLog::log("SLP", "negative passes=%u ms=%lu", static_cast<unsigned>(passes), millis() - startMs);
+}
+
 }  // namespace
 
 void SleepActivity::onEnter() {
@@ -148,6 +167,7 @@ void SleepActivity::onEnter() {
   // night-mode page sleeps in night polarity and the moon inverts with it at
   // transfer, like any other draw. Clearing inversion first pushed a night page out
   // at normal polarity -- the whole screen flipped as the device went to sleep.
+  driveNegative(renderer);
   display.setInverted(false);
 
   // Blank the framebuffer before the popup, and never draw the popup over whatever was on it.
@@ -195,12 +215,21 @@ void SleepActivity::onEnter() {
   // AFTER the clean, during the unpowered hold -- there is no image on the glass for a larger dose
   // to remove. Cleaning at every sleep is still worth its ~3 s; cleaning harder is not, and the
   // difference is ~6 s on every single sleep plus the panel wear.
+  //
+  // The exception is a heavy session: hundreds of FAST paints since the last clean (a page held
+  // through a long word-select scan reached 201 on X3) leave residue one cycle did not clear on
+  // that panel, so those sleeps get a second cycle. paintCount() counts since the last
+  // deepCleanPanel, i.e. since the previous sleep.
   static constexpr uint8_t kSleepDeepCleanCycles = 1;
-  const unsigned long cleanMs = renderer.deepCleanPanel(kSleepDeepCleanCycles);
+  static constexpr uint16_t kHeavySessionFastPaints = 150;
+  const uint8_t cycles = renderer.paintCount(HalDisplay::FAST_REFRESH) >= kHeavySessionFastPaints
+                             ? kSleepDeepCleanCycles + 1
+                             : kSleepDeepCleanCycles;
+  const unsigned long cleanMs = renderer.deepCleanPanel(cycles);
   // Not force-enabled like the manual refresh's line: this runs on every sleep, and forcing an
   // SD write each time would cost more than the diagnostic is worth. Visible with SD Card
   // Logging on, which is when we are measuring anyway.
-  SdDebugLog::log("SLP", "sleep deepclean cycles=%u ms=%lu", static_cast<unsigned>(kSleepDeepCleanCycles), cleanMs);
+  SdDebugLog::log("SLP", "sleep deepclean cycles=%u ms=%lu", static_cast<unsigned>(cycles), cleanMs);
 
   // Hand the SD glyph arenas and the decompressor cache back before the sleep screens
   // run. The image paths below (custom bitmap, PNG wallpaper, book cover) each want a
