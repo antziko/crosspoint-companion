@@ -185,37 +185,43 @@ std::vector<Hyphenator::BreakInfo> hangulLineEndBreaks(const std::string& word) 
   return breaks;
 }
 
+// Two passes over the text, counting then filling, instead of buffering every codepoint: a
+// (codepoint, offset) array reserved per BYTE was ~8x the result and aborted on the reader's
+// fragmented heap (5416 B for a 677-byte paragraph). The result is reserved exactly.
 std::vector<size_t> cjkCharacterBreakByteOffsets(const std::string& text) {
-  struct CodepointBoundary {
-    uint32_t cp;
-    size_t endOffset;
+  const auto* const start = reinterpret_cast<const unsigned char*>(text.c_str());
+  bool hasCjkBreakable = false;
+  size_t breakCount = 0;
+
+  // out == nullptr counts; otherwise appends each break offset.
+  const auto walk = [&](std::vector<size_t>* out) {
+    const auto* ptr = start;
+    uint32_t prev = 0;
+    size_t prevEnd = 0;
+    bool havePrev = false;
+    while (*ptr) {
+      const uint32_t cp = utf8NextCodepoint(&ptr);
+      if (cp == 0) break;
+      if (!out && utf8IsCjkBreakable(cp)) hasCjkBreakable = true;
+      if (havePrev && hasCjkBreakOpportunityBetween(prev, cp)) {
+        if (out) {
+          out->push_back(prevEnd);
+        } else {
+          ++breakCount;
+        }
+      }
+      prev = cp;
+      prevEnd = static_cast<size_t>(ptr - start);
+      havePrev = true;
+    }
   };
 
-  std::vector<CodepointBoundary> codepoints;
-  codepoints.reserve(text.size());
-  bool hasCjkBreakable = false;
-
-  const auto* ptr = reinterpret_cast<const unsigned char*>(text.c_str());
-  const auto* const start = ptr;
-  while (*ptr) {
-    const uint32_t cp = utf8NextCodepoint(&ptr);
-    if (cp == 0) break;
-    if (utf8IsCjkBreakable(cp)) {
-      hasCjkBreakable = true;
-    }
-    codepoints.push_back({cp, static_cast<size_t>(ptr - start)});
-  }
-
-  if (!hasCjkBreakable || codepoints.size() < 2) return {};
+  walk(nullptr);
+  if (!hasCjkBreakable || breakCount == 0) return {};
 
   std::vector<size_t> allowedOffsets;
-  allowedOffsets.reserve(codepoints.size() - 1);
-  for (size_t i = 0; i + 1 < codepoints.size(); ++i) {
-    const uint32_t current = codepoints[i].cp;
-    const uint32_t next = codepoints[i + 1].cp;
-    if (!hasCjkBreakOpportunityBetween(current, next)) continue;
-    allowedOffsets.push_back(codepoints[i].endOffset);
-  }
+  allowedOffsets.reserve(breakCount);
+  walk(&allowedOffsets);
   return allowedOffsets;
 }
 
