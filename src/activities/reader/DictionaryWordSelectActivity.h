@@ -385,6 +385,9 @@ class DictionaryWordSelectActivity final : public Activity {
   // Returns true when it scrubbed, which the caller records in the render log: a relocation
   // frame costs roughly twice a plain one, so the two must stay distinguishable there.
   bool restoreVacatedGlossStrip();
+  // Promotes every Word Select Clean-th repaint to a scrub (see the .cpp).
+  void countRepaint(bool scrubbed);
+  uint8_t repaintsSinceClean_ = 0;
 
   // Clear `height` pixels of the box column at `y` and re-render the page elements that
   // intersect it. Over-inclusive by a line either side: redrawing a line that is already

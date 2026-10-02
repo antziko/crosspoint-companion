@@ -226,7 +226,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   //
   // Derived, not guessed: 102 push_back sites below, and the two shortPwrBtn branches never
   // both compile, so at most 101 rows on any board. 108 keeps headroom for the next few rows.
-  constexpr size_t kSettingCount = 108;
+  constexpr size_t kSettingCount = 109;
   v.reserve(kSettingCount);
 
   // --- Display ---
@@ -276,6 +276,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   v.push_back(SettingInfo::Enum(StrId::STR_SCREEN_CHANGE_CLEAN, &CrossPointSettings::screenChangeClean,
                                 {StrId::STR_STATE_OFF, StrId::STR_NIGHT_ONLY, StrId::STR_ALWAYS}, "screenChangeClean",
                                 StrId::STR_DISP_EINK));
+  v.push_back(SettingInfo::Enum(StrId::STR_WORD_SELECT_CLEAN, &CrossPointSettings::wordSelectClean,
+                                {StrId::STR_LOOKUPS_5, StrId::STR_LOOKUPS_8, StrId::STR_LOOKUPS_15,
+                                 StrId::STR_LOOKUPS_30, StrId::STR_PAGES_NEVER},
+                                "wordSelectClean", StrId::STR_DISP_EINK));
   v.push_back(SettingInfo::Enum(StrId::STR_REFRESH_SCREEN_MODE, &CrossPointSettings::refreshScreenMode,
                                 {StrId::STR_REFRESH_MODE_HALF, StrId::STR_REFRESH_MODE_FULL}, "refreshScreenModeV2",
                                 StrId::STR_DISP_EINK));

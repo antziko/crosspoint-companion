@@ -1667,6 +1667,16 @@ bool DictionaryWordSelectActivity::stripHasImage(int y, int height) const {
   return false;
 }
 
+// Every word-select repaint is FAST and the page itself stays on the glass, so a long scan over one
+// page stacks FAST residue that the reader's page-turn cadence never counts. Collapse it once every
+// Word Select Clean repaints; a relocation scrub already did, so it restarts the count.
+void DictionaryWordSelectActivity::countRepaint(const bool scrubbed) {
+  const uint8_t every = SETTINGS.wordSelectCleanEvery();
+  if (!scrubbed && (every == 0 || ++repaintsSinceClean_ < every)) return;
+  if (!scrubbed) renderer.promoteNextRefresh(HalDisplay::SCRUB_REFRESH, "dws-repaints");
+  repaintsSinceClean_ = 0;
+}
+
 bool DictionaryWordSelectActivity::restoreVacatedGlossStrip() {
   if (!gloss_ || gloss_->drawnY == kGlossNotDrawn) return false;
   if (gloss_->place && gloss_->y == gloss_->drawnY) return false;  // parked — the common case
@@ -1819,6 +1829,7 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
       // wired up here. The savings come from skipping page->render, which dominates the
       // pre-optimization cost; the full push at the end is a hardware floor (~444ms).
       HangTrace::mark(HangTrace::Render, HangTrace::DwsDiffDisplay);
+      countRepaint(relocationScrubbed);
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
       HangTrace::mark(HangTrace::Render, HangTrace::DwsDone);
       // One line per cursor move. This is the path that decides how long "the user finding
@@ -1877,6 +1888,7 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
       drawGloss();
       const auto labels = mappedInput.mapLabels(backHintLabel(), confirmHintLabel(), "", "");
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+      countRepaint(false);
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
       // The cheap entry: the caller left the page in the framebuffer, so this skips BOTH page
       // renders. Seeing this line instead of "render full" means entry cost is already near the
@@ -1952,6 +1964,7 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
   const auto labels = mappedInput.mapLabels(backHintLabel(), confirmHintLabel(), "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   HangTrace::mark(HangTrace::Render, HangTrace::DwsDisplay);
+  countRepaint(false);
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);
   HangTrace::mark(HangTrace::Render, HangTrace::DwsDone);
   const unsigned long tDisplay = millis();

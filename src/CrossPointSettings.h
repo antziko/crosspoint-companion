@@ -204,15 +204,18 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
 
   // When the first frame of a new screen is driven with the scrub instead of FAST
   // (ActivityManager::armEntryScrub, plus the dictionary's dict-exit / dict-miss scrubs).
-  // A FAST screen change leaves the previous screen behind; the scrub erases it. The
-  // default is per controller (main.cpp, before the settings load): ALWAYS where the
-  // scrub does not flash (UC8253 X3), NIGHT elsewhere, where it is a full-panel flash.
+  // A FAST screen change leaves the previous screen behind; the scrub erases it. NIGHT by
+  // default on every board: X4/X4 Pro scrubs flash, and the UC8253 X3's Half bank pushes
+  // unchanged pixels further the same way, so frequent day-mode scrubs build a ghost there.
   enum SCREEN_CHANGE_CLEAN {
     SCREEN_CLEAN_OFF = 0,
     SCREEN_CLEAN_NIGHT = 1,
     SCREEN_CLEAN_ALWAYS = 2,
     SCREEN_CHANGE_CLEAN_COUNT
   };
+  // Word select scrubs every Nth repaint: its page and a parked gloss box stay on the glass while
+  // every lookup repaints FAST around them.
+  enum WORD_SELECT_CLEAN { WSC_5 = 0, WSC_8 = 1, WSC_15 = 2, WSC_30 = 3, WSC_NEVER = 4, WORD_SELECT_CLEAN_COUNT };
 
   // pagesUntilFullRefresh sentinels (negative so they never collide with a count):
   static constexpr int REFRESH_COUNTDOWN_DISABLED = -1;    // "Never" — no periodic maintenance
@@ -513,8 +516,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t refreshFrequency = REFRESH_15;
   // Refresh frequency used instead while night mode is on (default 5 pages)
   uint8_t nightRefreshFrequency = NIGHT_REFRESH_5;
-  // Scrub the first frame of a new screen (seeded per controller in main.cpp)
+  // Scrub the first frame of a new screen
   uint8_t screenChangeClean = SCREEN_CLEAN_NIGHT;
+  // Word-select repaints between scrubs
+  uint8_t wordSelectClean = WSC_30;
   // Manual "Refresh Screen" clear mode (default HALF: the only single pass that scrubs)
   uint8_t refreshScreenMode = RSM_HALF;
   uint8_t hyphenationEnabled = 0;
@@ -819,6 +824,11 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Whether a screen change should be scrubbed right now, per screenChangeClean and night mode.
   bool cleanOnScreenChange() const {
     return screenChangeClean == SCREEN_CLEAN_ALWAYS || (screenChangeClean == SCREEN_CLEAN_NIGHT && screenInverted);
+  }
+  // Word-select repaints between scrubs; 0 = never.
+  uint8_t wordSelectCleanEvery() const {
+    static constexpr uint8_t kEvery[WORD_SELECT_CLEAN_COUNT] = {5, 8, 15, 30, 0};
+    return wordSelectClean < WORD_SELECT_CLEAN_COUNT ? kEvery[wordSelectClean] : 30;
   }
 };
 

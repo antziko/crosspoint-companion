@@ -598,12 +598,6 @@ void setup() {
   if (gpio.hasTouch()) {
     SETTINGS.readerMenuStyle = CrossPointSettings::READER_MENU_TOOLBAR;
   }
-  // Clean on Screen Change defaults to Always only where the scrub does not flash: the UC8253
-  // X3 drives just the changed pixels (Uc8253X3Driver::displayStart). Every other controller's
-  // scrub is a full-panel flash, so they default to night mode only. Same seed-before-load rule.
-  if (BoardConfig::ACTIVE.displayController == BoardConfig::DisplayController::UC8253) {
-    SETTINGS.screenChangeClean = CrossPointSettings::SCREEN_CLEAN_ALWAYS;
-  }
   SETTINGS.loadFromFile();
   // Push the saved timezone's POSIX rule into the clock (migrating the legacy
   // UTC-offset setting on first boot after the update).
