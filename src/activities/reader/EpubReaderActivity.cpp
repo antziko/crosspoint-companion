@@ -4038,7 +4038,7 @@ void EpubReaderActivity::renderStatusBar() const {
 
 namespace {
 constexpr StrId kTextRowNames[] = {StrId::STR_FONT, StrId::STR_FONT_SIZE, StrId::STR_LINE_SPACING,
-                                   StrId::STR_PARA_ALIGNMENT, StrId::STR_FOCUS_READING};
+                                   StrId::STR_PARA_ALIGNMENT, StrId::STR_FOCUS_READING, StrId::STR_WORD_SELECT_BUTTONS};
 constexpr StrId kSpacingIds[] = {StrId::STR_TIGHT,     StrId::STR_NORMAL, StrId::STR_RELAXED,
                                  StrId::STR_SEMI_WIDE, StrId::STR_WIDE,   StrId::STR_EXTRA_WIDE};
 constexpr StrId kAlignIds[] = {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, StrId::STR_CENTER, StrId::STR_ALIGN_RIGHT,
@@ -4086,6 +4086,9 @@ std::string EpubReaderActivity::textRowValue(int row) const {
       return I18N.get(kAlignIds[ov.paragraphAlignment % CrossPointSettings::PARAGRAPH_ALIGNMENT_COUNT]);
     case 4:
       return SETTINGS.focusReadingEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+    case 5:
+      // Names the pair that steps word by word; the other pair moves between rows.
+      return ov.swapWordSelectAxes ? tr(STR_WORD_SELECT_SIDE) : tr(STR_WORD_SELECT_FRONT);
     default:
       return "";
   }
@@ -4479,6 +4482,12 @@ void EpubReaderActivity::handleOverlayInput() {
         // Focus Reading is a genuine on/off: a tap toggles and applies live.
         SETTINGS.focusReadingEnabled = SETTINGS.focusReadingEnabled ? 0 : 1;
         applyTextSettingLive();
+      } else if (panelIndex == 5) {
+        // Word Select Buttons only remaps input: persist and repaint the panel, no re-layout.
+        auto ov = SETTINGS.getReaderOverride();
+        ov.swapWordSelectAxes = ov.swapWordSelectAxes ? 0 : 1;
+        commitBookOverride(ov);
+        fastRedraw();
       } else {
         // Enum rows open the Settings-style option picker.
         showTextRowPopup(panelIndex);
