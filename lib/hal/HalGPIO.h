@@ -27,6 +27,7 @@
 #define BQ27220_SOC_REG 0x2C   // StateOfCharge() command code (%)
 #define BQ27220_CUR_REG 0x0C   // Current() command code (signed mA)
 #define BQ27220_VOLT_REG 0x08  // Voltage() command code (mV)
+#define BQ27220_TEMP_REG 0x06  // Temperature() command code (0.1 K)
 
 // Analog DS3231 RTC I2C
 #define I2C_ADDR_DS3231 0x68  // RTC I2C address
@@ -169,6 +170,10 @@ class HalGPIO {
   // so all sleep paths share the one complete sleep routine.
   // Should only be called when wakeup reason is PowerButton.
   bool verifyPowerButtonWakeup();
+
+  // Battery gauge temperature in 0.1 degC, the closest reading to the panel's (the X3 panel
+  // driver reads none). X3 only; false on other boards or a failed I2C read.
+  bool readBatteryTempDeciC(int16_t& out) const;
 
   // Check if USB is connected
   bool isUsbConnected() const;

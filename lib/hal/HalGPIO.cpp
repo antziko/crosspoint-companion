@@ -224,6 +224,14 @@ void HalGPIO::pollUsbState() {
 
 bool HalGPIO::wasUsbStateChanged() const { return usbStateChanged; }
 
+bool HalGPIO::readBatteryTempDeciC(int16_t& out) const {
+  if (!deviceIsX3()) return false;
+  uint16_t raw = 0;
+  if (!X3GPIO::readI2CReg16LE(I2C_ADDR_BQ27220, BQ27220_TEMP_REG, &raw)) return false;
+  out = static_cast<int16_t>(static_cast<int32_t>(raw) - 2732);
+  return true;
+}
+
 bool HalGPIO::isPressed(uint8_t buttonIndex) const {
   return buttonIndex <= BTN_POWER && (levelMask >> buttonIndex) & 1;
 }

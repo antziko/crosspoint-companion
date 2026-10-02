@@ -2213,6 +2213,25 @@ void GfxRenderer::notePaint(const HalDisplay::RefreshMode mode) const {
   if (idx < sizeof(paintCounts_) / sizeof(paintCounts_[0]) && paintCounts_[idx] != UINT16_MAX) {
     paintCounts_[idx]++;
   }
+  PanelDoseTrace::Kind kind = PanelDoseTrace::Fast;
+  switch (mode) {
+    case HalDisplay::SCRUB_REFRESH:
+      kind = PanelDoseTrace::Scrub;
+      break;
+    case HalDisplay::HALF_REFRESH:
+      kind = PanelDoseTrace::Half;
+      break;
+    case HalDisplay::FULL_REFRESH:
+      kind = PanelDoseTrace::Full;
+      break;
+    default:
+      break;
+  }
+  doseTrace_.notePaint(frameBuffer, panelWidthBytes, panelHeight, kind, railsMs());
+}
+
+void GfxRenderer::logDoseTrace(const char* why) const {
+  doseTrace_.dump(why, panelWidthBytes, panelHeight, static_cast<int>(orientation), railsMs());
 }
 
 unsigned long GfxRenderer::msSinceLastPaint() const { return lastPaintMs_ ? millis() - lastPaintMs_ : 0; }
@@ -2833,9 +2852,13 @@ size_t GfxRenderer::getBufferSize() const { return frameBufferSize; }
 
 void GfxRenderer::displayGrayscaleBase(HalDisplay::RefreshMode fallback) const {
   display.displayGrayscaleBase(fallback, fadingFix);
+  doseTrace_.noteGlobal(PanelDoseTrace::Gray);
 }
 
-void GfxRenderer::preconditionGrayscale() const { display.preconditionGrayscale(); }
+void GfxRenderer::preconditionGrayscale() const {
+  display.preconditionGrayscale();
+  doseTrace_.noteGlobal(PanelDoseTrace::Gray);
+}
 
 void GfxRenderer::preconditionGrayscale(int x, int y, int w, int h) const {
   if (w <= 0 || h <= 0) return;
@@ -2853,13 +2876,17 @@ void GfxRenderer::preconditionGrayscale(int x, int y, int w, int h) const {
   if (x1 < x0 || y1 < y0) return;
   display.preconditionGrayscale(static_cast<uint16_t>(x0), static_cast<uint16_t>(y0),
                                 static_cast<uint16_t>(x1 - x0 + 1), static_cast<uint16_t>(y1 - y0 + 1));
+  doseTrace_.noteGlobal(PanelDoseTrace::Gray);
 }
 
 void GfxRenderer::copyGrayscaleLsbBuffers() const { display.copyGrayscaleLsbBuffers(frameBuffer); }
 
 void GfxRenderer::copyGrayscaleMsbBuffers() const { display.copyGrayscaleMsbBuffers(frameBuffer); }
 
-void GfxRenderer::displayGrayBuffer() const { display.displayGrayBuffer(fadingFix); }
+void GfxRenderer::displayGrayBuffer() const {
+  display.displayGrayBuffer(fadingFix);
+  doseTrace_.noteGlobal(PanelDoseTrace::Gray);
+}
 
 void GfxRenderer::writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* scratch, int yStart, int numRows) const {
   // Guard the uint16_t casts below: a negative would wrap to a huge length.

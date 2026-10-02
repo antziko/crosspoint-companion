@@ -15,6 +15,8 @@
 #include <Xtc.h>
 #include <esp_random.h>
 
+#include <cstdlib>
+
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "SleepImageRender.h"
@@ -106,6 +108,13 @@ void logSleepEntry(const GfxRenderer& renderer, const bool fromTimeout, const bo
                   static_cast<unsigned>(renderer.paintCount(HalDisplay::SCRUB_REFRESH)));
   SdDebugLog::log("SLP", "rails ms=%lu parks=%u up=%d", renderer.railsMs(), static_cast<unsigned>(renderer.parkCount()),
                   renderer.panelRailsUp() ? 1 : 0);
+  // Waveforms under-drive when cold, and USB keeps the board powered through sleep.
+  int16_t tempDeciC = 0;
+  const bool haveTemp = gpio.readBatteryTempDeciC(tempDeciC);
+  SdDebugLog::log("SLP", "env tempC=%s%d.%d usb=%d", haveTemp ? "" : "na:", tempDeciC / 10, std::abs(tempDeciC % 10),
+                  gpio.isUsbConnected() ? 1 : 0);
+  // What each region of the outgoing frame sat through, before the negative and the clean add to it.
+  renderer.logDoseTrace("sleep");
 }
 
 // X3 and X4: drive the outgoing frame's negative before the clean. The UC8253 Half and FAST banks

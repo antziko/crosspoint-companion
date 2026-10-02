@@ -25,6 +25,7 @@ bool isEnabled();
 // true so pre-settings-load boot logging and TRACE_HEAP builds still emit; once
 // settings load it is set to the user's choice (default off).
 void setMasterEnabled(bool enabled);
+bool isMasterEnabled();
 
 // Delete the existing log (call when opening the browser to start a fresh trace).
 void clear();

@@ -30,6 +30,7 @@ constexpr size_t MAX_LOG_BYTES = 4 * 1024 * 1024;
 void setEnabled(bool enabled) { g_enabled = enabled; }
 bool isEnabled() { return g_enabled; }
 void setMasterEnabled(bool enabled) { g_masterEnabled = enabled; }
+bool isMasterEnabled() { return g_masterEnabled; }
 
 void clear() { Storage.remove(PATH); }
 

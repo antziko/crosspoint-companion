@@ -3,6 +3,8 @@
 #include <EpdFontFamily.h>
 #include <HalDisplay.h>
 
+#include "PanelDoseTrace.h"
+
 namespace BidiUtils {
 // Paragraph base direction for the Unicode BiDi algorithm (UAX#9).
 // AUTO: scan text for first strong directional character (P2/P3 rules)
@@ -72,6 +74,8 @@ class GfxRenderer {
   mutable unsigned long panelPoweredSinceMs_ = 0;
   mutable unsigned long railsMs_ = 0;
   mutable uint16_t parkCount_ = 0;
+  // Ghost diagnostics: what each tile's held content sat through (see PanelDoseTrace.h).
+  mutable PanelDoseTrace doseTrace_;
   uint8_t* frameBuffer = nullptr;
   uint16_t panelWidth = HalDisplay::DISPLAY_WIDTH;
   uint16_t panelHeight = HalDisplay::DISPLAY_HEIGHT;
@@ -361,6 +365,8 @@ class GfxRenderer {
   // Milliseconds the rails have been energised since the last deepCleanPanel, and how many times
   // they were parked over that span. Rails still up are included up to now.
   unsigned long railsMs() const;
+  // Writes the per-tile dose grids to the SD log (no-op unless SD logging was on).
+  void logDoseTrace(const char* why) const;
   uint16_t parkCount() const { return parkCount_; }
 
   void getOrientedViewableTRBL(int* outTop, int* outRight, int* outBottom, int* outLeft) const;

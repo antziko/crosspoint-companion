@@ -623,9 +623,12 @@ void setup() {
     const uint32_t nowS = static_cast<uint32_t>(time(nullptr));
     const bool traceWasEnabled = SdDebugLog::isEnabled();
     SdDebugLog::setEnabled(true);
-    SdDebugLog::log("SLP", "wake reason=%d dwellSec=%ld slept=%lu now=%lu", static_cast<int>(bootWakeupReason),
-                    static_cast<long>(nowS - sleepFrameEpochS), static_cast<unsigned long>(sleepFrameEpochS),
-                    static_cast<unsigned long>(nowS));
+    int16_t tempDeciC = 0;
+    const bool haveTemp = gpio.readBatteryTempDeciC(tempDeciC);
+    SdDebugLog::log("SLP", "wake reason=%d dwellSec=%ld slept=%lu now=%lu tempC=%s%d.%d usb=%d",
+                    static_cast<int>(bootWakeupReason), static_cast<long>(nowS - sleepFrameEpochS),
+                    static_cast<unsigned long>(sleepFrameEpochS), static_cast<unsigned long>(nowS),
+                    haveTemp ? "" : "na:", tempDeciC / 10, std::abs(tempDeciC % 10), gpio.isUsbConnected() ? 1 : 0);
     SdDebugLog::setEnabled(traceWasEnabled);
     sleepFrameEpochS = 0;
   }
