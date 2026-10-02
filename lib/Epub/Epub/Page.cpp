@@ -233,6 +233,14 @@ std::unique_ptr<Page> Page::deserialize(HalFile& file) {
     LOG_ERR("PGE", "Invalid footnote count %u", fnCount);
     return nullptr;
   }
+  // Footnotes and links are optional tap targets: when the heap cannot hold them, skip their
+  // records and still show the page (resize() would abort on OOM).
+  constexpr size_t FOOTNOTE_RECORD_BYTES = FOOTNOTE_NUMBER_LEN + FOOTNOTE_HREF_LEN;
+  if (!reserveNoThrow(page->footnotes, fnCount)) {
+    LOG_ERR("PGE", "OOM: skipping %u footnotes", fnCount);
+    if (!file.seekCur(static_cast<int64_t>(fnCount) * FOOTNOTE_RECORD_BYTES)) return nullptr;
+    fnCount = 0;
+  }
   page->footnotes.resize(fnCount);
   for (uint16_t i = 0; i < fnCount; i++) {
     auto& entry = page->footnotes[i];
@@ -250,6 +258,12 @@ std::unique_ptr<Page> Page::deserialize(HalFile& file) {
   if (linkCount > MAX_LINKS_PER_PAGE) {
     LOG_ERR("PGE", "Invalid link count %u", linkCount);
     return nullptr;
+  }
+  constexpr size_t LINK_RECORD_BYTES = sizeof(PageLink::href) + 4 * sizeof(int16_t);
+  if (!reserveNoThrow(page->links, linkCount)) {
+    LOG_ERR("PGE", "OOM: skipping %u links", linkCount);
+    if (!file.seekCur(static_cast<int64_t>(linkCount) * LINK_RECORD_BYTES)) return nullptr;
+    linkCount = 0;
   }
   page->links.resize(linkCount);
   for (uint16_t i = 0; i < linkCount; i++) {

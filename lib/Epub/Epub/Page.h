@@ -1,5 +1,6 @@
 #pragma once
 #include <HalStorage.h>
+#include <Memory.h>
 
 #include <algorithm>
 #include <cstring>
@@ -84,6 +85,9 @@ class Page {
 
   void addFootnote(const char* number, const char* href) {
     if (footnotes.size() >= MAX_FOOTNOTES_PER_PAGE) return;  // Cap per-page footnotes
+    // Entries are ~290 B, so a growth step needs several KB contiguous mid-parse; drop the
+    // footnote rather than abort when the heap cannot supply it.
+    if (!growForAppend(footnotes, MAX_FOOTNOTES_PER_PAGE)) return;
     FootnoteEntry entry;
     strncpy(entry.number, number, sizeof(entry.number) - 1);
     entry.number[sizeof(entry.number) - 1] = '\0';
@@ -100,6 +104,8 @@ class Page {
     if (hrefLen == 0 || hrefLen == sizeof(PageLink::href)) {
       return false;
     }
+    // Entries are ~264 B (16 -> 32 is an 8.4 KB block); dropping a tap target beats aborting.
+    if (!growForAppend(links, MAX_LINKS_PER_PAGE)) return false;
     links.emplace_back();
     auto& link = links.back();
     memcpy(link.href, href, hrefLen + 1);
@@ -108,6 +114,13 @@ class Page {
     link.width = width;
     link.height = height;
     return true;
+  }
+
+  // Ensures room for one more element without vector's aborting reallocation.
+  template <typename T>
+  static bool growForAppend(std::vector<T>& v, const size_t cap) {
+    if (v.size() < v.capacity()) return true;
+    return reserveNoThrow(v, std::min(cap, v.capacity() ? v.capacity() * 2 : size_t{4}));
   }
 
   void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset) const;
@@ -128,12 +141,11 @@ class Page {
   // (and the bookmark full-page light refresh) so tiny icons don't force a
   // HALF_REFRESH on the following page.
   bool hasLargeImages(int16_t minPx) const {
-    return std::any_of(elements.begin(), elements.end(),
-                       [minPx](const std::shared_ptr<PageElement>& el) {
-                         if (el->getTag() != TAG_PageImage) return false;
-                         const auto& img = static_cast<const PageImage&>(*el).getImageBlock();
-                         return img.getWidth() >= minPx && img.getHeight() >= minPx;
-                       });
+    return std::any_of(elements.begin(), elements.end(), [minPx](const std::shared_ptr<PageElement>& el) {
+      if (el->getTag() != TAG_PageImage) return false;
+      const auto& img = static_cast<const PageImage&>(*el).getImageBlock();
+      return img.getWidth() >= minPx && img.getHeight() >= minPx;
+    });
   }
 
   // True if any image on the page still needs decoding (upstream #1003: gates the
