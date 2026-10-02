@@ -204,6 +204,8 @@ void DictionaryWordSelectActivity::onEnter() {
   // After the word array and its text pool, never before: they are the big contiguous
   // requests, and the gloss is the optional extra.
   initGloss();
+  // With the gloss box up a pointed-at word is previewed in the box; a tap on it looks it up.
+  if (gloss_) autoLookupPending_ = false;
   // With the gloss box up the cursor is read along the text rather than dropped where the eyes
   // were, so the dwell band is ignored: resume where this page's last session left off, else
   // start at its first paragraph. A pointed-at word still wins.
@@ -780,7 +782,9 @@ void DictionaryWordSelectActivity::loop() {
   // Button boards (X3/X4) always step one frame at a time; a touch board only with the gloss box.
   const bool gateSteps = gloss_ || !mappedInput.hasTouch();
   const bool stepAllowed = !gateSteps || !stepFramePending_.load();
-  if (stepAllowed && navigator.handleNavigation(mappedInput, renderer, SETTINGS.getReaderSwapWordSelectAxes())) {
+  // A board with no front buttons walks the gloss box word by word on its side pair; rows are a touch away.
+  const bool swapAxes = SETTINGS.getReaderSwapWordSelectAxes() || (gloss_ && !mappedInput.hasFrontButtons());
+  if (stepAllowed && navigator.handleNavigation(mappedInput, renderer, swapAxes)) {
     if (gateSteps) stepFramePending_.store(true);
     HangTrace::mark(HangTrace::Loop, HangTrace::DwsLoopAuto);
     if (wasAuto) {
@@ -807,18 +811,37 @@ void DictionaryWordSelectActivity::loop() {
   // the cursor and a stray tap would silently move the anchor's far end. HighlightRange
   // instead RANGES by tapping -- first tap anchors, second tap ends and saves -- because a
   // touch-only board has no Confirm to long-press into multi-select with.
+  //
+  // With the gloss box up, Dictionary mode ranges too: a screen hold anchors a range the side
+  // buttons then grow, a tap inside it looks the phrase up, a tap outside drops it.
   HangTrace::mark(HangTrace::Loop, HangTrace::DwsLoopRest);
   const bool tapRanging = mode_ == Mode::HighlightRange;
   const bool autoRange = autoRangeActive();  // a card word picks like a single word
-  if (mappedInput.hasTouch() && (tapRanging || autoRange || !navigator.isMultiSelecting())) {
+  const bool glossRanging = gloss_ && mode_ == Mode::Dictionary;
+  if (mappedInput.hasTouch() && (tapRanging || autoRange || glossRanging || !navigator.isMultiSelecting())) {
     const int lineHeight = renderer.getLineHeight(SETTINGS.getReaderFontId());
     int tx = 0;
     int ty = 0;
+    // wasScreenLongPress swallows the rest of the contact, so the lift cannot also tap.
+    if (glossRanging && mappedInput.wasScreenLongPress(tx, ty)) {
+      const int hit = navigator.wordIndexAtPoint(tx, ty, lineHeight);
+      touchDownSeen_ = false;
+      if (hit >= 0) {
+        // Dropping any auto card word makes this range manual, so the side buttons grow it.
+        if (navigator.isMultiSelecting()) navigator.endMultiSelect();
+        autoLo_ = autoHi_ = -1;
+        navigator.beginMultiSelectAt(hit);
+        requestUpdate();
+      }
+      return;
+    }
     // Only before a range is open. renderHighlightDifferential declines in multi-select
     // (WordSelectNavigator.cpp), so a touch-down preview there would cost a full page
     // repaint for pixels the tap that follows is about to replace anyway.
     if ((autoRange || !navigator.isMultiSelecting()) && mappedInput.wasScreenTouchDown(tx, ty)) {
       const int hit = navigator.wordIndexAtPoint(tx, ty, lineHeight);
+      touchDownSeen_ = true;
+      touchDownWasSelected_ = hit >= 0 && isSelectedHit(hit);
       if (hit >= 0 && autoRange && (hit < autoLo_ || hit > autoHi_)) {
         navigator.endMultiSelect();
         autoLo_ = autoHi_ = -1;
@@ -831,7 +854,41 @@ void DictionaryWordSelectActivity::loop() {
     }
     if (mappedInput.wasScreenTapped(tx, ty)) {
       const int hit = navigator.wordIndexAtPoint(tx, ty, lineHeight);
+      // A quick tap can arrive with no touch-down edge, in which case the cursor never moved.
+      const bool wasSelected = touchDownSeen_ ? touchDownWasSelected_ : (hit >= 0 && isSelectedHit(hit));
+      touchDownSeen_ = false;
       if (hit >= 0) {
+        if (glossRanging && manualRangeActive()) {
+          const int anchor = navigator.getAnchorFlatIndex();
+          const int cursor = navigator.getCurrentFlatIndex();
+          const int lo = std::min(anchor, cursor);
+          const int hi = std::max(anchor, cursor);
+          navigator.endMultiSelect();
+          if (hit >= lo && hit <= hi) {
+            navigator.selectFlatIndex(hi);
+            controller.lookupOrPopup(navigator.buildPhrase(lo, hi));
+          } else {
+            navigator.selectFlatIndex(hit);
+            maybeAutoSelectCardWord();
+            requestUpdate();
+          }
+          return;
+        }
+        if (glossRanging && !wasSelected) {
+          // The touch-down edge has usually moved the cursor already; repaint only if this did.
+          bool moved = false;
+          if (autoRangeActive() && (hit < autoLo_ || hit > autoHi_)) {
+            navigator.endMultiSelect();
+            autoLo_ = autoHi_ = -1;
+            moved = true;
+          }
+          if (!autoRangeActive() && navigator.selectFlatIndex(hit)) {
+            maybeAutoSelectCardWord();
+            moved = true;
+          }
+          if (moved) requestUpdate();
+          return;
+        }
         if (mode_ == Mode::Dictionary) {
           // A tap inside the auto-selected card word looks the whole word up.
           if (autoRangeActive() && hit >= autoLo_ && hit <= autoHi_) {
@@ -861,6 +918,8 @@ void DictionaryWordSelectActivity::loop() {
         return;
       }
     }
+    // A contact that ended in a swipe or drag-off is not a tap: forget its touch-down verdict.
+    if (mappedInput.wasScreenTouchReleased()) touchDownSeen_ = false;
   }
 
   // An auto-selected card word is not a range the user opened, so Back leaves the screen as it
@@ -1708,6 +1767,8 @@ void DictionaryWordSelectActivity::drawGloss() {
 
   renderer.clearRect(gloss_->x, y, gloss_->width, gloss_->height);
   renderer.drawRect(gloss_->x, y, gloss_->width, gloss_->height, true);
+  // A 3 px frame says a range is open. It eats into kGlossPad only, so the layout is unchanged.
+  if (manualRangeActive()) renderer.drawRect(gloss_->x, y, gloss_->width, gloss_->height, 3, true);
 
   const int textX = gloss_->textX;
   int textY = y + kGlossFrame + kGlossPad;
@@ -1950,7 +2011,9 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
     snapshotPrimed = setup.has_value();
   }
   if (!snapshotPrimed) {
-    navigator.renderHighlight(renderer, lineHeight);
+    // A range's fixed end is drawn hollow, so even a one-word range reads differently from a
+    // selection. A range always takes this path: the differential one declines it.
+    navigator.renderHighlight(renderer, lineHeight, gloss_ && manualRangeActive());
   }
   const unsigned long tHighlight = millis();
 

@@ -28,6 +28,8 @@ class GfxRenderer {
     ++fillRectCallCount;
   }
 
+  void drawRect(int /*x*/, int /*y*/, int /*width*/, int /*height*/, int /*lineWidth*/, bool /*state*/) const {}
+
   void drawText(int /*fontId*/, int x, int y, const char* text, bool /*black*/ = true, uint8_t /*style*/ = 0,
                 BidiUtils::BidiBaseDir /*baseDir*/ = BidiUtils::BidiBaseDir::AUTO) const {
     if (drawCallCount < MAX_DRAW_CALLS) {

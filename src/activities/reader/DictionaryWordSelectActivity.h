@@ -348,6 +348,18 @@ class DictionaryWordSelectActivity final : public Activity {
   bool autoRangeActive() const {
     return autoLo_ >= 0 && navigator.isMultiSelecting() && navigator.getAnchorFlatIndex() == autoLo_;
   }
+  // Whether `hit` is what the screen already shows selected: the single cursor, or inside the
+  // auto-selected card word.
+  bool isSelectedHit(const int hit) const {
+    if (autoRangeActive()) return hit >= autoLo_ && hit <= autoHi_;
+    return !navigator.isMultiSelecting() && hit == navigator.getCurrentFlatIndex();
+  }
+  // A range the user opened (a screen hold or the Confirm hold), as opposed to an auto card word.
+  bool manualRangeActive() const { return navigator.isMultiSelecting() && !autoRangeActive(); }
+  // With the gloss box up a tap on an unselected word only selects it; a second tap looks it up.
+  // The touch-down edge moves the cursor before the tap arrives, so the verdict is taken there.
+  bool touchDownSeen_ = false;
+  bool touchDownWasSelected_ = false;
   // After a navigation step taken out of an auto range: settle the cursor as single-token select.
   void leaveAutoRange();
   // Select the card word under the cursor, if any. True when it did.

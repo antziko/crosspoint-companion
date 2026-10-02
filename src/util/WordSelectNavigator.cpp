@@ -688,15 +688,17 @@ void WordSelectNavigator::HighlightSnapshot::restore(GfxRenderer& renderer) cons
   renderer.writeFramebufferRegion(x_, y_, w_, h_, buf_);
 }
 
-void WordSelectNavigator::renderHighlight(const GfxRenderer& renderer, int lineHeight) const {
+void WordSelectNavigator::renderHighlight(const GfxRenderer& renderer, int lineHeight, const bool hollowAnchor) const {
   if (inMultiSelectMode) {
     const int cursorIdx = getCurrentFlatIndex();
     const int lo = std::min(anchorFlatIndex, cursorIdx);
     const int hi = std::max(anchorFlatIndex, cursorIdx);
     for (int i = lo; i <= hi; i++) {
-      drawSingleHighlight(renderer, lineHeight, i);
+      if (!hollowAnchor || i != anchorFlatIndex) drawSingleHighlight(renderer, lineHeight, i);
       drawContinuationsIfOutside(renderer, lineHeight, getWordAt(i), lo, hi);
     }
+    // Last, so a neighbour band's padding that reached into the anchor's cell is cleared.
+    if (hollowAnchor) drawHollowHighlight(renderer, lineHeight, anchorFlatIndex);
   } else {
     const int selIdx = getCurrentFlatIndex();
     if (selIdx < 0) return;
@@ -712,6 +714,17 @@ void WordSelectNavigator::drawSingleHighlight(const GfxRenderer& renderer, int l
   const Rect band = boundsForWord(wordIndex, lineHeight);
   renderer.fillRect(band.x, band.y, band.width, band.height, true);
   renderer.drawText(fontIdFor(*w), w->screenX, drawYFor(*w), getDisplay(*w), false, w->style);
+}
+
+void WordSelectNavigator::drawHollowHighlight(const GfxRenderer& renderer, int lineHeight, int wordIndex) const {
+  const auto* w = getWordAt(wordIndex);
+  if (!w) return;
+  const Rect band = boundsForWord(wordIndex, lineHeight);
+  const int x = w->screenX;
+  const int width = w->width;
+  renderer.fillRect(x, band.y, width, band.height, false);
+  renderer.drawText(fontIdFor(*w), w->screenX, drawYFor(*w), getDisplay(*w), true, w->style);
+  renderer.drawRect(x, band.y, width, band.height, 2, true);
 }
 
 void WordSelectNavigator::drawContinuationsIfOutside(const GfxRenderer& renderer, int lineHeight, const WordInfo* w,

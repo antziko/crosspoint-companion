@@ -240,7 +240,8 @@ class WordSelectNavigator {
   // Draw inverted highlight for selected word(s).  Uses WordInfo::fontId.
   // In multi-select: highlights the anchor..cursor range.
   // In single-select: highlights the cursor word (+ hyphenated continuation if any).
-  void renderHighlight(const GfxRenderer& renderer, int lineHeight) const;
+  // hollowAnchor draws a range's anchor as plain text boxed inside its own cell, not as a band.
+  void renderHighlight(const GfxRenderer& renderer, int lineHeight, bool hollowAnchor = false) const;
 
   // Compute the union of the previous and current highlight bounding rectangles,
   // padded by 2 px on every side to cover renderHighlight's fillRect border.
@@ -410,6 +411,9 @@ class WordSelectNavigator {
   // Single-word highlight draw. Used by both renderHighlight (for each word it
   // chooses to highlight) and renderHighlightDifferential.
   void drawSingleHighlight(const GfxRenderer& renderer, int lineHeight, int wordIndex) const;
+  // Plain text in a box kept inside the word's own advance, so edge-to-edge CJK neighbours are
+  // never touched. Vertically it spans the same rows as the band.
+  void drawHollowHighlight(const GfxRenderer& renderer, int lineHeight, int wordIndex) const;
 
   // Draw the hyphenated continuation partner(s) of w when they fall outside [lo, hi].
   // No-op when w is nullptr or w has no continuation links.
