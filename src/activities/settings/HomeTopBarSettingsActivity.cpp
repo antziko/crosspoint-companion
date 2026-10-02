@@ -103,17 +103,17 @@ void HomeTopBarSettingsActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
   const auto metrics = UITheme::getInstance().getMetrics();
-  const auto pageWidth = renderer.getScreenWidth();
-  const auto pageHeight = renderer.getScreenHeight();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_CUSTOMISE_TOP_BAR));
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_CUSTOMISE_TOP_BAR));
 
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 
-  listTouch_.record(Rect{0, contentTop, pageWidth, contentHeight}, ITEM_COUNT, selectedIndex);
+  const int contentTop = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int contentHeight = safe.y + safe.height - contentTop - metrics.verticalSpacing;
+
+  listTouch_.record(Rect{safe.x, contentTop, safe.width, contentHeight}, ITEM_COUNT, selectedIndex);
   GUI.drawList(
-      renderer, Rect{0, contentTop, pageWidth, contentHeight}, ITEM_COUNT, selectedIndex,
+      renderer, Rect{safe.x, contentTop, safe.width, contentHeight}, ITEM_COUNT, selectedIndex,
       [](int index) { return std::string(I18N.get(menuNames[index])); }, nullptr, nullptr,
       [](int index) -> std::string {
         switch (index) {

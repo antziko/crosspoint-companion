@@ -21,6 +21,11 @@
 #include "util/FlashcardCardFace.h"
 
 namespace {
+// TapBarRect carries the hint-safe area too (the header does not pull in the theme's Rect).
+Rect asRect(const auto& r) { return Rect{r.x, r.y, r.width, r.height}; }
+}  // namespace
+
+namespace {
 
 // Small, dependency-free PRNG for the session shuffle (avoids <random> bloat).
 uint32_t xorshift32(uint32_t& s) {
@@ -536,8 +541,6 @@ void FlashcardReviewActivity::render(RenderLock&&) {
   renderer.clearScreen();
   if (controller.render()) return;
 
-  const int pageWidth = renderer.getScreenWidth();
-  const int pageHeight = renderer.getScreenHeight();
   const auto& metrics = UITheme::getInstance().getMetrics();
 
   const int sessionTotal = static_cast<int>(session.size());
@@ -549,17 +552,21 @@ void FlashcardReviewActivity::render(RenderLock&&) {
     // Overview / summary: show the whole-deck card count alongside the title.
     snprintf(titleBuf, sizeof(titleBuf), "%s (%d)", tr(STR_FLASHCARDS_REVIEW), stats.total);
   }
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, titleBuf);
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), titleBuf);
 
+  // Everything below lays out across the area the button hints leave free, which is a side
+  // column in landscape; the render* helpers read it from here.
+  const Rect safeArea = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  contentArea_ = TapBarRect{safeArea.x, safeArea.y, safeArea.width, safeArea.height};
   const int contentTop = contentTopY();
   // The card face stops above the on-screen buttons where there are any; with none (button
   // boards) this is the hint strip's top edge, exactly as before.
   const TapBarRect bar = tapBarRect();
-  const int contentBottom = bar.height > 0 ? bar.y - metrics.verticalSpacing : pageHeight - metrics.buttonHintsHeight;
+  const int contentBottom = bar.height > 0 ? bar.y - metrics.verticalSpacing : contentArea_.y + contentArea_.height;
 
   if (stats.total == 0) {
     const int midY = contentTop + (contentBottom - contentTop) / 2;
-    renderer.drawCenteredText(UI_10_FONT_ID, midY, tr(STR_FLASHCARDS_EMPTY));
+    UITheme::drawCenteredText(renderer, asRect(contentArea_), UI_10_FONT_ID, midY, tr(STR_FLASHCARDS_EMPTY));
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     displayList();
@@ -568,19 +575,19 @@ void FlashcardReviewActivity::render(RenderLock&&) {
 
   switch (phase) {
     case Phase::Overview:
-      renderOverview(contentTop, contentBottom, pageWidth);
+      renderOverview(contentTop, contentBottom, contentArea_.width);
       break;
     case Phase::Front:
-      renderFront(contentTop, contentBottom, pageWidth);
+      renderFront(contentTop, contentBottom, contentArea_.width);
       break;
     case Phase::Revealed:
-      renderRevealed(contentTop, contentBottom, pageWidth);
+      renderRevealed(contentTop, contentBottom, contentArea_.width);
       break;
     case Phase::AwaitingGrade:
-      renderAwaitingGrade(contentTop, contentBottom, pageWidth);
+      renderAwaitingGrade(contentTop, contentBottom, contentArea_.width);
       break;
     case Phase::Summary:
-      renderSummary(contentTop, contentBottom, pageWidth);
+      renderSummary(contentTop, contentBottom, contentArea_.width);
       break;
   }
   drawTapBar();
@@ -589,7 +596,8 @@ void FlashcardReviewActivity::render(RenderLock&&) {
 
 int FlashcardReviewActivity::contentTopY() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  return metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  return UITheme::getInstance().getScreenSafeArea(renderer, true, false).y + metrics.topPadding + metrics.headerHeight +
+         metrics.verticalSpacing;
 }
 
 int FlashcardReviewActivity::buildTapActions(Tap* actions, const char** labels) {
@@ -648,8 +656,9 @@ FlashcardReviewActivity::TapBarRect FlashcardReviewActivity::tapBarRect() const 
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int height = renderer.getLineHeight(UI_10_FONT_ID) + TAP_BUTTON_PADDING_Y * 2;
   const int inset = metrics.contentSidePadding;
-  const int y = renderer.getScreenHeight() - metrics.buttonHintsHeight - metrics.verticalSpacing - height;
-  return TapBarRect{inset, y, renderer.getScreenWidth() - inset * 2, height};
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int y = safe.y + safe.height - metrics.verticalSpacing - height;
+  return TapBarRect{safe.x + inset, y, safe.width - inset * 2, height};
 }
 
 void FlashcardReviewActivity::drawTapBar() {
@@ -700,8 +709,9 @@ bool FlashcardReviewActivity::handleStyleTap() {
   // height is one text line, so the hit band is grown to a finger; the "Due N" line below
   // is a whole row plus two spacings away.
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const int left = metrics.contentSidePadding;
-  const int halfWidth = (renderer.getScreenWidth() - 2 * left) / 2;
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int left = safe.x + metrics.contentSidePadding;
+  const int halfWidth = (safe.width - 2 * metrics.contentSidePadding) / 2;
   const int boxTop = contentTopY() - 1;
   const int boxHeight = renderer.getLineHeight(UI_10_FONT_ID) + 2;
   constexpr int GROW = 8;
@@ -770,9 +780,9 @@ void FlashcardReviewActivity::runTapAction(const Tap action) {
 
 void FlashcardReviewActivity::renderOverview(int contentTop, int contentBottom, int pageWidth) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const int left = metrics.contentSidePadding;
+  const int left = contentArea_.x + metrics.contentSidePadding;
   const int rowH = metrics.listRowHeight;
-  const int countRight = pageWidth - metrics.contentSidePadding;
+  const int countRight = contentArea_.x + pageWidth - metrics.contentSidePadding;
 
   int y = contentTop;
 
@@ -783,7 +793,7 @@ void FlashcardReviewActivity::renderOverview(int contentTop, int contentBottom, 
   const int lh = renderer.getLineHeight(sf);
   const char* opt0 = tr(STR_FLASHCARD_STYLE_CLOZE);
   const char* opt1 = tr(STR_FLASHCARD_STYLE_WORD_CONTEXT);
-  const int halfW = (pageWidth - 2 * left) / 2;
+  const int halfW = (countRight - left) / 2;
 
   auto drawHalf = [&](const char* t, int boxX, bool sel) {
     if (sel) {
@@ -803,16 +813,16 @@ void FlashcardReviewActivity::renderOverview(int contentTop, int contentBottom, 
     // dropped the due filter, and stats.due counts only never-scheduled cards. Showing
     // "Due N" here would be a number that means nothing, so say what is actually going
     // on instead -- the session still works as a drill, it just records nothing.
-    renderer.drawCenteredText(UI_10_FONT_ID, y, tr(STR_FLASHCARD_NO_CLOCK));
+    UITheme::drawCenteredText(renderer, asRect(contentArea_), UI_10_FONT_ID, y, tr(STR_FLASHCARD_NO_CLOCK));
     y += lh;
-    renderer.drawCenteredText(SMALL_FONT_ID, y, tr(STR_FLASHCARD_NO_CLOCK_HINT));
+    UITheme::drawCenteredText(renderer, asRect(contentArea_), SMALL_FONT_ID, y, tr(STR_FLASHCARD_NO_CLOCK_HINT));
     y += rowH + metrics.verticalSpacing;
   } else {
     // Cards due for review right now -- the only "do this now" number; New/Mastered
     // are conveyed by the box ladder below. Same font (UI_10) as the progress row.
     char stat[48];
     snprintf(stat, sizeof(stat), "%s %d", tr(STR_FLASHCARD_STAT_DUE), stats.due);
-    renderer.drawCenteredText(UI_10_FONT_ID, y, stat);
+    UITheme::drawCenteredText(renderer, asRect(contentArea_), UI_10_FONT_ID, y, stat);
     y += rowH + metrics.verticalSpacing * 2;
   }
 
@@ -897,8 +907,8 @@ void FlashcardReviewActivity::renderFront(int contentTop, int contentBottom, int
   // Word+context shows the word; cloze hides it (masked excerpt + blank header).
   // Suspended review always shows the word (recall isn't being tested).
   const bool showWord = suspendedMode || cardStyle != CrossPointSettings::FLASHCARD_STYLE_CLOZE;
-  FlashcardCardFace::render(renderer, contentTop, contentBottom, pageWidth, card.word, card.excerpt, card.chapter,
-                            showWord, card.count);
+  FlashcardCardFace::render(renderer, contentTop, contentBottom, contentArea_.x, pageWidth, card.word, card.excerpt,
+                            card.chapter, showWord, card.count);
   drawSuspendHint(contentTop, contentBottom);
 
   // Suspended review: flip (read definition) + Prev/Next browsing + resume (Up).
@@ -916,7 +926,8 @@ void FlashcardReviewActivity::renderRevealed(int contentTop, int contentBottom, 
   // Reveal in place: same layout as the cloze front, but the word now shows (bold
   // header + filled, underlined in the excerpt) -- the only change is the blank
   // resolving, no vertical jump.
-  FlashcardCardFace::render(renderer, contentTop, contentBottom, pageWidth, card.word, card.excerpt, card.chapter,
+  FlashcardCardFace::render(renderer, contentTop, contentBottom, contentArea_.x, pageWidth, card.word, card.excerpt,
+                            card.chapter,
                             /*showWord=*/true, card.count);
   drawSuspendHint(contentTop, contentBottom, /*showNextHint=*/true);
 
@@ -925,8 +936,8 @@ void FlashcardReviewActivity::renderRevealed(int contentTop, int contentBottom, 
   char pick[48];
   snprintf(pick, sizeof(pick), "%s", pendingCorrect ? tr(STR_FLASHCARD_PASS) : tr(STR_FLASHCARD_FAIL));
   // Same size as the "next" side-button clue (SMALL_FONT_ID) drawn by drawSuspendHint.
-  renderer.drawCenteredText(SMALL_FONT_ID, contentBottom - metrics.listRowHeight * 2, pick, true,
-                            EpdFontFamily::ITALIC);
+  UITheme::drawCenteredText(renderer, asRect(contentArea_), SMALL_FONT_ID, contentBottom - metrics.listRowHeight * 2,
+                            pick, true, EpdFontFamily::ITALIC);
 
   // Left/Right re-pick the grade; Confirm flips to the definition. "Next" (commit +
   // advance) is the Down side button, clued top-right by drawSuspendHint above.
@@ -948,7 +959,7 @@ void FlashcardReviewActivity::drawSuspendHint(int contentTop, int contentBottom,
   // clued as a rocker. It has the X3's layout, and BaseTheme::drawSideButtonHints already
   // splits on exactly this predicate.
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const int leftX = metrics.contentSidePadding;
+  const int leftX = contentArea_.x + metrics.contentSidePadding;
   const bool stackedSideButtons = !gpio.hasEdgeSideButtons();
   // On a rocker board the DOWN-button clue sits at the bottom-right, aligned to the centered
   // "Missed / Got it" grade line (renderRevealed draws it at this same row). That
@@ -958,13 +969,13 @@ void FlashcardReviewActivity::drawSuspendHint(int contentTop, int contentBottom,
   auto place = [&](const char* text, bool isUpButton) {
     int x, ypos;
     if (stackedSideButtons) {
-      x = renderer.getScreenWidth() - metrics.contentSidePadding - renderer.getTextWidth(SMALL_FONT_ID, text);
+      x = contentArea_.x + contentArea_.width - metrics.contentSidePadding - renderer.getTextWidth(SMALL_FONT_ID, text);
       ypos = isUpButton ? contentTop : bottomY;
     } else {
       ypos = contentTop;
-      x = isUpButton
-              ? leftX
-              : renderer.getScreenWidth() - metrics.contentSidePadding - renderer.getTextWidth(SMALL_FONT_ID, text);
+      x = isUpButton ? leftX
+                     : contentArea_.x + contentArea_.width - metrics.contentSidePadding -
+                           renderer.getTextWidth(SMALL_FONT_ID, text);
     }
     renderer.drawText(SMALL_FONT_ID, x, ypos, text, true);
   };
@@ -980,7 +991,8 @@ void FlashcardReviewActivity::drawSuspendHint(int contentTop, int contentBottom,
 
 void FlashcardReviewActivity::renderAwaitingGrade(int contentTop, int contentBottom, int pageWidth) {
   // Back face viewed: same revealed card face (word shown, underlined in context).
-  FlashcardCardFace::render(renderer, contentTop, contentBottom, pageWidth, card.word, card.excerpt, card.chapter,
+  FlashcardCardFace::render(renderer, contentTop, contentBottom, contentArea_.x, pageWidth, card.word, card.excerpt,
+                            card.chapter,
                             /*showWord=*/true, card.count);
   drawSuspendHint(contentTop, contentBottom);
 
@@ -998,27 +1010,28 @@ void FlashcardReviewActivity::renderSummary(int contentTop, int contentBottom, i
 
   int y = contentTop + metrics.listRowHeight;
   char buf[64];
-  renderer.drawCenteredText(NOTOSERIF_16_FONT_ID, y, tr(STR_FLASHCARD_SUMMARY_TITLE), true, EpdFontFamily::BOLD);
+  UITheme::drawCenteredText(renderer, asRect(contentArea_), NOTOSERIF_16_FONT_ID, y, tr(STR_FLASHCARD_SUMMARY_TITLE),
+                            true, EpdFontFamily::BOLD);
   y += metrics.listRowHeight * 2;
 
   const int statFontId = uiScaleSpec().bodyFontId;
   if (suspendedMode) {
     // Suspended review has no grading tally -- only the restored count is meaningful.
     snprintf(buf, sizeof(buf), "%s: %d", tr(STR_FLASHCARD_SUMMARY_UNSUSPENDED), suspended);
-    renderer.drawCenteredText(statFontId, y, buf);
+    UITheme::drawCenteredText(renderer, asRect(contentArea_), statFontId, y, buf);
   } else {
     snprintf(buf, sizeof(buf), "%s: %d", tr(STR_FLASHCARD_SUMMARY_REVIEWED), reviewed);
-    renderer.drawCenteredText(statFontId, y, buf);
+    UITheme::drawCenteredText(renderer, asRect(contentArea_), statFontId, y, buf);
     y += metrics.listRowHeight;
     snprintf(buf, sizeof(buf), "%s: %d", tr(STR_FLASHCARD_SUMMARY_CORRECT), correct);
-    renderer.drawCenteredText(statFontId, y, buf);
+    UITheme::drawCenteredText(renderer, asRect(contentArea_), statFontId, y, buf);
     y += metrics.listRowHeight;
     snprintf(buf, sizeof(buf), "%s: %d", tr(STR_FLASHCARD_SUMMARY_MASTERED), mastered);
-    renderer.drawCenteredText(statFontId, y, buf);
+    UITheme::drawCenteredText(renderer, asRect(contentArea_), statFontId, y, buf);
     if (suspended > 0) {
       y += metrics.listRowHeight;
       snprintf(buf, sizeof(buf), "%s: %d", tr(STR_FLASHCARD_SUMMARY_SUSPENDED), suspended);
-      renderer.drawCenteredText(statFontId, y, buf);
+      UITheme::drawCenteredText(renderer, asRect(contentArea_), statFontId, y, buf);
     }
   }
 

@@ -1240,7 +1240,8 @@ void BaseTheme::fillPopupProgress(const GfxRenderer& renderer, const Rect& layou
 void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, const int currentPage,
                               const int pageCount, std::string title, const int paddingBottom, const int textYOffset,
                               const bool fillMargin, const bool isPageBookmarked, const bool isReturnMark,
-                              const bool isPageQuoted, const bool pageCountEstimated) const {
+                              const bool isPageQuoted, const bool pageCountEstimated, const int insetLeft,
+                              const int insetRight) const {
   // Hidden by the Home-key "Toggle Status Bar" gesture. The progress bar is exempt (see the
   // return below); everything else in the band is skipped, and getStatusBarHeight() hands the
   // band's strip to the page. The callers all clearScreen() before rendering the page, so no
@@ -1251,6 +1252,9 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
   int orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft;
   renderer.getOrientedViewableTRBL(&orientedMarginTop, &orientedMarginRight, &orientedMarginBottom,
                                    &orientedMarginLeft);
+  // Extra side room a caller reserves, e.g. the settings preview clearing a column of button hints.
+  orientedMarginLeft += insetLeft;
+  orientedMarginRight += insetRight;
 
   // Draw Progress Text
   const auto screenHeight = renderer.getScreenHeight();

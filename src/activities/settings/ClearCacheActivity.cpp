@@ -24,8 +24,8 @@ void ClearCacheActivity::onExit() { Activity::onExit(); }
 
 void ClearCacheActivity::render(RenderLock&&) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 
   renderer.clearScreen();
 
@@ -33,7 +33,7 @@ void ClearCacheActivity::render(RenderLock&&) {
   const bool repaginate = mode_ == Mode::RepaginateAll;
   const bool covers = mode_ == Mode::RebuildCovers;
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer),
                  prune        ? tr(STR_REMOVE_ORPHANED_CACHES)
                  : repaginate ? tr(STR_REPAGINATE_BOOKS)
                  : covers     ? tr(STR_REBUILD_COVERS)
@@ -42,19 +42,24 @@ void ClearCacheActivity::render(RenderLock&&) {
   if (state == WARNING) {
     // Clear-all, repaginate and rebuild-covers; prune previews via SCANNING/PREVIEW instead.
     if (covers) {
-      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 30, tr(STR_REBUILD_COVERS_WARNING_1), true);
-      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 10, tr(STR_REBUILD_COVERS_WARNING_2), true);
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, pageHeight / 2 - 30, tr(STR_REBUILD_COVERS_WARNING_1),
+                                true);
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, pageHeight / 2 + 10, tr(STR_REBUILD_COVERS_WARNING_2),
+                                true);
     } else if (repaginate) {
-      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 45, tr(STR_REPAGINATE_WARNING_1), true);
-      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 15, tr(STR_REPAGINATE_WARNING_2), true,
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, pageHeight / 2 - 45, tr(STR_REPAGINATE_WARNING_1), true);
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, pageHeight / 2 - 15, tr(STR_REPAGINATE_WARNING_2), true,
                                 EpdFontFamily::BOLD);
-      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 25, tr(STR_REPAGINATE_WARNING_3), true);
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, pageHeight / 2 + 25, tr(STR_REPAGINATE_WARNING_3), true);
     } else {
-      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 60, tr(STR_CLEAR_CACHE_WARNING_1), true);
-      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 30, tr(STR_CLEAR_CACHE_WARNING_2), true,
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, pageHeight / 2 - 60, tr(STR_CLEAR_CACHE_WARNING_1),
+                                true);
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, pageHeight / 2 - 30, tr(STR_CLEAR_CACHE_WARNING_2), true,
                                 EpdFontFamily::BOLD);
-      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 10, tr(STR_CLEAR_CACHE_WARNING_3), true);
-      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 30, tr(STR_CLEAR_CACHE_WARNING_4), true);
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, pageHeight / 2 + 10, tr(STR_CLEAR_CACHE_WARNING_3),
+                                true);
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, pageHeight / 2 + 30, tr(STR_CLEAR_CACHE_WARNING_4),
+                                true);
     }
 
     if (actionBar_.active()) {
@@ -68,14 +73,15 @@ void ClearCacheActivity::render(RenderLock&&) {
   }
 
   if (state == SCANNING) {
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_SCANNING_CACHES));
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, pageHeight / 2, tr(STR_SCANNING_CACHES));
     renderer.displayBuffer();
     return;
   }
 
   if (state == PREVIEW) {
     if (orphanDirs_.empty()) {
-      renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_NO_ORPHANED_CACHES), true, EpdFontFamily::BOLD);
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, pageHeight / 2, tr(STR_NO_ORPHANED_CACHES), true,
+                                EpdFontFamily::BOLD);
       const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
       renderer.displayBuffer();
@@ -83,8 +89,9 @@ void ClearCacheActivity::render(RenderLock&&) {
     }
     std::string foundText =
         std::to_string(static_cast<int>(orphanDirs_.size())) + " " + std::string(tr(STR_ORPHANED_CACHES_FOUND));
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 15, foundText.c_str(), true, EpdFontFamily::BOLD);
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 20, tr(STR_PRUNE_CACHE_WARNING_3), true);
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, pageHeight / 2 - 15, foundText.c_str(), true,
+                              EpdFontFamily::BOLD);
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, pageHeight / 2 + 20, tr(STR_PRUNE_CACHE_WARNING_3), true);
 
     if (actionBar_.active()) {
       const char* barLabels[] = {tr(STR_CANCEL), tr(STR_REMOVE_BUTTON)};
@@ -97,13 +104,13 @@ void ClearCacheActivity::render(RenderLock&&) {
   }
 
   if (state == CLEARING) {
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_CLEARING_CACHE));
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, pageHeight / 2, tr(STR_CLEARING_CACHE));
     renderer.displayBuffer();
     return;
   }
 
   if (state == SUCCESS) {
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 20,
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, pageHeight / 2 - 20,
                               prune        ? tr(STR_ORPHANS_REMOVED)
                               : repaginate ? tr(STR_PAGINATION_CLEARED)
                               : covers     ? tr(STR_COVERS_CLEARED)
@@ -113,7 +120,7 @@ void ClearCacheActivity::render(RenderLock&&) {
     if (failedCount > 0) {
       resultText += ", " + std::to_string(failedCount) + " " + std::string(tr(STR_FAILED_LOWER));
     }
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 10, resultText.c_str());
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, pageHeight / 2 + 10, resultText.c_str());
 
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
@@ -122,9 +129,9 @@ void ClearCacheActivity::render(RenderLock&&) {
   }
 
   if (state == FAILED) {
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 - 20, tr(STR_CLEAR_CACHE_FAILED), true,
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, pageHeight / 2 - 20, tr(STR_CLEAR_CACHE_FAILED), true,
                               EpdFontFamily::BOLD);
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 10, tr(STR_CHECK_SERIAL_OUTPUT));
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, pageHeight / 2 + 10, tr(STR_CHECK_SERIAL_OUTPUT));
 
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

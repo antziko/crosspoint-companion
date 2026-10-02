@@ -23,6 +23,7 @@
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
+#include "components/UiAppHelpers.h"
 #include "fontIds.h"
 #include "network/HttpDownloader.h"
 
@@ -947,9 +948,8 @@ void FontDownloadActivity::activateSelected() {
 
 void FontDownloadActivity::buildScreen(UiScreen& screen) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  // Content below the GUI.drawHeader band, above the button hints.
-  screen.setContentMargin(fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0,
-                                      static_cast<int16_t>(metrics.buttonHintsHeight), 0});
+  // Content below the header band, clear of the button hints in any orientation.
+  screen.setContentMargin(safeContentInsets(renderer, metrics.topPadding + metrics.headerHeight));
   screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
 
   if (state_ == FAMILY_LIST && filteredIndices_.empty()) {
@@ -1204,8 +1204,7 @@ void FontDownloadActivity::render(RenderLock&&) {
     renderer.drawCenteredText(UI_10_FONT_ID, metrics.topPadding + (metrics.headerHeight - lineHeight) / 2,
                               tr(STR_FONT_BROWSER), true, EpdFontFamily::BOLD);
   } else {
-    GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_FONT_BROWSER),
-                   headerSubtitle);
+    GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_FONT_BROWSER), headerSubtitle);
   }
 
   const auto contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;

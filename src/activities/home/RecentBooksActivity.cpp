@@ -1022,13 +1022,15 @@ void RecentBooksActivity::buildShelf(UiScreen& screen) {
 
 void RecentBooksActivity::buildScreen(UiScreen& screen) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  // Content below the GUI.drawHeader band, above the button hints -- except on
+  // Content below the header band, clear of the button hints in any orientation -- except on
   // the shelf, which draws no hints (drawFooter) and takes the strip as cover
   // height instead. Already 0 on a touch board: UITheme::getMetrics() zeroes
   // buttonHintsHeight whenever the panel has touch.
-  const auto bottomReserve = static_cast<int16_t>(isShelf() ? 0 : metrics.buttonHintsHeight);
-  screen.setContentMargin(
-      fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0, bottomReserve, 0});
+  if (isShelf()) {
+    screen.setContentMargin(fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0, 0, 0});
+  } else {
+    screen.setContentMargin(safeContentInsets(renderer, metrics.topPadding + metrics.headerHeight));
+  }
   // The shelf skips the theme's leading spacer too: the covers are their own
   // separation, and on a tall-header theme those pixels are a whole ladder rung.
   if (!isShelf()) screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));

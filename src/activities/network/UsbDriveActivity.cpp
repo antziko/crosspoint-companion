@@ -7,6 +7,7 @@
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
 #include "components/UITheme.h"
+#include "components/UiAppHelpers.h"
 
 namespace fui = freeink::ui;
 
@@ -90,8 +91,7 @@ void UsbDriveActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const int pageWidth = renderer.getScreenWidth();
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_USB_DRIVE));
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_USB_DRIVE));
 
   renderUi();
 
@@ -134,9 +134,10 @@ void UsbDriveActivity::buildDriveScreen(UiScreen& screen) const {
   }
 
   const auto& metrics = UITheme::getInstance().getMetrics();
-  screen.setContentMargin(fui::Insets{
-      static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), static_cast<int16_t>(metrics.contentSidePadding),
-      static_cast<int16_t>(metrics.buttonHintsHeight), static_cast<int16_t>(metrics.contentSidePadding)});
+  fui::Insets margin = safeContentInsets(renderer, metrics.topPadding + metrics.headerHeight);
+  margin.left = static_cast<int16_t>(margin.left + metrics.contentSidePadding);
+  margin.right = static_cast<int16_t>(margin.right + metrics.contentSidePadding);
+  screen.setContentMargin(margin);
 
   auto messageStyle = screen.theme().smallText;
   messageStyle.align = fui::TextAlign::Center;

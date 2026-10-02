@@ -15,10 +15,10 @@ class GfxRenderer;
 // reveal share one layout and the answer fills into place with no vertical jump.
 namespace FlashcardCardFace {
 
-// Render the card face into [contentTop, contentBottom) across `pageWidth`.
+// Render the card face into [contentTop, contentBottom) across [left, left + width).
 // `lookupCount` draws a small "xN" beside the word when > 1 (and the word is shown);
 // pass 1 (or 0) to omit it.
-void render(GfxRenderer& renderer, int contentTop, int contentBottom, int pageWidth, const std::string& word,
+void render(GfxRenderer& renderer, int contentTop, int contentBottom, int left, int width, const std::string& word,
             const std::string& excerpt, const std::string& chapter, bool showWord, uint32_t lookupCount = 1);
 
 }  // namespace FlashcardCardFace

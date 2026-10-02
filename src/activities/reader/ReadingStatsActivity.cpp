@@ -212,17 +212,19 @@ Rect ReadingStatsActivity::tabBarRect() const {
   // device (must match the render() condition or tabs and content drift apart).
   const int summaryLines = (stats && stats->remoteOtherSeconds > 0) ? SUMMARY_LINES + 1 : SUMMARY_LINES;
   const int summaryHeight = summaryLines * (renderer.getLineHeight(SMALL_FONT_ID) + 2);
-  const int y =
-      metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing + summaryHeight + metrics.verticalSpacing;
-  return Rect{0, y, renderer.getScreenWidth(), metrics.tabBarHeight};
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int y = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing + summaryHeight +
+                metrics.verticalSpacing;
+  return Rect{safe.x, y, safe.width, metrics.tabBarHeight};
 }
 
 Rect ReadingStatsActivity::contentRect() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect tabs = tabBarRect();
   const int top = tabs.y + tabs.height + metrics.verticalSpacing;
-  const int height = renderer.getScreenHeight() - top - metrics.buttonHintsHeight - metrics.verticalSpacing;
-  return Rect{0, top, renderer.getScreenWidth(), std::max(0, height)};
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int height = safe.y + safe.height - top - metrics.verticalSpacing;
+  return Rect{safe.x, top, safe.width, std::max(0, height)};
 }
 
 std::vector<TabInfo> ReadingStatsActivity::buildTabs() const {
@@ -411,14 +413,14 @@ void ReadingStatsActivity::loop() {
 void ReadingStatsActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
-  const int pageWidth = renderer.getScreenWidth();
   const auto& metrics = UITheme::getInstance().getMetrics();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_READING_STATS));
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_READING_STATS));
 
-  const int leftX = metrics.contentSidePadding;
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int leftX = safe.x + metrics.contentSidePadding;
   const int lineHeight = renderer.getLineHeight(SMALL_FONT_ID) + 2;
-  int y = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  int y = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
 
   // Total reading time (dated + undated merged — both X3 RTC and X4 SNTP now
   // date-stamp sessions, so the split is noise).

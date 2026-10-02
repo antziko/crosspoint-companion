@@ -227,8 +227,6 @@ void LookedUpWordsActivity::render(RenderLock&&) {
   renderer.clearScreen();
   if (controller.render()) return;
 
-  const int pageWidth = renderer.getScreenWidth();
-  const int pageHeight = renderer.getScreenHeight();
   const auto& metrics = UITheme::getInstance().getMetrics();
 
   // Same row count the nav uses (orientation-aware: drops the bottom button-hints
@@ -241,12 +239,14 @@ void LookedUpWordsActivity::render(RenderLock&&) {
   char titleBuf[64];
   snprintf(titleBuf, sizeof(titleBuf), tr(STR_LOOKUP_HIST_HEADER_FORMAT), tr(STR_LOOKUP_HISTORY),
            static_cast<int>(totalCount), curPage, totalPages);
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, titleBuf);
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), titleBuf);
 
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+
+  const int contentTop = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
 
   if (totalCount == 0) {
-    const int midY = contentTop + (pageHeight - contentTop - metrics.buttonHintsHeight) / 2;
+    const int midY = contentTop + (safe.y + safe.height - contentTop) / 2;
     renderer.drawCenteredText(UI_10_FONT_ID, midY, tr(STR_LOOKUP_HISTORY_EMPTY));
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
@@ -259,9 +259,9 @@ void LookedUpWordsActivity::render(RenderLock&&) {
   // the bottom button-hints band doesn't apply).
   const int contentHeight = pageItems * metrics.listRowHeight;
 
-  listTouch_.record(Rect{0, contentTop, pageWidth, contentHeight}, totalCount, selectedIndex);
+  listTouch_.record(Rect{safe.x, contentTop, safe.width, contentHeight}, totalCount, selectedIndex);
   GUI.drawList(
-      renderer, Rect{0, contentTop, pageWidth, contentHeight}, totalCount, selectedIndex,
+      renderer, Rect{safe.x, contentTop, safe.width, contentHeight}, totalCount, selectedIndex,
       [this](int i) {
         const auto* e = entryAt(i);
         if (!e) return std::string();

@@ -290,18 +290,17 @@ void DictionarySelectActivity::loop() {
 void DictionarySelectActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
-  const int pageWidth = renderer.getScreenWidth();
-  const int pageHeight = renderer.getScreenHeight();
   const auto& metrics = UITheme::getInstance().getMetrics();
 
   if (showingInfo) {
-    GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_DICT_INFO));
+    GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_DICT_INFO));
 
     const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
-    int y = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-    const int x = metrics.contentSidePadding;
-    const int maxWidth = pageWidth - metrics.contentSidePadding * 2;
-    const int maxY = pageHeight - metrics.buttonHintsHeight - metrics.verticalSpacing;
+    const Rect infoArea = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+    int y = infoArea.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+    const int x = infoArea.x + metrics.contentSidePadding;
+    const int maxWidth = infoArea.width - metrics.contentSidePadding * 2;
+    const int maxY = infoArea.y + infoArea.height - metrics.verticalSpacing;
 
     if (showingRaw) {
       // --- Raw view: forward-only SD streaming, character-wrapped per line ---
@@ -444,20 +443,22 @@ void DictionarySelectActivity::render(RenderLock&&) {
   }
 
   // --- Picker screen ---
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_DICTIONARY));
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_DICTIONARY));
 
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+
+  const int contentTop = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int contentHeight = safe.y + safe.height - contentTop - metrics.verticalSpacing;
 
   // Show "None found" note when no dictionaries are available
   if (dictFolders.empty()) {
     const int textY = contentTop + contentHeight / 3;
-    renderer.drawCenteredText(UI_10_FONT_ID, textY, tr(STR_DICT_NONE_FOUND));
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, textY, tr(STR_DICT_NONE_FOUND));
   }
 
-  listTouch_.record(Rect{0, contentTop, pageWidth, contentHeight}, totalItems, selectedIndex);
+  listTouch_.record(Rect{safe.x, contentTop, safe.width, contentHeight}, totalItems, selectedIndex);
   GUI.drawList(
-      renderer, Rect{0, contentTop, pageWidth, contentHeight}, totalItems, selectedIndex,
+      renderer, Rect{safe.x, contentTop, safe.width, contentHeight}, totalItems, selectedIndex,
       [this](int index) { return std::string(nameForIndex(index)); }, nullptr, nullptr,
       [this](int index) -> std::string {
         // Show "Selected" marker for the currently active dictionary.

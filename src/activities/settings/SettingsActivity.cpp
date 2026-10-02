@@ -753,9 +753,8 @@ std::string SettingsActivity::settingValueText(const SettingInfo& setting) {
 
 void SettingsActivity::buildScreen(UiScreen& screen) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  // Content below the GUI.drawHeader band, above the button hints.
-  screen.setContentMargin(fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0,
-                                      static_cast<int16_t>(metrics.buttonHintsHeight), 0});
+  // Content below the header band, clear of the button hints in any orientation.
+  screen.setContentMargin(safeContentInsets(renderer, metrics.topPadding + metrics.headerHeight));
 
   // LOCAL(feat): the tab bar is a top-level affordance; a sub-screen shows one
   // fixed category and reclaims that vertical space.
@@ -802,7 +801,6 @@ void SettingsActivity::buildScreen(UiScreen& screen) {
 }
 
 void SettingsActivity::drawChrome() {
-  const auto pageWidth = renderer.getScreenWidth();
   const auto& metrics = UITheme::getInstance().getMetrics();
 
   // Header via GUI.drawHeader (already FreeInkUI-themed) for the battery
@@ -810,7 +808,7 @@ void SettingsActivity::drawChrome() {
   // Version rides in the header's trailing label slot: the footer position
   // conflicts with button hints on non-touch devices.
   // LOCAL(feat): a sub-screen shows its group name and no version.
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer),
                  isSubScreen() ? I18N.get(subTitle_) : tr(STR_SETTINGS_TITLE), isSubScreen() ? "" : CROSSPOINT_VERSION);
 }
 

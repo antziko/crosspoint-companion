@@ -39,17 +39,19 @@ void BookStatsActivity::onExit() { Activity::onExit(); }
 Rect BookStatsActivity::tabBarRect() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int summaryHeight = summaryLineCount() * (renderer.getLineHeight(SMALL_FONT_ID) + 2);
-  const int y =
-      metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing + summaryHeight + metrics.verticalSpacing;
-  return Rect{0, y, renderer.getScreenWidth(), metrics.tabBarHeight};
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int y = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing + summaryHeight +
+                metrics.verticalSpacing;
+  return Rect{safe.x, y, safe.width, metrics.tabBarHeight};
 }
 
 Rect BookStatsActivity::contentRect() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect tabs = tabBarRect();
   const int top = tabs.y + tabs.height + metrics.verticalSpacing;
-  const int height = renderer.getScreenHeight() - top - metrics.buttonHintsHeight - metrics.verticalSpacing;
-  return Rect{0, top, renderer.getScreenWidth(), std::max(0, height)};
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int height = safe.y + safe.height - top - metrics.verticalSpacing;
+  return Rect{safe.x, top, safe.width, std::max(0, height)};
 }
 
 std::vector<TabInfo> BookStatsActivity::buildTabs() const {
@@ -139,16 +141,15 @@ void BookStatsActivity::loop() {
 void BookStatsActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
-  const int pageWidth = renderer.getScreenWidth();
   const auto& metrics = UITheme::getInstance().getMetrics();
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_BOOK_STATS),
-                 bookTitle.c_str());
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_BOOK_STATS), bookTitle.c_str());
 
-  const int leftX = metrics.contentSidePadding;
-  const int rightEdge = pageWidth - metrics.contentSidePadding;
+  const int leftX = safe.x + metrics.contentSidePadding;
+  const int rightEdge = safe.x + safe.width - metrics.contentSidePadding;
   const int lineHeight = renderer.getLineHeight(SMALL_FONT_ID) + 2;
-  int y = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  int y = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
 
   // Line 1: "This session" (left) paired with "Est. left" (right-aligned).
   if (session.elapsedSecs > 0) {

@@ -44,16 +44,16 @@ void DictionarySuggestionsActivity::loop() {
 
 void DictionarySuggestionsActivity::render(RenderLock&&) {
   renderer.clearScreen();
-  const int pageWidth = renderer.getScreenWidth();
-  const int pageHeight = renderer.getScreenHeight();
   const auto& metrics = UITheme::getInstance().getMetrics();
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_DICT_DID_YOU_MEAN));
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing;
-  listTouch_.record(Rect{0, contentTop, pageWidth, contentHeight}, static_cast<int>(suggestions.size()), selectedIndex);
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_DICT_DID_YOU_MEAN));
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int contentTop = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int contentHeight = safe.y + safe.height - contentTop - metrics.verticalSpacing;
+  listTouch_.record(Rect{safe.x, contentTop, safe.width, contentHeight}, static_cast<int>(suggestions.size()),
+                    selectedIndex);
   GUI.drawList(
-      renderer, Rect{0, contentTop, pageWidth, contentHeight}, static_cast<int>(suggestions.size()), selectedIndex,
-      [this](int i) { return suggestions[i]; }, nullptr, nullptr, nullptr, true);
+      renderer, Rect{safe.x, contentTop, safe.width, contentHeight}, static_cast<int>(suggestions.size()),
+      selectedIndex, [this](int i) { return suggestions[i]; }, nullptr, nullptr, nullptr, true);
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);

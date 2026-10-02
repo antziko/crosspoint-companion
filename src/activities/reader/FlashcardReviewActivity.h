@@ -184,6 +184,8 @@ class FlashcardReviewActivity final : public Activity {
     int height = 0;
   };
   TapBarRect tapBarRect() const;
+  // The hint-safe area of the frame being drawn, set at the top of render().
+  TapBarRect contentArea_{};
   void drawTapBar();
   // True when a tap was consumed. handleStyleTap covers the overview's card-style pair,
   // which is drawn as two boxes already and only had Up/Down to switch it.

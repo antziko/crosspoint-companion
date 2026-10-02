@@ -676,11 +676,11 @@ void HomeActivity::loop() {
 
   const int coverColumnCount = std::max(1, metrics.homeRecentBooksCount);
   const int recentCount = std::min(static_cast<int>(recentBooks.size()), coverColumnCount);
-  const int coverColumnWidth = (renderer.getScreenWidth() - 2 * metrics.contentSidePadding) / coverColumnCount;
+  const Rect covers = coverRect();
+  const int coverColumnWidth = (covers.width - 2 * metrics.contentSidePadding) / coverColumnCount;
   int touchedBook = -1;
-  const auto coverTouch = mappedInput.colTouch(touchedBook, metrics.contentSidePadding, coverColumnWidth, recentCount,
-                                               metrics.homeTopPadding,
-                                               metrics.homeTopPadding + metrics.homeCoverTileHeight, coverColumnWidth);
+  const auto coverTouch = mappedInput.colTouch(touchedBook, covers.x + metrics.contentSidePadding, coverColumnWidth,
+                                               recentCount, covers.y, covers.y + covers.height, coverColumnWidth);
   if (coverTouch != MappedInputManager::RowTouch::None) {
     if (coverTouch == MappedInputManager::RowTouch::Down) {
       if (selectorIndex != touchedBook) {
@@ -694,7 +694,7 @@ void HomeActivity::loop() {
     return;
   }
 
-  const int menuTop = metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset;
+  const int menuTop = menuRect().y;
   const int renderedMenuCount =
       menuCount - (metrics.homeContinueReadingInMenu ? 0 : static_cast<int>(recentBooks.size()));
   int menuRow = -1;
@@ -723,17 +723,21 @@ void HomeActivity::loop() {
   }
 }
 
+// Both bands sit inside the area the button hints leave free: a side column in landscape, a
+// top band when inverted.
 Rect HomeActivity::coverRect() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  return Rect{0, metrics.homeTopPadding, renderer.getScreenWidth(), metrics.homeCoverTileHeight};
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  return Rect{safe.x, safe.y + metrics.homeTopPadding, safe.width, metrics.homeCoverTileHeight};
 }
 
 Rect HomeActivity::menuRect() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  return Rect{0, metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset,
-              renderer.getScreenWidth(),
-              renderer.getScreenHeight() - (metrics.headerHeight + metrics.homeTopPadding + metrics.verticalSpacing +
-                                            metrics.homeMenuTopOffset + metrics.buttonHintsHeight)};
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  return Rect{
+      safe.x, safe.y + metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset, safe.width,
+      safe.height -
+          (metrics.headerHeight + metrics.homeTopPadding + metrics.verticalSpacing + metrics.homeMenuTopOffset)};
 }
 
 // Open whatever selectorIndex currently points at: a recent-book cover tile
@@ -771,7 +775,6 @@ void HomeActivity::activateSelection() {
 
 void HomeActivity::render(RenderLock&&) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const auto pageWidth = renderer.getScreenWidth();
 
   // Paint timing, split draw vs panel. A whole-screen render is normally dominated by the e-ink
   // refresh, so a single elapsed number would hide what we are actually chasing here: with a CJK
@@ -820,7 +823,9 @@ void HomeActivity::render(RenderLock&&) {
   // homeTopPadding, so the height must shrink by topPadding or the band (and a
   // centered title, e.g. RoundedRaff's book title) sinks into the tile.
   // Root screen: Home owns the bottom of the stack, so no back button.
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.homeTopPadding - metrics.topPadding},
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  GUI.drawHeader(renderer,
+                 Rect{safe.x, safe.y + metrics.topPadding, safe.width, metrics.homeTopPadding - metrics.topPadding},
                  metrics.homeContinueReadingInMenu && !recentBooks.empty() ? recentBooks[0].title.c_str() : nullptr,
                  nullptr, /*backButton=*/false);
 

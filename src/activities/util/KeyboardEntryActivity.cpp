@@ -419,24 +419,28 @@ bool KeyboardEntryActivity::cursorPositionFromPoint(const int x, const int y, si
   // never the text field, so skip the wrap/measure work entirely.
   if (y >= keyboardRect().y) return false;
 
-  const int pageWidth = renderer.getScreenWidth();
+  // The field is laid out across the area the button hints leave free (a side column in
+  // landscape); pageWidth is that area's width and every x is offset by areaX.
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int areaX = safe.x;
+  const int pageWidth = safe.width;
   const auto& metrics = UITheme::getInstance().getMetrics();
 
   const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);
-  const int inputStartY = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing +
+  const int inputStartY = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing +
                           metrics.verticalSpacing * 4 + metrics.keyboardVerticalOffset;
 
   int availableWidth = pageWidth;
   if (gpio.deviceIsX3()) {
     availableWidth -= 2 * metrics.sideButtonHintsWidth;
   }
-  const int effectiveMargin = (pageWidth - availableWidth * metrics.keyboardTextFieldWidthPercent / 100) / 2;
+  const int effectiveMargin = areaX + (pageWidth - availableWidth * metrics.keyboardTextFieldWidthPercent / 100) / 2;
   const int toggleGap = inputType == InputType::Password ? 4 : 0;
   const int toggleReserve = inputType == InputType::Password ? std::max(renderer.getTextWidth(UI_12_FONT_ID, "[abc]"),
                                                                         renderer.getTextWidth(UI_12_FONT_ID, "[***]")) +
                                                                    toggleGap
                                                              : 0;
-  const int textAreaWidth = pageWidth - 2 * effectiveMargin - toggleReserve;
+  const int textAreaWidth = pageWidth - 2 * (effectiveMargin - areaX) - toggleReserve;
   const int maxLineWidth = textAreaWidth;
   const bool centerText = metrics.keyboardCenteredText;
   std::string displayText = displayTextForCurrentState();
@@ -508,15 +512,14 @@ bool KeyboardEntryActivity::cursorPositionFromPoint(const int x, const int y, si
 
 fui::Rect KeyboardEntryActivity::keyboardRect() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const int pageWidth = renderer.getScreenWidth();
-  const int pageHeight = renderer.getScreenHeight();
+  // Centred in, and anchored to the bottom of, the area the button hints leave free.
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
   const int rows = currentLayout().rowCount;
   const int gap = metrics.keyboardKeySpacing;
   const int height = rows * metrics.keyboardKeyHeight + (rows > 1 ? (rows - 1) * gap : 0);
-  const int width = pageWidth * metrics.keyboardWidthPercent / 100;
-  const int x = (pageWidth - width) / 2;
-  const int y =
-      pageHeight - metrics.buttonHintsHeight - metrics.verticalSpacing - height + metrics.keyboardVerticalOffset;
+  const int width = safe.width * metrics.keyboardWidthPercent / 100;
+  const int x = safe.x + (safe.width - width) / 2;
+  const int y = safe.y + safe.height - metrics.verticalSpacing - height + metrics.keyboardVerticalOffset;
   return fui::Rect{static_cast<int16_t>(x), static_cast<int16_t>(y), static_cast<int16_t>(width),
                    static_cast<int16_t>(height)};
 }
@@ -720,13 +723,16 @@ void KeyboardEntryActivity::loop() {
 void KeyboardEntryActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
-  const auto pageWidth = renderer.getScreenWidth();
+  // Same hint-safe extent as cursorPositionFromPoint().
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int areaX = safe.x;
+  const int pageWidth = safe.width;
   const auto& metrics = UITheme::getInstance().getMetrics();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, title.c_str());
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), title.c_str());
 
   const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);
-  const int inputStartY = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing +
+  const int inputStartY = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing +
                           metrics.verticalSpacing * 4 + metrics.keyboardVerticalOffset;
   int inputHeight = 0;
 
@@ -737,13 +743,13 @@ void KeyboardEntryActivity::render(RenderLock&&) {
   if (gpio.deviceIsX3()) {
     availableWidth -= 2 * metrics.sideButtonHintsWidth;
   }
-  const int effectiveMargin = (pageWidth - availableWidth * metrics.keyboardTextFieldWidthPercent / 100) / 2;
+  const int effectiveMargin = areaX + (pageWidth - availableWidth * metrics.keyboardTextFieldWidthPercent / 100) / 2;
   const int toggleGap = isPassword ? 4 : 0;
   const int toggleReserve = isPassword ? std::max(renderer.getTextWidth(UI_12_FONT_ID, "[abc]"),
                                                   renderer.getTextWidth(UI_12_FONT_ID, "[***]")) +
                                              toggleGap
                                        : 0;
-  const int textAreaWidth = pageWidth - 2 * effectiveMargin - toggleReserve;
+  const int textAreaWidth = pageWidth - 2 * (effectiveMargin - areaX) - toggleReserve;
   const int maxLineWidth = textAreaWidth;
   const bool centerText = metrics.keyboardCenteredText;
 
@@ -834,8 +840,8 @@ void KeyboardEntryActivity::render(RenderLock&&) {
   }
 
   const int fieldWidth = (inputHeight > 0) ? maxLineWidth : textWidth;
-  const int lineMargin = effectiveMargin;
-  GUI.drawTextField(renderer, Rect{0, inputStartY, pageWidth, inputHeight}, fieldWidth, cursorMode, lineMargin,
+  const int lineMargin = effectiveMargin - areaX;  // relative to the field rect
+  GUI.drawTextField(renderer, Rect{areaX, inputStartY, pageWidth, inputHeight}, fieldWidth, cursorMode, lineMargin,
                     pageWidth - 2 * lineMargin);
 
   if (cursorMode && !togglePos && cursorPos <= displayText.length()) {
@@ -859,7 +865,7 @@ void KeyboardEntryActivity::render(RenderLock&&) {
   if (isPassword) {
     const char* toggleLabel = passwordVisible ? "[***]" : "[abc]";
     const int toggleWidth = renderer.getTextWidth(UI_12_FONT_ID, toggleLabel);
-    const int toggleX = pageWidth - effectiveMargin - toggleWidth;
+    const int toggleX = areaX + pageWidth - (effectiveMargin - areaX) - toggleWidth;
     const int toggleY = inputStartY + inputHeight;
     const bool toggleSelected = cursorMode && togglePos;
 
@@ -984,7 +990,8 @@ void KeyboardEntryActivity::render(RenderLock&&) {
   props.padding = fui::Insets{0, 0, 0, 0};
   // Fingers land low on the bottom row (occlusion) and there is no key below
   // to catch the miss — extend its hit band down to the button hints bar.
-  const int hintsTop = renderer.getScreenHeight() - metrics.buttonHintsHeight;
+  const Rect hintFree = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int hintsTop = hintFree.y + hintFree.height;
   props.bottomHitOverflow = static_cast<int16_t>(std::max(0, hintsTop - (kbRect.y + kbRect.height)));
   fui::keyboard(frame, kbRect, props);
   interactions.publish();

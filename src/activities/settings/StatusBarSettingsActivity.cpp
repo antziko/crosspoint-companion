@@ -10,6 +10,7 @@
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "components/UITheme.h"
+#include "components/UiAppHelpers.h"
 #include "fontIds.h"
 
 namespace fui = freeink::ui;
@@ -256,8 +257,9 @@ void StatusBarSettingsActivity::buildScreen(UiScreen& screen) {
   const int statusBarHeight = UITheme::getInstance().getStatusBarHeight();
   const auto previewFooter =
       static_cast<int16_t>(statusBarHeight + verticalPreviewTextPadding + metrics.verticalSpacing);
-  screen.setContentMargin(fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0,
-                                      static_cast<int16_t>(metrics.buttonHintsHeight + previewFooter), 0});
+  fui::Insets margin = safeContentInsets(renderer, metrics.topPadding + metrics.headerHeight);
+  margin.bottom = static_cast<int16_t>(margin.bottom + previewFooter);
+  screen.setContentMargin(margin);
   screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
 
   // rowItems_'s labels/actionValue were set once in onEnter(); only the live
@@ -296,13 +298,11 @@ void StatusBarSettingsActivity::render(RenderLock&&) {
         const auto m = UITheme::getInstance().getMetrics();
         // Header via GUI.drawHeader (already FreeInkUI-themed) for the battery
         // indicator; the list renders through the app; the preview stays raw.
-        GUI.drawHeader(self->renderer, Rect{0, m.topPadding, self->renderer.getScreenWidth(), m.headerHeight},
+        GUI.drawHeader(self->renderer, UITheme::getInstance().getSafeHeaderRect(self->renderer),
                        tr(STR_CUSTOMISE_STATUS_BAR));
         self->renderUi();
       },
       this);
-
-  auto metrics = UITheme::getInstance().getMetrics();
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_TOGGLE), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
@@ -314,13 +314,16 @@ void StatusBarSettingsActivity::render(RenderLock&&) {
     title = tr(STR_EXAMPLE_CHAPTER);
   }
 
-  // Anchor the preview as a footer directly above the button hints.
-  GUI.drawStatusBar(renderer, 75, 8, 32, title, metrics.buttonHintsHeight, 0, false);
+  // Anchor the preview as a footer at the bottom of the area the button hints leave free: above
+  // them in portrait, beside them in landscape.
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int hintBelow = renderer.getScreenHeight() - (safe.y + safe.height);
+  GUI.drawStatusBar(renderer, 75, 8, 32, title, hintBelow, 0, false, false, false, false, false, safe.x,
+                    renderer.getScreenWidth() - (safe.x + safe.width));
 
-  renderer.drawCenteredText(UI_10_FONT_ID,
-                            renderer.getScreenHeight() - UITheme::getInstance().getStatusBarHeight() -
-                                metrics.buttonHintsHeight - verticalPreviewTextPadding,
-                            tr(STR_PREVIEW));
+  UITheme::drawCenteredText(
+      renderer, safe, UI_10_FONT_ID,
+      safe.y + safe.height - UITheme::getInstance().getStatusBarHeight() - verticalPreviewTextPadding, tr(STR_PREVIEW));
 
   renderer.displayBuffer();
 }

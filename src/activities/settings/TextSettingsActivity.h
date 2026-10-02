@@ -137,6 +137,9 @@ class TextSettingsActivity final : public UiTabListActivity {
 
   ThemeMetrics metrics_ = {};
   int afterHeader = 0;
+  // Horizontal extent of the hint-safe area (a side column of hints in landscape).
+  int safeX = 0;
+  int safeWidth = 0;
   int bottomReserved = 0;
   int usableHeight = 0;
   int previewHeight = 0;

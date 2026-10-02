@@ -257,8 +257,6 @@ void FlashcardListActivity::renderList() {
   renderer.clearScreen();
   if (controller.render()) return;
 
-  const int pageWidth = renderer.getScreenWidth();
-  const int pageHeight = renderer.getScreenHeight();
   const auto& metrics = UITheme::getInstance().getMetrics();
 
   const int pageItems = std::max(1, UITheme::getNumberOfItemsPerPage(renderer, true, false, true, false));
@@ -268,12 +266,14 @@ void FlashcardListActivity::renderList() {
   char titleBuf[64];
   snprintf(titleBuf, sizeof(titleBuf), tr(STR_LOOKUP_HIST_HEADER_FORMAT), tr(STR_FLASHCARDS_LIST),
            static_cast<int>(totalCount), curPage, totalPages);
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, titleBuf);
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), titleBuf);
 
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+
+  const int contentTop = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
 
   if (totalCount == 0) {
-    const int midY = contentTop + (pageHeight - contentTop - metrics.buttonHintsHeight) / 2;
+    const int midY = contentTop + (safe.y + safe.height - contentTop) / 2;
     renderer.drawCenteredText(UI_10_FONT_ID, midY, tr(STR_FLASHCARDS_EMPTY));
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
@@ -283,9 +283,9 @@ void FlashcardListActivity::renderList() {
 
   const int contentHeight = pageItems * metrics.listRowHeight;
   const uint32_t todayLocal = today;
-  listTouch_.record(Rect{0, contentTop, pageWidth, contentHeight}, totalCount, selectedIndex);
+  listTouch_.record(Rect{safe.x, contentTop, safe.width, contentHeight}, totalCount, selectedIndex);
   GUI.drawList(
-      renderer, Rect{0, contentTop, pageWidth, contentHeight}, totalCount, selectedIndex,
+      renderer, Rect{safe.x, contentTop, safe.width, contentHeight}, totalCount, selectedIndex,
       [this, todayLocal](int i) {
         const auto* e = entryAt(i);
         if (!e) return std::string();
@@ -318,17 +318,18 @@ void FlashcardListActivity::renderDetail() {
   renderer.clearScreen();
   if (controller.render()) return;
 
-  const int pageWidth = renderer.getScreenWidth();
-  const int pageHeight = renderer.getScreenHeight();
   const auto& metrics = UITheme::getInstance().getMetrics();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_FLASHCARDS_LIST));
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_FLASHCARDS_LIST));
 
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int contentBottom = pageHeight - metrics.buttonHintsHeight;
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+
+  const int contentTop = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int contentBottom = safe.y + safe.height;
 
   // Shared card face: bold word + excerpt (word underlined in context) + chapter.
-  FlashcardCardFace::render(renderer, contentTop, contentBottom, pageWidth, detail.word, detail.excerpt, detail.chapter,
+  FlashcardCardFace::render(renderer, contentTop, contentBottom, safe.x, safe.width, detail.word, detail.excerpt,
+                            detail.chapter,
                             /*showWord=*/true, detail.count);
 
   // Leitner status line, in the gap between the word header and the excerpt.

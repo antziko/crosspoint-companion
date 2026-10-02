@@ -30,16 +30,17 @@ void CrashActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const auto pageWidth = renderer.getScreenWidth();
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const auto pageWidth = safe.width;
   const auto contentWidth = pageWidth - 2 * metrics.contentSidePadding;
-  const auto x = metrics.contentSidePadding;
+  const auto x = safe.x + metrics.contentSidePadding;
   const auto lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
 
   // Root screen: there is nothing to go back to from a crash report.
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_CRASH_TITLE), nullptr,
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_CRASH_TITLE), nullptr,
                  /*backButton=*/false);
 
-  int y = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  int y = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
 
   auto descLines = renderer.wrappedText(UI_10_FONT_ID, tr(STR_CRASH_DESCRIPTION), contentWidth, 10);
   for (const auto& line : descLines) {

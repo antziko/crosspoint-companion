@@ -66,18 +66,19 @@ void SyncScopeSelectionActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const auto pageWidth = renderer.getScreenWidth();
-  const auto pageHeight = renderer.getScreenHeight();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_KOREADER_SYNC));
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_KOREADER_SYNC));
 
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing * 2;
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 
-  listTouch_.record(Rect{0, contentTop, pageWidth, contentHeight}, static_cast<int>(MENU_ITEM_COUNT), selectedIndex,
+  const int contentTop = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int contentHeight = safe.y + safe.height - contentTop - metrics.verticalSpacing * 2;
+
+  listTouch_.record(Rect{safe.x, contentTop, safe.width, contentHeight}, static_cast<int>(MENU_ITEM_COUNT),
+                    selectedIndex,
                     /*hasSubtitle=*/true);
   GUI.drawList(
-      renderer, Rect{0, contentTop, pageWidth, contentHeight}, static_cast<int>(MENU_ITEM_COUNT), selectedIndex,
+      renderer, Rect{safe.x, contentTop, safe.width, contentHeight}, static_cast<int>(MENU_ITEM_COUNT), selectedIndex,
       [](int index) { return std::string(I18N.get(kLabels[index])); },
       [](int index) { return std::string(I18N.get(kDescs[index])); }, [](int index) { return kIcons[index]; });
 

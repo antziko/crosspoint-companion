@@ -34,6 +34,9 @@ class UITheme {
   const BaseTheme& getTheme() const { return currentTheme ? *currentTheme : fallbackTheme; }
   Rect getScreenSafeArea(const GfxRenderer& renderer, bool hasFrontButtonHints = false,
                          bool hasSideButtonHints = false);
+  // The header band inside the area the front button hints leave free, in any orientation:
+  // below the hints when they are a top band (inverted), beside them when they are a side column.
+  Rect getSafeHeaderRect(const GfxRenderer& renderer);
   static void drawCenteredText(const GfxRenderer& renderer, Rect screen, int fontId, int y, const char* text,
                                bool black = true, EpdFontFamily::Style style = EpdFontFamily::REGULAR);
   // Wraps only overflowing text, then aligns the complete line block within bounds.

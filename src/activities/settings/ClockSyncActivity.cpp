@@ -111,38 +111,41 @@ void ClockSyncActivity::loop() {
 
 void ClockSyncActivity::render(RenderLock&&) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 
   renderer.clearScreen();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_CLOCK_SYNC));
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_CLOCK_SYNC));
 
   const int midY = pageHeight / 2;
 
   switch (state) {
     case SYNCING:
-      renderer.drawCenteredText(UI_10_FONT_ID, midY, tr(STR_CLOCK_SYNCING));
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, midY, tr(STR_CLOCK_SYNCING));
       break;
     case SUCCESS: {
-      renderer.drawCenteredText(UI_10_FONT_ID, midY - 20, tr(STR_CLOCK_SYNC_OK), true, EpdFontFamily::BOLD);
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, midY - 20, tr(STR_CLOCK_SYNC_OK), true,
+                                EpdFontFamily::BOLD);
       if (syncedTime[0] != '\0') {
         // Sized for the label in any language: STR_CURRENT_TIME is 26 bytes in
         // Russian (UTF-8 Cyrillic is 2 bytes per letter) versus 13 in English,
         // plus a separator and up to "08:56 PM".
         char line[64];
         snprintf(line, sizeof(line), "%s %s", tr(STR_CURRENT_TIME), syncedTime);
-        renderer.drawCenteredText(UI_10_FONT_ID, midY + 10, line);
+        UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, midY + 10, line);
       }
       break;
     }
     case NO_WIFI:
-      renderer.drawCenteredText(UI_10_FONT_ID, midY - 20, tr(STR_CLOCK_SYNC_NO_WIFI), true, EpdFontFamily::BOLD);
-      renderer.drawCenteredText(UI_10_FONT_ID, midY + 10, tr(STR_CLOCK_SYNC_NO_WIFI_HINT));
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, midY - 20, tr(STR_CLOCK_SYNC_NO_WIFI), true,
+                                EpdFontFamily::BOLD);
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, midY + 10, tr(STR_CLOCK_SYNC_NO_WIFI_HINT));
       break;
     case FAILED:
-      renderer.drawCenteredText(UI_10_FONT_ID, midY - 20, tr(STR_CLOCK_SYNC_FAIL), true, EpdFontFamily::BOLD);
-      renderer.drawCenteredText(UI_10_FONT_ID, midY + 10, tr(STR_CHECK_SERIAL_OUTPUT));
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, midY - 20, tr(STR_CLOCK_SYNC_FAIL), true,
+                                EpdFontFamily::BOLD);
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, midY + 10, tr(STR_CHECK_SERIAL_OUTPUT));
       break;
   }
 

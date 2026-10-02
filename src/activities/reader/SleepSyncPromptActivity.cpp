@@ -15,14 +15,13 @@ void SleepSyncPromptActivity::onEnter() {
   Activity::onEnter();
 
   lineHeight = renderer.getLineHeight(fontId);
-  const int maxWidth = renderer.getScreenWidth() - (margin * 2);
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int maxWidth = safe.width - (margin * 2);
 
-  // Line budget = screen minus top/bottom margins, the heading/body gap, and the bottom
-  // button-hint strip, so the wrapped text can't ride under the hints.
+  // Line budget = the hint-safe area minus top/bottom margins and the heading/body gap,
+  // so the wrapped text cannot ride under the hints in any orientation.
   actionBar_.layout(renderer, mappedInput.hasTouch(), fontId, 2);
-  const int buttonHintsHeight = UITheme::getInstance().getMetrics().buttonHintsHeight;
-  const int available =
-      renderer.getScreenHeight() - (margin * 2) - buttonHintsHeight - actionBar_.reservedHeight() - spacing;
+  const int available = safe.height - (margin * 2) - actionBar_.reservedHeight() - spacing;
   const int maxLines = std::max(1, available / lineHeight);
 
   if (!heading.empty()) {
@@ -36,7 +35,7 @@ void SleepSyncPromptActivity::onEnter() {
   int totalHeight = static_cast<int>(headingLines.size() + bodyLines.size()) * lineHeight;
   if (!headingLines.empty() && !bodyLines.empty()) totalHeight += spacing;
 
-  startY = std::max(margin, (renderer.getScreenHeight() - totalHeight) / 2);
+  startY = safe.y + std::max(margin, (safe.height - totalHeight) / 2);
 
   requestUpdate(true);
 }
@@ -44,14 +43,15 @@ void SleepSyncPromptActivity::onEnter() {
 void SleepSyncPromptActivity::render(RenderLock&& lock) {
   renderer.clearScreen();
 
+  const Rect area = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
   int currentY = startY;
   for (const auto& line : headingLines) {
-    renderer.drawCenteredText(fontId, currentY, line.c_str(), true, EpdFontFamily::BOLD);
+    UITheme::drawCenteredText(renderer, area, fontId, currentY, line.c_str(), true, EpdFontFamily::BOLD);
     currentY += lineHeight;
   }
   if (!headingLines.empty() && !bodyLines.empty()) currentY += spacing;
   for (const auto& line : bodyLines) {
-    renderer.drawCenteredText(fontId, currentY, line.c_str(), true, EpdFontFamily::REGULAR);
+    UITheme::drawCenteredText(renderer, area, fontId, currentY, line.c_str(), true, EpdFontFamily::REGULAR);
     currentY += lineHeight;
   }
 

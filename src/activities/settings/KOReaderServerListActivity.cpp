@@ -161,13 +161,13 @@ void KOReaderServerListActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const auto pageWidth = renderer.getScreenWidth();
-  const auto pageHeight = renderer.getScreenHeight();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_KOREADER_SYNC_SERVERS));
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_KOREADER_SYNC_SERVERS));
 
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing * 2;
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+
+  const int contentTop = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int contentHeight = safe.y + safe.height - contentTop - metrics.verticalSpacing * 2;
   const int itemCount = getItemCount();
   const int activeIdx = KOREADER_STORE.getActiveIndex();
 
@@ -178,10 +178,10 @@ void KOReaderServerListActivity::render(RenderLock&&) {
   // out on the taller with-subtitle height (drawList keys on the provider being present,
   // not on any row actually returning text). Recording it as a single-line list made the
   // hit bands 20px short of the rows, so a tap opened a row further down the list.
-  listTouch_.record(Rect{0, contentTop, pageWidth, contentHeight}, itemCount, selectedIndex,
+  listTouch_.record(Rect{safe.x, contentTop, safe.width, contentHeight}, itemCount, selectedIndex,
                     /*hasSubtitle=*/true);
   GUI.drawList(
-      renderer, Rect{0, contentTop, pageWidth, contentHeight}, itemCount, selectedIndex,
+      renderer, Rect{safe.x, contentTop, safe.width, contentHeight}, itemCount, selectedIndex,
       [&servers, serverCount, activeIdx](int index) -> std::string {
         if (index < serverCount) {
           const auto& s = servers[index];

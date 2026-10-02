@@ -65,9 +65,9 @@ struct HeadwordLayout {
 // columns (DictionaryWordSelectActivity.cpp:1207-1222). Loading the family at a third point
 // size is the alternative, and it pins another resident .cpfont on the reader's heap.
 HeadwordLayout drawHeadword(GfxRenderer& renderer, const int bodyFont, const int bandTop, const int bandHeight,
-                            const int pageWidth, const std::string& word) {
+                            const Rect area, const std::string& word) {
   if (!containsCjk(word.c_str())) {
-    renderer.drawCenteredText(NOTOSERIF_18_FONT_ID, bandTop, word.c_str(), true, EpdFontFamily::BOLD);
+    UITheme::drawCenteredText(renderer, area, NOTOSERIF_18_FONT_ID, bandTop, word.c_str(), true, EpdFontFamily::BOLD);
     return {renderer.getTextWidth(NOTOSERIF_18_FONT_ID, word.c_str(), EpdFontFamily::BOLD),
             renderer.getLineHeight(NOTOSERIF_18_FONT_ID), bandTop};
   }
@@ -78,7 +78,7 @@ HeadwordLayout drawHeadword(GfxRenderer& renderer, const int bodyFont, const int
   // better one when it does not: it keeps the kerning and bidi handling drawText does and the
   // per-glyph loop does not.
   if (lineHeight * 2 > bandHeight) {
-    renderer.drawCenteredText(fontId, bandTop, word.c_str(), true, EpdFontFamily::BOLD);
+    UITheme::drawCenteredText(renderer, area, fontId, bandTop, word.c_str(), true, EpdFontFamily::BOLD);
     return {renderer.getTextWidth(fontId, word.c_str(), EpdFontFamily::BOLD), lineHeight, bandTop};
   }
 
@@ -87,7 +87,7 @@ HeadwordLayout drawHeadword(GfxRenderer& renderer, const int bodyFont, const int
   // advances are uniform and unkerned -- the same assumption the gloss box's cell layout makes.
   const int total = renderer.getTextAdvanceWidth(fontId, word.c_str()) * kScale;
   const int top = bandTop + (bandHeight - renderer.getFontAscenderSize(fontId) * kScale) / 2;
-  int x = (pageWidth - total) / 2;
+  int x = area.x + (area.width - total) / 2;
   const auto* cursor = reinterpret_cast<const unsigned char*>(word.c_str());
   uint32_t cp;
   while ((cp = utf8NextCodepoint(&cursor))) {
@@ -101,11 +101,11 @@ HeadwordLayout drawHeadword(GfxRenderer& renderer, const int bodyFont, const int
 // `highlightWord` is non-null, each case-insensitive occurrence is underlined;
 // when `maskHighlight` is also true the occurrence is white-boxed first (the
 // cloze blank), leaving just the underline.
-int drawWrappedCentered(GfxRenderer& renderer, int fontId, int contentTop, int contentBottom, int pageWidth,
+int drawWrappedCentered(GfxRenderer& renderer, int fontId, int contentTop, int contentBottom, const Rect area,
                         const char* text, const char* highlightWord, bool maskHighlight) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int lineHeight = metrics.listRowHeight;
-  const int maxWidth = pageWidth - 2 * metrics.contentSidePadding;
+  const int maxWidth = area.width - 2 * metrics.contentSidePadding;
   const int hlLen = highlightWord ? static_cast<int>(strlen(highlightWord)) : 0;
 
   // Greedy word wrap into a fixed line buffer (excerpt is capped, so bounded).
@@ -120,8 +120,8 @@ int drawWrappedCentered(GfxRenderer& renderer, int fontId, int contentTop, int c
   // matched word in isolation would drop the boundary kern and drift by ~a char.
   auto underline = [&](int top) {
     if (hlLen == 0) return;
-    // Pen origin of the centered line = drawCenteredText's x = (W - inkWidth)/2.
-    const int startX = (pageWidth - renderer.getTextWidth(fontId, line)) / 2;
+    // Pen origin of the centered line = drawCenteredText's x = area.x + (W - inkWidth)/2.
+    const int startX = area.x + (area.width - renderer.getTextWidth(fontId, line)) / 2;
     for (int i = 0; i + hlLen <= lineLen;) {
       // Never start a match on a UTF-8 continuation byte: this scan is byte-wise, so on CJK it
       // could otherwise align mid-sequence and underline a span straddling two characters.
@@ -165,7 +165,7 @@ int drawWrappedCentered(GfxRenderer& renderer, int fontId, int contentTop, int c
     if (lineLen == 0) return;
     line[lineLen] = '\0';
     if (y + lineHeight <= contentBottom) {
-      renderer.drawCenteredText(fontId, y, line);
+      UITheme::drawCenteredText(renderer, area, fontId, y, line);
       underline(y);
     }
     y += lineHeight;
@@ -228,7 +228,7 @@ int drawWrappedCentered(GfxRenderer& renderer, int fontId, int contentTop, int c
 
 // Draw the card's chapter title (if any) as a small footer just above the button
 // hints. No-op when the chapter is empty.
-void drawChapterFooter(GfxRenderer& renderer, int contentBottom, const std::string& chapter) {
+void drawChapterFooter(GfxRenderer& renderer, int contentBottom, const Rect area, const std::string& chapter) {
   if (chapter.empty()) return;
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int y = contentBottom - metrics.listRowHeight;
@@ -244,14 +244,14 @@ void drawChapterFooter(GfxRenderer& renderer, int contentBottom, const std::stri
   // ellipsis-truncated, then dimmed to a grey checkerboard stipple so the footer
   // recedes from the card body (see BaseTheme::drawStatusBar).
   const int margin = metrics.contentSidePadding;
-  const int sw = renderer.getScreenWidth();
+  const int sw = area.width;
   const int lineH = renderer.getLineHeight(SMALL_FONT_ID);
 
   if (!hasPage) {  // legacy / no page token: centered title, full-width budget
     const std::string trunc = renderer.truncatedText(SMALL_FONT_ID, ch, sw - 2 * margin);
     const int w = renderer.getTextWidth(SMALL_FONT_ID, trunc.c_str());
-    renderer.drawCenteredText(SMALL_FONT_ID, y, trunc.c_str(), true);
-    renderer.dimRegionCheckerboard((sw - w) / 2, y, w, lineH);
+    UITheme::drawCenteredText(renderer, area, SMALL_FONT_ID, y, trunc.c_str(), true);
+    renderer.dimRegionCheckerboard(area.x + (sw - w) / 2, y, w, lineH);
     return;
   }
 
@@ -274,19 +274,20 @@ void drawChapterFooter(GfxRenderer& renderer, int contentBottom, const std::stri
     if (titleMax > 0) {
       const std::string trunc = renderer.truncatedText(SMALL_FONT_ID, titleBuf, titleMax);
       const int w = renderer.getTextWidth(SMALL_FONT_ID, trunc.c_str());
-      renderer.drawText(SMALL_FONT_ID, margin, y, trunc.c_str(), true);
-      renderer.dimRegionCheckerboard(margin, y, w, lineH);
+      renderer.drawText(SMALL_FONT_ID, area.x + margin, y, trunc.c_str(), true);
+      renderer.dimRegionCheckerboard(area.x + margin, y, w, lineH);
     }
   }
-  renderer.drawText(SMALL_FONT_ID, sw - margin - wPage, y, pageBuf, true);
+  renderer.drawText(SMALL_FONT_ID, area.x + sw - margin - wPage, y, pageBuf, true);
 }
 
 }  // namespace
 
 namespace FlashcardCardFace {
 
-void render(GfxRenderer& renderer, int contentTop, int contentBottom, int pageWidth, const std::string& word,
+void render(GfxRenderer& renderer, int contentTop, int contentBottom, int left, int width, const std::string& word,
             const std::string& excerpt, const std::string& chapter, bool showWord, uint32_t lookupCount) {
+  const Rect area{left, contentTop, width, contentBottom - contentTop};
   const int defFont = CrossPointSettings::getInstance().getDefinitionFontId();
   const int bodyFont = cjkCapableFontId(renderer, defFont, excerpt.c_str());
   const auto& metrics = UITheme::getInstance().getMetrics();
@@ -297,14 +298,14 @@ void render(GfxRenderer& renderer, int contentTop, int contentBottom, int pageWi
     const int wordY = contentTop + metrics.listRowHeight;
     // The header owns the two rows between its own row and the excerpt below it.
     const int band = metrics.listRowHeight * 2;
-    const HeadwordLayout head = drawHeadword(renderer, defFont, wordY, band, pageWidth, word);
+    const HeadwordLayout head = drawHeadword(renderer, defFont, wordY, band, area, word);
     // Small "xN" lookup-count badge just right of the centered word, only when > 1.
     // Small font + bottom-aligned so it reads as a subtle annotation, not a second word.
     if (lookupCount > 1) {
       char cbuf[12];
       snprintf(cbuf, sizeof(cbuf), "x%lu", static_cast<unsigned long>(lookupCount));
       const int gap = renderer.getTextWidth(NOTOSERIF_18_FONT_ID, "  ", EpdFontFamily::BOLD);  // ~2 word-spaces
-      const int x = (pageWidth + head.width) / 2 + gap;  // right edge of the centered word + the gap
+      const int x = left + (width + head.width) / 2 + gap;  // right edge of the centered word + the gap
       const int dy = head.lineHeight - renderer.getLineHeight(SMALL_FONT_ID);
       renderer.drawText(SMALL_FONT_ID, x, head.top + dy, cbuf, true);
     }
@@ -326,14 +327,14 @@ void render(GfxRenderer& renderer, int contentTop, int contentBottom, int pageWi
     }
 
     // Excerpt with the word underlined in context; masked (white-boxed) when hidden.
-    drawWrappedCentered(renderer, bodyFont, contentTop + metrics.listRowHeight * 3, contentBottom, pageWidth,
+    drawWrappedCentered(renderer, bodyFont, contentTop + metrics.listRowHeight * 3, contentBottom, area,
                         excerpt.c_str(), highlight, /*maskHighlight=*/!showWord);
   } else if (!showWord) {
     // No excerpt to blank into: fall back to a centered "____" placeholder.
-    renderer.drawCenteredText(bodyFont, contentTop + metrics.listRowHeight * 3, "____");
+    UITheme::drawCenteredText(renderer, area, bodyFont, contentTop + metrics.listRowHeight * 3, "____");
   }
 
-  drawChapterFooter(renderer, contentBottom, chapter);
+  drawChapterFooter(renderer, contentBottom, area, chapter);
 }
 
 }  // namespace FlashcardCardFace

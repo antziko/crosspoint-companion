@@ -6,6 +6,7 @@
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "components/UITheme.h"
+#include "components/UiAppHelpers.h"
 #include "util/Timezones.h"
 
 namespace fui = freeink::ui;
@@ -44,8 +45,7 @@ void TimezonePickerActivity::activateIndex(const int index) {
 
 void TimezonePickerActivity::buildScreen(UiScreen& screen) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  screen.setContentMarginFromScreen(fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0,
-                                                static_cast<int16_t>(metrics.buttonHintsHeight), 0});
+  screen.setContentMarginFromScreen(safeContentInsets(renderer, metrics.topPadding + metrics.headerHeight));
   screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
 
   fui::ListProps props;

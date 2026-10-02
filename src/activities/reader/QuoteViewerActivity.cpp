@@ -70,13 +70,13 @@ void QuoteViewerActivity::loadCurrent() {
 
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int sidePad = metrics.contentSidePadding;
-  const int contentWidth = renderer.getScreenWidth() - sidePad * 2;
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int contentWidth = safe.width - sidePad * 2;
   wrappedLines_ = renderer.wrappedText(kBodyFontId, text, contentWidth, kWrapLineCap);
 
   lineHeight_ = renderer.getLineHeight(kBodyFontId);
   const int topReserve = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int bottomReserve = metrics.buttonHintsHeight + metrics.verticalSpacing;
-  const int bodyHeight = renderer.getScreenHeight() - topReserve - bottomReserve;
+  const int bodyHeight = safe.height - topReserve - metrics.verticalSpacing;
   linesPerPage_ = (lineHeight_ > 0) ? std::max(1, bodyHeight / lineHeight_) : 1;
 }
 
@@ -153,44 +153,43 @@ void QuoteViewerActivity::render(RenderLock&&) {
   }
 
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const int sidePad = metrics.contentSidePadding;
-  const int pageWidth = renderer.getScreenWidth();
-  const int pageHeight = renderer.getScreenHeight();
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int left = safe.x + metrics.contentSidePadding;
+  const int right = safe.x + safe.width - metrics.contentSidePadding;
   const auto& bms = BOOKMARKS.getBookmarks();
   const size_t absIdx = quoteIndices_[currentPos_];
   const struct Bookmark& bm = bms[absIdx];
 
   // Header: chapter title (left, bold) + "N / M" quote counter (right). Both are drawn here
   // rather than passed to drawHeader, which only gets the empty title so it paints the band.
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, "");
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), "");
   // With the top bar off the band is one title line tall and holds no battery, so the labels
   // centre in it and reclaim the reserve the battery group would have needed.
   const bool compactBand = UITheme::isTopBarHidden();
   constexpr int kBatteryReserve = 90;
   const int batteryReserve = compactBand ? 0 : kBatteryReserve;
-  const int headerY = compactBand
-                          ? metrics.topPadding + (metrics.headerHeight - renderer.getLineHeight(kHeaderFontId)) / 2
-                          : metrics.topPadding + (metrics.headerHeight > 60 ? metrics.batteryBarHeight + 3 : 14);
+  const int headerY =
+      safe.y + (compactBand ? metrics.topPadding + (metrics.headerHeight - renderer.getLineHeight(kHeaderFontId)) / 2
+                            : metrics.topPadding + (metrics.headerHeight > 60 ? metrics.batteryBarHeight + 3 : 14));
   const char* chapter = bm.chapterTitle[0] != '\0' ? bm.chapterTitle : tr(STR_BOOKMARKS);
 
   char counter[24];
   std::snprintf(counter, sizeof(counter), "%d / %d", currentPos_ + 1, static_cast<int>(quoteIndices_.size()));
   const int counterW = renderer.getTextWidth(kHeaderFontId, counter, EpdFontFamily::REGULAR);
   constexpr int kCounterGap = 8;
-  const int chapterBudget = std::max(0, pageWidth - sidePad * 2 - batteryReserve - counterW - kCounterGap);
+  const int chapterBudget = std::max(0, right - left - batteryReserve - counterW - kCounterGap);
   const std::string chapterTrunc = renderer.truncatedText(kHeaderFontId, chapter, chapterBudget);
-  renderer.drawText(kHeaderFontId, sidePad, headerY, chapterTrunc.c_str(), true, EpdFontFamily::BOLD);
-  renderer.drawText(kHeaderFontId, pageWidth - sidePad - batteryReserve - counterW, headerY, counter, true,
-                    EpdFontFamily::REGULAR);
+  renderer.drawText(kHeaderFontId, left, headerY, chapterTrunc.c_str(), true, EpdFontFamily::BOLD);
+  renderer.drawText(kHeaderFontId, right - batteryReserve - counterW, headerY, counter, true, EpdFontFamily::REGULAR);
 
   // Body: wrapped preview, paginated by pageOffset_.
-  int y = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int bodyBottomLimit = pageHeight - metrics.buttonHintsHeight - metrics.verticalSpacing;
+  int y = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int bodyBottomLimit = safe.y + safe.height - metrics.verticalSpacing;
   const int linesAvailable = static_cast<int>(wrappedLines_.size()) - pageOffset_;
   const int linesToDraw = std::min(linesPerPage_, std::max(0, linesAvailable));
   for (int i = 0; i < linesToDraw; i++) {
     if (y + lineHeight_ > bodyBottomLimit) break;
-    renderer.drawText(kBodyFontId, sidePad, y, wrappedLines_[pageOffset_ + i].c_str(), true, EpdFontFamily::REGULAR);
+    renderer.drawText(kBodyFontId, left, y, wrappedLines_[pageOffset_ + i].c_str(), true, EpdFontFamily::REGULAR);
     y += lineHeight_;
   }
 

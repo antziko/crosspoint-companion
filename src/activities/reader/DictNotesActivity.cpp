@@ -195,13 +195,13 @@ void DictNotesActivity::openNoteText() {
   viewWord_ = full.word;
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int sidePad = metrics.contentSidePadding;
-  const int contentWidth = renderer.getScreenWidth() - sidePad * 2;
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int contentWidth = safe.width - sidePad * 2;
   wrappedLines_ = renderer.wrappedText(kBodyFontId, full.text.c_str(), contentWidth, kWrapLineCap);
 
   lineHeight_ = renderer.getLineHeight(kBodyFontId);
   const int topReserve = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int bottomReserve = metrics.buttonHintsHeight + metrics.verticalSpacing;
-  const int bodyHeight = renderer.getScreenHeight() - topReserve - bottomReserve;
+  const int bodyHeight = safe.height - topReserve - metrics.verticalSpacing;
   linesPerPage_ = (lineHeight_ > 0) ? std::max(1, bodyHeight / lineHeight_) : 1;
 
   pageOffset_ = 0;
@@ -450,17 +450,16 @@ void DictNotesActivity::render(RenderLock&&) {
 }
 
 void DictNotesActivity::renderDictionaries() {
-  const int pageWidth = renderer.getScreenWidth();
-  const int pageHeight = renderer.getScreenHeight();
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int pageItems = std::max(1, UITheme::getNumberOfItemsPerPage(renderer, true, false, true, false));
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_DICT_NOTES));
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_DICT_NOTES));
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int contentTop = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
 
   if (dicts_.empty()) {
     listTouch_.clear();
-    const int midY = contentTop + (pageHeight - contentTop - metrics.buttonHintsHeight) / 2;
+    const int midY = contentTop + (safe.y + safe.height - contentTop) / 2;
     renderer.drawCenteredText(UI_10_FONT_ID, midY, tr(STR_DICT_NOTES_EMPTY));
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
@@ -469,9 +468,9 @@ void DictNotesActivity::renderDictionaries() {
 
   const int count = static_cast<int>(dicts_.size());
   const int contentHeight = pageItems * metrics.listRowHeight;
-  listTouch_.record(Rect{0, contentTop, pageWidth, contentHeight}, count, dictIndex_);
+  listTouch_.record(Rect{safe.x, contentTop, safe.width, contentHeight}, count, dictIndex_);
   GUI.drawList(
-      renderer, Rect{0, contentTop, pageWidth, contentHeight}, count, dictIndex_,
+      renderer, Rect{safe.x, contentTop, safe.width, contentHeight}, count, dictIndex_,
       [this](int i) { return i >= 0 && i < static_cast<int>(dicts_.size()) ? dicts_[i].name : std::string(); }, nullptr,
       nullptr,
       // How many notes each dictionary holds, right-aligned: the row shape a settings list uses
@@ -486,8 +485,6 @@ void DictNotesActivity::renderDictionaries() {
 }
 
 void DictNotesActivity::renderList() {
-  const int pageWidth = renderer.getScreenWidth();
-  const int pageHeight = renderer.getScreenHeight();
   const auto& metrics = UITheme::getInstance().getMetrics();
 
   // Same row count the nav uses (orientation-aware), so render and navigation always agree on
@@ -503,13 +500,15 @@ void DictNotesActivity::renderList() {
   snprintf(titleBuf, sizeof(titleBuf), tr(STR_LOOKUP_HIST_HEADER_FORMAT),
            dictName_.empty() ? tr(STR_DICT_NOTES) : dictName_.c_str(), static_cast<int>(totalCount), curPage,
            totalPages);
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, titleBuf);
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), titleBuf);
 
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+
+  const int contentTop = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
 
   if (totalCount == 0) {
     listTouch_.clear();
-    const int midY = contentTop + (pageHeight - contentTop - metrics.buttonHintsHeight) / 2;
+    const int midY = contentTop + (safe.y + safe.height - contentTop) / 2;
     renderer.drawCenteredText(UI_10_FONT_ID, midY, tr(STR_DICT_NOTES_EMPTY));
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
@@ -517,9 +516,9 @@ void DictNotesActivity::renderList() {
   }
 
   const int contentHeight = pageItems * metrics.listRowHeight;
-  listTouch_.record(Rect{0, contentTop, pageWidth, contentHeight}, totalCount, selectedIndex);
+  listTouch_.record(Rect{safe.x, contentTop, safe.width, contentHeight}, totalCount, selectedIndex);
   GUI.drawList(
-      renderer, Rect{0, contentTop, pageWidth, contentHeight}, totalCount, selectedIndex,
+      renderer, Rect{safe.x, contentTop, safe.width, contentHeight}, totalCount, selectedIndex,
       [this](int i) {
         const auto* e = entryAt(i);
         if (!e) return std::string();
@@ -535,15 +534,15 @@ void DictNotesActivity::renderList() {
 
 void DictNotesActivity::renderNote() {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const int pageWidth = renderer.getScreenWidth();
-  const int sidePad = metrics.contentSidePadding;
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int left = safe.x + metrics.contentSidePadding;
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, viewWord_.c_str());
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), viewWord_.c_str());
 
-  const int top = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int top = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
   const int visible = std::min(linesPerPage_, static_cast<int>(wrappedLines_.size()) - pageOffset_);
   for (int i = 0; i < visible; i++) {
-    renderer.drawText(kBodyFontId, sidePad, top + i * lineHeight_, wrappedLines_[pageOffset_ + i].c_str(), true,
+    renderer.drawText(kBodyFontId, left, top + i * lineHeight_, wrappedLines_[pageOffset_ + i].c_str(), true,
                       EpdFontFamily::REGULAR);
   }
 

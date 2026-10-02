@@ -235,7 +235,8 @@ void SdFirmwareUpdateActivity::loop() {
 
 void SdFirmwareUpdateActivity::render(RenderLock&&) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const auto pageWidth = renderer.getScreenWidth();
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const auto pageWidth = safe.width;
   const auto pageHeight = renderer.getScreenHeight();
 
   const auto lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
@@ -274,24 +275,25 @@ void SdFirmwareUpdateActivity::render(RenderLock&&) {
     // and it shows up later as a faint line across the sleep wallpaper, the only
     // full-screen content with nothing drawn at that y. Text glyphs are thin and sparse,
     // so the title itself is not a comparable risk.
-    renderer.drawCenteredText(UI_10_FONT_ID, metrics.topPadding + (metrics.headerHeight - lineHeight) / 2, headerText,
-                              true, EpdFontFamily::BOLD);
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID,
+                              safe.y + metrics.topPadding + (metrics.headerHeight - lineHeight) / 2, headerText, true,
+                              EpdFontFamily::BOLD);
   } else {
-    GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, headerText);
+    GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), headerText);
   }
 
   const auto top = (pageHeight - lineHeight) / 2;
 
   if (state == State::VALIDATING) {
-    renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_VALIDATING_FIRMWARE));
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, top, tr(STR_VALIDATING_FIRMWARE));
   } else if (state == State::UPDATING) {
-    renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATING), true, EpdFontFamily::BOLD);
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, top, tr(STR_UPDATING), true, EpdFontFamily::BOLD);
 
     int y = top + lineHeight + metrics.verticalSpacing;
-    GUI.drawProgressBar(
-        renderer,
-        Rect{metrics.contentSidePadding, y, pageWidth - metrics.contentSidePadding * 2, metrics.progressBarHeight},
-        static_cast<int>(pct), 100);
+    GUI.drawProgressBar(renderer,
+                        Rect{safe.x + metrics.contentSidePadding, y, pageWidth - metrics.contentSidePadding * 2,
+                             metrics.progressBarHeight},
+                        static_cast<int>(pct), 100);
     y += metrics.progressBarHeight + metrics.verticalSpacing;
     // Percent label is drawn by BaseTheme::drawProgressBar; this slot is left intentionally empty
     // so the do-not-power-off line below stays at the same Y as before.
@@ -300,7 +302,7 @@ void SdFirmwareUpdateActivity::render(RenderLock&&) {
     const auto warnLines =
         renderer.wrappedText(UI_10_FONT_ID, tr(STR_FIRMWARE_UPDATE_DO_NOT_POWER_OFF), pageWidth - 40, 2);
     for (const auto& line : warnLines) {
-      renderer.drawCenteredText(UI_10_FONT_ID, y, line.c_str());
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, y, line.c_str());
       y += lineHeight;
     }
   } else if (state == State::SUCCESS) {
@@ -320,23 +322,23 @@ void SdFirmwareUpdateActivity::render(RenderLock&&) {
     // held black through an entire flash write is the canonical set-in-sticking case
     // (GfxRenderer.h:238-244), and after ESP.restart() nothing can clear it.
     logUpdateDiagnostics(renderer.deepCleanPanel(1));
-    renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_COMPLETE), true, EpdFontFamily::BOLD);
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, top, tr(STR_UPDATE_COMPLETE), true, EpdFontFamily::BOLD);
     // Wrap the restart hint ("...hold the power for a few seconds...") over up to 3
     // lines instead of a single centered line that runs off both edges (X3 narrower).
     const int hintY = top + lineHeight + metrics.verticalSpacing;
-    const Rect hintBounds{metrics.contentSidePadding, hintY, pageWidth - metrics.contentSidePadding * 2,
+    const Rect hintBounds{safe.x + metrics.contentSidePadding, hintY, pageWidth - metrics.contentSidePadding * 2,
                           pageHeight - hintY};
     UITheme::drawCenteredWrappedText(renderer, hintBounds, UI_10_FONT_ID, tr(STR_RESTARTING_HINT), 3, true,
                                      EpdFontFamily::REGULAR, UITheme::TextVerticalAlignment::TOP);
   } else if (state == State::FAILED) {
-    renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_FAILED), true, EpdFontFamily::BOLD);
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, top, tr(STR_UPDATE_FAILED), true, EpdFontFamily::BOLD);
     if (!errorMessage.empty()) {
       // Wrap so a long detail can't run off both screen edges (consistency with
       // the other error screens; X3 is narrower than X4).
       const auto errLines = renderer.wrappedText(UI_10_FONT_ID, errorMessage.c_str(), pageWidth - 40, 3);
       int errY = top + lineHeight + metrics.verticalSpacing;
       for (const auto& line : errLines) {
-        renderer.drawCenteredText(UI_10_FONT_ID, errY, line.c_str());
+        UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, errY, line.c_str());
         errY += lineHeight;
       }
     }
@@ -345,7 +347,7 @@ void SdFirmwareUpdateActivity::render(RenderLock&&) {
   } else {
     // PICKING / CONFIRMING: a sub-activity is on top, nothing to draw.
     if (recoveryMode) {
-      renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_RECOVERY_MODE_HINT));
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, top, tr(STR_RECOVERY_MODE_HINT));
     }
   }
 

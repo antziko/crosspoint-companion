@@ -36,7 +36,7 @@ class FontComparePane {
 
   // Two stacked compare panes in [top, top+height): top = committed font, bottom = highlighted.
   // Loads the highlighted font on demand (may swap the resident SD family) and clears the nav-lock.
-  void renderPanes(GfxRenderer& renderer, int top, int height);
+  void renderPanes(GfxRenderer& renderer, int top, int height, int paneX = 0, int paneWidth = -1);
   // The font list within [listTop, listTop+listHeight): pinned entries float to the top with a
   // '*' marker; the committed font is tagged [Selected]. listX/listWidth bound it horizontally
   // (listWidth < 0 = full screen width).
@@ -87,7 +87,8 @@ class FontComparePane {
 
  private:
   int loadPaneFontId(GfxRenderer& renderer, int index);
-  void renderPreviewPane(GfxRenderer& renderer, int top, int height, int fontId, const char* label) const;
+  void renderPreviewPane(GfxRenderer& renderer, int top, int height, int fontId, const char* label, int paneX,
+                         int paneWidth) const;
   void applyPinSort();
   int currentSelectionIndex() const;
 

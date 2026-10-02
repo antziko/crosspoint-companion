@@ -20,7 +20,10 @@ void ConfirmationActivity::onEnter() {
   Activity::onEnter();
 
   lineHeight = renderer.getLineHeight(fontId);
-  const int maxWidth = renderer.getScreenWidth() - (margin * 2);
+  // Wrapped and centred across the area the button hints leave free, which is a side column
+  // in landscape.
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int maxWidth = safe.width - (margin * 2);
 
   // Touch boards hide the physical button-hint strip (BaseTheme::drawButtonHints
   // returns early there), so the prompt draws its own Cancel / Confirm pair. On the
@@ -33,8 +36,7 @@ void ConfirmationActivity::onEnter() {
   // strip is in use — so the wrapped block can't ride under the Cancel/Confirm
   // hints or the on-screen buttons.
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const int bottomReserved = metrics.buttonHintsHeight + touchButtonHeight;
-  const int available = renderer.getScreenHeight() - (margin * 2) - bottomReserved - spacing;
+  const int available = safe.height - (margin * 2) - touchButtonHeight - spacing;
   const int maxLines = std::max(1, available / lineHeight);
 
   if (!heading.empty()) {
@@ -103,11 +105,12 @@ void ConfirmationActivity::finishWith(const bool cancelled) {
 void ConfirmationActivity::render(RenderLock&& lock) {
   renderer.clearScreen();
 
+  const Rect area = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
   int currentY = startY;
 
   // Draw heading (wrapped, centered)
   for (const auto& line : headingLines) {
-    renderer.drawCenteredText(fontId, currentY, line.c_str(), true, EpdFontFamily::BOLD);
+    UITheme::drawCenteredText(renderer, area, fontId, currentY, line.c_str(), true, EpdFontFamily::BOLD);
     currentY += lineHeight;
   }
 
@@ -116,7 +119,7 @@ void ConfirmationActivity::render(RenderLock&& lock) {
 
   // Draw body (wrapped, centered)
   for (const auto& line : bodyLines) {
-    renderer.drawCenteredText(fontId, currentY, line.c_str(), true, EpdFontFamily::REGULAR);
+    UITheme::drawCenteredText(renderer, area, fontId, currentY, line.c_str(), true, EpdFontFamily::REGULAR);
     currentY += lineHeight;
   }
 

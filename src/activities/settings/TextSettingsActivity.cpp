@@ -73,8 +73,11 @@ void TextSettingsActivity::onEnter() {
   UiTabListActivity::onEnter();
 
   metrics_ = UITheme::getInstance().getMetrics();
-  afterHeader = metrics_.topPadding + metrics_.headerHeight + metrics_.verticalSpacing;
-  bottomReserved = metrics_.buttonHintsHeight + metrics_.verticalSpacing;
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  safeX = safe.x;
+  safeWidth = safe.width;
+  afterHeader = safe.y + metrics_.topPadding + metrics_.headerHeight + metrics_.verticalSpacing;
+  bottomReserved = renderer.getScreenHeight() - (safe.y + safe.height) + metrics_.verticalSpacing;
   usableHeight = renderer.getScreenHeight() - afterHeader - bottomReserved;
   previewHeight = usableHeight * metrics_.previewHeightPercent / 100;
 
@@ -370,7 +373,8 @@ void TextSettingsActivity::buildScreen(UiScreen& screen) {
   const int tabTop = afterHeader + previewHeight;
   const int captionHeight = renderer.getTextHeight(UI_10_FONT_ID) + metrics_.verticalSpacing;
   screen.setContentMargin(
-      fui::Insets{static_cast<int16_t>(tabTop), 0, static_cast<int16_t>(bottomReserved + captionHeight), 0});
+      fui::Insets{static_cast<int16_t>(tabTop), static_cast<int16_t>(renderer.getScreenWidth() - (safeX + safeWidth)),
+                  static_cast<int16_t>(bottomReserved + captionHeight), static_cast<int16_t>(safeX)});
 
   buildTabBar(screen);
 
@@ -441,21 +445,20 @@ const char* TextSettingsActivity::confirmLabelText() const {
 }
 
 void TextSettingsActivity::drawChrome() {
-  const auto pageWidth = renderer.getScreenWidth();
-
-  GUI.drawHeader(renderer, Rect{0, metrics_.topPadding, pageWidth, metrics_.headerHeight}, tr(STR_TEXT_SETTINGS));
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_TEXT_SETTINGS));
 
   if (onFamilyTab()) {
     // LOCAL(feat): the Font tab shows the two-pane live compare (committed vs highlighted)
     // in the preview region instead of the shared single-pane preview.
-    fontPane_.renderPanes(renderer, afterHeader, previewHeight);
+    fontPane_.renderPanes(renderer, afterHeader, previewHeight, safeX, safeWidth);
   } else {
     const char* familyName = fontPane_.committed().name.c_str();
     const char* sizeName = (currentSizeIndex_ >= 0 && currentSizeIndex_ < static_cast<int>(sizes_.size()))
                                ? sizes_[currentSizeIndex_].name.c_str()
                                : "";
     textsettings::renderPreview(renderer, previewLayout_, metrics_.previewPadding, metrics_.verticalSpacing,
-                                afterHeader, previewHeight, familyName, sizeName);
+                                afterHeader, previewHeight, familyName, sizeName, /*sampleText=*/nullptr,
+                                /*showLabel=*/true, safeX, safeWidth);
   }
 }
 
@@ -463,7 +466,7 @@ void TextSettingsActivity::drawFooter() {
   if (focusedRowHasNoPreview()) {
     const int captionHeight = renderer.getTextHeight(UI_10_FONT_ID) + metrics_.verticalSpacing;
     const int capY = afterHeader + usableHeight - captionHeight + metrics_.verticalSpacing;
-    renderer.drawText(UI_10_FONT_ID, metrics_.previewPadding, capY, tr(STR_NOT_IN_PREVIEW));
+    renderer.drawText(UI_10_FONT_ID, safeX + metrics_.previewPadding, capY, tr(STR_NOT_IN_PREVIEW));
   }
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabelText(), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
@@ -488,7 +491,7 @@ void TextSettingsActivity::render(RenderLock&&) {
         // LOCAL(feat): drawn after renderUi so it lands in the body region the FUI frame left empty.
         if (self->onFamilyTab()) {
           const auto geo = self->paneGeometry();
-          self->fontPane_.renderList(self->renderer, geo.listTop, geo.listHeight);
+          self->fontPane_.renderList(self->renderer, geo.listTop, geo.listHeight, self->safeX, self->safeWidth);
         }
       },
       this);

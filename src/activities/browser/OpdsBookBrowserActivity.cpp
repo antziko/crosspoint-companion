@@ -25,6 +25,7 @@
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UIScale.h"
 #include "components/UITheme.h"
+#include "components/UiAppHelpers.h"
 #include "components/icons/headerIcons.h"
 #include "components/icons/search32.h"
 #include "fontIds.h"
@@ -496,10 +497,11 @@ void OpdsBookBrowserActivity::rootScreen(UiScreen& screen, void* user) {
   }
 }
 
-// Shared chrome for every state: reserve the firmware's button-hint band and
-// draw the themed header (padding, centering, and rule come from the theme).
+// Shared chrome for every state: reserve the firmware's button-hint band (on whichever edge it
+// lands in this orientation) and draw the themed header (padding, centering, and rule come from
+// the theme).
 void OpdsBookBrowserActivity::screenHeader(UiScreen& screen, const bool withSearch) {
-  screen.takeBottom(static_cast<int16_t>(UITheme::getInstance().getMetrics().buttonHintsHeight));
+  screen.setContentMargin(safeContentInsets(renderer, 0));
   // Same top offset as every GUI.drawHeader caller, so the band lines up with
   // the rest of the firmware's screens.
   screen.spacer(static_cast<int16_t>(UITheme::getInstance().getMetrics().topPadding));

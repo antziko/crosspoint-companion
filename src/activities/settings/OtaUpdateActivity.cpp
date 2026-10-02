@@ -121,7 +121,8 @@ void OtaUpdateActivity::onExit() {
 
 void OtaUpdateActivity::render(RenderLock&&) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const auto pageWidth = renderer.getScreenWidth();
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const auto pageWidth = safe.width;
   const auto pageHeight = renderer.getScreenHeight();
 
   const auto height = renderer.getLineHeight(UI_10_FONT_ID);
@@ -150,48 +151,49 @@ void OtaUpdateActivity::render(RenderLock&&) {
     // black on the same three rows the entire time. That dwell — not the frame count — is what
     // sets e-ink image sticking, and it surfaces later as a faint line across the sleep
     // wallpaper. Same treatment as SdFirmwareUpdateActivity, which was confirmed on device.
-    renderer.drawCenteredText(UI_10_FONT_ID, metrics.topPadding + (metrics.headerHeight - height) / 2, tr(STR_UPDATE),
-                              true, EpdFontFamily::BOLD);
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID,
+                              safe.y + metrics.topPadding + (metrics.headerHeight - height) / 2, tr(STR_UPDATE), true,
+                              EpdFontFamily::BOLD);
   } else {
-    GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_UPDATE));
+    GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_UPDATE));
   }
 
   if (state == CHECKING_FOR_UPDATE) {
-    renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_CHECKING_UPDATE));
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, top, tr(STR_CHECKING_UPDATE));
   } else if (state == WAITING_CONFIRMATION) {
     // Version info sits in the upper part of the screen so the centered
     // Cancel/Update popup doesn't cover it (same layout as ConfirmationActivity).
     const int infoTop = pageHeight / 6;
-    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, infoTop,
+    renderer.drawText(UI_10_FONT_ID, safe.x + metrics.contentSidePadding, infoTop,
                       (std::string(tr(STR_CURRENT_VERSION)) + CROSSPOINT_VERSION).c_str());
-    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, infoTop + height + metrics.verticalSpacing,
+    renderer.drawText(UI_10_FONT_ID, safe.x + metrics.contentSidePadding, infoTop + height + metrics.verticalSpacing,
                       (std::string(tr(STR_NEW_VERSION)) + updater.getLatestVersion()).c_str());
 
     if (confirmPopup.processRender(renderer, mappedInput)) return;
   } else if (state == UPDATE_IN_PROGRESS) {
-    renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATING));
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, top, tr(STR_UPDATING));
 
     int y = top + height + metrics.verticalSpacing;
-    GUI.drawProgressBar(
-        renderer,
-        Rect{metrics.contentSidePadding, y, pageWidth - metrics.contentSidePadding * 2, metrics.progressBarHeight},
-        static_cast<int>(updaterProgress * 100), 100);
+    GUI.drawProgressBar(renderer,
+                        Rect{safe.x + metrics.contentSidePadding, y, pageWidth - metrics.contentSidePadding * 2,
+                             metrics.progressBarHeight},
+                        static_cast<int>(updaterProgress * 100), 100);
 
     y += metrics.progressBarHeight + metrics.verticalSpacing;
     // Percent label is drawn by BaseTheme::drawProgressBar; this slot is left intentionally empty
     // so the bytes line below stays at the same Y it was at when the activity drew its own percent.
     y += height + metrics.verticalSpacing;
-    renderer.drawCenteredText(
-        UI_10_FONT_ID, y,
+    UITheme::drawCenteredText(
+        renderer, safe, UI_10_FONT_ID, y,
         (std::to_string(updater.getProcessedSize()) + " / " + std::to_string(updater.getTotalSize())).c_str());
   } else if (state == NO_UPDATE) {
-    renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_NO_UPDATE), true, EpdFontFamily::BOLD);
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, top, tr(STR_NO_UPDATE), true, EpdFontFamily::BOLD);
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   } else if (state == FAILED) {
-    renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_FAILED), true, EpdFontFamily::BOLD);
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, top, tr(STR_UPDATE_FAILED), true, EpdFontFamily::BOLD);
     if (failedDetail != nullptr) {
-      renderer.drawCenteredText(UI_10_FONT_ID, top + height + metrics.verticalSpacing, failedDetail);
+      UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, top + height + metrics.verticalSpacing, failedDetail);
     }
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
@@ -208,9 +210,9 @@ void OtaUpdateActivity::render(RenderLock&&) {
       deepCleanDone = true;
       renderer.deepCleanPanel();
     }
-    renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_COMPLETE), true, EpdFontFamily::BOLD);
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, top, tr(STR_UPDATE_COMPLETE), true, EpdFontFamily::BOLD);
     const int hintY = top + height + metrics.verticalSpacing;
-    const Rect hintBounds{metrics.contentSidePadding, hintY, pageWidth - metrics.contentSidePadding * 2,
+    const Rect hintBounds{safe.x + metrics.contentSidePadding, hintY, pageWidth - metrics.contentSidePadding * 2,
                           pageHeight - hintY};
     UITheme::drawCenteredWrappedText(renderer, hintBounds, UI_10_FONT_ID, tr(STR_POWER_ON_HINT), 3, true,
                                      EpdFontFamily::REGULAR, UITheme::TextVerticalAlignment::TOP);

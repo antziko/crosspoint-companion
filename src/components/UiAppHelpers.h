@@ -16,6 +16,16 @@
 // Shared glue for activities hosting a FreeInkApp: the font-bound render
 // target and the touch snapshot FreeInkApp routing consumes.
 
+// Content insets that keep a FreeInkApp screen inside the area the front button hints leave free
+// (a bottom band in portrait, a side column in landscape, a top band inverted), plus extraTop for
+// chrome drawn at the top of that area -- normally the header band.
+inline freeink::ui::Insets safeContentInsets(const GfxRenderer& renderer, const int extraTop) {
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  return freeink::ui::Insets{
+      static_cast<int16_t>(safe.y + extraTop), static_cast<int16_t>(renderer.getScreenWidth() - (safe.x + safe.width)),
+      static_cast<int16_t>(renderer.getScreenHeight() - (safe.y + safe.height)), static_cast<int16_t>(safe.x)};
+}
+
 // One app-wide ThemeTokens instance shared by every FreeInkApp via
 // setThemeRef, so per-app copies (~1.5KB each, and one per stacked activity)
 // aren't pure heap waste. Refreshed on every screen entry, so theme or font

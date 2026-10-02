@@ -703,33 +703,34 @@ bool DictPrepareActivity::generateCspt(const char* srcPath, const char* oftPath,
 void DictPrepareActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
-  const int pageWidth = renderer.getScreenWidth();
   const auto& metrics = UITheme::getInstance().getMetrics();
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_DICT_PREPARE_TITLE));
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_DICT_PREPARE_TITLE));
 
   const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int contentTop = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
   constexpr int BAR_HEIGHT = 16;
   constexpr int STEP_SPACING = 6;
   constexpr int BAR_MARGIN = 40;
+  const int barLeft = safe.x + BAR_MARGIN;
 
   if (state == State::CONFIRM) {
     int y = contentTop;
 
-    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, y, dictName);
+    renderer.drawText(UI_10_FONT_ID, safe.x + metrics.contentSidePadding, y, dictName);
     y += lineHeight + STEP_SPACING;
 
     // List required steps
     for (int i = 0; i < stepCount; i++) {
-      renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, y, stepLabel(steps[i].type));
+      renderer.drawText(UI_10_FONT_ID, safe.x + metrics.contentSidePadding, y, stepLabel(steps[i].type));
       y += lineHeight + STEP_SPACING;
     }
 
     y += metrics.verticalSpacing;
-    renderer.drawCenteredText(UI_10_FONT_ID, y, tr(STR_DICT_PREPARE_WARN_1));
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, y, tr(STR_DICT_PREPARE_WARN_1));
     y += lineHeight + STEP_SPACING;
-    renderer.drawCenteredText(UI_10_FONT_ID, y, tr(STR_DICT_PREPARE_WARN_2));
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, y, tr(STR_DICT_PREPARE_WARN_2));
 
     const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), tr(STR_CONFIRM), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
@@ -742,7 +743,7 @@ void DictPrepareActivity::render(RenderLock&&) {
   // Bold: current (IN_PROGRESS) and failed steps only. Completed steps use regular weight.
   int y = contentTop;
 
-  renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, y, dictName);
+  renderer.drawText(UI_10_FONT_ID, safe.x + metrics.contentSidePadding, y, dictName);
   y += lineHeight + STEP_SPACING;
 
   for (int i = 0; i < stepCount; i++) {
@@ -756,7 +757,7 @@ void DictPrepareActivity::render(RenderLock&&) {
 
     char labelBuf[64];
     snprintf(labelBuf, sizeof(labelBuf), "%s%s", prefix, stepLabel(step.type));
-    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, y, labelBuf, true, style);
+    renderer.drawText(UI_10_FONT_ID, safe.x + metrics.contentSidePadding, y, labelBuf, true, style);
     y += lineHeight;
 
     if (inProgress && step.total > 0) {
@@ -765,13 +766,13 @@ void DictPrepareActivity::render(RenderLock&&) {
       char pctBuf[8];
       snprintf(pctBuf, sizeof(pctBuf), "%d%%", percent);
       const int pctWidth = renderer.getTextWidth(UI_10_FONT_ID, pctBuf);
-      const int pctX = pageWidth - BAR_MARGIN - pctWidth;
+      const int pctX = safe.x + safe.width - BAR_MARGIN - pctWidth;
       const int barRight = pctX - 4;
-      const int barWidth = barRight - BAR_MARGIN;
+      const int barWidth = barRight - barLeft;
       if (barWidth > 4) {
-        renderer.drawRect(BAR_MARGIN, y, barWidth, BAR_HEIGHT);
+        renderer.drawRect(barLeft, y, barWidth, BAR_HEIGHT);
         const int fillWidth = (barWidth - 4) * percent / 100;
-        if (fillWidth > 0) renderer.fillRect(BAR_MARGIN + 2, y + 2, fillWidth, BAR_HEIGHT - 4);
+        if (fillWidth > 0) renderer.fillRect(barLeft + 2, y + 2, fillWidth, BAR_HEIGHT - 4);
       }
       const int pctY = y + (BAR_HEIGHT - lineHeight) / 2;
       renderer.drawText(UI_10_FONT_ID, pctX, pctY, pctBuf, true);
@@ -795,7 +796,7 @@ void DictPrepareActivity::render(RenderLock&&) {
       msg = tr(STR_DICT_PREPARE_CANCELLED);
     else
       msg = tr(STR_DICT_PREPARE_FAILED);
-    renderer.drawCenteredText(UI_10_FONT_ID, y, msg, true, EpdFontFamily::BOLD);
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, y, msg, true, EpdFontFamily::BOLD);
 
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

@@ -31,9 +31,9 @@ void FontSelectionActivity::onEnter() {
 
   // Cache layout dims so loop() (page sizing) and render() agree without recompute.
   const auto& metrics = UITheme::getInstance().getMetrics();
-  afterHeader_ = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int bottomReserved = metrics.buttonHintsHeight + metrics.verticalSpacing;
-  usableHeight_ = renderer.getScreenHeight() - afterHeader_ - bottomReserved;
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  afterHeader_ = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  usableHeight_ = safe.y + safe.height - afterHeader_ - metrics.verticalSpacing;
   panesHeight_ = usableHeight_ * kPanesPercent / 100;
 
   pane_.build(registry_, currentBuiltinFamily_, currentSdFamilyName_.c_str());
@@ -142,20 +142,19 @@ void FontSelectionActivity::loop() {
 void FontSelectionActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
-  const auto pageWidth = renderer.getScreenWidth();
-  const auto& metrics = UITheme::getInstance().getMetrics();
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_FONT_FAMILY));
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_FONT_FAMILY));
 
-  pane_.renderPanes(renderer, afterHeader_, panesHeight_);
+  pane_.renderPanes(renderer, afterHeader_, panesHeight_, safe.x, safe.width);
 
   const int listTop = afterHeader_ + panesHeight_ + kPaneGap;
   const int listHeight = usableHeight_ - panesHeight_ - kPaneGap;
 
-  // Separator between the panes and the list. pageWidth-1: the rightmost valid pixel is width-1.
-  renderer.drawLine(0, listTop - kPaneGap / 2, pageWidth - 1, listTop - kPaneGap / 2);
+  // Separator between the panes and the list. -1: the rightmost valid pixel is width-1.
+  renderer.drawLine(safe.x, listTop - kPaneGap / 2, safe.x + safe.width - 1, listTop - kPaneGap / 2);
 
-  pane_.renderList(renderer, listTop, listHeight);
+  pane_.renderList(renderer, listTop, listHeight, safe.x, safe.width);
 
   // Preview is live (follows the highlight), so Confirm always commits.
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));

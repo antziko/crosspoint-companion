@@ -116,11 +116,11 @@ int FontComparePane::loadPaneFontId(GfxRenderer& renderer, int index) {
   return id;
 }
 
-void FontComparePane::renderPreviewPane(GfxRenderer& renderer, int top, int height, int fontId,
-                                        const char* label) const {
+void FontComparePane::renderPreviewPane(GfxRenderer& renderer, int top, int height, int fontId, const char* label,
+                                        const int paneX, const int paneWidth) const {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const int left = metrics.previewPadding;
-  const int width = renderer.getScreenWidth() - (metrics.previewPadding * 2);
+  const int left = paneX + metrics.previewPadding;
+  const int width = paneWidth - (metrics.previewPadding * 2);
   if (width <= 0 || height <= 0) return;
 
   // Caption at the bottom of the pane: the font's name, so each pane is identifiable.
@@ -158,7 +158,8 @@ void FontComparePane::renderPreviewPane(GfxRenderer& renderer, int top, int heig
   }
 }
 
-void FontComparePane::renderPanes(GfxRenderer& renderer, int top, int height) {
+void FontComparePane::renderPanes(GfxRenderer& renderer, int top, int height, const int paneX, int paneWidth) {
+  if (paneWidth < 0) paneWidth = renderer.getScreenWidth();
   const int paneHeight = (height - kPaneGap) / 2;
   if (paneHeight <= 0) {
     navLocked_ = false;
@@ -176,11 +177,11 @@ void FontComparePane::renderPanes(GfxRenderer& renderer, int top, int height) {
   // Top (committed): load FIRST — its pixels land before the highlighted load below can swap out the
   // resident SD family, so only one SD family is ever resident at a time.
   const int committedFontId = loadPaneFontId(renderer, committedIndex_);
-  renderPreviewPane(renderer, committedTop, paneHeight, committedFontId, committedName);
+  renderPreviewPane(renderer, committedTop, paneHeight, committedFontId, committedName, paneX, paneWidth);
 
   // Bottom (highlighted): load second (may swap out the committed SD font, now already drawn).
   const int previewFontId = loadPaneFontId(renderer, selectedIndex_);
-  renderPreviewPane(renderer, previewTop, paneHeight, previewFontId, previewName);
+  renderPreviewPane(renderer, previewTop, paneHeight, previewFontId, previewName, paneX, paneWidth);
 
   // The requested preview is now on screen — accept up/down again.
   navLocked_ = false;
