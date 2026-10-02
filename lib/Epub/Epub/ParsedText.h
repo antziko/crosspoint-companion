@@ -90,6 +90,8 @@ class ParsedText {
   void pushVisibleOffset(uint32_t offset);
   void insertVisibleOffset(size_t wordIndex, uint32_t offset);
   void eraseVisibleOffsetPrefix(size_t count);
+  // Releases and erases the first `consumed` words from every per-word array.
+  void dropPrefix(size_t consumed);
   int resolveFirstLineIndent(bool isFirstLine, const GfxRenderer& renderer, int fontId) const;
   std::vector<size_t> computeLineBreaks(const GfxRenderer& renderer, int fontId, int pageWidth,
                                         std::vector<uint16_t>& wordWidths, std::vector<bool>& continuesVec,
@@ -130,6 +132,10 @@ class ParsedText {
   void ensureRubyCapacity();
   void setBlockStyle(const BlockStyle& blockStyle) { this->blockStyle = blockStyle; }
   BlockStyle& getBlockStyle() { return blockStyle; }
+  // Moves the first `count` words into a new block with the same style, so a block can be laid
+  // out as separate paragraphs. Null (and this block untouched) on OOM or a count that would leave
+  // either side empty.
+  std::unique_ptr<ParsedText> takePrefix(size_t count);
   size_t size() const { return words.size(); }
   bool isEmpty() const { return words.empty(); }
   // True once any word or line was dropped because an allocation failed. Callers must treat

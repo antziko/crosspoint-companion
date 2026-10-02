@@ -3,6 +3,7 @@
 #include <BidiUtils.h>
 #include <GfxRenderer.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <Utf8.h>
 
 #include <algorithm>
@@ -811,22 +812,55 @@ void ParsedText::layoutAndExtractLines(const GfxRenderer& renderer, const int fo
 
   // Remove consumed words so size() reflects only remaining words
   if (lineCount > 0) {
-    const size_t consumed = lineBreakIndices[lineCount - 1];
-    for (size_t i = 0; i < consumed; ++i) {
-      wordStore.release(words[i]);  // retires arena chunks as lines are consumed
-    }
-    words.erase(words.begin(), words.begin() + consumed);
-    wordStyles.erase(wordStyles.begin(), wordStyles.begin() + consumed);
-    wordContinues.erase(wordContinues.begin(), wordContinues.begin() + consumed);
-    wordNoSpaceBefore.erase(wordNoSpaceBefore.begin(), wordNoSpaceBefore.begin() + consumed);
-    wordFocusBoundary.erase(wordFocusBoundary.begin(), wordFocusBoundary.begin() + consumed);
-    wordLinkIds.erase(wordLinkIds.begin(), wordLinkIds.begin() + consumed);
-    eraseVisibleOffsetPrefix(consumed);
-    if (!rubyTexts.empty()) {
-      const size_t rtConsumed = std::min(consumed, rubyTexts.size());
-      rubyTexts.erase(rubyTexts.begin(), rubyTexts.begin() + rtConsumed);
-    }
+    dropPrefix(lineBreakIndices[lineCount - 1]);
   }
+}
+
+void ParsedText::dropPrefix(const size_t consumed) {
+  for (size_t i = 0; i < consumed; ++i) {
+    wordStore.release(words[i]);  // retires arena chunks as lines are consumed
+  }
+  words.erase(words.begin(), words.begin() + consumed);
+  wordStyles.erase(wordStyles.begin(), wordStyles.begin() + consumed);
+  wordContinues.erase(wordContinues.begin(), wordContinues.begin() + consumed);
+  wordNoSpaceBefore.erase(wordNoSpaceBefore.begin(), wordNoSpaceBefore.begin() + consumed);
+  wordFocusBoundary.erase(wordFocusBoundary.begin(), wordFocusBoundary.begin() + consumed);
+  wordLinkIds.erase(wordLinkIds.begin(), wordLinkIds.begin() + consumed);
+  eraseVisibleOffsetPrefix(consumed);
+  if (!rubyTexts.empty()) {
+    const size_t rtConsumed = std::min(consumed, rubyTexts.size());
+    rubyTexts.erase(rubyTexts.begin(), rubyTexts.begin() + rtConsumed);
+  }
+}
+
+std::unique_ptr<ParsedText> ParsedText::takePrefix(const size_t count) {
+  if (count == 0 || count >= words.size()) return nullptr;
+  auto head = makeUniqueNoThrow<ParsedText>(extraParagraphSpacing, hyphenationEnabled, focusReadingEnabled, blockStyle);
+  if (!head) return nullptr;
+  if (!reserveNoThrow(head->wordStyles, count) || !reserveNoThrow(head->wordContinues, count) ||
+      !reserveNoThrow(head->wordNoSpaceBefore, count) || !reserveNoThrow(head->wordFocusBoundary, count) ||
+      !reserveNoThrow(head->wordLinkIds, count) || !reserveNoThrow(head->wordVisibleOffsetDeltas, count) ||
+      !reserveNoThrow(head->linkTargets, linkTargets.size())) {
+    return nullptr;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    WordStore::StoredWord stored;
+    if (!head->storeWord(wordAt(i), stored)) return nullptr;  // this block is still intact
+    head->words.push_back(stored);
+    head->wordStyles.push_back(wordStyles[i]);
+    head->wordContinues.push_back(wordContinues[i]);
+    head->wordNoSpaceBefore.push_back(wordNoSpaceBefore[i]);
+    head->wordFocusBoundary.push_back(wordFocusBoundary[i]);
+    head->wordLinkIds.push_back(wordLinkIds[i]);
+    head->pushVisibleOffset(visibleOffsetAt(i));
+  }
+  for (size_t i = 0; i < count && i < rubyTexts.size(); ++i) {
+    head->rubyTexts.push_back(rubyTexts[i]);
+  }
+  for (const auto& target : linkTargets) head->linkTargets.push_back(target);  // ids index this table
+  head->hasRtlWord = hasRtlWord;
+  dropPrefix(count);
+  return head;
 }
 
 static inline bool isCjkIdeograph(uint32_t cp) {

@@ -2,8 +2,11 @@
 #include <GfxRenderer.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cstring>
 #include <memory>
 #include <string>
+#include <vector>
 
 #define class struct
 #define private public
@@ -115,6 +118,52 @@ TEST_F(ChapterHtmlSlimParserTest, DivWithHiddenAttributeContentShouldBeSkipped) 
   ChapterHtmlSlimParser::characterData(&parser, "[HIDDEN]", 8);
 
   ASSERT_EQ(parser.partWordBufferIndex, 0);
+}
+
+// Each <p> in the cell becomes "<word> line"; returns the distinct line y-positions on the page.
+std::vector<int16_t> lineRowsAfterTable(ChapterHtmlSlimParser& parser,
+                                        const std::vector<std::vector<const char*>>& cells) {
+  parser.beginParse();
+  parser.currentTextBlock.reset();
+  ChapterHtmlSlimParser::startElement(&parser, "table", nullptr);
+  ChapterHtmlSlimParser::startElement(&parser, "tr", nullptr);
+  for (const auto& cell : cells) {
+    ChapterHtmlSlimParser::startElement(&parser, "td", nullptr);
+    for (const char* text : cell) {
+      ChapterHtmlSlimParser::startElement(&parser, "p", nullptr);
+      ChapterHtmlSlimParser::characterData(&parser, text, static_cast<int>(strlen(text)));
+      ChapterHtmlSlimParser::endElement(&parser, "p");
+    }
+    ChapterHtmlSlimParser::endElement(&parser, "td");
+  }
+  ChapterHtmlSlimParser::endElement(&parser, "tr");
+  ChapterHtmlSlimParser::endElement(&parser, "table");
+
+  std::vector<int16_t> rows;
+  if (!parser.currentPage) return rows;
+  for (const auto& element : parser.currentPage->elements) {
+    if (element->getTag() != TAG_PageLine) continue;
+    if (std::find(rows.begin(), rows.end(), element->yPos) == rows.end()) rows.push_back(element->yPos);
+  }
+  return rows;
+}
+
+TEST_F(ChapterHtmlSlimParserTest, OneCellTableKeepsParagraphBreaks) {
+  const auto rows = lineRowsAfterTable(parser, {{"cd home", "mkdir practice", "ls"}});
+  EXPECT_EQ(rows.size(), 3u);
+}
+
+TEST_F(ChapterHtmlSlimParserTest, LongOneCellTableKeepsParagraphBreaks) {
+  // Over MAX_GRID_TABLE_CELL_WORDS, so the row stacks mid-cell and the cell is held to the row end.
+  std::vector<const char*> lines(12, "one two three four");
+  const auto rows = lineRowsAfterTable(parser, {lines});
+  EXPECT_EQ(rows.size(), 12u);
+}
+
+TEST_F(ChapterHtmlSlimParserTest, MultiColumnCellParagraphsStayJoined) {
+  // Two columns: the first cell's paragraphs still collapse into one line beside the second cell.
+  const auto rows = lineRowsAfterTable(parser, {{"aa", "bb"}, {"cc"}});
+  EXPECT_EQ(rows.size(), 1u);
 }
 
 }  // namespace

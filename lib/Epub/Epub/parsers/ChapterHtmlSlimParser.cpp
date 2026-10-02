@@ -457,12 +457,14 @@ void ChapterHtmlSlimParser::flushLongTextBlockIfNeeded() {
   const int horizontalInset = currentTextBlock->getBlockStyle().totalHorizontalInset();
   const uint16_t effectiveWidth =
       (horizontalInset < viewportWidth) ? static_cast<uint16_t>(viewportWidth - horizontalInset) : viewportWidth;
+  const size_t wordsBeforeFlush = currentTextBlock->size();
   currentTextBlock->layoutAndExtractLines(
       renderer, fontId, effectiveWidth,
       [this](const std::shared_ptr<TextBlock>& textBlock, const uint32_t offset) {
         this->addLineToPage(textBlock, offset);
       },
       false, characterSpacing, wordSpacingPercent);
+  if (insideTableCell) shiftTableCellBreaks(wordsBeforeFlush - currentTextBlock->size());
   // A dropped word means the arena could not allocate. Route it through the existing
   // out-of-heap path so the build is abandoned rather than committing a cache whose text
   // has holes in it.
@@ -607,6 +609,60 @@ void ChapterHtmlSlimParser::fallbackTableRowToStacked() {
   wordsExtractedInBlock = 0;
 }
 
+void ChapterHtmlSlimParser::noteTableCellBreak() {
+  if (tableRowCellIndex != 1 || !currentTextBlock || tableCellBreakCount >= MAX_TABLE_CELL_BREAKS) return;
+  const size_t at = currentTextBlock->size();
+  if (at == 0 || at > UINT16_MAX) return;
+  if (tableCellBreakCount > 0 && tableCellBreaks[tableCellBreakCount - 1] >= at) return;
+  tableCellBreaks[tableCellBreakCount++] = static_cast<uint16_t>(at);
+}
+
+// A soft flush laid out (and consumed) the cell's first words: keep the breaks pointing at the
+// same words, dropping the ones already behind the flushed lines.
+void ChapterHtmlSlimParser::shiftTableCellBreaks(const size_t consumed) {
+  if (consumed == 0 || tableCellBreakCount == 0) return;
+  uint8_t kept = 0;
+  for (uint8_t i = 0; i < tableCellBreakCount; i++) {
+    if (tableCellBreaks[i] > consumed) tableCellBreaks[kept++] = static_cast<uint16_t>(tableCellBreaks[i] - consumed);
+  }
+  tableCellBreakCount = kept;
+}
+
+// A second cell opened: the row is multi-column after all, so the held first cell renders as one
+// block, exactly as it did before cell breaks existed.
+void ChapterHtmlSlimParser::emitPendingFirstCellJoined() {
+  tableCellBreakCount = 0;
+  if (!pendingFirstCell) return;
+  currentTextBlock = std::move(pendingFirstCell);
+  wordsExtractedInBlock = 0;
+  makePages();
+  currentTextBlock.reset();
+}
+
+// The row ended with only this cell: lay it out one paragraph per recorded break. Each piece is
+// cut off the front just before it is laid out, so at most one extra word chunk is alive. On OOM
+// the remainder stays one block.
+void ChapterHtmlSlimParser::emitTableCellParagraphs(std::unique_ptr<ParsedText> cell) {
+  auto outer = std::move(currentTextBlock);  // e.g. a caption block still open around the row
+  currentTextBlock = std::move(cell);
+  wordsExtractedInBlock = 0;  // cumulative across the pieces, so footnote word indices still match
+  size_t taken = 0;
+  for (uint8_t i = 0; i < tableCellBreakCount && currentTextBlock; i++) {
+    const size_t at = tableCellBreaks[i];
+    if (at <= taken) continue;
+    auto piece = currentTextBlock->takePrefix(at - taken);
+    if (!piece) break;
+    auto rest = std::move(currentTextBlock);
+    currentTextBlock = std::move(piece);
+    makePages();
+    currentTextBlock = std::move(rest);
+    taken = at;
+  }
+  tableCellBreakCount = 0;
+  if (currentTextBlock && !currentTextBlock->isEmpty()) makePages();
+  currentTextBlock = std::move(outer);
+}
+
 void ChapterHtmlSlimParser::closeTableCell() {
   if (!insideTableCell) {
     return;
@@ -623,6 +679,10 @@ void ChapterHtmlSlimParser::closeTableCell() {
   }
 
   if (tableRowStacked) {
+    if (tableRowCellIndex == 1 && tableCellBreakCount > 0 && !currentTextBlock->isEmpty()) {
+      pendingFirstCell = std::move(currentTextBlock);  // resolved by the next cell or the row end
+      return;
+    }
     wordsExtractedInBlock = 0;
     if (!currentTextBlock->isEmpty()) {
       makePages();
@@ -655,6 +715,18 @@ void ChapterHtmlSlimParser::addTableRowSeparator() {
 
 void ChapterHtmlSlimParser::finishTableRow() {
   closeTableCell();
+
+  if (pendingFirstCell) {
+    emitTableCellParagraphs(std::move(pendingFirstCell));
+  } else if (tableRowCells.size() == 1 && tableCellBreakCount > 0) {
+    // A one-column grid row stacks anyway (columnCount < 2 below); this keeps its paragraphs.
+    auto cell = std::move(tableRowCells.front());
+    tableRowCells.clear();
+    tableRowStacked = true;
+    if (cell && !cell->isEmpty()) emitTableCellParagraphs(std::move(cell));
+  }
+  tableCellBreakCount = 0;
+  tableRowCellIndex = 0;
 
   if (tableRowCells.empty()) {
     if (tableRowStacked) {
@@ -916,6 +988,9 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
     self->tableRowStacked = false;
     self->tableRowRtl = cssStyle.hasDirection() && cssStyle.direction == CssTextDirection::Rtl;
     self->tableRowsSpannedRemaining = 0;
+    self->tableCellBreakCount = 0;
+    self->tableRowCellIndex = 0;
+    self->pendingFirstCell.reset();
     self->tableCellTextBytes = 0;
     self->tableRowCells.clear();
     self->tableRowCells.reserve(MAX_GRID_TABLE_COLUMNS);
@@ -949,6 +1024,8 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
       self->makePages();
     }
     self->currentTextBlock.reset();
+    if (self->tableRowCellIndex < UINT8_MAX) self->tableRowCellIndex++;
+    if (self->tableRowCellIndex == 2) self->emitPendingFirstCellJoined();
 
     const uint16_t columnSpan = parseTableSpan(getAttribute(atts, "colspan"));
     const uint16_t rowSpan = parseTableSpan(getAttribute(atts, "rowspan"));
@@ -1002,10 +1079,12 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
   }
 
   if (self->tableDepth >= 1 && self->insideTableCell && isHeaderOrBlock(name)) {
-    // Collapse block markup inside a cell to a word boundary.
+    // Collapse block markup inside a cell to a word boundary; a one-cell row restores it as a
+    // paragraph break at the row end (see tableCellBreaks).
     if (self->partWordBufferIndex > 0) {
       self->flushPartWordBuffer();
     }
+    self->noteTableCellBreak();
     self->nextWordContinues = false;
     self->depth += 1;
     return;
@@ -2026,6 +2105,7 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
     if (self->partWordBufferIndex > 0) {
       self->flushPartWordBuffer();
     }
+    self->noteTableCellBreak();
     self->nextWordContinues = false;
     self->depth -= 1;
     return;
@@ -2094,6 +2174,9 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
     self->insideTableCell = false;
     self->tableRowStacked = false;
     self->tableRowsSpannedRemaining = 0;
+    self->tableCellBreakCount = 0;
+    self->tableRowCellIndex = 0;
+    self->pendingFirstCell.reset();
     self->tableCellTextBytes = 0;
     self->tableRowCells.clear();
     self->nextWordContinues = false;
@@ -2194,6 +2277,9 @@ bool ChapterHtmlSlimParser::beginParse() {
   insideTableCell = false;
   tableRowStacked = false;
   tableRowsSpannedRemaining = 0;
+  tableCellBreakCount = 0;
+  tableRowCellIndex = 0;
+  pendingFirstCell.reset();
   tableCellTextBytes = 0;
   tableRowCells.clear();
   for (auto& lines : tableCellLines) {
@@ -2283,6 +2369,15 @@ bool ChapterHtmlSlimParser::finishParse() {
     xmlParser_ = nullptr;
   }
   parseFile_.close();
+
+  // An unclosed table can leave its first cell held: hand it to the last-page flush as one block.
+  if (pendingFirstCell) {
+    if (currentTextBlock) {
+      emitTableCellParagraphs(std::move(pendingFirstCell));
+    } else {
+      currentTextBlock = std::move(pendingFirstCell);
+    }
+  }
 
   // Process last page if there is still text
   if (currentTextBlock) {

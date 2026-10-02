@@ -107,6 +107,18 @@ class ChapterHtmlSlimParser {
   std::vector<std::unique_ptr<ParsedText>> tableRowCells;
   std::array<std::vector<std::shared_ptr<TextBlock>>, MAX_GRID_TABLE_COLUMNS> tableCellLines;
   std::vector<uint32_t> tableLineVisibleOffsets;
+  // A one-cell row keeps the paragraph breaks inside its cell: word indices into the row's first
+  // cell where a block element began or ended. Applied only once the row ends with that single
+  // cell; a second cell drops them, so multi-column rows render exactly as before.
+  static constexpr size_t MAX_TABLE_CELL_BREAKS = 32;
+  std::array<uint16_t, MAX_TABLE_CELL_BREAKS> tableCellBreaks{};
+  uint8_t tableCellBreakCount = 0;
+  uint8_t tableRowCellIndex = 0;                 // 1-based index of the latest cell opened in the row
+  std::unique_ptr<ParsedText> pendingFirstCell;  // stacked first cell held until the row's column count is known
+  void noteTableCellBreak();
+  void shiftTableCellBreaks(size_t consumed);
+  void emitPendingFirstCellJoined();
+  void emitTableCellParagraphs(std::unique_ptr<ParsedText> cell);
   bool listItemBulletOnly = false;  // true when currentTextBlock has only the <li> bullet
 
   // Tracks the innermost open <ul>/<ol> so <li> knows whether to number itself,

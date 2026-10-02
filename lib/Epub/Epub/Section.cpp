@@ -132,7 +132,9 @@ namespace {
 //      laid out with. Covers upstream's #3528 (their v47).
 // v59: Large images fill the page width regardless of the book's CSS size, and bleed into
 //      the screen margin; the bleed joins the header (cache validation).
-constexpr uint8_t SECTION_FILE_VERSION = 59;
+// v60: A one-column table row keeps the paragraph breaks inside its cell (they used to collapse
+//      into one paragraph); multi-column rows are unchanged.
+constexpr uint8_t SECTION_FILE_VERSION = 60;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
