@@ -2,10 +2,12 @@
 
 #include <SdCardFontRegistry.h>
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
 
+#include "CrossPointSettings.h"
 #include "FontComparePane.h"
 #include "TextSettingsPreview.h"
 #include "activities/UiTabListActivity.h"
@@ -32,9 +34,15 @@
 class TextSettingsActivity final : public UiTabListActivity {
  public:
   enum class Tab : uint8_t { Family, Size, Layout, Style, Count };
+  // Where edits land. Settings edits the global defaults with every tab. The Book modes are
+  // opened from the reader's Text panel and edit that book's override, written to
+  // `bookCachePath`; settings a book does not store (word/character spacing, embedded style,
+  // anti-aliasing) stay reader-wide. BookFont shows only the font list; BookMore shows only
+  // the Layout/Style rows the Text panel does not already carry.
+  enum class Mode : uint8_t { Settings, BookFont, BookMore };
 
   TextSettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const SdCardFontRegistry* registry,
-                       Tab initialTab = Tab::Family);
+                       Tab initialTab = Tab::Family, Mode mode = Mode::Settings, std::string bookCachePath = "");
 
   void onEnter() override;
   void onExit() override;
@@ -51,8 +59,8 @@ class TextSettingsActivity final : public UiTabListActivity {
 
   // --- UiTabListActivity contract ---
   int listCount() const override;
-  int tabCount() const override { return static_cast<int>(Tab::Count); }
-  int activeTab() const override { return static_cast<int>(tab_); }
+  int tabCount() const override { return visibleTabCount_; }
+  int activeTab() const override { return tabIndex(tab_); }
   const char* tabLabel(int index) const override;
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;
@@ -76,6 +84,16 @@ class TextSettingsActivity final : public UiTabListActivity {
 
   std::string layoutValueText(int row) const;
   std::string styleValueText(int row) const;
+  // List index -> row enum value for the active mode (book modes hide some rows).
+  int layoutRowAt(int index) const { return layoutRows_[index]; }
+  int styleRowAt(int index) const { return styleRows_[index]; }
+  // Position of `tab` in the visible tab list, or -1 when this mode hides it.
+  int tabIndex(Tab tab) const;
+  bool bookMode() const { return mode_ != Mode::Settings; }
+  // Makes the edited book override live (memory only) so the preview and font loader see it.
+  void applyBook();
+  // Saves the routed fields: the book's override file in a book mode, else the global settings.
+  void persist();
   // Button-hint label for Confirm at the current ring position.
   const char* confirmLabelText() const;
   // True when the focused list row is a setting the preview cannot reflect.
@@ -126,6 +144,26 @@ class TextSettingsActivity final : public UiTabListActivity {
   textsettings::PreviewLayout previewLayout_;  // cached preview line layout; relaid only on setting/geometry change
 
   Tab tab_;
+  Mode mode_;
+  std::string bookCachePath_;
+  CrossPointSettings::ReaderOverride book_;
+  // The fields a book can override, pointing into book_ in a book mode and at the globals otherwise.
+  struct Fields {
+    uint8_t* fontFamily;
+    uint8_t* fontPointSize;
+    uint8_t* lineSpacing;
+    uint8_t* paragraphAlignment;
+    uint8_t* extraParagraphSpacing;
+    uint8_t* screenMargin;
+    uint8_t* hyphenationEnabled;
+    char* sdFontFamilyName;  // char[32] in both
+  } f_{};
+  std::array<Tab, static_cast<size_t>(Tab::Count)> visibleTabs_{};
+  int visibleTabCount_ = 0;
+  std::array<uint8_t, 6> layoutRows_{};
+  int layoutRowCount_ = 0;
+  std::array<uint8_t, 4> styleRows_{};
+  int styleRowCount_ = 0;
   int currentSizeIndex_ = 0;
   // LOCAL(feat): Font tab Confirm = tap-commits / hold-pins (mirrors FontSelectionActivity).
   // confirmArmed_ also serves as the Confirm press-origin latch for every tab: this screen

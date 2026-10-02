@@ -2,6 +2,7 @@
 
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <Logging.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -15,6 +16,7 @@
 #include "ReaderFontSizes.h"
 #include "SdCardFontSystem.h"
 #include "TextSettingsPreview.h"
+#include "activities/reader/ReaderSettingsIO.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/ButtonNavigator.h"
@@ -64,10 +66,81 @@ static_assert(std::size(WORD_SPACING_IDS) == (WORD_SPACING_MAX - WORD_SPACING_MI
 }  // namespace
 
 TextSettingsActivity::TextSettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                           const SdCardFontRegistry* registry, Tab initialTab)
-    : UiTabListActivity("TextSettings", renderer, mappedInput), registry_(registry), tab_(initialTab) {}
+                                           const SdCardFontRegistry* registry, Tab initialTab, Mode mode,
+                                           std::string bookCachePath)
+    : UiTabListActivity("TextSettings", renderer, mappedInput),
+      registry_(registry),
+      tab_(initialTab),
+      mode_(mode),
+      bookCachePath_(std::move(bookCachePath)) {
+  // Visible tabs and rows are fixed per mode, and set here because the base sizes its per-tab
+  // state from tabCount() in onEnter(). The book modes leave out what the Text panel carries.
+  const auto addTab = [this](const Tab t) { visibleTabs_[visibleTabCount_++] = t; };
+  const auto addLayout = [this](const LayoutRow r) { layoutRows_[layoutRowCount_++] = static_cast<uint8_t>(r); };
+  const auto addStyle = [this](const StyleRow r) { styleRows_[styleRowCount_++] = static_cast<uint8_t>(r); };
+  switch (mode_) {
+    case Mode::BookFont:
+      addTab(Tab::Family);
+      break;
+    case Mode::BookMore:
+      addTab(Tab::Layout);
+      addTab(Tab::Style);
+      break;
+    default:
+      for (int t = 0; t < static_cast<int>(Tab::Count); t++) addTab(static_cast<Tab>(t));
+      break;
+  }
+  for (int r = 0; r < static_cast<int>(LayoutRow::Count); r++) {
+    const auto row = static_cast<LayoutRow>(r);
+    if (bookMode() && (row == LayoutRow::LineSpacing || row == LayoutRow::Alignment)) continue;
+    addLayout(row);
+  }
+  for (int r = 0; r < static_cast<int>(StyleRow::Count); r++) {
+    const auto row = static_cast<StyleRow>(r);
+    if (bookMode() && row == StyleRow::FocusReading) continue;
+    addStyle(row);
+  }
+  if (tabIndex(tab_) < 0) tab_ = visibleTabs_[0];
 
-const char* TextSettingsActivity::tabLabel(const int index) const { return I18N.get(TAB_NAME_IDS[index]); }
+  if (bookMode()) {
+    book_ = SETTINGS.getReaderOverride();
+    f_ = {&book_.fontFamily,         &book_.fontPointSize,         &book_.lineSpacing,
+          &book_.paragraphAlignment, &book_.extraParagraphSpacing, &book_.screenMargin,
+          &book_.hyphenationEnabled, book_.sdFontFamilyName};
+  } else {
+    f_ = {&SETTINGS.fontFamily,         &SETTINGS.fontPointSize,         &SETTINGS.lineSpacing,
+          &SETTINGS.paragraphAlignment, &SETTINGS.extraParagraphSpacing, &SETTINGS.screenMargin,
+          &SETTINGS.hyphenationEnabled, SETTINGS.sdFontFamilyName};
+  }
+}
+
+int TextSettingsActivity::tabIndex(const Tab tab) const {
+  for (int i = 0; i < visibleTabCount_; i++) {
+    if (visibleTabs_[i] == tab) return i;
+  }
+  return -1;
+}
+
+void TextSettingsActivity::applyBook() {
+  if (!bookMode()) return;
+  book_.active = true;
+  SETTINGS.setReaderOverride(book_);
+}
+
+void TextSettingsActivity::persist() {
+  if (!bookMode()) {
+    SETTINGS.saveToFile();
+    return;
+  }
+  applyBook();
+  if (!ReaderSettingsIO::write(bookCachePath_, book_)) {
+    LOG_ERR("TXTS", "Failed to persist per-book reader settings");
+  }
+}
+
+const char* TextSettingsActivity::tabLabel(const int index) const {
+  return I18N.get(TAB_NAME_IDS[static_cast<int>(visibleTabs_[index])]);
+}
 
 void TextSettingsActivity::onEnter() {
   UiTabListActivity::onEnter();
@@ -82,7 +155,7 @@ void TextSettingsActivity::onEnter() {
   previewHeight = usableHeight * metrics_.previewHeightPercent / 100;
 
   // LOCAL(feat): the shared compare pane owns the font list (built-in + SD, pinned-first).
-  fontPane_.build(registry_, SETTINGS.fontFamily, SETTINGS.sdFontFamilyName);
+  fontPane_.build(registry_, *f_.fontFamily, f_.sdFontFamilyName);
   // Touch commits on the SECOND tap here (see handleFamilyTouch), so the highlighted row
   // has to say so. Button boards commit on Confirm and never show the hint.
   fontPane_.setTapToApplyHint(mappedInput.hasTouch());
@@ -93,9 +166,10 @@ void TextSettingsActivity::onEnter() {
   // nav with followOnBuild armed, so each tab's first build shows its remembered
   // selection (Family/Size open on the current item).
   for (auto& n : tabNavs) n.selected = 1;  // default to the first list row
-  tabNavs[static_cast<int>(Tab::Family)].selected = fontPane_.highlightedIndex() + 1;
-  tabNavs[static_cast<int>(Tab::Size)].selected = currentSizeIndex_ + 1;
-  tabNavs[static_cast<int>(tab_)].selected = 0;  // screen opens with the tab bar focused, not a list row
+  if (tabIndex(Tab::Family) >= 0) tabNavs[tabIndex(Tab::Family)].selected = fontPane_.highlightedIndex() + 1;
+  if (tabIndex(Tab::Size) >= 0) tabNavs[tabIndex(Tab::Size)].selected = currentSizeIndex_ + 1;
+  // Opens with the tab bar focused; a single-tab book screen opens on its list instead.
+  if (visibleTabCount_ > 1) tabNavs[tabIndex(tab_)].selected = 0;
 
   rebuildRowItems();
 }
@@ -135,10 +209,10 @@ void TextSettingsActivity::rebuildRowItems() {
         item.label = sizes_[i].name.c_str();
         break;
       case Tab::Layout:
-        item.label = I18N.get(LAYOUT_ROW_NAME_IDS[i]);
+        item.label = I18N.get(LAYOUT_ROW_NAME_IDS[layoutRowAt(i)]);
         break;
       case Tab::Style:
-        item.label = I18N.get(STYLE_ROW_NAME_IDS[i]);
+        item.label = I18N.get(STYLE_ROW_NAME_IDS[styleRowAt(i)]);
         break;
       default:
         break;
@@ -153,12 +227,12 @@ void TextSettingsActivity::rebuildRowItems() {
 // which snaps SETTINGS.fontPointSize into the new family's set — but entry does
 // not, so the highlight is resolved by snapping rather than by exact match.
 void TextSettingsActivity::rebuildSizeList() {
-  const std::vector<uint8_t> points = readerFontPointSizes(registry_, SETTINGS.sdFontFamilyName);
+  const std::vector<uint8_t> points = readerFontPointSizes(registry_, f_.sdFontFamilyName);
 
   // The stored size can still sit outside this family's set — e.g. the family
   // was deleted while selected, or the card was swapped. Highlight the size the
   // reader actually renders, which getReaderFontId() resolves the same way.
-  const uint8_t selectedPt = snapToNearestPointSize(points, SETTINGS.fontPointSize);
+  const uint8_t selectedPt = snapToNearestPointSize(points, *f_.fontPointSize);
 
   sizes_.clear();
   sizes_.reserve(points.size());
@@ -187,8 +261,9 @@ TextSettingsActivity::PaneGeometry TextSettingsActivity::paneGeometry() const {
 
 void TextSettingsActivity::onTabAction(const int index) {
   if (optionPopup_.isActive()) return;
-  if (tab_ != static_cast<Tab>(index)) {
-    tab_ = static_cast<Tab>(index);
+  if (index < 0 || index >= visibleTabCount_) return;
+  if (tab_ != visibleTabs_[index]) {
+    tab_ = visibleTabs_[index];
     rebuildRowItems();
     auto& n = activeNav();
     n.selected = 0;          // tab taps land with the tab bar focused (legacy tap behavior)
@@ -399,10 +474,10 @@ void TextSettingsActivity::buildScreen(UiScreen& screen) {
         rowValues_[i] = (i == currentSizeIndex_) ? tr(STR_SELECTED) : "";
         break;
       case Tab::Layout:
-        rowValues_[i] = layoutValueText(i);
+        rowValues_[i] = layoutValueText(layoutRowAt(i));
         break;
       case Tab::Style:
-        rowValues_[i] = styleValueText(i);
+        rowValues_[i] = styleValueText(styleRowAt(i));
         break;
       default:
         break;
@@ -430,22 +505,24 @@ void TextSettingsActivity::buildScreen(UiScreen& screen) {
 const char* TextSettingsActivity::confirmLabelText() const {
   if (ringPos() == 0) {
     // Confirm on the tab bar advances to the next tab.
-    return I18N.get(TAB_NAME_IDS[(static_cast<int>(tab_) + 1) % static_cast<int>(Tab::Count)]);
+    const Tab next = visibleTabs_[(tabIndex(tab_) + 1) % visibleTabCount_];
+    return I18N.get(TAB_NAME_IDS[static_cast<int>(next)]);
   }
   switch (tab_) {
     case Tab::Layout:
       // Extra Paragraph Spacing toggles; the rest open a picker
-      return ringPos() - 1 == static_cast<int>(LayoutRow::ParaSpacing) ? tr(STR_TOGGLE) : tr(STR_SELECT);
+      return layoutRowAt(ringPos() - 1) == static_cast<int>(LayoutRow::ParaSpacing) ? tr(STR_TOGGLE) : tr(STR_SELECT);
     case Tab::Style:
       // Anti-aliasing opens a tri-state picker; the rest toggle
-      return ringPos() - 1 == static_cast<int>(StyleRow::AntiAliasing) ? tr(STR_SELECT) : tr(STR_TOGGLE);
+      return styleRowAt(ringPos() - 1) == static_cast<int>(StyleRow::AntiAliasing) ? tr(STR_SELECT) : tr(STR_TOGGLE);
     default:
       return tr(STR_SELECT);
   }
 }
 
 void TextSettingsActivity::drawChrome() {
-  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_TEXT_SETTINGS));
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer),
+                 mode_ == Mode::BookFont ? tr(STR_FONT) : tr(STR_TEXT_SETTINGS));
 
   if (onFamilyTab()) {
     // LOCAL(feat): the Font tab shows the two-pane live compare (committed vs highlighted)
@@ -509,27 +586,33 @@ void TextSettingsActivity::applyFamily() {
   RenderLock lock;
   // LOCAL(feat): apply the compare pane's highlighted font live to global settings.
   const auto& font = fontPane_.highlighted();
+  constexpr size_t kNameSize = sizeof(SETTINGS.sdFontFamilyName);
+  static_assert(sizeof(book_.sdFontFamilyName) == kNameSize, "sdFontFamilyName size mismatch");
   if (font.isBuiltin) {
-    SETTINGS.fontFamily = font.settingIndex;
-    SETTINGS.sdFontFamilyName[0] = '\0';
-    sdFontSystem.ensureLoaded(renderer);  // unloads the previously resident SD font
+    *f_.fontFamily = font.settingIndex;
+    f_.sdFontFamilyName[0] = '\0';
   } else if (registry_) {
     const int sdIdx = font.settingIndex - CrossPointSettings::BUILTIN_FONT_COUNT;
     const auto& families = registry_->getFamilies();
     if (sdIdx >= static_cast<int>(families.size())) return;
-    strncpy(SETTINGS.sdFontFamilyName, families[sdIdx].name.c_str(), sizeof(SETTINGS.sdFontFamilyName) - 1);
-    SETTINGS.sdFontFamilyName[sizeof(SETTINGS.sdFontFamilyName) - 1] = '\0';
-    sdFontSystem.ensureLoaded(renderer);
+    strncpy(f_.sdFontFamilyName, families[sdIdx].name.c_str(), kNameSize - 1);
+    f_.sdFontFamilyName[kNameSize - 1] = '\0';
   } else {
     return;
   }
-  fontPane_.commitHighlighted();  // move the top (committed) pane onto the applied font
+  if (bookMode()) {
+    // The loader snaps only the global size, so keep the book's size inside the new family's set.
+    *f_.fontPointSize = snapToNearestPointSize(readerFontPointSizes(registry_, f_.sdFontFamilyName), *f_.fontPointSize);
+    applyBook();
+  }
+  sdFontSystem.ensureLoaded(renderer);  // also unloads the previously resident SD font
+  fontPane_.commitHighlighted();        // move the top (committed) pane onto the applied font
 
   // The new family ships its own set of point sizes, and ensureLoaded() may have
   // snapped the selection into it, so the Size tab's list and its nav position
   // both have to be rebuilt.
   rebuildSizeList();
-  tabNavs[static_cast<int>(Tab::Size)].selected = currentSizeIndex_ + 1;
+  if (tabIndex(Tab::Size) >= 0) tabNavs[tabIndex(Tab::Size)].selected = currentSizeIndex_ + 1;
 }
 
 void TextSettingsActivity::activateRow(int row) {
@@ -545,21 +628,21 @@ void TextSettingsActivity::activateRow(int row) {
       // finish(), so relying on it loses the change when this screen is left via the home
       // gesture/key or a sleep. Saved here, outside applyFamily()'s RenderLock (released on
       // return), so the SD write does not happen under it.
-      SETTINGS.saveToFile();
+      persist();
       requestUpdate();
       break;
     case Tab::Size:
       if (row != currentSizeIndex_) {
         applySize(row);
-        SETTINGS.saveToFile();  // persist immediately (#2806); outside applySize()'s RenderLock
+        persist();  // persist immediately (#2806); outside applySize()'s RenderLock
         requestUpdate();
       }
       break;
     case Tab::Layout:
-      confirmLayoutRow(row);
+      confirmLayoutRow(layoutRowAt(row));
       break;
     case Tab::Style:
-      confirmStyleRow(row);
+      confirmStyleRow(styleRowAt(row));
       break;
     default:
       break;
@@ -572,30 +655,31 @@ void TextSettingsActivity::applySize(int listIndex) {
   RenderLock lock;
 
   currentSizeIndex_ = listIndex;
-  SETTINGS.fontPointSize = sizes_[listIndex].pointSize;
+  *f_.fontPointSize = sizes_[listIndex].pointSize;
+  applyBook();
   sdFontSystem.ensureLoaded(renderer);
 }
 
 void TextSettingsActivity::confirmLayoutRow(int row) {
   switch (static_cast<LayoutRow>(row)) {
     case LayoutRow::ParaSpacing:
-      SETTINGS.extraParagraphSpacing = !SETTINGS.extraParagraphSpacing;
-      SETTINGS.saveToFile();  // persist immediately (#2806)
+      *f_.extraParagraphSpacing = !*f_.extraParagraphSpacing;
+      persist();  // persist immediately (#2806)
       requestUpdate();
       break;
     case LayoutRow::LineSpacing:
       optionPopup_.show(StrId::STR_LINE_SPACING, LINE_SPACING_IDS, static_cast<int>(std::size(LINE_SPACING_IDS)),
-                        SETTINGS.lineSpacing, [](int idx) {
-                          SETTINGS.lineSpacing = static_cast<uint8_t>(idx);
-                          SETTINGS.saveToFile();  // persist immediately (#2806)
+                        *f_.lineSpacing, [this](int idx) {
+                          *f_.lineSpacing = static_cast<uint8_t>(idx);
+                          persist();  // persist immediately (#2806)
                         });
       requestUpdate();
       break;
     case LayoutRow::Alignment:
       optionPopup_.show(StrId::STR_ALIGNMENT, ALIGNMENT_IDS, static_cast<int>(std::size(ALIGNMENT_IDS)),
-                        SETTINGS.paragraphAlignment, [](int idx) {
-                          SETTINGS.paragraphAlignment = static_cast<uint8_t>(idx);
-                          SETTINGS.saveToFile();  // persist immediately (#2806)
+                        *f_.paragraphAlignment, [this](int idx) {
+                          *f_.paragraphAlignment = static_cast<uint8_t>(idx);
+                          persist();  // persist immediately (#2806)
                         });
       requestUpdate();
       break;
@@ -622,10 +706,10 @@ void TextSettingsActivity::confirmLayoutRow(int row) {
       std::vector<std::string> options;
       options.reserve((MARGIN_MAX - MARGIN_MIN) / MARGIN_STEP + 1);
       for (int m = MARGIN_MIN; m <= MARGIN_MAX; m += MARGIN_STEP) options.push_back(std::to_string(m));
-      const int cur = (std::clamp<int>(SETTINGS.screenMargin, MARGIN_MIN, MARGIN_MAX) - MARGIN_MIN) / MARGIN_STEP;
-      optionPopup_.show(StrId::STR_SCREEN_MARGIN, options, cur, [](int idx) {
-        SETTINGS.screenMargin = static_cast<uint8_t>(MARGIN_MIN + idx * MARGIN_STEP);
-        SETTINGS.saveToFile();  // persist immediately (#2806)
+      const int cur = (std::clamp<int>(*f_.screenMargin, MARGIN_MIN, MARGIN_MAX) - MARGIN_MIN) / MARGIN_STEP;
+      optionPopup_.show(StrId::STR_SCREEN_MARGIN, options, cur, [this](int idx) {
+        *f_.screenMargin = static_cast<uint8_t>(MARGIN_MIN + idx * MARGIN_STEP);
+        persist();  // persist immediately (#2806)
       });
       requestUpdate();
       break;
@@ -639,13 +723,13 @@ void TextSettingsActivity::confirmLayoutRow(int row) {
 std::string TextSettingsActivity::layoutValueText(int row) const {
   switch (static_cast<LayoutRow>(row)) {
     case LayoutRow::LineSpacing: {
-      const uint8_t v = SETTINGS.lineSpacing;
+      const uint8_t v = *f_.lineSpacing;
       return v < std::size(LINE_SPACING_IDS) ? I18N.get(LINE_SPACING_IDS[v]) : I18N.get(StrId::STR_NORMAL);
     }
     case LayoutRow::ParaSpacing:
-      return SETTINGS.extraParagraphSpacing ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+      return *f_.extraParagraphSpacing ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     case LayoutRow::Alignment: {
-      const uint8_t v = SETTINGS.paragraphAlignment;
+      const uint8_t v = *f_.paragraphAlignment;
       return v < std::size(ALIGNMENT_IDS) ? I18N.get(ALIGNMENT_IDS[v]) : I18N.get(StrId::STR_JUSTIFY);
     }
     case LayoutRow::WordSpacing:
@@ -656,7 +740,7 @@ std::string TextSettingsActivity::layoutValueText(int row) const {
                                                   : I18N.get(StrId::STR_SPACING_ZERO);
     }
     case LayoutRow::ScreenMargin:
-      return std::to_string(SETTINGS.screenMargin);
+      return std::to_string(*f_.screenMargin);
 
     default:
       return "";
@@ -669,8 +753,10 @@ void TextSettingsActivity::confirmStyleRow(int row) {
       SETTINGS.focusReadingEnabled = !SETTINGS.focusReadingEnabled;
       break;
     case StyleRow::Hyphenation:
-      SETTINGS.hyphenationEnabled = !SETTINGS.hyphenationEnabled;
-      break;
+      *f_.hyphenationEnabled = !*f_.hyphenationEnabled;
+      persist();  // a book field: saves to the book in a book mode
+      requestUpdate();
+      return;
     case StyleRow::EmbeddedStyle:
       SETTINGS.embeddedStyle = !SETTINGS.embeddedStyle;
       break;
@@ -696,7 +782,7 @@ std::string TextSettingsActivity::styleValueText(int row) const {
     case StyleRow::FocusReading:
       return SETTINGS.focusReadingEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     case StyleRow::Hyphenation:
-      return SETTINGS.hyphenationEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+      return *f_.hyphenationEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     case StyleRow::EmbeddedStyle:
       return SETTINGS.embeddedStyle ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     case StyleRow::AntiAliasing: {
@@ -713,14 +799,14 @@ std::string TextSettingsActivity::styleValueText(int row) const {
 // have no distinct preview.
 bool TextSettingsActivity::focusedRowHasNoPreview() const {
   if (ringPos() == 0 || tab_ != Tab::Style) return false;
-  const StyleRow row = static_cast<StyleRow>(ringPos() - 1);
+  const StyleRow row = static_cast<StyleRow>(styleRowAt(ringPos() - 1));
   return row == StyleRow::Hyphenation || row == StyleRow::EmbeddedStyle || row == StyleRow::AntiAliasing;
 }
 
 void TextSettingsActivity::switchTab(int direction) {
   const bool onTabBar = ringPos() == 0;
-  constexpr int tabCount = static_cast<int>(Tab::Count);
-  tab_ = static_cast<Tab>((static_cast<int>(tab_) + direction + tabCount) % tabCount);
+  const int count = visibleTabCount_;
+  tab_ = visibleTabs_[(tabIndex(tab_) + direction + count) % count];
   rebuildRowItems();
   auto& n = activeNav();
   if (onTabBar) n.selected = 0;
@@ -735,9 +821,9 @@ int TextSettingsActivity::listCount() const {
     case Tab::Size:
       return static_cast<int>(sizes_.size());
     case Tab::Layout:
-      return static_cast<int>(LayoutRow::Count);
+      return layoutRowCount_;
     case Tab::Style:
-      return static_cast<int>(StyleRow::Count);
+      return styleRowCount_;
 
     default:
       return 0;

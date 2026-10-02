@@ -4037,8 +4037,12 @@ void EpubReaderActivity::renderStatusBar() const {
 // ---------------------------------------------------------------------------
 
 namespace {
-constexpr StrId kTextRowNames[] = {StrId::STR_FONT, StrId::STR_FONT_SIZE, StrId::STR_LINE_SPACING,
-                                   StrId::STR_PARA_ALIGNMENT, StrId::STR_FOCUS_READING, StrId::STR_WORD_SELECT_BUTTONS};
+constexpr StrId kTextRowNames[] = {
+    StrId::STR_FONT,          StrId::STR_FONT_SIZE,           StrId::STR_LINE_SPACING,      StrId::STR_PARA_ALIGNMENT,
+    StrId::STR_FOCUS_READING, StrId::STR_WORD_SELECT_BUTTONS, StrId::STR_MORE_TEXT_SETTINGS};
+// Text panel rows that open a screen rather than change a value in place.
+constexpr int kTextRowFont = 0;
+constexpr int kTextRowMore = 6;
 constexpr StrId kSpacingIds[] = {StrId::STR_TIGHT,     StrId::STR_NORMAL, StrId::STR_RELAXED,
                                  StrId::STR_SEMI_WIDE, StrId::STR_WIDE,   StrId::STR_EXTRA_WIDE};
 constexpr StrId kAlignIds[] = {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, StrId::STR_CENTER, StrId::STR_ALIGN_RIGHT,
@@ -4460,24 +4464,28 @@ void EpubReaderActivity::handleOverlayInput() {
   const auto activateRow = [this, count, &fastRedraw] {
     if (panelIndex < 0 || panelIndex >= count) return;
     if (overlay == Overlay::Text) {
-      if (panelIndex == 0) {
-        // Full font picker (built-in + SD fonts, live preview) -- the same
-        // screen Settings uses; a popup cannot scroll a long font list.
+      if (panelIndex == kTextRowFont || panelIndex == kTextRowMore) {
+        // Font opens only the font list (a popup cannot scroll a long one); More opens the
+        // Layout/Style rows the panel does not carry. Both edit THIS book's override, so the
+        // page and both screens always agree on what the book uses.
+        const int returnRow = panelIndex;
+        const bool font = panelIndex == kTextRowFont;
+        // A book read only through the classic menu may never have been given an override.
+        if (!SETTINGS.getReaderOverride().active) syncBookOverrideFromGlobals();
         overlay = Overlay::None;
         overlayPopup.dismiss();
         discardOverlayPage();
         startActivityForResultNoThrow<TextSettingsActivity>(
-            [this](const ActivityResult&) {
-              // That screen edits the GLOBALS; the page is laid out from this
-              // book's override, so fold the two before re-paginating.
-              syncBookOverrideFromGlobals();
+            [this, returnRow](const ActivityResult&) {
               applyReaderTextSettings();
               overlay = Overlay::Text;  // back to the Text panel
-              panelIndex = 0;
-              if (toolbarUi) toolbarUi->begin();  // the picker drew its own FUI screen
+              panelIndex = returnRow;
+              if (toolbarUi) toolbarUi->begin();  // the screen drew its own FUI frame
               requestUpdate();                    // re-render page + Text panel
             },
-            renderer, mappedInput, &sdFontSystem.registry(), TextSettingsActivity::Tab::Family);
+            renderer, mappedInput, &sdFontSystem.registry(),
+            font ? TextSettingsActivity::Tab::Family : TextSettingsActivity::Tab::Layout,
+            font ? TextSettingsActivity::Mode::BookFont : TextSettingsActivity::Mode::BookMore, epub->getCachePath());
       } else if (panelIndex == 4) {
         // Focus Reading is a genuine on/off: a tap toggles and applies live.
         SETTINGS.focusReadingEnabled = SETTINGS.focusReadingEnabled ? 0 : 1;
