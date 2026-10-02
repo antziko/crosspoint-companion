@@ -2189,7 +2189,12 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
         // choice, launch the matching scope; on Back, do nothing.
         startActivityForResultNoThrow<SyncScopeSelectionActivity>(
             [this](const ActivityResult& result) {
-              if (result.isCancelled) return;
+              if (result.isCancelled) {
+                // The picker closes on the Back PRESS, so its release lands here: swallow it,
+                // or the reader reads it as a short Back and goes Home.
+                ignoreBackUntilRelease = true;
+                return;
+              }
               if (const auto* scopeResult = std::get_if<SyncScopeResult>(&result.data)) {
                 launchKoSync(/*sleepWhenDone=*/false, scopeResult->scope);
               }
@@ -3649,7 +3654,10 @@ void EpubReaderActivity::showOpenSyncPrompt() {
         // On Back at the scope picker, stay reading without launching.
         startActivityForResultNoThrow<SyncScopeSelectionActivity>(
             [this](const ActivityResult& scopeRes) {
-              if (scopeRes.isCancelled) return;
+              if (scopeRes.isCancelled) {
+                ignoreBackUntilRelease = true;  // same Back-release swallow as the menu path
+                return;
+              }
               if (const auto* scopeResult = std::get_if<SyncScopeResult>(&scopeRes.data)) {
                 launchKoSync(/*sleepWhenDone=*/false, scopeResult->scope);
               }
