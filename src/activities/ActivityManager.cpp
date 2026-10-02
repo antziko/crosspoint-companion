@@ -2,6 +2,7 @@
 
 #include <FontCacheManager.h>
 #include <HalDisplay.h>
+#include <HalGPIO.h>
 #include <HalPowerManager.h>
 #include <VectorFontSupport.h>
 
@@ -34,6 +35,7 @@
 static portMUX_TYPE activityManagerSpinlock = portMUX_INITIALIZER_UNLOCKED;
 
 void ActivityManager::begin() {
+  mainTaskHandle = xTaskGetCurrentTaskHandle();
 #if defined(configNUM_CORES) && configNUM_CORES > 1
   constexpr BaseType_t renderTaskCore = 1;
 #else
@@ -541,6 +543,16 @@ void ActivityManager::requestUpdateAndWait() {
 
 RenderLock::RenderLock(const Mode mode) {
   ASSERT_RENDER_LOCK_NOT_HELD();
+  if (mode == Mode::Blocking && xTaskGetCurrentTaskHandle() == activityManager.mainTaskHandle) {
+    // The render task holds this lock through a whole e-ink refresh (up to ~3 s on X3),
+    // and the main loop samples no buttons while parked here. Keep sampling at the
+    // loop's 100 Hz cadence so a click inside the wait still reaches the next frame.
+    while (xSemaphoreTake(activityManager.renderingMutex, pdMS_TO_TICKS(10)) != pdTRUE) {
+      gpio.pumpButtons();
+    }
+    isLocked = true;
+    return;
+  }
   isLocked = xSemaphoreTake(activityManager.renderingMutex, mode == Mode::Try ? 0 : portMAX_DELAY) == pdTRUE;
   assert((mode == Mode::Try || isLocked) && "Blocking render lock acquisition failed");
 }

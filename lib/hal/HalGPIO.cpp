@@ -160,7 +160,31 @@ void HalGPIO::begin() {
 
 void HalGPIO::update() {
   inputMgr.update();
+  uint8_t pressed = 0;
+  uint8_t released = 0;
+  uint8_t level = 0;
+  for (uint8_t i = 0; i <= BTN_POWER; i++) {
+    const uint8_t bit = 1 << i;
+    if (inputMgr.wasPressed(i)) pressed |= bit;
+    if (inputMgr.wasReleased(i)) released |= bit;
+    if (inputMgr.isPressed(i)) level |= bit;
+  }
+  pressedMask = pressed | pumpedPressed;
+  releasedMask = released | pumpedReleased;
+  levelMask = level;
+  pumpedPressed = 0;
+  pumpedReleased = 0;
   updateUsbState(millis());
+}
+
+void HalGPIO::pumpButtons() {
+  if (inputMgr.hasTouch()) return;
+  inputMgr.update();
+  for (uint8_t i = 0; i <= BTN_POWER; i++) {
+    const uint8_t bit = 1 << i;
+    if (inputMgr.wasPressed(i)) pumpedPressed |= bit;
+    if (inputMgr.wasReleased(i)) pumpedReleased |= bit;
+  }
 }
 
 void HalGPIO::updateUsbState(const unsigned long now) {
@@ -200,15 +224,21 @@ void HalGPIO::pollUsbState() {
 
 bool HalGPIO::wasUsbStateChanged() const { return usbStateChanged; }
 
-bool HalGPIO::isPressed(uint8_t buttonIndex) const { return inputMgr.isPressed(buttonIndex); }
+bool HalGPIO::isPressed(uint8_t buttonIndex) const {
+  return buttonIndex <= BTN_POWER && (levelMask >> buttonIndex) & 1;
+}
 
-bool HalGPIO::wasPressed(uint8_t buttonIndex) const { return inputMgr.wasPressed(buttonIndex); }
+bool HalGPIO::wasPressed(uint8_t buttonIndex) const {
+  return buttonIndex <= BTN_POWER && (pressedMask >> buttonIndex) & 1;
+}
 
-bool HalGPIO::wasAnyPressed() const { return inputMgr.wasAnyPressed(); }
+bool HalGPIO::wasAnyPressed() const { return pressedMask != 0; }
 
-bool HalGPIO::wasReleased(uint8_t buttonIndex) const { return inputMgr.wasReleased(buttonIndex); }
+bool HalGPIO::wasReleased(uint8_t buttonIndex) const {
+  return buttonIndex <= BTN_POWER && (releasedMask >> buttonIndex) & 1;
+}
 
-bool HalGPIO::wasAnyReleased() const { return inputMgr.wasAnyReleased(); }
+bool HalGPIO::wasAnyReleased() const { return releasedMask != 0; }
 
 bool HalGPIO::isDebouncePending() const { return inputMgr.isDebouncePending(); }
 

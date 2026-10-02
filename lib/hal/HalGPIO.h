@@ -44,6 +44,17 @@ class HalGPIO {
   InputManager inputMgr;
 #endif
 
+  // Button edges and levels as of the last update(), one bit per BTN_* index. Frozen
+  // between update() calls so pumpButtons() can sample mid-frame without changing what
+  // the current frame reads.
+  uint8_t pressedMask = 0;
+  uint8_t releasedMask = 0;
+  uint8_t levelMask = 0;
+  // Edges committed by pumpButtons() since the last update(), merged into the next one.
+  // A bit, not a count: repeated clicks of one button inside a pump window act once.
+  uint8_t pumpedPressed = 0;
+  uint8_t pumpedReleased = 0;
+
   bool lastUsbConnected = false;
   bool usbStateChanged = false;
   unsigned long usbLastPollMs = 0;
@@ -106,6 +117,12 @@ class HalGPIO {
 
   // Button input methods
   void update();
+  // Keep sampling buttons while the main loop is parked (e.g. waiting out an e-ink
+  // refresh for the render lock). Buttons are polled with no queue, so a click that
+  // starts and ends inside a park is otherwise never seen. Edges are held for the next
+  // update(). Main loop task only. No-op on touch boards: it would consume touch
+  // one-shot events no frame ever reads.
+  void pumpButtons();
   bool isPressed(uint8_t buttonIndex) const;
   bool wasPressed(uint8_t buttonIndex) const;
   bool wasAnyPressed() const;

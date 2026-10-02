@@ -67,6 +67,10 @@ class ActivityManager {
   // Must only be used via RenderLock
   SemaphoreHandle_t renderingMutex = nullptr;
 
+  // The Arduino loop task, captured in begin(). Only this task samples input, so only
+  // its blocking RenderLock waits keep pumping the buttons.
+  TaskHandle_t mainTaskHandle = nullptr;
+
   // Whether to trigger a render after the current loop()
   // This variable must only be set by the main loop, to avoid race conditions
   std::atomic<bool> requestedUpdate{false};
