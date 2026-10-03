@@ -121,6 +121,27 @@ void SleepImageReviewActivity::renderImage() {
   file.close();
 }
 
+// "<dir>/<name>" -> "<dir>/.<name>". The leading dot excludes it from the sleep picker
+// (SleepActivity skips name[0]=='.') without deleting anything — reversible.
+std::string SleepImageReviewActivity::hiddenPathFor(const std::string& path) {
+  const std::string dir = FsHelpers::extractFolderPath(path);
+  const size_t lastSlash = path.find_last_of('/');
+  const std::string name = (lastSlash != std::string::npos) ? path.substr(lastSlash + 1) : path;
+  std::string hidden = dir;
+  if (!hidden.empty() && hidden.back() != '/') hidden += "/";
+  hidden += "." + name;
+  return hidden;
+}
+
+namespace {
+// Moves `from` to `to`. When `to` already exists, `from` is a copy of it put back on the card,
+// so it is deleted instead: the image the user chose survives as `to`.
+bool moveOrDropDuplicate(const std::string& from, const std::string& to) {
+  if (Storage.exists(to.c_str())) return Storage.remove(from.c_str());
+  return Storage.rename(from.c_str(), to.c_str());
+}
+}  // namespace
+
 void SleepImageReviewActivity::doKeep() {
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
 
@@ -130,35 +151,31 @@ void SleepImageReviewActivity::doKeep() {
   if (FsHelpers::hasBmpExtension(imagePath)) {
     kept = imagePath.substr(0, imagePath.length() - 4) + ".keep.bmp";
   }
-  const bool ok = (kept != imagePath) && Storage.rename(imagePath.c_str(), kept.c_str());
+  const bool duplicate = Storage.exists(kept.c_str());
+  const bool ok = (kept != imagePath) && moveOrDropDuplicate(imagePath, kept);
+  SdDebugLog::log("SLPR", "keep %s ok=%d duplicate=%d", imagePath.c_str(), ok ? 1 : 0, duplicate ? 1 : 0);
   // The sleep deck is indexed by directory position; a rename can reorder iteration and
   // desync the "already shown" bitset. Invalidate it so the next sleep starts a fresh
   // cycle. Zero allocation — resetSleepDeck() only clears the existing 64-byte bitset.
   if (ok) APP_STATE.resetSleepDeck(0);
   GUI.drawPopup(renderer, ok ? tr(STR_DONE) : tr(STR_FAILED_LOWER));
-  delay(800);
+  activityManager.holdForReading(800);
   finishToDestination();
 }
 
 void SleepImageReviewActivity::doRemove() {
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
 
-  // "<dir>/<name>" -> "<dir>/.<name>". The leading dot excludes it from the sleep
-  // picker (SleepActivity skips name[0]=='.') without deleting anything — reversible.
-  const std::string dir = FsHelpers::extractFolderPath(imagePath);
-  const size_t lastSlash = imagePath.find_last_of('/');
-  const std::string name = (lastSlash != std::string::npos) ? imagePath.substr(lastSlash + 1) : imagePath;
-  std::string hidden = dir;
-  if (!hidden.empty() && hidden.back() != '/') hidden += "/";
-  hidden += "." + name;
-
-  const bool ok = Storage.rename(imagePath.c_str(), hidden.c_str());
+  const std::string hidden = hiddenPathFor(imagePath);
+  const bool duplicate = Storage.exists(hidden.c_str());
+  const bool ok = moveOrDropDuplicate(imagePath, hidden);
+  SdDebugLog::log("SLPR", "remove %s ok=%d duplicate=%d", imagePath.c_str(), ok ? 1 : 0, duplicate ? 1 : 0);
   // Removal drops a file from the rotation; the next sleep would reset the deck anyway
   // (file count changed), but invalidate explicitly so the positional bitset never maps
   // to the wrong files in between. Zero allocation (clears the existing bitset).
   if (ok) APP_STATE.resetSleepDeck(0);
   GUI.drawPopup(renderer, ok ? tr(STR_DONE) : tr(STR_FAILED_LOWER));
-  delay(800);
+  activityManager.holdForReading(800);
   finishToDestination();
 }
 

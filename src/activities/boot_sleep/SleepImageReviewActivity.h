@@ -25,6 +25,7 @@ class SleepImageReviewActivity final : public Activity {
   void renderImage();
   void doKeep();
   void doRemove();
+  static std::string hiddenPathFor(const std::string& path);
   // Clear the recorded sleep image from state, then route on to the destination the
   // boot logic chose (reader resume or home).
   void finishToDestination();
