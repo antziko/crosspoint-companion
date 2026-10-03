@@ -75,11 +75,11 @@ void PanelDoseTrace::notePaint(const uint8_t* fb, const uint16_t widthBytes, con
 
 void PanelDoseTrace::dump(const char* why, const uint16_t widthBytes, const uint16_t height, const int orientation,
                           const unsigned long railsMs) const {
-  SdDebugLog::log("DOSE", "%s grid=%dx%d native=%ux%u orient=%d totals fast=%u scrub=%u half=%u full=%u gray=%u railsMs=%lu",
-                  why, GRID, GRID, static_cast<unsigned>(widthBytes) * 8, static_cast<unsigned>(height), orientation,
-                  static_cast<unsigned>(totalFast), static_cast<unsigned>(total[Scrub]),
-                  static_cast<unsigned>(total[Half]), static_cast<unsigned>(total[Full]),
-                  static_cast<unsigned>(total[Gray]));
+  SdDebugLog::log(
+      "DOSE", "%s grid=%dx%d native=%ux%u orient=%d totals fast=%u scrub=%u half=%u full=%u gray=%u railsMs=%lu", why,
+      GRID, GRID, static_cast<unsigned>(widthBytes) * 8, static_cast<unsigned>(height), orientation,
+      static_cast<unsigned>(totalFast), static_cast<unsigned>(total[Scrub]), static_cast<unsigned>(total[Half]),
+      static_cast<unsigned>(total[Full]), static_cast<unsigned>(total[Gray]), railsMs);
   if (!tiles) {
     SdDebugLog::log("DOSE", "no tile table (%s)", allocFailed ? "oom" : "logging was off");
     return;
@@ -90,7 +90,8 @@ void PanelDoseTrace::dump(const char* why, const uint16_t widthBytes, const uint
   // Per-tile value since the tile's content last changed. Stays are what the held content sat
   // through: drive delivered to pixels that did not change.
   enum Field { F_SCRUB, F_FAST, F_HALF, F_FULL, F_GRAY, F_HELD, F_RAILS, F_INK, FIELD_COUNT };
-  static constexpr const char* kNames[FIELD_COUNT] = {"scrub", "fast", "half", "full", "gray", "heldS", "railsS", "ink%"};
+  static constexpr const char* kNames[FIELD_COUNT] = {"scrub", "fast",  "half",   "full",
+                                                      "gray",  "heldS", "railsS", "ink%"};
   const auto value = [&](const Tile& t, const int f) -> unsigned {
     if (t.secAt == 0) return 0;
     switch (f) {
@@ -131,11 +132,13 @@ void PanelDoseTrace::dump(const char* why, const uint16_t widthBytes, const uint
   }
   for (int g = 0; g < 2; g++) {
     if (n[g] == 0) continue;
-    SdDebugLog::log("DOSE", "%s n=%u avg/max scrub=%lu/%u fast=%lu/%u half=%lu/%u full=%lu/%u gray=%lu/%u heldS=%lu/%u railsS=%lu/%u",
-                    g == 0 ? "inked" : "blank", n[g], sum[g][F_SCRUB] / n[g], maxv[g][F_SCRUB],
-                    sum[g][F_FAST] / n[g], maxv[g][F_FAST], sum[g][F_HALF] / n[g], maxv[g][F_HALF],
-                    sum[g][F_FULL] / n[g], maxv[g][F_FULL], sum[g][F_GRAY] / n[g], maxv[g][F_GRAY],
-                    sum[g][F_HELD] / n[g], maxv[g][F_HELD], sum[g][F_RAILS] / n[g], maxv[g][F_RAILS]);
+    SdDebugLog::log(
+        "DOSE",
+        "%s n=%u avg/max scrub=%lu/%u fast=%lu/%u half=%lu/%u full=%lu/%u gray=%lu/%u heldS=%lu/%u railsS=%lu/%u",
+        g == 0 ? "inked" : "blank", n[g], sum[g][F_SCRUB] / n[g], maxv[g][F_SCRUB], sum[g][F_FAST] / n[g],
+        maxv[g][F_FAST], sum[g][F_HALF] / n[g], maxv[g][F_HALF], sum[g][F_FULL] / n[g], maxv[g][F_FULL],
+        sum[g][F_GRAY] / n[g], maxv[g][F_GRAY], sum[g][F_HELD] / n[g], maxv[g][F_HELD], sum[g][F_RAILS] / n[g],
+        maxv[g][F_RAILS]);
   }
 
   // Full grids, one line per tile row (native space; see orient= to map onto the photo).

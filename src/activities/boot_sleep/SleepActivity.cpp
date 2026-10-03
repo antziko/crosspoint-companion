@@ -15,6 +15,7 @@
 #include <Xtc.h>
 #include <esp_random.h>
 
+#include <algorithm>
 #include <cstdlib>
 
 #include "CrossPointSettings.h"
@@ -176,6 +177,8 @@ void SleepActivity::onEnter() {
   // night-mode page sleeps in night polarity and the moon inverts with it at
   // transfer, like any other draw. Clearing inversion first pushed a night page out
   // at normal polarity -- the whole screen flipped as the device went to sleep.
+  // Read before driveNegative() repaints: how long the outgoing frame sat untouched.
+  const unsigned long outgoingHeldMs = renderer.msSinceLastPaint();
   driveNegative(renderer);
   display.setInverted(false);
 
@@ -219,26 +222,34 @@ void SleepActivity::onEnter() {
   // The quick-resume path never reaches here: it returned above precisely because it keeps the
   // last screen, which a panel wipe cannot coexist with.
   //
-  // One cycle. Three were tried on the X4 Pro's ghosting report and measurably did not help: the
-  // ghost is absent when the wallpaper appears and emerges over the following minutes, so it forms
-  // AFTER the clean, during the unpowered hold -- there is no image on the glass for a larger dose
-  // to remove. Cleaning at every sleep is still worth its ~3 s; cleaning harder is not, and the
-  // difference is ~6 s on every single sleep plus the panel wear.
+  // One cycle by default. Three on every sleep were tried for the X4 Pro's night-mode ghost and did
+  // not help (that ghost was later traced to night-mode manual refreshes), and they cost ~6 s on
+  // each sleep plus panel wear, so extra cycles are reserved for the cases below.
   //
-  // The exception is a heavy session: hundreds of FAST paints since the last clean (a page held
-  // through a long word-select scan reached 201 on X3) leave residue one cycle did not clear on
-  // that panel, so those sleeps get a second cycle. paintCount() counts since the last
-  // deepCleanPanel, i.e. since the previous sleep.
+  // Two exceptions, and the larger wins:
+  // - A heavy session: hundreds of FAST paints since the last clean (a page held through a long
+  //   word-select scan reached 201 on X3) leave residue one cycle did not clear on that panel.
+  //   paintCount() counts since the last deepCleanPanel, i.e. since the previous sleep.
+  // - A long hold: a screen left untouched for minutes sticks (X4: the button-hint bar burned in
+  //   after a reader menu sat 5 min into an auto-sleep). Every auto-sleep is such a hold, since
+  //   the frame sat for the whole timeout. These sleeps run unattended, so the time is free.
   static constexpr uint8_t kSleepDeepCleanCycles = 1;
   static constexpr uint16_t kHeavySessionFastPaints = 150;
-  const uint8_t cycles = renderer.paintCount(HalDisplay::FAST_REFRESH) >= kHeavySessionFastPaints
-                             ? kSleepDeepCleanCycles + 1
-                             : kSleepDeepCleanCycles;
+  static constexpr unsigned long kLongHoldMs = 60UL * 1000;
+  static constexpr unsigned long kVeryLongHoldMs = 3UL * 60 * 1000;
+  uint8_t cycles = kSleepDeepCleanCycles;
+  if (renderer.paintCount(HalDisplay::FAST_REFRESH) >= kHeavySessionFastPaints) cycles = kSleepDeepCleanCycles + 1;
+  if (fromTimeout || outgoingHeldMs >= kVeryLongHoldMs) {
+    cycles = std::max<uint8_t>(cycles, 3);
+  } else if (outgoingHeldMs >= kLongHoldMs) {
+    cycles = std::max<uint8_t>(cycles, 2);
+  }
   const unsigned long cleanMs = renderer.deepCleanPanel(cycles);
   // Not force-enabled like the manual refresh's line: this runs on every sleep, and forcing an
   // SD write each time would cost more than the diagnostic is worth. Visible with SD Card
   // Logging on, which is when we are measuring anyway.
-  SdDebugLog::log("SLP", "sleep deepclean cycles=%u ms=%lu", static_cast<unsigned>(cycles), cleanMs);
+  SdDebugLog::log("SLP", "sleep deepclean cycles=%u ms=%lu heldMs=%lu timeout=%d", static_cast<unsigned>(cycles),
+                  cleanMs, outgoingHeldMs, fromTimeout ? 1 : 0);
 
   // Hand the SD glyph arenas and the decompressor cache back before the sleep screens
   // run. The image paths below (custom bitmap, PNG wallpaper, book cover) each want a
