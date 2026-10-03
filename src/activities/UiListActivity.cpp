@@ -137,21 +137,24 @@ void UiListActivity::loop() {
 }
 
 void UiListActivity::navigateButtons() {
-  const int count = listCount();
-  auto& n = activeNav();
-  buttonNavigator.onNextRelease([this, count, &n] { moveSelectionTo(ButtonNavigator::nextIndex(n.selected, count)); });
+  buttonNavigator.onNextRelease(
+      [this] { moveSelectionTo(ButtonNavigator::nextIndex(activeNav().selected, listCount())); });
   buttonNavigator.onPreviousRelease(
-      [this, count, &n] { moveSelectionTo(ButtonNavigator::previousIndex(n.selected, count)); });
+      [this] { moveSelectionTo(ButtonNavigator::previousIndex(activeNav().selected, listCount())); });
   // Page by the rows the last build actually drew (pageRows), not the
   // fixed-height visibleRows estimate: rows whose label wraps to a second line
   // grow, so the estimate overshoots and the rows between two pages would never
   // be shown. Every screen that sets maxLines = 2 (Settings, Status Bar, Text
   // Settings, Wi-Fi) is affected on the dense X3/X4 row heights, where the
   // two-line label always exceeds the theme row height.
-  buttonNavigator.onNextContinuous(
-      [this, count, &n] { moveSelectionTo(ButtonNavigator::nextPageIndex(n.selected, count, n.pageRows())); });
-  buttonNavigator.onPreviousContinuous(
-      [this, count, &n] { moveSelectionTo(ButtonNavigator::previousPageIndex(n.selected, count, n.pageRows())); });
+  buttonNavigator.onNextContinuous([this] {
+    const auto& n = activeNav();
+    moveSelectionTo(ButtonNavigator::nextPageIndex(n.selected, listCount(), n.pageRows()));
+  });
+  buttonNavigator.onPreviousContinuous([this] {
+    const auto& n = activeNav();
+    moveSelectionTo(ButtonNavigator::previousPageIndex(n.selected, listCount(), n.pageRows()));
+  });
 }
 
 int16_t UiListActivity::resolveRowHeight(fui::ListProps& props, const bool hasSubtitle) const {
