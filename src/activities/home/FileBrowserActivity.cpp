@@ -656,6 +656,15 @@ void FileBrowserActivity::loop() {
   const int tappedRow = tapped ? listTouch_.touchRow(renderer, tapX, tapY) : -1;
   if (tappedRow >= 0 && tappedRow < static_cast<int>(files.size())) selectorIndex = tappedRow;
 
+  // Hold Confirm on an entry: open its actions the moment the hold crosses GO_HOME_MS, not on
+  // release. wasLongPressed swallows that release, so it cannot also open the entry. A Confirm
+  // carried in from the previous screen is not this screen's hold.
+  if (mode == Mode::Books && !lockNextConfirmRelease && !files.empty() &&
+      mappedInput.wasLongPressed(MappedInputManager::Button::Confirm, GO_HOME_MS)) {
+    showEntryActions();
+    return;
+  }
+
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) || tappedRow >= 0) {
     // A tap is never a hold: it must not reach the long-press delete below, and the
     // Confirm-release lock guards a button edge this did not come from.
@@ -683,11 +692,6 @@ void FileBrowserActivity::loop() {
       return;
     }
 
-    if (mode == Mode::Books && !viaTouch && mappedInput.getHeldTime() >= GO_HOME_MS) {
-      // --- LONG PRESS ACTION: ENTRY ACTIONS MENU ---
-      showEntryActions();
-      return;
-    }
     // --- SHORT PRESS ACTION: OPEN/NAVIGATE ---
     openSelectedEntry();
     return;

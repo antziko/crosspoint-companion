@@ -82,16 +82,16 @@ enum class SideNavAction { NONE, STEP, ROTATE };
 // SETTINGS.sideLongPressButtonBehavior == ORIENTATION_CHANGE) a hold gesture
 // that cycles the non-reader display orientation -- mirroring the reader's
 // hold-to-rotate. A single press can't safely fire both, so when the gesture
-// is enabled we switch to release-based detection (measure hold time first,
-// like detectPageTurn's usePress branch); otherwise we keep the snappier
-// press-based single-step navigation these screens already had.
+// is enabled a short press steps on release and the hold rotates the moment it
+// crosses SKIP_HOLD_MS (wasLongPressed swallows that hold's release, as in
+// detectPageTurn); otherwise we keep the snappier press-based single step.
 inline SideNavAction resolveSideNavAction(const MappedInputManager& input, const MappedInputManager::Button button) {
   if (SETTINGS.sideLongPressButtonBehavior != SETTINGS.ORIENTATION_CHANGE) {
     return input.wasPressed(button) ? SideNavAction::STEP : SideNavAction::NONE;
   }
 
-  if (!input.wasReleased(button)) return SideNavAction::NONE;
-  return input.getHeldTime() > SKIP_HOLD_MS ? SideNavAction::ROTATE : SideNavAction::STEP;
+  if (input.wasLongPressed(button, SKIP_HOLD_MS)) return SideNavAction::ROTATE;
+  return input.wasReleased(button) ? SideNavAction::STEP : SideNavAction::NONE;
 }
 
 // Cycles SETTINGS.displayOrientation by `step` (+1/-1, wrapping) and applies it

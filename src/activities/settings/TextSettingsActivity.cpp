@@ -34,7 +34,7 @@ constexpr StrId STYLE_ROW_NAME_IDS[] = {StrId::STR_FOCUS_READING, StrId::STR_HYP
                                         StrId::STR_TEXT_AA};
 
 // LOCAL(feat): Hold Confirm this long on a Font-tab row to pin/unpin (vs a tap = commit).
-constexpr unsigned long kPinHoldMs = 600;
+constexpr unsigned long kPinHoldMs = 700;
 
 constexpr StrId LINE_SPACING_IDS[] = {StrId::STR_TIGHT,     StrId::STR_NORMAL, StrId::STR_RELAXED,
                                       StrId::STR_SEMI_WIDE, StrId::STR_WIDE,   StrId::STR_EXTRA_WIDE};

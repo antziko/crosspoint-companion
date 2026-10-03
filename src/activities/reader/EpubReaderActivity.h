@@ -136,7 +136,7 @@ class EpubReaderActivity final : public Activity {
   // (a contents list runs to hundreds of chapters). One jump per hold, not a repeat -- every
   // step repaints the panel, so repeating is bounded by the e-ink refresh anyway and reads as
   // sluggish. True once a hold has jumped, so the release that ends it is swallowed.
-  static constexpr unsigned long PANEL_HOLD_MS = 1500;
+  static constexpr unsigned long PANEL_HOLD_MS = 1000;
   static constexpr int PANEL_HOLD_STEP = 10;
   bool panelHoldJumped = false;
   // Whether the panel draws its cursor row. Button boards always do; touch
@@ -642,6 +642,7 @@ class EpubReaderActivity final : public Activity {
   bool skipLoopDelay() override { return !buildHeapPaused && backgroundBuildWanted(); }
   bool isReaderActivity() const override { return true; }
   bool onManualSleepRequested() override;
+  bool wantsManualSleepPrompt() const override;
   ScreenshotInfo getScreenshotInfo() const override;
   CrossPointPosition getCurrentPosition() const;
 };

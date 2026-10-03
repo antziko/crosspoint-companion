@@ -62,7 +62,12 @@ class Activity {
   // Called by the main loop when the user makes a *manual* power-button sleep gesture
   // (never on auto-sleep timeout). Return true to take over the gesture and abort the
   // sleep (e.g. show a confirmation prompt); false to let the main loop deep-sleep.
+  // Only called when wantsManualSleepPrompt() is true; override the two together.
   virtual bool onManualSleepRequested() { return false; }
+  // True when onManualSleepRequested() would take the gesture over. The main loop then waits
+  // for the power button to come up first, so the release cannot answer the prompt; otherwise
+  // sleep starts while the button is still held.
+  virtual bool wantsManualSleepPrompt() const { return false; }
   virtual bool isReaderActivity() const { return false; }
   virtual bool isHomeActivity() const { return false; }
   // True for a screen the user passes THROUGH rather than settles on: a modal prompt, the

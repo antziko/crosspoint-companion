@@ -3597,9 +3597,13 @@ void EpubReaderActivity::recordSyncPromptSkip() {
   }
 }
 
-bool EpubReaderActivity::onManualSleepRequested() {
+bool EpubReaderActivity::wantsManualSleepPrompt() const {
   // Opt-in, reader page only, pointless without credentials, and only past the reading threshold.
-  if (!SETTINGS.syncPromptOnSleep || !epub || !KOREADER_STORE.hasCredentials() || !syncPromptThresholdReached()) {
+  return SETTINGS.syncPromptOnSleep && epub && KOREADER_STORE.hasCredentials() && syncPromptThresholdReached();
+}
+
+bool EpubReaderActivity::onManualSleepRequested() {
+  if (!wantsManualSleepPrompt()) {
     return false;  // let the main loop sleep normally
   }
 

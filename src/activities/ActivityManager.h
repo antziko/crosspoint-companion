@@ -138,6 +138,7 @@ class ActivityManager {
   // took it over (e.g. the reader showed a "sync before sleep" prompt), meaning the main
   // loop must NOT deep-sleep this iteration. Default activities return false → sleep proceeds.
   bool onManualSleepRequested();
+  bool wantsManualSleepPrompt() const;
   // Tell the active activity that the framebuffer no longer holds what it drew. Call between
   // wiping the framebuffer outside a render and asking for the re-render, so activities that
   // repaint differentially drop their stale state first.

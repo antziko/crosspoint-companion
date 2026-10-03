@@ -1197,13 +1197,16 @@ void loop() {
     }
     LOG_DBG("MAIN", "Power button held %lums, sleeping", gpio.getPowerButtonHeldTime());
     // Offer the gesture to the active activity first. The reader may intercept it to show a
-    // "sync before sleep" prompt instead of sleeping immediately. Release the still-held power
+    // "sync before sleep" prompt instead of sleeping immediately: release the still-held power
     // button before handing over so the prompt isn't dismissed by the same press, and re-arm
-    // allowSleepAt so the release doesn't immediately re-trigger this branch.
-    waitForPowerRelease();
-    allowSleepAt = millis() + 2000;
-    if (activityManager.onManualSleepRequested()) {
-      return;  // activity took over the gesture; it will request sleep later if appropriate
+    // allowSleepAt so the release doesn't immediately re-trigger this branch. Without a prompt,
+    // sleep starts at the threshold; startDeepSleep() waits for the release before arming wake.
+    if (activityManager.wantsManualSleepPrompt()) {
+      waitForPowerRelease();
+      allowSleepAt = millis() + 2000;
+      if (activityManager.onManualSleepRequested()) {
+        return;  // activity took over the gesture; it will request sleep later if appropriate
+      }
     }
     enterDeepSleep();
     // This should never be hit as `enterDeepSleep` calls esp_deep_sleep_start

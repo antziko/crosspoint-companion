@@ -11,7 +11,7 @@
 
 namespace {
 // Hold Confirm at least this long to pin/unpin (vs a tap, which commits the font).
-constexpr unsigned long kPinHoldMs = 600;
+constexpr unsigned long kPinHoldMs = 700;
 // Gap between the panes and between the panes and the list.
 constexpr int kPaneGap = 2;
 // Combined compare-pane region as a % of the usable area (two stacked panes share it).

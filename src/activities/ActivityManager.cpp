@@ -452,6 +452,10 @@ bool ActivityManager::requiresExclusiveStorageLoop() const {
 
 bool ActivityManager::onManualSleepRequested() { return currentActivity && currentActivity->onManualSleepRequested(); }
 
+bool ActivityManager::wantsManualSleepPrompt() const {
+  return currentActivity && currentActivity->wantsManualSleepPrompt();
+}
+
 void ActivityManager::notifyFramebufferInvalidated() {
   if (currentActivity) currentActivity->onFramebufferInvalidated();
 }
