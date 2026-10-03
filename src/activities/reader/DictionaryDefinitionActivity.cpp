@@ -1099,7 +1099,7 @@ void DictionaryDefinitionActivity::extractWordsFromLayout() {
     // read, then repaint the definition. The clean refresh stops the popup box ghosting under
     // the restored page. navigator stays empty, so loop() simply does not enter word-select.
     GUI.drawPopup(renderer, tr(STR_MEMORY_ERROR));
-    delay(900);
+    activityManager.holdForReading(900);
     renderer.forceCleanRefreshNextPaint();
     requestUpdate();
     return;
@@ -1650,7 +1650,7 @@ void DictionaryDefinitionActivity::saveNoteFromSelection(const int fromIdx, cons
     RenderLock lock;
     GUI.drawPopup(renderer, saved ? tr(STR_NOTE_SAVED) : tr(STR_MEMORY_ERROR));  // refreshes internally
   }
-  delay(700);
+  activityManager.holdForReading(700);
   // The popup was drawn over the page, and the mark this note leaves only appears on the repaint.
   renderer.forceCleanRefreshNextPaint();
   nextRenderMode_ = RenderMode::FullPage;

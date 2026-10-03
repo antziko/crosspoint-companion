@@ -1959,7 +1959,7 @@ void EpubReaderActivity::launchHighlightWordSelect(const int pointX, const int p
           // drawPopup refreshes internally (BaseTheme.cpp:803); a second displayBuffer here
           // was a second full-panel FAST refresh of the same pixels.
           GUI.drawPopup(renderer, tr(STR_MARK_LIMIT));
-          delay(900);
+          activityManager.holdForReading(900);
         }
       }
     }
@@ -4988,7 +4988,7 @@ void EpubReaderActivity::addBookmark(bool returnMark, bool lightRefresh) {
     if (!returnMark) {
       RenderLock lock(*this);
       GUI.drawPopup(renderer, tr(STR_MARK_LIMIT));  // refreshes internally (BaseTheme.cpp:803)
-      delay(900);
+      activityManager.holdForReading(900);
       requestUpdate();
     }
   }

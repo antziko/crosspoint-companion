@@ -177,6 +177,13 @@ void HalGPIO::update() {
   updateUsbState(millis());
 }
 
+void HalGPIO::dropEdges(const uint8_t buttonIndex) {
+  if (buttonIndex > BTN_POWER) return;
+  const auto keep = static_cast<uint8_t>(~(1u << buttonIndex));
+  pressedMask &= keep;
+  releasedMask &= keep;
+}
+
 void HalGPIO::pumpButtons() {
   if (inputMgr.hasTouch()) return;
   inputMgr.update();

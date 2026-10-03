@@ -190,7 +190,7 @@ void ReadingStatsActivity::openSelectedBook() {
   if (bookPath.empty() || !Storage.exists(bookPath.c_str())) {
     LOG_ERR("ReadingStats", "Cannot open %s: no book path", bookRows[booksSelectedIndex].dirName.c_str());
     GUI.drawPopup(renderer, tr(STR_STATS_BOOK_MISSING));
-    delay(900);
+    activityManager.holdForReading(900);
     renderer.forceCleanRefreshNextPaint();  // stop the popup box ghosting under the list
     requestUpdate();
     return;

@@ -156,6 +156,9 @@ class ActivityManager {
   // Trigger a render and block until it completes.
   // Must NOT be called from the render task or while holding a RenderLock.
   void requestUpdateAndWait();
+  // delay() for a message the user is reading (toast, confirmation flash). On the main
+  // task the buttons are still sampled, so a click during the pause reaches the next frame.
+  void holdForReading(unsigned long ms);
 };
 
 extern ActivityManager activityManager;  // singleton, to be defined in main.cpp

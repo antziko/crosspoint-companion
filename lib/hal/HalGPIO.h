@@ -124,6 +124,9 @@ class HalGPIO {
   // update(). Main loop task only. No-op on touch boards: it would consume touch
   // one-shot events no frame ever reads.
   void pumpButtons();
+  // Clear one button's press/release edges from the current frame, so later readers in
+  // the frame see neither (the level is kept).
+  void dropEdges(uint8_t buttonIndex);
   bool isPressed(uint8_t buttonIndex) const;
   bool wasPressed(uint8_t buttonIndex) const;
   bool wasAnyPressed() const;

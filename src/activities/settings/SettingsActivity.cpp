@@ -615,7 +615,7 @@ void SettingsActivity::toggleCurrentSetting() {
         const uint32_t dictHash = DictUtils::dictHashOfPath(dictPath);
         if (dictHash == 0) {
           GUI.drawPopup(renderer, tr(STR_DICT_NONE));  // refreshes internally
-          delay(900);
+          activityManager.holdForReading(900);
           requestUpdate();
           break;
         }

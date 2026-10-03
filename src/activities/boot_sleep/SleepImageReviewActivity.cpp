@@ -4,6 +4,7 @@
 #include <BitmapRenderUtils.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
+#include <HalGPIO.h>
 #include <HalStorage.h>
 #include <I18n.h>
 #include <SdDebugLog.h>
@@ -191,6 +192,17 @@ void SleepImageReviewActivity::onExit() {
 
 void SleepImageReviewActivity::loop() {
   Activity::loop();
+
+  if (gpio.wasAnyPressed() || gpio.wasAnyReleased()) {
+    // Diagnostics: when each click reached this screen, against the MEM enter/exit lines.
+    uint8_t down = 0;
+    uint8_t up = 0;
+    for (uint8_t i = 0; i <= HalGPIO::BTN_POWER; i++) {
+      if (gpio.wasPressed(i)) down |= 1 << i;
+      if (gpio.wasReleased(i)) up |= 1 << i;
+    }
+    SdDebugLog::log("SLPR", "input down=%02x up=%02x", down, up);
+  }
 
   int tapX = 0;
   int tapY = 0;

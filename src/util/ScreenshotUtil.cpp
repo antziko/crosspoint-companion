@@ -98,7 +98,7 @@ void ScreenshotUtil::takeScreenshot(GfxRenderer& renderer) {
     // Add extra margin to the border to make it more visible
     renderer.drawRect(marginLeft + 1, marginTop + 1, width - 2, height - 2, 2, true);
     renderer.displayBuffer();
-    delay(1000);
+    activityManager.holdForReading(1000);
     renderer.restoreBwBuffer();
     renderer.displayBuffer(HalDisplay::RefreshMode::HALF_REFRESH);
   }

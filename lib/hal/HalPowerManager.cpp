@@ -237,6 +237,12 @@ bool HalPowerManager::lightSleep(const HalGPIO& gpio) const {
 }
 
 bool HalPowerManager::onEinkBusyWaitSlice(const int8_t busyPin, const uint8_t busyLevel) {
+  // A paint the loop task drives itself (setup() screens, popups drawn from loop()) leaves no
+  // one sampling the buttons, so a click made while it shows would vanish. Sample here; the
+  // edges reach the next update(). Before the guards below so a pending debounce can commit.
+  if (xTaskGetCurrentTaskHandle() == mainLoopTask) {
+    gpio.pumpButtons();
+  }
 #ifdef CROSSPOINT_DISABLE_LIGHT_SLEEP
   return false;  // see lightSleep(): fall back to the SDK's plain busy poll
 #endif

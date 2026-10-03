@@ -284,7 +284,7 @@ void BmpViewerActivity::doSetSleepCover() {
     GUI.drawPopup(renderer, tr(STR_FAILED_LOWER));
   }
 
-  delay(1000);
+  activityManager.holdForReading(1000);
   onEnter();
 }
 
@@ -296,7 +296,7 @@ void BmpViewerActivity::doClearSleepCover() {
   const bool removed = !Storage.exists("/sleep.bmp") || Storage.remove("/sleep.bmp");
 
   GUI.drawPopup(renderer, removed ? tr(STR_DONE) : tr(STR_FAILED_LOWER));
-  delay(1000);
+  activityManager.holdForReading(1000);
   onEnter();
 }
 

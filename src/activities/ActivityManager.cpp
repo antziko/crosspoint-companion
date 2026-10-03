@@ -525,8 +525,27 @@ void ActivityManager::requestUpdateAndWait() {
   // Tell the power manager the loop is parked here: it cannot poll input until the
   // render finishes, so the BUSY-wait slice hook should not yield to it meanwhile.
   powerManager.noteRenderWaitBegin();
-  ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+  if (xTaskGetCurrentTaskHandle() == mainTaskHandle) {
+    // Same 10 ms button sampling as a blocking RenderLock: the wait spans a whole refresh.
+    while (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10)) == 0) {
+      gpio.pumpButtons();
+    }
+  } else {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+  }
   powerManager.noteRenderWaitEnd();
+}
+
+void ActivityManager::holdForReading(const unsigned long ms) {
+  if (xTaskGetCurrentTaskHandle() != mainTaskHandle) {
+    delay(ms);
+    return;
+  }
+  const unsigned long start = millis();
+  while (millis() - start < ms) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+    gpio.pumpButtons();
+  }
 }
 
 // RenderLock

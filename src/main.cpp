@@ -950,7 +950,7 @@ static void toggleFrontlightWithFeedback() {
   {
     RenderLock lock;  // drawPopup refreshes internally; do not paint under the render task
     GUI.drawPopup(renderer, msg);
-    delay(FRONTLIGHT_TOAST_MS);
+    activityManager.holdForReading(FRONTLIGHT_TOAST_MS);
   }
   // No forceCleanRefreshNextPaint() here, unlike the other toast sites: this gesture is used
   // often, and a SCRUB per toggle would cost a full black/white flash every time the light goes
@@ -1107,11 +1107,16 @@ void loop() {
   }
 
   // Let wake continue as soon as its hold has been verified. The release can arrive
-  // after setup, so consume that one input frame rather than letting it become a page
-  // turn, a forced refresh, or any other short power-button action.
+  // after setup, so drop its edge rather than letting it become a page turn, a forced
+  // refresh, or any other short power-button action. Only the power edge: a click on the
+  // first screen, pumped while setup() painted it, lands in this same frame.
   if (wakePowerReleasePending && !gpio.isPressed(HalGPIO::BTN_POWER)) {
     wakePowerReleasePending = false;
-    return;
+    gpio.dropEdges(HalGPIO::BTN_POWER);
+    // One physical key: a release inside its hold window is reported as a Confirm click.
+    if (BoardConfig::ACTIVE.inputStyle == BoardConfig::InputStyle::DigitalConfirmPowerHold) {
+      gpio.dropEdges(HalGPIO::BTN_CONFIRM);
+    }
   }
 
   static bool screenshotButtonsReleased = true;
