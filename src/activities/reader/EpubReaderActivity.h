@@ -179,6 +179,13 @@ class EpubReaderActivity final : public Activity {
   LookupMarks::Mark pageActionMark_{};
   bool pageActionHasMark_ = false;
   char pageActionWord_[40] = {};
+  // A build step lent the framebuffer: it came back white while the panel still shows the
+  // page. Until renderBook() redraws, nothing may be painted straight onto it. Set by the
+  // loop task (background build) or the render task (silent next-chapter index), cleared by
+  // the render task.
+  std::atomic<bool> pageBufferStale{false};
+  // Render task only: silentIndexNextChapterIfNeeded() lent the framebuffer this pass.
+  bool silentIndexLentBuffer = false;
   int autoTurnOption = 0;  // current auto page-turn rate index (More panel)
   std::vector<EpubReaderMenuActivity::MenuItem> moreItems;
   // Armed in onEnter() when the "sync prompt on open" gate passes; consumed once in loop() after
@@ -693,7 +700,7 @@ class EpubReaderActivity final : public Activity {
   // isBuilding() would spin at full clock indefinitely while idle on a page -- doing no
   // build work and blocking idle light-sleep. The main loop queries this under the
   // render lock, so the section cannot change underneath it.
-  bool skipLoopDelay() override { return !buildHeapPaused && backgroundBuildWanted(); }
+  bool skipLoopDelay() override { return overlay == Overlay::None && !buildHeapPaused && backgroundBuildWanted(); }
   bool isReaderActivity() const override { return true; }
   bool onManualSleepRequested() override;
   bool wantsManualSleepPrompt() const override;

@@ -1135,8 +1135,17 @@ void EpubReaderActivity::loop() {
   // the build or expand retained glyph buffers between the test and the tick.
   {
     RenderLock lock(RenderLock::Mode::Try);
-    if (lock.ownsLock() && backgroundBuildWanted() && buildTickHeapGate()) {
-      if (!section->buildSomeMore(BACKGROUND_BUILD_PAGES_PER_TICK)) {
+    // Not under an open toolbar or panel: those repaint straight onto the page in the framebuffer.
+    if (lock.ownsLock() && overlay == Overlay::None && backgroundBuildWanted() && buildTickHeapGate()) {
+      // A build step can lend the framebuffer (image probes), which hands it back white while the
+      // panel still shows the page; redraw so nothing is later painted over the blank buffer.
+      const uint32_t loansBefore = renderer.frameBufferLoanCount();
+      const bool built = section->buildSomeMore(BACKGROUND_BUILD_PAGES_PER_TICK);
+      if (renderer.frameBufferLoanCount() != loansBefore) {
+        pageBufferStale = true;
+        requestUpdate();
+      }
+      if (!built) {
         LOG_ERR("ERS", "Background section build failed");
         section.reset();
         requestUpdate();
@@ -3483,6 +3492,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     renderer.drawCenteredText(uiScaleSpec().titleFontId, 300, tr(STR_EMPTY_CHAPTER), true, EpdFontFamily::BOLD);
     renderStatusBar();
     renderer.displayBuffer();
+    pageBufferStale = false;
     automaticPageTurnActive = false;
     showPendingSyncSaveError();
     return;
@@ -3626,6 +3636,14 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     GUI.drawPopup(renderer, inlineReviewMessage_);
   }
 
+  // The page is back in the framebuffer, unless this pass's silent index lent it out after
+  // drawing: then redraw (the next pass finds the section cached and does not lend again).
+  pageBufferStale = silentIndexLentBuffer;
+  if (silentIndexLentBuffer) {
+    silentIndexLentBuffer = false;
+    requestUpdate();
+  }
+
   // Toolbar menu: overlay the toolbar / panel on top of the freshly rendered page.
   if (overlay != Overlay::None && usesToolbarMenu()) {
     // The page just re-rendered under the overlay: refresh the snapshot that
@@ -3718,9 +3736,12 @@ void EpubReaderActivity::silentIndexNextChapterIfNeeded(const uint16_t viewportW
   }
 
   LOG_DBG("ERS", "Silently indexing next chapter: %d", nextSpineIndex);
+  const uint32_t loansBefore = renderer.frameBufferLoanCount();
   if (!nextSection.createSectionFile(SETTINGS.readerRenderSpec(viewportWidth, viewportHeight))) {
     LOG_ERR("ERS", "Failed silent indexing for chapter: %d", nextSpineIndex);
   }
+  // An image probe may have lent the framebuffer, which came back white under the page on screen.
+  if (renderer.frameBufferLoanCount() != loansBefore) silentIndexLentBuffer = true;
 }
 
 bool EpubReaderActivity::launchKoSync(bool sleepWhenDone, SyncScope scope) {
@@ -4617,7 +4638,7 @@ void EpubReaderActivity::openOverlay(Overlay target) {
   // Xteink-class panels, whose close path re-renders the page. If text or
   // images ever visibly ghost through the chrome, restore a HALF cleanup on
   // the first open (see #2190 for the mechanism).
-  if (section) {
+  if (section && !pageBufferStale) {
     // Serialize against the render task: renderBook may be mid-page (status
     // bar included) in the shared framebuffer, and painting the chrome from
     // the loop task at the same time interleaves the two frames.
@@ -4638,7 +4659,7 @@ void EpubReaderActivity::openOverlay(Overlay target) {
     renderOverlay();
     renderer.displayBuffer(HalDisplay::FAST_REFRESH);
   } else {
-    requestUpdate();  // no page yet: renderBook() draws the overlay once it is
+    requestUpdate();  // no page in the framebuffer: renderBook() draws the overlay once it is
   }
 }
 
