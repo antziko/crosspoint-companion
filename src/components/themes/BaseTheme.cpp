@@ -226,18 +226,18 @@ void BaseTheme::drawProgressBar(const GfxRenderer& renderer, Rect rect, const si
   renderer.drawCenteredText(UI_10_FONT_ID, rect.y + rect.height + 15, percentText.c_str());
 }
 
-// Centre a button-hint label inside its box. A label that fits is drawn on the single
-// baseline it always was; one too wide used to overflow the button border and run into
-// the neighbouring hint, and now wraps to at most two centred lines (wrappedText
-// ellipsises anything that still does not fit).
+// Centre a button-hint label inside its box, by text height. A label too wide to fit
+// wraps to at most two centred lines (wrappedText ellipsises anything that still does not fit).
 void BaseTheme::drawHintLabel(GfxRenderer& renderer, const int fontId, const char* label, const int x,
-                              const int boxWidth, const int boxTop, const int boxHeight, const int singleLineYOffset) {
+                              const int boxWidth, const int boxTop, const int boxHeight) {
   constexpr int textPadding = 4;  // keeps a wrapped label off the button's border
   const int maxTextWidth = boxWidth - (textPadding * 2);
 
+  const int textHeight = renderer.getTextHeight(fontId);
   const int textWidth = renderer.getTextWidth(fontId, label);
   if (textWidth <= maxTextWidth) {
-    renderer.drawText(fontId, x + (boxWidth - 1 - textWidth) / 2, boxTop + singleLineYOffset, label);
+    const int textY = boxTop + std::max(1, (boxHeight - textHeight) / 2);
+    renderer.drawText(fontId, x + (boxWidth - 1 - textWidth) / 2, textY, label);
     return;
   }
 
@@ -245,14 +245,14 @@ void BaseTheme::drawHintLabel(GfxRenderer& renderer, const int fontId, const cha
   // advanceY (leading included), which stacks two lines taller than the button and
   // clips the second one.
   constexpr int lineGap = 2;
-  const int step = renderer.getTextHeight(fontId) + lineGap;
+  const int step = textHeight + lineGap;
   const auto lines = renderer.wrappedText(fontId, label, maxTextWidth, 2);
   const int block = static_cast<int>(lines.size()) * step - lineGap;
   // wrappedText breaks only at spaces, so a single over-wide word (Lyra gives a hint
   // just 72px of text room) comes back as ONE ellipsised line. Centring that in the box
   // would drop it several pixels below every neighbouring label that took the fast path
   // above — so a one-line result shares their baseline whichever branch produced it.
-  int lineY = lines.size() == 1 ? boxTop + singleLineYOffset : boxTop + std::max(1, (boxHeight - block) / 2);
+  int lineY = boxTop + std::max(1, (boxHeight - block) / 2);
   for (const auto& line : lines) {
     const int lineWidth = renderer.getTextWidth(fontId, line.c_str());
     renderer.drawText(fontId, x + (boxWidth - 1 - lineWidth) / 2, lineY, line.c_str());
@@ -273,7 +273,6 @@ void BaseTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
   constexpr int buttonWidth = 106;
   constexpr int buttonHeight = BaseMetrics::values.buttonHintsHeight;
   constexpr int buttonY = BaseMetrics::values.buttonHintsHeight;  // Distance from bottom
-  constexpr int textYOffset = 7;                                  // Distance from top of button to text baseline
   // Keyed to the portrait panel width: the 528-wide X3 gets more spacing than
   // the 480-wide boards (X4, X4 Pro, and the other 800x480 panels).
   constexpr int narrowButtonPositions[] = {25, 130, 245, 350};
@@ -287,8 +286,7 @@ void BaseTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
       const int x = buttonPositions[i];
       renderer.fillRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, false);
       renderer.drawRect(x, pageHeight - buttonY, buttonWidth, buttonHeight);
-      drawHintLabel(renderer, UI_10_FONT_ID, labels[i], x, buttonWidth, pageHeight - buttonY, buttonHeight,
-                    textYOffset);
+      drawHintLabel(renderer, UI_10_FONT_ID, labels[i], x, buttonWidth, pageHeight - buttonY, buttonHeight);
     }
   }
 
