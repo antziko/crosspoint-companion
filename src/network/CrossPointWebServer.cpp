@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <FsHelpers.h>
 #include <HalGPIO.h>
+#include <HalMemory.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <WiFi.h>
@@ -1806,6 +1807,9 @@ void CrossPointWebServer::handleFontList() const {
   JsonDocument doc;
   JsonArray arr = doc["families"].to<JsonArray>();
   doc["maxFamilies"] = SdCardFontRegistry::MAX_SD_FAMILIES;
+  // Vector (.ttf/.otf) fonts need PSRAM to stay resident; DRAM-only boards
+  // only take pre-rendered .cpfont uploads.
+  doc["vectorFonts"] = HalMemory::getPsramHeap().totalBytes > 0;
 
   // The only caller that needs every family's listing at once. The registry keeps a
   // catalogue (name + root) and scans one family at a time, so this walks the catalogue
@@ -1858,6 +1862,7 @@ void CrossPointWebServer::handleFontUploadData() {
       fontUpload.filePath.clear();
       fontUpload.valid = false;
       fontUpload.magicChecked = false;
+      fontUpload.isVector = false;
       fontUpload.bytesWritten = 0;
       fontUpload.bufferPos = 0;
 
@@ -1869,10 +1874,14 @@ void CrossPointWebServer::handleFontUploadData() {
       String filename = upload.filename;
       filename.replace(' ', '_');
       // Validate filename: rejects path traversal (../, /, \) and enforces
-      // a .cpfont basename of alphanumeric + hyphen + underscore. Without
-      // this an attacker could supply "../../.crosspoint/settings.json" as
-      // a "filename" and have it written outside the fonts directory.
-      if (!FontInstaller::isValidCpfontFilename(filename.c_str())) {
+      // a .cpfont/.ttf/.otf basename of alphanumeric + hyphen + underscore.
+      // Without this an attacker could supply
+      // "../../.crosspoint/settings.json" as a "filename" and have it written
+      // outside the fonts directory. Vector fonts need PSRAM to stay
+      // resident, so DRAM-only boards only accept .cpfont.
+      const bool psramCapable = HalMemory::getPsramHeap().totalBytes > 0;
+      fontUpload.isVector = psramCapable && FontInstaller::isValidVectorFontFilename(filename.c_str());
+      if (!fontUpload.isVector && !FontInstaller::isValidCpfontFilename(filename.c_str())) {
         LOG_ERR("WEB", "Invalid font filename: %s", filename.c_str());
         break;
       }
@@ -1906,8 +1915,17 @@ void CrossPointWebServer::handleFontUploadData() {
 
       // Validate magic bytes on first chunk only
       if (!fontUpload.magicChecked && upload.currentSize >= 8) {
-        if (memcmp(upload.buf, "CPFONT\0\0", 8) != 0) {
-          LOG_ERR("WEB", "Invalid .cpfont magic bytes");
+        bool magicOk;
+        if (fontUpload.isVector) {
+          // sfnt versions: 0x00010000 (TrueType), "OTTO" (CFF), "true" (Apple)
+          static constexpr uint8_t kTtfMagic[4] = {0x00, 0x01, 0x00, 0x00};
+          magicOk = memcmp(upload.buf, kTtfMagic, 4) == 0 || memcmp(upload.buf, "OTTO", 4) == 0 ||
+                    memcmp(upload.buf, "true", 4) == 0;
+        } else {
+          magicOk = memcmp(upload.buf, "CPFONT\0\0", 8) == 0;
+        }
+        if (!magicOk) {
+          LOG_ERR("WEB", "Invalid font magic bytes");
           fontUpload.valid = false;
           break;
         }
@@ -1974,7 +1992,7 @@ void CrossPointWebServer::handleFontUpload() {
     server->send(200, "application/json", "{\"ok\":true}");
     LOG_DBG("WEB", "Font upload complete: %s", fontUpload.filePath.c_str());
   } else {
-    server->send(400, "application/json", "{\"error\":\"Invalid .cpfont file\"}");
+    server->send(400, "application/json", "{\"error\":\"Invalid font file\"}");
   }
 }
 
