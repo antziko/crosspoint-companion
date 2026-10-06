@@ -1068,6 +1068,13 @@ void loop() {
 
   halTiltSensor.update(SETTINGS.tiltPageTurn, APP_STATE.activeOrientation, activityManager.isReaderActivity());
 
+  // Under the render lock, so a step never overlaps the themes' gauge reads.
+  static bool gaugeCapacityPending = true;
+  if (gaugeCapacityPending) {
+    RenderLock lock(RenderLock::Mode::Try);
+    if (lock.ownsLock()) gaugeCapacityPending = BatteryMonitor::loadDesignCapacity();
+  }
+
   renderer.setFadingFix(SETTINGS.fadingFix);
 
   // The ROM console does not depend on Arduino USB CDC's connection state.
