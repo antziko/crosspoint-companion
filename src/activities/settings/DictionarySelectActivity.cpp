@@ -16,6 +16,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/DictionaryRegistry.h"
+#include "util/ListSwipeScroll.h"
 
 // Long press threshold for viewing dictionary metadata.
 static constexpr unsigned long VIEW_INFO_MS = 1000;
@@ -281,6 +282,12 @@ void DictionarySelectActivity::loop() {
     selectedIndex = ButtonNavigator::previousPageIndex(selectedIndex, totalItems, pageItems);
     requestUpdate();
   });
+  // A swipe pages like a held side key, wrapping at both ends.
+  if (const int step = listSwipeStep(mappedInput)) {
+    selectedIndex = step > 0 ? ButtonNavigator::nextPageIndex(selectedIndex, totalItems, pageItems)
+                             : ButtonNavigator::previousPageIndex(selectedIndex, totalItems, pageItems);
+    requestUpdate();
+  }
 }
 
 // ---------------------------------------------------------------------------

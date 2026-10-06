@@ -1,6 +1,12 @@
 #pragma once
 #include <cstdint>
 
+// Paragraph spacing level: 0 = no gap, first lines indented; 1 = no gap and no indent;
+// n >= 2 = (n - 1) quarter-lines after each paragraph, no indent synthesized.
+inline int paragraphGapPx(const int lineHeight, const uint8_t level) {
+  return level > 1 ? lineHeight * (level - 1) / 4 : 0;
+}
+
 // The resolved text-rendering configuration a reader hands to the layout engine.
 // Section-cache validation keys on every field: a section file built with a
 // different spec is discarded and rebuilt.
@@ -20,7 +26,7 @@
 struct ReaderRenderSpec {
   int fontId = 0;
   float lineCompression = 1.0f;
-  bool extraParagraphSpacing = false;
+  uint8_t paragraphSpacing = 0;  // level, see paragraphGapPx()
   int8_t characterSpacing = 0;
   uint8_t wordSpacingPercent = 100;
   uint8_t paragraphAlignment = 0;

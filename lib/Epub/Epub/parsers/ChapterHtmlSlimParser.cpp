@@ -20,6 +20,7 @@
 #include "../../../../src/fontIds.h"
 #include "Epub.h"
 #include "Epub/Page.h"
+#include "Epub/ReaderRenderSpec.h"
 #include "Epub/VisibleTextUtils.h"
 #include "Epub/converters/ImageDecoderFactory.h"
 #include "Epub/converters/ImageDimsProbe.h"
@@ -30,11 +31,12 @@
 constexpr size_t MIN_SIZE_FOR_POPUP = 10 * 1024;  // 10KB
 constexpr size_t PARSE_BUFFER_SIZE = 1024;
 
-// An image with no explicit CSS size whose natural width is at least this
-// fraction of the container is treated as a "block" image and upscaled to the
-// full container width. Below it (small inline icons, emoji, dividers) keeps
-// its natural size.
+// An image whose natural width or height reaches these fractions of the column / page is a
+// "block" image and fills the page. Below both (inline icons, emoji) it keeps its natural size.
+// The height test keeps the verdict from flipping with panel width: a 193 px picture is under
+// 40% of the X3's ~500 px column but over 40% of the X4's ~460 px one.
 constexpr float LARGE_IMAGE_WIDTH_FRAC = 0.4f;
+constexpr float LARGE_IMAGE_HEIGHT_FRAC = 0.25f;
 
 // This number comes from PR #73
 // If we have this many words buffered, lay them out and consume all but the last line, freeing a
@@ -515,7 +517,7 @@ void ChapterHtmlSlimParser::startNewTextBlock(const BlockStyle& blockStyle) {
   // block is flushed so the chapter starts on a fresh page.
   flushPendingAnchor();
   currentTextBlock.reset(new (std::nothrow)
-                             ParsedText(extraParagraphSpacing, hyphenationEnabled, focusReadingEnabled, blockStyle));
+                             ParsedText(paragraphSpacing != 0, hyphenationEnabled, focusReadingEnabled, blockStyle));
   if (!currentTextBlock) {
     signalOutOfMemory("startNewTextBlock: ParsedText");
     return;
@@ -1051,7 +1053,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
       tableCellBlockStyle.isRtl = cssStyle.direction == CssTextDirection::Rtl;
     }
 
-    self->currentTextBlock = makeUniqueNoThrow<ParsedText>(self->extraParagraphSpacing, self->hyphenationEnabled,
+    self->currentTextBlock = makeUniqueNoThrow<ParsedText>(self->paragraphSpacing != 0, self->hyphenationEnabled,
                                                            self->focusReadingEnabled, tableCellBlockStyle);
     if (!self->currentTextBlock) {
       LOG_ERR("EHP", "OOM: table cell");
@@ -1208,6 +1210,11 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                   }
                 }
 
+                const bool largeImage =
+                    dims.width > 0 && dims.height > 0 &&
+                    (dims.width >= static_cast<int>(LARGE_IMAGE_WIDTH_FRAC * containerWidth) ||
+                     dims.height >= static_cast<int>(LARGE_IMAGE_HEIGHT_FRAC * self->viewportHeight));
+
                 if (hasCssHeight && hasCssWidth && dims.width > 0 && dims.height > 0) {
                   // Both CSS height and width set: resolve both, then clamp to viewport preserving requested ratio
                   displayHeight = static_cast<int>(
@@ -1269,9 +1276,8 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                   }
                   if (displayHeight < 1) displayHeight = 1;
                   LOG_DBG("EHP", "Display size from CSS width: %dx%d", displayWidth, displayHeight);
-                } else if (dims.width >= static_cast<int>(LARGE_IMAGE_WIDTH_FRAC * containerWidth)) {
-                  // No explicit CSS size and the image is "large" (its natural
-                  // width is at least LARGE_IMAGE_WIDTH_FRAC of the container):
+                } else if (largeImage) {
+                  // No explicit CSS size and the image is "large" (see LARGE_IMAGE_*_FRAC):
                   // blow it up to the full container width, deriving height from
                   // the aspect ratio. If that makes it taller than the page,
                   // clamp the height to the page and shrink width to match (so an
@@ -1308,8 +1314,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                 // spare. It bleeds into the screen margin, and is capped by the page height so
                 // it never splits. Small images (icons, emoji, rules) keep the size above.
                 const int fullImageWidth = self->viewportWidth + 2 * self->imageBleed;
-                if (dims.width > 0 && dims.height > 0 &&
-                    dims.width >= static_cast<int>(LARGE_IMAGE_WIDTH_FRAC * containerWidth)) {
+                if (largeImage) {
                   const float aspect = static_cast<float>(dims.height) / dims.width;
                   displayWidth = fullImageWidth;
                   displayHeight = static_cast<int>(fullImageWidth * aspect + 0.5f);
@@ -1837,7 +1842,7 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
   if (!self->currentTextBlock) {
     const BlockStyle flowStyle =
         self->blockStyleStack.empty() ? BlockStyle() : self->blockStyleStack.back().withoutBottom();
-    self->currentTextBlock = makeUniqueNoThrow<ParsedText>(self->extraParagraphSpacing, self->hyphenationEnabled,
+    self->currentTextBlock = makeUniqueNoThrow<ParsedText>(self->paragraphSpacing != 0, self->hyphenationEnabled,
                                                            self->focusReadingEnabled, flowStyle);
     if (!self->currentTextBlock) {
       LOG_ERR("EHP", "OOM: text block for character data");
@@ -2183,7 +2188,7 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
 
     const BlockStyle flowStyle =
         self->blockStyleStack.empty() ? BlockStyle() : self->blockStyleStack.back().withoutBottom();
-    self->currentTextBlock = makeUniqueNoThrow<ParsedText>(self->extraParagraphSpacing, self->hyphenationEnabled,
+    self->currentTextBlock = makeUniqueNoThrow<ParsedText>(self->paragraphSpacing != 0, self->hyphenationEnabled,
                                                            self->focusReadingEnabled, flowStyle);
     if (!self->currentTextBlock) {
       LOG_ERR("EHP", "OOM: text block after table");
@@ -2546,8 +2551,5 @@ void ChapterHtmlSlimParser::makePages() {
     currentPageNextY += blockStyle.paddingBottom;
   }
 
-  // Extra paragraph spacing if enabled (default behavior)
-  if (extraParagraphSpacing) {
-    currentPageNextY += lineHeight / 2;
-  }
+  currentPageNextY += paragraphGapPx(lineHeight, paragraphSpacing);
 }

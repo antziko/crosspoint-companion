@@ -13,17 +13,18 @@
 // In-reader per-book reader settings editor.
 // Displays the per-book text settings (font family, font size, line spacing,
 // paragraph alignment, hyphenation, extra paragraph spacing, screen margin) plus
-// the word-select button assignment and the stats min-read-time.  Changes are
-// applied live to the SETTINGS override and persisted to reader_settings.bin
-// immediately.
+// the word-select button assignment, Focus Reading, the stats min-read-time and a
+// More Text Settings row (TextSettingsActivity in BookMore mode, as the toolbar's
+// Text panel opens). Changes are applied live to the SETTINGS override and
+// persisted to reader_settings.bin immediately.
 class ReaderOptionsActivity final : public Activity {
  public:
-  // showMinSession controls the "min read time for stats" item. Readers without
-  // reading-time tracking (e.g. the plain-text reader) pass false to hide it.
+  // epubRows shows the rows only the EPUB reader honours (Focus Reading, min read time
+  // for stats); the plain-text reader passes false to hide them.
   // sampleText seeds the live preview with the book's own text (the reader passes its
   // current page); empty falls back to the built-in pangram.
   explicit ReaderOptionsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string bookCachePath,
-                                 const CrossPointSettings::ReaderOverride& initialOverride, bool showMinSession = true,
+                                 const CrossPointSettings::ReaderOverride& initialOverride, bool epubRows = true,
                                  std::string sampleText = "");
 
   void onEnter() override;
@@ -32,13 +33,16 @@ class ReaderOptionsActivity final : public Activity {
   void render(RenderLock&&) override;
 
  private:
-  // MIN_SESSION is the last item; hiding it just trims the count by one.
-  static constexpr int ITEM_COUNT = 9;
-  int itemCount() const { return showMinSession ? ITEM_COUNT : ITEM_COUNT - 1; }
+  static constexpr int ITEM_COUNT = 11;
+  int itemCount() const { return rowCount_; }
+  // Item id of the highlighted row.
+  int currentItem() const { return rows_[selectedIndex]; }
 
   std::string cachePath;
   CrossPointSettings::ReaderOverride localOverride;
-  bool showMinSession = true;
+  // Visible item ids in display order, fixed at construction.
+  uint8_t rows_[ITEM_COUNT] = {};
+  int rowCount_ = 0;
   // Book text sampled into the preview pane; empty => pangram fallback.
   std::string sampleText;
   int selectedIndex = 0;
@@ -46,6 +50,8 @@ class ReaderOptionsActivity final : public Activity {
 
   // Cycle the current item to its next value and persist.
   void cycleCurrentItem();
+  // Open the Layout/Style rows this list does not carry, editing the same book override.
+  void openMoreTextSettings();
 
   // Embedded font-family picker (no separate screen): the font list replaces the settings
   // list while open, and the preview above shows the highlighted font against the book text.

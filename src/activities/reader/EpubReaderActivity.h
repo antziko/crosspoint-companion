@@ -79,6 +79,14 @@ class EpubReaderActivity final : public Activity {
   // (legacy bookmark, or a section whose cache carries no paragraph map) and the
   // percentage jump then applies unchanged.
   uint16_t pendingParagraphAnchor = UINT16_MAX;
+  // Go to page from a flashcard: after the fraction jump, settle on the nearest page that
+  // prints this word (seekSavedTextNearCurrentPage).
+  bool pendingSeekWord_ = false;
+  LookupMarks::Mark pendingSeekMark_{};
+  std::string pendingSeekCard_;  // its card, which takes the page found
+  // Opening a bookmark or quote: after its position resolves, the nearest page printing this.
+  std::string pendingSeekSnippet_;
+  bool pendingSeekQuote_ = false;
   // Exact character position to land on, 0 when unknown. Tried before the paragraph: a
   // peer's mark can sit mid-paragraph, and the paragraph alone lands on the page that
   // paragraph starts on.
@@ -317,6 +325,8 @@ class EpubReaderActivity final : public Activity {
   // (Re)build the resident looked-up-word index from this book's flashcard deck. One streaming
   // pass; called at book open and on return from any screen that can change the deck.
   void reloadLookupMarks() const;
+  int nearestPageWhere(bool (*has)(const Page&, void*), void* ctx) const;
+  void seekSavedTextNearCurrentPage();
   // The word a card is anchored under as the PAGE prints it. A "Did you mean?" card is filed
   // under the suggestion, so the printed form is recovered from the card's own excerpt; falls
   // back to the headword when it cannot be. The one derivation shared by the mark table and the
@@ -614,6 +624,10 @@ class EpubReaderActivity final : public Activity {
   // Footnote navigation
   void navigateToHref(const std::string& href, bool savePosition = false);
   void restoreSavedPosition();
+  bool handleHomeGesture() override;
+  // A tap on the status bar band, where "« Back" shows after following a link.
+  bool isStatusBarBackTap() const;
+  static constexpr int kStatusBarTapSlack = 12;  // px above the band, for a finger landing short
 
  public:
   explicit EpubReaderActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Epub> epub,

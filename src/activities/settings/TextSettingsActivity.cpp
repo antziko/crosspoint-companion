@@ -36,6 +36,10 @@ constexpr StrId STYLE_ROW_NAME_IDS[] = {StrId::STR_FOCUS_READING, StrId::STR_HYP
 // LOCAL(feat): Hold Confirm this long on a Font-tab row to pin/unpin (vs a tap = commit).
 constexpr unsigned long kPinHoldMs = 700;
 
+constexpr StrId PARA_SPACING_IDS[] = {StrId::STR_STATE_OFF, StrId::STR_PARA_SPACING_ZERO,
+                                      StrId::STR_SMALL,     StrId::STR_NORMAL,
+                                      StrId::STR_LARGE,     StrId::STR_X_LARGE};
+static_assert(std::size(PARA_SPACING_IDS) == CrossPointSettings::PARAGRAPH_SPACING_COUNT, "paragraph spacing labels");
 constexpr StrId LINE_SPACING_IDS[] = {StrId::STR_TIGHT,     StrId::STR_NORMAL, StrId::STR_RELAXED,
                                       StrId::STR_SEMI_WIDE, StrId::STR_WIDE,   StrId::STR_EXTRA_WIDE};
 static_assert(std::size(LINE_SPACING_IDS) == CrossPointSettings::LINE_COMPRESSION_COUNT, "line spacing labels");
@@ -104,12 +108,11 @@ TextSettingsActivity::TextSettingsActivity(GfxRenderer& renderer, MappedInputMan
 
   if (bookMode()) {
     book_ = SETTINGS.getReaderOverride();
-    f_ = {&book_.fontFamily,         &book_.fontPointSize,         &book_.lineSpacing,
-          &book_.paragraphAlignment, &book_.extraParagraphSpacing, &book_.screenMargin,
-          &book_.hyphenationEnabled, book_.sdFontFamilyName};
+    f_ = {&book_.fontFamily,       &book_.fontPointSize, &book_.lineSpacing,        &book_.paragraphAlignment,
+          &book_.paragraphSpacing, &book_.screenMargin,  &book_.hyphenationEnabled, book_.sdFontFamilyName};
   } else {
-    f_ = {&SETTINGS.fontFamily,         &SETTINGS.fontPointSize,         &SETTINGS.lineSpacing,
-          &SETTINGS.paragraphAlignment, &SETTINGS.extraParagraphSpacing, &SETTINGS.screenMargin,
+    f_ = {&SETTINGS.fontFamily,         &SETTINGS.fontPointSize,    &SETTINGS.lineSpacing,
+          &SETTINGS.paragraphAlignment, &SETTINGS.paragraphSpacing, &SETTINGS.screenMargin,
           &SETTINGS.hyphenationEnabled, SETTINGS.sdFontFamilyName};
   }
 }
@@ -663,8 +666,11 @@ void TextSettingsActivity::applySize(int listIndex) {
 void TextSettingsActivity::confirmLayoutRow(int row) {
   switch (static_cast<LayoutRow>(row)) {
     case LayoutRow::ParaSpacing:
-      *f_.extraParagraphSpacing = !*f_.extraParagraphSpacing;
-      persist();  // persist immediately (#2806)
+      optionPopup_.show(StrId::STR_EXTRA_SPACING, PARA_SPACING_IDS, static_cast<int>(std::size(PARA_SPACING_IDS)),
+                        *f_.paragraphSpacing, [this](int idx) {
+                          *f_.paragraphSpacing = static_cast<uint8_t>(idx);
+                          persist();  // persist immediately (#2806)
+                        });
       requestUpdate();
       break;
     case LayoutRow::LineSpacing:
@@ -726,8 +732,10 @@ std::string TextSettingsActivity::layoutValueText(int row) const {
       const uint8_t v = *f_.lineSpacing;
       return v < std::size(LINE_SPACING_IDS) ? I18N.get(LINE_SPACING_IDS[v]) : I18N.get(StrId::STR_NORMAL);
     }
-    case LayoutRow::ParaSpacing:
-      return *f_.extraParagraphSpacing ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+    case LayoutRow::ParaSpacing: {
+      const uint8_t v = *f_.paragraphSpacing;
+      return v < std::size(PARA_SPACING_IDS) ? I18N.get(PARA_SPACING_IDS[v]) : I18N.get(StrId::STR_NORMAL);
+    }
     case LayoutRow::Alignment: {
       const uint8_t v = *f_.paragraphAlignment;
       return v < std::size(ALIGNMENT_IDS) ? I18N.get(ALIGNMENT_IDS[v]) : I18N.get(StrId::STR_JUSTIFY);

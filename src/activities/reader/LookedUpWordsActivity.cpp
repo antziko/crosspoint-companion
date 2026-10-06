@@ -14,6 +14,7 @@
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
 #include "util/FlashcardDeck.h"
+#include "util/ListSwipeScroll.h"
 #include "util/LookupHistory.h"
 
 const char* LookedUpWordsActivity::glyphFor(LookupHistory::Status s) {
@@ -167,6 +168,12 @@ void LookedUpWordsActivity::loop() {
     selectedIndex = ButtonNavigator::previousPageIndex(selectedIndex, totalItems, pageItems);
     requestUpdate();
   });
+  // A swipe pages like a held side key, wrapping at both ends.
+  if (const int step = listSwipeStep(mappedInput)) {
+    selectedIndex = step > 0 ? ButtonNavigator::nextPageIndex(selectedIndex, totalItems, pageItems)
+                             : ButtonNavigator::previousPageIndex(selectedIndex, totalItems, pageItems);
+    requestUpdate();
+  }
 
   // A tap on a row selects and activates it in one go, like the FUI list screens.
   // A tap is never a hold, so it cannot reach the long-press branch above.

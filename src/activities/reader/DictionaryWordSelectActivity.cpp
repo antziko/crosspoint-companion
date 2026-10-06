@@ -375,6 +375,7 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
     const auto* line = static_cast<const PageLine*>(element.get());
     const auto& block = line->getBlock();
     if (!block) continue;
+    const int8_t tracking = block->getBlockStyle().characterSpacing;
 
     // Flat per-word storage (TextBlock stores words back-to-back in a single
     // NUL-terminated arena; wordText(i) is a stable const char*, wordTextLen(i)
@@ -389,7 +390,7 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
       const EpdFontFamily::Style firstStyle = block->wordStyle(0);
       const std::string firstWord(block->wordText(0), block->wordTextLen(0));
       const int16_t firstWidth =
-          PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), firstWord, firstStyle);
+          PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), firstWord, firstStyle, tracking);
       const int16_t derivedGap = static_cast<int16_t>(block->wordXpos(1) - block->wordXpos(0) - firstWidth);
       // When wordList[1] is a continuation (attached punctuation etc., ParsedText.cpp:537-544)
       // the layout inserts no inter-word gap, so derivedGap collapses to the kerning offset
@@ -464,12 +465,12 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
           // land inside the box either. Measuring is exact and costs nothing here — CJK
           // tokens are single characters and prebuildAdvanceTable() already made this an
           // in-RAM advance-table hit.
-          wordWidth = PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), wordText, wordStyle);
+          wordWidth = PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), wordText, wordStyle, tracking);
         } else if (wIdx + 1 < blockWordCount) {
           const int16_t raw = static_cast<int16_t>(block->wordXpos(wIdx + 1) - block->wordXpos(wIdx));
           wordWidth = std::max(static_cast<int16_t>(1), static_cast<int16_t>(raw - lineGapWidth));
         } else {
-          wordWidth = PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), wordText, wordStyle);
+          wordWidth = PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), wordText, wordStyle, tracking);
         }
         {
           uint16_t off = WordSelectNavigator::poolAppend(textPool, wordText.c_str(), wordText.size());
@@ -492,9 +493,11 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
           // Dash-split words are rare (~0-2 per page); per-part measurement
           // is fine here. Soft-hyphen stripping matches the rest of
           // extractWords and matches layout's preprocessor.
-          int16_t offsetX =
-              prefix.empty() ? 0 : PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), prefix, wordStyle);
-          int16_t partWidth = PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), part, wordStyle);
+          int16_t offsetX = prefix.empty() ? 0
+                                           : PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), prefix,
+                                                                        wordStyle, tracking);
+          int16_t partWidth =
+              PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), part, wordStyle, tracking);
           {
             uint16_t off = WordSelectNavigator::poolAppend(textPool, part.c_str(), part.size());
             WordSelectNavigator::WordInfo wi;

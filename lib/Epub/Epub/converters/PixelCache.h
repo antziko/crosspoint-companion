@@ -105,7 +105,7 @@ struct StreamingPixelCache {
   int writtenRows{0};   // next local row to flush to file (flush cursor)
   bool ok{false};
   bool borrowedScratch{false};  // band points at the shared inflate window, not malloc
-  uint8_t* rowPtr{nullptr};      // current row within band (set by beginRow), or null
+  uint8_t* rowPtr{nullptr};     // current row within band (set by beginRow), or null
 
   StreamingPixelCache() = default;
   StreamingPixelCache(const StreamingPixelCache&) = delete;

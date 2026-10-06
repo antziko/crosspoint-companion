@@ -1,5 +1,7 @@
 #pragma once
 
+#include "activities/ActivityManager.h"
+
 // ESP.restart() with an RTC_NOINIT flag that survives the reboot, so setup()
 // skips the boot splash and routes straight to a destination. Used to clear
 // heap fragmentation accumulated during a wifi session. The live frontlight
@@ -7,7 +9,8 @@
 // comes back exactly as it was, regardless of the Restore Light on Wake
 // preference.
 
-void silentRestart();                        // home screen
+// home screen, with the selector on homeItem
+void silentRestart(HomeMenuItem homeItem = HomeMenuItem::NONE);
 void silentRestartToReader();                // currently-open EPUB (APP_STATE.openEpubPath)
 void silentRestartToSettings(int category);  // settings list at the given category index (0-3)
 

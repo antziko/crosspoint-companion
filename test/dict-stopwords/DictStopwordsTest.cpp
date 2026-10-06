@@ -1,8 +1,8 @@
-#include "util/DictStopwords.h"
-
 #include <gtest/gtest.h>
 
 #include <cstring>
+
+#include "util/DictStopwords.h"
 
 using DictStopwords::isStopword;
 using DictStopwords::STOPWORD_COUNT;
@@ -81,7 +81,7 @@ TEST(DictStopwords, EmptyAndOverlengthEarlyOut) {
 
 // Only the first `len` bytes are read — safe on a non-null-terminated substring.
 TEST(DictStopwords, RespectsLengthNotNullTerminator) {
-  const char* buf = "theory";       // "the" is a prefix
+  const char* buf = "theory";        // "the" is a prefix
   EXPECT_TRUE(isStopword(buf, 3));   // "the"
   EXPECT_FALSE(isStopword(buf, 6));  // "theory"
 }

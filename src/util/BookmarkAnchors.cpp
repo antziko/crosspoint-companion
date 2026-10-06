@@ -2,9 +2,9 @@
 
 #include <ChapterXPathResolver.h>
 #include <DocFragmentPath.h>
+#include <Epub/Section.h>
 #include <Logging.h>
 #include <Memory.h>
-#include <Epub/Section.h>
 #include <ProgressMapper.h>
 #include <SdDebugLog.h>
 
@@ -128,8 +128,7 @@ int anchorPointsByProgress(const std::shared_ptr<Epub>& epub, const BookmarkStor
     ChapterXPathResolver::findXPathsForOffsets(epub, spine, offsets, resolved, k, inclusive);
     for (size_t t = 0; t < k; t++) {
       if (resolved[t].empty()) {
-        LOG_DBG("BKA", "spine %u: progress %.3f did not resolve", spine,
-                static_cast<double>(bms[srcIdx[t]].progress));
+        LOG_DBG("BKA", "spine %u: progress %.3f did not resolve", spine, static_cast<double>(bms[srcIdx[t]].progress));
         SdDebugLog::log("BKA", "spine %u: progress %.3f did not resolve", spine,
                         static_cast<double>(bms[srcIdx[t]].progress));
         continue;
@@ -258,8 +257,7 @@ int BookmarkAnchors::backfill(const std::shared_ptr<Epub>& epub) {
   return anchored;
 }
 
-int BookmarkAnchors::adoptForeign(const std::shared_ptr<Epub>& epub, GfxRenderer& renderer,
-                                  const bool onlyUnplaced) {
+int BookmarkAnchors::adoptForeign(const std::shared_ptr<Epub>& epub, GfxRenderer& renderer, const bool onlyUnplaced) {
   if (!epub) return 0;
   auto& store = BOOKMARKS;
   const auto wanted = onlyUnplaced ? &BookmarkStore::isUnplacedForeign : &BookmarkStore::isForeignMark;
@@ -279,15 +277,13 @@ int BookmarkAnchors::adoptForeign(const std::shared_ptr<Epub>& epub, GfxRenderer
   // parse, and the array would be up to 1.8KB.
   auto keys = makeUniqueNoThrow<ForeignKey[]>(count);
   if (!keys) {
-    LOG_ERR("BKA", "OOM: %u bytes for the foreign-mark key set",
-            static_cast<unsigned>(count * sizeof(ForeignKey)));
+    LOG_ERR("BKA", "OOM: %u bytes for the foreign-mark key set", static_cast<unsigned>(count * sizeof(ForeignKey)));
     return 0;
   }
   size_t k = 0;
   for (const auto& bm : store.getBookmarks()) {
     if (!wanted(bm) || k >= count) continue;
-    keys[k++] = ForeignKey{bm.quote,     bm.spineIndex, bm.paragraphIndex,
-                           bm.startWord, bm.endWord,    bm.progress};
+    keys[k++] = ForeignKey{bm.quote, bm.spineIndex, bm.paragraphIndex, bm.startWord, bm.endWord, bm.progress};
   }
 
   // Every outcome is counted. Two of them used to leave no trace at all, which made
@@ -365,8 +361,7 @@ int BookmarkAnchors::adoptForeign(const std::shared_ptr<Epub>& epub, GfxRenderer
     float endProgress = -1.0f;
     if (key.quote && !endXPath.empty() && endXPath != xpath) {
       ProgressMapper::XPathAnchor endAnchor;
-      if (ProgressMapper::resolveXPathAnchor(epub, endXPath, endAnchor) &&
-          endAnchor.spineIndex == anchor.spineIndex) {
+      if (ProgressMapper::resolveXPathAnchor(epub, endXPath, endAnchor) && endAnchor.spineIndex == anchor.spineIndex) {
         if (const auto endPage = pages.getPageForVisibleTextOffset(endAnchor.visibleTextOffset)) {
           endProgress = static_cast<float>(*endPage) / static_cast<float>(total);
           if (endProgress < progress) endProgress = progress;  // inverted anchors: trust the start
@@ -382,8 +377,7 @@ int BookmarkAnchors::adoptForeign(const std::shared_ptr<Epub>& epub, GfxRenderer
 
     const float was = store.getBookmarks()[i].progress;
     if (store.adoptForeignMark(i, static_cast<uint16_t>(anchor.spineIndex), progress, anchor.paragraphIndex,
-                               chapter.c_str(), xpath, endXPath, *page, total, anchor.visibleTextOffset,
-                               endProgress)) {
+                               chapter.c_str(), xpath, endXPath, *page, total, anchor.visibleTextOffset, endProgress)) {
       adopted++;
       // Per mark, because the counts alone cannot show a mark that is re-filed to the
       // same place on every sync -- which is what a mark that never settles looks like.
@@ -399,8 +393,7 @@ int BookmarkAnchors::adoptForeign(const std::shared_ptr<Epub>& epub, GfxRenderer
   // Always traced, and with the counts: "adopted 0" and "never ran" are the same silence
   // otherwise, and they call for opposite fixes.
   LOG_DBG("BKA", "Re-filed %d of %u mark(s) made on a KOReader peer", adopted, static_cast<unsigned>(k));
-  SdDebugLog::log("BKA",
-                  "%s foreign=%u adopted=%d settled=%d noanchor=%d unresolved=%d nopages=%d unplaced=%d gone=%d",
+  SdDebugLog::log("BKA", "%s foreign=%u adopted=%d settled=%d noanchor=%d unresolved=%d nopages=%d unplaced=%d gone=%d",
                   onlyUnplaced ? "open" : "sync", static_cast<unsigned>(k), adopted, settled, noAnchor, unresolved,
                   noPages, unplaced, gone);
   return adopted;

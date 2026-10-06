@@ -26,22 +26,34 @@ namespace ListCursor {
 
 inline bool hiddenUntilNavigation = false;
 
+// A swipe paged a list that pages by moving its selection: the row it parked on is where the
+// buttons would resume, not one the user picked, so it is not highlighted until they do.
+inline bool scrolledBySwipe = false;
+
 // A no-op on a buttons-only board, where the cursor must always be visible.
-inline void hide() { hiddenUntilNavigation = gpio.hasTouch(); }
+inline void hide() {
+  hiddenUntilNavigation = gpio.hasTouch();
+  scrolledBySwipe = false;
+}
+
+inline void hideAfterSwipe() { scrolledBySwipe = true; }
 
 // Returns true when this call actually revealed the cursor, so the caller can force the
 // repaint that shows it. Needed because the press that reveals may not move anything — Up
 // on the first row clamps to where it already is, and the screen then never repaints on its
 // own, leaving the cursor invisible until some other input came along.
 inline bool reveal() {
-  const bool wasHidden = hiddenUntilNavigation;
+  const bool wasHidden = hiddenUntilNavigation || scrolledBySwipe;
   hiddenUntilNavigation = false;
+  scrolledBySwipe = false;
   return wasHidden;
 }
 
 // True when the highlight for `selectedIndex` should not be drawn yet. Callers keep using
 // the real selectedIndex for their paging maths -- only the highlight is withheld.
-inline bool suppressed(const int selectedIndex) { return hiddenUntilNavigation && selectedIndex <= 0; }
+inline bool suppressed(const int selectedIndex) {
+  return scrolledBySwipe || (hiddenUntilNavigation && selectedIndex <= 0);
+}
 
 // True while the cursor is still unrevealed, WHATEVER row the selection sits on. For a view
 // whose selection doubles as the scroll anchor: the Recent Books shelf pages by moving the

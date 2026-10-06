@@ -249,8 +249,6 @@ void OpdsBookBrowserActivity::onEnter() {
 void OpdsBookBrowserActivity::onExit() {
   Activity::onExit();
 
-  SdDebugLog::setEnabled(false);
-
   // Reset orientation back to portrait for the rest of the UI.
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
 
@@ -261,7 +259,7 @@ void OpdsBookBrowserActivity::onExit() {
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(false);
     delay(30);
-    silentRestart();
+    silentRestart(HomeMenuItem::OPDS_BROWSER);
   }
 }
 

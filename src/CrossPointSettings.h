@@ -164,6 +164,18 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     BOOK_STYLE = 4,
     PARAGRAPH_ALIGNMENT_COUNT
   };
+  // Gap after each paragraph (see paragraphGapPx()): OFF indents first lines instead, ZERO
+  // neither gaps nor indents, then 1..4 quarter-lines. Stored by index in settings.json,
+  // reader_settings.bin and the section cache header.
+  enum PARAGRAPH_SPACING {
+    PARA_SPACING_OFF = 0,
+    PARA_SPACING_ZERO = 1,
+    PARA_SPACING_SMALL = 2,
+    PARA_SPACING_NORMAL = 3,
+    PARA_SPACING_LARGE = 4,
+    PARA_SPACING_EXTRA = 5,
+    PARAGRAPH_SPACING_COUNT
+  };
 
   // Auto-sleep timeout options (in minutes)
   enum SLEEP_TIMEOUT {
@@ -355,7 +367,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     uint8_t lineSpacing = NORMAL;
     uint8_t paragraphAlignment = JUSTIFIED;
     uint8_t hyphenationEnabled = 0;
-    uint8_t extraParagraphSpacing = 1;
+    uint8_t paragraphSpacing = PARA_SPACING_NORMAL;
     // Per-book screen margin (px). Snapshotted from the global screenMargin on first open,
     // like the font/spacing fields above; a concrete value, not an inherit sentinel.
     // Literal (not SCREEN_MARGIN_MIN) because that constant is declared later in the
@@ -442,7 +454,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // uint32_t, so it is persisted by hand in toJson/fromJson rather than the uint8_t table.
   uint32_t clockLastSyncEpoch = 0;
   // Text rendering settings
-  uint8_t extraParagraphSpacing = 1;
+  uint8_t paragraphSpacing = PARA_SPACING_NORMAL;       // PARAGRAPH_SPACING enum
   uint8_t textAntiAliasing = TEXT_AA_ANTIALIASED;       // TEXT_AA enum (0=Off,1=Antialiased,2=Sharp)
   uint8_t quoteHighlightStyle = QUOTE_STYLE_HIGHLIGHT;  // QUOTE_STYLE enum
   // Underline words looked up in the dictionary, on the page they were looked up on.
@@ -775,7 +787,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // When an override is active these return override values; otherwise globals.
   uint8_t getReaderParagraphAlignment() const;
   uint8_t getReaderHyphenationEnabled() const;
-  uint8_t getReaderExtraParagraphSpacing() const;
+  uint8_t getReaderParagraphSpacing() const;
   // Stored 0..4 as signed -2..+2 px of tracking.
   int8_t getCharacterSpacing() const { return static_cast<int8_t>(characterSpacing - CHARACTER_SPACING_OFFSET); }
   // The layout configuration the section cache is keyed on, with every per-book

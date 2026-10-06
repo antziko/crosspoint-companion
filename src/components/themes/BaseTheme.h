@@ -345,7 +345,7 @@ class BaseTheme {
                      std::string title, const int paddingBottom = 0, const int textYOffset = 0,
                      const bool fillMargin = true, const bool isPageBookmarked = false, const bool isReturnMark = false,
                      const bool isPageQuoted = false, const bool pageCountEstimated = false, const int insetLeft = 0,
-                     const int insetRight = 0) const;
+                     const int insetRight = 0, const char* backLabel = nullptr) const;
   void drawHelpText(const GfxRenderer& renderer, Rect rect, const char* label) const;
   virtual void drawTextField(const GfxRenderer& renderer, Rect rect, const int textWidth, bool cursorMode = false,
                              int contentStartX = 0, int contentWidth = 0) const;

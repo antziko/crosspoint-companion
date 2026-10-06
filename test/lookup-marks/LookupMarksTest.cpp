@@ -106,8 +106,9 @@ TEST_F(LookupMarksTest, CollectMatchesOnlyItsOwnPage) {
   EXPECT_EQ(marks.collectForPage(LookupMarks::hashChapter("Other", 5), 11, 27, out, 4), 0);  // other chapter
 }
 
-// After a re-layout (status bar toggle, font, margins) the chapter has a different page count.
-// The mark follows its position in the chapter onto the one or two pages now covering it.
+// After a re-layout (status bar toggle, font, margins, another device) the chapter has a
+// different page count. The mark follows its position in the chapter onto the pages now covering
+// it, widened by RELAYOUT_SLACK_PAGES because the text does not move evenly.
 TEST_F(LookupMarksTest, RepaginationMapsTheMarkByChapterPosition) {
   auto& marks = LookupMarks::getInstance();
   ASSERT_TRUE(marks.add("pews", 4, "Bident", 6, 11, 27));  // slice [10/27, 11/27) = [.370, .407)
@@ -115,8 +116,11 @@ TEST_F(LookupMarksTest, RepaginationMapsTheMarkByChapterPosition) {
   const uint32_t ch = LookupMarks::hashChapter("Bident", 6);
   EXPECT_EQ(marks.collectForPage(ch, 12, 31, out, 4), 1);  // [.355, .387) overlaps
   EXPECT_EQ(marks.collectForPage(ch, 13, 31, out, 4), 1);  // [.387, .419) overlaps
-  EXPECT_EQ(marks.collectForPage(ch, 10, 31, out, 4), 0);  // [.290, .323) does not
-  EXPECT_EQ(marks.collectForPage(ch, 14, 31, out, 4), 0);  // [.419, .452) does not
+  // Within RELAYOUT_SLACK_PAGES (2) of those: pages 10..15.
+  EXPECT_EQ(marks.collectForPage(ch, 10, 31, out, 4), 1);
+  EXPECT_EQ(marks.collectForPage(ch, 15, 31, out, 4), 1);
+  EXPECT_EQ(marks.collectForPage(ch, 9, 31, out, 4), 0);
+  EXPECT_EQ(marks.collectForPage(ch, 16, 31, out, 4), 0);
   // Its own page number always matches: a total recorded mid-build was an estimate, so the
   // count drifting under an unchanged layout must not lose the mark.
   EXPECT_EQ(marks.collectForPage(ch, 11, 31, out, 4), 1);

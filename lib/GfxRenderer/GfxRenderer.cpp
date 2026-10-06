@@ -2100,18 +2100,25 @@ unsigned long GfxRenderer::deepCleanPanel(const uint8_t cycles) const {
     displayBuffer(HalDisplay::FULL_REFRESH);
     SdDebugLog::log("GFX", "deepclean cycle=%u black mode=FULL ms=%lu", static_cast<unsigned>(i), millis() - phaseMs);
 
-    // White phase: HALF. What HALF drives depends on the controller:
+    // White phase. What HALF drives depends on the controller:
     //   * UC8279 (X4 Pro): OLD = ~target, so every pixel takes a real black->white swing
     //     (Uc8279X4Driver.cpp, the `scrub` branch). A white-seed GC against a white target
     //     would redraw nothing.
     //   * UC8253 (X3): HalDisplay turns HALF into a forced full sync, the OEM _full bank
     //     against the frame actually on the glass, so every pixel transitions from black.
-    //   * SSD1677 (X4): RED is bypassed, so the panel's OTP absolute waveform runs from the
-    //     BW plane alone; no OLD-plane seed is involved.
+    //   * SSD1677 (X4): HALF is the OTP waveform at a forced 90 C temperature, about half
+    //     the drive of FULL, and leaves a ghost behind. The X4 runs FULL here instead.
+#if FREEINK_DEVICE_X4PRO || FREEINK_DEVICE_PAPERMONO
+    constexpr bool ssd1677Build = false;
+#else
+    constexpr bool ssd1677Build = true;
+#endif
+    const bool fullWhite = ssd1677Build && !isX3();
     clearScreen(0xFF);
     phaseMs = millis();
-    displayBuffer(HalDisplay::HALF_REFRESH);
-    SdDebugLog::log("GFX", "deepclean cycle=%u white mode=HALF ms=%lu", static_cast<unsigned>(i), millis() - phaseMs);
+    displayBuffer(fullWhite ? HalDisplay::FULL_REFRESH : HalDisplay::HALF_REFRESH);
+    SdDebugLog::log("GFX", "deepclean cycle=%u white mode=%s ms=%lu", static_cast<unsigned>(i),
+                    fullWhite ? "FULL" : "HALF", millis() - phaseMs);
   }
   // Duration is the tuning knob: if residue survives N cycles we raise N, and the
   // cost of doing so has to stay visible in the log.

@@ -32,9 +32,7 @@ TEST(SiblingOriginPaths, NonDeviceDigitIsNotATag) {
   EXPECT_EQ(siblingOriginPaths("/a/b/My Title (X2).epub"), V({}));
 }
 
-TEST(SiblingOriginPaths, NoDirectory) {
-  EXPECT_EQ(siblingOriginPaths("book (X3).epub"), V({"book.epub"}));
-}
+TEST(SiblingOriginPaths, NoDirectory) { EXPECT_EQ(siblingOriginPaths("book (X3).epub"), V({"book.epub"})); }
 
 // Single-word title (no " - ") -> only the same-order candidate, no swap variant.
 TEST(SiblingOriginPaths, NoSeparatorNoSwapCandidate) {

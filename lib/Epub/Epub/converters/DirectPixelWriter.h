@@ -154,7 +154,7 @@ struct DirectCacheWriter {
   uint8_t* buffer{nullptr};
   int bytesPerRow{0};
   int originX{0};
-  uint8_t* rowPtr{nullptr};            // Pre-computed for current row (null = skip)
+  uint8_t* rowPtr{nullptr};              // Pre-computed for current row (null = skip)
   StreamingPixelCache* stream{nullptr};  // non-null => stream rows to SD instead of a full buffer
 
   // Full-buffer mode: the whole image fits in RAM and is written in one shot at the end.

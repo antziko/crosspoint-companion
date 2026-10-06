@@ -25,6 +25,40 @@ bool g_masterEnabled = true;
 // is not the constrained resource here (RAM is); 4MB is a blink to write/read
 // and holds tens of thousands of lines.
 constexpr size_t MAX_LOG_BYTES = 4 * 1024 * 1024;
+
+// Lines whose append failed (card not answering). Reported by the next line that lands, so a
+// silent gap in the trace reads as "SD stopped taking writes" rather than "nothing happened".
+// Only the caller of log() touches these; concurrent loggers can at worst miscount, never corrupt.
+uint32_t g_droppedLines = 0;
+uint32_t g_firstDropMs = 0;
+uint32_t g_lastDropMs = 0;
+char g_firstDropTag[8] = {};
+
+// A card that stops answering makes every open wait out SD timeouts. After this many failures in
+// a row, stop touching the card for BACKOFF_MS and only count, so logging can't add that wait to
+// every page turn and lookup while the card is sick.
+constexpr uint8_t FAILS_BEFORE_BACKOFF = 3;
+constexpr uint32_t BACKOFF_MS = 10000;
+uint8_t g_consecutiveFails = 0;
+uint32_t g_backoffUntilMs = 0;
+
+void noteDropped(const char* tag) {
+  const uint32_t now = millis();
+  if (g_droppedLines == 0) {
+    g_firstDropMs = now;
+    snprintf(g_firstDropTag, sizeof(g_firstDropTag), "%s", tag);
+  }
+  g_lastDropMs = now;
+  g_droppedLines++;
+}
+
+void noteWriteFailed(const char* tag) {
+  noteDropped(tag);
+  if (++g_consecutiveFails >= FAILS_BEFORE_BACKOFF) {
+    g_backoffUntilMs = millis() + BACKOFF_MS;
+    g_consecutiveFails = 0;
+  }
+}
 }  // namespace
 
 void setEnabled(bool enabled) { g_enabled = enabled; }
@@ -61,17 +95,42 @@ void log(const char* tag, const char* fmt, ...) {
   const int len = snprintf(line, sizeof(line), "[%lu][%s] %s: %s\n", millis(), model, tag, msg);
   if (len <= 0) return;
 
-  // Rotate if the file has grown too large (cheap size check before append).
-  HalFile probe;
-  if (Storage.openFileForRead("SDLOG", PATH, probe)) {
-    const size_t sz = probe.size();
-    probe.close();
-    if (sz > MAX_LOG_BYTES) Storage.remove(PATH);
+  if (g_backoffUntilMs != 0) {
+    if (static_cast<int32_t>(millis() - g_backoffUntilMs) < 0) {
+      noteDropped(tag);
+      return;
+    }
+    g_backoffUntilMs = 0;
   }
 
   HalFile file;
-  if (!Storage.openFileForAppend("SDLOG", PATH, file)) return;
-  file.write(line, static_cast<size_t>(len));
+  if (!Storage.openFileForAppend("SDLOG", PATH, file)) {
+    noteWriteFailed(tag);
+    return;
+  }
+  // Rotate once the log passes the cap. The append handle already knows the size, so no
+  // separate probe open per line.
+  if (file.size() > MAX_LOG_BYTES) {
+    file.close();
+    Storage.remove(PATH);
+    if (!Storage.openFileForAppend("SDLOG", PATH, file)) {
+      noteWriteFailed(tag);
+      return;
+    }
+  }
+  if (g_droppedLines > 0) {
+    // msg is already copied into line; reuse it rather than grow this frame.
+    const int gapLen = snprintf(msg, sizeof(msg), "[%lu][%s] SDLOG: dropped %lu lines %lu..%lu first=%s\n", millis(),
+                                model, (unsigned long)g_droppedLines, (unsigned long)g_firstDropMs,
+                                (unsigned long)g_lastDropMs, g_firstDropTag);
+    if (gapLen > 0) file.write(msg, static_cast<size_t>(gapLen));
+    g_droppedLines = 0;
+  }
+  if (file.write(line, static_cast<size_t>(len)) != static_cast<size_t>(len)) {
+    noteWriteFailed(tag);
+  } else {
+    g_consecutiveFails = 0;
+  }
   // Force the write (data + dir entry + FAT) to the card NOW. The activities that
   // enable this log (OPDS / KOSync) silent-restart on exit, and an abrupt
   // ESP.restart() before the close-sync lands drops a freshly-created file — which

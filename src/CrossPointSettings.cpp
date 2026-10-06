@@ -242,6 +242,12 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
     }
   }
 
+  // Paragraph spacing was an on/off toggle under the old key; On was today's Normal gap.
+  if (doc["paragraphSpacing"].isNull() && !doc["extraParagraphSpacing"].isNull()) {
+    s.paragraphSpacing = (doc["extraParagraphSpacing"] | (uint8_t)1) ? PARA_SPACING_NORMAL : PARA_SPACING_OFF;
+    needsResave = true;
+  }
+
   // refreshScreenMode was FAST/HALF/FULL. FAST cleared nothing, so it folds onto HALF.
   if (doc["refreshScreenModeV2"].isNull() && !doc["refreshScreenMode"].isNull()) {
     s.refreshScreenMode = (doc["refreshScreenMode"] | (uint8_t)1) == 2 ? RSM_FULL : RSM_HALF;
@@ -705,8 +711,8 @@ uint8_t CrossPointSettings::getReaderHyphenationEnabled() const {
   return readerOverride.active ? readerOverride.hyphenationEnabled : hyphenationEnabled;
 }
 
-uint8_t CrossPointSettings::getReaderExtraParagraphSpacing() const {
-  return readerOverride.active ? readerOverride.extraParagraphSpacing : extraParagraphSpacing;
+uint8_t CrossPointSettings::getReaderParagraphSpacing() const {
+  return readerOverride.active ? readerOverride.paragraphSpacing : paragraphSpacing;
 }
 
 ReaderRenderSpec CrossPointSettings::readerRenderSpec(const uint16_t viewportWidth,
@@ -718,7 +724,7 @@ ReaderRenderSpec CrossPointSettings::readerRenderSpec(const uint16_t viewportWid
   // match and the section is rebuilt on every open.
   spec.fontId = getReaderFontId();
   spec.lineCompression = getReaderLineCompression();
-  spec.extraParagraphSpacing = getReaderExtraParagraphSpacing() != 0;
+  spec.paragraphSpacing = getReaderParagraphSpacing();
   spec.characterSpacing = getCharacterSpacing();
   spec.wordSpacingPercent = wordSpacing;
   spec.paragraphAlignment = getReaderParagraphAlignment();

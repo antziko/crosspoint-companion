@@ -7,6 +7,7 @@
 #include <Utf8.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 
@@ -22,6 +23,33 @@ namespace {
 
 constexpr int kUnderlineThickness = 2;
 
+// Byte length of one edge punctuation mark at the start (atEnd = false) or end of `t`, 0 when
+// none: ASCII that is neither letter nor digit, and the UTF-8 quotes, dashes, ellipsis and
+// CJK marks a page prints against a word. The lookup underline steps over these.
+size_t edgePunct(const char* t, const size_t len, const bool atEnd) {
+  if (len == 0) return 0;
+  const auto u = [&](const size_t i) { return static_cast<uint8_t>(t[i]); };
+  const uint8_t a = u(atEnd ? len - 1 : 0);
+  if (a < 0x80) return std::isalnum(a) ? 0 : 1;
+  if (len >= 2) {
+    const size_t i = atEnd ? len - 2 : 0;
+    if (u(i) == 0xC2 && (u(i + 1) == 0xAB || u(i + 1) == 0xBB || u(i + 1) == 0xA1 || u(i + 1) == 0xBF)) return 2;
+  }
+  if (len >= 3) {
+    const size_t i = atEnd ? len - 3 : 0;
+    const uint8_t b = u(i + 1), c = u(i + 2);
+    if (u(i) == 0xE2 && b == 0x80 && ((c >= 0x93 && c <= 0x9E) || c == 0xA6 || c == 0xB9 || c == 0xBA)) return 3;
+    if (u(i) == 0xE3 && b == 0x80 && ((c >= 0x81 && c <= 0x82) || (c >= 0x88 && c <= 0x91))) return 3;
+    if (u(i) == 0xEF && b == 0xBC &&
+        (c == 0x81 || c == 0x88 || c == 0x89 || c == 0x8C || c == 0x9A || c == 0x9B || c == 0x9F))
+      return 3;
+  }
+  return 0;
+}
+
+// Looked-up words get a dotted rule, so they read apart from a link's solid underline.
+constexpr int kLookupDotPitch = 4;  // one 2x2 dot every this many pixels
+
 // Horizontal bleed on the highlight band, so it does not cut flush against the first and last
 // glyph. The band's height is exactly the line height, which already contains the descent, so
 // bands on consecutive rows cannot run into each other.
@@ -31,6 +59,13 @@ constexpr int kBandPadX = 1;
 // skipped rather than grown into, so the whole walk stays on the stack — this runs on the
 // render task, whose depth is already budgeted for EPUB section indexing.
 constexpr size_t kMaxQuotesPerPage = 6;
+
+// How far, in pages, a quote made on this device is looked for by its text when its saved
+// page no longer holds it: a re-layout, or a page count that was still growing when it was
+// saved, moves the text a few pages either way. Only snippets this long take part, since a
+// short one ("the") would match somewhere on any page.
+constexpr int kRelocatePages = 3;
+constexpr size_t kRelocateMinSnippet = 8;
 
 // Looked-up words marked on a single page. A page holds a handful of lookups at most; the
 // extras are skipped rather than grown into, for the same stack-only reason as the quote cap.
@@ -71,6 +106,11 @@ struct Range {
   // A mark a KOReader peer made: its word range describes that reader's layout, so the
   // range above is resolved from the quoted text instead (resolveForeignRanges).
   bool foreign = false;
+  // A local quote: tried at its saved word first, then located by its text when that word no
+  // longer matches. `nearby` is one saved for another page, located by its text alone.
+  bool local = false;
+  bool nearby = false;
+  bool indexOk = false;
   // Which part of the quote this page holds. A peer selects against a larger page, so one
   // of its highlights routinely covers two or three here: the first page runs from the
   // matched word to the page end, the last from the page start to where the quote stops,
@@ -114,7 +154,8 @@ bool firstWordMatches(const char* snippet, const char* text, size_t len) {
   return firstLen >= len && std::strncmp(snippet + firstLen - len, text, len) == 0;
 }
 
-// Resolve the word range of every foreign quote on this page, in one walk. Measuring
+// Resolve the word range of every foreign quote on this page, and settle where each local
+// one is (its saved word, else its text), in one walk. Measuring
 // nothing: this only needs the token sequence, and it has to complete before any band is
 // drawn, or a false partial match would paint one.
 void resolveForeignRanges(const Page& page, Range* ranges, size_t rangeCount) {
@@ -122,7 +163,17 @@ void resolveForeignRanges(const Page& page, Range* ranges, size_t rangeCount) {
   size_t pending = 0;
   size_t continuing = 0;
   for (size_t i = 0; i < rangeCount; i++) {
-    if (!ranges[i].foreign) continue;
+    if (!ranges[i].foreign && !ranges[i].local) continue;
+    if (ranges[i].local) {
+      if (!ranges[i].snippet || !*ranges[i].snippet) {
+        ranges[i].indexOk = true;  // nothing to check its word against, as firstWordMatches
+        continue;
+      }
+      matchers[i].snippet = ranges[i].snippet;
+      matchers[i].begin(BOOKMARK_SNIPPET_MAX);
+      pending++;
+      continue;
+    }
     if (!ranges[i].startsHere) {
       // The quote began on an earlier page, so it covers this one from its first token.
       // There is nothing to match: the snippet holds the quote's OPENING words, which are
@@ -140,6 +191,7 @@ void resolveForeignRanges(const Page& page, Range* ranges, size_t rangeCount) {
   }
   if (pending == 0 && continuing == 0) return;
 
+  uint16_t matchEnd[kMaxQuotesPerPage] = {};
   uint16_t index = 0;
   uint16_t lastIndex = 0;
   bool seenAny = false;
@@ -164,6 +216,17 @@ void resolveForeignRanges(const Page& page, Range* ranges, size_t rangeCount) {
         lastIndex = index;
         seenAny = true;
         for (size_t i = 0; i < rangeCount; i++) {
+          Range& lr = ranges[i];
+          if (lr.local && !lr.nearby && index == lr.start) {
+            lr.indexOk = firstWordMatches(lr.snippet, text + partStart, partLen);
+          }
+          if (lr.local) {
+            if (!lr.indexOk && !matchers[i].done && matchers[i].snippet &&
+                matchers[i].offer(text + partStart, partLen, index)) {
+              matchEnd[i] = index;
+            }
+            continue;
+          }
           if (!ranges[i].foreign || !ranges[i].startsHere || matchers[i].done || !matchers[i].snippet) continue;
           if (matchers[i].offer(text + partStart, partLen, index)) {
             ranges[i].start = matchers[i].start;
@@ -172,6 +235,28 @@ void resolveForeignRanges(const Page& page, Range* ranges, size_t rangeCount) {
             // repeat what this just proved.
             ranges[i].checked = true;
           }
+        }
+      }
+    }
+  }
+
+  for (size_t i = 0; i < rangeCount; i++) {
+    Range& r = ranges[i];
+    if (!r.local) continue;
+    if (r.indexOk) {
+      r.checked = true;
+    } else if (matchers[i].done) {
+      // Its saved word moved, its text did not: draw it where the text is now.
+      r.start = matchers[i].start;
+      r.end = matchEnd[i];
+      r.checked = true;
+    } else {
+      r.rejected = true;
+      if (!r.nearby) {
+        static const char* lastLocal = nullptr;
+        if (r.snippet && r.snippet != lastLocal) {
+          lastLocal = r.snippet;
+          SdDebugLog::log("PGM", "quote unmatched on its page: \"%.63s\"", r.snippet);
         }
       }
     }
@@ -235,6 +320,67 @@ void resolveForeignRanges(const Page& page, Range* ranges, size_t rangeCount) {
 
 }  // namespace
 
+bool pageHasWord(const Page& page, const LookupMarks::Mark& mark) {
+  LookupMarks::RunState state;
+  for (const auto& element : page.elements) {
+    if (element->getTag() != TAG_PageLine) continue;
+    const auto* line = static_cast<const PageLine*>(element.get());
+    const auto& block = line->getBlock();
+    if (!block) continue;
+    const uint16_t blockWordCount = block->wordCount();
+    for (uint16_t w = 0; w < blockWordCount; w++) {
+      const char* text = block->wordText(w);
+      const size_t len = block->wordTextLen(w);
+      bool isCjk = false;
+      if (!PageTokens::isSelectable(text, len, isCjk)) continue;
+      PageTokens::Part parts[PageTokens::kMaxTokenParts];
+      const size_t partCount = PageTokens::collectParts(text, len, parts, PageTokens::kMaxTokenParts);
+      const bool unsplit = partCount == 1 && parts[0].start == 0 && parts[0].end == len;
+      for (size_t pi = 0; pi < partCount; pi++) {
+        const size_t partStart = unsplit ? 0 : parts[pi].start;
+        const size_t partLen = unsplit ? len : parts[pi].end - parts[pi].start;
+        uint16_t tokenLen = 0;
+        const uint32_t tokenHash =
+            LookupMarks::hashAppend(LookupMarks::FNV_OFFSET, text + partStart, partLen, &tokenLen);
+        const auto step = LookupMarks::step(mark, state, isCjk, tokenHash, tokenLen, text + partStart, partLen,
+                                            static_cast<int16_t>(line->yPos));
+        if (step == LookupMarks::Step::MatchedToken || step == LookupMarks::Step::MatchedRun) return true;
+      }
+    }
+  }
+  return false;
+}
+
+SnippetAt findSnippet(const Page& page, const char* snippet) {
+  if (!snippet || std::strlen(snippet) < kRelocateMinSnippet) return SnippetAt::None;
+  SnippetMatch::Matcher matcher;
+  matcher.snippet = snippet;
+  matcher.begin(BOOKMARK_SNIPPET_MAX);
+  uint16_t index = 0;
+  for (const auto& element : page.elements) {
+    if (element->getTag() != TAG_PageLine) continue;
+    const auto* line = static_cast<const PageLine*>(element.get());
+    const auto& block = line->getBlock();
+    if (!block) continue;
+    const uint16_t blockWordCount = block->wordCount();
+    for (uint16_t w = 0; w < blockWordCount; w++) {
+      const char* text = block->wordText(w);
+      const size_t len = block->wordTextLen(w);
+      bool isCjk = false;
+      if (!PageTokens::isSelectable(text, len, isCjk)) continue;
+      PageTokens::Part parts[PageTokens::kMaxTokenParts];
+      const size_t partCount = PageTokens::collectParts(text, len, parts, PageTokens::kMaxTokenParts);
+      const bool unsplit = partCount == 1 && parts[0].start == 0 && parts[0].end == len;
+      for (size_t pi = 0; pi < partCount; pi++, index++) {
+        const size_t partStart = unsplit ? 0 : parts[pi].start;
+        const size_t partLen = unsplit ? len : parts[pi].end - parts[pi].start;
+        if (matcher.offer(text + partStart, partLen, index)) return SnippetAt::Whole;
+      }
+    }
+  }
+  return matcher.open ? SnippetAt::RunsOff : SnippetAt::None;
+}
+
 void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int marginLeft, int marginTop,
                  uint16_t spineIndex, float pageProgress, int pageCount, uint32_t chapterHash, int pageNumber,
                  const int markPageCount, const int bandTop, const int bandBottom) {
@@ -253,15 +399,23 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
       // endProgress equals progress for a quote made here -- a selection on this device
       // cannot cross a page break -- so this reduces to the old start-page test for them.
       const QuoteSpan::Role role = QuoteSpan::pageRole(b.progress, b.endProgress, pageProgress, pageSlice);
-      if (role == QuoteSpan::Role::NotHere) continue;
+      const bool foreign = BookmarkStore::isForeignMark(b);
+      // A local quote is single-page (endProgress == progress); one saved for a nearby page
+      // is offered to this page too, to be drawn only if its text is here.
+      const float pageOffset = (b.progress - pageProgress) / pageSlice;
+      const bool nearby = role == QuoteSpan::Role::NotHere && !foreign && pageOffset > -(kRelocatePages + 1) &&
+                          pageOffset < kRelocatePages + 1 && std::strlen(b.snippet) >= kRelocateMinSnippet;
+      if (role == QuoteSpan::Role::NotHere && !nearby) continue;
       if (rangeCount >= kMaxQuotesPerPage) break;
       Range& r = ranges[rangeCount++];
       r.start = std::min(b.startWord, b.endWord);
       r.end = std::max(b.startWord, b.endWord);
       r.snippet = b.snippet;
-      r.foreign = BookmarkStore::isForeignMark(b);
-      r.startsHere = role == QuoteSpan::Role::Whole || role == QuoteSpan::Role::Starts;
-      r.endsHere = role == QuoteSpan::Role::Whole || role == QuoteSpan::Role::Ends;
+      r.foreign = foreign;
+      r.local = !foreign;
+      r.nearby = nearby;
+      r.startsHere = nearby || role == QuoteSpan::Role::Whole || role == QuoteSpan::Role::Starts;
+      r.endsHere = nearby || role == QuoteSpan::Role::Whole || role == QuoteSpan::Role::Ends;
       r.endFracInPage = QuoteSpan::endFraction(b.endProgress, pageProgress, pageSlice);
     }
     resolveForeignRanges(page, ranges, rangeCount);
@@ -283,13 +437,20 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
   const int lineHeight = renderer.getLineHeight(fontId);
   const int ascender = renderer.getFontAscenderSize(fontId);
 
-  // One rule under a span of a line, the mark a looked-up word gets and the one a quote gets
-  // when the user has chosen the underline style.
+  // One rule under a span of a line: solid for a quote in the underline style, dotted for a
+  // looked-up word.
   const auto inBand = [&](const int rowY) { return rowY < bandBottom && rowY + lineHeight > bandTop; };
 
   const auto underlineSpan = [&](int16_t x0, int width, int16_t rowY) {
     if (width > 0 && inBand(rowY))
       renderer.fillRect(x0, rowY + lineHeight - kUnderlineThickness, width, kUnderlineThickness, true);
+  };
+  const auto lookupSpan = [&](int16_t x0, int width, int16_t rowY) {
+    if (width <= 0 || !inBand(rowY)) return;
+    const int y = rowY + lineHeight - kUnderlineThickness;
+    for (int dx = 0; dx < width; dx += kLookupDotPitch) {
+      renderer.fillRect(x0 + dx, y, std::min(kUnderlineThickness, width - dx), kUnderlineThickness, true);
+    }
   };
 
   const auto flush = [&](Range& r) {
@@ -315,6 +476,7 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
     const auto* line = static_cast<const PageLine*>(element.get());
     const auto& block = line->getBlock();
     if (!block) continue;
+    const int8_t tracking = block->getBlockStyle().characterSpacing;
 
     // Ruby-annotated lines shift their base text down by half an ascender, exactly as
     // extractWords moves the selection boxes in lockstep with them.
@@ -373,10 +535,10 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
           measured = true;
           const EpdFontFamily::Style style = block->wordStyle(w);
           x = static_cast<int16_t>(line->xPos + block->wordXpos(w) + marginLeft);
-          if (partStart > 0) x += PageTokens::measureAdvance(renderer, fontId, text, partStart, style);
+          if (partStart > 0) x += PageTokens::measureAdvance(renderer, fontId, text, partStart, style, tracking);
           // The whole-token form copies nothing; only a dash-split part needs the sub-range one.
-          width = unsplit ? PageTokens::measureAdvance(renderer, fontId, text, style)
-                          : PageTokens::measureAdvance(renderer, fontId, text + partStart, partLen, style);
+          width = unsplit ? PageTokens::measureAdvance(renderer, fontId, text, style, tracking)
+                          : PageTokens::measureAdvance(renderer, fontId, text + partStart, partLen, style, tracking);
         };
 
         for (size_t i = 0; i < rangeCount; i++) {
@@ -411,6 +573,27 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
         const uint32_t tokenHash =
             LookupMarks::hashAppend(LookupMarks::FNV_OFFSET, text + partStart, partLen, &tokenLen);
 
+        // The token's span minus its edge punctuation: the lookup rule marks the word only.
+        bool trimmed = false;
+        int16_t lx = 0;
+        int16_t lw = 0;
+        const auto trimToWord = [&]() {
+          if (trimmed) return;
+          trimmed = true;
+          measure();
+          lx = x;
+          lw = width;
+          const char* t = text + partStart;
+          size_t lead = 0, trail = 0;
+          for (size_t n; (n = edgePunct(t + lead, partLen - lead - trail, false)) != 0;) lead += n;
+          for (size_t n; (n = edgePunct(t + lead, partLen - lead - trail, true)) != 0;) trail += n;
+          if ((lead == 0 && trail == 0) || lead + trail >= partLen) return;
+          const EpdFontFamily::Style style = block->wordStyle(w);
+          if (lead > 0)
+            lx = static_cast<int16_t>(x + PageTokens::measureAdvance(renderer, fontId, t, lead, style, tracking));
+          lw = PageTokens::measureAdvance(renderer, fontId, t + lead, partLen - lead - trail, style, tracking);
+        };
+
         for (size_t i = 0; i < lookupCount; i++) {
           const LookupMarks::Mark* m = lookups[i];
           LookupRun& r = runs[i];
@@ -419,7 +602,7 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
           const Step outcome =
               LookupMarks::step(*m, r.state, isCjk, tokenHash, tokenLen, text + partStart, partLen, rowY);
           if (outcome == Step::None) continue;
-          measure();
+          trimToWord();
           if (r.state.wrappedHere) {
             // The run just crossed its line break: what it held so far is the first segment.
             r.headX0 = r.x0;
@@ -428,35 +611,35 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
             r.headLine = r.line;
             r.headWStart = r.wStart;
             r.headWLast = r.wLast;
-            r.x0 = x;
-            r.x1 = x;
+            r.x0 = lx;
+            r.x1 = lx;
             r.y = rowY;
             r.line = line;
             r.wStart = w;
           }
           switch (outcome) {
             case Step::Opened:
-              r.x0 = x;
-              r.x1 = static_cast<int16_t>(x + width);
+              r.x0 = lx;
+              r.x1 = static_cast<int16_t>(lx + lw);
               r.y = rowY;
               r.line = line;
               r.wStart = w;
               r.wLast = w;
               break;
             case Step::Extended:
-              r.x1 = std::max(r.x1, static_cast<int16_t>(x + width));
+              r.x1 = std::max(r.x1, static_cast<int16_t>(lx + lw));
               r.wLast = w;
               break;
             case Step::MatchedRun:
               if (r.state.wrapped) {
-                underlineSpan(r.headX0, r.headX1 - r.headX0, r.headY);
+                lookupSpan(r.headX0, r.headX1 - r.headX0, r.headY);
                 emboldenCjk(r.headLine, r.headWStart, r.headWLast);
               }
-              underlineSpan(r.x0, std::max<int16_t>(r.x1, static_cast<int16_t>(x + width)) - r.x0, r.state.y);
+              lookupSpan(r.x0, std::max<int16_t>(r.x1, static_cast<int16_t>(lx + lw)) - r.x0, r.state.y);
               emboldenCjk(line, r.wStart, w);
               break;
             case Step::MatchedToken:
-              underlineSpan(x, width, rowY);
+              lookupSpan(lx, lw, rowY);
               if (isCjk) emboldenCjk(line, w, w);
               break;
             case Step::None:
@@ -488,6 +671,7 @@ bool invertWordAtPoint(const GfxRenderer& renderer, const Page& page, const int 
     const auto* line = static_cast<const PageLine*>(element.get());
     const auto& block = line->getBlock();
     if (!block) continue;
+    const int8_t tracking = block->getBlockStyle().characterSpacing;
 
     const uint16_t blockWordCount = block->wordCount();
     // Ruby-annotated lines shift their base text down, and extractWords moves the tap boxes
@@ -501,7 +685,8 @@ bool invertWordAtPoint(const GfxRenderer& renderer, const Page& page, const int 
     // undersized gap widens every box on the line and swallows the space after the word.
     int16_t lineGapWidth = naturalSpaceWidth;
     if (blockWordCount >= 2 && block->wordTextLen(0) > 0) {
-      const int16_t firstWidth = PageTokens::measureAdvance(renderer, fontId, block->wordText(0), block->wordStyle(0));
+      const int16_t firstWidth =
+          PageTokens::measureAdvance(renderer, fontId, block->wordText(0), block->wordStyle(0), tracking);
       const int16_t derivedGap = static_cast<int16_t>(block->wordXpos(1) - block->wordXpos(0) - firstWidth);
       if (derivedGap > naturalSpaceWidth / 2) lineGapWidth = derivedGap;
     }
@@ -525,12 +710,12 @@ bool invertWordAtPoint(const GfxRenderer& renderer, const Page& page, const int 
         int16_t boxX = screenX;
         int16_t boxWidth;
         if (!unsplit) {
-          if (partStart > 0) boxX += PageTokens::measureAdvance(renderer, fontId, text, partStart, style);
-          boxWidth = PageTokens::measureAdvance(renderer, fontId, text + partStart, partLen, style);
+          if (partStart > 0) boxX += PageTokens::measureAdvance(renderer, fontId, text, partStart, style, tracking);
+          boxWidth = PageTokens::measureAdvance(renderer, fontId, text + partStart, partLen, style, tracking);
         } else if (isCjk) {
           // CJK carries no inter-word gap for the xpos diff to subtract, and a justified CJK
           // line hides justifyExtra in it; measuring is exact and the glyph is already cached.
-          boxWidth = PageTokens::measureAdvance(renderer, fontId, text, style);
+          boxWidth = PageTokens::measureAdvance(renderer, fontId, text, style, tracking);
         } else if (w + 1 < blockWordCount) {
           // The layout's xpos diff with the trailing inter-word gap removed. Punctuation
           // tokens keep their xpos entry as a boundary marker, so the next token's is always
@@ -538,7 +723,7 @@ bool invertWordAtPoint(const GfxRenderer& renderer, const Page& page, const int 
           const int16_t raw = static_cast<int16_t>(block->wordXpos(w + 1) - block->wordXpos(w));
           boxWidth = std::max(static_cast<int16_t>(1), static_cast<int16_t>(raw - lineGapWidth));
         } else {
-          boxWidth = PageTokens::measureAdvance(renderer, fontId, text, style);  // no next xpos
+          boxWidth = PageTokens::measureAdvance(renderer, fontId, text, style, tracking);  // no next xpos
         }
 
         if (x < boxX - kSlop || x >= boxX + boxWidth + kSlop) continue;
@@ -604,6 +789,7 @@ const LookupMarks::Mark* lookupMarkAtPoint(const GfxRenderer& renderer, const Pa
     const auto* line = static_cast<const PageLine*>(element.get());
     const auto& block = line->getBlock();
     if (!block) continue;
+    const int8_t tracking = block->getBlockStyle().characterSpacing;
 
     const int16_t rowY = static_cast<int16_t>(line->yPos + marginTop + block->getRubyShift(ascender));
     const uint16_t blockWordCount = block->wordCount();
@@ -630,9 +816,10 @@ const LookupMarks::Mark* lookupMarkAtPoint(const GfxRenderer& renderer, const Pa
           measured = true;
           const EpdFontFamily::Style style = block->wordStyle(w);
           tokenX = static_cast<int16_t>(line->xPos + block->wordXpos(w) + marginLeft);
-          if (partStart > 0) tokenX += PageTokens::measureAdvance(renderer, fontId, text, partStart, style);
-          tokenWidth = unsplit ? PageTokens::measureAdvance(renderer, fontId, text, style)
-                               : PageTokens::measureAdvance(renderer, fontId, text + partStart, partLen, style);
+          if (partStart > 0) tokenX += PageTokens::measureAdvance(renderer, fontId, text, partStart, style, tracking);
+          tokenWidth = unsplit
+                           ? PageTokens::measureAdvance(renderer, fontId, text, style, tracking)
+                           : PageTokens::measureAdvance(renderer, fontId, text + partStart, partLen, style, tracking);
         };
 
         uint16_t tokenLen = 0;

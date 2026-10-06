@@ -17,11 +17,11 @@
 namespace QuoteSpan {
 
 enum class Role : uint8_t {
-  NotHere,   // no part of the quote is on this page
-  Whole,     // starts and ends here: the ordinary single-page mark
-  Starts,    // starts here and carries on past the page
-  Through,   // began earlier and carries on past: the page is highlighted end to end
-  Ends,      // began earlier and stops on this page
+  NotHere,  // no part of the quote is on this page
+  Whole,    // starts and ends here: the ordinary single-page mark
+  Starts,   // starts here and carries on past the page
+  Through,  // began earlier and carries on past: the page is highlighted end to end
+  Ends,     // began earlier and stops on this page
 };
 
 /**

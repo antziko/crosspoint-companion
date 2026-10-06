@@ -81,6 +81,10 @@ struct BookmarkResult {
   // Exact character position in the chapter, 0 when unknown. Preferred over the paragraph
   // when set: see Bookmark::visibleTextOffset.
   uint32_t visibleTextOffset = 0;
+  // The mark's opening words (a quote's text, or the top of a bookmarked page), so the reader
+  // can open the page that prints them. Empty when the mark saved none.
+  std::string snippet;
+  bool quote = false;
 };
 
 // Font picked in FontSelectionActivity. When isBuiltin, builtinIndex is the
@@ -112,10 +116,22 @@ struct FlashcardReviewResult {
   uint8_t mastered = 0;
 };
 
-using ResultVariant =
-    std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, IntervalResult,
-                 PageResult, ProgressChangeResult, NetworkModeResult, FootnoteResult, WordResult, FilePathResult,
-                 BookmarkResult, FontSelectionResult, HighlightRangeResult, SyncScopeResult, FlashcardReviewResult>;
+// Go to page on a flashcard: the chapter position the card recorded, plus the word itself so the
+// reader can settle on the nearby page that actually prints it after a re-layout.
+struct FlashcardJumpResult {
+  uint16_t spineIndex = 0;
+  float progress = 0.0f;
+  bool hasWord = false;
+  uint32_t wordHash = 0;
+  uint32_t headHash = 0;
+  uint16_t byteLen = 0;
+  std::string word;  // the card, so the reader can save the page it found the word on
+};
+
+using ResultVariant = std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult,
+                                   IntervalResult, PageResult, ProgressChangeResult, NetworkModeResult, FootnoteResult,
+                                   WordResult, FilePathResult, BookmarkResult, FontSelectionResult,
+                                   HighlightRangeResult, SyncScopeResult, FlashcardReviewResult, FlashcardJumpResult>;
 
 struct ActivityResult {
   bool isCancelled = false;

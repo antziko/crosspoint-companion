@@ -508,8 +508,11 @@ void HomeActivity::loop() {
     return;
   }
 
-  // Hold Back on the home screen: move the selector to the first recent book.
-  if (!recentBooks.empty() && mappedInput.isPressed(MappedInputManager::Button::Back) &&
+  if (mappedInput.wasPressed(MappedInputManager::Button::Back)) backPressSeen = true;
+
+  // Hold Back on the home screen: move the selector to the first recent book. backPressSeen
+  // ignores a hold carried over from the screen that returned here (e.g. hold Back in OPDS).
+  if (!recentBooks.empty() && backPressSeen && mappedInput.isPressed(MappedInputManager::Button::Back) &&
       mappedInput.getHeldTime() >= RECENT_LONG_PRESS_MS) {
     backLongPressFired = true;
     if (selectorIndex != 0) {
@@ -623,8 +626,6 @@ void HomeActivity::loop() {
       requestUpdate();
     });
   }
-
-  if (mappedInput.wasPressed(MappedInputManager::Button::Back)) backPressSeen = true;
 
   // Back is otherwise unused on the home menu: open the most recently read
   // book directly (recentBooks is most-recent-first and already pruned of

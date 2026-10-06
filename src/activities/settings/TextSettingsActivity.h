@@ -153,7 +153,7 @@ class TextSettingsActivity final : public UiTabListActivity {
     uint8_t* fontPointSize;
     uint8_t* lineSpacing;
     uint8_t* paragraphAlignment;
-    uint8_t* extraParagraphSpacing;
+    uint8_t* paragraphSpacing;
     uint8_t* screenMargin;
     uint8_t* hyphenationEnabled;
     char* sdFontFamilyName;  // char[32] in both

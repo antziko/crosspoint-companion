@@ -9,6 +9,7 @@
 #include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/ListSwipeScroll.h"
 
 namespace {
 constexpr int ENTER_DELETE_MODE_MS = 700;
@@ -121,6 +122,14 @@ void TxtReaderBookmarksActivity::loop() {
                                                        GUI.getListPageItems(getListHeight(renderer), true));
     requestUpdate();
   });
+
+  // A swipe pages like a held side key, wrapping at both ends.
+  if (const int step = listSwipeStep(mappedInput)) {
+    const int pageItems = GUI.getListPageItems(getListHeight(renderer), true);
+    selectorIndex = step > 0 ? ButtonNavigator::nextPageIndex(selectorIndex, bookmarks.size(), pageItems)
+                             : ButtonNavigator::previousPageIndex(selectorIndex, bookmarks.size(), pageItems);
+    requestUpdate();
+  }
 }
 
 void TxtReaderBookmarksActivity::render(RenderLock&&) {

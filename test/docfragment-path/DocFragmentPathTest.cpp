@@ -1,8 +1,8 @@
-#include "DocFragmentPath.h"
-
 #include <gtest/gtest.h>
 
 #include <string>
+
+#include "DocFragmentPath.h"
 
 namespace {
 // Convenience: the offset just past the prefix, or npos when there is none.
@@ -121,7 +121,8 @@ TEST(DocFragmentPathChapterStart, AnythingPastTheFirstCharacterIsNotTheStart) {
   EXPECT_FALSE(DocFragmentPath::isChapterStart("/body/DocFragment[16]/body/h1/text()[2].0"));
   EXPECT_FALSE(DocFragmentPath::isChapterStart("/body/DocFragment[16]/body/p[1]/text().0"));
   EXPECT_FALSE(DocFragmentPath::isChapterStart("/body/DocFragment[16]/body/div[2]/ul/li[2]/p/text()[1].52"));
-  EXPECT_FALSE(DocFragmentPath::isChapterStart("/body/DocFragment[16]/body/table[5]/tbody[1]/tr[5]/td[2]/p[1]/text()[1].0"));
+  EXPECT_FALSE(
+      DocFragmentPath::isChapterStart("/body/DocFragment[16]/body/table[5]/tbody[1]/tr[5]/td[2]/p[1]/text()[1].0"));
 }
 
 TEST(DocFragmentPathChapterStart, ElementIndexDefaultsToOneWhenAbsent) {

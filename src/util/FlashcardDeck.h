@@ -69,7 +69,9 @@ class FlashcardDeck {
   // Excerpt is capped so a line fits the 512-byte streaming buffer with room to
   // spare for the word + the box/dueDay/chapter fields.
   static constexpr int EXCERPT_MAX = 160;
-  static constexpr int CHAPTER_MAX = 80;
+  // Holds the TOC title plus the " page/pageCount" token the reader appends; a cap that cuts
+  // the token leaves the card unanchored (no page underline, no Go to page).
+  static constexpr int CHAPTER_MAX = 128;
 
   // Cross-device sync ("fc" blob): adaptive per-sync slice cap bounds, in bytes.
   // The blob is bounded by a card *count* (it stops when the next card would
@@ -176,6 +178,11 @@ class FlashcardDeck {
   // any I/O when the word has no card, and true without any I/O when the association is
   // already what was asked for. Only a genuine change costs a deck rewrite.
   static bool setCardDict(const std::string& cachePath, const std::string& word, uint32_t dictHash);
+
+  // Rewrite the page token on `word`'s chapter field to `page`/`pageCount`, where Go to page
+  // found the word. Local only (version kept). True only when it rewrote the card: false without
+  // a token, or when it already matches.
+  static bool setCardPage(const std::string& cachePath, const std::string& word, int page, int pageCount);
 
   // Read the dictionary association recorded for `word`, without touching the deck.
   //

@@ -22,7 +22,9 @@ namespace {
 //     fontPointSize's pre-1.5 slots are folded up below.
 // v8: lineSpacing renumbered again by the insertion of RELAXED at index 2; v7 files are remapped
 //     in place the same way.
-constexpr uint8_t READER_SETTINGS_FILE_VERSION = 8;
+// v9: paragraphSpacing widened from on/off to a PARAGRAPH_SPACING level; an older On is remapped
+//     in place to Normal, the gap it always drew.
+constexpr uint8_t READER_SETTINGS_FILE_VERSION = 9;
 // Oldest layout load() still understands; everything from here up is read field by field.
 constexpr uint8_t READER_SETTINGS_MIN_READABLE_VERSION = 5;
 
@@ -60,7 +62,11 @@ bool load(const std::string& cachePath, CrossPointSettings::ReaderOverride& out)
   }
   serialization::readPod(f, out.paragraphAlignment);
   serialization::readPod(f, out.hyphenationEnabled);
-  serialization::readPod(f, out.extraParagraphSpacing);
+  serialization::readPod(f, out.paragraphSpacing);
+  if (version < 9) {
+    out.paragraphSpacing =
+        out.paragraphSpacing ? CrossPointSettings::PARA_SPACING_NORMAL : CrossPointSettings::PARA_SPACING_OFF;
+  }
   f.read(reinterpret_cast<uint8_t*>(out.sdFontFamilyName), sizeof(out.sdFontFamilyName));
   out.sdFontFamilyName[sizeof(out.sdFontFamilyName) - 1] = '\0';
   serialization::readPod(f, out.minSessionMinutes);
@@ -86,7 +92,7 @@ bool write(const std::string& cachePath, const CrossPointSettings::ReaderOverrid
   serialization::writePod(f, ov.lineSpacing);
   serialization::writePod(f, ov.paragraphAlignment);
   serialization::writePod(f, ov.hyphenationEnabled);
-  serialization::writePod(f, ov.extraParagraphSpacing);
+  serialization::writePod(f, ov.paragraphSpacing);
   f.write(reinterpret_cast<const uint8_t*>(ov.sdFontFamilyName), sizeof(ov.sdFontFamilyName));
   serialization::writePod(f, ov.minSessionMinutes);
   serialization::writePod(f, ov.screenMargin);

@@ -1,11 +1,13 @@
 #include "FlashcardListActivity.h"
 
+#include <Epub.h>
 #include <GfxRenderer.h>
 #include <HalClock.h>
 #include <I18n.h>
 #include <Memory.h>
 
 #include <algorithm>
+#include <string_view>
 
 #include "CrossPointSettings.h"
 #include "DictionaryDefinitionActivity.h"
@@ -16,6 +18,8 @@
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
 #include "util/FlashcardCardFace.h"
+#include "util/ListSwipeScroll.h"
+#include "util/LookupMarks.h"
 
 const char* FlashcardListActivity::glyphFor(const FlashcardDeck::Entry& e, uint32_t today) {
   if (FlashcardDeck::isMastered(e.box)) return "*";                            // graduated
@@ -68,8 +72,45 @@ void FlashcardListActivity::openDetail() {
   if (selectedIndex < 0 || selectedIndex >= totalCount) return;
   // Load the selected card in full (excerpt + chapter) for the detail card face.
   if (FlashcardDeck::loadWindow(cachePath, selectedIndex, 1, &detail, /*wordsOnly=*/false) < 1) return;
+  resolveDetailPosition();
   phase = Phase::Detail;
   requestUpdate();
+}
+
+// The card records its chapter by TOC title plus a "page/pageCount" token from the layout it
+// was saved under, so the jump lands on the first spine carrying that title at the same
+// fraction of the chapter. The fraction aims at the middle of the card's page slice: its
+// pageCount may have been a mid-build estimate, and the start of the slice then falls on
+// the page before the word.
+void FlashcardListActivity::resolveDetailPosition() {
+  detailSpine = -1;
+  if (!book) return;
+  int titleLen = static_cast<int>(detail.chapter.size());
+  int page = 0;
+  int pageCount = 0;
+  FlashcardDeck::parseChapterPage(detail.chapter.c_str(), static_cast<int>(detail.chapter.size()), &titleLen, &page,
+                                  &pageCount);
+  const bool hasPage = page >= 1 && pageCount >= 1;
+  const std::string_view field(detail.chapter.data(), detail.chapter.size());
+  const std::string_view title(detail.chapter.data(), static_cast<size_t>(titleLen));
+  const int tocCount = book->getTocItemsCount();
+  for (int i = 0; i < tocCount; i++) {
+    const std::string toc = book->getTocItem(i).title;
+    bool match = toc == title;
+    // A card with no page saved: an older one, or one whose long title the chapter cap cut,
+    // with or without a stub of the page token after it ("...Rules 9"). Matched by prefix.
+    if (!match && !hasPage && toc.size() >= kMinTitlePrefix && field.size() >= kMinTitlePrefix) {
+      match = (field.size() > toc.size() && field.substr(0, toc.size()) == toc && field[toc.size()] == ' ') ||
+              (toc.size() > field.size() && std::string_view(toc).substr(0, field.size()) == field);
+    }
+    if (!match) continue;
+    detailSpine = book->getSpineIndexForTocIndex(i);
+    // No page saved: the chapter start, from where the reader searches the whole chapter.
+    detailProgress =
+        hasPage ? (static_cast<float>(std::min(page, pageCount)) - 0.5f) / static_cast<float>(pageCount) : 0.0f;
+    return;
+  }
+  LOG_DBG("FCL", "'%s': chapter \"%s\" not in this book's TOC", detail.word.c_str(), detail.chapter.c_str());
 }
 
 void FlashcardListActivity::onExit() {
@@ -143,6 +184,33 @@ void FlashcardListActivity::loop() {
       controller.startLookup(detail.word);
       return;
     }
+    // Right on the front row; Down too, because the X4 Pro has only the side pair.
+    if (detailSpine >= 0 && (mappedInput.wasReleased(MappedInputManager::Button::Right) ||
+                             mappedInput.wasReleased(MappedInputManager::Button::Down))) {
+      FlashcardJumpResult jump;
+      jump.spineIndex = static_cast<uint16_t>(detailSpine);
+      jump.progress = detailProgress;
+      // The word as the page prints it ("donned" for a card filed under "don"), as the underline.
+      int surfaceLen = 0;
+      const char* surface =
+          FlashcardDeck::findSurfaceForm(detail.word.c_str(), static_cast<int>(detail.word.size()),
+                                         detail.excerpt.c_str(), static_cast<int>(detail.excerpt.size()), &surfaceLen);
+      if (!surface || surfaceLen <= 0) {
+        surface = detail.word.c_str();
+        surfaceLen = static_cast<int>(detail.word.size());
+      }
+      LookupMarks::Mark mark;
+      if (LookupMarks::markFor(surface, surfaceLen, mark)) {
+        jump.hasWord = true;
+        jump.wordHash = mark.wordHash;
+        jump.headHash = mark.headHash;
+        jump.byteLen = mark.byteLen;
+        jump.word = detail.word;
+      }
+      setResult(ActivityResult{jump});
+      finish();
+      return;
+    }
     if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
       phase = Phase::List;
       requestUpdate();
@@ -211,6 +279,12 @@ void FlashcardListActivity::loop() {
     selectedIndex = ButtonNavigator::previousPageIndex(selectedIndex, totalItems, pageItems);
     requestUpdate();
   });
+  // A swipe pages like a held side key, wrapping at both ends.
+  if (const int step = listSwipeStep(mappedInput)) {
+    selectedIndex = step > 0 ? ButtonNavigator::nextPageIndex(selectedIndex, totalItems, pageItems)
+                             : ButtonNavigator::previousPageIndex(selectedIndex, totalItems, pageItems);
+    requestUpdate();
+  }
 
   // A tap on a row selects and activates it in one go, like the FUI list screens.
   // A tap is never a hold, so it cannot reach the long-press branch above.
@@ -352,7 +426,8 @@ void FlashcardListActivity::renderDetail() {
   // header (which the card face draws at contentTop + listRowHeight).
   renderer.drawCenteredText(UI_10_FONT_ID, contentTop, statusBuf, true, EpdFontFamily::ITALIC);
 
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_FLASHCARD_FLIP), "", "");
+  const auto labels =
+      mappedInput.mapLabels(tr(STR_BACK), tr(STR_FLASHCARD_FLIP), "", detailSpine >= 0 ? tr(STR_GO_TO_PAGE) : "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   displayList();

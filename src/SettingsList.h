@@ -362,8 +362,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
       SettingInfo::Enum(StrId::STR_ORIENTATION, &CrossPointSettings::orientation,
                         {StrId::STR_PORTRAIT, StrId::STR_LANDSCAPE_CW, StrId::STR_INVERTED, StrId::STR_LANDSCAPE_CCW},
                         "orientation", StrId::STR_CAT_READER));
-  v.push_back(SettingInfo::Toggle(StrId::STR_EXTRA_SPACING, &CrossPointSettings::extraParagraphSpacing,
-                                  "extraParagraphSpacing", StrId::STR_READER_TEXT)
+  v.push_back(SettingInfo::Enum(StrId::STR_EXTRA_SPACING, &CrossPointSettings::paragraphSpacing,
+                                {StrId::STR_STATE_OFF, StrId::STR_PARA_SPACING_ZERO, StrId::STR_SMALL,
+                                 StrId::STR_NORMAL, StrId::STR_LARGE, StrId::STR_X_LARGE},
+                                "paragraphSpacing", StrId::STR_READER_TEXT)
                   .withTextSettings());
   v.push_back(SettingInfo::Enum(StrId::STR_TEXT_AA, &CrossPointSettings::textAntiAliasing,
                                 {StrId::STR_TEXT_AA_OFF, StrId::STR_TEXT_AA_ANTIALIASED, StrId::STR_TEXT_AA_SHARP},

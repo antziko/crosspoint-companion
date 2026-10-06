@@ -130,7 +130,9 @@ void EpubReaderBookmarksActivity::openSelectedBookmark() {
         renderer, mappedInput, quoteIndex);
     return;
   }
-  setResult(BookmarkResult{bm.spineIndex, bm.progress, bm.paragraphIndex, bm.visibleTextOffset});
+  BookmarkResult jump{bm.spineIndex, bm.progress, bm.paragraphIndex, bm.visibleTextOffset};
+  jump.snippet = bm.snippet;
+  setResult(std::move(jump));
   finish();
 }
 

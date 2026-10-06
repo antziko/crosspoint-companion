@@ -2,6 +2,9 @@
 
 #include <FreeInkUI.h>
 
+#include "MappedInputManager.h"
+#include "components/ListCursor.h"
+
 // One swipe of list paging, wrapping at both ends: a swipe past the last page returns to
 // the first and one past the first jumps to the last. Button paging already wraps
 // (ButtonNavigator::nextPageIndex), so without this a touch-only board is the one input
@@ -26,4 +29,15 @@ inline bool listSwipeScroll(freeink::ui::ListNav& nav, const bool forward, const
   // scrollBy clamps to the real last page (it knows the measured page size), and returns
   // false when there is no last page to go to.
   return nav.scrollBy(count, count);
+}
+
+// The same swipe for a list that moves its selection a page at a time (ButtonNavigator's
+// next/previousPageIndex) instead of keeping a ListNav viewport: +1 for a swipe up, -1 for a
+// swipe down, 0 for anything else. The caller pages the selection, which wraps at both ends;
+// the highlight is withheld until the next nav-button press, as the swipe only scrolled.
+inline int listSwipeStep(const MappedInputManager& input) {
+  const auto swipe = input.wasSwipe();
+  const int step = swipe == MappedInputManager::SwipeDir::Up ? 1 : swipe == MappedInputManager::SwipeDir::Down ? -1 : 0;
+  if (step != 0) ListCursor::hideAfterSwipe();
+  return step;
 }

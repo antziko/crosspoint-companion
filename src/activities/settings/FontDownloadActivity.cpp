@@ -131,7 +131,6 @@ void FontDownloadActivity::onExit() {
   // force-synced as it is written, so the silent restart below cannot truncate the
   // capture.
   SdDebugLog::log("FONT", "screen exit");
-  SdDebugLog::setEnabled(false);
 
   // Kept for the duration of the screen so a download can re-parse it instead of re-fetching.
   Storage.remove(MANIFEST_TMP);

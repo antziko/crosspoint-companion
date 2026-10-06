@@ -1237,11 +1237,15 @@ void BaseTheme::fillPopupProgress(const GfxRenderer& renderer, const Rect& layou
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);
 }
 
+namespace {
+constexpr int kBackLabelGap = 10;  // px between the status bar's "« Back" and what follows it
+}  // namespace
+
 void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, const int currentPage,
                               const int pageCount, std::string title, const int paddingBottom, const int textYOffset,
                               const bool fillMargin, const bool isPageBookmarked, const bool isReturnMark,
                               const bool isPageQuoted, const bool pageCountEstimated, const int insetLeft,
-                              const int insetRight) const {
+                              const int insetRight, const char* backLabel) const {
   // Hidden by the Home-key "Toggle Status Bar" gesture. The progress bar is exempt (see the
   // return below); everything else in the band is skipped, and getStatusBarHeight() hands the
   // band's strip to the page. The callers all clearScreen() before rendering the page, so no
@@ -1318,7 +1322,15 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
   static constexpr int bmIconGap = 4;
   static constexpr int bmNotchDepth = 5;
   static constexpr int quoteIconW = 9;
-  const int leftClusterX = metrics.statusBarHorizontalMargin + orientedMarginLeft + 1;
+  int leftClusterX = metrics.statusBarHorizontalMargin + orientedMarginLeft + 1;
+  // A way back from a followed link leads the left cluster: "« Back", full ink (it is an action,
+  // not page furniture), then the indicators and battery after it.
+  int backWidth = 0;
+  if (backLabel && *backLabel) {
+    renderer.drawText(SMALL_FONT_ID, leftClusterX, textY, backLabel);
+    backWidth = renderer.getTextWidth(SMALL_FONT_ID, backLabel) + kBackLabelGap;
+    leftClusterX += backWidth;
+  }
   const int bmPart = isPageBookmarked ? (bmIconW + bmIconGap) : 0;
   const int quotePart = isPageQuoted ? (quoteIconW + bmIconGap) : 0;
   const int bmTotalWidth = bmPart + quotePart;  // reserved width for battery/title layout
@@ -1427,7 +1439,7 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
         renderer.getScreenWidth() - (metrics.statusBarHorizontalMargin * 2) - orientedMarginLeft - orientedMarginRight;
 
     const int batterySize = SETTINGS.statusBarBattery ? (showBatteryPercentage ? 50 : 20) : 0;
-    const int titleMarginLeft = bmTotalWidth + batterySize + 30;
+    const int titleMarginLeft = backWidth + bmTotalWidth + batterySize + 30;
     const int clockReserve = totalDateClockWidth > 0 ? (totalDateClockWidth + 10) : 0;
     const int titleMarginRight = progressTextWidth + clockReserve + 30;
 

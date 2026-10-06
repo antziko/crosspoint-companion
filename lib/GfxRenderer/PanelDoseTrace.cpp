@@ -90,8 +90,6 @@ void PanelDoseTrace::dump(const char* why, const uint16_t widthBytes, const uint
   // Per-tile value since the tile's content last changed. Stays are what the held content sat
   // through: drive delivered to pixels that did not change.
   enum Field { F_SCRUB, F_FAST, F_HALF, F_FULL, F_GRAY, F_HELD, F_RAILS, F_INK, FIELD_COUNT };
-  static constexpr const char* kNames[FIELD_COUNT] = {"scrub", "fast",  "half",   "full",
-                                                      "gray",  "heldS", "railsS", "ink%"};
   const auto value = [&](const Tile& t, const int f) -> unsigned {
     if (t.secAt == 0) return 0;
     switch (f) {
@@ -141,7 +139,11 @@ void PanelDoseTrace::dump(const char* why, const uint16_t widthBytes, const uint
         maxv[g][F_RAILS]);
   }
 
+#ifdef DOSE_TRACE_GRID
   // Full grids, one line per tile row (native space; see orient= to map onto the photo).
+  // ~100 lines at ~4 ms each on every sleep, so only in builds chasing a burn-in pattern.
+  static constexpr const char* kNames[FIELD_COUNT] = {"scrub", "fast",  "half",   "full",
+                                                      "gray",  "heldS", "railsS", "ink%"};
   char line[96];
   for (int f = 0; f < FIELD_COUNT; f++) {
     for (int tr = 0; tr < GRID; tr++) {
@@ -152,4 +154,5 @@ void PanelDoseTrace::dump(const char* why, const uint16_t widthBytes, const uint
       SdDebugLog::log("DOSE", "%s", line);
     }
   }
+#endif
 }

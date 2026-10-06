@@ -40,7 +40,7 @@ void relayout(PreviewLayout& layout, const GfxRenderer& renderer, int fontId, in
   style.alignment = toCssAlign(SETTINGS.getReaderParagraphAlignment());
   style.textAlignDefined = true;  // honor the user's choice; RTL auto-detected from text
 
-  ParsedText parsed(SETTINGS.getReaderExtraParagraphSpacing() != 0, SETTINGS.getReaderHyphenationEnabled() != 0,
+  ParsedText parsed(SETTINGS.getReaderParagraphSpacing() != 0, SETTINGS.getReaderHyphenationEnabled() != 0,
                     SETTINGS.focusReadingEnabled != 0, style);
 
   // Feed one space-separated word at a time; addWord handles NFC/CJK/RTL/focus splitting
@@ -132,7 +132,7 @@ void renderPreview(GfxRenderer& renderer, PreviewLayout& layout, int previewPadd
 
   const float compression = SETTINGS.getReaderLineCompression();
   const int lineAdvance = std::max(1, renderer.getLineHeight(fontId, compression));
-  const int paragraphGap = SETTINGS.getReaderExtraParagraphSpacing() ? lineAdvance / 2 : 0;
+  const int paragraphGap = paragraphGapPx(lineAdvance, SETTINGS.getReaderParagraphSpacing());
 
   // Re-lay-out (and re-prewarm glyphs) only when a layout-affecting setting or the
   // geometry changed; else reuse the cache. The prewarm inputs are (fontId, the sample
@@ -147,7 +147,7 @@ void renderPreview(GfxRenderer& renderer, PreviewLayout& layout, int previewPadd
                        .textWidth = textWidth,
                        .lineCompression = compression,
                        .alignment = SETTINGS.getReaderParagraphAlignment(),
-                       .extraParagraphSpacing = SETTINGS.getReaderExtraParagraphSpacing() != 0,
+                       .paragraphSpacing = SETTINGS.getReaderParagraphSpacing(),
                        .characterSpacing = SETTINGS.getCharacterSpacing(),
                        .wordSpacingPercent = SETTINGS.wordSpacing,
                        .focusReading = SETTINGS.focusReadingEnabled != 0,

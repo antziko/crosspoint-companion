@@ -89,7 +89,7 @@ class PaintProbe {
   struct Counters {
     uint32_t miss, missMs, ioFail, oom, hit, evict, clear, rebuild, skip;
     static Counters of(const SdCardFont::Stats& s) {
-      return {s.overflowMisses, s.overflowMissMs,    s.overflowIoFails, s.bitmapOom,     s.overflowHits,
+      return {s.overflowMisses,    s.overflowMissMs, s.overflowIoFails, s.bitmapOom,     s.overflowHits,
               s.overflowEvictions, s.overflowClears, s.miniRebuilds,    s.miniGuardSkips};
     }
   };

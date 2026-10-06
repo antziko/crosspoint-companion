@@ -1,5 +1,3 @@
-#include "FileWindowSelect.h"
-
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -7,6 +5,8 @@
 #include <random>
 #include <string>
 #include <vector>
+
+#include "FileWindowSelect.h"
 
 using filewindow::Entry;
 using filewindow::WindowSelector;
@@ -38,7 +38,8 @@ std::vector<Entry> makeEntries(const std::vector<std::string>& names) {
 
 // Feed entries (in the given, possibly unsorted, order) to a selector and return its window.
 std::vector<std::string> runWindow(WindowSelector::Mode mode, const std::string& cursor, size_t k,
-                                   filewindow::NameLess less, const std::vector<Entry>& entries, bool* overflow = nullptr) {
+                                   filewindow::NameLess less, const std::vector<Entry>& entries,
+                                   bool* overflow = nullptr) {
   WindowSelector sel(mode, cursor, k, less);
   for (const auto& e : entries) sel.consider(e);
   if (overflow) *overflow = sel.overflowed();
@@ -149,12 +150,13 @@ TEST(FileWindowSelectTest, TiebreakKeepsStrictOrderAcrossPaging) {
   // every distinct name exactly once.
   const std::vector<std::string> names = {"box", "Apple", "apple", "Box", "cat"};
   std::vector<std::string> sorted = names;
-  std::sort(sorted.begin(), sorted.end(), [](const std::string& a, const std::string& b) { return ciStrictLess(a, b); });
+  std::sort(sorted.begin(), sorted.end(),
+            [](const std::string& a, const std::string& b) { return ciStrictLess(a, b); });
 
   const auto entries = makeEntries(names);
   for (size_t k : {1u, 2u, 3u}) {
     const auto all = pageForwardAll(entries, k, ciStrictLess);
-    EXPECT_EQ(all.size(), names.size()) << "k=" << k;            // no skips, no dups
+    EXPECT_EQ(all.size(), names.size()) << "k=" << k;  // no skips, no dups
     EXPECT_EQ(all, sorted) << "k=" << k;
   }
 }

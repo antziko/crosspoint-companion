@@ -162,6 +162,7 @@ EpdFontFamily ui12FontFamily(&ui12MediumFont, &ui12BoldFont);
 RTC_NOINIT_ATTR uint32_t silentRebootMagic;
 RTC_NOINIT_ATTR uint32_t silentRebootTarget;
 RTC_NOINIT_ATTR uint32_t silentRebootSettingsCategory;  // category index for SETTINGS target
+RTC_NOINIT_ATTR uint32_t silentRebootHomeItem;          // HomeMenuItem for HOME target
 // LIVE frontlight state carried across the reboot. SETTINGS.frontlightOn is the saved
 // PREFERENCE and legitimately diverges from the live state — a wake with Restore Light on
 // Wake off leaves the light off while the saved "was on" preference is kept — so the live
@@ -219,10 +220,11 @@ static void armSilentReboot(const uint32_t target) {
   silentRebootMagic = SILENT_REBOOT_MAGIC;
 }
 
-void silentRestart() {
+void silentRestart(const HomeMenuItem homeItem) {
   if (deepSleepInProgress) return;  // sleeping supersedes the heap-defrag reboot
   armSilentReboot(SILENT_REBOOT_TARGET_HOME);
-  LOG_DBG("MAIN", "Silent restart (target=home)");
+  silentRebootHomeItem = static_cast<uint32_t>(homeItem);
+  LOG_DBG("MAIN", "Silent restart (target=home,item=%d)", static_cast<int>(homeItem));
   // E-ink retains the previous frame until Home's first paint lands (~2-3s).
   // Without an overlay, users don't see the reboot and fire input through to
   // Home. Select on the default selectorIndex=0 then opens the most-recent
@@ -249,6 +251,7 @@ void restartToHomeAfterStorageHandoff() {
   // light for an invisible reboot. Here the panel has already been handed a popup and the
   // USB peripheral is about to be switched back, so only the target matters.
   silentRebootTarget = SILENT_REBOOT_TARGET_HOME;
+  silentRebootHomeItem = static_cast<uint32_t>(HomeMenuItem::NONE);
   silentRebootMagic = SILENT_REBOOT_MAGIC;
   LOG_DBG("MAIN", "Restart after storage handoff (target=home)");
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
@@ -267,14 +270,6 @@ void silentRestartToSettings(int category) {
   halClock.persistTimeAcrossReboot();  // X4: carry NTP-synced time across the soft reset
   delay(50);
   ESP.restart();
-}
-
-void waitForPowerRelease() {
-  gpio.update();
-  while (gpio.isPressed(HalGPIO::BTN_POWER)) {
-    delay(50);
-    gpio.update();
-  }
 }
 
 constexpr char SLEEP_FRAME_FILE[] = "/.crosspoint/sleep_frame.bin";
@@ -475,6 +470,7 @@ void setup() {
   // (#2481, new-SDK power model). Idempotent with powerManager.begin() below,
   // which configures the peripheral rails; this only holds the main latch.
   BoardConfig::holdPowerRails();
+  HangTrace::capturePreviousBoot();
 #ifdef ENABLE_SERIAL_LOG
 #ifdef CROSSPOINT_WAIT_FOR_USB_SERIAL
   // Earliest possible Serial setup. The 250 ms stall before begin() lets the
@@ -516,6 +512,10 @@ void setup() {
   static constexpr uint32_t SETTINGS_CATEGORY_COUNT = 4;
   const uint32_t snapshotSettingsCategory =
       (isSilentReboot && silentRebootSettingsCategory < SETTINGS_CATEGORY_COUNT) ? silentRebootSettingsCategory : 0;
+  const auto snapshotHomeItem = (isSilentReboot && snapshotTarget == SILENT_REBOOT_TARGET_HOME &&
+                                 silentRebootHomeItem <= static_cast<uint32_t>(HomeMenuItem::SETTINGS_MENU))
+                                    ? static_cast<HomeMenuItem>(silentRebootHomeItem)
+                                    : HomeMenuItem::NONE;
   const bool silentRebootLightOn = isSilentReboot && (silentRebootPayload & SILENT_REBOOT_LIGHT_ON) != 0;
   silentRebootMagic = 0;
   silentRebootTarget = 0;
@@ -829,7 +829,7 @@ void setup() {
     // target == home (or reader with no open book): land on home — don't fall
     // through to the sleep-wake "resume reader" logic, which fires on stale
     // openEpubPath + lastSleepFromReader from a prior session.
-    activityManager.goHome();
+    activityManager.goHome(snapshotHomeItem);
   } else if (APP_STATE.openEpubPath.empty() || !APP_STATE.lastSleepFromReader ||
              mappedInputManager.isPressed(MappedInputManager::Button::Back) || APP_STATE.readerActivityLoadCount > 0) {
     // Boot to home screen if no book is open, last sleep was not from reader, back button is held, or reader activity
@@ -1197,12 +1197,14 @@ void loop() {
     }
     LOG_DBG("MAIN", "Power button held %lums, sleeping", gpio.getPowerButtonHeldTime());
     // Offer the gesture to the active activity first. The reader may intercept it to show a
-    // "sync before sleep" prompt instead of sleeping immediately: release the still-held power
-    // button before handing over so the prompt isn't dismissed by the same press, and re-arm
-    // allowSleepAt so the release doesn't immediately re-trigger this branch. Without a prompt,
-    // sleep starts at the threshold; startDeepSleep() waits for the release before arming wake.
+    // "sync before sleep" prompt instead of sleeping immediately. The prompt opens at the
+    // threshold like sleep does; the still-held press is handled as a wake hold, so its
+    // release is dropped instead of answering the prompt, and holding on cannot re-enter this
+    // branch. Without a prompt, sleep starts at the threshold; startDeepSleep() waits for the
+    // release before arming wake.
     if (activityManager.wantsManualSleepPrompt()) {
-      waitForPowerRelease();
+      wakePowerReleasePending = true;
+      powerReleasedSinceWake = false;
       allowSleepAt = millis() + 2000;
       if (activityManager.onManualSleepRequested()) {
         return;  // activity took over the gesture; it will request sleep later if appropriate

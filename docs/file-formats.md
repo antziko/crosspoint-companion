@@ -356,7 +356,7 @@ struct SectionBin {
 
     s32 fontId;
     float lineCompression;
-    bool extraParagraphSpacing;
+    u8 paragraphSpacing;           // level: 0 indent, 1 none, n>=2 = (n-1) quarter-lines after a paragraph
     u8 paragraphAlignment;
     u16 viewportWidth;
     u16 viewportHeight;

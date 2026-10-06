@@ -137,6 +137,17 @@ void FontSelectionActivity::loop() {
     pane_.movePagePrevious(pageItems);
     requestUpdate();
   });
+  // A swipe pages like a held side key, wrapping at both ends. The highlight stays: it names
+  // the font the preview pane shows.
+  const auto swipe = mappedInput.wasSwipe();
+  if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
+    if (swipe == MappedInputManager::SwipeDir::Up) {
+      pane_.movePageNext(pageItems);
+    } else {
+      pane_.movePagePrevious(pageItems);
+    }
+    requestUpdate();
+  }
 }
 
 void FontSelectionActivity::render(RenderLock&&) {

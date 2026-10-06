@@ -8,6 +8,8 @@
 #include "util/DictionaryLookupController.h"
 #include "util/FlashcardDeck.h"
 
+class Epub;
+
 // Browse the per-book flashcard deck (FlashcardDeck) as a paged list, modeled on
 // LookedUpWordsActivity: the deck is paged from SD a window at a time (never
 // materialized), so RAM is bounded regardless of deck size. Each row shows a box
@@ -22,8 +24,11 @@
 // detail-lookup (one fewer heap object on the fragmented reader heap).
 class FlashcardListActivity final : public Activity {
  public:
-  explicit FlashcardListActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string bookCachePath)
+  // `book` resolves a card's chapter to a reader position for Go to page; null hides the action.
+  explicit FlashcardListActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string bookCachePath,
+                                 const Epub* book = nullptr)
       : Activity("FlashcardList", renderer, mappedInput),
+        book(book),
         cachePath(std::move(bookCachePath)),
         controller(renderer, mappedInput, *this, cachePath) {}
 
@@ -42,6 +47,7 @@ class FlashcardListActivity final : public Activity {
   // deleted on exit, so the destructor always runs.
   Dictionary::SessionOverrideScope dictOverrideScope_;
 
+  const Epub* book;
   std::string cachePath;
   // Same windowed-paging discipline as LookedUpWordsActivity: only the on-screen
   // page lives in RAM. WINDOW_CAP is the real max rows/page (not over-sized), and
@@ -58,7 +64,12 @@ class FlashcardListActivity final : public Activity {
 
   Phase phase = Phase::List;
   FlashcardDeck::Entry detail;  // the one resident full card (word+excerpt+chapter)
-  uint32_t today = 0;           // days-since-2000 (local), 0 if clock unavailable
+  int detailSpine = -1;         // spine the detail card was saved on, -1 = unknown (no Go to page)
+  float detailProgress = 0.0f;  // its page as a fraction of that chapter
+  // Shortest saved title matched by prefix against the TOC, so a short stub cannot pick a
+  // chapter at random.
+  static constexpr size_t kMinTitlePrefix = 16;
+  uint32_t today = 0;  // days-since-2000 (local), 0 if clock unavailable
   bool clockOk = false;
 
   DictionaryLookupController controller;
@@ -74,6 +85,7 @@ class FlashcardListActivity final : public Activity {
   const FlashcardDeck::Entry* entryAt(int uiIndex);  // word-only paged fetch
 
   void openDetail();  // load the selected card full -> phase = Detail
+  void resolveDetailPosition();
   void renderList();
   void renderDetail();
 

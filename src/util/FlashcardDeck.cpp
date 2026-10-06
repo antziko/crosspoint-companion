@@ -1591,6 +1591,40 @@ bool FlashcardDeck::setCardDict(const std::string& cachePath, const std::string&
   });
 }
 
+// The version is kept, so the correction stays on this device: a peer's page counts its own
+// layout, and an incoming update may bring it back until the next jump corrects it again.
+bool FlashcardDeck::setCardPage(const std::string& cachePath, const std::string& word, const int page,
+                                const int pageCount) {
+  if (word.empty() || cachePath.empty() || page < 1 || pageCount < page) return false;
+  CountCtx cc{&word, 0, false, {}, 0, {}, 0, 0, 0, 0, 0};
+  if (!forEachLine(filePath(cachePath), countLine, &cc) || !cc.dupSeen) return false;
+  int titleLen = 0;
+  int oldPage = 0;
+  int oldCount = 0;
+  // A card without a token may carry a cap-cut title; appending one would stop it matching.
+  if (!parseChapterPage(cc.savedChapter, cc.savedChapterLen, &titleLen, &oldPage, &oldCount)) return false;
+  if (oldPage == page && oldCount == pageCount) return false;
+
+  char chapter[CHAPTER_MAX + 1];
+  memcpy(chapter, cc.savedChapter, static_cast<size_t>(titleLen));
+  const int tokenLen = snprintf(chapter + titleLen, sizeof(chapter) - titleLen, " %d/%d", page, pageCount);
+  if (tokenLen <= 0 || titleLen + tokenLen > CHAPTER_MAX) return false;
+
+  struct P {
+    const std::string* word;
+    const char* chapter;
+    int chapterLen;
+  } pc{&word, chapter, titleLen + tokenLen};
+  return rewriteDeck(cachePath, &pc, [](void* ctx, HalFile& out, const char* line, int len) {
+    auto* c = static_cast<P*>(ctx);
+    const Parsed p = parseLine(line, len);
+    if (static_cast<size_t>(p.wordLen) != c->word->size() || memcmp(line, c->word->c_str(), p.wordLen) != 0)
+      return writeRaw(out, line, len) && out.write("\n", 1) == 1;  // copy verbatim
+    return writeCard(out, line, static_cast<size_t>(p.wordLen), p.box, p.dueDay, c->chapter, c->chapterLen, p.version,
+                     p.count, p.dictHash, p.excerpt, p.excerptLen);
+  });
+}
+
 bool FlashcardDeck::updateRemoteCard(const std::string& cachePath, const std::string& word, const char* chapter,
                                      int chapterLen, const char* excerpt, int excerptLen, uint32_t version) {
   struct U {

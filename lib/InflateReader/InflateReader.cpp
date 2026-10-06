@@ -33,8 +33,8 @@ static_assert(std::is_standard_layout<InflateReader>::value,
 
 uint8_t* InflateReader::acquireScratch(size_t need) {
   if (need > INFLATE_DICT_SIZE) return nullptr;
-  if (!s_inflateWindow) return nullptr;                                                // released — caller mallocs
-  if (s_inflateWindowInUse.test_and_set(std::memory_order_acquire)) return nullptr;    // window busy
+  if (!s_inflateWindow) return nullptr;                                              // released — caller mallocs
+  if (s_inflateWindowInUse.test_and_set(std::memory_order_acquire)) return nullptr;  // window busy
   return s_inflateWindow;
 }
 

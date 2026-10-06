@@ -33,7 +33,10 @@ enum Step : uint16_t {
 };
 
 void mark(Task task, Step step);
-// Log the previous boot's breadcrumbs (once, after SD logging is up) and clear them.
+// Copy the previous boot's breadcrumbs aside. Call first thing in setup(), before any task
+// marks a step, or the report shows this boot's own crumbs.
+void capturePreviousBoot();
+// Log what capturePreviousBoot() saved (once, after SD logging is up).
 void reportPreviousBoot();
 
 }  // namespace HangTrace

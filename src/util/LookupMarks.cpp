@@ -107,6 +107,18 @@ void LookupMarks::clear() {
   writeIdx_ = 0;
 }
 
+bool LookupMarks::markFor(const char* word, const int wordLen, Mark& out) {
+  if (!word || wordLen <= 0) return false;
+  uint16_t byteLen = 0;
+  const uint32_t wordHash = hashAppend(FNV_OFFSET, word, static_cast<size_t>(wordLen), &byteLen);
+  if (byteLen == 0) return false;
+  out = Mark{};
+  out.wordHash = wordHash;
+  out.headHash = hashWord(word, firstCodepointLen(word, static_cast<size_t>(wordLen)));
+  out.byteLen = byteLen;
+  return true;
+}
+
 bool LookupMarks::add(const char* word, const int wordLen, const char* chapterTitle, const int titleLen, const int page,
                       const int pageCount) {
   // No page anchor, no mark: a legacy card, one synced from a peer, or one whose chapter title
@@ -151,8 +163,14 @@ int LookupMarks::collectForPage(const uint32_t chapterHash, const int page, cons
     // m.page/m.pageCount) against the same for this page, cross-multiplied. The first holds
     // whenever the layout is unchanged, even though a total recorded mid-build was an estimate;
     // the second follows the word through a re-layout.
-    const uint32_t mp = m.page, mc = m.pageCount, p = static_cast<uint32_t>(page), c = static_cast<uint32_t>(pageCount);
-    if (mp != p && !((mp - 1) * c < p * mc && (p - 1) * mc < mp * c)) continue;
+    // After a re-layout the slices only approximate where the text went -- headings, images
+    // and paragraph gaps do not scale evenly, and another device's screen paginates another
+    // way -- so this page's slice is widened by RELAYOUT_SLACK_PAGES each side.
+    const int64_t mp = m.page, mc = m.pageCount, p = page, c = pageCount;
+    if (mp != p) {
+      const int64_t slack = mc == c ? 0 : RELAYOUT_SLACK_PAGES;
+      if (!((mp - 1) * c < (p + slack) * mc && (p - 1 - slack) * mc < mp * c)) continue;
+    }
     out[found++] = &m;
   }
   return found;

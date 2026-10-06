@@ -15,6 +15,7 @@
 #include "ReaderFontSizes.h"
 #include "ReaderSettingsIO.h"
 #include "SdCardFontSystem.h"
+#include "activities/settings/TextSettingsActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -30,8 +31,9 @@ enum ItemIndex : int {
   EXTRA_SPACING = 5,
   SCREEN_MARGIN = 6,
   WORD_SELECT_BUTTONS = 7,
-  // MIN_SESSION must stay last: itemCount() hides it by trimming the count by one.
-  MIN_SESSION = 8,
+  FOCUS_READING = 8,
+  MIN_SESSION = 9,
+  MORE_TEXT_SETTINGS = 10,
 };
 
 // Ordered cycle of valid per-book min-session values: 0xFF = use global, then indices
@@ -39,6 +41,12 @@ enum ItemIndex : int {
 static constexpr uint8_t MIN_SESSION_CYCLE[] = {
     CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL, 0, 1, 2, 3, 4, 5};
 static constexpr int MIN_SESSION_CYCLE_COUNT = static_cast<int>(sizeof(MIN_SESSION_CYCLE));
+
+constexpr StrId PARA_SPACING_LABELS[] = {StrId::STR_STATE_OFF, StrId::STR_PARA_SPACING_ZERO,
+                                         StrId::STR_SMALL,     StrId::STR_NORMAL,
+                                         StrId::STR_LARGE,     StrId::STR_X_LARGE};
+static_assert(std::size(PARA_SPACING_LABELS) == CrossPointSettings::PARAGRAPH_SPACING_COUNT,
+              "paragraph spacing labels");
 
 // Formats a MIN_SESSION_SECONDS index as a short duration label ("Always", "15s", "2 min").
 static void formatMinSession(uint8_t idx, char* buf, size_t len) {
@@ -67,13 +75,17 @@ int enlargedPreviewHeight(int contentHeight, int listRowHeight, int verticalSpac
 
 ReaderOptionsActivity::ReaderOptionsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                              std::string bookCachePath,
-                                             const CrossPointSettings::ReaderOverride& initialOverride,
-                                             bool showMinSession, std::string sampleText)
+                                             const CrossPointSettings::ReaderOverride& initialOverride, bool epubRows,
+                                             std::string sampleText)
     : Activity("ReaderOptions", renderer, mappedInput),
       cachePath(std::move(bookCachePath)),
       localOverride(initialOverride),
-      showMinSession(showMinSession),
-      sampleText(std::move(sampleText)) {}
+      sampleText(std::move(sampleText)) {
+  for (int item = 0; item < ITEM_COUNT; item++) {
+    if (!epubRows && (item == FOCUS_READING || item == MIN_SESSION)) continue;
+    rows_[rowCount_++] = static_cast<uint8_t>(item);
+  }
+}
 
 void ReaderOptionsActivity::onEnter() {
   Activity::onEnter();
@@ -134,8 +146,10 @@ void ReaderOptionsActivity::loop() {
   if (tappedRow >= 0) selectedIndex = tappedRow;
 
   if (mappedInput.wasPressed(MappedInputManager::Button::Confirm) || tappedRow >= 0) {
-    if (selectedIndex == FONT_FAMILY) {
+    if (currentItem() == FONT_FAMILY) {
       openInlineFontList();
+    } else if (currentItem() == MORE_TEXT_SETTINGS) {
+      openMoreTextSettings();
     } else {
       cycleCurrentItem();
       requestUpdate();
@@ -200,8 +214,29 @@ void ReaderOptionsActivity::cancelInlineFont() {
   requestUpdate();
 }
 
+void ReaderOptionsActivity::openMoreTextSettings() {
+  // TextSettingsActivity arms Confirm/Back on its own press, so the press that opened it
+  // cannot act there.
+  startActivityForResultNoThrow<TextSettingsActivity>(
+      [this](const ActivityResult&) {
+        // It edits the live override and the reader-wide globals; pick up its edits.
+        localOverride = SETTINGS.getReaderOverride();
+        fullRedraw_ = true;
+        requestUpdate();
+      },
+      renderer, mappedInput, &sdFontSystem.registry(), TextSettingsActivity::Tab::Layout,
+      TextSettingsActivity::Mode::BookMore, cachePath);
+}
+
 void ReaderOptionsActivity::cycleCurrentItem() {
-  switch (selectedIndex) {
+  if (currentItem() == FOCUS_READING) {
+    // Reader-wide, not part of the book override.
+    SETTINGS.focusReadingEnabled = SETTINGS.focusReadingEnabled ? 0 : 1;
+    SETTINGS.saveToFile();
+    fullRedraw_ = true;
+    return;
+  }
+  switch (currentItem()) {
     case FONT_SIZE: {
       // Cycle through the point sizes the active (per-book) family actually ships.
       // readerFontPointSizes() never returns empty, so the modulo is safe.
@@ -229,7 +264,8 @@ void ReaderOptionsActivity::cycleCurrentItem() {
       localOverride.hyphenationEnabled = localOverride.hyphenationEnabled ? 0 : 1;
       break;
     case EXTRA_SPACING:
-      localOverride.extraParagraphSpacing = localOverride.extraParagraphSpacing ? 0 : 1;
+      localOverride.paragraphSpacing =
+          (localOverride.paragraphSpacing + 1) % static_cast<uint8_t>(CrossPointSettings::PARAGRAPH_SPACING_COUNT);
       break;
     case SCREEN_MARGIN: {
       // Step through [MIN, MAX] and wrap; clamp guards a stale/out-of-range stored value.
@@ -262,11 +298,11 @@ void ReaderOptionsActivity::cycleCurrentItem() {
   // Most items cycled here feed the preview. MIN_SESSION (stats-only) and
   // WORD_SELECT_BUTTONS (input mapping) appear nowhere in PreviewKey, so they keep the
   // cheap list-only repaint.
-  if (selectedIndex != MIN_SESSION && selectedIndex != WORD_SELECT_BUTTONS) fullRedraw_ = true;
+  if (currentItem() != MIN_SESSION && currentItem() != WORD_SELECT_BUTTONS) fullRedraw_ = true;
   // A size change must reload the resident SD font at the new size, or getReaderFontId()
   // keeps resolving the old-size id and the live preview never reflows (SD fonts load one
   // size at a time; built-ins are always resident so this is a no-op for them).
-  if (selectedIndex == FONT_SIZE) sdFontSystem.ensureLoaded(renderer);
+  if (currentItem() == FONT_SIZE) sdFontSystem.ensureLoaded(renderer);
 }
 
 void ReaderOptionsActivity::persistAndApply() {
@@ -296,8 +332,12 @@ const char* ReaderOptionsActivity::getItemName(const int index) {
       return tr(STR_SCREEN_MARGIN);
     case WORD_SELECT_BUTTONS:
       return tr(STR_WORD_SELECT_BUTTONS);
+    case FOCUS_READING:
+      return tr(STR_FOCUS_READING);
     case MIN_SESSION:
       return tr(STR_MIN_SESSION_FOR_STATS);
+    case MORE_TEXT_SETTINGS:
+      return tr(STR_MORE_TEXT_SETTINGS);
     default:
       return "";
   }
@@ -343,12 +383,15 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
     case HYPHENATION:
       return localOverride.hyphenationEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     case EXTRA_SPACING:
-      return localOverride.extraParagraphSpacing ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+      return I18N.get(
+          PARA_SPACING_LABELS[localOverride.paragraphSpacing % CrossPointSettings::PARAGRAPH_SPACING_COUNT]);
     case SCREEN_MARGIN:
       return std::to_string(localOverride.screenMargin);
     case WORD_SELECT_BUTTONS:
       // Names the pair that steps word by word; the other pair moves between rows.
       return localOverride.swapWordSelectAxes ? tr(STR_WORD_SELECT_SIDE) : tr(STR_WORD_SELECT_FRONT);
+    case FOCUS_READING:
+      return SETTINGS.focusReadingEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     case MIN_SESSION: {
       const uint8_t v = localOverride.minSessionMinutes;
       if (v == CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL) {
@@ -430,9 +473,9 @@ void ReaderOptionsActivity::render(RenderLock&&) {
   // and let the framebuffer keep the rest.
   //
   // This relies on nothing else painting the framebuffer between our renders. True today:
-  // ActivityManager never clears it, this activity pushes no sub-activities (the font picker is
-  // inline), loop() takes no touch input, and deep sleep resets the chip rather than resuming.
-  // Adding a sub-screen or a touch handler here means setting fullRedraw_ alongside it.
+  // ActivityManager never clears it, the font picker is inline and the More Text Settings
+  // screen sets fullRedraw_ on return, and deep sleep resets the chip rather than resuming.
+  // Adding another sub-screen here means setting fullRedraw_ alongside it.
   if (fullRedraw_) {
     renderer.clearScreen();
     GUI.drawHeader(renderer, headerRect, tr(STR_READER_OPTIONS));
@@ -458,8 +501,9 @@ void ReaderOptionsActivity::render(RenderLock&&) {
   const Rect listRect{safe.x, listTop, safe.width, listHeight};
   listTouch_.record(listRect, itemCount(), selectedIndex);
   GUI.drawList(
-      renderer, listRect, itemCount(), selectedIndex, [](int index) { return std::string(getItemName(index)); },
-      nullptr, nullptr, [this](int index) -> std::string { return getItemValue(index); }, true);
+      renderer, listRect, itemCount(), selectedIndex,
+      [this](int index) { return std::string(getItemName(rows_[index])); }, nullptr, nullptr,
+      [this](int index) -> std::string { return getItemValue(rows_[index]); }, true);
 
   renderer.displayBuffer();
 }

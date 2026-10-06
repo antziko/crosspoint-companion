@@ -12,6 +12,16 @@ class Page;
 // order PageTokens numbers them, so they share one walk and one set of measurements.
 namespace PageMarks {
 
+// True when `page` prints the word `mark` identifies (LookupMarks::markFor), by the same token
+// matching the lookup underline uses. Allocates nothing.
+bool pageHasWord(const Page& page, const LookupMarks::Mark& mark);
+
+// Where `page` prints a mark's opening words (Bookmark::snippet): all of them, or a start at its
+// foot that the next page carries on. Snippets shorter than the nearby-relocation minimum never
+// match. Allocates nothing.
+enum class SnippetAt : uint8_t { None, Whole, RunsOff };
+SnippetAt findSnippet(const Page& page, const char* snippet);
+
 // Marks every quote anchored on this page and underlines every word looked up on it, in the
 // coordinate space the page was just rendered in. Quotes draw as a 25% dither band behind the
 // words or a rule under them, per SETTINGS.quoteHighlightStyle; looked-up words always draw as

@@ -77,7 +77,7 @@ void TxtReaderActivity::onEnter() {
       bookOverride.lineSpacing = SETTINGS.lineSpacing;
       bookOverride.paragraphAlignment = SETTINGS.paragraphAlignment;
       bookOverride.hyphenationEnabled = SETTINGS.hyphenationEnabled;
-      bookOverride.extraParagraphSpacing = SETTINGS.extraParagraphSpacing;
+      bookOverride.paragraphSpacing = SETTINGS.paragraphSpacing;
       bookOverride.screenMargin = SETTINGS.screenMargin;
       static_assert(sizeof(bookOverride.sdFontFamilyName) == sizeof(SETTINGS.sdFontFamilyName),
                     "sdFontFamilyName size mismatch");
@@ -840,7 +840,7 @@ void TxtReaderActivity::onReaderMenuConfirm(const TxtReaderMenuActivity::MenuAct
       }
       auto options = makeUniqueNoThrow<ReaderOptionsActivity>(renderer, mappedInput, txt->getCachePath(),
                                                               SETTINGS.getReaderOverride(),
-                                                              /*showMinSession=*/false, std::move(sample));
+                                                              /*epubRows=*/false, std::move(sample));
       if (!options) {
         LOG_ERR("TXT", "OOM: ReaderOptionsActivity");
         openReaderMenu();

@@ -195,8 +195,11 @@ class KOReaderSyncActivity final : public Activity {
   void syncStats(bool includeDict, bool includeGlobal, bool includeFlashcards);
   // Render the shared "Also synced" footer (bookmarks/dict/stats summary) starting at
   // `y`, advancing and returning the new cursor. Used by SHOWING_RESULT, NO_REMOTE_PROGRESS
-  // and FEATURE_DONE so the summary layout lives in one place.
-  int drawAlsoSyncedFooter(int sideX, int y, int lhFoot, bool showAlsoLabel = true);
+  // and FEATURE_DONE so the summary layout lives in one place. Rows wrap within maxWidth.
+  int drawAlsoSyncedFooter(int sideX, int y, int lhFoot, int maxWidth, bool showAlsoLabel = true);
+  // Word-wraps `text` into at most three lines no wider than maxWidth, each advancing `y` by
+  // lineStep, and returns the new cursor.
+  int drawWrappedRow(int x, int y, int maxWidth, const char* text, int lineStep);
   // Render "[i/total] phase" into statusMessage (prefix omitted when total <= 1) and
   // block until the paint completes, so the message is visible during the blocking
   // network leg that follows. Sets state = SYNCING.

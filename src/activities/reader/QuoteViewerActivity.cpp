@@ -107,8 +107,11 @@ void QuoteViewerActivity::loop() {
     const auto& bms = BOOKMARKS.getBookmarks();
     const size_t absIdx = quoteIndices_[currentPos_];
     if (absIdx < bms.size()) {
-      setResult(ActivityResult{BookmarkResult{bms[absIdx].spineIndex, bms[absIdx].progress, bms[absIdx].paragraphIndex,
-                                              bms[absIdx].visibleTextOffset}});
+      BookmarkResult jump{bms[absIdx].spineIndex, bms[absIdx].progress, bms[absIdx].paragraphIndex,
+                          bms[absIdx].visibleTextOffset};
+      jump.snippet = bms[absIdx].snippet;
+      jump.quote = true;
+      setResult(ActivityResult{std::move(jump)});
     }
     finish();
     return;

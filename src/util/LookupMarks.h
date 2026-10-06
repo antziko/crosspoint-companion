@@ -58,9 +58,10 @@ class LookupMarks {
   // Marks anchored on this page, written to out[0..cap). Returns how many. `pageCount` is the
   // chapter's best-known total (an estimate while it is still being laid out). A mark matches
   // its own page number -- right whenever the layout is unchanged -- and, after a re-layout
-  // (status bar toggle, font or margin change), every page whose slice of the chapter overlaps
-  // the slice its page covered, one or two pages. The word itself still has to be found on the
-  // page, so a stray match can only land on a nearby repeat of the same word.
+  // (status bar toggle, font or margin change, a card from another device), every page within
+  // RELAYOUT_SLACK_PAGES of the slice its page covered. The word itself still has to be found
+  // on the page, so a stray match can only land on a nearby repeat of the same word.
+  static constexpr int RELAYOUT_SLACK_PAGES = 2;
   int collectForPage(uint32_t chapterHash, int page, int pageCount, const Mark** out, int cap) const;
 
   // --- Run matching ------------------------------------------------------------------------
@@ -127,6 +128,10 @@ class LookupMarks {
   static uint32_t hashAppend(uint32_t h, const char* text, size_t len, uint16_t* inOutLen = nullptr);
 
   static uint32_t hashWord(const char* text, size_t len) { return hashAppend(FNV_OFFSET, text, len); }
+
+  // The word identity add() stores (wordHash, headHash, byteLen), without a page anchor: for
+  // finding a word on pages it was not recorded against. False when the word is all punctuation.
+  static bool markFor(const char* word, int wordLen, Mark& out);
 
   // Chapter titles are compared whole, so they take the same normalisation.
   static uint32_t hashChapter(const char* title, size_t len) { return hashWord(title, len); }

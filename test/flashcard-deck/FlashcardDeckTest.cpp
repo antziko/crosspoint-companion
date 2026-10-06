@@ -1433,6 +1433,38 @@ TEST_F(FlashcardDeckTest, ParseChapterPageKeepsATitleThatEndsInDigits) {
   EXPECT_EQ(count, 9);
 }
 
+TEST_F(FlashcardDeckTest, LongChapterTitleKeepsItsPageToken) {
+  const std::string title = "Chapter Eleven: The Reality Distortion Field: Playing by His Own Set of Rules";
+  EXPECT_TRUE(FlashcardDeck::enroll(cachePath, "m\xC3\xA9lange", "a confounding m\xC3\xA9lange of", title + " 5/41"));
+  FlashcardDeck::Entry e;
+  ASSERT_EQ(FlashcardDeck::loadWindow(cachePath, 0, 1, &e), 1);
+  int titleLen = -1, page = -1, count = -1;
+  ASSERT_TRUE(
+      FlashcardDeck::parseChapterPage(e.chapter.c_str(), static_cast<int>(e.chapter.size()), &titleLen, &page, &count));
+  EXPECT_EQ(std::string(e.chapter.c_str(), titleLen), title);
+  EXPECT_EQ(page, 5);
+  EXPECT_EQ(count, 41);
+}
+
+TEST_F(FlashcardDeckTest, SetCardPageRewritesOnlyTheTokenAndKeepsTheVersion) {
+  EXPECT_TRUE(FlashcardDeck::enroll(cachePath, "skunkworks", "a small skunkworks project", "Chapter Nine 24/35"));
+  EXPECT_TRUE(FlashcardDeck::enroll(cachePath, "vermiform", "nasty vermiform creature", "Sign of the Bident"));
+  FlashcardDeck::Entry before[2];
+  ASSERT_EQ(FlashcardDeck::loadWindow(cachePath, 0, 2, before), 2);
+
+  EXPECT_TRUE(FlashcardDeck::setCardPage(cachePath, "skunkworks", 13, 51));
+  EXPECT_FALSE(FlashcardDeck::setCardPage(cachePath, "skunkworks", 13, 51));  // already there
+  EXPECT_FALSE(FlashcardDeck::setCardPage(cachePath, "vermiform", 2, 9));     // no token to correct
+  EXPECT_FALSE(FlashcardDeck::setCardPage(cachePath, "absent", 2, 9));
+
+  FlashcardDeck::Entry e[2];
+  ASSERT_EQ(FlashcardDeck::loadWindow(cachePath, 0, 2, e), 2);
+  EXPECT_EQ(e[1].chapter, "Chapter Nine 13/51");
+  EXPECT_EQ(e[1].excerpt, "a small skunkworks project");
+  EXPECT_EQ(e[0].chapter, "Sign of the Bident");
+  EXPECT_EQ(e[1].version, before[1].version);  // local only: nothing to propagate
+}
+
 struct Anchor {
   std::string word;
   std::string title;

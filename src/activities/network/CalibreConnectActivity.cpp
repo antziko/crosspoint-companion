@@ -62,7 +62,7 @@ void CalibreConnectActivity::onExit() {
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(false);
     delay(30);
-    silentRestart();
+    silentRestart(HomeMenuItem::FILE_TRANSFER);
   }
 }
 

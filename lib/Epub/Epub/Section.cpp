@@ -134,7 +134,10 @@ namespace {
 //      the screen margin; the bleed joins the header (cache validation).
 // v60: A one-column table row keeps the paragraph breaks inside its cell (they used to collapse
 //      into one paragraph); multi-column rows are unchanged.
-constexpr uint8_t SECTION_FILE_VERSION = 60;
+// v61: An image at least a quarter of the page tall fills the page like a wide one, so the
+//      verdict no longer depends on the panel's width.
+// v62: The paragraph-spacing header byte is a level (see paragraphGapPx()), not on/off.
+constexpr uint8_t SECTION_FILE_VERSION = 62;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
@@ -199,21 +202,20 @@ void Section::writeSectionFileHeader(const ReaderRenderSpec& spec) {
     LOG_DBG("SCT", "File not open for writing header");
     return;
   }
-  static_assert(HEADER_SIZE == sizeof(SECTION_FILE_VERSION) + sizeof(spec.fontId) + sizeof(spec.lineCompression) +
-                                   sizeof(spec.extraParagraphSpacing) + sizeof(spec.paragraphAlignment) +
-                                   sizeof(spec.viewportWidth) + sizeof(spec.viewportHeight) + sizeof(pageCount) +
-                                   sizeof(spec.hyphenationEnabled) + sizeof(spec.embeddedStyle) +
-                                   sizeof(spec.imageRendering) + sizeof(spec.focusReadingEnabled) +
-                                   sizeof(spec.characterSpacing) + sizeof(spec.wordSpacingPercent) +
-                                   sizeof(spec.imageBleed) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
-                                   sizeof(uint32_t) + sizeof(uint32_t),
-                "Header size mismatch");
+  static_assert(
+      HEADER_SIZE == sizeof(SECTION_FILE_VERSION) + sizeof(spec.fontId) + sizeof(spec.lineCompression) +
+                         sizeof(spec.paragraphSpacing) + sizeof(spec.paragraphAlignment) + sizeof(spec.viewportWidth) +
+                         sizeof(spec.viewportHeight) + sizeof(pageCount) + sizeof(spec.hyphenationEnabled) +
+                         sizeof(spec.embeddedStyle) + sizeof(spec.imageRendering) + sizeof(spec.focusReadingEnabled) +
+                         sizeof(spec.characterSpacing) + sizeof(spec.wordSpacingPercent) + sizeof(spec.imageBleed) +
+                         sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t),
+      "Header size mismatch");
   // Written as the incomplete sentinel; finalizeBuild() patches it to
   // SECTION_FILE_VERSION as the last step, committing the file.
   serialization::writePod(file, SECTION_FILE_INCOMPLETE_VERSION);
   serialization::writePod(file, spec.fontId);
   serialization::writePod(file, spec.lineCompression);
-  serialization::writePod(file, spec.extraParagraphSpacing);
+  serialization::writePod(file, spec.paragraphSpacing);
   serialization::writePod(file, spec.paragraphAlignment);
   serialization::writePod(file, spec.viewportWidth);
   serialization::writePod(file, spec.viewportHeight);
@@ -254,7 +256,7 @@ bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
     int fileFontId;
     uint16_t fileViewportWidth, fileViewportHeight;
     float fileLineCompression;
-    bool fileExtraParagraphSpacing;
+    uint8_t fileParagraphSpacing;
     uint8_t fileParagraphAlignment;
     bool fileHyphenationEnabled;
     bool fileEmbeddedStyle;
@@ -265,7 +267,7 @@ bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
     uint8_t fileImageBleed;
     serialization::readPod(file, fileFontId);
     serialization::readPod(file, fileLineCompression);
-    serialization::readPod(file, fileExtraParagraphSpacing);
+    serialization::readPod(file, fileParagraphSpacing);
     serialization::readPod(file, fileParagraphAlignment);
     serialization::readPod(file, fileViewportWidth);
     serialization::readPod(file, fileViewportHeight);
@@ -278,7 +280,7 @@ bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
     serialization::readPod(file, fileImageBleed);
 
     if (spec.fontId != fileFontId || spec.lineCompression != fileLineCompression ||
-        spec.extraParagraphSpacing != fileExtraParagraphSpacing || spec.paragraphAlignment != fileParagraphAlignment ||
+        spec.paragraphSpacing != fileParagraphSpacing || spec.paragraphAlignment != fileParagraphAlignment ||
         spec.viewportWidth != fileViewportWidth || spec.viewportHeight != fileViewportHeight ||
         spec.hyphenationEnabled != fileHyphenationEnabled || spec.embeddedStyle != fileEmbeddedStyle ||
         spec.imageRendering != fileImageRendering || spec.focusReadingEnabled != fileFocusReadingEnabled ||
@@ -597,7 +599,7 @@ bool Section::startBuild(const ReaderRenderSpec& spec, const std::function<void(
   // context for the parser's whole lifetime.
   BuildContext* ctxPtr = ctx.get();
   ctx->parser = makeUniqueNoThrow<ChapterHtmlSlimParser>(
-      epub, ctxPtr->parsePath, renderer, spec.fontId, spec.lineCompression, spec.extraParagraphSpacing,
+      epub, ctxPtr->parsePath, renderer, spec.fontId, spec.lineCompression, spec.paragraphSpacing,
       spec.paragraphAlignment, spec.viewportWidth, spec.viewportHeight, spec.hyphenationEnabled,
       spec.focusReadingEnabled,
       [this, ctxPtr](std::unique_ptr<Page> page, const uint16_t paragraphIndex, const uint16_t listItemIndex,

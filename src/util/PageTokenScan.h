@@ -83,13 +83,16 @@ bool nextTextPart(const char* text, size_t from, size_t& outStart, size_t& outLe
 // before measurement (ParsedText.cpp:19), so a measurement that kept them would overrun the
 // word into the inter-word gap. The std::string form is the allocation-free one when the
 // token is clean; the pointer+length form copies, and exists for callers holding a substring.
-int16_t measureAdvance(const GfxRenderer& renderer, int fontId, const std::string& word, EpdFontFamily::Style style);
+// `tracking` is the block's character spacing (BlockStyle::characterSpacing), as TextBlock draws it.
+int16_t measureAdvance(const GfxRenderer& renderer, int fontId, const std::string& word, EpdFontFamily::Style style,
+                       int8_t tracking = 0);
 // Whole-token form. `text` must be NUL-terminated — TextBlock's word arena is — and this is
 // the one that copies nothing at all, which is why the quote underline measures through it.
-int16_t measureAdvance(const GfxRenderer& renderer, int fontId, const char* text, EpdFontFamily::Style style);
+int16_t measureAdvance(const GfxRenderer& renderer, int fontId, const char* text, EpdFontFamily::Style style,
+                       int8_t tracking = 0);
 // Sub-range form, for a dash-split part or the prefix before one. Copies, since the range is
 // not NUL-terminated.
 int16_t measureAdvance(const GfxRenderer& renderer, int fontId, const char* text, size_t len,
-                       EpdFontFamily::Style style);
+                       EpdFontFamily::Style style, int8_t tracking = 0);
 
 }  // namespace PageTokens

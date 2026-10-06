@@ -16,6 +16,7 @@
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
 #include "util/DictionaryRegistry.h"
+#include "util/ListSwipeScroll.h"
 
 namespace {
 // Bounds the wrap in reader mode. A note is capped at DictNotes::TEXT_MAX bytes on disk, so it
@@ -343,6 +344,12 @@ void DictNotesActivity::loop() {
       dictIndex_ = ButtonNavigator::previousPageIndex(dictIndex_, totalItems, pageItems);
       requestUpdate();
     });
+    // A swipe pages like a held side key, wrapping at both ends.
+    if (const int step = listSwipeStep(mappedInput)) {
+      dictIndex_ = step > 0 ? ButtonNavigator::nextPageIndex(dictIndex_, totalItems, pageItems)
+                            : ButtonNavigator::previousPageIndex(dictIndex_, totalItems, pageItems);
+      requestUpdate();
+    }
 
     int tapX = 0;
     int tapY = 0;
@@ -399,6 +406,12 @@ void DictNotesActivity::loop() {
     selectedIndex = ButtonNavigator::previousPageIndex(selectedIndex, totalItems, pageItems);
     requestUpdate();
   });
+  // A swipe pages like a held side key, wrapping at both ends.
+  if (const int step = listSwipeStep(mappedInput)) {
+    selectedIndex = step > 0 ? ButtonNavigator::nextPageIndex(selectedIndex, totalItems, pageItems)
+                             : ButtonNavigator::previousPageIndex(selectedIndex, totalItems, pageItems);
+    requestUpdate();
+  }
 
   // A tap on a row selects and opens it in one go, like the other hand-rolled list screens.
   // A tap is never a hold, so it cannot reach the long-press branch above.

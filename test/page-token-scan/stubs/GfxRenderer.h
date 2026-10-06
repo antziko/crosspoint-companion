@@ -9,7 +9,7 @@
 
 class GfxRenderer {
  public:
-  int getTextAdvanceX(int /*fontId*/, const char* text, uint8_t /*style*/ = 0) const {
+  int getTextAdvanceX(int /*fontId*/, const char* text, uint8_t /*style*/ = 0, int8_t /*tracking*/ = 0) const {
     lastMeasured = text ? text : "";
     return text ? static_cast<int>(std::strlen(text)) : 0;
   }

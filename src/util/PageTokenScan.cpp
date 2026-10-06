@@ -137,29 +137,31 @@ size_t collectParts(const char* text, size_t len, Part* out, size_t maxParts) {
   return n;
 }
 
-int16_t measureAdvance(const GfxRenderer& renderer, int fontId, const std::string& word, EpdFontFamily::Style style) {
+int16_t measureAdvance(const GfxRenderer& renderer, int fontId, const std::string& word, EpdFontFamily::Style style,
+                       const int8_t tracking) {
   if (word.find(SOFT_HYPHEN_UTF8) == std::string::npos) {
-    return static_cast<int16_t>(renderer.getTextAdvanceX(fontId, word.c_str(), style));
+    return static_cast<int16_t>(renderer.getTextAdvanceX(fontId, word.c_str(), style, tracking));
   }
   std::string sanitized = word;
   size_t pos = 0;
   while ((pos = sanitized.find(SOFT_HYPHEN_UTF8, pos)) != std::string::npos) {
     sanitized.erase(pos, SOFT_HYPHEN_BYTES);
   }
-  return static_cast<int16_t>(renderer.getTextAdvanceX(fontId, sanitized.c_str(), style));
+  return static_cast<int16_t>(renderer.getTextAdvanceX(fontId, sanitized.c_str(), style, tracking));
 }
 
-int16_t measureAdvance(const GfxRenderer& renderer, int fontId, const char* text, EpdFontFamily::Style style) {
+int16_t measureAdvance(const GfxRenderer& renderer, int fontId, const char* text, EpdFontFamily::Style style,
+                       const int8_t tracking) {
   if (!text) return 0;
   if (!std::strstr(text, SOFT_HYPHEN_UTF8)) {
-    return static_cast<int16_t>(renderer.getTextAdvanceX(fontId, text, style));  // no copy
+    return static_cast<int16_t>(renderer.getTextAdvanceX(fontId, text, style, tracking));  // no copy
   }
-  return measureAdvance(renderer, fontId, std::string(text), style);
+  return measureAdvance(renderer, fontId, std::string(text), style, tracking);
 }
 
 int16_t measureAdvance(const GfxRenderer& renderer, int fontId, const char* text, size_t len,
-                       EpdFontFamily::Style style) {
-  return measureAdvance(renderer, fontId, std::string(text, len), style);
+                       EpdFontFamily::Style style, const int8_t tracking) {
+  return measureAdvance(renderer, fontId, std::string(text, len), style, tracking);
 }
 
 }  // namespace PageTokens

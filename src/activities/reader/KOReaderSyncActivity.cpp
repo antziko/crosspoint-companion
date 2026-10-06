@@ -1358,8 +1358,6 @@ void KOReaderSyncActivity::onExit() {
   LookupHistory::setMergeProgressHook(nullptr, nullptr);
   FlashcardDeck::setMergeProgressHook(nullptr, nullptr);
 
-  SdDebugLog::setEnabled(false);
-
   // Sleeping after a successful sleepWhenDone sync: skip the silent restart. enterDeepSleep()
   // (driven by APP_STATE.requestManualSleep in the main loop) tears WiFi down and a deep-sleep
   // wake is a full chip reset, so the heap-defrag reboot would only fight the sleep gesture.
@@ -1375,7 +1373,15 @@ void KOReaderSyncActivity::onExit() {
   }
 }
 
-int KOReaderSyncActivity::drawAlsoSyncedFooter(int sideX, int y, int lhFoot, bool showAlsoLabel) {
+int KOReaderSyncActivity::drawWrappedRow(const int x, int y, const int maxWidth, const char* text, const int lineStep) {
+  for (const auto& line : renderer.wrappedText(UI_10_FONT_ID, text, maxWidth, 3)) {
+    renderer.drawText(UI_10_FONT_ID, x, y, line.c_str());
+    y += lineStep;
+  }
+  return y;
+}
+
+int KOReaderSyncActivity::drawAlsoSyncedFooter(int sideX, int y, int lhFoot, int maxWidth, bool showAlsoLabel) {
   // One line per feature, with generous spacing for legibility. A feature with no real
   // change collapses to "<name>  up to date"; full counts show only when something moved.
   // Per-feature fetch/upload status is a compact "ok/fail" suffix on the same line (no
@@ -1403,15 +1409,13 @@ int KOReaderSyncActivity::drawAlsoSyncedFooter(int sideX, int y, int lhFoot, boo
     char counts[96];
     snprintf(counts, sizeof(counts), tr(STR_BOOKMARK_DIFF_FORMAT), bmRemoteCount, bmLocalCount, bmMergedCount);
     snprintf(buf, sizeof(buf), "%s  %s  %s/%s", tr(STR_BOOKMARKS), counts, st(bmFetchOk), st(bmUploadOk));
-    renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-    y += ROW;
+    y = drawWrappedRow(sideX, y, maxWidth, buf, ROW);
   }
 
   // Why the upload above reads "fail" without the server having failed: the remote set is
   // larger than this device can hold, so it merged what it could and deliberately sent nothing.
   if (bmRemoteTruncated) {
-    renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_SYNC_BM_TRUNCATED));
-    y += ROW;
+    y = drawWrappedRow(sideX, y, maxWidth, tr(STR_SYNC_BM_TRUNCATED), ROW);
   }
 
   if (dictSynced) {
@@ -1425,11 +1429,9 @@ int KOReaderSyncActivity::drawAlsoSyncedFooter(int sideX, int y, int lhFoot, boo
       // STR_SYNC_DICT_FORMAT already carries the "Dictionary" label; append the status.
       snprintf(buf, sizeof(buf), "%s  %s/%s", counts, st(statsFetchOk), st(statsUploadOk));
     }
-    renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-    y += ROW;
+    y = drawWrappedRow(sideX, y, maxWidth, buf, ROW);
   } else if (dictSkippedLowHeap) {
-    renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_SYNC_DICT_SKIPPED));
-    y += ROW;
+    y = drawWrappedRow(sideX, y, maxWidth, tr(STR_SYNC_DICT_SKIPPED), ROW);
   }
 
   if (fcSynced) {
@@ -1444,8 +1446,7 @@ int KOReaderSyncActivity::drawAlsoSyncedFooter(int sideX, int y, int lhFoot, boo
                fcDeletedCards);
       snprintf(buf, sizeof(buf), "%s  %s/%s", counts, st(statsFetchOk), st(statsUploadOk));
     }
-    renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-    y += ROW;
+    y = drawWrappedRow(sideX, y, maxWidth, buf, ROW);
     // Backfill sub-line ONLY while a broadcast pass is incomplete (cursor < deck). Once the
     // deck has been fully re-offered the heal keeps cycling silently — no line needed.
     if (fcDeckCount > 0 && fcCursor < fcDeckCount) {
@@ -1453,20 +1454,17 @@ int KOReaderSyncActivity::drawAlsoSyncedFooter(int sideX, int y, int lhFoot, boo
       const int perSlice = (fcHealCards > 0) ? fcHealCards : 1;  // cursor advances by the heal slice
       const int roundsLeft = (remaining + perSlice - 1) / perSlice;
       snprintf(buf, sizeof(buf), tr(STR_SYNC_FC_BACKFILL), fcCursor, fcDeckCount, roundsLeft);
-      renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-      y += ROW;
+      y = drawWrappedRow(sideX, y, maxWidth, buf, ROW);
     }
   } else if (fcSkippedLowHeap) {
-    renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_SYNC_FC_SKIPPED));
-    y += ROW;
+    y = drawWrappedRow(sideX, y, maxWidth, tr(STR_SYNC_FC_SKIPPED), ROW);
   }
 
   if (statsSynced) {
     char durBuf[24];
     BookReadingStats::formatDuration(statsTotalAllDevices, durBuf, sizeof(durBuf));
     snprintf(buf, sizeof(buf), tr(STR_STATS_ALL_DEVICES_FORMAT), durBuf);
-    renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-    y += ROW;
+    y = drawWrappedRow(sideX, y, maxWidth, buf, ROW);
   }
 
   // Transfer totals last (network summary). Shows even on a progress-only sync.
@@ -1476,8 +1474,7 @@ int KOReaderSyncActivity::drawAlsoSyncedFooter(int sideX, int y, int lhFoot, boo
     formatXferBytes(xferDown, downBuf, sizeof(downBuf));
     formatXferBytes(xferUp, upBuf, sizeof(upBuf));
     snprintf(buf, sizeof(buf), tr(STR_SYNC_XFER_FORMAT), downBuf, upBuf);
-    renderer.drawText(UI_10_FONT_ID, sideX, y, buf);
-    y += ROW;
+    y = drawWrappedRow(sideX, y, maxWidth, buf, ROW);
   }
   return y;
 }
@@ -1595,8 +1592,7 @@ void KOReaderSyncActivity::render(RenderLock&&) {
     }
     renderer.drawText(UI_10_FONT_ID, sideX, y, remoteLabel, true, EpdFontFamily::BOLD);
     y += LABEL_ROW;
-    renderer.drawText(UI_10_FONT_ID, detailX, y, remoteChapter.c_str());
-    y += DATA_ROW;
+    y = drawWrappedRow(detailX, y, contentW - (detailX - sideX), remoteChapter.c_str(), DATA_ROW);
     snprintf(buf, sizeof(buf), tr(STR_PAGE_OVERALL_FORMAT), remotePosition.pageNumber + 1,
              remoteProgress.percentage * 100);
     renderer.drawText(UI_10_FONT_ID, detailX, y, buf);
@@ -1610,8 +1606,7 @@ void KOReaderSyncActivity::render(RenderLock&&) {
     // --- LOCAL card ---
     renderer.drawText(UI_10_FONT_ID, sideX, y, tr(STR_LOCAL_LABEL), true, EpdFontFamily::BOLD);
     y += LABEL_ROW;
-    renderer.drawText(UI_10_FONT_ID, detailX, y, localChapter.c_str());
-    y += DATA_ROW;
+    y = drawWrappedRow(detailX, y, contentW - (detailX - sideX), localChapter.c_str(), DATA_ROW);
     snprintf(buf, sizeof(buf), tr(STR_PAGE_TOTAL_OVERALL_FORMAT), localPosition.pageNumber + 1,
              localPosition.totalPages, localProgress.percentage * 100);
     renderer.drawText(UI_10_FONT_ID, detailX, y, buf);
@@ -1623,7 +1618,7 @@ void KOReaderSyncActivity::render(RenderLock&&) {
 
     // --- "Also synced" footer: bookmarks + reading stats always merge, so they are
     // passive info, not a choice. Extra gap above separates it from the choice buttons.
-    y = drawAlsoSyncedFooter(sideX, y, lhFoot);
+    y = drawAlsoSyncedFooter(sideX, y, lhFoot, contentW);
 
     // Bottom button hints
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
@@ -1647,7 +1642,7 @@ void KOReaderSyncActivity::render(RenderLock&&) {
     y += renderer.getLineHeight(UI_10_FONT_ID) + SECTION_GAP;
 
     // Same "Also synced" footer as SHOWING_RESULT: passive info, extra gap above.
-    y = drawAlsoSyncedFooter(sideX, y, lhFoot);
+    y = drawAlsoSyncedFooter(sideX, y, lhFoot, screen.width - 2 * metrics.contentSidePadding);
 
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_UPLOAD), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
@@ -1665,7 +1660,7 @@ void KOReaderSyncActivity::render(RenderLock&&) {
     renderer.drawText(uiScaleSpec().titleFontId, sideX, y, tr(STR_SYNC_FEATURE_DONE), true, EpdFontFamily::BOLD);
     y += renderer.getLineHeight(uiScaleSpec().titleFontId) + 4;
     // Single-feature sync: the feature is the main event, so skip the "Also synced:" header.
-    drawAlsoSyncedFooter(sideX, y, lhFoot, /*showAlsoLabel=*/false);
+    drawAlsoSyncedFooter(sideX, y, lhFoot, screen.width - 2 * metrics.contentSidePadding, /*showAlsoLabel=*/false);
 
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
