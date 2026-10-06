@@ -141,7 +141,10 @@ namespace {
 // v62: The paragraph-spacing header byte is a level (see paragraphGapPx()), not on/off.
 // v63: A soft-flushed paragraph's continuation is no longer re-indented, and its top
 //      margin/padding lands once, before the first line. Covers upstream's #3875.
-constexpr uint8_t SECTION_FILE_VERSION = 63;
+// v64: A missing U+2588 FULL BLOCK / U+25A0 BLACK SQUARE is drawn as a solid rectangle with
+//      font-sized metrics instead of advancing zero, so lines holding redaction blocks
+//      break differently. Covers upstream's #3882 (their v52).
+constexpr uint8_t SECTION_FILE_VERSION = 64;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
