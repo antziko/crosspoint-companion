@@ -436,6 +436,26 @@ struct NoWifiSleep {
   ~NoWifiSleep() { esp_wifi_set_ps(WIFI_PS_MIN_MODEM); }
 };
 
+// One line of freeink::TlsRxStats: how the ciphertext arrived (gap histogram, bursts) and
+// how long wolfSSL spent turning it into plaintext. Says whether a slow transfer is the TCP
+// stream or the TLS layer above it.
+void logRxStats(const char* when) {
+#if defined(FREEINK_NET_WOLFSSL)
+  const freeink::TlsRxStats rx = freeink::tlsRxStats();
+  SdDebugLog::log("RX",
+                  "%s raw=%lu reads=%lu want=%lu gaps<5/20/100/300/1000/+=%lu/%lu/%lu/%lu/%lu/%lu maxGap=%lums "
+                  "bursts=%lu avgBurst=%lu maxBurst=%lu decrypt=%lums maxDecrypt=%luus plainReads=%lu",
+                  when, (unsigned long)rx.rawBytes, (unsigned long)rx.rawReads, (unsigned long)rx.wantRead,
+                  (unsigned long)rx.gaps[0], (unsigned long)rx.gaps[1], (unsigned long)rx.gaps[2],
+                  (unsigned long)rx.gaps[3], (unsigned long)rx.gaps[4], (unsigned long)rx.gaps[5],
+                  (unsigned long)rx.maxGapMs, (unsigned long)rx.bursts,
+                  (unsigned long)(rx.bursts ? rx.rawBytes / rx.bursts : 0), (unsigned long)rx.maxBurstBytes,
+                  (unsigned long)(rx.decryptUs / 1000), (unsigned long)rx.maxDecryptUs, (unsigned long)rx.plainReads);
+#else
+  (void)when;
+#endif
+}
+
 #if defined(FREEINK_NET_WOLFSSL)
 // ---------------------------------------------------------------------------
 // wolfSSL (SecureHttpClient) path — the active TLS stack for app HTTPS.
@@ -471,6 +491,15 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
     SdDebugLog::log("HTTP", "GET start: heap=%u largest8=%u intFree=%u intLargest=%u rssi=%d light=%u url=%s",
                     s.heapFree, s.largest8Bit, s.internalFree, s.internalLargest, (int)s.rssi,
                     Frontlight.isOn() ? Frontlight.brightness() : 0, startUrl.c_str());
+    // ps= confirms NoWifiSleep took (0 = WIFI_PS_NONE); proto/bw are the negotiated link.
+    wifi_ps_type_t ps = WIFI_PS_MIN_MODEM;
+    const esp_err_t psErr = esp_wifi_get_ps(&ps);
+    uint8_t proto = 0;
+    esp_wifi_get_protocol(WIFI_IF_STA, &proto);
+    wifi_bandwidth_t bw = WIFI_BW_HT20;
+    esp_wifi_get_bandwidth(WIFI_IF_STA, &bw);
+    SdDebugLog::log("HTTP", "link: ps=%d psErr=%d proto=0x%x bw=%d", (int)ps, (int)psErr, proto, (int)bw);
+    freeink::tlsRxStatsReset();
   }
 
   std::string url = startUrl;
@@ -810,6 +839,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
             // rate= are the per-hop pair that elapsed= actually measures.
             SdDebugLog::log("XFER", "bytes=%zu hop=%zu elapsed=%lums rate=%uB/s heap=%u largest8=%u", sink.downloaded,
                             hopBytes, (unsigned long)elapsedMs, bytesPerSec, xs.heapFree, xs.largest8Bit);
+            if ((sink.downloaded / XFER_LOG_BYTES) % 8 == 0) logRxStats("xfer");
           }
           return true;
         },
@@ -1352,6 +1382,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
                       sink.downloaded, (unsigned long)totalElapsedMs, bytesPerSec, (unsigned long)waitAllMs,
                       (unsigned long)workAllMs, (unsigned long)sdAllMs, (unsigned long)progressAllMs,
                       (unsigned long)ttfbAllMs, (unsigned long)otherMs, resumes, emptyHopsTotal, freshRetries);
+      logRxStats("done");
     }
     return HttpDownloader::OK;
   }
