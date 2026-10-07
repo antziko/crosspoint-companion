@@ -578,6 +578,7 @@ void KOReaderSyncActivity::setSyncPhase(const char* phase) {
   // Restart the liveness clock: the counter is per-phase, so it reads as "this leg has
   // been running Ns", not "the whole sync has".
   syncPhaseStartMs = millis();
+  mergeLogLastMs = syncPhaseStartMs;
   syncTickLastPaintMs = 0;
   syncTickLastSecs = 0;
   {
@@ -600,7 +601,16 @@ void KOReaderSyncActivity::syncTickTrampoline(void* ctx, const uint32_t elapsedM
 // up smoothly when a leg hands off from "receiving" to "merging" rather than restarting.
 void KOReaderSyncActivity::mergePumpTrampoline(void* ctx, const size_t done, const size_t total) {
   auto* self = static_cast<KOReaderSyncActivity*>(ctx);
-  self->syncTick(millis() - self->syncPhaseStartMs, done, total);
+  // The transport heartbeat is silent while a merge runs inside the stats sink, so the merge
+  // logs its own progress; a capture that stops on one of these lines stopped in the merge.
+  const uint32_t now = millis();
+  if (now - self->mergeLogLastMs >= 5000) {
+    self->mergeLogLastMs = now;
+    SdDebugLog::log("KOSYNC", "merge t=%lums done=%u/%u heap=%u largest=%u",
+                    (unsigned long)(now - self->syncPhaseStartMs), (unsigned)done, (unsigned)total,
+                    (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  }
+  self->syncTick(now - self->syncPhaseStartMs, done, total);
 }
 
 // Called from inside SecureHttpClient's read loop (see KOReaderSyncClient::setHeartbeat).
@@ -818,6 +828,75 @@ bool spoolUploadBlob(const char* path, const uint8_t* data, const size_t len) {
   return false;
 }
 
+// Other devices' merge blobs, parked on SD during the stats GET and merged after it.
+//
+// The stats decoder hands each blob to its fold from inside the socket read, so a fold runs
+// at the bottom of the TLS, HTTP and JSON parser frames. Appending to a file already open is
+// shallow; a merge is not (each changed card is a full deck rewrite: copy, remove, rename
+// with long names), and on the X3's 8KB loop stack that overflowed mid-write, crashed and
+// left the card wedged. Records are [kind u8][len u32][bytes].
+class MergeSpool {
+ public:
+  static constexpr uint8_t DICT = 'D';
+  static constexpr uint8_t FLASHCARDS = 'F';
+
+  void open(const char* path) {
+    ok = Storage.openFileForWrite("KOSYNC", path, file);
+    if (!ok) SdDebugLog::log("KOSYNC", "merge spool open failed: %s", path);
+  }
+
+  // From the fold, deep in the socket read: append only.
+  void add(const uint8_t kind, const uint8_t* blob, const size_t len) {
+    if (!ok) {
+      dropped++;
+      return;
+    }
+    const uint32_t n = static_cast<uint32_t>(len);
+    uint8_t head[5] = {kind};
+    memcpy(head + 1, &n, sizeof(n));
+    ok = file.write(head, sizeof(head)) == sizeof(head) && file.write(blob, len) == len;
+    if (ok) {
+      records++;
+    } else {
+      dropped++;
+    }
+  }
+
+  // Merges every complete record through `merge(kind, blob, len)` and removes the file.
+  // A record that cannot be loaded is skipped; the peer's rolling heal re-sends its cards.
+  template <typename Merge>
+  void replay(const char* path, Merge&& merge) {
+    if (!file && records == 0 && dropped == 0) return;  // never opened
+    file.close();                                       // flush before reading back
+    if (dropped > 0) SdDebugLog::log("KOSYNC", "merge spool dropped %u blob(s)", (unsigned)dropped);
+    if (records > 0) {
+      HalFile in;
+      if (Storage.openFileForRead("KOSYNC", path, in)) {
+        for (uint16_t i = 0; i < records; i++) {
+          uint8_t head[5];
+          if (in.read(head, sizeof(head)) != static_cast<int>(sizeof(head))) break;
+          uint32_t len = 0;
+          memcpy(&len, head + 1, sizeof(len));
+          auto blob = makeUniqueNoThrow<uint8_t[]>(len);
+          if (!blob) {
+            SdDebugLog::log("KOSYNC", "merge spool OOM: %u bytes", (unsigned)len);
+            break;
+          }
+          if (in.read(blob.get(), len) != static_cast<int>(len)) break;
+          merge(head[0], blob.get(), static_cast<size_t>(len));
+        }
+      }
+    }
+    Storage.remove(path);
+  }
+
+ private:
+  HalFile file;
+  bool ok = false;
+  uint16_t records = 0;
+  uint16_t dropped = 0;
+};
+
 // Read a spooled blob back for the PUT. Allocated here, at PUT time, so it is absent during
 // the GET handshake — which is the whole point of spooling it. Null on OOM or a short read;
 // the leg then uploads counters only and does not advance its watermark, so the same slice
@@ -881,7 +960,7 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool 
   //
   // Priced against what this branch actually costs ON TOP of the stats GET that runs
   // regardless: one 4KB nothrow scratch plus a tight copy of a few hundred bytes, both
-  // freed before the handshake, then a streaming merge (mergeBlob folds entry-by-entry;
+  // freed before the handshake, then a merge of each spooled blob (mergeBlob folds entry-by-entry;
   // LookupHistory::load() — the one throwing reserve in that file — is not on this path).
   // 24KB keeps ~5x headroom over that marginal cost while still vetoing a genuinely
   // starved heap. Do NOT re-raise this without re-measuring the post-radio ceiling: the
@@ -890,6 +969,9 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool 
   // files, like the OPDS feed scratch, and removed on every exit path from this leg.
   static constexpr const char* kDictUploadSpool = "/.kosync_du.bin";
   static constexpr const char* kFcUploadSpool = "/.kosync_fu.bin";
+  // Other devices' dictionary/flashcard blobs, as the stats GET delivers them. Merged once the
+  // GET has returned: see MergeSpool.
+  static constexpr const char* kMergeSpool = "/.kosync_mg.bin";
 
   constexpr uint32_t kDictSyncMinHeap = 24 * 1024;
   constexpr size_t kDictBlobCap = 4096;
@@ -928,11 +1010,12 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool 
   bool dictSerialized = false;
   bool dictWasKeyframe = false;
   LookupHistory::BlobStats dictUpStats;
-  struct DictMergeCtx {
-    const std::string* cachePath;
-    int merged;   // remote adds applied
-    int deleted;  // remote deletes applied
-  } dictMergeCtx{&cachePath, 0, 0};
+  // The folds below only spool: they run inside the stats GET's socket read, at the bottom of
+  // the TLS, HTTP and JSON frames, and a merge that rewrites the deck from there overran the
+  // X3's 8KB loop stack mid-write. The merges run after the GET returns.
+  MergeSpool mergeSpool;
+  int dictMerged = 0;   // remote adds applied
+  int dictDeleted = 0;  // remote deletes applied
   StatsDatedFold dictFold;
   if (doDictSync) {
     // Right-size the upload blob so the 4KB serialize scratch does NOT straddle the stats GET
@@ -954,12 +1037,9 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool 
     }
     // dictScratch frees at this block's end (before getStats): its 4KB returns to the heap so
     // the handshake gets a clean contiguous block.
-    dictFold.ctx = &dictMergeCtx;
+    dictFold.ctx = &mergeSpool;
     dictFold.fn = [](void* ctx, const uint8_t* blob, size_t len) {
-      auto* c = static_cast<DictMergeCtx*>(ctx);
-      int del = 0;
-      c->merged += LookupHistory::mergeBlob(*c->cachePath, blob, len, &del);
-      c->deleted += del;
+      static_cast<MergeSpool*>(ctx)->add(MergeSpool::DICT, blob, len);
     };
   } else {
     LOG_DBG("KOSync", "Low heap (%u); skipping dict history sync", (unsigned)ESP.getFreeHeap());
@@ -969,7 +1049,7 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool 
   // Same shape as the dict block: serialize OUR pre-merge slice for upload (a
   // bounded rolling slice, sized adaptively from free heap + the last-seen device
   // count), free the scratch BEFORE the GET handshake, and merge every OTHER
-  // device's "fc" blob during the GET. Gated on its OWN scope flag (independent of
+  // device's "fc" blob after the GET (MergeSpool). Gated on its OWN scope flag (independent of
   // dict) + the same heap backstop.
   //
   // Own constant since 2026-08-16 rather than borrowing kDictSyncMinHeap: this branch is
@@ -988,11 +1068,8 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool 
   size_t fcUpLen = 0;  // spooled to kFcUploadSpool — see the dict blob above
   bool fcSerialized = false;
   FlashcardDeck::BlobStats fcUpStats;
-  struct FcMergeCtx {
-    const std::string* cachePath;
-    int merged;   // remote cards added
-    int deleted;  // remote deletes applied
-  } fcMergeCtx{&cachePath, 0, 0};
+  int fcMerged = 0;   // remote cards added
+  int fcDeleted = 0;  // remote deletes applied
   StatsDatedFold fcFold;
   if (doFcSync) {
     // Adaptive slice cap: grows with heap / shrinks with device count, clamped
@@ -1009,12 +1086,9 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool 
       if (n > 0 && spoolUploadBlob(kFcUploadSpool, fcScratch.get(), n)) fcUpLen = n;
     }
     // fcScratch frees here (before getStats) so the handshake gets a clean block.
-    fcFold.ctx = &fcMergeCtx;
+    fcFold.ctx = &mergeSpool;
     fcFold.fn = [](void* ctx, const uint8_t* blob, size_t len) {
-      auto* c = static_cast<FcMergeCtx*>(ctx);
-      int del = 0;
-      c->merged += FlashcardDeck::mergeBlob(*c->cachePath, blob, len, &del);
-      c->deleted += del;
+      static_cast<MergeSpool*>(ctx)->add(MergeSpool::FLASHCARDS, blob, len);
     };
   } else {
     LOG_DBG("KOSync", "Low heap (%u); skipping flashcard sync", (unsigned)ESP.getFreeHeap());
@@ -1033,15 +1107,29 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool 
   KOReaderStatsEntry* entries = entriesBuf.get();
 
   // Pull every device's counter. NOT_FOUND = server has nothing yet; still upload ours.
-  // The dict fold (when enabled) merges other devices' lookup history during this GET.
+  // The dict/flashcard folds (when enabled) spool other devices' blobs during this GET; they
+  // are merged once it returns.
   size_t count = 0;
   // Brackets the serialize step against the `pre-stats heap` probe in performSync: this is
   // the heap the cold handshake actually gets, and dictUp/fcUp say how much of any drop is
   // payload (now spooled, so it should be near zero) versus something else in that block.
   SdDebugLog::log("KOSYNC", "stats pre-GET heap free=%u largest=%u dictUp=%u fcUp=%u", (unsigned)ESP.getFreeHeap(),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), (unsigned)dictUpLen, (unsigned)fcUpLen);
+  if (doDictSync || doFcSync) mergeSpool.open(kMergeSpool);
   const auto getResult = KOReaderSyncClient::getStats(documentHash, entries, count, nullptr,
                                                       doDictSync ? &dictFold : nullptr, doFcSync ? &fcFold : nullptr);
+  // Blobs reach the spool only once fully decoded, so even a GET that failed after some of
+  // them left whole ones to merge.
+  mergeSpool.replay(kMergeSpool, [&](const uint8_t kind, const uint8_t* blob, const size_t len) {
+    int del = 0;
+    if (kind == MergeSpool::DICT) {
+      dictMerged += LookupHistory::mergeBlob(cachePath, blob, len, &del);
+      dictDeleted += del;
+    } else {
+      fcMerged += FlashcardDeck::mergeBlob(cachePath, blob, len, &del);
+      fcDeleted += del;
+    }
+  });
   statsFetchOk = (getResult == KOReaderSyncClient::OK || getResult == KOReaderSyncClient::NOT_FOUND);
   if (statsFetchOk) {
     uint32_t othersSeconds = 0;
@@ -1149,16 +1237,16 @@ void KOReaderSyncActivity::syncStats(bool includeDict, bool includeGlobal, bool 
   // Only a heap-forced skip counts as "skipped (low memory)". When dict was excluded
   // by scope (Stats-only sync), neither flag is set so the footer omits it entirely.
   dictSkippedLowHeap = includeDict && !doDictSync;
-  dictMergedWords = dictMergeCtx.merged;
-  dictDeletedWords = dictMergeCtx.deleted;
+  dictMergedWords = dictMerged;
+  dictDeletedWords = dictDeleted;
 
   // Flashcard merge result (same footer treatment as dict). fcSynced when attempted;
   // fcSkippedLowHeap only when excluded by heap, not by scope, so a missing line is
   // never silent on a Flashcards-scope run.
   fcSynced = doFcSync;
   fcSkippedLowHeap = includeFlashcards && !doFcSync;
-  fcMergedCards = fcMergeCtx.merged;
-  fcDeletedCards = fcMergeCtx.deleted;
+  fcMergedCards = fcMerged;
+  fcDeletedCards = fcDeleted;
   // Backfill progress: deck size (denominator) + the rolling-cursor position the
   // upload commit just advanced to (numerator). Read post-commit so it reflects the
   // stored watermark; on a failed PUT the cursor didn't advance and this shows the

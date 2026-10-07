@@ -102,6 +102,7 @@ class KOReaderSyncActivity final : public Activity {
   uint32_t syncPhaseStartMs = 0;     // millis() when the current phase label was set
   uint32_t syncTickLastPaintMs = 0;  // last tick that actually repainted
   uint32_t syncTickLastSecs = 0;     // last elapsed value rendered, to skip no-op repaints
+  uint32_t mergeLogLastMs = 0;       // last `merge` SD line, see mergePumpTrampoline
   static void syncTickTrampoline(void* ctx, uint32_t elapsedMs, size_t received, size_t total);
   static void mergePumpTrampoline(void* ctx, size_t done, size_t total);
   void syncTick(uint32_t elapsedMs, size_t received, size_t total);

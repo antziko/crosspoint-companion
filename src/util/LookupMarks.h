@@ -47,12 +47,22 @@ class LookupMarks {
   // Drop the table and free it. Called when the reader closes the book.
   void clear();
 
+  // The chapter being read. Once the table is full, add() overwrites the oldest mark of any OTHER
+  // chapter first, so a book with more cards than MAX_MARKS still underlines every card of this
+  // one. clear() forgets it.
+  void setPreferredChapter(uint32_t chapterHash) {
+    preferred_ = chapterHash;
+    hasPreferred_ = true;
+  }
+
   // Record one card. Allocates the table on first use; a false return means OOM (the caller
-  // should stop feeding) or a card with no usable page anchor. Once full, the oldest mark is
-  // overwritten.
+  // should stop feeding), a card with no usable page anchor, or one dropped to keep the
+  // preferred chapter. Once full, the oldest mark is overwritten (see setPreferredChapter).
   bool add(const char* word, int wordLen, const char* chapterTitle, int titleLen, int page, int pageCount);
 
   int size() const { return count_; }
+  // The newest mark for a word, or nullptr: diagnostics for an underline that did not draw.
+  const Mark* findWord(uint32_t wordHash) const;
   bool empty() const { return count_ == 0; }
 
   // Marks anchored on this page, written to out[0..cap). Returns how many. `pageCount` is the
@@ -142,4 +152,6 @@ class LookupMarks {
   std::unique_ptr<Mark[]> marks_;
   int count_ = 0;     // marks held, <= MAX_MARKS
   int writeIdx_ = 0;  // ring cursor: once full, the oldest mark is the one overwritten
+  uint32_t preferred_ = 0;
+  bool hasPreferred_ = false;
 };

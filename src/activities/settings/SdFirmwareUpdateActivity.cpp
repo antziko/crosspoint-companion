@@ -12,6 +12,7 @@
 #include "MappedInputManager.h"
 #include "activities/home/FileBrowserActivity.h"
 #include "activities/util/ConfirmationActivity.h"
+#include "components/DownloadProgress.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/FirmwareFlasher.h"
@@ -290,14 +291,15 @@ void SdFirmwareUpdateActivity::render(RenderLock&&) {
     UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, top, tr(STR_UPDATING), true, EpdFontFamily::BOLD);
 
     int y = top + lineHeight + metrics.verticalSpacing;
-    GUI.drawProgressBar(renderer,
-                        Rect{safe.x + metrics.contentSidePadding, y, pageWidth - metrics.contentSidePadding * 2,
-                             metrics.progressBarHeight},
-                        static_cast<int>(pct), 100);
-    y += metrics.progressBarHeight + metrics.verticalSpacing;
-    // Percent label is drawn by BaseTheme::drawProgressBar; this slot is left intentionally empty
-    // so the do-not-power-off line below stays at the same Y as before.
-    y += lineHeight + metrics.verticalSpacing;
+    // One layout held for the whole flash: unshaded track (see DownloadProgress.h).
+    DownloadProgress::State progress;
+    progress.done = writtenBytes;
+    progress.total = firmwareSize;
+    progress.elapsedMs = millis() - updateStartMs;
+    progress.shadedTrack = false;
+    y += DownloadProgress::draw(renderer, safe.x + metrics.contentSidePadding, y,
+                                pageWidth - metrics.contentSidePadding * 2, progress);
+    y += metrics.verticalSpacing;
     // Wrap the warning over up to 2 lines instead of clipping at the screen edge.
     const auto warnLines =
         renderer.wrappedText(UI_10_FONT_ID, tr(STR_FIRMWARE_UPDATE_DO_NOT_POWER_OFF), pageWidth - 40, 2);

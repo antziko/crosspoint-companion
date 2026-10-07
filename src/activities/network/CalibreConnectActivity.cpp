@@ -11,6 +11,7 @@
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
 #include "WifiSelectionActivity.h"
+#include "components/DownloadProgress.h"
 #include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -152,6 +153,7 @@ void CalibreConnectActivity::loop() {
     if (status.inProgress) {
       if (status.received != lastProgressReceived || status.total != lastProgressTotal ||
           status.filename != currentUploadName) {
+        if (status.filename != currentUploadName || status.received < lastProgressReceived) uploadStartMs = millis();
         lastProgressReceived = status.received;
         lastProgressTotal = status.total;
         currentUploadName = status.filename;
@@ -236,11 +238,14 @@ void CalibreConnectActivity::render(RenderLock&&) {
                                        EpdFontFamily::REGULAR);
       }
       renderer.drawText(SMALL_FONT_ID, safe.x + metrics.contentSidePadding, y, label.c_str());
-      GUI.drawProgressBar(renderer,
-                          Rect{safe.x + metrics.contentSidePadding, y + height + metrics.verticalSpacing,
-                               pageWidth - metrics.contentSidePadding * 2, metrics.progressBarHeight},
-                          lastProgressReceived, lastProgressTotal);
-      y += height + metrics.verticalSpacing * 2 + metrics.progressBarHeight;
+      DownloadProgress::State progress;
+      progress.done = lastProgressReceived;
+      progress.total = lastProgressTotal;
+      progress.elapsedMs = millis() - uploadStartMs;
+      y += height + metrics.verticalSpacing;
+      y += DownloadProgress::draw(renderer, safe.x + metrics.contentSidePadding, y,
+                                  pageWidth - metrics.contentSidePadding * 2, progress);
+      y += metrics.verticalSpacing;
     }
 
     if (lastCompleteAt > 0 && (millis() - lastCompleteAt) < 6000) {

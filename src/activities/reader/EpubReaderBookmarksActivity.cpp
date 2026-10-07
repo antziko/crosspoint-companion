@@ -84,7 +84,11 @@ void EpubReaderBookmarksActivity::rebuildRowItems() {
 
     if (!snippetUsesSubtitle) {
       const char* chapter = bm.chapterTitle[0] != '\0' ? bm.chapterTitle : tr(STR_UNNAMED);
-      const int pct = static_cast<int>(std::lround(bm.progress * 100.0f));
+      // From the page when one is recorded: the reader keeps it current as the chapter re-flows,
+      // while `progress` stays the fraction the mark was saved at.
+      const int pct = bm.chapterPageCount > 0
+                          ? static_cast<int>(std::lround(bm.chapterCurrentPage * 100.0f / bm.chapterPageCount))
+                          : static_cast<int>(std::lround(bm.progress * 100.0f));
       char buf[96];
       if (bm.chapterPageCount > 0) {
         // Snapshot page position within the chapter (chapterCurrentPage is 0-based).

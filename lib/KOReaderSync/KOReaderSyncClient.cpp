@@ -52,6 +52,9 @@ char statsServerTagBuf[32] = {0};
 // with device count; cap the unbounded realloc so a pathological response fails
 // clean instead of exhausting the heap. 64 KB covers the realistic device range.
 constexpr int kMaxResponseBytes = 64 * 1024;
+// Interval of the in-request `<TAG> wait` SD line, and the elapsed time past which a leg also
+// logs `<TAG> end`.
+constexpr uint32_t kWaitLogMs = 5000;
 // Contiguous-heap headroom kept free while the response string grows. The append
 // happens with the TLS connection live (wolfSSL record buffers resident), so leave
 // room rather than consuming the very last block.
@@ -200,6 +203,24 @@ struct KoStreamSink {
 // pinned-root CA, streams the response into a 64 KB-capped buffer (or into `stream`
 // when one is given), updates the byte counters + lastHttpCode, and reuses the session
 // connection when one is active (otherwise a one-shot local client that closes after).
+// Times a lookup of `url`'s host and logs it with the link state and the resolvers in use.
+void probeDns(const char* tag, const std::string& url) {
+  const size_t hostStart = url.find("://");
+  if (hostStart == std::string::npos) return;
+  const size_t from = hostStart + 3;
+  const size_t hostEnd = url.find_first_of(":/", from);
+  char host[64];
+  snprintf(host, sizeof(host), "%.*s", static_cast<int>((hostEnd == std::string::npos ? url.size() : hostEnd) - from),
+           url.c_str() + from);
+  IPAddress ip;
+  const uint32_t t0 = millis();
+  const int ok = WiFi.hostByName(host, ip);
+  SdDebugLog::log("KOSYNC", "%s dns host=%s ok=%d ms=%lu ip=%s wifi=%d gw=%s dns0=%s dns1=%s rssi=%d", tag, host, ok,
+                  static_cast<unsigned long>(millis() - t0), ip.toString().c_str(), static_cast<int>(WiFi.status()),
+                  WiFi.gatewayIP().toString().c_str(), WiFi.dnsIP(0).toString().c_str(),
+                  WiFi.dnsIP(1).toString().c_str(), WiFi.RSSI());
+}
+
 KoResponse koPerform(const char* method, const std::string& url, const std::string* body, const char* tag,
                      const KoStreamSink* stream = nullptr) {
   KoResponse r;
@@ -324,11 +345,37 @@ KoResponse koPerform(const char* method, const std::string& url, const std::stri
   // anything can run while a leg blocks. It never aborts — always returns false. The
   // std::function is constructed only when a heartbeat is registered, so the common path
   // still passes the default nullptr and allocates nothing.
+  //
+  // Every kWaitLogMs the beat also writes a `<TAG> wait` SD line, so a leg that never returns
+  // still says where it was. `phase` reads SecureClient's connect timings, which connect()
+  // zeroes: tcp = TCP/DNS still running, tls = handshake, hdr = connected but no status line
+  // yet, body = receiving. `conn` compares those timings with their pre-request values: new =
+  // this leg (re)connected, reused = it rode the kept-alive connection.
   freeink::SecureHttpClient::AbortCallback beat;
   uint32_t beats = 0;
+  const uint32_t preTcpMs = http->tcpConnectMs();
+  const uint32_t preTlsMs = http->tlsHandshakeMs();
   if (s_heartbeatFn) {
-    beat = [startMs, &streamedBytes, &r, http, stream, &beats]() {
+    beat = [startMs, &streamedBytes, &r, http, stream, &beats, &sinkMs, tag, preTcpMs, preTlsMs,
+            lastWaitLogMs = startMs]() mutable {
       ++beats;
+      const uint32_t now = millis();
+      if (now - lastWaitLogMs >= kWaitLogMs) {
+        lastWaitLogMs = now;
+        const uint32_t tcpMs = http->tcpConnectMs();
+        const uint32_t tlsMs = http->tlsHandshakeMs();
+        const int status = http->getStatus();
+        const char* phase = status > 0 ? "body" : tcpMs == 0 ? "tcp" : tlsMs == 0 ? "tls" : "hdr";
+        const bool fresh = tcpMs == 0 || tcpMs != preTcpMs || tlsMs != preTlsMs;  // 0: connect still running or failed
+        const size_t got = (stream && stream->fn) ? streamedBytes : r.body.size();
+        const SdDebugLog::NetSnapshot snap = SdDebugLog::captureNetSnapshot();
+        SdDebugLog::log("KOSYNC",
+                        "%s wait t=%lums phase=%s conn=%s status=%d bytes=%u/%u sink=%lums beats=%lu rssi=%d heap=%u "
+                        "largest8=%u",
+                        tag, (unsigned long)(now - startMs), phase, fresh ? "new" : "reused", status, (unsigned)got,
+                        http->hasContentLength() ? (unsigned)http->getContentLength() : 0u, (unsigned long)sinkMs,
+                        (unsigned long)beats, (int)snap.rssi, snap.heapFree, snap.largest8Bit);
+      }
       if (s_heartbeatFn) {
         // Streaming legs never fill r.body, buffered ones never touch streamedBytes.
         const size_t got = (stream && stream->fn) ? streamedBytes : r.body.size();
@@ -365,6 +412,19 @@ KoResponse koPerform(const char* method, const std::string& url, const std::stri
   const size_t downBytes = (stream && stream->fn) ? streamedBytes : r.body.size();
   s_bytesDown += static_cast<uint32_t>(downBytes);
   koTraceResp(tag, r.status, downBytes, startMs, sinkMs, beats);
+  // A slow or failed leg also gets how it connected and why it ended. tcp/tls are the last
+  // connect's timings, stale on a reused connection (conn=reused).
+  if (millis() - startMs >= kWaitLogMs || !r.transportOk) {
+    const bool fresh =
+        http->tcpConnectMs() == 0 || http->tcpConnectMs() != preTcpMs || http->tlsHandshakeMs() != preTlsMs;
+    SdDebugLog::log("KOSYNC", "%s end conn=%s tcp=%lums dns=%lums tls=%lums resumed=%d complete=%d hsErr=%d tlsErr=%d",
+                    tag, fresh ? "new" : "reused", (unsigned long)http->tcpConnectMs(), (unsigned long)http->dnsMs(),
+                    (unsigned long)http->tlsHandshakeMs(), http->tlsSessionResumed() ? 1 : 0,
+                    http->responseComplete() ? 1 : 0, http->lastHandshakeError(), http->lastTlsError());
+    // tcp=0 on a failure means the socket never opened, and WiFiClient::connect hides
+    // whether the name lookup or the connect stalled. Resolve again on its own to tell.
+    if (!r.transportOk && http->tcpConnectMs() == 0 && !http->aborted()) probeDns(tag, url);
+  }
   return r;
 }
 }  // namespace

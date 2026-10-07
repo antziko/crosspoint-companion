@@ -1,9 +1,11 @@
 #include "ChapterXPathResolver.h"
 
 #include <Epub/VisibleTextUtils.h>
+#include <Epub/htmlEntities.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <Print.h>
+#include <SdDebugLog.h>
 #include <Utf8.h>
 #include <XmlParserUtils.h>
 #include <expat.h>
@@ -83,6 +85,23 @@ size_t countUtf8Codepoints(const XML_Char* data, const int len) {
   return count;
 }
 
+// Named HTML entities (&nbsp;, &ldquo;, ...) are not XML. Left to expat, one in a chapter with
+// no DOCTYPE is a parse error that ends the pass, and one under an XHTML DOCTYPE is silently
+// dropped -- while the page parser expands both (ChapterHtmlSlimParser::defaultHandlerExpand).
+// Every pass here expands them the same way, so all of them count the text the page shows.
+template <void (*CharacterData)(void*, const XML_Char*, int)>
+void XMLCALL expandHtmlEntity(void* userData, const XML_Char* s, const int len) {
+  if (len < 3 || s[0] != '&' || s[len - 1] != ';') return;
+  const char* value = lookupHtmlEntity(s, static_cast<size_t>(len));
+  if (value) {
+    CharacterData(userData, value, static_cast<int>(strlen(value)));
+  } else {
+    CharacterData(userData, s, len);  // unknown: kept verbatim, as the page parser does
+  }
+}
+
+void XMLCALL ignoreText(void*, const XML_Char*, int) {}
+
 class ParagraphTextCounter final : public Print {
  public:
   ParagraphTextCounter() {
@@ -95,6 +114,7 @@ class ParagraphTextCounter final : public Print {
     XML_SetUserData(parser, this);
     XML_SetElementHandler(parser, &ParagraphTextCounter::startElement, &ParagraphTextCounter::endElement);
     XML_SetCharacterDataHandler(parser, &ParagraphTextCounter::characterData);
+    XML_SetDefaultHandlerExpand(parser, &expandHtmlEntity<&ParagraphTextCounter::characterData>);
   }
 
   ~ParagraphTextCounter() override { destroyXmlParser(parser); }
@@ -229,6 +249,8 @@ class XPathParagraphResolver final : public Print {
 
     XML_SetUserData(parser, this);
     XML_SetElementHandler(parser, &XPathParagraphResolver::startElement, &XPathParagraphResolver::endElement);
+    // Counts no text, but an entity must not end the pass with a parse error.
+    XML_SetDefaultHandlerExpand(parser, &expandHtmlEntity<&ignoreText>);
   }
 
   ~XPathParagraphResolver() override { destroyXmlParser(parser); }
@@ -391,6 +413,7 @@ class XPathProgressResolver final : public Print {
     XML_SetUserData(parser, this);
     XML_SetElementHandler(parser, &XPathProgressResolver::startElement, &XPathProgressResolver::endElement);
     XML_SetCharacterDataHandler(parser, &XPathProgressResolver::characterData);
+    XML_SetDefaultHandlerExpand(parser, &expandHtmlEntity<&XPathProgressResolver::characterData>);
     XML_SetCommentHandler(parser, &XPathProgressResolver::comment);
     XML_SetProcessingInstructionHandler(parser, &XPathProgressResolver::processingInstruction);
     XML_SetCdataSectionHandler(parser, &XPathProgressResolver::startCdataSection,
@@ -685,8 +708,9 @@ std::string normalizeForMatch(const std::string& in) {
 // a parallel raw-offset per byte, which is what turns a byte match back into a position.
 class ChapterTextLocator final : public Print {
  public:
-  ChapterTextLocator(const std::string* needles, ChapterXPathResolver::TextRange* out, const size_t count)
-      : outRanges(out), count(count) {
+  ChapterTextLocator(const std::string* needles, ChapterXPathResolver::TextRange* out, const size_t count,
+                     const bool anyBlock)
+      : outRanges(out), count(count), anyBlock(anyBlock) {
     size_t longest = 0;
     for (size_t i = 0; i < count; i++) {
       normalized[i] = normalizeForMatch(needles[i]);
@@ -723,6 +747,7 @@ class ChapterTextLocator final : public Print {
     XML_SetUserData(parser, this);
     XML_SetElementHandler(parser, &ChapterTextLocator::startElement, &ChapterTextLocator::endElement);
     XML_SetCharacterDataHandler(parser, &ChapterTextLocator::characterData);
+    XML_SetDefaultHandlerExpand(parser, &expandHtmlEntity<&ChapterTextLocator::characterData>);
   }
 
   ~ChapterTextLocator() override { destroyXmlParser(parser); }
@@ -735,7 +760,7 @@ class ChapterTextLocator final : public Print {
     }
     if (XML_Parse(parser, "", 0, XML_TRUE) == XML_STATUS_ERROR) {
       LOG_ERR("KOX", "Final XML parse error: %s", XML_ErrorString(XML_GetErrorCode(parser)));
-      parseOk = false;
+      noteParseError();
     }
     return parseOk;
   }
@@ -753,6 +778,7 @@ class ChapterTextLocator final : public Print {
         LOG_DBG("KOX", "Quote text occurs %u times in spine %d; not anchored", static_cast<unsigned>(hits[i]),
                 spineIndex);
       }
+      outRanges[i].occurrences = static_cast<uint16_t>(std::min<size_t>(hits[i], UINT16_MAX));
     }
     return found;
   }
@@ -767,15 +793,36 @@ class ChapterTextLocator final : public Print {
       const enum XML_Error error = XML_GetErrorCode(parser);
       if (error != XML_ERROR_ABORTED) {
         LOG_ERR("KOX", "XML parse error: %s", XML_ErrorString(error));
-        parseOk = false;
+        noteParseError();
       }
     }
     return size;
   }
 
   int spineIndex = 0;
+  // Diagnostics for a chapter that yields nothing: the first parse error and where it hit, how
+  // much visible text was seen, and (anyBlock passes only) each needle's longest matched
+  // opening with the chapter bytes that followed it.
+  int errorCode = 0;
+  unsigned long errorLine = 0;
+  unsigned long errorColumn = 0;
+  size_t visibleSeen() const { return visibleChars; }
+  struct NearMiss {
+    uint16_t best = 0;
+    char got[17] = {};
+  };
+  NearMiss nearMiss[ChapterXPathResolver::kMaxTextNeedles];
 
  private:
+  void noteParseError() {
+    if (parseOk) {
+      errorCode = static_cast<int>(XML_GetErrorCode(parser));
+      errorLine = static_cast<unsigned long>(XML_GetCurrentLineNumber(parser));
+      errorColumn = static_cast<unsigned long>(XML_GetCurrentColumnNumber(parser));
+    }
+    parseOk = false;
+  }
+
   static constexpr size_t kChunkBytes = 1024;  // the read size findTextRanges streams with
 
   static void XMLCALL startElement(void* userData, const XML_Char* name, const XML_Char**) {
@@ -827,7 +874,7 @@ class ChapterTextLocator final : public Print {
   }
 
   void onCharacterData(const XML_Char* data, const int len) {
-    if (!insideBody || nonVisibleDepth > 0 || (paragraphDepth <= 0 && liDepth <= 0) || len <= 0) {
+    if (!insideBody || nonVisibleDepth > 0 || (!anyBlock && paragraphDepth <= 0 && liDepth <= 0) || len <= 0) {
       return;
     }
 
@@ -859,6 +906,7 @@ class ChapterTextLocator final : public Print {
   }
 
   void scanWindow() {
+    if (anyBlock) trackNearMisses();
     for (size_t i = 0; i < count; i++) {
       const std::string& needle = normalized[i];
       if (needle.empty() || hits[i] > 1) continue;  // already ambiguous; no need to keep counting
@@ -882,6 +930,25 @@ class ChapterTextLocator final : public Print {
     }
   }
 
+  void trackNearMisses() {
+    for (size_t i = 0; i < count; i++) {
+      const std::string& needle = normalized[i];
+      if (needle.empty()) continue;
+      NearMiss& m = nearMiss[i];
+      for (size_t at = 0; at < windowLen; at++) {
+        if (window[at] != needle[0]) continue;
+        size_t n = 0;
+        while (n < needle.size() && at + n < windowLen && window[at + n] == needle[n]) n++;
+        // A run cut off by the window's end is not a divergence; the next scan sees it whole.
+        if (n <= m.best || (at + n == windowLen && n < needle.size())) continue;
+        m.best = static_cast<uint16_t>(n);
+        const size_t take = std::min<size_t>(sizeof(m.got) - 1, windowLen - (at + n));
+        memcpy(m.got, window.get() + at + n, take);
+        m.got[take] = '\0';
+      }
+    }
+  }
+
   void slideWindow() {
     if (windowLen <= retain) return;
     const size_t drop = windowLen - retain;
@@ -894,6 +961,7 @@ class ChapterTextLocator final : public Print {
   XML_Parser parser = nullptr;
   ChapterXPathResolver::TextRange* outRanges;
   const size_t count;
+  const bool anyBlock;
   std::string normalized[ChapterXPathResolver::kMaxTextNeedles];
   size_t hits[ChapterXPathResolver::kMaxTextNeedles] = {};
   size_t lastAbsStart[ChapterXPathResolver::kMaxTextNeedles] = {};
@@ -1092,7 +1160,8 @@ std::string ChapterXPathResolver::findXPathForProgress(const std::shared_ptr<Epu
 }
 
 size_t ChapterXPathResolver::findTextRanges(const std::shared_ptr<Epub>& epub, const int spineIndex,
-                                            const std::string* needles, TextRange* outRanges, const size_t count) {
+                                            const std::string* needles, TextRange* outRanges, const size_t count,
+                                            const bool anyBlock) {
   if (!needles || !outRanges || count == 0 || count > kMaxTextNeedles) {
     return 0;
   }
@@ -1116,14 +1185,29 @@ size_t ChapterXPathResolver::findTextRanges(const std::shared_ptr<Epub>& epub, c
     return 0;
   }
 
-  ChapterTextLocator locator(needles, outRanges, count);
+  ChapterTextLocator locator(needles, outRanges, count, anyBlock);
   if (!locator.ok()) {
+    SdDebugLog::log("KOX", "spine %d: quote locator not ready (OOM or parser)", spineIndex);
     return 0;
   }
   locator.spineIndex = spineIndex;
-  if (!epub->readItemContentsToStream(href, locator, 1024) || !locator.finish()) {
-    return 0;
+  const bool streamed = epub->readItemContentsToStream(href, locator, 1024);
+  const bool parsed = streamed && locator.finish();
+  if (!parsed || anyBlock) {
+    SdDebugLog::log("KOX", "spine %d: locate %s streamed=%d xmlErr=%d \"%s\" at %lu:%lu visible=%u", spineIndex,
+                    anyBlock ? "anyBlock" : "para", streamed ? 1 : 0, locator.errorCode,
+                    locator.errorCode ? XML_ErrorString(static_cast<XML_Error>(locator.errorCode)) : "",
+                    locator.errorLine, locator.errorColumn, static_cast<unsigned>(locator.visibleSeen()));
   }
+  if (anyBlock) {
+    for (size_t i = 0; i < count; i++) {
+      if (needles[i].empty()) continue;
+      SdDebugLog::log("KOX", "spine %d: needle %u matched %u/%u bytes, then \"%s\"", spineIndex,
+                      static_cast<unsigned>(i), locator.nearMiss[i].best,
+                      static_cast<unsigned>(normalizeForMatch(needles[i]).size()), locator.nearMiss[i].got);
+    }
+  }
+  if (!parsed) return 0;
 
   const size_t found = locator.commit();
   LOG_DBG("KOX", "Located %u/%u quote text(s) in spine %d", static_cast<unsigned>(found), static_cast<unsigned>(count),

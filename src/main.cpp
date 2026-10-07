@@ -563,7 +563,25 @@ void setup() {
 
   // SD Card Initialization
   // We need 6 open files concurrently when parsing a new chapter
-  if (!Storage.begin()) {
+  // A crash during an SD write resets the chip but not the card, which can be left stuck in
+  // that write and ignore the probe. Where the board switches the SD rail (X3: GPIO13), each
+  // retry first cuts the card's power, which is the only reset such a card answers. Failing
+  // here also skips the crash report written below. A missing card costs ~1.5 s more.
+  bool sdReady = Storage.begin();
+  for (int attempt = 1; !sdReady && attempt < 4; ++attempt) {
+    LOG_ERR("MAIN", "SD card init attempt %d failed, retrying", attempt);
+#if !FREEINK_SD_SDMMC
+    const int8_t sdPower = BoardConfig::ACTIVE.sd.powerEnable;
+    if (sdPower >= 0) {
+      pinMode(sdPower, OUTPUT);
+      digitalWrite(sdPower, BoardConfig::ACTIVE.sd.powerActiveHigh ? LOW : HIGH);
+      delay(300);  // Storage.begin() powers the rail back up
+    }
+#endif
+    delay(200);
+    sdReady = Storage.begin();
+  }
+  if (!sdReady) {
     LOG_ERR("MAIN", "SD card initialization failed");
     gpio.pollUsbState();  // settle the USB verdict before the error paint (see above)
     setupDisplayAndFonts(isSilentReboot);

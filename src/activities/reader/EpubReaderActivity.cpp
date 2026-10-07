@@ -626,7 +626,7 @@ const char* EpubReaderActivity::cardSurfaceForm(const char* word, const int word
 // still building recorded an estimated page total. Look on the landing page, then alternately
 // one page further each way, so the nearest page printing the text wins; stay put if none does.
 // One SD read per page tried, only on a deliberate jump.
-int EpubReaderActivity::nearestPageWhere(bool (*has)(const Page&, void*), void* ctx) const {
+int EpubReaderActivity::nearestPageWhere(bool (*has)(const Page&, int, void*), void* ctx) const {
   const int pageCount = section->pageCount;
   const int landed = section->currentPage;
   const int reach = std::max(landed, pageCount - 1 - landed);
@@ -634,7 +634,7 @@ int EpubReaderActivity::nearestPageWhere(bool (*has)(const Page&, void*), void* 
     const int p = landed + ((i % 2) ? (i + 1) / 2 : -(i / 2));  // landed, +1, -1, +2, -2, ...
     if (p < 0 || p >= pageCount) continue;
     const auto page = section->loadPage(p);
-    if (page && has(*page, ctx)) return p;
+    if (page && has(*page, p, ctx)) return p;
   }
   return -1;
 }
@@ -651,53 +651,269 @@ void EpubReaderActivity::seekSavedTextNearCurrentPage() {
     struct Find {
       const char* snippet;
       PageMarks::SnippetAt at;
-    } find{snippet.c_str(), PageMarks::SnippetAt::None};
+      PageMarks::SnippetMiss miss;
+    } find{snippet.c_str(), PageMarks::SnippetAt::None, {}};
     int p = nearestPageWhere(
-        [](const Page& page, void* ctx) {
+        [](const Page& page, const int pageIndex, void* ctx) {
           auto* f = static_cast<Find*>(ctx);
-          f->at = PageMarks::findSnippet(page, f->snippet);
+          f->miss.curPage = pageIndex + 1;
+          f->at = PageMarks::findSnippet(page, f->snippet, &f->miss);
           return f->at != PageMarks::SnippetAt::None;
         },
         &find);
+    const int found = p;
     // Words crossing the page break: a quote opens where its band starts, a bookmark on the
     // page they finish on, which is the one a reader would have been looking at.
     if (p >= 0 && find.at == PageMarks::SnippetAt::RunsOff && !quote && p + 1 < section->pageCount) p++;
     LOG_DBG("ERS", "Saved text on page %d (position landed on %d)", p + 1, landed + 1);
+    SdDebugLog::log("ERS",
+                    "seek spine=%d quote=%d landed=%d found=%d at=%d final=%d pages=%d best=%u/%u bestPage=%d "
+                    "want=\"%s\" got=\"%s\" hex=%s snip=\"%.63s\"",
+                    currentSpineIndex, quote ? 1 : 0, landed + 1, found + 1, static_cast<int>(find.at), p + 1,
+                    section->pageCount, find.miss.best, (unsigned)snippet.size(), find.miss.page, find.miss.want,
+                    find.miss.got, find.miss.gotHex, snippet.c_str());
     if (p >= 0) section->currentPage = p;
     return;
   }
   const int p = nearestPageWhere(
-      [](const Page& page, void* ctx) {
+      [](const Page& page, int, void* ctx) {
         return PageMarks::pageHasWord(page, *static_cast<const LookupMarks::Mark*>(ctx));
       },
       &pendingSeekMark_);
   LOG_DBG("ERS", "Card word on page %d (fraction landed on %d)", p + 1, landed + 1);
-  if (p < 0) return;
+  if (p < 0) {
+    SdDebugLog::log("ERS", "card seek spine=%d word=\"%.32s\" landed=%d/%d not found", currentSpineIndex, card.c_str(),
+                    landed + 1, section->pageCount);
+    return;
+  }
   section->currentPage = p;
   // The card now names this page, so the underline and the card's page agree with it.
-  if (FlashcardDeck::setCardPage(epub->getCachePath(), card, p + 1, section->pageCount)) reloadLookupMarks();
+  const bool repaged = FlashcardDeck::setCardPage(epub->getCachePath(), card, p + 1, section->pageCount);
+  if (repaged || (lookupMarksOverflow_ && lookupMarksSpine_ != currentSpineIndex)) reloadLookupMarks();
+  SdDebugLog::log("ERS", "card seek spine=%d word=\"%.32s\" landed=%d found=%d/%d repaged=%d", currentSpineIndex,
+                  card.c_str(), landed + 1, p + 1, section->pageCount, repaged ? 1 : 0);
+  // Why the underline would not draw here: the word missing from the table (dropped by its cap,
+  // or a card with no page anchor), its chapter title hashing differently from the live one,
+  // or its page not overlapping this one.
+  const PageMarks::PageKey key = currentPageMarkKey();
+  const LookupMarks::Mark* mark = LookupMarks::getInstance().findWord(pendingSeekMark_.wordHash);
+  if (!mark) {
+    SdDebugLog::log("ERS", "card mark \"%.32s\": NOT in table (size=%d underline=%d)", card.c_str(),
+                    LookupMarks::getInstance().size(), SETTINGS.lookupUnderline ? 1 : 0);
+  } else {
+    const LookupMarks::Mark* hits[8] = {};
+    const int n =
+        LookupMarks::getInstance().collectForPage(key.chapterHash, key.pageNumber, key.markPageCount, hits, 8);
+    bool hit = false;
+    for (int i = 0; i < n; i++) hit = hit || hits[i] == mark;
+    SdDebugLog::log("ERS", "card mark \"%.32s\": chapter %08lx vs page %08lx, page %u/%u vs %d/%d, collected=%d",
+                    card.c_str(), static_cast<unsigned long>(mark->chapterHash),
+                    static_cast<unsigned long>(key.chapterHash), mark->page, mark->pageCount, key.pageNumber,
+                    key.markPageCount, hit ? 1 : 0);
+  }
 }
 
-void EpubReaderActivity::reloadLookupMarks() const {
+void EpubReaderActivity::refreshBookmarkSpans() const {
+  if (!section || section->pageCount <= 0 || section->isBuilding() || section->isPartial()) {
+    // Page numbers are only a watermark mid-build; resolve once the chapter is complete.
+    bookmarkSpanCount_ = 0;
+    spansValid_ = false;
+    return;
+  }
+  const int pageCount = section->pageCount;
+  if (spansValid_ && spansSection_ == section.get() && spansSpine_ == currentSpineIndex &&
+      spansPageCount_ == pageCount && spansClock_ == BOOKMARKS.clock()) {
+    return;
+  }
+  spansValid_ = true;
+  spansSection_ = section.get();
+  spansSpine_ = currentSpineIndex;
+  spansPageCount_ = pageCount;
+  spansClock_ = BOOKMARKS.clock();
+  bookmarkSpanCount_ = 0;
+
+  // How far either side of its saved page a bookmark's opening words are looked for. A
+  // re-flow moves text a few pages at most; a whole-chapter scan per bookmark is not worth it.
+  constexpr int kSearchPages = 4;
+  // How many pages a recorded length is counted across. A bookmark is one page long, so
+  // even a much smaller font spreads it over two or three.
+  constexpr int kSpanPages = 4;
+
+  bool repaged = false;
+  const auto& bms = BOOKMARKS.getBookmarks();
+  for (size_t bi = 0; bi < bms.size(); bi++) {
+    const auto& b = bms[bi];
+    if (b.spineIndex != static_cast<uint16_t>(currentSpineIndex)) continue;
+    // A peer's highlight is placed by PageMarks from its own page span, not its opening words.
+    if (b.quote && BookmarkStore::isForeignMark(b)) continue;
+    if (bookmarkSpanCount_ >= MAX_BOOKMARK_SPANS || bi > UINT8_MAX) {
+      SdDebugLog::log("BMS", "spine=%d more than %u marks, rest placed by position", currentSpineIndex,
+                      (unsigned)MAX_BOOKMARK_SPANS);
+      break;
+    }
+    int landed = pageFromFraction(b.progress, pageCount);
+    if (b.visibleTextOffset != 0) {
+      const auto offsetPage = section->getPageForVisibleTextOffset(b.visibleTextOffset, /*preferFirstAtOffset=*/true);
+      if (offsetPage.has_value() && *offsetPage < pageCount) landed = *offsetPage;
+    } else if (!b.quote && b.paragraphIndex != UINT16_MAX && !BookmarkStore::isForeignMark(b)) {
+      const auto anchored = section->getPageForParagraphIndex(b.paragraphIndex);
+      if (anchored.has_value() && *anchored < pageCount) landed = *anchored;
+    }
+
+    // A bookmark made on a page with no text (a full-page image) has no words to look for: it
+    // sits on the page its offset names, and gets no margin mark. Without an offset it falls
+    // back to its saved position, like any mark that is not found.
+    if (b.snippet[0] == '\0') {
+      if (b.visibleTextOffset != 0) {
+        BookmarkSpan span;
+        span.bmIndex = static_cast<uint8_t>(bi);
+        span.textless = true;
+        span.startPage = span.endPage = static_cast<uint16_t>(landed);
+        bookmarkSpans_[bookmarkSpanCount_++] = span;
+        if (BOOKMARKS.setDisplayPage(bi, span.startPage, static_cast<uint16_t>(pageCount))) repaged = true;
+      }
+      SdDebugLog::log("BMS", "spine=%d textless landed=%d/%d vto=%u", currentSpineIndex, landed + 1, pageCount,
+                      b.visibleTextOffset);
+      continue;
+    }
+
+    int startPage = -1;
+    uint16_t startIndex = 0;
+    bool runsOff = false;
+    for (int i = 0; i <= 2 * kSearchPages; i++) {
+      const int p = landed + ((i % 2) ? (i + 1) / 2 : -(i / 2));  // landed, +1, -1, +2, -2, ...
+      if (p < 0 || p >= pageCount) continue;
+      const auto page = section->loadPage(p);
+      if (!page) continue;
+      const PageMarks::SnippetAt at = PageMarks::findSnippet(*page, b.snippet, nullptr, &startIndex);
+      if (at != PageMarks::SnippetAt::None) {
+        startPage = p;
+        runsOff = at == PageMarks::SnippetAt::RunsOff;
+        break;
+      }
+    }
+    if (startPage < 0) {
+      SdDebugLog::log("BMS", "spine=%d q=%d landed=%d/%d start not found \"%.40s\"", currentSpineIndex, b.quote ? 1 : 0,
+                      landed + 1, pageCount, b.snippet);
+      continue;
+    }
+
+    BookmarkSpan span;
+    span.bmIndex = static_cast<uint8_t>(bi);
+    span.quote = b.quote;
+    span.hasLength = !b.quote && b.endWord > 0;
+    span.startPage = static_cast<uint16_t>(startPage);
+    span.startIndex = startIndex;
+    span.endPage = span.startPage;
+    span.endIndex = startIndex;
+    // A point bookmark's recorded length, or a quote's word count: either way its end is that
+    // many words on from where its opening words are now, which may be a page or two later.
+    const uint16_t lengthWords =
+        b.quote ? static_cast<uint16_t>(std::max(b.startWord, b.endWord) - std::min(b.startWord, b.endWord) + 1)
+                : b.endWord;
+    if (lengthWords > 0) {
+      uint16_t remaining = lengthWords;
+      uint16_t from = startIndex;
+      span.endIndex = UINT16_MAX;
+      for (int p = startPage; p < pageCount && p < startPage + kSpanPages; p++, from = 0) {
+        const auto page = section->loadPage(p);
+        if (!page) break;
+        span.endPage = static_cast<uint16_t>(p);
+        uint16_t endIndex = 0;
+        if (PageMarks::advanceSpan(*page, from, remaining, endIndex)) {
+          span.endIndex = endIndex;
+          break;
+        }
+      }
+    }
+    // Opening words that run off a page's foot: the bookmark belongs to the page they finish on,
+    // the one seekSavedTextNearCurrentPage jumps to, so its start mark goes on that page's top
+    // line. Its length was still counted from where the words begin.
+    if (runsOff && !b.quote && span.startPage + 1 < pageCount && (lengthWords == 0 || span.endPage > span.startPage)) {
+      span.startPage++;
+      span.startIndex = 0;
+      if (span.endPage < span.startPage) {
+        span.endPage = span.startPage;
+        span.endIndex = 0;
+      }
+    }
+    bookmarkSpans_[bookmarkSpanCount_++] = span;
+    SdDebugLog::log("BMS", "spine=%d q=%d landed=%d start=%u:%u end=%u:%u words=%u runsOff=%d vto=%u pages=%d",
+                    currentSpineIndex, b.quote ? 1 : 0, landed + 1, span.startPage + 1, span.startIndex,
+                    span.endPage + 1, span.endIndex, (unsigned)lengthWords, runsOff ? 1 : 0, b.visibleTextOffset,
+                    pageCount);
+    // The list's "page X/Y" was the page count when the mark was made; show where it is now.
+    if (BOOKMARKS.setDisplayPage(bi, span.startPage, static_cast<uint16_t>(pageCount))) repaged = true;
+  }
+  if (repaged) BOOKMARKS.saveToFile();  // one write per re-pagination, not per mark
+}
+
+bool EpubReaderActivity::pageHasMarginMark() const {
+  if (!section) return false;
+  refreshBookmarkSpans();
+  const int cur = section->currentPage;
+  for (uint8_t i = 0; i < bookmarkSpanCount_; i++) {
+    const BookmarkSpan& s = bookmarkSpans_[i];
+    if (s.quote || s.textless) continue;
+    if (cur == s.startPage || (s.hasLength && cur == s.endPage && s.endIndex != UINT16_MAX)) return true;
+  }
+  return false;
+}
+
+int EpubReaderActivity::markIndexOnCurrentPage(const bool quote) const {
+  if (!section || section->pageCount <= 0) return -1;
+  refreshBookmarkSpans();
+  const int cur = section->currentPage;
+  const float pageSlice = 1.0f / static_cast<float>(section->pageCount);
+  const float pageStart = static_cast<float>(cur) * pageSlice;
+  const auto& bms = BOOKMARKS.getBookmarks();
+  for (size_t bi = 0; bi < bms.size(); bi++) {
+    const auto& b = bms[bi];
+    if (b.quote != quote || b.spineIndex != static_cast<uint16_t>(currentSpineIndex)) continue;
+    const BookmarkSpan* placed = nullptr;
+    for (uint8_t i = 0; i < bookmarkSpanCount_; i++) {
+      if (bookmarkSpans_[i].bmIndex == bi) {
+        placed = &bookmarkSpans_[i];
+        break;
+      }
+    }
+    const bool here =
+        placed ? placed->startPage == cur : (b.progress >= pageStart && b.progress < pageStart + pageSlice);
+    if (here) return static_cast<int>(bi);
+  }
+  return -1;
+}
+
+void EpubReaderActivity::reloadLookupMarks() {
   LookupMarks::getInstance().clear();
+  lookupMarksSpine_ = currentSpineIndex;
+  lookupMarksOverflow_ = false;
   if (!epub || !SETTINGS.lookupUnderline) return;
-  int added = 0;
+  LookupMarks::getInstance().setPreferredChapter(currentChapterHash());
+  const uint32_t startMs = millis();
+  struct Counts {
+    int cards = 0;  // every card the deck holds for this book
+    int added = 0;  // those with a page anchor; the table keeps only the newest MAX_MARKS
+  } counts;
   // Captureless lambda -> plain function pointer: no std::function, nothing allocated.
   FlashcardDeck::forEachCardAnchor(
       epub->getCachePath(),
       [](void* ctx, const char* word, int wordLen, const char* title, int titleLen, int page, int pageCount,
          const char* excerpt, int excerptLen) {
+        auto* c = static_cast<Counts*>(ctx);
+        c->cards++;
         // Mark the word the PAGE prints, which a "Did you mean?" card does not carry as its
         // headword — cardSurfaceForm recovers it from the card's own excerpt.
         int surfaceLen = 0;
         const char* surface = cardSurfaceForm(word, wordLen, excerpt, excerptLen, surfaceLen);
-        if (LookupMarks::getInstance().add(surface, surfaceLen, title, titleLen, page, pageCount)) {
-          (*static_cast<int*>(ctx))++;
-        }
+        if (LookupMarks::getInstance().add(surface, surfaceLen, title, titleLen, page, pageCount)) c->added++;
         return true;
       },
-      &added);
-  LOG_DBG("EPUB", "Lookup marks: %d anchored", added);
+      &counts);
+  lookupMarksOverflow_ = counts.added >= LookupMarks::MAX_MARKS;
+  SdDebugLog::log("LMK", "reload spine=%d cards=%d anchored=%d table=%d/%d ms=%lu", currentSpineIndex, counts.cards,
+                  counts.added, LookupMarks::getInstance().size(), LookupMarks::MAX_MARKS,
+                  static_cast<unsigned long>(millis() - startMs));
 }
 
 void EpubReaderActivity::commitReadingTime(uint32_t minDeltaSecs) {
@@ -1906,12 +2122,16 @@ void EpubReaderActivity::openHighlightSelect(const int pointX, const int pointY,
   }
 
   const uint16_t spine = static_cast<uint16_t>(currentSpineIndex);
-  const float progress = static_cast<float>(currentPage) / static_cast<float>(pageCount);
 
   // No existing highlight on this page. Entering that way is a request to make one; but
   // arriving here by deleting the last one means the page is now clear and the user is
   // done, so go back to reading rather than opening a selection they did not ask for.
-  if (!BOOKMARKS.hasQuoteForPage(spine, progress, pageCount)) {
+  int quoteIndex;
+  {
+    RenderLock lock(*this);
+    quoteIndex = markIndexOnCurrentPage(true);
+  }
+  if (quoteIndex < 0) {
     if (afterDelete) {
       requestUpdate();
       return;
@@ -1920,21 +2140,18 @@ void EpubReaderActivity::openHighlightSelect(const int pointX, const int pointY,
     return;
   }
 
-  // Find the first quote anchored on this page and its full preview text. Page match
-  // mirrors BookmarkStore::hasQuoteForPage (spine + progress within the page slice).
-  const float pageSlice = 1.0f / static_cast<float>(pageCount);
+  // The first quote belonging to this page (markIndexOnCurrentPage) and its full preview text.
   const auto& bms = BOOKMARKS.getBookmarks();
   uint16_t qStartWord = 0, qEndWord = 0;
   std::string quoteText;
-  for (size_t i = 0; i < bms.size(); i++) {
+  {
+    const size_t i = static_cast<size_t>(quoteIndex);
     const auto& b = bms[i];
-    if (!b.quote || b.spineIndex != spine || b.progress < progress || b.progress >= progress + pageSlice) continue;
     qStartWord = b.startWord;
     qEndWord = b.endWord;
     if (!BOOKMARKS.readPreviewAt(i, quoteText) || quoteText.empty()) {
       quoteText = b.snippet;  // fall back to the resident teaser if .qtext is unavailable
     }
-    break;
   }
 
   startActivityForResultNoThrow<HighlightActionActivity>(
@@ -2015,6 +2232,8 @@ void EpubReaderActivity::launchHighlightWordSelect(const int pointX, const int p
     ignoreBackUntilRelease = true;
     if (!result.isCancelled) {
       if (const auto* hr = std::get_if<HighlightRangeResult>(&result.data)) {
+        SdDebugLog::log("PGM", "save spine=%u page=%d/%d progress=%.4f sw=%d ew=%d \"%.63s\"", spine, currentPage + 1,
+                        pageCount, progress, hr->startWordIndex, hr->endWordIndex, hr->previewText.c_str());
         const auto addRes = BOOKMARKS.addQuote(spine, progress, static_cast<uint16_t>(std::max(0, hr->startWordIndex)),
                                                static_cast<uint16_t>(std::max(0, hr->endWordIndex)), pageCount,
                                                chapterTitle.empty() ? nullptr : chapterTitle.c_str(),
@@ -2074,11 +2293,14 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
   switch (action) {
     case EpubReaderMenuActivity::MenuAction::BOOKMARK_TOGGLE: {
       if (!section || section->pageCount == 0) break;
-      const uint16_t spine = static_cast<uint16_t>(currentSpineIndex);
-      const float progress = static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
-      if (BOOKMARKS.hasPointBookmarkForPage(spine, progress, section->pageCount)) {
+      int existing;
+      {
+        RenderLock lock(*this);  // the mark cache is the render task's; read it under its lock
+        existing = markIndexOnCurrentPage(false);
+      }
+      if (existing >= 0) {
         // Remove: update only the status-bar strip so the image stays untouched.
-        BOOKMARKS.removeBookmarkForPage(spine, progress, section->pageCount);
+        BOOKMARKS.removeBookmarkAt(static_cast<size_t>(existing));
         lightStatusBarRefresh();
       } else {
         // Add: same light-refresh path — tab appears without re-rendering the page.
@@ -2435,10 +2657,12 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
               };
 
               if (section && section->pageCount > 0) {
-                const float bmProgress =
-                    static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
-                if (!BOOKMARKS.hasPointBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), bmProgress,
-                                                       section->pageCount)) {
+                bool pageUnmarked;
+                {
+                  RenderLock lock(*this);
+                  pageUnmarked = markIndexOnCurrentPage(false) < 0;
+                }
+                if (pageUnmarked) {
                   startActivityForResultNoThrow<ConfirmationActivity>(
                       [this, doNavigate](const ActivityResult& confirmResult) {
                         if (!confirmResult.isCancelled) {
@@ -3136,14 +3360,20 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     // a smaller screen that paragraph can span pages -- the paragraph anchor alone would
     // then open a page before the text the peer had at the top.
     if (pendingVisibleOffset != 0 && section->pageCount > 0) {
-      const auto offsetPage = section->getPageForVisibleTextOffset(pendingVisibleOffset);
+      // First page at the offset: an image-only page shares its offset with the text page after
+      // it, and a bookmark made on it means the image. A text bookmark that lands there instead
+      // is carried on to its text by the snippet seek below.
+      const auto offsetPage = section->getPageForVisibleTextOffset(pendingVisibleOffset, /*preferFirstAtOffset=*/true);
       if (offsetPage.has_value() && *offsetPage < section->pageCount) {
         section->currentPage = *offsetPage;
         pendingPercentJump = false;
         pendingParagraphAnchor = UINT16_MAX;
         LOG_DBG("ERS", "Bookmark offset %u -> page %u", pendingVisibleOffset, *offsetPage);
+        SdDebugLog::log("ERS", "jump spine=%d offset=%u -> page %u/%u", currentSpineIndex, pendingVisibleOffset,
+                        *offsetPage + 1, section->pageCount);
       } else {
         LOG_DBG("ERS", "Bookmark offset %u unresolved; using the paragraph", pendingVisibleOffset);
+        SdDebugLog::log("ERS", "jump spine=%d offset=%u unresolved", currentSpineIndex, pendingVisibleOffset);
       }
       pendingVisibleOffset = 0;
     }
@@ -3157,8 +3387,11 @@ void EpubReaderActivity::render(RenderLock&& lock) {
         section->currentPage = *anchoredPage;
         pendingPercentJump = false;
         LOG_DBG("ERS", "Bookmark paragraph %u -> page %u", pendingParagraphAnchor, *anchoredPage);
+        SdDebugLog::log("ERS", "jump spine=%d paragraph=%u -> page %u/%u", currentSpineIndex, pendingParagraphAnchor,
+                        *anchoredPage + 1, section->pageCount);
       } else {
         LOG_DBG("ERS", "Bookmark paragraph %u unresolved; using progress", pendingParagraphAnchor);
+        SdDebugLog::log("ERS", "jump spine=%d paragraph=%u unresolved", currentSpineIndex, pendingParagraphAnchor);
       }
       pendingParagraphAnchor = UINT16_MAX;
     }
@@ -3167,6 +3400,11 @@ void EpubReaderActivity::render(RenderLock&& lock) {
       // Apply the pending percent jump now that we know the new section's page count.
       section->currentPage = pageFromFraction(pendingSpineProgress, section->pageCount);
       pendingPercentJump = false;
+      if (!pendingSeekSnippet_.empty()) {
+        SdDebugLog::log("ERS", "jump spine=%d progress=%.4f -> page %d/%u partial=%d", currentSpineIndex,
+                        pendingSpineProgress, section->currentPage + 1, section->pageCount,
+                        section->isPartial() ? 1 : 0);
+      }
       if (pendingSeekWord_) {
         pendingSeekWord_ = false;
         seekSavedTextNearCurrentPage();
@@ -3277,6 +3515,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   }
 
   {
+    refreshBookmarkSpans();
     // Unified page read: the in-progress build's in-RAM table if it has reached the page,
     // otherwise the on-disk file (finalized section, or a partial from a previous session).
     auto p = section->loadPage(section->currentPage);
@@ -3897,9 +4136,43 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   const auto drawPageMarks = [&]() {
     const PageMarks::PageKey key = currentPageMarkKey();
     if (!key.valid) return;
+    // A full table holds the chapter it was built in first; a new chapter needs its own.
+    if (lookupMarksOverflow_ && lookupMarksSpine_ != currentSpineIndex) reloadLookupMarks();
+    // This device's quotes, as the span resolver placed them: a quote a re-flow pushed across a
+    // page break is drawn on both pages, from where its text is now.
+    refreshBookmarkSpans();
+    const int curPage = section->currentPage;
+    const auto& marks = BOOKMARKS.getBookmarks();
+    PageMarks::QuotePlacement placements[MAX_BOOKMARK_SPANS];
+    size_t placementCount = 0;
+    for (uint8_t i = 0; i < bookmarkSpanCount_; i++) {
+      const BookmarkSpan& s = bookmarkSpans_[i];
+      if (!s.quote || s.bmIndex >= marks.size()) continue;
+      PageMarks::QuotePlacement& q = placements[placementCount++];
+      q.snippet = marks[s.bmIndex].snippet;
+      q.onThisPage = curPage >= s.startPage && curPage <= s.endPage;
+      q.start = curPage == s.startPage ? s.startIndex : 0;
+      q.end = curPage == s.endPage ? s.endIndex : UINT16_MAX;
+    }
     PageMarks::drawForPage(renderer, *page, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop,
                            key.spineIndex, key.pageProgress, key.pageCount, key.chapterHash, key.pageNumber,
-                           key.markPageCount);
+                           key.markPageCount, INT16_MIN, INT16_MAX, placements, placementCount);
+    // Bookmark marks sit in the left margin, clear of the text and inside the viewable area. The
+    // blocks are as bold as the margin allows, leaving a pixel before the text.
+    const int viewableLeft = orientedMarginLeft - SETTINGS.getReaderScreenMargin();
+    const int barX = std::max(viewableLeft, orientedMarginLeft - 7);
+    const int blockWidth = std::clamp(orientedMarginLeft - 1 - barX, 2, 5);
+    const int cur = section->currentPage;
+    paintedMarginMark_ = pageHasMarginMark();
+    for (uint8_t i = 0; i < bookmarkSpanCount_; i++) {
+      const BookmarkSpan& s = bookmarkSpans_[i];
+      if (s.quote || s.textless || cur < s.startPage || cur > s.endPage) continue;
+      const bool startsHere = cur == s.startPage;
+      const bool endsHere = cur == s.endPage && s.endIndex != UINT16_MAX;
+      PageMarks::drawBookmarkSpan(renderer, *page, SETTINGS.getReaderFontId(), orientedMarginTop, barX,
+                                  startsHere ? s.startIndex : 0, endsHere ? s.endIndex : UINT16_MAX, startsHere,
+                                  endsHere, s.hasLength, blockWidth);
+    }
   };
 
   // No automatic ghost-clear flash on image page turns — the power-button manual
@@ -4126,17 +4399,12 @@ void EpubReaderActivity::renderStatusBar() const {
     title = epub->getTitle();
   }
 
-  const float bmPageProgress = (section && section->pageCount > 0)
-                                   ? static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount)
-                                   : 0.0f;
   const bool hasSection = section && section->pageCount > 0;
   // Split by type so a page can show both the bookmark tab and the quote glyph.
-  const bool pointBookmarked = hasSection && BOOKMARKS.hasPointBookmarkForPage(static_cast<uint16_t>(currentSpineIndex),
-                                                                               bmPageProgress, section->pageCount);
-  const bool quoted = hasSection && BOOKMARKS.hasQuoteForPage(static_cast<uint16_t>(currentSpineIndex), bmPageProgress,
-                                                              section->pageCount);
-  const bool returnMark = pointBookmarked && BOOKMARKS.isReturnMarkForPage(static_cast<uint16_t>(currentSpineIndex),
-                                                                           bmPageProgress, section->pageCount);
+  const int pointIndex = hasSection ? markIndexOnCurrentPage(false) : -1;
+  const bool pointBookmarked = pointIndex >= 0;
+  const bool quoted = hasSection && markIndexOnCurrentPage(true) >= 0;
+  const bool returnMark = pointBookmarked && BOOKMARKS.getBookmarks()[pointIndex].returnMark;
   // pageCountEstimated = the section is still building, so the page total is a smoothed estimate
   // (drawStatusBar prefixes it with "~"). Matches upstream's building indicator.
   // After following a link a way back exists (Back, the Home key, or a tap on this band).
@@ -4928,6 +5196,13 @@ void EpubReaderActivity::lightStatusBarRefresh() {
   }
 
   RenderLock lock(*this);
+  // A bookmark's margin blocks are page content: a toggle that adds or removes one needs the
+  // page repainted, which also redraws the status bar.
+  if (paintedMarginMark_ || pageHasMarginMark()) {
+    lock.unlock();
+    requestUpdate();
+    return;
+  }
 
   int orientedTop, orientedRight, orientedBottom, orientedLeft;
   renderer.getOrientedViewableTRBL(&orientedTop, &orientedRight, &orientedBottom, &orientedLeft);
@@ -5038,8 +5313,8 @@ void EpubReaderActivity::restoreSavedPosition() {
 
 bool EpubReaderActivity::canOfferReturnMark() const {
   if (!section || section->pageCount == 0) return false;
-  const float progress = static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
-  return !BOOKMARKS.hasPointBookmarkForPage(static_cast<uint16_t>(currentSpineIndex), progress, section->pageCount);
+  RenderLock lock;  // the mark cache is the render task's; read it under its lock
+  return markIndexOnCurrentPage(false) < 0;
 }
 
 bool EpubReaderActivity::chapterJumpLeavesPage(const int spineIndex, const std::string& anchor) const {
@@ -5066,12 +5341,17 @@ void EpubReaderActivity::addBookmark(bool returnMark, bool lightRefresh) {
 
   int pageCount;
   int currentPage;
+  int replaced;
   {
     RenderLock lock(*this);
     pageCount = section->estimatedTotalPages();
     currentPage = section->currentPage;
+    // The bookmark this page already shows is the one a new one replaces -- by where its text
+    // is now, not by its saved position, which a re-flow may have moved onto this page.
+    replaced = markIndexOnCurrentPage(false);
   }
   if (pageCount == 0) return;
+  if (replaced >= 0) BOOKMARKS.removeBookmarkAt(static_cast<size_t>(replaced));
 
   const uint16_t spine = static_cast<uint16_t>(currentSpineIndex);
   const float progress = static_cast<float>(currentPage) / static_cast<float>(pageCount);
@@ -5090,13 +5370,20 @@ void EpubReaderActivity::addBookmark(bool returnMark, bool lightRefresh) {
   }
 
   char snippet[BOOKMARK_SNIPPET_MAX] = {};
+  uint16_t spanWords = 0;
+  // The page's exact starting character: unlike paragraphIndex, which names the paragraph the
+  // page ENDS in, this re-finds the page's first line after a re-flow.
+  uint32_t visibleOffset = 0;
+  if (const auto off = section->getVisibleTextOffsetForPage(static_cast<uint16_t>(currentPage))) visibleOffset = *off;
   if (auto page = section->loadPage(section->currentPage)) {
     buildBookmarkSnippet(*page, snippet, sizeof(snippet));
+    spanWords = PageMarks::countSpanWords(*page);
   }
 
   LOG_DBG("ERS", "Adding bookmark at spine %d, page %d", currentSpineIndex, currentPage);
-  const auto addResult =
-      BOOKMARKS.addBookmark(spine, progress, pageCount, chapterTitle, paragraphIndex, snippet, returnMark, currentPage);
+  const auto addResult = BOOKMARKS.addBookmark(spine, progress, pageCount, chapterTitle, paragraphIndex, snippet,
+                                               returnMark, currentPage, spanWords, visibleOffset,
+                                               /*replaceSamePage=*/false);
   if (addResult == BookmarkStore::AddResult::Added) {
     if (lightRefresh) {
       // Interactive toggle: update only the status-bar strip (image untouched).

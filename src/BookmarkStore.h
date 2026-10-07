@@ -88,7 +88,11 @@ struct Bookmark {
   uint16_t endSpineIndex = 0;
   float endProgress = 0.0f;
   uint16_t startWord = 0;  // page-local word index of the selection start
-  uint16_t endWord = 0;    // page-local word index of the selection end (inclusive)
+  // Quote: page-local word index of the selection end (inclusive). Point bookmark: how many
+  // words the bookmarked page held (PageMarks::countSpanWords), 0 when unknown -- the length
+  // the reader re-finds the bookmark's end by after a re-flow. Not part of a point bookmark's
+  // identity, so reusing the field costs no format change.
+  uint16_t endWord = 0;
 
   bool isQuote() const { return quote; }
 };
@@ -136,7 +140,8 @@ class BookmarkStore {
 
   AddResult addBookmark(uint16_t spineIndex, float progress, int pageCount, const char* chapterTitle,
                         uint16_t paragraphIndex = UINT16_MAX, const char* snippet = nullptr, bool returnMark = false,
-                        int currentPage = 0);
+                        int currentPage = 0, uint16_t spanWords = 0, uint32_t visibleTextOffset = 0,
+                        bool replaceSamePage = true);
 
   // Add a ranged quote ("highlight"). The anchor (spineIndex, progress, chapterTitle,
   // page snapshot) matches how a point bookmark anchors; startWord/endWord are the
@@ -254,6 +259,12 @@ class BookmarkStore {
 
   void removeBookmarkForPage(uint16_t spineIndex, float pageProgress, int pageCount);
   bool removeBookmarkAt(size_t index);
+
+  // Records where a mark now sits in this device's pagination (0-based page), for the "page X/Y"
+  // the list shows. Display-only: no version bump, since nothing changes that a peer needs, and
+  // no write -- the caller flushes with saveToFile() once it has placed every mark. Returns
+  // whether anything changed.
+  bool setDisplayPage(size_t index, uint16_t page, uint16_t pageCount);
   // Consume the session "return here" mark at this spot (matched like the merge key):
   // removes it only when the matching bookmark is a return mark. Used when the user
   // reopens it to navigate back — the one-shot aid has served its purpose. No-op (returns

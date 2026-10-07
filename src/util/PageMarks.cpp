@@ -145,7 +145,8 @@ bool firstWordMatches(const char* snippet, const char* text, size_t len) {
     len -= 2;
   }
   if (len == 0) return true;
-  if (std::strncmp(snippet, text, len) == 0) return true;
+  bool snippetRanOut = false;
+  if (SnippetMatch::foldedPrefix(snippet, std::strlen(snippet), text, len, snippetRanOut) >= 0) return true;
 
   // The other half of that pair: the snippet opens with the merged word while the token holds
   // only its tail ("nity"), so a match against the end of the snippet's first word counts too.
@@ -154,11 +155,64 @@ bool firstWordMatches(const char* snippet, const char* text, size_t len) {
   return firstLen >= len && std::strncmp(snippet + firstLen - len, text, len) == 0;
 }
 
+// Copies at most cap-1 bytes of `src`, never ending inside a UTF-8 sequence.
+void copyCut(char* dst, const size_t cap, const char* src, const size_t len) {
+  size_t n = std::min(len, cap - 1);
+  if (n < len) {
+    while (n > 0 && (static_cast<uint8_t>(src[n]) & 0xC0) == 0x80) n--;
+  }
+  std::memcpy(dst, src, n);
+  dst[n] = '\0';
+}
+
+// Hex of `src`, as many whole bytes as fit: shows the soft hyphens, NBSPs and quote variants a
+// printed token hides.
+void hexOf(char* dst, const size_t cap, const char* src, const size_t len) {
+  size_t o = 0;
+  dst[0] = '\0';
+  for (size_t i = 0; i < len && o + 3 <= cap; i++) {
+    o += static_cast<size_t>(std::snprintf(dst + o, cap - o, "%02X", static_cast<uint8_t>(src[i])));
+  }
+}
+
+// Matcher::offer, noting in `miss` where an open run broke when that run got further than any
+// before it.
+bool offerNoting(SnippetMatch::Matcher& m, const char* text, const size_t len, const uint16_t index,
+                 SnippetMiss* miss) {
+  if (!miss) return m.offer(text, len, index);
+  const bool wasOpen = m.open;
+  const uint16_t startBefore = m.start;
+  const uint8_t pos = static_cast<uint8_t>(m.partStart + m.matchedLen);
+  const size_t wantLen = m.partLen > m.matchedLen ? m.partLen - m.matchedLen : 0;
+  const bool matched = m.offer(text, len, index);
+  if (wasOpen && !m.done && (!m.open || m.start != startBefore) && pos > miss->best) {
+    miss->best = pos;
+    miss->page = miss->curPage;
+    copyCut(miss->want, sizeof(miss->want), m.snippet + pos, wantLen);
+    copyCut(miss->got, sizeof(miss->got), text, len);
+    hexOf(miss->gotHex, sizeof(miss->gotHex), text, len);
+  }
+  return matched;
+}
+
+// One line per (quote, page, outcome): a page redraws far more often than its marks change.
+bool firstReport(const char* snippet, const int pageNumber, const uint8_t kind) {
+  static const char* lastSnippet = nullptr;
+  static int lastPage = -1;
+  static uint8_t lastKind = 0xFF;
+  if (snippet == lastSnippet && pageNumber == lastPage && kind == lastKind) return false;
+  lastSnippet = snippet;
+  lastPage = pageNumber;
+  lastKind = kind;
+  return true;
+}
+
 // Resolve the word range of every foreign quote on this page, and settle where each local
 // one is (its saved word, else its text), in one walk. Measuring
 // nothing: this only needs the token sequence, and it has to complete before any band is
 // drawn, or a false partial match would paint one.
-void resolveForeignRanges(const Page& page, Range* ranges, size_t rangeCount) {
+void resolveForeignRanges(const Page& page, Range* ranges, size_t rangeCount, const int pageNumber,
+                          const int pageCount) {
   SnippetMatch::Matcher matchers[kMaxQuotesPerPage];
   size_t pending = 0;
   size_t continuing = 0;
@@ -192,6 +246,9 @@ void resolveForeignRanges(const Page& page, Range* ranges, size_t rangeCount) {
   if (pending == 0 && continuing == 0) return;
 
   uint16_t matchEnd[kMaxQuotesPerPage] = {};
+  // The token a local quote's saved start index names on this page, for the miss log.
+  const char* atStart[kMaxQuotesPerPage] = {};
+  uint8_t atStartLen[kMaxQuotesPerPage] = {};
   uint16_t index = 0;
   uint16_t lastIndex = 0;
   bool seenAny = false;
@@ -219,6 +276,8 @@ void resolveForeignRanges(const Page& page, Range* ranges, size_t rangeCount) {
           Range& lr = ranges[i];
           if (lr.local && !lr.nearby && index == lr.start) {
             lr.indexOk = firstWordMatches(lr.snippet, text + partStart, partLen);
+            atStart[i] = text + partStart;
+            atStartLen[i] = static_cast<uint8_t>(std::min<size_t>(partLen, 40));
           }
           if (lr.local) {
             if (!lr.indexOk && !matchers[i].done && matchers[i].snippet &&
@@ -247,17 +306,34 @@ void resolveForeignRanges(const Page& page, Range* ranges, size_t rangeCount) {
       r.checked = true;
     } else if (matchers[i].done) {
       // Its saved word moved, its text did not: draw it where the text is now.
+      if (firstReport(r.snippet, pageNumber, 1)) {
+        SdDebugLog::log("PGM", "local relocated p=%d nearby=%d sw=%u->%u ew=%u->%u \"%.40s\"", pageNumber,
+                        r.nearby ? 1 : 0, r.start, matchers[i].start, r.end, matchEnd[i], r.snippet);
+      }
       r.start = matchers[i].start;
       r.end = matchEnd[i];
       r.checked = true;
     } else {
       r.rejected = true;
-      if (!r.nearby) {
-        static const char* lastLocal = nullptr;
-        if (r.snippet && r.snippet != lastLocal) {
-          lastLocal = r.snippet;
-          SdDebugLog::log("PGM", "quote unmatched on its page: \"%.63s\"", r.snippet);
+      const SnippetMatch::Matcher& m = matchers[i];
+      const unsigned consumed = m.open ? static_cast<unsigned>(m.partStart + m.matchedLen) : 0u;
+      if (m.open && consumed >= kRelocateMinSnippet) {
+        // The text starts on this page and carries on past its foot: a quote the re-flow split
+        // across a page break, which neither page draws.
+        if (firstReport(r.snippet, pageNumber, 2)) {
+          SdDebugLog::log("PGM", "local runs off p=%d nearby=%d at=%u matched=%u/%u sw=%u ew=%u \"%.40s\"", pageNumber,
+                          r.nearby ? 1 : 0, m.start, consumed, (unsigned)std::strlen(r.snippet), r.start, r.end,
+                          r.snippet);
         }
+      } else if (!r.nearby && r.snippet && firstReport(r.snippet, pageNumber, 3)) {
+        SnippetMiss miss;
+        findSnippet(page, r.snippet, &miss);
+        SdDebugLog::log("PGM",
+                        "local unmatched p=%d/%d sw=%u ew=%u pageLast=%u atSw=\"%.*s\" best=%u/%u want=\"%s\" "
+                        "got=\"%s\" hex=%s snip=\"%.63s\"",
+                        pageNumber, pageCount, r.start, r.end, seenAny ? lastIndex : 0,
+                        atStart[i] ? (int)atStartLen[i] : 0, atStart[i] ? atStart[i] : "", miss.best,
+                        (unsigned)std::strlen(r.snippet), miss.want, miss.got, miss.gotHex, r.snippet);
       }
     }
   }
@@ -351,7 +427,7 @@ bool pageHasWord(const Page& page, const LookupMarks::Mark& mark) {
   return false;
 }
 
-SnippetAt findSnippet(const Page& page, const char* snippet) {
+SnippetAt findSnippet(const Page& page, const char* snippet, SnippetMiss* miss, uint16_t* startIndex) {
   if (!snippet || std::strlen(snippet) < kRelocateMinSnippet) return SnippetAt::None;
   SnippetMatch::Matcher matcher;
   matcher.snippet = snippet;
@@ -374,16 +450,108 @@ SnippetAt findSnippet(const Page& page, const char* snippet) {
       for (size_t pi = 0; pi < partCount; pi++, index++) {
         const size_t partStart = unsplit ? 0 : parts[pi].start;
         const size_t partLen = unsplit ? len : parts[pi].end - parts[pi].start;
-        if (matcher.offer(text + partStart, partLen, index)) return SnippetAt::Whole;
+        if (offerNoting(matcher, text + partStart, partLen, index, miss)) {
+          if (startIndex) *startIndex = matcher.start;
+          return SnippetAt::Whole;
+        }
       }
     }
   }
+  if (startIndex && matcher.open) *startIndex = matcher.start;
   return matcher.open ? SnippetAt::RunsOff : SnippetAt::None;
+}
+
+namespace {
+bool isSpanWord(const char* text, const size_t len) { return SnippetMatch::withoutTrailingHyphen(text, len) == len; }
+}  // namespace
+
+uint16_t countSpanWords(const Page& page) {
+  uint16_t remaining = UINT16_MAX;
+  uint16_t endIndex = 0;
+  advanceSpan(page, 0, remaining, endIndex);
+  return static_cast<uint16_t>(UINT16_MAX - remaining);
+}
+
+bool advanceSpan(const Page& page, const uint16_t fromIndex, uint16_t& remaining, uint16_t& endIndex) {
+  if (remaining == 0) return false;
+  uint16_t index = 0;
+  for (const auto& element : page.elements) {
+    if (element->getTag() != TAG_PageLine) continue;
+    const auto& block = static_cast<const PageLine*>(element.get())->getBlock();
+    if (!block) continue;
+    const uint16_t blockWordCount = block->wordCount();
+    for (uint16_t w = 0; w < blockWordCount; w++) {
+      const char* text = block->wordText(w);
+      const size_t len = block->wordTextLen(w);
+      bool isCjk = false;
+      if (!PageTokens::isSelectable(text, len, isCjk)) continue;
+      PageTokens::Part parts[PageTokens::kMaxTokenParts];
+      const size_t partCount = PageTokens::collectParts(text, len, parts, PageTokens::kMaxTokenParts);
+      const bool unsplit = partCount == 1 && parts[0].start == 0 && parts[0].end == len;
+      for (size_t pi = 0; pi < partCount; pi++, index++) {
+        if (index < fromIndex) continue;
+        const size_t partStart = unsplit ? 0 : parts[pi].start;
+        const size_t partLen = unsplit ? len : parts[pi].end - parts[pi].start;
+        if (!isSpanWord(text + partStart, partLen)) continue;
+        if (--remaining == 0) {
+          endIndex = index;
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+void drawBookmarkSpan(const GfxRenderer& renderer, const Page& page, const int fontId, const int marginTop,
+                      const int barX, const uint16_t fromIndex, const uint16_t toIndex, const bool startsHere,
+                      const bool endsHere, const bool hasLength, const int blockWidth) {
+  constexpr int kMinWidth = 2;
+
+  const int lineHeight = renderer.getLineHeight(fontId);
+  const int ascender = renderer.getFontAscenderSize(fontId);
+
+  // Only rows are needed: everything is drawn in the margin, nothing inside a line.
+  int firstRow = -1;
+  int startRow = -1;
+  int endRow = -1;
+  uint16_t index = 0;
+  for (const auto& element : page.elements) {
+    if (element->getTag() != TAG_PageLine) continue;
+    const auto* line = static_cast<const PageLine*>(element.get());
+    const auto& block = line->getBlock();
+    if (!block) continue;
+    const int rowY = line->yPos + marginTop + block->getRubyShift(ascender);
+    const uint16_t blockWordCount = block->wordCount();
+    for (uint16_t w = 0; w < blockWordCount; w++) {
+      const char* text = block->wordText(w);
+      const size_t len = block->wordTextLen(w);
+      bool isCjk = false;
+      if (!PageTokens::isSelectable(text, len, isCjk)) continue;
+      PageTokens::Part parts[PageTokens::kMaxTokenParts];
+      const size_t partCount = PageTokens::collectParts(text, len, parts, PageTokens::kMaxTokenParts);
+      for (size_t pi = 0; pi < partCount; pi++, index++) {
+        if (firstRow < 0) firstRow = rowY;
+        if (index == fromIndex) startRow = rowY;
+        if (index == toIndex) endRow = rowY;
+      }
+    }
+  }
+  if (firstRow < 0) return;  // no text on the page
+  if (startsHere && startRow < 0) return;
+
+  // One block the height of the line beside the line it starts on, and one beside the line it
+  // ends on; nothing between, so a bookmark the layout has not moved is not a rule down the page.
+  const int width = std::max(kMinWidth, blockWidth);
+  if (startsHere) renderer.fillRect(barX, startRow, width, lineHeight, true);
+  // Without a recorded length the end is unknown, and the start block is the whole mark.
+  if (hasLength && endsHere && endRow >= 0) renderer.fillRect(barX, endRow, width, lineHeight, true);
 }
 
 void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int marginLeft, int marginTop,
                  uint16_t spineIndex, float pageProgress, int pageCount, uint32_t chapterHash, int pageNumber,
-                 const int markPageCount, const int bandTop, const int bandBottom) {
+                 const int markPageCount, const int bandTop, const int bandBottom, const QuotePlacement* placements,
+                 const size_t placementCount) {
   if (pageCount <= 0) return;
   // markStyle, not style: the per-word EpdFontFamily::Style below would shadow it.
   const uint8_t markStyle = SETTINGS.quoteHighlightStyle;
@@ -396,6 +564,23 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
     const float pageSlice = 1.0f / static_cast<float>(pageCount);
     for (const auto& b : BOOKMARKS.getBookmarks()) {
       if (!b.quote || b.spineIndex != spineIndex) continue;
+      const QuotePlacement* placed = nullptr;
+      for (size_t pi = 0; pi < placementCount; pi++) {
+        if (placements[pi].snippet == b.snippet) {
+          placed = &placements[pi];
+          break;
+        }
+      }
+      if (placed) {
+        if (!placed->onThisPage) continue;
+        if (rangeCount >= kMaxQuotesPerPage) break;
+        Range& r = ranges[rangeCount++];
+        r.start = placed->start;
+        r.end = placed->end;
+        r.snippet = b.snippet;
+        r.checked = true;  // located by its text already; neither foreign nor local resolution
+        continue;
+      }
       // endProgress equals progress for a quote made here -- a selection on this device
       // cannot cross a page break -- so this reduces to the old start-page test for them.
       const QuoteSpan::Role role = QuoteSpan::pageRole(b.progress, b.endProgress, pageProgress, pageSlice);
@@ -406,7 +591,13 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
       const bool nearby = role == QuoteSpan::Role::NotHere && !foreign && pageOffset > -(kRelocatePages + 1) &&
                           pageOffset < kRelocatePages + 1 && std::strlen(b.snippet) >= kRelocateMinSnippet;
       if (role == QuoteSpan::Role::NotHere && !nearby) continue;
-      if (rangeCount >= kMaxQuotesPerPage) break;
+      if (rangeCount >= kMaxQuotesPerPage) {
+        if (firstReport(b.snippet, pageNumber, 4)) {
+          SdDebugLog::log("PGM", "quote cap %u hit p=%d, skipped \"%.40s\"", (unsigned)kMaxQuotesPerPage, pageNumber,
+                          b.snippet);
+        }
+        break;
+      }
       Range& r = ranges[rangeCount++];
       r.start = std::min(b.startWord, b.endWord);
       r.end = std::max(b.startWord, b.endWord);
@@ -418,7 +609,7 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
       r.endsHere = nearby || role == QuoteSpan::Role::Whole || role == QuoteSpan::Role::Ends;
       r.endFracInPage = QuoteSpan::endFraction(b.endProgress, pageProgress, pageSlice);
     }
-    resolveForeignRanges(page, ranges, rangeCount);
+    resolveForeignRanges(page, ranges, rangeCount, pageNumber, pageCount);
   }
 
   // Looked-up words anchored here. Resolved against the resident table, not the page: the

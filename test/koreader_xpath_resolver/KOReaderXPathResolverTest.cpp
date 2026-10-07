@@ -461,3 +461,26 @@ TEST(KOReaderXPathResolver, BatchedProgressAgreesWithTheSingleTargetApi) {
         << "progress " << progresses[i];
   }
 }
+
+// Named HTML entities are not XML: under an XHTML DOCTYPE expat drops them unless a handler
+// expands them, so a quote opening on &ldquo; never matched.
+TEST(KOReaderXPathResolver, MatchesANamedEntityUnderAnXhtmlDoctype) {
+  const auto epub = epubWith(
+      "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" "
+      "\"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd\">\n<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p>"
+      "&ldquo;In Hong Kong, what is not expressly forbidden</p></body></html>");
+  const std::string needles[] = {"\xE2\x80\x9CIn Hong Kong, what is not expressly forbidden"};
+  ChapterXPathResolver::TextRange ranges[1];
+  ASSERT_EQ(ChapterXPathResolver::findTextRanges(epub, 0, needles, ranges, 1), 1u);
+  EXPECT_EQ(ranges[0].start, 0u);  // the expanded “ is the first visible codepoint
+}
+
+// The offset passes count an expanded entity too, so an offset past one still resolves into
+// the text node that holds it.
+TEST(KOReaderXPathResolver, CountsAnExpandedEntityAsOneVisibleCodepoint) {
+  const auto epub = epubWith(
+      "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" "
+      "\"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd\">\n<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>"
+      "<p>a&mdash;b</p></body></html>");
+  EXPECT_EQ(ChapterXPathResolver::countVisibleChars(epub, 0), 3u);
+}

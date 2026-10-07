@@ -21,6 +21,7 @@ class OtaUpdateActivity : public Activity {
 
   State state = WIFI_SELECTION;
   unsigned int lastUpdaterPercentage = UNINITIALIZED_PERCENTAGE;
+  uint32_t updateStartMs = 0;  // millis() when the download+install began; drives the rate line
   // Guards the ~16s pre-reboot panel scrub in render()'s FINISHED branch against a repeat.
   bool deepCleanDone = false;
   OtaUpdater updater;

@@ -23,6 +23,7 @@
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/reader/ReaderUtils.h"
 #include "activities/util/KeyboardEntryActivity.h"
+#include "components/DownloadProgress.h"
 #include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
@@ -612,13 +613,13 @@ void OpdsBookBrowserActivity::buildBrowsingScreen(UiScreen& screen) {
 void OpdsBookBrowserActivity::buildDownloadScreen(UiScreen& screen) {
   screenHeader(screen, false);
 
-  // Centered block: status line, book title, progress bar, cancel button.
+  // Centered block: status line, book title, progress block, cancel button.
   const auto& theme = screen.theme();
   fui::TextStyle centered = theme.smallText;
   centered.align = fui::TextAlign::Center;
   const int16_t lh = screen.target().lineHeight(centered.font);
   const int16_t gap = theme.spaceMd;
-  const int16_t barH = 16;
+  const int16_t barH = static_cast<int16_t>(DownloadProgress::height(renderer));
   const int16_t btnH = theme.rowHeight;
   // LOCAL(feat): the book title wraps over up to 2 lines rather than being
   // ellipsized on one (wrappedText falls back to truncatedText only if even 2
@@ -639,30 +640,11 @@ void OpdsBookBrowserActivity::buildDownloadScreen(UiScreen& screen) {
     }
   }
 
-  const fui::Rect bar = screen.takeTop(barH, gap).inset(fui::Insets{0, 50, 0, 50});
-  if (downloadTotal > 0) {
-    fui::ProgressBarProps progress;
-    progress.value = static_cast<int32_t>(downloadProgress);
-    progress.max = static_cast<int32_t>(downloadTotal);
-    progress.border = fui::Paint::solid(fui::Color::Black);
-    progress.borderWidth = 1;
-    fui::progressBar(screen.frame(), bar, progress);
-  } else if (downloadProgress > 0) {
-    // LOCAL(feat): the server sent no Content-Length (chunked / redirected
-    // CDN), so there is no percentage to draw — show bytes received instead,
-    // scaled to KB / MB / GB as the transfer grows. Upstream draws nothing at
-    // all here, leaving a frozen, apparently-stalled screen.
-    char sizeText[32];
-    const double bytes = static_cast<double>(downloadProgress);
-    if (bytes < 1024.0 * 1024.0) {
-      snprintf(sizeText, sizeof(sizeText), "%.1f KB", bytes / 1024.0);
-    } else if (bytes < 1024.0 * 1024.0 * 1024.0) {
-      snprintf(sizeText, sizeof(sizeText), "%.1f MB", bytes / (1024.0 * 1024.0));
-    } else {
-      snprintf(sizeText, sizeof(sizeText), "%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
-    }
-    screen.target().text(bar, sizeText, centered);
-  }
+  // The UI target draws straight into the renderer, so the shared block can paint into the
+  // rect reserved for it. A server that sends no Content-Length gets the hatched
+  // bytes-so-far form rather than nothing.
+  const fui::Rect bar = screen.takeTop(barH, gap).inset(fui::Insets{0, 30, 0, 30});
+  drawTransferProgress(bar.x, bar.y, bar.width);
 
   const fui::Rect btnArea = screen.takeTop(btnH);
   const int16_t btnW = static_cast<int16_t>(btnArea.width / 3);
@@ -710,8 +692,28 @@ void OpdsBookBrowserActivity::buildStatusScreen(UiScreen& screen) {
     }
     return;
   }
+  // A feed transfer in flight: its label above the shared progress block.
+  if (transferStartMs != 0 && downloadProgress > 0) {
+    const int16_t lh = screen.target().lineHeight(centered.font);
+    const int16_t gap = screen.theme().spaceMd;
+    const int16_t blockH = static_cast<int16_t>(DownloadProgress::height(renderer));
+    const fui::Rect body = screen.body();
+    if (body.height > lh + gap + blockH) screen.spacer(static_cast<int16_t>((body.height - lh - gap - blockH) / 2));
+    screen.target().text(screen.takeTop(lh, gap), statusMessage.c_str(), centered);
+    const fui::Rect bar = screen.takeTop(blockH).inset(fui::Insets{0, 30, 0, 30});
+    drawTransferProgress(bar.x, bar.y, bar.width);
+    return;
+  }
   // CHECK_WIFI / LOADING (and the brief child-activity handoff states).
   screen.centeredText(statusMessage.c_str(), centered);
+}
+
+void OpdsBookBrowserActivity::drawTransferProgress(const int x, const int y, const int width) const {
+  DownloadProgress::State progress;
+  progress.done = downloadProgress;
+  progress.total = downloadTotal;
+  progress.elapsedMs = transferStartMs != 0 ? millis() - transferStartMs : 0;
+  DownloadProgress::draw(renderer, x, y, width, progress);
 }
 
 void OpdsBookBrowserActivity::render(RenderLock&&) {
@@ -888,13 +890,12 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path, const bool allo
     size_t lastShown = 0;
     int lastRenderedPercent = -1;
     unsigned long lastProgressUpdateMs = 0;
-    // Elapsed-time clock for the progress label.
-    const uint32_t fetchStartMs = millis();
+    downloadProgress = downloadTotal = 0;
+    transferStartMs = millis();
     cancelFetch = false;
     const auto dl = HttpDownloader::downloadToFile(
         url, feedPath.c_str(),
-        [this, &lastShown, &lastRenderedPercent, &lastProgressUpdateMs, fetchStartMs](const size_t downloaded,
-                                                                                      const size_t total) {
+        [this, &lastShown, &lastRenderedPercent, &lastProgressUpdateMs](const size_t downloaded, const size_t total) {
           // Poll Back every chunk (this fires per READ_CHUNK, not just per display
           // step) so the user can abort a slow feed instead of rebooting.
           // The downloader checks cancelFetch before the next socket read.
@@ -913,19 +914,13 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path, const bool allo
           lastRenderedPercent = percent;
           lastProgressUpdateMs = now;
           lastShown = downloaded;
-          char sizeText[64];
-          const unsigned elapsedS = (millis() - fetchStartMs) / 1000;
-          const double bytes = static_cast<double>(downloaded);
-          if (bytes < 1024.0 * 1024.0) {
-            snprintf(sizeText, sizeof(sizeText), "%s %.0f KB (%us)", tr(STR_DOWNLOADING), bytes / 1024.0, elapsedS);
-          } else {
-            snprintf(sizeText, sizeof(sizeText), "%s %.1f MB (%us)", tr(STR_DOWNLOADING), bytes / (1024.0 * 1024.0),
-                     elapsedS);
-          }
-          statusMessage = sizeText;
+          downloadProgress = downloaded;
+          downloadTotal = total;
+          statusMessage = tr(STR_DOWNLOADING);
           requestUpdate(true);
         },
         &cancelFetch, server.username, server.password, &httpDetail);
+    transferStartMs = 0;
     if (dl == HttpDownloader::ABORTED) {
       // User pressed Back during the transfer. Drop to ERROR (not a hard failure):
       // Confirm retries, Back steps up a level — both handled in loop(). Avoids
@@ -1127,7 +1122,11 @@ void OpdsBookBrowserActivity::rebuildRowItems() {
     item.label = rowLabels.back().c_str();
     // subtitle points straight into the arena — no copy, and valid as long as the feed is.
     item.subtitle = secondary;
-    if (entry.type == OpdsEntryType::NAVIGATION) item.value = ">";
+    if (entry.type == OpdsEntryType::NAVIGATION) {
+      item.value = ">";
+    } else if (entry.size[0] != '\0') {
+      item.value = entry.size;  // into the arena, like subtitle
+    }
     item.actionValue = static_cast<int16_t>(rowItems.size());
     rowItems.push_back(item);
   }
@@ -1148,7 +1147,7 @@ void OpdsBookBrowserActivity::releaseEntries() {
   closeRouting();
   std::vector<OpdsEntry>().swap(entries);
   // The arena goes with them: it holds every title/author/href, and it is the larger half
-  // of a feed's footprint now that the entry vector is 16 bytes per row. Freeing the
+  // of a feed's footprint now that the entry vector is 20 bytes per row. Freeing the
   // entries without it would keep the text alive for nothing.
   entriesArena.clear();
   std::vector<uint8_t>().swap(downloadedCache);
@@ -1201,6 +1200,7 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   state = BrowserState::DOWNLOADING;
   statusMessage = bookTitle;
   downloadProgress = downloadTotal = 0;
+  transferStartMs = millis();
   goHomeAfterCancel = false;
   // And-Wait, not requestUpdate(true). requestUpdate(true) only posts to the render task
   // (ActivityManager.cpp:349, xTaskNotify), so the repaint runs CONCURRENTLY with the code
@@ -1321,6 +1321,7 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
         }
       },
       &cancelFetch, server.username, server.password, &httpDetail);
+  transferStartMs = 0;
 
   if (result == HttpDownloader::ABORTED) {
     // User cancelled mid-download. downloadToFile already removed the partial

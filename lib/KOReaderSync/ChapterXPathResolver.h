@@ -65,6 +65,7 @@ class ChapterXPathResolver {
     uint32_t start = 0;
     uint32_t end = 0;
     bool found = false;
+    uint16_t occurrences = 0;  // how many times the needle occurs (found only when exactly 1)
   };
 
   /**
@@ -86,8 +87,11 @@ class ChapterXPathResolver {
    * @param outRanges  Caller-owned array of `count` ranges, reset on entry.
    * @return How many needles were located unambiguously.
    */
+  //
+  // `anyBlock` widens the search from <p>/<li> text to all visible body text. Its offsets are
+  // NOT in the space findXPathsForOffsets consumes; it only says whether text occurs at all.
   static size_t findTextRanges(const std::shared_ptr<Epub>& epub, int spineIndex, const std::string* needles,
-                               TextRange* outRanges, size_t count);
+                               TextRange* outRanges, size_t count, bool anyBlock = false);
 
   /**
    * Resolve a zero-based visible-codepoint offset in a spine item to its real

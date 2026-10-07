@@ -23,6 +23,7 @@ class CalibreConnectActivity final : public Activity {
   size_t lastProgressReceived = 0;
   size_t lastProgressTotal = 0;
   std::string currentUploadName;
+  uint32_t uploadStartMs = 0;  // millis() when the current file's upload began
   std::string lastCompleteName;
   unsigned long lastCompleteAt = 0;
   unsigned long lastProcessedCompleteAt = 0;  // Track which server value we've already processed

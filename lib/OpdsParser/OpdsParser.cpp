@@ -5,6 +5,8 @@
 #include <XmlParserUtils.h>
 #include <esp_heap_caps.h>
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace {
@@ -176,6 +178,22 @@ const char* OpdsParser::findAttribute(const XML_Char** atts, const char* name) {
   return nullptr;
 }
 
+namespace {
+// An Atom link's optional `length` attribute (bytes) as the row shows it, "1.2 MB"; "" when absent or
+// not a number.
+void formatLinkLength(const char* length, char* out, const size_t outSize) {
+  out[0] = '\0';
+  if (!length) return;
+  char* end = nullptr;
+  const unsigned long bytes = strtoul(length, &end, 10);
+  if (end == length || *end != '\0' || bytes == 0) return;
+  // Always MB with one decimal, so a column of books lines up and compares at a glance; a
+  // book under 0.05 MB still reads as 0.1 rather than 0.0.
+  const double mb = static_cast<double>(bytes) / (1024.0 * 1024.0);
+  snprintf(out, outSize, "%.1f MB", mb < 0.05 ? 0.1 : mb);
+}
+}  // namespace
+
 void XMLCALL OpdsParser::startElement(void* userData, const XML_Char* name, const XML_Char** atts) {
   auto* self = static_cast<OpdsParser*>(userData);
 
@@ -208,6 +226,7 @@ void XMLCALL OpdsParser::startElement(void* userData, const XML_Char* name, cons
           if (self->currentEntry.type != OpdsEntryType::BOOK || (isPlainEpub && !alreadyHasPlainEpub)) {
             self->currentEntry.type = OpdsEntryType::BOOK;
             self->currentEntry.href = href;
+            formatLinkLength(findAttribute(atts, "length"), self->currentEntry.size, sizeof(self->currentEntry.size));
           }
         } else if (type && strstr(type, "application/atom+xml") != nullptr) {
           if (self->currentEntry.type != OpdsEntryType::BOOK) {
@@ -227,6 +246,7 @@ void XMLCALL OpdsParser::startElement(void* userData, const XML_Char* name, cons
     self->currentEntry.title.clear();
     self->currentEntry.author.clear();
     self->currentEntry.href.clear();
+    self->currentEntry.size[0] = '\0';
     return;
   }
 
@@ -270,7 +290,8 @@ void XMLCALL OpdsParser::endElement(void* userData, const XML_Char* name) {
         const char* title = self->arena.add(self->currentEntry.title);
         const char* author = self->arena.add(self->currentEntry.author);
         const char* href = self->arena.add(self->currentEntry.href);
-        if (title == nullptr || author == nullptr || href == nullptr) {
+        const char* size = self->arena.add(self->currentEntry.size, strlen(self->currentEntry.size));
+        if (title == nullptr || author == nullptr || href == nullptr || size == nullptr) {
           self->truncated = true;
         } else {
           // Reserve the fixed step explicitly. Left to itself push_back would double,
@@ -280,7 +301,7 @@ void XMLCALL OpdsParser::endElement(void* userData, const XML_Char* name) {
           if (self->entries.size() == self->entries.capacity()) {
             self->entries.reserve(self->entries.capacity() + OPDS_GROWTH_STEP);
           }
-          self->entries.push_back(OpdsEntry{self->currentEntry.type, title, author, href});
+          self->entries.push_back(OpdsEntry{self->currentEntry.type, title, author, href, size});
         }
       }
     }

@@ -324,9 +324,49 @@ class EpubReaderActivity final : public Activity {
   PageMarks::PageKey currentPageMarkKey();
   // (Re)build the resident looked-up-word index from this book's flashcard deck. One streaming
   // pass; called at book open and on return from any screen that can change the deck.
-  void reloadLookupMarks() const;
-  int nearestPageWhere(bool (*has)(const Page&, void*), void* ctx) const;
+  void reloadLookupMarks();
+  // The spine the table was built for, and whether the book has more anchored cards than the
+  // table holds: only then does the table depend on the chapter, and need rebuilding on entry.
+  int lookupMarksSpine_ = -1;
+  bool lookupMarksOverflow_ = false;
+  int nearestPageWhere(bool (*has)(const Page&, int, void*), void* ctx) const;
   void seekSavedTextNearCurrentPage();
+  // Where each mark of the current chapter lies in this pagination: re-found by its opening
+  // words, so it follows the text through a re-flow. A point bookmark also counts its recorded
+  // length in words on from there, for its margin bar; one with no recorded length spans just
+  // its start token. Page-local token indices, as PageMarks numbers them. The status-bar icons
+  // and the bookmark toggle go by startPage, so they agree with the page a jump opens.
+  struct BookmarkSpan {
+    uint8_t bmIndex = 0;  // into BOOKMARKS.getBookmarks(); valid while spansClock_ holds
+    bool quote = false;
+    bool hasLength = false;  // a recorded length, so the mark runs past its start line
+    bool textless = false;   // made on a page with no text: placed by offset, nothing to draw
+    uint16_t startPage = 0;
+    uint16_t startIndex = 0;
+    uint16_t endPage = 0;
+    uint16_t endIndex = 0;  // UINT16_MAX: runs on to the end of endPage
+  };
+  static constexpr size_t MAX_BOOKMARK_SPANS = 16;
+  // A cache over the section and BOOKMARKS, refreshed from const render paths.
+  mutable BookmarkSpan bookmarkSpans_[MAX_BOOKMARK_SPANS];
+  mutable uint8_t bookmarkSpanCount_ = 0;
+  // What the spans were resolved against; a change to any of these re-resolves them.
+  mutable bool spansValid_ = false;
+  mutable const Section* spansSection_ = nullptr;
+  mutable int spansSpine_ = -1;
+  mutable int spansPageCount_ = -1;
+  mutable uint32_t spansClock_ = 0;
+  // Resolves bookmarkSpans_ for the current section when stale. A few page reads per
+  // bookmark, once per chapter pagination; nothing while the section is still building.
+  void refreshBookmarkSpans() const;
+  // Index into BOOKMARKS of a mark of this kind belonging to the current page, or -1: the page
+  // its text was found on, or, for a mark not re-found, the page its saved position falls on.
+  int markIndexOnCurrentPage(bool quote) const;
+  // Whether the current page carries a bookmark's margin block, from the resolved spans.
+  bool pageHasMarginMark() const;
+  // Whether the last paint of the current page drew a margin block. A toggle that changes
+  // either has to repaint the page, not just the status bar, or a removed block stays on screen.
+  mutable bool paintedMarginMark_ = false;
   // The word a card is anchored under as the PAGE prints it. A "Did you mean?" card is filed
   // under the suggestion, so the printed form is recovered from the card's own excerpt; falls
   // back to the headword when it cannot be. The one derivation shared by the mark table and the

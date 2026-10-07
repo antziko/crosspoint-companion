@@ -105,6 +105,7 @@ void LookupMarks::clear() {
   marks_.reset();
   count_ = 0;
   writeIdx_ = 0;
+  hasPreferred_ = false;
 }
 
 bool LookupMarks::markFor(const char* word, const int wordLen, Mark& out) {
@@ -138,9 +139,25 @@ bool LookupMarks::add(const char* word, const int wordLen, const char* chapterTi
   const uint32_t wordHash = hashAppend(FNV_OFFSET, word, static_cast<size_t>(wordLen), &byteLen);
   if (byteLen == 0) return false;  // nothing but punctuation
 
+  const uint32_t chapterHash = hashChapter(chapterTitle, titleLen > 0 ? static_cast<size_t>(titleLen) : 0);
+  if (count_ == MAX_MARKS && hasPreferred_) {
+    // Full: the slot to overwrite is the oldest one outside the preferred chapter. With none
+    // left, a preferred mark replaces the oldest preferred one and any other mark is dropped.
+    int slot = -1;
+    for (int k = 0; k < MAX_MARKS && slot < 0; k++) {
+      const int i = (writeIdx_ + k) % MAX_MARKS;
+      if (marks_[i].chapterHash != preferred_) slot = i;
+    }
+    if (slot >= 0) {
+      writeIdx_ = slot;
+    } else if (chapterHash != preferred_) {
+      return false;
+    }
+  }
+
   const size_t headLen = firstCodepointLen(word, static_cast<size_t>(wordLen));
   Mark& m = marks_[writeIdx_];
-  m.chapterHash = hashChapter(chapterTitle, titleLen > 0 ? static_cast<size_t>(titleLen) : 0);
+  m.chapterHash = chapterHash;
   m.wordHash = wordHash;
   m.headHash = hashWord(word, headLen);
   m.page = static_cast<uint16_t>(page);
@@ -150,6 +167,16 @@ bool LookupMarks::add(const char* word, const int wordLen, const char* chapterTi
   writeIdx_ = (writeIdx_ + 1) % MAX_MARKS;
   if (count_ < MAX_MARKS) count_++;
   return true;
+}
+
+const LookupMarks::Mark* LookupMarks::findWord(const uint32_t wordHash) const {
+  if (!marks_) return nullptr;
+  // Walk back from the newest write so a re-enrolled word reports its latest anchor.
+  for (int k = 1; k <= count_; k++) {
+    const Mark& m = marks_[(writeIdx_ - k + MAX_MARKS) % MAX_MARKS];
+    if (m.wordHash == wordHash) return &m;
+  }
+  return nullptr;
 }
 
 int LookupMarks::collectForPage(const uint32_t chapterHash, const int page, const int pageCount, const Mark** out,

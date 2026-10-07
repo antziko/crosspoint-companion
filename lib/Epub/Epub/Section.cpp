@@ -656,6 +656,15 @@ bool Section::buildSomeMore(const int maxPages) {
       } else {
         recordBuildFailure(BuildFailure::Reason::Parse, 0, buildHtmlSize_);
         LOG_ERR("SCT", "Parse error during incremental build");
+        // A cached HTML is reused on every open without re-checking it, so one damaged by an
+        // interrupted SD write would fail the same way forever. Drop it: the next open
+        // re-inflates from the EPUB, which either heals it or proves the book itself is bad.
+        if (build_->reusedHtml) {
+          build_->parser->abortParse();  // closes the HTML before it is removed
+          const bool dropped = Storage.remove(build_->htmlPath.c_str());
+          SdDebugLog::log("SCT", "PARSE-FAIL spine=%d dropped cached html=%u removed=%d", spineIndex,
+                          (unsigned)buildHtmlSize_, dropped ? 1 : 0);
+        }
       }
       abandonBuild();
       return false;

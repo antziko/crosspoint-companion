@@ -9,6 +9,7 @@
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
+#include "components/DownloadProgress.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/OtaUpdater.h"
@@ -173,19 +174,14 @@ void OtaUpdateActivity::render(RenderLock&&) {
   } else if (state == UPDATE_IN_PROGRESS) {
     UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, top, tr(STR_UPDATING));
 
-    int y = top + height + metrics.verticalSpacing;
-    GUI.drawProgressBar(renderer,
-                        Rect{safe.x + metrics.contentSidePadding, y, pageWidth - metrics.contentSidePadding * 2,
-                             metrics.progressBarHeight},
-                        static_cast<int>(updaterProgress * 100), 100);
-
-    y += metrics.progressBarHeight + metrics.verticalSpacing;
-    // Percent label is drawn by BaseTheme::drawProgressBar; this slot is left intentionally empty
-    // so the bytes line below stays at the same Y it was at when the activity drew its own percent.
-    y += height + metrics.verticalSpacing;
-    UITheme::drawCenteredText(
-        renderer, safe, UI_10_FONT_ID, y,
-        (std::to_string(updater.getProcessedSize()) + " / " + std::to_string(updater.getTotalSize())).c_str());
+    // One layout held for the whole download and flash: unshaded track (see DownloadProgress.h).
+    DownloadProgress::State progress;
+    progress.done = updater.getProcessedSize();
+    progress.total = updater.getTotalSize();
+    progress.elapsedMs = millis() - updateStartMs;
+    progress.shadedTrack = false;
+    DownloadProgress::draw(renderer, safe.x + metrics.contentSidePadding, top + height + metrics.verticalSpacing,
+                           pageWidth - metrics.contentSidePadding * 2, progress);
   } else if (state == NO_UPDATE) {
     UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, top, tr(STR_NO_UPDATE), true, EpdFontFamily::BOLD);
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
@@ -229,6 +225,7 @@ void OtaUpdateActivity::runUpdateInstall() {
   {
     RenderLock lock(*this);
     state = UPDATE_IN_PROGRESS;
+    updateStartMs = millis();
   }
   requestUpdateAndWait();
   const auto res = updater.installUpdate(

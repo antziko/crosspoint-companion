@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #include "LookupMarks.h"
@@ -20,7 +21,41 @@ bool pageHasWord(const Page& page, const LookupMarks::Mark& mark);
 // foot that the next page carries on. Snippets shorter than the nearby-relocation minimum never
 // match. Allocates nothing.
 enum class SnippetAt : uint8_t { None, Whole, RunsOff };
-SnippetAt findSnippet(const Page& page, const char* snippet);
+
+// Diagnostics for a snippet that would not match: the furthest any run of it got (bytes of the
+// snippet consumed), the page that run was on, and the snippet part it expected against the page
+// token it got instead. Accumulates over calls, so one instance can follow a whole-chapter search;
+// the caller sets `curPage` before each call.
+struct SnippetMiss {
+  int curPage = -1;
+  int page = -1;
+  uint8_t best = 0;
+  char want[24] = {};
+  char got[24] = {};
+  char gotHex[40] = {};
+};
+// `startIndex`, when given, receives the page-local token index the match opened at.
+SnippetAt findSnippet(const Page& page, const char* snippet, SnippetMiss* miss = nullptr,
+                      uint16_t* startIndex = nullptr);
+
+// A point bookmark's extent. It records how many words its page held and is re-found by its
+// opening words, so after a re-flow its end is that many words further on. A "span word" is a
+// token part not ending in a hyphen: a word broken across two lines then counts once, wherever
+// the layout breaks it. Both allocate nothing.
+uint16_t countSpanWords(const Page& page);
+
+// Counts span words off `remaining` from token `fromIndex` on. True when the count runs out
+// on this page, `endIndex` then being the token it ran out on; otherwise `remaining` is what
+// the following page still has to cover.
+bool advanceSpan(const Page& page, uint16_t fromIndex, uint16_t& remaining, uint16_t& endIndex);
+
+// Draws a bookmark's marks in the left margin at `barX`, for tokens fromIndex..toIndex
+// (UINT16_MAX: past the page end): a bold block `blockWidth` wide beside the line it starts on,
+// and, when it has a recorded length (`hasLength`), the same beside the line it ends on. A page
+// it only passes through gets nothing. Nothing is drawn inside the text.
+void drawBookmarkSpan(const GfxRenderer& renderer, const Page& page, int fontId, int marginTop, int barX,
+                      uint16_t fromIndex, uint16_t toIndex, bool startsHere, bool endsHere, bool hasLength,
+                      int blockWidth);
 
 // Marks every quote anchored on this page and underlines every word looked up on it, in the
 // coordinate space the page was just rendered in. Quotes draw as a 25% dither band behind the
@@ -41,9 +76,22 @@ SnippetAt findSnippet(const Page& page, const char* snippet);
 // still runs, so a word wrapped into the band is still recognised): for a repaint of one strip
 // of a page whose other rows already carry their marks -- or carry a selection highlight that a
 // mark drawn over it would spoil.
+//
+// `placements`, when given, are this device's quotes already located across the chapter by
+// their opening words and length (the reader's span resolver): a quote listed there is drawn
+// from its token range on this page, including a page it only continues onto, and on no other
+// page. A quote the list omits falls back to being found on this page alone, which cannot
+// draw one a re-flow split across a page break.
+struct QuotePlacement {
+  const char* snippet = nullptr;  // identity: the BookmarkStore entry's own snippet buffer
+  bool onThisPage = false;
+  uint16_t start = 0;
+  uint16_t end = 0;  // inclusive; UINT16_MAX = to the page end
+};
 void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int marginLeft, int marginTop,
                  uint16_t spineIndex, float pageProgress, int pageCount, uint32_t chapterHash, int pageNumber,
-                 int markPageCount, int bandTop = INT16_MIN, int bandBottom = INT16_MAX);
+                 int markPageCount, int bandTop = INT16_MIN, int bandBottom = INT16_MAX,
+                 const QuotePlacement* placements = nullptr, size_t placementCount = 0);
 
 // The page identity drawForPage needs, for a screen that redraws the reader's page without the
 // reader's Section (the dictionary word-select overlay).

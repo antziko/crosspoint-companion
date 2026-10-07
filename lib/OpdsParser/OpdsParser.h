@@ -18,7 +18,7 @@ enum class OpdsEntryType {
 /**
  * Represents an entry from an OPDS feed (either a navigation link or a book).
  */
-// Deliberately three strings, not four. An `id` field (the Atom <id>, typically a
+// Deliberately four strings, not five. An `id` field (the Atom <id>, typically a
 // urn:uuid) was parsed and stored but never read anywhere in the tree. On the X3 that
 // cost a live heap block per entry — ids exceed the 16-char SSO buffer, so a 40-entry
 // feed pinned 40 extra small allocations across the browsing session — plus 40
@@ -28,11 +28,11 @@ enum class OpdsEntryType {
 // allocations are exactly what hurts. If a future feature needs the id, re-add it and
 // accept that cost knowingly.
 //
-// The three fields are bare `const char*` into an OpdsStringArena, not std::string. As
+// The string fields are bare `const char*` into an OpdsStringArena, not std::string. As
 // strings this struct was 76 bytes, which made the entry vector's growth step the biggest
 // single allocation of a parse and truncated real feeds: `entries growth bailed: count=48
 // need=6304 largest=5876` is a 56 x 76 reallocation failing by 428 bytes with 12196 free.
-// At 16 bytes the same step asks for 2944. The arena also collapses ~144 scattered string
+// At 16 bytes (20 with the size) the same step asks for 2944 (3680). The arena also collapses ~144 scattered string
 // blocks per feed into 512-byte chunks. Pointers are NUL-terminated and stable for the
 // arena's lifetime, so they are ordinary C strings.
 //
@@ -44,6 +44,7 @@ struct OpdsEntry {
   const char* title = "";
   const char* author = "";  // Only for books; "" when absent
   const char* href = "";    // Navigation URL or epub download URL
+  const char* size = "";    // Books: the download link's length, as "0.7 MB"; "" when the feed omits it
 };
 
 // Legacy alias for backward compatibility
@@ -141,6 +142,7 @@ class OpdsParser final : public Print {
     std::string title;
     std::string author;
     std::string href;
+    char size[12] = {};  // formatted when the chosen acquisition link is taken
   };
 
   XML_Parser parser = nullptr;

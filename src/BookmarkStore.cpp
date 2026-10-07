@@ -204,8 +204,10 @@ void BookmarkStore::unload() {
 
 BookmarkStore::AddResult BookmarkStore::addBookmark(uint16_t spineIndex, float progress, int pageCount,
                                                     const char* chapterTitle, uint16_t paragraphIndex,
-                                                    const char* snippet, bool returnMark, int currentPage) {
-  if (pageCount > 0) {
+                                                    const char* snippet, bool returnMark, int currentPage,
+                                                    uint16_t spanWords, uint32_t visibleTextOffset,
+                                                    bool replaceSamePage) {
+  if (replaceSamePage && pageCount > 0) {
     const float pageSlice = 1.0f / static_cast<float>(pageCount);
     const float pageStart = progress;
     const float pageEnd = progress + pageSlice;
@@ -231,6 +233,8 @@ BookmarkStore::AddResult BookmarkStore::addBookmark(uint16_t spineIndex, float p
   bm.returnMark = returnMark;
   bm.chapterCurrentPage = static_cast<uint16_t>(currentPage < 0 ? 0 : currentPage);
   bm.chapterPageCount = static_cast<uint16_t>(pageCount < 0 ? 0 : pageCount);
+  bm.endWord = spanWords;
+  bm.visibleTextOffset = visibleTextOffset;
 
   bookmarks.push_back(bm);
   sortBookmarks();
@@ -443,6 +447,16 @@ bool BookmarkStore::adoptForeignMark(const size_t index, const uint16_t spineInd
     }
   }
   LOG_DBG("BKS", "Adopted foreign bookmark at spine %u -> paragraph %u", spineIndex, paragraphIndex);
+  return true;
+}
+
+bool BookmarkStore::setDisplayPage(const size_t index, const uint16_t page, const uint16_t pageCount) {
+  if (index >= bookmarks.size() || pageCount == 0) return false;
+  Bookmark& bm = bookmarks[index];
+  if (bm.chapterCurrentPage == page && bm.chapterPageCount == pageCount) return false;
+  bm.chapterCurrentPage = page;
+  bm.chapterPageCount = pageCount;
+  dirty = true;
   return true;
 }
 
@@ -788,6 +802,7 @@ bool BookmarkStore::writeToFile() const {
 //   bookmark: s=spineIndex  p=progress  v=version  ct=chapterTitle  pi=paragraphIndex
 //             sn=snippet    cp=chapterCurrentPage  pc=chapterPageCount
 //             q=quote  es=endSpineIndex  ep=endProgress  sw=startWord  ew=endWord
+//             (a point bookmark sends only ew: its length in words, when known)
 //   tombstone:s=spineIndex  pi=paragraphIndex  p=progress  v=version
 //             q=quote  sw=startWord  ew=endWord
 // One builder for both the plain and the anchored blob. `anchorStore`/`anchorOffsets`, when
@@ -824,6 +839,8 @@ std::string BookmarkStore::serializeInternal(const std::vector<Bookmark>& bms, c
       obj["ep"] = bm.endProgress;
       obj["sw"] = bm.startWord;
       obj["ew"] = bm.endWord;
+    } else if (bm.endWord != 0) {
+      obj["ew"] = bm.endWord;  // the point bookmark's length in words; identity ignores it
     }
     // The KOReader anchor: "xp" locates the mark, "xp1" the far end of a highlight. These
     // are what a crengine client places an annotation from — CrossPoint's own spine/word

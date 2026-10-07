@@ -860,8 +860,12 @@ bool Epub::generateThumbBmpForCover(const std::string& thumbPath, const int targ
       return false;
     }
     // 1-bit BMP for fast home screen rendering (no gray passes needed).
+    const uint32_t convertStartMs = millis();
     const bool success =
         JpegToBmpConverter::jpegFileTo1BitBmpStreamWithSize(coverJpg, thumbBmp, targetWidth, targetHeight, crop);
+    SdDebugLog::log("EBP", "thumb jpg convert %s %ux%u ms=%lu free=%u largest=%u", success ? "ok" : "FAIL", targetWidth,
+                    targetHeight, static_cast<unsigned long>(millis() - convertStartMs), (unsigned)ESP.getFreeHeap(),
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     // Explicitly close() files before calling Storage.remove()
     coverJpg.close();
     thumbBmp.close();
@@ -900,8 +904,12 @@ bool Epub::generateThumbBmpForCover(const std::string& thumbPath, const int targ
     if (!Storage.openFileForWrite("EBP", thumbPath, thumbBmp)) {
       return false;
     }
+    const uint32_t convertStartMs = millis();
     const bool success =
         PngToBmpConverter::pngFileTo1BitBmpStreamWithSize(coverPng, thumbBmp, targetWidth, targetHeight, crop);
+    SdDebugLog::log("EBP", "thumb png convert %s %ux%u ms=%lu free=%u largest=%u", success ? "ok" : "FAIL", targetWidth,
+                    targetHeight, static_cast<unsigned long>(millis() - convertStartMs), (unsigned)ESP.getFreeHeap(),
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     // Explicitly close() files before calling Storage.remove()
     coverPng.close();
     thumbBmp.close();

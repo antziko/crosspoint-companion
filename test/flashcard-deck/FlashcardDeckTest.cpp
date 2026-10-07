@@ -1454,15 +1454,27 @@ TEST_F(FlashcardDeckTest, SetCardPageRewritesOnlyTheTokenAndKeepsTheVersion) {
 
   EXPECT_TRUE(FlashcardDeck::setCardPage(cachePath, "skunkworks", 13, 51));
   EXPECT_FALSE(FlashcardDeck::setCardPage(cachePath, "skunkworks", 13, 51));  // already there
-  EXPECT_FALSE(FlashcardDeck::setCardPage(cachePath, "vermiform", 2, 9));     // no token to correct
+  EXPECT_TRUE(FlashcardDeck::setCardPage(cachePath, "vermiform", 2, 9));      // no token yet: one is appended
+  EXPECT_FALSE(FlashcardDeck::setCardPage(cachePath, "vermiform", 2, 9));
   EXPECT_FALSE(FlashcardDeck::setCardPage(cachePath, "absent", 2, 9));
 
   FlashcardDeck::Entry e[2];
   ASSERT_EQ(FlashcardDeck::loadWindow(cachePath, 0, 2, e), 2);
   EXPECT_EQ(e[1].chapter, "Chapter Nine 13/51");
   EXPECT_EQ(e[1].excerpt, "a small skunkworks project");
-  EXPECT_EQ(e[0].chapter, "Sign of the Bident");
+  EXPECT_EQ(e[0].chapter, "Sign of the Bident 2/9");
+  EXPECT_EQ(e[0].version, before[0].version);
   EXPECT_EQ(e[1].version, before[1].version);  // local only: nothing to propagate
+}
+
+TEST_F(FlashcardDeckTest, SetCardPageLeavesACapCutTitleAlone) {
+  // A title the cap cut fills the chapter field, so no token fits beside it.
+  const std::string title(FlashcardDeck::CHAPTER_MAX + 20, 'x');
+  EXPECT_TRUE(FlashcardDeck::enroll(cachePath, "lagniappe", "a little lagniappe", title));
+  EXPECT_FALSE(FlashcardDeck::setCardPage(cachePath, "lagniappe", 3, 40));
+  FlashcardDeck::Entry e;
+  ASSERT_EQ(FlashcardDeck::loadWindow(cachePath, 0, 1, &e), 1);
+  EXPECT_EQ(e.chapter.find('/'), std::string::npos);
 }
 
 struct Anchor {

@@ -139,6 +139,37 @@ int anchorPointsByProgress(const std::shared_ptr<Epub>& epub, const BookmarkStor
   return anchored;
 }
 
+// Why quotes' text was not located, in one extra chapter stream that only failures pay for:
+// occurring more than once, sitting in text outside <p>/<li> (the only text the anchor space
+// counts), or differing from the chapter part way in (its opening still matches).
+void logQuoteMisses(const std::shared_ptr<Epub>& epub, const uint16_t spine, const std::string* needles,
+                    const ChapterXPathResolver::TextRange* ranges, const size_t k) {
+  constexpr size_t kPrefixBytes = 24;
+  const size_t probes = 2 * kMaxQuoteBatch;
+  auto probe = makeUniqueNoThrow<std::string[]>(probes);
+  auto wide = makeUniqueNoThrow<ChapterXPathResolver::TextRange[]>(probes);
+  uint8_t idx[kMaxQuoteBatch];
+  size_t m = 0;
+  for (size_t t = 0; t < k && probe && wide; t++) {
+    if (ranges[t].found || needles[t].empty()) continue;
+    size_t cut = std::min(needles[t].size(), kPrefixBytes);
+    while (cut > 0 && cut < needles[t].size() && (static_cast<uint8_t>(needles[t][cut]) & 0xC0) == 0x80) cut--;
+    probe[2 * m] = needles[t];
+    probe[2 * m + 1] = needles[t].substr(0, cut);
+    idx[m++] = static_cast<uint8_t>(t);
+  }
+  if (m > 0) ChapterXPathResolver::findTextRanges(epub, spine, probe.get(), wide.get(), 2 * m, /*anyBlock=*/true);
+  for (size_t j = 0, t = 0; t < k; t++) {
+    if (ranges[t].found) continue;
+    const bool probed = j < m && idx[j] == t;
+    SdDebugLog::log("BKA", "spine %u: quote not anchored: inPara=%u anyBlock=%d prefixAnyBlock=%d len=%u \"%.40s\"",
+                    spine, ranges[t].occurrences, probed ? wide[2 * j].occurrences : -1,
+                    probed ? wide[2 * j + 1].occurrences : -1, static_cast<unsigned>(needles[t].size()),
+                    needles[t].c_str());
+    if (probed) j++;
+  }
+}
+
 // Quotes: the stored text located in the chapter, then both of its ends resolved. Two
 // passes over the spine item, because the second needs offsets the first produces.
 int anchorQuotes(const std::shared_ptr<Epub>& epub, const BookmarkStore& store, const bool* has, const size_t from,
@@ -177,13 +208,9 @@ int anchorQuotes(const std::shared_ptr<Epub>& epub, const BookmarkStore& store, 
     if (k == 0) continue;
 
     ChapterXPathResolver::TextRange ranges[kMaxQuoteBatch];
-    if (ChapterXPathResolver::findTextRanges(epub, spine, needles, ranges, k) == 0) {
-      for (size_t t = 0; t < k; t++) {
-        LOG_DBG("BKA", "spine %u: no unique match for \"%.40s\"", spine, needles[t].c_str());
-        SdDebugLog::log("BKA", "spine %u: no unique match for \"%.40s\"", spine, needles[t].c_str());
-      }
-      continue;
-    }
+    const size_t located = ChapterXPathResolver::findTextRanges(epub, spine, needles, ranges, k);
+    if (located < k) logQuoteMisses(epub, spine, needles, ranges, k);
+    if (located == 0) continue;
 
     // Both ends of every located quote go into one offset pass, interleaved so entry 2i is
     // a start and 2i+1 its end.
@@ -199,11 +226,7 @@ int anchorQuotes(const std::shared_ptr<Epub>& epub, const BookmarkStore& store, 
     ChapterXPathResolver::findXPathsForOffsets(epub, spine, offsets, paths, 2 * k, endOfRange);
 
     for (size_t t = 0; t < k; t++) {
-      if (!ranges[t].found) {
-        LOG_DBG("BKA", "spine %u: no unique match for \"%.40s\"", spine, needles[t].c_str());
-        SdDebugLog::log("BKA", "spine %u: no unique match for \"%.40s\"", spine, needles[t].c_str());
-        continue;
-      }
+      if (!ranges[t].found) continue;  // logged by logQuoteMisses
       if (paths[2 * t].empty()) {
         LOG_DBG("BKA", "spine %u: quote start at %u did not resolve", spine, ranges[t].start);
         SdDebugLog::log("BKA", "spine %u: quote start at %u did not resolve", spine, ranges[t].start);

@@ -735,11 +735,12 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
             const uint32_t tlsMs = http.tlsHandshakeMs();
             const uint32_t ttfbMs = openMs > tcpMs + tlsMs ? openMs - tcpMs - tlsMs : 0;
             SdDebugLog::log("CONNECT",
-                            "handshake=%lums tcp=%lums tls=%lums ttfb=%lums resumed=%d heap=%u largest8=%u intFree=%u "
-                            "intLargest=%u rssi=%d total=%zu url=%s",
-                            (unsigned long)openMs, (unsigned long)tcpMs, (unsigned long)tlsMs, (unsigned long)ttfbMs,
-                            http.tlsSessionResumed() ? 1 : 0, snap.heapFree, snap.largest8Bit, snap.internalFree,
-                            snap.internalLargest, (int)snap.rssi, sink.total, url.c_str());
+                            "handshake=%lums tcp=%lums (dns=%lums) tls=%lums ttfb=%lums resumed=%d heap=%u largest8=%u "
+                            "intFree=%u intLargest=%u rssi=%d total=%zu url=%s",
+                            (unsigned long)openMs, (unsigned long)tcpMs, (unsigned long)http.dnsMs(),
+                            (unsigned long)tlsMs, (unsigned long)ttfbMs, http.tlsSessionResumed() ? 1 : 0,
+                            snap.heapFree, snap.largest8Bit, snap.internalFree, snap.internalLargest, (int)snap.rssi,
+                            sink.total, url.c_str());
             ttfbAllMs += ttfbMs;
             // Body is flowing, so from here a silent socket is a stall rather than a slow
             // server. readFixed/readUntilClose re-arm their deadline from _timeoutMs after
@@ -849,11 +850,11 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       // and "the deadline expired" were one indistinguishable line. MEMORY_E (-125) or
       // MP_MEM (-2) is this device; a fatal alert or a socket error is the far end.
       SdDebugLog::log("HTTP",
-                      "wolfSSL request failed after %lums (tcp=%lums tls=%lums tlsErr=%d hsErr=%d) heap=%u "
-                      "largest8=%u rssi=%d url=%s",
+                      "wolfSSL request failed after %lums (tcp=%lums dns=%lums tls=%lums tlsErr=%d hsErr=%d) "
+                      "heap=%u largest8=%u rssi=%d url=%s",
                       (unsigned long)(millis() - openStartMs), (unsigned long)http.tcpConnectMs(),
-                      (unsigned long)http.tlsHandshakeMs(), http.lastTlsError(), http.lastHandshakeError(), s.heapFree,
-                      s.largest8Bit, (int)s.rssi, url.c_str());
+                      (unsigned long)http.dnsMs(), (unsigned long)http.tlsHandshakeMs(), http.lastTlsError(),
+                      http.lastHandshakeError(), s.heapFree, s.largest8Bit, (int)s.rssi, url.c_str());
       // A handshake that never completed, at a heap too small to run one, is starvation —
       // and it is the one connect failure that retrying makes actively WORSE.
       //

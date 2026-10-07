@@ -2331,6 +2331,10 @@ ChapterHtmlSlimParser::ParseStatus ChapterHtmlSlimParser::parseStep() {
   void* const buf = XML_GetBuffer(xmlParser_, PARSE_BUFFER_SIZE);
   if (!buf) {
     LOG_ERR("EHP", "Couldn't allocate memory for buffer");
+    SdDebugLog::log("EHP", "PARSE-FAIL buffer OOM at=%lu free=%u largest8=%u",
+                    static_cast<unsigned long>(parseBytesConsumed()), (unsigned)esp_get_free_heap_size(),
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    outOfMemory_ = true;
     return ParseStatus::Error;
   }
 
@@ -2338,6 +2342,8 @@ ChapterHtmlSlimParser::ParseStatus ChapterHtmlSlimParser::parseStep() {
 
   if (len == 0 && parseFile_.available() > 0) {
     LOG_ERR("EHP", "File read error");
+    SdDebugLog::log("EHP", "PARSE-FAIL SD read error at=%lu left=%lu", static_cast<unsigned long>(parseBytesConsumed()),
+                    static_cast<unsigned long>(parseFile_.available()));
     return ParseStatus::Error;
   }
 
@@ -2348,8 +2354,17 @@ ChapterHtmlSlimParser::ParseStatus ChapterHtmlSlimParser::parseStep() {
       LOG_DBG("EHP", "Ignoring trailing data after </html>: %s", XML_ErrorString(XML_GetErrorCode(xmlParser_)));
       return ParseStatus::Done;
     }
-    LOG_ERR("EHP", "Parse error at line %lu:\n%s", XML_GetCurrentLineNumber(xmlParser_),
-            XML_ErrorString(XML_GetErrorCode(xmlParser_)));
+    const XML_Error code = XML_GetErrorCode(xmlParser_);
+    LOG_ERR("EHP", "Parse error at line %lu:\n%s", XML_GetCurrentLineNumber(xmlParser_), XML_ErrorString(code));
+    // The X3 has no serial, so the cause goes to the SD log too. Expat running out of memory is
+    // a low-heap stop, not bad markup, and is reported as one.
+    SdDebugLog::log("EHP", "PARSE-FAIL xml code=%d \"%s\" line=%lu col=%lu byte=%ld free=%u largest8=%u",
+                    static_cast<int>(code), XML_ErrorString(code),
+                    static_cast<unsigned long>(XML_GetCurrentLineNumber(xmlParser_)),
+                    static_cast<unsigned long>(XML_GetCurrentColumnNumber(xmlParser_)),
+                    static_cast<long>(XML_GetCurrentByteIndex(xmlParser_)), (unsigned)esp_get_free_heap_size(),
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    if (code == XML_ERROR_NO_MEMORY) outOfMemory_ = true;
     return ParseStatus::Error;
   }
 

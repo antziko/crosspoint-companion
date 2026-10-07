@@ -148,6 +148,28 @@ TEST_F(LookupMarksTest, OverflowKeepsTheNewestLookups) {
   EXPECT_FALSE(hasOldest);
 }
 
+// A book with more cards than the table: the chapter being read keeps all of its cards, even
+// the oldest, whatever order the deck lists them in.
+TEST_F(LookupMarksTest, OverflowKeepsThePreferredChapter) {
+  auto& marks = LookupMarks::getInstance();
+  const uint32_t mine = LookupMarks::hashChapter("Mine", 4);
+  marks.setPreferredChapter(mine);
+  ASSERT_TRUE(marks.add("askance", 7, "Mine", 4, 3, 9));
+  for (int i = 0; i < LookupMarks::MAX_MARKS * 2; i++) {
+    const std::string word = "other" + std::to_string(i);
+    marks.add(word.c_str(), static_cast<int>(word.size()), "Other", 5, 1, 1);
+  }
+  ASSERT_TRUE(marks.add("echelons", 8, "Mine", 4, 5, 9));
+  EXPECT_EQ(marks.size(), LookupMarks::MAX_MARKS);
+
+  const LookupMarks::Mark* out[4];
+  EXPECT_EQ(marks.collectForPage(mine, 3, 9, out, 4), 1);
+  EXPECT_EQ(marks.collectForPage(mine, 5, 9, out, 4), 1);
+  // Other chapters still fill the rest, newest first.
+  EXPECT_NE(marks.findWord(hash("other" + std::to_string(LookupMarks::MAX_MARKS * 2 - 1))), nullptr);
+  EXPECT_EQ(marks.findWord(hash("other0")), nullptr);
+}
+
 // A chapter with no TOC entry stores an empty title. The reader has to key such a page with
 // the empty hash, not with 0 — getting that wrong silently loses every mark in the chapter.
 TEST_F(LookupMarksTest, UntitledChapterKeysOnTheEmptyHash) {

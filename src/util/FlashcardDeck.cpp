@@ -10,6 +10,58 @@
 
 #include "DictStopwords.h"
 
+#ifdef ARDUINO
+#include <Arduino.h>
+#include <esp_cpu.h>
+#include <esp_heap_caps.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/idf_additions.h>
+#include <freertos/task.h>
+#endif
+
+namespace {
+// Diagnostics readings for the SD log; zero in host tests, which have no clock or heap API.
+uint32_t diagMs() {
+#ifdef ARDUINO
+  return millis();
+#else
+  return 0;
+#endif
+}
+unsigned diagFree() {
+#ifdef ARDUINO
+  return static_cast<unsigned>(ESP.getFreeHeap());
+#else
+  return 0;
+#endif
+}
+unsigned diagLargest() {
+#ifdef ARDUINO
+  return static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+#else
+  return 0;
+#endif
+}
+// Stack left below the caller right now, and the task's lowest ever (bytes). The merge runs
+// inside the stats GET's socket read, so it starts deep in the sync task's stack.
+unsigned diagStackNow() {
+#ifdef ARDUINO
+  const auto sp = reinterpret_cast<uintptr_t>(esp_cpu_get_sp());
+  const auto base = reinterpret_cast<uintptr_t>(pxTaskGetStackStart(nullptr));
+  return sp > base ? static_cast<unsigned>(sp - base) : 0;
+#else
+  return 0;
+#endif
+}
+unsigned diagStackMin() {
+#ifdef ARDUINO
+  return static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr));
+#else
+  return 0;
+#endif
+}
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
@@ -552,6 +604,10 @@ namespace {
 
 // Bridges a (ctx, out, line, len) transform to forEachLine's signature, carrying
 // the output file and a sticky ok flag so a single I/O failure stops the stream.
+// Deck rewrites since boot; mergeBlob reports how many each pass cost.
+uint32_t s_rewriteCount = 0;
+uint32_t s_rewriteLogged = 0;  // rewrite-start lines written this boot; capped
+
 struct RewriteAdapter {
   bool (*lineFn)(void* ctx, HalFile& out, const char* line, int len);
   void* ctx;
@@ -573,9 +629,17 @@ bool FlashcardDeck::rewriteDeck(const std::string& cachePath, void* ctx,
   const std::string path = filePath(cachePath);
   const std::string tmpPath = tmpFilePath(cachePath);
 
+  s_rewriteCount++;
+  if (s_rewriteLogged < 4) {
+    s_rewriteLogged++;
+    SdDebugLog::log("FCD", "rewrite start #%lu stackNow=%u stackMin=%u free=%u largest=%u",
+                    static_cast<unsigned long>(s_rewriteCount), diagStackNow(), diagStackMin(), diagFree(),
+                    diagLargest());
+  }
   HalFile out;
   if (!Storage.openFileForWrite("FCD", tmpPath, out)) {
     LOG_ERR("FCD", "Failed to open temp for write: %s", tmpPath.c_str());
+    SdDebugLog::log("FCD", "rewrite: temp open FAILED %s", tmpPath.c_str());
     return false;
   }
   RewriteAdapter ad{lineFn, ctx, &out, true};
@@ -585,12 +649,14 @@ bool FlashcardDeck::rewriteDeck(const std::string& cachePath, void* ctx,
 
   if (!ad.ok) {
     LOG_ERR("FCD", "Deck rewrite failed: %s", tmpPath.c_str());
+    SdDebugLog::log("FCD", "rewrite: write FAILED %s", tmpPath.c_str());
     Storage.remove(tmpPath.c_str());
     return false;
   }
   Storage.remove(path.c_str());
   if (!Storage.rename(tmpPath.c_str(), path.c_str())) {
     LOG_ERR("FCD", "Deck rewrite rename failed: %s", path.c_str());
+    SdDebugLog::log("FCD", "rewrite: rename FAILED %s", path.c_str());
     return false;
   }
   return true;
@@ -1601,9 +1667,14 @@ bool FlashcardDeck::setCardPage(const std::string& cachePath, const std::string&
   int titleLen = 0;
   int oldPage = 0;
   int oldCount = 0;
-  // A card without a token may carry a cap-cut title; appending one would stop it matching.
-  if (!parseChapterPage(cc.savedChapter, cc.savedChapterLen, &titleLen, &oldPage, &oldCount)) return false;
-  if (oldPage == page && oldCount == pageCount) return false;
+  if (!parseChapterPage(cc.savedChapter, cc.savedChapterLen, &titleLen, &oldPage, &oldCount)) {
+    // No token yet (a card saved without a page, or from a peer): the whole field is the title.
+    // A title cut by the chapter cap fills it, so the token-fits check below refuses exactly
+    // those -- appending to a cut title would leave a title the chapter hash no longer matches.
+    titleLen = cc.savedChapterLen;
+  } else if (oldPage == page && oldCount == pageCount) {
+    return false;
+  }
 
   char chapter[CHAPTER_MAX + 1];
   memcpy(chapter, cc.savedChapter, static_cast<size_t>(titleLen));
@@ -1894,6 +1965,8 @@ void FlashcardDeck::setMergeProgressHook(void (*fn)(void* ctx, size_t done, size
 int FlashcardDeck::mergeBlob(const std::string& cachePath, const uint8_t* blob, size_t len, int* outDeleted) {
   if (outDeleted) *outDeleted = 0;
   if (!blob || len == 0) return 0;
+  SdDebugLog::log("FCD", "merge start blob=%u stackNow=%u stackMin=%u", static_cast<unsigned>(len), diagStackNow(),
+                  diagStackMin());
 
   // RAM-only pre-pass: raise the Lamport clock ONCE, before any edit lands, instead of
   // once per blob line. observeVersion() re-reads the counter file on every call, so the
@@ -1962,6 +2035,11 @@ int FlashcardDeck::mergeBlob(const std::string& cachePath, const uint8_t* blob, 
   // same blob's 'H' pass.
   for (int pass = 0; pass < 3; pass++) {
     const char want = (pass == 0) ? 'T' : (pass == 1) ? 'H' : 'D';
+    // Per-pass SD summary: a sync that dies mid-merge shows which pass it reached, and the
+    // rewrite count is the SD write load (each is a full deck copy, remove and rename).
+    const uint32_t passStartMs = diagMs();
+    const uint32_t passStartRewrites = s_rewriteCount;
+    int passLines = 0;
     size_t i = 0;
     while (i < len) {
       size_t j = i;
@@ -1969,8 +2047,9 @@ int FlashcardDeck::mergeBlob(const std::string& cachePath, const uint8_t* blob, 
       const char* lineStart = reinterpret_cast<const char*>(blob + i);
       const int lineLen = static_cast<int>(j - i);
       i = j + 1;
-      if (s_mergePumpFn) s_mergePumpFn(s_mergePumpCtx, static_cast<size_t>(pass) * len + i, len * 2);
+      if (s_mergePumpFn) s_mergePumpFn(s_mergePumpCtx, static_cast<size_t>(pass) * len + i, len * 3);
       if (lineLen < 2 || lineStart[0] != want) continue;
+      passLines++;
       const char* payload = lineStart + 1;
       const int plen = lineLen - 1;
 
@@ -2049,6 +2128,10 @@ int FlashcardDeck::mergeBlob(const std::string& cachePath, const uint8_t* blob, 
         setCardDict(cachePath, word, dictHash);
       }
     }
+    SdDebugLog::log("FCD", "merge pass=%c lines=%d rewrites=%lu ms=%lu blob=%u free=%u largest=%u stackMin=%u", want,
+                    passLines, static_cast<unsigned long>(s_rewriteCount - passStartRewrites),
+                    static_cast<unsigned long>(diagMs() - passStartMs), static_cast<unsigned>(len), diagFree(),
+                    diagLargest(), diagStackMin());
   }
   if (outDeleted) *outDeleted = deleted;
   return added;

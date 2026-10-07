@@ -67,8 +67,11 @@ class OpdsBookBrowserActivity final : public Activity, private UiAppHost {
   int selectorIndex = 0;
   std::string errorMessage;
   std::string statusMessage;
+  // Transfer progress, shared by the book download and the feed fetch: bytes so far, the
+  // total (0 = unknown), and when it started (0 = no transfer on screen).
   size_t downloadProgress = 0;
   size_t downloadTotal = 0;
+  uint32_t transferStartMs = 0;
 
   OpdsServer server;  // Copied at construction — safe even if the store changes during browsing
 
@@ -95,6 +98,7 @@ class OpdsBookBrowserActivity final : public Activity, private UiAppHost {
   // network entirely. Opt-in, and only the two callers that return to a page they just
   // left pass true (navigateBack, the post-download reload) — a forward navigation or an
   // explicit retry always goes to the server. See feedCachePath() in the .cpp.
+  void drawTransferProgress(int x, int y, int width) const;
   void buildDownloadScreen(UiScreen& screen);
   void buildStatusScreen(UiScreen& screen);
   void activateSelected();

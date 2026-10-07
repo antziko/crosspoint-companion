@@ -447,6 +447,23 @@ static void testTheLoggedFailureNowMatches() {
   CHECK(runMatch(snippet, page, 64) == 0, "the X4 Pro log's unmatched quote now matches");
 }
 
+// A mark saved against one copy of a book, found in another that differs only in quote style.
+static void testQuoteStyleIsFolded() {
+  std::printf("curly and straight quotes match each other\n");
+  const std::vector<std::string> straight = {"Critics", "wrote,", "\"In", "Hong", "Kong,", "what", "is", "not"};
+  // The X4 Pro log's snippet: curly opening quote, book has 0x22, at the real cap.
+  const char* curly = "\xE2\x80\x9CIn Hong Kong, what is not";
+  CHECK(runMatch(curly, straight, 64) == 2, "a curly-quoted snippet matches straight-quoted words");
+  const std::vector<std::string> curlyPage = {"Critics", "wrote,", "\xE2\x80\x9CIn", "Hong", "Kong,"};
+  CHECK(runMatch("\"In Hong Kong,", curlyPage, 64) == 2, "a straight-quoted snippet matches curly words");
+  const std::vector<std::string> apos = {"so", "let\xE2\x80\x99s", "play"};
+  CHECK(runMatch("so let's play", apos, 64) == 0, "apostrophes fold too");
+  CHECK(runMatch("\"In Hong Kong, what is not\"", straight, 64) == -1, "folding does not loosen the words");
+  // Cut mid-word at the cap, with the folded quote earlier in the snippet.
+  const std::vector<std::string> cut = {"\"In", "Hong", "Kong,", "what"};
+  CHECK(runMatch("\xE2\x80\x9CIn Hong Kong, wh", cut, 20) == 0, "a cut snippet still matches after a fold");
+}
+
 // ---------------------------------------------------------------------------
 // QuoteSpan: which part of a quote each page holds.
 // ---------------------------------------------------------------------------
@@ -526,6 +543,7 @@ int main() {
   testInteriorWordMustStillMatchWhole();
   testHyphenatedPageWordRejoins();
   testTheLoggedFailureNowMatches();
+  testQuoteStyleIsFolded();
   testAQuoteOnOnePageIsWhole();
   testAQuoteAcrossTwoPagesSplits();
   testAQuoteAcrossThreePagesFillsTheMiddle();

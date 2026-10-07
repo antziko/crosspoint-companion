@@ -22,6 +22,7 @@
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/util/ConfirmationActivity.h"
+#include "components/DownloadProgress.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
 #include "fontIds.h"
@@ -696,6 +697,7 @@ void FontDownloadActivity::downloadFamily(const DownloadJob& family) {
       RenderLock lock(*this);
       fileProgress_ = 0;
       fileTotal_ = file.size;
+      fileStartMs_ = millis();
       lastRenderedPercent_ = PERCENT_UNRENDERED;  // per-file: progress restarts at 0
     }
     requestUpdateAndWait();
@@ -1235,16 +1237,12 @@ void FontDownloadActivity::render(RenderLock&&) {
                              std::to_string(currentFileIndex_ + 1) + "/" + std::to_string(currentFileTotal_) + ")";
     renderer.drawCenteredText(UI_10_FONT_ID, centerY - lineHeight, statusText.c_str());
 
-    float progress = 0;
-    if (fileTotal_ > 0) {
-      progress = static_cast<float>(fileProgress_) / static_cast<float>(fileTotal_);
-    }
-
-    int barY = centerY + metrics.verticalSpacing;
-    GUI.drawProgressBar(
-        renderer,
-        Rect{metrics.contentSidePadding, barY, pageWidth - metrics.contentSidePadding * 2, metrics.progressBarHeight},
-        static_cast<int>(progress * 100), 100);
+    DownloadProgress::State progress;
+    progress.done = fileProgress_;
+    progress.total = fileTotal_;
+    progress.elapsedMs = millis() - fileStartMs_;
+    DownloadProgress::draw(renderer, metrics.contentSidePadding, centerY + metrics.verticalSpacing,
+                           pageWidth - metrics.contentSidePadding * 2, progress);
 
     const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

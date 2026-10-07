@@ -179,9 +179,10 @@ class FlashcardDeck {
   // already what was asked for. Only a genuine change costs a deck rewrite.
   static bool setCardDict(const std::string& cachePath, const std::string& word, uint32_t dictHash);
 
-  // Rewrite the page token on `word`'s chapter field to `page`/`pageCount`, where Go to page
-  // found the word. Local only (version kept). True only when it rewrote the card: false without
-  // a token, or when it already matches.
+  // Set the page token on `word`'s chapter field to `page`/`pageCount`, where Go to page found
+  // the word, appending one to a card that has none. Local only (version kept). True only when
+  // it rewrote the card: false when it already matches, or when the token would not fit beside
+  // the title (a title cut by the cap).
   static bool setCardPage(const std::string& cachePath, const std::string& word, int page, int pageCount);
 
   // Read the dictionary association recorded for `word`, without touching the deck.

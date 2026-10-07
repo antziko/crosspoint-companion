@@ -103,6 +103,7 @@ class FontDownloadActivity final : public UiListActivity {
   size_t currentFileTotal_ = 0;
   size_t fileProgress_ = 0;
   size_t fileTotal_ = 0;
+  uint32_t fileStartMs_ = 0;  // millis() when the current file started; drives the rate line
   // Progress redraw granularity. Each repaint is a full-screen refresh (~435ms on X3) that
   // competes with the transfer and, because SD shares the display SPI bus, with the file
   // writes too. Must divide 100 so the last step lands on a drawn frame.

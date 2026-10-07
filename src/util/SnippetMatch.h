@@ -29,6 +29,51 @@ inline size_t withoutTrailingHyphen(const char* text, size_t len) {
   return len;
 }
 
+/**
+ * One unit of text for matching: a byte, or a typographic quote folded to its ASCII form, with
+ * its byte length in `n`.
+ *
+ * Copies of one book routinely differ only in quote style -- a re-converted EPUB, or a mark made
+ * on another device's copy -- and a mark saved against one must still find its words in the other.
+ */
+inline char foldedUnit(const char* s, const size_t avail, size_t& n) {
+  if (avail >= 3 && static_cast<uint8_t>(s[0]) == 0xE2 && static_cast<uint8_t>(s[1]) == 0x80) {
+    const uint8_t c = static_cast<uint8_t>(s[2]);
+    if (c >= 0x98 && c <= 0x9B) {  // ‘ ’ ‚ ‛
+      n = 3;
+      return '\'';
+    }
+    if (c >= 0x9C && c <= 0x9F) {  // “ ” „ ‟
+      n = 3;
+      return '"';
+    }
+  }
+  n = 1;
+  return s[0];
+}
+
+/**
+ * How many bytes of `a` the whole of `b` covers, comparing under foldedUnit; -1 when they
+ * differ, or when `a` runs out first -- `aRanOut` is then set if everything up to there agreed.
+ */
+inline int foldedPrefix(const char* a, const size_t alen, const char* b, const size_t blen, bool& aRanOut) {
+  aRanOut = false;
+  size_t i = 0;
+  size_t j = 0;
+  while (j < blen) {
+    if (i >= alen) {
+      aRanOut = true;
+      return -1;
+    }
+    size_t na = 0;
+    size_t nb = 0;
+    if (foldedUnit(a + i, alen - i, na) != foldedUnit(b + j, blen - j, nb)) return -1;
+    i += na;
+    j += nb;
+  }
+  return static_cast<int>(i);
+}
+
 /** One quote being matched against the page, a token at a time. */
 struct Matcher {
   const char* snippet = nullptr;
@@ -89,13 +134,14 @@ struct Matcher {
     if (len == 0) return false;
 
     const size_t remaining = partLen - matchedLen;
+    bool snippetRanOut = false;
+    const int covered = foldedPrefix(snippet + partStart + matchedLen, remaining, text, len, snippetRanOut);
     // A snippet is cut to fit its buffer wherever the cut falls, so the last part of a
     // full one is usually the head of a longer word: "...playground, so l" for "let's".
     // Requiring the page's word to fit inside it fails every highlight over the cap.
     // Only the last part, and only when the snippet is full -- a shorter one was not cut,
     // so its tail is a whole word and must match as one.
-    if (truncated && lastPart && len > remaining && remaining > 0 &&
-        strncmp(snippet + partStart + matchedLen, text, remaining) == 0) {
+    if (truncated && lastPart && snippetRanOut && remaining > 0) {
       if (!open) {
         open = true;
         start = index;
@@ -103,7 +149,7 @@ struct Matcher {
       done = true;
       return true;
     }
-    if (len > remaining || strncmp(snippet + partStart + matchedLen, text, len) != 0) {
+    if (covered < 0) {
       // Not the occurrence we were following. Start over, and give this same token its
       // chance as a first word rather than skipping it.
       const bool wasOpen = open;
@@ -116,7 +162,7 @@ struct Matcher {
       open = true;
       start = index;
     }
-    matchedLen = static_cast<uint8_t>(matchedLen + len);
+    matchedLen = static_cast<uint8_t>(matchedLen + covered);
     if (matchedLen < partLen) return false;  // mid-part: a hyphenation break
 
     takePart(cursor);
