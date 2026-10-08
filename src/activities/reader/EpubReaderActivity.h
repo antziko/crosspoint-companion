@@ -671,6 +671,9 @@ class EpubReaderActivity final : public Activity {
   // Footnote navigation
   void navigateToHref(const std::string& href, bool savePosition = false);
   void restoreSavedPosition();
+  // Persist / restore the link back-stack across sleep (<cache>/links.bin, consumed on load).
+  void saveLinkStack() const;
+  void loadLinkStack();
   bool handleHomeGesture() override;
   // A tap on the status bar band, where "« Back" shows after following a link.
   bool isStatusBarBackTap() const;
