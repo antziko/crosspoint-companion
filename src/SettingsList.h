@@ -367,6 +367,12 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                                  StrId::STR_NORMAL, StrId::STR_LARGE, StrId::STR_X_LARGE},
                                 "paragraphSpacing", StrId::STR_READER_TEXT)
                   .withTextSettings());
+  v.push_back(
+      SettingInfo::Enum(StrId::STR_PARAGRAPH_INDENT, &CrossPointSettings::paragraphIndent,
+                        {StrId::STR_BOOK, StrId::STR_STATE_OFF, StrId::STR_INDENT_1_SPACE, StrId::STR_INDENT_2_SPACES,
+                         StrId::STR_INDENT_3_SPACES, StrId::STR_INDENT_4_SPACES, StrId::STR_INDENT_5_SPACES},
+                        "paragraphIndent", StrId::STR_READER_TEXT)
+          .withTextSettings());
   v.push_back(SettingInfo::Enum(StrId::STR_TEXT_AA, &CrossPointSettings::textAntiAliasing,
                                 {StrId::STR_TEXT_AA_OFF, StrId::STR_TEXT_AA_ANTIALIASED, StrId::STR_TEXT_AA_SHARP},
                                 "textAntiAliasing", StrId::STR_READER_TEXT)

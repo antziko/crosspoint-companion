@@ -468,7 +468,7 @@ void ChapterHtmlSlimParser::flushLongTextBlockIfNeeded() {
         topPending = false;
         this->addLineToPage(textBlock, offset);
       },
-      false, characterSpacing, wordSpacingPercent);
+      false, characterSpacing, wordSpacingPercent, paragraphIndent);
   if (insideTableCell) shiftTableCellBreaks(wordsBeforeFlush - currentTextBlock->size());
   // A dropped word means the arena could not allocate. Route it through the existing
   // out-of-heap path so the build is abandoned rather than committing a cache whose text
@@ -783,7 +783,7 @@ void ChapterHtmlSlimParser::finishTableRow() {
           }
           tableLineVisibleOffsets[lineIndex] = std::min(tableLineVisibleOffsets[lineIndex], offset);
         },
-        true, characterSpacing, wordSpacingPercent);
+        true, characterSpacing, wordSpacingPercent, paragraphIndent);
     if (tableRowCells[column]->hadDroppedWords()) signalOutOfMemory("layout: word arena (table cell)");
     maxLineCount = std::max(maxLineCount, lines.size());
   }
@@ -2570,7 +2570,7 @@ void ChapterHtmlSlimParser::makePages() {
         topPending = false;
         addLineToPage(textBlock, offset);
       },
-      true, characterSpacing, wordSpacingPercent);
+      true, characterSpacing, wordSpacingPercent, paragraphIndent);
   // An empty block still takes its top spacing, as before.
   if (topPending) applyBlockTopSpacing();
   if (currentTextBlock->hadDroppedWords()) signalOutOfMemory("layout: word arena");

@@ -24,7 +24,8 @@ namespace {
 //     in place the same way.
 // v9: paragraphSpacing widened from on/off to a PARAGRAPH_SPACING level; an older On is remapped
 //     in place to Normal, the gap it always drew.
-constexpr uint8_t READER_SETTINGS_FILE_VERSION = 9;
+// v10: appended paragraphIndent. Older files take the current global, as a newly opened book would.
+constexpr uint8_t READER_SETTINGS_FILE_VERSION = 10;
 // Oldest layout load() still understands; everything from here up is read field by field.
 constexpr uint8_t READER_SETTINGS_MIN_READABLE_VERSION = 5;
 
@@ -76,6 +77,13 @@ bool load(const std::string& cachePath, CrossPointSettings::ReaderOverride& out)
   if (version >= 6) {
     serialization::readPod(f, out.swapWordSelectAxes);
   }
+  out.paragraphIndent = SETTINGS.paragraphIndent;
+  if (version >= 10) {
+    serialization::readPod(f, out.paragraphIndent);
+    if (out.paragraphIndent >= CrossPointSettings::PARAGRAPH_INDENT_COUNT) {
+      out.paragraphIndent = CrossPointSettings::PARA_INDENT_BOOK;
+    }
+  }
   out.active = true;
   return true;
 }
@@ -97,6 +105,7 @@ bool write(const std::string& cachePath, const CrossPointSettings::ReaderOverrid
   serialization::writePod(f, ov.minSessionMinutes);
   serialization::writePod(f, ov.screenMargin);
   serialization::writePod(f, ov.swapWordSelectAxes);
+  serialization::writePod(f, ov.paragraphIndent);
   return true;
 }
 

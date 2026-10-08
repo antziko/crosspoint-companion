@@ -90,6 +90,13 @@ if (parsedSize != fileSize) {
 
 ## `section.bin`
 
+### Version 65
+
+Version 65 adds one `u8 paragraphIndent` to the header, after `imageBleed` and before
+`pageCount`: 0 = Book (the paragraph-spacing level and the book's CSS decide the first-line
+indent), 1 = Off, n >= 2 = n - 1 spaces. Off and the space counts replace the book's own
+indent except a negative (hanging) one.
+
 ### Version 59
 
 Version 59 adds one `u8 imageBleed` to the header, after `wordSpacingPercent` and before

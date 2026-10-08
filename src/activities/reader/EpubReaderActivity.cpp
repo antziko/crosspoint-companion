@@ -374,6 +374,7 @@ void EpubReaderActivity::onEnter() {
       bookOverride.paragraphAlignment = SETTINGS.paragraphAlignment;
       bookOverride.hyphenationEnabled = SETTINGS.hyphenationEnabled;
       bookOverride.paragraphSpacing = SETTINGS.paragraphSpacing;
+      bookOverride.paragraphIndent = SETTINGS.paragraphIndent;
       bookOverride.screenMargin = SETTINGS.screenMargin;
       static_assert(sizeof(bookOverride.sdFontFamilyName) == sizeof(SETTINGS.sdFontFamilyName),
                     "sdFontFamilyName size mismatch");
@@ -4527,6 +4528,7 @@ void EpubReaderActivity::syncBookOverrideFromGlobals() {
   ov.paragraphAlignment = SETTINGS.paragraphAlignment;
   ov.hyphenationEnabled = SETTINGS.hyphenationEnabled;
   ov.paragraphSpacing = SETTINGS.paragraphSpacing;
+  ov.paragraphIndent = SETTINGS.paragraphIndent;
   ov.screenMargin = SETTINGS.screenMargin;
   static_assert(sizeof(ov.sdFontFamilyName) == sizeof(SETTINGS.sdFontFamilyName), "sdFontFamilyName size mismatch");
   strncpy(ov.sdFontFamilyName, SETTINGS.sdFontFamilyName, sizeof(ov.sdFontFamilyName) - 1);

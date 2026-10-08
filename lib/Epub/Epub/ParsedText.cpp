@@ -722,6 +722,14 @@ int ParsedText::resolveFirstLineIndent(const bool isFirstLine, const GfxRenderer
   if (firstLineConsumed || !isFirstLine || !isNaturalAlign) {
     return 0;
   }
+  if (paragraphIndent != PARAGRAPH_INDENT_BOOK) {
+    // A hanging indent is list/note structure, not paragraph style: keep it.
+    if (blockStyle.textIndentDefined && blockStyle.textIndent < 0) {
+      return blockStyle.textIndent;
+    }
+    return scaleSpace(renderer.getSpaceWidth(fontId, EpdFontFamily::REGULAR), wordSpacingPercent) *
+           (paragraphIndent - 1);
+  }
   if (blockStyle.textIndentDefined) {
     if (blockStyle.textIndent < 0 || !extraParagraphSpacing) {
       return blockStyle.textIndent;
@@ -737,13 +745,14 @@ int ParsedText::resolveFirstLineIndent(const bool isFirstLine, const GfxRenderer
 void ParsedText::layoutAndExtractLines(const GfxRenderer& renderer, const int fontId, const uint16_t viewportWidth,
                                        const std::function<void(std::shared_ptr<TextBlock>, uint32_t)>& processLine,
                                        const bool includeLastLine, const int8_t characterSpacing,
-                                       const uint8_t wordSpacingPercent) {
+                                       const uint8_t wordSpacingPercent, const uint8_t paragraphIndent) {
   if (words.empty()) {
     return;
   }
   // Stamped here rather than at construction: the parser replaces blockStyle as CSS resolves.
   blockStyle.characterSpacing = characterSpacing;
   this->wordSpacingPercent = wordSpacingPercent;
+  this->paragraphIndent = paragraphIndent;
 
   // Per-paragraph RTL auto-detection: only when CSS/HTML didn't explicitly set direction.
   // Explicit dir="ltr" must be respected and not overridden by content heuristic.

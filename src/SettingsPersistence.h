@@ -126,6 +126,8 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
     persisted::enumerated("orientation", &CrossPointSettings::orientation, CrossPointSettings::ORIENTATION_COUNT - 1),
     persisted::enumerated("paragraphSpacing", &CrossPointSettings::paragraphSpacing,
                           CrossPointSettings::PARAGRAPH_SPACING_COUNT - 1),
+    persisted::enumerated("paragraphIndent", &CrossPointSettings::paragraphIndent,
+                          CrossPointSettings::PARAGRAPH_INDENT_COUNT - 1),
     persisted::enumerated("textAntiAliasing", &CrossPointSettings::textAntiAliasing,
                           CrossPointSettings::TEXT_AA_COUNT - 1),
     persisted::enumerated("imageRendering", &CrossPointSettings::imageRendering,

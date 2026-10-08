@@ -121,3 +121,62 @@ TEST(TextSpacing, SerializedBlockRestoresCharacterSpacing) {
   in.close();
   std::filesystem::remove(path);
 }
+
+namespace {
+
+// First word's x on the first line. cssIndent < -999 leaves text-indent undefined.
+int firstLineX(const bool paragraphGap, const uint8_t paragraphIndent, const int cssIndent,
+               const uint8_t wordSpacingPercent = 100) {
+  GfxRenderer renderer;
+  BlockStyle style;
+  style.alignment = CssTextAlign::Left;
+  if (cssIndent > -1000) {
+    style.textIndentDefined = true;
+    style.textIndent = static_cast<int16_t>(cssIndent);
+  }
+  ParsedText text(paragraphGap, false, false, style);
+  for (const char* word : {"aa", "bb", "cc"}) text.addWord(word, EpdFontFamily::REGULAR);
+  int x = INT32_MIN;
+  text.layoutAndExtractLines(
+      renderer, 0, 400,
+      [&](std::shared_ptr<TextBlock> block, auto) {
+        if (x == INT32_MIN) x = block->wordXpos(0);
+      },
+      true, 0, wordSpacingPercent, paragraphIndent);
+  return x;
+}
+
+constexpr int NO_CSS = -1000;
+constexpr uint8_t BOOK = PARAGRAPH_INDENT_BOOK;
+constexpr uint8_t OFF = 1;
+constexpr uint8_t SPACES(const int n) { return static_cast<uint8_t>(n + 1); }
+
+}  // namespace
+
+// Book keeps the spacing-level rules: no gap indents 3 spaces (or the book's own indent), a gap drops it.
+TEST(ParagraphIndent, BookFollowsTheSpacingLevel) {
+  EXPECT_EQ(firstLineX(false, BOOK, NO_CSS), 12);
+  EXPECT_EQ(firstLineX(false, BOOK, 20), 20);
+  EXPECT_EQ(firstLineX(true, BOOK, NO_CSS), 0);
+  EXPECT_EQ(firstLineX(true, BOOK, 20), 0);
+}
+
+TEST(ParagraphIndent, OffDropsEveryPositiveIndent) {
+  EXPECT_EQ(firstLineX(false, OFF, NO_CSS), 0);
+  EXPECT_EQ(firstLineX(false, OFF, 20), 0);
+}
+
+// A space count applies with or without a paragraph gap, replacing missing, zero and positive CSS indents.
+TEST(ParagraphIndent, SpacesReplaceTheBooksIndent) {
+  EXPECT_EQ(firstLineX(true, SPACES(2), NO_CSS), 8);
+  EXPECT_EQ(firstLineX(true, SPACES(2), 0), 8);
+  EXPECT_EQ(firstLineX(false, SPACES(5), 20), 20);
+  EXPECT_EQ(firstLineX(false, SPACES(1), 20), 4);
+}
+
+TEST(ParagraphIndent, SpacesScaleWithWordSpacing) { EXPECT_EQ(firstLineX(true, SPACES(2), NO_CSS, 150), 12); }
+
+TEST(ParagraphIndent, HangingIndentSurvivesEveryChoice) {
+  EXPECT_EQ(firstLineX(true, OFF, -10), firstLineX(true, BOOK, -10));
+  EXPECT_EQ(firstLineX(true, SPACES(3), -10), firstLineX(true, BOOK, -10));
+}

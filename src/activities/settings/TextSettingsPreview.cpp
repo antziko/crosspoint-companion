@@ -62,7 +62,8 @@ void relayout(PreviewLayout& layout, const GfxRenderer& renderer, int fontId, in
   parsed.layoutAndExtractLines(
       renderer, fontId, static_cast<uint16_t>(textWidth),
       [&layout](std::shared_ptr<TextBlock> line, uint32_t) { layout.lines.push_back(std::move(line)); },
-      /*includeLastLine=*/true, SETTINGS.getCharacterSpacing(), SETTINGS.wordSpacing);
+      /*includeLastLine=*/true, SETTINGS.getCharacterSpacing(), SETTINGS.wordSpacing,
+      SETTINGS.getReaderParagraphIndent());
 }
 
 // Cut the sample down to what the pane can physically show.
@@ -148,6 +149,7 @@ void renderPreview(GfxRenderer& renderer, PreviewLayout& layout, int previewPadd
                        .lineCompression = compression,
                        .alignment = SETTINGS.getReaderParagraphAlignment(),
                        .paragraphSpacing = SETTINGS.getReaderParagraphSpacing(),
+                       .paragraphIndent = SETTINGS.getReaderParagraphIndent(),
                        .characterSpacing = SETTINGS.getCharacterSpacing(),
                        .wordSpacingPercent = SETTINGS.wordSpacing,
                        .focusReading = SETTINGS.focusReadingEnabled != 0,

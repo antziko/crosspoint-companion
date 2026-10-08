@@ -715,6 +715,10 @@ uint8_t CrossPointSettings::getReaderParagraphSpacing() const {
   return readerOverride.active ? readerOverride.paragraphSpacing : paragraphSpacing;
 }
 
+uint8_t CrossPointSettings::getReaderParagraphIndent() const {
+  return readerOverride.active ? readerOverride.paragraphIndent : paragraphIndent;
+}
+
 ReaderRenderSpec CrossPointSettings::readerRenderSpec(const uint16_t viewportWidth,
                                                       const uint16_t viewportHeight) const {
   ReaderRenderSpec spec;
@@ -725,6 +729,7 @@ ReaderRenderSpec CrossPointSettings::readerRenderSpec(const uint16_t viewportWid
   spec.fontId = getReaderFontId();
   spec.lineCompression = getReaderLineCompression();
   spec.paragraphSpacing = getReaderParagraphSpacing();
+  spec.paragraphIndent = getReaderParagraphIndent();
   spec.characterSpacing = getCharacterSpacing();
   spec.wordSpacingPercent = wordSpacing;
   spec.paragraphAlignment = getReaderParagraphAlignment();

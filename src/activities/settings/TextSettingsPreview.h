@@ -18,6 +18,7 @@ struct PreviewKey {
   float lineCompression = -1.0f;
   uint8_t alignment = 0xFF;
   uint8_t paragraphSpacing = 0xFF;
+  uint8_t paragraphIndent = 0xFF;
   int8_t characterSpacing = 0;
   uint8_t wordSpacingPercent = 100;
   bool focusReading = false;

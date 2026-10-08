@@ -29,11 +29,12 @@ enum ItemIndex : int {
   PARA_ALIGNMENT = 3,
   HYPHENATION = 4,
   EXTRA_SPACING = 5,
-  SCREEN_MARGIN = 6,
-  WORD_SELECT_BUTTONS = 7,
-  FOCUS_READING = 8,
-  MIN_SESSION = 9,
-  MORE_TEXT_SETTINGS = 10,
+  PARA_INDENT = 6,
+  SCREEN_MARGIN = 7,
+  WORD_SELECT_BUTTONS = 8,
+  FOCUS_READING = 9,
+  MIN_SESSION = 10,
+  MORE_TEXT_SETTINGS = 11,
 };
 
 // Ordered cycle of valid per-book min-session values: 0xFF = use global, then indices
@@ -47,6 +48,14 @@ constexpr StrId PARA_SPACING_LABELS[] = {StrId::STR_STATE_OFF, StrId::STR_PARA_S
                                          StrId::STR_LARGE,     StrId::STR_X_LARGE};
 static_assert(std::size(PARA_SPACING_LABELS) == CrossPointSettings::PARAGRAPH_SPACING_COUNT,
               "paragraph spacing labels");
+constexpr StrId PARA_INDENT_LABELS[] = {StrId::STR_BOOK,
+                                        StrId::STR_STATE_OFF,
+                                        StrId::STR_INDENT_1_SPACE,
+                                        StrId::STR_INDENT_2_SPACES,
+                                        StrId::STR_INDENT_3_SPACES,
+                                        StrId::STR_INDENT_4_SPACES,
+                                        StrId::STR_INDENT_5_SPACES};
+static_assert(std::size(PARA_INDENT_LABELS) == CrossPointSettings::PARAGRAPH_INDENT_COUNT, "paragraph indent labels");
 
 // Formats a MIN_SESSION_SECONDS index as a short duration label ("Always", "15s", "2 min").
 static void formatMinSession(uint8_t idx, char* buf, size_t len) {
@@ -82,7 +91,7 @@ ReaderOptionsActivity::ReaderOptionsActivity(GfxRenderer& renderer, MappedInputM
       localOverride(initialOverride),
       sampleText(std::move(sampleText)) {
   for (int item = 0; item < ITEM_COUNT; item++) {
-    if (!epubRows && (item == FOCUS_READING || item == MIN_SESSION)) continue;
+    if (!epubRows && (item == FOCUS_READING || item == MIN_SESSION || item == PARA_INDENT)) continue;
     rows_[rowCount_++] = static_cast<uint8_t>(item);
   }
 }
@@ -267,6 +276,10 @@ void ReaderOptionsActivity::cycleCurrentItem() {
       localOverride.paragraphSpacing =
           (localOverride.paragraphSpacing + 1) % static_cast<uint8_t>(CrossPointSettings::PARAGRAPH_SPACING_COUNT);
       break;
+    case PARA_INDENT:
+      localOverride.paragraphIndent =
+          (localOverride.paragraphIndent + 1) % static_cast<uint8_t>(CrossPointSettings::PARAGRAPH_INDENT_COUNT);
+      break;
     case SCREEN_MARGIN: {
       // Step through [MIN, MAX] and wrap; clamp guards a stale/out-of-range stored value.
       const int cur = std::clamp<int>(localOverride.screenMargin, CrossPointSettings::SCREEN_MARGIN_MIN,
@@ -328,6 +341,8 @@ const char* ReaderOptionsActivity::getItemName(const int index) {
       return tr(STR_HYPHENATION);
     case EXTRA_SPACING:
       return tr(STR_EXTRA_SPACING);
+    case PARA_INDENT:
+      return tr(STR_PARAGRAPH_INDENT);
     case SCREEN_MARGIN:
       return tr(STR_SCREEN_MARGIN);
     case WORD_SELECT_BUTTONS:
@@ -385,6 +400,8 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
     case EXTRA_SPACING:
       return I18N.get(
           PARA_SPACING_LABELS[localOverride.paragraphSpacing % CrossPointSettings::PARAGRAPH_SPACING_COUNT]);
+    case PARA_INDENT:
+      return I18N.get(PARA_INDENT_LABELS[localOverride.paragraphIndent % CrossPointSettings::PARAGRAPH_INDENT_COUNT]);
     case SCREEN_MARGIN:
       return std::to_string(localOverride.screenMargin);
     case WORD_SELECT_BUTTONS:

@@ -7,6 +7,11 @@ inline int paragraphGapPx(const int lineHeight, const uint8_t level) {
   return level > 1 ? lineHeight * (level - 1) / 4 : 0;
 }
 
+// Paragraph indent level: 0 = Book (the spacing level and the book's CSS decide, as above);
+// 1 = Off; n >= 2 = n - 1 spaces. Off and the space counts replace the book's own first-line
+// indent, except a negative (hanging) one.
+constexpr uint8_t PARAGRAPH_INDENT_BOOK = 0;
+
 // The resolved text-rendering configuration a reader hands to the layout engine.
 // Section-cache validation keys on every field: a section file built with a
 // different spec is discarded and rebuilt.
@@ -27,6 +32,7 @@ struct ReaderRenderSpec {
   int fontId = 0;
   float lineCompression = 1.0f;
   uint8_t paragraphSpacing = 0;  // level, see paragraphGapPx()
+  uint8_t paragraphIndent = PARAGRAPH_INDENT_BOOK;
   int8_t characterSpacing = 0;
   uint8_t wordSpacingPercent = 100;
   uint8_t paragraphAlignment = 0;

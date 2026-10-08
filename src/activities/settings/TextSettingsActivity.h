@@ -54,7 +54,16 @@ class TextSettingsActivity final : public UiTabListActivity {
 
   // Row indices per tab. enum class (not plain enum) so a LayoutRow can't be
   // silently confused with a StyleRow of equal value.
-  enum class LayoutRow { LineSpacing, WordSpacing, CharacterSpacing, ParaSpacing, Alignment, ScreenMargin, Count };
+  enum class LayoutRow {
+    LineSpacing,
+    WordSpacing,
+    CharacterSpacing,
+    ParaSpacing,
+    ParaIndent,
+    Alignment,
+    ScreenMargin,
+    Count
+  };
   enum class StyleRow { FocusReading, Hyphenation, EmbeddedStyle, AntiAliasing, Count };
 
   // --- UiTabListActivity contract ---
@@ -156,13 +165,14 @@ class TextSettingsActivity final : public UiTabListActivity {
     uint8_t* lineSpacing;
     uint8_t* paragraphAlignment;
     uint8_t* paragraphSpacing;
+    uint8_t* paragraphIndent;
     uint8_t* screenMargin;
     uint8_t* hyphenationEnabled;
     char* sdFontFamilyName;  // char[32] in both
   } f_{};
   std::array<Tab, static_cast<size_t>(Tab::Count)> visibleTabs_{};
   int visibleTabCount_ = 0;
-  std::array<uint8_t, 6> layoutRows_{};
+  std::array<uint8_t, static_cast<size_t>(LayoutRow::Count)> layoutRows_{};
   int layoutRowCount_ = 0;
   std::array<uint8_t, 4> styleRows_{};
   int styleRowCount_ = 0;

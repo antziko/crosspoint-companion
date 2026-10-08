@@ -33,7 +33,7 @@ class ReaderOptionsActivity final : public Activity {
   void render(RenderLock&&) override;
 
  private:
-  static constexpr int ITEM_COUNT = 11;
+  static constexpr int ITEM_COUNT = 12;
   int itemCount() const { return rowCount_; }
   // Item id of the highlighted row.
   int currentItem() const { return rows_[selectedIndex]; }

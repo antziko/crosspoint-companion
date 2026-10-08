@@ -27,9 +27,9 @@ namespace {
 // Tab labels for Font | Size | Layout | Style.
 constexpr StrId TAB_NAME_IDS[] = {StrId::STR_FONT, StrId::STR_SIZE, StrId::STR_LAYOUT, StrId::STR_STYLE};
 
-constexpr StrId LAYOUT_ROW_NAME_IDS[] = {StrId::STR_LINE_SPACING,      StrId::STR_WORD_SPACING,
-                                         StrId::STR_CHARACTER_SPACING, StrId::STR_EXTRA_SPACING,
-                                         StrId::STR_ALIGNMENT,         StrId::STR_SCREEN_MARGIN};
+constexpr StrId LAYOUT_ROW_NAME_IDS[] = {
+    StrId::STR_LINE_SPACING,     StrId::STR_WORD_SPACING, StrId::STR_CHARACTER_SPACING, StrId::STR_EXTRA_SPACING,
+    StrId::STR_PARAGRAPH_INDENT, StrId::STR_ALIGNMENT,    StrId::STR_SCREEN_MARGIN};
 constexpr StrId STYLE_ROW_NAME_IDS[] = {StrId::STR_FOCUS_READING, StrId::STR_HYPHENATION, StrId::STR_EMBEDDED_STYLE,
                                         StrId::STR_TEXT_AA};
 
@@ -40,6 +40,14 @@ constexpr StrId PARA_SPACING_IDS[] = {StrId::STR_STATE_OFF, StrId::STR_PARA_SPAC
                                       StrId::STR_SMALL,     StrId::STR_NORMAL,
                                       StrId::STR_LARGE,     StrId::STR_X_LARGE};
 static_assert(std::size(PARA_SPACING_IDS) == CrossPointSettings::PARAGRAPH_SPACING_COUNT, "paragraph spacing labels");
+constexpr StrId PARA_INDENT_IDS[] = {StrId::STR_BOOK,
+                                     StrId::STR_STATE_OFF,
+                                     StrId::STR_INDENT_1_SPACE,
+                                     StrId::STR_INDENT_2_SPACES,
+                                     StrId::STR_INDENT_3_SPACES,
+                                     StrId::STR_INDENT_4_SPACES,
+                                     StrId::STR_INDENT_5_SPACES};
+static_assert(std::size(PARA_INDENT_IDS) == CrossPointSettings::PARAGRAPH_INDENT_COUNT, "paragraph indent labels");
 constexpr StrId LINE_SPACING_IDS[] = {StrId::STR_TIGHT,     StrId::STR_NORMAL, StrId::STR_RELAXED,
                                       StrId::STR_SEMI_WIDE, StrId::STR_WIDE,   StrId::STR_EXTRA_WIDE};
 static_assert(std::size(LINE_SPACING_IDS) == CrossPointSettings::LINE_COMPRESSION_COUNT, "line spacing labels");
@@ -108,12 +116,13 @@ TextSettingsActivity::TextSettingsActivity(GfxRenderer& renderer, MappedInputMan
 
   if (bookMode()) {
     book_ = SETTINGS.getReaderOverride();
-    f_ = {&book_.fontFamily,       &book_.fontPointSize, &book_.lineSpacing,        &book_.paragraphAlignment,
-          &book_.paragraphSpacing, &book_.screenMargin,  &book_.hyphenationEnabled, book_.sdFontFamilyName};
+    f_ = {&book_.fontFamily,         &book_.fontPointSize,      &book_.lineSpacing,
+          &book_.paragraphAlignment, &book_.paragraphSpacing,   &book_.paragraphIndent,
+          &book_.screenMargin,       &book_.hyphenationEnabled, book_.sdFontFamilyName};
   } else {
-    f_ = {&SETTINGS.fontFamily,         &SETTINGS.fontPointSize,    &SETTINGS.lineSpacing,
-          &SETTINGS.paragraphAlignment, &SETTINGS.paragraphSpacing, &SETTINGS.screenMargin,
-          &SETTINGS.hyphenationEnabled, SETTINGS.sdFontFamilyName};
+    f_ = {&SETTINGS.fontFamily,         &SETTINGS.fontPointSize,      &SETTINGS.lineSpacing,
+          &SETTINGS.paragraphAlignment, &SETTINGS.paragraphSpacing,   &SETTINGS.paragraphIndent,
+          &SETTINGS.screenMargin,       &SETTINGS.hyphenationEnabled, SETTINGS.sdFontFamilyName};
   }
 }
 
@@ -519,8 +528,8 @@ const char* TextSettingsActivity::confirmLabelText() const {
   }
   switch (tab_) {
     case Tab::Layout:
-      // Extra Paragraph Spacing toggles; the rest open a picker
-      return layoutRowAt(ringPos() - 1) == static_cast<int>(LayoutRow::ParaSpacing) ? tr(STR_TOGGLE) : tr(STR_SELECT);
+      // Every Layout row opens a picker.
+      return tr(STR_SELECT);
     case Tab::Style:
       // Anti-aliasing opens a tri-state picker; the rest toggle
       return styleRowAt(ringPos() - 1) == static_cast<int>(StyleRow::AntiAliasing) ? tr(STR_SELECT) : tr(STR_TOGGLE);
@@ -679,6 +688,14 @@ void TextSettingsActivity::confirmLayoutRow(int row) {
                         });
       requestUpdate();
       break;
+    case LayoutRow::ParaIndent:
+      optionPopup_.show(StrId::STR_PARAGRAPH_INDENT, PARA_INDENT_IDS, static_cast<int>(std::size(PARA_INDENT_IDS)),
+                        *f_.paragraphIndent, [this](int idx) {
+                          *f_.paragraphIndent = static_cast<uint8_t>(idx);
+                          persist();  // persist immediately (#2806)
+                        });
+      requestUpdate();
+      break;
     case LayoutRow::LineSpacing:
       optionPopup_.show(StrId::STR_LINE_SPACING, LINE_SPACING_IDS, static_cast<int>(std::size(LINE_SPACING_IDS)),
                         *f_.lineSpacing, [this](int idx) {
@@ -741,6 +758,10 @@ std::string TextSettingsActivity::layoutValueText(int row) const {
     case LayoutRow::ParaSpacing: {
       const uint8_t v = *f_.paragraphSpacing;
       return v < std::size(PARA_SPACING_IDS) ? I18N.get(PARA_SPACING_IDS[v]) : I18N.get(StrId::STR_NORMAL);
+    }
+    case LayoutRow::ParaIndent: {
+      const uint8_t v = *f_.paragraphIndent;
+      return v < std::size(PARA_INDENT_IDS) ? I18N.get(PARA_INDENT_IDS[v]) : I18N.get(StrId::STR_BOOK);
     }
     case LayoutRow::Alignment: {
       const uint8_t v = *f_.paragraphAlignment;

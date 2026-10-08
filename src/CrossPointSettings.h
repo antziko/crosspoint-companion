@@ -176,6 +176,18 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     PARA_SPACING_EXTRA = 5,
     PARAGRAPH_SPACING_COUNT
   };
+  // First-line indent (see PARAGRAPH_INDENT_BOOK in ReaderRenderSpec.h): BOOK keeps the
+  // spacing-level behaviour, OFF drops indents, then 1..5 spaces.
+  enum PARAGRAPH_INDENT {
+    PARA_INDENT_BOOK = 0,
+    PARA_INDENT_OFF = 1,
+    PARA_INDENT_1 = 2,
+    PARA_INDENT_2 = 3,
+    PARA_INDENT_3 = 4,
+    PARA_INDENT_4 = 5,
+    PARA_INDENT_5 = 6,
+    PARAGRAPH_INDENT_COUNT
+  };
 
   // Auto-sleep timeout options (in minutes)
   enum SLEEP_TIMEOUT {
@@ -368,6 +380,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     uint8_t paragraphAlignment = JUSTIFIED;
     uint8_t hyphenationEnabled = 0;
     uint8_t paragraphSpacing = PARA_SPACING_NORMAL;
+    uint8_t paragraphIndent = PARA_INDENT_BOOK;
     // Per-book screen margin (px). Snapshotted from the global screenMargin on first open,
     // like the font/spacing fields above; a concrete value, not an inherit sentinel.
     // Literal (not SCREEN_MARGIN_MIN) because that constant is declared later in the
@@ -455,6 +468,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint32_t clockLastSyncEpoch = 0;
   // Text rendering settings
   uint8_t paragraphSpacing = PARA_SPACING_NORMAL;       // PARAGRAPH_SPACING enum
+  uint8_t paragraphIndent = PARA_INDENT_BOOK;           // PARAGRAPH_INDENT enum
   uint8_t textAntiAliasing = TEXT_AA_ANTIALIASED;       // TEXT_AA enum (0=Off,1=Antialiased,2=Sharp)
   uint8_t quoteHighlightStyle = QUOTE_STYLE_HIGHLIGHT;  // QUOTE_STYLE enum
   // Underline words looked up in the dictionary, on the page they were looked up on.
@@ -788,6 +802,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t getReaderParagraphAlignment() const;
   uint8_t getReaderHyphenationEnabled() const;
   uint8_t getReaderParagraphSpacing() const;
+  uint8_t getReaderParagraphIndent() const;
   // Stored 0..4 as signed -2..+2 px of tracking.
   int8_t getCharacterSpacing() const { return static_cast<int8_t>(characterSpacing - CHARACTER_SPACING_OFFSET); }
   // The layout configuration the section cache is keyed on, with every per-book

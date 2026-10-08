@@ -78,6 +78,7 @@ void TxtReaderActivity::onEnter() {
       bookOverride.paragraphAlignment = SETTINGS.paragraphAlignment;
       bookOverride.hyphenationEnabled = SETTINGS.hyphenationEnabled;
       bookOverride.paragraphSpacing = SETTINGS.paragraphSpacing;
+      bookOverride.paragraphIndent = SETTINGS.paragraphIndent;
       bookOverride.screenMargin = SETTINGS.screenMargin;
       static_assert(sizeof(bookOverride.sdFontFamilyName) == sizeof(SETTINGS.sdFontFamilyName),
                     "sdFontFamilyName size mismatch");
