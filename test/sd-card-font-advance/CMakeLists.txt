@@ -46,3 +46,27 @@ target_link_libraries(CodepointFreqTest PRIVATE
 )
 
 gtest_discover_tests(CodepointFreqTest)
+
+add_executable(SdCardFontKernTest
+  SdCardFontKernTest.cpp
+  ${REPO_ROOT}/lib/EpdFont/SdCardFont.cpp
+  ${REPO_ROOT}/lib/EpdFont/EpdFont.cpp
+  ${REPO_ROOT}/lib/Utf8/Utf8.cpp
+)
+
+# Real SdCardFont over an in-memory font file; stubs/ stands in for HalStorage, the
+# inflate scratch window, heap probes and logging.
+target_include_directories(SdCardFontKernTest PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/stubs
+  ${REPO_ROOT}/lib/EpdFont
+  ${REPO_ROOT}/lib/Utf8
+  ${REPO_ROOT}/lib/Memory
+)
+
+target_link_libraries(SdCardFontKernTest PRIVATE
+  crosspoint_test_common
+  GTest::gtest_main
+)
+target_compile_options(SdCardFontKernTest PRIVATE -fno-exceptions)
+
+gtest_discover_tests(SdCardFontKernTest)
