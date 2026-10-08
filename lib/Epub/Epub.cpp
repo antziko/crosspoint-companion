@@ -1120,10 +1120,20 @@ bool Epub::readItemContentsToStream(const std::string& itemHref, Print& out, con
   const std::string path = FsHelpers::normalisePath(itemHref);
 
   if (decryptor && decryptor->isEncrypted(path)) {
+    struct StreamSink {
+      Print* out;
+      bool stopped;
+    } sink{&out, false};
     auto append = [](void* context, const uint8_t* data, size_t len) {
-      return static_cast<Print*>(context)->write(data, len) == len;
+      auto* target = static_cast<StreamSink*>(context);
+      if (target->out->write(data, len) == len) return true;
+      target->stopped = true;
+      return false;
     };
-    const bool ok = decryptor->decryptToSink(path, append, &out);
+    bool ok = decryptor->decryptToSink(path, append, &sink);
+    // A consumer that has read what it needs (e.g. an image-size probe) stops
+    // the stream; like the zip and text paths, that is success when allowed.
+    if (!ok && sink.stopped && allowEarlyStop) ok = true;
     if (!ok) LOG_ERR("EBP", "content read failed for %s", path.c_str());
     if (outStreamReason) {
       *outStreamReason = static_cast<uint8_t>(ok ? ZipFile::StreamResult::Ok : ZipFile::StreamResult::ShortRead);

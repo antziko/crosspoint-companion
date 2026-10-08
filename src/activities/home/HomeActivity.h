@@ -173,6 +173,10 @@ class HomeActivity final : public Activity {
   bool restoreCoverBuffer();  // Restore frame buffer from stored cover
   void freeCoverBuffer();     // Free the stored cover buffer
   void loadRecentBooks(int maxBooks);
+  // The card stopped answering and a remount did not bring it back.
+  bool sdCardUnresponsive = false;
+  // Offers a restart in place of an empty "No open book" home.
+  void showSdCardError();
   void loadRecentCovers(int coverHeight);
   void resolveGridCoverPaths();
   void loadGridCover(RecentBook& book, int height, bool& showingLoading, Rect& popupRect);

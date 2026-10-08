@@ -88,6 +88,8 @@ class ProtectedBookDecryptor : public ContentDecryptor {
     if (!source_.ensureOpen()) return false;
     reclaimContentCaches();
     if (!book_->decryptEntryToSink(source_, crypto(), itemPath, sink, context)) {
+      // The consumer stopped reading; the caller decides whether that is an error.
+      if (book_->lastError() == ProtectedBook::kSinkStoppedError) return false;
       LOG_ERR("CPRO", "Decrypt failed: %s (%s), free=%u max_block=%u", itemPath.c_str(), book_->lastError().c_str(),
               static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
       return false;

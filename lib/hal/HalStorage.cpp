@@ -46,6 +46,17 @@ class HalStorage::StorageLock {
   ~StorageLock() { xSemaphoreGiveRecursive(HalStorage::getInstance().storageMutex); }
 };
 
+bool HalStorage::remount() {
+  StorageLock lock;
+  const bool mounted = SDCard.remount();
+  if (mounted) {
+    LOG_INF("SD", "Card remounted");
+  } else {
+    LOG_ERR("SD", "Card remount failed");
+  }
+  return mounted;
+}
+
 #if FREEINK_CAP_USB_MSC && !FREEINK_SD_SDMMC
 #error "USB Drive requires an SDMMC-backed storage profile"
 #endif

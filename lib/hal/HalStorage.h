@@ -23,6 +23,9 @@ class HalStorage {
  public:
   HalStorage();
   bool begin();
+  // Mount the card again after it stopped answering mid-session. Open HalFile
+  // handles are invalid afterwards.
+  bool remount();
   bool ready() const;
   // USB Drive hands the raw block device to the host and exclusively owns the SD card
   // while active: the filesystem is detached, so every other storage user must have

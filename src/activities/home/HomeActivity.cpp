@@ -26,6 +26,7 @@
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
+#include "SilentRestart.h"
 #include "activities/plugins/PluginCatalogActivity.h"  // anyPluginInstalled()
 #include "activities/reader/GlobalReadingStats.h"
 #include "activities/util/ConfirmationActivity.h"
@@ -52,23 +53,46 @@ int HomeActivity::getMenuItemCount() const {
 }
 
 void HomeActivity::loadRecentBooks(int maxBooks) {
-  recentBooks.clear();
   const auto& books = RECENT_BOOKS.getBooks();
-  recentBooks.reserve(coverGridUi ? maxBooks : std::min(static_cast<int>(books.size()), maxBooks));
+  const auto collect = [&] {
+    recentBooks.clear();
+    recentBooks.reserve(coverGridUi ? maxBooks : std::min(static_cast<int>(books.size()), maxBooks));
+    for (const RecentBook& book : books) {
+      // Limit to maximum number of recent books
+      if (recentBooks.size() >= maxBooks) {
+        break;
+      }
 
-  for (const RecentBook& book : books) {
-    // Limit to maximum number of recent books
-    if (recentBooks.size() >= maxBooks) {
-      break;
+      // Skip if file no longer exists
+      if (RecentBooksStore::isMissing(book)) {
+        continue;
+      }
+
+      recentBooks.push_back(book);
     }
+  };
+  collect();
 
-    // Skip if file no longer exists
-    if (RecentBooksStore::isMissing(book)) {
-      continue;
+  // Every recent book missing AND the settings dir gone means the card stopped
+  // answering, not that the books were deleted: remount once and look again.
+  sdCardUnresponsive = false;
+  if (recentBooks.empty() && !books.empty() && !Storage.exists("/.crosspoint")) {
+    LOG_ERR("HOME", "SD card not responding; remounting");
+    if (Storage.remount() && Storage.exists("/.crosspoint")) {
+      collect();
+    } else {
+      sdCardUnresponsive = true;
     }
-
-    recentBooks.push_back(book);
   }
+}
+
+void HomeActivity::showSdCardError() {
+  startActivityForResultNoThrow<ConfirmationActivity>(
+      [](const ActivityResult& result) {
+        if (!result.isCancelled) silentRestart();
+      },
+      renderer, mappedInput, tr(STR_SD_CARD_NOT_RESPONDING), tr(STR_SD_CARD_NOT_RESPONDING_HINT), tr(STR_CANCEL),
+      tr(STR_RESTART));
 }
 
 void HomeActivity::resolveGridCoverPaths() {
@@ -283,6 +307,7 @@ void HomeActivity::onEnter() {
 
   // Trigger first update
   requestUpdate();
+  if (sdCardUnresponsive) showSdCardError();
 }
 
 void HomeActivity::onExit() {
