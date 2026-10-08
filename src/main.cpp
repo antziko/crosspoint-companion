@@ -52,6 +52,7 @@
 #include "util/ReaderStatusBar.h"
 #include "util/ScreenRefresh.h"
 #include "util/ScreenshotUtil.h"
+#include "util/SysTaskStacks.h"
 #include "util/Timezones.h"
 
 GfxRenderer renderer(display);
@@ -918,9 +919,14 @@ void setup() {
   // Heap profiling baseline: free heap once boot is fully done (fonts, SD, first
   // activity entered). Every later MEM line in the trace diffs against this.
   SdDebugLog::setEnabled(true);
-  SdDebugLog::log("MEM", "boot-done %s free=%u largest=%u minEver=%u", gpio.deviceIsX3() ? "X3" : "X4",
-                  (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-                  (unsigned)ESP.getMinFreeHeap());
+  // cfg names the custom_sdkconfig build; tmrStk/svcStk are the shrunk system task stacks
+  // as configured/unused bytes.
+  SdDebugLog::log(
+      "MEM", "boot-done %s free=%u largest=%u minEver=%u cfg wifiIram=%d rxIram=%d tmrStk=%d/%u svcStk=%d/%u",
+      gpio.deviceIsX3() ? "X3" : "X4", (unsigned)ESP.getFreeHeap(),
+      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), (unsigned)ESP.getMinFreeHeap(),
+      SysTaskStacks::WIFI_IRAM, SysTaskStacks::WIFI_RX_IRAM, CONFIG_ESP_TIMER_TASK_STACK_SIZE,
+      SysTaskStacks::espTimerHeadroom(), CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH, SysTaskStacks::timerServiceHeadroom());
   HangTrace::reportPreviousBoot();
 }
 

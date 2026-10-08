@@ -6,6 +6,7 @@
 
 #include "ActivityManager.h"
 #include "components/ListCursor.h"
+#include "util/SysTaskStacks.h"
 
 namespace {
 // Heap profiling. onEnter() runs before an activity allocates (baseline), onExit()
@@ -17,9 +18,13 @@ void logHeap(const char* phase, const char* name) {
   const uint32_t freeHeap = ESP.getFreeHeap();
   const uint32_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   const uint32_t minEver = ESP.getMinFreeHeap();
-  LOG_DBG("MEM", "%s %-22s free=%u largest=%u minEver=%u", phase, name, freeHeap, largest, minEver);
+  const unsigned tmrStk = SysTaskStacks::espTimerHeadroom();
+  const unsigned svcStk = SysTaskStacks::timerServiceHeadroom();
+  LOG_DBG("MEM", "%s %-22s free=%u largest=%u minEver=%u tmrStk=%u svcStk=%u", phase, name, freeHeap, largest, minEver,
+          tmrStk, svcStk);
   SdDebugLog::setEnabled(true);
-  SdDebugLog::log("MEM", "%s %s free=%u largest=%u minEver=%u", phase, name, freeHeap, largest, minEver);
+  SdDebugLog::log("MEM", "%s %s free=%u largest=%u minEver=%u tmrStk=%u svcStk=%u", phase, name, freeHeap, largest,
+                  minEver, tmrStk, svcStk);
 #else
   (void)phase;
   (void)name;
