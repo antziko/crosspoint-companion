@@ -231,6 +231,7 @@ void OpdsBookBrowserActivity::onEnter() {
   selectorIndex = 0;
   consumeConfirm = false;
   consumeBack = false;
+  leftSearchPending = false;
   errorMessage.clear();
   statusMessage = tr(STR_CHECKING_WIFI);
 
@@ -376,12 +377,18 @@ void OpdsBookBrowserActivity::loop() {
   if (state == BrowserState::DOWNLOADING) return;
 
   if (state == BrowserState::BROWSING) {
+    // Left on the top row opens search on release; the press must not also step the selection.
+    if (mappedInput.wasPressed(MappedInputManager::Button::Left)) {
+      leftSearchPending = !searchTemplate.empty() && selectorIndex == 0;
+    }
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       activateSelected();
     } else if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
       navigateBack();
-    } else if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
-      if (!searchTemplate.empty() && selectorIndex == 0) launchSearch();
+    } else if (mappedInput.wasReleased(MappedInputManager::Button::Left) && leftSearchPending) {
+      leftSearchPending = false;
+      launchSearch();
+      return;
     }
 
     // Touch goes through the FreeInkApp: render() registered every tap target
@@ -425,16 +432,19 @@ void OpdsBookBrowserActivity::loop() {
 
       // LOCAL(feat): list navigation is bound to the FRONT Left/Right buttons
       // only, not ButtonNavigator's default {Down,Right}/{Up,Left} sets that
-      // upstream's onNextRelease/onPreviousRelease use. The side Up/Down
+      // upstream's onNextPress/onPreviousPress use. The side Up/Down
       // buttons are claimed below by resolveSideNavAction, whose hold gesture
       // cycles the display orientation — letting the default sets consume them
       // would silently kill that gesture.
-      buttonNavigator.onRelease({MappedInputManager::Button::Right}, navigateNext);
-      buttonNavigator.onRelease({MappedInputManager::Button::Left}, navigatePrevious);
+      buttonNavigator.onPress({MappedInputManager::Button::Right}, navigateNext);
+      buttonNavigator.onPress({MappedInputManager::Button::Left}, [this, navigatePrevious] {
+        if (!leftSearchPending) navigatePrevious();
+      });
       buttonNavigator.onContinuous({MappedInputManager::Button::Right}, [this, moveSelection] {
         moveSelection(ButtonNavigator::nextPageIndex(selectorIndex, entries.size(), listNav.pageRows()));
       });
       buttonNavigator.onContinuous({MappedInputManager::Button::Left}, [this, moveSelection] {
+        leftSearchPending = false;
         moveSelection(ButtonNavigator::previousPageIndex(selectorIndex, entries.size(), listNav.pageRows()));
       });
 
