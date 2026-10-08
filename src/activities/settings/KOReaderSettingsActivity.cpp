@@ -19,9 +19,9 @@ namespace fui = freeink::ui;
 namespace {
 // Rows always present for an existing server.
 // New servers only show the first BASE_ITEMS_NEW rows (no Set Active, Authenticate, or Delete).
-constexpr int BASE_ITEMS_NEW =
-    7;  // Name, Username, Password, Sync Server URL, Doc Matching, Send Metadata, Sync Behavior
-constexpr int BASE_ITEMS_EXISTING = 10;  // + Set as Active + Sign Up + Authenticate
+// Name, Username, Password, Sync Server URL, Doc Matching, Send Metadata, Precise Position, Sync Behavior
+constexpr int BASE_ITEMS_NEW = 8;
+constexpr int BASE_ITEMS_EXISTING = 11;  // + Set as Active + Sign Up + Authenticate
 
 // Row indices (shared between getMenuItemCount, handleSelection, render)
 constexpr int ROW_NAME = 0;
@@ -30,11 +30,12 @@ constexpr int ROW_PASSWORD = 2;
 constexpr int ROW_URL = 3;
 constexpr int ROW_DOC_MATCH = 4;
 constexpr int ROW_SEND_METADATA = 5;
-constexpr int ROW_SYNC_BEHAVIOR = 6;
-constexpr int ROW_SET_ACTIVE = 7;
-constexpr int ROW_SIGN_UP = 8;
-constexpr int ROW_AUTHENTICATE = 9;
-constexpr int ROW_DELETE = 10;
+constexpr int ROW_PRECISE_POSITION = 6;
+constexpr int ROW_SYNC_BEHAVIOR = 7;
+constexpr int ROW_SET_ACTIVE = 8;
+constexpr int ROW_SIGN_UP = 9;
+constexpr int ROW_AUTHENTICATE = 10;
+constexpr int ROW_DELETE = 11;
 }  // namespace
 
 KOReaderSettingsActivity::KOReaderSettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
@@ -42,7 +43,7 @@ KOReaderSettingsActivity::KOReaderSettingsActivity(GfxRenderer& renderer, Mapped
     : UiListActivity("KOReaderSettings", renderer, mappedInput), serverIndex(serverIndex) {
   // Labels never change (unlike the values, which track editServer's fields
   // live), so they're set once here rather than every buildScreen() call.
-  // LOCAL(feat): eleven rows, not upstream's eight. Listing fewer here would
+  // LOCAL(feat): twelve rows, not upstream's eight. Listing fewer here would
   // leave the tail labels value-initialised to StrId(0) and render the wrong
   // strings on an existing server.
   static constexpr StrId ROW_LABELS[MAX_MENU_ITEMS] = {
@@ -52,11 +53,12 @@ KOReaderSettingsActivity::KOReaderSettingsActivity(GfxRenderer& renderer, Mapped
       StrId::STR_SYNC_SERVER_URL,    // 3  Sync Server URL
       StrId::STR_DOCUMENT_MATCHING,  // 4  Document Matching
       StrId::STR_SEND_METADATA,      // 5  Send Metadata
-      StrId::STR_SYNC_BEHAVIOR,      // 6  Sync Behavior
-      StrId::STR_SET_AS_ACTIVE,      // 7  Set as Active
-      StrId::STR_SIGN_UP,            // 8  Sign Up
-      StrId::STR_AUTHENTICATE,       // 9  Authenticate
-      StrId::STR_DELETE_SERVER,      // 10 Delete Server
+      StrId::STR_PRECISE_POSITION,   // 6  Precise Position
+      StrId::STR_SYNC_BEHAVIOR,      // 7  Sync Behavior
+      StrId::STR_SET_AS_ACTIVE,      // 8  Set as Active
+      StrId::STR_SIGN_UP,            // 9  Sign Up
+      StrId::STR_AUTHENTICATE,       // 10 Authenticate
+      StrId::STR_DELETE_SERVER,      // 11 Delete Server
   };
   for (int i = 0; i < MAX_MENU_ITEMS; i++) {
     rowItems_[i].label = I18N.get(ROW_LABELS[i]);
@@ -168,6 +170,7 @@ void KOReaderSettingsActivity::handleSelection() {
           if (!result.isCancelled) {
             const auto& text = std::get<KeyboardResult>(result.data).text;
             editServer.serverUrl = (text == "https://" || text == "http://") ? "" : text;
+            if (KOReaderCredentialStore::isCrossPointSyncUrl(editServer.serverUrl)) editServer.precisePosition = true;
             saveServer();
             requestUpdate();
           }
@@ -184,6 +187,11 @@ void KOReaderSettingsActivity::handleSelection() {
   } else if (nav.selected == ROW_SEND_METADATA) {
     // Toggle whether document metadata is sent with progress sync for this server (#1820)
     editServer.sendMetadata = !editServer.sendMetadata;
+    saveServer();
+    requestUpdate();
+
+  } else if (nav.selected == ROW_PRECISE_POSITION) {
+    editServer.precisePosition = !editServer.precisePosition;
     saveServer();
     requestUpdate();
 
@@ -269,6 +277,10 @@ void KOReaderSettingsActivity::buildScreen(UiScreen& screen) {
     } else if (i == ROW_SEND_METADATA) {
       rowValues_[i].clear();
       GUI.setCheckboxRow(rowItems_[i], editServer.sendMetadata);
+      continue;
+    } else if (i == ROW_PRECISE_POSITION) {
+      rowValues_[i].clear();
+      GUI.setCheckboxRow(rowItems_[i], editServer.precisePosition);
       continue;
     } else if (i == ROW_SYNC_BEHAVIOR) {
       rowValues_[i] =

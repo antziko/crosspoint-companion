@@ -1,6 +1,6 @@
 add_executable(KOReaderStatsStreamTest
   KOReaderStatsStreamTest.cpp
-  ${REPO_ROOT}/lib/JsonParser/StreamingJsonParser.cpp
+  ${REPO_ROOT}/lib/JsonParser/ChunkedJsonParser.cpp
 )
 
 # stubs/ first so the host Logging.h shadows the device one (which pulls in Arduino).

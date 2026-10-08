@@ -165,7 +165,8 @@ bool BookMetadataCache::endWrite() {
   return true;
 }
 
-bool BookMetadataCache::buildBookBin(const std::string& epubPath, const BookMetadata& metadata) {
+bool BookMetadataCache::buildBookBin(const std::string& epubPath, const BookMetadata& metadata,
+                                     const std::vector<uint32_t>* knownSizes) {
   // Open all three files, writing to meta, reading from spine and toc
   if (!Storage.openFileForWrite("BMC", cachePath + bookBinFile, bookFile)) {
     return false;
@@ -248,7 +249,7 @@ bool BookMetadataCache::buildBookBin(const std::string& epubPath, const BookMeta
 
   ZipFile zip(epubPath);
   // Pre-open zip file to speed up size calculations
-  if (!zip.open()) {
+  if (!knownSizes && !zip.open()) {
     LOG_ERR("BMC", "Could not open EPUB zip for size calculations");
     // Explicit close() required: member variables persist beyond function scope
     bookFile.close();
@@ -267,7 +268,7 @@ bool BookMetadataCache::buildBookBin(const std::string& epubPath, const BookMeta
   std::deque<uint32_t> spineSizes;
   bool useBatchSizes = false;
 
-  if (spineCount >= LARGE_SPINE_THRESHOLD) {
+  if (!knownSizes && spineCount >= LARGE_SPINE_THRESHOLD) {
     LOG_DBG("BMC", "Using batch size lookup for %d spine items", spineCount);
 
     std::deque<ZipFile::SizeTarget> targets;
@@ -318,7 +319,9 @@ bool BookMetadataCache::buildBookBin(const std::string& epubPath, const BookMeta
     lastSpineTocIndex = spineEntry.tocIndex;
 
     size_t itemSize = 0;
-    if (useBatchSizes) {
+    if (knownSizes) {
+      itemSize = i < static_cast<int>(knownSizes->size()) ? (*knownSizes)[i] : 0;
+    } else if (useBatchSizes) {
       itemSize = spineSizes[i];
       if (itemSize == 0) {
         const std::string path = FsHelpers::normalisePath(spineEntry.href);
@@ -340,7 +343,7 @@ bool BookMetadataCache::buildBookBin(const std::string& epubPath, const BookMeta
     writeSpineEntryTo(bookOut, spineEntry);
   }
   // Close opened zip file
-  zip.close();
+  if (!knownSizes) zip.close();
 
   // Loop through toc entries from toc file writing to book.bin
   tocIn.seek(0);

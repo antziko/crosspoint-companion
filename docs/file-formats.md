@@ -88,6 +88,22 @@ if (parsedSize != fileSize) {
 }
 ```
 
+## Text books (`.txt` / `.md`)
+
+Plain-text and Markdown books are read through the EPUB pipeline and share its
+`epub_<hash>` cache directory. On first open `lib/TextBook` converts the source
+into XHTML parts, and `book.bin` is built with one spine entry per part:
+
+- `parts/pNNNN.xhtml` — the converted text. A part closes at the first top-level
+  block boundary after ~32 KB of source (and before each Markdown H1/H2), so a
+  large file never becomes one giant section.
+- `text.stamp` — 5 bytes: converter version (`textbook::CONVERTER_VERSION`),
+  then the source file size (uint32 LE). A mismatch on open rebuilds `book.bin`,
+  `parts/` and `sections/`; `progress.bin` is kept.
+
+Item hrefs other than `pNNNN.xhtml` (images, the companion cover) are
+root-relative SD paths.
+
 ## `section.bin`
 
 ### Version 65

@@ -9,15 +9,19 @@
 #include <HalFrontlight.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <KOReaderDocumentId.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <SdDebugLog.h>
 #include <Serialization.h>
+#include <TrustedTime.h>
 #include <ZipFile.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
 
 #include <algorithm>
+#include <cctype>
+#include <cstdio>
 #include <functional>
 #include <iterator>
 #include <limits>
@@ -65,8 +69,11 @@
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
 #include "util/FlashcardDeck.h"
+#include "util/LoanDue.h"
 #include "util/LookupMarks.h"
 #include "util/PageMarks.h"
+#include "util/PluginEvents.h"
+#include "util/PluginLocations.h"
 #include "util/ReaderStatusBar.h"
 #include "util/ScreenRefresh.h"
 #include "util/ScreenshotUtil.h"
@@ -317,6 +324,7 @@ void EpubReaderActivity::onEnter() {
   if (!epub) {
     return;
   }
+  pluginDocument = PluginLocations::isPluginFile(epub->getPath());
 
   // If the book was moved/renamed outside the firmware, re-key its orphaned cache dir
   // (progress, stats, sections) before setupCacheDir() creates a fresh empty one.
@@ -480,7 +488,7 @@ void EpubReaderActivity::onEnter() {
   // from KOReaderSyncActivity won't re-arm. Pointless without credentials.
   // A first-open sibling-stats import also arms it (one-time event), bypassing the threshold/opt-in
   // gate so the freshly seeded book reconciles progress with the server immediately.
-  openSyncPromptArmed_ = KOREADER_STORE.hasCredentials() &&
+  openSyncPromptArmed_ = !pluginDocument && KOREADER_STORE.hasCredentials() &&
                          (importedSiblingStats || (SETTINGS.syncPromptOnOpen && syncPromptThresholdReached()));
 
   // Trigger first update
@@ -489,6 +497,16 @@ void EpubReaderActivity::onEnter() {
 
 void EpubReaderActivity::onExit() {
   Activity::onExit();
+
+  // Flush BEFORE the ReaderExit event: the session's final progress must be
+  // durable before a subscriber can act on the exit notification.
+  flushReaderSession();
+  if (epub && !pluginDocument && pluginevents::anySubscriber(pluginevents::Event::ReaderExit)) {
+    char percent[8];
+    snprintf(percent, sizeof(percent), "%d", getScreenshotInfo().progressPercent);
+    const pluginevents::Var vars[] = {{"book", epub->getPath().c_str()}, {"percent", percent}};
+    pluginevents::emit(pluginevents::Event::ReaderExit, vars, 2);
+  }
 
   // The lazy-image extractor holds a raw pointer to this activity's epub; drop it
   // before the activity (and the shared_ptr) goes away (#2611).
@@ -1556,6 +1574,8 @@ void EpubReaderActivity::loop() {
       }
       section.reset();
     }
+    // A skip is navigation, not reading: it never counts toward session dwell.
+    notePageTurn(false, true);
     requestUpdate();
     return;
   }
@@ -1724,6 +1744,9 @@ void EpubReaderActivity::openReaderMenu() {
   // changes layout (font/orientation), the subsequent re-layout re-renders the page anyway.
   pauseMarkerDwell();
   accumulateVisibleSegment();
+  std::string loanLine;
+  char loanText[64];
+  if (loandue::describe(epub->getLoanExpiresAt(), loanText, sizeof(loanText))) loanLine = loanText;
   startActivityForResultNoThrow<EpubReaderMenuActivity>(
       [this](const ActivityResult& result) {
         // Always apply orientation change even if the menu was cancelled
@@ -1736,7 +1759,7 @@ void EpubReaderActivity::openReaderMenu() {
       },
       renderer, mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent,
       APP_STATE.activeOrientation, !currentPageFootnotes.empty(), Dictionary::exists(epub->getCachePath().c_str()),
-      std::move(activeDictName));
+      std::move(activeDictName), std::move(loanLine));
 }
 
 bool EpubReaderActivity::runHoldAction() {
@@ -2934,6 +2957,7 @@ void EpubReaderActivity::pageTurn(bool isForwardTurn) {
     RenderLock lock(*this);
     clearDeferredReposition();
   }
+  bool moved = true;
   if (isForwardTurn) {
     // Fold the final visible segment into the page's accumulated reading time (sub-activity
     // time is already excluded). The idle cap is applied to this total by the new-page render
@@ -2990,18 +3014,75 @@ void EpubReaderActivity::pageTurn(bool isForwardTurn) {
         currentSpineIndex--;
         section.reset();
       }
+    } else {
+      moved = false;
     }
   }
+  notePageTurn(isForwardTurn, moved);
   lastPageTurnTime = millis();
   requestUpdate();
 }
 
+void EpubReaderActivity::notePageTurn(const bool forward, const bool succeeded) {
+  RenderLock lock(*this);
+  readerSession.noteTurn(forward, succeeded);
+}
+
+void EpubReaderActivity::prepareForSleep() { flushReaderSession(); }
+
+void EpubReaderActivity::flushReaderSession() {
+  if (!epub || pluginDocument || !readerSession.isEmitWorthy() ||
+      !pluginevents::anySubscriber(pluginevents::Event::ReaderSession)) {
+    readerSession.reset();
+    return;
+  }
+
+  const std::string& bookPath = epub->getPath();
+  const std::string document = KOReaderDocumentId::calculate(bookPath);
+  const bool validDocument =
+      document.size() == 32 && std::all_of(document.begin(), document.end(), [](const unsigned char c) {
+        return std::isdigit(c) || (c >= 'a' && c <= 'f');
+      });
+  if (validDocument) {
+    char startTime[24];
+    char endTime[24];
+    char duration[16];
+    char startProgress[8];
+    char endProgress[8];
+    snprintf(startTime, sizeof(startTime), "%lld", static_cast<long long>(readerSession.startTime()));
+    snprintf(endTime, sizeof(endTime), "%lld", static_cast<long long>(readerSession.endTime()));
+    snprintf(duration, sizeof(duration), "%lu", static_cast<unsigned long>(readerSession.durationSeconds()));
+    snprintf(startProgress, sizeof(startProgress), "%u", readerSession.startProgressBp());
+    snprintf(endProgress, sizeof(endProgress), "%u", readerSession.endProgressBp());
+    const pluginevents::Var vars[] = {{"book", bookPath.c_str()},       {"document", document.c_str()},
+                                      {"start_time", startTime},        {"end_time", endTime},
+                                      {"duration_seconds", duration},   {"start_progress_bp", startProgress},
+                                      {"end_progress_bp", endProgress}, {"progress_scale", "10000"}};
+    pluginevents::emit(pluginevents::Event::ReaderSession, vars, 8);
+  }
+  readerSession.reset();
+}
+
+int EpubReaderActivity::getProgressBasisPoints() const {
+  if (epub && currentSpineIndex >= epub->getSpineItemsCount()) return 10000;
+  const int fallback = getScreenshotInfo().progressPercent * 100;
+  if (!epub || !section || epub->getBookSize() == 0) return fallback;
+  const int totalPages = section->estimatedTotalPages();
+  if (totalPages <= 0) return fallback;
+  const float chapterProgress = static_cast<float>(section->currentPage) / static_cast<float>(totalPages);
+  const int basisPoints =
+      static_cast<int>(epub->calculateProgress(currentSpineIndex, chapterProgress) * 10000.0f + 0.5f);
+  return std::clamp(basisPoints, 0, 10000);
+}
+
 // TODO: Failure handling
 void EpubReaderActivity::commitOpenBook() {
-  if (!epub || !openBookRecord.shouldCommit()) return;
+  if (!epub || pluginDocument || !openBookRecord.shouldCommit()) return;
   APP_STATE.openEpubPath = epub->getPath();
   APP_STATE.saveToFile();
   RECENT_BOOKS.addBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), epub->getThumbBmpPath());
+  const pluginevents::Var openVars[] = {{"book", epub->getPath().c_str()}};
+  pluginevents::emit(pluginevents::Event::ReaderOpen, openVars, 1);
 }
 
 bool EpubReaderActivity::backgroundBuildWanted() const {
@@ -3573,6 +3654,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     LOG_DBG("ERS", "Rendered page in %dms", millis() - start);
     lastRenderCompleteMs = millis();
     openBookRecord.markPageRendered();
+    readerSession.onRenderComplete(lastRenderCompleteMs, trustedtime::trustedNow(), getProgressBasisPoints());
     // EPUB steady-state heap profile (post-render, font cache already freed). Watch
     // `largest` for fragmentation and `minEver` for the worst-case low-water mark.
     LOG_DBG("MEM", "epub-page free=%u largest=%u minEver=%u", (unsigned)ESP.getFreeHeap(),
@@ -3968,7 +4050,8 @@ void EpubReaderActivity::recordSyncPromptSkip() {
 
 bool EpubReaderActivity::wantsManualSleepPrompt() const {
   // Opt-in, reader page only, pointless without credentials, and only past the reading threshold.
-  return SETTINGS.syncPromptOnSleep && epub && KOREADER_STORE.hasCredentials() && syncPromptThresholdReached();
+  return SETTINGS.syncPromptOnSleep && epub && !pluginDocument && KOREADER_STORE.hasCredentials() &&
+         syncPromptThresholdReached();
 }
 
 bool EpubReaderActivity::onManualSleepRequested() {

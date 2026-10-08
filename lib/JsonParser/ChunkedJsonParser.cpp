@@ -1,10 +1,10 @@
-#include "StreamingJsonParser.h"
+#include "ChunkedJsonParser.h"
 
 #include <cstring>
 
-StreamingJsonParser::StreamingJsonParser(const JsonCallbacks& callbacks) : cb(callbacks) { reset(); }
+ChunkedJsonParser::ChunkedJsonParser(const ChunkedJsonCallbacks& callbacks) : cb(callbacks) { reset(); }
 
-void StreamingJsonParser::reset() {
+void ChunkedJsonParser::reset() {
   tokenLen = 0;
   state = State::SCANNING;
   expectingValue = false;
@@ -17,7 +17,7 @@ void StreamingJsonParser::reset() {
   literalPos = 0;
 }
 
-void StreamingJsonParser::feed(const char* data, size_t len) {
+void ChunkedJsonParser::feed(const char* data, size_t len) {
   for (size_t i = 0; i < len && !error; ++i) {
     char c = data[i];
     switch (state) {
@@ -41,7 +41,7 @@ void StreamingJsonParser::feed(const char* data, size_t len) {
   }
 }
 
-void StreamingJsonParser::handleScanning(char c) {
+void ChunkedJsonParser::handleScanning(char c) {
   switch (c) {
     case '"':
       tokenLen = 0;
@@ -124,7 +124,7 @@ void StreamingJsonParser::handleScanning(char c) {
   }
 }
 
-void StreamingJsonParser::handleStringChar(char c) {
+void ChunkedJsonParser::handleStringChar(char c) {
   if (escaped) {
     escaped = false;
     switch (c) {
@@ -175,7 +175,7 @@ void StreamingJsonParser::handleStringChar(char c) {
   appendToken(c);
 }
 
-void StreamingJsonParser::handleNumber(char c) {
+void ChunkedJsonParser::handleNumber(char c) {
   if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E') {
     appendToken(c);
     return;
@@ -191,7 +191,7 @@ void StreamingJsonParser::handleNumber(char c) {
   handleScanning(c);
 }
 
-void StreamingJsonParser::handleLiteral(char c) {
+void ChunkedJsonParser::handleLiteral(char c) {
   if (c == literalExpected[literalPos]) {
     ++literalPos;
     if (literalPos == literalLen) {
@@ -210,7 +210,7 @@ void StreamingJsonParser::handleLiteral(char c) {
   }
 }
 
-void StreamingJsonParser::handleSkipString(char c) {
+void ChunkedJsonParser::handleSkipString(char c) {
   if (escaped) {
     escaped = false;
     return;
@@ -225,7 +225,7 @@ void StreamingJsonParser::handleSkipString(char c) {
   }
 }
 
-void StreamingJsonParser::appendToken(char c) {
+void ChunkedJsonParser::appendToken(char c) {
   if (tokenLen < TOKEN_BUF_SIZE - 1) {
     tokenBuf[tokenLen++] = c;
     return;
@@ -244,7 +244,7 @@ void StreamingJsonParser::appendToken(char c) {
   tokenOverflow = true;
 }
 
-void StreamingJsonParser::emitToken() {
+void ChunkedJsonParser::emitToken() {
   if (state == State::IN_STRING_KEY) {
     if (!tokenOverflow && cb.onKey) {
       tokenBuf[tokenLen] = '\0';

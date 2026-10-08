@@ -14,6 +14,7 @@
 #include "EpubReaderMenuActivity.h"
 #include "OpenBookRecord.h"
 #include "ProgressMapper.h"
+#include "ReaderSession.h"
 #include "ReaderToolbarUi.h"
 #include "SyncScope.h"
 #include "activities/Activity.h"
@@ -406,6 +407,13 @@ class EpubReaderActivity final : public Activity {
   // Records the open book once its first page has reached the panel.
   OpenBookRecord openBookRecord;
   void commitOpenBook();
+  // Active-reading summary for the reader.session plugin event.
+  ReaderSession readerSession;
+  // A plugin README opened from the plugin picker: no recents, last-read, sync prompts or events.
+  bool pluginDocument = false;
+  void notePageTurn(bool forward, bool succeeded);
+  void flushReaderSession();
+  int getProgressBasisPoints() const;
   // Gate for a background build tick: true when the heap can take parse allocations.
   // Updates buildHeapPaused as a side effect.
   bool buildTickHeapGate();
@@ -687,6 +695,7 @@ class EpubReaderActivity final : public Activity {
         pagesUntilFullRefresh(initialRefreshCountdown) {}
   void onEnter() override;
   void onExit() override;
+  void prepareForSleep() override;
   void onPause() override;
   void onResume() override;
   void loop() override;

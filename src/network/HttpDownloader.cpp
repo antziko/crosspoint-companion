@@ -13,6 +13,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #if defined(FREEINK_NET_WOLFSSL)
 #include <SecureHttpClient.h>
@@ -407,7 +408,29 @@ struct Sink {
   // KOReaderSyncClient.cpp and the template-bloat rule in CLAUDE.md.
   void* rewindCtx = nullptr;
   bool (*rewind)(void* ctx) = nullptr;
+  // Extra request headers (e.g. a plugin's Bearer token). Non-null only for callers that
+  // pass headers; those also get UNAUTHORIZED instead of HTTP_ERROR for a 401/403.
+  const std::vector<HttpDownloader::Header>* headers = nullptr;
 };
+
+// scheme://host[:port] of `url`, for keeping caller headers on the starting origin.
+std::string_view urlOrigin(const std::string& url) {
+  const size_t scheme = url.find("://");
+  if (scheme == std::string::npos) return {};
+  const size_t path = url.find('/', scheme + 3);
+  return std::string_view(url).substr(0, path == std::string::npos ? url.size() : path);
+}
+
+// Caller headers (typically an Authorization) stay with the starting origin: a redirect to a
+// CDN must not receive the token, and presigned-URL hosts reject an extra Authorization.
+bool sendsCallerHeaders(const Sink& sink, const std::string& startUrl, const std::string& hopUrl) {
+  return sink.headers && urlOrigin(startUrl) == urlOrigin(hopUrl);
+}
+
+HttpDownloader::DownloadError statusError(const Sink& sink, const int status) {
+  if (sink.headers && (status == 401 || status == 403)) return HttpDownloader::UNAUTHORIZED;
+  return HttpDownloader::HTTP_ERROR;
+}
 
 // snprintf into a stack buffer, then store the reason in *out (if provided).
 // Keeps the error path off std::string formatting while still giving the UI text.
@@ -643,6 +666,9 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
     // a second User-Agent header, which strict servers reject.
     http.setUserAgent("CrossPoint-ESP32-" CROSSPOINT_VERSION);
     if (!username.empty() && !password.empty()) http.setBasicAuth(username, password);
+    if (sendsCallerHeaders(sink, startUrl, url)) {
+      for (const auto& h : *sink.headers) http.addHeader(h.first, h.second);
+    }
 
     const uint32_t openStartMs = millis();
     uint32_t transferStartMs = openStartMs;
@@ -1119,7 +1145,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       LOG_ERR("HTTP", "wolfSSL unexpected status: %d, body: %s", status, errorBodyLen ? errorBody : "(empty)");
       SdDebugLog::log("HTTP", "unexpected status: %d, body: %s", status, errorBodyLen ? errorBody : "(empty)");
       setDetail(sink.detail, "HTTP %d", status);
-      return HttpDownloader::HTTP_ERROR;
+      return statusError(sink, status);
     }
     // A false sink.write return set _callbackAborted; surface it as the SD/parser error.
     if (http.callbackAborted()) {
@@ -1681,6 +1707,9 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
       const String header = "Basic " + base64::encode(credentials.c_str());
       esp_http_client_set_header(c, "Authorization", header.c_str());
     }
+    if (sendsCallerHeaders(sink, url, hopUrl)) {
+      for (const auto& h : *sink.headers) esp_http_client_set_header(c, h.first.c_str(), h.second.c_str());
+    }
 
     // Snapshot immediately before the (blocking) connect+TLS handshake, then again after,
     // with the handshake duration. The before/after heap delta is the mbedTLS arena cost —
@@ -1794,7 +1823,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
     SdDebugLog::log("HTTP", "unexpected status: %d", status);
     setDetail(sink.detail, "HTTP %d", status);
     esp_http_client_cleanup(client);
-    return HttpDownloader::HTTP_ERROR;
+    return statusError(sink, status);
   }
 
   // fetch_headers returns 0 for a chunked response (no Content-Length); leave
@@ -1948,7 +1977,8 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
                                                              ProgressCallback progress, bool* cancelFlag,
                                                              const std::string& username, const std::string& password,
                                                              std::string* errorDetail, const char* caPemOverride,
-                                                             const char* caPemRedirect) {
+                                                             const char* caPemRedirect,
+                                                             const std::vector<Header>& headers) {
   LOG_DBG("HTTP", "Downloading: %s -> %s", url.c_str(), destPath.c_str());
 
   if (Storage.exists(destPath.c_str())) {
@@ -1965,6 +1995,7 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
   sink.progress = std::move(progress);
   sink.cancelFlag = cancelFlag;
   sink.detail = errorDetail;
+  if (!headers.empty()) sink.headers = &headers;
   sink.write = [&file](const uint8_t* data, size_t len) { return file.write(data, len) == len; };
   // A file destination can be emptied, so this transfer can start over at byte 0 when a
   // server turns out not to honour Range. HalFile has no truncate(); reopening for write

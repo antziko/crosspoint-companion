@@ -6,6 +6,7 @@
 // the local header last and break the build.
 #include "HttpDownloader.h"
 #include <Logging.h>
+#include <Memory.h>
 #include <ReleaseJsonParser.h>
 #include <esp_ota_ops.h>
 #include <esp_wifi.h>
@@ -30,7 +31,13 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   // on top of the TLS session's heap during the fetch; with -fno-exceptions an
   // OOM there aborts. fetchUrl handles the verified-https GET, redirects, and
   // User-Agent (see HttpDownloader).
-  ReleaseJsonParser releaseParser;
+  // Heap-allocated: the parser embeds a 2 KB JSON token buffer.
+  auto releaseParserPtr = makeUniqueNoThrow<ReleaseJsonParser>();
+  if (!releaseParserPtr) {
+    LOG_ERR("OTA", "OOM: release parser");
+    return OOM_ERROR;
+  }
+  ReleaseJsonParser& releaseParser = *releaseParserPtr;
   // Each board updates from its own release asset: plain firmware.bin for the
   // C3 X4/X3 binary (matching the pre-existing releases), firmware-<board>.bin
   // otherwise. A board whose asset isn't published yet simply sees no update.

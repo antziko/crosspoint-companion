@@ -73,7 +73,8 @@ flowchart LR
     B --> C{Format}
     C -->|EPUB| D[lib/Epub/Epub]
     C -->|XTC| E[lib/Xtc reader]
-    C -->|TXT| F[lib/Txt reader]
+    C -->|TXT/MD| F[lib/TextBook converts to XHTML parts]
+    F --> D
     D --> G[Parse OPF/TOC and collect CSS refs]
     G --> H[Build/load book.bin and css_rules.cache]
     H --> I[Layout pages/sections]

@@ -26,6 +26,7 @@
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
+#include "activities/plugins/PluginCatalogActivity.h"  // anyPluginInstalled()
 #include "activities/reader/GlobalReadingStats.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
@@ -41,7 +42,7 @@ int HomeActivity::getMenuItemCount() const {
   if (!recentBooks.empty()) {
     count += recentBooks.size();
   }
-  if (hasOpdsServers) {
+  if (hasLibrarySlot()) {
     count++;
   }
   if (hasReadingStats) {
@@ -75,7 +76,7 @@ void HomeActivity::resolveGridCoverPaths() {
     if (!book.coverBmpPath.empty()) continue;
     // Constructors only derive cache paths; no metadata parsing or image generation.
     // Keep these large objects off the task stack and release each before the next book.
-    if (FsHelpers::hasEpubExtension(book.path)) {
+    if (FsHelpers::hasReflowableBookExtension(book.path)) {
       auto epub = makeUniqueNoThrow<Epub>(book.path, "/.crosspoint");
       if (!epub) {
         LOG_ERR("HOME", "OOM: EPUB thumbnail path");
@@ -97,7 +98,7 @@ void HomeActivity::loadGridCover(RecentBook& book, int height, bool& showingLoad
   if (!book.coverBmpPath.empty() && Storage.exists(UITheme::getCoverThumbPath(book.coverBmpPath, height).c_str()))
     return;
   // Only one parser lives at a time; EPUB/XTC objects exceed the stack budget.
-  if (FsHelpers::hasEpubExtension(book.path)) {
+  if (FsHelpers::hasReflowableBookExtension(book.path)) {
     auto epub = makeUniqueNoThrow<Epub>(book.path, "/.crosspoint");
     if (!epub) {
       LOG_ERR("HOME", "OOM: cover EPUB");
@@ -173,7 +174,7 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
       // it without the crop a cover-fit thumb forces. EPUB only: XTC has its own bespoke
       // scaler, so an XTC book in such a slot keeps the cover-fit thumb and its crop.
       const auto thumbSpec = GUI.homeCoverThumbSpec(renderer, progress, coverHeight);
-      const bool isEpub = FsHelpers::hasEpubExtension(book.path);
+      const bool isEpub = FsHelpers::hasReflowableBookExtension(book.path);
       const bool wantFitThumb = thumbSpec.width > 0 && isEpub;
       const std::string coverPath =
           wantFitThumb ? UITheme::getCoverThumbFitPath(book.coverBmpPath, thumbSpec.width, thumbSpec.height)
@@ -250,6 +251,7 @@ void HomeActivity::onEnter() {
   Activity::onEnter();
 
   hasOpdsServers = OPDS_STORE.hasServers();
+  hasPlugins = anyPluginInstalled();
 
   // Brief heap probe (struct embeds a ~785-byte ReadingTimeHistory — never a
   // stack local) just to decide whether the menu entry should be shown.
@@ -271,13 +273,13 @@ void HomeActivity::onEnter() {
     // grid fills from the recent-books store alone and simply shows fewer tiles
     // until enough books have been opened.
     resolveGridCoverPaths();
-    coverGridUi->begin(recentBooks, hasOpdsServers, !recentBooks.empty());
+    coverGridUi->begin(recentBooks, hasLibrarySlot(), !recentBooks.empty());
   }
 
   const auto base = static_cast<int>(recentBooks.size());
   selectorIndex = initialMenuItem == HomeMenuItem::NONE
                       ? 0
-                      : base + menuItemToIndex(initialMenuItem, hasOpdsServers, hasReadingStats);
+                      : base + menuItemToIndex(initialMenuItem, hasLibrarySlot(), hasReadingStats);
 
   // Trigger first update
   requestUpdate();
@@ -752,15 +754,15 @@ void HomeActivity::activateSelection() {
     return;
   }
   const int menuIndex = selectorIndex - static_cast<int>(recentBooks.size());
-  switch (indexToMenuItem(menuIndex, hasOpdsServers, hasReadingStats)) {
+  switch (indexToMenuItem(menuIndex, hasLibrarySlot(), hasReadingStats)) {
     case HomeMenuItem::FILE_BROWSER:
       onFileBrowserOpen();
       break;
     case HomeMenuItem::RECENTS:
       onRecentsOpen();
       break;
-    case HomeMenuItem::OPDS_BROWSER:
-      onOpdsBrowserOpen();
+    case HomeMenuItem::OPDS_BROWSER:  // the library slot
+      hasPlugins ? onPluginsOpen() : onOpdsBrowserOpen();
       break;
     case HomeMenuItem::READING_STATS:
       onReadingStatsOpen();
@@ -849,13 +851,13 @@ void HomeActivity::render(RenderLock&&) {
                                         tr(STR_SETTINGS_TITLE)};
   std::vector<UIIcon> menuIcons = {Folder, Recent, Transfer, Settings};
 
-  if (hasOpdsServers) {
-    menuItems.insert(menuItems.begin() + 2, tr(STR_OPDS_BROWSER));
-    menuIcons.insert(menuIcons.begin() + 2, Library);
+  if (hasLibrarySlot()) {
+    menuItems.insert(menuItems.begin() + 2, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));
+    menuIcons.insert(menuIcons.begin() + 2, hasPlugins ? Plugins : Library);
   }
 
   if (hasReadingStats) {
-    const size_t pos = hasOpdsServers ? 3 : 2;
+    const size_t pos = hasLibrarySlot() ? 3 : 2;
     menuItems.insert(menuItems.begin() + pos, tr(STR_READING_STATS));
     menuIcons.insert(menuIcons.begin() + pos, Chart);
   }
@@ -973,5 +975,7 @@ void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
 void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
+
+void HomeActivity::onPluginsOpen() { activityManager.goToPlugins(hasOpdsServers); }
 
 void HomeActivity::onReadingStatsOpen() { activityManager.goToReadingStats(); }

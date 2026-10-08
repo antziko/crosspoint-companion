@@ -83,21 +83,21 @@ struct Harness {
     dec.blob.dictBuf = dictBuf;
     dec.blob.fcBuf = fcBuf;
 
-    JsonCallbacks blobCbs = {};
+    ChunkedJsonCallbacks blobCbs = {};
     blobCbs.ctx = &dec.blob;
     blobCbs.onKey = kostats::blobOnKey;
     blobCbs.onNumber = kostats::blobOnNumber;
     blobCbs.onStringChunk = kostats::blobOnStringChunk;
-    StreamingJsonParser inner(blobCbs);
+    ChunkedJsonParser inner(blobCbs);
     dec.inner = &inner;
 
-    JsonCallbacks envCbs = {};
+    ChunkedJsonCallbacks envCbs = {};
     envCbs.ctx = &dec;
     envCbs.onKey = kostats::statsOnKey;
     envCbs.onObjectStart = kostats::statsOnObjectStart;
     envCbs.onObjectEnd = kostats::statsOnObjectEnd;
     envCbs.onStringChunk = kostats::statsOnStringChunk;
-    StreamingJsonParser outer(envCbs);
+    ChunkedJsonParser outer(envCbs);
 
     if (feedSize == 0) {
       outer.feed(body.data(), body.size());
@@ -242,20 +242,20 @@ TEST(KOReaderStatsStream, PayloadWithoutAFoldRequestedIsIgnored) {
   noFold.dec.maxEntries = KOReaderSyncClient::MAX_STATS_DEVICES;
   noFold.dec.selfDeviceId = "crosspoint-me";
   noFold.dec.blob.datedBuf = noFold.datedBuf;  // buffer present, fold absent
-  JsonCallbacks blobCbs = {};
+  ChunkedJsonCallbacks blobCbs = {};
   blobCbs.ctx = &noFold.dec.blob;
   blobCbs.onKey = kostats::blobOnKey;
   blobCbs.onNumber = kostats::blobOnNumber;
   blobCbs.onStringChunk = kostats::blobOnStringChunk;
-  StreamingJsonParser inner(blobCbs);
+  ChunkedJsonParser inner(blobCbs);
   noFold.dec.inner = &inner;
-  JsonCallbacks envCbs = {};
+  ChunkedJsonCallbacks envCbs = {};
   envCbs.ctx = &noFold.dec;
   envCbs.onKey = kostats::statsOnKey;
   envCbs.onObjectStart = kostats::statsOnObjectStart;
   envCbs.onObjectEnd = kostats::statsOnObjectEnd;
   envCbs.onStringChunk = kostats::statsOnStringChunk;
-  StreamingJsonParser outer(envCbs);
+  ChunkedJsonParser outer(envCbs);
   outer.feed(body.data(), body.size());
 
   EXPECT_EQ(noFold.dec.count, 1u);

@@ -4,22 +4,27 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Memory.h>
+#include <TrustedTime.h>
+#include <WiFi.h>
 
 #include <optional>
 
 #include "CrossPointSettings.h"
+#include "CrossPointState.h"
 #include "Epub.h"
 #include "EpubReaderActivity.h"
 #include "SdCardFontSystem.h"
-#include "Txt.h"
-#include "TxtReaderActivity.h"
+#include "SilentRestart.h"
 #include "Xtc.h"
 #include "XtcReaderActivity.h"
+#include "activities/network/WifiSelectionActivity.h"
 #include "activities/util/BmpViewerActivity.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "activities/util/FullScreenMessageActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/NtpBgState.h"
+#include "util/LoanDue.h"
 
 namespace {
 // The boot-time background NTP sync (X4 only — gated on no hardware RTC, see
@@ -54,11 +59,6 @@ void waitOutBackgroundNtpSync(GfxRenderer& renderer, MappedInputManager& mappedI
 }  // namespace
 
 bool ReaderActivity::isXtcFile(const std::string& path) { return FsHelpers::hasXtcExtension(path); }
-
-bool ReaderActivity::isTxtFile(const std::string& path) {
-  return FsHelpers::hasTxtExtension(path) ||
-         FsHelpers::hasMarkdownExtension(path);  // Treat .md as txt files (until we have a markdown reader)
-}
 
 bool ReaderActivity::isImageFile(const std::string& path) {
   return FsHelpers::hasBmpExtension(path) || FsHelpers::hasPngExtension(path);
@@ -113,7 +113,8 @@ std::unique_ptr<Epub> ReaderActivity::loadEpub(const std::string& path) {
     return epub;
   }
 
-  LOG_ERR("READER", "Failed to load epub");
+  loadProtectionError = epub->getProtectionError();
+  LOG_ERR("READER", "Failed to load epub%s%s", loadProtectionError.empty() ? "" : ": ", loadProtectionError.c_str());
   return nullptr;
 }
 
@@ -129,21 +130,6 @@ std::unique_ptr<Xtc> ReaderActivity::loadXtc(const std::string& path) {
   }
 
   LOG_ERR("READER", "Failed to load XTC");
-  return nullptr;
-}
-
-std::unique_ptr<Txt> ReaderActivity::loadTxt(const std::string& path) {
-  if (!Storage.exists(path.c_str())) {
-    LOG_ERR("READER", "File does not exist: %s", path.c_str());
-    return nullptr;
-  }
-
-  auto txt = std::unique_ptr<Txt>(new Txt(path, "/.crosspoint"));
-  if (txt->load()) {
-    return txt;
-  }
-
-  LOG_ERR("READER", "Failed to load TXT");
   return nullptr;
 }
 
@@ -189,19 +175,6 @@ void ReaderActivity::onGoToXtcReader(std::unique_ptr<Xtc> xtc) {
   activityManager.replaceActivity(std::move(xtcReader));
 }
 
-void ReaderActivity::onGoToTxtReader(std::unique_ptr<Txt> txt) {
-  const auto txtPath = txt->getPath();
-  currentBookPath = txtPath;
-  auto txtReader =
-      makeUniqueNoThrow<TxtReaderActivity>(renderer, mappedInput, std::move(txt), initialRefreshCountdown());
-  if (!txtReader) {
-    LOG_ERR("READER", "OOM: TxtReaderActivity; returning home");
-    activityManager.goHome();
-    return;
-  }
-  activityManager.replaceActivity(std::move(txtReader));
-}
-
 void ReaderActivity::onEnter() {
   Activity::onEnter();
 
@@ -226,21 +199,94 @@ void ReaderActivity::onEnter() {
       return;
     }
     onGoToXtcReader(std::move(xtc));
-  } else if (isTxtFile(initialBookPath)) {
-    auto txt = loadTxt(initialBookPath);
-    if (!txt) {
+  } else {
+    // .epub, and .txt/.md, which Epub converts into XHTML parts on first open.
+    auto epub = loadEpub(initialBookPath);
+    if (!epub) {
+      if (!loadProtectionError.empty()) {
+        showProtectionError();
+        return;
+      }
       onGoBack();
       return;
     }
-    onGoToTxtReader(std::move(txt));
-  } else {
-    auto epub = loadEpub(initialBookPath);
-    if (!epub) {
-      onGoBack();
+    if (loandue::dueSoon(epub->getLoanExpiresAt())) {
+      showLoanDueReminder(std::move(epub));
       return;
     }
     onGoToEpubReader(std::move(epub));
   }
 }
 
+ReaderActivity::ReaderActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string initialBookPath,
+                               const bool allowFastInitialRefresh)
+    : Activity("Reader", renderer, mappedInput),
+      initialBookPath(std::move(initialBookPath)),
+      allowFastInitialRefresh(allowFastInitialRefresh) {}
+
+ReaderActivity::~ReaderActivity() = default;
+
 void ReaderActivity::onGoBack() { finish(); }
+
+void ReaderActivity::showLoanDueReminder(std::unique_ptr<Epub> epub) {
+  char message[64];
+  if (!loandue::describe(epub->getLoanExpiresAt(), message, sizeof(message))) {
+    onGoToEpubReader(std::move(epub));
+    return;
+  }
+  pendingEpub = std::move(epub);
+  const bool shown = startActivityForResultNoThrow<ConfirmationActivity>(
+      [this](const ActivityResult&) { onGoToEpubReader(std::move(pendingEpub)); }, renderer, mappedInput, "", message,
+      "", tr(STR_OK_BUTTON));
+  if (!shown) onGoToEpubReader(std::move(pendingEpub));
+}
+
+// Exact error strings are set by openProtectedBook (lib/Epub/ContentProtection.cpp).
+void ReaderActivity::showProtectionError() {
+  StrId msg = StrId::STR_DRM_PROTECTED_FILE;
+  bool offerSync = false;
+  if (loadProtectionError == "access expired") {
+    msg = StrId::STR_LOAN_EXPIRED;
+  } else if (loadProtectionError == "loan date unverified") {
+    msg = StrId::STR_LOAN_TIME_UNVERIFIED;
+    offerSync = true;
+  }
+  const bool shown = startActivityForResultNoThrow<ConfirmationActivity>(
+      [this, offerSync](const ActivityResult& result) {
+        if (offerSync && !result.isCancelled) {
+          beginLoanTimeSync();
+          return;
+        }
+        onGoBack();
+      },
+      renderer, mappedInput, "", I18N.get(msg), offerSync ? tr(STR_OK_BUTTON) : "",
+      I18N.get(offerSync ? StrId::STR_CLOCK_SYNC_NOW : StrId::STR_OK_BUTTON));
+  if (!shown) onGoBack();
+}
+
+void ReaderActivity::beginLoanTimeSync() {
+  const bool shown = startActivityForResultNoThrow<WifiSelectionActivity>(
+      [this](const ActivityResult& result) {
+        if (result.isCancelled || WiFi.status() != WL_CONNECTED) {
+          onGoBack();
+          return;
+        }
+        GUI.drawPopup(renderer, tr(STR_SYNCING_TIME));
+        const bool synced = trustedtime::syncNow(5000);
+        WiFi.disconnect(false);
+        delay(30);
+        if (!synced) {
+          loadProtectionError = "loan date unverified";
+          showProtectionError();
+          return;
+        }
+        APP_STATE.openEpubPath = initialBookPath;
+        APP_STATE.saveToFile();
+        // Reboot straight back into this book on a clean heap (no-op on touch boards,
+        // which relaunch in place).
+        silentRestartToReader();
+        activityManager.goToReader(initialBookPath);
+      },
+      renderer, mappedInput);
+  if (!shown) onGoBack();
+}

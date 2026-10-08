@@ -3,6 +3,8 @@
 
 #include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 
 /**
  * HTTP client utility for fetching content and downloading files. Built on
@@ -21,7 +23,10 @@ class HttpDownloader {
     HTTP_ERROR,
     FILE_ERROR,
     ABORTED,
+    UNAUTHORIZED,  // 401/403 on a request that carried `headers`: a refreshable credential can retry
   };
+
+  using Header = std::pair<std::string, std::string>;
 
   /**
    * Fetch text content from a URL with optional credentials.
@@ -57,10 +62,12 @@ class HttpDownloader {
    * verify on the X4 (github.com -> USERTrust ECC, then release-assets CDN -> ISRG
    * Root X1). Only honoured when caPemOverride is also set; when null, redirects are
    * followed on the same connection/cert exactly as before (OPDS/KOSync path).
+   *
+   * headers (default none) are added to every hop, e.g. a plugin's Bearer token.
    */
   static DownloadError downloadToFile(const std::string& url, const std::string& destPath,
                                       ProgressCallback progress = nullptr, bool* cancelFlag = nullptr,
                                       const std::string& username = "", const std::string& password = "",
                                       std::string* errorDetail = nullptr, const char* caPemOverride = nullptr,
-                                      const char* caPemRedirect = nullptr);
+                                      const char* caPemRedirect = nullptr, const std::vector<Header>& headers = {});
 };

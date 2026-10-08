@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "StreamingJsonParser.h"
+#include "ChunkedJsonParser.h"
 
 class ReleaseJsonParser {
  public:
@@ -54,7 +54,7 @@ class ReleaseJsonParser {
 
   void commitAsset();
 
-  StreamingJsonParser parser;
+  ChunkedJsonParser parser;
 
   Position position;
   LastKey lastKey;

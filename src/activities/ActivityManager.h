@@ -102,12 +102,14 @@ class ActivityManager {
 
   // goTo... functions are convenient wrapper for replaceActivity()
   void goToFileTransfer();
+  void goToJoinNetwork();  // File Transfer straight into Join Network (post heap-defrag reboot)
   void goToUsbDrive();
   void goToSettings(int initialCategory = 0);
   void goToFileBrowser(std::string path = {});
   void goToRecentBooks();
   void goToReadingStats();
   void goToBrowser();
+  void goToPlugins(bool showOpds);
   // allowFastInitialRefresh defaults true: an ordinary reader entry (book open
   // from the browser/home, end-of-book "open next") repaints over UI that a
   // fast/normal first paint clears well enough, so it must NOT flash on every
@@ -149,6 +151,7 @@ class ActivityManager {
   bool isInReaderContext() const;
   bool skipLoopDelay() const;
   ScreenshotInfo getScreenshotInfo() const;
+  void prepareForSleep();
 
   // If immediate is true, the update will be triggered immediately.
   // Otherwise, it will be deferred until the end of the current loop iteration.

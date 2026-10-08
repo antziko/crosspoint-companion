@@ -1,7 +1,7 @@
 add_executable(ReleaseJsonParserTest
   ReleaseJsonParserTest.cpp
   ${REPO_ROOT}/lib/JsonParser/ReleaseJsonParser.cpp
-  ${REPO_ROOT}/lib/JsonParser/StreamingJsonParser.cpp
+  ${REPO_ROOT}/lib/JsonParser/ChunkedJsonParser.cpp
 )
 
 target_include_directories(ReleaseJsonParserTest PRIVATE

@@ -528,9 +528,9 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
     outProgress.deviceId = doc["device_id"].as<std::string>();
     outProgress.timestamp = doc["timestamp"].as<int64_t>();
 
-    // CrossPoint `position` extension; only trusted from the server that defines it.
+    // CrossPoint `position` extension; only read from servers opted into Precise Position.
     outProgress.position.reset();
-    if (KOREADER_STORE.usesCrossPointSyncServer()) {
+    if (KOREADER_STORE.usesPrecisePosition()) {
       const JsonObjectConst pos = doc["position"].as<JsonObjectConst>();
       if (!pos.isNull()) {
         KOReaderRichPosition rich;
@@ -579,12 +579,24 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
       meta["filename"] = progress.metadata->filename;
       meta["title"] = progress.metadata->title;
       meta["authors"] = progress.metadata->authors;
+      JsonDocument extra;
+      if (!progress.metadata->extraJson.empty() &&
+          deserializeJson(extra, progress.metadata->extraJson) == DeserializationError::Ok) {
+        for (JsonPairConst kv : extra.as<JsonObjectConst>()) {
+          // Flat strings, numbers, and booleans keep their JSON type; null and
+          // nested values are skipped, and the reserved keys above always win.
+          const JsonVariantConst value = kv.value();
+          if (!(value.is<const char*>() || value.is<bool>() || value.is<long long>() || value.is<double>())) continue;
+          if (!meta[kv.key().c_str()].isNull()) continue;
+          meta[kv.key().c_str()] = value;
+        }
+      }
     }
     doc["progress"] = progress.progress;
     doc["percentage"] = progress.percentage;
     doc["device"] = DEVICE_NAME;
     doc["device_id"] = KOReaderSyncClient::deviceId();
-    if (progress.position.has_value() && KOREADER_STORE.usesCrossPointSyncServer()) {
+    if (progress.position.has_value() && KOREADER_STORE.usesPrecisePosition()) {
       // CrossPoint-specific extension: not sent to third-party kosync servers.
       const auto& p = *progress.position;
       auto pos = doc["position"].to<JsonObject>();
@@ -774,25 +786,25 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
   dec.blob.dictBuf = dictBuf.get();
   dec.blob.fcBuf = fcBuf.get();
 
-  JsonCallbacks blobCbs = {};
+  ChunkedJsonCallbacks blobCbs = {};
   blobCbs.ctx = &dec.blob;
   blobCbs.onKey = kostats::blobOnKey;
   blobCbs.onNumber = kostats::blobOnNumber;
   blobCbs.onStringChunk = kostats::blobOnStringChunk;
-  auto innerParser = makeUniqueNoThrow<StreamingJsonParser>(blobCbs);
+  auto innerParser = makeUniqueNoThrow<ChunkedJsonParser>(blobCbs);
   if (!innerParser) {
     LOG_ERR("KOSync", "OOM: stats blob parser");
     return NETWORK_ERROR;
   }
   dec.inner = innerParser.get();
 
-  JsonCallbacks envCbs = {};
+  ChunkedJsonCallbacks envCbs = {};
   envCbs.ctx = &dec;
   envCbs.onKey = kostats::statsOnKey;
   envCbs.onObjectStart = kostats::statsOnObjectStart;
   envCbs.onObjectEnd = kostats::statsOnObjectEnd;
   envCbs.onStringChunk = kostats::statsOnStringChunk;
-  auto outerParser = makeUniqueNoThrow<StreamingJsonParser>(envCbs);
+  auto outerParser = makeUniqueNoThrow<ChunkedJsonParser>(envCbs);
   if (!outerParser) {
     LOG_ERR("KOSync", "OOM: stats envelope parser");
     return NETWORK_ERROR;
@@ -801,7 +813,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getStats(const std::string& docume
   // Only 2xx bodies are worth decoding; an error body would otherwise be fed to the parser and
   // reported as a malformed envelope. The status is known before any body byte arrives.
   struct SinkCtx {
-    StreamingJsonParser* parser;
+    ChunkedJsonParser* parser;
     kostats::StatsDecoder* dec;
   } sinkCtx{outerParser.get(), &dec};
 

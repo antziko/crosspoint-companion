@@ -1,7 +1,7 @@
 #pragma once
 
+#include <ChunkedJsonParser.h>
 #include <Logging.h>
-#include <StreamingJsonParser.h>
 
 #include <cstdint>
 #include <cstdlib>
@@ -13,7 +13,7 @@
 //
 // Split out of KOReaderSyncClient.cpp so it can be exercised on the host: the file it came from
 // pulls in Arduino, wolfSSL and ArduinoJson, none of which a unit test can link, while everything
-// here is plain C++ over StreamingJsonParser. See test/koreader-stats-stream/.
+// here is plain C++ over ChunkedJsonParser. See test/koreader-stats-stream/.
 //
 // Why it exists at all: the previous decode buffered the whole response and then built an
 // ArduinoJson document over it (~3x the body), peaking near 36 KB on a device reporting
@@ -221,7 +221,7 @@ void blobOnStringChunk(void* ctx, const char* data, size_t len, bool first, bool
 
 // Envelope consumer, driven by the outer parser.
 struct StatsDecoder {
-  StreamingJsonParser* inner = nullptr;
+  ChunkedJsonParser* inner = nullptr;
   BlobDecoder blob;
 
   KOReaderStatsEntry* outEntries = nullptr;

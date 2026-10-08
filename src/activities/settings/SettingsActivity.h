@@ -35,6 +35,7 @@ enum class SettingAction {
   OpenSubCategory,
   TextSettings,  // LOCAL(feat-dictionary): #2605 Text Settings screen
   DictNotes,     // LOCAL(feat-dictionary): the active dictionary's saved highlights
+  Plugins,
   KeyboardLayouts,
   About,
   HomeButton,

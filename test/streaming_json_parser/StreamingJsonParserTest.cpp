@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "lib/JsonParser/StreamingJsonParser.h"
+#include "lib/JsonParser/ChunkedJsonParser.h"
 
 namespace {
 
@@ -48,20 +48,20 @@ void onObjectEnd(void* ctx) { static_cast<TestContext*>(ctx)->events.push_back({
 void onArrayStart(void* ctx) { static_cast<TestContext*>(ctx)->events.push_back({EventType::ARRAY_START, {}}); }
 void onArrayEnd(void* ctx) { static_cast<TestContext*>(ctx)->events.push_back({EventType::ARRAY_END, {}}); }
 
-JsonCallbacks makeCallbacks(TestContext* ctx) {
+ChunkedJsonCallbacks makeCallbacks(TestContext* ctx) {
   return {ctx, onKey, onString, onNumber, onBool, onNull, onObjectStart, onObjectEnd, onArrayStart, onArrayEnd};
 }
 
 std::vector<Event> parse(const char* json) {
   TestContext ctx;
-  StreamingJsonParser parser(makeCallbacks(&ctx));
+  ChunkedJsonParser parser(makeCallbacks(&ctx));
   parser.feed(json, strlen(json));
   return ctx.events;
 }
 
 std::vector<Event> parseBytewise(const char* json) {
   TestContext ctx;
-  StreamingJsonParser parser(makeCallbacks(&ctx));
+  ChunkedJsonParser parser(makeCallbacks(&ctx));
   size_t len = strlen(json);
   for (size_t i = 0; i < len; ++i) {
     parser.feed(json + i, 1);
@@ -71,7 +71,7 @@ std::vector<Event> parseBytewise(const char* json) {
 
 }  // namespace
 
-TEST(StreamingJsonParser, SimpleObject) {
+TEST(ChunkedJsonParser, SimpleObject) {
   auto events = parse(R"({"key": "value", "num": 42})");
 
   ASSERT_EQ(events.size(), 6u);
@@ -87,7 +87,7 @@ TEST(StreamingJsonParser, SimpleObject) {
   EXPECT_EQ(events[5].type, EventType::OBJECT_END);
 }
 
-TEST(StreamingJsonParser, NestedObjects) {
+TEST(ChunkedJsonParser, NestedObjects) {
   auto events = parse(R"({"a": {"b": "c"}})");
 
   ASSERT_EQ(events.size(), 7u);
@@ -103,7 +103,7 @@ TEST(StreamingJsonParser, NestedObjects) {
   EXPECT_EQ(events[6].type, EventType::OBJECT_END);
 }
 
-TEST(StreamingJsonParser, ArrayOfValues) {
+TEST(ChunkedJsonParser, ArrayOfValues) {
   auto events = parse(R"({"items": [1, "two", true, false, null]})");
 
   ASSERT_EQ(events.size(), 10u);
@@ -122,7 +122,7 @@ TEST(StreamingJsonParser, ArrayOfValues) {
   EXPECT_EQ(events[9].type, EventType::OBJECT_END);
 }
 
-TEST(StreamingJsonParser, ArrayOfObjects) {
+TEST(ChunkedJsonParser, ArrayOfObjects) {
   auto events = parse(R"([{"a": 1}, {"b": 2}])");
 
   ASSERT_EQ(events.size(), 10u);
@@ -142,7 +142,7 @@ TEST(StreamingJsonParser, ArrayOfObjects) {
   EXPECT_EQ(events[9].type, EventType::ARRAY_END);
 }
 
-TEST(StreamingJsonParser, StringEscapes) {
+TEST(ChunkedJsonParser, StringEscapes) {
   auto events = parse(R"({"esc": "a\"b\\c\/d\ne\tf"})");
 
   ASSERT_EQ(events.size(), 4u);
@@ -150,7 +150,7 @@ TEST(StreamingJsonParser, StringEscapes) {
   EXPECT_EQ(events[2].value, std::string("a\"b\\c/d\ne\tf"));
 }
 
-TEST(StreamingJsonParser, UnicodeEscapePassthrough) {
+TEST(ChunkedJsonParser, UnicodeEscapePassthrough) {
   auto events = parse(R"({"u": "\u0041\u0042"})");
 
   ASSERT_EQ(events.size(), 4u);
@@ -159,7 +159,7 @@ TEST(StreamingJsonParser, UnicodeEscapePassthrough) {
   EXPECT_EQ(events[2].value, "\\u0041\\u0042");
 }
 
-TEST(StreamingJsonParser, Numbers) {
+TEST(ChunkedJsonParser, Numbers) {
   auto events = parse(R"({"int": 42, "neg": -7, "flt": 3.14, "exp": 1e10, "nexp": -2.5E-3})");
 
   ASSERT_EQ(events.size(), 12u);
@@ -175,7 +175,7 @@ TEST(StreamingJsonParser, Numbers) {
   EXPECT_EQ(events[10].value, "-2.5E-3");
 }
 
-TEST(StreamingJsonParser, BooleansAndNull) {
+TEST(ChunkedJsonParser, BooleansAndNull) {
   auto events = parse(R"({"t": true, "f": false, "n": null})");
 
   ASSERT_EQ(events.size(), 8u);
@@ -184,7 +184,7 @@ TEST(StreamingJsonParser, BooleansAndNull) {
   EXPECT_EQ(events[6].type, EventType::NULL_VAL);
 }
 
-TEST(StreamingJsonParser, ChunkedFeeding) {
+TEST(ChunkedJsonParser, ChunkedFeeding) {
   const char* json = R"({"key": "value", "num": 42, "arr": [1, 2]})";
   auto reference = parse(json);
 
@@ -197,7 +197,7 @@ TEST(StreamingJsonParser, ChunkedFeeding) {
 
   for (size_t chunkSize = 2; chunkSize <= 7; ++chunkSize) {
     TestContext ctx;
-    StreamingJsonParser parser(makeCallbacks(&ctx));
+    ChunkedJsonParser parser(makeCallbacks(&ctx));
     size_t len = strlen(json);
     for (size_t offset = 0; offset < len; offset += chunkSize) {
       size_t remaining = len - offset;
@@ -213,14 +213,14 @@ TEST(StreamingJsonParser, ChunkedFeeding) {
   }
 }
 
-TEST(StreamingJsonParser, EveryByteBoundary) {
+TEST(ChunkedJsonParser, EveryByteBoundary) {
   const char* json = R"({"tag_name":"v1.2.3","assets":[{"name":"firmware.bin","size":12345}]})";
   auto reference = parse(json);
   size_t len = strlen(json);
 
   for (size_t split = 0; split <= len; ++split) {
     TestContext ctx;
-    StreamingJsonParser parser(makeCallbacks(&ctx));
+    ChunkedJsonParser parser(makeCallbacks(&ctx));
     if (split > 0) parser.feed(json, split);
     if (split < len) parser.feed(json + split, len - split);
 
@@ -232,9 +232,9 @@ TEST(StreamingJsonParser, EveryByteBoundary) {
   }
 }
 
-TEST(StreamingJsonParser, LargeTokenTruncation) {
+TEST(ChunkedJsonParser, LargeTokenTruncation) {
   // Build a string value that exceeds TOKEN_BUF_SIZE
-  std::string longVal(StreamingJsonParser::TOKEN_BUF_SIZE + 100, 'x');
+  std::string longVal(ChunkedJsonParser::TOKEN_BUF_SIZE + 100, 'x');
   std::string json = R"({"short": "ok", "long": ")" + longVal + R"("})";
 
   auto events = parse(json.c_str());
@@ -255,21 +255,21 @@ TEST(StreamingJsonParser, LargeTokenTruncation) {
   EXPECT_FALSE(foundLongValue);
 }
 
-TEST(StreamingJsonParser, EmptyObject) {
+TEST(ChunkedJsonParser, EmptyObject) {
   auto events = parse("{}");
   ASSERT_EQ(events.size(), 2u);
   EXPECT_EQ(events[0].type, EventType::OBJECT_START);
   EXPECT_EQ(events[1].type, EventType::OBJECT_END);
 }
 
-TEST(StreamingJsonParser, EmptyArray) {
+TEST(ChunkedJsonParser, EmptyArray) {
   auto events = parse("[]");
   ASSERT_EQ(events.size(), 2u);
   EXPECT_EQ(events[0].type, EventType::ARRAY_START);
   EXPECT_EQ(events[1].type, EventType::ARRAY_END);
 }
 
-TEST(StreamingJsonParser, NestedArrays) {
+TEST(ChunkedJsonParser, NestedArrays) {
   auto events = parse("[[1, 2], [3]]");
   ASSERT_EQ(events.size(), 9u);
   EXPECT_EQ(events[0].type, EventType::ARRAY_START);
@@ -286,7 +286,7 @@ TEST(StreamingJsonParser, NestedArrays) {
   EXPECT_EQ(events[8].type, EventType::ARRAY_END);
 }
 
-TEST(StreamingJsonParser, TopLevelArray) {
+TEST(ChunkedJsonParser, TopLevelArray) {
   auto events = parse(R"(["hello", 42, true, null])");
   ASSERT_EQ(events.size(), 6u);
   EXPECT_EQ(events[0].type, EventType::ARRAY_START);
@@ -299,7 +299,7 @@ TEST(StreamingJsonParser, TopLevelArray) {
   EXPECT_EQ(events[5].type, EventType::ARRAY_END);
 }
 
-TEST(StreamingJsonParser, WhitespaceVariants) {
+TEST(ChunkedJsonParser, WhitespaceVariants) {
   auto minified = parse(R"({"a":1,"b":"x"})");
   const char* pretty = "{\n  \"a\": 1,\n  \"b\": \"x\"\n}";
   auto prettyEvents = parse(pretty);
@@ -311,9 +311,9 @@ TEST(StreamingJsonParser, WhitespaceVariants) {
   }
 }
 
-TEST(StreamingJsonParser, ResetBetweenDocuments) {
+TEST(ChunkedJsonParser, ResetBetweenDocuments) {
   TestContext ctx;
-  StreamingJsonParser parser(makeCallbacks(&ctx));
+  ChunkedJsonParser parser(makeCallbacks(&ctx));
 
   const char* json1 = R"({"a": 1})";
   parser.feed(json1, strlen(json1));
@@ -329,7 +329,7 @@ TEST(StreamingJsonParser, ResetBetweenDocuments) {
   EXPECT_EQ(ctx.events[2].value, "2");
 }
 
-TEST(StreamingJsonParser, NumberAtEndOfInput) {
+TEST(ChunkedJsonParser, NumberAtEndOfInput) {
   auto events = parse(R"({"n": 99})");
   bool found = false;
   for (auto& e : events) {
@@ -338,7 +338,7 @@ TEST(StreamingJsonParser, NumberAtEndOfInput) {
   EXPECT_TRUE(found);
 }
 
-TEST(StreamingJsonParser, ArrayOfStrings) {
+TEST(ChunkedJsonParser, ArrayOfStrings) {
   auto events = parse(R"(["a", "b", "c"])");
 
   ASSERT_EQ(events.size(), 5u);
@@ -352,7 +352,7 @@ TEST(StreamingJsonParser, ArrayOfStrings) {
   EXPECT_EQ(events[4].type, EventType::ARRAY_END);
 }
 
-TEST(StreamingJsonParser, TruncatedInputNoCrash) {
+TEST(ChunkedJsonParser, TruncatedInputNoCrash) {
   const char* truncated[] = {
       R"({"key": "val)", R"({"key": )",  R"({"key)",     R"([1, 2, )",
       R"({"a": tru)",    R"({"a": fal)", R"({"a": nul)", R"({"a": "hello\)",
@@ -360,21 +360,21 @@ TEST(StreamingJsonParser, TruncatedInputNoCrash) {
 
   for (auto* json : truncated) {
     TestContext ctx;
-    StreamingJsonParser parser(makeCallbacks(&ctx));
+    ChunkedJsonParser parser(makeCallbacks(&ctx));
     parser.feed(json, strlen(json));
     // Just verify no crash; partial results are acceptable
   }
   SUCCEED();
 }
 
-TEST(StreamingJsonParser, AllEscapeSequences) {
+TEST(ChunkedJsonParser, AllEscapeSequences) {
   auto events = parse(R"({"e": "\b\f\n\r\t\"\\\/"})");
   ASSERT_EQ(events.size(), 4u);
   EXPECT_EQ(events[2].type, EventType::STRING);
   EXPECT_EQ(events[2].value, std::string("\b\f\n\r\t\"\\/"));
 }
 
-TEST(StreamingJsonParser, ObjectInArray) {
+TEST(ChunkedJsonParser, ObjectInArray) {
   // After an object closes inside an array, the next string after comma
   // should be correctly identified as a key (inside the next object) or
   // a string value (if directly in the array).
@@ -393,7 +393,7 @@ TEST(StreamingJsonParser, ObjectInArray) {
   EXPECT_EQ(events[6].type, EventType::ARRAY_END);
 }
 
-TEST(StreamingJsonParser, DeeplyNested) {
+TEST(ChunkedJsonParser, DeeplyNested) {
   // 20 levels of nesting (well within MAX_NESTING=32)
   std::string json;
   for (int i = 0; i < 20; ++i) json += R"({"d":)";
@@ -410,26 +410,26 @@ TEST(StreamingJsonParser, DeeplyNested) {
   EXPECT_EQ(events[60].type, EventType::OBJECT_END);
 }
 
-TEST(StreamingJsonParser, NestingOverflow) {
+TEST(ChunkedJsonParser, NestingOverflow) {
   // Exceed MAX_NESTING -- parser should set error flag, not crash
   std::string json;
-  for (size_t i = 0; i < StreamingJsonParser::MAX_NESTING + 5; ++i) json += "[";
+  for (size_t i = 0; i < ChunkedJsonParser::MAX_NESTING + 5; ++i) json += "[";
 
   TestContext ctx;
-  StreamingJsonParser parser(makeCallbacks(&ctx));
+  ChunkedJsonParser parser(makeCallbacks(&ctx));
   parser.feed(json.c_str(), json.size());
 
   EXPECT_TRUE(parser.hasError());
 }
 
-TEST(StreamingJsonParser, NumberZero) {
+TEST(ChunkedJsonParser, NumberZero) {
   auto events = parse(R"({"z": 0})");
   ASSERT_EQ(events.size(), 4u);
   EXPECT_EQ(events[2].type, EventType::NUMBER);
   EXPECT_EQ(events[2].value, "0");
 }
 
-TEST(StreamingJsonParser, MultipleValuesInObject) {
+TEST(ChunkedJsonParser, MultipleValuesInObject) {
   auto events = parse(R"({"a": "x", "b": "y", "c": "z"})");
 
   ASSERT_EQ(events.size(), 8u);
@@ -441,13 +441,13 @@ TEST(StreamingJsonParser, MultipleValuesInObject) {
   EXPECT_EQ(events[6].value, "z");
 }
 
-TEST(StreamingJsonParser, ChunkedSplitInsideString) {
+TEST(ChunkedJsonParser, ChunkedSplitInsideString) {
   const char* json = R"({"key": "hello world"})";
   auto reference = parse(json);
 
   size_t splitAt = 14;  // inside the string value
   TestContext ctx;
-  StreamingJsonParser parser(makeCallbacks(&ctx));
+  ChunkedJsonParser parser(makeCallbacks(&ctx));
   parser.feed(json, splitAt);
   parser.feed(json + splitAt, strlen(json) - splitAt);
 
@@ -458,7 +458,7 @@ TEST(StreamingJsonParser, ChunkedSplitInsideString) {
   }
 }
 
-TEST(StreamingJsonParser, ChunkedSplitInsideEscape) {
+TEST(ChunkedJsonParser, ChunkedSplitInsideEscape) {
   const char* json = R"({"k": "a\"b"})";
   auto reference = parse(json);
 
@@ -467,7 +467,7 @@ TEST(StreamingJsonParser, ChunkedSplitInsideEscape) {
   size_t splitAt = static_cast<size_t>(bs - json) + 1;  // after the backslash
 
   TestContext ctx;
-  StreamingJsonParser parser(makeCallbacks(&ctx));
+  ChunkedJsonParser parser(makeCallbacks(&ctx));
   parser.feed(json, splitAt);
   parser.feed(json + splitAt, strlen(json) - splitAt);
 
@@ -478,13 +478,13 @@ TEST(StreamingJsonParser, ChunkedSplitInsideEscape) {
   }
 }
 
-TEST(StreamingJsonParser, ChunkedSplitInsideLiteral) {
+TEST(ChunkedJsonParser, ChunkedSplitInsideLiteral) {
   const char* json = R"({"a": true, "b": false, "c": null})";
   auto reference = parse(json);
 
   size_t splitAt = 7;  // inside "true"
   TestContext ctx;
-  StreamingJsonParser parser(makeCallbacks(&ctx));
+  ChunkedJsonParser parser(makeCallbacks(&ctx));
   parser.feed(json, splitAt);
   parser.feed(json + splitAt, strlen(json) - splitAt);
 
@@ -495,10 +495,10 @@ TEST(StreamingJsonParser, ChunkedSplitInsideLiteral) {
   }
 }
 
-TEST(StreamingJsonParser, NullCallbacksNoCrash) {
-  JsonCallbacks nullCbs = {};
+TEST(ChunkedJsonParser, NullCallbacksNoCrash) {
+  ChunkedJsonCallbacks nullCbs = {};
   nullCbs.ctx = nullptr;
-  StreamingJsonParser parser(nullCbs);
+  ChunkedJsonParser parser(nullCbs);
 
   const char* json = R"({"key": "value", "num": 42, "b": true, "n": null, "a": [1]})";
   parser.feed(json, strlen(json));
@@ -538,8 +538,8 @@ void onPlainString(void* ctx, const char* value, size_t len) {
   static_cast<ChunkContext*>(ctx)->plain.push_back({EventType::STRING, std::string(value, len)});
 }
 
-JsonCallbacks makeChunkCallbacks(ChunkContext* ctx) {
-  JsonCallbacks cbs = {};
+ChunkedJsonCallbacks makeChunkCallbacks(ChunkContext* ctx) {
+  ChunkedJsonCallbacks cbs = {};
   cbs.ctx = ctx;
   cbs.onString = onPlainString;  // deliberately set, to prove chunking takes precedence
   cbs.onStringChunk = onChunk;
@@ -548,7 +548,7 @@ JsonCallbacks makeChunkCallbacks(ChunkContext* ctx) {
 
 ChunkContext parseChunked(const std::string& json, size_t feedSize = 0) {
   ChunkContext ctx;
-  StreamingJsonParser parser(makeChunkCallbacks(&ctx));
+  ChunkedJsonParser parser(makeChunkCallbacks(&ctx));
   if (feedSize == 0) {
     parser.feed(json.data(), json.size());
   } else {
@@ -562,7 +562,7 @@ ChunkContext parseChunked(const std::string& json, size_t feedSize = 0) {
 }  // namespace
 
 TEST(StreamingJsonParserChunk, LongValueSurvivesInsteadOfBeingDropped) {
-  const std::string longVal(StreamingJsonParser::TOKEN_BUF_SIZE * 3 + 77, 'x');
+  const std::string longVal(ChunkedJsonParser::TOKEN_BUF_SIZE * 3 + 77, 'x');
   const auto ctx = parseChunked(R"({"long": ")" + longVal + R"("})");
 
   ASSERT_EQ(ctx.values.size(), 1u);
@@ -570,7 +570,7 @@ TEST(StreamingJsonParserChunk, LongValueSurvivesInsteadOfBeingDropped) {
   EXPECT_GT(ctx.calls, 1);            // it really was split
   EXPECT_EQ(ctx.firsts, 1);
   EXPECT_EQ(ctx.lasts, 1);
-  EXPECT_LE(ctx.maxPiece, StreamingJsonParser::TOKEN_BUF_SIZE - 1);
+  EXPECT_LE(ctx.maxPiece, ChunkedJsonParser::TOKEN_BUF_SIZE - 1);
   EXPECT_TRUE(ctx.plain.empty()) << "onString must not fire when onStringChunk is set";
 }
 
@@ -606,7 +606,7 @@ TEST(StreamingJsonParserChunk, EscapesResolveBeforeChunking) {
 TEST(StreamingJsonParserChunk, PieceBoundariesAreIndependentOfFeedSplits) {
   // A value spanning several buffers, fed one byte at a time, must reassemble identically —
   // the split points of feed() must not leak into the reassembled value.
-  const std::string longVal(StreamingJsonParser::TOKEN_BUF_SIZE * 2 + 5, 'q');
+  const std::string longVal(ChunkedJsonParser::TOKEN_BUF_SIZE * 2 + 5, 'q');
   const std::string json = R"({"a": ")" + longVal + R"(", "b": "tail"})";
 
   const auto whole = parseChunked(json);
@@ -621,8 +621,8 @@ TEST(StreamingJsonParserChunk, PieceBoundariesAreIndependentOfFeedSplits) {
 }
 
 TEST(StreamingJsonParserChunk, MultipleLongValuesEachGetTheirOwnFirstAndLast) {
-  const std::string a(StreamingJsonParser::TOKEN_BUF_SIZE + 10, 'a');
-  const std::string b(StreamingJsonParser::TOKEN_BUF_SIZE + 20, 'b');
+  const std::string a(ChunkedJsonParser::TOKEN_BUF_SIZE + 10, 'a');
+  const std::string b(ChunkedJsonParser::TOKEN_BUF_SIZE + 20, 'b');
   const auto ctx = parseChunked(R"({"x": ")" + a + R"(", "y": ")" + b + R"("})");
 
   ASSERT_EQ(ctx.values.size(), 2u);
@@ -634,7 +634,7 @@ TEST(StreamingJsonParserChunk, MultipleLongValuesEachGetTheirOwnFirstAndLast) {
 
 TEST(StreamingJsonParserChunk, LongKeysAreUnaffected) {
   // Keys keep the truncate-and-drop path: chunking is for values only.
-  const std::string longKey(StreamingJsonParser::TOKEN_BUF_SIZE + 50, 'k');
+  const std::string longKey(ChunkedJsonParser::TOKEN_BUF_SIZE + 50, 'k');
   const auto ctx = parseChunked(R"({")" + longKey + R"(": "v"})");
 
   ASSERT_EQ(ctx.values.size(), 1u);

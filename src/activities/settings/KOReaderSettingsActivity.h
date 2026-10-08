@@ -23,10 +23,10 @@ class KOReaderSettingsActivity final : public UiListActivity {
 
   void onEnter() override;
 
-  // LOCAL(feat): 11, not upstream's 8 — feat's multi-server editor adds Name,
-  // Set as Active and Delete Server on top of upstream's single-server rows.
-  // Sizing this to 8 would overrun rowItems_/rowValues_ on an existing server.
-  static constexpr int MAX_MENU_ITEMS = 11;
+  // LOCAL(feat): 12, not upstream's 8 — feat's multi-server editor adds Name,
+  // Precise Position, Set as Active and Delete Server on top of upstream's
+  // single-server rows. Sizing this to 8 would overrun rowItems_/rowValues_.
+  static constexpr int MAX_MENU_ITEMS = 12;
 
  private:
   int listCount() const override { return getMenuItemCount(); }

@@ -6,7 +6,6 @@
 #include <Logging.h>
 #include <Memory.h>
 #include <SdDebugLog.h>
-#include <Txt.h>
 #include <Xtc.h>
 
 #include <cstring>
@@ -44,19 +43,16 @@ constexpr uint16_t CONTENT_ID_MAX_PATH = 512;
 
 // Cache dir prefix by book type; nullptr for non-book files.
 const char* cacheDirPrefixForPath(const std::string& path) {
-  if (FsHelpers::hasEpubExtension(path)) {
-    return "epub_";
+  if (FsHelpers::hasReflowableBookExtension(path)) {
+    return "epub_";  // .txt/.md are read through Epub and share its cache layout
   }
   if (FsHelpers::hasXtcExtension(path)) {
     return "xtc_";
   }
-  if (FsHelpers::hasTxtExtension(path)) {
-    return "txt_";
-  }
   return nullptr;
 }
 
-// Mirrors the cache-key derivation in the Epub/Xtc/Txt constructors.
+// Mirrors the cache-key derivation in the Epub/Xtc constructors.
 std::string cacheDirForPath(const char* prefix, const std::string& path) {
   return std::string(CACHE_BASE_DIR) + "/" + prefix + std::to_string(std::hash<std::string>{}(path));
 }
@@ -218,12 +214,10 @@ bool isBookCacheDirectoryName(const char* name) {
 }
 
 void clearBookCache(const std::string& path) {
-  if (FsHelpers::hasEpubExtension(path)) {
+  if (FsHelpers::hasReflowableBookExtension(path)) {
     Epub(path, "/.crosspoint").clearCache();
   } else if (FsHelpers::hasXtcExtension(path)) {
     Xtc(path, "/.crosspoint").clearCache();
-  } else if (FsHelpers::hasTxtExtension(path)) {
-    Txt(path, "/.crosspoint").clearCache();
   } else {
     return;
   }
@@ -237,12 +231,10 @@ void clearBookCache(const std::string& path) {
 }
 
 void relocateBookBookmarks(const std::string& srcPath, const std::string& dstPath) {
-  if (FsHelpers::hasEpubExtension(srcPath)) {
+  if (FsHelpers::hasReflowableBookExtension(srcPath)) {
     BookmarkStore::relocateForFilePath(srcPath, dstPath, "epub");
   } else if (FsHelpers::hasXtcExtension(srcPath)) {
     BookmarkStore::relocateForFilePath(srcPath, dstPath, "xtc");
-  } else if (FsHelpers::hasTxtExtension(srcPath)) {
-    BookmarkStore::relocateForFilePath(srcPath, dstPath, "txt");
   }
 }
 
@@ -252,6 +244,18 @@ void relocateBookSidecars(const std::string& srcPath, const std::string& dstPath
   }
 
   relocateBookBookmarks(srcPath, dstPath);
+
+  // A protected book's device-wrapped key (and rights file) sit beside it; a book
+  // separated from its key no longer opens.
+  static constexpr const char* PROTECTED_SIDECARS[] = {".key", ".rights"};
+  for (const char* ext : PROTECTED_SIDECARS) {
+    const std::string from = srcPath + ext;
+    if (!Storage.exists(from.c_str())) continue;
+    const std::string to = dstPath + ext;
+    if (!Storage.rename(from.c_str(), to.c_str())) {
+      LOG_ERR("BookCache", "Failed to move sidecar %s -> %s", from.c_str(), to.c_str());
+    }
+  }
 
   const char* prefix = cacheDirPrefixForPath(srcPath);
   if (!prefix) {
@@ -531,12 +535,10 @@ std::string recordedBookPathForCache(const std::string& dirName) {
 void forgetBookSidecars(const std::string& bookPath) {
   // Bookmarks + tombstones live under /.crosspoint/bookmarks keyed by crc32(path), not in
   // the cache dir, so removeBookCache() never touches them.
-  if (FsHelpers::hasEpubExtension(bookPath)) {
+  if (FsHelpers::hasReflowableBookExtension(bookPath)) {
     BookmarkStore::deleteForFilePath(bookPath, "epub");
   } else if (FsHelpers::hasXtcExtension(bookPath)) {
     BookmarkStore::deleteForFilePath(bookPath, "xtc");
-  } else if (FsHelpers::hasTxtExtension(bookPath)) {
-    BookmarkStore::deleteForFilePath(bookPath, "txt");
   } else {
     return;  // not a book file: nothing keyed on this path
   }

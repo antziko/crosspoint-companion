@@ -74,12 +74,21 @@ inline bool hasTxtExtension(const String& fileName) {
 // Check for .md extension (case-insensitive)
 bool hasMarkdownExtension(std::string_view fileName);
 
+// .txt or .md: plain-text books converted into XHTML parts and read through Epub.
+bool hasTextBookExtension(std::string_view fileName);
+// Everything the Epub class opens: .epub plus the text books.
+bool hasReflowableBookExtension(std::string_view fileName);
+inline bool hasReflowableBookExtension(const String& fileName) {
+  return hasReflowableBookExtension(std::string_view{fileName.c_str(), fileName.length()});
+}
+
 // Check for .css extension (case-insensitive)
 bool hasCssExtension(std::string_view fileName);
 inline bool hasCssExtension(const String& fileName) {
   return hasCssExtension(std::string_view{fileName.c_str(), fileName.length()});
 }
 std::string extractFolderPath(const std::string& filePath);
+std::string getFileNameWithoutExtension(std::string_view filePath);
 
 // Rejects an empty component, one containing '/' or '\', or the exact components
 // "." and "..", so a single filename/folder-name argument can never be used to

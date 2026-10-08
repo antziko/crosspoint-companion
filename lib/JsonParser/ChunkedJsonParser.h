@@ -1,9 +1,12 @@
 #pragma once
 
+// The firmware's SAX JSON parser (KOSync stats, OTA release feed). Kept apart from the SDK's
+// JsonSax StreamingJsonParser: it adds onStringChunk and a smaller token buffer.
+
 #include <cstddef>
 #include <cstdint>
 
-struct JsonCallbacks {
+struct ChunkedJsonCallbacks {
   void* ctx;
   void (*onKey)(void* ctx, const char* key, size_t len);
   void (*onString)(void* ctx, const char* value, size_t len);
@@ -33,12 +36,12 @@ struct JsonCallbacks {
   void (*onStringChunk)(void* ctx, const char* data, size_t len, bool first, bool last) = nullptr;
 };
 
-class StreamingJsonParser {
+class ChunkedJsonParser {
  public:
   static constexpr size_t TOKEN_BUF_SIZE = 512;
   static constexpr size_t MAX_NESTING = 32;
 
-  explicit StreamingJsonParser(const JsonCallbacks& callbacks);
+  explicit ChunkedJsonParser(const ChunkedJsonCallbacks& callbacks);
 
   void reset();
   void feed(const char* data, size_t len);
@@ -72,7 +75,7 @@ class StreamingJsonParser {
 
   bool inArray() const { return nestingDepth > 0 && nestingStack[nestingDepth - 1] == Container::ARRAY; }
 
-  JsonCallbacks cb;
+  ChunkedJsonCallbacks cb;
   char tokenBuf[TOKEN_BUF_SIZE];
   size_t tokenLen;
   State state;

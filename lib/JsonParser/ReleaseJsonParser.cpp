@@ -14,8 +14,8 @@ void safeCopy(char* dst, size_t dstSize, const char* src, size_t srcLen) {
 }  // namespace
 
 ReleaseJsonParser::ReleaseJsonParser()
-    : parser(JsonCallbacks{this, sOnKey, sOnString, sOnNumber, sOnBool, sOnNull, sOnObjectStart, sOnObjectEnd,
-                           sOnArrayStart, sOnArrayEnd}) {
+    : parser(ChunkedJsonCallbacks{this, sOnKey, sOnString, sOnNumber, sOnBool, sOnNull, sOnObjectStart, sOnObjectEnd,
+                                  sOnArrayStart, sOnArrayEnd}) {
   safeCopy(firmwareAssetName, sizeof(firmwareAssetName), "firmware.bin", sizeof("firmware.bin") - 1);
   reset();
 }

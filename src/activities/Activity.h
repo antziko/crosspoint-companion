@@ -31,6 +31,8 @@ class Activity {
   virtual ~Activity() = default;
   virtual void onEnter();
   virtual void onExit();
+  // Last chance to queue activity-owned state before sleep events are drained.
+  virtual void prepareForSleep() {}
   // Called when this activity is suspended (another activity is pushed over it on the
   // stack) and when it is resumed (the pushed activity pops). Default no-op. The reader
   // uses these to freeze its wall-clock reading-time while a sub-screen is foreground.

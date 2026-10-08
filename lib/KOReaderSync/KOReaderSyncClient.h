@@ -12,6 +12,12 @@ struct KOReaderMetadata {
   std::string filename;  // e.g. "my_book.epub"
   std::string title;     // Document title from EPUB metadata
   std::string authors;   // Author(s) from EPUB metadata
+  // Raw JSON of the book's plugin sidecar ("<book>.meta.json"): e.g. a
+  // service book id a plugin recorded at download time, so a custom sync
+  // server can route progress to that service. Its flat fields are sent
+  // verbatim (JSON types kept) inside the metadata object; the firmware
+  // assigns no meaning to the keys. Empty for books without a sidecar.
+  std::string extraJson;
 };
 
 /**

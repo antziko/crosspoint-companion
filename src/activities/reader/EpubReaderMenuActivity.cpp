@@ -15,7 +15,7 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(GfxRenderer& renderer, MappedInpu
                                                const std::string& title, const int currentPage, const int totalPages,
                                                const int bookProgressPercent, const uint8_t currentOrientation,
                                                const bool hasFootnotes, const bool hasDictionary,
-                                               std::string activeDictName)
+                                               std::string activeDictName, std::string loanLine)
     : UiListActivity("EpubReaderMenu", renderer, mappedInput),
       menuItems(buildMenuItems(hasFootnotes, hasDictionary)),
       title(title),
@@ -23,7 +23,8 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(GfxRenderer& renderer, MappedInpu
       currentPage(currentPage),
       totalPages(totalPages),
       bookProgressPercent(bookProgressPercent),
-      activeDictName(std::move(activeDictName)) {
+      activeDictName(std::move(activeDictName)),
+      loanLine(std::move(loanLine)) {
   buildMenuRowItems();
 }
 
@@ -192,6 +193,10 @@ void EpubReaderMenuActivity::buildScreen(UiScreen& screen) {
   const fui::Rect band = screen.takeTop(static_cast<int16_t>(metrics.tabBarHeight));
   const int16_t pad = screen.theme().headerSidePadding;
   screen.target().text(band.inset(fui::Insets{0, pad, 0, pad}), progressLine.c_str(), screen.theme().smallText);
+  if (!loanLine.empty()) {
+    const fui::Rect loanBand = screen.takeTop(static_cast<int16_t>(metrics.tabBarHeight));
+    screen.target().text(loanBand.inset(fui::Insets{0, pad, 0, pad}), loanLine.c_str(), screen.theme().smallText);
+  }
   screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
 
   // menuRowItems's labels/actionValue were set once in the constructor (see

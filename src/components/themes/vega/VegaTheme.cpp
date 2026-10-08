@@ -20,6 +20,7 @@
 #include "activities/reader/EpubReaderUtils.h"
 #include "activities/reader/ReadingTimeHistory.h"
 #include "components/UITheme.h"
+#include "components/icons/blocks.h"
 #include "components/icons/book.h"
 #include "components/icons/bookmark.h"
 #include "components/icons/bookmarkReturn.h"
@@ -32,6 +33,7 @@
 #include "components/icons/settings2.h"
 #include "components/icons/transfer.h"
 #include "fontIds.h"
+#include "util/LoanDue.h"
 
 namespace {
 
@@ -102,17 +104,21 @@ struct HeroDetails {
   char estRemainingText[24] = {};
   bool hasLastRead = false;
   char lastReadText[64] = {};
+  bool hasLoanDue = false;
+  char loanDueText[64] = {};
 };
 
 HeroDetails loadHeroDetails(const RecentBook& book) {
   HeroDetails details;
-  if (!FsHelpers::hasEpubExtension(book.path)) {
+  if (!FsHelpers::hasReflowableBookExtension(book.path)) {
     return details;
   }
   Epub epub(book.path, "/.crosspoint");
   if (!epub.load(false, true)) {
     return details;
   }
+
+  details.hasLoanDue = loandue::describe(epub.getLoanExpiresAt(), details.loanDueText, sizeof(details.loanDueText));
 
   EpubReaderUtils::Progress progress;
   if (EpubReaderUtils::loadProgress(epub, progress, "VEGA") && progress.hasPageCount && progress.pageCount > 0) {
@@ -356,6 +362,9 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
     // Bottom block height: progress-section + today + lastRead.
     // Chapter moves to the top block so is excluded here.
     int detailBlockH = 0;
+    if (details.hasLoanDue) {
+      detailBlockH += textLineH + kLineGap;  // loan due date, above the progress label
+    }
     if (details.hasProgress) {
       detailBlockH += textLineH + kLineGap;           // "xx% - duration" label
       detailBlockH += kProgressBarHeight + kLineGap;  // bar
@@ -417,6 +426,12 @@ void VegaTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
       const int labelX = std::clamp(fillEdgeX - labelW, textX, textX + textW - labelW);
       renderer.drawText(SMALL_FONT_ID, labelX, textY, text, true);
     };
+
+    if (details.hasLoanDue) {
+      const std::string loanLine = renderer.truncatedText(SMALL_FONT_ID, details.loanDueText, textW);
+      renderer.drawText(SMALL_FONT_ID, textX, textY, loanLine.c_str(), true);
+      textY += textLineH + kLineGap;
+    }
 
     if (details.hasProgress) {
       char label[40];
@@ -599,6 +614,8 @@ const uint8_t* vegaMenuIcon(UIIcon icon) {
       return TransferIcon;
     case UIIcon::Library:
       return LibraryIcon;
+    case UIIcon::Plugins:
+      return BlocksIcon;
     case UIIcon::Chart:
       return ChartIcon;
     case UIIcon::BookmarkRibbon:

@@ -162,6 +162,7 @@ enum UIIcon {
   Settings,
   Transfer,
   Library,
+  Plugins,
   Wifi,
   Hotspot,
   BookmarkRibbon,  // renamed from Bookmark to avoid colliding with struct Bookmark (BookmarkStore.h)

@@ -7,6 +7,7 @@
 #include <deque>
 #include <memory>
 #include <string>
+#include <vector>
 
 class BookMetadataCache {
  public:
@@ -120,7 +121,10 @@ class BookMetadataCache {
   bool cleanupTmpFiles() const;
 
   // Post-processing to update mappings and sizes
-  bool buildBookBin(const std::string& epubPath, const BookMetadata& metadata);
+  // knownSizes: per-spine item sizes supplied by the caller (text books, whose items are
+  // files on SD rather than zip entries); when set, the zip is never opened.
+  bool buildBookBin(const std::string& epubPath, const BookMetadata& metadata,
+                    const std::vector<uint32_t>* knownSizes = nullptr);
 
   // Reading phase (read mode)
   bool load();

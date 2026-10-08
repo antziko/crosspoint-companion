@@ -505,10 +505,9 @@ void KOReaderSyncActivity::performUpload() {
   progress.progress = localProgress.xpath;
   progress.percentage = localProgress.percentage;
 
-  // Rich CrossPoint position for the crosspoint-sync server (lossless CrossPoint<->
-  // CrossPoint sync). Skipped entirely for third-party kosync servers; the HTTP
-  // client enforces the same boundary before serializing.
-  if (KOREADER_STORE.usesCrossPointSyncServer()) {
+  // Rich CrossPoint position (lossless CrossPoint<->CrossPoint sync), only for servers
+  // with Precise Position on; the HTTP client enforces the same boundary before serializing.
+  if (KOREADER_STORE.usesPrecisePosition()) {
     KOReaderRichPosition pos;
     const float pct = localProgress.percentage < 0.0f   ? 0.0f
                       : localProgress.percentage > 1.0f ? 1.0f
@@ -539,6 +538,10 @@ void KOReaderSyncActivity::performUpload() {
     } else {
       LOG_ERR("KOSync", "Epub unavailable for metadata; sending filename only");
     }
+    // Plugin sidecar fields ride along so a custom sync server can route progress by a
+    // service book id. Most books have none; the exists() check keeps that path silent.
+    const std::string sidecar = epubPath + ".meta.json";
+    if (Storage.exists(sidecar.c_str())) Storage.readFileToString("KOSync", sidecar, 2 * 1024, meta.extraJson);
     progress.metadata = std::move(meta);
   }
 

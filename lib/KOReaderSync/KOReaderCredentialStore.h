@@ -29,6 +29,9 @@ struct KOReaderSyncServer {
   std::string password;
   DocumentMatchMethod matchMethod = DocumentMatchMethod::FILENAME;
   bool sendMetadata = false;  // Send document metadata (filename/title/authors) with progress sync (#1820)
+  // Send and read the CrossPoint `position` extension. Defaults on for the CrossPoint host;
+  // a self-hosted server that stores `position` opts in here.
+  bool precisePosition = false;
   // Default ASK_EVERY_TIME preserves this branch's always-prompt sync flow; Smart is opt-in (#2192).
   KOReaderSyncBehavior syncBehavior = KOReaderSyncBehavior::ASK_EVERY_TIME;
 };
@@ -104,9 +107,11 @@ class KOReaderCredentialStore : public PersistableStore<KOReaderCredentialStore>
   // Get base URL for API calls (protocol normalization + default fallback).
   std::string getBaseUrl() const;
 
-  // Whether API calls target the sync server that understands the CrossPoint
-  // `position` protocol extension.
-  bool usesCrossPointSyncServer() const;
+  // Whether the active server exchanges the CrossPoint `position` extension.
+  bool usesPrecisePosition() const;
+
+  // Whether `serverUrl` points at the CrossPoint sync host (the precisePosition default).
+  static bool isCrossPointSyncUrl(const std::string& serverUrl);
 
   void setMatchMethod(DocumentMatchMethod method);
   DocumentMatchMethod getMatchMethod() const;

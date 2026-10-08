@@ -81,6 +81,7 @@ void KOReaderCredentialStore::toJson(JsonDocument& doc) const {
     obj["password_obf"] = obfuscation::obfuscateToBase64(server.password);
     obj["matchMethod"] = static_cast<uint8_t>(server.matchMethod);
     obj["sendMetadata"] = server.sendMetadata;
+    obj["precisePosition"] = server.precisePosition;
     obj["syncBehavior"] = static_cast<uint8_t>(server.syncBehavior);
   }
 }
@@ -102,6 +103,7 @@ bool KOReaderCredentialStore::fromJson(JsonVariantConst doc) {
       server.password = extractPassword(obj, needsResave);
       server.matchMethod = clampMatchMethod(obj["matchMethod"] | static_cast<uint8_t>(0));
       server.sendMetadata = obj["sendMetadata"] | false;
+      server.precisePosition = obj["precisePosition"] | isCrossPointSyncUrl(server.serverUrl);
       server.syncBehavior =
           clampSyncBehavior(obj["syncBehavior"] | static_cast<uint8_t>(KOReaderSyncBehavior::ASK_EVERY_TIME));
       servers.push_back(std::move(server));
@@ -123,6 +125,7 @@ bool KOReaderCredentialStore::fromJson(JsonVariantConst doc) {
     server.serverUrl = doc["serverUrl"] | "";
     server.matchMethod = clampMatchMethod(doc["matchMethod"] | static_cast<uint8_t>(0));
     server.sendMetadata = doc["sendMetadata"] | false;
+    server.precisePosition = isCrossPointSyncUrl(server.serverUrl);
     server.syncBehavior =
         clampSyncBehavior(doc["syncBehavior"] | static_cast<uint8_t>(KOReaderSyncBehavior::ASK_EVERY_TIME));
     server.name = nameFromUrl(server.serverUrl);
@@ -357,8 +360,7 @@ std::string KOReaderCredentialStore::getBaseUrl() const {
   return url;
 }
 
-bool KOReaderCredentialStore::usesCrossPointSyncServer() const {
-  const std::string url = getBaseUrl();
+bool KOReaderCredentialStore::isCrossPointSyncUrl(const std::string& url) {
   const size_t scheme = url.find("://");
   const size_t start = (scheme == std::string::npos) ? 0 : scheme + 3;
   size_t end = url.find_first_of(":/", start);
@@ -366,6 +368,11 @@ bool KOReaderCredentialStore::usesCrossPointSyncServer() const {
   const size_t hostLen = end - start;
   if (hostLen != sizeof(CROSSPOINT_SYNC_HOST) - 1) return false;
   return strncasecmp(url.c_str() + start, CROSSPOINT_SYNC_HOST, hostLen) == 0;
+}
+
+bool KOReaderCredentialStore::usesPrecisePosition() const {
+  if (activeIndex < 0 || static_cast<size_t>(activeIndex) >= servers.size()) return false;
+  return servers[activeIndex].precisePosition;
 }
 
 void KOReaderCredentialStore::setMatchMethod(DocumentMatchMethod method) {

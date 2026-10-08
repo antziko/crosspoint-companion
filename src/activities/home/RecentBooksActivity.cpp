@@ -747,7 +747,7 @@ void RecentBooksActivity::loadShelfCovers() {
     // already flushed to the panel, and no frame build is in progress.
     // Nesting-safe: an already-lent framebuffer yields an inert loan.
     bool ok = false;
-    if (FsHelpers::hasEpubExtension(book.path)) {
+    if (FsHelpers::hasReflowableBookExtension(book.path)) {
       Epub epub(book.path, "/.crosspoint");
       // Metadata only -- generateThumbBmp needs the cache loaded, nothing else.
       epub.load(/*buildIfMissing=*/false, /*skipLoadingCss=*/true);

@@ -7,16 +7,27 @@
 #include <Memory.h>
 #include <PngToBmpConverter.h>
 #include <SdDebugLog.h>
+#include <TextBook.h>
 #include <Utf8.h>
 #include <ZipFile.h>
 #include <esp_heap_caps.h>
 
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <set>
 
+#include "BookKey.h"
 #include "Epub/parsers/ContainerParser.h"
 #include "Epub/parsers/ContentOpfParser.h"
 #include "Epub/parsers/TocNavParser.h"
 #include "Epub/parsers/TocNcxParser.h"
+
+Epub::Epub(std::string filepath, const std::string& cacheDir)
+    : filepath(std::move(filepath)), textBook(FsHelpers::hasTextBookExtension(this->filepath)) {
+  // create a cache key based on the filepath
+  cachePath = cacheDir + "/epub_" + std::to_string(std::hash<std::string>{}(this->filepath));
+}
 
 bool Epub::findContentOpfFile(std::string* contentOpfFile, ZipFile* sharedZip) const {
   const auto containerPath = "META-INF/container.xml";
@@ -159,7 +170,14 @@ bool Epub::parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata, const 
   return true;
 }
 
-bool Epub::parseTocNcxFile() const {
+namespace {
+// Marker left in the cache dir when a build could not read the book's TOC.
+constexpr char TOC_RETRY_FILE[] = "/toc.retry";
+// Marker for a protected book whose empty TOC was rechecked once.
+constexpr char TOC_CHECKED_FILE[] = "/toc.checked";
+}  // namespace
+
+bool Epub::parseTocNcxFile(bool* readFailed) const {
   // the ncx file should have been specified in the content.opf file
   if (tocNcxItem.empty()) {
     LOG_DBG("EBP", "No ncx file specified");
@@ -185,6 +203,7 @@ bool Epub::parseTocNcxFile() const {
   // through a temp file on the SD card (decompress -> write -> reopen -> reread -> delete).
   if (!readItemContentsToStream(tocNcxItem, ncxParser, 1024)) {
     LOG_ERR("EBP", "Could not read toc ncx file");
+    *readFailed = true;
     return false;
   }
 
@@ -192,7 +211,7 @@ bool Epub::parseTocNcxFile() const {
   return true;
 }
 
-bool Epub::parseTocNavFile() const {
+bool Epub::parseTocNavFile(bool* readFailed) const {
   // the nav file should have been specified in the content.opf file (EPUB 3)
   if (tocNavItem.empty()) {
     LOG_DBG("EBP", "No nav file specified");
@@ -221,6 +240,7 @@ bool Epub::parseTocNavFile() const {
   // through a temp file on the SD card (decompress -> write -> reopen -> reread -> delete).
   if (!readItemContentsToStream(tocNavItem, navParser, 1024)) {
     LOG_ERR("EBP", "Could not read toc nav file");
+    *readFailed = true;
     return false;
   }
 
@@ -416,6 +436,7 @@ bool Epub::rebuildCssCache() {
     LOG_ERR("EBP", "rebuildCssCache() before a successful load()");
     return false;
   }
+  if (textBook) return true;  // generated parts carry no stylesheets
 
   cssParser->clear();
   cssParser->deleteCache();
@@ -452,6 +473,24 @@ bool Epub::rebuildCssCache() {
 }
 
 // load in the meta data for the epub file
+// Opens the optional encrypted-entry accessor. A null result without an error
+// means normal ZIP reads should be used. A hard error refuses the open with a
+// user-presentable reason.
+bool Epub::openProtection() {
+  std::string err;
+  decryptor = freeink::content::openProtectedBook(filepath, err);
+  if (!err.empty()) {
+    LOG_ERR("EBP", "protected content unavailable: %s", err.c_str());
+    protectionError = err;
+    return false;
+  }
+  if (decryptor) {
+    LOG_DBG("EBP", "protected content; on-read access path open");
+    if (!bookkey::readExpiry(filepath, &loanExpiresAt)) loanExpiresAt = 0;
+  }
+  return true;
+}
+
 bool Epub::load(const bool buildIfMissing, const bool skipLoadingCss) {
   LOG_DBG("EBP", "Loading ePub: %s", filepath.c_str());
 
@@ -460,8 +499,30 @@ bool Epub::load(const bool buildIfMissing, const bool skipLoadingCss) {
   // Always create CssParser - needed for inline style parsing even without CSS files
   cssParser.reset(new CssParser(cachePath));
 
+  if (textBook) return loadTextBook(buildIfMissing);
+  if (!openProtection()) return false;
+
+  // The last build could not read the TOC; drop its index so this open retries.
+  if (buildIfMissing && Storage.exists((cachePath + TOC_RETRY_FILE).c_str())) {
+    LOG_DBG("EBP", "Rebuilding book index: TOC was unreadable last time");
+    Storage.remove((cachePath + "/book.bin").c_str());
+    Storage.remove((cachePath + TOC_RETRY_FILE).c_str());
+  }
+
   // Try to load existing cache first
-  if (bookMetadataCache->load()) {
+  bool cacheLoaded = bookMetadataCache->load();
+  // A protected book indexed with no chapters may predate a TOC that failed to
+  // decrypt; rebuild once. The marker stops a repeat for a book that has none.
+  if (cacheLoaded && buildIfMissing && decryptor && bookMetadataCache->getTocCount() == 0 &&
+      !Storage.exists((cachePath + TOC_CHECKED_FILE).c_str())) {
+    LOG_DBG("EBP", "Rebuilding book index: protected book cached without a TOC");
+    bookMetadataCache.reset(new BookMetadataCache(cachePath));  // closes book.bin
+    Storage.remove((cachePath + "/book.bin").c_str());
+    HalFile marker;
+    Storage.openFileForWrite("EBP", cachePath + TOC_CHECKED_FILE, marker);
+    cacheLoaded = false;
+  }
+  if (cacheLoaded) {
     if (!skipLoadingCss) {
       // Rebuild CSS cache when missing or when cache version changed (loadFromCache removes stale file)
       if (!cssParser->hasCache() || !cssParser->loadFromCache()) {
@@ -524,17 +585,18 @@ bool Epub::load(const bool buildIfMissing, const bool skipLoadingCss) {
   }
 
   bool tocParsed = false;
+  bool tocReadFailed = false;
 
   // Try EPUB 3 nav document first (preferred)
   if (!tocNavItem.empty()) {
     LOG_DBG("EBP", "Attempting to parse EPUB 3 nav document");
-    tocParsed = parseTocNavFile();
+    tocParsed = parseTocNavFile(&tocReadFailed);
   }
 
   // Fall back to NCX if nav parsing failed or wasn't available
   if (!tocParsed && !tocNcxItem.empty()) {
     LOG_DBG("EBP", "Falling back to NCX TOC");
-    tocParsed = parseTocNcxFile();
+    tocParsed = parseTocNcxFile(&tocReadFailed);
   }
 
   if (!tocParsed) {
@@ -579,6 +641,15 @@ bool Epub::load(const bool buildIfMissing, const bool skipLoadingCss) {
   if (!bookMetadataCache->load()) {
     LOG_ERR("EBP", "Failed to reload cache after writing");
     return false;
+  }
+
+  // A TOC that exists but could not be read is a transient failure; keep this
+  // session's index (book.bin stays open while loaded) and mark it for a
+  // rebuild on the next open rather than serving an empty chapter list for good.
+  if (!tocParsed && tocReadFailed) {
+    LOG_ERR("EBP", "TOC unreadable - book index will be rebuilt on next open");
+    HalFile marker;
+    Storage.openFileForWrite("EBP", cachePath + TOC_RETRY_FILE, marker);
   }
 
   LOG_DBG("EBP", "Loaded ePub: %s", filepath.c_str());
@@ -743,6 +814,16 @@ bool Epub::generateCoverBmp(bool cropped) const {
     return success;
   }
 
+  if (textBook && FsHelpers::hasBmpExtension(coverImageHref)) {
+    // A companion .bmp is already in the display format: copy it as-is.
+    HalFile coverBmp;
+    if (!Storage.openFileForWrite("EBP", getCoverBmpPath(cropped), coverBmp)) return false;
+    const bool copied = readItemContentsToStream(coverImageHref, coverBmp, 1024);
+    coverBmp.close();
+    if (!copied) Storage.remove(getCoverBmpPath(cropped).c_str());
+    return copied;
+  }
+
   LOG_ERR("EBP", "Cover image is not a supported format, skipping");
   return false;
 }
@@ -807,6 +888,13 @@ bool Epub::generateThumbFitBmp(const int width, const int height) const {
 
 bool Epub::generateThumbBmpFromSource(int height) {
   if (Storage.exists(getThumbBmpPath(height).c_str())) return true;
+  if (textBook) {
+    const std::string cover = findCompanionCover();
+    if (cover.empty()) return false;
+    setupCacheDir();
+    return generateThumbBmpForCover(getThumbBmpPath(height), coverFitThumbWidth(height), height, /*crop=*/true,
+                                    cover.substr(1));
+  }
   // Parser input and metadata outlive parsing but exceed the small task stack budget.
   auto metadata = makeUniqueNoThrow<BookMetadataCache::BookMetadata>();
   auto zip = makeUniqueNoThrow<ZipFile>(filepath);
@@ -820,6 +908,8 @@ bool Epub::generateThumbBmpFromSource(int height) {
   }
   if (!parseContentOpf(*metadata, /*writeSpineEntries=*/false, /*metadataOnly=*/false, zip.get())) return false;
   zip.reset();
+  // The cover of a protected book is encrypted like everything else.
+  if (!decryptor && !openProtection()) return false;
   setupCacheDir();
   return generateThumbBmpForCover(getThumbBmpPath(height), coverFitThumbWidth(height), height, /*crop=*/true,
                                   metadata->coverItemHref);
@@ -938,7 +1028,58 @@ uint8_t* Epub::readItemContentsToBytes(const std::string& itemHref, size_t* size
     return nullptr;
   }
 
+  if (textBook) {
+    HalFile file;
+    if (!Storage.openFileForRead("EBP", textItemPath(itemHref), file)) return nullptr;
+    const size_t len = file.size();
+    auto* buf = static_cast<uint8_t*>(malloc(len + (trailingNullByte ? 1 : 0)));
+    if (!buf) {
+      LOG_ERR("EBP", "OOM: %u bytes for %s", static_cast<unsigned>(len), itemHref.c_str());
+      return nullptr;
+    }
+    if (file.read(buf, len) != static_cast<int>(len)) {
+      free(buf);
+      return nullptr;
+    }
+    if (trailingNullByte) buf[len] = 0;
+    if (size) *size = len;
+    return buf;
+  }
+
   const std::string path = FsHelpers::normalisePath(itemHref);
+
+  // Decode encrypted entries on demand in memory.
+  if (decryptor && decryptor->isEncrypted(path)) {
+    const size_t plainSize = decryptor->decryptedSize(path);
+    if (plainSize > SIZE_MAX - (trailingNullByte ? 1 : 0)) return nullptr;
+    const size_t total = plainSize + (trailingNullByte ? 1 : 0);
+    // malloc, not makeUniqueNoThrow: the caller owns the buffer and free()s it.
+    auto* content = static_cast<uint8_t*>(malloc(total > 0 ? total : 1));
+    if (!content) {
+      LOG_ERR("EBP", "insufficient memory for %s (%u bytes)", path.c_str(), static_cast<unsigned>(total));
+      return nullptr;
+    }
+    struct BufferSink {
+      uint8_t* data;
+      size_t capacity;
+      size_t written;
+    } state{content, plainSize, 0};
+    auto append = [](void* context, const uint8_t* data, size_t len) {
+      auto* target = static_cast<BufferSink*>(context);
+      if (len > target->capacity - target->written) return false;
+      memcpy(target->data + target->written, data, len);
+      target->written += len;
+      return true;
+    };
+    if (!decryptor->decryptToSink(path, append, &state) || state.written != plainSize) {
+      free(content);
+      LOG_ERR("EBP", "content read failed for %s", path.c_str());
+      return nullptr;
+    }
+    if (trailingNullByte) content[plainSize] = 0;
+    if (size) *size = plainSize;
+    return content;
+  }
 
   const auto content = ZipFile(filepath).readFileToMemory(path.c_str(), size, trailingNullByte);
   if (!content) {
@@ -957,7 +1098,39 @@ bool Epub::readItemContentsToStream(const std::string& itemHref, Print& out, con
     return false;
   }
 
+  if (textBook) {
+    HalFile file;
+    if (!Storage.openFileForRead("EBP", textItemPath(itemHref), file)) {
+      if (outStreamReason) *outStreamReason = static_cast<uint8_t>(ZipFile::StreamResult::NotFound);
+      return false;
+    }
+    auto chunk = makeUniqueNoThrow<uint8_t[]>(chunkSize);
+    if (!chunk) {
+      LOG_ERR("EBP", "OOM: %u byte stream chunk", static_cast<unsigned>(chunkSize));
+      return false;
+    }
+    int n;
+    while ((n = file.read(chunk.get(), chunkSize)) > 0) {
+      if (out.write(chunk.get(), static_cast<size_t>(n)) != static_cast<size_t>(n)) return allowEarlyStop;
+    }
+    if (outStreamReason) *outStreamReason = static_cast<uint8_t>(ZipFile::StreamResult::Ok);
+    return n == 0;
+  }
+
   const std::string path = FsHelpers::normalisePath(itemHref);
+
+  if (decryptor && decryptor->isEncrypted(path)) {
+    auto append = [](void* context, const uint8_t* data, size_t len) {
+      return static_cast<Print*>(context)->write(data, len) == len;
+    };
+    const bool ok = decryptor->decryptToSink(path, append, &out);
+    if (!ok) LOG_ERR("EBP", "content read failed for %s", path.c_str());
+    if (outStreamReason) {
+      *outStreamReason = static_cast<uint8_t>(ok ? ZipFile::StreamResult::Ok : ZipFile::StreamResult::ShortRead);
+    }
+    return ok;
+  }
+
   ZipFile::StreamResult res = ZipFile::StreamResult::Ok;
   const bool ok = ZipFile(filepath).readFileToStream(path.c_str(), out, chunkSize, allowEarlyStop, &res);
   if (outStreamReason) *outStreamReason = static_cast<uint8_t>(res);
@@ -979,7 +1152,17 @@ bool Epub::extractItemToFile(const std::string& itemHref, const std::string& des
 }
 
 bool Epub::getItemSize(const std::string& itemHref, size_t* size) const {
+  if (textBook) {
+    HalFile file;
+    if (!Storage.openFileForRead("EBP", textItemPath(itemHref), file)) return false;
+    if (size) *size = file.size();
+    return true;
+  }
   const std::string path = FsHelpers::normalisePath(itemHref);
+  if (decryptor && decryptor->isEncrypted(path)) {
+    if (size) *size = decryptor->decryptedSize(path);
+    return true;
+  }
   return ZipFile(filepath).getInflatedFileSize(path.c_str(), size);
 }
 
@@ -1134,4 +1317,195 @@ int Epub::resolveHrefToSpineIndex(const std::string& href) const {
     if (spineFilename == targetFilename) return i;
   }
   return -1;
+}
+
+// ---- Text books (.txt / .md) ----
+
+namespace {
+
+constexpr char TEXT_STAMP_FILE[] = "/text.stamp";
+constexpr char TEXT_PARTS_DIR[] = "/parts";
+// TOC rows kept in RAM until the spine pass is written; deeper headings are dropped first.
+constexpr size_t MAX_TEXT_TOC = 1024;
+
+class FileSource final : public textbook::Source {
+ public:
+  explicit FileSource(HalFile& file) : file(file) {}
+  int read(uint8_t* buf, const size_t size) override { return file.read(buf, size); }
+  bool rewind() override { return file.seek(0); }
+
+ private:
+  HalFile& file;
+};
+
+class PartFileSink final : public textbook::Sink {
+ public:
+  struct TocRow {
+    uint8_t level;
+    uint16_t part;
+    std::string title;
+    std::string anchor;
+  };
+
+  explicit PartFileSink(std::string dir) : dir(std::move(dir)) {
+    sizes.reserve(32);
+    toc.reserve(32);
+  }
+
+  bool beginPart(const uint16_t index) override {
+    current = 0;
+    return Storage.openFileForWrite("EBP", dir + "/" + textbook::partHref(index), file);
+  }
+  bool write(const char* data, const size_t len) override {
+    current += len;
+    return file.write(reinterpret_cast<const uint8_t*>(data), len) == len;
+  }
+  bool endPart() override {
+    file.flush();
+    file.close();
+    sizes.push_back(current);
+    return true;
+  }
+  void addToc(const uint8_t level, const std::string& title, const uint16_t part, const std::string& anchor) override {
+    if (toc.size() < MAX_TEXT_TOC) toc.push_back({level, part, title, anchor});
+  }
+
+  std::vector<uint32_t> sizes;
+  std::vector<TocRow> toc;
+
+ private:
+  std::string dir;
+  HalFile file;
+  uint32_t current = 0;
+};
+
+uint32_t sourceSizeOf(const std::string& path) {
+  HalFile file;
+  return Storage.openFileForRead("EBP", path, file) ? static_cast<uint32_t>(file.size()) : 0;
+}
+
+}  // namespace
+
+std::string Epub::textItemPath(const std::string& itemHref) const {
+  if (textbook::isPartHref(itemHref)) return cachePath + TEXT_PARTS_DIR + "/" + itemHref;
+  return "/" + FsHelpers::normalisePath(itemHref);
+}
+
+std::string Epub::findCompanionCover() const {
+  const std::string folder = FsHelpers::extractFolderPath(filepath);
+  const std::string prefix = folder == "/" ? "" : folder;
+  const std::string baseName = FsHelpers::getFileNameWithoutExtension(filepath);
+  static constexpr const char* EXTENSIONS[] = {".jpg", ".jpeg", ".png", ".bmp", ".JPG", ".JPEG", ".PNG", ".BMP"};
+  static constexpr const char* COVER_NAMES[] = {"cover", "Cover", "COVER"};
+  for (const char* ext : EXTENSIONS) {
+    const std::string path = prefix + "/" + baseName + ext;
+    if (Storage.exists(path.c_str())) return path;
+  }
+  for (const char* name : COVER_NAMES) {
+    for (const char* ext : EXTENSIONS) {
+      const std::string path = prefix + "/" + name + ext;
+      if (Storage.exists(path.c_str())) return path;
+    }
+  }
+  return "";
+}
+
+// The stamp ties the parts to the converter version and the source size, so an edited
+// .md/.txt (or a converter change) rebuilds instead of showing stale text.
+bool Epub::textBookStampMatches() const {
+  HalFile stamp;
+  uint8_t data[5];
+  if (!Storage.openFileForRead("EBP", cachePath + TEXT_STAMP_FILE, stamp) || stamp.read(data, 5) != 5) return false;
+  const uint32_t size = data[1] | (data[2] << 8) | (data[3] << 16) | (static_cast<uint32_t>(data[4]) << 24);
+  return data[0] == textbook::CONVERTER_VERSION && size == sourceSizeOf(filepath);
+}
+
+bool Epub::loadTextBook(const bool buildIfMissing) {
+  // A metadata-only load (buildIfMissing=false) may read a stale cache: titles and covers
+  // survive an edit, and the next real open rebuilds the parts.
+  if ((!buildIfMissing || textBookStampMatches()) && bookMetadataCache->load()) {
+    cssParser->clear();
+    LOG_DBG("EBP", "Loaded text book: %s", filepath.c_str());
+    return true;
+  }
+  if (!buildIfMissing) return false;
+
+  bookMetadataCache.reset();
+  if (!buildTextBookCache()) return false;
+  bookMetadataCache = makeUniqueNoThrow<BookMetadataCache>(cachePath);
+  if (!bookMetadataCache || !bookMetadataCache->load()) {
+    LOG_ERR("EBP", "Failed to load text book cache");
+    return false;
+  }
+  return true;
+}
+
+bool Epub::buildTextBookCache() {
+  const uint32_t start = millis();
+  LOG_INF("TXB", "Converting %s (free=%u largest=%u)", filepath.c_str(), static_cast<unsigned>(ESP.getFreeHeap()),
+          static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+
+  // Progress and bookmarks live in the same dir and must survive a rebuild; only the
+  // derived layout goes.
+  setupCacheDir();
+  Storage.remove((cachePath + TEXT_STAMP_FILE).c_str());
+  Storage.remove((cachePath + "/book.bin").c_str());
+  Storage.removeDir((cachePath + TEXT_PARTS_DIR).c_str());
+  Storage.removeDir((cachePath + "/sections").c_str());
+  Storage.mkdir((cachePath + TEXT_PARTS_DIR).c_str());
+
+  auto sink = makeUniqueNoThrow<PartFileSink>(cachePath + TEXT_PARTS_DIR);
+  if (!sink) {
+    LOG_ERR("TXB", "OOM: part sink");
+    return false;
+  }
+  textbook::Result result;
+  {
+    HalFile source;
+    if (!Storage.openFileForRead("TXB", filepath, source)) return false;
+    FileSource src(source);
+    const std::string title = utf8ComposeNfc(FsHelpers::getFileNameWithoutExtension(filepath));
+    if (FsHelpers::hasMarkdownExtension(filepath)) {
+      result = textbook::convertMarkdown(src, *sink, title, FsHelpers::extractFolderPath(filepath));
+    } else {
+      result = textbook::convertTxt(src, *sink, title);
+    }
+  }
+  if (!result.ok || sink->sizes.empty()) {
+    LOG_ERR("TXB", "Conversion failed: %s", filepath.c_str());
+    return false;
+  }
+
+  BookMetadataCache cache(cachePath);
+  BookMetadataCache::BookMetadata metadata;
+  metadata.title = utf8ComposeNfc(result.title);
+  metadata.author = utf8ComposeNfc(result.author);
+  const std::string cover = findCompanionCover();
+  if (!cover.empty()) metadata.coverItemHref = cover.substr(1);  // root-relative, like image hrefs
+
+  bool ok = cache.beginWrite() && cache.beginContentOpfPass();
+  for (uint16_t i = 0; ok && i < sink->sizes.size(); i++) cache.createSpineEntry(textbook::partHref(i));
+  ok = ok && cache.endContentOpfPass() && cache.beginTocPass();
+  for (size_t i = 0; ok && i < sink->toc.size(); i++) {
+    const auto& row = sink->toc[i];
+    cache.createTocEntry(row.title, textbook::partHref(row.part), row.anchor, row.level);
+  }
+  ok = ok && cache.endTocPass() && cache.endWrite() && cache.buildBookBin(filepath, metadata, &sink->sizes);
+  cache.cleanupTmpFiles();
+  if (!ok) {
+    LOG_ERR("TXB", "Could not write book.bin for %s", filepath.c_str());
+    return false;
+  }
+
+  HalFile stamp;
+  if (Storage.openFileForWrite("TXB", cachePath + TEXT_STAMP_FILE, stamp)) {
+    const uint32_t size = sourceSizeOf(filepath);
+    const uint8_t data[5] = {textbook::CONVERTER_VERSION, static_cast<uint8_t>(size), static_cast<uint8_t>(size >> 8),
+                             static_cast<uint8_t>(size >> 16), static_cast<uint8_t>(size >> 24)};
+    stamp.write(data, sizeof(data));
+  }
+  LOG_INF("TXB", "Converted %u parts, %u toc in %lu ms (free=%u largest=%u)", static_cast<unsigned>(sink->sizes.size()),
+          static_cast<unsigned>(sink->toc.size()), millis() - start, static_cast<unsigned>(ESP.getFreeHeap()),
+          static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+  return true;
 }

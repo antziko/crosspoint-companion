@@ -1,6 +1,7 @@
 #pragma once
 
 #include <HalClock.h>
+#include <TrustedTime.h>
 
 #include <ctime>
 
@@ -58,4 +59,5 @@ inline void noteClockSynced() {
     dirty = true;
   }
   if (dirty) SETTINGS.saveToFile();
+  trustedtime::note();  // raise the persisted loan-clock floor
 }

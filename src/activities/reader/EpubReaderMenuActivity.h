@@ -40,7 +40,8 @@ class EpubReaderMenuActivity final : public UiListActivity {
   explicit EpubReaderMenuActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const std::string& title,
                                   const int currentPage, const int totalPages, const int bookProgressPercent,
                                   const uint8_t currentOrientation, const bool hasFootnotes,
-                                  const bool hasDictionary = false, std::string activeDictName = "");
+                                  const bool hasDictionary = false, std::string activeDictName = "",
+                                  std::string loanLine = "");
 
   void render(RenderLock&&) override;
   bool handleHomeGesture() override;
@@ -100,4 +101,6 @@ class EpubReaderMenuActivity final : public UiListActivity {
   int totalPages = 0;
   int bookProgressPercent = 0;
   std::string activeDictName;
+  // Loan due-date line under the progress summary; empty when not on loan.
+  std::string loanLine;
 };

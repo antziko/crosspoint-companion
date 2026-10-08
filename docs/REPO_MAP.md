@@ -26,7 +26,7 @@ Hard constraint: **stability under ~380KB RAM**. Single 48KB framebuffer. See `C
 | `lib/EpdFont/` | Bitmap font format + builtin fonts. |
 | `lib/I18n/` | Translations. Edit `translations/*.yaml`, regen with `scripts/gen_i18n.py` (generated files gitignored). |
 | `lib/DictHtmlRenderer/` | Renders dictionary entry HTML. |
-| `lib/Xtc/`, `lib/Txt/`, `lib/OpdsParser/`, `lib/KOReaderSync/`, `lib/ZipFile/`, `lib/InflateReader/`, `lib/uzlib/`, `lib/expat/`, `lib/JsonParser/`, `lib/*ToBmpConverter/` | Format/codec/parser support libs. |
+| `lib/Xtc/`, `lib/TextBook/` (TXT/Markdown -> XHTML parts), `lib/OpdsParser/`, `lib/KOReaderSync/`, `lib/ZipFile/`, `lib/InflateReader/`, `lib/uzlib/`, `lib/expat/`, `lib/JsonParser/`, `lib/*ToBmpConverter/` | Format/codec/parser support libs. |
 | `lib/Memory/` | `makeUniqueNoThrow` — the mandated allocation helper. |
 | `open-x4-sdk/` | Vendored low-level SDK (EInkDisplay, InputManager, BatteryMonitor, SDCardManager). Wrap via HAL — do not call directly. |
 | `scripts/` | Build/codegen/tooling (Python). i18n, HTML build, hyphenation trie, font manifest, dictionary tools, unit-test runner. |

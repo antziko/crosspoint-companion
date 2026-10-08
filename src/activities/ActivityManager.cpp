@@ -22,6 +22,7 @@
 #include "home/RecentBooksActivity.h"
 #include "network/CrossPointWebServerActivity.h"
 #include "network/UsbDriveActivity.h"
+#include "plugins/PluginCatalogActivity.h"
 #include "reader/ReaderActivity.h"
 #include "reader/ReadingStatsActivity.h"
 #include "settings/OpdsServerListActivity.h"
@@ -349,6 +350,13 @@ void ActivityManager::goToFileTransfer() {
   replaceActivityNoThrow<CrossPointWebServerActivity>("CrossPointWebServer", renderer, mappedInput);
 }
 
+void ActivityManager::goToJoinNetwork() {
+  // Post heap-defrag reboot: enter the web-server activity straight in Join
+  // Network mode (skips mode selection, does not reboot again).
+  replaceActivityNoThrow<CrossPointWebServerActivity>("CrossPointWebServer", renderer, mappedInput,
+                                                      /*startInJoinNetwork=*/true);
+}
+
 void ActivityManager::goToUsbDrive() {
 #if FREEINK_CAP_USB_MSC
   replaceActivityNoThrow<UsbDriveActivity>("UsbDrive", renderer, mappedInput);
@@ -383,6 +391,10 @@ void ActivityManager::goToBrowser() {
   }
 }
 
+void ActivityManager::goToPlugins(const bool showOpds) {
+  replaceActivityNoThrow<PluginCatalogActivity>("PluginCatalog", renderer, mappedInput, showOpds, /*rootMode=*/true);
+}
+
 void ActivityManager::goToReader(std::string path, const bool allowFastInitialRefresh) {
   replaceActivityNoThrow<ReaderActivity>("Reader", renderer, mappedInput, std::move(path), allowFastInitialRefresh);
 }
@@ -406,7 +418,7 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem, const bool cleanIniti
       initialMenuItem = HomeMenuItem::FILE_BROWSER;
     } else if (activityName == "RecentBooks") {
       initialMenuItem = HomeMenuItem::RECENTS;
-    } else if (activityName == "OpdsBookBrowser") {
+    } else if (activityName == "OpdsBookBrowser" || activityName == "PluginCatalog") {
       initialMenuItem = HomeMenuItem::OPDS_BROWSER;
     } else if (activityName == "ReadingStats") {
       initialMenuItem = HomeMenuItem::READING_STATS;
@@ -486,6 +498,12 @@ ScreenshotInfo ActivityManager::getScreenshotInfo() const {
     return currentActivity->getScreenshotInfo();
   }
   return {};
+}
+
+void ActivityManager::prepareForSleep() {
+  RenderLock lock;
+  for (const auto& activity : stackActivities) activity->prepareForSleep();
+  if (currentActivity) currentActivity->prepareForSleep();
 }
 
 void ActivityManager::requestUpdate(bool immediate) {

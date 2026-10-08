@@ -1,6 +1,6 @@
 add_executable(StreamingJsonParserTest
   StreamingJsonParserTest.cpp
-  ${REPO_ROOT}/lib/JsonParser/StreamingJsonParser.cpp
+  ${REPO_ROOT}/lib/JsonParser/ChunkedJsonParser.cpp
 )
 
 target_include_directories(StreamingJsonParserTest PRIVATE

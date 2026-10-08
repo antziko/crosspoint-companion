@@ -33,6 +33,7 @@
 #include "StatusBarSettingsActivity.h"
 #include "TextSettingsActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
+#include "activities/plugins/PluginCatalogActivity.h"
 #include "activities/reader/DictNotesActivity.h"
 #include "activities/util/IntervalSelectionActivity.h"
 #include "components/UITheme.h"
@@ -101,6 +102,7 @@ void SettingsActivity::rebuildSettingsLists() {
     } else if (subCategory_ == StrId::STR_SYS_MAINTENANCE) {
       readerSettings.push_back(SettingInfo::Action(StrId::STR_CHECK_UPDATES, SettingAction::CheckForUpdates));
       readerSettings.push_back(SettingInfo::Action(StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate));
+      readerSettings.push_back(SettingInfo::Action(StrId::STR_PLUGINS, SettingAction::Plugins));
       readerSettings.push_back(SettingInfo::Action(StrId::STR_LANGUAGE, SettingAction::Language));
       readerSettings.push_back(SettingInfo::Action(StrId::STR_KEYBOARD_LAYOUTS, SettingAction::KeyboardLayouts));
       readerSettings.push_back(SettingInfo::Action(StrId::STR_ABOUT, SettingAction::About));
@@ -573,6 +575,9 @@ void SettingsActivity::toggleCurrentSetting() {
         break;
       case SettingAction::SdFirmwareUpdate:
         startActivityForResultNoThrow<SdFirmwareUpdateActivity>(resultHandler, renderer, mappedInput);
+        break;
+      case SettingAction::Plugins:
+        startActivityForResultNoThrow<PluginCatalogActivity>(resultHandler, renderer, mappedInput);
         break;
       case SettingAction::DownloadFonts:
         startActivityForResultNoThrow<FontDownloadActivity>(
