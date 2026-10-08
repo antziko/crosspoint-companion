@@ -139,7 +139,9 @@ namespace {
 // v61: An image at least a quarter of the page tall fills the page like a wide one, so the
 //      verdict no longer depends on the panel's width.
 // v62: The paragraph-spacing header byte is a level (see paragraphGapPx()), not on/off.
-constexpr uint8_t SECTION_FILE_VERSION = 62;
+// v63: A soft-flushed paragraph's continuation is no longer re-indented, and its top
+//      margin/padding lands once, before the first line. Covers upstream's #3875.
+constexpr uint8_t SECTION_FILE_VERSION = 63;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects

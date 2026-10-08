@@ -194,6 +194,7 @@ class ChapterHtmlSlimParser {
   void addTableRowSeparator();
   void setCurrentPageVisibleOffset(uint32_t offset);
   void flushLongTextBlockIfNeeded();
+  void applyBlockTopSpacing();
   void makePages();
   static EpdFontFamily::Style fontStyleForTextDecoration(CssTextDecoration decoration);
   static void applyDirectionToEntry(StyleStackEntry& entry, const CssStyle& css);

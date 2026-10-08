@@ -460,9 +460,12 @@ void ChapterHtmlSlimParser::flushLongTextBlockIfNeeded() {
   const uint16_t effectiveWidth =
       (horizontalInset < viewportWidth) ? static_cast<uint16_t>(viewportWidth - horizontalInset) : viewportWidth;
   const size_t wordsBeforeFlush = currentTextBlock->size();
+  bool topPending = !currentTextBlock->firstLineEmitted();
   currentTextBlock->layoutAndExtractLines(
       renderer, fontId, effectiveWidth,
-      [this](const std::shared_ptr<TextBlock>& textBlock, const uint32_t offset) {
+      [this, &topPending](const std::shared_ptr<TextBlock>& textBlock, const uint32_t offset) {
+        if (topPending) applyBlockTopSpacing();
+        topPending = false;
         this->addLineToPage(textBlock, offset);
       },
       false, characterSpacing, wordSpacingPercent);
@@ -2522,6 +2525,16 @@ void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line, const
   currentPageNextY += lineHeight;
 }
 
+void ChapterHtmlSlimParser::applyBlockTopSpacing() {
+  const BlockStyle& blockStyle = currentTextBlock->getBlockStyle();
+  if (blockStyle.marginTop > 0) {
+    currentPageNextY += blockStyle.marginTop;
+  }
+  if (blockStyle.paddingTop > 0) {
+    currentPageNextY += blockStyle.paddingTop;
+  }
+}
+
 void ChapterHtmlSlimParser::makePages() {
   if (!currentTextBlock) {
     LOG_ERR("EHP", "!! No text block to make pages for !!");
@@ -2540,14 +2553,10 @@ void ChapterHtmlSlimParser::makePages() {
 
   const int lineHeight = renderer.getLineHeight(fontId, lineCompression);
 
-  // Apply top spacing before the paragraph (stored in pixels)
   const BlockStyle& blockStyle = currentTextBlock->getBlockStyle();
-  if (blockStyle.marginTop > 0) {
-    currentPageNextY += blockStyle.marginTop;
-  }
-  if (blockStyle.paddingTop > 0) {
-    currentPageNextY += blockStyle.paddingTop;
-  }
+  // Top spacing goes before the paragraph's first line, which a soft flush may already have
+  // emitted -- the lines laid out here are then its continuation.
+  bool topPending = !currentTextBlock->firstLineEmitted();
 
   // Calculate effective width accounting for horizontal margins/padding
   const int horizontalInset = blockStyle.totalHorizontalInset();
@@ -2556,8 +2565,14 @@ void ChapterHtmlSlimParser::makePages() {
 
   currentTextBlock->layoutAndExtractLines(
       renderer, fontId, effectiveWidth,
-      [this](const std::shared_ptr<TextBlock>& textBlock, const uint32_t offset) { addLineToPage(textBlock, offset); },
+      [this, &topPending](const std::shared_ptr<TextBlock>& textBlock, const uint32_t offset) {
+        if (topPending) applyBlockTopSpacing();
+        topPending = false;
+        addLineToPage(textBlock, offset);
+      },
       true, characterSpacing, wordSpacingPercent);
+  // An empty block still takes its top spacing, as before.
+  if (topPending) applyBlockTopSpacing();
   if (currentTextBlock->hadDroppedWords()) signalOutOfMemory("layout: word arena");
 
   // Fallback: transfer any remaining pending footnotes to current page.

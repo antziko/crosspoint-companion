@@ -71,6 +71,8 @@ class ParsedText {
   bool isNaturalAlign;
   bool hasRtlWord;
   bool droppedWords = false;
+  // A soft flush already emitted this paragraph's first line: the rest continues it, unindented.
+  bool firstLineConsumed = false;
   std::vector<std::string> reorderedWordsScratch;
   std::vector<EpdFontFamily::Style> reorderedStylesScratch;
   std::vector<uint16_t> reorderedWidthsScratch;
@@ -141,6 +143,7 @@ class ParsedText {
   // True once any word or line was dropped because an allocation failed. Callers must treat
   // the block as incomplete and fail the section build rather than cache text with holes.
   bool hadDroppedWords() const { return droppedWords; }
+  bool firstLineEmitted() const { return firstLineConsumed; }
   void layoutAndExtractLines(const GfxRenderer& renderer, int fontId, uint16_t viewportWidth,
                              const std::function<void(std::shared_ptr<TextBlock>, uint32_t)>& processLine,
                              bool includeLastLine = true, int8_t characterSpacing = 0,
