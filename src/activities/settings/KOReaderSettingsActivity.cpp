@@ -267,7 +267,9 @@ void KOReaderSettingsActivity::buildScreen(UiScreen& screen) {
     } else if (i == ROW_DOC_MATCH) {
       rowValues_[i] = editServer.matchMethod == DocumentMatchMethod::FILENAME ? tr(STR_FILENAME) : tr(STR_BINARY);
     } else if (i == ROW_SEND_METADATA) {
-      rowValues_[i] = editServer.sendMetadata ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+      rowValues_[i].clear();
+      GUI.setCheckboxRow(rowItems_[i], editServer.sendMetadata);
+      continue;
     } else if (i == ROW_SYNC_BEHAVIOR) {
       rowValues_[i] =
           editServer.syncBehavior == KOReaderSyncBehavior::SMART ? tr(STR_SMART_SYNC) : tr(STR_ASK_EVERY_TIME);
