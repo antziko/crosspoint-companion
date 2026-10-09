@@ -40,10 +40,9 @@ bool describe(const int64_t expiresAt, char* buf, const size_t size) {
   char date[16];
   snprintf(date, sizeof(date), "%d %s", local.tm_mday, MONTHS[local.tm_mon % 12]);
 
-  if (left >= 2 * SECONDS_PER_DAY) {
-    snprintf(buf, size, tr(STR_LOAN_DUE_DAYS), date, static_cast<int>(left / SECONDS_PER_DAY));
-  } else if (left >= SECONDS_PER_DAY) {
-    snprintf(buf, size, tr(STR_LOAN_DUE_ONE_DAY), date);
+  if (left >= SECONDS_PER_DAY) {
+    snprintf(buf, size, tr(STR_LOAN_DUE_DAYS), date, static_cast<int>(left / SECONDS_PER_DAY),
+             static_cast<int>((left % SECONDS_PER_DAY) / 3600));
   } else {
     const int hours = static_cast<int>(left / 3600);
     snprintf(buf, size, tr(STR_LOAN_DUE_HOURS), date, hours < 1 ? 1 : hours);
