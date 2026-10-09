@@ -18,7 +18,7 @@ class RecentBooksActivity final : public UiListActivity {
   void render(RenderLock&&) override;
 
  private:
-  int listCount() const override { return static_cast<int>(recentBooks.size()); }
+  int listCount() const override { return static_cast<int>(offsets.size()); }
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;
   void onRowLongPress(int index) override;
@@ -35,9 +35,9 @@ class RecentBooksActivity final : public UiListActivity {
   // No-op: handleButtons() already owns every button this screen navigates
   // with. See the definition for why the base tail double-handled them.
   void navigateButtons() override;
-  // "Recent Books (7)". Formatted into a fixed buffer by rebuildRowItems()
-  // whenever the list changes, so the header shows the count without building a
-  // std::string on every repaint.
+  // "Recent Books (7)", or "Recent · Libby (7)" under a folder filter. Formatted
+  // into a fixed buffer by rescan() whenever the list changes, so the header shows
+  // the count without building a std::string on every repaint.
   // Move mode renames the header: the count is not what the user needs to read while the
   // side buttons are moving a book, and on a touch board the hint strip that would
   // otherwise say so has no height (UITheme::getMetrics zeroes it).
@@ -70,29 +70,39 @@ class RecentBooksActivity final : public UiListActivity {
   int shelfCoverH = 210;
   static int pickShelfCoverHeight(int bodyHeight, int cellWidth, int columns);
 
-  // The view picker, opened by a Back hold. Writes the setting, drops the stale
-  // interaction table, and repaints.
+  // Back hold (or a header tap) opens View / Folder; each opens its picker. The
+  // view picker writes the setting, drops the stale interaction table, and repaints.
+  void showOptionsMenu();
   void showViewPicker();
+  void showFolderPicker();
+  // Persist `folder` (see CrossPointState::recentBooksFolder) and reload the list.
+  void applyFolder(const std::string& folder);
   OptionPopup optionPopup;
+  // The picker the View / Folder menu chose, opened on the next loop pass: the
+  // popup is still inside its own callback when the choice arrives.
+  enum class PendingPicker : uint8_t { None, View, Folder };
+  PendingPicker pendingPicker = PendingPicker::None;
 
   // Switch to `view` and do the bookkeeping a view change needs. No-op when
   // already on it. Shared by the picker and the header tap -- the ordering
   // inside is load-bearing, so there must be exactly one copy of it.
   void applyView(int view);
 
-  // A tap anywhere on the header band cycles List -> 2x2 -> 3x3. The X4 Pro
-  // wires no Back button, so the Back hold that opens the picker is
-  // unreachable there and the title is the only in-screen way to switch view.
+  // A tap anywhere on the header band opens the View / Folder menu. The X4 Pro
+  // wires no Back button, so the Back hold that opens it is unreachable there
+  // and the title is the only in-screen way in.
   static constexpr freeink::ui::ActionId ACTION_HEADER = ACTION_USER;
   static void headerActionTrampoline(const freeink::ui::ActionEvent& event, void* user);
 
-  // Generates any missing cover thumbnails for the visible books. Runs from the
-  // render tail on the render task — it takes a GfxRenderer::FrameBufferLoan,
-  // which is legal only outside a frame build, and draws its own progress
-  // popup. Latched so it runs once per entry.
+  // Generates any missing cover thumbnails for the shelf page on screen. Runs from
+  // the render tail on the render task — it takes a GfxRenderer::FrameBufferLoan,
+  // which is legal only outside a frame build, and draws its own progress popup.
+  // Latched per page: shelfCoversPage is the page top it last covered (-1 = none).
   void loadShelfCovers();
-  bool shelfCoversLoaded = false;
+  int shelfCoversPage = -1;
   bool shelfCoversLoading = false;
+  // Top index of the page the last shelf build laid out.
+  int shelfPageTop = 0;
   // Cells the last shelf build laid out; the swipe pager's page size. Written
   // on the render task in buildScreen, read on the loop task under RenderLock.
   int shelfPageItems = 1;
@@ -133,14 +143,34 @@ class RecentBooksActivity final : public UiListActivity {
   // also fits more of a long title before the line ellipsizes).
   bool usesBodyLabel() const;
 
+  // --- history window --------------------------------------------------------
+  // Line offsets (RecentBooksStore::scan) of the books the folder filter shows,
+  // newest first: the whole list at 4 bytes a book. Titles live only in the
+  // window below, so a long history costs no more heap than a short one.
+  std::vector<uint32_t> offsets;
+  // The folders the filter offers (one per OPDS server, then Libby), refreshed by rescan().
+  std::vector<std::string> folders;
+  // Rebuild offsets/folders for the current filter and drop the window. Caller
+  // holds the render lock once the screen is up (the render task reads both).
+  void rescan();
+
+  // Books [windowStart, windowStart + recentBooks.size()) read from SD, and the
+  // rows built over them. Moved on the render task by buildScreen/buildShelf.
+  static constexpr int WINDOW_SIZE = 24;
   std::vector<RecentBook> recentBooks;
-  // Row buffer, built in loadRecentBooks() (not buildScreen(), which reuses
-  // it on every repaint instead of rebuilding a ListItem vector per render).
+  int windowStart = 0;
+  bool windowValid = false;
+  // Load the window starting near `first` unless it already covers
+  // [first, first + count). Render task, or loop task under the render lock.
+  void ensureWindow(int first, int count);
+  // The window's book at absolute `index`, or null outside it.
+  const RecentBook* windowBook(int index) const;
+  // A copy of the book at `index`, from the window or the store. Loop task only:
+  // takes the render lock itself, so never call it while holding one.
+  RecentBook entryAt(int index);
+  // Row buffer over the window, rebuilt with it (not per render).
   std::vector<freeink::ui::ListItem> rowItems;
   void rebuildRowItems();
-
-  // Data loading
-  void loadRecentBooks();
 
   // Move the selected entry up/down one slot, persist, and repaint. Returns false
   // (no-op) at the list boundary. Driven by Left/Right taps — a tap, not a hold,

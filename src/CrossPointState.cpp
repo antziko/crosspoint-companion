@@ -23,6 +23,7 @@ void CrossPointState::resetSleepDeck(uint16_t size) {
 void CrossPointState::toJson(JsonDocument& doc) const {
   doc["openEpubPath"] = openEpubPath;
   doc["lastSleepImagePath"] = lastSleepImagePath;
+  doc["recentBooksFolder"] = recentBooksFolder;
   JsonArray deckArr = doc["sleepDeckShown"].to<JsonArray>();
   for (size_t i = 0; i < sizeof(sleepDeckShown); i++) deckArr.add(sleepDeckShown[i]);
   doc["sleepDeckSize"] = sleepDeckSize;
@@ -35,6 +36,7 @@ void CrossPointState::toJson(JsonDocument& doc) const {
 bool CrossPointState::fromJson(JsonVariantConst doc) {
   openEpubPath = doc["openEpubPath"] | "";
   lastSleepImagePath = doc["lastSleepImagePath"] | "";
+  recentBooksFolder = doc["recentBooksFolder"] | "";
   // Sleep shuffle-bag deck. Absent keys (old state.json) leave the deck cleared,
   // so the next wake just starts a fresh cycle — no migration needed.
   memset(sleepDeckShown, 0, sizeof(sleepDeckShown));

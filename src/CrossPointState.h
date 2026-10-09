@@ -26,6 +26,9 @@ class CrossPointState : public PersistableStore<CrossPointState> {
   // image to offer keep/remove for. Empty for non-folder sleep screens (blank, cover,
   // quick-resume, /sleep.bmp). Cleared once the prompt has been handled.
   std::string lastSleepImagePath;
+  // Recent Books folder filter: "" shows every book, anything else the books
+  // under that top-level folder (an OPDS server's, or Libby's).
+  std::string recentBooksFolder;
   uint8_t sleepDeckShown[SLEEP_DECK_MAX / 8] = {};  // bit i set => image i shown this cycle (64 bytes)
   uint16_t sleepDeckSize = 0;                       // folder size the current cycle was built for
   uint16_t sleepDeckShownCount = 0;                 // images shown so far this cycle

@@ -15,7 +15,9 @@
 #include <memory>
 
 #include "CrossPointSettings.h"
+#include "CrossPointState.h"
 #include "MappedInputManager.h"
+#include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
 #include "activities/reader/ReaderUtils.h"
 #include "activities/util/ConfirmationActivity.h"
@@ -23,12 +25,34 @@
 #include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
+#include "util/RecentBooksLine.h"
+#include "util/StringUtils.h"
 
 namespace fui = freeink::ui;
 
 namespace {
 // Hold threshold for the long-press "remove from list" action (firmware convention).
 constexpr unsigned long LONG_PRESS_MS = 1000;
+// The folder picker fits 16 rows: "All" and this many folders.
+constexpr size_t MAX_FOLDERS = 15;
+// Where the Libby plugin puts its loans.
+constexpr char LIBBY_FOLDER[] = "Libby";
+
+// The folders the filter offers: each OPDS server's download folder (named
+// after the server, see OpdsBookBrowserActivity's serverFolder), then Libby's.
+std::vector<std::string> filterFolders() {
+  std::vector<std::string> folders;
+  folders.reserve(std::min(OPDS_STORE.getCount() + 1, MAX_FOLDERS));
+  const auto add = [&folders](std::string folder) {
+    if (folder.empty() || folders.size() >= MAX_FOLDERS) return;
+    if (std::find(folders.begin(), folders.end(), folder) == folders.end()) folders.push_back(std::move(folder));
+  };
+  for (const auto& server : OPDS_STORE.getServers()) {
+    if (!server.name.empty()) add(StringUtils::sanitizeFilename(server.name));
+  }
+  add(LIBBY_FOLDER);
+  return folders;
+}
 
 // Allowed shelf thumbnail heights, largest first. A LADDER rather than a height
 // computed from the cell: an exactly-fitted height would mint a new
@@ -112,24 +136,99 @@ RecentBooksActivity::RecentBooksActivity(GfxRenderer& renderer, MappedInputManag
 
 bool RecentBooksActivity::usesBodyLabel() const { return mappedInput.hasTouch(); }
 
-void RecentBooksActivity::loadRecentBooks() {
-  recentBooks = RECENT_BOOKS.getBooks();
+void RecentBooksActivity::rescan() {
+  folders = filterFolders();
+  // A filter for a server since renamed or removed falls back to every book.
+  std::string& filter = APP_STATE.recentBooksFolder;
+  if (!filter.empty() && std::find(folders.begin(), folders.end(), filter) == folders.end()) {
+    filter.clear();
+    APP_STATE.saveToFile();
+  }
+
+  struct ScanContext {
+    std::vector<uint32_t>& offsets;
+    const std::string& filter;
+  } ctx{offsets, filter};
+  offsets.clear();
+  offsets.reserve(RecentBooksStore::MAX_RECENT_BOOKS);
+  RECENT_BOOKS.scan(
+      [](void* raw, const std::string_view path, const uint32_t offset) {
+        auto& c = *static_cast<ScanContext*>(raw);
+        const bool shown = c.filter.empty() || recentline::topFolder(path) == c.filter;
+        if (shown && c.offsets.size() < static_cast<size_t>(RecentBooksStore::MAX_RECENT_BOOKS)) {
+          c.offsets.push_back(offset);
+        }
+        return true;
+      },
+      &ctx);
+
+  rowItems.clear();  // aliases recentBooks
+  recentBooks.clear();
+  windowValid = false;
+
+  // Header count. Empty stays bare -- the body already says "no recent books",
+  // so a "(0)" in the title only repeats it.
+  // The filter stays in the title even when it empties the list.
+  if (!filter.empty()) {
+    snprintf(headerTitleBuf, sizeof(headerTitleBuf), "%s · %s (%d)", tr(STR_MENU_RECENT_BOOKS), filter.c_str(),
+             listCount());
+  } else if (offsets.empty()) {
+    snprintf(headerTitleBuf, sizeof(headerTitleBuf), "%s", tr(STR_MENU_RECENT_BOOKS));
+  } else {
+    snprintf(headerTitleBuf, sizeof(headerTitleBuf), "%s (%d)", tr(STR_MENU_RECENT_BOOKS), listCount());
+  }
+}
+
+void RecentBooksActivity::ensureWindow(const int first, const int count) {
+  const int total = listCount();
+  if (total == 0) {
+    rowItems.clear();
+    recentBooks.clear();
+    windowValid = false;
+    return;
+  }
+  if (windowValid && first >= windowStart && first + count <= windowStart + static_cast<int>(recentBooks.size())) {
+    return;
+  }
+  // Centre the requested rows in the window, so a step either way stays inside it.
+  const int start = std::clamp(first - (WINDOW_SIZE - count) / 2, 0, std::max(0, total - WINDOW_SIZE));
+  const int size = std::min(WINDOW_SIZE, total - start);
+  rowItems.clear();  // aliases recentBooks
+  recentBooks.clear();
+  recentBooks.reserve(WINDOW_SIZE);
+  for (int i = 0; i < size; i++) {
+    RecentBook book;
+    if (!RECENT_BOOKS.readAt(offsets[start + i], book)) LOG_ERR("RBA", "Unreadable recent entry %d", start + i);
+    recentBooks.push_back(std::move(book));
+  }
+  windowStart = start;
+  windowValid = true;
   rebuildRowItems();
 }
 
-// Derives rowItems from recentBooks. Called whenever recentBooks changes
-// (loadRecentBooks(), i.e. load/removal) so buildScreen() reuses the cached
-// rows on every repaint instead of rebuilding them per render.
-void RecentBooksActivity::rebuildRowItems() {
-  // Header count. Empty stays bare -- the body already says "no recent books",
-  // so a "(0)" in the title only repeats it.
-  if (recentBooks.empty()) {
-    snprintf(headerTitleBuf, sizeof(headerTitleBuf), "%s", tr(STR_MENU_RECENT_BOOKS));
-  } else {
-    snprintf(headerTitleBuf, sizeof(headerTitleBuf), "%s (%d)", tr(STR_MENU_RECENT_BOOKS),
-             static_cast<int>(recentBooks.size()));
-  }
+const RecentBook* RecentBooksActivity::windowBook(const int index) const {
+  const int slot = index - windowStart;
+  if (!windowValid || slot < 0 || slot >= static_cast<int>(recentBooks.size())) return nullptr;
+  return &recentBooks[slot];
+}
 
+RecentBook RecentBooksActivity::entryAt(const int index) {
+  RecentBook book;
+  uint32_t offset = 0;
+  {
+    RenderLock lock(*this);  // the render task moves the window
+    if (const RecentBook* cached = windowBook(index)) return *cached;
+    if (index < 0 || index >= listCount()) return book;
+    offset = offsets[index];
+  }
+  RECENT_BOOKS.readAt(offset, book);
+  return book;
+}
+
+// Derives rowItems from the window. Called whenever the window moves, so
+// buildScreen() reuses the cached rows on every repaint instead of rebuilding
+// them per render.
+void RecentBooksActivity::rebuildRowItems() {
   rowItems.clear();
   rowItems.reserve(recentBooks.size());
   for (const auto& book : recentBooks) {
@@ -137,7 +236,7 @@ void RecentBooksActivity::rebuildRowItems() {
     item.label = book.title.c_str();
     if (!book.author.empty()) item.subtitle = book.author.c_str();
     item.icon = listIconFor(UITheme::getFileIcon(book.path), 32);  // subtitle rows carry the larger icon
-    item.actionValue = static_cast<int16_t>(rowItems.size());
+    item.actionValue = static_cast<int16_t>(windowStart + rowItems.size());
     rowItems.push_back(item);
   }
 
@@ -168,19 +267,19 @@ void RecentBooksActivity::rebuildRowItems() {
       &recentBooks, count, EpdFontFamily::BOLD);
 }
 
+// Swaps with the neighbour in the FILTERED order, which may sit several books
+// away in the full history; the books between keep their places.
 bool RecentBooksActivity::moveSelectedUp() {
-  if (!RECENT_BOOKS.moveUp(nav.selected)) {
-    return false;
-  }
+  const int index = nav.selected;
+  if (index <= 0 || index >= listCount()) return false;
+  if (!RECENT_BOOKS.swapEntries(entryAt(index - 1).path, entryAt(index).path)) return false;
   {
-    // loadRecentBooks() refills recentBooks and rebuilds rowItems, whose
-    // label/subtitle pointers the render task dereferences; mutate under the
-    // render lock (same race as FileBrowserActivity, #3034). Released before
-    // requestUpdate().
+    // rescan() empties recentBooks and rowItems, whose label/subtitle pointers
+    // the render task dereferences; mutate under the render lock (same race as
+    // FileBrowserActivity, #3034). Released before requestUpdate().
     RenderLock lock(*this);
     nav.selected--;
-    RECENT_BOOKS.saveToFile();
-    loadRecentBooks();
+    rescan();
     // The rows swapped under the published interaction table, so a tap arriving
     // before the next render would activate by the pre-move index; and without
     // follow() the moved row can walk off the top of the viewport, which just
@@ -193,14 +292,13 @@ bool RecentBooksActivity::moveSelectedUp() {
 }
 
 bool RecentBooksActivity::moveSelectedDown() {
-  if (!RECENT_BOOKS.moveDown(nav.selected)) {
-    return false;
-  }
+  const int index = nav.selected;
+  if (index < 0 || index + 1 >= listCount()) return false;
+  if (!RECENT_BOOKS.swapEntries(entryAt(index).path, entryAt(index + 1).path)) return false;
   {
     RenderLock lock(*this);  // see moveSelectedUp()
     nav.selected++;
-    RECENT_BOOKS.saveToFile();
-    loadRecentBooks();
+    rescan();
     closeRouting();
     nav.follow(listCount());
   }
@@ -316,13 +414,10 @@ void RecentBooksActivity::onEnter() {
   // (the hold-to-rotate gesture is handled in loop(), see resolveSideNavAction).
   ReaderUtils::applyOrientation(renderer, SETTINGS.displayOrientation);
 
-  // Prune entries whose backing files are gone; this is one of two interaction
-  // points where the persistent store gets cleaned (the other is addBook).
-  if (RECENT_BOOKS.pruneMissing()) {
-    RECENT_BOOKS.saveToFile();
-  }
-
-  loadRecentBooks();
+  // Books whose files are gone are not swept here: checking hundreds of paths
+  // would stall the screen. Deleting through the File Browser removes them, and
+  // opening one that has vanished drops it (activateIndex).
+  rescan();
 }
 
 void RecentBooksActivity::onExit() {
@@ -334,6 +429,10 @@ void RecentBooksActivity::onExit() {
   // rowItems' label/subtitle pointers alias recentBooks' strings; drop both.
   rowItems.clear();
   recentBooks.clear();
+  offsets.clear();
+  offsets.shrink_to_fit();
+  folders.clear();
+  windowValid = false;
 }
 
 void RecentBooksActivity::activateIndex(const int index) {
@@ -343,8 +442,24 @@ void RecentBooksActivity::activateIndex(const int index) {
   // Opening the book leaves this screen; a lingering flash would gray an
   // unrelated row when the list next appears.
   app.clearTapFlash();
-  LOG_DBG("RBA", "Selected recent book: %s", recentBooks[index].path.c_str());
-  onSelectBook(recentBooks[index].path);
+  const RecentBook book = entryAt(index);
+  if (book.path.empty()) return;
+  if (RecentBooksStore::isMissing(book)) {
+    // Moved or deleted outside the File Browser: drop it rather than open nothing.
+    LOG_DBG("RBA", "Recent book is gone, removing: %s", book.path.c_str());
+    RECENT_BOOKS.removeByPath(book.path);
+    {
+      RenderLock lock(*this);
+      closeRouting();
+      rescan();
+      if (nav.selected >= listCount()) nav.selected = std::max(0, listCount() - 1);
+      nav.follow(listCount());
+    }
+    requestUpdate(true);
+    return;
+  }
+  LOG_DBG("RBA", "Selected recent book: %s", book.path.c_str());
+  onSelectBook(book.path);
 }
 
 void RecentBooksActivity::onRowLongPress(const int index) {
@@ -362,8 +477,9 @@ bool RecentBooksActivity::holdOffersReorder() const {
 
 void RecentBooksActivity::promptBookActions(const int index) {
   if (index < 0 || index >= listCount()) return;
-  const std::string path = recentBooks[index].path;
-  const std::string title = recentBooks[index].title;
+  const RecentBook book = entryAt(index);
+  const std::string path = book.path;
+  const std::string title = book.title;
   if (!holdOffersReorder()) {
     promptRemoveBook(path, title);
     return;
@@ -399,7 +515,7 @@ void RecentBooksActivity::endReorder() {
 // else the user can reach on a touch-only board (a tap, the Back edge-swipe) leaves the mode
 // rather than acting on the list underneath it.
 bool RecentBooksActivity::handleReorderInput() {
-  if (recentBooks.empty()) {
+  if (listCount() == 0) {
     endReorder();
     return true;
   }
@@ -489,15 +605,15 @@ bool RecentBooksActivity::handleButtons() {
   // Long-press Confirm on the selected book: prompt to remove it from the list.
   // Fires when the hold times out while still held (firmware hold-to-act pattern,
   // cf. FileBrowserActivity BACK long-press).
-  if (!recentBooks.empty() && nav.selected < listCount() &&
-      mappedInput.isPressed(MappedInputManager::Button::Confirm) && mappedInput.getHeldTime() >= LONG_PRESS_MS) {
+  if (listCount() > 0 && nav.selected < listCount() && mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
+      mappedInput.getHeldTime() >= LONG_PRESS_MS) {
     longPressFired = true;
     promptBookActions(nav.selected);
     return true;
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    if (!recentBooks.empty() && nav.selected < listCount()) {
+    if (listCount() > 0 && nav.selected < listCount()) {
       activateIndex(nav.selected);
       return true;
     }
@@ -508,7 +624,7 @@ bool RecentBooksActivity::handleButtons() {
   // eventual Back release to be swallowed — otherwise that release falls
   // through to the short-press goHome handler below.
   if (mappedInput.wasLongPressed(MappedInputManager::Button::Back, LONG_PRESS_MS)) {
-    showViewPicker();
+    showOptionsMenu();
     return true;
   }
 
@@ -522,7 +638,7 @@ bool RecentBooksActivity::handleButtons() {
   // cycles the display orientation (this is one of the few non-reader screens
   // that follows SETTINGS.displayOrientation); Left/Right are reserved for
   // reordering above. Upstream has neither gesture and just returns false here.
-  const int listSize = static_cast<int>(recentBooks.size());
+  const int listSize = listCount();
   bool consumed = false;
 
   // Cursor moves on the Up/Down side buttons only — Left/Right are reserved for
@@ -595,7 +711,7 @@ void RecentBooksActivity::render(RenderLock&& lock) {
   // Cover generation runs AFTER the first paint, so the shelf appears
   // immediately with empty frames and fills in behind the progress popup,
   // rather than stalling on up to ten decodes before anything is on screen.
-  if (isShelf() && !recentBooks.empty() && !shelfCoversLoaded && !shelfCoversLoading) {
+  if (isShelf() && listCount() > 0 && shelfCoversPage != shelfPageTop && !shelfCoversLoading) {
     shelfCoversLoading = true;
     loadShelfCovers();
   }
@@ -616,7 +732,7 @@ void RecentBooksActivity::applyView(const int view) {
     closeRouting();
     // The new view wants its own cover pass (or none at all), and its own
     // glyph prewarm.
-    shelfCoversLoaded = false;
+    shelfCoversPage = -1;
     shelfCoversLoading = false;
     // rowItems' label pointers are what the render task dereferences, and the
     // prewarm inside depends on the new view -- both must move under the lock,
@@ -628,8 +744,50 @@ void RecentBooksActivity::applyView(const int view) {
   requestUpdate(true);
 }
 
-// List / Bookshelf 2x2 / Bookshelf 3x3. Opened by a Back hold; the same three
-// values are also on the Settings > Library & Storage row.
+// View / Folder. Opened by a Back hold or a header tap.
+void RecentBooksActivity::showOptionsMenu() {
+  static constexpr StrId OPTIONS[] = {StrId::STR_RECENT_MENU_VIEW, StrId::STR_RECENT_MENU_FOLDER};
+  optionPopup.show(StrId::STR_MENU_RECENT_BOOKS, OPTIONS, 2, 0,
+                   [this](const int idx) { pendingPicker = idx == 0 ? PendingPicker::View : PendingPicker::Folder; });
+  requestUpdate();
+}
+
+// All / each OPDS server's folder / Libby.
+void RecentBooksActivity::showFolderPicker() {
+  std::vector<std::string> options;
+  options.reserve(folders.size() + 1);
+  options.emplace_back(tr(STR_RECENT_FOLDER_ALL));
+  for (const auto& folder : folders) options.push_back(folder);
+  const auto it = std::find(folders.begin(), folders.end(), APP_STATE.recentBooksFolder);
+  const int selected = it == folders.end() ? 0 : 1 + static_cast<int>(it - folders.begin());
+  optionPopup.show(StrId::STR_RECENT_MENU_FOLDER, options, selected, [this](const int idx) {
+    if (idx == 0) {
+      applyFolder("");
+    } else if (idx - 1 < static_cast<int>(folders.size())) {
+      applyFolder(folders[idx - 1]);
+    }
+  });
+  requestUpdate();
+}
+
+void RecentBooksActivity::applyFolder(const std::string& folder) {
+  if (APP_STATE.recentBooksFolder == folder) return;
+  APP_STATE.recentBooksFolder = folder;
+  APP_STATE.saveToFile();
+  {
+    RenderLock lock(*this);  // the render task reads offsets and the window
+    closeRouting();
+    rescan();
+    nav.selected = 0;
+    nav.top = 0;
+    shelfCoversPage = -1;
+    nav.follow(listCount());
+  }
+  requestUpdate(true);
+}
+
+// List / Bookshelf 2x2 / Bookshelf 3x3. Opened from the View / Folder menu; the
+// same three values are also on the Settings > Library & Storage row.
 void RecentBooksActivity::showViewPicker() {
   static constexpr StrId OPTIONS[] = {StrId::STR_VIEW_LIST, StrId::STR_VIEW_SHELF_2, StrId::STR_VIEW_SHELF_3};
   optionPopup.show(StrId::STR_RECENT_BOOKS_VIEW, OPTIONS, CrossPointSettings::RECENT_VIEW_COUNT,
@@ -637,18 +795,26 @@ void RecentBooksActivity::showViewPicker() {
   requestUpdate();
 }
 
-// Header tap: step to the next view and wrap. Cycling rather than opening the
-// picker keeps the switch to one tap, which matters on a panel where every
-// change costs a full refresh.
+// Header tap: the View / Folder menu, the same one a Back hold opens.
 void RecentBooksActivity::headerActionTrampoline(const fui::ActionEvent&, void* user) {
   auto* self = static_cast<RecentBooksActivity*>(user);
   // The flash is keyed to the header rect, which the next layout may not
   // publish; clear it so it cannot gray an unrelated element after the switch.
   self->app.clearTapFlash();
-  self->applyView((SETTINGS.recentBooksView + 1) % CrossPointSettings::RECENT_VIEW_COUNT);
+  self->showOptionsMenu();
 }
 
 bool RecentBooksActivity::handleCustomInput() {
+  if (pendingPicker != PendingPicker::None && !optionPopup.isActive()) {
+    const PendingPicker picker = pendingPicker;
+    pendingPicker = PendingPicker::None;
+    if (picker == PendingPicker::View) {
+      showViewPicker();
+    } else {
+      showFolderPicker();
+    }
+    return true;
+  }
   if (optionPopup.isActive()) {
     optionPopup.handleInput(mappedInput, [this] { requestUpdate(); });
     // Closed this pass: the button that closed it is still down, and its
@@ -665,7 +831,7 @@ bool RecentBooksActivity::handleCustomInput() {
   // derives its viewport from the SELECTION, so nav.top moves nothing there --
   // page the selection instead. Guarded by isShelf() so list mode never sees
   // this consuming read of wasSwipe().
-  if (!isShelf() || recentBooks.empty()) return false;
+  if (!isShelf() || listCount() == 0) return false;
   const auto swipe = mappedInput.wasSwipe();
   if (swipe != MappedInputManager::SwipeDir::Up && swipe != MappedInputManager::SwipeDir::Down) return false;
 
@@ -700,8 +866,8 @@ void RecentBooksActivity::promptRemoveBook(const std::string& path, const std::s
         // The interaction table still indexes the pre-removal rows; stop routing
         // touches against it until the next render republishes.
         closeRouting();
-        loadRecentBooks();
-        if (recentBooks.empty()) {
+        rescan();
+        if (listCount() == 0) {
           nav.selected = 0;
         } else if (nav.selected >= listCount()) {
           nav.selected = listCount() - 1;
@@ -723,13 +889,26 @@ void RecentBooksActivity::loadShelfCovers() {
   bool showingLoading = false;
   Rect popupRect;
   int generated = 0;
+  // Only the page on screen: the window holds more books than a page, and a
+  // decode is seconds apiece.
+  const int pageTop = shelfPageTop;
+  const int pageEnd = std::min(pageTop + shelfPageItems, listCount());
+  const int pageCount = std::max(1, pageEnd - pageTop);
 
-  SdDebugLog::log("RBA", "shelf cover pass h=%d books=%u free=%u largest=%u", coverHeight,
-                  static_cast<unsigned>(recentBooks.size()), static_cast<unsigned>(ESP.getFreeHeap()),
+  SdDebugLog::log("RBA", "shelf cover pass h=%d page=%d+%d free=%u largest=%u", coverHeight, pageTop, pageCount,
+                  static_cast<unsigned>(ESP.getFreeHeap()),
                   static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
 
+  // A copy of the page: the decoder below is long, and the window it comes from
+  // is rebuilt by any frame. render() still holds the render lock here.
+  std::vector<RecentBook> page;
+  page.reserve(pageCount);
+  for (int index = pageTop; index < pageEnd; index++) {
+    if (const RecentBook* cached = windowBook(index)) page.push_back(*cached);
+  }
+
   int progress = 0;
-  for (RecentBook& book : recentBooks) {
+  for (const RecentBook& book : page) {
     progress++;
     if (book.coverBmpPath.empty()) continue;
     if (Storage.exists(UITheme::getCoverThumbPath(book.coverBmpPath, coverHeight).c_str())) continue;
@@ -738,7 +917,7 @@ void RecentBooksActivity::loadShelfCovers() {
       showingLoading = true;
       popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
     }
-    GUI.fillPopupProgress(renderer, popupRect, 10 + progress * 90 / static_cast<int>(recentBooks.size()));
+    GUI.fillPopupProgress(renderer, popupRect, 10 + progress * 90 / pageCount);
 
     // The loan hands the 48KB framebuffer to the decoder as build scratch. The
     // JPEG path wants a ~26.6KB contiguous block, which a fragmented UI heap
@@ -778,9 +957,9 @@ void RecentBooksActivity::loadShelfCovers() {
       [](const void* ctx, uint32_t i) -> const char* {
         return (*static_cast<const std::vector<RecentBook>*>(ctx))[i].title.c_str();
       },
-      &recentBooks, static_cast<uint32_t>(recentBooks.size()));
+      &page, static_cast<uint32_t>(page.size()));
 
-  shelfCoversLoaded = true;
+  shelfCoversPage = pageTop;
   shelfCoversLoading = false;
   if (generated > 0 || showingLoading) requestUpdate();
 }
@@ -788,10 +967,11 @@ void RecentBooksActivity::loadShelfCovers() {
 fui::CoverGridItem RecentBooksActivity::shelfItemProvider(const uint16_t index, void* userData) {
   auto* self = static_cast<RecentBooksActivity*>(userData);
   fui::CoverGridItem item;
-  if (index >= self->recentBooks.size()) return item;
-  // Points straight into recentBooks; the render lock keeps that vector alive
-  // for the whole build, the same contract rowItems has in list mode.
-  item.title = self->recentBooks[index].title.c_str();
+  const RecentBook* book = self->windowBook(index);
+  if (!book) return item;
+  // Points straight into the window; the render lock keeps it alive for the
+  // whole build, the same contract rowItems has in list mode.
+  item.title = book->title.c_str();
   item.actionValue = static_cast<int16_t>(index);
   return item;
 }
@@ -816,9 +996,9 @@ bool RecentBooksActivity::shelfCoverPainter(fui::DrawTarget&, const fui::Rect re
   // a previous pass's ink ghosts through the light areas of the cover.
   renderer.fillRect(rect.x, rect.y, rect.width, rect.height, false);
 
-  if (index < self->recentBooks.size() && !self->recentBooks[index].coverBmpPath.empty()) {
-    const std::string thumbPath =
-        UITheme::getCoverThumbPath(self->recentBooks[index].coverBmpPath, self->shelfCoverHeight());
+  const RecentBook* book = self->windowBook(index);
+  if (book && !book->coverBmpPath.empty()) {
+    const std::string thumbPath = UITheme::getCoverThumbPath(book->coverBmpPath, self->shelfCoverHeight());
     HalFile file;
     if (Storage.openFileForRead("RBA", thumbPath, file)) {
       Bitmap bitmap(file);
@@ -893,7 +1073,7 @@ void RecentBooksActivity::buildShelf(UiScreen& screen) {
     // old height is no longer what the painter asks for. Same task as the
     // render tail that reads this, so no lock is needed.
     shelfCoverH = picked;
-    shelfCoversLoaded = false;
+    shelfCoversPage = -1;
   }
   auto coverH = static_cast<int16_t>(shelfCoverH);
   auto rowHeight = static_cast<int16_t>(coverH + insetBoth);
@@ -910,7 +1090,7 @@ void RecentBooksActivity::buildShelf(UiScreen& screen) {
 
   props.itemProvider = &RecentBooksActivity::shelfItemProvider;
   props.itemProviderUserData = this;
-  props.count = static_cast<uint16_t>(recentBooks.size());
+  props.count = static_cast<uint16_t>(listCount());
   props.columns = static_cast<uint8_t>(columns);
   props.coverSize = fui::Size{coverW, coverH};
   props.rowHeight = rowHeight;
@@ -982,7 +1162,7 @@ void RecentBooksActivity::buildShelf(UiScreen& screen) {
   // shave the last column and pull every cover off the pitch computed here.
   // Reserve it instead, so the covers keep an exact cell and the track sits in
   // its own gutter.
-  const bool overflows = static_cast<int>(recentBooks.size()) > fitRows * columns;
+  const bool overflows = listCount() > fitRows * columns;
   const auto gutter = static_cast<int16_t>(overflows ? scrollGutter : 0);
   props.gap = evenGap(body.width - gutter, coverW, columns);
 
@@ -1010,6 +1190,9 @@ void RecentBooksActivity::buildShelf(UiScreen& screen) {
   shelfPageItems = pageItems > 0 ? static_cast<int>(pageItems) : 1;
   props.topIndex = fui::coverGridTopIndexFor(static_cast<uint16_t>(nav.selected), props.count, props.columns,
                                              pageItems > 0 ? pageItems : props.columns);
+  // The provider and painter read the window, so it must hold the whole page.
+  shelfPageTop = static_cast<int>(props.topIndex);
+  ensureWindow(shelfPageTop, shelfPageItems);
 
   props.coverPainter = &RecentBooksActivity::shelfCoverPainter;
   props.coverPainterUserData = this;
@@ -1050,7 +1233,7 @@ void RecentBooksActivity::buildScreen(UiScreen& screen) {
         ACTION_HEADER, 0, fui::InputTouch);
   }
 
-  if (recentBooks.empty()) {
+  if (listCount() == 0) {
     screen.centeredText(tr(STR_NO_RECENT_BOOKS), screen.theme().smallText);
     return;
   }
@@ -1060,11 +1243,9 @@ void RecentBooksActivity::buildScreen(UiScreen& screen) {
     return;
   }
 
-  // rowItems is built in loadRecentBooks() (see rebuildRowItems()) and
-  // reused here on every repaint.
+  // rowItems covers the window (see ensureWindow()), set once the viewport is final below.
   fui::ListProps props;
-  props.items = rowItems.data();
-  props.count = static_cast<uint16_t>(rowItems.size());
+  props.count = static_cast<uint16_t>(listCount());
   props.action = ACTION_ROW;
   // Tap opens; long-press prompts removal (physical buttons stay in loop()).
   props.inputMask = fui::InputTouch | fui::InputLongPress;
@@ -1085,6 +1266,12 @@ void RecentBooksActivity::buildScreen(UiScreen& screen) {
   // none of its own (see ListProps::subtitleRowPadding).
   props.subtitleRowPadding = screen.theme().spaceMd;
   syncListViewport(screen, props, /*hasSubtitle=*/true);
+  // Materialize the window for the FINAL viewport -- syncListViewport has just applied
+  // follow/clamping to nav.top -- and hand list() the rows with their absolute base index.
+  ensureWindow(nav.top, std::max(1, static_cast<int>(nav.visibleRows)));
+  props.items = rowItems.data();
+  props.itemsWindowFirst = static_cast<uint16_t>(windowStart);
+  props.itemsWindowCount = static_cast<uint16_t>(rowItems.size());
   // The row being moved has to be visible whatever the cursor rule says: it was picked with
   // a finger, so ListCursor is still withholding the highlight syncListViewport just cleared.
   // Outside the mode the highlight is withheld at ANY row -- hidden(), not the suppressed()
@@ -1106,7 +1293,7 @@ void RecentBooksActivity::drawFooter() {
   if (isShelf()) return;
 
   // No rows: blank the row-action hints, same as FileBrowserActivity.
-  const bool empty = recentBooks.empty();
+  const bool empty = listCount() == 0;
   const auto labels = mappedInput.mapLabels(tr(STR_HOME), empty ? "" : tr(STR_OPEN), empty ? "" : tr(STR_DIR_UP),
                                             empty ? "" : tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
