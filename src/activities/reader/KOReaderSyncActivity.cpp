@@ -55,7 +55,15 @@ void KOReaderSyncActivity::ensureEpubLoaded() {
     epub = std::make_shared<Epub>(epubPath, "/.crosspoint");
     epub->setupCacheDir();
     // Load metadata only (no CSS needed for progress mapping, don't rebuild if cache is missing).
-    if (!epub->load(false, true)) {
+    // A protected book inflates its encryption manifest here, and the 32KB inflate window was
+    // released for WiFi, so lend the framebuffer (the status screen stays on the panel).
+    bool loaded;
+    {
+      RenderLock lock(*this);
+      GfxRenderer::FrameBufferLoan loan(renderer);
+      loaded = epub->load(false, true);
+    }
+    if (!loaded) {
       LOG_ERR("KOSync", "Failed to load epub for progress mapping");
       epub.reset();
       return;

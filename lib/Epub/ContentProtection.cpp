@@ -8,6 +8,7 @@
 // book was fulfilled; the reader carries no rights or account scheme.
 
 #include <Arduino.h>
+#include <BuildScratch.h>
 #include <ByteSource.h>
 #include <ContentProtection.h>
 #include <HalStorage.h>
@@ -25,9 +26,27 @@
 #include "Epub/parsers/EncryptionManifestProbe.h"
 
 // Lend the boot-reserved 32KB inflate window to the protected read path, as
-// InflateStream does for plain zip entries.
-extern "C" uint8_t* freeink_content_acquire_inflate_window(size_t size) { return InflateReader::acquireScratch(size); }
-extern "C" void freeink_content_release_inflate_window(uint8_t*) { InflateReader::releaseScratch(); }
+// InflateStream does for plain zip entries. While that window is released (a
+// TLS session, e.g. KOSync), a framebuffer loan's bytes stand in.
+namespace {
+const uint8_t* windowFromBuildScratch = nullptr;
+}  // namespace
+
+extern "C" uint8_t* freeink_content_acquire_inflate_window(size_t size) {
+  if (uint8_t* window = InflateReader::acquireScratch(size)) return window;
+  uint8_t* window = buildscratch::claim(size);
+  if (window) windowFromBuildScratch = window;
+  return window;
+}
+
+extern "C" void freeink_content_release_inflate_window(uint8_t* window) {
+  if (window && window == windowFromBuildScratch) {
+    windowFromBuildScratch = nullptr;
+    buildscratch::release(window);
+    return;
+  }
+  InflateReader::releaseScratch();
+}
 
 namespace freeink {
 namespace content {
