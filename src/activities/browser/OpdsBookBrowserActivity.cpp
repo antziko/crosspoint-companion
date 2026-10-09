@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "MappedInputManager.h"
+#include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/reader/ReaderUtils.h"
@@ -1252,6 +1253,10 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
     if (auto* fcm = renderer.getFontCacheManager()) {
       fcm->releaseCache();
     }
+    // The resident SD reading font (~16KB of tables) too: a bigger contiguous block means
+    // longer TLS hops. Browsing keeps it (CJK titles need its UI fallback); exiting with WiFi
+    // on reboots, which reloads it.
+    sdFontSystem.unloadFonts(renderer);
   }
   const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   SdDebugLog::log("OPDS", "download start, heap=%u, largest=%u, url=%s", (unsigned)ESP.getFreeHeap(),

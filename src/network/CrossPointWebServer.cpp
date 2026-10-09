@@ -12,6 +12,7 @@
 #include <Logging.h>
 #include <Memory.h>
 #include <ResumableFetch.h>
+#include <SdDebugLog.h>
 #include <SecureHttpClient.h>
 #include <Util.h>
 #include <WiFi.h>
@@ -1878,6 +1879,8 @@ void CrossPointWebServer::handleRelay() {
   ScopedCleanup resumeServices{[this] { resumeTransferServices(); }};
   LOG_DBG("WEB", "Relay TLS start: heap %u, max block %u: %s", (unsigned)ESP.getFreeHeap(),
           (unsigned)ESP.getMaxAllocHeap(), url.c_str());
+  SdDebugLog::log("WEB", "relay start: free=%u largest=%u %s", (unsigned)ESP.getFreeHeap(),
+                  (unsigned)ESP.getMaxAllocHeap(), url.c_str());
 
   // The reply goes to SD, not DRAM: growing a buffer next to a live TLS
   // session needs old and new blocks at once, which even a 10KB chunked reply

@@ -6,6 +6,7 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <InflateReader.h>
+#include <SdDebugLog.h>
 #include <WiFi.h>
 #include <esp_mac.h>
 #include <esp_task_wdt.h>
@@ -15,6 +16,7 @@
 
 #include "MappedInputManager.h"
 #include "NetworkModeSelectionActivity.h"
+#include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "WifiSelectionActivity.h"
 #include "activities/ActivityManager.h"
@@ -333,6 +335,17 @@ void CrossPointWebServerActivity::startWebServer() {
     fcm->releaseCache();
     LOG_DBG("WEBACT", "Released font caches for the server (heap: %u -> %u)", (unsigned)before,
             (unsigned)ESP.getFreeHeap());
+  }
+
+  // The resident SD reading font (~10KB of tables) is not drawn by this activity's screens,
+  // and plugin calls need that heap for their TLS handshakes (X3 failed /api/relay with
+  // MEMORY_E without it). onExit() reboots, which reloads it.
+  {
+    const uint32_t before = ESP.getFreeHeap();
+    RenderLock lock;
+    sdFontSystem.unloadFonts(renderer);
+    SdDebugLog::log("WEBACT", "unloaded SD font: free %u -> %u largest=%u", (unsigned)before,
+                    (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
   }
 
   // Create the web server instance. nothrow: a bare new aborts on OOM under

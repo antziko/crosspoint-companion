@@ -2,6 +2,7 @@
 
 #include <HalStorage.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
 #include <SecureHttpClient.h>
 
 #include <algorithm>
@@ -191,7 +192,10 @@ int request(freeink::SecureHttpClient* session, const std::string& url, const st
   WifiPowerSaveGuard psGuard;
   freeink::SecureHttpClient tmp;
   freeink::SecureHttpClient* httpPtr = openClient(session, tmp, url, headers);
-  if (!httpPtr) return -1;
+  if (!httpPtr) {
+    SdDebugLog::log("PHTP", "begin failed: %s", url.c_str());
+    return -1;
+  }
   freeink::SecureHttpClient& http = *httpPtr;
 
   out.remove(0);
@@ -227,9 +231,13 @@ int request(freeink::SecureHttpClient* session, const std::string& url, const st
   // Error statuses still return their body: OAuth device-code polling carries
   // its state ("authorization_pending") in 4xx response bodies.
   if (overflow || outOfMemory || status < 0 || !http.responseComplete()) {
-    LOG_ERR("PHTP", "API request failed: status=%d overflow=%d oom=%d (%u bytes, max block %u) complete=%d %s",
-            status, overflow, outOfMemory, static_cast<unsigned>(reserved),
-            static_cast<unsigned>(ESP.getMaxAllocHeap()), http.responseComplete(), url.c_str());
+    LOG_ERR("PHTP", "API request failed: status=%d overflow=%d oom=%d (%u bytes, max block %u) complete=%d %s", status,
+            overflow, outOfMemory, static_cast<unsigned>(reserved), static_cast<unsigned>(ESP.getMaxAllocHeap()),
+            http.responseComplete(), url.c_str());
+    SdDebugLog::log(
+        "PHTP", "request failed: status=%d overflow=%d oom=%d complete=%d hs=%d tls=%d free=%u largest=%u %s", status,
+        overflow, outOfMemory, http.responseComplete(), http.lastHandshakeError(), http.lastTlsError(),
+        static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()), url.c_str());
     return -1;
   }
   return status;
@@ -241,7 +249,10 @@ int requestToFile(freeink::SecureHttpClient* session, const std::string& url, co
   WifiPowerSaveGuard psGuard;
   freeink::SecureHttpClient tmp;
   freeink::SecureHttpClient* httpPtr = openClient(session, tmp, url, headers);
-  if (!httpPtr) return -1;
+  if (!httpPtr) {
+    SdDebugLog::log("PHTP", "begin failed: %s", url.c_str());
+    return -1;
+  }
   freeink::SecureHttpClient& http = *httpPtr;
 
   int status = -1;
@@ -250,20 +261,21 @@ int requestToFile(freeink::SecureHttpClient* session, const std::string& url, co
   {
     HalFile file;
     if (!Storage.openFileForWrite("PHTP", destPath, file)) return -1;
-    status = http.sendRequest(method.c_str(), reinterpret_cast<const uint8_t*>(body.data()), body.size(),
-                              [&](const uint8_t* data, size_t len) {
-                                if (written + len > maxResponse) {
-                                  writeOk = false;
-                                  return false;
-                                }
-                                if (file.write(data, len) != len) {
-                                  writeOk = false;
-                                  return false;
-                                }
-                                written += len;
-                                return true;
-                              },
-                              shouldAbort);
+    status = http.sendRequest(
+        method.c_str(), reinterpret_cast<const uint8_t*>(body.data()), body.size(),
+        [&](const uint8_t* data, size_t len) {
+          if (written + len > maxResponse) {
+            writeOk = false;
+            return false;
+          }
+          if (file.write(data, len) != len) {
+            writeOk = false;
+            return false;
+          }
+          written += len;
+          return true;
+        },
+        shouldAbort);
     file.flush();
     // file closed at scope exit, before any Storage.remove of destPath
   }
@@ -271,6 +283,11 @@ int requestToFile(freeink::SecureHttpClient* session, const std::string& url, co
   if (!writeOk || status < 0 || !http.responseComplete()) {
     LOG_ERR("PHTP", "API request (to file) failed: status=%d writeOk=%d complete=%d %s", status, writeOk,
             http.responseComplete(), url.c_str());
+    SdDebugLog::log("PHTP",
+                    "to-file failed: status=%d writeOk=%d complete=%d bytes=%u hs=%d tls=%d free=%u largest=%u %s",
+                    status, writeOk, http.responseComplete(), static_cast<unsigned>(written), http.lastHandshakeError(),
+                    http.lastTlsError(), static_cast<unsigned>(ESP.getFreeHeap()),
+                    static_cast<unsigned>(ESP.getMaxAllocHeap()), url.c_str());
     Storage.remove(destPath);
     return -1;
   }

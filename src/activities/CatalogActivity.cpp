@@ -8,6 +8,7 @@
 #include <WiFi.h>
 
 #include "MappedInputManager.h"
+#include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/util/KeyboardEntryActivity.h"
@@ -179,6 +180,11 @@ HttpDownloader::DownloadError CatalogActivity::downloadFile(const std::string& u
   // refuse to start below the floor. Same contiguous-block bars as the OPDS
   // browser: wolfSSL negotiates 2KB records, so no ~17KB record buffer is needed.
   if (auto* fcm = renderer.getFontCacheManager()) fcm->releaseCache();
+  // The resident SD reading font as well; onExit() reboots while WiFi is on, which reloads it.
+  {
+    RenderLock lock;
+    sdFontSystem.unloadFonts(renderer);
+  }
   const size_t minBlock = url.rfind("https://", 0) == 0 ? MIN_TLS_MAX_ALLOC : MIN_HTTP_MAX_ALLOC;
   if (ESP.getMaxAllocHeap() < minBlock) {
     LOG_ERR("CAT", "Low heap for download (%u free, %u max block)", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
