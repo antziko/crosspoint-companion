@@ -166,4 +166,87 @@ TEST_F(ChapterHtmlSlimParserTest, MultiColumnCellParagraphsStayJoined) {
   EXPECT_EQ(rows.size(), 1u);
 }
 
+std::vector<int16_t> lineRows(const ChapterHtmlSlimParser& parser) {
+  std::vector<int16_t> rows;
+  if (!parser.currentPage) return rows;
+  for (const auto& element : parser.currentPage->elements) {
+    if (element->getTag() != TAG_PageLine) continue;
+    if (std::find(rows.begin(), rows.end(), element->yPos) == rows.end()) rows.push_back(element->yPos);
+  }
+  return rows;
+}
+
+TEST_F(ChapterHtmlSlimParserTest, PreKeepsLineBreaksWithoutParagraphGaps) {
+  parser.paragraphSpacing = 5;  // a gap between paragraphs, which code lines must not get
+  parser.beginParse();
+  parser.currentTextBlock.reset();
+  ChapterHtmlSlimParser::startElement(&parser, "body", nullptr);
+  // Text ending in <br/>, which would otherwise leave a blank line above the code.
+  ChapterHtmlSlimParser::startElement(&parser, "p", nullptr);
+  ChapterHtmlSlimParser::characterData(&parser, "intro", 5);
+  ChapterHtmlSlimParser::startElement(&parser, "br", nullptr);
+  ChapterHtmlSlimParser::endElement(&parser, "br");
+  ChapterHtmlSlimParser::endElement(&parser, "p");
+  ChapterHtmlSlimParser::startElement(&parser, "pre", nullptr);
+  ChapterHtmlSlimParser::startElement(&parser, "code", nullptr);
+  // Leading newline is dropped; the blank line is kept; the trailing newline is dropped.
+  const char* code = "\nmkdir a\ncd a\n\n  npm init\n";
+  ChapterHtmlSlimParser::characterData(&parser, code, static_cast<int>(strlen(code)));
+  ChapterHtmlSlimParser::endElement(&parser, "code");
+  ChapterHtmlSlimParser::endElement(&parser, "pre");
+  ChapterHtmlSlimParser::startElement(&parser, "p", nullptr);
+  ChapterHtmlSlimParser::characterData(&parser, "after", 5);
+  ChapterHtmlSlimParser::endElement(&parser, "p");
+  ChapterHtmlSlimParser::endElement(&parser, "body");
+  parser.makePages();
+
+  auto rows = lineRows(parser);
+  ASSERT_EQ(rows.size(), 5u);
+  const int introRow = rows.front();
+  rows.erase(rows.begin());
+  const int step = rows[1] - rows[0];
+  EXPECT_GT(step, 0);
+  // Only the paragraph gap plus the box's own small margin and padding, no <br/> blank line.
+  const int lineHeight = 16;  // stub renderer
+  EXPECT_LE(rows[0] - introRow, step + paragraphGapPx(lineHeight, 5) + lineHeight / 2);
+  EXPECT_EQ(rows[2] - rows[1], 2 * step);  // blank line between "cd a" and "npm init"
+  EXPECT_GT(rows[3] - rows[2], step);      // the paragraph gap returns after </pre>
+
+  // One outline encloses the three code rows and not the paragraph after it.
+  const PageElement* box = nullptr;
+  for (const auto& element : parser.currentPage->elements) {
+    if (element->getTag() == TAG_PageBox) {
+      ASSERT_EQ(box, nullptr);
+      box = element.get();
+    }
+  }
+  ASSERT_NE(box, nullptr);
+  const auto& outline = static_cast<const PageBox&>(*box);
+  EXPECT_LT(outline.yPos, rows[0]);
+  EXPECT_GT(outline.yPos + outline.getHeight(), rows[2] + step);
+  EXPECT_LT(outline.yPos + outline.getHeight(), rows[3]);
+}
+
+TEST_F(ChapterHtmlSlimParserTest, PreIndentedLongLineWrapsWithoutBlankLines) {
+  parser.beginParse();
+  parser.currentTextBlock.reset();
+  ChapterHtmlSlimParser::startElement(&parser, "body", nullptr);
+  ChapterHtmlSlimParser::startElement(&parser, "pre", nullptr);
+  std::string code = "a {\n";
+  code += std::string(12, ' ');
+  code += std::string(400, 'x');  // one word far wider than the line
+  code += " = y;\nb\n";
+  ChapterHtmlSlimParser::characterData(&parser, code.c_str(), static_cast<int>(code.size()));
+  ChapterHtmlSlimParser::endElement(&parser, "pre");
+  ChapterHtmlSlimParser::endElement(&parser, "body");
+  parser.makePages();
+
+  const auto rows = lineRows(parser);
+  ASSERT_GE(rows.size(), 4u);
+  const int step = rows[1] - rows[0];
+  for (size_t i = 2; i < rows.size(); ++i) {
+    EXPECT_EQ(rows[i] - rows[i - 1], step) << "gap before row " << i;
+  }
+}
+
 }  // namespace

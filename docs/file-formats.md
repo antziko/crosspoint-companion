@@ -106,6 +106,13 @@ root-relative SD paths.
 
 ## `section.bin`
 
+### Version 69
+
+`<pre>` content lays out as one block per source line (newlines are hard breaks, leading
+indentation kept, left-aligned, no paragraph gap between lines) inside an outline. Adds page
+element tag 4, `PageBox`: `i16 xPos, i16 yPos, u16 width, u16 height, u8 thickness`, one per
+page a `<pre>` spans.
+
 ### Version 65
 
 Version 65 adds one `u8 paragraphIndent` to the header, after `imageBleed` and before

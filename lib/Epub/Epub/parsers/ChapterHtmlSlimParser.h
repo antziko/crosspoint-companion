@@ -35,6 +35,20 @@ class ChapterHtmlSlimParser {
   int skipUntilDepth = INT_MAX;
   int boldUntilDepth = INT_MAX;
   int italicUntilDepth = INT_MAX;
+  // <pre> state: newlines are hard line breaks and leading indentation is kept.
+  int preDepth = INT_MAX;
+  bool preSawText = false;     // the newline right after <pre> is dropped, as in HTML
+  bool preAtLineStart = true;  // leading whitespace on this line is indentation
+  uint8_t prePendingNewlines = 0;
+  uint8_t preIndentSpaces = 0;        // leading spaces counted on the current line
+  bool suppressParagraphGap = false;  // set while a <pre> line break closes the previous line
+  // Outline around the open <pre>, tracked per page: top < 0 means no line on this page yet.
+  bool preBoxActive = false;
+  int16_t preBoxX = 0;
+  int16_t preBoxWidth = 0;
+  int16_t preBoxPadV = 0;
+  int16_t preBoxTop = -1;
+  int16_t preBoxBottom = 0;
   // buffer for building up words from characters, will auto break if longer than this
   // leave one char at end for null pointer
   char partWordBuffer[MAX_WORD_SIZE + 1] = {};
@@ -197,6 +211,9 @@ class ChapterHtmlSlimParser {
   void flushLongTextBlockIfNeeded();
   void applyBlockTopSpacing();
   void makePages();
+  bool insidePre() const { return preDepth != INT_MAX && tableDepth == 0; }
+  void breakPreLine();
+  void emitPreBox();
   static EpdFontFamily::Style fontStyleForTextDecoration(CssTextDecoration decoration);
   static void applyDirectionToEntry(StyleStackEntry& entry, const CssStyle& css);
   static void applyTextDecorationToEntry(StyleStackEntry& entry, const CssStyle& css);

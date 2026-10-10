@@ -75,6 +75,9 @@ class ParsedText {
   bool droppedWords = false;
   // A soft flush already emitted this paragraph's first line: the rest continues it, unindented.
   bool firstLineConsumed = false;
+  // A <pre> line: its first-line indent is exactly its leading spaces, never the reader's.
+  bool preformatted = false;
+  uint8_t preIndentSpaces = 0;
   std::vector<std::string> reorderedWordsScratch;
   std::vector<EpdFontFamily::Style> reorderedStylesScratch;
   std::vector<uint16_t> reorderedWidthsScratch;
@@ -146,6 +149,10 @@ class ParsedText {
   // the block as incomplete and fail the section build rather than cache text with holes.
   bool hadDroppedWords() const { return droppedWords; }
   bool firstLineEmitted() const { return firstLineConsumed; }
+  void setPreformatted(const uint8_t indentSpaces) {
+    preformatted = true;
+    preIndentSpaces = indentSpaces;
+  }
   void layoutAndExtractLines(const GfxRenderer& renderer, int fontId, uint16_t viewportWidth,
                              const std::function<void(std::shared_ptr<TextBlock>, uint32_t)>& processLine,
                              bool includeLastLine = true, int8_t characterSpacing = 0, uint8_t wordSpacingPercent = 100,

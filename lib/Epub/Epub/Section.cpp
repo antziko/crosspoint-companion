@@ -145,7 +145,9 @@ namespace {
 //      font-sized metrics instead of advancing zero, so lines holding redaction blocks
 //      break differently. Covers upstream's #3882 (their v52).
 // v65: Header gains the paragraph-indent level after imageBleed.
-constexpr uint8_t SECTION_FILE_VERSION = 65;
+// v69: <pre> keeps its line breaks and leading indentation, left-aligned and unindented,
+//      inside a PageBox outline (page element tag 4).
+constexpr uint8_t SECTION_FILE_VERSION = 69;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects

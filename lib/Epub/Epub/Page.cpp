@@ -120,6 +120,41 @@ std::unique_ptr<PageHorizontalRule> PageHorizontalRule::deserialize(HalFile& fil
   return std::unique_ptr<PageHorizontalRule>(rule);
 }
 
+void PageBox::render(GfxRenderer& renderer, const int fontId, const int xOffset, const int yOffset) {
+  (void)fontId;
+  if (width <= 2 * thickness || height <= 2 * thickness) {
+    return;
+  }
+  renderer.drawRect(xPos + xOffset, yPos + yOffset, width, height, thickness, true);
+}
+
+bool PageBox::serialize(HalFile& file) {
+  serialization::writePod(file, xPos);
+  serialization::writePod(file, yPos);
+  serialization::writePod(file, width);
+  serialization::writePod(file, height);
+  serialization::writePod(file, thickness);
+  return true;
+}
+
+std::unique_ptr<PageBox> PageBox::deserialize(HalFile& file) {
+  int16_t xPos = 0;
+  int16_t yPos = 0;
+  uint16_t width = 0;
+  uint16_t height = 0;
+  uint8_t thickness = 0;
+  serialization::readPod(file, xPos);
+  serialization::readPod(file, yPos);
+  serialization::readPod(file, width);
+  serialization::readPod(file, height);
+  serialization::readPod(file, thickness);
+  if (width == 0 || height == 0 || thickness == 0) {
+    LOG_ERR("PGE", "Deserialization failed: invalid box metadata (%ux%u t=%u)", width, height, thickness);
+    return nullptr;
+  }
+  return makeUniqueNoThrow<PageBox>(width, height, thickness, xPos, yPos);
+}
+
 void Page::render(GfxRenderer& renderer, const int fontId, const int xOffset, const int yOffset) const {
   renderFilteredPageElements(elements, renderer, fontId, xOffset, yOffset, [](const PageElement&) { return true; });
 }
@@ -220,6 +255,12 @@ std::unique_ptr<Page> Page::deserialize(HalFile& file) {
         return nullptr;
       }
       page->elements.push_back(std::move(rule));
+    } else if (tag == TAG_PageBox) {
+      auto box = PageBox::deserialize(file);
+      if (!box) {
+        return nullptr;
+      }
+      page->elements.push_back(std::move(box));
     } else {
       LOG_ERR("PGE", "Deserialization failed: Unknown tag %u", tag);
       return nullptr;

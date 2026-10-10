@@ -719,7 +719,13 @@ void ParsedText::ensureRubyCapacity() {
 }
 
 int ParsedText::resolveFirstLineIndent(const bool isFirstLine, const GfxRenderer& renderer, const int fontId) const {
-  if (firstLineConsumed || !isFirstLine || !isNaturalAlign) {
+  if (firstLineConsumed || !isFirstLine) {
+    return 0;
+  }
+  if (preformatted) {
+    return renderer.getSpaceWidth(fontId, EpdFontFamily::REGULAR) * preIndentSpaces;
+  }
+  if (!isNaturalAlign) {
     return 0;
   }
   if (paragraphIndent != PARAGRAPH_INDENT_BOOK) {
@@ -847,6 +853,8 @@ std::unique_ptr<ParsedText> ParsedText::takePrefix(const size_t count) {
   if (count == 0 || count >= words.size()) return nullptr;
   auto head = makeUniqueNoThrow<ParsedText>(extraParagraphSpacing, hyphenationEnabled, focusReadingEnabled, blockStyle);
   if (!head) return nullptr;
+  head->preformatted = preformatted;
+  head->preIndentSpaces = preIndentSpaces;
   if (!reserveNoThrow(head->wordStyles, count) || !reserveNoThrow(head->wordContinues, count) ||
       !reserveNoThrow(head->wordNoSpaceBefore, count) || !reserveNoThrow(head->wordFocusBoundary, count) ||
       !reserveNoThrow(head->wordLinkIds, count) || !reserveNoThrow(head->wordVisibleOffsetDeltas, count) ||

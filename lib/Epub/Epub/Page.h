@@ -17,6 +17,7 @@ enum PageElementTag : uint8_t {
   TAG_PageLine = 1,
   TAG_PageImage = 2,
   TAG_PageHorizontalRule = 3,
+  TAG_PageBox = 4,
 };
 
 // represents something that has been added to a page
@@ -72,6 +73,23 @@ class PageHorizontalRule final : public PageElement {
   bool serialize(HalFile& file) override;
   PageElementTag getTag() const override { return TAG_PageHorizontalRule; }
   static std::unique_ptr<PageHorizontalRule> deserialize(HalFile& file);
+};
+
+// Outline drawn around a preformatted (<pre>) block; one per page the block spans.
+class PageBox final : public PageElement {
+  uint16_t width;
+  uint16_t height;
+  uint8_t thickness;
+
+ public:
+  PageBox(uint16_t width, uint16_t height, uint8_t thickness, const int16_t xPos, const int16_t yPos)
+      : PageElement(xPos, yPos), width(width), height(height), thickness(thickness) {}
+  uint16_t getHeight() const { return height; }
+
+  void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset) override;
+  bool serialize(HalFile& file) override;
+  PageElementTag getTag() const override { return TAG_PageBox; }
+  static std::unique_ptr<PageBox> deserialize(HalFile& file);
 };
 
 class Page {

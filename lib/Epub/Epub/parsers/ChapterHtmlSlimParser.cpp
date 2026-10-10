@@ -84,12 +84,16 @@ constexpr uint8_t TABLE_ROW_SEPARATOR_THICKNESS = 1;
 constexpr int16_t TABLE_MIN_CELL_WIDTH_LINE_HEIGHTS = 3;
 
 constexpr const char* HEADER_TAGS[] = {"h1", "h2", "h3", "h4", "h5", "h6"};
-constexpr const char* BLOCK_TAGS[] = {"p", "li", "div", "br", "blockquote", "ul", "ol"};
+constexpr const char* BLOCK_TAGS[] = {"p", "li", "div", "br", "blockquote", "ul", "ol", "pre"};
 constexpr const char* BOLD_TAGS[] = {"b", "strong"};
 constexpr const char* ITALIC_TAGS[] = {"i", "em"};
 constexpr const char* UNDERLINE_TAGS[] = {"u", "ins"};
 constexpr const char* LINETHROUGH_TAGS[] = {"del", "s", "strike"};
 constexpr const char* IMAGE_TAGS[] = {"img", "image"};
+
+// <pre> outline. The book's own pre padding/margins are replaced: they are sized for a
+// shaded browser box and leave large blank bands on a page with no background.
+constexpr uint8_t PRE_BOX_THICKNESS = 1;
 
 bool isWhitespace(const char c) { return c == ' ' || c == '\r' || c == '\n' || c == '\t'; }
 
@@ -498,6 +502,7 @@ void ChapterHtmlSlimParser::startNewTextBlock(const BlockStyle& blockStyle) {
       }
 
       currentTextBlock->setBlockStyle(style.getCombinedBlockStyle(incoming, BlockStyle::CombineAxis::Vertical));
+      if (insidePre()) currentTextBlock->setPreformatted(0);
 
       flushPendingAnchor();
       return;
@@ -525,8 +530,41 @@ void ChapterHtmlSlimParser::startNewTextBlock(const BlockStyle& blockStyle) {
     signalOutOfMemory("startNewTextBlock: ParsedText");
     return;
   }
+  if (insidePre()) currentTextBlock->setPreformatted(0);
   wordsExtractedInBlock = 0;
   listItemBulletOnly = false;
+}
+
+// A newline inside <pre> ends the line: the next line is a new block with no container
+// margins and no paragraph gap. Extra newlines become blank lines.
+void ChapterHtmlSlimParser::breakPreLine() {
+  if (partWordBufferIndex > 0) flushPartWordBuffer();
+  BlockStyle lineStyle = blockStyleStack.back().withoutTop().withoutBottom();
+  if (prePendingNewlines > 1) {
+    const int lineHeight = renderer.getLineHeight(fontId, lineCompression);
+    lineStyle.marginTop = static_cast<int16_t>(lineHeight * (prePendingNewlines - 1));
+  }
+  prePendingNewlines = 0;
+  suppressParagraphGap = true;
+  startNewTextBlock(lineStyle);
+  suppressParagraphGap = false;
+}
+
+// Outline the <pre> lines placed on the current page.
+void ChapterHtmlSlimParser::emitPreBox() {
+  if (preBoxTop < 0 || !currentPage) return;
+  const int bottom = std::min<int>(preBoxBottom + preBoxPadV, viewportHeight);
+  const int height = bottom - preBoxTop;
+  const int16_t top = preBoxTop;
+  preBoxTop = -1;
+  if (height <= 0 || preBoxWidth <= 0) return;
+  auto box = std::shared_ptr<PageBox>(new (std::nothrow) PageBox(
+      static_cast<uint16_t>(preBoxWidth), static_cast<uint16_t>(height), PRE_BOX_THICKNESS, preBoxX, top));
+  if (!box) {
+    LOG_ERR("EHP", "OOM: pre box");
+    return;
+  }
+  currentPage->elements.push_back(box);
 }
 
 void ChapterHtmlSlimParser::emitHorizontalRule(const BlockStyle& blockStyle) {
@@ -1141,7 +1179,15 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
           // Resolve the image path relative to the HTML file
           std::string resolvedPath = FsHelpers::normalisePath(FsHelpers::decodeUriEscapes(self->contentBase + src));
 
-          if (ImageDecoderFactory::isFormatSupported(resolvedPath)) {
+          if (!ImageDecoderFactory::isFormatSupported(resolvedPath)) {
+            // Inline data: URIs can be kilobytes long; log the scheme and size only.
+            if (src.compare(0, 5, "data:") == 0) {
+              SdDebugLog::log("EHP", "img skip data-uri %.24s len=%u in %s", src.c_str(), (unsigned)src.size(),
+                              self->contentBase.c_str());
+            } else {
+              SdDebugLog::log("EHP", "img skip unsupported %s", resolvedPath.c_str());
+            }
+          } else {
             // Create a unique filename for the cached image
             std::string ext;
             size_t extPos = resolvedPath.rfind('.');
@@ -1200,6 +1246,9 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                   }
                 } else {
                   LOG_ERR("EHP", "Failed to extract image");
+                  SdDebugLog::log("EHP", "img extract fail %s free=%u largest=%u", resolvedPath.c_str(),
+                                  (unsigned)esp_get_free_heap_size(),
+                                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
                 }
               }
 
@@ -1481,6 +1530,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                 return;
               } else {
                 LOG_ERR("EHP", "Failed to get image dimensions");
+                SdDebugLog::log("EHP", "img dims fail %s", resolvedPath.c_str());
                 Storage.remove(cachedImagePath.c_str());
               }
             }
@@ -1673,7 +1723,45 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
       const auto accumulated = self->blockStyleStack.back().getCombinedBlockStyle(userAlignmentBlockStyle,
                                                                                   BlockStyle::CombineAxis::Horizontal);
       self->blockStyleStack.push_back(accumulated);
-      self->startNewTextBlock(accumulated.withoutBottom());
+      const bool opensPre = strcmp(name, "pre") == 0 && self->preDepth == INT_MAX && self->tableDepth == 0;
+      if (opensPre) {
+        const BlockStyle& parent = self->blockStyleStack[self->blockStyleStack.size() - 2];
+        BlockStyle& pre = self->blockStyleStack.back();
+        const int lineHeight = self->renderer.getLineHeight(self->fontId, self->lineCompression);
+        const auto margin = static_cast<int16_t>(lineHeight / 4);
+        const auto padV = static_cast<int16_t>(lineHeight / 4);
+        const auto padH = static_cast<int16_t>(lineHeight / 3 + PRE_BOX_THICKNESS);
+        // Code lines are never justified: a long line that wraps would get stretched gaps.
+        pre.alignment = pre.isRtl ? CssTextAlign::Right : CssTextAlign::Left;
+        pre.textAlignDefined = true;
+        pre.marginTop = margin;
+        pre.marginBottom = 0;  // the closing margin is placed by endElement, see there
+        pre.paddingTop = padV;
+        pre.paddingBottom = 0;  // added by emitPreBox, inside the outline
+        pre.marginLeft = parent.marginLeft;
+        pre.marginRight = parent.marginRight;
+        pre.paddingLeft = static_cast<int16_t>(parent.paddingLeft + padH);
+        pre.paddingRight = static_cast<int16_t>(parent.paddingRight + padH);
+        self->preDepth = self->depth;
+        self->preSawText = false;
+        self->preAtLineStart = true;
+        self->prePendingNewlines = 0;
+        self->preIndentSpaces = 0;
+        self->preBoxX = parent.leftInset();
+        self->preBoxWidth = static_cast<int16_t>(self->viewportWidth - parent.totalHorizontalInset());
+        self->preBoxPadV = padV;
+      }
+      self->startNewTextBlock(self->blockStyleStack.back().withoutBottom());
+      // Set after startNewTextBlock, which may still be laying out the preceding paragraph.
+      if (opensPre) {
+        // Replace, don't merge, spacing deposited by what came before (a trailing <br>'s blank
+        // line, the previous paragraph's bottom margin): the box sits close under the text.
+        if (self->currentTextBlock && self->currentTextBlock->isEmpty()) {
+          self->currentTextBlock->setBlockStyle(self->blockStyleStack.back().withoutBottom());
+        }
+        self->preBoxActive = true;
+        self->preBoxTop = -1;
+      }
       self->updateEffectiveInlineStyle();
 
       if (strcmp(name, "li") == 0) {
@@ -1899,6 +1987,36 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
     const uint32_t codepointOffset = nextCodepointOffset;
     if (countVisibleOffsets && (static_cast<uint8_t>(s[i]) & 0xC0) != 0x80) {
       nextCodepointOffset++;
+    }
+
+    if (self->insidePre()) {
+      if (s[i] == '\r') continue;
+      if (s[i] == '\n') {
+        if (self->partWordBufferIndex > 0) self->flushPartWordBuffer();
+        if (self->preSawText && self->prePendingNewlines < 8) self->prePendingNewlines++;
+        self->preAtLineStart = true;
+        self->preIndentSpaces = 0;
+        self->nextWordContinues = false;
+        continue;
+      }
+      if (self->prePendingNewlines > 0) self->breakPreLine();
+      self->preSawText = true;
+      if (s[i] == ' ' || s[i] == '\t') {
+        if (self->preAtLineStart) {
+          // Indentation becomes the line's first-line indent: as glued space tokens it would
+          // make an unbreakable run with a long first word and push blank lines out.
+          constexpr uint8_t MAX_PRE_INDENT_SPACES = 32;
+          self->preIndentSpaces = static_cast<uint8_t>(
+              std::min<int>(self->preIndentSpaces + (s[i] == '\t' ? 4 : 1), MAX_PRE_INDENT_SPACES));
+          continue;
+        }
+      } else if (self->preAtLineStart) {
+        self->preAtLineStart = false;
+        if (self->currentTextBlock && self->preIndentSpaces > 0) {
+          self->currentTextBlock->setPreformatted(self->preIndentSpaces);
+        }
+        self->preIndentSpaces = 0;
+      }
     }
 
     if (isWhitespace(s[i])) {
@@ -2172,6 +2290,28 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
   // Leaving skip
   if (self->skipUntilDepth == self->depth) {
     self->skipUntilDepth = INT_MAX;
+  }
+
+  // Leaving <pre>: trailing newlines before </pre> are dropped.
+  if (self->preDepth == self->depth) {
+    self->preDepth = INT_MAX;
+    self->prePendingNewlines = 0;
+    if (self->preBoxActive) {
+      // Lay out the last line now, while the box is still open, without a paragraph gap.
+      self->suppressParagraphGap = true;
+      self->startNewTextBlock(self->blockStyleStack.back().withoutTop().withoutBottom());
+      self->suppressParagraphGap = false;
+      if (self->preBoxTop >= 0) self->currentPageNextY += self->preBoxPadV;
+      self->emitPreBox();
+      self->preBoxActive = false;
+      // The last line is already laid out, so the closing margin goes on top of the next block,
+      // where it collapses with that block's own top margin.
+      if (self->currentTextBlock) {
+        BlockStyle next = self->currentTextBlock->getBlockStyle();
+        next.marginTop = std::max<int16_t>(next.marginTop, self->blockStyleStack.back().marginTop);
+        self->currentTextBlock->setBlockStyle(next);
+      }
+    }
   }
 
   if (!insideSkippedSubtree && self->tableDepth == 1 && (strcmp(name, "td") == 0 || strcmp(name, "th") == 0)) {
@@ -2477,7 +2617,10 @@ void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line, const
     currentPageVisibleOffsetSet = false;
   }
 
-  if (currentPageNextY + lineHeight > viewportHeight) {
+  // An open <pre> keeps room for its bottom padding and restarts its outline on the next page.
+  const int boxPad = preBoxActive ? preBoxPadV : 0;
+  if (currentPageNextY + lineHeight + boxPad > viewportHeight) {
+    if (preBoxActive) emitPreBox();
     setCurrentPageVisibleOffset(visibleOffset);
     completePageFn(std::move(currentPage), xpathParagraphIndex, xpathListItemIndex, currentPageVisibleOffset);
     completedPageCount++;
@@ -2486,10 +2629,14 @@ void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line, const
       signalOutOfMemory("addLineToPage: page break");
       return;
     }
-    currentPageNextY = 0;
+    currentPageNextY = static_cast<int16_t>(boxPad);
     currentPageVisibleOffsetSet = false;
   }
   setCurrentPageVisibleOffset(visibleOffset);
+  if (preBoxActive) {
+    if (preBoxTop < 0) preBoxTop = static_cast<int16_t>(std::max(0, currentPageNextY - boxPad));
+    preBoxBottom = static_cast<int16_t>(currentPageNextY + lineHeight);
+  }
 
   // Track cumulative words to assign footnotes to the page containing their anchor
   wordsExtractedInBlock += line->wordCount();
@@ -2593,5 +2740,5 @@ void ChapterHtmlSlimParser::makePages() {
     currentPageNextY += blockStyle.paddingBottom;
   }
 
-  currentPageNextY += paragraphGapPx(lineHeight, paragraphSpacing);
+  if (!suppressParagraphGap) currentPageNextY += paragraphGapPx(lineHeight, paragraphSpacing);
 }
