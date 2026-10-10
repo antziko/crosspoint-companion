@@ -108,6 +108,10 @@ class HalPowerManager {
   // Get battery percentage (range 0-100)
   uint16_t getBatteryPercentage() const;
 
+  // Optional SD-log sink for gauge SoC changes (same cycle-avoidance as
+  // HalClock::setTraceSink). Receives one formatted line, no tag, no newline.
+  static void setBatteryTraceSink(void (*sink)(const char* line));
+
   // RAII helper class to manage power saving locks
   // Usage: create an instance of Lock in a scope to disable power saving, for example when running a task that needs
   // full performance. When the Lock instance is destroyed (goes out of scope), power saving will be re-enabled.

@@ -16,6 +16,12 @@
 
 HalPowerManager powerManager;  // Singleton instance
 
+namespace {
+void (*batteryTraceSink)(const char* line) = nullptr;
+}  // namespace
+
+void HalPowerManager::setBatteryTraceSink(void (*sink)(const char* line)) { batteryTraceSink = sink; }
+
 // GPIO13 must stay high during light sleep on the C3 Xteink boards: it controls
 // the X4 battery latch and the X3 SD power rail. Other boards use it for
 // unrelated signals, including the X4 Pro display chip select.
@@ -345,6 +351,14 @@ uint16_t HalPowerManager::getBatteryPercentage() const {
     uint16_t percent = 0;
     if (!battery.readPercentageChecked(percent)) {
       return _batteryCachedPercent;
+    }
+    if (batteryTraceSink != nullptr && percent != _batteryCachedPercent) {
+      // One line per change; the first after boot/wake logs from 0. Epoch, not
+      // millis(), orders lines across deep sleeps.
+      char line[64];
+      snprintf(line, sizeof(line), "soc %d -> %u mv=%u epoch=%lu", _batteryCachedPercent, percent,
+               battery.readMillivolts(), static_cast<unsigned long>(time(nullptr)));
+      batteryTraceSink(line);
     }
     _batteryCachedPercent = percent;
     return _batteryCachedPercent;

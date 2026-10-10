@@ -620,6 +620,13 @@ void setup() {
   // while logging is still disabled and is dropped -- the lines that matter (sync start / ok
   // / timeout) all come from a user opening Clock Sync, long after setup.
   HalClock::setTraceSink([](const char* line) { SdDebugLog::log("CLK", "%s", line); });
+  // Forced past the per-context gate (the reader never enables it); sdCardLogging still gates.
+  HalPowerManager::setBatteryTraceSink([](const char* line) {
+    const bool wasEnabled = SdDebugLog::isEnabled();
+    SdDebugLog::setEnabled(true);
+    SdDebugLog::log("BAT", "%s", line);
+    SdDebugLog::setEnabled(wasEnabled);
+  });
   halClock.begin();
 
   // First of two USB samples (second below, before display bring-up): the SOF
