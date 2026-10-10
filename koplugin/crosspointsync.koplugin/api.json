@@ -22,6 +22,19 @@
             ],
             "expected_status" : [200, 401]
         },
+        "update_quote_texts" : {
+            "path" : "/syncs/bookmarks/text",
+            "method" : "PUT",
+            "required_params" : [
+                "document",
+                "items"
+            ],
+            "payload" : [
+                "document",
+                "items"
+            ],
+            "expected_status" : [200, 401, 403, 404]
+        },
         "get_progress" : {
             "path" : "/syncs/progress/:document",
             "method" : "GET",

@@ -138,7 +138,14 @@ void KOReaderAuthActivity::render(RenderLock&&) {
     UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, top,
                               mode == Mode::SIGN_UP ? tr(STR_ACCOUNT_CREATED) : tr(STR_AUTH_SUCCESS), true,
                               EpdFontFamily::BOLD);
-    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, top + height + 10, tr(STR_SYNC_READY));
+    const char* serverLabel = KOREADER_STORE.getActiveServerLabel();
+    char ready[128];
+    if (serverLabel) {
+      snprintf(ready, sizeof(ready), tr(STR_SYNC_READY_FORMAT), serverLabel);
+    } else {
+      snprintf(ready, sizeof(ready), "%s", tr(STR_SYNC_READY));
+    }
+    UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, top + height + 10, ready);
   } else if (state == FAILED) {
     UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, top,
                               mode == Mode::SIGN_UP ? tr(STR_SIGNUP_FAILED) : tr(STR_AUTH_FAILED), true,

@@ -936,12 +936,22 @@ function CrossPointSync:push(creds, document, summary, done)
         return
     end
 
-    self.client:putBookmarks(creds.username, creds.userkey, document, encoded, function(sent, _, status)
+    self.client:putBookmarks(creds.username, creds.userkey, document, encoded, function(sent, body, status)
         Diag.log("upload:", sent and "ok -- the server now holds this set"
                                   or ("FAILED, HTTP " .. tostring(status) .. "; deletions kept for the next pull"))
         summary.commit(sent)
         summary.uploadFailed = not sent
-        done()
+        local items = sent and type(body) == "table"
+            and Push.quoteTexts(body.need_text, summary.blob, self.ui.annotation and self.ui.annotation.annotations)
+        if not items or #items == 0 then
+            done()
+            return
+        end
+        -- Best effort: the server asks again on the next upload if this one is lost.
+        self.client:putQuoteTexts(creds.username, creds.userkey, document, items, function(ok, _, textStatus)
+            Diag.log("quote text:", #items, ok and "sent" or ("FAILED, HTTP " .. tostring(textStatus)))
+            done()
+        end)
     end)
 end
 

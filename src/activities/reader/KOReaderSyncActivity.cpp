@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cctype>
 
 #include "BookReadingStats.h"
 #include "BookmarkStore.h"
@@ -38,6 +39,26 @@
 #include "util/LookupHistory.h"
 
 namespace {
+// Short device tag "1D-F8". A CrossPoint id is "crosspoint-" + the eFuse MAC printed as a
+// little-endian u64, so the MAC's last two bytes are its first four hex digits, reversed (the
+// last digits are the vendor prefix every reader shares). Any other id: its last four chars.
+void shortDeviceTag(const std::string& id, char* out, size_t outSize) {
+  constexpr char PREFIX[] = "crosspoint-";
+  constexpr size_t PREFIX_LEN = sizeof(PREFIX) - 1;
+  const bool mac = id.size() == PREFIX_LEN + 12 && id.compare(0, PREFIX_LEN, PREFIX) == 0;
+  const char* h = mac ? id.c_str() + PREFIX_LEN : id.c_str() + (id.size() >= 4 ? id.size() - 4 : 0);
+  if (!mac && id.size() < 4) {
+    snprintf(out, outSize, "%s", id.c_str());
+    return;
+  }
+  const auto up = [](char c) { return static_cast<char>(toupper(static_cast<unsigned char>(c))); };
+  if (mac) {
+    snprintf(out, outSize, "%c%c-%c%c", up(h[2]), up(h[3]), up(h[0]), up(h[1]));
+  } else {
+    snprintf(out, outSize, "%c%c-%c%c", up(h[0]), up(h[1]), up(h[2]), up(h[3]));
+  }
+}
+
 // Format a transfer byte count for the summary: < 1 MB shows 2-decimal KB,
 // otherwise 2-decimal MB (1024 base). Writes into the caller's fixed buffer.
 void formatXferBytes(uint32_t bytes, char* out, size_t outLen) {
@@ -474,6 +495,13 @@ void KOReaderSyncActivity::performSync() {
             localProgress.percentage, remoteProgress.percentage, remotePosition.spineIndex, remotePosition.pageNumber);
     switch (comparison) {
       case ProgressComparison::Synchronized:
+        // The server has no title for this book (progress imported from a plain kosync server),
+        // so its web app hides it. Re-push the same position once with the metadata. This
+        // releases the Epub, which SYNC_COMPLETE never reads.
+        if (remoteProgress.metadataWanted && KOREADER_STORE.getSendMetadata()) {
+          const auto result = uploadLocalProgress();
+          LOG_INF("KOSync", "Metadata backfill upload: %s", KOReaderSyncClient::errorString(result));
+        }
         completeAlreadySynced();
         return;
       case ProgressComparison::LocalAhead:
@@ -507,6 +535,31 @@ void KOReaderSyncActivity::performUpload() {
   }
   requestUpdateAndWait();
 
+  const auto result = uploadLocalProgress();
+
+  // Drop the radio while user reads the result; full teardown happens at silent reboot.
+  esp_wifi_stop();
+
+  if (result != KOReaderSyncClient::OK) {
+    {
+      RenderLock lock(*this);
+      state = SYNC_FAILED;
+      statusMessage = KOReaderSyncClient::errorString(result);
+    }
+    requestUpdate();
+    return;
+  }
+
+  {
+    RenderLock lock(*this);
+    state = UPLOAD_COMPLETE;
+    uploadCompleteAt = millis();  // start the auto-return countdown
+    syncSucceeded = true;         // upload landed: a sleepWhenDone sync may now deep-sleep
+  }
+  requestUpdate(true);
+}
+
+KOReaderSyncClient::Error KOReaderSyncActivity::uploadLocalProgress() {
   // localProgress was pre-computed in EpubReaderActivity before the Epub was released.
   KOReaderProgress progress;
   progress.document = documentHash;
@@ -556,28 +609,7 @@ void KOReaderSyncActivity::performUpload() {
   // Release epub before the TLS handshake to free ~30KB RAM. Nothing below needs it.
   epub.reset();
 
-  const auto result = KOReaderSyncClient::updateProgress(progress);
-
-  // Drop the radio while user reads the result; full teardown happens at silent reboot.
-  esp_wifi_stop();
-
-  if (result != KOReaderSyncClient::OK) {
-    {
-      RenderLock lock(*this);
-      state = SYNC_FAILED;
-      statusMessage = KOReaderSyncClient::errorString(result);
-    }
-    requestUpdate();
-    return;
-  }
-
-  {
-    RenderLock lock(*this);
-    state = UPLOAD_COMPLETE;
-    uploadCompleteAt = millis();  // start the auto-return countdown
-    syncSucceeded = true;         // upload landed: a sleepWhenDone sync may now deep-sleep
-  }
-  requestUpdate(true);
+  return KOReaderSyncClient::updateProgress(progress);
 }
 
 void KOReaderSyncActivity::setSyncPhase(const char* phase) {
@@ -811,13 +843,69 @@ void KOReaderSyncActivity::syncBookmarks() {
 
   logHeap("pre-put");
   setSyncPhase(tr(STR_SYNC_PH_BM_UPLOAD));
-  const auto putResult = KOReaderSyncClient::updateBookmarks(documentHash, localJson);
+  KOReaderQuoteKey needText[KOReaderSyncClient::MAX_QUOTE_TEXT_REQUESTS];
+  size_t needCount = 0;
+  const auto putResult = KOReaderSyncClient::updateBookmarks(documentHash, localJson, needText, &needCount);
+  std::string().swap(localJson);
   bmUploadOk = (putResult == KOReaderSyncClient::OK);
   if (!bmUploadOk) {
     // A failed upload means local deletes/additions never reached the server, so other
     // devices won't converge. Surface this on the result screen rather than hiding it.
     LOG_ERR("KOSync", "Bookmark upload failed: %s", KOReaderSyncClient::errorString(putResult));
+    return;
   }
+  if (needCount > 0) uploadQuoteTexts(needText, needCount, bookTitle, bookAuthor);
+}
+
+void KOReaderSyncActivity::uploadQuoteTexts(const KOReaderQuoteKey* keys, const size_t count,
+                                            const std::string& bookTitle, const std::string& bookAuthor) {
+  // The blob carries only a snippet of each quote; the server asked for the full .qtext text of
+  // these. Best effort: a miss here is asked for again on the next sync.
+  if (!BOOKMARKS.loadForBook(epubPath, bookTitle, bookAuthor, "epub")) return;
+  // Four ~512-byte previews per request keep the body near 2 KB.
+  constexpr size_t kBatch = 4;
+  KOReaderQuoteText batch[kBatch];
+  size_t filled = 0;
+  size_t sent = 0;
+  const auto flush = [&]() {
+    if (filled == 0) return true;
+    const auto result = KOReaderSyncClient::updateQuoteTexts(documentHash, batch, filled);
+    for (size_t i = 0; i < filled; i++) std::string().swap(batch[i].text);
+    if (result != KOReaderSyncClient::OK) {
+      LOG_ERR("KOSync", "Quote text upload failed: %s", KOReaderSyncClient::errorString(result));
+      filled = 0;
+      return false;
+    }
+    sent += filled;
+    filled = 0;
+    return true;
+  };
+  const auto& bms = BOOKMARKS.getBookmarks();
+  for (size_t k = 0; k < count; k++) {
+    for (size_t i = 0; i < bms.size(); i++) {
+      const auto& bm = bms[i];
+      if (!bm.isQuote() || bm.spineIndex != keys[k].spine || bm.startWord != keys[k].startWord ||
+          bm.endWord != keys[k].endWord) {
+        continue;
+      }
+      // No .qtext (e.g. a mark adopted from a peer): the snippet is all there is, and sending it
+      // stops the server from asking again.
+      if (!BOOKMARKS.readPreviewAt(i, batch[filled].text) || batch[filled].text.empty()) {
+        batch[filled].text = bm.snippet;
+      }
+      if (!batch[filled].text.empty()) {
+        batch[filled].key = keys[k];
+        if (++filled == kBatch && !flush()) {
+          BOOKMARKS.unload();
+          return;
+        }
+      }
+      break;
+    }
+  }
+  BOOKMARKS.unload();
+  flush();
+  SdDebugLog::log("KOSYNC", "quote text: asked=%u sent=%u", (unsigned)count, (unsigned)sent);
 }
 
 namespace {
@@ -1584,15 +1672,10 @@ void KOReaderSyncActivity::render(RenderLock&&) {
   auto metrics = UITheme::getInstance().getMetrics();
   Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 
-  const auto* activeServer = KOREADER_STORE.getServer(static_cast<size_t>(KOREADER_STORE.getActiveIndex()));
-  // Header is just the active server name (fall back to the generic title when the
-  // server has no name), plus the optional stats tag below.
+  // Header is the active server's name (or address), plus the match method and stats tag below.
   char syncHeader[96];
-  if (activeServer && !activeServer->name.empty()) {
-    snprintf(syncHeader, sizeof(syncHeader), "%s", activeServer->name.c_str());
-  } else {
-    snprintf(syncHeader, sizeof(syncHeader), "%s", tr(STR_KOREADER_SYNC));
-  }
+  const char* serverLabel = KOREADER_STORE.getActiveServerLabel();
+  snprintf(syncHeader, sizeof(syncHeader), "%s", serverLabel ? serverLabel : tr(STR_KOREADER_SYNC));
   // Match method (Filename/Binary) — device-side config that keys the doc-id both
   // devices must share. Surfaced first so a mismatched method is visible at a glance —
   // Binary keys on file content, so device-optimized copies never converge (the
@@ -1675,15 +1758,14 @@ void KOReaderSyncActivity::render(RenderLock&&) {
     };
 
     // --- REMOTE card ---
-    // Label + source device on one line. Prefer the unique efuse id (already parsed
-    // into deviceId) so two CrossPoint devices are distinguishable; the generic
-    // "device" name is identical for every CrossPoint upload.
+    // Label + source device on one line, as "device:TAG" so two readers of the same model
+    // are distinguishable. Same format as the crosspoint-sync web app (deviceLabel.js).
     char remoteLabel[80];
     if (!remoteProgress.deviceId.empty()) {
-      const std::string& id = remoteProgress.deviceId;
-      const char* tail = id.size() >= 4 ? id.c_str() + id.size() - 4 : id.c_str();  // short tag
+      char tag[8];
+      shortDeviceTag(remoteProgress.deviceId, tag, sizeof(tag));
       snprintf(remoteLabel, sizeof(remoteLabel), "%s  (%s:%s)", tr(STR_REMOTE_LABEL),
-               remoteProgress.device.empty() ? "device" : remoteProgress.device.c_str(), tail);
+               remoteProgress.device.empty() ? "device" : remoteProgress.device.c_str(), tag);
     } else if (!remoteProgress.device.empty()) {
       snprintf(remoteLabel, sizeof(remoteLabel), "%s  (%s)", tr(STR_REMOTE_LABEL), remoteProgress.device.c_str());
     } else {

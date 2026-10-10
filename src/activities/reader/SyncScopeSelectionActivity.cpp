@@ -2,6 +2,7 @@
 
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <KOReaderCredentialStore.h>
 
 #include "MappedInputManager.h"
 #include "activities/ActivityResult.h"
@@ -67,7 +68,9 @@ void SyncScopeSelectionActivity::render(RenderLock&&) {
 
   const auto& metrics = UITheme::getInstance().getMetrics();
 
-  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_KOREADER_SYNC));
+  const char* serverLabel = KOREADER_STORE.getActiveServerLabel();
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer),
+                 serverLabel ? serverLabel : tr(STR_KOREADER_SYNC));
 
   const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 

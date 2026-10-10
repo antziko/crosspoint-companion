@@ -49,6 +49,7 @@ struct KOReaderProgress {
   int64_t timestamp;                             // Unix timestamp of last update
   std::optional<KOReaderMetadata> metadata;      // Optional document metadata
   std::optional<KOReaderRichPosition> position;  // Optional rich position (crosspoint-sync servers only)
+  bool metadataWanted = false;                   // GET only: crosspoint-sync has no title for this document
 };
 
 /**
@@ -63,6 +64,23 @@ struct KOReaderStatsEntry {
   uint32_t lastReadDayIndex = 0;  // "lr": days-since-2000 of last dated session (0 = none)
   uint8_t lastReadHour = 0;       // "lh"
   uint8_t lastReadMinute = 0;     // "lm"
+};
+
+/**
+ * A quote highlight's identity on the wire: the bookmark blob's (s, sw, ew).
+ * A crosspoint-sync server lists the quotes whose full text it still lacks
+ * (the blob carries only a snippet) in its bookmark PUT response.
+ */
+struct KOReaderQuoteKey {
+  uint16_t spine = 0;
+  uint16_t startWord = 0;
+  uint16_t endWord = 0;
+};
+
+/** Full text for one quote, answering a KOReaderQuoteKey request. */
+struct KOReaderQuoteText {
+  KOReaderQuoteKey key;
+  std::string text;
 };
 
 /**
@@ -91,6 +109,7 @@ struct StatsDatedFold {
  *   PUT /syncs/progress - Update progress for a document
  *   GET /syncs/bookmarks/:document - Get bookmarks for a document (self-hosted server extension)
  *   PUT /syncs/bookmarks - Update bookmarks for a document (self-hosted server extension)
+ *   PUT /syncs/bookmarks/text - Full quote text a bookmark PUT asked for (crosspoint-sync)
  *
  * Authentication:
  *   x-auth-user: username
@@ -172,9 +191,25 @@ class KOReaderSyncClient {
    * Replace the bookmarks blob for a document (self-hosted server extension).
    * @param documentHash The document hash
    * @param bookmarksJson Pre-serialized JSON-array string of all bookmarks
+   * @param needText Optional array of MAX_QUOTE_TEXT_REQUESTS entries, filled from the
+   *   response's "need_text" list (quotes the server wants full text for)
+   * @param needCount Output: entries filled in needText (0 when the server sent none)
    * @return OK on success, error code on failure
    */
-  static Error updateBookmarks(const std::string& documentHash, const std::string& bookmarksJson);
+  static Error updateBookmarks(const std::string& documentHash, const std::string& bookmarksJson,
+                               KOReaderQuoteKey* needText = nullptr, size_t* needCount = nullptr);
+
+  /** Most quote-text requests read from one bookmark PUT response. */
+  static constexpr size_t MAX_QUOTE_TEXT_REQUESTS = 8;
+
+  /**
+   * Send full quote text the server asked for in a bookmark PUT response.
+   * @param documentHash The document hash
+   * @param items The quotes and their text
+   * @param count Entries in items
+   * @return OK on success, error code on failure
+   */
+  static Error updateQuoteTexts(const std::string& documentHash, const KOReaderQuoteText* items, size_t count);
 
   /** Max device entries parsed from a stats response; extras are dropped. */
   static constexpr size_t MAX_STATS_DEVICES = 8;

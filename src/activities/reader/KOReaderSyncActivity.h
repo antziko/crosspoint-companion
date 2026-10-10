@@ -178,6 +178,8 @@ class KOReaderSyncActivity final : public Activity {
   void onWifiSelectionComplete(bool success);
   void performSync();
   void performUpload();
+  // PUTs the local position (plus metadata when enabled). No UI or radio changes.
+  KOReaderSyncClient::Error uploadLocalProgress();
   bool smartSyncEnabled() const;  // active server's syncBehavior == SMART (#2192)
   void completeAlreadySynced();   // enter SYNC_COMPLETE + start the existing auto-return countdown
   // Pull + union-merge + push bookmarks alongside progress. Silent (logs only);
@@ -185,6 +187,9 @@ class KOReaderSyncActivity final : public Activity {
   // Uses NO keep-alive session: the ~2.7KB upload body needs an unfragmented arena,
   // so GET and PUT run as separate fresh connections (see the .cpp for the why).
   void syncBookmarks();
+  // Sends the full text of the quotes a crosspoint-sync server asked for after the bookmark PUT.
+  void uploadQuoteTexts(const KOReaderQuoteKey* keys, size_t count, const std::string& bookTitle,
+                        const std::string& bookAuthor);
   // Pull + merge + push per-device reading-time counters alongside progress.
   // Same contract as syncBookmarks(): silent, never fails the progress sync.
   // `includeDict` folds/uploads the per-book dictionary history ("dh");

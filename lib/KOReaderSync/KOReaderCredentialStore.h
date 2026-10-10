@@ -91,6 +91,9 @@ class KOReaderCredentialStore : public PersistableStore<KOReaderCredentialStore>
   // --- Legacy active-server accessors (unchanged signatures; used by sync consumers and web UI) ---
   // All return empty/default when no active server (count == 0).
   const std::string& getUsername() const;
+  // Active server's name, else its URL without the scheme; nullptr when neither is set.
+  // Points into the stored server, so it is valid until the server list changes.
+  const char* getActiveServerLabel() const;
   const std::string& getPassword() const;
   std::string getMd5Password() const;
   bool hasCredentials() const;

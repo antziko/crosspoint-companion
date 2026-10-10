@@ -184,4 +184,47 @@ function Push.differs(blob, remoteB, remoteT)
     return false
 end
 
+--[[--
+Full text for the quotes a crosspoint-sync server asked for.
+
+The blob carries only a 63-byte snippet of each highlight, so the server lists the quotes
+it wants whole in the PUT response as `need_text = { {s, sw, ew}, ... }`. A record is
+matched to its KOReader annotation through the record's own anchors, which covers marks
+made on a device as well as here.
+
+@param need        the response's `need_text`
+@param blob        the blob that was uploaded (`Push.blob`)
+@param annotations the document's KOReader annotations
+@return list of `{ s, sw, ew, text }`, at most `Push.MAX_QUOTE_TEXTS`
+]]
+Push.MAX_QUOTE_TEXTS = 16
+Push.QUOTE_TEXT_MAX = 4096
+
+function Push.quoteTexts(need, blob, annotations)
+    local out = {}
+    if type(need) ~= "table" or type(blob) ~= "table" then return out end
+    local textByKey = {}
+    for _, item in ipairs(annotations or {}) do
+        local pos0, pos1 = Annotations.anchorsOf(item)
+        if pos0 and pos1 and type(item.text) == "string" and item.text ~= "" then
+            textByKey[Annotations.keyOf(pos0, pos1)] = item.text
+        end
+    end
+    for _, key in ipairs(need) do
+        if #out >= Push.MAX_QUOTE_TEXTS then break end
+        local s, sw, ew = tonumber(key[1]), tonumber(key[2]), tonumber(key[3])
+        for _, rec in ipairs(blob.b or {}) do
+            if Lamport.isQuote(rec) and tonumber(rec.s) == s and tonumber(rec.sw) == sw
+                    and tonumber(rec.ew) == ew then
+                local text = rec.xp and rec.xp1 and textByKey[Annotations.keyOf(rec.xp, rec.xp1)]
+                if text then
+                    out[#out + 1] = { s = s, sw = sw, ew = ew, text = Push.trim(text, Push.QUOTE_TEXT_MAX) }
+                end
+                break
+            end
+        end
+    end
+    return out
+end
+
 return Push

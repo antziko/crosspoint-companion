@@ -281,6 +281,15 @@ const std::string& KOReaderCredentialStore::getUsername() const {
   return servers[activeIndex].username;
 }
 
+const char* KOReaderCredentialStore::getActiveServerLabel() const {
+  if (activeIndex < 0 || static_cast<size_t>(activeIndex) >= servers.size()) return nullptr;
+  const KOReaderSyncServer& server = servers[activeIndex];
+  if (!server.name.empty()) return server.name.c_str();
+  if (server.serverUrl.empty()) return nullptr;
+  const size_t scheme = server.serverUrl.find("://");
+  return server.serverUrl.c_str() + (scheme == std::string::npos ? 0 : scheme + 3);
+}
+
 const std::string& KOReaderCredentialStore::getPassword() const {
   if (activeIndex < 0 || static_cast<size_t>(activeIndex) >= servers.size()) return EMPTY_STRING;
   return servers[activeIndex].password;

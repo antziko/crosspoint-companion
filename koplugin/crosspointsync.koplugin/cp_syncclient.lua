@@ -158,6 +158,18 @@ function CPSyncClient:putBookmarks(username, userkey, document, blob, callback)
 end
 
 --[[--
+Send full highlight text a crosspoint-sync server asked for in a bookmark PUT response
+(`need_text`). Other servers never ask, so this is never called against them.
+
+@param items list of `{ s, sw, ew, text }` from `Push.quoteTexts`
+]]
+function CPSyncClient:putQuoteTexts(username, userkey, document, items, callback)
+    self:_call(username, userkey, "PUT /syncs/bookmarks/text (" .. tostring(#items) .. ")", function(client)
+        return client:update_quote_texts({ document = document, items = items })
+    end, callback)
+end
+
+--[[--
 Replace the stored reading position for a document.
 
 The server takes `progress`, `percentage` and `device` together and rejects the write if

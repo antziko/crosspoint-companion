@@ -176,4 +176,26 @@ describe("cp_push", function()
             assert.is_true(Push.differs(blob, remoteB, {}))
         end)
     end)
+    describe("quoteTexts", function()
+        local blob = {
+            b = {
+                { s = 2, q = true, sw = 5, ew = 9, xp = QUOTE.pos0, xp1 = QUOTE.pos1, sn = "the quo" },
+                { s = 0, pi = 3, xp = BOOKMARK.page },
+            },
+            t = {},
+        }
+
+        it("answers a requested quote with its annotation's full text", function()
+            local items = Push.quoteTexts({ { 2, 5, 9 } }, blob, { QUOTE, BOOKMARK })
+            assert.are.equal(1, #items)
+            assert.are.equal("the quoted sentence", items[1].text)
+            assert.are.equal(5, items[1].sw)
+        end)
+
+        it("skips keys it has no annotation for", function()
+            assert.are.equal(0, #Push.quoteTexts({ { 2, 6, 9 } }, blob, { QUOTE }))
+            assert.are.equal(0, #Push.quoteTexts({ { 2, 5, 9 } }, blob, {}))
+            assert.are.equal(0, #Push.quoteTexts(nil, blob, { QUOTE }))
+        end)
+    end)
 end)

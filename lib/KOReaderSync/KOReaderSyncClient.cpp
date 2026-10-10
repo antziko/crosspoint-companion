@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <BoardConfig.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <SdDebugLog.h>
@@ -264,6 +265,10 @@ KoResponse koPerform(const char* method, const std::string& url, const std::stri
   http->addHeader("x-auth-user", KOREADER_STORE.getUsername());
   http->addHeader("x-auth-key", KOREADER_STORE.getMd5Password());
   if (body) http->addHeader("Content-Type", "application/json");
+  // Lets crosspoint-sync ask for metadata it lacks (metadata_wanted); other servers ignore it.
+  if (KOREADER_STORE.getSendMetadata() && strcmp(tag, "PROGRESS_GET") == 0) {
+    http->addHeader("x-crosspoint-metadata", "1");
+  }
 
   // Response sink with two guards. The stats GET aggregates every device's blob, so
   // the body scales with device count:
@@ -527,6 +532,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
     outProgress.device = doc["device"].as<std::string>();
     outProgress.deviceId = doc["device_id"].as<std::string>();
     outProgress.timestamp = doc["timestamp"].as<int64_t>();
+    outProgress.metadataWanted = doc["metadata_wanted"] | false;
 
     // CrossPoint `position` extension; only read from servers opted into Precise Position.
     outProgress.position.reset();
@@ -594,7 +600,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
     }
     doc["progress"] = progress.progress;
     doc["percentage"] = progress.percentage;
-    doc["device"] = DEVICE_NAME;
+    // Board profile name ("xteink_x3", "xteink_x4_pro"), as Settings > About shows it.
+    doc["device"] = BoardConfig::ACTIVE.name;
     doc["device_id"] = KOReaderSyncClient::deviceId();
     if (progress.position.has_value() && KOREADER_STORE.usesPrecisePosition()) {
       // CrossPoint-specific extension: not sent to third-party kosync servers.
@@ -663,8 +670,10 @@ KOReaderSyncClient::Error KOReaderSyncClient::getBookmarks(const std::string& do
 }
 
 KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string& documentHash,
-                                                              const std::string& bookmarksJson) {
+                                                              const std::string& bookmarksJson,
+                                                              KOReaderQuoteKey* needText, size_t* needCount) {
   lastHttpCode = 0;
+  if (needCount) *needCount = 0;
   if (!KOREADER_STORE.hasCredentials()) {
     LOG_DBG("KOSync", "No credentials configured");
     return NO_CREDENTIALS;
@@ -705,14 +714,16 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
   constexpr int kMaxAttempts = 3;
   int status = 0;
   bool transportOk = false;
+  std::string respBody;
   for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
     if (attempt > 0) {
       LOG_DBG("KOSync", "Retrying bookmark upload (attempt %d/%d)", attempt + 1, kMaxAttempts);
       vTaskDelay(pdMS_TO_TICKS(800));
     }
-    const KoResponse resp = koPerform("PUT", url, &body, "BOOKMARKS_PUT");
+    KoResponse resp = koPerform("PUT", url, &body, "BOOKMARKS_PUT");
     status = resp.status;
     transportOk = resp.transportOk;
+    respBody.swap(resp.body);
     LOG_DBG("KOSync", "Update bookmarks response: %d (attempt %d)", status, attempt + 1);
     if (transportOk) break;  // got an HTTP response — no point retrying the transport
     if (!linkUp()) {
@@ -738,8 +749,68 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateBookmarks(const std::string&
   }
 
   if (!transportOk) return NETWORK_ERROR;
-  if (isSuccessStatus(status)) return OK;
+  if (isSuccessStatus(status)) {
+    // crosspoint-sync lists quotes whose full text it lacks as "need_text": [[s, sw, ew], ...].
+    // Other servers send no such field, which leaves needCount at 0.
+    if (needText && needCount && respBody.find("need_text") != std::string::npos) {
+      JsonDocument respDoc;
+      if (!deserializeJson(respDoc, respBody)) {
+        for (JsonArrayConst k : respDoc["need_text"].as<JsonArrayConst>()) {
+          if (*needCount >= MAX_QUOTE_TEXT_REQUESTS) break;
+          if (k.size() != 3) continue;
+          KOReaderQuoteKey& key = needText[(*needCount)++];
+          key.spine = k[0].as<uint16_t>();
+          key.startWord = k[1].as<uint16_t>();
+          key.endWord = k[2].as<uint16_t>();
+        }
+      }
+    }
+    return OK;
+  }
   if (status == 401) return AUTH_FAILED;
+  return SERVER_ERROR;
+}
+
+KOReaderSyncClient::Error KOReaderSyncClient::updateQuoteTexts(const std::string& documentHash,
+                                                               const KOReaderQuoteText* items, const size_t count) {
+  lastHttpCode = 0;
+  if (!KOREADER_STORE.hasCredentials()) {
+    LOG_DBG("KOSync", "No credentials configured");
+    return NO_CREDENTIALS;
+  }
+  if (count == 0) return OK;
+
+  const std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/bookmarks/text";
+  std::string body;
+  {
+    JsonDocument doc;
+    doc["document"] = documentHash;
+    JsonArray arr = doc["items"].to<JsonArray>();
+    for (size_t i = 0; i < count; i++) {
+      JsonObject obj = arr.add<JsonObject>();
+      obj["s"] = items[i].key.spine;
+      obj["sw"] = items[i].key.startWord;
+      obj["ew"] = items[i].key.endWord;
+      obj["text"] = items[i].text;
+    }
+    if (doc.overflowed()) {
+      LOG_ERR("KOSync", "QUOTE_TEXT_PUT: JsonDocument overflow - skip");
+      return LOW_MEMORY;
+    }
+    const size_t bodyLen = measureJson(doc) + 1;
+    if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < bodyLen + 1024) {
+      LOG_ERR("KOSync", "QUOTE_TEXT_PUT: no %u-byte block for the body - skip", (unsigned)bodyLen);
+      return LOW_MEMORY;
+    }
+    body.reserve(bodyLen);
+    serializeJson(doc, body);
+  }
+
+  // No retry: the server keeps asking on every bookmark PUT until the text arrives.
+  const KoResponse resp = koPerform("PUT", url, &body, "QUOTE_TEXT_PUT");
+  if (!resp.transportOk) return NETWORK_ERROR;
+  if (isSuccessStatus(resp.status)) return OK;
+  if (resp.status == 401) return AUTH_FAILED;
   return SERVER_ERROR;
 }
 
