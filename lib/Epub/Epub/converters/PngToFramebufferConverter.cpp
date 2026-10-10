@@ -3,6 +3,7 @@
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
+#include <InflateReader.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <PNGdec.h>
@@ -37,6 +38,7 @@ struct PngContext {
   int lastDstY{-1};  // Track last rendered destination Y to avoid duplicates
 
   PixelCache cache;
+  StreamingPixelCache* stream{nullptr};  // non-null => cache rows stream to SD instead of `cache`
   bool caching{false};
 
   uint8_t* grayLineBuffer{nullptr};
@@ -80,17 +82,38 @@ int32_t pngSeekWithHandle(PNGFILE* pFile, int32_t pos) {
   return f->seek(pos);
 }
 
-// The PNG decoder (PNGdec) is ~42 KB due to internal zlib decompression buffers.
-// We heap-allocate it on demand rather than using a static instance, so this memory
-// is only consumed while actually decoding/querying PNG images. This is critical on
-// the ESP32-C3 where total RAM is ~320 KB.
-constexpr size_t PNG_DECODER_APPROX_SIZE = 44 * 1024;                          // ~42 KB + overhead
-constexpr size_t MIN_FREE_HEAP_FOR_PNG = PNG_DECODER_APPROX_SIZE + 16 * 1024;  // decoder + 16 KB headroom
+// The PNG decoder is heap-allocated on demand, so its memory is only held while decoding.
+// scripts/patch_pngdec.py moves its 32 KB zlib window out of the object (see PngZlibWindow),
+// leaving ~26 KB here: mostly the PNG_MAX_BUFFERED_PIXELS row buffer and inflate state.
+constexpr size_t PNG_ZLIB_WINDOW_BYTES = 32768;
+constexpr size_t MIN_FREE_HEAP_FOR_PNG = sizeof(PNG) + 16 * 1024;  // decoder + 16 KB headroom
+
+// PNGdec's inflate dictionary. Borrows the InflateReader window allocated on the pristine
+// boot heap (idle during an image decode); allocates its own only if that one is busy or
+// released. Keeps every PNG decode from needing one ~58 KB contiguous block, which the
+// X3's fragmented reading heap stops having after a few page turns.
+class PngZlibWindow {
+ public:
+  PngZlibWindow() : borrowed(InflateReader::acquireScratch(PNG_ZLIB_WINDOW_BYTES)) {
+    if (!borrowed) owned = makeUniqueNoThrow<uint8_t[]>(PNG_ZLIB_WINDOW_BYTES);
+  }
+  ~PngZlibWindow() {
+    if (borrowed) InflateReader::releaseScratch();
+  }
+  PngZlibWindow(const PngZlibWindow&) = delete;
+  PngZlibWindow& operator=(const PngZlibWindow&) = delete;
+
+  uint8_t* get() const { return borrowed ? borrowed : owned.get(); }
+
+ private:
+  uint8_t* borrowed;
+  std::unique_ptr<uint8_t[]> owned;
+};
 
 // Mirror heap-related decode failures to SD: on an untethered X3 (no serial) these
 // lines are the only trace of why an image silently failed to render. `largest`
 // distinguishes exhaustion (free low) from fragmentation (free OK but no
-// contiguous ~42 KB block for the decoder).
+// contiguous block for the decoder).
 void logHeapFailureToSd(const char* what) {
   SdDebugLog::log("PNG", "%s free=%u largest=%u", what, (unsigned)ESP.getFreeHeap(),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
@@ -261,12 +284,13 @@ int pngDrawCallback(PNGDRAW* pDraw) {
   DirectPixelWriter pw;
   pw.init(*ctx->renderer);
 
-  // The full-image PixelCache keeps every output row resident, so a single init
-  // covers the whole callback; beginRow() below just repositions within that
-  // buffer per row (no streaming band to advance).
   DirectCacheWriter cw;
   if (caching) {
-    cw.init(ctx->cache.buffer, ctx->cache.bytesPerRow, ctx->cache.originX);
+    if (ctx->stream) {
+      cw.initStreaming(ctx->stream);
+    } else {
+      cw.init(ctx->cache.buffer, ctx->cache.bytesPerRow, ctx->cache.originX);
+    }
   }
 
   // One source scanline can map to several output rows when upscaling; replicate
@@ -301,6 +325,8 @@ int pngDrawCallback(PNGDRAW* pDraw) {
       }
     }
   }
+  // Rows are final once written: later source rows only map to later output rows.
+  if (caching) cw.flushBelow(endDstY);
 
   return 1;
 }
@@ -349,6 +375,9 @@ X4Tone pngImageIsDark(const std::string& imagePath) {
                      pngMeasureCallback);
   const ScopedCleanup cleanup{[&png]() { png->close(); }};
   if (rc != PNG_SUCCESS) return X4Tone::Brighten;
+  PngZlibWindow window;
+  if (!window.get()) return X4Tone::Brighten;
+  png->setZlibWindow(window.get());
 
   const int srcWidth = png->getWidth();
   if (srcWidth <= 0) return X4Tone::Brighten;
@@ -418,11 +447,11 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
 
   // Only the 4-level X4 path applies a tone curve. For that path, probe luminance
   // to classify the image and select the right curve. Done before allocating the
-  // real decoder so only one PNG decoder (~42 KB) is ever live at a time. The
+  // real decoder so only one PNG decoder is ever live at a time. The
   // 1-bit (X3) and no-dither paths don't use the curve, so skip the probe entirely.
   const X4Tone tone = (!config.oneBitDither && config.useDithering) ? pngImageIsDark(imagePath) : X4Tone::None;
 
-  // Heap-allocate PNG decoder (~42 KB) - freed at end of function
+  // Heap-allocate PNG decoder - freed at end of function
   std::unique_ptr<PNG> png(new (std::nothrow) PNG());
   if (!png) {
     LOG_ERR("PNG", "Failed to allocate PNG decoder");
@@ -445,6 +474,14 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
     SdDebugLog::log("PNG", "decode open fail rc=%d %s", rc, imagePath.c_str());
     return false;
   }
+  // Acquired before the cache band below, which may otherwise borrow the same window.
+  PngZlibWindow window;
+  if (!window.get()) {
+    LOG_ERR("PNG", "Failed to allocate zlib window");
+    logHeapFailureToSd("decode zlib window OOM");
+    return false;
+  }
+  png->setZlibWindow(window.get());
 
   ImageDimensions sourceDimensions;
   if (!validateAndStoreDimensions(png->getWidth(), png->getHeight(), sourceDimensions, "PNG")) {
@@ -515,19 +552,22 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
   }
   ctx.grayLineBuffer = grayLineBuffer.get();
 
-  // Allocate cache buffer using SCALED dimensions.
-  // PNG decode is fast enough (~135ms for 400x600) that caching provides minimal benefit
-  // for larger images, while the cache buffer competes with the 44KB PNG decoder for heap.
-  // Skip caching when the buffer would exceed the framebuffer size (48KB).
-  static constexpr size_t PNG_MAX_CACHE_BYTES = 48000;
+  // Cache the dithered output so later renders of this image skip the decoder. Small
+  // images use one RAM buffer written at the end; larger ones stream rows to SD as they
+  // are decoded (PNGdec rejects interlaced files, so rows always arrive top to bottom).
+  // The band holds the output rows of one source row, which upscaling can repeat.
+  static constexpr size_t PNG_MAX_FULL_BUFFER_BYTES = 16 * 1024;
+  StreamingPixelCache streamCache;
   ctx.caching = !config.cachePath.empty();
   if (ctx.caching) {
-    size_t cacheSize = (size_t)((ctx.dstWidth + 3) / 4) * ctx.dstHeight;
-    if (cacheSize > PNG_MAX_CACHE_BYTES) {
-      LOG_DBG("PNG", "Skipping cache: %zu bytes exceeds PNG limit (%zu)", cacheSize, PNG_MAX_CACHE_BYTES);
-      ctx.caching = false;
-    } else if (!ctx.cache.allocate(ctx.dstWidth, ctx.dstHeight, config.x, config.y)) {
-      LOG_ERR("PNG", "Failed to allocate cache buffer, continuing without caching");
+    const size_t cacheSize = (size_t)((ctx.dstWidth + 3) / 4) * ctx.dstHeight;
+    const int bandRows = 2 + (ctx.dstHeight + ctx.srcHeight - 1) / ctx.srcHeight;
+    if (cacheSize <= PNG_MAX_FULL_BUFFER_BYTES && ctx.cache.allocate(ctx.dstWidth, ctx.dstHeight, config.x, config.y)) {
+      // full-buffer path
+    } else if (streamCache.begin(config.cachePath, ctx.dstWidth, ctx.dstHeight, config.x, bandRows)) {
+      ctx.stream = &streamCache;
+    } else {
+      LOG_ERR("PNG", "Cache init failed, continuing without caching");
       ctx.caching = false;
     }
   }
@@ -543,14 +583,25 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
     LOG_ERR("PNG", "Decode failed: %d", rc);
     SdDebugLog::log("PNG", "decode fail rc=%d %dx%d->%dx%d %s", rc, ctx.srcWidth, ctx.srcHeight, ctx.dstWidth,
                     ctx.dstHeight, imagePath.c_str());
+    if (ctx.stream) {
+      streamCache.finish();                      // close the file before removing it
+      Storage.remove(config.cachePath.c_str());  // drop the partial cache
+    }
     return false;
   }
 
   LOG_DBG("PNG", "PNG decoding complete - render time: %lu ms", decodeTime);
 
-  // Write cache file if caching was enabled and buffer was allocated
   if (ctx.caching) {
-    ctx.cache.writeToFile(config.cachePath);
+    if (ctx.stream) {
+      if (!streamCache.finish()) {
+        LOG_ERR("PNG", "Streaming cache incomplete; removing partial file");
+        SdDebugLog::log("PNG", "stream cache incomplete %s", config.cachePath.c_str());
+        Storage.remove(config.cachePath.c_str());
+      }
+    } else {
+      ctx.cache.writeToFile(config.cachePath);
+    }
   }
 
   return true;
