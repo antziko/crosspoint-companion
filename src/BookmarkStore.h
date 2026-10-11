@@ -149,8 +149,11 @@ class BookmarkStore {
   // QUOTE_PREVIEW_MAX on disk); its first BOOKMARK_SNIPPET_MAX-1 chars are stored in
   // the resident snippet teaser used by the list and by sync. Shares the same
   // MAX_BOOKMARKS limit as point bookmarks (one combined budget per book).
+  // `visibleTextOffset` is where the highlighted page starts (see Bookmark::visibleTextOffset),
+  // 0 when unknown.
   AddResult addQuote(uint16_t spineIndex, float progress, uint16_t startWord, uint16_t endWord, int pageCount,
-                     const char* chapterTitle, const char* preview, int currentPage = 0);
+                     const char* chapterTitle, const char* preview, int currentPage = 0,
+                     uint32_t visibleTextOffset = 0);
 
   // Remove a quote identified by its range key (spineIndex, startWord, endWord). Writes
   // a tombstone so the delete propagates on sync. No-op (returns false) if not found.
@@ -265,6 +268,9 @@ class BookmarkStore {
   // no write -- the caller flushes with saveToFile() once it has placed every mark. Returns
   // whether anything changed.
   bool setDisplayPage(size_t index, uint16_t page, uint16_t pageCount);
+  // Records the visible-text offset of the page a mark was found on, so the next layout lands
+  // on it directly instead of by its page fraction. Same contract as setDisplayPage.
+  bool setVisibleTextOffset(size_t index, uint32_t visibleTextOffset);
   // Consume the session "return here" mark at this spot (matched like the merge key):
   // removes it only when the matching bookmark is a return mark. Used when the user
   // reopens it to navigate back — the one-shot aid has served its purpose. No-op (returns

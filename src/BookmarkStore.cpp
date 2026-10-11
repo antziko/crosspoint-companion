@@ -246,7 +246,8 @@ BookmarkStore::AddResult BookmarkStore::addBookmark(uint16_t spineIndex, float p
 
 BookmarkStore::AddResult BookmarkStore::addQuote(uint16_t spineIndex, float progress, uint16_t startWord,
                                                  uint16_t endWord, int pageCount, const char* chapterTitle,
-                                                 const char* preview, int currentPage) {
+                                                 const char* preview, int currentPage,
+                                                 const uint32_t visibleTextOffset) {
   // Re-adding the exact same range replaces the prior quote (and its preview), rather
   // than dedup-by-page like point bookmarks — multiple quotes may share a page.
   std::erase_if(bookmarks, [&](const Bookmark& b) {
@@ -270,6 +271,7 @@ BookmarkStore::AddResult BookmarkStore::addQuote(uint16_t spineIndex, float prog
   bm.returnMark = false;
   bm.chapterCurrentPage = static_cast<uint16_t>(currentPage < 0 ? 0 : currentPage);
   bm.chapterPageCount = static_cast<uint16_t>(pageCount < 0 ? 0 : pageCount);
+  bm.visibleTextOffset = visibleTextOffset;
   bm.quote = true;
   bm.endSpineIndex = spineIndex;  // single-page selection (cross-chapter is future work)
   bm.endProgress = progress;
@@ -456,6 +458,15 @@ bool BookmarkStore::setDisplayPage(const size_t index, const uint16_t page, cons
   if (bm.chapterCurrentPage == page && bm.chapterPageCount == pageCount) return false;
   bm.chapterCurrentPage = page;
   bm.chapterPageCount = pageCount;
+  dirty = true;
+  return true;
+}
+
+bool BookmarkStore::setVisibleTextOffset(const size_t index, const uint32_t visibleTextOffset) {
+  if (index >= bookmarks.size() || visibleTextOffset == 0) return false;
+  Bookmark& bm = bookmarks[index];
+  if (bm.visibleTextOffset == visibleTextOffset) return false;
+  bm.visibleTextOffset = visibleTextOffset;
   dirty = true;
   return true;
 }

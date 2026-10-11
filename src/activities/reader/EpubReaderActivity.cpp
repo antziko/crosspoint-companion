@@ -730,13 +730,18 @@ void EpubReaderActivity::seekSavedTextNearCurrentPage() {
 }
 
 void EpubReaderActivity::refreshBookmarkSpans() const {
-  if (!section || section->pageCount <= 0 || section->isBuilding() || section->isPartial()) {
-    // Page numbers are only a watermark mid-build; resolve once the chapter is complete.
+  if (!section || section->pageCount <= 0 || section->isBuilding()) {
+    // Page numbers are only a watermark mid-build; resolve once the build settles.
     bookmarkSpanCount_ = 0;
     spansValid_ = false;
     return;
   }
+  // A partial is resolved over the pages it has laid out. Reopening one does not resume its
+  // build until the reader nears the watermark, so waiting for completion would leave every
+  // quote to the progress fallback, whose page count is only an estimate.
   const int pageCount = section->pageCount;
+  const bool partial = section->isPartial();
+  const int totalPages = section->estimatedTotalPages();
   if (spansValid_ && spansSection_ == section.get() && spansSpine_ == currentSpineIndex &&
       spansPageCount_ == pageCount && spansClock_ == BOOKMARKS.clock()) {
     return;
@@ -749,13 +754,16 @@ void EpubReaderActivity::refreshBookmarkSpans() const {
   bookmarkSpanCount_ = 0;
 
   // How far either side of its saved page a bookmark's opening words are looked for. A
-  // re-flow moves text a few pages at most; a whole-chapter scan per bookmark is not worth it.
+  // re-flow moves text a few pages at most from an offset-anchored landing. A page fraction
+  // can be off by far more (a chapter whose opening pages do not scale with the font), so a
+  // local quote with no offset yet scans the chapter once and records the offset it finds.
   constexpr int kSearchPages = 4;
   // How many pages a recorded length is counted across. A bookmark is one page long, so
   // even a much smaller font spreads it over two or three.
   constexpr int kSpanPages = 4;
 
   bool repaged = false;
+  bool anchored = false;
   const auto& bms = BOOKMARKS.getBookmarks();
   for (size_t bi = 0; bi < bms.size(); bi++) {
     const auto& b = bms[bi];
@@ -767,7 +775,11 @@ void EpubReaderActivity::refreshBookmarkSpans() const {
                       (unsigned)MAX_BOOKMARK_SPANS);
       break;
     }
-    int landed = pageFromFraction(b.progress, pageCount);
+    const bool scanChapter = b.quote && b.visibleTextOffset == 0 && b.snippet[0] != '\0';
+    int landed = pageFromFraction(b.progress, totalPages);
+    // Saved past the watermark: its page is not laid out yet, so there is nothing to search.
+    if (!scanChapter && b.visibleTextOffset == 0 && landed >= pageCount + kSearchPages) continue;
+    landed = std::min(landed, pageCount - 1);
     if (b.visibleTextOffset != 0) {
       const auto offsetPage = section->getPageForVisibleTextOffset(b.visibleTextOffset, /*preferFirstAtOffset=*/true);
       if (offsetPage.has_value() && *offsetPage < pageCount) landed = *offsetPage;
@@ -786,7 +798,7 @@ void EpubReaderActivity::refreshBookmarkSpans() const {
         span.textless = true;
         span.startPage = span.endPage = static_cast<uint16_t>(landed);
         bookmarkSpans_[bookmarkSpanCount_++] = span;
-        if (BOOKMARKS.setDisplayPage(bi, span.startPage, static_cast<uint16_t>(pageCount))) repaged = true;
+        if (!partial && BOOKMARKS.setDisplayPage(bi, span.startPage, static_cast<uint16_t>(pageCount))) repaged = true;
       }
       SdDebugLog::log("BMS", "spine=%d textless landed=%d/%d vto=%u", currentSpineIndex, landed + 1, pageCount,
                       b.visibleTextOffset);
@@ -796,7 +808,8 @@ void EpubReaderActivity::refreshBookmarkSpans() const {
     int startPage = -1;
     uint16_t startIndex = 0;
     bool runsOff = false;
-    for (int i = 0; i <= 2 * kSearchPages; i++) {
+    const int reach = scanChapter ? std::max(landed, pageCount - 1 - landed) : kSearchPages;
+    for (int i = 0; i <= 2 * reach; i++) {
       const int p = landed + ((i % 2) ? (i + 1) / 2 : -(i / 2));  // landed, +1, -1, +2, -2, ...
       if (p < 0 || p >= pageCount) continue;
       const auto page = section->loadPage(p);
@@ -809,9 +822,14 @@ void EpubReaderActivity::refreshBookmarkSpans() const {
       }
     }
     if (startPage < 0) {
-      SdDebugLog::log("BMS", "spine=%d q=%d landed=%d/%d start not found \"%.40s\"", currentSpineIndex, b.quote ? 1 : 0,
-                      landed + 1, pageCount, b.snippet);
+      SdDebugLog::log("BMS", "spine=%d q=%d landed=%d/%d reach=%d start not found \"%.40s\"", currentSpineIndex,
+                      b.quote ? 1 : 0, landed + 1, pageCount, reach, b.snippet);
       continue;
+    }
+    // A character offset survives re-layout, so the next pagination lands on this page directly.
+    if (scanChapter) {
+      const auto offset = section->getVisibleTextOffsetForPage(static_cast<uint16_t>(startPage));
+      if (offset.has_value() && BOOKMARKS.setVisibleTextOffset(bi, *offset)) anchored = true;
     }
 
     BookmarkSpan span;
@@ -854,14 +872,15 @@ void EpubReaderActivity::refreshBookmarkSpans() const {
       }
     }
     bookmarkSpans_[bookmarkSpanCount_++] = span;
-    SdDebugLog::log("BMS", "spine=%d q=%d landed=%d start=%u:%u end=%u:%u words=%u runsOff=%d vto=%u pages=%d",
-                    currentSpineIndex, b.quote ? 1 : 0, landed + 1, span.startPage + 1, span.startIndex,
-                    span.endPage + 1, span.endIndex, (unsigned)lengthWords, runsOff ? 1 : 0, b.visibleTextOffset,
-                    pageCount);
+    SdDebugLog::log(
+        "BMS", "spine=%d q=%d landed=%d start=%u:%u end=%u:%u words=%u runsOff=%d vto=%u pages=%d partial=%d",
+        currentSpineIndex, b.quote ? 1 : 0, landed + 1, span.startPage + 1, span.startIndex, span.endPage + 1,
+        span.endIndex, (unsigned)lengthWords, runsOff ? 1 : 0, b.visibleTextOffset, pageCount, partial ? 1 : 0);
     // The list's "page X/Y" was the page count when the mark was made; show where it is now.
-    if (BOOKMARKS.setDisplayPage(bi, span.startPage, static_cast<uint16_t>(pageCount))) repaged = true;
+    // Not from a partial: its page count is a watermark, not the chapter's.
+    if (!partial && BOOKMARKS.setDisplayPage(bi, span.startPage, static_cast<uint16_t>(pageCount))) repaged = true;
   }
-  if (repaged) BOOKMARKS.saveToFile();  // one write per re-pagination, not per mark
+  if (repaged || anchored) BOOKMARKS.saveToFile();  // one write per re-pagination, not per mark
 }
 
 bool EpubReaderActivity::pageHasMarginMark() const {
@@ -880,7 +899,8 @@ int EpubReaderActivity::markIndexOnCurrentPage(const bool quote) const {
   if (!section || section->pageCount <= 0) return -1;
   refreshBookmarkSpans();
   const int cur = section->currentPage;
-  const float pageSlice = 1.0f / static_cast<float>(section->pageCount);
+  // The scale marks are saved on (addBookmark), not a partial's watermark.
+  const float pageSlice = 1.0f / static_cast<float>(section->estimatedTotalPages());
   const float pageStart = static_cast<float>(cur) * pageSlice;
   const auto& bms = BOOKMARKS.getBookmarks();
   for (size_t bi = 0; bi < bms.size(); bi++) {
@@ -1951,11 +1971,14 @@ PageMarks::PageKey EpubReaderActivity::currentPageMarkKey() {
   if (!section || section->pageCount <= 0) return key;
   key.valid = true;
   key.spineIndex = static_cast<uint16_t>(currentSpineIndex);
-  key.pageProgress = static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
-  key.pageCount = section->pageCount;
+  // Marks save their progress against the best-known total (addBookmark, the highlight save),
+  // so a partial's watermark would put this page on a different scale from theirs.
+  const int totalPages = section->estimatedTotalPages();
+  key.pageProgress = static_cast<float>(section->currentPage) / static_cast<float>(totalPages);
+  key.pageCount = totalPages;
   key.chapterHash = currentChapterHash();
   key.pageNumber = section->currentPage + 1;
-  key.markPageCount = section->estimatedTotalPages();
+  key.markPageCount = totalPages;
   return key;
 }
 
@@ -2220,13 +2243,15 @@ void EpubReaderActivity::launchHighlightWordSelect(const int pointX, const int p
   int pageCount, currentPage;
   {
     RenderLock lock(*this);
-    pageCount = section->pageCount;
+    pageCount = section->estimatedTotalPages();  // as addBookmark: a partial's watermark is not the chapter
     currentPage = section->currentPage;
   }
   if (pageCount == 0) {
     requestUpdate();
     return;
   }
+  uint32_t visibleOffset = 0;
+  if (const auto off = section->getVisibleTextOffsetForPage(static_cast<uint16_t>(currentPage))) visibleOffset = *off;
 
   // Anchor captured at launch = the page being highlighted (same as addBookmark()).
   const uint16_t spine = static_cast<uint16_t>(currentSpineIndex);
@@ -2257,8 +2282,8 @@ void EpubReaderActivity::launchHighlightWordSelect(const int pointX, const int p
     return;
   }
   highlightSelect->setPageMarkKey(currentPageMarkKey());
-  startActivityForResult(std::move(highlightSelect), [this, spine, progress, pageCount, currentPage,
-                                                      chapterTitle](const ActivityResult& result) {
+  startActivityForResult(std::move(highlightSelect), [this, spine, progress, pageCount, currentPage, chapterTitle,
+                                                      visibleOffset](const ActivityResult& result) {
     ignoreBackUntilRelease = true;
     if (!result.isCancelled) {
       if (const auto* hr = std::get_if<HighlightRangeResult>(&result.data)) {
@@ -2267,7 +2292,7 @@ void EpubReaderActivity::launchHighlightWordSelect(const int pointX, const int p
         const auto addRes = BOOKMARKS.addQuote(spine, progress, static_cast<uint16_t>(std::max(0, hr->startWordIndex)),
                                                static_cast<uint16_t>(std::max(0, hr->endWordIndex)), pageCount,
                                                chapterTitle.empty() ? nullptr : chapterTitle.c_str(),
-                                               hr->previewText.c_str(), currentPage);
+                                               hr->previewText.c_str(), currentPage, visibleOffset);
         if (addRes == BookmarkStore::AddResult::LimitReached) {
           RenderLock lock(*this);
           // drawPopup refreshes internally (BaseTheme.cpp:803); a second displayBuffer here
