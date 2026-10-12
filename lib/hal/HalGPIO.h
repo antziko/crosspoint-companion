@@ -29,6 +29,11 @@
 #define BQ27220_VOLT_REG 0x08  // Voltage() command code (mV)
 #define BQ27220_TEMP_REG 0x06  // Temperature() command code (0.1 K)
 
+namespace X3GPIO {
+// Raw little-endian 16-bit register read on the X3's shared I2C bus.
+bool readI2CReg16LE(uint8_t addr, uint8_t reg, uint16_t* outValue);
+}  // namespace X3GPIO
+
 // Analog DS3231 RTC I2C
 #define I2C_ADDR_DS3231 0x68  // RTC I2C address
 #define DS3231_SEC_REG 0x00   // Seconds register (BCD)

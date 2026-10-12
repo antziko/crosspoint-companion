@@ -46,6 +46,7 @@
 #include "network/NtpBgState.h"
 #include "network/WifiEventLog.h"
 #include "platform/UsbSerialJtagHandoff.h"
+#include "util/BatteryLog.h"
 #include "util/ButtonNavigator.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryRegistry.h"
@@ -87,6 +88,14 @@ constexpr unsigned long X4PRO_RECOVERY_SETTLE_MS = 20;
 constexpr unsigned long DEFAULT_RECOVERY_SETTLE_MS = 500;
 }  // namespace
 static unsigned long lastX4ProPowerClickAt = 0;
+
+// Forced past the per-context gate (the reader never enables it); sdCardLogging still gates.
+static void logBatteryTrace(const char* line) {
+  const bool wasEnabled = SdDebugLog::isEnabled();
+  SdDebugLog::setEnabled(true);
+  SdDebugLog::log("BAT", "%s", line);
+  SdDebugLog::setEnabled(wasEnabled);
+}
 
 static unsigned long allowSleepAt = 0;
 // A wake hold must never become an in-app power-button action. Boot may finish while the
@@ -407,6 +416,8 @@ void enterDeepSleep(bool fromTimeout = false) {
     WiFi.mode(WIFI_OFF);
   }
 
+  BatteryLog::onSleep(gpio.isUsbConnectedCached());
+
   halTiltSensor.deepSleep();
   const unsigned long panelOffStartMs = millis();
   display.deepSleep();
@@ -620,13 +631,7 @@ void setup() {
   // while logging is still disabled and is dropped -- the lines that matter (sync start / ok
   // / timeout) all come from a user opening Clock Sync, long after setup.
   HalClock::setTraceSink([](const char* line) { SdDebugLog::log("CLK", "%s", line); });
-  // Forced past the per-context gate (the reader never enables it); sdCardLogging still gates.
-  HalPowerManager::setBatteryTraceSink([](const char* line) {
-    const bool wasEnabled = SdDebugLog::isEnabled();
-    SdDebugLog::setEnabled(true);
-    SdDebugLog::log("BAT", "%s", line);
-    SdDebugLog::setEnabled(wasEnabled);
-  });
+  HalPowerManager::setBatteryTraceSink(logBatteryTrace);
   halClock.begin();
 
   // First of two USB samples (second below, before display bring-up): the SOF
@@ -1167,7 +1172,25 @@ void loop() {
   static bool gaugeCapacityPending = true;
   if (gaugeCapacityPending) {
     RenderLock lock(RenderLock::Mode::Try);
-    if (lock.ownsLock()) gaugeCapacityPending = BatteryMonitor::loadDesignCapacity();
+    if (lock.ownsLock()) {
+      // Start and end only: the step machine is internal to the SDK, but a run that
+      // lasts seconds means it unlocked the gauge and entered CONFIG UPDATE.
+      static unsigned long capStartMs = 0;
+      if (capStartMs == 0) capStartMs = millis() | 1;
+      gaugeCapacityPending = BatteryMonitor::loadDesignCapacity();
+      if (!gaugeCapacityPending) {
+        char line[64];
+        snprintf(line, sizeof(line), "cap load t=%lu..%lu", capStartMs, millis());
+        logBatteryTrace(line);
+      }
+    }
+  }
+
+  BatteryLog::noteActivity(activityManager.isReaderActivity(), WiFi.getMode() != WIFI_MODE_NULL);
+  if (BatteryLog::due(gpio.isUsbConnectedCached())) {
+    // Same lock as the capacity load: the sample reads the gauge the themes also read.
+    RenderLock lock(RenderLock::Mode::Try);
+    if (lock.ownsLock()) BatteryLog::tick(gpio.isUsbConnectedCached());
   }
 
   renderer.setFadingFix(SETTINGS.fadingFix);

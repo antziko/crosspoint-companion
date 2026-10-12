@@ -12,6 +12,7 @@
 #include <cstring>
 
 #include "AboutActivity.h"
+#include "BatteryActivity.h"
 #include "ButtonRemapActivity.h"
 #include "ClearCacheActivity.h"
 #include "ClockSettingsActivity.h"
@@ -105,6 +106,7 @@ void SettingsActivity::rebuildSettingsLists() {
       readerSettings.push_back(SettingInfo::Action(StrId::STR_PLUGINS, SettingAction::Plugins));
       readerSettings.push_back(SettingInfo::Action(StrId::STR_LANGUAGE, SettingAction::Language));
       readerSettings.push_back(SettingInfo::Action(StrId::STR_KEYBOARD_LAYOUTS, SettingAction::KeyboardLayouts));
+      readerSettings.push_back(SettingInfo::Action(StrId::STR_BATTERY, SettingAction::Battery));
       readerSettings.push_back(SettingInfo::Action(StrId::STR_ABOUT, SettingAction::About));
     }
     currentSettings = &readerSettings;
@@ -634,6 +636,9 @@ void SettingsActivity::toggleCurrentSetting() {
       }
       case SettingAction::About:
         startActivityForResultNoThrow<AboutActivity>([](const ActivityResult&) {}, renderer, mappedInput);
+        break;
+      case SettingAction::Battery:
+        startActivityForResultNoThrow<BatteryActivity>([](const ActivityResult&) {}, renderer, mappedInput);
         break;
       case SettingAction::None:
         // Do nothing

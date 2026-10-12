@@ -33,6 +33,7 @@ class CrossPointState : public PersistableStore<CrossPointState> {
   uint16_t sleepDeckSize = 0;                       // folder size the current cycle was built for
   uint16_t sleepDeckShownCount = 0;                 // images shown so far this cycle
   uint8_t readerActivityLoadCount = 0;
+  uint8_t batteryGraphRange = 0;  // Settings > Battery level graph: 0 = 24 h, 1 = 7 days, 2 = 30 days
   bool lastSleepFromReader = false;
   bool showBootScreen = true;
   // Orientation the reader is currently using. Runtime only — NOT serialized.

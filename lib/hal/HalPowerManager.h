@@ -108,6 +108,22 @@ class HalPowerManager {
   // Get battery percentage (range 0-100)
   uint16_t getBatteryPercentage() const;
 
+  // Same reading, but false until one has succeeded this boot: before that,
+  // getBatteryPercentage() returns a placeholder 0 on gauge boards.
+  bool getBatteryPercentageChecked(uint16_t& out) const;
+
+  // Battery voltage in mV, 0 when the read fails.
+  uint16_t getBatteryMillivolts() const;
+
+  // X3 BQ27220 only: learned full-charge capacity, design capacity, cycle count.
+  struct GaugeHealth {
+    uint16_t fullChargeMah = 0;
+    uint16_t designMah = 0;
+    uint16_t cycles = 0;
+  };
+  // False on boards without a gauge that reports these, or on a failed read.
+  bool readGaugeHealth(GaugeHealth& out) const;
+
   // Optional SD-log sink for gauge SoC changes (same cycle-avoidance as
   // HalClock::setTraceSink). Receives one formatted line, no tag, no newline.
   static void setBatteryTraceSink(void (*sink)(const char* line));

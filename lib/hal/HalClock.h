@@ -18,9 +18,6 @@ class HalClock {
   // DS3231 code. Only hasHardwareRtc() folds the two together.
   bool _hwRtcPresent = false;
   bool _ntpConfigured = false;  // set when configTzTime() called; SNTP runs async after this
-  // UTC epoch from whichever source this board keeps time on; localTime() resolves it
-  // through the TZ rule. Returns false while no source has valid time yet.
-  bool utcEpoch(time_t& out) const;
   // Raw UTC readers: the RTC/system clock as stored, before the TZ rule.
   bool getUtcTime(uint8_t& hour, uint8_t& minute) const;
   bool getUtcDate(uint8_t& dayOfWeek, uint8_t& date, uint8_t& month, uint16_t& year) const;
@@ -71,6 +68,11 @@ class HalClock {
   // read. nullptr/empty falls back to UTC. Drops the read cache so the change
   // shows immediately.
   void setTimezone(const char* posixTz);
+
+  // UTC epoch from whichever source this board keeps time on (on X3 the DS3231, NOT
+  // time(nullptr), which X3 never sets); localTime() resolves it through the TZ rule.
+  // Returns false while no source has valid time yet. Minute resolution on X3.
+  bool utcEpoch(time_t& out) const;
 
   // Current wall-clock time in the configured timezone.
   // Returns false if RTC is not available.

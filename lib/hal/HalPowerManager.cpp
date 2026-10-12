@@ -12,12 +12,16 @@
 
 #include <cassert>
 
+#include "HalClock.h"
 #include "HalGPIO.h"
 
 HalPowerManager powerManager;  // Singleton instance
 
 namespace {
 void (*batteryTraceSink)(const char* line) = nullptr;
+// Trace-only state: a failed read or a genuine 0 otherwise looks identical to "no reading yet".
+unsigned batteryReadFails = 0;  // since the last good read
+bool batteryHadReading = false;
 }  // namespace
 
 void HalPowerManager::setBatteryTraceSink(void (*sink)(const char* line)) { batteryTraceSink = sink; }
@@ -350,16 +354,27 @@ uint16_t HalPowerManager::getBatteryPercentage() const {
     _batteryLastPollMs = now;
     uint16_t percent = 0;
     if (!battery.readPercentageChecked(percent)) {
+      if (batteryTraceSink != nullptr && batteryReadFails++ == 0) {
+        char line[64];
+        snprintf(line, sizeof(line), "soc read failed t=%lu shown=%d", now, _batteryCachedPercent);
+        batteryTraceSink(line);
+      }
       return _batteryCachedPercent;
     }
-    if (batteryTraceSink != nullptr && percent != _batteryCachedPercent) {
-      // One line per change; the first after boot/wake logs from 0. Epoch, not
-      // millis(), orders lines across deep sleeps.
-      char line[64];
-      snprintf(line, sizeof(line), "soc %d -> %u mv=%u epoch=%lu", _batteryCachedPercent, percent,
-               battery.readMillivolts(), static_cast<unsigned long>(time(nullptr)));
+    if (batteryTraceSink != nullptr &&
+        (percent != _batteryCachedPercent || !batteryHadReading || batteryReadFails != 0)) {
+      // One line per change, per first good read after boot/wake, and per recovery from
+      // failed reads. Epoch, not millis(), orders lines across deep sleeps.
+      char line[112];
+      time_t epoch = 0;
+      halClock.utcEpoch(epoch);
+      snprintf(line, sizeof(line), "soc %d -> %u mv=%u epoch=%lu t=%lu fails=%u%s", _batteryCachedPercent, percent,
+               battery.readMillivolts(), static_cast<unsigned long>(epoch), now, batteryReadFails,
+               batteryHadReading ? "" : " first");
       batteryTraceSink(line);
     }
+    batteryReadFails = 0;
+    batteryHadReading = true;
     _batteryCachedPercent = percent;
     return _batteryCachedPercent;
   }
@@ -371,6 +386,28 @@ uint16_t HalPowerManager::getBatteryPercentage() const {
     _batteryCachedPercent = (_batteryCachedPercent * 9 + battery.readPercentage() * 10) / 10;
   }
   return _batteryCachedPercent / 10;
+}
+
+bool HalPowerManager::getBatteryPercentageChecked(uint16_t& out) const {
+  out = getBatteryPercentage();
+  // The ADC path always yields a value; only gauge boards can still be on the placeholder.
+  return BoardConfig::ACTIVE.batteryGauge.gaugeAddr == 0 || batteryHadReading;
+}
+
+uint16_t HalPowerManager::getBatteryMillivolts() const {
+  static const BatteryMonitor battery;
+  return battery.readMillivolts();
+}
+
+bool HalPowerManager::readGaugeHealth(GaugeHealth& out) const {
+  if (!gpio.deviceIsX3()) return false;
+  // BQ27220 standard commands: FullChargeCapacity(), DesignCapacity(), CycleCount().
+  constexpr uint8_t REG_FULL_CHARGE_CAPACITY = 0x12;
+  constexpr uint8_t REG_CYCLE_COUNT = 0x2A;
+  constexpr uint8_t REG_DESIGN_CAPACITY = 0x3C;
+  return X3GPIO::readI2CReg16LE(I2C_ADDR_BQ27220, REG_FULL_CHARGE_CAPACITY, &out.fullChargeMah) &&
+         X3GPIO::readI2CReg16LE(I2C_ADDR_BQ27220, REG_DESIGN_CAPACITY, &out.designMah) &&
+         X3GPIO::readI2CReg16LE(I2C_ADDR_BQ27220, REG_CYCLE_COUNT, &out.cycles);
 }
 
 HalPowerManager::Lock::Lock() {
