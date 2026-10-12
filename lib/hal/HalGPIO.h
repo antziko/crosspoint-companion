@@ -179,6 +179,19 @@ class HalGPIO {
   // Should only be called when wakeup reason is PowerButton.
   bool verifyPowerButtonWakeup();
 
+  // Timing of the last verifyPowerButtonWakeup(), for the boot log: ms from power-on to the
+  // check (0 when not a cold boot), ms the check itself polled, and the hold it required.
+  struct WakeHoldTiming {
+    unsigned long preSetupMs = 0;
+    unsigned long polledMs = 0;
+    unsigned long requiredMs = 0;
+  };
+  const WakeHoldTiming& wakeHoldTiming() const { return wakeHold; }
+
+ private:
+  WakeHoldTiming wakeHold;
+
+ public:
   // Battery gauge temperature in 0.1 degC, the closest reading to the panel's (the X3 panel
   // driver reads none). X3 only; false on other boards or a failed I2C read.
   bool readBatteryTempDeciC(int16_t& out) const;

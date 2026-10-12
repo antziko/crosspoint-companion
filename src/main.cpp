@@ -24,6 +24,7 @@
 #include <WiFi.h>
 #include <builtinFonts/all.h>
 #include <esp_heap_caps.h>
+#include <esp_rtc_time.h>
 
 #include <cstring>
 #include <ctime>
@@ -1021,6 +1022,13 @@ void setup() {
       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), (unsigned)ESP.getMinFreeHeap(),
       SysTaskStacks::WIFI_IRAM, SysTaskStacks::WIFI_RX_IRAM, CONFIG_ESP_TIMER_TASK_STACK_SIZE,
       SysTaskStacks::espTimerHeadroom(), CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH, SysTaskStacks::timerServiceHeadroom());
+  if (bootWakeupReason == HalGPIO::WakeupReason::PowerButton) {
+    // preSetup = power-on to the hold check; ready = power-on to here (0 = not a cold boot).
+    const auto& hold = gpio.wakeHoldTiming();
+    const unsigned long readyMs = hold.preSetupMs > 0 ? static_cast<unsigned long>(esp_rtc_get_time_us() / 1000) : 0;
+    SdDebugLog::log("WAKE", "hold preSetup=%lu polled=%lu required=%lu ready=%lu", hold.preSetupMs, hold.polledMs,
+                    hold.requiredMs, readyMs);
+  }
   HangTrace::reportPreviousBoot();
 }
 

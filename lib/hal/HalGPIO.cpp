@@ -6,6 +6,7 @@
 #include <SPI.h>
 #include <Wire.h>
 #include <XteinkDetect.h>
+#include <esp_rtc_time.h>
 #include <esp_sleep.h>
 #include <soc/usb_serial_jtag_struct.h>
 
@@ -355,21 +356,38 @@ bool HalGPIO::verifyPowerButtonWakeup() {
   // The threshold mirrors the hold the sleep gesture asks for
   // (CrossPointSettings::getPowerButtonDuration()), so one press length means "change
   // power state" in both directions; it is a constant because settings are not loaded
-  // this early. The physical press is longer than this by the pre-setup() boot time,
-  // which is already part of the hold from the user's side.
+  // this early.
+  //
+  // On an Xteink cold boot the button is what powers the chip until firmware latches it,
+  // so the time from power-on to here (bootloader, image check, early setup) was already
+  // held and counts toward the hold. The RTC counter starts at power-on; on a deep-sleep
+  // wake it has been running through the sleep, so it is only trusted on POWERON.
+  // MIN_POLL_MS keeps a short check of its own so a press that is already releasing
+  // still reads as a tap.
   constexpr unsigned long POWER_WAKE_HOLD_MS = 400;
+  constexpr unsigned long MIN_POLL_MS = 100;
   // One released sample mid-hold can be contact bounce; confirm it before giving up.
   constexpr unsigned long RELEASE_CONFIRM_MS = 8;
+  wakeHold = WakeHoldTiming{};
+  if (esp_reset_reason() == ESP_RST_POWERON && coldBootImpliesPowerButton()) {
+    wakeHold.preSetupMs = static_cast<unsigned long>(esp_rtc_get_time_us() / 1000);
+  }
+  wakeHold.requiredMs =
+      wakeHold.preSetupMs >= POWER_WAKE_HOLD_MS - MIN_POLL_MS ? MIN_POLL_MS : POWER_WAKE_HOLD_MS - wakeHold.preSetupMs;
   if (!inputMgr.isPowerButtonPhysicallyPressed()) return false;  // already released: a tap
   const unsigned long holdStart = millis();
-  while (millis() - holdStart < POWER_WAKE_HOLD_MS) {
+  while (millis() - holdStart < wakeHold.requiredMs) {
     delay(2);
     inputMgr.update();  // keep the debouncer (and the power-button press timestamps) warm
     if (!inputMgr.isPowerButtonPhysicallyPressed()) {
       delay(RELEASE_CONFIRM_MS);
-      if (!inputMgr.isPowerButtonPhysicallyPressed()) return false;
+      if (!inputMgr.isPowerButtonPhysicallyPressed()) {
+        wakeHold.polledMs = millis() - holdStart;
+        return false;
+      }
     }
   }
+  wakeHold.polledMs = millis() - holdStart;
   return inputMgr.isPowerButtonPhysicallyPressed();
 }
 
