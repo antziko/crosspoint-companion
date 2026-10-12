@@ -26,7 +26,21 @@ TEST(SiblingOriginPaths, PrefixTagWithDir) {
   EXPECT_EQ(siblingOriginPaths("/calibre/(X3) book.epub"), V({"/calibre/book.epub"}));
 }
 
-// Only X3/X4 are device tags now — other digits are part of the title, so no sibling.
+TEST(SiblingOriginPaths, TagLeadingTheTitleComponent) {
+  EXPECT_EQ(siblingOriginPaths("/calibre/Smith - (x) Dune.epub"),
+            V({"/calibre/Smith - Dune.epub", "/calibre/Dune - Smith.epub"}));
+  EXPECT_EQ(siblingOriginPaths("/calibre/Smith - (X4) Dune.epub"),
+            V({"/calibre/Smith - Dune.epub", "/calibre/Dune - Smith.epub"}));
+  EXPECT_EQ(siblingOriginPaths("/calibre/Smith - (X11) Dune.epub"), V({}));
+  EXPECT_EQ(siblingOriginPaths("/calibre/A - (x) B - C.epub"), V({}));  // ambiguous split
+}
+
+TEST(SiblingOriginPaths, OptimizedTagWithDir) {
+  EXPECT_EQ(siblingOriginPaths("/calibre/(x) book.epub"), V({"/calibre/book.epub"}));
+  EXPECT_EQ(siblingOriginPaths("/calibre/book (x).epub"), V({"/calibre/book.epub"}));
+}
+
+// Only (x)/(X3)/(X4) are tags — other digits are part of the title, so no sibling.
 TEST(SiblingOriginPaths, NonDeviceDigitIsNotATag) {
   EXPECT_EQ(siblingOriginPaths("/a/b/My Title (X12).epub"), V({}));
   EXPECT_EQ(siblingOriginPaths("/a/b/My Title (X2).epub"), V({}));

@@ -30,7 +30,26 @@ TEST(StripDeviceTag, SuffixOtherSingleDigitNotStripped) {
   EXPECT_EQ(strip("Book (X5).epub"), "Book (X5).epub");
 }
 
-TEST(StripDeviceTag, SuffixRequiresDigit) { EXPECT_EQ(strip("Book (X).epub"), "Book (X).epub"); }
+// "(x)" is the single optimized copy's tag; the X is case-insensitive.
+TEST(StripDeviceTag, SuffixRemovesOptimizedTag) {
+  EXPECT_EQ(strip("Book (x).epub"), "Book.epub");
+  EXPECT_EQ(strip("Book (X).epub"), "Book.epub");
+}
+
+// Legacy device tags stay uppercase-only, so no existing name changes its sync key.
+TEST(StripDeviceTag, LegacyTagIsCaseSensitive) {
+  EXPECT_EQ(strip("Book (x4).epub"), "Book (x4).epub");
+  EXPECT_EQ(strip("(x3) Book.epub"), "(x3) Book.epub");
+}
+
+TEST(StripDeviceTag, SuffixOtherLettersNotStripped) {
+  EXPECT_EQ(strip("Book (y).epub"), "Book (y).epub");
+  EXPECT_EQ(strip("Book (xx).epub"), "Book (xx).epub");
+}
+
+TEST(StripDeviceTag, SuffixOptimizedTagRequiresLeadingSpace) { EXPECT_EQ(strip("Book(x).epub"), "Book(x).epub"); }
+
+TEST(StripDeviceTag, SuffixOptimizedTagAloneKept) { EXPECT_EQ(strip("(x).epub"), "(x).epub"); }
 
 TEST(StripDeviceTag, SuffixRequiresLeadingSpace) { EXPECT_EQ(strip("Book(X4).epub"), "Book(X4).epub"); }
 
@@ -40,7 +59,7 @@ TEST(StripDeviceTag, SuffixOnlyTrailingGroupRemoved) {
 
 TEST(StripDeviceTag, SuffixNoExtension) { EXPECT_EQ(strip("Book (X4)"), "Book"); }
 
-// --- Leading prefix form (new) ---
+// --- Leading prefix form ---
 TEST(StripDeviceTag, PrefixRemovesX3AndX4) {
   EXPECT_EQ(strip("(X4) Book.epub"), "Book.epub");
   EXPECT_EQ(strip("(X3) Book.epub"), "Book.epub");
@@ -57,7 +76,17 @@ TEST(StripDeviceTag, PrefixRealWorldAuthorTitle) {
             "Henry Kissinger - From Third World to First.epub");
 }
 
-TEST(StripDeviceTag, PrefixRequiresDigit) { EXPECT_EQ(strip("(X) Book.epub"), "(X) Book.epub"); }
+TEST(StripDeviceTag, PrefixRemovesOptimizedTag) {
+  EXPECT_EQ(strip("(x) Book.epub"), "Book.epub");
+  EXPECT_EQ(strip("(X) Book.epub"), "Book.epub");
+  EXPECT_EQ(strip("(x) Henry Kissinger - From Third World to First.epub"),
+            "Henry Kissinger - From Third World to First.epub");
+}
+
+TEST(StripDeviceTag, PrefixOptimizedTagRequiresSeparatorSpace) {
+  EXPECT_EQ(strip("(x)Book.epub"), "(x)Book.epub");
+  EXPECT_EQ(strip("(x)tra Book.epub"), "(x)tra Book.epub");
+}
 
 TEST(StripDeviceTag, PrefixRequiresSeparatorSpace) { EXPECT_EQ(strip("(X4)Book.epub"), "(X4)Book.epub"); }
 
@@ -67,7 +96,10 @@ TEST(StripDeviceTag, PrefixKeepsNonDeviceParens) {
 }
 
 // --- Both tags present ---
-TEST(StripDeviceTag, BothPrefixAndSuffix) { EXPECT_EQ(strip("(X4) Book (X4).epub"), "Book.epub"); }
+TEST(StripDeviceTag, BothPrefixAndSuffix) {
+  EXPECT_EQ(strip("(X4) Book (X4).epub"), "Book.epub");
+  EXPECT_EQ(strip("(x) Book (X3).epub"), "Book.epub");
+}
 
 // --- Passthrough / edges ---
 TEST(StripDeviceTag, UnsuffixedPassthrough) { EXPECT_EQ(strip("Book.epub"), "Book.epub"); }
@@ -125,6 +157,10 @@ TEST(NormalizePipeline, AllTagAndOrderCombosConverge) {
   EXPECT_EQ(norm("(X3) Smith - Dune.epub"), canonical);
   EXPECT_EQ(norm("(X3) Dune - Smith.epub"), canonical);
   EXPECT_EQ(norm("(X4) Dune - Smith (X4).epub"), canonical);  // both tags present
+  EXPECT_EQ(norm("(x) Smith - Dune.epub"), canonical);
+  EXPECT_EQ(norm("(x) Dune - Smith.epub"), canonical);
+  EXPECT_EQ(norm("Smith - Dune (x).epub"), canonical);
+  EXPECT_EQ(norm("Smith - (x) Dune.epub"), canonical);
 }
 
 // A tag on the title rather than on the whole name sits at neither end of the filename,

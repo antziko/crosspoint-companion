@@ -31,6 +31,25 @@ describe("cp_docid", function()
             assert.are.equal("My Bk (A).ep", DocId.stripDeviceTag("My Bk (A) (X4).ep"))
         end)
 
+        it("drops the optimised-copy tag in either case and placement", function()
+            assert.are.equal("Book.epub", DocId.stripDeviceTag("(x) Book.epub"))
+            assert.are.equal("Book.epub", DocId.stripDeviceTag("(X) Book.epub"))
+            assert.are.equal("Book.epub", DocId.stripDeviceTag("Book (x).epub"))
+            assert.are.equal("Book.epub", DocId.stripDeviceTag("(x) Book (X3).epub"))
+        end)
+
+        it("keeps the optimised-copy tag without its space, or alone", function()
+            assert.are.equal("(x)Book.epub", DocId.stripDeviceTag("(x)Book.epub"))
+            assert.are.equal("(x)tra Book.epub", DocId.stripDeviceTag("(x)tra Book.epub"))
+            assert.are.equal("Book(x).epub", DocId.stripDeviceTag("Book(x).epub"))
+            assert.are.equal("(x).epub", DocId.stripDeviceTag("(x).epub"))
+        end)
+
+        it("keeps lowercase legacy tags, which were never stripped", function()
+            assert.are.equal("Book (x4).epub", DocId.stripDeviceTag("Book (x4).epub"))
+            assert.are.equal("(x3) Book.epub", DocId.stripDeviceTag("(x3) Book.epub"))
+        end)
+
         it("leaves a plain name alone", function()
             assert.are.equal("Book.epub", DocId.stripDeviceTag("Book.epub"))
         end)
@@ -82,6 +101,9 @@ describe("cp_docid canonicalFilename", function()
             "Smith - Dune (X4).epub",
             "Dune - Smith (X3).epub",
             "(X4) Dune - Smith (X4).epub",
+            "(x) Smith - Dune.epub",
+            "Dune - Smith (x).epub",
+            "Smith - (x) Dune.epub",
         }) do
             assert.are.equal(canonical, DocId.canonicalFilename(name))
         end

@@ -5,6 +5,19 @@
 #include <string>
 #include <vector>
 
+// "A - B.ext" -> "B - A.ext" when the stem has exactly one " - ", else "".
+inline std::string reverseAuthorTitle(const std::string& name) {
+  const size_t dot = name.rfind('.');
+  const std::string stem = (dot == std::string::npos) ? name : name.substr(0, dot);
+  const std::string ext = (dot == std::string::npos) ? std::string() : name.substr(dot);
+  const size_t first = stem.find(" - ");
+  if (first == std::string::npos || stem.find(" - ", first + 3) != std::string::npos) return {};
+  const std::string a = stem.substr(0, first);
+  const std::string b = stem.substr(first + 3);
+  if (a.empty() || b.empty()) return {};
+  return b + " - " + a + ext;
+}
+
 // Returns candidate untagged sibling paths for a device-tagged book path, or an
 // empty list if the name carries no auto-epub-optimizer device tag. Candidates,
 // in priority order:
@@ -15,6 +28,7 @@
 // Candidate 2 is the literal reverse (not the sorted canonical form): the on-disk
 // sibling could be in either order, so we must name the opposite ordering exactly.
 // The same " - " / exactly-one-separator rule as KOReader filename-sync applies.
+// The tag may also lead the title component ("/calibre/A - (x) B.epub").
 // Pure — no filesystem access. Host-testable. The caller picks the first that
 // exists on disk.
 inline std::vector<std::string> siblingOriginPaths(const std::string& bookPath) {
@@ -22,23 +36,25 @@ inline std::vector<std::string> siblingOriginPaths(const std::string& bookPath) 
   const size_t slash = bookPath.rfind('/');
   const std::string dir = slash == std::string::npos ? std::string() : bookPath.substr(0, slash + 1);
   const std::string name = slash == std::string::npos ? bookPath : bookPath.substr(slash + 1);
-  const std::string untagged = KOReaderDocumentId::stripDeviceTag(name);
+  std::string untagged = KOReaderDocumentId::stripDeviceTag(name);
   if (untagged == name) {
-    return out;  // no device tag => this IS the origin, nothing to seed
+    // The tag may lead the second component ("Author - (x) Title.epub"): reversing
+    // brings it to the front, where stripDeviceTag sees it.
+    const std::string reversed = reverseAuthorTitle(name);
+    const std::string strippedReversed = reversed.empty() ? reversed : KOReaderDocumentId::stripDeviceTag(reversed);
+    if (strippedReversed == reversed) {
+      return out;  // no device tag => this IS the origin, nothing to seed
+    }
+    untagged = reverseAuthorTitle(strippedReversed);
+    if (untagged.empty()) return out;
   }
+  out.reserve(2);
   out.push_back(dir + untagged);  // (1) same-order untagged sibling
 
   // (2) literal author/title-reversed sibling, only on exactly one " - " separator.
-  const size_t dot = untagged.rfind('.');
-  const std::string stem = (dot == std::string::npos) ? untagged : untagged.substr(0, dot);
-  const std::string ext = (dot == std::string::npos) ? std::string() : untagged.substr(dot);
-  const size_t first = stem.find(" - ");
-  if (first != std::string::npos && stem.find(" - ", first + 3) == std::string::npos) {
-    const std::string a = stem.substr(0, first);
-    const std::string b = stem.substr(first + 3);
-    if (!a.empty() && !b.empty()) {
-      out.push_back(dir + b + " - " + a + ext);  // reversed order
-    }
+  const std::string reversed = reverseAuthorTitle(untagged);
+  if (!reversed.empty()) {
+    out.push_back(dir + reversed);
   }
   return out;
 }

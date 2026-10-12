@@ -22,27 +22,41 @@ function DocId.basename(path)
 end
 
 --[[--
-Drop the auto-optimizer device tag so an optimised copy keys the same as the original.
+Drop the auto-optimizer tag so an optimised copy keys the same as the original.
 
-Only "(X3)" and "(X4)" are recognised, in either placement, and both require the
-separating space — so a real title ending in "(X11)" is not falsely stripped.
+Recognised tags: "(x)" or "(X)" (the single optimised copy) and the legacy per-device
+"(X3)"/"(X4)" (uppercase only, so no existing name changes its key). Either placement,
+and both require the separating space -- so a real title ending in "(X11)" is kept.
 ]]
+
+-- Length of a tag starting at pos: 3 for "(x)"/"(X)", 4 for "(X3)"/"(X4)", else 0.
+local function tagLengthAt(s, pos)
+    if s:sub(pos, pos) ~= "(" then return 0 end
+    local x = s:sub(pos + 1, pos + 1)
+    if x ~= "x" and x ~= "X" then return 0 end
+    local c = s:sub(pos + 2, pos + 2)
+    if c == ")" then return 3 end
+    if x == "X" and (c == "3" or c == "4") and s:sub(pos + 3, pos + 3) == ")" then return 4 end
+    return 0
+end
+
 function DocId.stripDeviceTag(basename)
     local s = basename
 
-    -- Leading "(X3) " / "(X4) ", exactly five characters.
-    local prefix = s:sub(1, 5)
-    if prefix == "(X3) " or prefix == "(X4) " then
-        s = s:sub(6)
+    -- Leading tag plus its space.
+    local plen = tagLengthAt(s, 1)
+    if plen > 0 and s:sub(plen + 1, plen + 1) == " " then
+        s = s:sub(plen + 2)
     end
 
-    -- Trailing " (X3)" / " (X4)", immediately before the final extension.
+    -- Trailing " (x)" / " (X3)", immediately before the final extension.
     local dot = s:match("^.*()%.")
     local stemEnd = dot and (dot - 1) or #s
-    if stemEnd >= 5 then
-        local tag = s:sub(stemEnd - 4, stemEnd)
-        if tag == " (X3)" or tag == " (X4)" then
-            s = s:sub(1, stemEnd - 5) .. s:sub(stemEnd + 1)
+    for _, len in ipairs({ 3, 4 }) do
+        local p = stemEnd - len + 1
+        if p >= 2 and s:sub(p - 1, p - 1) == " " and tagLengthAt(s, p) == len then
+            s = s:sub(1, p - 2) .. s:sub(stemEnd + 1)
+            break
         end
     end
 

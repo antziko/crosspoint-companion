@@ -36,20 +36,24 @@ class KOReaderDocumentId {
   static std::string calculateFromFilename(const std::string& filePath);
 
   /**
-   * Strip the auto-epub-optimizer device tag so optimized copies hash to the same
-   * key as the original (and across X3/X4 devices). Restricted to the existing
-   * hardware device set — only "(X3)" and "(X4)" are recognized, so real titles
-   * that happen to end in "(X<n>)" (e.g. "Mac OS X (X11)") are NOT false-stripped.
+   * Strip the auto-epub-optimizer tag so optimized copies hash to the same key as
+   * the original. Recognized tags: "(x)" or "(X)" (the single optimized copy) and the
+   * legacy per-device "(X3)"/"(X4)" (uppercase only). Any other parenthesized
+   * group, e.g. "Mac OS X (X11)", is part of the title and kept.
    * Removes the tag in either placement:
-   *   - leading prefix  "(X3) "/"(X4) " at the very start of the name, or
-   *   - trailing suffix " (X3)"/" (X4)" immediately before the final extension.
+   *   - leading prefix  "(x) "/"(X3) " at the very start of the name, or
+   *   - trailing suffix " (x)"/" (X3)" immediately before the final extension.
    * Both require the separating space; either or both may be present.
    *
-   *   "(X4) Book.epub"  -> "Book.epub"      "Book (X4).epub"   -> "Book.epub"
-   *   "(X3) Book.epub"  -> "Book.epub"      "Book.epub"        -> "Book.epub"
-   *   "(X12) Book.epub" -> unchanged        "Book (X11).epub"  -> unchanged (not X3/X4)
-   *   "(X4)Book.epub"   -> unchanged        "Book(X4).epub"    -> unchanged (no space)
-   *   "(X4) Bk (X4).epub" -> "Bk.epub"      "My Bk (A) (X4).ep"-> "My Bk (A).ep"
+   *   "(x) Book.epub"   -> "Book.epub"      "Book (x).epub"    -> "Book.epub"
+   *   "(X4) Book.epub"  -> "Book.epub"      "Book (X3).epub"   -> "Book.epub"
+   *   "(X12) Book.epub" -> unchanged        "Book (X11).epub"  -> unchanged
+   *   "(x)Book.epub"    -> unchanged        "Book(X4).epub"    -> unchanged (no space)
+   *   "(X4) Bk (X4).epub" -> "Bk.epub"      "My Bk (A) (x).ep" -> "My Bk (A).ep"
+   *
+   * Both sides of a sync must apply exactly this rule: the KOReader plugin copy is
+   * koplugin/crosspointsync.koplugin/cp_docid.lua, the server copy is
+   * crosspoint-sync src/routes/kosync.ts.
    *
    * Pure string logic (defined inline, no Arduino/HAL deps) so host tests can
    * use it.
@@ -60,19 +64,19 @@ class KOReaderDocumentId {
   static inline std::string stripDeviceTag(const std::string& basename) {
     std::string s = basename;
 
-    // --- Leading "(X3) "/"(X4) " prefix (exact 5 chars) ---
-    if (s.size() >= 5 && s[0] == '(' && s[1] == 'X' && (s[2] == '3' || s[2] == '4') && s[3] == ')' && s[4] == ' ') {
-      s.erase(0, 5);  // drop "(Xn) "
+    const size_t prefixLen = tagLengthAt(s, 0);
+    if (prefixLen > 0 && s.size() > prefixLen && s[prefixLen] == ' ') {
+      s.erase(0, prefixLen + 1);
     }
 
-    // --- Trailing " (X3)"/" (X4)" (exact 5 chars) before the final extension ---
     const size_t dot = s.rfind('.');
     const size_t stemEnd = (dot == std::string::npos) ? s.size() : dot;
-    if (stemEnd >= 5) {
-      const size_t p = stemEnd - 5;
-      if (s[p] == ' ' && s[p + 1] == '(' && s[p + 2] == 'X' && (s[p + 3] == '3' || s[p + 3] == '4') &&
-          s[p + 4] == ')') {
-        s = s.substr(0, p) + s.substr(stemEnd);  // drop " (Xn)", keep extension
+    for (const size_t len : {size_t{3}, size_t{4}}) {
+      if (stemEnd < len + 1) continue;
+      const size_t p = stemEnd - len;
+      if (s[p - 1] == ' ' && tagLengthAt(s, p) == len) {
+        s = s.substr(0, p - 1) + s.substr(stemEnd);  // drop " (x)", keep extension
+        break;
       }
     }
 
@@ -142,6 +146,17 @@ class KOReaderDocumentId {
   }
 
  private:
+  // Length of the tag "(x)"/"(X)" (3) or legacy "(X3)"/"(X4)" (4) starting at pos, else 0.
+  // The legacy tags stay uppercase-only so no existing filename changes its sync key.
+  static inline size_t tagLengthAt(const std::string& s, size_t pos) {
+    if (pos + 3 > s.size() || s[pos] != '(' || (s[pos + 1] != 'X' && s[pos + 1] != 'x')) return 0;
+    if (s[pos + 2] == ')') return 3;
+    if (s[pos + 1] == 'X' && pos + 4 <= s.size() && (s[pos + 2] == '3' || s[pos + 2] == '4') && s[pos + 3] == ')') {
+      return 4;
+    }
+    return 0;
+  }
+
   // Size of each chunk to read at each offset
   static constexpr size_t CHUNK_SIZE = 1024;
 
