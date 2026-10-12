@@ -20,6 +20,7 @@
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "SleepImageRender.h"
+#include "SleepReviewFrame.h"
 #include "activities/reader/ReaderUtils.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -150,6 +151,7 @@ void SleepActivity::onEnter() {
     APP_STATE.lastSleepImagePath.clear();
     APP_STATE.saveToFile();
   }
+  SleepReviewFrame::discard();
 
   const bool renderQuickResume =
       SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
@@ -416,6 +418,14 @@ void SleepActivity::renderCustomSleepScreen() const {
             APP_STATE.saveToFile();
             SdDebugLog::log("SLP", "wallpaper=%s", filename.c_str());
             renderBitmapSleepScreen(bitmap);
+            // The on-wake review will show this same frame: save it so the review need not
+            // decode the BMP again. Only when that review will run, and only a B/W render.
+            if (SETTINGS.reviewSleepImageOnWake && !FsHelpers::isKeptSleepImage(filename) &&
+                !(bitmap.hasGreyscale() && sleepImageUsesGrayscale(renderer))) {
+              const unsigned long saveStart = millis();
+              SleepReviewFrame::save(renderer, filename);
+              SdDebugLog::log("SLP", "review frame saved ms=%lu", millis() - saveStart);
+            }
             randFile.close();
             dir.close();
             return;

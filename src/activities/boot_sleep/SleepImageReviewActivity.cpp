@@ -12,6 +12,7 @@
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "SleepImageRender.h"
+#include "SleepReviewFrame.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -37,6 +38,47 @@ void SleepImageReviewActivity::render(RenderLock&&) { renderImage(); }
 void SleepImageReviewActivity::renderImage() {
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
+
+  // Back = Skip, Confirm = Keep, Right = Remove. Keep/Skip both continue; only
+  // Remove and Keep change the file (see loop()).
+  const auto labels = mappedInput.mapLabels(tr(STR_SKIP), tr(STR_KEEP), "", tr(STR_REMOVE));
+  // Skip / Keep / Remove, on top of the wallpaper. Both the hint boxes and the bar paint
+  // their own ground, so they stay readable over a photo -- but the grayscale pass below
+  // repaints the gray planes across the whole screen, so on a grayscale render the photo's
+  // gray still tints them. That is the price of showing the wallpaper at its true scale.
+  const auto drawControls = [&]() {
+    if (actionBar_.active()) {
+      const char* barLabels[] = {tr(STR_SKIP), tr(STR_KEEP), tr(STR_REMOVE)};
+      actionBar_.draw(renderer, UI_10_FONT_ID, barLabels, /*primaryIndex=*/1);
+    }
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  };
+  const auto logPaint = [](const char* source, const unsigned long prepMs, const unsigned long displayMs,
+                           const bool gray) {
+    // Runs during boot, before setup() turns the SD log on; the master switch still applies.
+    const bool logWasEnabled = SdDebugLog::isEnabled();
+    SdDebugLog::setEnabled(true);
+    SdDebugLog::log("SLPR", "paint frame=%s prep=%lu display=%lu gray=%d", source, prepMs, displayMs, gray ? 1 : 0);
+    SdDebugLog::setEnabled(logWasEnabled);
+  };
+
+  // SCRUB, not HALF: the same single half-scrub pass, without the X3 upgrade of HALF to a
+  // three-pass full sync (~3.2 s vs ~0.75 s). That upgrade is for swapping one full-screen
+  // image for another; here the panel still holds this wallpaper from sleep and the scrub
+  // drives every pixel to its target. onExit() keeps the full HALF, so nothing this pass
+  // leaves behind reaches the next screen. On X4 the two are the same refresh.
+  //
+  // Fast path: the frame the sleep screen drew, saved on the way into sleep. It loads in
+  // a fraction of the decode, so no loading popup goes up over the wallpaper first.
+  const unsigned long loadStart = millis();
+  if (SleepReviewFrame::load(renderer, imagePath)) {
+    drawControls();
+    const unsigned long paintStart = millis();
+    renderer.displayBuffer(HalDisplay::SCRUB_REFRESH);
+    shownGrayscale_ = false;
+    logPaint("saved", paintStart - loadStart, millis() - paintStart, false);
+    return;
+  }
 
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
 
@@ -68,10 +110,6 @@ void SleepImageReviewActivity::renderImage() {
   const int x = place.x;
   const int y = place.y;
 
-  // Back = Skip, Confirm = Keep, Right = Remove. Keep/Skip both continue; only
-  // Remove and Keep change the file (see loop()).
-  const auto labels = mappedInput.mapLabels(tr(STR_SKIP), tr(STR_KEEP), "", tr(STR_REMOVE));
-
   // The same answer the sleep render used, so this screen shows the image the user actually
   // woke up to -- the cover filter suppresses the gray planes, and reviewing a filtered
   // wallpaper through the unfiltered pipeline would show a different picture. Crop and
@@ -79,12 +117,13 @@ void SleepImageReviewActivity::renderImage() {
   const bool hasGreyscale = bitmap.hasGreyscale() && sleepImageUsesGrayscale(renderer);
 
   // Same single-activation recipe as SleepActivity::renderBitmapSleepScreen. This screen
-  // shows the very image the panel is still retaining from sleep, so the paint must be
-  // HALF, never FAST: FAST is the turbo differential driven off the stale plane
-  // (Uc8253X3Driver.cpp:191-206), while HALF loads the `_half` scrub bank on X3 and seeds
-  // the OLD plane with the complement of the target on X4 -- either way every pixel is
-  // driven to its target regardless of what the panel was holding. That is what erases the
-  // retained frame, so no separate wipe pass is needed ahead of it.
+  // shows the very image the panel is still retaining from sleep, so the paint must use the
+  // HALF waveform (SCRUB above), never FAST: FAST is the turbo differential driven off the
+  // stale plane (Uc8253X3Driver.cpp:191-206), while HALF loads the `_half` scrub bank on X3
+  // and seeds the OLD plane with the complement of the target on X4 -- either way every
+  // pixel is driven to its target regardless of what the panel was holding. That is what
+  // erases the retained frame, so no separate wipe pass is needed ahead of it.
+  const unsigned long drawStart = millis();
   renderer.clearScreen();
   renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, place.cropX, place.cropY);
   // Before the controls below, not after: the inversion covers the whole framebuffer, so
@@ -93,23 +132,17 @@ void SleepImageReviewActivity::renderImage() {
   if (sleepImageInverts()) {
     renderer.invertScreen();
   }
-  // Skip / Keep / Remove, on top of the wallpaper. Both the hint boxes and the bar paint
-  // their own ground, so they stay readable over a photo -- but the grayscale pass below
-  // repaints the gray planes across the whole screen, so on a grayscale render the photo's
-  // gray still tints them. That is the price of showing the wallpaper at its true scale.
-  if (actionBar_.active()) {
-    const char* barLabels[] = {tr(STR_SKIP), tr(STR_KEEP), tr(STR_REMOVE)};
-    actionBar_.draw(renderer, UI_10_FONT_ID, barLabels, /*primaryIndex=*/1);
-  }
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  drawControls();
+  const unsigned long paintStart = millis();
   if (hasGreyscale) {
     // Must be displayGrayscaleBase, not displayBuffer: the gray nudge LUT applied by
     // applyGrayscaleOverlay below is calibrated against the pixel state this base leaves
     // behind (see the same call in SleepActivity).
     renderer.displayGrayscaleBase(HalDisplay::HALF_REFRESH);
   } else {
-    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    renderer.displayBuffer(HalDisplay::SCRUB_REFRESH);
   }
+  logPaint("decoded", paintStart - drawStart, millis() - paintStart, hasGreyscale);
 
   shownGrayscale_ = hasGreyscale;
   if (hasGreyscale) {
