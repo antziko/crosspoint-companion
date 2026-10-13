@@ -109,6 +109,45 @@ TEST_F(ChapterHtmlSlimParserTest, SpanWithHiddenAttributeShouldBeSkipped) {
   ASSERT_EQ(parser.currentTextBlock->wordAt(1), "After");
 }
 
+TEST_F(ChapterHtmlSlimParserTest, EmptySpacerSpanSeparatesRunInLabel) {
+  // <b>Q:</b><span style="margin-left:0.5em"></span>Did it -- the label must not glue onto "Did".
+  const XML_Char* spacer[] = {"style", "margin-left:0.5em", nullptr};
+
+  parser.beginParse();
+  ChapterHtmlSlimParser::startElement(&parser, "p", nullptr);
+  ChapterHtmlSlimParser::startElement(&parser, "b", nullptr);
+  ChapterHtmlSlimParser::characterData(&parser, "Q:", 2);
+  ChapterHtmlSlimParser::endElement(&parser, "b");
+  ChapterHtmlSlimParser::startElement(&parser, "span", spacer);
+  ChapterHtmlSlimParser::endElement(&parser, "span");
+  ChapterHtmlSlimParser::characterData(&parser, "Did it", 6);
+
+  // "it" is still in the part-word buffer.
+  ParsedText* block = parser.currentTextBlock.get();
+  ASSERT_NE(block, nullptr);
+  ASSERT_EQ(block->size(), 2);
+  EXPECT_EQ(block->wordAt(0), "Q:");
+  EXPECT_EQ(block->wordAt(1), "Did");
+  EXPECT_FALSE(block->wordContinues[1]);
+}
+
+TEST_F(ChapterHtmlSlimParserTest, PaddedSpanWithTextStillJoinsWord) {
+  // A drop cap with padding keeps its letter attached to the rest of the word.
+  const XML_Char* dropCap[] = {"style", "padding-right:2px", nullptr};
+
+  parser.beginParse();
+  ChapterHtmlSlimParser::startElement(&parser, "p", nullptr);
+  ChapterHtmlSlimParser::startElement(&parser, "span", dropCap);
+  ChapterHtmlSlimParser::characterData(&parser, "T", 1);
+  ChapterHtmlSlimParser::endElement(&parser, "span");
+  ChapterHtmlSlimParser::characterData(&parser, "he end", 6);
+
+  ParsedText* block = parser.currentTextBlock.get();
+  ASSERT_NE(block, nullptr);
+  ASSERT_EQ(block->size(), 1);
+  EXPECT_EQ(block->wordAt(0), "The");
+}
+
 TEST_F(ChapterHtmlSlimParserTest, DivWithHiddenAttributeContentShouldBeSkipped) {
   const XML_Char* attributes[] = {"hidden", "hidden", nullptr};
 

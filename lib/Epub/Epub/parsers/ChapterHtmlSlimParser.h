@@ -54,6 +54,11 @@ class ChapterHtmlSlimParser {
   char partWordBuffer[MAX_WORD_SIZE + 1] = {};
   int partWordBufferIndex = 0;
   bool nextWordContinues = false;  // true when next flushed word attaches to previous (inline element boundary)
+  // Depth of an open inline element with horizontal margin/padding and no text so far; its end
+  // breaks the word (-1 = none). See startElement.
+  int spacerGapDepth = -1;
+  // Ends the word in progress so the next text starts a new word instead of continuing it.
+  void breakInlineWord();
   std::unique_ptr<ParsedText> currentTextBlock = nullptr;
   // Ruby text state
   bool inRuby = false;

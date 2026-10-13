@@ -183,6 +183,10 @@ bool isTableStructuralTag(const char* name) {
   return strcmp(name, "table") == 0 || strcmp(name, "tr") == 0 || strcmp(name, "td") == 0 || strcmp(name, "th") == 0;
 }
 
+namespace {
+bool hasPositiveLength(const bool defined, const CssLength& length) { return defined && length.value > 0.0f; }
+}  // namespace
+
 void ChapterHtmlSlimParser::applyDirectionToEntry(StyleStackEntry& entry, const CssStyle& css) {
   if (css.hasDirection()) {
     entry.hasDirection = true;
@@ -360,6 +364,11 @@ void ChapterHtmlSlimParser::setCurrentPageVisibleOffset(const uint32_t offset) {
   // contains leading formatting whitespace before its first rendered word.
   currentPageVisibleOffset = completedPageCount == 0 ? 0 : offset;
   currentPageVisibleOffsetSet = true;
+}
+
+void ChapterHtmlSlimParser::breakInlineWord() {
+  if (partWordBufferIndex > 0) flushPartWordBuffer();
+  nextWordContinues = false;
 }
 
 // flush the contents of partWordBuffer to currentTextBlock
@@ -1863,6 +1872,17 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
     self->inlineStyleStack.push_back(entry);
     self->updateEffectiveInlineStyle();
   } else if (strcmp(name, "span") == 0 || !isHeaderOrBlock(name)) {
+    // Inline box geometry is not modelled, but an EMPTY inline element with horizontal margin or
+    // padding exists only to make a gap (a spacer span between a run-in "Q:" label and its
+    // text). Without one the inline boundary glues the neighbouring words, so its end becomes a
+    // word break. Elements with text (drop caps, small caps) are left alone: characterData
+    // cancels the gap.
+    if (self->spacerGapDepth < 0 && (hasPositiveLength(cssStyle.hasMarginLeft(), cssStyle.marginLeft) ||
+                                     hasPositiveLength(cssStyle.hasMarginRight(), cssStyle.marginRight) ||
+                                     hasPositiveLength(cssStyle.hasPaddingLeft(), cssStyle.paddingLeft) ||
+                                     hasPositiveLength(cssStyle.hasPaddingRight(), cssStyle.paddingRight))) {
+      self->spacerGapDepth = self->depth;
+    }
     // Handle span and other inline elements for CSS styling.
     const bool inheritedTableTextAlign = self->tableDepth >= 1 && cssStyle.hasTextAlign();
     if (cssStyle.hasFontWeight() || cssStyle.hasFontStyle() || cssStyle.hasTextDecoration() ||
@@ -1903,6 +1923,14 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
   auto* self = static_cast<ChapterHtmlSlimParser*>(userData);
   const bool countVisibleOffsets = self->insideBody && self->nonVisibleTextDepth == 0 && !self->syntheticCharacterData;
   const uint32_t callbackVisibleOffset = self->visibleTextOffset;
+  if (self->spacerGapDepth >= 0) {
+    for (int i = 0; i < len; i++) {
+      if (!isspace(static_cast<unsigned char>(s[i]))) {
+        self->spacerGapDepth = -1;  // has text: not a spacer
+        break;
+      }
+    }
+  }
   if (countVisibleOffsets) {
     const unsigned char* ptr = reinterpret_cast<const unsigned char*>(s);
     const unsigned char* end = ptr + len;
@@ -2359,6 +2387,11 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
   // Leaving italic tag
   if (self->italicUntilDepth == self->depth) {
     self->italicUntilDepth = INT_MAX;
+  }
+
+  if (self->spacerGapDepth >= 0 && self->spacerGapDepth >= self->depth) {
+    self->spacerGapDepth = -1;
+    self->breakInlineWord();
   }
 
   // Pop from inline style stack if we pushed an entry at this depth

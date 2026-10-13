@@ -147,7 +147,8 @@ namespace {
 // v65: Header gains the paragraph-indent level after imageBleed.
 // v69: <pre> keeps its line breaks and leading indentation, left-aligned and unindented,
 //      inside a PageBox outline (page element tag 4).
-constexpr uint8_t SECTION_FILE_VERSION = 69;
+// v70: An empty inline element with horizontal margin/padding (a spacer span) breaks the word.
+constexpr uint8_t SECTION_FILE_VERSION = 70;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
@@ -553,6 +554,7 @@ bool Section::startBuild(const ReaderRenderSpec& spec, const std::function<void(
     SdDebugLog::log("SCT", "BUILD-START spine=%d free=%u largest8=%u required=%u html=%u", spineIndex,
                     (unsigned)freeHeap, (unsigned)largest8, (unsigned)requiredHeap, (unsigned)inflatedHtmlSize);
   }
+  ParsedText::takeDroppedLinkLines();  // count this build only
   // Header is written with the incomplete-version sentinel; finalizeBuild() commits it.
   writeSectionFileHeader(spec);
 
@@ -893,8 +895,10 @@ bool Section::finalizeBuild() {
   partial_ = false;
   partialPageCount_ = 0;
   pageCount = builtPageCount_;
-  SdDebugLog::log("SCT", "BUILD-DONE spine=%d pages=%d free=%u largest8=%u", spineIndex, (int)pageCount,
-                  (unsigned)esp_get_free_heap_size(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  // linkDrops = lines whose link tap targets were dropped for lack of heap (text kept).
+  SdDebugLog::log("SCT", "BUILD-DONE spine=%d pages=%d free=%u largest8=%u linkDrops=%u", spineIndex, (int)pageCount,
+                  (unsigned)esp_get_free_heap_size(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                  (unsigned)ParsedText::takeDroppedLinkLines());
   return true;
 }
 
