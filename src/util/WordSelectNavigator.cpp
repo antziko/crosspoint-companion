@@ -2,6 +2,7 @@
 
 #include <Arduino.h>  // millis(), for the word-step auto-repeat interval
 #include <GfxRenderer.h>
+#include <Memory.h>
 #include <Utf8.h>
 
 #include <algorithm>
@@ -670,7 +671,14 @@ bool WordSelectNavigator::HighlightSnapshot::capture(uint16_t x, uint16_t y, uin
   // out-of-bounds, or rejection. We do NOT pre-check capacity here because the
   // aligned-memory size differs from the naive screen-coord size, and only
   // the renderer knows the exact figure.
-  const size_t written = renderer.readFramebufferRegion(x, y, w, h, buf_, MAX_SNAPSHOT_BYTES);
+  if (!buf_) {
+    buf_ = makeUniqueNoThrow<uint8_t[]>(MAX_SNAPSHOT_BYTES);
+    if (!buf_) {  // OOM: the caller takes its full-repaint fallback
+      bytes_ = 0;
+      return false;
+    }
+  }
+  const size_t written = renderer.readFramebufferRegion(x, y, w, h, buf_.get(), MAX_SNAPSHOT_BYTES);
   if (written == 0) {
     bytes_ = 0;
     return false;
@@ -685,7 +693,7 @@ bool WordSelectNavigator::HighlightSnapshot::capture(uint16_t x, uint16_t y, uin
 
 void WordSelectNavigator::HighlightSnapshot::restore(GfxRenderer& renderer) const {
   if (bytes_ == 0) return;
-  renderer.writeFramebufferRegion(x_, y_, w_, h_, buf_);
+  renderer.writeFramebufferRegion(x_, y_, w_, h_, buf_.get());
 }
 
 void WordSelectNavigator::renderHighlight(const GfxRenderer& renderer, int lineHeight, const bool hollowAnchor) const {

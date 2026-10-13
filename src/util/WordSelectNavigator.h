@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -267,17 +268,18 @@ class WordSelectNavigator {
                                                   int currWordIdx);
 
   // Pixel snapshot for one rectangular framebuffer region. The pixel buffer is
-  // inline (a fixed-size array member), so the snapshot does no heap allocation
-  // — but it lives wherever its enclosing WordSelectNavigator lives, which in
-  // practice is on the heap inside DictionaryWordSelectActivity /
-  // DictionaryDefinitionActivity. Used by renderHighlightDifferential to
+  // allocated on the first capture and kept for the navigator's lifetime, so a
+  // screen that never highlights (a definition opened from a flashcard) does not
+  // carry 4 KB inside its activity object, and the cursor moves that do use it
+  // allocate nothing. If the buffer cannot be had, capture() fails and the caller
+  // takes its full-repaint fallback. Used by renderHighlightDifferential to
   // capture pixels under a highlight before it is drawn, so a later cursor move
   // can restore them and wipe the old highlight without re-rendering the page.
   //
   // Relationship to GfxRenderer::storeBwBuffer / restoreBwBuffer: that pair
   // captures the *entire* framebuffer to a heap-allocated buffer for grayscale
   // rendering. HighlightSnapshot is region-scoped (one word's bounding rect)
-  // and stays out of the heap, so it can run on every cursor move without
+  // and reuses its one buffer, so it can run on every cursor move without
   // fragmentation pressure.
   //
   // Safety: the renderer byte-aligns the captured rectangle along the
@@ -323,7 +325,7 @@ class WordSelectNavigator {
     uint16_t w_ = 0;
     uint16_t h_ = 0;
     size_t bytes_ = 0;
-    uint8_t buf_[MAX_SNAPSHOT_BYTES] = {};
+    std::unique_ptr<uint8_t[]> buf_;
   };
 
   void reset();
