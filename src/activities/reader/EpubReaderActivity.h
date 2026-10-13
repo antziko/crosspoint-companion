@@ -493,6 +493,15 @@ class EpubReaderActivity final : public Activity {
   // must already hold the RenderLock.
   void clearDeferredReposition();
   void rememberCurrentContentOffset();
+  // A saved content offset (sync download or reflow) that still has to pick the landing page:
+  // same spine, and no explicit jump overriding it.
+  bool resumeOffsetPending() const;
+  // True once the page holding `offset` is laid out: a later page starts past it, or the
+  // section is complete.
+  bool visibleOffsetLaidOut(uint32_t offset) const;
+  // Lands a pending resume offset on its page once that page is laid out, consuming the
+  // deferred reposition. Returns true if nextPageNumber was set.
+  bool resolveResumeOffset();
   // Builds the next chapter's section cache in the background while the penultimate page of the
   // current chapter is on screen, so the forward turn into it is instant. No-op if already cached.
   void silentIndexNextChapterIfNeeded(uint16_t viewportWidth, uint16_t viewportHeight);

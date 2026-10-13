@@ -3302,7 +3302,11 @@ void EpubReaderActivity::render(RenderLock&& lock) {
       // as-is: consume any pending settings-change reposition. Without this, a chapter total
       // saved while the section was still building (i.e. a watermark, not the real count)
       // would remap the resume page against the finalized count and teleport the reader.
-      clearDeferredReposition();
+      // A saved content offset stays: a synced position's page number is only an estimate, and
+      // the offset names the text. resolveResumeOffset() lands it once its page is laid out.
+      cachedChapterTotalPageCount = 0;
+      resolveResumeOffset();
+      if (!resumeOffsetPending()) clearDeferredReposition();
     }
     const bool cacheComplete = cacheLoaded && !section->isPartial();
     if (!cacheComplete) {
@@ -3353,15 +3357,18 @@ void EpubReaderActivity::render(RenderLock&& lock) {
         // build in a blink and stay popup-free.
         const int target = pendingPageJump.has_value() ? *pendingPageJump : (nextPageNumber < 0 ? 0 : nextPageNumber);
         const bool anchorJump = !pendingAnchor.empty();
+        // A saved offset whose page isn't laid out yet: build until it is, not to the
+        // (estimated) saved page number.
+        const bool offsetJump = !anchorJump && resumeOffsetPending();
 
         // Landing well inside a partial: the page (or anchor, via the on-disk map) is already
         // servable, so don't restart the extension build now -- it re-lays out the WHOLE chapter
         // from page 0 (minutes of background CPU + SD writes on a giant spine), pure waste when
         // the reader never nears the watermark this session. loop() starts it lazily once the
         // reader is within PARTIAL_REBUILD_START_MARGIN pages of the watermark.
-        if (section->isPartial() &&
-            (anchorJump ? section->getPageForAnchor(pendingAnchor).has_value()
-                        : target + PARTIAL_REBUILD_START_MARGIN < static_cast<int>(section->pageCount))) {
+        if (section->isPartial() && (anchorJump ? section->getPageForAnchor(pendingAnchor).has_value()
+                                                : !offsetJump && target + PARTIAL_REBUILD_START_MARGIN <
+                                                                     static_cast<int>(section->pageCount))) {
           LOG_DBG("ERS", "Partial covers target %d of %d; deferring extension build", target, section->pageCount);
         } else {
           const size_t spineBytes =
@@ -3419,8 +3426,9 @@ void EpubReaderActivity::render(RenderLock&& lock) {
             failBuild();
             return;
           }
-          while (!section->isBuildComplete() &&
-                 (anchorJump ? !section->findAnchor(pendingAnchor) : static_cast<int>(section->pageCount) <= target)) {
+          while (!section->isBuildComplete() && (anchorJump   ? !section->findAnchor(pendingAnchor)
+                                                 : offsetJump ? !visibleOffsetLaidOut(*cachedVisibleTextOffset)
+                                                              : static_cast<int>(section->pageCount) <= target)) {
             // Anchor jump: build until the anchor's page is laid out (usually page 0), checking a
             // partial's on-disk anchor map too so an already-indexed anchor resolves immediately.
             // Otherwise: build until the target page exists. loop() builds the rest behind it.
@@ -3446,6 +3454,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
       sectionJustRebuilt = false;  // using existing cache; one rebuild is allowed if it's stale
       buildFailedSpine = -1;       // loaded OK; allow this chapter again
     }
+    resolveResumeOffset();
 
     if (pendingPageJump.has_value()) {
       section->currentPage = *pendingPageJump;
@@ -3803,6 +3812,28 @@ bool EpubReaderActivity::applyDeferredReposition() {
 void EpubReaderActivity::clearDeferredReposition() {
   cachedChapterTotalPageCount = 0;
   cachedVisibleTextOffset.reset();
+}
+
+bool EpubReaderActivity::resumeOffsetPending() const {
+  return cachedVisibleTextOffset.has_value() && currentSpineIndex == cachedSpineIndex && !pendingPageJump.has_value() &&
+         pendingAnchor.empty() && !pendingPercentJump;
+}
+
+bool EpubReaderActivity::visibleOffsetLaidOut(const uint32_t offset) const {
+  if (!section || section->pageCount == 0) return false;
+  if (!section->isBuilding() && !section->isPartial()) return true;
+  const auto lastStart = section->getVisibleTextOffsetForPage(static_cast<uint16_t>(section->pageCount - 1));
+  return lastStart.has_value() && *lastStart > offset;
+}
+
+bool EpubReaderActivity::resolveResumeOffset() {
+  if (!resumeOffsetPending() || !visibleOffsetLaidOut(*cachedVisibleTextOffset)) return false;
+  const auto page = section->getPageForVisibleTextOffset(*cachedVisibleTextOffset, /*preferFirstAtOffset=*/true);
+  if (!page.has_value()) return false;
+  LOG_DBG("ERS", "Resume offset %u -> page %u (saved page %d)", *cachedVisibleTextOffset, *page, nextPageNumber);
+  nextPageNumber = *page;
+  clearDeferredReposition();
+  return true;
 }
 
 void EpubReaderActivity::rememberCurrentContentOffset() {
