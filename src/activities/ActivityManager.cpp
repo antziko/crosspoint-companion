@@ -1,5 +1,6 @@
 #include "ActivityManager.h"
 
+#include <BoardConfig.h>
 #include <FontCacheManager.h>
 #include <HalDisplay.h>
 #include <HalGPIO.h>
@@ -86,6 +87,7 @@ void ActivityManager::renderTaskLoop() {
       // one exception (it paints from onEnter, outside this resolution) and clears
       // it explicitly.
       display.setInverted(SETTINGS.screenInverted != 0);
+      syncCleanGapScrub();
       renderInProgress_ = true;
       currentActivity->render(std::move(lock));
       renderInProgress_ = false;
@@ -481,6 +483,13 @@ bool ActivityManager::isReaderActivity() const {
   return std::any_of(stackActivities.begin(), stackActivities.end(),
                      [](const auto& activity) { return activity->isReaderActivity(); }) ||
          (currentActivity && currentActivity->isReaderActivity());
+}
+
+void ActivityManager::syncCleanGapScrub() const {
+  // The menu chrome burn-in it relieves was seen on the X4 only; on X3 and X4 Pro it would only
+  // add flashes.
+  static const bool boardWants = gpio.deviceIsX4() && !BoardConfig::isX4Pro();
+  renderer.setCleanGapScrub(boardWants && !isInReaderContext());
 }
 
 bool ActivityManager::isInReaderContext() const {

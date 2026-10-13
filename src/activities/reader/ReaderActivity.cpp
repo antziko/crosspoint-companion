@@ -4,8 +4,10 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Memory.h>
+#include <SdDebugLog.h>
 #include <TrustedTime.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 
 #include <optional>
 
@@ -185,7 +187,19 @@ void ReaderActivity::onEnter() {
 
   // Don't load a book while boot-time background NTP holds WiFi up — the
   // fragmented heap can't fit the EPUB inflate window and the open OOM-aborts.
+  const bool ntpWasActive = NtpBg::active;
+  const unsigned long ntpWaitStart = millis();
   waitOutBackgroundNtpSync(renderer, mappedInput);
+  // The heap the book opens on: a small largest block here is what later layout OOMs
+  // run out of. ntpBoot = the boot clock sync ran this boot (X4 Wi-Fi, see main.cpp).
+  // Forced past the per-context gate (the reader keeps it off); sdCardLogging still gates.
+  const bool logWasEnabled = SdDebugLog::isEnabled();
+  SdDebugLog::setEnabled(true);
+  SdDebugLog::log("MEM", "book-open free=%u largest=%u minEver=%u ntpBoot=%d ntpWaitMs=%lu",
+                  (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                  (unsigned)ESP.getMinFreeHeap(), NtpBg::startedThisBoot ? 1 : 0,
+                  ntpWasActive ? millis() - ntpWaitStart : 0UL);
+  SdDebugLog::setEnabled(logWasEnabled);
 
   sdFontSystem.ensureLoaded(renderer);
 

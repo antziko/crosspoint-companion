@@ -2182,7 +2182,14 @@ HalDisplay::RefreshMode GfxRenderer::applyPromotedRefresh(const HalDisplay::Refr
 HalDisplay::RefreshMode GfxRenderer::applyDwellScrub(const HalDisplay::RefreshMode refreshMode) const {
   if (refreshMode != HalDisplay::FAST_REFRESH || lastPaintMs_ == 0) return refreshMode;
   const unsigned long heldMs = millis() - lastPaintMs_;
-  if (heldMs < DWELL_SCRUB_MS) return refreshMode;
+  const unsigned long sinceCleanMs = millis() - lastCleanPaintMs_;
+  if (heldMs < DWELL_SCRUB_MS) {
+    if (!cleanGapScrub_ || sinceCleanMs < CLEAN_GAP_SCRUB_MS) return refreshMode;
+    SdDebugLog::log("GFX", "clean-gap scrub sinceCleanMs=%lu paintsFast=%u inverted=%u ink=%d%%", sinceCleanMs,
+                    static_cast<unsigned>(paintCounts_[HalDisplay::FAST_REFRESH]), display.isInverted() ? 1u : 0u,
+                    frameInkPercent());
+    return HalDisplay::SCRUB_REFRESH;
+  }
   // ink is the shape being driven out, and it is read BEFORE the paint, so it describes the
   // OUTGOING frame -- the one that did the imprinting.
   SdDebugLog::log("GFX", "dwell scrub heldMs=%lu inverted=%u ink=%d%%", heldMs, display.isInverted() ? 1u : 0u,
@@ -2232,6 +2239,9 @@ void GfxRenderer::displayBuffer(HalDisplay::RefreshMode refreshMode) const {
 // has this image been held", and a 1.5 s waveform is not part of that hold.
 void GfxRenderer::notePaint(const HalDisplay::RefreshMode mode) const {
   lastPaintMs_ = millis();
+  // The first paint after boot starts the clean-gap clock even when it is FAST: boot and wake
+  // both put a fully driven frame on the glass first.
+  if (mode != HalDisplay::FAST_REFRESH || lastCleanPaintMs_ == 0) lastCleanPaintMs_ = lastPaintMs_;
   // An activation always leaves the rails up on panels that do not power down per refresh; the
   // ones that do report it by being parked already, and their next paint just restarts the clock.
   if (panelPoweredSinceMs_ == 0) panelPoweredSinceMs_ = lastPaintMs_;

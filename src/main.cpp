@@ -487,13 +487,42 @@ void setupDisplayAndFonts(bool seamless = false) {
 // enough to make X4 stats land on the timeline/heatmap instead of "Undated". No-op
 // on X3 (hardware RTC), when time is already valid, when every clock feature is off,
 // or when no WiFi network is saved (so non-clock users never power the radio).
-static void maybeStartBackgroundNtpSync() {
-  if (halClock.hasHardwareRtc() || halClock.isSystemTimeValid()) return;
-  if (!SETTINGS.homeTopBarClock && !SETTINGS.homeTopBarDate && !SETTINGS.statusBarClock && !SETTINGS.statusBarDate)
+// Forced past the per-context gate like logBatteryTrace: the reader-bound start runs in
+// setup(), before boot turns the SD log on. sdCardLogging still gates.
+static void logNtpBg(const char* why, const bool started) {
+  const bool wasEnabled = SdDebugLog::isEnabled();
+  SdDebugLog::setEnabled(true);
+  SdDebugLog::log("NTP", "bg %s %s t=%lu free=%u largest=%u", started ? "start" : "skip", why, millis(),
+                  (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  SdDebugLog::setEnabled(wasEnabled);
+}
+
+static void maybeStartBackgroundNtpSync(const char* why) {
+  if (halClock.hasHardwareRtc() || halClock.isSystemTimeValid()) return;  // X3/X4 Pro: not needed, no log
+  if (!SETTINGS.homeTopBarClock && !SETTINGS.homeTopBarDate && !SETTINGS.statusBarClock && !SETTINGS.statusBarDate) {
+    logNtpBg("no-clock-shown", false);
     return;
+  }
   WIFI_STORE.loadFromFile();
   const std::string lastSsid = WIFI_STORE.getLastConnectedSsid();
-  if (lastSsid.empty()) return;
+  if (lastSsid.empty()) {
+    logNtpBg("no-saved-wifi", false);
+    return;
+  }
+  // esp_wifi_init that fails for lack of heap does not fail cleanly: its own deinit path
+  // panics (xQueueGiveMutexRecursive, X4 at free=52580 largest=49140). Never start below
+  // the floor; the clock just stays unset this boot.
+  static constexpr uint32_t WIFI_INIT_MIN_FREE = 70000;
+  if (ESP.getFreeHeap() < WIFI_INIT_MIN_FREE) {
+    logNtpBg("low-heap", false);
+    return;
+  }
+  logNtpBg(why, true);
+  NtpBg::startedThisBoot = true;
+  // Bring the Wi-Fi driver up here on the caller's task, not inside ntp_bg: its long-lived
+  // blocks are then taken before whatever the caller allocates next, instead of whenever the
+  // task first gets scheduled. The task's own WiFi.mode() call is then a no-op.
+  WiFi.mode(WIFI_STA);
 
   struct NtpBgCtx {
     char ssid[33];
@@ -867,6 +896,12 @@ void setup() {
   // SOF host-link verdict before the first refresh can slice-sleep.
   gpio.pollUsbState();
 
+  // X4 (no RTC) loses the time on every sleep/boot: background-sync NTP if the clock is on.
+  // Started BEFORE the display, fonts and first screen allocate: Wi-Fi up while the review
+  // screen decoded left the heap's largest block at ~26 KB for the whole session against
+  // ~80 KB without it. A silent reboot keeps the time it had.
+  if (resume != BootResume::Silent) maybeStartBackgroundNtpSync("boot-early");
+
   setupDisplayAndFonts(resume != BootResume::Splash);
 
   switch (resume) {
@@ -897,14 +932,9 @@ void setup() {
         // allowFastInitialReaderRefresh staying false; Home is told via goHome() below.
         needsWakeRefresh = true;
       }
-      // X4: time is lost on deep sleep — background-sync NTP if the clock is on.
-      maybeStartBackgroundNtpSync();
       break;
     case BootResume::Splash:
       activityManager.goToBoot();
-      // X4: full boot also loses time — sync in the background so the home clock
-      // refreshes on every wake, not just quick-resume wakes.
-      maybeStartBackgroundNtpSync();
       break;
   }
 
@@ -1176,6 +1206,17 @@ void loop() {
 
   halTiltSensor.update(SETTINGS.tiltPageTurn, APP_STATE.activeOrientation, activityManager.isReaderActivity());
 
+  // SD tripwire fired (HalStorage::guardTripped): writes are already refused; tell the user
+  // once, so they check the card before more sessions pile onto a damaged filesystem.
+  static bool sdGuardNotified = false;
+  if (!sdGuardNotified && Storage.guardTripped()) {
+    sdGuardNotified = true;
+    RenderLock lock;
+    GUI.drawPopup(renderer, tr(STR_SD_GUARD_TRIPPED));
+    activityManager.holdForReading(4000);
+    activityManager.requestUpdate();
+  }
+
   // Under the render lock, so a step never overlaps the themes' gauge reads.
   static bool gaugeCapacityPending = true;
   if (gaugeCapacityPending) {
@@ -1202,6 +1243,7 @@ void loop() {
   }
 
   renderer.setFadingFix(SETTINGS.fadingFix);
+  activityManager.syncCleanGapScrub();
 
   // The ROM console does not depend on Arduino USB CDC's connection state.
   if ((Serial || FREEINK_LOG_TRANSPORT == FREEINK_LOG_TRANSPORT_ROM_PRINTF) && millis() - lastMemPrint >= 10000) {

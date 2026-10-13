@@ -78,6 +78,17 @@ class HalStorage {
 
   static HalStorage& getInstance() { return instance; }
 
+  // SD write tripwire (diagnostic). After write operations (throttled to once a second) the
+  // first 64 root-directory entries are read back through SdFat -- i.e. from its sector cache,
+  // where the X4 root overwrites started -- and validated as FAT entries. When several are
+  // invalid, a report (first bad entry + the recent write operations) goes to
+  // /.crosspoint/sd_guard.txt and every later write is refused until restart, so nothing more
+  // is damaged. exFAT cards are skipped.
+  bool guardTripped() const { return guardTripped_; }
+  // Records a write-type operation for the report and runs the throttled check. Called by the
+  // HAL's own write paths; must run under StorageLock.
+  void guardNoteWrite(const char* op, const char* path);
+
   class StorageLock;  // private class, used internally
 
  private:
@@ -85,6 +96,14 @@ class HalStorage {
 
   bool initialized = false;
   SemaphoreHandle_t storageMutex = nullptr;
+  volatile bool guardTripped_ = false;
+  bool guardDisabled_ = false;  // exFAT card
+  bool guardWarned_ = false;    // a below-threshold bad entry was logged once
+  unsigned long guardLastCheckMs_ = 0;
+  void guardCheckRoot(const char* trigger);
+  bool guardIsExFat();
+  void guardWriteReport(const char* trigger, int firstBadIndex, int badCount, const uint8_t* entry);
+  bool guardRefuse(const char* op, const char* path) const;
 };
 
 #define Storage HalStorage::getInstance()

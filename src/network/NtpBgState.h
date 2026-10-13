@@ -15,4 +15,6 @@
 namespace NtpBg {
 extern volatile bool active;
 extern volatile bool cancel;
+// Set by main when the sync starts (main task only); read by the book-open memory log.
+extern volatile bool startedThisBoot;
 }  // namespace NtpBg

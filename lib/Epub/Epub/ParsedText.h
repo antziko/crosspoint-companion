@@ -73,6 +73,7 @@ class ParsedText {
   bool isNaturalAlign;
   bool hasRtlWord;
   bool droppedWords = false;
+  static inline uint32_t droppedLinkLines = 0;
   // A soft flush already emitted this paragraph's first line: the rest continues it, unindented.
   bool firstLineConsumed = false;
   // A <pre> line: its first-line indent is exactly its leading spaces, never the reader's.
@@ -148,6 +149,14 @@ class ParsedText {
   // True once any word or line was dropped because an allocation failed. Callers must treat
   // the block as incomplete and fail the section build rather than cache text with holes.
   bool hadDroppedWords() const { return droppedWords; }
+  // Lines that kept their text but lost their link tap targets for lack of heap, across all
+  // blocks since the last call (Section reports and resets it per build). One builder runs
+  // at a time, so a plain counter suffices.
+  static uint32_t takeDroppedLinkLines() {
+    const uint32_t n = droppedLinkLines;
+    droppedLinkLines = 0;
+    return n;
+  }
   bool firstLineEmitted() const { return firstLineConsumed; }
   void setPreformatted(const uint8_t indentSpaces) {
     preformatted = true;

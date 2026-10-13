@@ -121,6 +121,14 @@ class GfxRenderer {
   // falsified five times over. Relieved at the moment the content changes instead, which costs
   // only the duration of a paint that was happening anyway.
   static constexpr unsigned long DWELL_SCRUB_MS = 180000;  // 3 minutes
+  // Menu chrome (title, hint bar) sits at the same pixels on every screen, so moving through
+  // menus redraws often enough that no single frame reaches DWELL_SCRUB_MS while those pixels
+  // never get a clean drive. Where enabled, a FAST paint this long after the last clean one is
+  // upgraded too. The owner turns it on per board and off in the reader, whose own refresh
+  // cadence covers page content.
+  static constexpr unsigned long CLEAN_GAP_SCRUB_MS = 180000;  // 3 minutes
+  mutable unsigned long lastCleanPaintMs_ = 0;                 // last non-FAST activation (0 = none yet)
+  bool cleanGapScrub_ = false;
   HalDisplay::RefreshMode applyDwellScrub(HalDisplay::RefreshMode refreshMode) const;
 
   // Tiled grayscale strip target. When active, drawPixel()/clearScreen()
@@ -251,6 +259,8 @@ class GfxRenderer {
 
   // Fading fix control
   void setFadingFix(const bool enabled) { fadingFix = enabled; }
+  // See CLEAN_GAP_SCRUB_MS.
+  void setCleanGapScrub(const bool enabled) { cleanGapScrub_ = enabled; }
 
   // Screen ops
   int getScreenWidth() const;

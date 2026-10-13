@@ -146,6 +146,9 @@ class ActivityManager {
   // repaint differentially drop their stale state first.
   void notifyFramebufferInvalidated();
   bool isReaderActivity() const;
+  // Turns GfxRenderer's clean-gap scrub on for X4 menus only (see CLEAN_GAP_SCRUB_MS). Run before
+  // every render and once per main loop, so a screen change never paints under the old policy.
+  void syncCleanGapScrub() const;
   // Whether the foreground screen keeps its header band; see Activity::keepsTopBar().
   bool foregroundKeepsTopBar() const;
   bool isInReaderContext() const;

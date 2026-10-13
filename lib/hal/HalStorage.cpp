@@ -10,6 +10,7 @@
 #endif
 
 #include <cassert>
+#include <cstring>
 
 #define SDCard SDCardManager::getInstance()
 
@@ -45,6 +46,146 @@ class HalStorage::StorageLock {
   StorageLock() { xSemaphoreTakeRecursive(HalStorage::getInstance().storageMutex, portMAX_DELAY); }
   ~StorageLock() { xSemaphoreGiveRecursive(HalStorage::getInstance().storageMutex); }
 };
+
+namespace {
+// SD write tripwire state (see HalStorage::guardTripped). The ring holds the most recent
+// write-type operations so the report names what ran just before the damage appeared.
+struct GuardOp {
+  uint32_t ms;
+  char op[8];
+  char task[8];
+  char path[40];
+};
+constexpr int GUARD_RING = 16;
+GuardOp guardRing[GUARD_RING] = {};
+int guardRingNext = 0;
+constexpr unsigned long GUARD_CHECK_INTERVAL_MS = 1000;
+constexpr int GUARD_ROOT_ENTRIES = 64;
+constexpr int GUARD_TRIP_BAD_ENTRIES = 4;
+constexpr char GUARD_REPORT_PATH[] = "/.crosspoint/sd_guard.txt";
+
+// A FAT directory entry as SdFat or any FAT driver would have written it. Deleted (0xE5)
+// entries keep stale bytes and are accepted as-is.
+bool guardEntryValid(const uint8_t* e) {
+  if (e[0] == 0xE5) return true;
+  if (e[11] == 0x0F) {  // long-name fragment
+    const uint8_t ord = e[0] & 0x1F;
+    return ord >= 1 && ord <= 20 && e[12] == 0 && e[26] == 0 && e[27] == 0;
+  }
+  if (e[11] & 0xC0) return false;
+  static constexpr char ILLEGAL[] = "\"*+,/:;<=>?[\\]|";
+  for (int i = 0; i < 11; i++) {
+    const uint8_t c = e[i];
+    if (i == 0 && c == 0x05) continue;  // escaped 0xE5 first byte
+    if (c < 0x20 || (c < 0x80 && strchr(ILLEGAL, static_cast<char>(c)) != nullptr)) return false;
+  }
+  return true;
+}
+}  // namespace
+
+void HalStorage::guardNoteWrite(const char* op, const char* path) {
+  GuardOp& g = guardRing[guardRingNext];
+  guardRingNext = (guardRingNext + 1) % GUARD_RING;
+  g.ms = millis();
+  snprintf(g.op, sizeof(g.op), "%s", op);
+  snprintf(g.task, sizeof(g.task), "%s", pcTaskGetName(nullptr));
+  // Keep the tail of long paths: the file name is the useful part.
+  const size_t len = path ? strlen(path) : 0;
+  snprintf(g.path, sizeof(g.path), "%s",
+           len >= sizeof(g.path) ? path + len - (sizeof(g.path) - 1) : (path ? path : ""));
+  if (guardTripped_ || guardDisabled_ || millis() - guardLastCheckMs_ < GUARD_CHECK_INTERVAL_MS) return;
+  guardLastCheckMs_ = millis();
+  guardCheckRoot(op);
+}
+
+void HalStorage::guardCheckRoot(const char* trigger) {
+  // exFAT root entries follow a different format; the check is FAT12/16/32 only.
+  if (guardIsExFat()) {
+    guardDisabled_ = true;
+    return;
+  }
+  // Static, not stack: this runs on whichever task wrote, some with 4 KB stacks. StorageLock
+  // (held by every caller) serialises use.
+  static FsFile dir;
+  static uint8_t e[32];
+  static uint8_t firstBad[32];
+  dir = SDCard.open("/", O_RDONLY);
+  if (!dir) {
+    LOG_ERR("SDGUARD", "root unreadable; check skipped");
+    return;
+  }
+  int badCount = 0;
+  int firstBadIndex = -1;
+  for (int i = 0; i < GUARD_ROOT_ENTRIES; i++) {
+    if (dir.read(e, sizeof(e)) != static_cast<int>(sizeof(e))) break;
+    if (e[0] == 0x00) break;  // end of directory
+    if (guardEntryValid(e)) continue;
+    if (badCount++ == 0) {
+      firstBadIndex = i;
+      memcpy(firstBad, e, sizeof(firstBad));
+    }
+  }
+  dir.close();
+  // Both overwrites seen so far left 12-14 consecutive invalid entries. One odd entry is more
+  // likely a legal name this validator does not know, and is only logged.
+  if (badCount == 0) return;
+  if (badCount < GUARD_TRIP_BAD_ENTRIES) {
+    if (!guardWarned_) {
+      guardWarned_ = true;
+      LOG_ERR("SDGUARD", "root entry %d looks invalid (%d bad); not tripping", firstBadIndex, badCount);
+    }
+    return;
+  }
+  LOG_ERR("SDGUARD", "%d invalid root entries from %d after %s; SD writes stopped", badCount, firstBadIndex, trigger);
+  guardWriteReport(trigger, firstBadIndex, badCount, firstBad);
+  guardTripped_ = true;
+}
+
+// Written while writes are still allowed, straight through SdFat (the HAL write paths would
+// re-enter the guard).
+void HalStorage::guardWriteReport(const char* trigger, const int firstBadIndex, const int badCount,
+                                  const uint8_t* entry) {
+  static FsFile rep;
+  static char line[160];
+  rep = SDCard.open(GUARD_REPORT_PATH, O_RDWR | O_CREAT | O_APPEND);
+  if (!rep) return;
+  int n = snprintf(line, sizeof(line),
+                   "[%lu] TRIPPED %d invalid root entries from %d, check after '%s' (task %s)\nentry:", millis(),
+                   badCount, firstBadIndex, trigger, pcTaskGetName(nullptr));
+  rep.write(line, n);
+  for (int b = 0; b < 32; b++) {
+    n = snprintf(line, sizeof(line), " %02x", entry[b]);
+    rep.write(line, n);
+  }
+  rep.write("\nrecent writes (oldest first):\n", 32);
+  for (int k = 0; k < GUARD_RING; k++) {
+    const GuardOp& g = guardRing[(guardRingNext + k) % GUARD_RING];
+    if (g.ms == 0) continue;
+    n = snprintf(line, sizeof(line), "  [%lu] %-7s %-7s %s\n", static_cast<unsigned long>(g.ms), g.task, g.op, g.path);
+    rep.write(line, n);
+  }
+  rep.close();
+}
+
+// Sector 0 is either the volume boot record ("EXFAT   " at offset 3) or an MBR whose first
+// partition is type 0x07 (exFAT/NTFS). Read once; the card does not change format mid-session.
+bool HalStorage::guardIsExFat() {
+  static int8_t cached = -1;
+  if (cached >= 0) return cached == 1;
+  auto* dev = SDCard.rawBlockDevice();
+  static uint8_t sector[512];
+  if (dev == nullptr || !dev->readSector(0, sector)) return false;
+  const bool vbr = memcmp(sector + 3, "EXFAT   ", 8) == 0;
+  const bool mbr = sector[510] == 0x55 && sector[511] == 0xAA && sector[0x1C2] == 0x07;
+  cached = (vbr || mbr) ? 1 : 0;
+  return cached == 1;
+}
+
+bool HalStorage::guardRefuse(const char* op, const char* path) const {
+  if (!guardTripped_) return false;
+  LOG_ERR("SDGUARD", "refused %s %s (SD writes stopped)", op, path ? path : "");
+  return true;
+}
 
 bool HalStorage::remount() {
   StorageLock lock;
@@ -164,10 +305,21 @@ bool HalStorage::readFileToString(const char* moduleName, const std::string& pat
 }
 
 bool HalStorage::writeFile(const char* path, const String& content) {
-  HAL_STORAGE_WRAPPED_CALL(writeFile, path, content);
+  StorageLock lock;
+  if (guardRefuse("write", path)) return false;
+  const bool ok = SDCard.writeFile(path, content);
+  guardNoteWrite("write", path);
+  return ok;
 }
 
-bool HalStorage::ensureDirectoryExists(const char* path) { HAL_STORAGE_WRAPPED_CALL(ensureDirectoryExists, path); }
+bool HalStorage::ensureDirectoryExists(const char* path) {
+  StorageLock lock;
+  if (SDCard.exists(path)) return true;
+  if (guardRefuse("mkdir", path)) return false;
+  const bool ok = SDCard.ensureDirectoryExists(path);
+  guardNoteWrite("mkdir", path);
+  return ok;
+}
 
 class HalFile::Impl {
  public:
@@ -193,23 +345,53 @@ HalFile& HalFile::operator=(HalFile&&) = default;
 
 HalFile HalStorage::open(const char* path, const oflag_t oflag) {
   StorageLock lock;  // ensure thread safety for the duration of this function
-  return HalFile(makeUniqueNoThrow<HalFile::Impl>(SDCard.open(path, oflag)));
+  const bool writes = (oflag & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND)) != 0;
+  if (writes && guardRefuse("open", path)) return HalFile();
+  HalFile f(makeUniqueNoThrow<HalFile::Impl>(SDCard.open(path, oflag)));
+  if (writes) guardNoteWrite("open", path);
+  return f;
 }
 
-bool HalStorage::mkdir(const char* path, const bool pFlag) { HAL_STORAGE_WRAPPED_CALL(mkdir, path, pFlag); }
+bool HalStorage::mkdir(const char* path, const bool pFlag) {
+  StorageLock lock;
+  if (guardRefuse("mkdir", path)) return false;
+  const bool ok = SDCard.mkdir(path, pFlag);
+  guardNoteWrite("mkdir", path);
+  return ok;
+}
 
 bool HalStorage::exists(const char* path) { HAL_STORAGE_WRAPPED_CALL(exists, path); }
 
-bool HalStorage::remove(const char* path) { HAL_STORAGE_WRAPPED_CALL(remove, path); }
+bool HalStorage::remove(const char* path) {
+  StorageLock lock;
+  if (guardRefuse("remove", path)) return false;
+  const bool ok = SDCard.remove(path);
+  guardNoteWrite("remove", path);
+  return ok;
+}
 bool HalStorage::rename(const char* oldPath, const char* newPath) {
-  HAL_STORAGE_WRAPPED_CALL(rename, oldPath, newPath);
+  StorageLock lock;
+  if (guardRefuse("rename", newPath)) return false;
+  const bool ok = SDCard.rename(oldPath, newPath);
+  guardNoteWrite("rename", newPath);
+  return ok;
 }
 
 bool HalStorage::replaceFile(const char* tmpPath, const char* path) {
-  HAL_STORAGE_WRAPPED_CALL(replaceFile, tmpPath, path);
+  StorageLock lock;
+  if (guardRefuse("replace", path)) return false;
+  const bool ok = SDCard.replaceFile(tmpPath, path);
+  guardNoteWrite("replace", path);
+  return ok;
 }
 
-bool HalStorage::rmdir(const char* path) { HAL_STORAGE_WRAPPED_CALL(rmdir, path); }
+bool HalStorage::rmdir(const char* path) {
+  StorageLock lock;
+  if (guardRefuse("rmdir", path)) return false;
+  const bool ok = SDCard.rmdir(path);
+  guardNoteWrite("rmdir", path);
+  return ok;
+}
 
 bool HalStorage::openFileForRead(const char* moduleName, const char* path, HalFile& file) {
   StorageLock lock;  // ensure thread safety for the duration of this function
@@ -236,6 +418,11 @@ bool HalStorage::openFileForRead(const char* moduleName, const String& path, Hal
 
 bool HalStorage::openFileForWrite(const char* moduleName, const char* path, HalFile& file) {
   StorageLock lock;  // ensure thread safety for the duration of this function
+  if (guardRefuse("openW", path)) {
+    file = HalFile();
+    return false;
+  }
+  guardNoteWrite("openW", path);
   FsFile fsFile;
   bool ok = SDCard.openFileForWrite(moduleName, path, fsFile);
   // A failed Impl allocation must read as a failed open: the HalFile would otherwise be
@@ -255,6 +442,11 @@ bool HalStorage::openFileForWrite(const char* moduleName, const std::string& pat
 
 bool HalStorage::openFileForAppend(const char* moduleName, const char* path, HalFile& file) {
   StorageLock lock;  // ensure thread safety for the duration of this function
+  if (guardRefuse("openA", path)) {
+    file = HalFile();
+    return false;
+  }
+  guardNoteWrite("openA", path);
   // freeink's SDCardManager has no openFileForAppend() (openFileForWrite truncates
   // with O_TRUNC); open with append flags via the generic open() instead.
   FsFile fsFile = SDCard.open(path, O_RDWR | O_CREAT | O_APPEND);
@@ -276,7 +468,13 @@ bool HalStorage::openFileForWrite(const char* moduleName, const String& path, Ha
   return openFileForWrite(moduleName, path.c_str(), file);
 }
 
-bool HalStorage::removeDir(const char* path) { HAL_STORAGE_WRAPPED_CALL(removeDir, path); }
+bool HalStorage::removeDir(const char* path) {
+  StorageLock lock;
+  if (guardRefuse("rmtree", path)) return false;
+  const bool ok = SDCard.removeDir(path);
+  guardNoteWrite("rmtree", path);
+  return ok;
+}
 
 // HalFile implementation
 // Allow doing file operations while ensuring thread safety via HalStorage's mutex.
@@ -291,7 +489,19 @@ bool HalStorage::removeDir(const char* path) { HAL_STORAGE_WRAPPED_CALL(removeDi
   assert(impl != nullptr);                 \
   return impl->file.method(__VA_ARGS__);
 
-void HalFile::flush() { HAL_FILE_WRAPPED_CALL(flush, ); }
+// Writes are refused once the SD tripwire has fired (see HalStorage::guardTripped).
+#define HAL_FILE_GUARDED_WRITE(fail, method, ...) \
+  HalStorage::StorageLock lock;                   \
+  assert(impl != nullptr);                        \
+  if (Storage.guardTripped()) return fail;        \
+  return impl->file.method(__VA_ARGS__);
+
+void HalFile::flush() {
+  HalStorage::StorageLock lock;
+  assert(impl != nullptr);
+  impl->file.flush();
+  Storage.guardNoteWrite("flush", "");
+}
 size_t HalFile::getName(char* name, size_t len) { HAL_FILE_WRAPPED_CALL(getName, name, len); }
 size_t HalFile::size() { HAL_FILE_FORWARD_CALL(size, ); }              // already thread-safe, no need to wrap
 size_t HalFile::fileSize() { HAL_FILE_FORWARD_CALL(fileSize, ); }      // already thread-safe, no need to wrap
@@ -300,15 +510,16 @@ bool HalFile::seek(size_t pos) { HAL_FILE_WRAPPED_CALL(seekSet, pos); }
 bool HalFile::seek64(uint64_t pos) { HAL_FILE_WRAPPED_CALL(seekSet, pos); }
 bool HalFile::seekCur(int64_t offset) { HAL_FILE_WRAPPED_CALL(seekCur, offset); }
 bool HalFile::seekSet(size_t offset) { HAL_FILE_WRAPPED_CALL(seekSet, offset); }
-bool HalFile::truncate(const uint64_t length) { HAL_FILE_WRAPPED_CALL(truncate, length); }
+bool HalFile::truncate(const uint64_t length) { HAL_FILE_GUARDED_WRITE(false, truncate, length); }
 int HalFile::available() const { HAL_FILE_WRAPPED_CALL(available, ); }
 size_t HalFile::position() const { HAL_FILE_WRAPPED_CALL(position, ); }
 int HalFile::read(void* buf, size_t count) { HAL_FILE_WRAPPED_CALL(read, buf, count); }
 int HalFile::read() { HAL_FILE_WRAPPED_CALL(read, ); }
-size_t HalFile::write(const uint8_t* buf, size_t count) { HAL_FILE_WRAPPED_CALL(write, buf, count); }
-size_t HalFile::write(const void* buf, size_t count) { HAL_FILE_WRAPPED_CALL(write, buf, count); }
-size_t HalFile::write(uint8_t b) { HAL_FILE_WRAPPED_CALL(write, b); }
-bool HalFile::rename(const char* newPath) { HAL_FILE_WRAPPED_CALL(rename, newPath); }
+
+size_t HalFile::write(const uint8_t* buf, size_t count) { HAL_FILE_GUARDED_WRITE(0, write, buf, count); }
+size_t HalFile::write(const void* buf, size_t count) { HAL_FILE_GUARDED_WRITE(0, write, buf, count); }
+size_t HalFile::write(uint8_t b) { HAL_FILE_GUARDED_WRITE(0, write, b); }
+bool HalFile::rename(const char* newPath) { HAL_FILE_GUARDED_WRITE(false, rename, newPath); }
 bool HalFile::isDirectory() const { HAL_FILE_FORWARD_CALL(isDirectory, ); }  // already thread-safe, no need to wrap
 void HalFile::rewindDirectory() { HAL_FILE_WRAPPED_CALL(rewindDirectory, ); }
 // The one method that tolerates a null impl, deliberately. Every other call above asserts
@@ -327,7 +538,12 @@ void HalFile::rewindDirectory() { HAL_FILE_WRAPPED_CALL(rewindDirectory, ); }
 bool HalFile::close() {
   if (!impl) return true;
   HalStorage::StorageLock lock;
-  return impl->file.close();
+  // A close syncs the file's directory entry: the moment a damaged cached directory sector
+  // would reach the card, so it is a check point for the tripwire.
+  const bool wasWritable = impl->file.isWritable();
+  const bool ok = impl->file.close();
+  if (wasWritable) Storage.guardNoteWrite("close", "");
+  return ok;
 }
 HalFile HalFile::openNextFile() {
   HalStorage::StorageLock lock;

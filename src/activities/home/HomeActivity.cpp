@@ -273,6 +273,8 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
 
 void HomeActivity::onEnter() {
   Activity::onEnter();
+  // Timestamp only: the snapshot and paint lines that follow time the entry against it.
+  SdDebugLog::log("HOME", "enter");
 
   hasOpdsServers = OPDS_STORE.hasServers();
   hasPlugins = anyPluginInstalled();

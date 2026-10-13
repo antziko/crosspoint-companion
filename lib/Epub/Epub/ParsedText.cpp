@@ -1742,9 +1742,29 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
     return willReorder ? reorderedFocusBoundaryScratch[idx] : wordFocusBoundary[lastBreakAt + idx];
   };
 
+  // Sized once from the line's distinct links, never grown: a LinkSpan carries its href
+  // inline (~262 B), so an index line of page links doubles into multi-KB blocks mid-parse,
+  // and a growth that fails aborts. Without the room, this line keeps its text and loses
+  // only its tap targets.
   std::vector<TextBlock::LinkSpan> lineLinks;
   std::vector<uint8_t> lineLinkIdsSeen;
-  for (size_t i = 0; i < lineWordCount; i++) {
+  size_t distinctLinks = 0;
+  {
+    uint8_t seen[32] = {};  // bitset over link ids 1..255
+    for (size_t i = 0; i < lineWordCount; i++) {
+      const uint8_t linkId = wordLinkIds[lastBreakAt + i];
+      if (linkId == 0 || linkId > linkTargets.size() || (seen[linkId >> 3] & (1u << (linkId & 7)))) continue;
+      seen[linkId >> 3] |= static_cast<uint8_t>(1u << (linkId & 7));
+      distinctLinks++;
+    }
+  }
+  const bool linksFit = distinctLinks == 0 ||
+                        (reserveNoThrow(lineLinks, distinctLinks) && reserveNoThrow(lineLinkIdsSeen, distinctLinks));
+  if (!linksFit) {
+    LOG_ERR("PTX", "OOM: %u link spans dropped from a line", static_cast<unsigned>(distinctLinks));
+    droppedLinkLines++;
+  }
+  for (size_t i = 0; i < lineWordCount && linksFit && distinctLinks > 0; i++) {
     const uint8_t linkId = wordLinkIds[lastBreakAt + (willReorder ? visualOrderScratch[i] : i)];
     if (linkId == 0 || linkId > linkTargets.size()) continue;
 
