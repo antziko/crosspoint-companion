@@ -35,17 +35,19 @@ Placement centeredPlacement(int imgWidth, int imgHeight, int screenWidth, int sc
 }
 
 void applyGrayscaleOverlay(GfxRenderer& renderer, const Bitmap& bitmap, int x, int y, int screenWidth, int screenHeight,
-                           float cropX, float cropY) {
+                           float cropX, float cropY, const PlaneHook onPlane) {
   bitmap.rewindToData();
   renderer.clearScreen(0x00);
   renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
   renderer.drawBitmap(bitmap, x, y, screenWidth, screenHeight, cropX, cropY);
+  if (onPlane.fn) onPlane.fn(onPlane.ctx, renderer);
   renderer.copyGrayscaleLsbBuffers();
 
   bitmap.rewindToData();
   renderer.clearScreen(0x00);
   renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
   renderer.drawBitmap(bitmap, x, y, screenWidth, screenHeight, cropX, cropY);
+  if (onPlane.fn) onPlane.fn(onPlane.ctx, renderer);
   renderer.copyGrayscaleMsbBuffers();
 
   renderer.displayGrayBuffer();

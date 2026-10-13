@@ -27,7 +27,13 @@ Placement centeredPlacement(int imgWidth, int imgHeight, int screenWidth, int sc
 // and drive the panel with the combined gray frame. The caller is responsible for the
 // prior BW pass; call this only when bitmap.hasGreyscale() on a grayscale-capable panel.
 // Leaves the renderer back in BW mode. cropX/cropY mirror GfxRenderer::drawBitmap().
+// `onPlane`, when set, sees each finished plane in the framebuffer (LSB, then MSB) before it
+// goes to the panel.
+struct PlaneHook {
+  void* ctx = nullptr;
+  void (*fn)(void* ctx, const GfxRenderer& renderer) = nullptr;
+};
 void applyGrayscaleOverlay(GfxRenderer& renderer, const Bitmap& bitmap, int x, int y, int screenWidth, int screenHeight,
-                           float cropX = 0.0f, float cropY = 0.0f);
+                           float cropX = 0.0f, float cropY = 0.0f, PlaneHook onPlane = {});
 
 }  // namespace BitmapRenderUtils

@@ -32,6 +32,10 @@ class CrossPointState : public PersistableStore<CrossPointState> {
   uint8_t sleepDeckShown[SLEEP_DECK_MAX / 8] = {};  // bit i set => image i shown this cycle (64 bytes)
   uint16_t sleepDeckSize = 0;                       // folder size the current cycle was built for
   uint16_t sleepDeckShownCount = 0;                 // images shown so far this cycle
+  // Wallpaper count of a folder too large for the deck (0 = unknown), and how many sleeps have
+  // picked from it since it was counted. Lets SleepActivity skip the counting pass.
+  uint16_t sleepFolderFiles = 0;
+  uint8_t sleepFolderAge = 0;
   uint8_t readerActivityLoadCount = 0;
   uint8_t batteryGraphRange = 0;  // Settings > Battery level graph: 0 = 24 h, 1 = 7 days, 2 = 30 days
   bool lastSleepFromReader = false;

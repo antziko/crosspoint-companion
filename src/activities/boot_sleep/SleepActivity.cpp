@@ -327,18 +327,32 @@ void SleepActivity::renderCustomSleepScreen() const {
     // only one actually opened and BMP-parsed (a corrupt pick falls through to default).
     char name[500];
 
-    // Pass 1: count BMP candidates.
+    // Pass 1: count BMP candidates. A folder too large for the deck skips it: the count from an
+    // earlier sleep picks the index and pass 2 confirms it (a stale count that runs out re-picks
+    // from the true one). Recounted every SLEEP_RECOUNT_EVERY sleeps so added images get picked.
+    static constexpr uint8_t SLEEP_RECOUNT_EVERY = 8;
     uint16_t numFiles = 0;
-    for (auto dirFile = dir.openNextFile(); dirFile; dirFile = dir.openNextFile()) {
-      if (dirFile.isDirectory()) {
+    bool countKnown = false;
+    if (APP_STATE.sleepFolderFiles > CrossPointState::SLEEP_DECK_MAX &&
+        APP_STATE.sleepFolderAge < SLEEP_RECOUNT_EVERY) {
+      numFiles = APP_STATE.sleepFolderFiles;
+      APP_STATE.sleepFolderAge++;
+    } else {
+      for (auto dirFile = dir.openNextFile(); dirFile; dirFile = dir.openNextFile()) {
+        if (dirFile.isDirectory()) {
+          dirFile.close();
+          continue;
+        }
+        dirFile.getName(name, sizeof(name));
         dirFile.close();
-        continue;
+        if (name[0] == '.' || !FsHelpers::hasBmpExtension(std::string(name))) continue;
+        if (++numFiles == UINT16_MAX) break;  // guard the counter
       }
-      dirFile.getName(name, sizeof(name));
-      dirFile.close();
-      if (name[0] == '.' || !FsHelpers::hasBmpExtension(std::string(name))) continue;
-      if (++numFiles == UINT16_MAX) break;  // guard the counter
+      countKnown = true;
+      APP_STATE.sleepFolderFiles = numFiles;
+      APP_STATE.sleepFolderAge = 0;
     }
+    SdDebugLog::log("SLP", "pick files=%u counted=%d", static_cast<unsigned>(numFiles), countKnown ? 1 : 0);
 
     if (numFiles > 0) {
       // Hybrid selection:
@@ -384,55 +398,74 @@ void SleepActivity::renderCustomSleepScreen() const {
                 (unsigned)CrossPointState::SLEEP_DECK_MAX, pickIndex);
       }
 
-      // Pass 2: walk to the chosen candidate and render it.
-      dir.rewindDirectory();
-      uint16_t idx = 0;
-      for (auto dirFile = dir.openNextFile(); dirFile; dirFile = dir.openNextFile()) {
-        if (dirFile.isDirectory()) {
+      // Pass 2: walk to the chosen candidate and render it. A second attempt only follows a
+      // remembered count that ran out before the pick.
+      for (int attempt = 0; attempt < 2; attempt++) {
+        dir.rewindDirectory();
+        uint16_t idx = 0;
+        bool pickFailed = false;
+        for (auto dirFile = dir.openNextFile(); dirFile; dirFile = dir.openNextFile()) {
+          if (dirFile.isDirectory()) {
+            dirFile.close();
+            continue;
+          }
+          dirFile.getName(name, sizeof(name));
+          if (name[0] == '.' || !FsHelpers::hasBmpExtension(std::string(name))) {
+            dirFile.close();
+            continue;
+          }
+          if (idx != pickIndex) {
+            idx++;
+            dirFile.close();
+            continue;
+          }
+          // This is the pick. Build the path, then open+parse it specifically.
+          const auto filename = std::string(sleepDir) + "/" + name;
           dirFile.close();
-          continue;
-        }
-        dirFile.getName(name, sizeof(name));
-        if (name[0] == '.' || !FsHelpers::hasBmpExtension(std::string(name))) {
-          dirFile.close();
-          continue;
-        }
-        if (idx != pickIndex) {
-          idx++;
-          dirFile.close();
-          continue;
-        }
-        // This is the pick. Build the path, then open+parse it specifically.
-        const auto filename = std::string(sleepDir) + "/" + name;
-        dirFile.close();
-        HalFile randFile;
-        if (Storage.openFileForRead("SLP", filename, randFile)) {
-          LOG_DBG("SLP", "Randomly loading: %s", filename.c_str());
-          Bitmap bitmap(randFile, true);
-          configureSleepBitmap(bitmap, renderer);  // dither target + halftone tone
-          if (bitmap.parseHeaders() == BmpReaderError::Ok) {
-            // Record the shown wallpaper so the on-wake review prompt can offer
-            // keep/remove for it. Skipped implicitly for already-kept images (the
-            // prompt ignores ".keep.bmp" picks on wake).
-            APP_STATE.lastSleepImagePath = filename;
-            APP_STATE.saveToFile();
-            SdDebugLog::log("SLP", "wallpaper=%s", filename.c_str());
-            renderBitmapSleepScreen(bitmap);
-            // The on-wake review will show this same frame: save it so the review need not
-            // decode the BMP again. Only when that review will run, and only a B/W render.
-            if (SETTINGS.reviewSleepImageOnWake && !FsHelpers::isKeptSleepImage(filename) &&
-                !(bitmap.hasGreyscale() && sleepImageUsesGrayscale(renderer))) {
-              const unsigned long saveStart = millis();
-              SleepReviewFrame::save(renderer, filename);
-              SdDebugLog::log("SLP", "review frame saved ms=%lu", millis() - saveStart);
+          HalFile randFile;
+          if (Storage.openFileForRead("SLP", filename, randFile)) {
+            LOG_DBG("SLP", "Randomly loading: %s", filename.c_str());
+            Bitmap bitmap(randFile, true);
+            configureSleepBitmap(bitmap, renderer);  // dither target + halftone tone
+            if (bitmap.parseHeaders() == BmpReaderError::Ok) {
+              // Record the shown wallpaper so the on-wake review prompt can offer
+              // keep/remove for it. Skipped implicitly for already-kept images (the
+              // prompt ignores ".keep.bmp" picks on wake).
+              APP_STATE.lastSleepImagePath = filename;
+              APP_STATE.saveToFile();
+              SdDebugLog::log("SLP", "wallpaper=%s", filename.c_str());
+              // The on-wake review will show this same frame: save its planes as they are drawn
+              // so the review need not decode the BMP again. Only when that review will run.
+              SleepReviewFrame::Writer frame;
+              if (SETTINGS.reviewSleepImageOnWake && !FsHelpers::isKeptSleepImage(filename)) {
+                const bool gray = bitmap.hasGreyscale() && sleepImageUsesGrayscale(renderer);
+                frame.begin(renderer, filename, gray ? SleepReviewFrame::PLANES_GRAY : SleepReviewFrame::PLANES_BW);
+              }
+              renderBitmapSleepScreen(bitmap, frame.active() ? &frame : nullptr);
+              if (frame.active()) {
+                const unsigned long finishStart = millis();
+                const bool saved = frame.finish();
+                SdDebugLog::log("SLP", "review frame %s finishMs=%lu", saved ? "saved" : "failed",
+                                millis() - finishStart);
+              }
+              randFile.close();
+              dir.close();
+              return;
             }
             randFile.close();
-            dir.close();
-            return;
           }
-          randFile.close();
+          pickFailed = true;
+          break;  // open/parse failed → fall through to the default screen
         }
-        break;  // open/parse failed → fall through to the default screen
+        if (pickFailed || countKnown || idx == 0) break;
+        // Images were removed since the count: idx is the true count now.
+        SdDebugLog::log("SLP", "pick stale count=%u actual=%u", static_cast<unsigned>(numFiles),
+                        static_cast<unsigned>(idx));
+        numFiles = idx;
+        countKnown = true;
+        APP_STATE.sleepFolderFiles = numFiles;
+        APP_STATE.sleepFolderAge = 0;
+        pickIndex = static_cast<uint16_t>(esp_random() % numFiles);
       }
     }
   }
@@ -488,7 +521,7 @@ void SleepActivity::renderDefaultSleepScreen() const {
   paintSleepFrame();
 }
 
-void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap) const {
+void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap, SleepReviewFrame::Writer* frameOut) const {
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
 
@@ -528,6 +561,11 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap) const {
   if (sleepImageInverts()) {
     renderer.invertScreen();
   }
+  if (frameOut) {
+    const unsigned long t = millis();
+    frameOut->addPlane(renderer);
+    SdDebugLog::log("SLP", "review frame plane=bw ms=%lu", millis() - t);
+  }
 
   if (hasGreyscale) {
     // OEM grayscale pipeline base. Must stay HALF: the gray nudge LUT is
@@ -543,7 +581,12 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap) const {
 
   if (hasGreyscale) {
     const unsigned long overlayStartMs = millis();
-    BitmapRenderUtils::applyGrayscaleOverlay(renderer, bitmap, x, y, pageWidth, pageHeight, cropX, cropY);
+    BitmapRenderUtils::PlaneHook hook;
+    if (frameOut) {
+      hook.ctx = frameOut;
+      hook.fn = [](void* ctx, const GfxRenderer& r) { static_cast<SleepReviewFrame::Writer*>(ctx)->addPlane(r); };
+    }
+    BitmapRenderUtils::applyGrayscaleOverlay(renderer, bitmap, x, y, pageWidth, pageHeight, cropX, cropY, hook);
     SdDebugLog::log("SLP", "paint gray-overlay ms=%lu", millis() - overlayStartMs);
   }
 }

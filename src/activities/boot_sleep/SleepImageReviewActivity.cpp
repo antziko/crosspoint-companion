@@ -69,15 +69,34 @@ void SleepImageReviewActivity::renderImage() {
   // leaves behind reaches the next screen. On X4 the two are the same refresh.
   //
   // Fast path: the frame the sleep screen drew, saved on the way into sleep. It loads in
-  // a fraction of the decode, so no loading popup goes up over the wallpaper first.
+  // a fraction of the decode, so no loading popup goes up over the wallpaper first. A
+  // grayscale frame replays the sleep render's own sequence: BW base, then the two planes.
   const unsigned long loadStart = millis();
-  if (SleepReviewFrame::load(renderer, imagePath)) {
-    drawControls();
-    const unsigned long paintStart = millis();
-    renderer.displayBuffer(HalDisplay::SCRUB_REFRESH);
-    shownGrayscale_ = false;
-    logPaint("saved", paintStart - loadStart, millis() - paintStart, false);
-    return;
+  {
+    SleepReviewFrame::Reader saved;
+    if (saved.open(renderer, imagePath) && saved.readPlane(renderer)) {
+      drawControls();
+      const unsigned long paintStart = millis();
+      if (saved.planes() == SleepReviewFrame::PLANES_GRAY) {
+        renderer.displayGrayscaleBase(HalDisplay::HALF_REFRESH);
+        const unsigned long baseMs = millis() - paintStart;
+        shownGrayscale_ = saved.readPlane(renderer);
+        if (shownGrayscale_) renderer.copyGrayscaleLsbBuffers();
+        shownGrayscale_ = shownGrayscale_ && saved.readPlane(renderer);
+        if (shownGrayscale_) {
+          renderer.copyGrayscaleMsbBuffers();
+          renderer.displayGrayBuffer();
+        } else {
+          LOG_ERR("SLPR", "Saved gray planes unreadable; showing the B/W base");
+        }
+        logPaint("saved", paintStart - loadStart, baseMs, shownGrayscale_);
+      } else {
+        renderer.displayBuffer(HalDisplay::SCRUB_REFRESH);
+        shownGrayscale_ = false;
+        logPaint("saved", paintStart - loadStart, millis() - paintStart, false);
+      }
+      return;
+    }
   }
 
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
@@ -176,7 +195,9 @@ bool moveOrDropDuplicate(const std::string& from, const std::string& to) {
 }  // namespace
 
 void SleepImageReviewActivity::doKeep() {
+  const unsigned long t0 = millis();
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+  const unsigned long tPopup = millis();
 
   // "<dir>/<name>.bmp" -> "<dir>/<name>.keep.bmp". hasBmpExtension still matches, so
   // the image stays in the sleep rotation; isKeptSleepImage() skips it on future wakes.
@@ -191,13 +212,19 @@ void SleepImageReviewActivity::doKeep() {
   // desync the "already shown" bitset. Invalidate it so the next sleep starts a fresh
   // cycle. Zero allocation — resetSleepDeck() only clears the existing 64-byte bitset.
   if (ok) APP_STATE.resetSleepDeck(0);
+  const unsigned long tFile = millis();
   GUI.drawPopup(renderer, ok ? tr(STR_DONE) : tr(STR_FAILED_LOWER));
+  const unsigned long tDone = millis();
   activityManager.holdForReading(800);
+  SdDebugLog::log("SLPR", "%s timing loadingPopup=%lu file=%lu donePopup=%lu hold=%lu", "keep", tPopup - t0,
+                  tFile - tPopup, tDone - tFile, millis() - tDone);
   finishToDestination();
 }
 
 void SleepImageReviewActivity::doRemove() {
+  const unsigned long t0 = millis();
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+  const unsigned long tPopup = millis();
 
   const std::string hidden = hiddenPathFor(imagePath);
   const bool duplicate = Storage.exists(hidden.c_str());
@@ -207,8 +234,12 @@ void SleepImageReviewActivity::doRemove() {
   // (file count changed), but invalidate explicitly so the positional bitset never maps
   // to the wrong files in between. Zero allocation (clears the existing bitset).
   if (ok) APP_STATE.resetSleepDeck(0);
+  const unsigned long tFile = millis();
   GUI.drawPopup(renderer, ok ? tr(STR_DONE) : tr(STR_FAILED_LOWER));
+  const unsigned long tDone = millis();
   activityManager.holdForReading(800);
+  SdDebugLog::log("SLPR", "%s timing loadingPopup=%lu file=%lu donePopup=%lu hold=%lu", "remove", tPopup - t0,
+                  tFile - tPopup, tDone - tFile, millis() - tDone);
   finishToDestination();
 }
 
@@ -229,6 +260,17 @@ void SleepImageReviewActivity::finishToDestination() {
 
 void SleepImageReviewActivity::onExit() {
   Activity::onExit();
+  // Night mode with Clean on Screen Change: the next screen's opening frame is a scrub
+  // anyway (ActivityManager::armEntryScrub), so a clean here is the same waveform twice
+  // (~1.5 s on X4 Pro). Arm that scrub ourselves so it holds whatever screen comes next.
+  // X3 keeps its clean (HALF there is the three-pass sync), and so does a grayscale render
+  // (its mid-grays need two passes).
+  if (SETTINGS.screenInverted && SETTINGS.cleanOnScreenChange() && !gpio.deviceIsX3() && !shownGrayscale_) {
+    renderer.promoteNextRefresh(HalDisplay::SCRUB_REFRESH, "review-exit");
+    SdDebugLog::log("SLPR", "exit clean skipped: next screen scrubs");
+    return;
+  }
+  const unsigned long cleanStart = millis();
   renderer.clearScreen();
   renderer.displayBuffer(HalDisplay::HALF_REFRESH);
   // One HALF leaves the grayscale overlay's mid-grays speckled on X4, and every paint after
@@ -238,6 +280,8 @@ void SleepImageReviewActivity::onExit() {
     renderer.displayBuffer(HalDisplay::HALF_REFRESH);
     SdDebugLog::log("SLPR", "exit grayscale clean passes=2");
   }
+  // Read against the next screen's first paint: in night mode that paint may scrub again.
+  SdDebugLog::log("SLPR", "exit clean ms=%lu", millis() - cleanStart);
 }
 
 void SleepImageReviewActivity::loop() {

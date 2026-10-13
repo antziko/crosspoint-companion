@@ -28,6 +28,8 @@ void CrossPointState::toJson(JsonDocument& doc) const {
   for (size_t i = 0; i < sizeof(sleepDeckShown); i++) deckArr.add(sleepDeckShown[i]);
   doc["sleepDeckSize"] = sleepDeckSize;
   doc["sleepDeckShownCount"] = sleepDeckShownCount;
+  doc["sleepFolderFiles"] = sleepFolderFiles;
+  doc["sleepFolderAge"] = sleepFolderAge;
   doc["readerActivityLoadCount"] = readerActivityLoadCount;
   doc["batteryGraphRange"] = batteryGraphRange;
   doc["lastSleepFromReader"] = lastSleepFromReader;
@@ -48,6 +50,8 @@ bool CrossPointState::fromJson(JsonVariantConst doc) {
   }
   sleepDeckSize = doc["sleepDeckSize"] | static_cast<uint16_t>(0);
   sleepDeckShownCount = doc["sleepDeckShownCount"] | static_cast<uint16_t>(0);
+  sleepFolderFiles = doc["sleepFolderFiles"] | static_cast<uint16_t>(0);
+  sleepFolderAge = doc["sleepFolderAge"] | static_cast<uint8_t>(0);
   readerActivityLoadCount = doc["readerActivityLoadCount"] | static_cast<uint8_t>(0);
   batteryGraphRange = doc["batteryGraphRange"] | static_cast<uint8_t>(0);
   lastSleepFromReader = doc["lastSleepFromReader"] | false;
