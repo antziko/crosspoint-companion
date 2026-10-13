@@ -116,9 +116,15 @@ void HalStorage::guardCheckRoot(const char* trigger) {
   }
   int badCount = 0;
   int firstBadIndex = -1;
+  bool exfatBitmap = false;
+  bool exfatUpcase = false;
   for (int i = 0; i < GUARD_ROOT_ENTRIES; i++) {
     if (dir.read(e, sizeof(e)) != static_cast<int>(sizeof(e))) break;
     if (e[0] == 0x00) break;  // end of directory
+    // Every exFAT root holds an allocation-bitmap (0x81) and an up-case-table (0x82) entry near
+    // its start. Seeing both is exFAT even where the sector-0 probe has no raw access (C3 SPI).
+    if (i < 8 && e[0] == 0x81) exfatBitmap = true;
+    if (i < 8 && e[0] == 0x82) exfatUpcase = true;
     if (guardEntryValid(e)) continue;
     if (badCount++ == 0) {
       firstBadIndex = i;
@@ -126,6 +132,10 @@ void HalStorage::guardCheckRoot(const char* trigger) {
     }
   }
   dir.close();
+  if (exfatBitmap && exfatUpcase) {
+    guardDisabled_ = true;
+    return;
+  }
   // Both overwrites seen so far left 12-14 consecutive invalid entries. One odd entry is more
   // likely a legal name this validator does not know, and is only logged.
   if (badCount == 0) return;
@@ -169,6 +179,8 @@ void HalStorage::guardWriteReport(const char* trigger, const int firstBadIndex, 
 
 // Sector 0 is either the volume boot record ("EXFAT   " at offset 3) or an MBR whose first
 // partition is type 0x07 (exFAT/NTFS). Read once; the card does not change format mid-session.
+// Boards without raw block access (C3 SPI) answer false here; guardCheckRoot then recognises
+// exFAT from the root entries.
 bool HalStorage::guardIsExFat() {
   static int8_t cached = -1;
   if (cached >= 0) return cached == 1;
