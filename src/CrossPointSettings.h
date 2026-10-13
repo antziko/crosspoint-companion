@@ -258,6 +258,23 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     SHORT_PWRBTN_COUNT
   };
 
+  // Control Center quick tiles (touch boards). The first four are the panel's own toggles;
+  // the rest close the panel and run the matching reader action. Persisted indices: append only.
+  enum PANEL_TILE : uint8_t {
+    PANEL_TILE_NIGHT_MODE = 0,
+    PANEL_TILE_REFRESH,
+    PANEL_TILE_ORIENTATION,
+    PANEL_TILE_TOUCH,
+    PANEL_TILE_FOOTNOTES,
+    PANEL_TILE_BOOKMARK,
+    PANEL_TILE_DICTIONARY,
+    PANEL_TILE_SYNC,
+    PANEL_TILE_READER_MENU,
+    PANEL_TILE_STATUS_BAR,
+    PANEL_TILE_HOME,
+    PANEL_TILE_COUNT
+  };
+
   // Manual "Refresh Screen" (power-button FORCE_REFRESH) clear mode. Drives the
   // whole-panel ghost clear (util/ScreenRefresh.h). HALF is the single-pass clean and the
   // default. FULL is the multi-cycle deep clean (GfxRenderer::deepCleanPanel, ~15s of
@@ -484,6 +501,14 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Boards without a Home key: a double click of POWER runs this HomeButtonAction. Ignore = off.
   // While one is set, a single click's shortPwrBtn action waits out the double-click window.
   uint8_t powerDoubleClickAction = static_cast<uint8_t>(HomeButtonAction::Ignore);
+  // Boards without a Home key: a double click of BACK in the reader runs this HomeButtonAction.
+  // Ignore = off. While one is set, a single Back in the reader waits out the double-click window.
+  uint8_t backDoubleClickAction = static_cast<uint8_t>(HomeButtonAction::Ignore);
+  // Control Center tiles, in grid order (PANEL_TILE enum).
+  uint8_t panelTile1 = PANEL_TILE_NIGHT_MODE;
+  uint8_t panelTile2 = PANEL_TILE_REFRESH;
+  uint8_t panelTile3 = PANEL_TILE_ORIENTATION;
+  uint8_t panelTile4 = PANEL_TILE_TOUCH;
   // EPUB reading orientation settings
   // 0 = portrait (default), 1 = landscape clockwise, 2 = inverted, 3 = landscape counter-clockwise
   uint8_t orientation = PORTRAIT;

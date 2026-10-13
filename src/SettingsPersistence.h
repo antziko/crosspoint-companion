@@ -162,6 +162,12 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
                           static_cast<uint8_t>(HomeButtonAction::Count) - 1),
     persisted::enumerated("powerDoubleClickAction", &CrossPointSettings::powerDoubleClickAction,
                           static_cast<uint8_t>(HomeButtonAction::Count) - 1),
+    persisted::enumerated("backDoubleClickAction", &CrossPointSettings::backDoubleClickAction,
+                          static_cast<uint8_t>(HomeButtonAction::Count) - 1),
+    persisted::enumerated("panelTile1", &CrossPointSettings::panelTile1, CrossPointSettings::PANEL_TILE_COUNT - 1),
+    persisted::enumerated("panelTile2", &CrossPointSettings::panelTile2, CrossPointSettings::PANEL_TILE_COUNT - 1),
+    persisted::enumerated("panelTile3", &CrossPointSettings::panelTile3, CrossPointSettings::PANEL_TILE_COUNT - 1),
+    persisted::enumerated("panelTile4", &CrossPointSettings::panelTile4, CrossPointSettings::PANEL_TILE_COUNT - 1),
     persisted::toggle("dictFallbackGroup", &CrossPointSettings::dictFallbackGroup),
 
     // --- Reader: stats ---

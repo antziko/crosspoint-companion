@@ -152,6 +152,9 @@ class ActivityManager {
   // Whether the foreground screen keeps its header band; see Activity::keepsTopBar().
   bool foregroundKeepsTopBar() const;
   bool isInReaderContext() const;
+  // The reader itself is the active screen, not a child pushed over it.
+  bool isReaderInForeground() const;
+  bool foregroundHasFootnoteAction() const;
   bool skipLoopDelay() const;
   ScreenshotInfo getScreenshotInfo() const;
   void prepareForSleep();

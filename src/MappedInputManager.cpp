@@ -452,6 +452,7 @@ bool MappedInputManager::wasPressed(const Button button, const bool applySwap) c
 bool MappedInputManager::wasReleased(const Button button, const bool applySwap) const {
   if (button == Button::Confirm && homeAction == HomeButtonAction::Confirm) return true;
   if (button == Button::Back && wasBackGesture()) return true;
+  if (button == Button::Back && (backReleaseFrame || backReleaseHidden)) return backReleaseFrame;
 #if FREEINK_CAP_TOUCH
   if (button == Button::Confirm && wasPowerConfirmClick()) return true;
 #endif
@@ -474,6 +475,11 @@ void MappedInputManager::suppressNextRelease(const Button button) const {
 bool MappedInputManager::powerDoubleClickEnabled() const {
   return !gpio.hasHomeKey() && SETTINGS.powerDoubleClickAction != static_cast<uint8_t>(HomeButtonAction::Ignore) &&
          SETTINGS.powerDoubleClickAction < static_cast<uint8_t>(HomeButtonAction::Count);
+}
+
+bool MappedInputManager::backDoubleClickEnabled() const {
+  return !gpio.hasHomeKey() && SETTINGS.backDoubleClickAction != static_cast<uint8_t>(HomeButtonAction::Ignore) &&
+         SETTINGS.backDoubleClickAction < static_cast<uint8_t>(HomeButtonAction::Count);
 }
 
 bool MappedInputManager::wasPowerShortPress() const {

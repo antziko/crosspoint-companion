@@ -81,6 +81,9 @@ FontCacheManager fontCacheManager(renderer.getFontMap(), renderer.getSdCardFonts
 // button boards' powerDoubleClickAction.
 namespace {
 constexpr unsigned long POWER_DOUBLE_CLICK_MS = 500;
+// Back's window is shorter: a single Back in the reader waits it out before leaving the book.
+// Matches the Home key's double tap (HomeButtonInput::DOUBLE_TAP_MS).
+constexpr unsigned long BACK_DOUBLE_CLICK_MS = 350;
 // How long the frontlight toast stays up. Matches the other toast sites in the firmware
 // (DictionaryDefinitionActivity, EpubReaderActivity): long enough to read two words.
 constexpr unsigned long FRONTLIGHT_TOAST_MS = 900;
@@ -1177,6 +1180,48 @@ static bool handlePowerDoubleClick() {
   return SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP;
 }
 
+// Boards without a Home key: a double click of BACK over the reader runs backDoubleClickAction,
+// raised through the Home-key action dispatch. A single click's release is hidden until the window
+// passes and only then handed on, so a double click never also leaves the book. Only presses that
+// began over the reader count: a release left over from a closing child screen passes straight on.
+static unsigned long lastBackClickAt = 0;
+static bool backPressOverReader = false;
+static void handleBackDoubleClick() {
+  mappedInputManager.setBackClickFrame(false, false);
+  if (!mappedInputManager.backDoubleClickEnabled() || !activityManager.isReaderInForeground()) {
+    lastBackClickAt = 0;
+    backPressOverReader = false;
+    return;
+  }
+
+  const unsigned long now = millis();
+  if (mappedInputManager.wasPressed(MappedInputManager::Button::Back)) backPressOverReader = true;
+  if (mappedInputManager.wasReleased(MappedInputManager::Button::Back)) {
+    // A long hold is the reader's highlight gesture, not half of a double click.
+    if (!backPressOverReader || gpio.getHeldTime() > POWER_CLICK_MAX_HOLD_MS) {
+      backPressOverReader = false;
+      return;
+    }
+    backPressOverReader = false;
+    mappedInputManager.setBackClickFrame(true, false);
+    if (lastBackClickAt != 0 && now - lastBackClickAt <= BACK_DOUBLE_CLICK_MS) {
+      lastBackClickAt = 0;
+      const auto action = static_cast<HomeButtonAction>(SETTINGS.backDoubleClickAction);
+      if (action == HomeButtonAction::Footnotes && !activityManager.foregroundHasFootnoteAction()) {
+        // No footnote on this page and none to return from: the click means Back after all.
+        mappedInputManager.setBackClickFrame(false, true);
+      } else {
+        mappedInputManager.raiseHomeButtonAction(action);
+      }
+    } else {
+      lastBackClickAt = now;
+    }
+  } else if (lastBackClickAt != 0 && now - lastBackClickAt > BACK_DOUBLE_CLICK_MS) {
+    lastBackClickAt = 0;
+    mappedInputManager.setBackClickFrame(false, true);
+  }
+}
+
 void loop() {
   static unsigned long maxLoopDuration = 0;
   const unsigned long loopStartTime = millis();
@@ -1433,6 +1478,8 @@ void loop() {
     }
   }
 #endif
+
+  handleBackDoubleClick();
 
   if (handlePowerDoubleClick()) {
     lastActivityTime = millis();

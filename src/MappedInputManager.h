@@ -98,8 +98,18 @@ class MappedInputManager {
   // otherwise it is the plain release.
   bool wasPowerShortPress() const;
   void setPowerShortPressFrame(const bool on) const { powerShortPressFrame = on; }
+  // Back double click in the reader (boards without a Home key; see backDoubleClickAction).
+  // main.cpp tracks the clicks: while a first click waits out the window its release is hidden,
+  // and once the window passes it is handed on as a one-frame Back release.
+  bool backDoubleClickEnabled() const;
+  void setBackClickFrame(const bool hideRelease, const bool deliverRelease) const {
+    backReleaseHidden = hideRelease;
+    backReleaseFrame = deliverRelease;
+  }
   // Runs `action` this frame as if the Home key had produced it, through the same dispatch.
   void raiseHomeButtonAction(const HomeButtonAction action) const { homeAction = action; }
+  // Runs `action` on the next frame instead, for a screen that has to close first.
+  void queueHomeButtonAction(const HomeButtonAction action) const { deferredHomeAction = action; }
   void resetHomeButtonInput() const {
     homeButtonInput.reset();
     deferredHomeAction = HomeButtonAction::Ignore;
@@ -191,5 +201,7 @@ class MappedInputManager {
   mutable uint16_t longPressFiredButtons = 0;
   mutable uint16_t suppressedReleaseButtons = 0;
   mutable bool powerShortPressFrame = false;
+  mutable bool backReleaseHidden = false;
+  mutable bool backReleaseFrame = false;
   mutable bool holdQueried = false;  // see holdWasQueried(); cleared every update()
 };

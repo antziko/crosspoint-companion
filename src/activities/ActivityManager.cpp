@@ -500,6 +500,12 @@ bool ActivityManager::isInReaderContext() const {
                      [](const auto& activity) { return activity && activity->isReaderActivity(); });
 }
 
+bool ActivityManager::isReaderInForeground() const { return currentActivity && currentActivity->isReaderActivity(); }
+
+bool ActivityManager::foregroundHasFootnoteAction() const {
+  return currentActivity && currentActivity->hasFootnoteAction();
+}
+
 bool ActivityManager::skipLoopDelay() const { return currentActivity && currentActivity->skipLoopDelay(); }
 
 ScreenshotInfo ActivityManager::getScreenshotInfo() const {

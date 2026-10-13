@@ -224,9 +224,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // growth allocation is what aborted (and rebooted the device) when settings were saved at
   // low heap; see SettingsPersistence.h. Keep headroom above the real count.
   //
-  // Derived, not guessed: 102 push_back sites below, and the two shortPwrBtn branches never
-  // both compile, so at most 101 rows on any board. 108 keeps headroom for the next few rows.
-  constexpr size_t kSettingCount = 109;
+  // Derived, not guessed: 107 push_back sites below. One is the Home-key loop (which reserves its
+  // own rows), one the 4-row Control Center tile loop, and the two shortPwrBtn branches never
+  // both compile, so at most 108 rows here. 116 keeps headroom for the next few rows.
+  constexpr size_t kSettingCount = 116;
   v.reserve(kSettingCount);
 
   // --- Display ---
@@ -525,6 +526,28 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
       StrId::STR_DBL_CLICK_PWR, &CrossPointSettings::powerDoubleClickAction,
       std::vector<StrId>(std::begin(home_button::ACTION_LABELS), std::end(home_button::ACTION_LABELS)),
       "powerDoubleClickAction", StrId::STR_CAT_CONTROLS));
+  // Reader only; erased with the row above on Home-key boards, which have no Back button.
+  v.push_back(SettingInfo::Enum(
+      StrId::STR_DBL_CLICK_BACK, &CrossPointSettings::backDoubleClickAction,
+      std::vector<StrId>(std::begin(home_button::ACTION_LABELS), std::end(home_button::ACTION_LABELS)),
+      "backDoubleClickAction", StrId::STR_CAT_CONTROLS));
+  // Control Center tiles; erased below on boards without touch, where the panel has no grid.
+  {
+    static constexpr StrId kPanelTileRows[] = {StrId::STR_PANEL_TILE_1, StrId::STR_PANEL_TILE_2,
+                                               StrId::STR_PANEL_TILE_3, StrId::STR_PANEL_TILE_4};
+    static constexpr uint8_t CrossPointSettings::* kPanelTileFields[] = {
+        &CrossPointSettings::panelTile1, &CrossPointSettings::panelTile2, &CrossPointSettings::panelTile3,
+        &CrossPointSettings::panelTile4};
+    static constexpr const char* kPanelTileKeys[] = {"panelTile1", "panelTile2", "panelTile3", "panelTile4"};
+    for (unsigned i = 0; i < 4; ++i) {
+      v.push_back(SettingInfo::Enum(
+          kPanelTileRows[i], kPanelTileFields[i],
+          {StrId::STR_NIGHT_MODE, StrId::STR_FORCE_REFRESH, StrId::STR_ORIENTATION, StrId::STR_TOUCH_TOGGLE,
+           StrId::STR_FOOTNOTES, StrId::STR_BOOKMARK_OPTION, StrId::STR_DICTIONARY, StrId::STR_KOSYNC,
+           StrId::STR_HOLD_CONFIRM_READER_MENU, StrId::STR_TOGGLE_STATUS_BAR, StrId::STR_HOME_SHORTCUT},
+          kPanelTileKeys[i], StrId::STR_CAT_CONTROLS));
+    }
+  }
   // Erased below unless the QMI8658 IMU is present (X3). Pushed here rather than
   // inserted afterwards: insert() into a vector at capacity reallocates at 2x and
   // copies, which is the allocation pattern this list's reserve exists to avoid.
@@ -715,9 +738,11 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         v.end());
   }
   if (BoardConfig::hasHomeKey()) {
-    v.erase(
-        std::remove_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_DBL_CLICK_PWR; }),
-        v.end());
+    v.erase(std::remove_if(v.begin(), v.end(),
+                           [](const SettingInfo& s) {
+                             return s.nameId == StrId::STR_DBL_CLICK_PWR || s.nameId == StrId::STR_DBL_CLICK_BACK;
+                           }),
+            v.end());
   }
 
   if (dictRegistry) {
@@ -779,7 +804,9 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                            [](const SettingInfo& s) {
                              return s.nameId == StrId::STR_TOUCH_READER_CONTROLS ||
                                     s.nameId == StrId::STR_NEXT_PAGE_GESTURE ||
-                                    s.nameId == StrId::STR_PREV_PAGE_GESTURE;
+                                    s.nameId == StrId::STR_PREV_PAGE_GESTURE || s.nameId == StrId::STR_PANEL_TILE_1 ||
+                                    s.nameId == StrId::STR_PANEL_TILE_2 || s.nameId == StrId::STR_PANEL_TILE_3 ||
+                                    s.nameId == StrId::STR_PANEL_TILE_4;
                            }),
             v.end());
   } else {

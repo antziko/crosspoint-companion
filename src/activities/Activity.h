@@ -71,6 +71,9 @@ class Activity {
   // sleep starts while the button is still held.
   virtual bool wantsManualSleepPrompt() const { return false; }
   virtual bool isReaderActivity() const { return false; }
+  // Whether a Footnotes action has anything to do here (a link on the page, or a footnote to
+  // return from). A Back double click mapped to Footnotes falls back to Back when it does not.
+  virtual bool hasFootnoteAction() const { return false; }
   virtual bool isHomeActivity() const { return false; }
   // True for a screen the user passes THROUGH rather than settles on: a modal prompt, the
   // control-centre sheet, the reader's word-select overlay. The entry scrub

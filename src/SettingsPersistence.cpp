@@ -113,7 +113,9 @@ void verifySettingsPersistenceTable() {
       // the stored values travel with the file.
       "homeButtonTapAction", "homeButtonDoubleTapAction", "homeButtonLongPressAction",
       // Its button-board counterpart: the row is dropped where a Home key exists.
-      "powerDoubleClickAction"};
+      "powerDoubleClickAction", "backDoubleClickAction",
+      // Control Center tiles are touch targets: the rows exist on touch boards only.
+      "panelTile1", "panelTile2", "panelTile3", "panelTile4"};
 
   // Rows with no counterpart: a setting removed from SettingsList but left here would keep
   // being written to settings.json forever.

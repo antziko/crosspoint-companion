@@ -714,6 +714,7 @@ class EpubReaderActivity final : public Activity {
   // render lock, so the section cannot change underneath it.
   bool skipLoopDelay() override { return overlay == Overlay::None && !buildHeapPaused && backgroundBuildWanted(); }
   bool isReaderActivity() const override { return true; }
+  bool hasFootnoteAction() const override { return footnoteDepth > 0 || (section && !currentPageFootnotes.empty()); }
   bool onManualSleepRequested() override;
   bool wantsManualSleepPrompt() const override;
   ScreenshotInfo getScreenshotInfo() const override;

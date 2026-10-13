@@ -13,6 +13,7 @@
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "MappedInputManager.h"
+#include "activities/ActivityManager.h"
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
 #include "components/icons/customListIcons.h"
@@ -45,6 +46,35 @@ constexpr int BRIGHTNESS_STEP = 1;
 // button next to the slider is for, so a 0% "on" level would only be a second,
 // worse way to reach the same place.
 constexpr uint8_t MIN_BRIGHTNESS = 1;
+
+// The tile kind the user placed in grid slot `idx` (Settings -> Controls).
+uint8_t tileKind(const int idx) {
+  const uint8_t kinds[] = {SETTINGS.panelTile1, SETTINGS.panelTile2, SETTINGS.panelTile3, SETTINGS.panelTile4};
+  if (idx < 0 || idx >= static_cast<int>(std::size(kinds))) return CrossPointSettings::PANEL_TILE_COUNT;
+  return kinds[idx];
+}
+
+// Reader action for an action tile; Ignore for the panel's own toggles.
+HomeButtonAction tileAction(const uint8_t kind) {
+  switch (kind) {
+    case CrossPointSettings::PANEL_TILE_FOOTNOTES:
+      return HomeButtonAction::Footnotes;
+    case CrossPointSettings::PANEL_TILE_BOOKMARK:
+      return HomeButtonAction::Bookmark;
+    case CrossPointSettings::PANEL_TILE_DICTIONARY:
+      return HomeButtonAction::Dictionary;
+    case CrossPointSettings::PANEL_TILE_SYNC:
+      return HomeButtonAction::Sync;
+    case CrossPointSettings::PANEL_TILE_READER_MENU:
+      return HomeButtonAction::ReaderMenu;
+    case CrossPointSettings::PANEL_TILE_STATUS_BAR:
+      return HomeButtonAction::ToggleStatusBar;
+    case CrossPointSettings::PANEL_TILE_HOME:
+      return HomeButtonAction::Home;
+    default:
+      return HomeButtonAction::Ignore;
+  }
+}
 
 uint8_t percentFromPermille(const int16_t permille) {
   int value = (static_cast<int>(permille) * 100 + 500) / 1000;
@@ -79,6 +109,14 @@ void FrontlightPanelActivity::onEnter() {
   // The orientation actually in force: inside an open book that is the book's own, and
   // everywhere else activeOrientation mirrors the global default anyway.
   orientationShown = static_cast<uint8_t>(APP_STATE.activeOrientation % CrossPointSettings::ORIENTATION_COUNT);
+
+  const bool overBook = activityManager.isInReaderContext();
+  visibleTileCount = 0;
+  for (int slot = 0; slot < kTileCount; ++slot) {
+    const HomeButtonAction action = tileAction(tileKind(slot));
+    if (!overBook && action != HomeButtonAction::Ignore && action != HomeButtonAction::Home) continue;
+    visibleSlots[visibleTileCount++] = static_cast<uint8_t>(slot);
+  }
 
   resetUi();
   app.on(ACTION_BRIGHTNESS, &FrontlightPanelActivity::onBrightnessEvent, this);
@@ -156,8 +194,18 @@ void FrontlightPanelActivity::runTile(const int idx) {
   // setting were still on. The state change is the feedback here, so drop it.
   app.clearTapFlash();
 
-  switch (idx) {
-    case 0:  // Night mode (inverted output polarity, applied to the whole UI)
+  const uint8_t kind = tileKind(idx);
+  const HomeButtonAction action = tileAction(kind);
+  if (action != HomeButtonAction::Ignore) {
+    // Close first: the action belongs to the screen underneath, which runs it on the next
+    // frame. Queued after close(), whose pop clears any pending Home-key action.
+    close();
+    mappedInput.queueHomeButtonAction(action);
+    return;
+  }
+
+  switch (kind) {
+    case CrossPointSettings::PANEL_TILE_NIGHT_MODE:  // Night mode (inverted output polarity, applied to the whole UI)
       SETTINGS.screenInverted = SETTINGS.screenInverted ? 0 : 1;
       SETTINGS.saveToFile();
       // Inversion rewrites every pixel; take the clean waveform so the panel
@@ -165,7 +213,7 @@ void FrontlightPanelActivity::runTile(const int idx) {
       cleanRefreshPending = true;
       requestUpdate();
       break;
-    case 1:  // Ghost-cleanup refresh of the whole frame
+    case CrossPointSettings::PANEL_TILE_REFRESH:  // Ghost-cleanup refresh of the whole frame
       // Refreshing with the panel still up would clean a frame the user is
       // about to dismiss anyway: drop the panel first and let the repaint of
       // the screen underneath carry the clean waveform instead.
@@ -179,7 +227,7 @@ void FrontlightPanelActivity::runTile(const int idx) {
       renderer.promoteNextRefresh(HalDisplay::HALF_REFRESH, "tile");
       close();
       break;
-    case 2: {  // Cycle the reading orientation
+    case CrossPointSettings::PANEL_TILE_ORIENTATION: {  // Cycle the reading orientation
       const uint8_t next = static_cast<uint8_t>((orientationShown + 1) % CrossPointSettings::ORIENTATION_COUNT);
       orientationShown = next;
       // Over an open book the rotation belongs to that book alone, the same as the reader
@@ -202,7 +250,7 @@ void FrontlightPanelActivity::runTile(const int idx) {
       requestUpdate();
       break;
     }
-    case 3:  // Touch reader controls (for reading with the palm on the glass)
+    case CrossPointSettings::PANEL_TILE_TOUCH:  // Touch reader controls (for reading with the palm on the glass)
       // Toggles the existing Settings -> Controls option, nothing lower-level:
       // that setting only governs the reader's tap/swipe handling, so the
       // panel's own gestures (including the swipe that reopens it) keep
@@ -344,7 +392,7 @@ int FrontlightPanelActivity::computePanelBottom() const {
   }
   // Tiles are touch targets, so a buttons-only board gets no grid and the
   // sheet is exactly the frontlight controls.
-  const int tileCount = mappedInput.hasTouch() ? kTileCount : 0;
+  const int tileCount = mappedInput.hasTouch() ? visibleTileCount : 0;
   y += fui::tileGridHeight(static_cast<uint16_t>(tileCount), kTileCols, kTileHeight, kTileGap);
   // The sheet's grabber band: content margin + grabber + air to the edge.
   // buildPanelScreen() feeds the same theme spacings into SheetProps.
@@ -424,7 +472,7 @@ void FrontlightPanelActivity::buildPanelScreen(UiScreen& screen) {
   // Quick-setting tiles. Two columns of finger-sized cards; a tile whose
   // setting is currently on draws filled (StateChecked -> selected style).
   // Touch boards only — the tiles are touch targets.
-  if (mappedInput.hasTouch()) {
+  if (mappedInput.hasTouch() && visibleTileCount > 0) {
     static constexpr StrId kOrientNames[CrossPointSettings::ORIENTATION_COUNT] = {
         StrId::STR_PORTRAIT, StrId::STR_LANDSCAPE_CW, StrId::STR_ORIENTATION_INVERTED, StrId::STR_LANDSCAPE_CCW};
     // The orientation tile is labelled with just the current mode ("Portrait"):
@@ -434,21 +482,33 @@ void FrontlightPanelActivity::buildPanelScreen(UiScreen& screen) {
     // names the current state of the touch-reader-controls setting.
     const bool touchOn = SETTINGS.touchReaderControls != CrossPointSettings::TOUCH_READER_OFF;
 
-    const char* labels[kTileCount] = {tr(STR_NIGHT_MODE), tr(STR_FORCE_REFRESH), orientLabel, tr(STR_TOUCH_TOGGLE)};
-    const fui::State states[kTileCount] = {SETTINGS.screenInverted ? fui::StateChecked : fui::StateNormal,
-                                           fui::StateNormal, fui::StateNormal,
-                                           // Filled when touch reader controls are OFF — the non-default,
-                                           // attention-worthy state.
-                                           touchOn ? fui::StateNormal : fui::StateChecked};
+    static constexpr StrId kTileNames[CrossPointSettings::PANEL_TILE_COUNT] = {
+        StrId::STR_NIGHT_MODE,        StrId::STR_FORCE_REFRESH, StrId::STR_ORIENTATION,
+        StrId::STR_TOUCH_TOGGLE,      StrId::STR_FOOTNOTES,     StrId::STR_BOOKMARK_OPTION,
+        StrId::STR_DICTIONARY,        StrId::STR_KOSYNC,        StrId::STR_HOLD_CONFIRM_READER_MENU,
+        StrId::STR_TOGGLE_STATUS_BAR, StrId::STR_HOME_SHORTCUT};
 
-    for (int id = 0; id < kTileCount; ++id) {
-      gridItems[id].label = labels[id];
-      gridItems[id].value = static_cast<int16_t>(id);
-      gridItems[id].state = states[id];
-      gridItems[id].icon = id == 3 ? GUI.checkboxIcon(touchOn) : fui::BitmapRef{};
+    for (int id = 0; id < visibleTileCount; ++id) {
+      const uint8_t kind = tileKind(visibleSlots[id]);
+      fui::State state = fui::StateNormal;
+      fui::BitmapRef icon{};
+      const char* label = kind < CrossPointSettings::PANEL_TILE_COUNT ? I18N.get(kTileNames[kind]) : "";
+      if (kind == CrossPointSettings::PANEL_TILE_NIGHT_MODE && SETTINGS.screenInverted) {
+        state = fui::StateChecked;
+      } else if (kind == CrossPointSettings::PANEL_TILE_ORIENTATION) {
+        label = orientLabel;
+      } else if (kind == CrossPointSettings::PANEL_TILE_TOUCH) {
+        // Filled when touch reader controls are OFF — the non-default, attention-worthy state.
+        state = touchOn ? fui::StateNormal : fui::StateChecked;
+        icon = GUI.checkboxIcon(touchOn);
+      }
+      gridItems[id].label = label;
+      gridItems[id].value = static_cast<int16_t>(visibleSlots[id]);
+      gridItems[id].state = state;
+      gridItems[id].icon = icon;
     }
     gridProps.items = gridItems;
-    gridProps.count = static_cast<uint16_t>(kTileCount);
+    gridProps.count = static_cast<uint16_t>(visibleTileCount);
     gridProps.action = ACTION_TILE;
     gridProps.tileHeight = kTileHeight;
     gridProps.gap = kTileGap;
