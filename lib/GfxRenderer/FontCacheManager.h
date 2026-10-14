@@ -23,6 +23,8 @@ class FontCacheManager {
   // this before a heap-critical operation that will not render book text first — see the
   // KOSync TLS handshake.
   void releaseCache();
+  // matcha-reader's name for releaseCache(), used by the ported vertical engine.
+  void releaseAllFontMemory() { releaseCache(); }
   // Returns 0 when every requested glyph was prepared, >0 for the number that were not, and
   // -1 when the prewarm could not be attempted at all (unknown font, no decompressor, no free
   // page slot). Callers that only want the side effect can ignore it; callers that need to

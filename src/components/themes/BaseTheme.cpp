@@ -1475,8 +1475,10 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
     // Dim the title/chapter to a grey stipple so it recedes from the body text
     // instead of competing with it. Surrounding pixels are white (title is
     // centered within reserved margins), so the checkerboard only thins the
-    // glyphs.
-    renderer.dimRegionCheckerboard(titleX, textY, titleWidth, renderer.getLineHeight(SMALL_FONT_ID));
+    // glyphs. Night mode keeps it solid: thinned white-on-black reads as a grey smudge.
+    if (!renderer.isInverted()) {
+      renderer.dimRegionCheckerboard(titleX, textY, titleWidth, renderer.getLineHeight(SMALL_FONT_ID));
+    }
   }
 }
 

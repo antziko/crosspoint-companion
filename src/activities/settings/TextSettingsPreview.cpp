@@ -41,7 +41,7 @@ void relayout(PreviewLayout& layout, const GfxRenderer& renderer, int fontId, in
   style.textAlignDefined = true;  // honor the user's choice; RTL auto-detected from text
 
   ParsedText parsed(SETTINGS.getReaderParagraphSpacing() != 0, SETTINGS.getReaderHyphenationEnabled() != 0,
-                    SETTINGS.focusReadingEnabled != 0, style);
+                    SETTINGS.getReaderFocusReading() != 0, style);
 
   // Feed one space-separated word at a time; addWord handles NFC/CJK/RTL/focus splitting
   std::string word;
@@ -62,7 +62,7 @@ void relayout(PreviewLayout& layout, const GfxRenderer& renderer, int fontId, in
   parsed.layoutAndExtractLines(
       renderer, fontId, static_cast<uint16_t>(textWidth),
       [&layout](std::shared_ptr<TextBlock> line, uint32_t) { layout.lines.push_back(std::move(line)); },
-      /*includeLastLine=*/true, SETTINGS.getCharacterSpacing(), SETTINGS.wordSpacing,
+      /*includeLastLine=*/true, SETTINGS.getReaderCharacterSpacing(), SETTINGS.getReaderWordSpacing(),
       SETTINGS.getReaderParagraphIndent());
 }
 
@@ -150,9 +150,9 @@ void renderPreview(GfxRenderer& renderer, PreviewLayout& layout, int previewPadd
                        .alignment = SETTINGS.getReaderParagraphAlignment(),
                        .paragraphSpacing = SETTINGS.getReaderParagraphSpacing(),
                        .paragraphIndent = SETTINGS.getReaderParagraphIndent(),
-                       .characterSpacing = SETTINGS.getCharacterSpacing(),
-                       .wordSpacingPercent = SETTINGS.wordSpacing,
-                       .focusReading = SETTINGS.focusReadingEnabled != 0,
+                       .characterSpacing = SETTINGS.getReaderCharacterSpacing(),
+                       .wordSpacingPercent = SETTINGS.getReaderWordSpacing(),
+                       .focusReading = SETTINGS.getReaderFocusReading() != 0,
                        .hyphenation = SETTINGS.getReaderHyphenationEnabled() != 0};
   if (key != layout.key) {
     // Both the prewarm and the layout see the clamped sample, so neither pays for text the
@@ -161,7 +161,7 @@ void renderPreview(GfxRenderer& renderer, PreviewLayout& layout, int previewPadd
     const int visibleLines = std::max(1, (height - labelReserved) / lineAdvance);
     const std::string sample = clampToPane(text, visibleLines, textWidth, lineAdvance);
     if (auto* fcm = renderer.getFontCacheManager()) {
-      fcm->prewarmCache(fontId, sample.c_str(), SETTINGS.focusReadingEnabled ? 0x03 : 0x01);
+      fcm->prewarmCache(fontId, sample.c_str(), SETTINGS.getReaderFocusReading() ? 0x03 : 0x01);
     }
     relayout(layout, renderer, fontId, textWidth, sample.c_str());
     layout.key = key;

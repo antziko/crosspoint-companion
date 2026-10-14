@@ -61,6 +61,22 @@ void WordSelectNavigator::load(std::vector<WordInfo> w, std::vector<Row> r, std:
   rowNavGoalX = textBlockCenterX();
 }
 
+void WordSelectNavigator::replaceWords(std::vector<WordInfo> w, std::vector<Row> r, std::string pool,
+                                       const int cursor) {
+  words = std::move(w);
+  rows = std::move(r);
+  textPool = std::move(pool);
+  inMultiSelectMode = false;
+  anchorFlatIndex = -1;
+  currentRow = 0;
+  currentWordInRow = 0;
+  if (!selectFlatIndex(cursor)) {
+    // Already on row 0, word 0, or out of range: still drop the goal column, as a select would.
+    rowNavGoalX = -1;
+    pendingSnapIdx = -1;
+  }
+}
+
 void WordSelectNavigator::organizeIntoRows(std::vector<WordInfo>& words, std::vector<Row>& rows) {
   if (words.empty()) return;
   int16_t currentY = words[0].screenY;
@@ -128,6 +144,12 @@ void WordSelectNavigator::reset() {
 int WordSelectNavigator::wordIndexAtPoint(const int x, const int y, const int lineHeight, const int slop) const {
   for (int i = 0; i < static_cast<int>(words.size()); i++) {
     const WordInfo& w = words[i];
+    if (vertical_) {
+      if (x >= w.screenX - slop && x < w.screenX + columnWidth_ + slop && y >= w.screenY && y < w.screenY + w.width) {
+        return i;
+      }
+      continue;
+    }
     // drawYFor, not screenY: an IPA run is drawn on a shifted baseline, so its box is
     // where it was painted rather than where the row nominally starts.
     const int top = drawYFor(w);
@@ -295,8 +317,9 @@ int WordSelectNavigator::textBlockCenterX() const {
   int minX = INT_MAX;
   int maxX = INT_MIN;
   for (const auto& w : words) {
-    minX = std::min<int>(minX, w.screenX);
-    maxX = std::max<int>(maxX, w.screenX + w.width);
+    const int start = vertical_ ? w.screenY : w.screenX;  // the axis words run along
+    minX = std::min<int>(minX, start);
+    maxX = std::max<int>(maxX, start + w.width);
   }
   return (minX + maxX) / 2;
 }
@@ -435,11 +458,24 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
     wordNext = {MappedInputManager::Button::Right, false};
   }
 
+  // A vertical page reads down each column and its columns right to left. The chain above maps
+  // word steps to screen +X/-X and row steps to +Y/-Y, so the column order takes the -X/+X pair
+  // and the step down a column the +Y/-Y pair.
+  if (vertical_) {
+    const Bound plusX = wordNext;
+    const Bound minusX = wordPrev;
+    wordNext = rowNext;
+    wordPrev = rowPrev;
+    rowNext = minusX;
+    rowPrev = plusX;
+  }
+
   // Trade the axes AFTER the orientation chain has resolved which physical button means
   // which direction, so each pair keeps its own direction sense in all four orientations.
   // Swapping the bindings rather than the results keeps the repeat pointed at whichever
-  // button now drives the word axis.
-  if (swapAxes) {
+  // button now drives the word axis. A vertical page already has its word steps on the pair
+  // swapAxes asks for them on, so there the trade runs the other way round.
+  if (swapAxes != vertical_) {
     std::swap(rowPrev, wordPrev);
     std::swap(rowNext, wordNext);
   }
@@ -718,6 +754,11 @@ void WordSelectNavigator::renderHighlight(const GfxRenderer& renderer, int lineH
 void WordSelectNavigator::drawSingleHighlight(const GfxRenderer& renderer, int lineHeight, int wordIndex) const {
   const auto* w = getWordAt(wordIndex);
   if (!w) return;
+  if (vertical_) {
+    const Rect band = boundsForWord(wordIndex, lineHeight);
+    renderer.invertRect(band.x, band.y, band.width, band.height);
+    return;
+  }
   // Same rect renderHighlightDifferential snapshots and restores — they must not diverge.
   const Rect band = boundsForWord(wordIndex, lineHeight, &renderer);
   renderer.fillRect(band.x, band.y, band.width, band.height, true);
@@ -727,6 +768,12 @@ void WordSelectNavigator::drawSingleHighlight(const GfxRenderer& renderer, int l
 void WordSelectNavigator::drawHollowHighlight(const GfxRenderer& renderer, int lineHeight, int wordIndex) const {
   const auto* w = getWordAt(wordIndex);
   if (!w) return;
+  if (vertical_) {
+    // The range skips the anchor's inversion; outline it instead.
+    const Rect band = boundsForWord(wordIndex, lineHeight);
+    renderer.drawRect(band.x, band.y, band.width, band.height, 2, true);
+    return;
+  }
   const Rect band = boundsForWord(wordIndex, lineHeight);
   const int x = w->screenX;
   const int width = w->width;
@@ -771,6 +818,12 @@ WordSelectNavigator::Rect WordSelectNavigator::boundsForWord(int wordIndex, int 
                                                              const GfxRenderer* renderer) const {
   const auto* w = getWordAt(wordIndex);
   if (!w) return Rect{};
+  if (vertical_) {
+    // Flush along the column: neighbouring boxes must not overlap, or a range's inversions
+    // would cancel where they meet. A pixel of slack across it.
+    return Rect{static_cast<int>(w->screenX) - 1, static_cast<int>(w->screenY), columnWidth_ + 2,
+                static_cast<int>(w->width)};
+  }
   // An IPA word is drawn ipaDy_ off the line top, so grow the band in that direction by the
   // same amount rather than clipping the glyphs it moved.
   const int dy = w->isIpa ? ipaDy_ : 0;

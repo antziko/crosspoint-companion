@@ -64,7 +64,7 @@ class TextSettingsActivity final : public UiTabListActivity {
     ScreenMargin,
     Count
   };
-  enum class StyleRow { FocusReading, Hyphenation, EmbeddedStyle, AntiAliasing, Count };
+  enum class StyleRow { FocusReading, Hyphenation, EmbeddedStyle, AntiAliasing, WordSelectButtons, Count };
 
   // --- UiTabListActivity contract ---
   int listCount() const override;
@@ -169,12 +169,17 @@ class TextSettingsActivity final : public UiTabListActivity {
     uint8_t* screenMargin;
     uint8_t* hyphenationEnabled;
     char* sdFontFamilyName;  // char[32] in both
+    uint8_t* wordSpacing;
+    uint8_t* characterSpacing;
+    uint8_t* embeddedStyle;
+    uint8_t* textAntiAliasing;
+    uint8_t* focusReadingEnabled;
   } f_{};
   std::array<Tab, static_cast<size_t>(Tab::Count)> visibleTabs_{};
   int visibleTabCount_ = 0;
   std::array<uint8_t, static_cast<size_t>(LayoutRow::Count)> layoutRows_{};
   int layoutRowCount_ = 0;
-  std::array<uint8_t, 4> styleRows_{};
+  std::array<uint8_t, static_cast<size_t>(StyleRow::Count)> styleRows_{};
   int styleRowCount_ = 0;
   int currentSizeIndex_ = 0;
   // LOCAL(feat): Font tab Confirm = tap-commits / hold-pins (mirrors FontSelectionActivity).

@@ -98,6 +98,10 @@ class SdCardFontSystem {
   // No-op when no SD family is loaded. Safe to call repeatedly (sizes already
   // loaded are reused).
   void setupUiFallbacks(GfxRenderer& renderer);
+  // The family setupUiFallbacks() last registered. A font preview loads another family in its
+  // place (unloadAll clears every fallback), so a later ensureLoaded() that finds the wanted
+  // family already resident must re-register them rather than return early.
+  std::string uiFallbacksFamily_;
 
 #if CROSSPOINT_VECTOR_FONTS
   // --- Vector (.ttf/.otf) font path (FreeInkFont via TtfEpdFont) -------------

@@ -3,12 +3,14 @@
 #include <Epub/FootnoteEntry.h>
 #include <Epub/PageLink.h>
 #include <Epub/Section.h>
+#include <Epub/VerticalSection.h>
 
 #include <atomic>
 #include <memory>
 #include <optional>
 
 #include "BookReadingStats.h"
+#include "CjkBookPrefs.h"
 #include "CrossPointState.h"  // NO_ORIENTATION_REQUEST
 #include "EndOfBookOptions.h"
 #include "EpubReaderMenuActivity.h"
@@ -25,9 +27,14 @@
 #include "util/PageMarks.h"               // PageMarks::PageKey return type
 #include "util/WordSelectNavigator.h"
 
+class WordSelectionScan;
+
 class EpubReaderActivity final : public Activity {
   std::shared_ptr<Epub> epub;
   std::unique_ptr<Section> section = nullptr;
+  // Vertical (tategaki) layout of the current chapter; only one of section / verticalSection is
+  // ever live. See EpubReaderVertical.cpp.
+  std::unique_ptr<VerticalSection> verticalSection;
   // Clears any session dictionary override (set by long-press Confirm on the definition
   // screen) when this activity is destroyed. This is the one that defines "session" for
   // the feature: a switched dictionary lasts for the rest of the book and reverts to the
@@ -322,6 +329,9 @@ class EpubReaderActivity final : public Activity {
   int lastSavedPage = -1;
   int lastSavedPageCount = -1;
 
+  // Everything after the page is on the panel: progress save, dwell bookkeeping, popups and the
+  // toolbar overlay. Shared by the horizontal and vertical paths.
+  void finishPageRender(uint16_t viewportWidth, uint16_t viewportHeight);
   void renderContents(std::unique_ptr<Page> page, int orientedMarginTop, int orientedMarginRight,
                       int orientedMarginBottom, int orientedMarginLeft);
   void renderStatusBar() const;
@@ -375,6 +385,13 @@ class EpubReaderActivity final : public Activity {
   // Whether the last paint of the current page drew a margin block. A toggle that changes
   // either has to repaint the page, not just the status bar, or a removed block stays on screen.
   mutable bool paintedMarginMark_ = false;
+  // Night mode: a page showing a quote highlight, and the page after it, get the clean (HALF)
+  // refresh -- FAST leaves the dithered band's charge behind as ghosting. Keyed on the page so a
+  // repaint of the same page (menu closed, status bar) does not flash again.
+  bool quoteOnThisPaint_ = false;
+  bool quoteOnShownPage_ = false;
+  uint32_t shownPageKey_ = UINT32_MAX;
+  void cleanRefreshForNightQuotes(uint32_t pageKey);
   // The word a card is anchored under as the PAGE prints it. A "Did you mean?" card is filed
   // under the suggestion, so the printed form is recovered from the card's own excerpt; falls
   // back to the headword when it cannot be. The one derivation shared by the mark table and the
@@ -522,8 +539,17 @@ class EpubReaderActivity final : public Activity {
   std::string currentChapterTitle() const;
   // Text panel rows (font, size, line spacing, alignment, focus reading).
   std::string textRowName(int row) const;
+  // Text panel rows: the fixed ones plus Book Language, and Vertical Text / Furigana on a CJK book.
+  int textPanelRowCount() const;
+  // The Text panel's rows for this book, as TextRowIds (.cpp), in display order.
+  static constexpr int kTextPanelMaxRows = 8;
+  int textPanelRows(uint8_t (&out)[kTextPanelMaxRows]) const;
+  // What Text panel row `row` edits, or -1.
+  int textRowId(int row) const;
+  // Book Language / Vertical Text / Furigana changed in cjk.bin: lay the book out again.
+  void applyCjkPrefsChange(bool languageChanged);
   std::string textRowValue(int row) const;
-  void showTextRowPopup(int row);
+  void showTextRowPopup(int rowId);
   // The reader lays out from the PER-BOOK override, which is active for the whole
   // time a book is open (loadBook seeds it on first open). The Text panel therefore
   // reads and writes that override, not the globals -- writing a global would save
@@ -696,6 +722,79 @@ class EpubReaderActivity final : public Activity {
   bool isStatusBarBackTap() const;
   static constexpr int kStatusBarTapSlack = 12;  // px above the band, for a finger landing short
 
+  // Per-book CJK state (cjk.bin) and what follows from it. Names follow matcha-reader's
+  // EpubReaderActivity so its fixes map across; see EpubReaderCjk.cpp.
+  CjkBookPrefs cjkPrefs;
+  CjkScript bookScript_ = CjkScript::None;
+  std::string effectiveLanguage_;
+  void loadLanguageChoice();
+  // Decide a tagless or mis-tagged book's language from its text, once per book.
+  void sniffLanguageIfNeeded();
+  // Recomputed where the language settles: bookScript() sits on the render path.
+  void refreshBookScript();
+  CjkScript bookScript() const { return bookScript_; }
+  bool isCjkBook() const { return bookScript_ != CjkScript::None; }
+  bool isJapaneseBook() const { return bookScript_ == CjkScript::Japanese; }
+  bool isChineseBook() const { return cjk::isChinese(bookScript_); }
+  bool useFurigana() const { return cjkPrefs.furiganaOn(); }
+  // The horizontal layout spec for THIS book: the store's spec plus the per-book furigana
+  // toggle, which is a cache-key field. Build every section spec through here.
+  ReaderRenderSpec readerSpec(uint16_t viewportWidth, uint16_t viewportHeight) const;
+
+  // --- Vertical text (EpubReaderVertical.cpp; names follow matcha-reader) ---
+  // Drop both layouts. Every navigation that used to reset `section` goes through here.
+  void resetSections() {
+    section.reset();
+    verticalSection.reset();
+  }
+  // A page is laid out in either layout.
+  bool hasPage() const { return section || verticalSection; }
+  // Page turns run right-to-left: an RTL script, or vertical columns (tategaki).
+  bool readsRightToLeft() const;
+  // Current page and best-known chapter total of whichever layout is live (nextPageNumber /
+  // cachedChapterTotalPageCount when none is).
+  int pageIndex() const;
+  int pageTotal() const;
+  // Remember the reading position (content offset + page) so the next layout lands on it.
+  void rememberPositionForReflow();
+  bool useVerticalText() const;
+  // Whether the reader font can draw the book's script: vertical needs a CJK font.
+  bool readerFontCoversScript() const;
+  // readerSpec() plus the vertical-only fields.
+  ReaderRenderSpec verticalSpec(uint16_t viewportWidth, uint16_t viewportHeight, int marginRight) const;
+  // The vertical counterpart of render()'s horizontal path; marginRight holds the first column's ruby.
+  void renderVertical(int marginRight, uint16_t viewportWidth, uint16_t viewportHeight);
+  // `marks`: saved quotes and looked-up words on top (the black-and-white pass only).
+  void renderVerticalPageBody(const VerticalPage& vpage, bool glyphsAlreadyWarm = false, bool imagesOnly = false,
+                              bool marks = true);
+  void drawVerticalMarks(const VerticalPage& vpage, int marginLeft, int marginTop);
+  bool prewarmVerticalPageGlyphs(const VerticalPage& vpage);
+  void presentVerticalPage(const VerticalPage& vpage, bool glyphsWarm);
+  static void earlyRenderVerticalPageThunk(void* ctx, const VerticalPage& page, int pageIndex);
+  void earlyRenderVerticalPage(const VerticalPage& page, int pageIndex);
+  // Continue a chapter build render() left running, one slice per loop() tick.
+  void tickVerticalBuild();
+  // A word-select page scan (matcha-reader's WordSelectionScan) for whole-word selection, or null:
+  // not a CJK book, no converted dictionary in /dictionaries/<language>, or too little heap.
+  std::unique_ptr<WordSelectionScan> newWordScan() const;
+  std::string wordScanCachePath() const;
+  // The next page's first characters, flattened as WordSelectionScan::initFromPage flattens a page.
+  static std::string wordScanLookupTail(const Page& next);
+  // Word lookup on a vertical page: tokens from its cells, the page redrawn by paintVerticalPage.
+  // `highlight`: pick a range to save as a quote instead of a word to look up.
+  void openVerticalWordSelect(bool framebufferContainsPage, int pointX, int pointY, bool highlight = false);
+  static void paintVerticalPageThunk(void* ctx);
+  static void reloadLookupMarksThunk(void* ctx) { static_cast<EpubReaderActivity*>(ctx)->reloadLookupMarks(); }
+  int failedVerticalSpineIndex = -1;
+  // The page whose glyphs the font cache holds, so a redraw of it skips the prewarm.
+  int prewarmedVPage_ = -1;
+  // Set by the early-render hook once the reader's page is on the panel mid-build.
+  bool earlyPageShown_ = false;
+  // The build finished in loop(): the next render places the position against the final count.
+  bool verticalBuildFinished_ = false;
+  // One-shot notice that vertical text needs a font with the book's script.
+  bool verticalFontNoticeShown_ = false;
+
  public:
   explicit EpubReaderActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Epub> epub,
                               int initialRefreshCountdown)
@@ -721,7 +820,10 @@ class EpubReaderActivity final : public Activity {
   // isBuilding() would spin at full clock indefinitely while idle on a page -- doing no
   // build work and blocking idle light-sleep. The main loop queries this under the
   // render lock, so the section cannot change underneath it.
-  bool skipLoopDelay() override { return overlay == Overlay::None && !buildHeapPaused && backgroundBuildWanted(); }
+  bool skipLoopDelay() override {
+    return (overlay == Overlay::None && !buildHeapPaused && backgroundBuildWanted()) ||
+           (verticalSection && verticalSection->isBuilding());
+  }
   bool isReaderActivity() const override { return true; }
   bool hasFootnoteAction() const override { return footnoteDepth > 0 || (section && !currentPageFootnotes.empty()); }
   bool onManualSleepRequested() override;

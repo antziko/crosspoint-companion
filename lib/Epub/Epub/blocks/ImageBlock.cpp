@@ -487,3 +487,15 @@ std::unique_ptr<ImageBlock> ImageBlock::deserialize(HalFile& file) {
   serialization::readPod(file, h);
   return std::unique_ptr<ImageBlock>(new (std::nothrow) ImageBlock(path, src, w, h));
 }
+
+void ImageBlock::fitWithin(const int availW, const int availH, int& w, int& h) {
+  if (w > availW || h > availH) {
+    const float sx = static_cast<float>(availW) / w;
+    const float sy = static_cast<float>(availH) / h;
+    const float s = (sx < sy) ? sx : sy;
+    w = static_cast<int>(w * s + 0.5f);
+    h = static_cast<int>(h * s + 0.5f);
+  }
+  if (w < 1) w = 1;
+  if (h < 1) h = 1;
+}

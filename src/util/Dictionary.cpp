@@ -299,6 +299,9 @@ bool Dictionary::readInfoInto(const char* folderPath, DictInfo& info) {
         } else if (strcmp(keyBuf, "lang") == 0) {
           valDst = info.lang;
           valCap = sizeof(info.lang) - 1;
+        } else if (strcmp(keyBuf, "matchaslot") == 0) {
+          valDst = info.matchaSlot;
+          valCap = sizeof(info.matchaSlot) - 1;
         } else if (strcmp(keyBuf, "wordcount") == 0) {
           isNumField = true;
           valNum = &info.wordcount;

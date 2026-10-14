@@ -45,4 +45,13 @@ struct ReaderRenderSpec {
   // Px a large image may extend past each side of the viewport, into the reader's screen
   // margin. Text keeps the margin.
   uint8_t imageBleed = 0;
+  // Draw <ruby> annotations (furigana / pinyin). Per-book, so the reader sets it on top of the
+  // store's spec. Off drops the annotation at parse time, so lines reserve no ruby leading.
+  bool furiganaEnabled = true;
+  // Vertical text only (VerticalSection's cache keys on them; the horizontal Section ignores them).
+  // Column-gap step 0 tight .. 2 wide, mapped from the Line Spacing setting.
+  uint8_t lineSpacingLevel = 1;
+  // The margin right of the text area, bezel inset included: the first column's ruby is drawn
+  // there. 0 reserves the full ruby width.
+  uint16_t rightMarginPx = 0;
 };

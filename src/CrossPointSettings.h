@@ -414,6 +414,13 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     // character at a time in CJK) and the front pair moves between rows. Per-book only:
     // there is no global counterpart, so a book that has never enabled it reads 0.
     uint8_t swapWordSelectAxes = 0;
+    // Snapshotted from the globals on first open like the fields above (literals: the
+    // constants are declared later in the enclosing class).
+    uint8_t wordSpacing = 100;     // percent, WORD_SPACING_MIN..MAX
+    uint8_t characterSpacing = 2;  // CHARACTER_SPACING_OFFSET-based, 0..CHARACTER_SPACING_MAX
+    uint8_t embeddedStyle = 1;     // use the book's CSS
+    uint8_t textAntiAliasing = 1;  // TEXT_AA enum
+    uint8_t focusReadingEnabled = 0;
   };
 
   // Night mode: inverted output polarity for the whole UI, resolved once per render
@@ -828,8 +835,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t getReaderHyphenationEnabled() const;
   uint8_t getReaderParagraphSpacing() const;
   uint8_t getReaderParagraphIndent() const;
+  uint8_t getReaderWordSpacing() const;
   // Stored 0..4 as signed -2..+2 px of tracking.
-  int8_t getCharacterSpacing() const { return static_cast<int8_t>(characterSpacing - CHARACTER_SPACING_OFFSET); }
+  int8_t getReaderCharacterSpacing() const;
+  uint8_t getReaderEmbeddedStyle() const;
+  uint8_t getReaderTextAntiAliasing() const;
+  uint8_t getReaderFocusReading() const;
   // The layout configuration the section cache is keyed on, with every per-book
   // override already resolved. The viewport is the caller's because it is the one
   // field the store cannot know.

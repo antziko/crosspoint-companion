@@ -31,6 +31,13 @@ class ImageBlock final : public Block {
   // to streaming when it doesn't fit); the reader calls this when the page
   // render completes so nothing stays resident between pages.
   static void releaseRenderCache();
+  // Scale w x h down (never up) to fit inside availW x availH, preserving aspect ratio and
+  // clamping to >= 1. Used by the vertical reader's image-page fit.
+  static void fitWithin(int availW, int availH, int& w, int& h);
+  // Whether an image shown at w x h fills the page: it reaches (nearly) the full width or height.
+  static bool fillsPage(int w, int h, int pageW, int pageH) {
+    return w > 0 && h > 0 && (w * 10 >= pageW * 9 || h * 10 >= pageH * 9);
+  }
 
   // Lazy extraction hook: the section build only header-probes images for their
   // dimensions; the file at imagePath is extracted out of the book on first

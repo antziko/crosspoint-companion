@@ -125,6 +125,20 @@ class WordSelectNavigator {
   void load(std::vector<WordInfo> words, std::vector<Row> rows, std::string textPool,
             bool consumeInitialConfirm = false, InitialMarker initialMarker = InitialMarker::Middle);
 
+  // Hand the loaded list back (the navigator is empty until the next load or replaceWords).
+  void takeWords(std::vector<WordInfo>& w, std::vector<Row>& r, std::string& pool) {
+    w = std::move(words);
+    r = std::move(rows);
+    pool = std::move(textPool);
+    words.clear();
+    rows.clear();
+    textPool.clear();
+  }
+  // Swap in a re-tokenised list of the SAME page (CJK characters merged into words) and put the
+  // cursor on flat index `cursor`. Every other piece of state -- the swallowed Confirm release,
+  // the repeat arming, the highlight snapshot -- carries over. Not during a range.
+  void replaceWords(std::vector<WordInfo> w, std::vector<Row> r, std::string pool, int cursor);
+
   // Access null-terminated display text from the pool.
   const char* getDisplay(const WordInfo& w) const { return textPool.data() + w.textOffset; }
   // Access null-terminated lookup text from the pool.
@@ -154,6 +168,14 @@ class WordSelectNavigator {
   // row, Up/Down to the first/last row (nearest the current column). The hold's release is then
   // swallowed rather than taken as one more step.
   void setHoldJumps(bool enabled) { holdJumps_ = enabled; }
+  // A vertical (tategaki) page: each Row is a column, rows run right to left, and a word's
+  // `width` is its extent DOWN the column; every column is columnWidth wide. Highlights invert
+  // the box rather than redraw the text, which a column cannot be drawn through. Call before load().
+  void setVertical(int columnWidth) {
+    vertical_ = columnWidth > 0;
+    columnWidth_ = columnWidth;
+  }
+  bool isVertical() const { return vertical_; }
 
   // Organise a flat word list into rows by Y coordinate (2px tolerance).
   // Sets each word's row field and populates the rows vector.
@@ -368,6 +390,8 @@ class WordSelectNavigator {
   // restore, which only repaints boundsForWord's rect.
   int ipaDy_ = 0;
   bool skipStopwords_ = true;
+  bool vertical_ = false;
+  int columnWidth_ = 0;
   int currentRow = 0;
   int currentWordInRow = 0;
   bool inMultiSelectMode = false;
@@ -375,7 +399,11 @@ class WordSelectNavigator {
   int anchorFlatIndex = -1;
 
   // Centre X of one word — the coordinate every row-navigation comparison is made against.
-  int wordCenterX(int flatIdx) const { return words[flatIdx].screenX + words[flatIdx].width / 2; }
+  // On a vertical page the same comparison runs down the column, so it is the centre Y.
+  int wordCenterX(int flatIdx) const {
+    return vertical_ ? words[flatIdx].screenY + words[flatIdx].width / 2
+                     : words[flatIdx].screenX + words[flatIdx].width / 2;
+  }
 
   // Position within targetRow of the word nearest refCenterX. With preferContentWord the
   // search is run over non-stopwords first and only falls back to the whole row when it

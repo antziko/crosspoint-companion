@@ -409,6 +409,9 @@ class GfxRenderer {
 
   // Drawing
   void drawPixel(int x, int y, bool state = true) const;
+  // Flip every pixel of the rectangle in the framebuffer (logical coords, clipped to the panel).
+  // Highlights content that cannot simply be redrawn white-on-black, such as a vertical column.
+  void invertRect(int x, int y, int width, int height) const;
   // Fast path for unrotated glyphs: same result as drawPixel() per ink pixel, clipped and rotated once per glyph.
   void drawGlyphBitmap(const uint8_t* bitmap, int width, int height, const glyphBitmap::Frame& frame, bool twoBit,
                        RenderMode mode, bool state) const;
@@ -519,6 +522,27 @@ class GfxRenderer {
   // Helper for drawing rotated text (90 degrees clockwise, for side buttons)
   void drawTextRotated90CW(int fontId, int x, int y, const char* text, bool black = true,
                            EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
+  // Vertical text (ported from matcha-reader). Runs glyphs down the screen, baseline at x.
+  void drawTextRotated90CCW(int fontId, int x, int y, const char* text, bool black = true,
+                            EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
+  // Render-truth advance for SHORT strings: resolves glyphs exactly as the draw loops do
+  // (on-demand SD load), so layout reservations match drawn ink.
+  int getRenderAdvanceX(int fontId, const char* text, EpdFontFamily::Style style) const;
+  bool getGlyphMetrics(int fontId, uint32_t cp, EpdFontFamily::Style style, int* left, int* width, int* top,
+                       int* height) const;
+  // The y drawText() puts `text`'s baseline at, given the same y (CJK may route to a fallback).
+  int textBaselineOffset(int fontId, const char* text, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
+  // One upright codepoint flush to the top-right of its cell box: vertical-text small kana.
+  void drawCharVerticalCornerTopRight(int fontId, int cellLeftX, int cellTopY, int cellSize, uint32_t cp,
+                                      bool black = true, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
+  // Where drawCharVerticalRotatedInCell() would put this glyph's ink (top y, height), without drawing.
+  bool verticalPunctInkBox(int fontId, uint32_t cp, EpdFontFamily::Style style, int cellTopY, int cellSize,
+                           int shiftType, int* inkTop, int* inkHeight) const;
+  // One codepoint rotated 90° CCW inside a vertical cell. shiftType is Kinsoku::verticalShiftType():
+  // 0 = no bias, 2 = closing bracket, 3 = opening bracket, 4 = dash/choonpu.
+  void drawCharVerticalRotatedInCell(int fontId, int cellLeftX, int cellTopY, int cellSize, uint32_t cp, int shiftType,
+                                     bool black = true, EpdFontFamily::Style style = EpdFontFamily::REGULAR,
+                                     int* inkTopOut = nullptr, int* inkHeightOut = nullptr) const;
   int getTextHeight(int fontId) const;
 
   // Grayscale functions

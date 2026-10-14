@@ -114,8 +114,15 @@ ReadingSpan findReading(const char* s);
 // and the full definition screen always show the same thing.
 size_t readEntry(Dictionary::LookupCtx& ctx, HalFile& dictFile, const char* token, char* buf, size_t bufSize);
 
-// readEntry's read half, for a caller that already holds the entry's .dict location.
+// readEntry's read half, for a caller that already holds the entry's .dict location. The text
+// comes back through stripMarkup.
 size_t readEntryAt(HalFile& dictFile, uint32_t offset, uint32_t size, char* buf, size_t bufSize);
+
+// Removes the markup some "plain text" dictionaries carry (st-xhzd: `1`word`2`reading<br>...), in
+// place: an HTML tag (< then a letter or /, closed within 64 bytes) and a `<digits>` marker
+// become a space, &nbsp; &lt; &gt; &amp; &quot; their character; a tag the peek cut off at the
+// end is dropped. A bare '<' ("a < b") stays. Returns the new length; buf stays NUL-terminated.
+size_t stripMarkup(char* buf, size_t len);
 
 // How the entry's fields are distributed across the rows. Both flags exist for the enlarged-
 // character layout, where the box is columns rather than a paragraph: the headword field is drawn

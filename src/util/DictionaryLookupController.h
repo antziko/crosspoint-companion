@@ -115,6 +115,9 @@ class DictionaryLookupController {
   const std::string& getLookupWord() const { return lookupWord; }
   const std::string& getFoundWord() const { return foundWord; }
   const DictLocation& getFoundLocation() const { return foundLocation; }
+  // DictTabs slots (Words/Names/Grammar) whose matcha index holds the found word; 0 when the
+  // found dictionary's group has fewer than two tagged dictionaries. Valid once a lookup is done.
+  uint8_t foundSlots() const { return foundSlots_; }
   FoundStatus getFoundStatus() const { return foundStatus; }
   bool getRecordHistory() const { return recordHistory_; }
 
@@ -146,6 +149,7 @@ class DictionaryLookupController {
   std::string lookupWord;
   std::string foundWord;
   DictLocation foundLocation;
+  uint8_t foundSlots_ = 0;
   std::string altFormWord;
 
   // Set by the sweep in runLookup() when a dictionary OTHER than the active one answered;
@@ -209,6 +213,8 @@ class DictionaryLookupController {
   void logLookupOutcome(const char* outcome) const;
 
   void runLookup();
+  // Fills foundSlots_ for the word just found (lookup task).
+  void probeTabs();
   // The same-category sweep runLookup() delegates to once the active dictionary has missed.
   // Returns the winning location, or `primary` untouched when nothing in the group has the word.
   DictLocation sweepGroup(Dictionary::LookupCtx& ctx, const std::string& activeBase, const DictLocation& primary,

@@ -5,6 +5,7 @@
 
 #include "../settings/FontComparePane.h"
 #include "../settings/TextSettingsPreview.h"
+#include "CjkBookPrefs.h"
 #include "CrossPointSettings.h"
 #include "activities/Activity.h"
 #include "activities/ListTouchTarget.h"
@@ -23,9 +24,11 @@ class ReaderOptionsActivity final : public Activity {
   // for stats); the plain-text reader passes false to hide them.
   // sampleText seeds the live preview with the book's own text (the reader passes its
   // current page); empty falls back to the built-in pangram.
+  // languageTag / spineRtl are the EPUB's dc:language and spine direction; with epubRows they
+  // drive the Book Language, Vertical Text and Furigana rows (cjk.bin, see CjkBookPrefs).
   explicit ReaderOptionsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string bookCachePath,
                                  const CrossPointSettings::ReaderOverride& initialOverride, bool epubRows = true,
-                                 std::string sampleText = "");
+                                 std::string sampleText = "", std::string languageTag = "", bool spineRtl = false);
 
   void onEnter() override;
   void onExit() override;
@@ -33,16 +36,25 @@ class ReaderOptionsActivity final : public Activity {
   void render(RenderLock&&) override;
 
  private:
-  static constexpr int ITEM_COUNT = 12;
+  static constexpr int ITEM_COUNT = 15;
   int itemCount() const { return rowCount_; }
   // Item id of the highlighted row.
   int currentItem() const { return rows_[selectedIndex]; }
 
   std::string cachePath;
   CrossPointSettings::ReaderOverride localOverride;
-  // Visible item ids in display order, fixed at construction.
+  // Visible item ids in display order; rebuilt when the book language changes, since the
+  // Vertical Text and Furigana rows show only for a CJK book.
   uint8_t rows_[ITEM_COUNT] = {};
   int rowCount_ = 0;
+  bool epubRows_ = true;
+  void rebuildRows();
+
+  // Per-book CJK state, edited here and written to cjk.bin on every change.
+  CjkBookPrefs cjkPrefs_;
+  std::string languageTag_;
+  bool spineRtl_ = false;
+  CjkScript bookScript() const { return cjk::scriptForLanguage(cjkPrefs_.effectiveLanguage(languageTag_)); }
   // Book text sampled into the preview pane; empty => pangram fallback.
   std::string sampleText;
   int selectedIndex = 0;
@@ -67,7 +79,7 @@ class ReaderOptionsActivity final : public Activity {
   void persistAndApply();
 
   // Display name and value string for each item index.
-  static const char* getItemName(int index);
+  const char* getItemName(int index) const;
   std::string getItemValue(int index) const;
 
   // Live sample-text preview shown above the list; reflects the per-book override

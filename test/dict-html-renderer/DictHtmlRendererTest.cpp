@@ -787,6 +787,42 @@ int main(int argc, char** argv) {
   }
 
   // ---------------------------------------------------------------------------
+  // B6: st-xhzd field markers -- `1` opens a bold headword, `2` ends it with a space
+  // ---------------------------------------------------------------------------
+  {
+    printf("\n=== field markers (`1`headword`2`reading) ===\n");
+    const char* html = "`1`\xE9\x92\xBB\xE6\x9C\xBA`2`zu\xC3\xA0nj\xC4\xAB<br>[drilling rig] a";
+    const auto& spans = renderer.render(html, static_cast<int>(strlen(html)));
+    bool pass = spans.size() == 3 && strcmp(spans[0].text, "\xE9\x92\xBB\xE6\x9C\xBA") == 0 && spans[0].bold &&
+                strcmp(spans[1].text, " zu\xC3\xA0nj\xC4\xAB") == 0 && !spans[1].bold &&
+                strcmp(spans[2].text, "[drilling rig] a") == 0 && !spans[2].bold && spans[2].newlineBefore;
+    for (int i = 0; i < static_cast<int>(spans.size()); i++) printSpan(i, spans[i]);
+
+    // Not markers: a lone backtick, `x`, and a digit run never closed.
+    const char* plain = "a ` b `x` c `12 d";
+    const auto& p2 = renderer.render(plain, static_cast<int>(strlen(plain)));
+    pass = pass && p2.size() == 1 && strcmp(p2[0].text, plain) == 0 && !p2[0].bold;
+    for (int i = 0; i < static_cast<int>(p2.size()); i++) printSpan(i, p2[i]);
+
+    // A `1` with no closing marker ends at the line break.
+    const char* open = "`1`head<br>body";
+    const auto& p3 = renderer.render(open, static_cast<int>(strlen(open)));
+    pass = pass && p3.size() == 2 && p3[0].bold && strcmp(p3[1].text, "body") == 0 && !p3[1].bold;
+    for (int i = 0; i < static_cast<int>(p3.size()); i++) printSpan(i, p3[i]);
+
+    // Split across expat callbacks: the entity is fed as its own chunk.
+    const char* split = "`&#49;`head`2`tail";
+    const auto& p4 = renderer.render(split, static_cast<int>(strlen(split)));
+    pass = pass && p4.size() == 2 && strcmp(p4[0].text, "head") == 0 && p4[0].bold && strcmp(p4[1].text, " tail") == 0;
+    for (int i = 0; i < static_cast<int>(p4.size()); i++) printSpan(i, p4[i]);
+    printf("  %s\n", pass ? "PASS" : "FAIL");
+    if (pass)
+      passed++;
+    else
+      failed++;
+  }
+
+  // ---------------------------------------------------------------------------
   // Group C: isIpaCodepoint unit tests
   // ---------------------------------------------------------------------------
   {

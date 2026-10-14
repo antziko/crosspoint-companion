@@ -85,6 +85,8 @@ class Epub {
   const std::string& getTitle() const;
   const std::string& getAuthor() const;
   const std::string& getLanguage() const;
+  // The spine declares page-progression-direction="rtl".
+  bool pageProgressionRtl() const;
   std::string getCoverBmpPath(bool cropped = false) const;
   bool generateCoverBmp(bool cropped = false) const;
   std::string getThumbBmpPath() const;
@@ -111,6 +113,10 @@ class Epub {
   // pulling ZipFile.h into this header. Map via ZipFile::streamResultTag().
   bool readItemContentsToStream(const std::string& itemHref, Print& out, size_t chunkSize, bool allowEarlyStop = false,
                                 uint8_t* outStreamReason = nullptr) const;
+  // As above, polling shouldCancel(cancelCtx) before each chunk is written; a cancel ends the
+  // stream and returns false. Used by the vertical builder's image extraction.
+  bool readItemContentsToStream(const std::string& itemHref, Print& out, size_t chunkSize, bool allowEarlyStop,
+                                bool (*shouldCancel)(void*), void* cancelCtx) const;
   // Extract an item to a file on SD. On failure the partial file is removed.
   bool extractItemToFile(const std::string& itemHref, const std::string& destPath) const;
   bool getItemSize(const std::string& itemHref, size_t* size) const;
@@ -126,5 +132,8 @@ class Epub {
   size_t getBookSize() const;
   float calculateProgress(int currentSpineIndex, float currentSpineRead) const;
   CssParser* getCssParser() const { return cssParser.get(); }
+  // matcha-reader's per-chapter stylesheet filter. Our CSS cache does not track rule sources,
+  // so every chapter gets every rule.
+  CssParser::StylesheetFilter stylesheetFilterFor(const std::string&, const std::string&) const { return {}; }
   int resolveHrefToSpineIndex(const std::string& href) const;
 };

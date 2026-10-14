@@ -1,0 +1,215 @@
+#pragma once
+
+#include <atomic>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "Epub.h"
+#include "ReaderRenderSpec.h"
+#include "VerticalParsedText.h"
+
+class GfxRenderer;
+class HalFile;
+
+// A vertical-text chapter, backed by an on-SD page cache.
+//
+// Memory model: pages are NEVER all held in RAM. On an ESP32-C3 (~220KB usable heap) a single
+// real Japanese chapter (~30k characters) would need ~1.3MB of laid-out VerticalGlyphs -- the
+// original hold-everything design only ever worked in the desktop emulator's 8MB heap. Instead:
+//   - createSectionFile() streams: XML parse feeds paragraphs directly into layout, and each
+//     batch of laid-out pages is serialized to the cache file immediately and freed.
+//   - loadSectionFile() reads only the header + a per-page offset table (4 bytes/page).
+//   - getPage() loads the one requested page from SD on demand into a single-page cache.
+class VerticalSection {
+  std::shared_ptr<Epub> epub;
+  const int spineIndex;
+  GfxRenderer& renderer;
+  std::string filePath;
+
+  // File offset of each serialized page record within the cache file.
+  std::vector<uint32_t> pageOffsets_;
+  // File offset of the anchor table (id -> visible text offset), right after the page index.
+  uint32_t anchorTableOffset_ = 0;
+  // Filled by the build's parser, written after the page index, then released.
+  std::vector<std::pair<std::string, uint32_t>> buildAnchors_;
+
+  // Single-page read cache backing getPage()'s returned pointer. Mutable because getPage() is
+  // const to callers (a read) but faults the page in from SD. The pointer returned by getPage()
+  // is invalidated by the next getPage() call for a different index -- all existing callers
+  // fetch-and-render one page at a time, never holding two pages.
+  //
+  // NOT thread-safe, and the slot is shared by BOTH tasks: the render task re-faults it from
+  // render()'s prewarm and image-warm tail (seconds long), the main task from the menu / word
+  // lookup / bookmark paths. Faulting a page mutates this one std::vector<VerticalGlyph>, so a
+  // concurrent pair of getPage() calls frees the glyph buffer under the other task -- observed
+  // as a heap_caps_free panic ("target pointer is outside heap areas") on the NEXT clear().
+  // Rule: main-task callers must hold a RenderLock across getPage() AND every use of its
+  // result; the render task is covered by the lock it renders under.
+  mutable VerticalPage loadedPage_;
+  mutable int loadedPageIndex_ = -1;
+  // Set by getPage() when its last read failed because the glyph vector could not be reserved
+  // on a low heap (the on-disk record is fine). Lets the reader retry later instead of clearing
+  // a valid cache. See lastReadHeapRefused().
+  mutable bool lastReadHeapRefused_ = false;
+
+  // Set by streamParseAndLayout when the layout dropped chars/glyphs on low heap. The pages that
+  // made it to disk are readable (this session keeps working), but createSectionFile stamps the
+  // file with version 0 so the next open sees a version mismatch and rebuilds the chapter --
+  // instead of the truncation living on disk as a permanently sparse chapter.
+  bool lastBuildDroppedForHeap_ = false;
+  // Set when only the styled-block table was skipped. The chapter's TEXT is complete; the book's
+  // own block styling is not. Kept apart from lastBuildDroppedForHeap_ because the two differ in
+  // kind: this one is cosmetic and must not be reported, or cached, as lost content.
+  bool lastBuildUnstyledForHeap_ = false;
+  // Set by loadSectionFile when the on-disk cache carried the version-0 stale stamp (a prior
+  // build dropped glyphs). If THIS build drops again, createSectionFile keeps the best-effort
+  // cache valid instead of re-stamping: the drop conditions are deterministic per book, so
+  // re-stamping meant a full re-index on every open, forever.
+  bool rebuildingFromStale_ = false;
+  // Largest block at the start of this build, reported with the stale stamp so a sparse chapter
+  // says how much room it had.
+  uint32_t lastBuildStartMaxAlloc_ = 0;
+
+  // See setEarlyRenderHook().
+  void (*earlyRenderFn_)(void*, const VerticalPage&, int) = nullptr;
+  void* earlyRenderCtx_ = nullptr;
+  int earlyRenderTargetPage_ = -1;
+  // See requestPageDuringBuild(). Written by the loop() task, read by the build on the
+  // render task; -1 = no pending request.
+  std::atomic<int> buildPageRequest_{-1};
+  // See requestBuildNotice(). Set by loop(), consumed on the render task between pages so
+  // the notice is drawn by the same task that draws pages -- the framebuffer has one owner.
+  std::atomic<bool> buildNoticePending_{false};
+  void (*buildNoticeFn_)(void*) = nullptr;
+  void* buildNoticeCtx_ = nullptr;
+  // See setBuildCancelHook().
+  bool (*cancelFn_)(const void*) = nullptr;
+  const void* cancelCtx_ = nullptr;
+  bool lastBuildCancelled_ = false;
+
+  // The state of a build in progress (see startBuild()): what streamParseAndLayout() once held
+  // on the stack, kept between buildSomeMore() slices. Null when no build is running.
+  struct BuildContext;
+  std::unique_ptr<BuildContext> build_;
+  bool finishBuild(bool parseOk);
+
+ public:
+  uint16_t pageCount = 0;
+  int currentPage = 0;
+
+  // Both out of line: BuildContext is only complete in the .cpp. The destructor abandons a build
+  // that is still running.
+  explicit VerticalSection(const std::shared_ptr<Epub>& epub, int spineIndex, GfxRenderer& renderer);
+  ~VerticalSection();
+
+  // Early-first-render hook: when set, createSectionFile() invokes fn(ctx, page, pageIndex)
+  // once, right after the page with index targetPage has been laid out and written to the
+  // cache -- letting the reader show the user's page a couple of seconds into a whole-chapter
+  // build (~17s for a 431-page book) while the remaining pages keep building. Fires for text
+  // pages only: an image page would pay its multi-second decode in the middle of the build.
+  // Silent background builds simply never set the hook. Function pointer + ctx, not
+  // std::function, per the platform binary/heap rules.
+  void setEarlyRenderHook(void* ctx, void (*fn)(void*, const VerticalPage&, int), int targetPage) {
+    earlyRenderCtx_ = ctx;
+    earlyRenderFn_ = fn;
+    earlyRenderTargetPage_ = targetPage;
+  }
+
+  // Mid-build page turns: the reader's loop() task records the page the user wants while a
+  // build is still running on the render task; the build serves it through the early-render
+  // hook as soon as that page exists (immediately via cache read-back if it is already
+  // written, otherwise the moment it is laid out). Latest request wins -- rapid presses
+  // collapse to the final target.
+  void requestPageDuringBuild(int pageIndex) { buildPageRequest_.store(pageIndex, std::memory_order_relaxed); }
+
+  // Ask the active build to draw feedback at its next page boundary. Used when a backward turn,
+  // menu, or lookup must wait for the render lock the build owns.
+  void requestBuildNotice() { buildNoticePending_.store(true, std::memory_order_relaxed); }
+
+  // Draws the loading notice; invoked between pages on the render task. See requestBuildNotice().
+  void setBuildNoticeHook(void* ctx, void (*fn)(void*)) {
+    buildNoticePending_.store(false, std::memory_order_relaxed);
+    buildNoticeCtx_ = ctx;
+    buildNoticeFn_ = fn;
+  }
+
+  // Cooperative cancellation, polled once per laid-out page (~60ms apart). For SPECULATIVE
+  // builds only -- a build the reader is waiting on must never be cancelled, so the foreground
+  // path leaves this unset. A cancelled build writes no cache file at all: the partial layout is
+  // discarded rather than persisted, so the next attempt starts clean.
+  void setBuildCancelHook(const void* ctx, bool (*fn)(const void*)) {
+    cancelCtx_ = ctx;
+    cancelFn_ = fn;
+  }
+  // True when the last createSectionFile() returned false because the cancel hook fired, as
+  // opposed to a real failure. Lets a speculative caller back off quietly instead of logging.
+  bool lastBuildCancelled() const { return lastBuildCancelled_; }
+
+  // furiganaEnabled is part of the cache key: the column gap only has to clear ruby when ruby is
+  // drawn, so turning furigana off tightens the columns and the chapter must be re-laid out.
+  // retryDegraded: the foreground open may discard a best-effort cache for a rebuild (see
+  // degradedPath()); probes and background warms leave it alone.
+  // The same spec the horizontal Section takes. Vertical reads fontId, the viewport,
+  // lineSpacingLevel, furiganaEnabled and characterSpacing from it; all five are the cache key.
+  bool loadSectionFile(const ReaderRenderSpec& spec, bool retryDegraded = false);
+  // A whole chapter in one call: startBuild(), then buildSomeMore() until it is done.
+  bool createSectionFile(const ReaderRenderSpec& spec);
+
+  // Incremental build, so the reader stays responsive while a chapter is laid out. startBuild()
+  // extracts the chapter and sets up the layout and parser; each buildSomeMore() parses for up to
+  // maxMillis (0: to the end) and finalizes the cache once the chapter is done. Between slices,
+  // pageCount is the pages written so far and getPage() reads them back from the open build.
+  // The early-render and mid-build page-request hooks fire inside slices, as before.
+  enum class BuildStep : uint8_t { InProgress, Done, Failed };
+  bool startBuild(const ReaderRenderSpec& spec);
+  BuildStep buildSomeMore(uint32_t maxMillis);
+  bool isBuilding() const { return static_cast<bool>(build_); }
+  // Drops a running build and its partial file; the next load rebuilds the chapter.
+  void abandonBuild();
+  // The reader drew a page between two slices (a menu over the page): the build's result is then
+  // used for this session but stamped stale, see finishBuild().
+  void notePageDrawnBetweenSlices();
+  // The page a mid-build turn asked for and the build has not served yet, or -1.
+  int pendingPageRequest() const { return buildPageRequest_.load(std::memory_order_relaxed); }
+  // Frees the single-page read cache (getPage()); the next getPage() reads the page again.
+  void releasePageCache() const {
+    loadedPage_ = VerticalPage();  // move-assigning an empty page frees its buffers
+    loadedPageIndex_ = -1;
+  }
+  bool clearCache() const;
+  // Sidecar marking the cache as a best-effort low-heap build; holds lastLoadMaxAlloc_ of that open.
+  std::string degradedPath() const { return filePath + ".deg"; }
+  static constexpr uint32_t DEGRADED_RETRY_MARGIN = 16 * 1024;
+  uint32_t lastLoadMaxAlloc_ = 0;  // largest free block when the cache load that preceded a build ran
+
+  // Position of a page's first character within the chapter's visible character data, in the
+  // same units Section::getVisibleTextOffsetForPage() reports -- which is what makes a reading
+  // position portable between the two layouts. See VerticalPage::visibleTextOffset.
+  //
+  // Read straight from the page record on SD (its first field). No table is held in RAM and
+  // none is written: the reverse lookup binary-searches the page records through the offset
+  // table that loadSectionFile already keeps, which costs ~9 four-byte reads on a 500-page
+  // chapter and, unlike a second index, nothing at all during the build -- where this layout
+  // is already fighting for every contiguous KB.
+  std::optional<uint32_t> getVisibleTextOffsetForPage(int page) const;
+
+  // The page holding `offset`: the last page whose own offset is <= it. nullopt if the chapter
+  // has no pages or the records cannot be read.
+  // preferFirstAtOffset: of several pages starting exactly at `offset` (image pages add no
+  // characters, so they share the start of the text page after them), the first instead.
+  std::optional<int> getPageForVisibleTextOffset(uint32_t offset, bool preferFirstAtOffset = false) const;
+
+  // The page holding the element with this id (a TOC or footnote target), through the anchor table
+  // written after the page index. nullopt if the chapter has no such anchor.
+  std::optional<int> getPageForAnchor(const std::string& anchor) const;
+  // getPageForAnchor() for several ids in one pass over the anchor table: pages[i] is the page of
+  // anchors[i], or -1 if the chapter has no such anchor.
+  void findAnchorPages(const std::vector<std::string>& anchors, std::vector<int>& pages) const;
+  const VerticalPage* getPage() const;
+  const VerticalPage* getPage(int pageIndex) const;
+  // True when the most recent getPage() returned nullptr only because the page's glyph vector
+  // could not be reserved on a low heap -- the cache is valid; retry, do not clear it.
+  bool lastReadHeapRefused() const { return lastReadHeapRefused_; }
+};

@@ -249,8 +249,7 @@ TEST(TextBookMd, Emphasis) {
 }
 
 TEST(TextBookMd, CodeSpansShieldMarkup) {
-  EXPECT_EQ(mdBody("`*not* <em>` and ``a ` b``\n"),
-            "<p><code>*not* &lt;em&gt;</code> and <code>a ` b</code></p>\n");
+  EXPECT_EQ(mdBody("`*not* <em>` and ``a ` b``\n"), "<p><code>*not* &lt;em&gt;</code> and <code>a ` b</code></p>\n");
 }
 
 TEST(TextBookMd, EscapesAndEntities) {

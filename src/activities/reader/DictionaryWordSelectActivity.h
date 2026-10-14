@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "../Activity.h"
+#include "WordSelectionScan.h"
+#include "util/CjkWordMerge.h"
 #include "util/DictGloss.h"
 #include "util/DictionaryLookupController.h"
 #include "util/PageMarks.h"
@@ -54,6 +56,43 @@ class DictionaryWordSelectActivity final : public Activity {
   // The reader page's identity, so every repaint here draws the same looked-up-word underlines
   // and quote marks the reader drew.
   void setPageMarkKey(const PageMarks::PageKey& key) { markKey_ = key; }
+  // Rebuilds the shared lookup-mark table from the deck. Run when the definition screen returns
+  // to the gloss box, where a card may have just been deleted.
+  void setMarksReloader(void* ctx, void (*reload)(void*)) {
+    marksReloadCtx_ = ctx;
+    marksReload_ = reload;
+  }
+
+  // A vertical (tategaki) page has no Page: the reader hands over its token list
+  // (buildVerticalWordTokens) and a painter that redraws the page into the framebuffer. Call
+  // before the activity starts, with `page` null. The inline gloss box stays off: its strip
+  // repaints are horizontal-page operations.
+  struct PagePainter {
+    void* ctx = nullptr;
+    void (*draw)(void* ctx) = nullptr;
+  };
+  void setVerticalPage(std::vector<WordSelectNavigator::WordInfo> words, std::vector<WordSelectNavigator::Row> rows,
+                       std::string textPool, const int cellPx, const PagePainter painter) {
+    verticalWords_ = std::move(words);
+    verticalRows_ = std::move(rows);
+    verticalPool_ = std::move(textPool);
+    verticalCellPx_ = cellPx;
+    painter_ = painter;
+  }
+
+  // Whole-word CJK selection, after matcha-reader: `scan` segments this page against the converted
+  // dictionary in /dictionaries/<language>, and this screen merges the page's per-character tokens
+  // into the words it finds -- the cursor's neighbourhood before the first frame, the rest in the
+  // background while the screen is up. `tokenGlyphs` maps a vertical page's tokens to scan cells
+  // (a horizontal page is mapped here, by extractWords). `cachePath` is the scan's wlscan.bin.
+  void setWordScan(std::unique_ptr<WordSelectionScan> scan, std::string cachePath, const uint16_t spine,
+                   const uint16_t pageIndex, std::vector<CjkWordMerge::TokenGlyphs> tokenGlyphs = {}) {
+    scan_ = std::move(scan);
+    scanCachePath_ = std::move(cachePath);
+    scanSpine_ = spine;
+    scanPage_ = pageIndex;
+    tokenGlyphs_ = std::move(tokenGlyphs);
+  }
 
   void setGlossCursorMemory(const int resumeIdx, int* out) {
     glossResumeIdx_ = resumeIdx;
@@ -79,6 +118,15 @@ class DictionaryWordSelectActivity final : public Activity {
 
  private:
   std::unique_ptr<Page> page;
+  // Vertical page (see setVerticalPage); verticalCellPx_ > 0 marks one.
+  std::vector<WordSelectNavigator::WordInfo> verticalWords_;
+  std::vector<WordSelectNavigator::Row> verticalRows_;
+  std::string verticalPool_;
+  int verticalCellPx_ = 0;
+  PagePainter painter_;
+  void* marksReloadCtx_ = nullptr;
+  void (*marksReload_)(void*) = nullptr;
+  void drawPage() const;
   int marginLeft;
   int marginTop;
   std::string cachePath;
@@ -187,7 +235,47 @@ class DictionaryWordSelectActivity final : public Activity {
   // store as the flashcard front-face context. "" if there is no selection.
   std::string buildLookupExcerpt() const;
 
-  bool skipLoopDelay() override { return controller.skipLoopDelay(); }
+  bool skipLoopDelay() override { return controller.skipLoopDelay() || (scan_ && !scan_->isDone()); }
+
+  // --- Whole-word CJK selection (see setWordScan) ----------------------------------------
+  std::unique_ptr<WordSelectionScan> scan_;
+  std::string scanCachePath_;
+  uint16_t scanSpine_ = 0;
+  uint16_t scanPage_ = 0;
+  // Per character token: the scan cells it covers. Filled before the first merge.
+  std::vector<CjkWordMerge::TokenGlyphs> tokenGlyphs_;
+  // Horizontal page only: each token's line and codepoint position on it, recorded by
+  // extractWords and resolved to scan cells once the scan exists.
+  struct TokenCell {
+    uint16_t line;
+    uint16_t ordinal;
+    uint8_t count;
+  };
+  std::vector<TokenCell> tokenCells_;
+  // Merged token -> the character tokens it stands for. Empty while nothing is merged, when flat
+  // indices are character indices. Saved highlights and the gloss cursor memory are kept in
+  // character indices, so they stay valid whatever the merge does.
+  std::vector<CjkWordMerge::Span> spans_;
+  size_t mergedScanWords_ = 0;  // scan words the current merge was built from
+  unsigned long lastMergeMs_ = 0;
+  bool scanCacheSaved_ = false;
+
+  // Maps extractWords' token positions to scan cells (horizontal page).
+  void mapTokenCells();
+  // Opening burst: scan around the cursor's character and merge before the first frame.
+  void startWordScan();
+  // One background slice; re-merges when the scan has found words and the user is idle.
+  void stepWordScan();
+  // Merge the words the scan has found since the last merge into the navigator's list, the
+  // cursor on character `cursorChar` (-1: the one it is on now). False when the heap could not
+  // hold it, leaving the list as it was.
+  bool remergeWords(int cursorChar = -1);
+  // Aim the scan at the cursor's character when it has not been segmented yet.
+  void aimScanAtCursor();
+  // Character-token range of flat index `flat` (identity while nothing is merged).
+  int charLoOf(int flat) const;
+  int charHiOf(int flat) const;
+  int flatOfChar(int charIdx) const;
 
   // Force the next render() to take the full-repaint path. Used after the lookup controller
   // or a sub-activity (e.g. DictionaryDefinitionActivity) has drawn directly to the
@@ -247,6 +335,7 @@ class DictionaryWordSelectActivity final : public Activity {
     int cardDictCount = 0;
     std::unique_ptr<GlossAltDict> alt;  // allocated on the first card that needs it
     bool useAlt = false;                // the current peek reads `alt`, not ctx/dict
+    uint32_t fallbackHash = 0;          // group dictionary that last answered a book-dictionary miss
     bool probeAlt = false;              // which dictionary `probe` below was read from
     DictGloss::GlossResult result;
     char raw[DictGloss::kPeekBytes] = {};
@@ -367,6 +456,10 @@ class DictionaryWordSelectActivity final : public Activity {
   // Point the peek at the card's dictionary when `token` is such a card's word, else the book's.
   void selectGlossDict(const std::string& token);
   bool openGlossAltDict(uint32_t dictHash);
+  // A book-dictionary miss tried in the other dictionaries of its group (Try Other Dictionaries),
+  // in the order the full lookup sweeps them, at most kMaxGlossFallbacks opened. Reads into
+  // gloss_->raw and leaves useAlt set on a hit.
+  size_t readGlossFallback(const std::string& token);
   Dictionary::LookupCtx& glossCtx() { return gloss_->useAlt ? gloss_->alt->ctx : gloss_->ctx; }
   HalFile& glossDictFile() { return gloss_->useAlt ? gloss_->alt->dict : gloss_->dict; }
 

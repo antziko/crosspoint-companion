@@ -4,6 +4,7 @@
 add_executable(DictWordSelectNavigatorTest
   DictWordSelectNavigatorTest.cpp
   ${REPO_ROOT}/src/util/WordSelectNavigator.cpp
+  ${REPO_ROOT}/src/util/CjkWordMerge.cpp
   ${REPO_ROOT}/lib/Utf8/Utf8.cpp
 )
 

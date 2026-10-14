@@ -160,6 +160,8 @@ void DictHtmlRenderer::reset() {
   newlinePending = false;
   listItemPending = false;
   krefArrowPending_ = false;
+  markerLen_ = 0;
+  markerBold_ = false;
   spanSink_ = SpanSink{};  // batch mode by default; streaming sets it after reset()
 
   // Reuse the existing parser (cheap reset) rather than free+create on every
@@ -259,6 +261,34 @@ void DictHtmlRenderer::emitText(const char* s, int len) {
   }
 
   for (int i = 0; i < len; i++) {
+    if (markerLen_ > 0) {
+      const char m = s[i];
+      if (m >= '0' && m <= '9' && markerLen_ < sizeof(markerBuf_) - 1) {
+        markerBuf_[markerLen_++] = m;
+        continue;
+      }
+      if (m == '`' && markerLen_ >= 2) {
+        const bool headword = markerLen_ == 2 && markerBuf_[1] == '1';
+        markerLen_ = 0;
+        pushSpan();
+        if (headword) {
+          fmt.bold = true;
+          markerBold_ = true;
+        } else {
+          if (markerBold_) fmt.bold = false;
+          markerBold_ = false;
+          pendingText += ' ';
+        }
+        continue;
+      }
+      flushMarker();  // not a marker: its bytes are text, and this byte is handled below
+    }
+    if (s[i] == '`') {
+      markerBuf_[0] = '`';
+      markerLen_ = 1;
+      continue;
+    }
+
     // One comparison guards the whole substitution table: every codepoint in it is U+2000-U+2FFF,
     // so every UTF-8 encoding starts 0xE2.
     if (static_cast<unsigned char>(s[i]) == 0xE2 && i + 2 < len) {
@@ -273,6 +303,8 @@ void DictHtmlRenderer::emitText(const char* s, int len) {
     char c = s[i];
     if (c == '\r' || c == '\n') {
       pushSpan();
+      if (markerBold_) fmt.bold = false;
+      markerBold_ = false;
       newlinePending = true;
       // Treat \r\n as a single line ending
       if (c == '\r' && i + 1 < len && s[i + 1] == '\n') i++;
@@ -283,7 +315,16 @@ void DictHtmlRenderer::emitText(const char* s, int len) {
   }
 }
 
-void DictHtmlRenderer::flushPending() { pushSpan(); }
+void DictHtmlRenderer::flushMarker() {
+  if (markerLen_ == 0) return;
+  pendingText.append(markerBuf_, markerLen_);
+  markerLen_ = 0;
+}
+
+void DictHtmlRenderer::flushPending() {
+  flushMarker();
+  pushSpan();
+}
 
 // ---------------------------------------------------------------------------
 // Expat callbacks
@@ -294,6 +335,14 @@ void XMLCALL DictHtmlRenderer::onStart(void* ud, const XML_Char* name, const XML
   if (self->parseError) return;
 
   TagAction action = classify(name);
+
+  self->flushMarker();
+  // A headword never spans a line: a `1` left open ends at the break, before the tag saves fmt.
+  if (self->markerBold_ && action == TagAction::BLOCK_BREAK) {
+    self->flushPending();
+    self->fmt.bold = false;
+    self->markerBold_ = false;
+  }
 
   // Propagate suppression from parent
   bool parentSuppresses = !self->tagStack.empty() && self->tagStack.back().suppressChildren;
@@ -416,6 +465,7 @@ void XMLCALL DictHtmlRenderer::onStart(void* ud, const XML_Char* name, const XML
 void XMLCALL DictHtmlRenderer::onEnd(void* ud, const XML_Char* name) {
   auto* self = static_cast<DictHtmlRenderer*>(ud);
   if (self->parseError) return;
+  self->flushMarker();
 
   // Disarm on close so an empty <kref></kref> cannot eat an arrow that belongs to the text
   // after it. Done before the tagStack guard: the flag is parser state, not stack state.

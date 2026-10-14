@@ -172,7 +172,7 @@ struct NamedEntity {
 };
 // The XML five pass through as-is; these common HTML ones become their characters.
 constexpr NamedEntity NAMED_ENTITIES[] = {
-    {"nbsp", "&#160;"}, {"mdash", "\xE2\x80\x94"}, {"ndash", "\xE2\x80\x93"},  {"hellip", "\xE2\x80\xA6"},
+    {"nbsp", "&#160;"},        {"mdash", "\xE2\x80\x94"}, {"ndash", "\xE2\x80\x93"}, {"hellip", "\xE2\x80\xA6"},
     {"lsquo", "\xE2\x80\x98"}, {"rsquo", "\xE2\x80\x99"}, {"ldquo", "\xE2\x80\x9C"}, {"rdquo", "\xE2\x80\x9D"},
     {"laquo", "\xC2\xAB"},     {"raquo", "\xC2\xBB"},     {"copy", "\xC2\xA9"},      {"reg", "\xC2\xAE"},
     {"trade", "\xE2\x84\xA2"}, {"middot", "\xC2\xB7"},    {"bull", "\xE2\x80\xA2"},  {"times", "\xC3\x97"},
@@ -676,9 +676,10 @@ class Converter {
         std::string_view def = trim(r.substr(close + 2));
         if (!def.empty()) {
           if (pass1 && sh.refs.size() < MAX_REF_DEFS && !sh.findRef(r.substr(1, close - 1))) {
-            if (def.front() == '<') def = def.substr(1, def.find('>') == std::string_view::npos ? 0 : def.find('>') - 1);
-            sh.refs.push_back({normalizeLabel(r.substr(1, close - 1)),
-                               unescapeBackslashes(def.substr(0, def.find(' ')))});
+            if (def.front() == '<')
+              def = def.substr(1, def.find('>') == std::string_view::npos ? 0 : def.find('>') - 1);
+            sh.refs.push_back(
+                {normalizeLabel(r.substr(1, close - 1)), unescapeBackslashes(def.substr(0, def.find(' ')))});
           }
           return;
         }
@@ -1129,8 +1130,7 @@ class Converter {
     return false;
   }
 
-  static bool tryAutolink(const std::string_view s, const size_t open, std::string& o, const bool plain,
-                          size_t& next) {
+  static bool tryAutolink(const std::string_view s, const size_t open, std::string& o, const bool plain, size_t& next) {
     const size_t close = s.find('>', open + 1);
     if (close == std::string_view::npos || close == open + 1) return false;
     const std::string_view inner = s.substr(open + 1, close - open - 1);

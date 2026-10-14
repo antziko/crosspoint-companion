@@ -4,6 +4,8 @@
 #include <Logging.h>
 #include <Serialization.h>
 
+#include <algorithm>
+
 namespace {
 
 // On-disk layout version for reader_settings.bin. Bump when the field layout below
@@ -25,7 +27,9 @@ namespace {
 // v9: paragraphSpacing widened from on/off to a PARAGRAPH_SPACING level; an older On is remapped
 //     in place to Normal, the gap it always drew.
 // v10: appended paragraphIndent. Older files take the current global, as a newly opened book would.
-constexpr uint8_t READER_SETTINGS_FILE_VERSION = 10;
+// v11: appended wordSpacing, characterSpacing, embeddedStyle, textAntiAliasing, focusReadingEnabled;
+//      older files take the current globals.
+constexpr uint8_t READER_SETTINGS_FILE_VERSION = 11;
 // Oldest layout load() still understands; everything from here up is read field by field.
 constexpr uint8_t READER_SETTINGS_MIN_READABLE_VERSION = 5;
 
@@ -84,6 +88,28 @@ bool load(const std::string& cachePath, CrossPointSettings::ReaderOverride& out)
       out.paragraphIndent = CrossPointSettings::PARA_INDENT_BOOK;
     }
   }
+  out.wordSpacing = SETTINGS.wordSpacing;
+  out.characterSpacing = SETTINGS.characterSpacing;
+  out.embeddedStyle = SETTINGS.embeddedStyle;
+  out.textAntiAliasing = SETTINGS.textAntiAliasing;
+  out.focusReadingEnabled = SETTINGS.focusReadingEnabled;
+  if (version >= 11) {
+    serialization::readPod(f, out.wordSpacing);
+    serialization::readPod(f, out.characterSpacing);
+    serialization::readPod(f, out.embeddedStyle);
+    serialization::readPod(f, out.textAntiAliasing);
+    serialization::readPod(f, out.focusReadingEnabled);
+    out.wordSpacing =
+        std::clamp(out.wordSpacing, CrossPointSettings::WORD_SPACING_MIN, CrossPointSettings::WORD_SPACING_MAX);
+    if (out.characterSpacing > CrossPointSettings::CHARACTER_SPACING_MAX) {
+      out.characterSpacing = CrossPointSettings::CHARACTER_SPACING_OFFSET;
+    }
+    if (out.textAntiAliasing >= CrossPointSettings::TEXT_AA_COUNT) {
+      out.textAntiAliasing = CrossPointSettings::TEXT_AA_ANTIALIASED;
+    }
+    out.embeddedStyle = out.embeddedStyle ? 1 : 0;
+    out.focusReadingEnabled = out.focusReadingEnabled ? 1 : 0;
+  }
   out.active = true;
   return true;
 }
@@ -106,6 +132,11 @@ bool write(const std::string& cachePath, const CrossPointSettings::ReaderOverrid
   serialization::writePod(f, ov.screenMargin);
   serialization::writePod(f, ov.swapWordSelectAxes);
   serialization::writePod(f, ov.paragraphIndent);
+  serialization::writePod(f, ov.wordSpacing);
+  serialization::writePod(f, ov.characterSpacing);
+  serialization::writePod(f, ov.embeddedStyle);
+  serialization::writePod(f, ov.textAntiAliasing);
+  serialization::writePod(f, ov.focusReadingEnabled);
   return true;
 }
 

@@ -180,7 +180,12 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
     // Snap before the early return: the wanted size can already be loaded while
     // the setting still names a size this family does not ship.
     snapFontPointSizeTo(wantedPt);
-    if (!registryWasDirty && wantedPt == manager_.currentPointSize()) return;
+    if (!registryWasDirty && wantedPt == manager_.currentPointSize()) {
+      // Resident, but possibly loaded by a font preview, which registers no UI fallbacks:
+      // without them every CJK title in the UI (chapter list, flashcards) draws blank.
+      if (uiFallbacksFamily_ != currentFamily) setupUiFallbacks(renderer);
+      return;
+    }
     LOG_DBG("SDFS", "Reloading %s: size %u -> %u%s", wantedFamily, manager_.currentPointSize(), wantedPt,
             registryWasDirty ? " [registry dirty]" : "");
   }
@@ -208,6 +213,7 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
 void SdCardFontSystem::setupUiFallbacks(GfxRenderer& renderer) {
   const std::string& familyName = manager_.currentFamilyName();
   if (familyName.empty()) return;  // no SD family loaded — nothing to fall back to
+  uiFallbacksFamily_ = familyName;
 
   const auto* family = registry_.familyWithFiles(familyName);
   if (!family) return;
@@ -333,6 +339,7 @@ int SdCardFontSystem::loadFamilyForPreview(const char* familyName, uint8_t point
     return 0;
   }
   manager_.unloadAll(renderer);  // one family resident at a time
+  uiFallbacksFamily_.clear();    // unloadAll dropped them; ensureLoaded() puts them back
   if (!manager_.loadFamily(*family, renderer, pointSize)) {
     LOG_ERR("SDFS", "Preview load failed: %s", familyName);
     return 0;

@@ -453,7 +453,7 @@ static AlignedMemRect screenRectToAlignedMemRect(GfxRenderer::Orientation orient
   return out;
 }
 
-enum class TextRotation { None, Rotated90CW };
+enum class TextRotation { None, Rotated90CW, Rotated90CCW };
 
 // Shared glyph rendering logic for normal and rotated text.
 // Coordinate mapping and cursor advance direction are selected at compile time via the template parameter.
@@ -464,6 +464,9 @@ enum class TextRotation { None, Rotated90CW };
 //
 // The advance width is also halved in drawText() so layout reserves exactly the right
 // horizontal space for the scaled glyph.
+// Rotation mirrors renderCharImpl's Rotated90CCW mapping applied to the SCALED destination grid, for
+// vertical-text ruby whose half-size annotation holds a rotated glyph (a chounpu or a bracket).
+template <TextRotation Rotation = TextRotation::None>
 static void renderCharScaled(const GfxRenderer& renderer, GfxRenderer::RenderMode renderMode,
                              const EpdFontFamily& fontFamily, const uint32_t cp, int cursorX, int cursorY,
                              const bool pixelState, const EpdFontFamily::Style style) {
@@ -473,8 +476,13 @@ static void renderCharScaled(const GfxRenderer& renderer, GfxRenderer::RenderMod
 
   const EpdFontData* fontData = fontFamily.getData(style);
   if (glyph == &solidFallback) {
-    renderer.fillRect(cursorX + glyph->left / 2, cursorY - glyph->top / 2, (glyph->width + 1) / 2,
-                      (glyph->height + 1) / 2, pixelState);
+    if constexpr (Rotation == TextRotation::Rotated90CCW) {
+      renderer.fillRect(cursorX + glyph->top / 2 - (glyph->height + 1) / 2 + 1, cursorY + glyph->left / 2,
+                        (glyph->height + 1) / 2, (glyph->width + 1) / 2, pixelState);
+    } else {
+      renderer.fillRect(cursorX + glyph->left / 2, cursorY - glyph->top / 2, (glyph->width + 1) / 2,
+                        (glyph->height + 1) / 2, pixelState);
+    }
     return;
   }
   const uint8_t* bitmap = renderer.getGlyphBitmap(fontData, glyph);
@@ -488,6 +496,16 @@ static void renderCharScaled(const GfxRenderer& renderer, GfxRenderer::RenderMod
   // pixel offset from the (already-shifted) cursor position.
   const int baseX = cursorX + glyph->left / 2;
   const int baseY = cursorY - glyph->top / 2;
+  // dstX/dstY index the scaled glyph grid; map them to the screen for the requested rotation.
+  const int outerBase = cursorX + glyph->top / 2;
+  const int innerBase = cursorY + glyph->left / 2;
+  const auto plot = [&](const int dstX, const int dstY) {
+    if constexpr (Rotation == TextRotation::Rotated90CCW) {
+      renderer.drawPixel(outerBase - dstY, innerBase + dstX, pixelState);
+    } else {
+      renderer.drawPixel(baseX + dstX, baseY + dstY, pixelState);
+    }
+  };
 
   if (fontData->is2Bit) {
     // 2-bit packed format: 4 pixels per byte, MSB first, 2 bits per pixel.
@@ -508,7 +526,7 @@ static void renderCharScaled(const GfxRenderer& renderer, GfxRenderer::RenderMod
           }
         }
         if (maxRaw >= 2 || coverage >= 2) {
-          renderer.drawPixel(baseX + dstX, baseY + dstY, pixelState);
+          plot(dstX, dstY);
         }
       }
     }
@@ -530,7 +548,7 @@ static void renderCharScaled(const GfxRenderer& renderer, GfxRenderer::RenderMod
           }
         }
         if (hasInk) {
-          renderer.drawPixel(baseX + dstX, baseY + dstY, pixelState);
+          plot(dstX, dstY);
         }
       }
     }
@@ -616,6 +634,13 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
     if (!renderer.glyphIntersectsStrip(ob, ib - (width - 1), ob + height - 1, ib)) {
       return;
     }
+  } else if constexpr (rotation == TextRotation::Rotated90CCW) {
+    // Baseline at screenX == cursorX; ascent toward larger screenX.
+    const int ob = cursorX + top;
+    const int ib = cursorY + left;
+    if (!renderer.glyphIntersectsStrip(ob - (height - 1), ib, ob, ib + (width - 1))) {
+      return;
+    }
   } else {
     const int gx0 = cursorX + left;
     const int gy0 = cursorY - top;
@@ -627,6 +652,8 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
   if (glyph == &solidFallback) {
     if constexpr (rotation == TextRotation::Rotated90CW) {
       renderer.fillRect(cursorX + fontData->ascender - top, cursorY - left - width + 1, height, width, pixelState);
+    } else if constexpr (rotation == TextRotation::Rotated90CCW) {
+      renderer.fillRect(cursorX + top - (height - 1), cursorY + left, height, width, pixelState);
     } else {
       renderer.fillRect(cursorX + left, cursorY - top, width, height, pixelState);
     }
@@ -641,6 +668,9 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
   glyphBitmap::Frame frame;
   if constexpr (rotation == TextRotation::Rotated90CW) {
     frame = {cursorX + fontData->ascender - top, cursorY - left, 0, -1, 1, 0};
+  } else if constexpr (rotation == TextRotation::Rotated90CCW) {
+    // screenX = cursorX + top - glyphY, screenY = cursorY + left + glyphX.
+    frame = {cursorX + top, cursorY + left, 0, 1, -1, 0};
   } else {
     frame = {cursorX + left, cursorY - top, 1, 0, 0, 1};
   }
@@ -721,6 +751,20 @@ void GfxRenderer::drawPixel(const int x, const int y, const bool state) const {
     target[byteIndex] &= ~(1 << bitPosition);  // Clear bit
   } else {
     target[byteIndex] |= 1 << bitPosition;  // Set bit
+  }
+}
+
+void GfxRenderer::invertRect(const int x, const int y, const int width, const int height) const {
+  if (!frameBuffer || _stripActive) return;  // the framebuffer only: a strip band holds no page
+  for (int dy = 0; dy < height; dy++) {
+    for (int dx = 0; dx < width; dx++) {
+      int phyX = 0;
+      int phyY = 0;
+      rotateCoordinates(orientation, x + dx, y + dy, &phyX, &phyY, panelWidth, panelHeight);
+      if (phyX < 0 || phyX >= panelWidth || phyY < 0 || phyY >= panelHeight) continue;
+      frameBuffer[static_cast<uint32_t>(phyY) * panelWidthBytes + (phyX / 8)] ^=
+          static_cast<uint8_t>(1u << (7 - phyX % 8));
+    }
   }
 }
 
@@ -2880,6 +2924,242 @@ void GfxRenderer::drawTextRotated90CW(const int fontId, const int x, const int y
     renderCharImpl<TextRotation::Rotated90CW>(*this, renderMode, font, cp, x, lastBaseY, black, style);
     prevCp = cp;
   }
+}
+
+void GfxRenderer::drawTextRotated90CCW(const int fontId, const int x, const int y, const char* text, const bool black,
+                                       const EpdFontFamily::Style style) const {
+  if (text == nullptr || *text == '\0') return;
+
+  const auto fontIt = fontMap.find(fontId);
+  if (fontIt == fontMap.end()) {
+    LOG_ERR("GFX", "Font %d not found", fontId);
+    return;
+  }
+
+  const auto& font = fontIt->second;
+  int lastBaseY = y;
+  int32_t prevAdvanceFP = 0;
+
+  uint32_t cp;
+  uint32_t prevCp = 0;
+  while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&text)))) {
+    if (BidiUtils::isTransparentMark(cp) || utf8IsCombiningMark(cp)) continue;
+
+    cp = font.applyLigatures(cp, text, style);
+
+    if (prevCp != 0) {
+      const auto kernFP = font.getKerning(prevCp, cp, style);
+      lastBaseY += fp4::toPixel(prevAdvanceFP + kernFP);
+    }
+
+    const EpdGlyph* glyph = font.getGlyph(cp, style);
+    prevAdvanceFP = glyph ? glyph->advanceX : 0;
+
+    renderCharImpl<TextRotation::Rotated90CCW>(*this, renderMode, font, cp, x, lastBaseY, black, style);
+    prevCp = cp;
+  }
+}
+
+int GfxRenderer::getRenderAdvanceX(const int fontId, const char* text, const EpdFontFamily::Style style) const {
+  // Render-truth measurement: walks the same glyph/kerning sequence as drawTextRotated90CCW,
+  // resolving glyphs through getGlyph() (on-demand SD load) exactly as rendering will.
+  // getTextAdvanceX's advance-table fast path can under-report a non-resident glyph. Short
+  // strings only: each cold glyph costs an SD read.
+  if (text == nullptr || *text == '\0') return 0;
+  const auto fontIt = fontMap.find(fontId);
+  if (fontIt == fontMap.end()) {
+    LOG_ERR("GFX", "Font %d not found", fontId);
+    return 0;
+  }
+  const auto& font = fontIt->second;
+  int widthPx = 0;
+  int32_t prevAdvanceFP = 0;  // 12.4 fixed-point, same snap arithmetic as the draw loops
+  uint32_t cp;
+  uint32_t prevCp = 0;
+  while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&text)))) {
+    if (BidiUtils::isTransparentMark(cp) || utf8IsCombiningMark(cp)) continue;
+    cp = font.applyLigatures(cp, text, style);
+    if (prevCp != 0) {
+      const auto kernFP = font.getKerning(prevCp, cp, style);
+      widthPx += fp4::toPixel(prevAdvanceFP + kernFP);
+    }
+    const EpdGlyph* glyph = font.getGlyph(cp, style);
+    prevAdvanceFP = glyph ? glyph->advanceX : 0;
+    if ((style & (EpdFontFamily::SUP | EpdFontFamily::SUB)) != 0) {
+      prevAdvanceFP = (prevAdvanceFP + 1) / 2;
+    }
+    prevCp = cp;
+  }
+  widthPx += fp4::toPixel(prevAdvanceFP);
+  return widthPx;
+}
+
+bool GfxRenderer::getGlyphMetrics(const int fontId, const uint32_t cp, const EpdFontFamily::Style style, int* left,
+                                  int* width, int* top, int* height) const {
+  if (!left || !width || !top || !height) return false;
+  const auto fontIt = fontMap.find(fontId);
+  if (fontIt == fontMap.end()) {
+    LOG_ERR("GFX", "Font %d not found", fontId);
+    return false;
+  }
+  const EpdGlyph* glyph = fontIt->second.getGlyph(cp, style);
+  if (!glyph) return false;
+  *left = glyph->left;
+  *width = glyph->width;
+  *top = glyph->top;
+  *height = glyph->height;
+  return true;
+}
+
+int GfxRenderer::textBaselineOffset(const int fontId, const char* text, const EpdFontFamily::Style style) const {
+  // Mirrors drawText()'s own yPos derivation; keep the two in step.
+  const int resolvedFontId = resolveTextFontId(fontId, text, style);
+  int offset = getFontAscenderSize(resolvedFontId);
+  if (resolvedFontId != fontId) {
+    offset += (getLineHeight(fontId) - getLineHeight(resolvedFontId)) / 2;
+  }
+  return offset;
+}
+
+void GfxRenderer::drawCharVerticalCornerTopRight(const int fontId, const int cellLeftX, const int cellTopY,
+                                                 const int cellSize, const uint32_t cp, const bool black,
+                                                 const EpdFontFamily::Style style) const {
+  const auto fontIt = fontMap.find(fontId);
+  if (fontIt == fontMap.end()) {
+    LOG_ERR("GFX", "Font %d not found", fontId);
+    return;
+  }
+  const auto& font = fontIt->second;
+  const EpdGlyph* glyph = font.getGlyph(cp, style);
+  if (!glyph) return;
+
+  const int top = glyph->top;
+  const int height = glyph->height;
+  const int left = glyph->left;
+  const int width = glyph->width;
+  // Small kana sit in the right half, inset so they don't touch neighbouring columns/rows.
+  const int padX = std::max(1, cellSize / 4);
+  const int cursorX = cellLeftX + cellSize - padX - width - left;
+  // Vertically around the middle of the cell, not at its top, or they collide with the previous
+  // character in the column.
+  int topPos = cellTopY + cellSize / 2 - height / 2;
+  const int minTop = cellTopY + 1;
+  const int maxTop = cellTopY + std::max(1, cellSize - height - 1);
+  topPos = std::clamp(topPos, minTop, maxTop);
+  const int cursorY = topPos + top;
+
+  renderCharImpl<TextRotation::None>(*this, renderMode, font, cp, cursorX, cursorY, black, style);
+}
+
+// Round parens, angle brackets and braces are symmetric about the column axis, so they are drawn
+// ink-centred across it. The corner/lenticular/tortoise family hugs one side of the em box and is
+// flushed to the matching edge of the cell instead.
+static bool isSymmetricBracket(const uint32_t cp) {
+  switch (cp) {
+    case 0x0028:  // (
+    case 0x0029:  // )
+    case 0xFF08:  // （
+    case 0xFF09:  // ）
+    case 0x3008:  // 〈
+    case 0x3009:  // 〉
+    case 0x300A:  // 《
+    case 0x300B:  // 》
+    case 0xFF5B:  // ｛
+    case 0xFF5D:  // ｝
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Shared by the drawing path and by verticalPunctInkBox(): when inkTopOut is non-null the function
+// stops once the ink box is known and reports it instead of painting, so layout and drawing agree.
+void GfxRenderer::drawCharVerticalRotatedInCell(const int fontId, const int cellLeftX, const int cellTopY,
+                                                const int cellSize, const uint32_t cp, const int shiftType,
+                                                const bool black, const EpdFontFamily::Style style, int* inkTopOut,
+                                                int* inkHeightOut) const {
+  // Ellipsis glyphs are designed horizontally and come out too tall rotated; draw a centred
+  // vertical dot stack instead.
+  if (cp == 0x2026 || cp == 0x2025) {
+    const int dotCount = (cp == 0x2026) ? 3 : 2;
+    const int pitch = std::max(2, cellSize / 3);
+    const int dotSize = std::max(1, pitch / 2);
+    const int gap = pitch - dotSize;
+    const int totalH = dotCount * dotSize + (dotCount - 1) * gap;
+    const int startY = cellTopY + (cellSize - totalH) / 2;
+    if (inkTopOut) {
+      *inkTopOut = startY;
+      *inkHeightOut = totalH;
+      return;
+    }
+    const int startX = cellLeftX + (cellSize - dotSize) / 2;
+    for (int i = 0; i < dotCount; i++) {
+      fillRect(startX, startY + i * (dotSize + gap), dotSize, dotSize, black);
+    }
+    return;
+  }
+
+  const auto fontIt = fontMap.find(fontId);
+  if (fontIt == fontMap.end()) {
+    LOG_ERR("GFX", "Font %d not found", fontId);
+    return;
+  }
+  const auto& font = fontIt->second;
+  const EpdGlyph* glyph = font.getGlyph(cp, style);
+  if (!glyph) return;
+
+  // SUP/SUB render at 50% (renderCharScaled); halve the extents to match.
+  const bool scaledStyle = (style & (EpdFontFamily::SUP | EpdFontFamily::SUB)) != 0;
+  // After CCW rotation, glyph height maps to X extent and glyph width to Y extent.
+  const int rotatedW = scaledStyle ? (glyph->height + 1) / 2 : glyph->height;
+  const int rotatedH = scaledStyle ? (glyph->width + 1) / 2 : glyph->width;
+
+  int drawX = cellLeftX + (cellSize - rotatedW) / 2;
+  int drawY = cellTopY + (cellSize - rotatedH) / 2;
+
+  if (shiftType == 2) {  // closing bracket/quote: first half of its em, left across the column
+    drawY = cellTopY + (cellSize / 2 - rotatedH) / 2;
+    if (!isSymmetricBracket(cp)) drawX = cellLeftX;
+  } else if (shiftType == 3) {  // opening bracket/quote: second half of its em, right across the column
+    drawY = cellTopY + cellSize / 2 + (cellSize / 2 - rotatedH) / 2;
+    if (!isSymmetricBracket(cp)) drawX = cellLeftX + cellSize - rotatedW;
+  }
+
+  const int minX = cellLeftX;
+  // A rotated glyph wider than its cell would make the clamp bounds cross (UB); let it overhang.
+  const int maxX = std::max(minX, cellLeftX + cellSize - rotatedW);
+  const int minY = cellTopY;
+  // An opening bracket is placed into the following cell on purpose, so the box spans two.
+  const int maxY = cellTopY + cellSize * 2;
+  drawX = std::clamp(drawX, minX, maxX);
+  drawY = std::clamp(drawY, minY, maxY);
+
+  if (inkTopOut) {
+    *inkTopOut = drawY;
+    *inkHeightOut = rotatedH;
+    return;
+  }
+
+  // Solve for the cursor so the rotated bbox starts at (drawX, drawY), with the same bearing
+  // halving the chosen renderer applies.
+  if (scaledStyle) {
+    const int cursorXs = (drawX + rotatedW - 1) - glyph->top / 2;
+    const int cursorYs = drawY - glyph->left / 2;
+    renderCharScaled<TextRotation::Rotated90CCW>(*this, renderMode, font, cp, cursorXs, cursorYs, black, style);
+    return;
+  }
+  const int cursorX = (drawX + rotatedW - 1) - glyph->top;
+  const int cursorY = drawY - glyph->left;
+  renderCharImpl<TextRotation::Rotated90CCW>(*this, renderMode, font, cp, cursorX, cursorY, black, style);
+}
+
+bool GfxRenderer::verticalPunctInkBox(const int fontId, const uint32_t cp, const EpdFontFamily::Style style,
+                                      const int cellTopY, const int cellSize, const int shiftType, int* inkTop,
+                                      int* inkHeight) const {
+  if (!inkTop || !inkHeight) return false;
+  *inkTop = INT32_MIN;
+  drawCharVerticalRotatedInCell(fontId, 0, cellTopY, cellSize, cp, shiftType, true, style, inkTop, inkHeight);
+  return *inkTop != INT32_MIN;  // INT32_MIN: no glyph / font missing
 }
 
 uint8_t* GfxRenderer::getFrameBuffer() const { return frameBuffer; }

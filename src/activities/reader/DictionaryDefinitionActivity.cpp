@@ -290,6 +290,7 @@ void DictionaryDefinitionActivity::onEnter() {
   if (SETTINGS.dictionaryFontFamily == CrossPointSettings::DICT_FONT_MATCH_READER) {
     sdFontSystem.ensureFontSize(SETTINGS.getReaderSdFontFamilyName(), SETTINGS.getDefinitionPointSize(), renderer);
   }
+  refreshTabs();
   wrapText();
   // No forceCleanRefreshNextPaint() here. The frame this replaces may be carrying the "Looking
   // up" toast, but the box is erased by this paint like any other full-content change: the
@@ -1256,7 +1257,31 @@ bool DictionaryDefinitionActivity::consumeDictSwitchRelease() {
   return false;
 }
 
+void DictionaryDefinitionActivity::refreshTabs() {
+  tabCount_ = tabHits_ ? DictTabs::collect(dictionaryRegistry.indexOf(foundLocation.folderPath), tabHits_, tabs_) : 0;
+}
+
+bool DictionaryDefinitionActivity::selectTab(const int i) {
+  if (i < 0 || i >= tabCount_ || controller.isActive()) return false;
+  const std::string current = Dictionary::activeDictPath(cachePath.empty() ? nullptr : cachePath.c_str());
+  const int curIdx = dictionaryRegistry.indexOf(current);
+  if (curIdx < 0 || tabs_[i].registryIdx == curIdx) return false;
+  applyDictSwitch(curIdx, tabs_[i].registryIdx, current);
+  return true;
+}
+
 bool DictionaryDefinitionActivity::cycleDictionary() {
+  // With tabs up, the hop walks the tabs -- the dictionaries that hold this word -- instead of
+  // every dictionary in the group.
+  if (tabCount_ >= 2 && !controller.isActive()) {
+    const int curIdx =
+        dictionaryRegistry.indexOf(Dictionary::activeDictPath(cachePath.empty() ? nullptr : cachePath.c_str()));
+    int at = 0;
+    for (int i = 0; i < tabCount_; i++) {
+      if (tabs_[i].registryIdx == curIdx) at = i;
+    }
+    return selectTab((at + 1) % tabCount_);
+  }
   // Nothing to cycle to with 0 or 1 dictionaries installed.
   if (dictionaryRegistry.count() < 2) return false;
 
@@ -1701,6 +1726,8 @@ void DictionaryDefinitionActivity::loop() {
         prevSessionDictWasPromotion_ = false;
         headword = controller.getFoundWord();
         foundLocation = controller.getFoundLocation();
+        tabHits_ = controller.foundSlots();
+        refreshTabs();
         // A chained lookup is a new definition, so it re-measures. The other stamp site is
         // onEnter(); a page turn is deliberately neither. See openStartMs_ / openMs_.
         openStartMs_ = millis();
@@ -1947,6 +1974,12 @@ void DictionaryDefinitionActivity::loop() {
       openDictPicker();
       return;
     }
+    // The tabs stand where the name was, so a hold there opens the picker too.
+    if (tabsDrawn_ && tabCount_ > 0 && hy >= tabY_ && hy < tabY_ + tabH_ && hx >= tabX_[0] &&
+        hx < tabX_[tabCount_ - 1] + tabW_[tabCount_ - 1]) {
+      openDictPicker();
+      return;
+    }
     if (showLookupButton) openWordMenu(hx, hy);
     return;
   }
@@ -1976,6 +2009,14 @@ void DictionaryDefinitionActivity::loop() {
     if (!controller.isActive() && hit(addChipX_, addChipY_, addChipW_, addChipH_)) {
       addCurrentCard();
       return;
+    }
+    if (tabsDrawn_ && !controller.isActive()) {
+      for (int i = 0; i < tabCount_; i++) {
+        if (!hit(tabX_[i], tabY_, tabW_[i], tabH_)) continue;
+        // Same synthetic-Confirm swallow as the name tap below.
+        if (selectTab(i)) dictSwitchReleaseConsumed_ = true;
+        return;
+      }
     }
     if (!controller.isActive() && hit(dictLabelX_, dictLabelY_, dictLabelW_, dictLabelH_)) {
       if (!cycleDictionary()) return;  // sole member of its group: consume the tap, do nothing
@@ -2327,7 +2368,46 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   }
   const int nameBudget = footerRight - setChipSpan - addChipSpan - delChipSpan - leftPadding;
 
-  if (dictionaryRegistry.count() > 1) {
+  // Tabs in place of the name, when they fit the same budget.
+  tabsDrawn_ = false;
+  if (tabCount_ >= 2) {
+    static constexpr StrId kTabNames[] = {StrId::STR_DICT_TAB_WORDS, StrId::STR_DICT_TAB_GRAMMAR,
+                                          StrId::STR_DICT_TAB_NAMES};
+    const auto labelOf = [](const uint8_t slot) {
+      return I18N.get(slot == DictTabs::kNames     ? kTabNames[2]
+                      : slot == DictTabs::kGrammar ? kTabNames[1]
+                                                   : kTabNames[0]);
+    };
+    int need = 0;
+    for (int i = 0; i < tabCount_; i++)
+      need += renderer.getTextWidth(SMALL_FONT_ID, labelOf(tabs_[i].slot)) + 2 * kChipPadX + kTouchPad;
+    if (need <= nameBudget) {
+      const int activeIdx = dictionaryRegistry.indexOf(activePath);
+      tabY_ = footerY - kTouchPad;
+      tabH_ = labelH + 2 * kTouchPad;
+      for (int i = 0; i < tabCount_; i++) {
+        const char* label = labelOf(tabs_[i].slot);
+        const int w = renderer.getTextWidth(SMALL_FONT_ID, label);
+        const bool active = tabs_[i].registryIdx == activeIdx;
+        const int boxX = cursorX - kChipPadX;
+        const int boxY = footerY - kChipPadY;
+        const int boxW = w + 2 * kChipPadX;
+        const int boxH = labelH + 2 * kChipPadY;
+        if (active) {
+          renderer.fillRect(boxX, boxY, boxW, boxH, true);
+          renderer.drawText(SMALL_FONT_ID, cursorX, footerY, label, false);
+        } else {
+          renderer.drawRect(boxX, boxY, boxW, boxH, true);
+          renderer.drawText(SMALL_FONT_ID, cursorX, footerY, label);
+        }
+        tabX_[i] = boxX - kTouchPad / 2;
+        tabW_[i] = boxW + kTouchPad;
+        cursorX += w + 2 * kChipPadX + kTouchPad;
+      }
+      tabsDrawn_ = true;
+    }
+  }
+  if (!tabsDrawn_ && dictionaryRegistry.count() > 1) {
     std::string dictName = DictUtils::dictDisplayName(activePath);
     // Trim to the budget a character at a time; these names are short and this runs once a
     // paint, so the linear walk costs nothing worth a binary search.
@@ -2418,7 +2498,7 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   const unsigned long tDisplay = millis();
 
   // Anti-aliasing pass: overlay grayscale body text on top of the BW display
-  if (SETTINGS.textAntiAliasing == CrossPointSettings::TEXT_AA_ANTIALIASED) {
+  if (SETTINGS.getReaderTextAntiAliasing() == CrossPointSettings::TEXT_AA_ANTIALIASED) {
     ReaderUtils::renderAntiAliased(renderer, renderBody);
   }
 

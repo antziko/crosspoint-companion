@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "util/CjkWordMerge.h"
 #include "util/TextPool.h"
 #include "util/WordSelectNavigator.h"
 
@@ -1581,6 +1582,208 @@ static void testBeginMultiSelectAtRejectsOutOfRange() {
   CHECK(nav.getCurrentFlatIndex() == before, "cursor untouched");
 }
 
+// Vertical page: column 0 is the RIGHT one (x=200), column 1 the left one (x=170), each three
+// 20px cells tall. Portrait: Down steps down a column, Left moves to the next column.
+static void testVerticalPageNavigation() {
+  std::printf("testVerticalPageNavigation\n");
+  std::string pool;
+  const char* texts[] = {"\xE9\xAD\x94", "\xE6\xB3\x95", "\xE4\xBD\xBF",
+                         "\xE3\x83\x8F", "\xE3\x83\xAA", "\xE3\x83\xBC"};  // 魔 法 使 / ハ リ ー
+  std::vector<WordSelectNavigator::WordInfo> words;
+  for (int i = 0; i < 6; i++) {
+    const int column = i / 3;
+    WordSelectNavigator::WordInfo w = mkWord(texts[i], static_cast<int16_t>(column == 0 ? 200 : 170),
+                                             static_cast<int16_t>(10 + (i % 3) * 20), 20, column);
+    w.textOffset = poolAppendString(pool, texts[i]);
+    w.lookupOffset = w.textOffset;
+    words.push_back(w);
+  }
+  std::vector<WordSelectNavigator::Row> rows = {{200, 0, 3}, {170, 3, 3}};
+  WordSelectNavigator nav;
+  nav.setVertical(20);
+  nav.setSkipStopwords(false);
+  nav.load(std::move(words), std::move(rows), std::move(pool), false, WordSelectNavigator::InitialMarker::Top);
+  MappedInputManager input;
+  GfxRenderer renderer;
+
+  CHECK(nav.getCurrentFlatIndex() == 1, "starts mid-column on the right column");
+  // Word Select Buttons = Side: the side pair walks down the column, the front pair across.
+  input.reset();
+  input.setReleased(MappedInputManager::Button::Down, true);
+  nav.handleNavigation(input, renderer, /*swapAxes=*/true);
+  CHECK(nav.getCurrentFlatIndex() == 2, "Down steps down the column");
+  input.reset();
+  input.setReleased(MappedInputManager::Button::Left, true);
+  nav.handleNavigation(input, renderer, /*swapAxes=*/true);
+  CHECK(nav.getSelected() != nullptr && nav.getSelected()->row == 1, "Left moves to the next (left) column");
+  CHECK(nav.getCurrentFlatIndex() == 5, "keeps its place down the column");
+  input.reset();
+  input.setReleased(MappedInputManager::Button::Right, true);
+  nav.handleNavigation(input, renderer, /*swapAxes=*/true);
+  CHECK(nav.getSelected() != nullptr && nav.getSelected()->row == 0, "Right moves back to the previous column");
+
+  // Front: the front pair walks the words (Left onward, as the columns run), the side pair the columns.
+  input.reset();
+  input.setReleased(MappedInputManager::Button::Left, true);
+  nav.handleNavigation(input, renderer);
+  CHECK(nav.getCurrentFlatIndex() == 3, "Front: Left steps on to the next word");
+  input.reset();
+  input.setReleased(MappedInputManager::Button::Up, true);
+  nav.handleNavigation(input, renderer);
+  CHECK(nav.getSelected() != nullptr && nav.getSelected()->row == 0, "Front: Up moves to the previous column");
+
+  CHECK(nav.wordIndexAtPoint(205, 35, 0) == 1, "a point inside a cell hits that cell");
+  CHECK(nav.wordIndexAtPoint(175, 55, 0) == 5, "the left column hit-tests by its own x");
+  CHECK(nav.buildPhrase(0, 1) == "\xE9\xAD\x94\xE6\xB3\x95", "a range joins down the column without spaces");
+}
+
+// --------------------------------------------------------------------------
+// CjkWordMerge: per-character tokens -> whole words
+// --------------------------------------------------------------------------
+
+// One CJK character per token, 20 px wide, laid out on rows of `perRow` characters. Token t
+// covers scan cell t.
+struct CjkPage {
+  std::vector<WordSelectNavigator::WordInfo> words;
+  std::vector<WordSelectNavigator::Row> rows;
+  std::string pool;
+  std::vector<CjkWordMerge::TokenGlyphs> glyphs;
+};
+
+static CjkPage mkCjkPage(const char* const* chars, int count, int perRow) {
+  CjkPage p;
+  for (int i = 0; i < count; i++) {
+    const int row = i / perRow;
+    auto w =
+        mkWord(chars[i], static_cast<int16_t>(10 + (i % perRow) * 20), static_cast<int16_t>(100 + row * 40), 20, row);
+    w.textOffset = poolAppendString(p.pool, chars[i]);
+    w.lookupOffset = w.textOffset;
+    p.words.push_back(w);
+    if (static_cast<int>(p.rows.size()) <= row) {
+      p.rows.push_back({static_cast<int16_t>(100 + row * 40), static_cast<int16_t>(i), 0});
+    }
+    p.rows.back().wordCount++;
+    p.glyphs.push_back({static_cast<uint16_t>(i), 1});
+  }
+  return p;
+}
+
+static void testCjkMergeJoinsWord() {
+  std::printf("testCjkMergeJoinsWord\n");
+  const char* chars[] = {"魔", "法", "使", "い", "は"};
+  CjkPage p = mkCjkPage(chars, 5, 10);
+  std::vector<CjkWordMerge::ScanWord> scan = {{0, 4}};
+  std::vector<WordSelectNavigator::WordInfo> w;
+  std::vector<WordSelectNavigator::Row> r;
+  std::string pool;
+  std::vector<CjkWordMerge::Span> spans;
+  CHECK(CjkWordMerge::merge(p.words, p.rows, p.pool, p.glyphs, 5, scan, false, w, r, pool, spans), "merge ok");
+  CHECK(w.size() == 2, "four characters became one token");
+  CHECK(std::strcmp(pool.data() + w[0].textOffset, "魔法使い") == 0, "display joined");
+  CHECK(std::strcmp(pool.data() + w[0].lookupOffset, "魔法使い") == 0, "lookup joined");
+  CHECK(w[0].screenX == 10 && w[0].width == 80, "box spans the word");
+  CHECK(spans[0].lo == 0 && spans[0].hi == 3 && spans[1].lo == 4 && spans[1].hi == 4, "spans map back");
+  CHECK(r.size() == 1 && r[0].firstWord == 0 && r[0].wordCount == 2, "row rebuilt");
+  CHECK(CjkWordMerge::mergedIndexOf(spans, 2) == 0 && CjkWordMerge::mergedIndexOf(spans, 4) == 1, "index map");
+}
+
+static void testCjkMergeAcrossRowsIsPair() {
+  std::printf("testCjkMergeAcrossRowsIsPair\n");
+  const char* chars[] = {"今", "日", "は", "晴", "れ"};
+  CjkPage p = mkCjkPage(chars, 5, 2);  // rows: 今日 / は晴 / れ
+  std::vector<CjkWordMerge::ScanWord> scan = {{0, 2}, {3, 2}};
+  std::vector<WordSelectNavigator::WordInfo> w;
+  std::vector<WordSelectNavigator::Row> r;
+  std::string pool;
+  std::vector<CjkWordMerge::Span> spans;
+  CHECK(CjkWordMerge::merge(p.words, p.rows, p.pool, p.glyphs, 5, scan, false, w, r, pool, spans), "merge ok");
+  CHECK(w.size() == 4, "今日 | は | 晴 | れ");
+  CHECK(w[2].continuationIndex == 3 && w[3].continuationOf == 2, "halves linked");
+  CHECK(std::strcmp(pool.data() + w[2].lookupOffset, "晴れ") == 0, "first half looks up the word");
+  CHECK(std::strcmp(pool.data() + w[3].lookupOffset, "晴れ") == 0, "second half looks up the word");
+  CHECK(std::strcmp(pool.data() + w[3].textOffset, "れ") == 0, "second half shows its own text");
+  CHECK(r.size() == 3 && r[1].wordCount == 2 && r[2].firstWord == 3, "rows rebuilt");
+}
+
+static void testCjkMergeSkipsMisalignedWord() {
+  std::printf("testCjkMergeSkipsMisalignedWord\n");
+  const char* chars[] = {"英", "國。", "人"};
+  CjkPage p = mkCjkPage(chars, 3, 10);
+  p.glyphs = {{0, 1}, {1, 2}, {3, 1}};  // 國。 covers two cells
+  std::vector<WordSelectNavigator::WordInfo> w;
+  std::vector<WordSelectNavigator::Row> r;
+  std::string pool;
+  std::vector<CjkWordMerge::Span> spans;
+  // 英國 ends inside the glued token: still merged. A word starting mid-token is not.
+  std::vector<CjkWordMerge::ScanWord> scan = {{0, 2}, {2, 2}};
+  CHECK(CjkWordMerge::merge(p.words, p.rows, p.pool, p.glyphs, 4, scan, false, w, r, pool, spans), "merge ok");
+  CHECK(w.size() == 2, "英國。 | 人");
+  CHECK(std::strcmp(pool.data() + w[0].textOffset, "英國。") == 0, "glued punctuation kept");
+}
+
+static void testCjkMergeVerticalGrowsDownColumn() {
+  std::printf("testCjkMergeVerticalGrowsDownColumn\n");
+  const char* chars[] = {"賢", "者"};
+  CjkPage p = mkCjkPage(chars, 2, 10);
+  p.words[0].screenX = p.words[1].screenX = 500;
+  p.words[0].screenY = 40;
+  p.words[1].screenY = 70;
+  p.words[0].width = p.words[1].width = 30;
+  std::vector<CjkWordMerge::ScanWord> scan = {{0, 2}};
+  std::vector<WordSelectNavigator::WordInfo> w;
+  std::vector<WordSelectNavigator::Row> r;
+  std::string pool;
+  std::vector<CjkWordMerge::Span> spans;
+  CHECK(CjkWordMerge::merge(p.words, p.rows, p.pool, p.glyphs, 2, scan, true, w, r, pool, spans), "merge ok");
+  CHECK(w.size() == 1 && w[0].screenY == 40 && w[0].width == 60 && w[0].screenX == 500, "box runs down the column");
+}
+
+static void testReplaceWordsKeepsCursorWord() {
+  std::printf("testReplaceWordsKeepsCursorWord\n");
+  const char* chars[] = {"魔", "法", "使", "い", "は"};
+  CjkPage p = mkCjkPage(chars, 5, 10);
+  WordSelectNavigator nav;
+  nav.setSkipStopwords(false);
+  nav.load(p.words, p.rows, p.pool);
+  nav.selectFlatIndex(2);  // 使
+  std::vector<WordSelectNavigator::WordInfo> w;
+  std::vector<WordSelectNavigator::Row> r;
+  std::string pool;
+  nav.takeWords(w, r, pool);
+  CHECK(nav.isEmpty(), "taken");
+  std::vector<WordSelectNavigator::WordInfo> mw;
+  std::vector<WordSelectNavigator::Row> mr;
+  std::string mpool;
+  std::vector<CjkWordMerge::Span> spans;
+  std::vector<CjkWordMerge::ScanWord> scan = {{0, 4}};
+  CHECK(CjkWordMerge::merge(w, r, pool, p.glyphs, 5, scan, false, mw, mr, mpool, spans), "merge ok");
+  nav.replaceWords(std::move(mw), std::move(mr), std::move(mpool), CjkWordMerge::mergedIndexOf(spans, 2));
+  CHECK(nav.getCurrentFlatIndex() == 0, "cursor on the word holding 使");
+  CHECK(std::strcmp(nav.getLookup(*nav.getSelected()), "魔法使い") == 0, "selected word");
+}
+
+static void testCjkMergeOverMergedList() {
+  std::printf("testCjkMergeOverMergedList\n");
+  const char* chars[] = {"魔", "法", "使", "い", "は", "晴", "れ"};
+  CjkPage p = mkCjkPage(chars, 7, 10);
+  std::vector<WordSelectNavigator::WordInfo> w1;
+  std::vector<WordSelectNavigator::Row> r1;
+  std::string pool1;
+  std::vector<CjkWordMerge::Span> s1;
+  CHECK(CjkWordMerge::merge(p.words, p.rows, p.pool, p.glyphs, 7, {{0, 4}}, false, w1, r1, pool1, s1), "first");
+  // The merged token's cells are its characters' union.
+  std::vector<CjkWordMerge::TokenGlyphs> g1 = {{0, 4}, {4, 1}, {5, 1}, {6, 1}};
+  std::vector<WordSelectNavigator::WordInfo> w2;
+  std::vector<WordSelectNavigator::Row> r2;
+  std::string pool2;
+  std::vector<CjkWordMerge::Span> s2;
+  CHECK(CjkWordMerge::merge(w1, r1, pool1, g1, 7, {{0, 4}, {5, 2}}, false, w2, r2, pool2, s2), "second");
+  CHECK(w2.size() == 3, "魔法使い | は | 晴れ");
+  CHECK(std::strcmp(pool2.data() + w2[0].textOffset, "魔法使い") == 0, "earlier word kept");
+  CHECK(std::strcmp(pool2.data() + w2[2].lookupOffset, "晴れ") == 0, "new word joined");
+  CHECK(s2[2].lo == 2 && s2[2].hi == 3, "spans index the list given");
+}
+
 int main() {
   std::printf("=== WordSelectNavigator host litmus ===\n");
   testOrganizeIntoRows();
@@ -1622,7 +1825,14 @@ int main() {
   testWordRepeatIgnoresHoldCarriedIn();
   testWordRepeatDoesNotApplyToRows();
   testBeginMultiSelectAtOpensRangeWithoutConfirm();
+  testVerticalPageNavigation();
   testBeginMultiSelectAtRejectsOutOfRange();
+  testCjkMergeJoinsWord();
+  testCjkMergeAcrossRowsIsPair();
+  testCjkMergeSkipsMisalignedWord();
+  testCjkMergeVerticalGrowsDownColumn();
+  testReplaceWordsKeepsCursorWord();
+  testCjkMergeOverMergedList();
   std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

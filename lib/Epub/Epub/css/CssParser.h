@@ -39,6 +39,37 @@ class CssParser {
   //      grew by one byte (upstream #3500)
   static constexpr uint8_t CSS_CACHE_VERSION = 10;
 
+  // Vertical-text interface, named as in matcha-reader so its VerticalSection compiles unchanged.
+  // Our cache does not record which stylesheet a rule came from, so the filter admits everything.
+  struct StylesheetFilter {
+    [[nodiscard]] bool allows(uint8_t) const { return true; }
+  };
+  // Distilled per-block layout parameters the VERTICAL engine consumes, in em units.
+  struct VerticalBlockStyle {
+    float startEm = 0;         // margin-top: every column of the block starts this many cells down
+    float beforeEm = 0;        // margin-right: extra gap before the block's first column
+    float afterEm = 0;         // margin-left: extra gap after the block's last column
+    float hangEm = 0;          // padding-top + negative text-indent: hanging indent for wrapped lines
+    bool alignCenter = false;  // text-align: center -> column content vertically centered
+    uint8_t borderEdges = 0;   // border edge mask; our cache records no borders, so always 0
+    [[nodiscard]] bool any() const {
+      return startEm > 0 || beforeEm > 0 || afterEm > 0 || hangEm > 0 || alignCenter || borderEdges != 0;
+    }
+  };
+  // One styled-block rule keyed by hashes: the vertical engine matches "tag", ".class" and
+  // "tag.class" only. tagHash 0 = any tag, classHash 0 = no class.
+  struct VerticalBlockRule {
+    uint32_t tagHash = 0;
+    uint32_t classHash = 0;
+    VerticalBlockStyle style;
+  };
+  // Case-insensitive FNV-1a over a selector piece (tag name or class token). Never 0.
+  static uint32_t blockSelectorHash(const char* s, size_t len);
+  // Stream the on-disk rules cache and collect a VerticalBlockRule for every simple selector with
+  // a vertical-relevant property, without materializing the rule map. Returns the count (<= maxOut).
+  size_t collectVerticalStyles(std::vector<VerticalBlockRule>& out, size_t maxOut = 256,
+                               const StylesheetFilter* stylesheets = nullptr) const;
+
   explicit CssParser(std::string cachePath) : cachePath(std::move(cachePath)) {}
   ~CssParser() = default;
 

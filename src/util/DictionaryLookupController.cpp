@@ -1,10 +1,14 @@
 #include "DictionaryLookupController.h"
 
+#include <Deinflector.h>
+#include <DictIndex.h>
 #include <GfxRenderer.h>
 #include <HalDisplay.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <SdDebugLog.h>
+#include <Utf8.h>
+#include <WordLookup.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -16,6 +20,7 @@
 #include "Memory.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/DictTabs.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryRegistry.h"
 
@@ -92,7 +97,8 @@ void DictionaryLookupController::startLookup(const std::string& word, bool recor
     showMemoryErrorAndReset();
     return;
   }
-  task->start("DictLookup", 4096, 1);
+  // 6 KB: matcha's DictIndex lookups (dictionary forms, tab probe) left ~0.5 KB of 4 KB.
+  task->start("DictLookup", 6144, 1);
 
   if (showPopup) {
     // Toast overlay: draw popup directly over whatever the user is currently viewing.
@@ -513,6 +519,57 @@ DictLocation DictionaryLookupController::sweepGroup(Dictionary::LookupCtx& ctx, 
   return primary;
 }
 
+namespace {
+
+// Conjugation lives in a word's kana tail; a word without one has no other form to try.
+bool endsInHiragana(const std::string& word) {
+  const uint32_t cp = utf8LastCodepoint(word);
+  return cp >= 0x3041 && cp <= 0x309F;
+}
+
+// Dictionary forms of a conjugated word, best first. With a converted dictionary in
+// /dictionaries/<language> (DictIndex) this is the one form matcha-reader's lookup settles on,
+// checked against the word classes it records; without one, the Deinflector's first few
+// candidates, each costing a StarDict probe. Runs on the lookup task, which word-select's page
+// scan never overlaps (it steps only while no lookup is active), so DictIndex is not shared.
+void dictionaryForms(const std::string& word, std::vector<std::string>& out) {
+  if (DictIndex::isAvailable()) {
+    WordLookupResult r;
+    if (WordLookup::lookup(word, 0, r, /*needDefinition=*/false) && r.matchLength == word.size() &&
+        r.entry.headword != word) {
+      out.push_back(r.entry.headword);
+    }
+    // The definition screen opens next and wants this heap.
+    DictIndex::releaseCaches();
+    return;
+  }
+  constexpr size_t kMaxProbes = 6;
+  for (auto& c : Deinflector::deinflect(word)) {
+    if (c.text == word) continue;
+    out.push_back(std::move(c.text));
+    if (out.size() >= kMaxProbes) break;
+  }
+}
+
+}  // namespace
+
+void DictionaryLookupController::probeTabs() {
+  const std::string& word = stemWord_.empty() ? lookupWord : stemWord_;
+  if (utf8FirstCodepoint(word.c_str()) < 0x3000) return;  // tabs are for CJK words
+  const int foundIdx = dictionaryRegistry.indexOf(foundLocation.folderPath);
+  const uint8_t installed = DictTabs::installedSlots(foundIdx);
+  // One tagged dictionary is just the footer's name: nothing to probe.
+  if ((installed & (installed - 1)) == 0 || !DictIndex::isAvailable()) return;
+  const unsigned long t0 = millis();
+  for (const uint8_t slot : {DictTabs::kWords, DictTabs::kNames, DictTabs::kGrammar}) {
+    if (!(installed & slot)) continue;
+    DictEntry entry;
+    if (DictIndex::lookupExact(word.c_str(), entry, slot, /*needDefinition=*/false)) foundSlots_ |= slot;
+  }
+  DictIndex::releaseCaches();  // the definition screen opens next and wants this heap
+  SdDebugLog::log("DICT", "tabs mask=%x installed=%x %lums", foundSlots_, installed, millis() - t0);
+}
+
 void DictionaryLookupController::runLookup() {
   DictLookupCallbacks cbs;
   cbs.ctx = this;
@@ -550,6 +607,20 @@ void DictionaryLookupController::runLookup() {
     // Reusing ctx means zero extra SD opens (the old UI-task loop opened its own), and running
     // here rather than in handleInput() makes the probes cancellable and stops them blocking
     // the UI task.
+    // A conjugated Japanese word: its dictionary form (使った -> 使う), found the way matcha's
+    // lookup finds it, then probed here like a stem.
+    if (!foundLocation.found && !lookupCancelRequested && endsInHiragana(lookupWord)) {
+      std::vector<std::string> forms;
+      dictionaryForms(lookupWord, forms);
+      for (const auto& form : forms) {
+        if (lookupCancelRequested) break;
+        DictLocation loc = Dictionary::locateIn(ctx, form, probeCbs);
+        if (!loc.found) continue;
+        stemWord_ = form;
+        foundLocation = std::move(loc);
+        break;
+      }
+    }
     if (!foundLocation.found && !lookupCancelRequested) {
       for (const auto& stem : Dictionary::getStemVariants(lookupWord)) {
         DictLocation loc = Dictionary::locateIn(ctx, stem, probeCbs);
@@ -567,6 +638,8 @@ void DictionaryLookupController::runLookup() {
     foundLocation.folderPath = ctx.base;
   }
   if (!foundLocation.found) foundLocation = sweepGroup(ctx, activeBase, foundLocation, cbs);
+  foundSlots_ = 0;
+  if (foundLocation.found && !lookupCancelRequested) probeTabs();
 
   lookupCancelled = lookupCancelRequested;
   lookupDone = true;

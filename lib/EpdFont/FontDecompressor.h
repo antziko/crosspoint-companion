@@ -46,8 +46,12 @@ class FontDecompressor {
   void logStats(const char* label = "FDC");
   void resetStats();
   const Stats& getStats() const { return stats; }
+  // Glyphs returned as nullptr for want of a group buffer, since boot. Never reset, so a caller
+  // diffs two reads (the vertical layout uses it to judge whether its measurement was approximate).
+  uint32_t getStarvedGlyphCount() const { return starvedGlyphs; }
 
  private:
+  uint32_t starvedGlyphs = 0;  // see getStarvedGlyphCount()
   Stats stats;
   InflateReader inflateReader;
 

@@ -719,6 +719,27 @@ uint8_t CrossPointSettings::getReaderParagraphIndent() const {
   return readerOverride.active ? readerOverride.paragraphIndent : paragraphIndent;
 }
 
+uint8_t CrossPointSettings::getReaderWordSpacing() const {
+  return readerOverride.active ? readerOverride.wordSpacing : wordSpacing;
+}
+
+int8_t CrossPointSettings::getReaderCharacterSpacing() const {
+  const uint8_t v = readerOverride.active ? readerOverride.characterSpacing : characterSpacing;
+  return static_cast<int8_t>(v - CHARACTER_SPACING_OFFSET);
+}
+
+uint8_t CrossPointSettings::getReaderEmbeddedStyle() const {
+  return readerOverride.active ? readerOverride.embeddedStyle : embeddedStyle;
+}
+
+uint8_t CrossPointSettings::getReaderTextAntiAliasing() const {
+  return readerOverride.active ? readerOverride.textAntiAliasing : textAntiAliasing;
+}
+
+uint8_t CrossPointSettings::getReaderFocusReading() const {
+  return readerOverride.active ? readerOverride.focusReadingEnabled : focusReadingEnabled;
+}
+
 ReaderRenderSpec CrossPointSettings::readerRenderSpec(const uint16_t viewportWidth,
                                                       const uint16_t viewportHeight) const {
   ReaderRenderSpec spec;
@@ -730,17 +751,16 @@ ReaderRenderSpec CrossPointSettings::readerRenderSpec(const uint16_t viewportWid
   spec.lineCompression = getReaderLineCompression();
   spec.paragraphSpacing = getReaderParagraphSpacing();
   spec.paragraphIndent = getReaderParagraphIndent();
-  spec.characterSpacing = getCharacterSpacing();
-  spec.wordSpacingPercent = wordSpacing;
+  spec.characterSpacing = getReaderCharacterSpacing();
+  spec.wordSpacingPercent = getReaderWordSpacing();
   spec.paragraphAlignment = getReaderParagraphAlignment();
   spec.viewportWidth = viewportWidth;
   spec.viewportHeight = viewportHeight;
   spec.hyphenationEnabled = getReaderHyphenationEnabled() != 0;
-  // No per-book counterpart: readerOverride carries no embeddedStyle, imageRendering
-  // or focusReadingEnabled, so the global value is the resolved one.
-  spec.embeddedStyle = embeddedStyle != 0;
+  spec.embeddedStyle = getReaderEmbeddedStyle() != 0;
+  // No per-book counterpart: the global value is the resolved one.
   spec.imageRendering = imageRendering;
-  spec.focusReadingEnabled = focusReadingEnabled != 0;
+  spec.focusReadingEnabled = getReaderFocusReading() != 0;
   spec.imageBleed = getReaderScreenMargin();
   return spec;
 }

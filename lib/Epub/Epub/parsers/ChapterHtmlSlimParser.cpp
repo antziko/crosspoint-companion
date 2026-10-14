@@ -2200,7 +2200,8 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
   // Ruby text: </rt> distributes ruby to base words, </ruby> resets ruby state
   if (strcmp(name, "rt") == 0) {
     self->collectingRubyText = false;
-    if (self->inRuby && self->currentTextBlock) {
+    // Furigana off: the annotation is collected (so it never reaches the page) and dropped here.
+    if (self->inRuby && self->currentTextBlock && self->furiganaEnabled) {
       const int currentWordCount = static_cast<int>(self->currentTextBlock->size());
       const int baseWordCount = currentWordCount - self->rubyStartWordIndex;
       std::string cleanRuby = trimAndNormalize(self->rubyTextBuffer);

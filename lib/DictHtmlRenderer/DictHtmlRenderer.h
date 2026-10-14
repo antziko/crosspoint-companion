@@ -182,6 +182,13 @@ class DictHtmlRenderer {
   // of every cross-reference (EpdFont.cpp:224). Scoped to kref, and to the leading position,
   // because arrows elsewhere ARE content: reader.dict writes inflections as "glitch→glitches".
   bool krefArrowPending_ = false;
+  // Field markers some HTML dictionaries carry in their text (st-xhzd: `1`headword`2`reading):
+  // `1` sets the headword bold, any other `n` ends it with a space. A marker can be split
+  // between expat callbacks, so its bytes wait here until it closes or proves not to be one.
+  char markerBuf_[6] = {};
+  uint8_t markerLen_ = 0;
+  bool markerBold_ = false;  // fmt.bold was set by `1`, not by a tag
+  void flushMarker();
 
   std::vector<char> textBuf;
 

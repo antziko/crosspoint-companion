@@ -374,3 +374,29 @@ TEST_F(DictGlossTest, ProbePrefixTellsAHeadwordFromTheStartOfOneFromNeither) {
   EXPECT_FALSE(Dictionary::probePrefixIn(ctx, "中华人的").isPrefix);  // sorts between two headwords
   EXPECT_FALSE(Dictionary::probePrefixIn(ctx, "国家").isPrefix);      // sorts past the last one
 }
+
+namespace {
+std::string stripped(const char* in) {
+  char buf[256];
+  snprintf(buf, sizeof(buf), "%s", in);
+  const size_t n = DictGloss::stripMarkup(buf, strlen(buf));
+  EXPECT_EQ(n, strlen(buf));
+  return buf;
+}
+}  // namespace
+
+TEST(DictGlossStripMarkup, RemovesXhzdMarkersAndTags) {
+  EXPECT_EQ(stripped("`1`钻机`2`zuànjī<br>[drilling rig]"), " 钻机 zuànjī [drilling rig]");
+  EXPECT_EQ(stripped("a<b>bold</b> <span class=\"x\">c</span>"), "a bold   c ");
+}
+
+TEST(DictGlossStripMarkup, DecodesEntities) {
+  EXPECT_EQ(stripped("x&nbsp;&lt;y&gt; &amp; &quot;z&quot;"), "x <y> & \"z\"");
+}
+
+TEST(DictGlossStripMarkup, LeavesPlainTextAlone) {
+  EXPECT_EQ(stripped("a < b, `x` and 1`2 &copy;"), "a < b, `x` and 1`2 &copy;");
+  EXPECT_EQ(stripped("【みとめる】 to recognize"), "【みとめる】 to recognize");
+}
+
+TEST(DictGlossStripMarkup, DropsATagCutOffAtTheEnd) { EXPECT_EQ(stripped("meaning<br cla"), "meaning"); }

@@ -74,6 +74,8 @@ class ActivityManager {
   // Whether to trigger a render after the current loop()
   // This variable must only be set by the main loop, to avoid race conditions
   std::atomic<bool> requestedUpdate{false};
+  // Set by the main loop's Power + side-key combo; the next loop() goes Home (see requestHome).
+  bool homeRequested_ = false;
 
   // Set true by the render task only while currentActivity->render() runs.
   // Read by the Push path as a race tripwire (must be false there now that
@@ -126,6 +128,10 @@ class ActivityManager {
   // the one caller that lands Home over a retained sleep image (splashless wake, no frame
   // file). The reader equivalent is goToReader's allowFastInitialRefresh=false.
   void goHome(HomeMenuItem initialMenuItem = HomeMenuItem::NONE, bool cleanInitialRefresh = false);
+  // Go Home on the next loop(), from wherever the user is: the Power + side-key combo, which has
+  // to work even when the Home key or gesture has been remapped. Ignored while USB Drive owns
+  // the SD card, since Home reads it.
+  void requestHome() { homeRequested_ = true; }
 
   // This will move current activity to stack instead of deleting it
   void pushActivity(std::unique_ptr<Activity>&& activity);

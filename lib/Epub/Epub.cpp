@@ -105,6 +105,7 @@ bool Epub::parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata, const 
   bookMetadata.title = utf8ComposeNfc(opfParser.title);
   bookMetadata.author = opfParser.author;
   bookMetadata.language = opfParser.language;
+  bookMetadata.pageProgressionRtl = opfParser.pageProgressionRtl;
   bookMetadata.coverItemHref = opfParser.coverItemHref;
 
   // Guide-based cover fallback: if no cover found via metadata/properties,
@@ -468,6 +469,7 @@ bool Epub::rebuildCssCache() {
   // the same result — on every open, since without a cache this path runs again next time.
   if (cssCached) {
     Storage.removeDir((cachePath + "/sections").c_str());
+    Storage.removeDir((cachePath + "/vsections").c_str());  // vertical layouts, same rules
   }
   return true;
 }
@@ -634,6 +636,7 @@ bool Epub::load(const bool buildIfMissing, const bool skipLoadingCss) {
     bookMetadataCache.reset();
     parseCssFiles();
     Storage.removeDir((cachePath + "/sections").c_str());
+    Storage.removeDir((cachePath + "/vsections").c_str());  // vertical layouts, same rules
   }
 
   // Reload the cache from disk so it's in the correct state
@@ -699,6 +702,10 @@ const std::string& Epub::getAuthor() const {
   }
 
   return bookMetadataCache->coreMetadata.author;
+}
+
+bool Epub::pageProgressionRtl() const {
+  return bookMetadataCache && bookMetadataCache->isLoaded() && bookMetadataCache->coreMetadata.pageProgressionRtl;
 }
 
 const std::string& Epub::getLanguage() const {
@@ -1090,6 +1097,32 @@ uint8_t* Epub::readItemContentsToBytes(const std::string& itemHref, size_t* size
   return content;
 }
 
+namespace {
+// Forwards to the real sink until the cancel hook fires, then refuses the write, which ends the
+// stream (a short write is a failed write when early stop is off).
+class CancellablePrint : public Print {
+ public:
+  CancellablePrint(Print& out, bool (*shouldCancel)(void*), void* ctx)
+      : out(out), shouldCancel(shouldCancel), ctx(ctx) {}
+  size_t write(const uint8_t b) override { return write(&b, 1); }
+  size_t write(const uint8_t* buffer, const size_t size) override {
+    if (shouldCancel && shouldCancel(ctx)) return 0;
+    return out.write(buffer, size);
+  }
+
+ private:
+  Print& out;
+  bool (*shouldCancel)(void*);
+  void* ctx;
+};
+}  // namespace
+
+bool Epub::readItemContentsToStream(const std::string& itemHref, Print& out, const size_t chunkSize,
+                                    const bool allowEarlyStop, bool (*shouldCancel)(void*), void* cancelCtx) const {
+  CancellablePrint sink(out, shouldCancel, cancelCtx);
+  return readItemContentsToStream(itemHref, sink, chunkSize, allowEarlyStop);
+}
+
 bool Epub::readItemContentsToStream(const std::string& itemHref, Print& out, const size_t chunkSize,
                                     const bool allowEarlyStop, uint8_t* outStreamReason) const {
   if (itemHref.empty()) {
@@ -1462,6 +1495,7 @@ bool Epub::buildTextBookCache() {
   Storage.remove((cachePath + "/book.bin").c_str());
   Storage.removeDir((cachePath + TEXT_PARTS_DIR).c_str());
   Storage.removeDir((cachePath + "/sections").c_str());
+  Storage.removeDir((cachePath + "/vsections").c_str());  // vertical layouts, same rules
   Storage.mkdir((cachePath + TEXT_PARTS_DIR).c_str());
 
   auto sink = makeUniqueNoThrow<PartFileSink>(cachePath + TEXT_PARTS_DIR);

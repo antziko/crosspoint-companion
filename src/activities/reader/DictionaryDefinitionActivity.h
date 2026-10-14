@@ -12,6 +12,7 @@
 #include "fontIds.h"  // IPA_FONT_ID, used by ipaFontId() below
 #include "util/DictLayout.h"
 #include "util/DictNotes.h"
+#include "util/DictTabs.h"
 #include "util/DictionaryLookupController.h"
 #include "util/IpaUtils.h"
 #include "util/LookupChain.h"
@@ -47,6 +48,10 @@ class DictionaryDefinitionActivity final : public Activity {
         historyStatus(historyStatus),
         allowCardDelete_(allowCardDelete),
         controller(renderer, mappedInput, *this, cachePath) {}
+
+  // DictTabs slots whose dictionary holds this word (DictionaryLookupController::foundSlots()).
+  // Set by the screen that ran the lookup, before onEnter; 0 shows no tabs.
+  void setDictTabHits(const uint8_t mask) { tabHits_ = mask; }
 
   void onEnter() override;
   void onExit() override;
@@ -166,6 +171,19 @@ class DictionaryDefinitionActivity final : public Activity {
   // Delete, on the same terms as the Set chip: drawn only where there is no Left button to
   // press. Its hint-strip slot is zero-height on a touch board, so without this the offer is
   // named nowhere and reachable by nothing.
+  // Words / Names / Grammar tabs (DictTabs), drawn in the footer in place of the dictionary
+  // name when two or more dictionaries hold the word. Recomputed when the definition changes.
+  uint8_t tabHits_ = 0;
+  DictTabs::Tab tabs_[DictTabs::kMaxTabs] = {};
+  int tabCount_ = 0;
+  int tabX_[DictTabs::kMaxTabs] = {};
+  int tabW_[DictTabs::kMaxTabs] = {};
+  int tabY_ = 0;
+  int tabH_ = 0;
+  bool tabsDrawn_ = false;
+  void refreshTabs();
+  // Switch to tab `i` (a dictionary switch). False when it is already shown or a lookup runs.
+  bool selectTab(int i);
   int delChipX_ = 0;
   int delChipY_ = 0;
   int delChipW_ = 0;

@@ -81,6 +81,7 @@ class ChapterHtmlSlimParser {
   int8_t characterSpacing = 0;
   uint8_t wordSpacingPercent = 100;
   uint8_t imageBleed = 0;                           // see setImageBleed()
+  bool furiganaEnabled = true;                      // see setFuriganaEnabled()
   uint8_t paragraphIndent = PARAGRAPH_INDENT_BOOK;  // see setParagraphIndent()
   const CssParser* cssParser;
   bool embeddedStyle;
@@ -273,6 +274,8 @@ class ChapterHtmlSlimParser {
   }
   // Px a large image may extend past each side of the viewport (the reader's screen margin).
   void setImageBleed(const uint8_t px) { imageBleed = px; }
+  // False drops every <rt> annotation, so no word carries ruby and no line reserves its leading.
+  void setFuriganaEnabled(const bool enabled) { furiganaEnabled = enabled; }
   // Paragraph indent level, see PARAGRAPH_INDENT_BOOK.
   void setParagraphIndent(const uint8_t level) { paragraphIndent = level; }
   bool parseAndBuildPages();

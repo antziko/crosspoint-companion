@@ -1359,7 +1359,8 @@ void loop() {
 
   static bool screenshotButtonsReleased = true;
   static bool screenshotComboActive = false;
-  if (gpio.isPressed(HalGPIO::BTN_POWER) && gpio.isPressed(HalGPIO::BTN_BACK)) {
+  // Power + Back, or Power + the down/right side key (the X4 Pro has no Back key).
+  if (gpio.isPressed(HalGPIO::BTN_POWER) && (gpio.isPressed(HalGPIO::BTN_BACK) || gpio.isPressed(HalGPIO::BTN_DOWN))) {
     screenshotComboActive = true;
     if (screenshotButtonsReleased) {
       screenshotButtonsReleased = false;
@@ -1367,8 +1368,9 @@ void loop() {
         RenderLock lock;
         // Confirm first so a mistaken Power+Back doesn't silently save a screenshot.
         // The modal waits for the combo to release, so on return the buttons are up;
-        // the post-combo handler below resets the latch on the next iteration.
-        if (ScreenshotUtil::confirmScreenshot(renderer, mappedInputManager)) {
+        // the post-combo handler below resets the latch on the next iteration. A board with
+        // no front buttons (X4 Pro) has no Confirm/Back to answer it with, so it saves at once.
+        if (!mappedInputManager.hasFrontButtons() || ScreenshotUtil::confirmScreenshot(renderer, mappedInputManager)) {
           ScreenshotUtil::takeScreenshot(renderer);
         }
       }
@@ -1376,14 +1378,35 @@ void loop() {
     return;
   }
   if (screenshotComboActive) {
-    if (gpio.isPressed(HalGPIO::BTN_POWER)) return;
-    if (gpio.wasReleased(HalGPIO::BTN_POWER)) {
+    // The side key's release must not turn a page either.
+    if (gpio.isPressed(HalGPIO::BTN_POWER) || gpio.isPressed(HalGPIO::BTN_DOWN)) return;
+    if (gpio.wasReleased(HalGPIO::BTN_POWER) || gpio.wasReleased(HalGPIO::BTN_DOWN)) {
       screenshotButtonsReleased = true;
       screenshotComboActive = false;
       return;
     }
     screenshotButtonsReleased = true;
     screenshotComboActive = false;
+  }
+
+  // Power + the up/left side key goes Home from every screen, whatever the Home key and
+  // gestures are mapped to. Until both keys are up the loop stops here, so neither the page
+  // key's turn nor Power's short-press action (or the X4 Pro light double-click) sees the
+  // releases; Home follows on the next frame.
+  static bool homeComboActive = false;
+  const bool pageKeyDown = gpio.isPressed(HalGPIO::BTN_UP);
+  if (gpio.isPressed(HalGPIO::BTN_POWER) && pageKeyDown) {
+    if (!homeComboActive) {
+      homeComboActive = true;
+      LOG_INF("MAIN", "Power + up/left side key: going Home");
+      activityManager.requestHome();
+    }
+    return;
+  }
+  if (homeComboActive) {
+    if (gpio.isPressed(HalGPIO::BTN_POWER) || pageKeyDown) return;
+    homeComboActive = false;
+    return;  // this frame carries the last release
   }
 
   // Deferred manual sleep: an activity asked us to sleep on a later iteration (e.g. the

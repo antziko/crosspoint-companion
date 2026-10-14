@@ -1,5 +1,7 @@
 #include "DictionaryWordSelectActivity.h"
 
+#include <Deinflector.h>
+#include <DictIndex.h>
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
@@ -12,6 +14,7 @@
 #include <freertos/task.h>
 
 #include <algorithm>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -51,6 +54,8 @@ constexpr int kGlossMinWidth = 80;
 // y and a word may sit up to 2 px off it (the row-grouping tolerance in
 // WordSelectNavigator.cpp:41).
 constexpr int kGlossClearance = 10;
+// Group dictionaries a gloss miss may open (each open is an SD round trip per cursor move).
+constexpr int kMaxGlossFallbacks = 3;
 
 // Enlarged-character columns. The glyph is the definition font's own, drawn with each pixel
 // replicated cellScale times (GfxRenderer::drawGlyphScaled) — a larger font is not an option
@@ -144,6 +149,16 @@ void rememberPlainDictProbe(const char* path, bool isPlain) {
   g_plainProbeIsPlain = isPlain;
 }
 
+// Codepoints in s[0, len), spaces left out: the count WordSelectionScan::initFromPage gives a word.
+uint16_t scanCodepoints(const char* s, const size_t len) {
+  uint16_t n = 0;
+  for (size_t i = 0; i < len; i++) {
+    const auto c = static_cast<unsigned char>(s[i]);
+    if ((c & 0xC0) != 0x80 && c != ' ') n++;
+  }
+  return n;
+}
+
 }  // namespace
 
 void DictionaryWordSelectActivity::onEnter() {
@@ -162,9 +177,17 @@ void DictionaryWordSelectActivity::onEnter() {
   std::vector<WordSelectNavigator::WordInfo> words;
   std::vector<WordSelectNavigator::Row> rows;
   std::string textPool;  // sized exactly inside extractWords, from its counting pass
-  extractWords(words, rows, textPool);
+  if (verticalCellPx_ > 0) {
+    // Built by the reader from its vertical page; columns have no hyphenated wraps to merge.
+    words = std::move(verticalWords_);
+    rows = std::move(verticalRows_);
+    textPool = std::move(verticalPool_);
+    navigator.setVertical(verticalCellPx_);
+  } else {
+    extractWords(words, rows, textPool);
+  }
   const unsigned long tExtract = millis();
-  mergeHyphenatedWords(words, rows, textPool);
+  if (verticalCellPx_ == 0) mergeHyphenatedWords(words, rows, textPool);
   const unsigned long tMerge = millis();
   // Captured before load() moves the vector out. The navigator exposes only isEmpty(), and a
   // diagnostic is not a reason to widen its API.
@@ -198,6 +221,8 @@ void DictionaryWordSelectActivity::onEnter() {
       }
     }
   }
+  // Whole words: the scan maps the cursor's neighbourhood and the characters merge into words.
+  startWordScan();
   const unsigned long tLoad = millis();
   // Opened via the reader's hold-Back gesture? Back is still held — swallow its release once.
   consumeInitialBackRelease_ = mappedInput.isPressed(MappedInputManager::Button::Back);
@@ -214,8 +239,9 @@ void DictionaryWordSelectActivity::onEnter() {
   navigator.setHoldJumps(gloss_ != nullptr);
   glossTracksCursor_ = gloss_ && glossCursorOut_;
   if (glossTracksCursor_ && !pointedAtWord) {
-    const int start =
-        glossResumeIdx_ >= 0 && navigator.getWordAt(glossResumeIdx_) ? glossResumeIdx_ : findFirstBodyWord();
+    // The memory is a character index, so it outlives a different merge of the same page.
+    const int resume = glossResumeIdx_ >= 0 ? flatOfChar(glossResumeIdx_) : -1;
+    const int start = resume >= 0 && navigator.getWordAt(resume) ? resume : findFirstBodyWord();
     if (start >= 0) navigator.selectFlatIndex(start);
   }
   maybeAutoSelectCardWord();
@@ -228,8 +254,12 @@ void DictionaryWordSelectActivity::onEnter() {
 }
 
 void DictionaryWordSelectActivity::onExit() {
-  if (glossTracksCursor_) *glossCursorOut_ = navigator.getCurrentFlatIndex();
+  if (glossTracksCursor_) *glossCursorOut_ = charLoOf(navigator.getCurrentFlatIndex());
   controller.onExit();
+  // Before the reader takes the heap back (~30 KB of dictionary caches). A scan that finished
+  // has saved itself already; one cut short is simply not cached.
+  scan_.reset();
+  DictIndex::releaseCaches();
   // Hand back the dictionary that was in force on entry, dropping any per-word one applied
   // here. After controller.onExit(), deliberately: that stops and joins the lookup task, which
   // is the condition setSessionDictPath requires (Dictionary.h:98-99).
@@ -359,6 +389,10 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
     // lookup strings mergeHyphenatedWords appends afterwards (at most one per row).
     constexpr size_t kPoolSlack = 256;
     textPool.reserve(wantPoolBytes + kPoolSlack);
+    if (scan_ && !reserveNoThrow(tokenCells_, wantWords)) {
+      LOG_ERR("DWS", "OOM: token cells; per-character selection");
+      scan_.reset();
+    }
   }
 
   // Populate the SD font's advance table once so every getTextAdvanceX call
@@ -370,11 +404,15 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
   const int16_t naturalSpaceWidth =
       static_cast<int16_t>(renderer.getTextAdvanceX(SETTINGS.getReaderFontId(), " ", EpdFontFamily::REGULAR));
 
+  // Line count and codepoint position, as WordSelectionScan::initFromPage numbers the page.
+  uint16_t lineIndex = 0;
   for (const auto& element : page->elements) {
     if (element->getTag() != TAG_PageLine) continue;
     const auto* line = static_cast<const PageLine*>(element.get());
     const auto& block = line->getBlock();
     if (!block) continue;
+    const uint16_t scanLine = lineIndex++;
+    uint16_t scanOrdinal = 0;
     const int8_t tracking = block->getBlockStyle().characterSpacing;
 
     // Flat per-word storage (TextBlock stores words back-to-back in a single
@@ -424,6 +462,8 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
       // Tested before the std::string is built, so rejected tokens cost no allocation —
       // and via the same helper countTokens() used, so the reserve above cannot drift
       // out of step with what actually gets pushed.
+      const uint16_t wordOrdinal = scanOrdinal;
+      scanOrdinal += scanCodepoints(block->wordText(wIdx), block->wordTextLen(wIdx));
       bool isCjkToken = false;
       if (!PageTokens::isSelectable(block->wordText(wIdx), block->wordTextLen(wIdx), isCjkToken)) {
         continue;
@@ -498,6 +538,11 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
             wi.inkCentred = true;
           }
           words.push_back(wi);
+          if (scan_) {
+            tokenCells_.push_back(
+                {scanLine, wordOrdinal,
+                 static_cast<uint8_t>(std::min<uint16_t>(255, scanCodepoints(wordText.data(), wordText.size())))});
+          }
         }
       } else {
         for (size_t si = 0; si < partCount; si++) {
@@ -524,6 +569,11 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
             wi.width = partWidth;
             wi.style = wordStyle;
             words.push_back(wi);
+            if (scan_) {
+              tokenCells_.push_back(
+                  {scanLine, static_cast<uint16_t>(wordOrdinal + scanCodepoints(prefix.data(), prefix.size())),
+                   static_cast<uint8_t>(std::min<uint16_t>(255, scanCodepoints(part.data(), part.size())))});
+            }
           }
         }
       }
@@ -534,6 +584,7 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
 }
 
 int DictionaryWordSelectActivity::findFirstBodyWord() const {
+  if (!page) return navigator.isEmpty() ? -1 : 0;  // vertical: the first column's head
   const int rubyAscender = renderer.getFontAscenderSize(SETTINGS.getReaderFontId());
   for (const auto& element : page->elements) {
     if (element->getTag() != TAG_PageLine) continue;
@@ -706,6 +757,9 @@ void DictionaryWordSelectActivity::loop() {
         // The definition screen repaints everything anyway, so let its first paint also collapse
         // the residue the box left in its band.
         clearGlossGhostOnNextPaint();
+        // The definition screen needs the heap more than the paused scan needs its caches; they
+        // rebuild on the next slice.
+        DictIndex::releaseCaches();
         auto definition = makeUniqueNoThrow<DictionaryDefinitionActivity>(
             renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(), true, cachePath,
             controller.getRecordHistory(), controller.getLookupWord(),
@@ -713,6 +767,7 @@ void DictionaryWordSelectActivity::loop() {
             // The only entry point that may delete the card: this is the lookup that created it,
             // and the reader page behind us is where its underline is drawn.
             /*allowCardDelete=*/true);
+        if (definition) definition->setDictTabHits(controller.foundSlots());
         if (!definition) {
           LOG_ERR("DWS", "OOM: DictionaryDefinitionActivity");
           forceFullRepaintOnNextRender();
@@ -732,6 +787,7 @@ void DictionaryWordSelectActivity::loop() {
             // The definition screen can re-file the card under another dictionary; re-read the
             // table and re-peek, so the box follows the choice just made.
             loadGlossCards();
+            if (marksReload_) marksReload_(marksReloadCtx_);  // a deleted card drops its underline
             gloss_->forFlatIdx = -1;
             // A phrase lookup ends the range it looked up; put a card word back (the one just
             // enrolled included).
@@ -764,6 +820,10 @@ void DictionaryWordSelectActivity::loop() {
     }
     return;
   }
+
+  // Background scan, on the loop task and only while no lookup runs: the lookup task reads the
+  // same DictIndex caches, which are not thread-safe.
+  stepWordScan();
 
   // Swallow the Back release that ended the launching hold-Back gesture (see onEnter), so it
   // doesn't fall through to the cancel handlers below on the first tick.
@@ -817,6 +877,7 @@ void DictionaryWordSelectActivity::loop() {
       if (grows && !glossRangeAllowed(anchorBefore, cursor)) navigator.selectFlatIndex(cursorBefore);
     }
     maybeAutoSelectCardWord();
+    aimScanAtCursor();
     requestUpdate();
   }
 
@@ -865,6 +926,7 @@ void DictionaryWordSelectActivity::loop() {
       }
       if (!autoRangeActive() && navigator.selectFlatIndex(hit)) {
         maybeAutoSelectCardWord();
+        aimScanAtCursor();
         requestUpdate();
       }
       return;
@@ -1001,7 +1063,9 @@ void DictionaryWordSelectActivity::handleHighlightInput() {
     const auto* sel = navigator.getSelected();
     if (sel) {
       const int idx = navigator.getCurrentFlatIndex();
-      emitQuoteResult(idx, idx, navigator.getDisplay(*sel));
+      // A word split over two lines shows half of itself; its lookup text is the whole word.
+      const bool split = sel->continuationIndex >= 0 || sel->continuationOf >= 0;
+      emitQuoteResult(idx, idx, split ? navigator.getLookup(*sel) : navigator.getDisplay(*sel));
     }
   }
 }
@@ -1011,9 +1075,16 @@ void DictionaryWordSelectActivity::emitQuoteResult(int fromFlatIdx, int toFlatId
     DictUtils::cancelAndFinish(*this);  // selection went stale; treat as cancel
     return;
   }
+  // Saved highlights anchor to character tokens (the PageTokenScan numbering the reader's
+  // underline resolves), whatever this screen merged them into. A word split over two lines
+  // brings its other half along.
+  int lo = std::min(fromFlatIdx, toFlatIdx);
+  int hi = std::max(fromFlatIdx, toFlatIdx);
+  if (const auto* w = navigator.getWordAt(lo); w && w->continuationOf >= 0) lo = w->continuationOf;
+  if (const auto* w = navigator.getWordAt(hi); w && w->continuationIndex >= 0) hi = w->continuationIndex;
   HighlightRangeResult result;
-  result.startWordIndex = std::min(fromFlatIdx, toFlatIdx);
-  result.endWordIndex = std::max(fromFlatIdx, toFlatIdx);
+  result.startWordIndex = charLoOf(lo);
+  result.endWordIndex = charHiOf(hi);
   result.previewText = std::move(previewText);
   setResult(ActivityResult{std::move(result)});
   finish();
@@ -1291,12 +1362,14 @@ bool DictionaryWordSelectActivity::glossRangeAllowed(const int anchor, const int
   if (!gloss_ || anchor == cursor) return true;
   const int lo = std::min(anchor, cursor);
   const int hi = std::max(anchor, cursor);
-  const int chars = hi - lo + 1;
   if (!rangeIsCjk(lo, hi)) {
     SdDebugLog::log("DGL", "range lo=%d hi=%d ok (not cjk)", lo, hi);
     return true;
   }
   const std::string phrase = Dictionary::cleanWord(navigator.buildPhrase(lo, hi));
+  // Characters, not tokens: a merged token is a whole word.
+  int chars = 0;
+  for (const char c : phrase) chars += (static_cast<unsigned char>(c) & 0xC0) != 0x80;
   if (chars > kMaxGlossRangeChars || phrase.empty()) {
     SdDebugLog::log("DGL", "range lo=%d hi=%d refused why=%s", lo, hi, phrase.empty() ? "empty" : "cap");
     return false;
@@ -1513,6 +1586,40 @@ bool DictionaryWordSelectActivity::openGlossAltDict(const uint32_t dictHash) {
   return true;
 }
 
+size_t DictionaryWordSelectActivity::readGlossFallback(const std::string& token) {
+  const int start = dictionaryRegistry.indexOfHash(gloss_->bookDictHash);
+  if (start < 0) return 0;
+  const unsigned long t0 = millis();
+  const auto& entries = dictionaryRegistry.getEntries();
+  const auto probe = [&](const uint32_t hash) -> size_t {
+    if (hash == gloss_->bookDictHash || !openGlossAltDict(hash)) return 0;
+    return DictGloss::readEntry(gloss_->alt->ctx, gloss_->alt->dict, token.c_str(), gloss_->raw, sizeof(gloss_->raw));
+  };
+  // The last dictionary that answered first: its files are still open, so it costs one probe.
+  if (gloss_->fallbackHash != 0) {
+    if (const size_t n = probe(gloss_->fallbackHash)) {
+      gloss_->useAlt = true;
+      return n;
+    }
+  }
+  int tried = 0;
+  for (int idx = start; tried < kMaxGlossFallbacks;) {
+    idx = dictionaryRegistry.nextEntryIndexInGroup(idx);
+    if (idx < 0 || idx == start) break;
+    const uint32_t hash = DictionaryRegistry::nameHash(entries[idx].name.c_str());
+    if (hash == gloss_->fallbackHash) continue;  // tried above
+    tried++;
+    if (const size_t n = probe(hash)) {
+      gloss_->fallbackHash = hash;
+      gloss_->useAlt = true;
+      SdDebugLog::log("DGL", "fallback %s hop=%d %lums", entries[idx].name.c_str(), tried, millis() - t0);
+      return n;
+    }
+  }
+  SdDebugLog::log("DGL", "fallback miss tried=%d %lums", tried, millis() - t0);
+  return 0;
+}
+
 bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHeight) {
   if (!gloss_) return false;
   if (currIdx < 0 || controller.isActive()) {
@@ -1546,7 +1653,37 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
   const auto* first = ranged ? navigator.getWordAt(std::min(anchor, currIdx)) : w;
   const auto* last = ranged ? navigator.getWordAt(std::max(anchor, currIdx)) : w;
   gloss_->place = false;
-  if (gloss_->fits) {
+  if (gloss_->fits && navigator.isVertical()) {
+    // Across the page just below the selection, or just above it near the page foot. Every move
+    // of the box repaints the whole vertical page, so it stays where it is while it is still
+    // clear of the selection and no more than its own height away from it.
+    int selTop = INT_MAX;
+    int selBottom = 0;
+    for (int i = std::min(anchor >= 0 ? anchor : currIdx, currIdx); i <= std::max(anchor, currIdx); i++) {
+      if (const auto* sw = navigator.getWordAt(i)) {
+        selTop = std::min(selTop, static_cast<int>(sw->screenY));
+        selBottom = std::max(selBottom, sw->screenY + sw->width);
+      }
+    }
+    if (selTop == INT_MAX) selTop = selBottom;
+    const int h = gloss_->height;
+    const int held = gloss_->drawnY;
+    const bool heldClear =
+        held != kGlossNotDrawn && (held >= selBottom + kGlossClearance || held + h + kGlossClearance <= selTop);
+    const bool heldNear = held >= selBottom ? held - selBottom <= h : selTop - (held + h) <= h;
+    const int below = selBottom + kGlossClearance;
+    const int above = selTop - kGlossClearance - h;
+    if (heldClear && heldNear) {
+      gloss_->y = held;
+    } else if (below + h <= gloss_->bottomLimit) {
+      gloss_->y = below;
+    } else if (above >= gloss_->topY) {
+      gloss_->y = above;
+    } else {
+      gloss_->y = selBottom + kGlossClearance <= gloss_->bottomLimit - h ? gloss_->bottomLimit - h : gloss_->topY;
+    }
+    gloss_->place = true;
+  } else if (gloss_->fits) {
     const int above = navigator.rowY(first->row) - kGlossClearance - gloss_->height;
     const int below = navigator.rowY(last->row) + selectionLineHeight + kGlossClearance;
     if (above >= gloss_->topY) {
@@ -1582,6 +1719,19 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
       n = readGlossPhraseEntry(lo, hi, token, rangeIsCjk(lo, hi));
     } else {
       n = DictGloss::readEntry(glossCtx(), glossDictFile(), token.c_str(), gloss_->raw, sizeof(gloss_->raw));
+      // A conjugated Japanese word (認めない): its dictionary form, as the full lookup tries it.
+      // Deinflector only -- DictIndex belongs to the page scan here.
+      const uint32_t lastCp = n == 0 ? utf8LastCodepoint(token) : 0;
+      if (lastCp >= 0x3041 && lastCp <= 0x309F) {
+        constexpr size_t kMaxFormProbes = 6;
+        size_t probes = 0;
+        for (const auto& c : Deinflector::deinflect(token)) {
+          if (c.text == token) continue;
+          n = DictGloss::readEntry(glossCtx(), glossDictFile(), c.text.c_str(), gloss_->raw, sizeof(gloss_->raw));
+          if (n > 0 || ++probes >= kMaxFormProbes) break;
+        }
+      }
+      if (n == 0 && !gloss_->useAlt && SETTINGS.dictFallbackGroup) n = readGlossFallback(token);
     }
     const unsigned long tProbe = millis();
     unsigned long tWarm = tProbe;
@@ -1654,11 +1804,13 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
     // entry actually looks like on the card. bold= is offset+length of the bracketed reading in
     // row 0, so a wrong split shows up as numbers that do not bracket "[...]" in row0.
     SdDebugLog::log(
-        "DGL", "peek %s bytes=%u rows=%d bold=%u+%u probe=%lu warm=%lu fit=%lu cjk=%d/%d free=%u largest=%u row0='%s'",
-        gloss_->result.found ? "hit" : "miss", static_cast<unsigned>(n), gloss_->result.rowCount,
-        static_cast<unsigned>(gloss_->result.boldStart[0]), static_cast<unsigned>(gloss_->result.boldLen[0]),
-        tProbe - t0, tWarm - tProbe, tFit - tWarm, cjkTokenCount_, selectableTokenCount_,
-        static_cast<unsigned>(ESP.getFreeHeap()),
+        "DGL",
+        "peek '%s' alt=%d %s bytes=%u rows=%d bold=%u+%u probe=%lu warm=%lu fit=%lu cjk=%d/%d free=%u largest=%u "
+        "row0='%s'",
+        token.c_str(), static_cast<int>(gloss_->useAlt), gloss_->result.found ? "hit" : "miss",
+        static_cast<unsigned>(n), gloss_->result.rowCount, static_cast<unsigned>(gloss_->result.boldStart[0]),
+        static_cast<unsigned>(gloss_->result.boldLen[0]), tProbe - t0, tWarm - tProbe, tFit - tWarm, cjkTokenCount_,
+        selectableTokenCount_, static_cast<unsigned>(ESP.getFreeHeap()),
         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
         gloss_->result.rowCount > 0 ? gloss_->result.rows[0] : "");
 #endif
@@ -1670,10 +1822,21 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
   // cannot be put back cheaply — it may need decoding — so that case alone falls to the full
   // repaint, which redraws the page anyway.
   const bool moving = gloss_->drawnY != kGlossNotDrawn && (!gloss_->place || gloss_->drawnY != gloss_->y);
+  // A band of columns cannot be re-rendered on its own: the vertical page is redrawn whole.
+  if (navigator.isVertical()) return moving;
   return moving && stripHasImage(gloss_->drawnY, gloss_->height);
 }
 
+void DictionaryWordSelectActivity::drawPage() const {
+  if (page) {
+    page->render(renderer, SETTINGS.getReaderFontId(), marginLeft, marginTop);
+  } else if (painter_.draw) {
+    painter_.draw(painter_.ctx);
+  }
+}
+
 void DictionaryWordSelectActivity::renderPageStrip(int y, int height) {
+  if (!page) return;
   renderer.clearRect(gloss_->x, y, gloss_->width, height);
 
   const int fontId = SETTINGS.getReaderFontId();
@@ -1733,6 +1896,7 @@ void DictionaryWordSelectActivity::drawPageMarks(const int bandTop, const int ba
 }
 
 bool DictionaryWordSelectActivity::stripHasImage(int y, int height) const {
+  if (!page) return false;
   const int pad = renderer.getLineHeight(SETTINGS.getReaderFontId());
   for (const auto& el : page->elements) {
     if (el->getTag() != TAG_PageImage) continue;
@@ -2000,12 +2164,13 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
   auto* fcm = renderer.getFontCacheManager();
   HangTrace::mark(HangTrace::Render, HangTrace::DwsPrewarm);
   auto scope = fcm->createPrewarmScope();
-  page->render(renderer, SETTINGS.getReaderFontId(), marginLeft, marginTop);  // scan pass
+  // A vertical page's painter prewarms its own glyphs; the scan pass is a Page operation.
+  if (page) page->render(renderer, SETTINGS.getReaderFontId(), marginLeft, marginTop);  // scan pass
   const unsigned long tScan = millis();
   scope.endScanAndPrewarm();
   const unsigned long tPrewarm = millis();
   HangTrace::mark(HangTrace::Render, HangTrace::DwsPage);
-  page->render(renderer, SETTINGS.getReaderFontId(), marginLeft, marginTop);
+  drawPage();
   HangTrace::mark(HangTrace::Render, HangTrace::DwsMarks);
   drawPageMarks();  // before the highlight, which snapshots the pixels under it
   const unsigned long tDraw = millis();

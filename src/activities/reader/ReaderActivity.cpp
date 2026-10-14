@@ -15,6 +15,7 @@
 #include "CrossPointState.h"
 #include "Epub.h"
 #include "EpubReaderActivity.h"
+#include "ReaderSettingsIO.h"
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "Xtc.h"
@@ -109,7 +110,12 @@ std::unique_ptr<Epub> ReaderActivity::loadEpub(const std::string& path) {
     // activity follows redraws the full screen anyway.
     std::optional<GfxRenderer::FrameBufferLoan> loan;
     if (uncached) loan.emplace(renderer);
-    loaded = epub->load(true, SETTINGS.embeddedStyle == 0);
+    // Embedded Style is per book, and the book's settings load only once the reader opens:
+    // read them here so the stylesheets are loaded (or skipped) for this book.
+    uint8_t embeddedStyle = SETTINGS.embeddedStyle;
+    CrossPointSettings::ReaderOverride bookOverride;
+    if (ReaderSettingsIO::load(epub->getCachePath(), bookOverride)) embeddedStyle = bookOverride.embeddedStyle;
+    loaded = epub->load(true, embeddedStyle == 0);
   }
   if (loaded) {
     return epub;

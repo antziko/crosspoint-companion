@@ -31,7 +31,7 @@ constexpr StrId LAYOUT_ROW_NAME_IDS[] = {
     StrId::STR_LINE_SPACING,     StrId::STR_WORD_SPACING, StrId::STR_CHARACTER_SPACING, StrId::STR_EXTRA_SPACING,
     StrId::STR_PARAGRAPH_INDENT, StrId::STR_ALIGNMENT,    StrId::STR_SCREEN_MARGIN};
 constexpr StrId STYLE_ROW_NAME_IDS[] = {StrId::STR_FOCUS_READING, StrId::STR_HYPHENATION, StrId::STR_EMBEDDED_STYLE,
-                                        StrId::STR_TEXT_AA};
+                                        StrId::STR_TEXT_AA, StrId::STR_WORD_SELECT_BUTTONS};
 
 // LOCAL(feat): Hold Confirm this long on a Font-tab row to pin/unpin (vs a tap = commit).
 constexpr unsigned long kPinHoldMs = 700;
@@ -55,7 +55,7 @@ constexpr StrId WORD_SPACING_IDS[] = {StrId::STR_SPACING_50_PERCENT,  StrId::STR
                                       StrId::STR_SPACING_100_PERCENT, StrId::STR_SPACING_125_PERCENT,
                                       StrId::STR_SPACING_150_PERCENT, StrId::STR_SPACING_175_PERCENT,
                                       StrId::STR_SPACING_200_PERCENT};
-// Indices map straight onto the stored 0..4 value, which getCharacterSpacing() offsets to -2..+2 px.
+// Indices map straight onto the stored 0..4 value, which getReaderCharacterSpacing() offsets to -2..+2 px.
 constexpr StrId CHARACTER_SPACING_IDS[] = {StrId::STR_SPACING_MINUS_2, StrId::STR_SPACING_MINUS_1,
                                            StrId::STR_SPACING_ZERO, StrId::STR_SPACING_PLUS_1,
                                            StrId::STR_SPACING_PLUS_2};
@@ -109,20 +109,24 @@ TextSettingsActivity::TextSettingsActivity(GfxRenderer& renderer, MappedInputMan
   }
   for (int r = 0; r < static_cast<int>(StyleRow::Count); r++) {
     const auto row = static_cast<StyleRow>(r);
-    if (bookMode() && row == StyleRow::FocusReading) continue;
+    // Which button pair steps word by word is a per-book override field: book modes only.
+    if (!bookMode() && row == StyleRow::WordSelectButtons) continue;
     addStyle(row);
   }
   if (tabIndex(tab_) < 0) tab_ = visibleTabs_[0];
 
   if (bookMode()) {
     book_ = SETTINGS.getReaderOverride();
-    f_ = {&book_.fontFamily,         &book_.fontPointSize,      &book_.lineSpacing,
-          &book_.paragraphAlignment, &book_.paragraphSpacing,   &book_.paragraphIndent,
-          &book_.screenMargin,       &book_.hyphenationEnabled, book_.sdFontFamilyName};
+    f_ = {&book_.fontFamily,       &book_.fontPointSize,      &book_.lineSpacing,      &book_.paragraphAlignment,
+          &book_.paragraphSpacing, &book_.paragraphIndent,    &book_.screenMargin,     &book_.hyphenationEnabled,
+          book_.sdFontFamilyName,  &book_.wordSpacing,        &book_.characterSpacing, &book_.embeddedStyle,
+          &book_.textAntiAliasing, &book_.focusReadingEnabled};
   } else {
     f_ = {&SETTINGS.fontFamily,         &SETTINGS.fontPointSize,      &SETTINGS.lineSpacing,
           &SETTINGS.paragraphAlignment, &SETTINGS.paragraphSpacing,   &SETTINGS.paragraphIndent,
-          &SETTINGS.screenMargin,       &SETTINGS.hyphenationEnabled, SETTINGS.sdFontFamilyName};
+          &SETTINGS.screenMargin,       &SETTINGS.hyphenationEnabled, SETTINGS.sdFontFamilyName,
+          &SETTINGS.wordSpacing,        &SETTINGS.characterSpacing,   &SETTINGS.embeddedStyle,
+          &SETTINGS.textAntiAliasing,   &SETTINGS.focusReadingEnabled};
   }
 }
 
@@ -713,21 +717,21 @@ void TextSettingsActivity::confirmLayoutRow(int row) {
       requestUpdate();
       break;
     case LayoutRow::WordSpacing: {
-      const int cur = (std::clamp<int>(SETTINGS.wordSpacing, WORD_SPACING_MIN, WORD_SPACING_MAX) - WORD_SPACING_MIN) /
-                      WORD_SPACING_STEP;
+      const int cur =
+          (std::clamp<int>(*f_.wordSpacing, WORD_SPACING_MIN, WORD_SPACING_MAX) - WORD_SPACING_MIN) / WORD_SPACING_STEP;
       optionPopup_.show(StrId::STR_WORD_SPACING, WORD_SPACING_IDS, static_cast<int>(std::size(WORD_SPACING_IDS)), cur,
-                        [](int idx) {
-                          SETTINGS.wordSpacing = static_cast<uint8_t>(WORD_SPACING_MIN + idx * WORD_SPACING_STEP);
-                          SETTINGS.saveToFile();  // persist immediately (#2806)
+                        [this](int idx) {
+                          *f_.wordSpacing = static_cast<uint8_t>(WORD_SPACING_MIN + idx * WORD_SPACING_STEP);
+                          persist();  // persist immediately (#2806)
                         });
       requestUpdate();
       break;
     }
     case LayoutRow::CharacterSpacing:
       optionPopup_.show(StrId::STR_CHARACTER_SPACING, CHARACTER_SPACING_IDS,
-                        static_cast<int>(std::size(CHARACTER_SPACING_IDS)), SETTINGS.characterSpacing, [](int idx) {
-                          SETTINGS.characterSpacing = static_cast<uint8_t>(idx);
-                          SETTINGS.saveToFile();  // persist immediately (#2806)
+                        static_cast<int>(std::size(CHARACTER_SPACING_IDS)), *f_.characterSpacing, [this](int idx) {
+                          *f_.characterSpacing = static_cast<uint8_t>(idx);
+                          persist();  // persist immediately (#2806)
                         });
       requestUpdate();
       break;
@@ -768,9 +772,9 @@ std::string TextSettingsActivity::layoutValueText(int row) const {
       return v < std::size(ALIGNMENT_IDS) ? I18N.get(ALIGNMENT_IDS[v]) : I18N.get(StrId::STR_JUSTIFY);
     }
     case LayoutRow::WordSpacing:
-      return std::to_string(SETTINGS.wordSpacing) + "%";
+      return std::to_string(*f_.wordSpacing) + "%";
     case LayoutRow::CharacterSpacing: {
-      const uint8_t v = SETTINGS.characterSpacing;
+      const uint8_t v = *f_.characterSpacing;
       return v < std::size(CHARACTER_SPACING_IDS) ? I18N.get(CHARACTER_SPACING_IDS[v])
                                                   : I18N.get(StrId::STR_SPACING_ZERO);
     }
@@ -785,7 +789,7 @@ std::string TextSettingsActivity::layoutValueText(int row) const {
 void TextSettingsActivity::confirmStyleRow(int row) {
   switch (static_cast<StyleRow>(row)) {
     case StyleRow::FocusReading:
-      SETTINGS.focusReadingEnabled = !SETTINGS.focusReadingEnabled;
+      *f_.focusReadingEnabled = !*f_.focusReadingEnabled;
       break;
     case StyleRow::Hyphenation:
       *f_.hyphenationEnabled = !*f_.hyphenationEnabled;
@@ -793,14 +797,20 @@ void TextSettingsActivity::confirmStyleRow(int row) {
       requestUpdate();
       return;
     case StyleRow::EmbeddedStyle:
-      SETTINGS.embeddedStyle = !SETTINGS.embeddedStyle;
+      *f_.embeddedStyle = !*f_.embeddedStyle;
       break;
+    case StyleRow::WordSelectButtons:
+      // Input only: persisted with the book, nothing to re-lay out.
+      book_.swapWordSelectAxes = book_.swapWordSelectAxes ? 0 : 1;
+      persist();
+      requestUpdate();
+      return;
     case StyleRow::AntiAliasing:
       // Tri-state picker, not a toggle: negating it made Sharp unreachable (!2 == 0).
-      optionPopup_.show(StrId::STR_TEXT_AA, TEXT_AA_IDS, static_cast<int>(std::size(TEXT_AA_IDS)),
-                        SETTINGS.textAntiAliasing, [](int idx) {
-                          SETTINGS.textAntiAliasing = static_cast<uint8_t>(idx);
-                          SETTINGS.saveToFile();  // persist immediately (#2806)
+      optionPopup_.show(StrId::STR_TEXT_AA, TEXT_AA_IDS, static_cast<int>(std::size(TEXT_AA_IDS)), *f_.textAntiAliasing,
+                        [this](int idx) {
+                          *f_.textAntiAliasing = static_cast<uint8_t>(idx);
+                          persist();  // persist immediately (#2806)
                         });
       requestUpdate();
       return;
@@ -808,14 +818,17 @@ void TextSettingsActivity::confirmStyleRow(int row) {
     default:
       return;
   }
-  SETTINGS.saveToFile();  // persist immediately (#2806)
+  persist();  // persist immediately (#2806); a book field in a book mode
   requestUpdate();
 }
 
 std::string TextSettingsActivity::styleValueText(int row) const {
   switch (static_cast<StyleRow>(row)) {
+    case StyleRow::WordSelectButtons:
+      // Names the pair that steps word by word; the other pair moves between rows.
+      return book_.swapWordSelectAxes ? tr(STR_WORD_SELECT_SIDE) : tr(STR_WORD_SELECT_FRONT);
     case StyleRow::AntiAliasing: {
-      const uint8_t v = SETTINGS.textAntiAliasing;
+      const uint8_t v = *f_.textAntiAliasing;
       return v < std::size(TEXT_AA_IDS) ? I18N.get(TEXT_AA_IDS[v]) : I18N.get(StrId::STR_TEXT_AA_ANTIALIASED);
     }
 
@@ -833,11 +846,11 @@ bool TextSettingsActivity::styleRowIsToggle(int row) {
 bool TextSettingsActivity::styleRowChecked(int row) const {
   switch (static_cast<StyleRow>(row)) {
     case StyleRow::FocusReading:
-      return SETTINGS.focusReadingEnabled;
+      return *f_.focusReadingEnabled;
     case StyleRow::Hyphenation:
       return *f_.hyphenationEnabled;
     case StyleRow::EmbeddedStyle:
-      return SETTINGS.embeddedStyle;
+      return *f_.embeddedStyle;
 
     default:
       return false;
@@ -849,7 +862,8 @@ bool TextSettingsActivity::styleRowChecked(int row) const {
 bool TextSettingsActivity::focusedRowHasNoPreview() const {
   if (ringPos() == 0 || tab_ != Tab::Style) return false;
   const StyleRow row = static_cast<StyleRow>(styleRowAt(ringPos() - 1));
-  return row == StyleRow::Hyphenation || row == StyleRow::EmbeddedStyle || row == StyleRow::AntiAliasing;
+  return row == StyleRow::Hyphenation || row == StyleRow::EmbeddedStyle || row == StyleRow::AntiAliasing ||
+         row == StyleRow::WordSelectButtons;
 }
 
 void TextSettingsActivity::switchTab(int direction) {

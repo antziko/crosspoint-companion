@@ -190,6 +190,7 @@ const uint8_t* FontDecompressor::getBitmap(const EpdFontData* fontData, const Ep
         // cascade. Skip just this glyph; siblings keep rendering from the retained
         // buffer. Mirrors the hotGlyphBuf OOM path below.
         stats.hotGroupOomSkips++;
+        starvedGlyphs++;
         // Frag signal for future tuning: requested vs largest contiguous block.
         // freeAtFail != largest => fragmentation-limited, not absolute OOM.
         LOG_ERR("FDC", "OOM hot group %u: need=%u keptCap=%u free=%u largest=%u (glyph skipped)", groupIndex,

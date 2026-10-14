@@ -110,6 +110,7 @@ void ActivityManager::loop() {
   if (mappedInput.consumeSuppressedRelease()) return;
 
   if (currentActivity && currentActivity->requiresExclusiveStorageLoop()) {
+    homeRequested_ = false;
     // USB Drive owns the raw SD card. Run only its loop: every branch below can
     // reach a filesystem user (home gesture, frontlight sheet, pending activity
     // transitions), and the volume they would touch is detached.
@@ -121,6 +122,13 @@ void ActivityManager::loop() {
   }
 
   if (currentActivity) {
+    if (homeRequested_) {
+      homeRequested_ = false;
+      if (!currentActivity->isHomeActivity()) {
+        goHome();
+        return;
+      }
+    }
     if (!currentActivity->isHomeActivity() && mappedInput.wasHomeGesture()) {
       if (currentActivity->handleHomeGesture()) {
         return;

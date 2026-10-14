@@ -148,7 +148,8 @@ namespace {
 // v69: <pre> keeps its line breaks and leading indentation, left-aligned and unindented,
 //      inside a PageBox outline (page element tag 4).
 // v70: An empty inline element with horizontal margin/padding (a spacer span) breaks the word.
-constexpr uint8_t SECTION_FILE_VERSION = 70;
+// v71: Header gains furiganaEnabled after paragraphIndent; with it off, <rt> text is dropped.
+constexpr uint8_t SECTION_FILE_VERSION = 71;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
@@ -169,8 +170,8 @@ constexpr uint8_t SECTION_FILE_PARTIAL_VERSION = 0xFE - (SECTION_FILE_VERSION - 
 constexpr uint32_t HEADER_SIZE = sizeof(uint8_t) + sizeof(int) + sizeof(float) + sizeof(bool) + sizeof(uint8_t) +
                                  sizeof(uint16_t) + sizeof(uint16_t) + sizeof(uint16_t) + sizeof(bool) + sizeof(bool) +
                                  sizeof(uint8_t) + sizeof(bool) + sizeof(int8_t) + sizeof(uint8_t) + sizeof(uint8_t) +
-                                 sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
-                                 sizeof(uint32_t) + sizeof(uint32_t);
+                                 sizeof(uint8_t) + sizeof(bool) + sizeof(uint32_t) + sizeof(uint32_t) +
+                                 sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t);
 }  // namespace
 
 // Out-of-line so the unique_ptr<ChapterHtmlSlimParser> in BuildContext can be
@@ -213,15 +214,15 @@ void Section::writeSectionFileHeader(const ReaderRenderSpec& spec) {
     LOG_DBG("SCT", "File not open for writing header");
     return;
   }
-  static_assert(HEADER_SIZE == sizeof(SECTION_FILE_VERSION) + sizeof(spec.fontId) + sizeof(spec.lineCompression) +
-                                   sizeof(spec.paragraphSpacing) + sizeof(spec.paragraphAlignment) +
-                                   sizeof(spec.viewportWidth) + sizeof(spec.viewportHeight) + sizeof(pageCount) +
-                                   sizeof(spec.hyphenationEnabled) + sizeof(spec.embeddedStyle) +
-                                   sizeof(spec.imageRendering) + sizeof(spec.focusReadingEnabled) +
-                                   sizeof(spec.characterSpacing) + sizeof(spec.wordSpacingPercent) +
-                                   sizeof(spec.imageBleed) + sizeof(spec.paragraphIndent) + sizeof(uint32_t) +
-                                   sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t),
-                "Header size mismatch");
+  static_assert(
+      HEADER_SIZE == sizeof(SECTION_FILE_VERSION) + sizeof(spec.fontId) + sizeof(spec.lineCompression) +
+                         sizeof(spec.paragraphSpacing) + sizeof(spec.paragraphAlignment) + sizeof(spec.viewportWidth) +
+                         sizeof(spec.viewportHeight) + sizeof(pageCount) + sizeof(spec.hyphenationEnabled) +
+                         sizeof(spec.embeddedStyle) + sizeof(spec.imageRendering) + sizeof(spec.focusReadingEnabled) +
+                         sizeof(spec.characterSpacing) + sizeof(spec.wordSpacingPercent) + sizeof(spec.imageBleed) +
+                         sizeof(spec.paragraphIndent) + sizeof(spec.furiganaEnabled) + sizeof(uint32_t) +
+                         sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t),
+      "Header size mismatch");
   // Written as the incomplete sentinel; finalizeBuild() patches it to
   // SECTION_FILE_VERSION as the last step, committing the file.
   serialization::writePod(file, SECTION_FILE_INCOMPLETE_VERSION);
@@ -239,6 +240,7 @@ void Section::writeSectionFileHeader(const ReaderRenderSpec& spec) {
   serialization::writePod(file, spec.wordSpacingPercent);
   serialization::writePod(file, spec.imageBleed);
   serialization::writePod(file, spec.paragraphIndent);
+  serialization::writePod(file, spec.furiganaEnabled);
   serialization::writePod(file, pageCount);  // Placeholder for page count (will be initially 0, patched later)
   serialization::writePod(file, static_cast<uint32_t>(0));  // Placeholder for LUT offset (patched later)
   serialization::writePod(file, static_cast<uint32_t>(0));  // Placeholder for anchor map offset (patched later)
@@ -279,6 +281,7 @@ bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
     uint8_t fileWordSpacingPercent;
     uint8_t fileImageBleed;
     uint8_t fileParagraphIndent;
+    bool fileFuriganaEnabled;
     serialization::readPod(file, fileFontId);
     serialization::readPod(file, fileLineCompression);
     serialization::readPod(file, fileParagraphSpacing);
@@ -293,6 +296,7 @@ bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
     serialization::readPod(file, fileWordSpacingPercent);
     serialization::readPod(file, fileImageBleed);
     serialization::readPod(file, fileParagraphIndent);
+    serialization::readPod(file, fileFuriganaEnabled);
 
     if (spec.fontId != fileFontId || spec.lineCompression != fileLineCompression ||
         spec.paragraphSpacing != fileParagraphSpacing || spec.paragraphAlignment != fileParagraphAlignment ||
@@ -300,7 +304,8 @@ bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
         spec.hyphenationEnabled != fileHyphenationEnabled || spec.embeddedStyle != fileEmbeddedStyle ||
         spec.imageRendering != fileImageRendering || spec.focusReadingEnabled != fileFocusReadingEnabled ||
         spec.characterSpacing != fileCharacterSpacing || spec.wordSpacingPercent != fileWordSpacingPercent ||
-        spec.imageBleed != fileImageBleed || spec.paragraphIndent != fileParagraphIndent) {
+        spec.imageBleed != fileImageBleed || spec.paragraphIndent != fileParagraphIndent ||
+        spec.furiganaEnabled != fileFuriganaEnabled) {
       file.close();
       LOG_ERR("SCT", "Deserialization failed: Parameters do not match");
       clearCache();
@@ -637,6 +642,7 @@ bool Section::startBuild(const ReaderRenderSpec& spec, const std::function<void(
   ctx->parser->setTextSpacing(spec.characterSpacing, spec.wordSpacingPercent);
   ctx->parser->setParagraphIndent(spec.paragraphIndent);
   ctx->parser->setImageBleed(spec.imageBleed);
+  ctx->parser->setFuriganaEnabled(spec.furiganaEnabled);
   Hyphenator::setPreferredLanguage(epub->getLanguage());
   build_ = std::move(ctx);
 

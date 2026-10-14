@@ -8,7 +8,7 @@
 
 void DictLookupTask::run() {
   owner.runLookup();
-  // Peak stack use of the 4 KB task, including any SD log lines written during the lookup.
+  // Peak stack use of the 6 KB task, including any SD log lines written during the lookup.
   // ESP-IDF reports this in bytes.
   SdDebugLog::log("DICT", "lookup task stack free=%u", static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
 }

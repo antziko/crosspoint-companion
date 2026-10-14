@@ -181,7 +181,57 @@ size_t readEntryAt(HalFile& dictFile, const uint32_t offset, const uint32_t size
   size_t len = static_cast<size_t>(n);
   if (len < size) len = trimTrailingPartialUtf8(buf, len);
   buf[len] = '\0';
-  return len;
+  return stripMarkup(buf, len);
+}
+
+size_t stripMarkup(char* buf, const size_t len) {
+  constexpr size_t kMaxTag = 64;
+  struct Entity {
+    const char* name;
+    char c;
+  };
+  static constexpr Entity kEntities[] = {
+      {"&nbsp;", ' '}, {"&lt;", '<'}, {"&gt;", '>'}, {"&amp;", '&'}, {"&quot;", '"'}};
+  auto isAlpha = [](const char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
+  size_t out = 0;
+  size_t i = 0;
+  while (i < len) {
+    const char c = buf[i];
+    if (c == '<' && i + 1 < len && (isAlpha(buf[i + 1]) || buf[i + 1] == '/')) {
+      size_t j = i + 1;
+      while (j < len && j - i <= kMaxTag && buf[j] != '>' && buf[j] != '<') j++;
+      if (j < len && buf[j] == '>') {
+        buf[out++] = ' ';
+        i = j + 1;
+        continue;
+      }
+      if (j >= len) break;  // cut off by the peek: the rest is the tag
+    } else if (c == '`' && i + 1 < len && buf[i + 1] >= '0' && buf[i + 1] <= '9') {
+      size_t j = i + 1;
+      while (j < len && buf[j] >= '0' && buf[j] <= '9') j++;
+      if (j < len && buf[j] == '`') {
+        buf[out++] = ' ';
+        i = j + 1;
+        continue;
+      }
+    } else if (c == '&') {
+      bool matched = false;
+      for (const Entity& e : kEntities) {
+        const size_t n = strlen(e.name);
+        if (i + n <= len && memcmp(buf + i, e.name, n) == 0) {
+          buf[out++] = e.c;
+          i += n;
+          matched = true;
+          break;
+        }
+      }
+      if (matched) continue;
+    }
+    buf[out++] = c;
+    i++;
+  }
+  buf[out] = '\0';
+  return out;
 }
 
 void fit(char* buf, const DictLayout::WrapMetrics& metrics, const DictLayout::Measurer& measure, GlossResult& out,

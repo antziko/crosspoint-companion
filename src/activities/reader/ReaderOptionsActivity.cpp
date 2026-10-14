@@ -35,7 +35,21 @@ enum ItemIndex : int {
   FOCUS_READING = 9,
   MIN_SESSION = 10,
   MORE_TEXT_SETTINGS = 11,
+  BOOK_LANGUAGE = 12,
+  VERTICAL_TEXT = 13,
+  FURIGANA = 14,
 };
+
+// Display order: the CJK rows sit above More Text Settings, which stays last.
+constexpr ItemIndex ROW_ORDER[] = {FONT_FAMILY,         FONT_SIZE,     LINE_SPACING,      PARA_ALIGNMENT,
+                                   HYPHENATION,         EXTRA_SPACING, PARA_INDENT,       SCREEN_MARGIN,
+                                   WORD_SELECT_BUTTONS, FOCUS_READING, MIN_SESSION,       BOOK_LANGUAGE,
+                                   VERTICAL_TEXT,       FURIGANA,      MORE_TEXT_SETTINGS};
+
+constexpr StrId BOOK_LANGUAGE_LABELS[] = {StrId::STR_BOOK_LANG_AUTO, StrId::STR_BOOK_LANG_JA,
+                                          StrId::STR_BOOK_LANG_ZH_HANS, StrId::STR_BOOK_LANG_ZH_HANT,
+                                          StrId::STR_BOOK_LANG_YUE};
+static_assert(std::size(BOOK_LANGUAGE_LABELS) == cjk::LANGUAGE_CHOICE_COUNT, "book language labels");
 
 // Ordered cycle of valid per-book min-session values: 0xFF = use global, then indices
 // into CrossPointSettings::MIN_SESSION_SECONDS (0 = always, 15s, 30s, 1m, 2m, 5m).
@@ -85,15 +99,29 @@ int enlargedPreviewHeight(int contentHeight, int listRowHeight, int verticalSpac
 ReaderOptionsActivity::ReaderOptionsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                              std::string bookCachePath,
                                              const CrossPointSettings::ReaderOverride& initialOverride, bool epubRows,
-                                             std::string sampleText)
+                                             std::string sampleText, std::string languageTag, const bool spineRtl)
     : Activity("ReaderOptions", renderer, mappedInput),
       cachePath(std::move(bookCachePath)),
       localOverride(initialOverride),
+      epubRows_(epubRows),
+      languageTag_(std::move(languageTag)),
+      spineRtl_(spineRtl),
       sampleText(std::move(sampleText)) {
-  for (int item = 0; item < ITEM_COUNT; item++) {
-    if (!epubRows && (item == FOCUS_READING || item == MIN_SESSION || item == PARA_INDENT)) continue;
+  if (epubRows_) cjkPrefs_.load(cachePath);
+  rebuildRows();
+}
+
+void ReaderOptionsActivity::rebuildRows() {
+  static_assert(std::size(ROW_ORDER) == ITEM_COUNT, "every item has a display slot");
+  const bool cjkBook = bookScript() != CjkScript::None;
+  rowCount_ = 0;
+  for (const ItemIndex item : ROW_ORDER) {
+    const bool epubOnly = item == FOCUS_READING || item == MIN_SESSION || item == PARA_INDENT || item == BOOK_LANGUAGE;
+    if (!epubRows_ && epubOnly) continue;
+    if ((item == VERTICAL_TEXT || item == FURIGANA) && (!epubRows_ || !cjkBook)) continue;
     rows_[rowCount_++] = static_cast<uint8_t>(item);
   }
+  if (selectedIndex >= rowCount_) selectedIndex = rowCount_ - 1;
 }
 
 void ReaderOptionsActivity::onEnter() {
@@ -238,10 +266,28 @@ void ReaderOptionsActivity::openMoreTextSettings() {
 }
 
 void ReaderOptionsActivity::cycleCurrentItem() {
+  if (currentItem() == BOOK_LANGUAGE || currentItem() == VERTICAL_TEXT || currentItem() == FURIGANA) {
+    // Per-book CJK state lives in cjk.bin, not the text-settings override; the reader re-reads it
+    // on return and rebuilds the layout.
+    switch (currentItem()) {
+      case BOOK_LANGUAGE:
+        cjkPrefs_.languageOverride = (cjkPrefs_.languageOverride + 1) % cjk::LANGUAGE_CHOICE_COUNT;
+        rebuildRows();
+        fullRedraw_ = true;  // the row count sizes the preview pane
+        break;
+      case VERTICAL_TEXT:
+        cjkPrefs_.verticalOverride = cjkPrefs_.verticalOn(bookScript(), spineRtl_) ? 0 : 1;
+        break;
+      default:
+        cjkPrefs_.furiganaOverride = cjkPrefs_.furiganaOn() ? 0 : 1;
+        break;
+    }
+    cjkPrefs_.save(cachePath);
+    return;
+  }
   if (currentItem() == FOCUS_READING) {
-    // Reader-wide, not part of the book override.
-    SETTINGS.focusReadingEnabled = SETTINGS.focusReadingEnabled ? 0 : 1;
-    SETTINGS.saveToFile();
+    localOverride.focusReadingEnabled = localOverride.focusReadingEnabled ? 0 : 1;
+    persistAndApply();
     fullRedraw_ = true;
     return;
   }
@@ -326,8 +372,7 @@ void ReaderOptionsActivity::persistAndApply() {
   }
 }
 
-// static
-const char* ReaderOptionsActivity::getItemName(const int index) {
+const char* ReaderOptionsActivity::getItemName(const int index) const {
   switch (index) {
     case FONT_FAMILY:
       return tr(STR_FONT_FAMILY);
@@ -353,6 +398,12 @@ const char* ReaderOptionsActivity::getItemName(const int index) {
       return tr(STR_MIN_SESSION_FOR_STATS);
     case MORE_TEXT_SETTINGS:
       return tr(STR_MORE_TEXT_SETTINGS);
+    case BOOK_LANGUAGE:
+      return tr(STR_BOOK_LANGUAGE);
+    case VERTICAL_TEXT:
+      return tr(STR_VERTICAL_TEXT_LABEL);
+    case FURIGANA:
+      return cjk::isChinese(bookScript()) ? tr(STR_PINYIN_LABEL) : tr(STR_FURIGANA_LABEL);
     default:
       return "";
   }
@@ -408,7 +459,7 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
       // Names the pair that steps word by word; the other pair moves between rows.
       return localOverride.swapWordSelectAxes ? tr(STR_WORD_SELECT_SIDE) : tr(STR_WORD_SELECT_FRONT);
     case FOCUS_READING:
-      return SETTINGS.focusReadingEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+      return localOverride.focusReadingEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     case MIN_SESSION: {
       const uint8_t v = localOverride.minSessionMinutes;
       if (v == CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL) {
@@ -422,6 +473,22 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
       formatMinSession(v, buf, sizeof(buf));
       return std::string(buf);
     }
+    case BOOK_LANGUAGE: {
+      const uint8_t choice = cjkPrefs_.languageOverride < cjk::LANGUAGE_CHOICE_COUNT ? cjkPrefs_.languageOverride : 0;
+      if (choice != cjk::LANG_AUTO) return I18N.get(BOOK_LANGUAGE_LABELS[choice]);
+      // Auto names what it resolved to, so a mis-tagged book is visible at a glance.
+      const CjkScript script = bookScript();
+      const StrId resolved = script == CjkScript::Japanese             ? StrId::STR_BOOK_LANG_JA
+                             : script == CjkScript::SimplifiedChinese  ? StrId::STR_BOOK_LANG_ZH_HANS
+                             : script == CjkScript::TraditionalChinese ? StrId::STR_BOOK_LANG_ZH_HANT
+                                                                       : StrId::STR_BOOK_LANG_AUTO;
+      if (resolved == StrId::STR_BOOK_LANG_AUTO) return tr(STR_BOOK_LANG_AUTO);
+      return std::string(tr(STR_BOOK_LANG_AUTO)) + " (" + I18N.get(resolved) + ")";
+    }
+    case VERTICAL_TEXT:
+      return cjkPrefs_.verticalOn(bookScript(), spineRtl_) ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+    case FURIGANA:
+      return cjkPrefs_.furiganaOn() ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     default:
       return "";
   }

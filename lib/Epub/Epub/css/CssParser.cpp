@@ -1127,3 +1127,110 @@ bool CssParser::loadFromCache() {
           cssHeapBail_ ? " (heap-capped)" : "", (unsigned)stylePool_.size());
   return true;
 }
+
+uint32_t CssParser::blockSelectorHash(const char* s, const size_t len) {
+  uint32_t h = 2166136261u;
+  for (size_t i = 0; i < len; i++) {
+    h ^= static_cast<uint8_t>(std::tolower(static_cast<unsigned char>(s[i])));
+    h *= 16777619u;
+  }
+  return h == 0 ? 1 : h;  // 0 is the "any tag" / "no class" marker
+}
+
+size_t CssParser::collectVerticalStyles(std::vector<VerticalBlockRule>& out, const size_t maxOut,
+                                        const StylesheetFilter*) const {
+  out.clear();
+  if (cachePath.empty()) return 0;
+
+  HalFile file;
+  if (!Storage.openFileForRead("CSS", cachePath + rulesCache, file)) return 0;
+
+  uint8_t version = 0;
+  if (file.read(&version, 1) != 1 || version != CssParser::CSS_CACHE_VERSION) return 0;
+  uint16_t ruleCount = 0;
+  if (file.read(&ruleCount, sizeof(ruleCount)) != sizeof(ruleCount)) return 0;
+  if (ruleCount > MAX_RULES) return 0;
+
+  const auto emOf = [](const float v, const uint8_t unit) -> float {
+    return unit == static_cast<uint8_t>(CssUnit::Em) || unit == static_cast<uint8_t>(CssUnit::Rem) ? v : 0.0f;
+  };
+
+  // The bounded worst case in one allocation, rather than doubling up to maxOut.
+  if (out.capacity() < maxOut) out.reserve(maxOut);
+
+  // Record layout, as loadFromCache() reads it: selector, 5 enum bytes, 11 lengths (float + unit),
+  // display, verticalAlign, listStyleType, defined bits.
+  constexpr size_t kLengthCount = 11;
+  std::string selector;
+  for (uint16_t i = 0; i < ruleCount && out.size() < maxOut; i++) {
+    uint16_t selectorLen = 0;
+    if (file.read(&selectorLen, sizeof(selectorLen)) != sizeof(selectorLen)) break;
+    if (selectorLen == 0 || selectorLen > MAX_SELECTOR_LENGTH) break;
+    selector.resize(selectorLen);
+    if (file.read(&selector[0], selectorLen) != selectorLen) break;
+
+    uint8_t enums[5];  // textAlign, fontStyle, fontWeight, textDecoration, direction
+    if (file.read(enums, sizeof(enums)) != sizeof(enums)) break;
+    struct RawLen {
+      float v;
+      uint8_t u;
+    } lens[kLengthCount];  // textIndent, mT, mB, mL, mR, pT, pB, pL, pR, imgH, imgW
+    bool lenOk = true;
+    for (auto& l : lens) {
+      if (file.read(&l.v, sizeof(float)) != sizeof(float) || file.read(&l.u, 1) != 1) {
+        lenOk = false;
+        break;
+      }
+    }
+    if (!lenOk) break;
+    uint8_t tail[3];  // display, verticalAlign, listStyleType
+    uint32_t definedBits = 0;
+    if (file.read(tail, sizeof(tail)) != sizeof(tail) ||
+        file.read(&definedBits, sizeof(definedBits)) != sizeof(definedBits)) {
+      break;
+    }
+
+    // The vertical engine matches a block by its own tag/class alone; compound selectors could
+    // never match there and would spend entries of the bounded table.
+    if (selector.find_first_of(" >+~:[") != std::string::npos) continue;
+
+    VerticalBlockStyle vs;
+    if (definedBits & (1u << 5)) vs.startEm = emOf(lens[1].v, lens[1].u);   // margin-top
+    if (definedBits & (1u << 8)) vs.beforeEm = emOf(lens[4].v, lens[4].u);  // margin-right
+    if (definedBits & (1u << 7)) vs.afterEm = emOf(lens[3].v, lens[3].u);   // margin-left
+    if ((definedBits & (1u << 9)) && (definedBits & (1u << 4)) && emOf(lens[0].v, lens[0].u) < 0) {
+      vs.hangEm = emOf(lens[5].v, lens[5].u);  // padding-top under a hanging text-indent
+    }
+    if ((definedBits & (1u << 0)) && enums[0] == static_cast<uint8_t>(CssTextAlign::Center)) vs.alignCenter = true;
+    if (!vs.any()) continue;
+
+    VerticalBlockRule rule;
+    rule.style = vs;
+    if (selector[0] == '.') {
+      rule.classHash = blockSelectorHash(selector.c_str() + 1, selector.size() - 1);
+    } else {
+      const size_t dot = selector.find('.');
+      rule.tagHash = blockSelectorHash(selector.c_str(), dot == std::string::npos ? selector.size() : dot);
+      if (dot != std::string::npos) {
+        rule.classHash = blockSelectorHash(selector.c_str() + dot + 1, selector.size() - dot - 1);
+      }
+    }
+
+    // Same selector seen again: the later record overrides per property.
+    bool merged = false;
+    for (auto& entry : out) {
+      if (entry.tagHash == rule.tagHash && entry.classHash == rule.classHash) {
+        auto& existing = entry.style;
+        if (vs.startEm > 0) existing.startEm = vs.startEm;
+        if (vs.beforeEm > 0) existing.beforeEm = vs.beforeEm;
+        if (vs.afterEm > 0) existing.afterEm = vs.afterEm;
+        if (vs.hangEm > 0) existing.hangEm = vs.hangEm;
+        existing.alignCenter = existing.alignCenter || vs.alignCenter;
+        merged = true;
+        break;
+      }
+    }
+    if (!merged) out.push_back(rule);
+  }
+  return out.size();
+}

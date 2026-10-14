@@ -32,6 +32,7 @@ CXXFLAGS=(
 "$CXX" "${CXXFLAGS[@]}" \
   "$ROOT_DIR/test/dict-word-select-nav/DictWordSelectNavigatorTest.cpp" \
   "$ROOT_DIR/src/util/WordSelectNavigator.cpp" \
+  "$ROOT_DIR/src/util/CjkWordMerge.cpp" \
   "$ROOT_DIR/lib/Utf8/Utf8.cpp" \
   -o "$BINARY"
 

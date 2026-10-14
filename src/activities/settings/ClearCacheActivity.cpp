@@ -223,6 +223,9 @@ void ClearCacheActivity::clearCache() {
         // each chapter against the very rules that produced the layout being discarded.
         const String cssCache = fullPath + "/css_rules.cache";
         const bool cssDropped = Storage.exists(cssCache.c_str()) && Storage.remove(cssCache.c_str());
+        // Vertical-text layouts are pagination too.
+        const String vsections = fullPath + "/vsections";
+        if (Storage.exists(vsections.c_str())) Storage.removeDir(vsections.c_str());
         fullPath += "/sections";
         if (!Storage.exists(fullPath.c_str())) {
           if (cssDropped) {

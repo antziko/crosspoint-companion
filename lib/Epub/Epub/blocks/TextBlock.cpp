@@ -132,6 +132,17 @@ bool TextBlock::hasRuby() const {
   return false;
 }
 
+void TextBlock::wordPlacements(const GfxRenderer& renderer, const int fontId, const int x, const int y,
+                               const bool suppressRuby, std::vector<WordPlacement>& out) const {
+  out.clear();
+  if (!isValid) return;
+  const int wordY = y + (suppressRuby ? 0 : getRubyShift(renderer.getFontAscenderSize(fontId)));
+  out.reserve(numWords);
+  for (uint16_t i = 0; i < numWords; i++) {
+    out.push_back({static_cast<int16_t>(xposArr[i] + x), static_cast<int16_t>(wordY), fontId});
+  }
+}
+
 void TextBlock::render(const GfxRenderer& renderer, const int fontId, const int x, const int y) const {
   if (!isValid) {
     LOG_ERR("TXB", "Render skipped: invalid block");

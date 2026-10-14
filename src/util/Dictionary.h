@@ -43,6 +43,9 @@ struct DictInfo {
   bool hasAltForms = false;
   bool isCompressed = false;  // .dict.dz present but no .dict
   char lang[32] = "";         // e.g. "en-en", "el-el"
+  // Which matcha-reader dictionary this StarDict copy was converted from ("vocab", "names",
+  // "grammar"; scripts/matcha_dict_to_stardict.py). Empty for every other dictionary.
+  char matchaSlot[12] = "";
   bool valid = false;
 };
 
