@@ -39,6 +39,15 @@ class GfxRenderer {
     ++drawTextCallCount;
   }
 
+  // Glyph metrics for WordSelectNavigator::inkInsets; the fixtures never set inkCentred.
+  void getTextInkBounds(int /*fontId*/, const char* /*text*/, int* minX, int* maxX, uint8_t /*style*/ = 0) const {
+    *minX = 0;
+    *maxX = 0;
+  }
+  int getTextAdvanceX(int /*fontId*/, const char* /*text*/, uint8_t /*style*/, int8_t /*tracking*/ = 0) const {
+    return 0;
+  }
+
   // No-op framebuffer methods (only called by HighlightSnapshot).
   size_t readFramebufferRegion(uint16_t /*x*/, uint16_t /*y*/, uint16_t /*w*/, uint16_t /*h*/, uint8_t* /*dst*/,
                                size_t /*dstCapacity*/) const {

@@ -44,8 +44,34 @@ class WordSelectNavigator {
     // definition view renders IPA runs in a different font from the body; word-select
     // over book text sets neither flag nor a second font, so it always resolves to the
     // reader font. Storing the flag rather than the id keeps this struct 2-byte aligned.
-    bool isIpa = false;
+    bool isIpa : 1 = false;
+    // Centre the band on the word's ink rather than its advance box (see inkInsets). Set for
+    // book-text Latin words, whose first and last glyphs sit unevenly in their cells.
+    bool inkCentred : 1 = false;
+    // Horizontal padding of the highlight band (see bandPadX). These three share one byte, so
+    // a page of words costs no more than before.
+    uint8_t padX : 6 = 2;
   };
+
+  // Horizontal highlight padding for a Latin word on a line whose inter-word gap is
+  // lineGapWidth. A capital like N inks right up to its advance edge, so a 2 px band reads as
+  // a box cut through the last letter; half the gap is clear of the neighbour's ink, and the
+  // cap keeps a stretched justified line from growing wide slabs. CJK and dash-split parts
+  // have no gap to their neighbour and keep the default.
+  static constexpr uint8_t kMinBandPadX = 2;
+  static constexpr uint8_t kMaxBandPadX = 6;
+  static constexpr uint8_t bandPadX(const int lineGapWidth) {
+    return static_cast<uint8_t>(
+        std::max<int>(kMinBandPadX, std::min<int>({lineGapWidth / 2, lineGapWidth - 2, kMaxBandPadX})));
+  }
+
+  // Offsets from the advance box [0, width) to the word's drawn ink: left is where the ink
+  // starts, right how far short of width it ends (negative when it draws past width). A band
+  // from screenX + left to screenX + width - right, padded equally, has an even margin on both
+  // sides. Both are 0 when the metrics are unavailable or implausible. `text` must be
+  // NUL-terminated; the glyphs are the ones the band is about to draw, so the lookups are warm.
+  static void inkInsets(const GfxRenderer& renderer, int fontId, const char* text, EpdFontFamily::Style style,
+                        int width, int& left, int& right);
 
   // Words are extracted in flat order and assigned to rows in that same order
   // (organizeIntoRows), so a row's members are always the contiguous flat range
@@ -248,7 +274,8 @@ class WordSelectNavigator {
   // padded by 2 px on every side to cover renderHighlight's fillRect border.
   // When prevWordIdx is -1 (no previous highlight), returns just the current
   // highlight's padded bounds.
-  Rect computeDirtyRect(int prevWordIdx, int currWordIdx, int lineHeight) const;
+  // renderer is needed only for inkCentred words; without it their bands use the advance box.
+  Rect computeDirtyRect(int prevWordIdx, int currWordIdx, int lineHeight, const GfxRenderer* renderer = nullptr) const;
 
   // Differential repaint: restore pixels under the previous highlight, snapshot
   // pixels under the new highlight, then draw the new highlight. The caller
@@ -421,7 +448,8 @@ class WordSelectNavigator {
   // No-op when w is nullptr or w has no continuation links.
   void drawContinuationsIfOutside(const GfxRenderer& renderer, int lineHeight, const WordInfo* w, int lo, int hi) const;
 
-  // Padded bounding rectangle for one word, matching renderHighlight's ±2 padding.
-  // Returns Rect{0,0,0,0} when wordIndex is invalid.
-  Rect boundsForWord(int wordIndex, int lineHeight) const;
+  // Padded band rectangle for one word, the same rect renderHighlight fills. An inkCentred
+  // word is centred on its ink when renderer is given. Returns Rect{0,0,0,0} when wordIndex
+  // is invalid.
+  Rect boundsForWord(int wordIndex, int lineHeight, const GfxRenderer* renderer = nullptr) const;
 };

@@ -719,7 +719,7 @@ void WordSelectNavigator::drawSingleHighlight(const GfxRenderer& renderer, int l
   const auto* w = getWordAt(wordIndex);
   if (!w) return;
   // Same rect renderHighlightDifferential snapshots and restores — they must not diverge.
-  const Rect band = boundsForWord(wordIndex, lineHeight);
+  const Rect band = boundsForWord(wordIndex, lineHeight, &renderer);
   renderer.fillRect(band.x, band.y, band.width, band.height, true);
   renderer.drawText(fontIdFor(*w), w->screenX, drawYFor(*w), getDisplay(*w), false, w->style);
 }
@@ -746,22 +746,50 @@ void WordSelectNavigator::drawContinuationsIfOutside(const GfxRenderer& renderer
   }
 }
 
-WordSelectNavigator::Rect WordSelectNavigator::boundsForWord(int wordIndex, int lineHeight) const {
+void WordSelectNavigator::inkInsets(const GfxRenderer& renderer, const int fontId, const char* text,
+                                    const EpdFontFamily::Style style, const int width, int& left, int& right) {
+  left = 0;
+  right = 0;
+  if (!text || !*text || width <= 0) return;
+  // The whole word's ink, laid out exactly as drawText places it: per-glyph snapped advances,
+  // kerning and ligatures. width comes from the layout measure, which sums an SD font's
+  // advances unsnapped and unkerned, so a long word draws several px past it.
+  int minX = 0;
+  int maxX = 0;
+  renderer.getTextInkBounds(fontId, text, &minX, &maxX, style);
+  if (maxX <= minX) return;  // no ink, or no metrics: keep the advance box
+  const int l = minX;
+  const int r = width - maxX;
+  // Plausibility only: a bearing is a few px, and the snapping drift is well under a px a glyph.
+  constexpr int kLimit = kMaxBandPadX;
+  if (l < -kLimit || l > kLimit || r > kLimit || r < -(width / 4 + kLimit)) return;
+  left = l;
+  right = r;
+}
+
+WordSelectNavigator::Rect WordSelectNavigator::boundsForWord(int wordIndex, int lineHeight,
+                                                             const GfxRenderer* renderer) const {
   const auto* w = getWordAt(wordIndex);
   if (!w) return Rect{};
   // An IPA word is drawn ipaDy_ off the line top, so grow the band in that direction by the
   // same amount rather than clipping the glyphs it moved.
   const int dy = w->isIpa ? ipaDy_ : 0;
   const int top = static_cast<int>(w->screenY) - 2 + std::min(dy, 0);
-  return Rect{static_cast<int>(w->screenX) - 2, top, static_cast<int>(w->width) + 4,
-              lineHeight + 4 + (dy < 0 ? -dy : dy)};
+  int inkLeft = 0;
+  int inkRight = 0;
+  if (renderer && w->inkCentred) {
+    inkInsets(*renderer, fontIdFor(*w), getDisplay(*w), w->style, w->width, inkLeft, inkRight);
+  }
+  const int padX = w->padX;
+  return Rect{static_cast<int>(w->screenX) + inkLeft - padX, top,
+              static_cast<int>(w->width) - inkLeft - inkRight + 2 * padX, lineHeight + 4 + (dy < 0 ? -dy : dy)};
 }
 
-WordSelectNavigator::Rect WordSelectNavigator::computeDirtyRect(int prevWordIdx, int currWordIdx,
-                                                                int lineHeight) const {
-  Rect curr = boundsForWord(currWordIdx, lineHeight);
+WordSelectNavigator::Rect WordSelectNavigator::computeDirtyRect(int prevWordIdx, int currWordIdx, int lineHeight,
+                                                                const GfxRenderer* renderer) const {
+  Rect curr = boundsForWord(currWordIdx, lineHeight, renderer);
   if (prevWordIdx < 0) return curr;
-  Rect prev = boundsForWord(prevWordIdx, lineHeight);
+  Rect prev = boundsForWord(prevWordIdx, lineHeight, renderer);
   if (prev.width == 0 || prev.height == 0) return curr;
   if (curr.width == 0 || curr.height == 0) return prev;
   const int x0 = std::min(prev.x, curr.x);
@@ -798,7 +826,7 @@ std::optional<WordSelectNavigator::Rect> WordSelectNavigator::renderHighlightDif
 
   // Step 2: snapshot pixels under the new highlight, clamping coordinates so we
   // never pass negative values into the renderer's uint16_t API.
-  const Rect newRect = boundsForWord(currWordIdx, lineHeight);
+  const Rect newRect = boundsForWord(currWordIdx, lineHeight, &renderer);
   const uint16_t snapX = static_cast<uint16_t>(std::max(newRect.x, 0));
   const uint16_t snapY = static_cast<uint16_t>(std::max(newRect.y, 0));
   const uint16_t snapW = static_cast<uint16_t>(std::max(newRect.width, 0));
@@ -812,5 +840,5 @@ std::optional<WordSelectNavigator::Rect> WordSelectNavigator::renderHighlightDif
   drawSingleHighlight(renderer, lineHeight, currWordIdx);
 
   // Step 4: caller pushes the union region.
-  return computeDirtyRect(prevWordIdx, currWordIdx, lineHeight);
+  return computeDirtyRect(prevWordIdx, currWordIdx, lineHeight, &renderer);
 }

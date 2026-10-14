@@ -17,6 +17,7 @@
 #include "PageTokenScan.h"
 #include "QuoteSpan.h"
 #include "SnippetMatch.h"
+#include "WordSelectNavigator.h"
 
 namespace PageMarks {
 namespace {
@@ -850,7 +851,7 @@ bool invertWordAtPoint(const GfxRenderer& renderer, const Page& page, const int 
   // padding of a box here lands in the same box there.
   constexpr int kSlop = 4;
   // Band padding, and therefore the pushed rect: WordSelectNavigator::boundsForWord.
-  constexpr int kBandPad = 2;
+  constexpr int kBandPad = 2;  // vertical; horizontal is WordSelectNavigator::bandPadX
 
   const int lineHeight = renderer.getLineHeight(fontId);
   const int ascender = renderer.getFontAscenderSize(fontId);
@@ -907,14 +908,19 @@ bool invertWordAtPoint(const GfxRenderer& renderer, const Page& page, const int 
           // CJK carries no inter-word gap for the xpos diff to subtract, and a justified CJK
           // line hides justifyExtra in it; measuring is exact and the glyph is already cached.
           boxWidth = PageTokens::measureAdvance(renderer, fontId, text, style, tracking);
-        } else if (w + 1 < blockWordCount) {
-          // The layout's xpos diff with the trailing inter-word gap removed. Punctuation
-          // tokens keep their xpos entry as a boundary marker, so the next token's is always
-          // there to subtract from.
+        } else if (w + 1 < blockWordCount && block->focusBoundary(w) > 0) {
+          // A Focus Reading word's bold prefix outruns a plain measure: the layout's xpos diff
+          // with the trailing inter-word gap removed, as extractWords does.
           const int16_t raw = static_cast<int16_t>(block->wordXpos(w + 1) - block->wordXpos(w));
           boxWidth = std::max(static_cast<int16_t>(1), static_cast<int16_t>(raw - lineGapWidth));
         } else {
-          boxWidth = PageTokens::measureAdvance(renderer, fontId, text, style, tracking);  // no next xpos
+          // Measured and capped at the next token, as extractWords does: per-pair kerning makes
+          // the line-wide gap a pixel or two off for many words.
+          boxWidth = PageTokens::measureAdvance(renderer, fontId, text, style, tracking);
+          if (w + 1 < blockWordCount) {
+            const int16_t raw = static_cast<int16_t>(block->wordXpos(w + 1) - block->wordXpos(w));
+            boxWidth = std::max(static_cast<int16_t>(1), std::min(boxWidth, raw));
+          }
         }
 
         if (x < boxX - kSlop || x >= boxX + boxWidth + kSlop) continue;
@@ -929,9 +935,15 @@ bool invertWordAtPoint(const GfxRenderer& renderer, const Page& page, const int 
           glyphs = partBuf;
         }
 
-        out.x = boxX - kBandPad;
+        // Same band as WordSelectNavigator::boundsForWord gives an inkCentred word.
+        const bool latin = unsplit && !isCjk;
+        const int padX = latin ? WordSelectNavigator::bandPadX(lineGapWidth) : WordSelectNavigator::kMinBandPadX;
+        int inkLeft = 0;
+        int inkRight = 0;
+        if (latin) WordSelectNavigator::inkInsets(renderer, fontId, glyphs, style, boxWidth, inkLeft, inkRight);
+        out.x = boxX + inkLeft - padX;
         out.y = rowY - kBandPad;
-        out.width = boxWidth + 2 * kBandPad;
+        out.width = boxWidth - inkLeft - inkRight + 2 * padX;
         out.height = lineHeight + 2 * kBandPad;
         const int copied = snprintf(out.text, sizeof(out.text), "%.*s", static_cast<int>(partLen), text + partStart);
         // snprintf truncates by bytes; cut back to the last whole codepoint so a CJK token can

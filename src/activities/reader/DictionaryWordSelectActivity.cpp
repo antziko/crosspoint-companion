@@ -466,11 +466,21 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
           // tokens are single characters and prebuildAdvanceTable() already made this an
           // in-RAM advance-table hit.
           wordWidth = PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), wordText, wordStyle, tracking);
-        } else if (wIdx + 1 < blockWordCount) {
+        } else if (wIdx + 1 < blockWordCount && block->focusBoundary(wIdx) > 0) {
+          // A Focus Reading word draws a bold prefix that a plain measure undercounts, so it
+          // keeps the layout's xpos diff with the trailing gap removed.
           const int16_t raw = static_cast<int16_t>(block->wordXpos(wIdx + 1) - block->wordXpos(wIdx));
           wordWidth = std::max(static_cast<int16_t>(1), static_cast<int16_t>(raw - lineGapWidth));
         } else {
+          // Measured rather than xpos diff minus lineGapWidth: each layout gap carries the kerning
+          // against both flanking letters and the left word's style, so the first pair's gap is a
+          // pixel or two off for many words, which clipped the band's right edge. Capped at the
+          // distance to the next token so the band never runs into it.
           wordWidth = PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), wordText, wordStyle, tracking);
+          if (wIdx + 1 < blockWordCount) {
+            const int16_t raw = static_cast<int16_t>(block->wordXpos(wIdx + 1) - block->wordXpos(wIdx));
+            wordWidth = std::max(static_cast<int16_t>(1), std::min(wordWidth, raw));
+          }
         }
         {
           uint16_t off = WordSelectNavigator::poolAppend(textPool, wordText.c_str(), wordText.size());
@@ -483,6 +493,10 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
           wi.screenY = screenY;
           wi.width = wordWidth;
           wi.style = wordStyle;
+          if (!isCjkToken) {
+            wi.padX = WordSelectNavigator::bandPadX(lineGapWidth);
+            wi.inkCentred = true;
+          }
           words.push_back(wi);
         }
       } else {
