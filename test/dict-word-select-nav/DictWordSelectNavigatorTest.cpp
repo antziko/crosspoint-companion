@@ -1784,9 +1784,41 @@ static void testCjkMergeOverMergedList() {
   CHECK(s2[2].lo == 2 && s2[2].hi == 3, "spans index the list given");
 }
 
+// --- Page edges (gloss box turns the page) ---------------------------------------------
+static void testPageEdgesStopAndReport() {
+  std::printf("\n[testPageEdgesStopAndReport]\n");
+  MappedInputManager input;
+  GfxRenderer renderer;
+  using B = MappedInputManager::Button;
+
+  WordSelectNavigator nav = makeShortRowFixture();
+  nav.setStopAtPageEdges(true);
+  nav.selectFlatIndex(8);
+  step(nav, input, renderer, B::Right);
+  CHECK(nav.takePageEdge() == 1, "Next on the last word reports +1");
+  CHECK(nav.getCurrentFlatIndex() == 8, "cursor stays on the last word");
+  CHECK(nav.takePageEdge() == 0, "the edge is reported once");
+  step(nav, input, renderer, B::Down);
+  CHECK(nav.takePageEdge() == 1, "row step off the last row reports +1");
+  CHECK(nav.getCurrentFlatIndex() == 8, "cursor stays after the row step");
+
+  nav.selectFlatIndex(0);
+  step(nav, input, renderer, B::Left);
+  CHECK(nav.takePageEdge() == -1, "Prev on the first word reports -1");
+  CHECK(nav.getCurrentFlatIndex() == 0, "cursor stays on the first word");
+  step(nav, input, renderer, B::Right);
+  CHECK(nav.takePageEdge() == 0 && nav.getCurrentFlatIndex() == 1, "an inner step is a plain step");
+
+  WordSelectNavigator wrap = makeShortRowFixture();
+  wrap.selectFlatIndex(8);
+  step(wrap, input, renderer, B::Right);
+  CHECK(wrap.takePageEdge() == 0 && wrap.getCurrentFlatIndex() == 0, "edges off: Next wraps to the first word");
+}
+
 int main() {
   std::printf("=== WordSelectNavigator host litmus ===\n");
   testOrganizeIntoRows();
+  testPageEdgesStopAndReport();
   testHyphenatedNavBackward();
   testHyphenatedNavForward();
   testHyphenatedNavRowNavExempt();

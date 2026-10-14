@@ -1185,7 +1185,9 @@ bool Epub::extractItemToFile(const std::string& itemHref, const std::string& des
   if (!Storage.openFileForWrite("EBP", destPath, out)) {
     return false;
   }
-  const bool ok = readItemContentsToStream(itemHref, out, 4096);
+  // Small chunks: this runs during a page render, often beside a chapter build, and the inflate
+  // needs two contiguous blocks of this size.
+  const bool ok = readItemContentsToStream(itemHref, out, 1024);
   out.flush();
   out.close();
   if (!ok) {

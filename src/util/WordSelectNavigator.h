@@ -168,6 +168,16 @@ class WordSelectNavigator {
   // row, Up/Down to the first/last row (nearest the current column). The hold's release is then
   // swallowed rather than taken as one more step.
   void setHoldJumps(bool enabled) { holdJumps_ = enabled; }
+  // A single step that would wrap past either end of the page (Next on the last word, Prev on
+  // the first, or a row step off the last/first row) leaves the cursor where it is and is
+  // reported by takePageEdge() instead: +1 past the end, -1 before the start, 0 none. The gloss
+  // box turns the page on it. Not in multi-select, which keeps wrapping.
+  void setStopAtPageEdges(bool enabled) { stopAtPageEdges_ = enabled; }
+  int takePageEdge() {
+    const int edge = pageEdge_;
+    pageEdge_ = 0;
+    return edge;
+  }
   // A vertical (tategaki) page: each Row is a column, rows run right to left, and a word's
   // `width` is its extent DOWN the column; every column is columnWidth wide. Highlights invert
   // the box rather than redraw the text, which a column cannot be drawn through. Call before load().
@@ -453,6 +463,8 @@ class WordSelectNavigator {
   // this fires from the held LEVEL.
   uint16_t wordRepeatArmed_ = 0;
   bool holdJumps_ = false;
+  bool stopAtPageEdges_ = false;
+  int8_t pageEdge_ = 0;
   // Same arming rule as wordRepeatArmed_, for the four jump directions; and the directions whose
   // jump has fired this hold, so its release is not also a step.
   uint16_t jumpArmed_ = 0;

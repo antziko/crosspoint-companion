@@ -27,6 +27,7 @@
 #include "util/PageMarks.h"               // PageMarks::PageKey return type
 #include "util/WordSelectNavigator.h"
 
+class DictionaryWordSelectActivity;
 class WordSelectionScan;
 
 class EpubReaderActivity final : public Activity {
@@ -234,6 +235,10 @@ class EpubReaderActivity final : public Activity {
   // Where the gloss-box word select left its cursor, and the page that index belongs to
   // (DictionaryWordSelectActivity::setGlossCursorMemory). RAM only: it matters for one page.
   int glossCursorWord_ = -1;
+  // The gloss box ran off the page (+1 forward, -1 back): loop() turns it and reopens word select.
+  int8_t glossPageTurn_ = 0;
+  // Where the reopened gloss box starts (see DictionaryWordSelectActivity::setStartAtPageEdge).
+  int8_t glossStartEdge_ = 0;
   int glossCursorSpine_ = -1;
   int glossCursorPage_ = -1;
   int glossCursorPageCount_ = -1;
@@ -592,6 +597,9 @@ class EpubReaderActivity final : public Activity {
   // message's own timeout can run.
   bool runReaderAction(HomeButtonAction action);
   void openWordSelect(bool framebufferContainsPage, int pointX = -1, int pointY = -1);
+  // Hands word select the gloss cursor memory for this page, forgetting it first when the page
+  // (or its layout) differs from the one it was left on.
+  void attachGlossCursorMemory(DictionaryWordSelectActivity& wordSelect, int page, int pageCount);
   // Highlight entry point (hold-Back on button boards, the page long-press menu on touch
   // ones). If the current page already has a quote, shows a confirm dialog (existing text +
   // Delete/Add-new/Cancel) and acts on the choice; with no existing quote, launches the
@@ -774,6 +782,12 @@ class EpubReaderActivity final : public Activity {
   void earlyRenderVerticalPage(const VerticalPage& page, int pageIndex);
   // Continue a chapter build render() left running, one slice per loop() tick.
   void tickVerticalBuild();
+  // After a build that lost characters on low heap: free the caches and rebuild the chapter once
+  // now, at the same text position. False when the finished build needs no rebuild.
+  bool rebuildVerticalAfterLostText();
+  // Lays out the rest of a vertical chapter now, behind the indexing popup. False when the build
+  // failed or must restart; the caller then abandons what it was opening.
+  bool finishVerticalBuildNow();
   // A word-select page scan (matcha-reader's WordSelectionScan) for whole-word selection, or null:
   // not a CJK book, no converted dictionary in /dictionaries/<language>, or too little heap.
   std::unique_ptr<WordSelectionScan> newWordScan() const;

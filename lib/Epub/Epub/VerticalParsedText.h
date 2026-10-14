@@ -222,7 +222,7 @@ class VerticalParsedText {
   // Called for a page as soon as it's confirmed safe to write -- i.e. one page has already been
   // completed after it, so the "oikomi" pull-back check (which only ever looks at the single most
   // recently completed page) can no longer touch it. ctx is caller-supplied context.
-  using PageReadyCallback = void (*)(void* ctx, VerticalPage&& page);
+  using PageReadyCallback = void (*)(void* ctx, const VerticalPage& page);
 
   // Runs the column-fill layout algorithm over everything added since the last layoutPages() call
   // (i.e. since construction, or since the most recent call) and returns one VerticalPage per
@@ -303,10 +303,16 @@ class VerticalParsedText {
   // that dropped content produced sparse pages and must not be persisted as a VALID cache --
   // that makes the truncation permanent. Fresh object per build, so no explicit clear needed.
   bool everDroppedForHeap() const { return everDroppedForHeap_; }
+  // How many times content was dropped for lack of heap (each a glyph, a ruby, or a truncated run/batch).
+  uint32_t heapDropCount() const { return heapDropCount_; }
+  // Largest free block when the first drop happened.
+  uint32_t firstDropMaxAlloc() const { return firstDropMaxAlloc_; }
   // True when any page was closed early by the emergency split (glyph vector could not grow on
   // a heap dip). No content is lost, but the pagination is degraded -- pages end at arbitrary
   // fill levels -- so the build path treats it like a drop: usable now, rebuilt next open.
   bool everSplitForHeap() const { return everSplitForHeap_; }
+  // Pages closed early by the emergency split.
+  uint32_t heapSplitCount() const { return heapSplitCount_; }
   // Pin stream_'s backing store once at build start, while the heap is freshest. Mid-build
   // growth (alloc-copy-free every few dozen entries) interleaved with ruby-string churn walks
   // the buffer through the heap and shreds the largest contiguous block -- observed on a real
@@ -315,6 +321,13 @@ class VerticalParsedText {
   // (RUN_SLICE_CHARS=170, exact char counting) 512 entries are never exceeded, so after this
   // call stream_ never reallocates for the whole build. clear() in reset() keeps capacity.
   void preallocateStream();
+  // Page glyph buffers, reserved once while the heap is fresh and handed from finished pages to
+  // the next ones. Allocating each page's buffer anew landed on a heap fragmented by the build,
+  // so pages broke early (the emergency split) with most of the screen empty. `glyphsHint` is an
+  // estimate of one page's cells; a page that needs more grows as before.
+  void preallocatePageGlyphs(size_t glyphsHint);
+  // Returns a written page's glyph buffer for reuse by a later page.
+  void recycleGlyphs(std::vector<VerticalGlyph>&& glyphs);
   // Number of characters currently buffered for layout. Callers batching a long chapter use this
   // to flush layoutPages()+reset() periodically so stream_ stays O(batch) instead of O(chapter)
   // -- a whole chapter's worth of PendingChars (32 bytes each) cannot fit in RAM on-device.
@@ -396,7 +409,14 @@ class VerticalParsedText {
   // canPushStreamChar()).
   bool oom_ = false;
   bool everDroppedForHeap_ = false;  // see everDroppedForHeap()
-  bool everSplitForHeap_ = false;    // see everSplitForHeap()
+  uint32_t heapDropCount_ = 0;       // see heapDropCount()
+  uint32_t firstDropMaxAlloc_ = 0;   // see firstDropMaxAlloc()
+  uint32_t heapSplitCount_ = 0;      // see heapSplitCount()
+  // Two buffers cover the page being laid out and the finished one held for the look-back.
+  std::vector<VerticalGlyph> spareGlyphs_[2];
+  std::vector<VerticalGlyph> takeSpareGlyphs();
+  void noteHeapDrop();
+  bool everSplitForHeap_ = false;  // see everSplitForHeap()
 
   // Boxed-block state. inBox_/boxStartCol_ persist across batches (a box can span many flushes);
   // the marker vectors are per-batch (cleared in reset(), with boundary carry flags above).

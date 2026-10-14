@@ -98,6 +98,9 @@ class DictionaryWordSelectActivity final : public Activity {
     glossResumeIdx_ = resumeIdx;
     glossCursorOut_ = out;
   }
+  // The gloss box arrived here by running off the previous page (+1: open on the first word) or
+  // the next one (-1: open on the last word). Overrides the gloss memory; a pointed word wins.
+  void setStartAtPageEdge(const int edge) { startEdge_ = edge; }
 
   void onEnter() override;
   void onExit() override;
@@ -235,7 +238,9 @@ class DictionaryWordSelectActivity final : public Activity {
   // store as the flashcard front-face context. "" if there is no selection.
   std::string buildLookupExcerpt() const;
 
-  bool skipLoopDelay() override { return controller.skipLoopDelay() || (scan_ && !scan_->isDone()); }
+  bool skipLoopDelay() override {
+    return controller.skipLoopDelay() || (scan_ && !scan_->isDone() && scanPausedMs_ == 0);
+  }
 
   // --- Whole-word CJK selection (see setWordScan) ----------------------------------------
   std::unique_ptr<WordSelectionScan> scan_;
@@ -258,7 +263,30 @@ class DictionaryWordSelectActivity final : public Activity {
   std::vector<CjkWordMerge::Span> spans_;
   size_t mergedScanWords_ = 0;  // scan words the current merge was built from
   unsigned long lastMergeMs_ = 0;
+  // Last refused merge: largest block then, and when (0 = none); see stepWordScan's back-off.
+  uint32_t mergeRefusedLargest_ = 0;
+  unsigned long mergeRefusedMs_ = 0;
   bool scanCacheSaved_ = false;
+  bool scanDictReleased_ = false;  // DictIndex caches freed once the scan finished
+  // A finished scan waiting on its merge, cut down to what the merge reads (see
+  // compactFinishedScan); scan_ is null while scanCompacted_ is set.
+  std::vector<CjkWordMerge::ScanWord> pendingScanWords_;
+  size_t pendingFound_ = 0;   // the scan's selectableGlyphs.size(), compared with mergedScanWords_
+  size_t pendingOnPage_ = 0;  // the scan's onPageGlyphCount()
+  bool scanCompacted_ = false;
+  bool scanWaitsForFrame_ = false;  // the gloss entry deferred the scan until the first frame
+  unsigned long scanPausedMs_ = 0;  // when the scan paused on a starved heap (0 = running)
+  uint32_t scanPausedLargest_ = 0;  // largest free block when it paused
+  unsigned long lastStepMs_ = 0;    // last accepted cursor step (0 = none); the scan stays quiet after it
+  // A scan slice has run since the caches were last released; a cursor step frees them again.
+  bool scanCachesHeld_ = false;
+  char scanState_ = 0;  // last logged reason the scan did or did not step (see stepWordScan)
+  // When the step the next frame shows was accepted, for the render log's step= (0 = none).
+  std::atomic<unsigned long> stepAcceptedMs_{0};
+  // Set by the render task once a frame has been pushed; read by the loop's scan step.
+  std::atomic<bool> firstFrameShown_{false};
+  int startEdge_ = 0;
+  bool scanCompactTried_ = false;
 
   // Maps extractWords' token positions to scan cells (horizontal page).
   void mapTokenCells();
@@ -266,6 +294,10 @@ class DictionaryWordSelectActivity final : public Activity {
   void startWordScan();
   // One background slice; re-merges when the scan has found words and the user is idle.
   void stepWordScan();
+  void logScanState(char state);
+  // Saves the finished scan's cache, keeps its word list and frees the scan. Leaves the scan in
+  // place when the list does not fit.
+  void compactFinishedScan();
   // Merge the words the scan has found since the last merge into the navigator's list, the
   // cursor on character `cursorChar` (-1: the one it is on now). False when the heap could not
   // hold it, leaving the list as it was.
@@ -487,9 +519,16 @@ class DictionaryWordSelectActivity final : public Activity {
   // Give the page back the strip the box has just moved off. Must run BEFORE the highlight is
   // drawn: it re-renders page lines, which would otherwise paint text over a fresh highlight.
   // No-op while the box is parked, which is every keypress except a row change.
-  // Returns true when it scrubbed, which the caller records in the render log: a relocation
-  // frame costs roughly twice a plain one, so the two must stay distinguishable there.
-  bool restoreVacatedGlossStrip();
+  // Every kRelocationsPerScrub-th relocation also scrubs. Reports whether the box relocated and
+  // whether it scrubbed, which the caller records in the render log: a scrub frame costs roughly
+  // twice a plain one, so the two must stay distinguishable there.
+  struct StripRestore {
+    bool relocated = false;
+    bool scrubbed = false;
+  };
+  StripRestore restoreVacatedGlossStrip();
+  static constexpr uint8_t kRelocationsPerScrub = 3;
+  uint8_t relocationsSinceScrub_ = 0;
   // Promotes every Word Select Clean-th repaint to a scrub (see the .cpp).
   void countRepaint(bool scrubbed);
   uint8_t repaintsSinceClean_ = 0;
@@ -507,10 +546,9 @@ class DictionaryWordSelectActivity final : public Activity {
   // displayBuffer covers the highlight and the box in one refresh.
   void drawGloss();
 
-  // Ask the NEXT paint to collapse the box's accumulated refresh residue. Called when the box
-  // relocates (a row change, which is already a large visual change) and on the transitions out
-  // of it. Never on a plain left/right step: a refresh there is a flash in the middle of a
-  // stationary box the user is reading.
+  // Ask the NEXT paint to collapse the box's accumulated refresh residue. Called on the
+  // transitions out of the box; relocations scrub through restoreVacatedGlossStrip. Never on a plain left/right step: a
+  // refresh there is a flash in the middle of a stationary box the user is reading.
   void clearGlossGhostOnNextPaint();
 
   // Width measurement injected into DictGloss::fit. ctx is `this`. isIpa is ignored: the gloss

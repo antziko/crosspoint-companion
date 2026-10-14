@@ -3,6 +3,7 @@
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
+#include <InflateReader.h>
 #include <JPEGDEC.h>
 #include <Logging.h>
 #include <Memory.h>
@@ -156,12 +157,40 @@ int32_t jpegSeek(JPEGFILE* pFile, int32_t pos) {
 // sizeof rather than an estimate, because a guess set above the real 17884 bytes rejects
 // decodes that would have succeeded.
 constexpr size_t JPEG_DECODER_SIZE = sizeof(JPEGDEC);
-constexpr size_t MIN_BLOCK_FOR_JPEG = JPEG_DECODER_SIZE + 1024;  // allocator header + rounding
+// The largest-free-block figure is already usable bytes; the margin only covers alignment.
+constexpr size_t MIN_BLOCK_FOR_JPEG = JPEG_DECODER_SIZE + 64;
 // Headroom for the band/cache buffers the decode allocates after the decoder
 // (PixelCache.h). Modest on purpose: those already degrade gracefully — the streaming band
 // borrows the reserved inflate window when malloc fails, and PixelCache::allocate returns
 // false cleanly — so this is defence in depth, not the guarantee.
 constexpr size_t MIN_FREE_HEAP_FOR_JPEG = MIN_BLOCK_FOR_JPEG + 8 * 1024;
+
+// The decoder lives on the heap, or in the reserved 32 KB inflate window when no block fits (idle
+// during a JPEG decode; PngZlibWindow borrows it the same way). JPEGDEC has no destructor, so
+// releasing a borrowed one is just handing the window back.
+struct JpegDecoderRelease {
+  bool borrowed = false;
+  void operator()(JPEGDEC* jpeg) const {
+    if (borrowed) {
+      InflateReader::releaseScratch();
+    } else {
+      delete jpeg;
+    }
+  }
+};
+using JpegDecoderPtr = std::unique_ptr<JPEGDEC, JpegDecoderRelease>;
+
+JpegDecoderPtr makeJpegDecoder(const bool allowHeap) {
+  if (allowHeap) {
+    if (auto* jpeg = new (std::nothrow) JPEGDEC()) return JpegDecoderPtr(jpeg, JpegDecoderRelease{false});
+  }
+  if (uint8_t* window = InflateReader::acquireScratch(JPEG_DECODER_SIZE)) {
+    SdDebugLog::log("JPG", "decoder in inflate window free=%u largest=%u", (unsigned)ESP.getFreeHeap(),
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    return JpegDecoderPtr(new (window) JPEGDEC(), JpegDecoderRelease{true});
+  }
+  return JpegDecoderPtr(nullptr, JpegDecoderRelease{false});
+}
 
 // Mirror heap-related decode failures to SD: on an untethered X3 (no serial) these
 // lines are the only trace of why an image silently failed to render. `largest`
@@ -534,12 +563,14 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
 
   const size_t freeHeap = ESP.getFreeHeap();
   const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  if (largestBlock < MIN_BLOCK_FOR_JPEG || freeHeap < MIN_FREE_HEAP_FOR_JPEG) {
+  if (freeHeap < MIN_FREE_HEAP_FOR_JPEG) {
     LOG_ERR("JPG", "Not enough heap for JPEG decoder (%u free, %u largest; need %u free, %u block)", freeHeap,
             largestBlock, MIN_FREE_HEAP_FOR_JPEG, MIN_BLOCK_FOR_JPEG);
     logHeapFailureToSd("decode heap-guard fail");
     return false;
   }
+  // Below this the decoder can only go in the inflate window (makeJpegDecoder).
+  const bool decoderFitsHeap = largestBlock >= MIN_BLOCK_FOR_JPEG;
 
   // Only the 4-level X4 path applies a tone curve. For that path, probe luminance
   // to classify the image (light / dark-photo / grey-on-dark / white-on-dark) and
@@ -550,10 +581,10 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   const X4Tone tone =
       (!config.oneBitDither && config.useDithering) ? jpegImageIsDark(imagePath, sharpUpscale) : X4Tone::None;
 
-  std::unique_ptr<JPEGDEC> jpeg(new (std::nothrow) JPEGDEC());
+  JpegDecoderPtr jpeg = makeJpegDecoder(decoderFitsHeap);
   if (!jpeg) {
     LOG_ERR("JPG", "Failed to allocate JPEG decoder");
-    logHeapFailureToSd("decode decoder OOM");
+    logHeapFailureToSd(decoderFitsHeap ? "decode decoder OOM" : "decode heap-guard fail");
     return false;
   }
 

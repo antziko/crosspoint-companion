@@ -354,7 +354,6 @@ void LyraTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
   constexpr int buttonWidth = 80;
   constexpr int smallButtonHeight = 15;
   constexpr int buttonHeight = LyraMetrics::values.buttonHintsHeight;
-  constexpr int buttonY = LyraMetrics::values.buttonHintsHeight;  // Distance from bottom
   // Keyed to the portrait panel width: the 528-wide X3 gets more spacing than
   // the 480-wide boards (X4, X4 Pro, and the other 800x480 panels).
   constexpr int narrowButtonPositions[] = {58, 146, 254, 342};
@@ -362,14 +361,28 @@ void LyraTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
   const int* buttonPositions = renderer.getScreenWidth() >= 528 ? wideButtonPositions : narrowButtonPositions;
   const char* labels[] = {btn1, btn2, btn3, btn4};
 
+  // Boxes hug a one-line label; only a label that wraps to two lines needs the full height.
+  // The reserved band (buttonHintsHeight) is unchanged, so no layout moves.
+  constexpr int labelPadding = 4;  // drawHintLabel's side padding
+  constexpr int compactVerticalPad = 6;
+  const int textHeight = renderer.getTextHeight(SMALL_FONT_ID);
+  bool anyWraps = false;
+  for (const char* label : labels) {
+    if (label != nullptr && label[0] != '\0' &&
+        renderer.getTextWidth(SMALL_FONT_ID, label) > buttonWidth - labelPadding * 2) {
+      anyWraps = true;
+    }
+  }
+  const int boxHeight = anyWraps ? buttonHeight : std::min(buttonHeight, textHeight + compactVerticalPad * 2);
+  const int boxTop = pageHeight - boxHeight;
+
   for (int i = 0; i < 4; i++) {
     const int x = buttonPositions[i];
     if (labels[i] != nullptr && labels[i][0] != '\0') {
       // Draw the filled background and border for a FULL-sized button
-      renderer.fillRoundedRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, cornerRadius, Color::White);
-      renderer.drawRoundedRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, 1, cornerRadius, true, true, false,
-                               false, true);
-      drawHintLabel(renderer, SMALL_FONT_ID, labels[i], x, buttonWidth, pageHeight - buttonY, buttonHeight);
+      renderer.fillRoundedRect(x, boxTop, buttonWidth, boxHeight, cornerRadius, Color::White);
+      renderer.drawRoundedRect(x, boxTop, buttonWidth, boxHeight, 1, cornerRadius, true, true, false, false, true);
+      drawHintLabel(renderer, SMALL_FONT_ID, labels[i], x, buttonWidth, boxTop, boxHeight);
     } else {
       // Draw the filled background and border for a SMALL-sized button
       renderer.fillRoundedRect(x, pageHeight - smallButtonHeight, buttonWidth, smallButtonHeight, cornerRadius,

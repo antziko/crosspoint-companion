@@ -12,6 +12,8 @@
 #include <vector>
 
 namespace {
+bool g_cacheStarved = false;  // see DictIndex::cachesStarved()
+
 // Headroom to leave behind an allocation of `bytes`. Scaled, not flat: an 8KB reserve added to a
 // 54-byte definition refused every entry once the largest block fell below ~8KB (observed on
 // device at maxAlloc=6644, where a whole lookup session reported "no match" for words that were
@@ -148,6 +150,12 @@ struct DictFileHandles {
 DictFileHandles g_vocabHandles;
 DictFileHandles g_grammarHandles;
 DictFileHandles g_namesHandles;
+
+bool g_lowMemory = false;  // see DictIndex::setLowMemory
+
+// In low-memory mode only JMdict, the dictionary nearly every probe reaches, keeps the sparse
+// index and block cache; the others take the uncached full search, which is not a starvation.
+bool cacheAllowed(const DictFileHandles& h) { return !g_lowMemory || &h == &g_vocabHandles; }
 
 // Classified by filename, not full path: the folder is resolved at runtime (/dictionaries/jp,
 // /.dictionaries/jp or /dict), so only the leaf is fixed.
@@ -400,6 +408,7 @@ void loadSpx(DictFileHandles& h, const char* idxPath, size_t recordCount) {
   auto fineCache = makeUniqueNoThrow<uint8_t[]>(fineBytes);
   if (!coarse || !fineCache) {
     // Not enough contiguous heap right now -> stay on the full search. Not fatal.
+    g_cacheStarved = true;
     LOG_ERR("DICT", "spx alloc failed (%u coarse, %u B fine); using full search", static_cast<unsigned>(coarseCount),
             static_cast<unsigned>(fineBytes));
     return;
@@ -493,9 +502,10 @@ bool readIndexRecord(DictFileHandles& h, size_t idx, size_t recordCount, DictInd
   }
   g_recordCacheMisses++;
 
-  if (!h.blockCache && !h.blockCacheTried) {
+  if (!h.blockCache && !h.blockCacheTried && cacheAllowed(h)) {
     h.blockCacheTried = true;
     h.blockCache = makeUniqueNoThrow<DictIndexRecord[]>(DictFileHandles::BLOCK_RECORDS);
+    if (!h.blockCache) g_cacheStarved = true;
   }
   if (!h.blockCache) {
     // No cache memory available -- direct single-record read still works, just slower.
@@ -611,7 +621,7 @@ bool DictIndex::lookupInFile(const char* headword, const char* idxPath, const ch
   const size_t recordCount = fileSize / sizeof(DictIndexRecord);
 
   // Build the RAM coarse tier from the .spx sidecar on first use for this dict.
-  if (!h.spxTried) {
+  if (!h.spxTried && cacheAllowed(h)) {
     h.spxTried = true;
     loadSpx(h, idxPath, recordCount);
   }
@@ -866,6 +876,9 @@ namespace {
 // pressure the memo simply stays off.
 constexpr size_t kMissMemoSlots = 1024;
 std::unique_ptr<uint64_t[]> g_missMemo;
+// Set when the memo could not be allocated; no retry until releaseCaches(), so a tight heap does
+// not pay a failed 8KB request on every miss.
+bool g_missMemoRefused = false;
 
 uint64_t missTagFor(const char* headword, const uint8_t dictMask, const uint8_t posMask) {
   uint64_t h = 1469598103934665603ull;
@@ -882,8 +895,12 @@ uint64_t missTagFor(const char* headword, const uint8_t dictMask, const uint8_t 
 
 void rememberMiss(const uint64_t tag) {
   if (!g_missMemo) {
+    if (g_missMemoRefused || g_lowMemory) return;
     g_missMemo = makeUniqueNoThrow<uint64_t[]>(kMissMemoSlots);
-    if (!g_missMemo) return;  // no memo under pressure; results are unaffected either way
+    if (!g_missMemo) {
+      g_missMemoRefused = true;
+      return;  // no memo under pressure; results are unaffected either way
+    }
     std::fill_n(g_missMemo.get(), kMissMemoSlots, 0ull);
   }
   g_missMemo[tag % kMissMemoSlots] = tag;
@@ -930,6 +947,8 @@ void DictIndex::releaseCaches() {
   g_rootResolved.clear();  // re-probe /.dictionaries vs /dictionaries next session
   for (bool& probed : g_slotTitleProbed) probed = false;
   g_missMemo.reset();
+  g_missMemoRefused = false;
+  g_cacheStarved = false;
   g_vocabHandles.release();
   g_grammarHandles.release();
   g_namesHandles.release();
@@ -941,6 +960,16 @@ void DictIndex::releaseCaches() {
   g_vocabDat.clear();
   g_namesDat.clear();
   g_grammarDat.clear();
+}
+
+bool DictIndex::cachesStarved() { return g_cacheStarved; }
+
+void DictIndex::setLowMemory(const bool on) {
+  g_lowMemory = on;
+  if (!on) return;
+  g_missMemo.reset();
+  g_grammarHandles.release();
+  g_namesHandles.release();
 }
 
 void DictIndex::logAndResetStats(const char* label) {

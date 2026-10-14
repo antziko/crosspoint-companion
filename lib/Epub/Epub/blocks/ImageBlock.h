@@ -24,6 +24,10 @@ class ImageBlock final : public Block {
   bool needsDecode(const GfxRenderer& renderer) const;
   void renderPlaceholder(GfxRenderer& renderer, int x, int y) const;
   static void clearSessionRenderFailures();
+  // True once after a render where an image's extraction or decode first failed for lack of heap:
+  // the reader frees memory and redraws the page. A second failure of the same image is
+  // remembered as usual.
+  static bool takeHeapRetry();
 
   // A page render draws its image up to ~13 times (BW double-refresh plus every
   // grayscale band pass), and each draw streams the whole .pxc off SD. The

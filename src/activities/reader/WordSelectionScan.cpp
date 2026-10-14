@@ -6,6 +6,7 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <SdDebugLog.h>
 #include <WordLookup.h>
 
 #include <algorithm>
@@ -1125,15 +1126,38 @@ void WordSelectionScan::scanOnePosition() {
     // The match itself is untouched: the whole point is that the split word still resolves.
     if (i + span > contextStart) span = contextStart - i;
     entry.matchLen = static_cast<uint8_t>(std::min<size_t>(span, 255));
-    // Push selectableGlyphs first -- if it can't grow, the heap is exhausted, so stop the scan
-    // rather than push a mismatched selectToAllIdx entry with no corresponding glyph.
-    if (!pushGlyphSafe(selectableGlyphs, entry)) {
-      scanPos = allGlyphs.size();  // abort the remainder of the scan
-      scanTruncated = true;        // partial result -- don't let saveCache() persist it
-      return;
-    }
-    selectToAllIdx.push_back(i);
+    pushSelectable(entry, i);
   }
+}
+
+bool WordSelectionScan::pushSelectable(const GlyphRef& entry, const size_t cell) {
+  auto push = [&]() {
+    if (!pushGlyphSafe(selectableGlyphs, entry)) return false;
+    // Both lists grow together, guarded: a bare push_back that cannot grow aborts the device.
+    if (selectToAllIdx.size() == selectToAllIdx.capacity()) {
+      const size_t want = std::max(selectableGlyphs.capacity(), selectToAllIdx.size() + 1);
+      if (!fitsWithMargin(want * sizeof(size_t))) {
+        selectableGlyphs.pop_back();
+        return false;
+      }
+      selectToAllIdx.reserve(want);
+    }
+    selectToAllIdx.push_back(cell);
+    return true;
+  };
+  if (push()) return true;
+  // The heap this growth needs is usually held by the dictionary caches the scan itself loaded;
+  // they reload on the next lookup.
+  DictIndex::releaseCaches();
+  SdDebugLog::log("WLS", "selectable grow failed at %u, caches released largest=%u",
+                  static_cast<unsigned>(selectableGlyphs.size()), ESP.getMaxAllocHeap());
+  if (push()) return true;
+  // Stop here rather than resume: the walk would come back to these unmarked cells and fail the
+  // same way forever. The words found so far stay selectable.
+  phase = Phase::Done;
+  scanTruncated = true;  // partial result -- don't let saveCache() persist it
+  SdDebugLog::log("WLS", "scan stopped (heap) found=%u", static_cast<unsigned>(selectableGlyphs.size()));
+  return false;
 }
 
 bool WordSelectionScan::scanChineseRun(const size_t from) {
@@ -1209,12 +1233,7 @@ bool WordSelectionScan::scanChineseRun(const size_t from) {
       size_t span = len;
       if (cell + span > contextStart) span = contextStart - cell;
       entry.matchLen = static_cast<uint8_t>(std::min<size_t>(span, 255));
-      if (!pushGlyphSafe(selectableGlyphs, entry)) {
-        scanPos = allGlyphs.size();
-        scanTruncated = true;
-        return true;
-      }
-      selectToAllIdx.push_back(cell);
+      if (!pushSelectable(entry, cell)) return true;
     }
     covered = std::max(covered, p + advance);
     p += advance;

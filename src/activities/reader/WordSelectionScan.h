@@ -197,6 +197,9 @@ class WordSelectionScan {
   // OOM under -fno-exceptions (see CLAUDE.md and the .cpp for the rationale).
   static void reserveGlyphsSafe(std::vector<GlyphRef>& vec, size_t count);
   static bool pushGlyphSafe(std::vector<GlyphRef>& vec, const GlyphRef& g);
+  // Records a found word in selectableGlyphs + selectToAllIdx. On a heap that cannot grow them it
+  // releases the dictionary caches and retries once; failing that it ends the scan (truncated).
+  bool pushSelectable(const GlyphRef& entry, size_t cell);
 
  private:
   enum class Phase : uint8_t { Scan, Done };

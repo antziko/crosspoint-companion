@@ -740,6 +740,10 @@ uint8_t CrossPointSettings::getReaderFocusReading() const {
   return readerOverride.active ? readerOverride.focusReadingEnabled : focusReadingEnabled;
 }
 
+uint8_t CrossPointSettings::getReaderInlineGloss() const {
+  return readerOverride.active ? readerOverride.inlineGlossEnabled : dictInlineGlossEnabled;
+}
+
 ReaderRenderSpec CrossPointSettings::readerRenderSpec(const uint16_t viewportWidth,
                                                       const uint16_t viewportHeight) const {
   ReaderRenderSpec spec;

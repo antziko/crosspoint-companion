@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <Logging.h>
+#include <SdDebugLog.h>
 #include <Utf8.h>
 
 #include <algorithm>
@@ -510,12 +511,43 @@ void VerticalParsedText::preallocateStream() {
   }
 }
 
+void VerticalParsedText::preallocatePageGlyphs(const size_t glyphsHint) {
+  const size_t bytes = glyphsHint * sizeof(VerticalGlyph);
+  for (auto& spare : spareGlyphs_) {
+    if (spare.capacity() >= glyphsHint) continue;
+    if (!heapCanAfford(bytes, MIN_FREE_HEAP_FOR_RESERVE)) {
+      LOG_DBG("VPT", "preallocatePageGlyphs: %u bytes don't fit (maxAlloc=%u)", static_cast<unsigned>(bytes),
+              ESP.getMaxAllocHeap());
+      return;
+    }
+    spare.reserve(glyphsHint);
+  }
+}
+
+void VerticalParsedText::recycleGlyphs(std::vector<VerticalGlyph>&& glyphs) {
+  if (glyphs.capacity() == 0) return;
+  glyphs.clear();
+  // Fill an empty slot, else replace the smaller spare when this one is larger; else it is freed.
+  auto& smaller = spareGlyphs_[0].capacity() <= spareGlyphs_[1].capacity() ? spareGlyphs_[0] : spareGlyphs_[1];
+  if (glyphs.capacity() > smaller.capacity()) smaller = std::move(glyphs);
+}
+
+std::vector<VerticalGlyph> VerticalParsedText::takeSpareGlyphs() {
+  auto& larger = spareGlyphs_[0].capacity() >= spareGlyphs_[1].capacity() ? spareGlyphs_[0] : spareGlyphs_[1];
+  return std::move(larger);
+}
+
+void VerticalParsedText::noteHeapDrop() {
+  if (heapDropCount_++ == 0) firstDropMaxAlloc_ = ESP.getMaxAllocHeap();
+  everDroppedForHeap_ = true;
+}
+
 void VerticalParsedText::setRuby(PendingChar& pc, const char* s, const size_t len) {
   pc.rubyLen = 0;
   if (len == 0 || len > UINT16_MAX) return;
   const size_t need = rubyPool_.size() + len;
   if (need > rubyPool_.capacity() && !heapCanAfford(std::max(need, rubyPool_.capacity() * 2), SMALL_ALLOC_MARGIN)) {
-    everDroppedForHeap_ = true;
+    noteHeapDrop();
     return;
   }
   pc.rubyOffset = static_cast<uint32_t>(rubyPool_.size());
@@ -538,7 +570,7 @@ bool VerticalParsedText::canPushStreamChar() {
   if (growForOnePush(stream_, MARGINS, LINEAR_GROWTH_STEP)) return true;
   LOG_DBG("VPT", "Low heap (%u bytes) while building vertical text stream; truncating batch", ESP.getMaxAllocHeap());
   oom_ = true;
-  everDroppedForHeap_ = true;
+  noteHeapDrop();
   return false;
 }
 
@@ -686,7 +718,7 @@ void VerticalParsedText::addAnnotatedParagraph(const std::vector<RubyRun>& runs,
         if (!canGrowScratch(baseOffsets) || !canGrowScratch(baseCps) || !canGrowScratch(baseCpIndex) ||
             !canGrowScratch(breakBeforeBaseIndex)) {
           LOG_DBG("VPT", "Low heap (%u bytes) decoding run; truncating", ESP.getMaxAllocHeap());
-          everDroppedForHeap_ = true;
+          noteHeapDrop();
           break;
         }
         if ((cp == 0x3099 || cp == 0x309A) && !baseCps.empty()) {
@@ -821,6 +853,8 @@ struct VerticalParsedText::LayoutCursor {
   }
 
   void reservePageGlyphs(VerticalPage& p) const {
+    if (p.glyphs.capacity() == 0) p.glyphs = o.takeSpareGlyphs();
+    if (p.glyphs.capacity() >= glyphsPerPage) return;
     const size_t requestBytes = glyphsPerPage * sizeof(VerticalGlyph);
     if (heapCanAfford(requestBytes, MIN_FREE_HEAP_FOR_RESERVE)) {
       p.glyphs.reserve(glyphsPerPage);
@@ -855,7 +889,20 @@ struct VerticalParsedText::LayoutCursor {
     std::vector<VerticalGlyph>& glyphs = pg.glyphs;
     // Intern before the push: on a dropped glyph the orphaned pool entry is a few wasted
     // bytes, while interning after would need the glyph's index to patch -- not worth it.
-    if (!text.empty()) g.textId = pg.internText(text);
+    // The pool's growth and the string copy go through the throwing operator new, so both are
+    // checked first; a text that does not fit is dropped (the glyph itself still goes in).
+    if (!text.empty()) {
+      static constexpr uint32_t TEXT_MARGINS[] = {SMALL_ALLOC_MARGIN, 0};
+      constexpr size_t TEXT_GROWTH_STEP = 8;
+      constexpr size_t SSO_CAPACITY = 15;  // libstdc++: shorter strings need no allocation
+      if (growForOnePush(pg.texts, TEXT_MARGINS, TEXT_GROWTH_STEP) &&
+          (text.size() <= SSO_CAPACITY || heapCanAfford(text.size() + 1, 0))) {
+        g.textId = pg.internText(text);
+      } else {
+        LOG_DBG("VPT", "Low heap (%u bytes); dropping glyph text", ESP.getMaxAllocHeap());
+        o.noteHeapDrop();
+      }
+    }
     if (g.column != shiftColumn) {
       columnYShift = 0;
       shiftColumn = g.column;
@@ -878,7 +925,7 @@ struct VerticalParsedText::LayoutCursor {
       return true;
     }
     LOG_DBG("VPT", "Low heap (%u bytes); dropping glyph", ESP.getMaxAllocHeap());
-    o.everDroppedForHeap_ = true;
+    o.noteHeapDrop();
     return false;
   }
 
@@ -1237,7 +1284,8 @@ struct VerticalParsedText::LayoutCursor {
       // can never be touched again and is safe to write out and free now.
       if (onPageReady) {
         while (pages.size() > 1) {
-          onPageReady(ctx, std::move(pages.front()));
+          onPageReady(ctx, pages.front());
+          o.recycleGlyphs(std::move(pages.front().glyphs));
           pages.erase(pages.begin());
         }
       }
@@ -1716,6 +1764,13 @@ std::vector<VerticalPage> VerticalParsedText::layoutPages(void* ctx, PageReadyCa
     if (column < columnsPerPage && !page.glyphs.empty() && !cur.pageVectorCanTakeMore()) {
       LOG_INF("VPT", "Page glyph buffer cannot grow (%u glyphs, maxAlloc=%u); early page break",
               static_cast<unsigned>(page.glyphs.size()), ESP.getMaxAllocHeap());
+      if (heapSplitCount_++ == 0) {
+        SdDebugLog::log("VPT", "early page break glyphs=%u cap=%u full=%u stream=%u ruby=%u free=%u largest=%u",
+                        static_cast<unsigned>(page.glyphs.size()), static_cast<unsigned>(page.glyphs.capacity()),
+                        static_cast<unsigned>(glyphsPerPage),
+                        static_cast<unsigned>(stream_.capacity() * sizeof(PendingChar)),
+                        static_cast<unsigned>(rubyPool_.capacity()), ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+      }
       everSplitForHeap_ = true;
       column = columnsPerPage;
       cur.finalizePageIfNeeded();

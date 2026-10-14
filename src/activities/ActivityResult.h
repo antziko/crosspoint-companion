@@ -128,10 +128,16 @@ struct FlashcardJumpResult {
   std::string word;  // the card, so the reader can save the page it found the word on
 };
 
-using ResultVariant = std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult,
-                                   IntervalResult, PageResult, ProgressChangeResult, NetworkModeResult, FootnoteResult,
-                                   WordResult, FilePathResult, BookmarkResult, FontSelectionResult,
-                                   HighlightRangeResult, SyncScopeResult, FlashcardReviewResult, FlashcardJumpResult>;
+// The gloss box stepped past the first or last word: turn the page and reopen word select there.
+struct GlossPageTurnResult {
+  bool forward = true;
+};
+
+using ResultVariant =
+    std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, IntervalResult,
+                 PageResult, ProgressChangeResult, NetworkModeResult, FootnoteResult, WordResult, FilePathResult,
+                 BookmarkResult, FontSelectionResult, HighlightRangeResult, SyncScopeResult, FlashcardReviewResult,
+                 FlashcardJumpResult, GlossPageTurnResult>;
 
 struct ActivityResult {
   bool isCancelled = false;

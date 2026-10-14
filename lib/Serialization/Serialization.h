@@ -17,8 +17,13 @@ struct BufWriter {
   size_t cap;
   size_t len = 0;
   bool overflow = false;
+  // A null buffer only counts: len becomes the record's size, so a caller can size the buffer.
   BufWriter(uint8_t* b, const size_t c) : buf(b), cap(c) {}
   void write(const uint8_t* p, const size_t n) {
+    if (!buf) {
+      len += n;
+      return;
+    }
     if (overflow || len + n > cap) {
       overflow = true;
       return;

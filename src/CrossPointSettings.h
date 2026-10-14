@@ -421,6 +421,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     uint8_t embeddedStyle = 1;     // use the book's CSS
     uint8_t textAntiAliasing = 1;  // TEXT_AA enum
     uint8_t focusReadingEnabled = 0;
+    uint8_t inlineGlossEnabled = 0;  // word-select gloss box; defaults to dictInlineGlossEnabled
   };
 
   // Night mode: inverted output polarity for the whole UI, resolved once per render
@@ -841,6 +842,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t getReaderEmbeddedStyle() const;
   uint8_t getReaderTextAntiAliasing() const;
   uint8_t getReaderFocusReading() const;
+  uint8_t getReaderInlineGloss() const;
   // The layout configuration the section cache is keyed on, with every per-book
   // override already resolved. The viewport is the caller's because it is the one
   // field the store cannot know.

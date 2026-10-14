@@ -38,13 +38,14 @@ enum ItemIndex : int {
   BOOK_LANGUAGE = 12,
   VERTICAL_TEXT = 13,
   FURIGANA = 14,
+  INLINE_GLOSS = 15,
 };
 
 // Display order: the CJK rows sit above More Text Settings, which stays last.
-constexpr ItemIndex ROW_ORDER[] = {FONT_FAMILY,         FONT_SIZE,     LINE_SPACING,      PARA_ALIGNMENT,
-                                   HYPHENATION,         EXTRA_SPACING, PARA_INDENT,       SCREEN_MARGIN,
-                                   WORD_SELECT_BUTTONS, FOCUS_READING, MIN_SESSION,       BOOK_LANGUAGE,
-                                   VERTICAL_TEXT,       FURIGANA,      MORE_TEXT_SETTINGS};
+constexpr ItemIndex ROW_ORDER[] = {FONT_FAMILY,         FONT_SIZE,     LINE_SPACING,  PARA_ALIGNMENT,
+                                   HYPHENATION,         EXTRA_SPACING, PARA_INDENT,   SCREEN_MARGIN,
+                                   WORD_SELECT_BUTTONS, INLINE_GLOSS,  FOCUS_READING, MIN_SESSION,
+                                   BOOK_LANGUAGE,       VERTICAL_TEXT, FURIGANA,      MORE_TEXT_SETTINGS};
 
 constexpr StrId BOOK_LANGUAGE_LABELS[] = {StrId::STR_BOOK_LANG_AUTO, StrId::STR_BOOK_LANG_JA,
                                           StrId::STR_BOOK_LANG_ZH_HANS, StrId::STR_BOOK_LANG_ZH_HANT,
@@ -338,6 +339,9 @@ void ReaderOptionsActivity::cycleCurrentItem() {
     case WORD_SELECT_BUTTONS:
       localOverride.swapWordSelectAxes = localOverride.swapWordSelectAxes ? 0 : 1;
       break;
+    case INLINE_GLOSS:
+      localOverride.inlineGlossEnabled = localOverride.inlineGlossEnabled ? 0 : 1;
+      break;
     case MIN_SESSION: {
       // Find current position in cycle table and advance by one.
       int pos = 0;
@@ -357,7 +361,9 @@ void ReaderOptionsActivity::cycleCurrentItem() {
   // Most items cycled here feed the preview. MIN_SESSION (stats-only) and
   // WORD_SELECT_BUTTONS (input mapping) appear nowhere in PreviewKey, so they keep the
   // cheap list-only repaint.
-  if (currentItem() != MIN_SESSION && currentItem() != WORD_SELECT_BUTTONS) fullRedraw_ = true;
+  if (currentItem() != MIN_SESSION && currentItem() != WORD_SELECT_BUTTONS && currentItem() != INLINE_GLOSS) {
+    fullRedraw_ = true;
+  }
   // A size change must reload the resident SD font at the new size, or getReaderFontId()
   // keeps resolving the old-size id and the live preview never reflows (SD fonts load one
   // size at a time; built-ins are always resident so this is a no-op for them).
@@ -392,6 +398,8 @@ const char* ReaderOptionsActivity::getItemName(const int index) const {
       return tr(STR_SCREEN_MARGIN);
     case WORD_SELECT_BUTTONS:
       return tr(STR_WORD_SELECT_BUTTONS);
+    case INLINE_GLOSS:
+      return tr(STR_DICT_INLINE_GLOSS);
     case FOCUS_READING:
       return tr(STR_FOCUS_READING);
     case MIN_SESSION:
@@ -460,6 +468,8 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
       return localOverride.swapWordSelectAxes ? tr(STR_WORD_SELECT_SIDE) : tr(STR_WORD_SELECT_FRONT);
     case FOCUS_READING:
       return localOverride.focusReadingEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+    case INLINE_GLOSS:
+      return localOverride.inlineGlossEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     case MIN_SESSION: {
       const uint8_t v = localOverride.minSessionMinutes;
       if (v == CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL) {

@@ -8,6 +8,7 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <SdDebugLog.h>
 #include <Serialization.h>
 #include <XmlParserUtils.h>
 #include <expat.h>
@@ -1144,6 +1145,12 @@ struct LayoutPageSink final : ParagraphSink {
   // own starved measurements to judge whether its layout is approximate; a draw's misses are not
   // layout, and counting them stamped a correct chapter stale for a rebuild on the next open.
   uint32_t starvedWhileDrawing = 0;
+
+  // Build heap diagnostics for the SD summary: the lowest largest-free-block seen as pages were
+  // written, and the first page written after content was dropped.
+  uint32_t minMaxAlloc = UINT32_MAX;
+  int firstDropPage = -1;
+
   void renderEarly(const VerticalPage& page, const int pageIndex) {
     FontDecompressor* fd = nullptr;
     if (auto* fcm = renderer.getFontCacheManager()) fd = fcm->getDecompressor();
@@ -1296,7 +1303,9 @@ struct LayoutPageSink final : ParagraphSink {
     writeOne(imagePage);
   }
 
-  static void writePageCallback(void* ctx, VerticalPage&& page) { static_cast<LayoutPageSink*>(ctx)->writeOne(page); }
+  static void writePageCallback(void* ctx, const VerticalPage& page) {
+    static_cast<LayoutPageSink*>(ctx)->writeOne(page);
+  }
 
   // isFinalFlush must be true ONLY for the chapter's true last flush (see the caller in
   // streamParseAndLayout(), after extractor.flushParagraph()) -- every mid-chapter call (the
@@ -1324,7 +1333,10 @@ struct LayoutPageSink final : ParagraphSink {
     // VerticalParsedText.h for why this is safe (oikomi only ever looks one page back).
     auto pages = layout.layoutPages(this, &writePageCallback, isFinalFlush);
     layout.reset();
-    for (const auto& p : pages) writeOne(p);
+    for (auto& p : pages) {
+      writeOne(p);
+      layout.recycleGlyphs(std::move(p.glyphs));
+    }
   }
 
   // Page serialization staging capacity: one file.write per page instead of ~10 mutexed
@@ -1364,6 +1376,13 @@ struct LayoutPageSink final : ParagraphSink {
       }
     }
     pageOffsets.push_back(static_cast<uint32_t>(out.position()));
+    minMaxAlloc = std::min<uint32_t>(minMaxAlloc, ESP.getMaxAllocHeap());
+    if (pageOffsets.size() == 1) {
+      SdDebugLog::log("VSC", "first page free=%u largest=%u glyphs=%u cap=%u texts=%u", ESP.getFreeHeap(),
+                      ESP.getMaxAllocHeap(), static_cast<unsigned>(p.glyphs.size()),
+                      static_cast<unsigned>(p.glyphs.capacity()), static_cast<unsigned>(p.texts.size()));
+    }
+    if (firstDropPage < 0 && layout.heapDropCount() > 0) firstDropPage = static_cast<int>(pageOffsets.size()) - 1;
     // TRANSIENT staging buffer: allocated for this one write, freed before layout resumes.
     // Holding it resident across the whole build deepened the layout's low-heap dips by
     // roughly its own size (device evidence: maxAlloc bottoms 14324 without it vs
@@ -1371,17 +1390,22 @@ struct LayoutPageSink final : ParagraphSink {
     // speed buffer. As a per-page transient the layout never coexists with it, and the
     // same-size alloc/free per page reuses the same hole instead of fragmenting. If the
     // allocation fails at a tight moment, this page just takes the direct field-wise path.
-    auto pageBuf = makeUniqueNoThrow<uint8_t[]>(kPageBufCap);
+    // Sized to this page's record (a counting pass), not the cap: a typical page needs 3-5KB,
+    // which the X3's fragmented heap can serve when a fixed 12KB block cannot.
+    serialization::BufWriter counter(nullptr, 0);
+    writePage(counter, p);
+    const size_t recordBytes = counter.len;
+    auto pageBuf = recordBytes <= kPageBufCap ? makeUniqueNoThrow<uint8_t[]>(recordBytes) : nullptr;
     bool ok = false;
     if (pageBuf) {
-      serialization::BufWriter w(pageBuf.get(), kPageBufCap);
+      serialization::BufWriter w(pageBuf.get(), recordBytes);
       if (writePage(w, p) && !w.overflow) {
         ok = out.write(pageBuf.get(), w.len) == w.len;
       } else if (w.overflow) {
-        ok = writePage(out, p);  // page larger than the staging buffer: direct path
+        ok = writePage(out, p);
       }
     } else {
-      ok = writePage(out, p);
+      ok = writePage(out, p);  // record larger than the cap, or no block for it: direct path
     }
     if (!ok) {
       LOG_ERR("VSC", "Failed to write page %zu to cache", pageOffsets.size() - 1);
@@ -1667,6 +1691,7 @@ constexpr size_t HEADER_PAGECOUNT_OFFSET = sizeof(uint8_t)      // version
 // The old flat 48KB predated SD CJK fonts, and a resident CJK font cache holds maxAlloc under it
 // for a whole session: on device this book was skipped -- and so rendered unstyled -- with 46996
 // bytes still available in the largest free block, a miss of barely 4KB.
+constexpr size_t MIN_STYLES_SHRINK_HEADROOM = 1024;
 constexpr size_t STYLED_BLOCK_TABLE_ENTRIES = 256;  // must match collectVerticalStyles()'s maxOut default
 constexpr uint32_t MIN_MAX_ALLOC_FOR_STYLED_BLOCKS =
     static_cast<uint32_t>(STYLED_BLOCK_TABLE_ENTRIES * sizeof(CssParser::VerticalBlockRule)) + 12 * 1024;
@@ -1772,6 +1797,7 @@ bool VerticalSection::startBuild(const ReaderRenderSpec& spec) {
   pageCount = 0;
   lastBuildCancelled_ = false;
   lastBuildDroppedForHeap_ = false;
+  lastBuildLostText_ = false;
   lastBuildUnstyledForHeap_ = false;
 
   const uint32_t buildStartMs = millis();
@@ -1779,6 +1805,8 @@ bool VerticalSection::startBuild(const ReaderRenderSpec& spec) {
   lastBuildStartMaxAlloc_ = ESP.getMaxAllocHeap();
   LOG_INF("VSC", "streamParseAndLayout start spine=%d free=%u maxAlloc=%u", spineIndex, ESP.getFreeHeap(),
           lastBuildStartMaxAlloc_);
+  SdDebugLog::log("VSC", "BUILD-START spine=%d free=%u largest=%u stale=%d", spineIndex, ESP.getFreeHeap(),
+                  lastBuildStartMaxAlloc_, rebuildingFromStale_ ? 1 : 0);
   // Vertical placement measures each glyph's real ink extents (burasage, half-em pairing, the 3.8
   // squeeze deficits), and those measurements go through the font decompressor. A heap too tight for a
   // glyph group makes them fall back to nominal metrics silently, and the result is written to the
@@ -1831,6 +1859,13 @@ bool VerticalSection::startBuild(const ReaderRenderSpec& spec) {
   // isolates whether it's the HTML-to-tempfile copy (zip inflate window), the ruby-tag scan, or
   // XML_ParserCreate's own setup.
   LOG_DBG("VSC", "after readItemContentsToStream: maxAlloc=%u", ESP.getMaxAllocHeap());
+  // Free/largest after each start-up step, logged together once the build is ready.
+  struct HeapMark {
+    uint32_t free;
+    uint32_t largest;
+  };
+  const auto heapMark = [] { return HeapMark{ESP.getFreeHeap(), ESP.getMaxAllocHeap()}; };
+  const HeapMark mHtml = heapMark();
 
   // Resolve image paths relative to the chapter's directory in the EPUB.
   std::string chapterDir;
@@ -1874,7 +1909,9 @@ bool VerticalSection::startBuild(const ReaderRenderSpec& spec) {
   serialization::writePod(b.out, pageCountPlaceholder);
   serialization::writePod(b.out, indexOffsetPlaceholder);
 
+  const HeapMark mCtx = heapMark();
   b.layout.preallocateStream();
+  const HeapMark mStream = heapMark();
   // Column gap (行間) in EMS -- the unit the constraint is stated in. Ruby is half an em (JLREQ
   // 3.3.3) and is drawn in this gap beside its base column, so with furigana ON the floor is half
   // an em, and the settings span the half-to-full em Japanese body text conventionally uses. With
@@ -1893,9 +1930,26 @@ bool VerticalSection::startBuild(const ReaderRenderSpec& spec) {
   // Where the margin is narrower than that -- a large font at a small screen margin -- the ruby
   // would be drawn back over its own base characters, so the text area gives up the shortfall
   // and no more: at a margin that already holds the ruby, the column stays flush right.
+  const HeapMark mFont = heapMark();
   if (furiganaEnabled) {
     b.layout.setRightPaddingPx(std::max(0, (emPx + 1) / 2 - static_cast<int>(spec.rightMarginPx)));
   }
+  {
+    // A page's cell count by the layout's own formulas (layoutPages: cell = em; rows step by the
+    // row pitch; columns by cell + 行間), with the full width -- the right padding only removes
+    // columns.
+    const int columnGap = std::max(2, emPx * gapQuarterEms / 4);
+    const int rowPitch = std::max((emPx + 1) / 2, emPx + static_cast<int>(spec.characterSpacing));
+    const size_t rows =
+        static_cast<size_t>(std::max(1, (static_cast<int>(viewportHeight) + rowPitch - emPx) / rowPitch));
+    const size_t cols =
+        static_cast<size_t>(std::max(1, (static_cast<int>(viewportWidth) + columnGap) / (emPx + columnGap)));
+    // A page can carry more glyphs than cells (runs, ruby, paired punctuation; device: 129 on a
+    // 126-cell page), and the layout keeps 16 slots of growth headroom free, so pad both.
+    const size_t cells = rows * cols;
+    b.layout.preallocatePageGlyphs(cells + cells / 4 + 16);
+  }
+  const HeapMark mPages = heapMark();
 
   b.sink.earlyRenderFn = earlyRenderFn_;
   b.sink.earlyRenderCtx = earlyRenderCtx_;
@@ -1937,12 +1991,20 @@ bool VerticalSection::startBuild(const ReaderRenderSpec& spec) {
     } else {
       const CssParser::StylesheetFilter stylesheets = epub->stylesheetFilterFor(b.tmpHtmlPath, b.localPath);
       epub->getCssParser()->collectVerticalStyles(b.blockStyles, STYLED_BLOCK_TABLE_ENTRIES, &stylesheets);
+      // The collector reserves its whole 256-entry table (~7KB); a book uses a few dozen at most.
+      // Moving to an exact-size copy frees the rest for the build.
+      const size_t usedBytes = b.blockStyles.size() * sizeof(CssParser::VerticalBlockRule);
+      if (b.blockStyles.size() < b.blockStyles.capacity() &&
+          ESP.getMaxAllocHeap() >= usedBytes + MIN_STYLES_SHRINK_HEADROOM) {
+        std::vector<CssParser::VerticalBlockRule>(b.blockStyles.begin(), b.blockStyles.end()).swap(b.blockStyles);
+      }
       if (!b.blockStyles.empty()) {
         LOG_DBG("VSC", "%u styled-block selectors active", static_cast<unsigned>(b.blockStyles.size()));
       }
     }
   }
 
+  const HeapMark mStyles = heapMark();
   b.extractor.sink = &b.sink;
   b.extractor.rubyHarvest = &b.sink.rubyHarvest;
   b.extractor.blockStyles = &b.blockStyles;
@@ -1987,6 +2049,7 @@ bool VerticalSection::startBuild(const ReaderRenderSpec& spec) {
     buildAnchors_.reserve(kInitialAnchorCapacity);
   }
 
+  const HeapMark mReserves = heapMark();
   b.parser = XML_ParserCreate(nullptr);
   if (!b.parser) {
     LOG_ERR("VSC", "OOM: XML parser");
@@ -2006,6 +2069,14 @@ bool VerticalSection::startBuild(const ReaderRenderSpec& spec) {
     return false;
   }
   b.starvedInLayout = starvedGlyphCount(renderer) - b.starvedGlyphsAtStart;
+  const HeapMark mXml = heapMark();
+  SdDebugLog::log("VSC",
+                  "BUILD-MEM free/largest html=%u/%u ctx=%u/%u stream=%u/%u font=%u/%u pages=%u/%u styles=%u/%u(%u) "
+                  "reserves=%u/%u xml=%u/%u",
+                  mHtml.free, mHtml.largest, mCtx.free, mCtx.largest, mStream.free, mStream.largest, mFont.free,
+                  mFont.largest, mPages.free, mPages.largest, mStyles.free, mStyles.largest,
+                  static_cast<unsigned>(b.blockStyles.size()), mReserves.free, mReserves.largest, mXml.free,
+                  mXml.largest);
   return true;
 }
 
@@ -2130,6 +2201,7 @@ bool VerticalSection::finishBuild(const bool parseOk) {
   // rebuildingFromStale_ guard breaks the loop when a retry degrades again).
   lastBuildDroppedForHeap_ = lastBuildDroppedForHeap_ || b.layout.everDroppedForHeap() || b.layout.everSplitForHeap() ||
                              b.extractor.droppedTextForHeap;
+  lastBuildLostText_ = b.layout.everDroppedForHeap() || b.extractor.droppedTextForHeap;
   if (b.extractor.droppedTextForHeap) LOG_ERR("VSC", "Text dropped on low heap; chapter is incomplete");
   if (b.drawnBetweenSlices) {
     // A full page render ran next to the layout's resident working set, and on device the
@@ -2203,6 +2275,14 @@ bool VerticalSection::finishBuild(const bool parseOk) {
     // on the densest pages beat re-indexing on every single open.
     LOG_ERR("VSC", "Stale-rebuild dropped glyphs again; keeping best-effort cache to break the rebuild loop");
   }
+  SdDebugLog::log("VSC",
+                  "BUILD-END spine=%d pages=%u ms=%u largest start=%u min=%u drops=%u firstDrop=p%d@%u textDrop=%d "
+                  "splits=%u starved=%u drawn=%d -> %s",
+                  spineIndex, (unsigned)pageCount, (unsigned)(millis() - b.buildStartMs), lastBuildStartMaxAlloc_,
+                  b.sink.minMaxAlloc == UINT32_MAX ? 0u : b.sink.minMaxAlloc, b.layout.heapDropCount(),
+                  b.sink.firstDropPage, b.layout.firstDropMaxAlloc(), b.extractor.droppedTextForHeap ? 1 : 0,
+                  b.layout.heapSplitCount(), b.starvedInLayout, b.drawnBetweenSlices ? 1 : 0,
+                  !lastBuildDroppedForHeap_ ? "ok" : (rebuildingFromStale_ ? "kept" : "stale"));
   file.close();
   build_.reset();
   if (!lastBuildDroppedForHeap_ && Storage.exists(degradedPath().c_str())) Storage.remove(degradedPath().c_str());

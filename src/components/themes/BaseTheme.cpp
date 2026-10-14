@@ -233,10 +233,18 @@ void BaseTheme::drawHintLabel(GfxRenderer& renderer, const int fontId, const cha
   constexpr int textPadding = 4;  // keeps a wrapped label off the button's border
   const int maxTextWidth = boxWidth - (textPadding * 2);
 
-  const int textHeight = renderer.getTextHeight(fontId);
+  const int textHeight = renderer.getTextHeight(fontId);  // the ascender: drawText's y to the baseline
+  // Centred on the ink of a capital, not on the ascender: the ascender includes the room above
+  // the caps (accents), which left every label sitting low in its box.
+  int capHeight = textHeight;
+  int gl = 0, gw = 0, gt = 0, gh = 0;
+  if (renderer.getGlyphMetrics(fontId, 'H', EpdFontFamily::REGULAR, &gl, &gw, &gt, &gh) && gt > 0 && gt <= textHeight) {
+    capHeight = gt;
+  }
+  const int aboveCaps = textHeight - capHeight;
   const int textWidth = renderer.getTextWidth(fontId, label);
   if (textWidth <= maxTextWidth) {
-    const int textY = boxTop + std::max(1, (boxHeight - textHeight) / 2);
+    const int textY = boxTop + std::max(1, (boxHeight - capHeight) / 2) - aboveCaps;
     renderer.drawText(fontId, x + (boxWidth - 1 - textWidth) / 2, textY, label);
     return;
   }
@@ -247,12 +255,13 @@ void BaseTheme::drawHintLabel(GfxRenderer& renderer, const int fontId, const cha
   constexpr int lineGap = 2;
   const int step = textHeight + lineGap;
   const auto lines = renderer.wrappedText(fontId, label, maxTextWidth, 2);
-  const int block = static_cast<int>(lines.size()) * step - lineGap;
+  // First cap top to last baseline: the ink the block is centred on.
+  const int block = (static_cast<int>(lines.size()) - 1) * step + capHeight;
   // wrappedText breaks only at spaces, so a single over-wide word (Lyra gives a hint
   // just 72px of text room) comes back as ONE ellipsised line. Centring that in the box
   // would drop it several pixels below every neighbouring label that took the fast path
   // above — so a one-line result shares their baseline whichever branch produced it.
-  int lineY = boxTop + std::max(1, (boxHeight - block) / 2);
+  int lineY = boxTop + std::max(1, (boxHeight - block) / 2) - aboveCaps;
   for (const auto& line : lines) {
     const int lineWidth = renderer.getTextWidth(fontId, line.c_str());
     renderer.drawText(fontId, x + (boxWidth - 1 - lineWidth) / 2, lineY, line.c_str());

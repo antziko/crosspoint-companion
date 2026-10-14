@@ -66,6 +66,22 @@ TEST(DictStopwords, AmbiguousWordsDeliberatelyKept) {
   EXPECT_FALSE(isStopword(std::string_view("mine")));
 }
 
+TEST(DictStopwords, JapaneseParticles) {
+  EXPECT_TRUE(isStopword(std::string_view("が")));
+  EXPECT_TRUE(isStopword(std::string_view("は")));
+  EXPECT_TRUE(isStopword(std::string_view("の")));
+  EXPECT_TRUE(isStopword(std::string_view("から")));
+  EXPECT_TRUE(isStopword(std::string_view("には")));
+  // Left out on purpose, and longer words that merely start with a particle.
+  EXPECT_FALSE(isStopword(std::string_view("な")));
+  EXPECT_FALSE(isStopword(std::string_view("だ")));
+  EXPECT_FALSE(isStopword(std::string_view("ながら")));
+  EXPECT_FALSE(isStopword(std::string_view("はな")));
+  EXPECT_FALSE(isStopword(std::string_view("日本")));
+  EXPECT_TRUE(isStopword(std::string_view("・")));
+  EXPECT_FALSE(isStopword(std::string_view("サー・ハリー")));
+}
+
 TEST(DictStopwords, CaseInsensitive) {
   EXPECT_TRUE(isStopword(std::string_view("The")));
   EXPECT_TRUE(isStopword(std::string_view("SHOULD")));

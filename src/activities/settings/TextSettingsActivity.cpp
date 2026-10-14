@@ -30,8 +30,9 @@ constexpr StrId TAB_NAME_IDS[] = {StrId::STR_FONT, StrId::STR_SIZE, StrId::STR_L
 constexpr StrId LAYOUT_ROW_NAME_IDS[] = {
     StrId::STR_LINE_SPACING,     StrId::STR_WORD_SPACING, StrId::STR_CHARACTER_SPACING, StrId::STR_EXTRA_SPACING,
     StrId::STR_PARAGRAPH_INDENT, StrId::STR_ALIGNMENT,    StrId::STR_SCREEN_MARGIN};
-constexpr StrId STYLE_ROW_NAME_IDS[] = {StrId::STR_FOCUS_READING, StrId::STR_HYPHENATION, StrId::STR_EMBEDDED_STYLE,
-                                        StrId::STR_TEXT_AA, StrId::STR_WORD_SELECT_BUTTONS};
+constexpr StrId STYLE_ROW_NAME_IDS[] = {StrId::STR_FOCUS_READING,       StrId::STR_HYPHENATION,
+                                        StrId::STR_EMBEDDED_STYLE,      StrId::STR_TEXT_AA,
+                                        StrId::STR_WORD_SELECT_BUTTONS, StrId::STR_DICT_INLINE_GLOSS};
 
 // LOCAL(feat): Hold Confirm this long on a Font-tab row to pin/unpin (vs a tap = commit).
 constexpr unsigned long kPinHoldMs = 700;
@@ -109,8 +110,9 @@ TextSettingsActivity::TextSettingsActivity(GfxRenderer& renderer, MappedInputMan
   }
   for (int r = 0; r < static_cast<int>(StyleRow::Count); r++) {
     const auto row = static_cast<StyleRow>(r);
-    // Which button pair steps word by word is a per-book override field: book modes only.
-    if (!bookMode() && row == StyleRow::WordSelectButtons) continue;
+    // Word-select button pair and gloss box are per-book override fields: book modes only (the
+    // global gloss default lives in the Dictionary settings).
+    if (!bookMode() && (row == StyleRow::WordSelectButtons || row == StyleRow::InlineGloss)) continue;
     addStyle(row);
   }
   if (tabIndex(tab_) < 0) tab_ = visibleTabs_[0];
@@ -805,6 +807,11 @@ void TextSettingsActivity::confirmStyleRow(int row) {
       persist();
       requestUpdate();
       return;
+    case StyleRow::InlineGloss:
+      book_.inlineGlossEnabled = book_.inlineGlossEnabled ? 0 : 1;
+      persist();
+      requestUpdate();
+      return;
     case StyleRow::AntiAliasing:
       // Tri-state picker, not a toggle: negating it made Sharp unreachable (!2 == 0).
       optionPopup_.show(StrId::STR_TEXT_AA, TEXT_AA_IDS, static_cast<int>(std::size(TEXT_AA_IDS)), *f_.textAntiAliasing,
@@ -840,7 +847,8 @@ std::string TextSettingsActivity::styleValueText(int row) const {
 // On/off Style rows draw a checkbox; the rest show their value text.
 bool TextSettingsActivity::styleRowIsToggle(int row) {
   const auto r = static_cast<StyleRow>(row);
-  return r == StyleRow::FocusReading || r == StyleRow::Hyphenation || r == StyleRow::EmbeddedStyle;
+  return r == StyleRow::FocusReading || r == StyleRow::Hyphenation || r == StyleRow::EmbeddedStyle ||
+         r == StyleRow::InlineGloss;
 }
 
 bool TextSettingsActivity::styleRowChecked(int row) const {
@@ -851,6 +859,8 @@ bool TextSettingsActivity::styleRowChecked(int row) const {
       return *f_.hyphenationEnabled;
     case StyleRow::EmbeddedStyle:
       return *f_.embeddedStyle;
+    case StyleRow::InlineGloss:
+      return book_.inlineGlossEnabled;
 
     default:
       return false;
@@ -863,7 +873,7 @@ bool TextSettingsActivity::focusedRowHasNoPreview() const {
   if (ringPos() == 0 || tab_ != Tab::Style) return false;
   const StyleRow row = static_cast<StyleRow>(styleRowAt(ringPos() - 1));
   return row == StyleRow::Hyphenation || row == StyleRow::EmbeddedStyle || row == StyleRow::AntiAliasing ||
-         row == StyleRow::WordSelectButtons;
+         row == StyleRow::WordSelectButtons || row == StyleRow::InlineGloss;
 }
 
 void TextSettingsActivity::switchTab(int direction) {

@@ -21,10 +21,10 @@
 #include "CrossPointSettings.h"
 #include "DictionaryWordSelectActivity.h"
 #include "EpubReaderActivity.h"
-#include "VerticalPageMarks.h"
-#include "WordSelectionScan.h"
 #include "ReaderUtils.h"
+#include "VerticalPageMarks.h"
 #include "VerticalWordTokens.h"
+#include "WordSelectionScan.h"
 #include "components/UIScale.h"
 #include "components/UITheme.h"
 
@@ -182,8 +182,8 @@ void EpubReaderActivity::drawVerticalMarks(const VerticalPage& vpage, const int 
       }
       if (!candidate) continue;
       uint16_t start = 0;
-      if (!VerticalPageMarks::tokenAtOffset(renderer, vpage, fontId, marginLeft, marginTop, cellPx,
-                                            b.visibleTextOffset, b.snippet, start) &&
+      if (!VerticalPageMarks::tokenAtOffset(renderer, vpage, fontId, marginLeft, marginTop, cellPx, b.visibleTextOffset,
+                                            b.snippet, start) &&
           !VerticalPageMarks::findSnippet(renderer, vpage, fontId, marginLeft, marginTop, cellPx, b.snippet, start)) {
         continue;
       }
@@ -317,9 +317,25 @@ void EpubReaderActivity::tickVerticalBuild() {
     requestUpdate();
     return;
   }
+  if (rebuildVerticalAfterLostText()) return;
   // The page on screen is the truth now; render() redraws it against the final page count.
   verticalBuildFinished_ = true;
   requestUpdate();
+}
+
+bool EpubReaderActivity::rebuildVerticalAfterLostText() {
+  if (!verticalSection || !verticalSection->lostTextNeedsRebuild()) return false;
+  // The retry is a whole-chapter build (the remembered offset needs it), so no page is drawn
+  // between its slices and the font and image caches stay released throughout.
+  rememberPositionForReflow();
+  verticalSection.reset();
+  if (auto* fcm = renderer.getFontCacheManager()) fcm->releaseCache();
+  ImageBlock::releaseRenderCache();
+  prewarmedVPage_ = -1;
+  SdDebugLog::log("ERS", "vertical spine=%d lost text on low heap; rebuilding now free=%u largest=%u",
+                  currentSpineIndex, ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  requestUpdate();
+  return true;
 }
 
 void EpubReaderActivity::renderVertical(const int marginRight, const uint16_t viewportWidth,
@@ -361,8 +377,10 @@ void EpubReaderActivity::renderVertical(const int marginRight, const uint16_t vi
       if (!verticalSection->loadSectionFile(spec, /*retryDegraded=*/true)) {
         LOG_DBG("ERS", "Vertical cache not found, building...");
         drawIndexingPopup();
-        // The build is the reader's heaviest step; the glyph caches are dead weight until it ends.
+        // The build is the reader's heaviest step; the glyph and image caches are dead weight until
+        // it ends.
         if (auto* fcm = renderer.getFontCacheManager()) fcm->releaseCache();
+        ImageBlock::releaseRenderCache();
         // Show the reader's page the moment it is laid out, then finish the chapter between
         // frames (tickVerticalBuild). Positions that need the finished chapter -- a percent jump,
         // an anchor, a saved content offset -- wait for the whole build instead.
@@ -390,6 +408,7 @@ void EpubReaderActivity::renderVertical(const int marginRight, const uint16_t vi
           showError(StrId::STR_PAGE_LOAD_ERROR);
           return;
         }
+        if (rebuildVerticalAfterLostText()) return;
         builtNow = true;
       }
     }
@@ -486,10 +505,35 @@ void EpubReaderActivity::paintVerticalPageThunk(void* ctx) {
   }
 }
 
-void EpubReaderActivity::openVerticalWordSelect(const bool framebufferContainsPage, const int pointX,
-                                                const int pointY, const bool highlight) {
-  const auto mode = highlight ? DictionaryWordSelectActivity::Mode::HighlightRange
-                              : DictionaryWordSelectActivity::Mode::Dictionary;
+bool EpubReaderActivity::finishVerticalBuildNow() {
+  if (!verticalSection || !verticalSection->isBuilding()) return true;
+  RenderLock lock(*this);
+  if (!verticalSection || !verticalSection->isBuilding()) return true;
+  drawIndexingPopup();
+  VerticalSection::BuildStep step = VerticalSection::BuildStep::InProgress;
+  while (step == VerticalSection::BuildStep::InProgress) step = verticalSection->buildSomeMore(kVerticalSliceMs);
+  if (step == VerticalSection::BuildStep::Failed) {
+    LOG_ERR("ERS", "Vertical build failed while finishing for word select");
+    failedVerticalSpineIndex = currentSpineIndex;
+    verticalSection.reset();
+    requestUpdate();
+    return false;
+  }
+  if (rebuildVerticalAfterLostText()) return false;
+  verticalBuildFinished_ = true;
+  return true;
+}
+
+void EpubReaderActivity::openVerticalWordSelect(bool framebufferContainsPage, const int pointX, const int pointY,
+                                                const bool highlight) {
+  // The background layout holds ~40KB that the whole-word scan needs, and cannot pause the way the
+  // horizontal build does: finish it first (a one-time wait behind the indexing popup).
+  if (verticalSection && verticalSection->isBuilding()) {
+    if (!finishVerticalBuildNow()) return;
+    framebufferContainsPage = false;  // the popup is on screen now
+  }
+  const auto mode =
+      highlight ? DictionaryWordSelectActivity::Mode::HighlightRange : DictionaryWordSelectActivity::Mode::Dictionary;
   int marginTop, marginLeft;
   readerTextOrigin(renderer, marginTop, marginLeft);
   const int fontId = SETTINGS.getReaderFontId();
@@ -571,14 +615,20 @@ void EpubReaderActivity::openVerticalWordSelect(const bool framebufferContainsPa
   wordSelect->setVerticalPage(std::move(words), std::move(rows), std::move(textPool), cellPx,
                               {this, &EpubReaderActivity::paintVerticalPageThunk});
   wordSelect->setMarksReloader(this, &EpubReaderActivity::reloadLookupMarksThunk);
+  if (!highlight) attachGlossCursorMemory(*wordSelect, currentPage, pageCount);
+  wordSelect->setStartAtPageEdge(glossStartEdge_);
   if (wordScan) {
     wordSelect->setWordScan(std::move(wordScan), wordScanCachePath(), static_cast<uint16_t>(currentSpineIndex),
                             static_cast<uint16_t>(currentPage), std::move(scanCells));
   }
   const uint16_t spine = static_cast<uint16_t>(currentSpineIndex);
-  startActivityForResult(std::move(wordSelect), [this, spine, currentPage, pageCount, quoteChapter, cellPx,
-                                                 marginLeft, marginTop](const ActivityResult& result) {
+  startActivityForResult(std::move(wordSelect), [this, spine, currentPage, pageCount, quoteChapter, cellPx, marginLeft,
+                                                 marginTop](const ActivityResult& result) {
     ignoreBackUntilRelease = true;
+    if (const auto* turn = std::get_if<GlossPageTurnResult>(&result.data)) {
+      glossPageTurn_ = turn->forward ? 1 : -1;
+      return;
+    }
     const auto* hr = result.isCancelled ? nullptr : std::get_if<HighlightRangeResult>(&result.data);
     if (!hr) {
       // A lookup enrolls a flashcard, which anchors the underline drawn on the repaint below.

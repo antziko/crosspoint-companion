@@ -1,5 +1,6 @@
 #include "DictionaryWordSelectActivity.h"
 
+#include <BoardConfig.h>
 #include <Deinflector.h>
 #include <DictIndex.h>
 #include <FontCacheManager.h>
@@ -237,8 +238,13 @@ void DictionaryWordSelectActivity::onEnter() {
   // With the gloss box up a hold jumps to the row or page edge instead of repeating: each repeat
   // step would cost a full frame here.
   navigator.setHoldJumps(gloss_ != nullptr);
+  // Past the first or last word the gloss box turns the page instead of wrapping.
+  navigator.setStopAtPageEdges(gloss_ != nullptr);
   glossTracksCursor_ = gloss_ && glossCursorOut_;
-  if (glossTracksCursor_ && !pointedAtWord) {
+  if (gloss_ && startEdge_ != 0 && !pointedAtWord) {
+    const int start = startEdge_ > 0 ? findFirstBodyWord() : navigator.wordCount() - 1;
+    if (start >= 0) navigator.selectFlatIndex(start);
+  } else if (glossTracksCursor_ && !pointedAtWord) {
     // The memory is a character index, so it outlives a different merge of the same page.
     const int resume = glossResumeIdx_ >= 0 ? flatOfChar(glossResumeIdx_) : -1;
     const int start = resume >= 0 && navigator.getWordAt(resume) ? resume : findFirstBodyWord();
@@ -247,9 +253,10 @@ void DictionaryWordSelectActivity::onEnter() {
   maybeAutoSelectCardWord();
   // words= is the page's selectable-token count, which is what extract/merge/load all scale
   // with — without it a slow entry cannot be told from a dense page.
-  SdDebugLog::log("DWS", "enter extract=%lums merge=%lums load=%lums gloss=%lums total=%lums words=%u free=%u",
+  SdDebugLog::log("DWS",
+                  "enter extract=%lums merge=%lums load=%lums gloss=%lums total=%lums words=%u free=%u minEver=%u",
                   tExtract - tEnter0, tMerge - tExtract, tLoad - tMerge, millis() - tLoad, millis() - tEnter0,
-                  wordCount, static_cast<unsigned>(ESP.getFreeHeap()));
+                  wordCount, static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMinFreeHeap()));
   requestUpdate();
 }
 
@@ -259,7 +266,10 @@ void DictionaryWordSelectActivity::onExit() {
   // Before the reader takes the heap back (~30 KB of dictionary caches). A scan that finished
   // has saved itself already; one cut short is simply not cached.
   scan_.reset();
+  pendingScanWords_ = {};
+  scanCompacted_ = false;
   DictIndex::releaseCaches();
+  DictIndex::setLowMemory(false);
   // Hand back the dictionary that was in force on entry, dropping any per-word one applied
   // here. After controller.onExit(), deliberately: that stops and joins the lookup task, which
   // is the condition setSessionDictPath requires (Dictionary.h:98-99).
@@ -863,6 +873,18 @@ void DictionaryWordSelectActivity::loop() {
   const bool swapAxes = SETTINGS.getReaderSwapWordSelectAxes() || (gloss_ && !mappedInput.hasFrontButtons());
   if (stepAllowed && navigator.handleNavigation(mappedInput, renderer, swapAxes)) {
     if (gateSteps) stepFramePending_.store(true);
+    lastStepMs_ = std::max<unsigned long>(1, millis());
+    stepAcceptedMs_.store(lastStepMs_);
+    if (scanCachesHeld_) {
+      // The scan is quiet while the user steps, and the gloss box reads StarDict, not DictIndex:
+      // hand the scan's caches to the glyph prewarm. Its next idle slice reloads them.
+      scanCachesHeld_ = false;
+      const uint32_t freeBefore = ESP.getFreeHeap();
+      const uint32_t largestBefore = ESP.getMaxAllocHeap();
+      DictIndex::releaseCaches();
+      SdDebugLog::log("DWS", "scan caches released (step) free=%u->%u largest=%u->%u", freeBefore, ESP.getFreeHeap(),
+                      largestBefore, ESP.getMaxAllocHeap());
+    }
     HangTrace::mark(HangTrace::Loop, HangTrace::DwsLoopAuto);
     if (wasAuto) {
       // The step moved the cursor of a range the user did not build: settle it as a plain
@@ -879,6 +901,13 @@ void DictionaryWordSelectActivity::loop() {
     maybeAutoSelectCardWord();
     aimScanAtCursor();
     requestUpdate();
+  }
+  // The gloss box ran off the page: the reader turns it and opens this screen again there.
+  if (const int edge = navigator.takePageEdge(); edge != 0) {
+    SdDebugLog::log("DWS", "gloss page edge dir=%d", edge);
+    setResult(ActivityResult{GlossPageTurnResult{edge > 0}});
+    finish();
+    return;
   }
 
   // Touch: a touch-down walks the cursor to the word under the finger (differential
@@ -1213,7 +1242,7 @@ void DictionaryWordSelectActivity::planGlossCells(const char* token, const char*
 
 void DictionaryWordSelectActivity::initGloss() {
   if (mode_ != Mode::Dictionary) return;  // quote selection looks nothing up
-  if (!SETTINGS.dictInlineGlossEnabled) return;
+  if (!SETTINGS.getReaderInlineGloss()) return;
   if (navigator.isEmpty()) return;
 
   // Gate: plain-text dictionaries only. A folder named "st-" is that group by convention
@@ -1335,6 +1364,10 @@ void DictionaryWordSelectActivity::initGloss() {
     gloss_.reset();
     return;
   }
+
+  // On a C3 board the box leaves the page scan too little heap for every dictionary's caches;
+  // without them a scan is slower but never starves (see DictIndex::setLowMemory).
+  if (!BoardConfig::isX4Pro()) DictIndex::setLowMemory(true);
 
   // The miss label is constant, so warm it once here instead of on the first miss — where it
   // would land in the middle of a frame the user is waiting on.
@@ -1915,11 +1948,12 @@ void DictionaryWordSelectActivity::countRepaint(const bool scrubbed) {
   if (!scrubbed && (every == 0 || ++repaintsSinceClean_ < every)) return;
   if (!scrubbed) renderer.promoteNextRefresh(HalDisplay::SCRUB_REFRESH, "dws-repaints");
   repaintsSinceClean_ = 0;
+  relocationsSinceScrub_ = 0;
 }
 
-bool DictionaryWordSelectActivity::restoreVacatedGlossStrip() {
-  if (!gloss_ || gloss_->drawnY == kGlossNotDrawn) return false;
-  if (gloss_->place && gloss_->y == gloss_->drawnY) return false;  // parked — the common case
+DictionaryWordSelectActivity::StripRestore DictionaryWordSelectActivity::restoreVacatedGlossStrip() {
+  if (!gloss_ || gloss_->drawnY == kGlossNotDrawn) return {};
+  if (gloss_->place && gloss_->y == gloss_->drawnY) return {};  // parked — the common case
 
   // The whole old rectangle, not just the part the new box will leave uncovered: the new box is
   // drawn on top straight afterwards, so re-rendering a line or two underneath it costs almost
@@ -1927,13 +1961,15 @@ bool DictionaryWordSelectActivity::restoreVacatedGlossStrip() {
   renderPageStrip(gloss_->drawnY, gloss_->height);
   gloss_->drawnY = kGlossNotDrawn;
 
-  // The box has moved, so this frame already shows a visibly different layout — the one moment
-  // where collapsing the accumulated FAST-refresh residue costs nothing perceptually. It is what
-  // keeps a box that walks down the page from leaving a trail behind it, and it is deliberately
-  // NOT the periodic refresh this replaced: that one fired while the box sat still, which read
-  // as the screen flashing mid-scan. A left/right step along one row never reaches here.
+  // The box has moved, so this frame already shows a visibly different layout — the moment where
+  // collapsing the accumulated FAST-refresh residue costs least perceptually. It is what keeps a
+  // box that walks down the page from leaving a trail behind it. A scrub roughly doubles the
+  // frame, so only every kRelocationsPerScrub-th move pays it; the trail it clears is at most
+  // that many boxes old. A left/right step along one row never reaches here.
+  if (++relocationsSinceScrub_ < kRelocationsPerScrub) return {true, false};
   renderer.forceCleanRefreshNextPaint();
-  return true;
+  relocationsSinceScrub_ = 0;
+  return {true, true};
 }
 
 // The box's rows advance by gloss_->lineHeight, which is the DEFINITION font's and is generally a
@@ -2032,6 +2068,10 @@ void DictionaryWordSelectActivity::clearGlossGhostOnNextPaint() {
 }
 
 void DictionaryWordSelectActivity::render(RenderLock&&) {
+  struct FrameShown {
+    std::atomic<bool>& flag;
+    ~FrameShown() { flag.store(true); }
+  } frameShown{firstFrameShown_};
   // Every return below ends the frame a gloss-box step is waiting on.
   struct StepFrameDone {
     std::atomic<bool>& pending;
@@ -2058,7 +2098,7 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
     // freshly drawn highlight would print black text across the inverted rectangle. It is also
     // clear of the PREVIOUS highlight — the box kept kGlossClearance from the selection it was
     // placed against — so the snapshot the call below is about to restore stays untouched.
-    const bool relocationScrubbed = restoreVacatedGlossStrip();
+    const StripRestore restored = restoreVacatedGlossStrip();
     auto dirty = navigator.renderHighlightDifferential(renderer, lineHeight, prevHighlightIdx_, currIdx);
     if (dirty.has_value()) {
       // Drawn after the highlight, never before: renderHighlightDifferential captures the pixels
@@ -2071,16 +2111,19 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
       // wired up here. The savings come from skipping page->render, which dominates the
       // pre-optimization cost; the full push at the end is a hardware floor (~444ms).
       HangTrace::mark(HangTrace::Render, HangTrace::DwsDiffDisplay);
-      countRepaint(relocationScrubbed);
+      countRepaint(restored.scrubbed);
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
       HangTrace::mark(HangTrace::Render, HangTrace::DwsDone);
       // One line per cursor move. This is the path that decides how long "the user finding
       // their word" really takes: every move ends in a full-panel push, so N moves to reach a
       // word cost N x this. If that product is most of the pre-lookup gap, the fix is here and
-      // not in the entry render. scrub=1 marks a relocation frame, which re-renders the vacated
-      // strip and collapses the box's residue — measured at roughly twice a plain move.
-      SdDebugLog::log("DWS", "render diff total=%lums scrub=%d free=%u", millis() - tRender0, (int)relocationScrubbed,
-                      static_cast<unsigned>(ESP.getFreeHeap()));
+      // not in the entry render. reloc=1 marks a frame that re-rendered the strip the box left;
+      // scrub=1 one that also collapsed its residue — measured at roughly twice a plain move.
+      const unsigned long stepAt = stepAcceptedMs_.exchange(0);
+      SdDebugLog::log("DWS", "render diff total=%lums step=%lums reloc=%d scrub=%d free=%u largest=%u",
+                      millis() - tRender0, stepAt != 0 ? millis() - stepAt : 0UL, (int)restored.relocated,
+                      (int)restored.scrubbed, static_cast<unsigned>(ESP.getFreeHeap()),
+                      static_cast<unsigned>(ESP.getMaxAllocHeap()));
       prevHighlightIdx_ = currIdx;
       return;
     }
@@ -2135,8 +2178,8 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
       // The cheap entry: the caller left the page in the framebuffer, so this skips BOTH page
       // renders. Seeing this line instead of "render full" means entry cost is already near the
       // panel floor and the double render is not what the first lookup is paying for.
-      SdDebugLog::log("DWS", "render skip-initial total=%lums free=%u", millis() - tRender0,
-                      static_cast<unsigned>(ESP.getFreeHeap()));
+      SdDebugLog::log("DWS", "render skip-initial total=%lums free=%u minEver=%u", millis() - tRender0,
+                      static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMinFreeHeap()));
       prevHighlightIdx_ = currIdx;
       nextRenderMode_ = snapshotPrimed ? RenderMode::Differential : RenderMode::FullPage;
       return;
@@ -2223,6 +2266,7 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
   // Miss counters need no reset: PrewarmScope's constructor calls resetStats()
   // (FontCacheManager.cpp:98), so these are scoped to this render. Same counters the DDA lines
   // read, so a word-select miss count is directly comparable to a definition one.
+  const unsigned long stepAtFull = stepAcceptedMs_.exchange(0);
   uint32_t misses = 0, missMs = 0;
   const int readerFontId = SETTINGS.getReaderFontId();
   if (renderer.isSdCardFont(readerFontId)) {
@@ -2235,10 +2279,12 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
   }
   SdDebugLog::log("DWS",
                   "render full scan=%lums prewarm=%lums draw=%lums hl=%lums gloss=%lums display=%lums total=%lums "
-                  "miss=%u missMs=%u free=%u largest=%u",
+                  "miss=%u missMs=%u free=%u largest=%u minEver=%u step=%lums",
                   tScan - tFull0, tPrewarm - tScan, tDraw - tPrewarm, tHighlight - tDraw, tGloss - tHighlight,
                   tDisplay - tGloss, tDisplay - tFull0, misses, missMs, static_cast<unsigned>(ESP.getFreeHeap()),
-                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+                  static_cast<unsigned>(ESP.getMinFreeHeap()),
+                  stepAtFull != 0 && tDisplay > stepAtFull ? tDisplay - stepAtFull : 0UL);
 
   prevHighlightIdx_ = currIdx;
   nextRenderMode_ = snapshotPrimed ? RenderMode::Differential : RenderMode::FullPage;

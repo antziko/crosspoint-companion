@@ -36,8 +36,7 @@ class TextSettingsActivity final : public UiTabListActivity {
   enum class Tab : uint8_t { Family, Size, Layout, Style, Count };
   // Where edits land. Settings edits the global defaults with every tab. The Book modes are
   // opened from the reader's Text panel and edit that book's override, written to
-  // `bookCachePath`; settings a book does not store (word/character spacing, embedded style,
-  // anti-aliasing) stay reader-wide. BookFont shows only the font list; BookMore shows only
+  // `bookCachePath`. BookFont shows only the font list; BookMore shows only
   // the Layout/Style rows the Text panel does not already carry.
   enum class Mode : uint8_t { Settings, BookFont, BookMore };
 
@@ -64,7 +63,7 @@ class TextSettingsActivity final : public UiTabListActivity {
     ScreenMargin,
     Count
   };
-  enum class StyleRow { FocusReading, Hyphenation, EmbeddedStyle, AntiAliasing, WordSelectButtons, Count };
+  enum class StyleRow { FocusReading, Hyphenation, EmbeddedStyle, AntiAliasing, WordSelectButtons, InlineGloss, Count };
 
   // --- UiTabListActivity contract ---
   int listCount() const override;

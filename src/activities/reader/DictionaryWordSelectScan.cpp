@@ -9,6 +9,7 @@
 
 #include <algorithm>
 
+#include "CrossPointSettings.h"
 #include "DictionaryWordSelectActivity.h"
 #include "MappedInputManager.h"
 #include "activities/RenderLock.h"
@@ -24,6 +25,38 @@ constexpr uint32_t kBurstSliceMs = 50;
 constexpr uint32_t kBackgroundSliceMs = 40;
 // The background scan re-merges at most this often; a finished scan merges at once.
 constexpr unsigned long kRemergeIntervalMs = 1000;
+// A refused merge is retried once the largest block has grown this much, or after this long.
+constexpr uint32_t kMergeRetryGrowth = 1024;
+constexpr unsigned long kMergeRetryMs = 3000;
+// A finished scan whose last merge has to wait is cut down to the word list the merge reads, so
+// its glyph tables are freed at once. false keeps the whole scan until the merge lands.
+constexpr bool kCompactFinishedScan = true;
+// With the gloss box on, an uncached page skips the opening burst and the scan waits for the
+// first frame: the page and the box get the heap before the dictionary caches (~30 KB) do, and
+// words merge from the background steps a second or two later.
+constexpr bool kDeferScanForGloss = true;
+// The background scan steps aside while the user moves the cursor, and pauses when the dictionary
+// caches could not be allocated (each probe would then read the SD card in full, a page took 28 s
+// on device). A paused scan retries once the largest block has grown enough for the caches (the
+// miss memo alone is 8 KB) or after a while.
+constexpr bool kScanYields = true;
+constexpr uint32_t kScanResumeGrowth = 8 * 1024;
+constexpr unsigned long kScanRetryMs = 10000;
+// No scan slice this soon after a cursor step, so a run of presses never waits behind one.
+constexpr unsigned long kScanQuietAfterStepMs = 1500;
+
+// The scan's words as the merge takes them: first cell and length, in cells.
+bool collectScanWords(const WordSelectionScan& scan, std::vector<CjkWordMerge::ScanWord>& out) {
+  const size_t found = scan.selectableGlyphs.size();
+  if (!reserveNoThrow(out, found)) return false;
+  for (size_t i = 0; i < found && i < scan.selectToAllIdx.size(); i++) {
+    const size_t cell = scan.selectToAllIdx[i];
+    if (cell >= CjkWordMerge::TokenGlyphs::kNoGlyph) continue;
+    const uint8_t len = scan.selectableGlyphs[i].matchLen;
+    out.push_back({static_cast<uint16_t>(cell), static_cast<uint8_t>(len == 0 ? 1 : len)});
+  }
+  return true;
+}
 
 }  // namespace
 
@@ -96,16 +129,12 @@ void DictionaryWordSelectActivity::aimScanAtCursor() {
 }
 
 bool DictionaryWordSelectActivity::remergeWords(int cursorChar) {
-  if (!scan_ || navigator.isEmpty()) return false;
-  const size_t found = scan_->selectableGlyphs.size();
-  std::vector<CjkWordMerge::ScanWord> scanWords;
-  if (!reserveNoThrow(scanWords, found)) return false;
-  for (size_t i = 0; i < found && i < scan_->selectToAllIdx.size(); i++) {
-    const size_t cell = scan_->selectToAllIdx[i];
-    if (cell >= CjkWordMerge::TokenGlyphs::kNoGlyph) continue;
-    const uint8_t len = scan_->selectableGlyphs[i].matchLen;
-    scanWords.push_back({static_cast<uint16_t>(cell), static_cast<uint8_t>(len == 0 ? 1 : len)});
-  }
+  if ((!scan_ && !scanCompacted_) || navigator.isEmpty()) return false;
+  const size_t found = scan_ ? scan_->selectableGlyphs.size() : pendingFound_;
+  const size_t onPage = scan_ ? scan_->onPageGlyphCount() : pendingOnPage_;
+  std::vector<CjkWordMerge::ScanWord> collected;
+  if (scan_ && !collectScanWords(*scan_, collected)) return false;
+  const auto& scanWords = scan_ ? collected : pendingScanWords_;
   // The merge runs over the list the navigator holds now, words already merged included: each
   // token's cells are the union of its characters' (contiguous by construction), and a new scan
   // word only ever joins tokens no earlier word took.
@@ -147,8 +176,8 @@ bool DictionaryWordSelectActivity::remergeWords(int cursorChar) {
     std::vector<WordSelectNavigator::Row> rows;
     std::string pool;
     std::vector<CjkWordMerge::Span> spans;
-    if (!CjkWordMerge::merge(inWords, inRows, inPool, glyphs, scan_->onPageGlyphCount(), scanWords, verticalCellPx_ > 0,
-                             words, rows, pool, spans)) {
+    if (!CjkWordMerge::merge(inWords, inRows, inPool, glyphs, onPage, scanWords, verticalCellPx_ > 0, words, rows, pool,
+                             spans)) {
       navigator.replaceWords(std::move(inWords), std::move(inRows), std::move(inPool), cursorBefore);
       LOG_ERR("DWS", "Word merge skipped: heap");
       return false;
@@ -181,9 +210,9 @@ bool DictionaryWordSelectActivity::remergeWords(int cursorChar) {
     // Same box on screen: the differential snapshot still matches it under its new index.
     prevHighlightIdx_ = navigator.getCurrentFlatIndex();
   }
-  SdDebugLog::log("DWS", "merge words=%u scanned=%u/%u done=%d", static_cast<unsigned>(navigator.wordCount()),
-                  static_cast<unsigned>(found), static_cast<unsigned>(scan_->onPageGlyphCount()),
-                  static_cast<int>(scan_->isDone()));
+  SdDebugLog::log("DWS", "merge words=%u scanned=%u/%u done=%d src=%s", static_cast<unsigned>(navigator.wordCount()),
+                  static_cast<unsigned>(found), static_cast<unsigned>(onPage),
+                  static_cast<int>(!scan_ || scan_->isDone()), scan_ ? "scan" : "list");
   return true;
 }
 
@@ -205,6 +234,18 @@ void DictionaryWordSelectActivity::startWordScan() {
   const unsigned long t0 = millis();
   const bool cached = !scanCachePath_.empty() && scan_->tryLoadCache(scanCachePath_, scanSpine_, scanPage_);
   scanCacheSaved_ = cached;
+  scanDictReleased_ = false;
+  mergeRefusedMs_ = 0;
+  scanWaitsForFrame_ = false;
+  scanPausedMs_ = 0;
+  scanCompactTried_ = false;
+  scanCompacted_ = false;
+  pendingScanWords_ = {};
+  if (!cached && kDeferScanForGloss && mode_ == Mode::Dictionary && SETTINGS.getReaderInlineGloss()) {
+    scanWaitsForFrame_ = true;
+    SdDebugLog::log("DWS", "scan open deferred (gloss) free=%u minEver=%u", ESP.getFreeHeap(), ESP.getMinFreeHeap());
+    return;
+  }
   if (!cached) {
     const int ch = navigator.getCurrentFlatIndex();
     const uint16_t cell = ch >= 0 && ch < static_cast<int>(tokenGlyphs_.size()) ? tokenGlyphs_[ch].start
@@ -231,32 +272,143 @@ void DictionaryWordSelectActivity::startWordScan() {
     return;
   }
   if (anchorChar >= 0) navigator.beginMultiSelectAt(flatOfChar(anchorChar));
-  SdDebugLog::log("DWS", "scan open cached=%d burst=%lums found=%u", static_cast<int>(cached), millis() - t0,
-                  static_cast<unsigned>(scan_->selectableGlyphs.size()));
+  SdDebugLog::log("DWS", "scan open cached=%d burst=%lums found=%u free=%u minEver=%u", static_cast<int>(cached),
+                  millis() - t0, static_cast<unsigned>(scan_->selectableGlyphs.size()), ESP.getFreeHeap(),
+                  ESP.getMinFreeHeap());
+}
+
+void DictionaryWordSelectActivity::compactFinishedScan() {
+  scanCompactTried_ = true;
+  // The cache is the scan's own result, independent of the merge, and needs the scan to write.
+  if (!scanCacheSaved_ && !scanCachePath_.empty()) scan_->saveCache(scanCachePath_, scanSpine_, scanPage_, 0);
+  scanCacheSaved_ = true;
+  const uint32_t freeBefore = ESP.getFreeHeap();
+  const uint32_t largestBefore = ESP.getMaxAllocHeap();
+  if (!collectScanWords(*scan_, pendingScanWords_)) {
+    pendingScanWords_ = {};
+    SdDebugLog::log("DWS", "scan compact refused largest=%u", largestBefore);
+    return;
+  }
+  pendingFound_ = scan_->selectableGlyphs.size();
+  pendingOnPage_ = scan_->onPageGlyphCount();
+  scan_.reset();
+  scanCompacted_ = true;
+  SdDebugLog::log("DWS", "scan compacted words=%u free=%u->%u largest=%u->%u",
+                  static_cast<unsigned>(pendingScanWords_.size()), freeBefore, ESP.getFreeHeap(), largestBefore,
+                  ESP.getMaxAllocHeap());
+}
+
+// One line per change of state: r run, f waiting for the first frame, p paused on the heap,
+// b user busy, q quiet after a step, l render lock held, d done.
+void DictionaryWordSelectActivity::logScanState(const char state) {
+  if (state == scanState_) return;
+  scanState_ = state;
+  SdDebugLog::log("DWS", "scan state=%c pos=%u/%u found=%u free=%u largest=%u", state,
+                  static_cast<unsigned>(scan_ ? scan_->scannedGlyphs() : 0),
+                  static_cast<unsigned>(scan_ ? scan_->onPageGlyphCount() : pendingOnPage_),
+                  static_cast<unsigned>(scan_ ? scan_->selectableGlyphs.size() : pendingFound_), ESP.getFreeHeap(),
+                  ESP.getMaxAllocHeap());
 }
 
 void DictionaryWordSelectActivity::stepWordScan() {
-  if (!scan_) return;
+  if (!scan_ && !scanCompacted_) return;
+  if (scanWaitsForFrame_) {
+    if (!firstFrameShown_.load()) {
+      logScanState('f');
+      return;
+    }
+    scanWaitsForFrame_ = false;
+    SdDebugLog::log("DWS", "scan starts after first frame free=%u minEver=%u", ESP.getFreeHeap(), ESP.getMinFreeHeap());
+  }
+  using B = MappedInputManager::Button;
+  int tx = 0;
+  int ty = 0;
+  const bool userBusy = navigator.isMultiSelecting() || stepFramePending_.load() || mappedInput.isPressed(B::Back) ||
+                        mappedInput.isPressed(B::Confirm) || mappedInput.isPressed(B::Left) ||
+                        mappedInput.isPressed(B::Right) || mappedInput.isPressed(B::Up) ||
+                        mappedInput.isPressed(B::Down) || mappedInput.isScreenTouchHeld(tx, ty);
+  bool stepNow = scan_ && !scan_->isDone();
+  const bool quiet = lastStepMs_ != 0 && millis() - lastStepMs_ < kScanQuietAfterStepMs;
+  char state = stepNow ? 'r' : 'd';
+  if (kScanYields && stepNow) {
+    if (scanPausedMs_ != 0) {
+      if (ESP.getMaxAllocHeap() < scanPausedLargest_ + kScanResumeGrowth && millis() - scanPausedMs_ < kScanRetryMs) {
+        stepNow = false;
+        state = 'p';
+      } else {
+        scanPausedMs_ = 0;
+        SdDebugLog::log("DWS", "scan resumed free=%u largest=%u", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+      }
+    } else if (DictIndex::cachesStarved()) {
+      DictIndex::releaseCaches();
+      scanPausedLargest_ = ESP.getMaxAllocHeap();
+      scanPausedMs_ = std::max<unsigned long>(1, millis());
+      stepNow = false;
+      state = 'p';
+      SdDebugLog::log("DWS", "scan paused (heap) free=%u largest=%u minEver=%u", ESP.getFreeHeap(),
+                      ESP.getMaxAllocHeap(), ESP.getMinFreeHeap());
+    }
+    // Before a step can start, not after: one slice reads the SD card for tens of milliseconds.
+    if (stepNow && (userBusy || quiet)) {
+      stepNow = false;
+      state = userBusy ? 'b' : 'q';
+    }
+  }
   // Not while the render task draws: the font decompressor may be holding most of the largest
   // block for a moment (matcha's own condition).
-  if (!scan_->isDone() && !RenderLock::peek()) scan_->step(kBackgroundSliceMs);
-  const bool done = scan_->isDone();
-  if (scan_->selectableGlyphs.size() != mergedScanWords_ && (done || millis() - lastMergeMs_ >= kRemergeIntervalMs)) {
-    using B = MappedInputManager::Button;
-    int tx = 0;
-    int ty = 0;
-    const bool userBusy = navigator.isMultiSelecting() || stepFramePending_.load() || mappedInput.isPressed(B::Back) ||
-                          mappedInput.isPressed(B::Confirm) || mappedInput.isPressed(B::Left) ||
-                          mappedInput.isPressed(B::Right) || mappedInput.isPressed(B::Up) ||
-                          mappedInput.isPressed(B::Down) || mappedInput.isScreenTouchHeld(tx, ty);
-    if (!userBusy) remergeWords();
+  if (stepNow && RenderLock::peek()) {
+    stepNow = false;
+    state = 'l';
   }
-  if (done && scan_->selectableGlyphs.size() == mergedScanWords_) {
-    if (!scanCacheSaved_ && !scanCachePath_.empty()) scan_->saveCache(scanCachePath_, scanSpine_, scanPage_, 0);
+  logScanState(state);
+  if (stepNow) {
+    scan_->step(kBackgroundSliceMs);
+    scanCachesHeld_ = true;
+  }
+  const bool done = !scan_ || scan_->isDone();
+  if (done && !scanDictReleased_) {
+    // The finished scan reads no more dictionary; only the merge below is left, and it waits for
+    // the user to pause. Free the caches now rather than holding them through a busy session.
+    scanDictReleased_ = true;
+    const uint32_t freeBefore = ESP.getFreeHeap();
+    const uint32_t largestBefore = ESP.getMaxAllocHeap();
+    DictIndex::releaseCaches();
+    SdDebugLog::log("DWS", "scan done, caches released free=%u->%u largest=%u->%u minEver=%u", freeBefore,
+                    ESP.getFreeHeap(), largestBefore, ESP.getMaxAllocHeap(), ESP.getMinFreeHeap());
+  }
+  if (kCompactFinishedScan && scan_ && done && !scanCompactTried_ &&
+      scan_->selectableGlyphs.size() != mergedScanWords_) {
+    compactFinishedScan();
+  }
+  const size_t found = scan_ ? scan_->selectableGlyphs.size() : pendingFound_;
+  if (found != mergedScanWords_ && (done || millis() - lastMergeMs_ >= kRemergeIntervalMs)) {
+    // After a refused merge, wait for the heap to change rather than retrying every tick.
+    const bool backingOff = mergeRefusedMs_ != 0 && ESP.getMaxAllocHeap() < mergeRefusedLargest_ + kMergeRetryGrowth &&
+                            millis() - mergeRefusedMs_ < kMergeRetryMs;
+    // Not within the quiet period either: a merge requests a repaint, which a press would wait behind.
+    if (!userBusy && !quiet && !backingOff) {
+      if (remergeWords()) {
+        mergeRefusedMs_ = 0;
+      } else {
+        if (mergeRefusedMs_ == 0) {
+          SdDebugLog::log("DWS", "merge refused largest=%u free=%u (backing off)", ESP.getMaxAllocHeap(),
+                          ESP.getFreeHeap());
+        }
+        mergeRefusedLargest_ = ESP.getMaxAllocHeap();
+        mergeRefusedMs_ = std::max<unsigned long>(1, millis());
+      }
+    }
+  }
+  if (done && found == mergedScanWords_) {
+    if (scan_ && !scanCacheSaved_ && !scanCachePath_.empty()) {
+      scan_->saveCache(scanCachePath_, scanSpine_, scanPage_, 0);
+    }
     scanCacheSaved_ = true;
     // Nothing left to merge: give the scan and the dictionary caches back. spans_ stays, it is
     // what maps highlights to characters.
     scan_.reset();
+    pendingScanWords_ = {};
+    scanCompacted_ = false;
     tokenGlyphs_ = {};
     DictIndex::releaseCaches();
   }

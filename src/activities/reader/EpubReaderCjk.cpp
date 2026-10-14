@@ -4,10 +4,13 @@
 #include <DictIndex.h>
 #include <Epub/Kinsoku.h>
 #include <Epub/Page.h>
+#include <Epub/blocks/ImageBlock.h>
+#include <FontCacheManager.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <Print.h>
+#include <SdDebugLog.h>
 #include <Utf8.h>
 #include <esp_heap_caps.h>
 
@@ -129,12 +132,23 @@ std::unique_ptr<WordSelectionScan> EpubReaderActivity::newWordScan() const {
   // blocks) live only while word-select is up. Below this the page keeps per-character selection.
   constexpr size_t kMinFree = 40 * 1024;
   constexpr size_t kMinBlock = 12 * 1024;
-  const size_t freeHeap = ESP.getFreeHeap();
-  const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  size_t freeHeap = ESP.getFreeHeap();
+  size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   if (freeHeap < kMinFree || largest < kMinBlock) {
-    LOG_INF("ERS", "Word scan skipped: free=%u largest=%u", static_cast<unsigned>(freeHeap),
-            static_cast<unsigned>(largest));
-    return nullptr;
+    // The page's glyph and image caches reload on demand, and word-select redraws the page
+    // anyway: give them up before falling back to per-character selection.
+    if (auto* fcm = renderer.getFontCacheManager()) fcm->releaseCache();
+    ImageBlock::releaseRenderCache();
+    const size_t freeBefore = freeHeap;
+    const size_t largestBefore = largest;
+    freeHeap = ESP.getFreeHeap();
+    largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (freeHeap < kMinFree || largest < kMinBlock) {
+      SdDebugLog::log("ERS", "word scan skipped: free=%u->%u largest=%u->%u", static_cast<unsigned>(freeBefore),
+                      static_cast<unsigned>(freeHeap), static_cast<unsigned>(largestBefore),
+                      static_cast<unsigned>(largest));
+      return nullptr;
+    }
   }
   auto scan = makeUniqueNoThrow<WordSelectionScan>();
   if (!scan) LOG_ERR("ERS", "OOM: WordSelectionScan");

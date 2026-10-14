@@ -29,7 +29,8 @@ namespace {
 // v10: appended paragraphIndent. Older files take the current global, as a newly opened book would.
 // v11: appended wordSpacing, characterSpacing, embeddedStyle, textAntiAliasing, focusReadingEnabled;
 //      older files take the current globals.
-constexpr uint8_t READER_SETTINGS_FILE_VERSION = 11;
+// v12: appended inlineGlossEnabled; older files take the global Inline Gloss Box setting.
+constexpr uint8_t READER_SETTINGS_FILE_VERSION = 12;
 // Oldest layout load() still understands; everything from here up is read field by field.
 constexpr uint8_t READER_SETTINGS_MIN_READABLE_VERSION = 5;
 
@@ -110,6 +111,11 @@ bool load(const std::string& cachePath, CrossPointSettings::ReaderOverride& out)
     out.embeddedStyle = out.embeddedStyle ? 1 : 0;
     out.focusReadingEnabled = out.focusReadingEnabled ? 1 : 0;
   }
+  out.inlineGlossEnabled = SETTINGS.dictInlineGlossEnabled;
+  if (version >= 12) {
+    serialization::readPod(f, out.inlineGlossEnabled);
+    out.inlineGlossEnabled = out.inlineGlossEnabled ? 1 : 0;
+  }
   out.active = true;
   return true;
 }
@@ -137,6 +143,7 @@ bool write(const std::string& cachePath, const CrossPointSettings::ReaderOverrid
   serialization::writePod(f, ov.embeddedStyle);
   serialization::writePod(f, ov.textAntiAliasing);
   serialization::writePod(f, ov.focusReadingEnabled);
+  serialization::writePod(f, ov.inlineGlossEnabled);
   return true;
 }
 

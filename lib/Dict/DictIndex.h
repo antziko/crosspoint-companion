@@ -138,6 +138,14 @@ class DictIndex {
   static bool consumeHeapLimited();
 
   static void releaseCaches();
+  // True once a per-dictionary cache (sparse index or record block) could not be allocated since
+  // the last releaseCaches(): lookups still work, but each one goes to the SD card in full, which
+  // makes a page scan crawl. A caller that can wait frees the caches and retries later.
+  static bool cachesStarved();
+  // Low-memory mode: no negative-lookup memo (8 KB), and only JMdict keeps its sparse index and
+  // block cache (~11 KB); grammar and names search uncached. releaseCaches() leaves the setting
+  // alone. For callers that need the heap more than lookups need the speed.
+  static void setLowMemory(bool on);
 
   // Diagnostic: logs and resets the running lookupExact()/record-cache counters. Call with a
   // label (e.g. "buildSelectableGlyphs") right after a scan to see the real call volume instead

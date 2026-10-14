@@ -59,6 +59,8 @@ class VerticalSection {
   // file with version 0 so the next open sees a version mismatch and rebuilds the chapter --
   // instead of the truncation living on disk as a permanently sparse chapter.
   bool lastBuildDroppedForHeap_ = false;
+  // Characters were actually lost (not just approximate layout or early page breaks).
+  bool lastBuildLostText_ = false;
   // Set when only the styled-block table was skipped. The chapter's TEXT is complete; the book's
   // own block styling is not. Kept apart from lastBuildDroppedForHeap_ because the two differ in
   // kind: this one is cosmetic and must not be reported, or cached, as lost content.
@@ -146,6 +148,9 @@ class VerticalSection {
   // True when the last createSectionFile() returned false because the cancel hook fired, as
   // opposed to a real failure. Lets a speculative caller back off quietly instead of logging.
   bool lastBuildCancelled() const { return lastBuildCancelled_; }
+  // The finished build lost characters on low heap and stamped its file stale (first attempt).
+  // Reopening the section now rebuilds it once more; a second loss is kept best-effort.
+  bool lostTextNeedsRebuild() const { return lastBuildLostText_ && !rebuildingFromStale_; }
 
   // furiganaEnabled is part of the cache key: the column gap only has to clear ruby when ruby is
   // drawn, so turning furigana off tightens the columns and the chapter must be re-laid out.

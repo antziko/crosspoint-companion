@@ -393,6 +393,7 @@ void EpubReaderActivity::onEnter() {
       bookOverride.embeddedStyle = SETTINGS.embeddedStyle;
       bookOverride.textAntiAliasing = SETTINGS.textAntiAliasing;
       bookOverride.focusReadingEnabled = SETTINGS.focusReadingEnabled;
+      bookOverride.inlineGlossEnabled = SETTINGS.dictInlineGlossEnabled;
       static_assert(sizeof(bookOverride.sdFontFamilyName) == sizeof(SETTINGS.sdFontFamilyName),
                     "sdFontFamilyName size mismatch");
       strncpy(bookOverride.sdFontFamilyName, SETTINGS.sdFontFamilyName, sizeof(bookOverride.sdFontFamilyName) - 1);
@@ -1127,6 +1128,42 @@ void EpubReaderActivity::loop() {
     requestUpdate();
   }
 
+  // The gloss box ran off the page: turn it, let it paint, and open the box again on it. An
+  // inline flashcard review due at this turn takes it instead, as it does for a page-turn press.
+  if (glossPageTurn_ != 0 && !RenderLock::peek()) {
+    const bool forward = glossPageTurn_ > 0;
+    glossPageTurn_ = 0;
+    if (forward && maybeStartInlineReview()) return;
+    pageTurn(forward);
+    requestUpdateAndWait();
+    SdDebugLog::log("ERS", "gloss page turn dir=%d spine=%d page=%d", forward ? 1 : -1, currentSpineIndex,
+                    section ? section->currentPage : (verticalSection ? verticalSection->currentPage : -1));
+    if (hasPage()) {
+      glossStartEdge_ = forward ? 1 : -1;
+      openWordSelect(/*framebufferContainsPage=*/true);
+      glossStartEdge_ = 0;
+    }
+    return;
+  }
+
+  // An image on the page could not be extracted or decoded, usually because the chapter build
+  // holds the heap: give that memory back and draw the page again.
+  if (ImageBlock::takeHeapRetry()) {
+    const char* how = "idle";
+    if (verticalSection && verticalSection->isBuilding()) {
+      if (finishVerticalBuildNow()) how = "finished";
+    } else if (section && section->isBuilding()) {
+      RenderLock lock;
+      if (section && section->isBuilding()) {
+        section->suspendBuild();
+        how = "suspended";
+      }
+    }
+    SdDebugLog::log("ERS", "image retry after heap fail (build %s) free=%u largest=%u", how,
+                    (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    requestUpdate();
+  }
+
   // Periodic reading-time checkpoint, requested by the render task on full-refresh
   // pages. Handled here on the main task (same context as onExit's final flush) so
   // the session counters stay single-task. A crash then loses at most the time
@@ -1501,7 +1538,7 @@ void EpubReaderActivity::loop() {
   // starts a highlight selection on the current page. The child word-select swallows the release
   // that ends this launching hold (see its onEnter), so letting go doesn't immediately cancel;
   // ignoreBackUntilRelease is re-armed on return.
-  if (!suppressBack && section && mappedInput.isPressed(MappedInputManager::Button::Back) &&
+  if (!suppressBack && hasPage() && mappedInput.isPressed(MappedInputManager::Button::Back) &&
       mappedInput.getHeldTime() >= Dictionary::LONG_PRESS_MS && !highlightHoldFired) {
     highlightHoldFired = true;  // one-shot until Back is released, so we don't relaunch each tick
     openHighlightSelect();
@@ -1888,6 +1925,19 @@ bool EpubReaderActivity::runReaderAction(const HomeButtonAction action) {
   }
 }
 
+// The gloss cursor is remembered for this page only: any other page (or the same page number
+// after a re-layout) starts again from its first word outside a title.
+void EpubReaderActivity::attachGlossCursorMemory(DictionaryWordSelectActivity& wordSelect, const int page,
+                                                 const int pageCount) {
+  if (glossCursorSpine_ != currentSpineIndex || glossCursorPage_ != page || glossCursorPageCount_ != pageCount) {
+    glossCursorSpine_ = currentSpineIndex;
+    glossCursorPage_ = page;
+    glossCursorPageCount_ = pageCount;
+    glossCursorWord_ = -1;
+  }
+  wordSelect.setGlossCursorMemory(glossCursorWord_, &glossCursorWord_);
+}
+
 void EpubReaderActivity::openWordSelect(const bool framebufferContainsPage, const int pointX, const int pointY) {
   if (verticalSection) {
     openVerticalWordSelect(framebufferContainsPage, pointX, pointY);
@@ -1916,6 +1966,38 @@ void EpubReaderActivity::openWordSelect(const bool framebufferContainsPage, cons
                 SETTINGS.getReaderScreenMargin(),
                 static_cast<uint8_t>(statusBarHeight + UITheme::getInstance().getMetrics().statusBarVerticalMargin))
           : std::max(SETTINGS.getReaderScreenMargin(), statusBarHeight);
+  // Runs before the word scan's heap check, which needs what this frees.
+  // An in-flight chapter build pins its parser and CSS parser for as long as that chapter is
+  // being read — finalizeBuild() only runs once the chapter is fully consumed, so on device
+  // logs BUILD-START appears and BUILD-DONE never does. The cost is stark: mid-build the reader
+  // sits at free=35,952 largest=15,860, against free=71,936 largest=55,284 on a section served
+  // from cache. Word-select then opens at 23,556 instead of 58,880, and the definition view on
+  // top of it at 7,136 — which is where every dictionary crash has happened.
+  //
+  // suspendBuild() is the purpose-built release: it persists the laid-out pages as a partial
+  // and drops the parser, and the build resumes from that watermark on the next page turn past
+  // the built region. It was only ever called from ~Section(), so nothing freed this while the
+  // reader stayed open.
+  //
+  // Gated rather than unconditional: a cached section is already the healthy profile and must
+  // not pay the resume cost. First estimates, same standing as kMinFreeForWordSelect — the
+  // thresholds sit between the two measured states with margin on both sides; tune from the
+  // logged values.
+  constexpr size_t kMinFreeForDict = 48 * 1024;
+  constexpr size_t kMinBlockForDict = 24 * 1024;
+  // Blocking, not a try: skipping the suspend while a page render held the lock left word select
+  // on the build's heap (1 s renders, glyphs missing). This runs on the main task, no lock held.
+  if (section && section->isBuilding() &&
+      (ESP.getFreeHeap() < kMinFreeForDict || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < kMinBlockForDict)) {
+    RenderLock lock;  // suspendBuild() mutates pageCount/build_/file, which the render task reads
+    // Re-check under the lock: peek() and acquisition are not atomic, so the render task may
+    // have finished or replaced the build in between (same reason as the idle-prewarm gate).
+    if (section && section->isBuilding()) {
+      section->suspendBuild();
+      SdDebugLog::log("EPUB", "build suspended for dict: free=%u largest=%u", (unsigned)ESP.getFreeHeap(),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    }
+  }
   std::string nextPageFirstWord;
   // Whole-word CJK selection: segmented in word-select, which steps the scan.
   auto wordScan = newWordScan();
@@ -1958,35 +2040,6 @@ void EpubReaderActivity::openWordSelect(const bool framebufferContainsPage, cons
   const WordSelectNavigator::InitialMarker initialMarker = computeWordSelectMarker();
   pauseMarkerDwell();  // freeze the dwell across this word-select round-trip (excludes in-dict time)
   accumulateVisibleSegment();
-  // An in-flight chapter build pins its parser and CSS parser for as long as that chapter is
-  // being read — finalizeBuild() only runs once the chapter is fully consumed, so on device
-  // logs BUILD-START appears and BUILD-DONE never does. The cost is stark: mid-build the reader
-  // sits at free=35,952 largest=15,860, against free=71,936 largest=55,284 on a section served
-  // from cache. Word-select then opens at 23,556 instead of 58,880, and the definition view on
-  // top of it at 7,136 — which is where every dictionary crash has happened.
-  //
-  // suspendBuild() is the purpose-built release: it persists the laid-out pages as a partial
-  // and drops the parser, and the build resumes from that watermark on the next page turn past
-  // the built region. It was only ever called from ~Section(), so nothing freed this while the
-  // reader stayed open.
-  //
-  // Gated rather than unconditional: a cached section is already the healthy profile and must
-  // not pay the resume cost. First estimates, same standing as kMinFreeForWordSelect — the
-  // thresholds sit between the two measured states with margin on both sides; tune from the
-  // logged values.
-  constexpr size_t kMinFreeForDict = 48 * 1024;
-  constexpr size_t kMinBlockForDict = 24 * 1024;
-  if (section && section->isBuilding() && !RenderLock::peek() &&
-      (ESP.getFreeHeap() < kMinFreeForDict || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < kMinBlockForDict)) {
-    RenderLock lock;  // suspendBuild() mutates pageCount/build_/file, which the render task reads
-    // Re-check under the lock: peek() and acquisition are not atomic, so the render task may
-    // have finished or replaced the build in between (same reason as the idle-prewarm gate).
-    if (section && section->isBuilding()) {
-      section->suspendBuild();
-      SdDebugLog::log("EPUB", "build suspended for dict: free=%u largest=%u", (unsigned)ESP.getFreeHeap(),
-                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-    }
-  }
 
   // Nothrow: a CJK page leaves the heap at ~13 KB largest by the time this is pushed. On
   // failure pageForLookup is untouched (a failed nothrow new never runs the constructor, so
@@ -2002,24 +2055,20 @@ void EpubReaderActivity::openWordSelect(const bool framebufferContainsPage, cons
     // round-trip that never happened. The page is still on screen, so nothing to repaint.
     return;
   }
-  // The gloss cursor is remembered for this page only: any other page (or the same page number
-  // after a re-layout) starts again from its first word outside a title.
-  if (glossCursorSpine_ != currentSpineIndex || glossCursorPage_ != section->currentPage ||
-      glossCursorPageCount_ != section->pageCount) {
-    glossCursorSpine_ = currentSpineIndex;
-    glossCursorPage_ = section->currentPage;
-    glossCursorPageCount_ = section->pageCount;
-    glossCursorWord_ = -1;
-  }
-  wordSelect->setGlossCursorMemory(glossCursorWord_, &glossCursorWord_);
+  attachGlossCursorMemory(*wordSelect, section->currentPage, section->pageCount);
+  wordSelect->setStartAtPageEdge(glossStartEdge_);
   wordSelect->setPageMarkKey(currentPageMarkKey());
   wordSelect->setMarksReloader(this, &EpubReaderActivity::reloadLookupMarksThunk);
   if (wordScan) {
     wordSelect->setWordScan(std::move(wordScan), wordScanCachePath(), static_cast<uint16_t>(currentSpineIndex),
                             static_cast<uint16_t>(section->currentPage));
   }
-  startActivityForResult(std::move(wordSelect), [this](const ActivityResult&) {
+  startActivityForResult(std::move(wordSelect), [this](const ActivityResult& result) {
     ignoreBackUntilRelease = true;
+    if (const auto* turn = std::get_if<GlossPageTurnResult>(&result.data)) {
+      glossPageTurn_ = turn->forward ? 1 : -1;  // loop() turns the page and repaints
+      return;
+    }
     // A lookup enrolls a flashcard, which is what anchors the page underline — so the word
     // just looked up is underlined on the repaint below.
     reloadLookupMarks();
@@ -2220,6 +2269,7 @@ void EpubReaderActivity::paintPageActionPopup() {
 }
 
 void EpubReaderActivity::openHighlightSelect(const int pointX, const int pointY, const bool afterDelete) {
+  if (!finishVerticalBuildNow()) return;
   int pageCount = 0;
   {
     RenderLock lock(*this);
@@ -4862,6 +4912,7 @@ void EpubReaderActivity::syncBookOverrideFromGlobals() {
   ov.embeddedStyle = SETTINGS.embeddedStyle;
   ov.textAntiAliasing = SETTINGS.textAntiAliasing;
   ov.focusReadingEnabled = SETTINGS.focusReadingEnabled;
+  ov.inlineGlossEnabled = SETTINGS.dictInlineGlossEnabled;
   static_assert(sizeof(ov.sdFontFamilyName) == sizeof(SETTINGS.sdFontFamilyName), "sdFontFamilyName size mismatch");
   strncpy(ov.sdFontFamilyName, SETTINGS.sdFontFamilyName, sizeof(ov.sdFontFamilyName) - 1);
   ov.sdFontFamilyName[sizeof(ov.sdFontFamilyName) - 1] = '\0';

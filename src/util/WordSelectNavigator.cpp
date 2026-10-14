@@ -560,6 +560,13 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
     return true;
   }
 
+  // Where the cursor was before this step, to put it back when the step only wrapped.
+  const int edgeFromFlat = getCurrentFlatIndex();
+  const int edgeFromRow = currentRow;
+  const int edgeFromWordInRow = currentWordInRow;
+  const int edgeFromSnap = pendingSnapIdx;
+  const int edgeFromGoalX = rowNavGoalX;
+
   // Row navigation aims at a reference column, freshest source first:
   //  - the second half a wordPrev just snapped away from (across rows), so rowPrev/rowNext
   //    feels like it originates from where the user was — this picks the base row too;
@@ -629,6 +636,20 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
       currentRow = landedRow;
       currentWordInRow = landedWordInRow;
       pendingSnapIdx = landedSnapIdx;
+    }
+  }
+
+  if (stopAtPageEdges_ && !inMultiSelectMode && edgeFromFlat >= 0) {
+    const int now = getCurrentFlatIndex();
+    const bool forward = rowNextPressed || wordNextPressed;
+    const bool backward = rowPrevPressed || wordPrevPressed;
+    if ((forward && now <= edgeFromFlat) || (backward && !forward && now >= edgeFromFlat)) {
+      currentRow = edgeFromRow;
+      currentWordInRow = edgeFromWordInRow;
+      pendingSnapIdx = edgeFromSnap;
+      rowNavGoalX = edgeFromGoalX;
+      pageEdge_ = forward ? 1 : -1;
+      return false;
     }
   }
 

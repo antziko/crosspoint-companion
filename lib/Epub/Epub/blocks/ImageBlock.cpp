@@ -7,6 +7,7 @@
 #include <Serialization.h>
 #include <esp_heap_caps.h>
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <new>
@@ -100,6 +101,28 @@ bool imageFailedThisSession(const std::string& path) {
 void rememberImageFailure(const std::string& path) {
   if (failedImageCount == MAX_SESSION_IMAGE_FAILURES || imageFailedThisSession(path)) return;
   failedImageHashes[failedImageCount++] = imagePathHash(path);
+}
+
+// An extraction or decode that failed for lack of heap (usually a chapter build holding it) is
+// not remembered on its first failure: the reader frees memory and redraws. The second failure
+// of the same image is. The flag is written by the render task and read by the reader's loop.
+constexpr size_t MAX_HEAP_RETRIES = 8;
+uint64_t retriedImageHashes[MAX_HEAP_RETRIES];
+size_t retriedImageCount = 0;
+std::atomic<bool> heapRetryPending{false};
+// Below this largest block a failed decode is put down to the heap rather than the image.
+constexpr size_t HEAP_RETRY_MAX_LARGEST = 32 * 1024;
+
+// True when `path` gets its one retry now; false when it already had it (or no slot is left).
+bool deferForHeapRetry(const std::string& path) {
+  const uint64_t hash = imagePathHash(path);
+  for (size_t i = 0; i < retriedImageCount; i++) {
+    if (retriedImageHashes[i] == hash) return false;
+  }
+  if (retriedImageCount == MAX_HEAP_RETRIES) return false;
+  retriedImageHashes[retriedImageCount++] = hash;
+  heapRetryPending.store(true, std::memory_order_release);
+  return true;
 }
 
 // --- Per-page-render RAM slot for the pixel cache ----------------------------
@@ -319,7 +342,12 @@ bool ImageBlock::needsDecode(const GfxRenderer& renderer) const {
   return !imageFailedThisSession(imagePath) && !hasValidCache(renderer);
 }
 
-void ImageBlock::clearSessionRenderFailures() { failedImageCount = 0; }
+void ImageBlock::clearSessionRenderFailures() {
+  failedImageCount = 0;
+  retriedImageCount = 0;
+}
+
+bool ImageBlock::takeHeapRetry() { return heapRetryPending.exchange(false, std::memory_order_acq_rel); }
 
 void ImageBlock::releaseRenderCache() { releasePxcSlot(); }
 
@@ -397,6 +425,12 @@ void ImageBlock::render(GfxRenderer& renderer, const int x, const int y) {
     LOG_DBG("IMG", "Lazy-extracting %s -> %s", srcPath.c_str(), imagePath.c_str());
     if (!extractFn(extractCtx, srcPath.c_str(), imagePath.c_str())) {
       LOG_ERR("IMG", "Lazy extraction failed: %s", srcPath.c_str());
+      SdDebugLog::log("IMG", "extract fail %s free=%u largest=%u", srcPath.c_str(), (unsigned)ESP.getFreeHeap(),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+      if (deferForHeapRetry(imagePath)) {
+        renderPlaceholder(renderer, x, y);
+        return;
+      }
     }
   }
 
@@ -459,7 +493,9 @@ void ImageBlock::render(GfxRenderer& renderer, const int x, const int y) {
                     decoder->getFormatName(), (unsigned)ESP.getFreeHeap(),
                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     decodeFailed = true;  // don't retry on the remaining render passes for this view
-    rememberImageFailure(imagePath);
+    if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) >= HEAP_RETRY_MAX_LARGEST || !deferForHeapRetry(imagePath)) {
+      rememberImageFailure(imagePath);
+    }
     renderPlaceholder(renderer, x, y);
     return;
   }
