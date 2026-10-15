@@ -101,12 +101,13 @@ void logSleepEntry(const GfxRenderer& renderer, const bool fromTimeout, const bo
   //            image retention is set by. parks=0 with a large railsMs means the park never
   //            fired -- check it before reading anything else into a capture.
   const int ink = renderer.frameInkPercent();
-  SdDebugLog::log("SLP", "frame heldMs=%lu ink=%d%% panelBlack=%d%% paints fast=%u half=%u full=%u scrub=%u",
+  SdDebugLog::log("SLP", "frame heldMs=%lu ink=%d%% panelBlack=%d%% paints fast=%u half=%u full=%u scrub=%u win=%u",
                   renderer.msSinceLastPaint(), ink, SETTINGS.screenInverted ? 100 - ink : ink,
                   static_cast<unsigned>(renderer.paintCount(HalDisplay::FAST_REFRESH)),
                   static_cast<unsigned>(renderer.paintCount(HalDisplay::HALF_REFRESH)),
                   static_cast<unsigned>(renderer.paintCount(HalDisplay::FULL_REFRESH)),
-                  static_cast<unsigned>(renderer.paintCount(HalDisplay::SCRUB_REFRESH)));
+                  static_cast<unsigned>(renderer.paintCount(HalDisplay::SCRUB_REFRESH)),
+                  static_cast<unsigned>(renderer.windowPaintCount()));
   SdDebugLog::log("SLP", "rails ms=%lu parks=%u up=%d", renderer.railsMs(), static_cast<unsigned>(renderer.parkCount()),
                   renderer.panelRailsUp() ? 1 : 0);
   // Waveforms under-drive when cold, and USB keeps the board powered through sleep.
@@ -118,23 +119,30 @@ void logSleepEntry(const GfxRenderer& renderer, const bool fromTimeout, const bo
   renderer.logDoseTrace("sleep");
 }
 
-// X3 and X4: drive the outgoing frame's negative before the clean. The UC8253 Half and FAST banks
-// push a pixel that keeps its value further the same way (black blacker, white whiter), so a page
-// shown again and again leaves a text-shaped bias. The clean below cannot remove it: its black and
-// white phases push every pixel equally. Half passes of the negative push the text and the ground
-// the other way. The SSD1677 runs OTP waveforms whose balance cannot be read, so it gets the same
-// passes on trial, one at a time: its Half is the full-strength OTP waveform (~1.9 s, against
-// ~0.75 s on the X3). Runs before setInverted(false), so inverting the buffer under the driver's own
-// inversion still puts the negative of whatever the glass shows, in either polarity.
+// X3 and X4: drive the outgoing frame's negative before the clean. A page held through many FAST
+// and Half paints leaves a text-shaped bias the clean below cannot remove (its black and white
+// phases push every pixel equally); on the X3 it shows as the page's text in WHITE on the next
+// wallpaper. The negative pushes the text and the ground back the other way. X3 results, day mode:
+// 0 passes left a strong ghost, 2 a legible one, 5 a lighter one; a session heavier than that gets
+// 8. Light sessions take 2: the gloss box refreshes only its own window, so the page itself is
+// barely driven and 5 passes would overshoot. The SSD1677 runs OTP waveforms whose balance cannot
+// be read, so it gets one pass on trial: its Half is the full-strength OTP waveform (~1.9 s,
+// against ~0.75 s on the X3). Runs before setInverted(false), so inverting the buffer under the
+// driver's own inversion still puts the negative of whatever the glass shows, in either polarity.
 void driveNegative(const GfxRenderer& renderer) {
   const auto ctrl = BoardConfig::ACTIVE.displayController;
   if (ctrl != BoardConfig::DisplayController::UC8253 && ctrl != BoardConfig::DisplayController::SSD1677) return;
-  const uint8_t passes = ctrl == BoardConfig::DisplayController::UC8253 ? 2 : 1;
   if (!renderer.hasFrameBuffer() || renderer.frameInkPercent() == 0) return;
+  // A scrub re-drives held pixels ~12x a FAST's top-up.
+  const uint32_t dose =
+      renderer.paintCount(HalDisplay::FAST_REFRESH) + 12u * renderer.paintCount(HalDisplay::SCRUB_REFRESH);
+  uint8_t passes = 1;
+  if (ctrl == BoardConfig::DisplayController::UC8253) passes = dose < 100 ? 2 : dose < 200 ? 5 : 8;
   const unsigned long startMs = millis();
   renderer.invertScreen();
   for (uint8_t i = 0; i < passes; i++) renderer.displayBuffer(HalDisplay::SCRUB_REFRESH);
-  SdDebugLog::log("SLP", "negative passes=%u ms=%lu", static_cast<unsigned>(passes), millis() - startMs);
+  SdDebugLog::log("SLP", "negative dose=%u passes=%u ms=%lu", static_cast<unsigned>(dose),
+                  static_cast<unsigned>(passes), millis() - startMs);
 }
 
 }  // namespace
@@ -239,7 +247,9 @@ void SleepActivity::onEnter() {
   static constexpr unsigned long kLongHoldMs = 60UL * 1000;
   static constexpr unsigned long kVeryLongHoldMs = 3UL * 60 * 1000;
   uint8_t cycles = kSleepDeepCleanCycles;
-  if (renderer.paintCount(HalDisplay::FAST_REFRESH) >= kHeavySessionFastPaints) cycles = kSleepDeepCleanCycles + 1;
+  if (renderer.paintCount(HalDisplay::FAST_REFRESH) >= kHeavySessionFastPaints) {
+    cycles = std::max<uint8_t>(cycles, kSleepDeepCleanCycles + 1);
+  }
   if (fromTimeout || outgoingHeldMs >= kVeryLongHoldMs) {
     cycles = std::max<uint8_t>(cycles, 3);
   } else if (outgoingHeldMs >= kLongHoldMs) {

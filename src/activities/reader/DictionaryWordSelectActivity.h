@@ -170,6 +170,16 @@ class DictionaryWordSelectActivity final : public Activity {
   enum class RenderMode { FullPage, Differential };
   RenderMode nextRenderMode_ = RenderMode::FullPage;
   int prevHighlightIdx_ = -1;
+  // Windowed refresh bookkeeping. glassKnown_: the glass shows the page this activity last
+  // rendered, so a frame that only moved the highlight and the box can refresh just those.
+  // lastMarks_: the bounding box of the highlight band(s) and the box drawn on that frame (screen
+  // coordinates); lastMarksValid_ is false when there was no selection to name.
+  bool glassKnown_ = false;
+  bool lastMarksValid_ = false;
+  WordSelectNavigator::Rect lastMarks_{};
+  // Bounding box of every band the selection draws (a range's words, a split word's halves) plus
+  // the box; false when nothing is selected.
+  bool currentMarksRect(int currIdx, int lineHeight, WordSelectNavigator::Rect& out) const;
 
   // One-shot opt-in from the caller: "the framebuffer already contains the
   // page at marginLeft/marginTop (e.g. EpubReader just rendered it before the
@@ -287,6 +297,14 @@ class DictionaryWordSelectActivity final : public Activity {
   std::atomic<bool> firstFrameShown_{false};
   int startEdge_ = 0;
   bool scanCompactTried_ = false;
+  // Word grouping as the gloss box reports it. Written by the loop's scan step, read by the
+  // render task, which records what it last drew so a change gets one repaint.
+  enum GlossScanNote : uint8_t { kNoteNone, kNoteWorking, kNoteReopen };
+  bool scanIncomplete_ = false;  // the scan ended on the heap; the page's words are partly grouped
+  std::atomic<uint8_t> glossNote_{kNoteNone};
+  std::atomic<uint8_t> glossNoteDrawn_{kNoteNone};
+  // Stores the note, logging a change with the reason (DGL: note=).
+  void setGlossNote(uint8_t note, const char* why);
 
   // Maps extractWords' token positions to scan cells (horizontal page).
   void mapTokenCells();
@@ -318,6 +336,7 @@ class DictionaryWordSelectActivity final : public Activity {
   void forceFullRepaintOnNextRender() {
     nextRenderMode_ = RenderMode::FullPage;
     prevHighlightIdx_ = -1;
+    glassKnown_ = false;
     // Whatever drew over us also erased the box, so nothing holds one any more. Left stale,
     // restoreVacatedGlossStrip would clear and re-render a strip of a framebuffer that no
     // longer contains the page.

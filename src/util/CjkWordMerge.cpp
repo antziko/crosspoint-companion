@@ -23,8 +23,12 @@ bool joinText(const std::vector<WordInfo>& words, const std::string& pool, const
   len = 0;
   for (int i = lo; i <= hi; i++) {
     const WordInfo& w = words[i];
-    const uint16_t off = lookup ? w.lookupOffset : w.textOffset;
-    const uint16_t n = lookup ? w.lookupLen : w.textLen;
+    // Each half of a word split over two rows carries the WHOLE word as its lookup; joining
+    // those would repeat it, so a half contributes its own text.
+    const bool half = w.continuationIndex >= 0 || w.continuationOf >= 0;
+    const bool useLookup = lookup && !half;
+    const uint16_t off = useLookup ? w.lookupOffset : w.textOffset;
+    const uint16_t n = useLookup ? w.lookupLen : w.textLen;
     if (len + n >= kMaxJoinedBytes) return false;
     memcpy(buf + len, pool.data() + off, n);
     len += n;

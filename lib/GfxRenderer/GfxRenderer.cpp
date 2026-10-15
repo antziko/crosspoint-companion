@@ -2149,6 +2149,7 @@ unsigned long GfxRenderer::deepCleanPanel(const uint8_t cycles) const {
   // Zeroed before the clean, not after: the clean's own passes then land in the fresh window and
   // the counts a caller logs before calling still describe the session that preceded it.
   for (uint16_t& count : paintCounts_) count = 0;
+  windowPaints_ = 0;
   railsMs_ = 0;
   parkCount_ = 0;
   if (panelPoweredSinceMs_ != 0) panelPoweredSinceMs_ = millis();
@@ -2223,6 +2224,12 @@ HalDisplay::RefreshMode GfxRenderer::applyPromotedRefresh(const HalDisplay::Refr
 // SCRUB, not HALF: both map to the driver's Half (HalDisplay.cpp:52-56), but SCRUB skips the
 // X3 requestResync() that HALF fires, which costs three panel passes -- 3203ms against 437ms.
 // This runs unattended on every screen, so it must not carry that.
+bool GfxRenderer::dwellScrubDue() const {
+  if (lastPaintMs_ == 0) return false;
+  if (millis() - lastPaintMs_ >= DWELL_SCRUB_MS) return true;
+  return cleanGapScrub_ && millis() - lastCleanPaintMs_ >= CLEAN_GAP_SCRUB_MS;
+}
+
 HalDisplay::RefreshMode GfxRenderer::applyDwellScrub(const HalDisplay::RefreshMode refreshMode) const {
   if (refreshMode != HalDisplay::FAST_REFRESH || lastPaintMs_ == 0) return refreshMode;
   const unsigned long heldMs = millis() - lastPaintMs_;
@@ -2281,7 +2288,7 @@ void GfxRenderer::displayBuffer(HalDisplay::RefreshMode refreshMode) const {
 // Panel-activation history. Recorded after the activation, so lastPaintMs_ is when the frame
 // reached the glass rather than when the call started -- the sleep trace reads it as "how long
 // has this image been held", and a 1.5 s waveform is not part of that hold.
-void GfxRenderer::notePaint(const HalDisplay::RefreshMode mode) const {
+void GfxRenderer::notePaint(const HalDisplay::RefreshMode mode, const bool windowed) const {
   lastPaintMs_ = millis();
   // The first paint after boot starts the clean-gap clock even when it is FAST: boot and wake
   // both put a fully driven frame on the glass first.
@@ -2289,6 +2296,10 @@ void GfxRenderer::notePaint(const HalDisplay::RefreshMode mode) const {
   // An activation always leaves the rails up on panels that do not power down per refresh; the
   // ones that do report it by being parked already, and their next paint just restarts the clock.
   if (panelPoweredSinceMs_ == 0) panelPoweredSinceMs_ = lastPaintMs_;
+  if (windowed) {
+    if (windowPaints_ != UINT16_MAX) windowPaints_++;
+    return;
+  }
   const size_t idx = static_cast<size_t>(mode);
   if (idx < sizeof(paintCounts_) / sizeof(paintCounts_[0]) && paintCounts_[idx] != UINT16_MAX) {
     paintCounts_[idx]++;
@@ -2354,6 +2365,10 @@ int GfxRenderer::frameInkPercent() const {
 }
 
 void GfxRenderer::displayWindowRegion(int lx, int ly, int lw, int lh) const {
+  if (BoardConfig::ACTIVE.displayController == BoardConfig::DisplayController::UC8253) {
+    displayFastWindow(lx, ly, lw, lh);  // the X3's guarded path
+    return;
+  }
   const AlignedMemRect mem = screenRectToAlignedMemRect(orientation, lx, ly, lw, lh, panelWidth, panelHeight);
   if (!mem.valid) {
     // Fallback: full-frame fast refresh so callers always get a panel update.
@@ -2367,6 +2382,25 @@ void GfxRenderer::displayWindowRegion(int lx, int ly, int lw, int lh) const {
   // A windowed update drives only its rectangle, but it is still the moment the glass last
   // changed, and it is differential -- which is exactly what the FAST count is counting.
   notePaint(HalDisplay::FAST_REFRESH);
+}
+
+// The X3 (UC8253) drives a FAST window through PTIN/PTOUT, so pixels outside it take no drive at
+// all -- which is the point: the turbo bank tops up every unchanged pixel one way, and a page held
+// through a gloss-box session built that into a ghost. The SSD1677 window path is not used: it
+// produced alternating transition failures on consecutive partial refreshes.
+constexpr bool kX3WindowedFast = true;
+
+void GfxRenderer::displayFastWindow(const int lx, const int ly, const int lw, const int lh) const {
+  const bool windowCapable =
+      kX3WindowedFast && BoardConfig::ACTIVE.displayController == BoardConfig::DisplayController::UC8253;
+  const AlignedMemRect mem = screenRectToAlignedMemRect(orientation, lx, ly, lw, lh, panelWidth, panelHeight);
+  if (!windowCapable || !mem.valid || promotedRefreshPending_ || forceCleanRefreshOnce_ || dwellScrubDue() ||
+      display.isInverted()) {
+    displayBuffer(HalDisplay::FAST_REFRESH);
+    return;
+  }
+  display.displayWindow(mem.x, mem.y, mem.w, mem.h);
+  notePaint(HalDisplay::FAST_REFRESH, /*windowed=*/true);
 }
 
 void GfxRenderer::displayBufferAsync(HalDisplay::RefreshMode refreshMode) const {

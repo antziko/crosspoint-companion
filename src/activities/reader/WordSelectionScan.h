@@ -93,6 +93,10 @@ class WordSelectionScan {
   // Returns true when the scan is fully done.
   bool step(uint32_t maxMillis);
   bool isDone() const { return phase == Phase::Done; }
+  // True after a found word could not be stored: step() does nothing until resumeAfterStall(),
+  // which the owner calls once the heap has had time to recover.
+  bool heapStalled() const { return heapStalled_; }
+  void resumeAfterStall() { heapStalled_ = false; }
 
   // True when initFrom*() or step() abandoned work because the heap couldn't grow a vector, so
   // the selectable list is a partial (often tiny) result. Callers that can free heap (release
@@ -198,8 +202,10 @@ class WordSelectionScan {
   static void reserveGlyphsSafe(std::vector<GlyphRef>& vec, size_t count);
   static bool pushGlyphSafe(std::vector<GlyphRef>& vec, const GlyphRef& g);
   // Records a found word in selectableGlyphs + selectToAllIdx. On a heap that cannot grow them it
-  // releases the dictionary caches and retries once; failing that it ends the scan (truncated).
-  bool pushSelectable(const GlyphRef& entry, size_t cell);
+  // releases the dictionary caches and retries once; failing that it stalls the scan at `cell`
+  // (the walk rewinds to `runStart`, the cell its segmentation began at), and after
+  // kMaxHeapStalls stalls ends it (truncated).
+  bool pushSelectable(const GlyphRef& entry, size_t cell, size_t runStart);
 
  private:
   enum class Phase : uint8_t { Scan, Done };
@@ -214,6 +220,10 @@ class WordSelectionScan {
   size_t recordFrom = 0;
   void markScanned(size_t glyphIndex) {
     if (glyphIndex < allGlyphs.size() && !scannedBits.empty()) scannedBits[glyphIndex >> 3] |= (1u << (glyphIndex & 7));
+  }
+  void unmarkScanned(size_t glyphIndex) {
+    if (glyphIndex < allGlyphs.size() && !scannedBits.empty())
+      scannedBits[glyphIndex >> 3] &= ~(1u << (glyphIndex & 7));
   }
   // Off-page context cells are never walked, so they would stay unmapped forever: mark them
   // segmented so nextUnscanned() and the select-mode "closest unmapped cell" search skip them
@@ -233,6 +243,9 @@ class WordSelectionScan {
   // selectable words; persisting that result to the on-SD cache would poison every later open
   // of this page -- even after the heap recovers -- so saveCache() refuses when this is set.
   bool scanTruncated = false;
+  static constexpr uint8_t kMaxHeapStalls = 3;
+  bool heapStalled_ = false;
+  uint8_t heapStalls_ = 0;
 
   void reset();
   uint32_t glyphContentHash() const;

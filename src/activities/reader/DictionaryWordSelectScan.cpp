@@ -42,6 +42,11 @@ constexpr bool kDeferScanForGloss = true;
 constexpr bool kScanYields = true;
 constexpr uint32_t kScanResumeGrowth = 8 * 1024;
 constexpr unsigned long kScanRetryMs = 10000;
+// The scan's caches can also leave the rest of the device starving without failing themselves: below
+// both of these it pauses the same way. Both, because a scan with little free heap but whole blocks
+// is healthy.
+constexpr uint32_t kScanFloorFree = 10 * 1024;
+constexpr uint32_t kScanFloorLargest = 4 * 1024;
 // No scan slice this soon after a cursor step, so a run of presses never waits behind one.
 constexpr unsigned long kScanQuietAfterStepMs = 1500;
 
@@ -160,9 +165,24 @@ bool DictionaryWordSelectActivity::remergeWords(int cursorChar) {
 
   // The cursor stays on the character it was on, now inside its word.
   if (cursorChar < 0) cursorChar = charLoOf(navigator.getCurrentFlatIndex());
-  WordSelectNavigator::WordInfo before{};
-  const bool hadSelection = navigator.getSelected() != nullptr;
-  if (hadSelection) before = *navigator.getSelected();
+  // The selection's band(s) on screen, both halves of a split word: a merge that leaves them where
+  // they are changes nothing the reader can see, so it needs no repaint.
+  struct Band {
+    bool present = false;
+    int16_t x = 0, y = 0, width = 0;
+  };
+  const auto bandsOf = [&](Band(&out)[2]) {
+    out[0] = out[1] = {};
+    const auto* w = navigator.getSelected();
+    if (!w) return;
+    out[0] = {true, w->screenX, w->screenY, w->width};
+    const int partner = w->continuationIndex >= 0 ? w->continuationIndex : w->continuationOf;
+    if (const auto* p = partner >= 0 ? navigator.getWordAt(partner) : nullptr) {
+      out[1] = {true, p->screenX, p->screenY, p->width};
+    }
+  };
+  Band before[2];
+  bandsOf(before);
   {
     // The render task reads the word list while it draws, so it is taken, merged and put back
     // under the lock. The merge itself is a single pass over one page.
@@ -195,16 +215,20 @@ bool DictionaryWordSelectActivity::remergeWords(int cursorChar) {
   }
   mergedScanWords_ = found;
   lastMergeMs_ = millis();
-  const auto* after = navigator.getSelected();
-  const bool boxChanged = !hadSelection || !after || after->screenX != before.screenX ||
-                          after->screenY != before.screenY || after->width != before.width ||
-                          after->continuationIndex >= 0 || after->continuationOf >= 0;
+  Band after[2];
+  bandsOf(after);
+  const auto same = [](const Band& a, const Band& b) {
+    return a.present == b.present && a.x == b.x && a.y == b.y && a.width == b.width;
+  };
+  const bool boxChanged =
+      !before[0].present || !same(before[0], after[0]) || !same(before[1], after[1]) || navigator.isMultiSelecting();
   if (gloss_) {
     loadGlossCards();
-    gloss_->forFlatIdx = -1;
     gloss_->probeLo = gloss_->probeHi = -1;
+    // Same word under the cursor: its entry stands, under the index the merge gave it.
+    gloss_->forFlatIdx = boxChanged ? -1 : navigator.getCurrentFlatIndex();
   }
-  if (boxChanged || gloss_) {
+  if (boxChanged) {
     requestUpdate();
   } else if (prevHighlightIdx_ >= 0) {
     // Same box on screen: the differential snapshot still matches it under its new index.
@@ -214,6 +238,12 @@ bool DictionaryWordSelectActivity::remergeWords(int cursorChar) {
                   static_cast<unsigned>(found), static_cast<unsigned>(onPage),
                   static_cast<int>(!scan_ || scan_->isDone()), scan_ ? "scan" : "list");
   return true;
+}
+
+void DictionaryWordSelectActivity::setGlossNote(const uint8_t note, const char* why) {
+  if (glossNote_.exchange(note) == note) return;
+  static constexpr const char* kNames[] = {"none", "working", "reopen"};
+  SdDebugLog::log("DGL", "note=%s why=%s", note < 3 ? kNames[note] : "?", why);
 }
 
 void DictionaryWordSelectActivity::startWordScan() {
@@ -229,12 +259,15 @@ void DictionaryWordSelectActivity::startWordScan() {
     LOG_ERR("DWS", "Scan cell map missing (%u/%d); per-character selection", static_cast<unsigned>(tokenGlyphs_.size()),
             navigator.wordCount());
     scan_.reset();
+    setGlossNote(kNoteReopen, "no cell map");
     return;
   }
   const unsigned long t0 = millis();
   const bool cached = !scanCachePath_.empty() && scan_->tryLoadCache(scanCachePath_, scanSpine_, scanPage_);
   scanCacheSaved_ = cached;
   scanDictReleased_ = false;
+  scanIncomplete_ = false;
+  setGlossNote(cached ? kNoteNone : kNoteWorking, cached ? "cached" : "scan start");
   mergeRefusedMs_ = 0;
   scanWaitsForFrame_ = false;
   scanPausedMs_ = 0;
@@ -261,7 +294,9 @@ void DictionaryWordSelectActivity::startWordScan() {
       }
       return true;
     };
-    while (!scan_->isDone() && !neighbourhoodMapped() && millis() - t0 < kBurstCapMs) scan_->step(kBurstSliceMs);
+    while (!scan_->isDone() && !scan_->heapStalled() && !neighbourhoodMapped() && millis() - t0 < kBurstCapMs) {
+      scan_->step(kBurstSliceMs);
+    }
   }
 
   // A range opened by pointing (HighlightRange) survives the swap, re-begun on its word.
@@ -269,6 +304,7 @@ void DictionaryWordSelectActivity::startWordScan() {
   if (!remergeWords(navigator.getCurrentFlatIndex())) {  // nothing merged yet: a character index
     // No room for the merge: the page stays per character.
     scan_.reset();
+    setGlossNote(kNoteReopen, "first merge refused");
     return;
   }
   if (anchorChar >= 0) navigator.beginMultiSelectAt(flatOfChar(anchorChar));
@@ -337,16 +373,21 @@ void DictionaryWordSelectActivity::stepWordScan() {
         state = 'p';
       } else {
         scanPausedMs_ = 0;
+        scan_->resumeAfterStall();
         SdDebugLog::log("DWS", "scan resumed free=%u largest=%u", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
       }
-    } else if (DictIndex::cachesStarved()) {
+    } else if (const bool belowFloor =
+                   scanCachesHeld_ && ESP.getFreeHeap() < kScanFloorFree && ESP.getMaxAllocHeap() < kScanFloorLargest;
+               belowFloor || DictIndex::cachesStarved()) {
+      const uint32_t freeBefore = ESP.getFreeHeap();
       DictIndex::releaseCaches();
+      scanCachesHeld_ = false;
       scanPausedLargest_ = ESP.getMaxAllocHeap();
       scanPausedMs_ = std::max<unsigned long>(1, millis());
       stepNow = false;
       state = 'p';
-      SdDebugLog::log("DWS", "scan paused (heap) free=%u largest=%u minEver=%u", ESP.getFreeHeap(),
-                      ESP.getMaxAllocHeap(), ESP.getMinFreeHeap());
+      SdDebugLog::log("DWS", "scan paused (%s) free=%u->%u largest=%u minEver=%u", belowFloor ? "floor" : "heap",
+                      freeBefore, ESP.getFreeHeap(), ESP.getMaxAllocHeap(), ESP.getMinFreeHeap());
     }
     // Before a step can start, not after: one slice reads the SD card for tens of milliseconds.
     if (stepNow && (userBusy || quiet)) {
@@ -364,15 +405,26 @@ void DictionaryWordSelectActivity::stepWordScan() {
   if (stepNow) {
     scan_->step(kBackgroundSliceMs);
     scanCachesHeld_ = true;
+    if (scan_->heapStalled()) {
+      // A found word could not be stored (the scan has released the caches): wait for the heap
+      // like any other pause, then pick the walk up where it stalled.
+      scanCachesHeld_ = false;
+      scanPausedLargest_ = ESP.getMaxAllocHeap();
+      scanPausedMs_ = std::max<unsigned long>(1, millis());
+      SdDebugLog::log("DWS", "scan paused (stall) free=%u largest=%u minEver=%u", ESP.getFreeHeap(),
+                      ESP.getMaxAllocHeap(), ESP.getMinFreeHeap());
+    }
   }
   const bool done = !scan_ || scan_->isDone();
   if (done && !scanDictReleased_) {
     // The finished scan reads no more dictionary; only the merge below is left, and it waits for
     // the user to pause. Free the caches now rather than holding them through a busy session.
     scanDictReleased_ = true;
+    scanIncomplete_ = scan_ && scan_->wasTruncated();
     const uint32_t freeBefore = ESP.getFreeHeap();
     const uint32_t largestBefore = ESP.getMaxAllocHeap();
     DictIndex::releaseCaches();
+    scanCachesHeld_ = false;
     SdDebugLog::log("DWS", "scan done, caches released free=%u->%u largest=%u->%u minEver=%u", freeBefore,
                     ESP.getFreeHeap(), largestBefore, ESP.getMaxAllocHeap(), ESP.getMinFreeHeap());
   }
@@ -411,5 +463,12 @@ void DictionaryWordSelectActivity::stepWordScan() {
     scanCompacted_ = false;
     tokenGlyphs_ = {};
     DictIndex::releaseCaches();
+    scanCachesHeld_ = false;
+  }
+  const uint8_t note = scanIncomplete_ ? kNoteReopen : (scan_ || scanCompacted_) ? kNoteWorking : kNoteNone;
+  setGlossNote(note, scanIncomplete_ ? "scan stopped" : note == kNoteNone ? "grouped" : "scan");
+  // Outside a press, as a merge's repaint is; a press repaints anyway and picks the note up.
+  if (gloss_ && gloss_->drawnY != kGlossNotDrawn && note != glossNoteDrawn_.load() && !userBusy && !quiet) {
+    requestUpdate();
   }
 }

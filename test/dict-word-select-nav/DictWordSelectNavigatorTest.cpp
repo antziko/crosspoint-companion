@@ -1784,6 +1784,44 @@ static void testCjkMergeOverMergedList() {
   CHECK(s2[2].lo == 2 && s2[2].hi == 3, "spans index the list given");
 }
 
+// Every remerge sees the found words again; a pair split over two rows must not join its halves'
+// shared lookup (the device looked up 车道 eight times over after three remerges).
+static void testCjkRemergeKeepsSplitPairLookup() {
+  std::printf("testCjkRemergeKeepsSplitPairLookup\n");
+  const char* chars[] = {"今", "日", "は", "晴", "れ"};
+  CjkPage p = mkCjkPage(chars, 5, 2);  // rows: 今日 / は晴 / れ
+  std::vector<WordSelectNavigator::WordInfo> w = p.words;
+  std::vector<WordSelectNavigator::Row> r = p.rows;
+  std::string pool = p.pool;
+  std::vector<CjkWordMerge::Span> spans;
+  for (int pass = 0; pass < 3; pass++) {
+    std::vector<CjkWordMerge::TokenGlyphs> g;
+    for (const auto& sp :
+         spans.empty() ? std::vector<CjkWordMerge::Span>{{0, 0}, {1, 1}, {2, 2}, {3, 3}, {4, 4}} : spans) {
+      g.push_back({static_cast<uint16_t>(sp.lo), static_cast<uint8_t>(sp.hi - sp.lo + 1)});
+    }
+    std::vector<WordSelectNavigator::WordInfo> mw;
+    std::vector<WordSelectNavigator::Row> mr;
+    std::string mpool;
+    std::vector<CjkWordMerge::Span> ms;
+    CHECK(CjkWordMerge::merge(w, r, pool, g, 5, {{0, 2}, {3, 2}}, false, mw, mr, mpool, ms), "merge ok");
+    // Spans index the list given; back to cells for the next pass.
+    std::vector<CjkWordMerge::Span> cells;
+    for (const auto& sp : ms) {
+      const auto& lo = spans.empty() ? CjkWordMerge::Span{sp.lo, sp.lo} : spans[sp.lo];
+      const auto& hi = spans.empty() ? CjkWordMerge::Span{sp.hi, sp.hi} : spans[sp.hi];
+      cells.push_back({lo.lo, hi.hi});
+    }
+    w = std::move(mw);
+    r = std::move(mr);
+    pool = std::move(mpool);
+    spans = std::move(cells);
+  }
+  CHECK(w.size() == 4, "今日 | は | 晴 | れ after three passes");
+  CHECK(std::strcmp(pool.data() + w[2].lookupOffset, "晴れ") == 0, "first half still looks up the word once");
+  CHECK(std::strcmp(pool.data() + w[3].lookupOffset, "晴れ") == 0, "second half still looks up the word once");
+}
+
 // --- Page edges (gloss box turns the page) ---------------------------------------------
 static void testPageEdgesStopAndReport() {
   std::printf("\n[testPageEdgesStopAndReport]\n");
@@ -1865,6 +1903,7 @@ int main() {
   testCjkMergeVerticalGrowsDownColumn();
   testReplaceWordsKeepsCursorWord();
   testCjkMergeOverMergedList();
+  testCjkRemergeKeepsSplitPairLookup();
   std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

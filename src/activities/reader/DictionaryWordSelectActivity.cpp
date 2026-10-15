@@ -770,6 +770,7 @@ void DictionaryWordSelectActivity::loop() {
         // The definition screen needs the heap more than the paused scan needs its caches; they
         // rebuild on the next slice.
         DictIndex::releaseCaches();
+        scanCachesHeld_ = false;
         auto definition = makeUniqueNoThrow<DictionaryDefinitionActivity>(
             renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(), true, cachePath,
             controller.getRecordHistory(), controller.getLookupWord(),
@@ -1686,10 +1687,24 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
   const auto* first = ranged ? navigator.getWordAt(std::min(anchor, currIdx)) : w;
   const auto* last = ranged ? navigator.getWordAt(std::max(anchor, currIdx)) : w;
   gloss_->place = false;
+  // The other half of a word split over two rows or columns counts as selected too: the box
+  // must not cover it.
+  const auto partnerOf = [&](const WordSelectNavigator::WordInfo* x) -> const WordSelectNavigator::WordInfo* {
+    if (x->continuationIndex >= 0) return navigator.getWordAt(x->continuationIndex);
+    if (x->continuationOf >= 0) return navigator.getWordAt(x->continuationOf);
+    return nullptr;
+  };
   if (gloss_->fits && navigator.isVertical()) {
     // Across the page just below the selection, or just above it near the page foot. Every move
     // of the box repaints the whole vertical page, so it stays where it is while it is still
-    // clear of the selection and no more than its own height away from it.
+    // clear of the selection and no more than its own height away from it. "Clear" also keeps the
+    // cell after the selection free: the navigation skips particles, and that is where one sits.
+    struct Span {
+      int top;
+      int bottom;
+    };
+    Span spans[4];
+    int spanCount = 0;
     int selTop = INT_MAX;
     int selBottom = 0;
     for (int i = std::min(anchor >= 0 ? anchor : currIdx, currIdx); i <= std::max(anchor, currIdx); i++) {
@@ -1699,26 +1714,50 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
       }
     }
     if (selTop == INT_MAX) selTop = selBottom;
+    const int nextCell = verticalCellPx_ > 0 ? verticalCellPx_ : selectionLineHeight;
+    spans[spanCount++] = {selTop, selBottom + nextCell};
+    for (const auto* end : {first, last}) {
+      if (const auto* p = partnerOf(end); p && spanCount < 4) {
+        spans[spanCount++] = {p->screenY, p->screenY + p->width + nextCell};
+      }
+    }
     const int h = gloss_->height;
+    const auto clear = [&](const int y) {
+      if (y < gloss_->topY || y + h > gloss_->bottomLimit) return false;
+      for (int i = 0; i < spanCount; i++) {
+        if (y < spans[i].bottom + kGlossClearance && y + h + kGlossClearance > spans[i].top) return false;
+      }
+      return true;
+    };
     const int held = gloss_->drawnY;
-    const bool heldClear =
-        held != kGlossNotDrawn && (held >= selBottom + kGlossClearance || held + h + kGlossClearance <= selTop);
-    const bool heldNear = held >= selBottom ? held - selBottom <= h : selTop - (held + h) <= h;
-    const int below = selBottom + kGlossClearance;
+    const int below = selBottom + nextCell + kGlossClearance;
     const int above = selTop - kGlossClearance - h;
-    if (heldClear && heldNear) {
+    const bool heldNear = held >= selBottom ? held - selBottom <= h + nextCell : selTop - (held + h) <= h;
+    if (held != kGlossNotDrawn && clear(held) && heldNear) {
       gloss_->y = held;
-    } else if (below + h <= gloss_->bottomLimit) {
+    } else if (clear(below)) {
       gloss_->y = below;
-    } else if (above >= gloss_->topY) {
+    } else if (clear(above)) {
       gloss_->y = above;
+    } else if (clear(gloss_->bottomLimit - h)) {
+      gloss_->y = gloss_->bottomLimit - h;
+    } else if (clear(gloss_->topY)) {
+      gloss_->y = gloss_->topY;
     } else {
       gloss_->y = selBottom + kGlossClearance <= gloss_->bottomLimit - h ? gloss_->bottomLimit - h : gloss_->topY;
     }
     gloss_->place = true;
   } else if (gloss_->fits) {
-    const int above = navigator.rowY(first->row) - kGlossClearance - gloss_->height;
-    const int below = navigator.rowY(last->row) + selectionLineHeight + kGlossClearance;
+    int firstRow = std::min(first->row, last->row);
+    int lastRow = std::max(first->row, last->row);
+    for (const auto* end : {first, last}) {
+      if (const auto* p = partnerOf(end)) {
+        firstRow = std::min<int>(firstRow, p->row);
+        lastRow = std::max<int>(lastRow, p->row);
+      }
+    }
+    const int above = navigator.rowY(firstRow) - kGlossClearance - gloss_->height;
+    const int below = navigator.rowY(lastRow) + selectionLineHeight + kGlossClearance;
     if (above >= gloss_->topY) {
       gloss_->y = above;
       gloss_->place = true;
@@ -2054,6 +2093,22 @@ void DictionaryWordSelectActivity::drawGloss() {
     // information, and a blank box reads as a bug.
     renderer.drawText(gloss_->fontId, textX, textY, tr(STR_DICT_NOT_FOUND), true);
   }
+
+  // Word grouping still running, or ended short of the page: a black tag in the box's top-right
+  // corner, inside the frame so the box's refresh always covers it. A miss or a lone character
+  // then is not yet the final answer.
+  const uint8_t note = glossNote_.load();
+  if (note != kNoteNone) {
+    const char* text = note == kNoteReopen ? tr(STR_GLOSS_REOPEN) : "...";
+    const int w = renderer.getTextWidth(SMALL_FONT_ID, text);
+    const int tagW = w + 2 * kGlossPad;
+    const int tagH = renderer.getLineHeight(SMALL_FONT_ID);
+    const int tagX = gloss_->x + gloss_->width - kGlossFrame - tagW;
+    const int tagY = y + kGlossFrame;
+    renderer.fillRect(tagX, tagY, tagW, tagH, true);
+    renderer.drawText(SMALL_FONT_ID, tagX + kGlossPad, tagY, text, false);
+  }
+  glossNoteDrawn_.store(note);
   gloss_->drawnY = y;
 }
 
@@ -2065,6 +2120,43 @@ void DictionaryWordSelectActivity::clearGlossGhostOnNextPaint() {
   // full definition — which is what this call covers. Both are screen changes, so the refresh is
   // invisible inside them, and the residue never outlives the box that caused it.
   renderer.forceCleanRefreshNextPaint();
+}
+
+namespace {
+// Bounding box of two rectangles; an empty one (zero width or height) adds nothing.
+WordSelectNavigator::Rect unionRect(const WordSelectNavigator::Rect& a, const WordSelectNavigator::Rect& b) {
+  if (a.width <= 0 || a.height <= 0) return b;
+  if (b.width <= 0 || b.height <= 0) return a;
+  const int x0 = std::min(a.x, b.x);
+  const int y0 = std::min(a.y, b.y);
+  const int x1 = std::max(a.x + a.width, b.x + b.width);
+  const int y1 = std::max(a.y + a.height, b.y + b.height);
+  return {x0, y0, x1 - x0, y1 - y0};
+}
+}  // namespace
+
+bool DictionaryWordSelectActivity::currentMarksRect(const int currIdx, const int lineHeight,
+                                                    WordSelectNavigator::Rect& out) const {
+  // Every band the selection draws: each word of a range, and both halves of a split word.
+  if (currIdx < 0 || !navigator.getWordAt(currIdx)) return false;
+  int lo = currIdx;
+  int hi = currIdx;
+  if (navigator.isMultiSelecting()) {
+    lo = std::min(navigator.getAnchorFlatIndex(), currIdx);
+    hi = std::max(navigator.getAnchorFlatIndex(), currIdx);
+  }
+  out = {};
+  for (int i = std::max(0, lo); i <= hi; i++) {
+    const auto* w = navigator.getWordAt(i);
+    if (!w) continue;
+    out = unionRect(out, navigator.computeDirtyRect(-1, i, lineHeight, &renderer));
+    const int partner = w->continuationIndex >= 0 ? w->continuationIndex : w->continuationOf;
+    if (partner >= 0 && navigator.getWordAt(partner)) {
+      out = unionRect(out, navigator.computeDirtyRect(-1, partner, lineHeight, &renderer));
+    }
+  }
+  if (gloss_ && gloss_->place) out = unionRect(out, {gloss_->x, gloss_->y, gloss_->width, gloss_->height});
+  return out.width > 0 && out.height > 0;
 }
 
 void DictionaryWordSelectActivity::render(RenderLock&&) {
@@ -2098,6 +2190,7 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
     // freshly drawn highlight would print black text across the inverted rectangle. It is also
     // clear of the PREVIOUS highlight — the box kept kGlossClearance from the selection it was
     // placed against — so the snapshot the call below is about to restore stays untouched.
+    const int vacatedY = gloss_ ? gloss_->drawnY : kGlossNotDrawn;
     const StripRestore restored = restoreVacatedGlossStrip();
     auto dirty = navigator.renderHighlightDifferential(renderer, lineHeight, prevHighlightIdx_, currIdx);
     if (dirty.has_value()) {
@@ -2112,7 +2205,16 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
       // pre-optimization cost; the full push at the end is a hardware floor (~444ms).
       HangTrace::mark(HangTrace::Render, HangTrace::DwsDiffDisplay);
       countRepaint(restored.scrubbed);
-      renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+      // Only the highlight (old and new word) and the box (where it was and where it is) changed,
+      // so only they are refreshed: the rest of the page takes no drive this frame.
+      WordSelectNavigator::Rect changed = *dirty;
+      if (restored.relocated && vacatedY != kGlossNotDrawn) {
+        changed = unionRect(changed, {gloss_->x, vacatedY, gloss_->width, gloss_->height});
+      }
+      if (gloss_ && gloss_->place) changed = unionRect(changed, {gloss_->x, gloss_->y, gloss_->width, gloss_->height});
+      renderer.displayFastWindow(changed.x, changed.y, changed.width, changed.height);
+      glassKnown_ = true;
+      lastMarksValid_ = currentMarksRect(currIdx, lineHeight, lastMarks_);
       HangTrace::mark(HangTrace::Render, HangTrace::DwsDone);
       // One line per cursor move. This is the path that decides how long "the user finding
       // their word" really takes: every move ends in a full-panel push, so N moves to reach a
@@ -2120,9 +2222,9 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
       // not in the entry render. reloc=1 marks a frame that re-rendered the strip the box left;
       // scrub=1 one that also collapsed its residue — measured at roughly twice a plain move.
       const unsigned long stepAt = stepAcceptedMs_.exchange(0);
-      SdDebugLog::log("DWS", "render diff total=%lums step=%lums reloc=%d scrub=%d free=%u largest=%u",
+      SdDebugLog::log("DWS", "render diff total=%lums step=%lums reloc=%d scrub=%d win=%dx%d free=%u largest=%u",
                       millis() - tRender0, stepAt != 0 ? millis() - stepAt : 0UL, (int)restored.relocated,
-                      (int)restored.scrubbed, static_cast<unsigned>(ESP.getFreeHeap()),
+                      (int)restored.scrubbed, changed.width, changed.height, static_cast<unsigned>(ESP.getFreeHeap()),
                       static_cast<unsigned>(ESP.getMaxAllocHeap()));
       prevHighlightIdx_ = currIdx;
       return;
@@ -2175,6 +2277,8 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
       countRepaint(false);
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+      glassKnown_ = true;
+      lastMarksValid_ = currentMarksRect(currIdx, lineHeight, lastMarks_);
       // The cheap entry: the caller left the page in the framebuffer, so this skips BOTH page
       // renders. Seeing this line instead of "render full" means entry cost is already near the
       // panel floor and the double render is not what the first lookup is paying for.
@@ -2196,6 +2300,7 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
     // Controller drew an overlay; framebuffer state is unknown.
     nextRenderMode_ = RenderMode::FullPage;
     prevHighlightIdx_ = -1;
+    glassKnown_ = false;
     if (gloss_) gloss_->drawnY = kGlossNotDrawn;
     return;
   }
@@ -2253,7 +2358,21 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   HangTrace::mark(HangTrace::Render, HangTrace::DwsDisplay);
   countRepaint(false);
-  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+  // The page was re-rendered exactly as the glass already shows it, so when the last frame was
+  // ours, only its marks and these changed. This is the vertical page's every step, and a
+  // horizontal step the differential path declined (a range, a split word).
+  WordSelectNavigator::Rect marks{};
+  const bool marksValid = currentMarksRect(currIdx, lineHeight, marks);
+  WordSelectNavigator::Rect changed{};
+  if (glassKnown_ && lastMarksValid_ && marksValid) {
+    changed = unionRect(lastMarks_, marks);
+    renderer.displayFastWindow(changed.x, changed.y, changed.width, changed.height);
+  } else {
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+  }
+  glassKnown_ = true;
+  lastMarksValid_ = marksValid;
+  lastMarks_ = marks;
   HangTrace::mark(HangTrace::Render, HangTrace::DwsDone);
   const unsigned long tDisplay = millis();
 
@@ -2279,9 +2398,10 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
   }
   SdDebugLog::log("DWS",
                   "render full scan=%lums prewarm=%lums draw=%lums hl=%lums gloss=%lums display=%lums total=%lums "
-                  "miss=%u missMs=%u free=%u largest=%u minEver=%u step=%lums",
+                  "win=%dx%d miss=%u missMs=%u free=%u largest=%u minEver=%u step=%lums",
                   tScan - tFull0, tPrewarm - tScan, tDraw - tPrewarm, tHighlight - tDraw, tGloss - tHighlight,
-                  tDisplay - tGloss, tDisplay - tFull0, misses, missMs, static_cast<unsigned>(ESP.getFreeHeap()),
+                  tDisplay - tGloss, tDisplay - tFull0, changed.width, changed.height, misses, missMs,
+                  static_cast<unsigned>(ESP.getFreeHeap()),
                   static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
                   static_cast<unsigned>(ESP.getMinFreeHeap()),
                   stepAtFull != 0 && tDisplay > stepAtFull ? tDisplay - stepAtFull : 0UL);

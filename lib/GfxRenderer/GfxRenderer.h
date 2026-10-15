@@ -66,7 +66,12 @@ class GfxRenderer {
   // deep clean. Reset by deepCleanPanel, so the counts always describe one clean-to-clean span.
   mutable unsigned long lastPaintMs_ = 0;
   mutable uint16_t paintCounts_[4] = {0, 0, 0, 0};  // indexed by HalDisplay::RefreshMode
-  void notePaint(HalDisplay::RefreshMode mode) const;
+  mutable uint16_t windowPaints_ = 0;               // displayFastWindow paints that drove only their rect
+  // `windowed`: a FAST that drove only a rectangle. Counted apart from the full-panel FASTs and
+  // left out of the dose trace, which assumes every held tile was driven.
+  void notePaint(HalDisplay::RefreshMode mode, bool windowed = false) const;
+  // A FAST paint now would be upgraded to a scrub by applyDwellScrub (no logging).
+  bool dwellScrubDue() const;
   // Rail accounting, same clean-to-clean window. The panel's analog domain is energised from a
   // paint until parkPanelIdle() stands it down, so railsMs_ is the time-integral of DC across a
   // static image -- the quantity image retention is set by, and the one the park exists to cut.
@@ -282,6 +287,11 @@ class GfxRenderer {
   // FAST_REFRESH if the mapping produces an invalid rect.
   // EXPERIMENTAL — safe for single isolated refreshes; see HalDisplay::displayWindow.
   void displayWindowRegion(int lx, int ly, int lw, int lh) const;
+  // FAST paint of the logical rectangle only, on panels whose windowed refresh is proven (X3).
+  // Everything else -- other panels, an armed promotion or clean, a dwell scrub due, an invalid
+  // rect -- takes displayBuffer(FAST_REFRESH), so those one-shots behave exactly as before. The
+  // caller guarantees nothing outside the rectangle changed since the last paint.
+  void displayFastWindow(int lx, int ly, int lw, int lh) const;
   // Force the next displayBuffer() to use SCRUB_REFRESH (state-collapsed, ignores stale
   // old-RAM residue) regardless of the mode requested, then revert to normal. Used to
   // clear e-ink ghosting on the first paint after a silent reboot: the seamless boot skips
@@ -362,6 +372,8 @@ class GfxRenderer {
   // Paints since the last deepCleanPanel, by refresh mode (FAST, HALF, FULL, SCRUB order —
   // index with HalDisplay::RefreshMode). Saturating: a long session must not wrap the count.
   uint16_t paintCount(HalDisplay::RefreshMode mode) const;
+  // displayFastWindow paints since the last deepCleanPanel (not in paintCount(FAST_REFRESH)).
+  uint16_t windowPaintCount() const { return windowPaints_; }
   // Percentage of the framebuffer currently set to BLACK (0 bits — clearScreen(0x00) is black).
   // This is the LOGICAL frame: night mode inverts on the way to the panel, so the panel's black
   // coverage is 100 - this when SETTINGS.screenInverted is set. Cheap: one popcount pass over

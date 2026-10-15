@@ -221,6 +221,8 @@ void WordSelectionScan::reset() {
   scannedBits.clear();
   skipUntil = 0;
   scanTruncated = false;
+  heapStalled_ = false;
+  heapStalls_ = 0;
   restoredCursorIndex = kNoRestoredCursor;
   contextStart = 0;
 }
@@ -238,6 +240,8 @@ void WordSelectionScan::restartStepScan() {
   markContextScanned();
   skipUntil = 0;
   scanTruncated = false;
+  heapStalled_ = false;
+  heapStalls_ = 0;
   restoredCursorIndex = kNoRestoredCursor;
 }
 
@@ -572,7 +576,7 @@ void WordSelectionScan::aimAtGlyph(const size_t glyphIndex) {
 
 bool WordSelectionScan::step(const uint32_t maxMillis) {
   const uint32_t start = millis();
-  while (phase != Phase::Done) {
+  while (phase != Phase::Done && !heapStalled_) {
     // Walked off the end, or onto cells another pass already did: pick up the next unfinished
     // cell wherever it is. Searching from 0 keeps the sweep in page order once the demand-driven
     // jumps have filled in the parts the reader actually looked at.
@@ -1126,11 +1130,11 @@ void WordSelectionScan::scanOnePosition() {
     // The match itself is untouched: the whole point is that the split word still resolves.
     if (i + span > contextStart) span = contextStart - i;
     entry.matchLen = static_cast<uint8_t>(std::min<size_t>(span, 255));
-    pushSelectable(entry, i);
+    pushSelectable(entry, i, i);
   }
 }
 
-bool WordSelectionScan::pushSelectable(const GlyphRef& entry, const size_t cell) {
+bool WordSelectionScan::pushSelectable(const GlyphRef& entry, const size_t cell, const size_t runStart) {
   auto push = [&]() {
     if (!pushGlyphSafe(selectableGlyphs, entry)) return false;
     // Both lists grow together, guarded: a bare push_back that cannot grow aborts the device.
@@ -1152,8 +1156,21 @@ bool WordSelectionScan::pushSelectable(const GlyphRef& entry, const size_t cell)
   SdDebugLog::log("WLS", "selectable grow failed at %u, caches released largest=%u",
                   static_cast<unsigned>(selectableGlyphs.size()), ESP.getMaxAllocHeap());
   if (push()) return true;
-  // Stop here rather than resume: the walk would come back to these unmarked cells and fail the
-  // same way forever. The words found so far stay selectable.
+  if (++heapStalls_ < kMaxHeapStalls) {
+    // Wait for the heap rather than stop. The run's words before `cell` are stored, so their cells
+    // count as done; the walk re-reads the run from its start for context and records from `cell`.
+    for (size_t c = std::max(runStart, recordFrom); c < cell; c++) markScanned(c);
+    unmarkScanned(cell);
+    scanPos = runStart;
+    skipUntil = runStart;
+    recordFrom = cell;
+    heapStalled_ = true;
+    SdDebugLog::log("WLS", "scan stalled (heap) n=%u found=%u", static_cast<unsigned>(heapStalls_),
+                    static_cast<unsigned>(selectableGlyphs.size()));
+    return false;
+  }
+  // Stop after the last stall: the heap is not coming back while this page is open. The words
+  // found so far stay selectable.
   phase = Phase::Done;
   scanTruncated = true;  // partial result -- don't let saveCache() persist it
   SdDebugLog::log("WLS", "scan stopped (heap) found=%u", static_cast<unsigned>(selectableGlyphs.size()));
@@ -1233,7 +1250,7 @@ bool WordSelectionScan::scanChineseRun(const size_t from) {
       size_t span = len;
       if (cell + span > contextStart) span = contextStart - cell;
       entry.matchLen = static_cast<uint8_t>(std::min<size_t>(span, 255));
-      if (!pushSelectable(entry, cell)) return true;
+      if (!pushSelectable(entry, cell, from)) return true;
     }
     covered = std::max(covered, p + advance);
     p += advance;
