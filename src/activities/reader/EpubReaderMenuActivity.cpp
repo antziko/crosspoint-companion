@@ -28,6 +28,24 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(GfxRenderer& renderer, MappedInpu
   buildMenuRowItems();
 }
 
+// The heading drawn above the first row of each group buildMenuItems() lays out; it shares
+// that row's index, so row numbers and actions are unaffected.
+static const char* sectionHeadingFor(const EpubReaderMenuActivity::MenuAction action) {
+  using MA = EpubReaderMenuActivity::MenuAction;
+  switch (action) {
+    case MA::SELECT_CHAPTER:
+      return tr(STR_MENU_SECTION_NAVIGATE);
+    case MA::READER_OPTIONS:
+      return tr(STR_MENU_SECTION_READING);
+    case MA::LOOKUP_HISTORY:
+      return tr(STR_MENU_SECTION_STUDY);
+    case MA::BOOK_STATS:
+      return tr(STR_BOOK);
+    default:
+      return nullptr;
+  }
+}
+
 // Populates menuRowItems's labels/actionValue from menuItems. Called once
 // here since menuItems (and thus which rows exist) never changes after
 // construction; buildScreen() only touches the two rows with a live value.
@@ -35,6 +53,7 @@ void EpubReaderMenuActivity::buildMenuRowItems() {
   for (size_t i = 0; i < menuItems.size() && i < MAX_MENU_ITEMS; i++) {
     fui::ListItem item;
     item.label = I18N.get(menuItems[i].labelId);
+    item.sectionHeading = sectionHeadingFor(menuItems[i].action);
     item.actionValue = static_cast<int16_t>(i);
     menuRowItems[i] = item;
   }
@@ -48,33 +67,37 @@ std::vector<EpubReaderMenuActivity::MenuItem> EpubReaderMenuActivity::buildMenuI
   // aborts here rather than returning null, so this must never be short. Keep in
   // step with MAX_MENU_ITEMS.
   items.reserve(18);
-  items.push_back({MenuAction::READER_OPTIONS, StrId::STR_READER_OPTIONS});
-  items.push_back({MenuAction::VIEW_BOOKMARKS, StrId::STR_BOOKMARKS});
+  // Four groups, most-used first; sectionHeadingFor() names each group's first row.
+  // Navigate
   items.push_back({MenuAction::SELECT_CHAPTER, StrId::STR_SELECT_CHAPTER});
+  items.push_back({MenuAction::VIEW_BOOKMARKS, StrId::STR_BOOKMARKS});
+  if (hasFootnotes) {
+    items.push_back({MenuAction::FOOTNOTES, StrId::STR_FOOTNOTES});
+  }
   items.push_back({MenuAction::GO_TO_PERCENT, StrId::STR_GO_TO_PERCENT});
+  // Reading
+  items.push_back({MenuAction::READER_OPTIONS, StrId::STR_READER_OPTIONS});
   items.push_back({MenuAction::SET_BOOK_DICTIONARY, StrId::STR_BOOK_DICTIONARY});
-  items.push_back({MenuAction::AUTO_PAGE_TURN, StrId::STR_AUTO_TURN_PAGES_PER_MIN});
-  items.push_back({MenuAction::REPAGINATE, StrId::STR_REPAGINATE_BOOK});
-  items.push_back({MenuAction::DELETE_CACHE, StrId::STR_DELETE_CACHE});
-  items.push_back({MenuAction::SCREENSHOT, StrId::STR_SCREENSHOT_BUTTON});
-  items.push_back({MenuAction::DISPLAY_QR, StrId::STR_DISPLAY_QR});
   items.push_back({MenuAction::TRANSLATE_PAGE, StrId::STR_TRANSLATE_PAGE});
-  // Lookup history, flashcard review and footnotes sit directly above Book Stats.
+  items.push_back({MenuAction::AUTO_PAGE_TURN, StrId::STR_AUTO_TURN_PAGES_PER_MIN});
+  // Frontlight boards get an in-menu toggle; the swipe panel owns brightness
+  // and warmth. Absent everywhere else, so the row count stays as it was.
+  if (Frontlight.present()) {
+    items.push_back({MenuAction::FRONTLIGHT, StrId::STR_FRONTLIGHT});
+  }
+  // Study
   if (hasDictionary) {
     items.push_back({MenuAction::LOOKUP_HISTORY, StrId::STR_LOOKUP_HISTORY});
     items.push_back({MenuAction::DICT_NOTES, StrId::STR_DICT_NOTES});
     items.push_back({MenuAction::REVIEW_FLASHCARDS, StrId::STR_FLASHCARDS_REVIEW});
     items.push_back({MenuAction::FLASHCARDS_LIST, StrId::STR_FLASHCARDS_LIST});
   }
-  if (hasFootnotes) {
-    items.push_back({MenuAction::FOOTNOTES, StrId::STR_FOOTNOTES});
-  }
+  // Book; the cache rows last, away from casual presses.
   items.push_back({MenuAction::BOOK_STATS, StrId::STR_BOOK_STATS});
-  // Frontlight boards get an in-menu toggle; the swipe panel owns brightness
-  // and warmth. Absent everywhere else, so the row count stays as it was.
-  if (Frontlight.present()) {
-    items.push_back({MenuAction::FRONTLIGHT, StrId::STR_FRONTLIGHT});
-  }
+  items.push_back({MenuAction::SCREENSHOT, StrId::STR_SCREENSHOT_BUTTON});
+  items.push_back({MenuAction::DISPLAY_QR, StrId::STR_DISPLAY_QR});
+  items.push_back({MenuAction::REPAGINATE, StrId::STR_REPAGINATE_BOOK});
+  items.push_back({MenuAction::DELETE_CACHE, StrId::STR_DELETE_CACHE});
   return items;
 }
 
