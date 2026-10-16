@@ -37,10 +37,12 @@
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
 #include "SettingsPersistence.h"
+#include "SilentRestart.h"
 #include "WifiCredentialStore.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/boot_sleep/SleepImageReviewActivity.h"
+#include "activities/reader/EpubReaderTranslationActivity.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -196,7 +198,8 @@ constexpr uint32_t SILENT_REBOOT_TARGET_HOME = 0;
 constexpr uint32_t SILENT_REBOOT_TARGET_READER = 1;
 constexpr uint32_t SILENT_REBOOT_TARGET_SETTINGS = 2;      // settings list (category in silentRebootSettingsCategory)
 constexpr uint32_t SILENT_REBOOT_TARGET_JOIN_NETWORK = 3;  // File Transfer > Join Network
-constexpr uint32_t SILENT_REBOOT_TARGET_MAX = SILENT_REBOOT_TARGET_JOIN_NETWORK;
+constexpr uint32_t SILENT_REBOOT_TARGET_TRANSLATE = 4;     // page translation (text stashed on SD)
+constexpr uint32_t SILENT_REBOOT_TARGET_MAX = SILENT_REBOOT_TARGET_TRANSLATE;
 constexpr uint32_t SILENT_REBOOT_LIGHT_ON = 1U << 0;  // bit 0 of silentRebootPayload
 
 // How the device is coming back to life, resolved once at boot. Both resume
@@ -284,6 +287,16 @@ void silentRestartToSettings(int category) {
   armSilentReboot(SILENT_REBOOT_TARGET_SETTINGS);
   silentRebootSettingsCategory = static_cast<uint32_t>(category);
   LOG_DBG("MAIN", "Silent restart (target=settings,cat=%d)", category);
+  GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+  halClock.persistTimeAcrossReboot();  // X4: carry NTP-synced time across the soft reset
+  delay(50);
+  ESP.restart();
+}
+
+void silentRestartToTranslation() {
+  if (deepSleepInProgress) return;  // sleeping supersedes the heap-defrag reboot
+  armSilentReboot(SILENT_REBOOT_TARGET_TRANSLATE);
+  LOG_DBG("MAIN", "Silent restart (target=translate)");
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
   halClock.persistTimeAcrossReboot();  // X4: carry NTP-synced time across the soft reset
   delay(50);
@@ -582,6 +595,17 @@ static void maybeStartBackgroundNtpSync(const char* why) {
         vTaskDelete(nullptr);
       },
       "ntp_bg", 4096, &ntpBgCtx, 1, nullptr);
+}
+
+static bool openTranslationAfterRestart(std::string text) {
+  auto translation = makeUniqueNoThrow<EpubReaderTranslationActivity>(renderer, mappedInputManager, std::move(text), "",
+                                                                      /*resumedAfterRestart=*/true);
+  if (!translation) {
+    LOG_ERR("MAIN", "OOM: EpubReaderTranslationActivity; resuming the reader");
+    return false;
+  }
+  activityManager.replaceActivity(std::move(translation));
+  return true;
 }
 
 void setup() {
@@ -948,6 +972,14 @@ void setup() {
                                 !FsHelpers::isKeptSleepImage(APP_STATE.lastSleepImagePath) &&
                                 Storage.exists(APP_STATE.lastSleepImagePath.c_str());
 
+  // Consume (read + delete) the translation stash before routing, so a later silent reboot can
+  // never replay a stale one.
+  std::string translateStashText;
+  if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_TRANSLATE) {
+    translateStashText = Storage.readFile(translateStashPath().c_str()).c_str();
+    Storage.remove(translateStashPath().c_str());
+  }
+
   if (recoveryFirmwareMode) {
     // Skip normal home/reader routing: jump straight into the SD firmware picker.
     auto recovery = makeUniqueNoThrow<SdFirmwareUpdateActivity>(renderer, mappedInputManager, /*recoveryMode=*/true);
@@ -962,8 +994,13 @@ void setup() {
   } else if (rebootedFromPanic) {
     // If we rebooted from a panic, go to crash report screen to show the panic info
     activityManager.goToCrashReport();
-  } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_READER &&
+  } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_TRANSLATE &&
+             !translateStashText.empty() && openTranslationAfterRestart(std::move(translateStashText))) {
+    // Restarted to run a translation on a fresh heap; its exit restarts into the reader.
+  } else if (resume == BootResume::Silent &&
+             (snapshotTarget == SILENT_REBOOT_TARGET_READER || snapshotTarget == SILENT_REBOOT_TARGET_TRANSLATE) &&
              !APP_STATE.openEpubPath.empty()) {
+    // Also the fallback for a translation whose stash was missing: land back in the book.
     activityManager.goToReader(APP_STATE.openEpubPath);
   } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_JOIN_NETWORK) {
     // Rebooted on the way into File Transfer > Join Network for a fresh heap;
@@ -1013,7 +1050,8 @@ void setup() {
     }
   }
 
-  if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_READER) {
+  if (resume == BootResume::Silent &&
+      (snapshotTarget == SILENT_REBOOT_TARGET_READER || snapshotTarget == SILENT_REBOOT_TARGET_TRANSLATE)) {
     // Seamless boot skips the panel clear, so the first reader paint (fast refresh) would
     // ghost the pre-reboot frame — the KOReader sync "Progress found" screen bleeding
     // through whitish under the page. Force one HALF_REFRESH to wipe it (clears the stale
@@ -1227,6 +1265,7 @@ void loop() {
   const unsigned long loopStartTime = millis();
   static unsigned long lastMemPrint = 0;
   HangTrace::mark(HangTrace::Loop, HangTrace::LoopTop);
+  HangTrace::pollLiveStall();
 
   gpio.setSharedConfirmPowerShortPressEmitsPower(SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP);
   // Through the mapped manager, not gpio directly: it clears the long-press latch.

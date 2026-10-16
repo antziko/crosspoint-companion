@@ -30,6 +30,14 @@ enum Step : uint16_t {
   DwsGlossDraw = 38,  // full path: drawGloss + hints
   DwsDisplay = 39,    // full path: displayBuffer
   DwsDone = 40,
+  // Inside updateGloss's peek.
+  DwsGlossProbe = 41,      // book dictionary probe (+ dictionary forms)
+  DwsGlossFallback = 42,   // fallback group sweep
+  DwsGlossWarmToken = 43,  // font warm: the selected token
+  DwsGlossWarmEntry = 44,  // font warm: the entry text
+  DwsGlossWarmBold = 45,   // font warm: the bold reading
+  DwsGlossCells = 46,      // planGlossCells
+  DwsGlossFit = 47,        // DictGloss::fit
 };
 
 void mark(Task task, Step step);
@@ -38,5 +46,8 @@ void mark(Task task, Step step);
 void capturePreviousBoot();
 // Log what capturePreviousBoot() saved (once, after SD logging is up).
 void reportPreviousBoot();
+// Main loop: SD-log a render step held for several seconds. A power-cycle wipes the RTC crumbs,
+// so a hang the user ends that way is only on record if it was logged while it happened.
+void pollLiveStall();
 
 }  // namespace HangTrace

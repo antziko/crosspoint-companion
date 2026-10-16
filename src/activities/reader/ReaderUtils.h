@@ -167,7 +167,7 @@ struct TouchPageTurn {
   unsigned long heldMs;
 };
 
-inline TouchPageTurn detectTouchPageTurn(GfxRenderer& renderer, const MappedInputManager& input,
+inline TouchPageTurn detectTouchPageTurn(const GfxRenderer& renderer, const MappedInputManager& input,
                                          const bool rtlBook = false) {
   TouchPageTurn result{false, false, 0};
   if (!SETTINGS.touchReaderControls || !input.hasTouch()) {
@@ -282,6 +282,21 @@ inline bool backGestureIsPageTurn(const MappedInputManager& input, const bool rt
 // middle is free in tap mode. The Off/Swipe Up alternatives are only surfaced
 // on home-key boards (SettingsList), where the menu stays reachable through
 // the key's hold.
+// A vertical swipe scrolls a panel's text: +1 for up (next), -1 for down (previous), 0 for
+// anything else. Edge-anchored swipes stay with their own gestures (Home, menu, light panel).
+inline int definitionScrollSwipe(const MappedInputManager& input) {
+  if (!input.hasTouch()) return 0;
+  if (input.wasHomeGesture() || input.wasMenuGesture() || input.wasLightPanelGesture()) return 0;
+  switch (input.wasSwipe()) {
+    case MappedInputManager::SwipeDir::Up:
+      return 1;
+    case MappedInputManager::SwipeDir::Down:
+      return -1;
+    default:
+      return 0;
+  }
+}
+
 inline bool isTouchMenuTap(const GfxRenderer& renderer, const MappedInputManager& input) {
   if (!input.hasTouch()) return false;
   if (resolveShowReaderMenu(input) != CrossPointSettings::READER_MENU_TAP) return false;

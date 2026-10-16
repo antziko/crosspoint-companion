@@ -10,6 +10,7 @@
 #include <HalFrontlight.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <InflateReader.h>
 #include <KOReaderDocumentId.h>
 #include <Logging.h>
 #include <Memory.h>
@@ -41,6 +42,7 @@
 #include "EpubReaderChapterSelectionActivity.h"
 #include "EpubReaderFootnoteSelectActivity.h"
 #include "EpubReaderPercentSelectionActivity.h"
+#include "EpubReaderTranslationActivity.h"
 #include "EpubReaderUtils.h"
 #include "FlashcardListActivity.h"
 #include "FlashcardReviewActivity.h"
@@ -854,6 +856,7 @@ void EpubReaderActivity::refreshBookmarkSpans() const {
     BookmarkSpan span;
     span.bmIndex = static_cast<uint8_t>(bi);
     span.quote = b.quote;
+    span.returnMark = b.returnMark;
     span.hasLength = !b.quote && b.endWord > 0;
     span.startPage = static_cast<uint16_t>(startPage);
     span.startIndex = startIndex;
@@ -908,7 +911,7 @@ bool EpubReaderActivity::pageHasMarginMark() const {
   const int cur = section->currentPage;
   for (uint8_t i = 0; i < bookmarkSpanCount_; i++) {
     const BookmarkSpan& s = bookmarkSpans_[i];
-    if (s.quote || s.textless) continue;
+    if (s.quote || s.textless || s.returnMark) continue;
     if (cur == s.startPage || (s.hasLength && cur == s.endPage && s.endIndex != UINT16_MAX)) return true;
   }
   return false;
@@ -1146,6 +1149,15 @@ void EpubReaderActivity::loop() {
     return;
   }
 
+  // The translation panel floats over the page, so the menu it was picked from must be painted
+  // over first.
+  if (translatePending_ && !RenderLock::peek()) {
+    translatePending_ = false;
+    requestUpdateAndWait();
+    openTranslationPanel();
+    return;
+  }
+
   // An image on the page could not be extracted or decoded, usually because the chapter build
   // holds the heap: give that memory back and draw the page again.
   if (ImageBlock::takeHeapRetry()) {
@@ -1156,6 +1168,7 @@ void EpubReaderActivity::loop() {
       RenderLock lock;
       if (section && section->isBuilding()) {
         section->suspendBuild();
+        imageRetryHoldsBuild_ = true;
         how = "suspended";
       }
     }
@@ -1224,7 +1237,7 @@ void EpubReaderActivity::loop() {
   {
     RenderLock lock(RenderLock::Mode::Try);
     if (lock.ownsLock() && section && !section->isBuilding() && section->isPartial() && buildViewportWidth > 0 &&
-        !partialRebuildStartFailed &&
+        !partialRebuildStartFailed && !imageRetryHoldsBuild_ &&
         section->currentPage + PARTIAL_REBUILD_START_MARGIN >= static_cast<int>(section->pageCount)) {
       const ReaderRenderSpec buildSpec = readerSpec(buildViewportWidth, buildViewportHeight);
       if (!section->startBuild(buildSpec)) {
@@ -2576,6 +2589,11 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       requestUpdate();
       break;
     }
+    case EpubReaderMenuActivity::MenuAction::TRANSLATE_PAGE: {
+      translatePending_ = true;
+      requestUpdate();
+      break;
+    }
     case EpubReaderMenuActivity::MenuAction::GO_HOME: {
       onGoHome();
       return;
@@ -3824,6 +3842,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     renderContents(std::move(p), orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft);
     LOG_DBG("ERS", "Rendered page in %dms", millis() - start);
     lastRenderCompleteMs = millis();
+    imageRetryHoldsBuild_ = false;
     openBookRecord.markPageRendered();
     readerSession.onRenderComplete(lastRenderCompleteMs, trustedtime::trustedNow(), getProgressBasisPoints());
     // EPUB steady-state heap profile (post-render, font cache already freed). Watch
@@ -4500,7 +4519,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     paintedMarginMark_ = pageHasMarginMark();
     for (uint8_t i = 0; i < bookmarkSpanCount_; i++) {
       const BookmarkSpan& s = bookmarkSpans_[i];
-      if (s.quote || s.textless || cur < s.startPage || cur > s.endPage) continue;
+      if (s.quote || s.textless || s.returnMark || cur < s.startPage || cur > s.endPage) continue;
       const bool startsHere = cur == s.startPage;
       const bool endsHere = cur == s.endPage && s.endIndex != UINT16_MAX;
       PageMarks::drawBookmarkSpan(renderer, *page, SETTINGS.getReaderFontId(), orientedMarginTop, barX,
@@ -5965,4 +5984,47 @@ CrossPointPosition EpubReaderActivity::getCurrentPosition() const {
     localPos.hasParagraphIndex = true;
   }
   return localPos;
+}
+
+void EpubReaderActivity::openTranslationPanel() {
+  std::string pageText;
+  if (verticalSection) {
+    RenderLock lock(*this);
+    if (const VerticalPage* vpage = verticalSection->getPage(verticalSection->currentPage)) {
+      pageText = PageTextExtractor::fromVerticalPage(*vpage);
+    }
+  } else if (section) {
+    pageText = section->getTextFromSectionFile();
+  }
+  if (!pageText.empty()) openTranslationFor(std::move(pageText), StrId::STR_TRANSLATE_PAGE);
+}
+
+void EpubReaderActivity::openTranslationFor(std::string text, const StrId title) {
+  // The text is all Translation needs: the laid-out chapter is dead weight while WiFi and TLS
+  // run. nextPageNumber is synced first so render() reopens the same page on return.
+  {
+    RenderLock lock(*this);  // the render task may still be in its warm tail
+    // The translation exits through a restart, which skips onExit()'s flush of debounced progress.
+    if (section && (currentSpineIndex != lastSavedSpine_ || static_cast<int>(section->currentPage) != lastSavedPage_)) {
+      saveProgress(currentSpineIndex, section->currentPage, section->pageCount);
+    } else if (verticalSection && !verticalSection->isBuilding() &&
+               (currentSpineIndex != lastSavedSpine_ || verticalSection->currentPage != lastSavedPage_)) {
+      saveProgress(currentSpineIndex, verticalSection->currentPage, verticalSection->pageCount);
+    }
+    if (hasPage()) nextPageNumber = pageIndex();
+    resetSections();
+  }
+  auto translation = makeUniqueNoThrow<EpubReaderTranslationActivity>(renderer, mappedInput, std::move(text), "",
+                                                                      /*resumedAfterRestart=*/false, title);
+  if (!translation) {
+    LOG_ERR("XLAT", "OOM: EpubReaderTranslationActivity");
+    requestUpdate();
+    return;
+  }
+  startActivityForResult(std::move(translation), [this](const ActivityResult&) {
+    // Reached only when the translation ended before WiFi came up; with WiFi it restarts into
+    // the reader instead. It gave the inflate window up on entry.
+    InflateReader::ensureWindow();
+    requestUpdate();
+  });
 }

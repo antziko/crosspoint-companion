@@ -286,6 +286,18 @@ class DictionaryDefinitionActivity final : public Activity {
 
   int contentTop = 0;  // top of the header band, i.e. below the hint gutter + bezel + margin
   int bodyStartY = 0;  // top of the text body (set in wrapText)
+  // A CJK headword drawn enlarged at the top of page 1. It is headBandPx_ tall and takes
+  // headBandLines_ body lines, which the line stream counts as already used, so pagination needs
+  // no special case. Scale 0: none.
+  int headBandScale_ = 0;
+  int headBandLines_ = 0;
+  int headBandPx_ = 0;
+  int headInkAbove_ = 0;  // tallest ink above the baseline, unscaled
+  // Pixels this page leaves above its first text line: headBandPx_ on page 1, else 0.
+  int rowOffsetPx_ = 0;
+  bool headwordIsCjk() const;
+  void planHeadBand();
+  void drawHeadBand() const;
 
   // Word-select mode (activated by pressing Look Up Word in view mode)
   bool isWordSelectMode = false;

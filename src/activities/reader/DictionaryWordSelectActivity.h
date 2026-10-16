@@ -223,6 +223,10 @@ class DictionaryWordSelectActivity final : public Activity {
   // costs one frame per step actually seen instead of a queue of moves racing the render.
   // Set by the loop task when a step requests a frame, cleared by the render task as it returns.
   std::atomic<bool> stepFramePending_{false};
+  // A lookup is starting: the gloss peek must not run, since it shares Dictionary's static scan
+  // buffers with the lookup task. Set by the loop task before the task starts, cleared by it once
+  // the controller is idle again.
+  std::atomic<bool> lookupStarting_{false};
   int glossResumeIdx_ = -1;
   int* glossCursorOut_ = nullptr;
   bool glossTracksCursor_ = false;

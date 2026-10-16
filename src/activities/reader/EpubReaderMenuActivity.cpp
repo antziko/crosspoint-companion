@@ -43,11 +43,11 @@ void EpubReaderMenuActivity::buildMenuRowItems() {
 std::vector<EpubReaderMenuActivity::MenuItem> EpubReaderMenuActivity::buildMenuItems(bool hasFootnotes,
                                                                                      bool hasDictionary) {
   std::vector<MenuItem> items;
-  // 11 always-present rows + FOOTNOTES + the 4 dictionary rows + FRONTLIGHT on
-  // boards that have one = 17 worst case. A fully populated menu that reallocates
+  // 12 always-present rows + FOOTNOTES + the 4 dictionary rows + FRONTLIGHT on
+  // boards that have one = 18 worst case. A fully populated menu that reallocates
   // aborts here rather than returning null, so this must never be short. Keep in
   // step with MAX_MENU_ITEMS.
-  items.reserve(17);
+  items.reserve(18);
   items.push_back({MenuAction::READER_OPTIONS, StrId::STR_READER_OPTIONS});
   items.push_back({MenuAction::VIEW_BOOKMARKS, StrId::STR_BOOKMARKS});
   items.push_back({MenuAction::SELECT_CHAPTER, StrId::STR_SELECT_CHAPTER});
@@ -58,6 +58,7 @@ std::vector<EpubReaderMenuActivity::MenuItem> EpubReaderMenuActivity::buildMenuI
   items.push_back({MenuAction::DELETE_CACHE, StrId::STR_DELETE_CACHE});
   items.push_back({MenuAction::SCREENSHOT, StrId::STR_SCREENSHOT_BUTTON});
   items.push_back({MenuAction::DISPLAY_QR, StrId::STR_DISPLAY_QR});
+  items.push_back({MenuAction::TRANSLATE_PAGE, StrId::STR_TRANSLATE_PAGE});
   // Lookup history, flashcard review and footnotes sit directly above Book Stats.
   if (hasDictionary) {
     items.push_back({MenuAction::LOOKUP_HISTORY, StrId::STR_LOOKUP_HISTORY});

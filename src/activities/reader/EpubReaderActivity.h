@@ -239,6 +239,11 @@ class EpubReaderActivity final : public Activity {
   int8_t glossPageTurn_ = 0;
   // Where the reopened gloss box starts (see DictionaryWordSelectActivity::setStartAtPageEdge).
   int8_t glossStartEdge_ = 0;
+  // Translate Page was picked: loop() repaints the page under the menu, then opens the panel.
+  bool translatePending_ = false;
+  // The translation panel for this page (names follow matcha-reader).
+  void openTranslationPanel();
+  void openTranslationFor(std::string text, StrId title);
   int glossCursorSpine_ = -1;
   int glossCursorPage_ = -1;
   int glossCursorPageCount_ = -1;
@@ -327,6 +332,10 @@ class EpubReaderActivity final : public Activity {
   // Set when the lazy extension start failed, so loop() doesn't retry (and log) every
   // tick; the blocking extension in render() remains the fallback past the watermark.
   bool partialRebuildStartFailed = false;
+  // An image heap retry suspended the build: keep it suspended until the page has drawn again,
+  // or the lazy extension start retakes the heap before the image decodes. Set by the loop
+  // task, cleared by the render task.
+  std::atomic<bool> imageRetryHoldsBuild_{false};
 
   // Last position persisted by render()'s saveProgress, used to skip redundant
   // writeAtomic calls on no-op re-renders (menu/bookmark/screenshot).
@@ -362,8 +371,9 @@ class EpubReaderActivity final : public Activity {
   struct BookmarkSpan {
     uint8_t bmIndex = 0;  // into BOOKMARKS.getBookmarks(); valid while spansClock_ holds
     bool quote = false;
-    bool hasLength = false;  // a recorded length, so the mark runs past its start line
-    bool textless = false;   // made on a page with no text: placed by offset, nothing to draw
+    bool hasLength = false;   // a recorded length, so the mark runs past its start line
+    bool textless = false;    // made on a page with no text: placed by offset, nothing to draw
+    bool returnMark = false;  // a "return here" mark: placed for the toggle and list, no margin mark
     uint16_t startPage = 0;
     uint16_t startIndex = 0;
     uint16_t endPage = 0;

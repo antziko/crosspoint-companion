@@ -1,5 +1,9 @@
 #pragma once
 
+#include <SdSystemDir.h>
+
+#include <string>
+
 #include "activities/ActivityManager.h"
 
 // ESP.restart() with an RTC_NOINIT flag that survives the reboot, so setup()
@@ -17,6 +21,15 @@ void silentRestartToSettings(int category);  // settings list at the given categ
 // WiFi + TLS working set has the contiguous RAM it needs on tight boards. A
 // no-op on touch boards; the caller then proceeds without a reboot.
 void silentRestartToJoinNetwork();
+
+// Straight into the Translation activity on a fresh heap, re-reading the page text the
+// activity stashed at translateStashPath(). Used when the WiFi/TLS heap gates fail on a
+// fragmented heap. A missing or empty stash at boot falls back to the reader.
+void silentRestartToTranslation();
+// One page of source text, written by EpubReaderTranslationActivity before
+// silentRestartToTranslation() and consumed (read + deleted) by setup(). On SD, not RTC:
+// a page of CJK text does not fit the RTC slow memory that is left.
+inline std::string translateStashPath() { return sdsystem::path("translate_pending.txt"); }
 
 // Reboots immediately after an activity releases exclusive raw storage (USB Drive). The
 // RTC target lands setup() on Home rather than resuming a reader whose cache the host may

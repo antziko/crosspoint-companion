@@ -711,6 +711,13 @@ void DictionaryWordSelectActivity::preLookupTrampoline(void* ctx, const std::str
 }
 
 void DictionaryWordSelectActivity::applyCardDictForLookup(const std::string& cleanedWord) {
+  // The lookup task starts right after this hook. A render already inside updateGloss would
+  // probe the dictionary alongside it, so let that frame finish first; the flag keeps the next
+  // one from starting a peek before the controller reports active.
+  lookupStarting_ = true;
+  {
+    RenderLock lock;
+  }
   if (cachePath.empty()) return;
   const unsigned long t0 = millis();
   uint32_t recorded = 0;
@@ -737,6 +744,7 @@ void DictionaryWordSelectActivity::applyCardDictForLookup(const std::string& cle
 }
 
 void DictionaryWordSelectActivity::loop() {
+  if (!controller.isActive()) lookupStarting_ = false;
   if (controller.isActive()) {
     switch (controller.handleInput()) {
       case DictionaryLookupController::LookupEvent::FoundDefinition: {
@@ -1656,7 +1664,7 @@ size_t DictionaryWordSelectActivity::readGlossFallback(const std::string& token)
 
 bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHeight) {
   if (!gloss_) return false;
-  if (currIdx < 0 || controller.isActive()) {
+  if (currIdx < 0 || controller.isActive() || lookupStarting_) {
     gloss_->place = false;
     return false;
   }
@@ -1782,6 +1790,7 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
     size_t n = 0;
     // A range that misses is reported by name, so the user can see which phrase has no entry.
     snprintf(gloss_->missPhrase, sizeof(gloss_->missPhrase), "%s", ranged ? token.c_str() : "");
+    HangTrace::mark(HangTrace::Render, HangTrace::DwsGlossProbe);
     selectGlossDict(token);
     if (token.empty()) {
       // nothing to look up
@@ -1803,7 +1812,10 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
           if (n > 0 || ++probes >= kMaxFormProbes) break;
         }
       }
-      if (n == 0 && !gloss_->useAlt && SETTINGS.dictFallbackGroup) n = readGlossFallback(token);
+      if (n == 0 && !gloss_->useAlt && SETTINGS.dictFallbackGroup) {
+        HangTrace::mark(HangTrace::Render, HangTrace::DwsGlossFallback);
+        n = readGlossFallback(token);
+      }
     }
     const unsigned long tProbe = millis();
     unsigned long tWarm = tProbe;
@@ -1814,6 +1826,7 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
     // glyph at all. On a miss nothing else is warmed, so without this the enlarged character
     // would take SdCardFont's ~50 ms per-glyph path on the very frame that reports the miss.
     constexpr uint8_t kRegularOnly = styleToBitMask(EpdFontFamily::REGULAR);
+    HangTrace::mark(HangTrace::Render, HangTrace::DwsGlossWarmToken);
     if (!token.empty()) {
       renderer.ensureSdCardFontReady(gloss_->fontId, token.c_str(), kRegularOnly);
       if (auto* fcm = renderer.getFontCacheManager()) fcm->prewarmCache(gloss_->fontId, token.c_str(), kRegularOnly);
@@ -1831,6 +1844,7 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
       // above — advance table first (measurement), bitmaps second (drawing). Against the gloss
       // font, which is a different size from the page's, so none of the page's warm glyphs count.
       // This also covers the variant character, which is part of the entry by definition.
+      HangTrace::mark(HangTrace::Render, HangTrace::DwsGlossWarmEntry);
       renderer.ensureSdCardFontReady(gloss_->fontId, gloss_->raw, kRegularOnly);
       if (auto* fcm = renderer.getFontCacheManager()) fcm->prewarmCache(gloss_->fontId, gloss_->raw, kRegularOnly);
 
@@ -1841,6 +1855,7 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
       // bytes, which is also where fit() decides whether the run is on the first line.
       const DictGloss::ReadingSpan reading = DictGloss::findReading(gloss_->raw);
       if (reading.found) {
+        HangTrace::mark(HangTrace::Render, HangTrace::DwsGlossWarmBold);
         constexpr uint8_t kBoldOnly = styleToBitMask(EpdFontFamily::BOLD);
         char* const run = gloss_->raw + reading.start;
         const char saved = run[reading.len];
@@ -1853,6 +1868,7 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
 
       // Before fit(), which compacts the buffer in place and moves every offset in it. The wrap
       // width it settles is what the entry is then wrapped to.
+      HangTrace::mark(HangTrace::Render, HangTrace::DwsGlossCells);
       planGlossCells(token.c_str(), gloss_->raw);
 
       const DictLayout::Measurer measure{this, &DictionaryWordSelectActivity::measureGlossWidth};
@@ -1863,9 +1879,21 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
       DictGloss::FitOptions opts;
       opts.readingOnOwnRow = gloss_->cellScale > 0;
       opts.dropLeadingField = gloss_->dropField;
+      HangTrace::mark(HangTrace::Render, HangTrace::DwsGlossFit);
       DictGloss::fit(gloss_->raw, wrapMetrics, measure, gloss_->result, opts);
     }
     const unsigned long tFit = millis();
+    HangTrace::mark(HangTrace::Render, HangTrace::DwsGloss);
+#if !DICT_GLOSS_TRACE
+    // The per-move trace below is the full record; without it, only a peek slow enough to feel
+    // like a hang is written to SD.
+    if (tFit - t0 > 1000) {
+      SdDebugLog::log("DGL", "slow peek '%s' alt=%d probe=%lu warm=%lu fit=%lu free=%u largest=%u", token.c_str(),
+                      static_cast<int>(gloss_->useAlt), tProbe - t0, tWarm - tProbe, tFit - tWarm,
+                      static_cast<unsigned>(ESP.getFreeHeap()),
+                      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+    }
+#endif
     LOG_DBG("DGL", "peek '%s' %s rows=%d probe=%lums warm=%lums fit=%lums", token.c_str(),
             gloss_->result.found ? "hit" : "miss", gloss_->result.rowCount, tProbe - t0, tWarm - tProbe, tFit - tWarm);
 #if DICT_GLOSS_TRACE

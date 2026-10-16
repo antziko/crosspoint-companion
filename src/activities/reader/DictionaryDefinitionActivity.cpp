@@ -472,8 +472,78 @@ void DictionaryDefinitionActivity::wrapText() {
   // and so does every subsequent page turn (they call loadPage directly, so the glyphs
   // this warms have to stay resident for the life of the definition).
   prewarmDefinitionFont();
+  planHeadBand();
 
   loadPage(currentPage);
+}
+
+// The headword at its full width of 1-8 characters, all of them CJK. Longer words and any Latin
+// headword keep the plain header.
+bool DictionaryDefinitionActivity::headwordIsCjk() const {
+  constexpr int kMaxHeadBandChars = 8;
+  const auto* p = reinterpret_cast<const unsigned char*>(headword.c_str());
+  int count = 0;
+  while (*p) {
+    if (!utf8IsCjkCodepoint(utf8NextCodepoint(&p)) || ++count > kMaxHeadBandChars) return false;
+  }
+  return count > 0;
+}
+
+void DictionaryDefinitionActivity::planHeadBand() {
+  // Glyphs are drawn with each pixel replicated (GfxRenderer::drawGlyphScaled): there is no larger
+  // font to draw with, and this costs no heap and no extra font size.
+  constexpr int kMaxHeadBandScale = 3;
+  headBandScale_ = 0;
+  headBandLines_ = 0;
+  headBandPx_ = 0;
+  if (!headwordIsCjk()) return;
+  const int lineHeight = getLineHeight();
+  const int ascender = renderer.getFontAscenderSize(defFontId_);
+  const int advance = renderer.getTextAdvanceX(defFontId_, headword.c_str(), EpdFontFamily::REGULAR);
+  const int width = renderer.getScreenWidth() - leftPadding - rightPadding;
+  if (lineHeight <= 0 || ascender <= 0 || advance <= 0) return;
+
+  // The ink's own extent above and below the baseline, so the band hugs the characters rather than
+  // the font's ascender box. A glyph with no metrics here (drawn from a fallback font) falls back
+  // to that box.
+  int inkAbove = 0;
+  int inkBelow = 0;
+  const auto* p = reinterpret_cast<const unsigned char*>(headword.c_str());
+  while (*p) {
+    int left, w, top, h;
+    if (!renderer.getGlyphMetrics(defFontId_, utf8NextCodepoint(&p), EpdFontFamily::REGULAR, &left, &w, &top, &h)) {
+      inkAbove = ascender;
+      inkBelow = 0;
+      break;
+    }
+    inkAbove = std::max(inkAbove, top);
+    inkBelow = std::max(inkBelow, h - top);
+  }
+  if (inkAbove <= 0) return;
+
+  for (int scale = kMaxHeadBandScale; scale >= 2; scale--) {
+    if (advance * scale > width) continue;
+    // The ink plus a third of a line before the definition starts.
+    const int px = (inkAbove + inkBelow) * scale + lineHeight / 3;
+    const int lines = (px + lineHeight - 1) / lineHeight;
+    // The band must leave page 1 most of its text.
+    if (lines * 2 > linesPerPage) continue;
+    headBandScale_ = scale;
+    headBandLines_ = lines;
+    headBandPx_ = px;
+    headInkAbove_ = inkAbove;
+    return;
+  }
+}
+
+void DictionaryDefinitionActivity::drawHeadBand() const {
+  if (headBandScale_ == 0 || currentPage != 0) return;
+  // drawGlyphScaled puts the baseline at yTop + ascender * scale; this lands the tallest ink on
+  // the body's first pixel row.
+  const int yTop = bodyStartY + (headInkAbove_ - renderer.getFontAscenderSize(defFontId_)) * headBandScale_;
+  int x = leftPadding;
+  const auto* p = reinterpret_cast<const unsigned char*>(headword.c_str());
+  while (*p) x += renderer.drawGlyphScaled(defFontId_, utf8NextCodepoint(&p), x, yTop, headBandScale_, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -559,6 +629,11 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
       memcpy(collector->chunk, tail, static_cast<size_t>(tailLen));
       carry = tailLen;
     }
+  }
+
+  // The enlarged headword is drawn from the body font, and a cedict-style entry does not repeat it.
+  if (headwordIsCjk() && collector->addText(headword.c_str())) {
+    collector->styleMask |= spanStyleBit(false, false);
   }
 
   const unsigned long tScan = millis();
@@ -740,7 +815,9 @@ void DictionaryDefinitionActivity::loadPage(int page) {
   layoutLines.clear();
   pagePool_.clear();
   collectTargetPage_ = page;
-  collectLineCount_ = 0;
+  // The band's lines come first in the stream, so page 1 holds that many fewer text lines.
+  collectLineCount_ = headBandLines_;
+  rowOffsetPx_ = page == 0 ? headBandPx_ : 0;
   collectOom_ = false;
 
   // One reserve for the page's whole line budget, sized exactly. collectLineSink keeps only
@@ -1124,7 +1201,7 @@ void DictionaryDefinitionActivity::extractWordsFromLayout() {
   const int lineHeight = getLineHeight();  // cached for loop
   for (int i = 0; i < linesPerPage && i < static_cast<int>(layoutLines.size()); i++) {
     const PooledLine& line = layoutLines[i];
-    const int16_t lineY = static_cast<int16_t>(bodyStartY + i * lineHeight);
+    const int16_t lineY = static_cast<int16_t>(bodyStartY + rowOffsetPx_ + i * lineHeight);
     int x = leftPadding + line.indentLevel * indentStep;
 
     if (line.isListItem) {
@@ -2211,7 +2288,7 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
     int segIndex = 0;
     for (int i = 0; i < linesPerPage && i < static_cast<int>(layoutLines.size()); i++) {
       const PooledLine& line = layoutLines[i];
-      const int y = bodyStartY + i * lineHeight;
+      const int y = bodyStartY + rowOffsetPx_ + i * lineHeight;
       int x = leftPadding + line.indentLevel * indentStep;
 
       if (line.isListItem) {
@@ -2268,13 +2345,16 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
     // of missing-glyph marks, which is worse than no notice at all.
     if (collectOom_) {
       const int noticeRow = static_cast<int>(layoutLines.size());
-      if (noticeRow < linesPerPage) {
-        renderer.drawText(defFontId_, leftPadding, bodyStartY + noticeRow * lineHeight, tr(STR_ERROR_LOW_MEMORY), true,
-                          EpdFontFamily::REGULAR);
+      if (noticeRow < linesPerPage - (currentPage == 0 ? headBandLines_ : 0)) {
+        renderer.drawText(defFontId_, leftPadding, bodyStartY + rowOffsetPx_ + noticeRow * lineHeight,
+                          tr(STR_ERROR_LOW_MEMORY), true, EpdFontFamily::REGULAR);
       }
     }
   };
   renderBody();
+  // BW pass only, outside renderBody: the anti-aliasing pass re-runs renderBody into the gray
+  // planes, and the scaled glyphs are ink-only.
+  drawHeadBand();
   const unsigned long tBody = millis();
 
   // Word-select mode: overlay highlighted word(s) and prime snapshot for next frame.
