@@ -2,6 +2,7 @@
 #include <Epub.h>
 #include <I18n.h>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -35,7 +36,8 @@ class EpubReaderMenuActivity final : public UiListActivity {
     READER_OPTIONS,
     BOOK_STATS,
     ADD_HIGHLIGHT,
-    FRONTLIGHT
+    FRONTLIGHT,
+    MORE  // list menu only: opens the rarely used rows in a popup
   };
 
   explicit EpubReaderMenuActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const std::string& title,
@@ -60,6 +62,8 @@ class EpubReaderMenuActivity final : public UiListActivity {
   // dictionary rows (lookup history, flashcard review, flashcard list) have no
   // upstream equivalent. Only upstream's FUI row plumbing is taken here.
   static std::vector<MenuItem> buildMenuItems(bool hasFootnotes, bool hasDictionary);
+  // The list menu's rows: buildMenuItems() with the rare rows folded into one MORE row.
+  static std::vector<MenuItem> buildListRows(bool hasFootnotes, bool hasDictionary);
 
  private:
   // Row storage: menuItems is at most MAX_MENU_ITEMS (12 always-present rows +
@@ -69,12 +73,14 @@ class EpubReaderMenuActivity final : public UiListActivity {
   // (buildMenuRowItems()); buildScreen() only refreshes the rows whose value
   // reflects live state (rotation, page-turn interval, dictionary, frontlight).
   static constexpr size_t MAX_MENU_ITEMS = 18;
+  static constexpr int INFO_LINE_PADDING = 8;  // around the progress line
   freeink::ui::ListItem menuRowItems[MAX_MENU_ITEMS]{};
   void buildMenuRowItems();
 
   int listCount() const override { return static_cast<int>(menuItems.size()); }
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;
+  void activateAction(MenuAction action);
   // Popup input/close-swallow runs before any button or touch handling.
   bool handleCustomInput() override;
   // Back closes on RELEASE and Confirm activates on RELEASE; everything else
@@ -92,6 +98,8 @@ class EpubReaderMenuActivity final : public UiListActivity {
   // True while the button press that closed the popup is still held; its release
   // must not fall through to the menu's own Back/Confirm handlers.
   bool popupClosing = false;
+  // A row picked in the More popup, run once the popup has closed.
+  std::optional<MenuAction> pendingMoreAction;
   std::string title = "Reader Menu";
   uint8_t pendingOrientation = 0;
   uint8_t selectedPageTurnOption = 0;
