@@ -5417,7 +5417,8 @@ void EpubReaderActivity::handleOverlayInput() {
 
   switch (routed.event) {
     case ReaderToolbarUi::Event::Dismiss:
-      dismissPanel();
+      // A tap on the page closes everything in one go; Back steps out to the toolbar.
+      closeOverlayToPage();
       return;
     case ReaderToolbarUi::Event::Tool: {
       // Sheet-bottom tool switcher: hop straight to another panel.

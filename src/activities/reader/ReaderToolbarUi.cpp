@@ -217,7 +217,7 @@ void ReaderToolbarUi::buildPanel(UiScreen& screen) {
 
   fui::SheetProps sheetProps;
   sheetProps.anchor = fui::SheetEdge::Bottom;
-  sheetProps.dismissAction = ACTION_DISMISS;  // tap the page above the sheet = back to the toolbar
+  sheetProps.dismissAction = ACTION_DISMISS;  // tap the page above the sheet = back to the page
   // Same grabber air as the toolbar sheet / frontlight panel.
   sheetProps.grabberMargin = tokens.spaceLg;
   sheetProps.grabberInset = static_cast<int16_t>(tokens.spaceLg + tokens.spaceMd);
