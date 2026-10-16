@@ -425,7 +425,9 @@ void EpubReaderActivity::renderVertical(const int marginRight, const uint16_t vi
       } else if (pendingVisibleOffset != 0) {
         if (const auto p = verticalSection->getPageForVisibleTextOffset(pendingVisibleOffset, true)) page = *p;
       } else if (cachedVisibleTextOffset.has_value() && cachedSpineIndex == currentSpineIndex) {
-        if (const auto p = verticalSection->getPageForVisibleTextOffset(*cachedVisibleTextOffset)) page = *p;
+        if (const auto p =
+                verticalSection->getPageForVisibleTextOffset(*cachedVisibleTextOffset, /*preferFirstAtOffset=*/true))
+          page = *p;
       } else if (pendingPercentJump && count > 0) {
         page = static_cast<int>(pendingSpineProgress * static_cast<float>(count));
       }
