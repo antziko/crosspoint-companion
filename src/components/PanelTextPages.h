@@ -16,6 +16,9 @@ class PanelTextPages {
   // only pathological unbreakable tokens are split at this cap.
   static constexpr size_t MAX_LINE_BYTES = 191;
 
+  // crosspoint: line pitch as a percentage of the font's line height (100 = solid). Set before layout().
+  void setLineSpacingPercent(const int percent) { lineSpacingPercent = percent; }
+
   void layout(const GfxRenderer& renderer, int fontId, const std::string& text, int width, int height);
   void clear();
 
@@ -37,4 +40,5 @@ class PanelTextPages {
   std::vector<Line> lines;
   int linesPerPage = 1;
   int totalPages = 1;
+  int lineSpacingPercent = 100;  // crosspoint
 };

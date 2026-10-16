@@ -23,6 +23,7 @@
 #include "WifiCredentialStore.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/DictionaryPanel.h"
+#include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/ClockSyncPolicy.h"
@@ -93,6 +94,8 @@ constexpr unsigned long QUICK_CONNECT_TIMEOUT_MS = 12000;
 // Translations are prose, and a Japanese page's is read beside Japanese: the UI face carries the
 // CJK fallback.
 constexpr int TRANSLATION_FONT_ID = UI_12_FONT_ID;
+// crosspoint: air between lines of the translation; solid UI_12 reads cramped in the panel.
+constexpr int TRANSLATION_LINE_SPACING_PERCENT = 135;
 
 }  // namespace
 
@@ -133,7 +136,8 @@ void EpubReaderTranslationActivity::onEnter() {
   Activity::onEnter();
 
   if (hasPreTranslation) {
-    const auto body = DictionaryPanel::compute(renderer).body;
+    const auto body = DictionaryPanel::compute(renderer, /*titled=*/false).body;  // crosspoint
+    textPages.setLineSpacingPercent(TRANSLATION_LINE_SPACING_PERCENT);
     textPages.layout(renderer, TRANSLATION_FONT_ID, translatedText, body.width, body.height);
     requestUpdate();
     return;
@@ -529,7 +533,8 @@ void EpubReaderTranslationActivity::onWifiComplete(bool success) {
           errorMessage.c_str(), static_cast<unsigned>(translatedText.size()));  // crosspoint
   if (translated) {
     RenderLock lock(*this);
-    const auto body = DictionaryPanel::compute(renderer).body;
+    const auto body = DictionaryPanel::compute(renderer, /*titled=*/false).body;  // crosspoint
+    textPages.setLineSpacingPercent(TRANSLATION_LINE_SPACING_PERCENT);
     textPages.layout(renderer, TRANSLATION_FONT_ID, translatedText, body.width, body.height);
     currentPage = 0;
     state = SHOWING_RESULT;
@@ -642,7 +647,8 @@ void EpubReaderTranslationActivity::render(RenderLock&&) {
                static_cast<unsigned>(millicents / 100000), static_cast<unsigned>(millicents % 100000));
     }
   }
-  const auto layout = DictionaryPanel::draw(renderer, I18n::getInstance().get(title), footer, counter);
+  // crosspoint: untitled panel; the reader already knows what it asked for.
+  const auto layout = DictionaryPanel::draw(renderer, nullptr, footer, counter);
 
   if (state == SHOWING_RESULT) {
     auto* fcm = renderer.getFontCacheManager();
@@ -655,12 +661,10 @@ void EpubReaderTranslationActivity::render(RenderLock&&) {
                          : state == TRANSLATING ? tr(STR_TRANSLATING)
                          : state == ERROR       ? errorMessage.c_str()
                                                 : "";
-    const auto lines = renderer.wrappedText(TRANSLATION_FONT_ID, status, layout.body.width, 6);
-    int y = layout.body.y;
-    for (const auto& line : lines) {
-      renderer.drawText(TRANSLATION_FONT_ID, layout.body.x, y, line.c_str(), true);
-      y += renderer.getLineHeight(TRANSLATION_FONT_ID);
-    }
+    // crosspoint: status and errors in the popup font, as the reader's other progress messages.
+    const EpdFontFamily::Style style =
+        UITheme::getInstance().getMetrics().popupTextBold ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR;
+    UITheme::drawCenteredWrappedText(renderer, layout.body, uiScaleSpec().smallFontId, status, 6, true, style);
   }
 
   const bool paged = state == SHOWING_RESULT;

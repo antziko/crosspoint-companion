@@ -32,7 +32,7 @@ void PanelTextPages::layout(const GfxRenderer& renderer, const int fontId, const
 
   const int maxWidth = width;
   const int spaceWidth = renderer.getSpaceWidth(fontId, EpdFontFamily::REGULAR);
-  const int lineHeight = renderer.getLineHeight(fontId);
+  const int lineHeight = renderer.getLineHeight(fontId) * lineSpacingPercent / 100;  // crosspoint
   linesPerPage = std::max(1, height / lineHeight);
 
   const char* s = text.c_str();
@@ -120,7 +120,7 @@ void PanelTextPages::layout(const GfxRenderer& renderer, const int fontId, const
 
 void PanelTextPages::drawLines(const GfxRenderer& renderer, const int fontId, const int x, const int y,
                                const std::string& text, const int firstLine) const {
-  const int lineHeight = renderer.getLineHeight(fontId);
+  const int lineHeight = renderer.getLineHeight(fontId) * lineSpacingPercent / 100;  // crosspoint
   char buf[MAX_LINE_BYTES + 1];
   const int lastLine = std::min(firstLine + linesPerPage, static_cast<int>(lines.size()));
   for (int i = firstLine; i < lastLine; i++) {

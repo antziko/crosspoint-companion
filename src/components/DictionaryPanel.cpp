@@ -77,7 +77,7 @@ void ellipsize(const GfxRenderer& renderer, const int fontId, const char* text, 
 
 }  // namespace
 
-DictionaryPanel::Layout DictionaryPanel::compute(const GfxRenderer& renderer) {
+DictionaryPanel::Layout DictionaryPanel::compute(const GfxRenderer& renderer, const bool titled) {
   const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 
   Layout layout;
@@ -108,7 +108,8 @@ DictionaryPanel::Layout DictionaryPanel::compute(const GfxRenderer& renderer) {
   const int headwordHeight = renderer.getLineHeight(HEADWORD_FONT_ID);
   const int footerHeight = renderer.getLineHeight(SMALL_FONT_ID);
   const int bodyTop =
-      layout.box.y + PADDING + headwordHeight + HEADWORD_GAP + PADDING / 2 + DIVIDER_STROKE + PADDING / 2;
+      titled ? layout.box.y + PADDING + headwordHeight + HEADWORD_GAP + PADDING / 2 + DIVIDER_STROKE + PADDING / 2
+             : layout.box.y + PADDING;  // crosspoint
   const int bodyBottom = layout.box.y + layout.box.height - PADDING - footerHeight - PADDING / 2 - DIVIDER_STROKE;
 
   layout.body.x = layout.box.x + PADDING;
@@ -141,7 +142,8 @@ void DictionaryPanel::clearButtonHints(const GfxRenderer& renderer) {
 DictionaryPanel::Layout DictionaryPanel::draw(const GfxRenderer& renderer, const char* headword, const char* dictName,
                                               const char* counter, const char* kind, const bool addButton) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const Layout layout = compute(renderer);
+  const bool titled = (headword && headword[0] != '\0') || addButton;  // crosspoint
+  const Layout layout = compute(renderer, titled);
   const int radius = panelRadius(metrics);
 
   // Opaque fill: the panel floats over the reader's page, which is still in the framebuffer.
@@ -164,8 +166,10 @@ DictionaryPanel::Layout DictionaryPanel::draw(const GfxRenderer& renderer, const
     renderer.drawIcon(DictAddCardIcon, iconX, iconY, ADD_ICON_SIZE);
   }
 
-  const int dividerY = headwordY + renderer.getLineHeight(HEADWORD_FONT_ID) + HEADWORD_GAP + PADDING / 2;
-  renderer.drawLine(textX, dividerY, rightEdge, dividerY, DIVIDER_STROKE, true);
+  if (titled) {  // crosspoint
+    const int dividerY = headwordY + renderer.getLineHeight(HEADWORD_FONT_ID) + HEADWORD_GAP + PADDING / 2;
+    renderer.drawLine(textX, dividerY, rightEdge, dividerY, DIVIDER_STROKE, true);
+  }
 
   const int footerY = layout.box.y + layout.box.height - PADDING - renderer.getLineHeight(SMALL_FONT_ID);
   renderer.drawLine(textX, footerY - PADDING / 2, rightEdge, footerY - PADDING / 2, DIVIDER_STROKE, true);

@@ -27,7 +27,8 @@ void setAvoid(Rect band);
 
 // The panel's rectangles for the current orientation. Pure geometry, no drawing, so callers
 // can lay text out (wrap, paginate) before any pixels exist.
-Layout compute(const GfxRenderer& renderer);
+// crosspoint: `titled` false drops the headword line and its divider; the body starts at the top.
+Layout compute(const GfxRenderer& renderer, bool titled = true);
 
 // Paints the frame and `headword` above the divider. The footer carries "kind | dictName" on the
 // left, clipped with an ellipsis, and `counter` (the "1/2" page position) on the right. `kind`
@@ -35,7 +36,8 @@ Layout compute(const GfxRenderer& renderer);
 // null when the source is unambiguous; any of the texts may be null. `addButton` draws the
 // save-sentence button in the top-right corner (touch boards) -- its tap target is
 // Layout::addButton either way. The returned Layout is the same one compute() gives, so the
-// caller can draw its body straight after.
+// caller can draw its body straight after. crosspoint: with no headword and no addButton the
+// panel is untitled (see compute()).
 Layout draw(const GfxRenderer& renderer, const char* headword, const char* dictName, const char* counter,
             const char* kind = nullptr, bool addButton = false);
 
