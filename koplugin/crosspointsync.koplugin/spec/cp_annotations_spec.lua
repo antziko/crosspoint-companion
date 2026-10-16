@@ -41,6 +41,7 @@ describe("cp_annotations", function()
 
             assert.are.equal(1, #items)
             assert.are.equal("lighten", items[1].drawer)
+            assert.are.equal("cyan", items[1].color)
             assert.are.equal("/body/DocFragment[2]/body/p[1]/text()[1].4", items[1].pos0)
             assert.are.equal("/body/DocFragment[2]/body/p[1]/text()[1].15", items[1].pos1)
             assert.are.equal("the real highlighted text", items[1].text)
@@ -92,6 +93,27 @@ describe("cp_annotations", function()
             assert.are.equal(0, #items)
             assert.are.equal(0, skipped)
             assert.is_nil(next(byKey))
+        end)
+    end)
+
+    describe("recolorDeviceMarks", function()
+        it("colours only colourless highlights the ledger holds", function()
+            local annotations = {
+                { pos0 = "a", pos1 = "b", drawer = "lighten" },                    -- device, gray
+                { pos0 = "c", pos1 = "d", drawer = "lighten", color = "yellow" }, -- recoloured here
+                { pos0 = "e", pos1 = "f", drawer = "lighten" },                    -- KOReader's own
+                { page = "g" },                                                    -- bookmark
+            }
+            local marks = {
+                [Annotations.keyOf("a", "b")] = {},
+                [Annotations.keyOf("c", "d")] = {},
+                [Annotations.keyOf("g")] = {},
+            }
+            assert.are.same({ 1 }, Annotations.recolorDeviceMarks(annotations, marks))
+            assert.are.equal("cyan", annotations[1].color)
+            assert.are.equal("yellow", annotations[2].color)
+            assert.is_nil(annotations[3].color)
+            assert.is_nil(annotations[4].color)
         end)
     end)
 

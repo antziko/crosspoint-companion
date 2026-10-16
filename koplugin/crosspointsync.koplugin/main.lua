@@ -88,6 +88,8 @@ function CrossPointSync:init()
     -- Off for the same reason, and for one more: stock kosync may still be enabled, and
     -- two plugins writing the same record would each undo the other.
     if self.settings.push_progress == nil then self.settings.push_progress = false end
+    -- On by default: crosspoint-sync lists a book in its web app only once a title arrives.
+    if self.settings.send_metadata == nil then self.settings.send_metadata = true end
     self.device_id = G_reader_settings:readSetting("device_id")
     self.ui.menu:registerToMainMenu(self)
     self:onDispatcherRegisterActions()
@@ -435,6 +437,16 @@ Turn KOReader's own progress sync OFF before sending: both write the same record
                         checked_func = function() return self.settings.filename_mode end,
                         callback = function()
                             self.settings.filename_mode = not self.settings.filename_mode
+                            self:saveSettings()
+                        end,
+                        separator = true,
+                    },
+                    {
+                        text = _("Send book title and author"),
+                        help_text = _([[Send the book's filename, title and authors with your reading position, so the crosspoint-sync web app can list books read only in KOReader. Other sync servers ignore it.]]),
+                        checked_func = function() return self.settings.send_metadata end,
+                        callback = function()
+                            self.settings.send_metadata = not self.settings.send_metadata
                             self:saveSettings()
                         end,
                         separator = true,
@@ -861,6 +873,12 @@ function CrossPointSync:apply(body)
         removed = removed + 1
     end
 
+    local recolored = Annotations.recolorDeviceMarks(mgr.annotations, plan.byKey)
+    for _, index in ipairs(recolored) do
+        ui:handleEvent(Event:new("AnnotationsModified", { mgr.annotations[index], index_modified = index }))
+    end
+    if #recolored > 0 then Diag.log("recolored device highlights:", #recolored) end
+
     local existing = Annotations.existingKeys(mgr.annotations)
     local added = 0
     for _, item in ipairs(plan.items) do
@@ -883,7 +901,7 @@ function CrossPointSync:apply(body)
     Ledger.save(ui.doc_settings, ledger)
 
     Diag.log("result: added=" .. added, "removed=" .. removed)
-    if added > 0 or removed > 0 then
+    if added > 0 or removed > 0 or #recolored > 0 then
         ui:handleEvent(Event:new("BookmarkUpdated"))
     end
 
@@ -1199,9 +1217,14 @@ function CrossPointSync:pushProgress(interactive)
         percentage = Progress.roundPercent(here.percentage),
         device = Device.model,
         device_id = self.device_id,
+        metadata = self.settings.send_metadata
+            and Progress.metadata(self.ui.document.file, self.ui.doc_props) or nil,
     }
     Diag.log("position push:", tostring(record.progress),
         string.format("(%.2f%%)", (record.percentage or 0) * 100), "under", tostring(document))
+    if record.metadata then
+        Diag.log("  with title:", tostring(record.metadata.title), "file:", tostring(record.metadata.filename))
+    end
 
     self:_ensureClient(creds)
     self.client:putProgress(creds.username, creds.userkey, record, function(sent, _body, status)

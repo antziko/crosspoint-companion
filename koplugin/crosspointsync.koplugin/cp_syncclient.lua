@@ -182,11 +182,15 @@ devices, and DELETES it on any write that carries none -- deliberately, since a 
 anchor pointing somewhere the new progress does not is worse than no anchor. A push from
 here therefore costs the device the extra precision of its own last record; it still
 resolves the plain XPointer, which is what it navigates by.
+
+`metadata` is optional (stock kosync's shape, KOReader PR #15306): crosspoint-sync files the
+book's title under it so the web app lists the book; other servers ignore it.
 ]]
 function CPSyncClient:putProgress(username, userkey, record, callback)
     self:_call(username, userkey, "PUT /syncs/progress (" .. tostring(record.percentage) .. ")", function(client)
         return client:update_progress({
             document = record.document,
+            metadata = record.metadata,
             progress = record.progress,
             percentage = record.percentage,
             device = record.device,

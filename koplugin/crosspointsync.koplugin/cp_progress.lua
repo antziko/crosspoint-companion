@@ -123,4 +123,28 @@ function Progress.shouldPush(here, sent)
     return true
 end
 
+--[[--
+The `metadata` object sent with a position, in stock kosync's shape (KOReader PR #15306).
+
+crosspoint-sync lists a book in its web app only once it knows a title or filename; other
+servers ignore the field.
+
+@param file  the document's path, or nil
+@param props the reader's doc_props, or nil
+@return `{ filename, title, authors }`, or nil when there is nothing to name the book by
+]]
+function Progress.metadata(file, props)
+    props = props or {}
+    local function str(v)
+        return type(v) == "string" and v ~= "" and v or nil
+    end
+    local meta = {
+        filename = type(file) == "string" and str(file:match("([^/]*)$")) or nil,
+        title = str(props.display_title) or str(props.title),
+        authors = str(props.authors),
+    }
+    if not (meta.filename or meta.title or meta.authors) then return nil end
+    return meta
+end
+
 return Progress

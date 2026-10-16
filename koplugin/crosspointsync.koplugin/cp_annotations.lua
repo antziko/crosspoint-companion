@@ -40,6 +40,35 @@ function Annotations.anchorsOf(item)
 end
 
 --- Keys of the annotations already in the document, so a re-pull adds nothing twice.
+-- KOReader highlight colour for marks made on a CrossPoint device, so they stand apart from
+-- this reader's own. A KOReader colour key (ReaderHighlight's highlight_colors).
+Annotations.DEVICE_COLOR = "cyan"
+
+--[[--
+Give colourless device highlights the device colour.
+
+Highlights imported before the colour existed carry none, which KOReader draws gray. Only
+annotations the ledger holds as device marks are touched, and only while they have no
+colour, so one the reader has recoloured here keeps its choice.
+
+@param annotations the reader's annotation list
+@param marks       the ledger's marks, keyed by annotation key
+@return the indices changed
+]]
+function Annotations.recolorDeviceMarks(annotations, marks)
+    local changed = {}
+    for index, item in ipairs(annotations or {}) do
+        if item.drawer and item.color == nil then
+            local pos0, pos1 = Annotations.anchorsOf(item)
+            if pos0 and marks and marks[Annotations.keyOf(pos0, pos1)] then
+                item.color = Annotations.DEVICE_COLOR
+                changed[#changed + 1] = index
+            end
+        end
+    end
+    return changed
+end
+
 function Annotations.existingKeys(annotations)
     local keys = {}
     for _, item in ipairs(annotations or {}) do
@@ -115,6 +144,7 @@ function Annotations.build(records, doc, toc, datetime)
                         page = pos0,
                         text = text or "",
                         drawer = "lighten",
+                        color = Annotations.DEVICE_COLOR,
                         chapter = chapter,
                         pageno = pageno,
                         datetime = datetime,

@@ -116,4 +116,21 @@ describe("cp_progress", function()
             assert.are.equal(Progress.NOT_USABLE, why)
         end)
     end)
+
+    describe("metadata", function()
+        it("names the book by basename, display title and authors", function()
+            assert.are.same({ filename = "(x) Dune.epub", title = "Dune", authors = "Frank Herbert" },
+                Progress.metadata("/mnt/onboard/Books/(x) Dune.epub",
+                    { display_title = "Dune", title = "dune", authors = "Frank Herbert" }))
+        end)
+
+        it("falls back to the raw title and leaves out empty fields", function()
+            assert.are.same({ title = "Dune" }, Progress.metadata(nil, { title = "Dune", authors = "" }))
+        end)
+
+        it("is nil when nothing names the book", function()
+            assert.is_nil(Progress.metadata(nil, nil))
+            assert.is_nil(Progress.metadata("", { display_title = "" }))
+        end)
+    end)
 end)

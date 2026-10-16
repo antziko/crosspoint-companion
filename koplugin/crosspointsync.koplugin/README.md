@@ -28,8 +28,9 @@ CrossPoint sync
 ├─ Bookmarks and highlights: Receive from CrossPoint  ▸  Off / Receive / Two-way
 ├─ Reading position: Receive from CrossPoint          ▸  Off / Receive / Send / Two-way
 ├─ Server and login
-└─ Advanced                                  ▸  Match books by filename, diagnostics,
-                                                forget this book's sync record
+└─ Advanced                                  ▸  Match books by filename, send book title
+                                                and author, diagnostics, forget this
+                                                book's sync record
 ```
 
 Two things sync — bookmarks and highlights, and the reading position — and each is in its
