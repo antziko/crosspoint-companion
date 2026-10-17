@@ -77,7 +77,7 @@ class BookMetadataCache {
   std::unique_ptr<uint32_t[]> cumulativeSizes;
   uint16_t cumulativeSizeCount = 0;
 
-  // Index for fast href→spineIndex lookup (used only for large EPUBs)
+  // Index for fast href→spineIndex lookup during the TOC pass
   struct SpineHrefIndexEntry {
     uint64_t hrefHash;  // FNV-1a 64-bit hash
     uint16_t hrefLen;   // length for collision reduction
@@ -87,6 +87,9 @@ class BookMetadataCache {
   bool useSpineHrefIndex = false;
 
   static constexpr uint16_t LARGE_SPINE_THRESHOLD = 400;
+  // Without the index every TOC entry re-reads the spine from SD (194 entries x 196 spine items
+  // took 17.5s of a 29s first open). It costs 16 bytes per spine item for the pass alone.
+  static constexpr uint16_t TOC_HREF_INDEX_THRESHOLD = 16;
 
   // FNV-1a 64-bit hash function
   static uint64_t fnvHash64(const std::string& s) {

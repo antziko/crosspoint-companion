@@ -17,12 +17,12 @@
 #include <cstring>
 
 #include "CrossPointSettings.h"
+#include "HapticFeedback.h"
 #include "MappedInputManager.h"
-#include "PanelTouch.h"
+#include "ReaderUtils.h"
 #include "SilentRestart.h"
 #include "WifiCredentialStore.h"
 #include "activities/network/WifiSelectionActivity.h"
-#include "components/DictionaryPanel.h"
 #include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -87,8 +87,6 @@ constexpr GeminiModel GEMINI_MODELS[] = {
 };
 constexpr uint8_t GEMINI_MODEL_COUNT = sizeof(GEMINI_MODELS) / sizeof(GEMINI_MODELS[0]);
 constexpr const char* GEMINI_MODEL = GEMINI_MODELS[0].name;
-// The page behind the panel, kept across the full-screen Wi-Fi list and a silent restart.
-static std::string backgroundPath() { return sdsystem::path("translate_bg.bin"); }
 // A saved network either answers within this or is out of range; the Wi-Fi list takes over then.
 constexpr unsigned long QUICK_CONNECT_TIMEOUT_MS = 12000;
 // Translations are prose, and a Japanese page's is read beside Japanese: the UI face carries the
@@ -96,6 +94,26 @@ constexpr unsigned long QUICK_CONNECT_TIMEOUT_MS = 12000;
 constexpr int TRANSLATION_FONT_ID = UI_12_FONT_ID;
 // crosspoint: air between lines of the translation; solid UI_12 reads cramped in the panel.
 constexpr int TRANSLATION_LINE_SPACING_PERCENT = 135;
+
+// crosspoint: the translation fills the screen: text above a divider, and the model, cost and
+// page counter below it.
+constexpr int PAGE_MARGIN = 16;
+constexpr int FOOTER_GAP = 8;
+
+struct PageLayout {
+  Rect body;
+  int footerY;
+};
+
+PageLayout pageLayout(const GfxRenderer& renderer) {
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  PageLayout layout;
+  layout.footerY = safe.y + safe.height - FOOTER_GAP - renderer.getLineHeight(SMALL_FONT_ID);
+  const int top = safe.y + PAGE_MARGIN;
+  layout.body = Rect(safe.x + PAGE_MARGIN, top, std::max(0, safe.width - 2 * PAGE_MARGIN),
+                     std::max(0, layout.footerY - 2 * FOOTER_GAP - top));
+  return layout;
+}
 
 }  // namespace
 
@@ -136,18 +154,11 @@ void EpubReaderTranslationActivity::onEnter() {
   Activity::onEnter();
 
   if (hasPreTranslation) {
-    const auto body = DictionaryPanel::compute(renderer, /*titled=*/false).body;  // crosspoint
+    const auto body = pageLayout(renderer).body;  // crosspoint
     textPages.setLineSpacingPercent(TRANSLATION_LINE_SPACING_PERCENT);
     textPages.layout(renderer, TRANSLATION_FONT_ID, translatedText, body.width, body.height);
     requestUpdate();
     return;
-  }
-
-  // A restarted translation boots to a blank framebuffer; the page was saved before the restart.
-  if (resumedAfterRestart) {
-    restoreBackgroundPending = true;
-  } else {
-    saveBackground(renderer);
   }
 
   // The reader activity underneath is only paused, not destroyed, so its font decompressor's
@@ -195,29 +206,6 @@ void EpubReaderTranslationActivity::onEnter() {
   if (!startQuickConnect()) startWifiSelection();
 }
 
-bool EpubReaderTranslationActivity::saveBackground(const GfxRenderer& renderer) {
-  HalFile file;
-  if (!Storage.openFileForWrite("XLAT", backgroundPath().c_str(), file)) return false;
-  const size_t size = renderer.getBufferSize();
-  if (file.write(renderer.getFrameBuffer(), size) != size) {
-    LOG_ERR("XLAT", "Short write saving the page behind the panel");
-    return false;
-  }
-  return true;
-}
-
-bool EpubReaderTranslationActivity::restoreBackground(const GfxRenderer& renderer) {
-  HalFile file;
-  if (!Storage.openFileForRead("XLAT", backgroundPath().c_str(), file)) return false;
-  const size_t size = renderer.getBufferSize();
-  if (file.size() != size || file.read(renderer.getFrameBuffer(), size) != static_cast<int>(size)) {
-    // A page from another orientation or a truncated file: a blank backdrop beats a garbled one.
-    renderer.clearScreen();
-    return false;
-  }
-  return true;
-}
-
 bool EpubReaderTranslationActivity::startQuickConnect() {
   {
     RenderLock lock(*this);  // SD access shares the SPI bus with the display
@@ -261,16 +249,11 @@ void EpubReaderTranslationActivity::pollQuickConnect() {
 void EpubReaderTranslationActivity::startWifiSelection() {
   state = WIFI_SELECTION;
   startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
-                         [this](const ActivityResult& result) {
-                           // The list drew over the page behind the panel.
-                           restoreBackgroundPending = true;
-                           onWifiComplete(!result.isCancelled);
-                         });
+                         [this](const ActivityResult& result) { onWifiComplete(!result.isCancelled); });
 }
 
 void EpubReaderTranslationActivity::onExit() {
   Activity::onExit();
-  Storage.remove(backgroundPath().c_str());
 
   if (!hasPreTranslation && WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(false);
@@ -352,7 +335,6 @@ static std::string translationHttpError(const int httpCode) {
 bool EpubReaderTranslationActivity::callGeminiApi(const std::string& apiKey, const char* model) {
   if (!model) model = GEMINI_MODEL;  // crosspoint: model chain
   lastHttpCode = 0;
-  lastRecitation = false;
   std::string url = "https://generativelanguage.googleapis.com/v1beta/models/";
   url += model;
   url += ":generateContent?key=";
@@ -401,18 +383,13 @@ bool EpubReaderTranslationActivity::callGeminiApi(const std::string& apiKey, con
   auto part = contents.add<JsonObject>();
   auto parts = part["parts"].to<JsonArray>();
   auto textPart = parts.add<JsonObject>();
+  // crosspoint: numbered, close-to-literal sentences. A fluent translation of a published book
+  // reproduces its published English edition, which Gemini withholds as RECITATION.
   textPart["text"] = std::string(
-                         "Translate the following text to English. "
-                         "Return only the translation, no commentary.\n\n") +
+                         "Translate the following text to English sentence by sentence. Number each sentence "
+                         "and start it on a new line. Keep each close and literal to the original wording, "
+                         "but easy to read. Return only the translation, no commentary.\n\n") +
                      sourceText;
-  if (freeWording) {
-    // crosspoint: a page withheld as RECITATION (its faithful translation matches a published one)
-    // is asked once more for a translation in the model's own words.
-    textPart["text"] = std::string(
-                           "Translate the following text to English in your own plain, natural wording. "
-                           "Return only the translation, no commentary.\n\n") +
-                       sourceText;
-  }
 
   auto config = reqDoc["generationConfig"].to<JsonObject>();
   config["maxOutputTokens"] = 2048;
@@ -467,7 +444,6 @@ bool EpubReaderTranslationActivity::callGeminiApi(const std::string& apiKey, con
     LOG_ERR("XLAT", "No text in Gemini response (finish=%s)", finish);
     if (strcmp(finish, "RECITATION") == 0) {
       errorMessage = tr(STR_TRANSLATION_RECITATION);
-      lastRecitation = true;
     } else if (strcmp(finish, "SAFETY") == 0 || strcmp(finish, "PROHIBITED_CONTENT") == 0 ||
                strcmp(finish, "BLOCKLIST") == 0 || strcmp(finish, "SPII") == 0) {
       errorMessage = tr(STR_TRANSLATION_BLOCKED);
@@ -523,17 +499,11 @@ void EpubReaderTranslationActivity::onWifiComplete(bool success) {
     ++modelIndex;
     translated = callGeminiApi(apiKey, GEMINI_MODELS[modelIndex].name);
   }
-  if (!translated && lastRecitation) {
-    LOG_INF("XLAT", "%s withheld the page as recitation; asking for free wording", GEMINI_MODELS[modelIndex].name);
-    freeWording = true;
-    translated = callGeminiApi(apiKey, GEMINI_MODELS[modelIndex].name);
-    freeWording = false;
-  }
   LOG_DBG("XLAT", "Result ok=%d model=%u err='%s' chars=%u", translated ? 1 : 0, static_cast<unsigned>(modelIndex),
           errorMessage.c_str(), static_cast<unsigned>(translatedText.size()));  // crosspoint
   if (translated) {
     RenderLock lock(*this);
-    const auto body = DictionaryPanel::compute(renderer, /*titled=*/false).body;  // crosspoint
+    const auto body = pageLayout(renderer).body;  // crosspoint
     textPages.setLineSpacingPercent(TRANSLATION_LINE_SPACING_PERCENT);
     textPages.layout(renderer, TRANSLATION_FONT_ID, translatedText, body.width, body.height);
     currentPage = 0;
@@ -594,21 +564,25 @@ void EpubReaderTranslationActivity::loop() {
     return;
   }
 
-  switch (PanelTouch::read(renderer, mappedInput)) {
-    case PanelTouch::Action::Close:
+  // crosspoint: a tap in the middle third closes the page; the sides turn it as the reader does.
+  int tx = 0;
+  int ty = 0;
+  if (mappedInput.wasScreenTapped(tx, ty)) {
+    const int third = renderer.getScreenWidth() / 3;
+    if (tx >= third && tx < renderer.getScreenWidth() - third) {
+      haptic_feedback::touchAction();
       cancel();
       return;
-    case PanelTouch::Action::Next:
-    case PanelTouch::Action::ScrollDown:
-      stepPage(1);
-      return;
-    case PanelTouch::Action::Previous:
-    case PanelTouch::Action::ScrollUp:
-      stepPage(-1);
-      return;
-    case PanelTouch::Action::AddButton:
-    case PanelTouch::Action::None:
-      break;
+    }
+  }
+  if (const int scroll = ReaderUtils::definitionScrollSwipe(mappedInput)) {
+    stepPage(scroll > 0 ? 1 : -1);
+    return;
+  }
+  const auto turn = ReaderUtils::detectTouchPageTurn(renderer, mappedInput);
+  if (turn.next || turn.prev) {
+    stepPage(turn.next ? 1 : -1);
+    return;
   }
 
   buttonNavigator.onNext([this] { stepPage(1); });
@@ -617,14 +591,9 @@ void EpubReaderTranslationActivity::loop() {
 
 void EpubReaderTranslationActivity::render(RenderLock&&) {
   LOG_DBG("XLAT", "Render state=%d pages=%d page=%d", static_cast<int>(state), textPages.pageCount(),
-          currentPage);  // crosspoint
-  // No clearScreen: the panel floats over the reader's page, which is in the framebuffer or, after
-  // the Wi-Fi list, back from SD.
-  if (restoreBackgroundPending) {
-    restoreBackgroundPending = false;
-    restoreBackground(renderer);
-    panelOnGlass = false;  // crosspoint: the whole frame changed
-  }
+          currentPage);    // crosspoint
+  renderer.clearScreen();  // crosspoint: a full page, not a panel over the reader's page
+  const PageLayout page = pageLayout(renderer);
 
   char counter[16] = "";
   if (state == SHOWING_RESULT && textPages.pageCount() > 1) {
@@ -647,15 +616,26 @@ void EpubReaderTranslationActivity::render(RenderLock&&) {
                static_cast<unsigned>(millicents / 100000), static_cast<unsigned>(millicents % 100000));
     }
   }
-  // crosspoint: untitled panel; the reader already knows what it asked for.
-  const auto layout = DictionaryPanel::draw(renderer, nullptr, footer, counter);
+  const int left = page.body.x;
+  const int right = page.body.x + page.body.width;
+  renderer.drawLine(left, page.footerY - FOOTER_GAP, right, page.footerY - FOOTER_GAP, 1, true);
+  int footerWidth = page.body.width;
+  if (counter[0] != '\0') {
+    const int counterWidth = renderer.getTextWidth(SMALL_FONT_ID, counter);
+    renderer.drawText(SMALL_FONT_ID, right - counterWidth, page.footerY, counter);
+    footerWidth -= counterWidth + FOOTER_GAP;
+  }
+  if (footer[0] != '\0' && footerWidth > 0) {
+    renderer.drawText(SMALL_FONT_ID, left, page.footerY,
+                      renderer.truncatedText(SMALL_FONT_ID, footer, footerWidth).c_str());
+  }
 
   if (state == SHOWING_RESULT) {
     auto* fcm = renderer.getFontCacheManager();
     auto scope = fcm->createPrewarmScope();
-    textPages.draw(renderer, TRANSLATION_FONT_ID, layout.body.x, layout.body.y, translatedText, currentPage);
+    textPages.draw(renderer, TRANSLATION_FONT_ID, page.body.x, page.body.y, translatedText, currentPage);
     scope.endScanAndPrewarm();
-    textPages.draw(renderer, TRANSLATION_FONT_ID, layout.body.x, layout.body.y, translatedText, currentPage);
+    textPages.draw(renderer, TRANSLATION_FONT_ID, page.body.x, page.body.y, translatedText, currentPage);
   } else {
     const char* status = state == CONNECTING    ? tr(STR_CONNECTING_SAVED_WIFI)
                          : state == TRANSLATING ? tr(STR_TRANSLATING)
@@ -664,25 +644,13 @@ void EpubReaderTranslationActivity::render(RenderLock&&) {
     // crosspoint: status and errors in the popup font, as the reader's other progress messages.
     const EpdFontFamily::Style style =
         UITheme::getInstance().getMetrics().popupTextBold ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR;
-    UITheme::drawCenteredWrappedText(renderer, layout.body, uiScaleSpec().smallFontId, status, 6, true, style);
+    UITheme::drawCenteredWrappedText(renderer, page.body, uiScaleSpec().smallFontId, status, 6, true, style);
   }
 
   const bool paged = state == SHOWING_RESULT;
   const char* confirmLabel = state == ERROR && canRetry() ? tr(STR_RETRY) : "";  // crosspoint
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, paged && currentPage > 0 ? "<" : "",
                                             paged && currentPage + 1 < textPages.pageCount() ? ">" : "");
-  DictionaryPanel::clearButtonHints(renderer);
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-  // crosspoint: windowed after the first paint: the page around the panel is unchanged, so only
-  // the panel is driven. A change of hint labels takes one full FAST (the hints' place varies by
-  // orientation).
-  const uint8_t hintKey =
-      static_cast<uint8_t>((confirmLabel[0] ? 1 : 0) | (labels.btn3[0] ? 2 : 0) | (labels.btn4[0] ? 4 : 0));
-  if (panelOnGlass && hintKey == lastHintKey) {
-    renderer.displayFastWindow(layout.box.x, layout.box.y, layout.box.width, layout.box.height);
-  } else {
-    renderer.displayBuffer();
-  }
-  panelOnGlass = true;
-  lastHintKey = hintKey;
+  renderer.displayBuffer();
 }
