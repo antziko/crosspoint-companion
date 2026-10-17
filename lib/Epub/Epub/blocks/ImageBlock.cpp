@@ -347,7 +347,23 @@ void ImageBlock::clearSessionRenderFailures() {
   retriedImageCount = 0;
 }
 
+uint16_t ImageBlock::chapterImageIndex() const {
+  const size_t slash = imagePath.rfind('/');
+  const size_t underscore = imagePath.rfind('_');
+  if (underscore == std::string::npos || (slash != std::string::npos && underscore < slash)) return UINT16_MAX;
+  uint32_t n = 0;
+  size_t i = underscore + 1;
+  for (; i < imagePath.size() && imagePath[i] >= '0' && imagePath[i] <= '9'; i++) {
+    n = n * 10 + static_cast<uint32_t>(imagePath[i] - '0');
+    if (n >= UINT16_MAX) return UINT16_MAX;
+  }
+  if (i == underscore + 1) return UINT16_MAX;
+  return static_cast<uint16_t>(n);
+}
+
 bool ImageBlock::takeHeapRetry() { return heapRetryPending.exchange(false, std::memory_order_acq_rel); }
+
+bool ImageBlock::heapRetryQueued() { return heapRetryPending.load(std::memory_order_acquire); }
 
 void ImageBlock::releaseRenderCache() { releasePxcSlot(); }
 

@@ -35,8 +35,11 @@ struct SnippetMiss {
   char gotHex[40] = {};
 };
 // `startIndex`, when given, receives the page-local token index the match opened at.
+// A snippet under kMinSnippetLen is too common to trust on a guessed page; `allowShort` is for a
+// page already pinned by the mark's own offset.
+constexpr size_t kMinSnippetLen = 8;
 SnippetAt findSnippet(const Page& page, const char* snippet, SnippetMiss* miss = nullptr,
-                      uint16_t* startIndex = nullptr);
+                      uint16_t* startIndex = nullptr, bool allowShort = false);
 
 // A point bookmark's extent. It records how many words its page held and is re-found by its
 // opening words, so after a re-flow its end is that many words further on. A "span word" is a

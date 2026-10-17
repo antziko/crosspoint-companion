@@ -1263,3 +1263,87 @@ TEST_F(BookmarkStoreTest, AChangedEndAloneIsNotANoOp) {
       store.adoptForeignMark(indexOfQuote(store), 2, 0.25f, UINT16_MAX, "Ch", "/xp", "/xp1", 5, 20, 900u, 0.45f));
   EXPECT_FLOAT_EQ(store.getBookmarks()[indexOfQuote(store)].endProgress, 0.45f);
 }
+
+// An image-only page bookmark carries the image it shows: photos with no text between them share
+// one character offset, so the offset alone opens the first of them.
+TEST_F(BookmarkStoreTest, AnImageBookmarkKeepsItsPlacementAcrossAReloadAndTheWire) {
+  auto& store = BookmarkStore::getInstance();
+  const std::string book = "/books/photos.epub";
+  ASSERT_TRUE(store.loadForBook(book, "T", "A", "epub"));
+  ASSERT_EQ(store.addBookmark(13, 0.55f, 203, "Seven", 40, "", false, 112, 0, 34578u, false, 37),
+            BookmarkStore::AddResult::Added);
+  store.unload();
+
+  ASSERT_TRUE(store.loadForBook(book, "T", "A", "epub"));
+  ASSERT_EQ(store.getBookmarks().size(), 1u);
+  EXPECT_EQ(store.getBookmarks()[0].visibleTextOffset, 34578u);
+  EXPECT_EQ(store.getBookmarks()[0].imageIndex, 37u);
+
+  const std::string blob = BookmarkStore::serializeToJson(store.getBookmarks(), store.getTombstones());
+  EXPECT_NE(blob.find("\"vo\":34578"), std::string::npos);
+  EXPECT_NE(blob.find("\"im\":37"), std::string::npos);
+  std::vector<Bookmark> bms;
+  std::vector<Tombstone> tombs;
+  ASSERT_TRUE(BookmarkStore::parseFromJson(blob.c_str(), bms, tombs));
+  ASSERT_EQ(bms.size(), 1u);
+  EXPECT_EQ(bms[0].visibleTextOffset, 34578u);
+  EXPECT_EQ(bms[0].imageIndex, 37u);
+}
+
+TEST_F(BookmarkStoreTest, ATextBookmarkSendsNoImage) {
+  auto& store = BookmarkStore::getInstance();
+  ASSERT_TRUE(store.loadForBook("/books/text.epub", "T", "A", "epub"));
+  ASSERT_EQ(store.addBookmark(1, 0.2f, 10, "Ch", 9, "words"), BookmarkStore::AddResult::Added);
+  EXPECT_EQ(store.getBookmarks()[0].imageIndex, UINT16_MAX);
+  const std::string blob = BookmarkStore::serializeToJson(store.getBookmarks(), store.getTombstones());
+  EXPECT_EQ(blob.find("\"im\""), std::string::npos);
+  EXPECT_EQ(blob.find("\"vo\""), std::string::npos);
+}
+
+TEST_F(BookmarkStoreTest, AFileFromBeforeImageIndexLoadsWithNone) {
+  const std::string book = "/books/legacy-im.epub";
+  writeV7File(book, {{1, 0.10f, 0, "Chap One"}});
+  auto& store = BookmarkStore::getInstance();
+  ASSERT_TRUE(store.loadForBook(book, "Legacy", "Auth", "epub"));
+  ASSERT_EQ(store.getBookmarks().size(), 1u);
+  EXPECT_EQ(store.getBookmarks()[0].imageIndex, UINT16_MAX);
+}
+
+// A newer copy from firmware that predates the fields wins the merge; it must not erase the
+// placement this device knows.
+TEST_F(BookmarkStoreTest, AMergeKeepsPlacementTheWinningCopyLacks) {
+  auto& store = BookmarkStore::getInstance();
+  const std::string book = "/books/merge-im.epub";
+  ASSERT_TRUE(store.loadForBook(book, "T", "A", "epub"));
+  ASSERT_EQ(store.addBookmark(13, 0.55f, 203, "Seven", 40, "", false, 112, 0, 34578u, false, 37),
+            BookmarkStore::AddResult::Added);
+  const uint32_t localVersion = store.getBookmarks()[0].version;
+
+  Bookmark remote = store.getBookmarks()[0];
+  remote.version = localVersion + 5;
+  remote.visibleTextOffset = 0;
+  remote.imageIndex = UINT16_MAX;
+  store.mergeFrom({remote}, {});
+  ASSERT_EQ(store.getBookmarks().size(), 1u);
+  EXPECT_EQ(store.getBookmarks()[0].version, localVersion + 5);
+  EXPECT_EQ(store.getBookmarks()[0].visibleTextOffset, 34578u);
+  EXPECT_EQ(store.getBookmarks()[0].imageIndex, 37u);
+}
+
+// Placement learned from a peer alone is still a change worth saving.
+TEST_F(BookmarkStoreTest, PlacementPulledFromAPeerIsSaved) {
+  auto& store = BookmarkStore::getInstance();
+  const std::string book = "/books/merge-im2.epub";
+  ASSERT_TRUE(store.loadForBook(book, "T", "A", "epub"));
+  ASSERT_EQ(store.addBookmark(13, 0.55f, 203, "Seven", 40, ""), BookmarkStore::AddResult::Added);
+
+  Bookmark remote = store.getBookmarks()[0];
+  remote.visibleTextOffset = 34578u;
+  remote.imageIndex = 37;
+  store.mergeFrom({remote}, {});
+  store.unload();
+
+  ASSERT_TRUE(store.loadForBook(book, "T", "A", "epub"));
+  EXPECT_EQ(store.getBookmarks()[0].visibleTextOffset, 34578u);
+  EXPECT_EQ(store.getBookmarks()[0].imageIndex, 37u);
+}

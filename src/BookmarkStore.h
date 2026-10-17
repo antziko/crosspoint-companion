@@ -70,6 +70,10 @@ struct Bookmark {
   // the paragraph STARTS on, which on a smaller screen can be a page early. Set when a
   // peer's mark is adopted, where the resolver has already computed it. 4 bytes x 128 marks.
   uint32_t visibleTextOffset = 0;
+  // Image-only page: the chapter image number (ImageBlock::chapterImageIndex) of the page's
+  // first image, UINT16_MAX otherwise. Back-to-back photos share one visibleTextOffset (no text
+  // between them), so this is what tells them apart; it comes from the HTML, not the layout.
+  uint16_t imageIndex = UINT16_MAX;
 
   // Session-only flag: true for the "return here" bookmark auto-dropped when the user
   // jumps to another chapter, so the reader can show a distinct icon for it. Deliberately
@@ -141,7 +145,7 @@ class BookmarkStore {
   AddResult addBookmark(uint16_t spineIndex, float progress, int pageCount, const char* chapterTitle,
                         uint16_t paragraphIndex = UINT16_MAX, const char* snippet = nullptr, bool returnMark = false,
                         int currentPage = 0, uint16_t spanWords = 0, uint32_t visibleTextOffset = 0,
-                        bool replaceSamePage = true);
+                        bool replaceSamePage = true, uint16_t imageIndex = UINT16_MAX);
 
   // Add a ranged quote ("highlight"). The anchor (spineIndex, progress, chapterTitle,
   // page snapshot) matches how a point bookmark anchors; startWord/endWord are the

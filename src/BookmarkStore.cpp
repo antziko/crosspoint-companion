@@ -22,11 +22,12 @@ constexpr uint8_t RETURN_MARK_VERSION = 6;     // adds a per-bookmark "return he
 constexpr uint8_t CHAPTER_PAGES_VERSION = 7;   // adds chapterCurrentPage + chapterPageCount (two uint16)
 constexpr uint8_t QUOTE_RANGE_VERSION = 8;     // adds quote flag + end anchor + start/end word (ranged quotes)
 constexpr uint8_t VISIBLE_OFFSET_VERSION = 9;  // adds visibleTextOffset (uint32), 0 when unknown
-constexpr uint8_t VERSION = 9;
+constexpr uint8_t IMAGE_INDEX_VERSION = 10;    // adds imageIndex (uint16), UINT16_MAX when none
+constexpr uint8_t VERSION = 10;
 constexpr bool isKnownVersion(uint8_t v) {
   return v == LEGACY_VERSION || v == COUNT_U16_VERSION || v == PARAGRAPH_ANCHOR_VERSION || v == SNIPPET_VERSION ||
          v == RETURN_MARK_VERSION || v == CHAPTER_PAGES_VERSION || v == QUOTE_RANGE_VERSION ||
-         v == VISIBLE_OFFSET_VERSION;
+         v == VISIBLE_OFFSET_VERSION || v == IMAGE_INDEX_VERSION;
 }
 constexpr size_t INITIAL_BOOKMARK_RESERVE = 8;
 constexpr char BOOKMARKS_DIR[] = "/.crosspoint/bookmarks";
@@ -206,7 +207,7 @@ BookmarkStore::AddResult BookmarkStore::addBookmark(uint16_t spineIndex, float p
                                                     const char* chapterTitle, uint16_t paragraphIndex,
                                                     const char* snippet, bool returnMark, int currentPage,
                                                     uint16_t spanWords, uint32_t visibleTextOffset,
-                                                    bool replaceSamePage) {
+                                                    bool replaceSamePage, uint16_t imageIndex) {
   if (replaceSamePage && pageCount > 0) {
     const float pageSlice = 1.0f / static_cast<float>(pageCount);
     const float pageStart = progress;
@@ -235,6 +236,7 @@ BookmarkStore::AddResult BookmarkStore::addBookmark(uint16_t spineIndex, float p
   bm.chapterPageCount = static_cast<uint16_t>(pageCount < 0 ? 0 : pageCount);
   bm.endWord = spanWords;
   bm.visibleTextOffset = visibleTextOffset;
+  bm.imageIndex = imageIndex;
 
   bookmarks.push_back(bm);
   sortBookmarks();
@@ -748,6 +750,15 @@ bool BookmarkStore::readFromFile() {
     } else {
       bm.visibleTextOffset = 0;  // pre-v9: fall back to the paragraph anchor as before
     }
+    if (version >= IMAGE_INDEX_VERSION) {
+      if (f.available() < static_cast<int>(sizeof(bm.imageIndex))) {
+        LOG_ERR("BKS", "Bookmark file truncated at image index, record %u", i);
+        return false;
+      }
+      serialization::readPod(f, bm.imageIndex);
+    } else {
+      bm.imageIndex = UINT16_MAX;
+    }
     observeVersion(bm.version);  // rebuild the Lamport clock from stored versions
     bookmarks.push_back(bm);
   }
@@ -797,6 +808,7 @@ bool BookmarkStore::writeToFile() const {
     serialization::writePod(f, bm.startWord);
     serialization::writePod(f, bm.endWord);
     serialization::writePod(f, bm.visibleTextOffset);
+    serialization::writePod(f, bm.imageIndex);
   }
 
   LOG_DBG("BKS", "Saved %u bookmark(s)", count);
@@ -853,6 +865,9 @@ std::string BookmarkStore::serializeInternal(const std::vector<Bookmark>& bms, c
     } else if (bm.endWord != 0) {
       obj["ew"] = bm.endWord;  // the point bookmark's length in words; identity ignores it
     }
+    // Layout-independent placement for CrossPoint peers; identity ignores both.
+    if (bm.visibleTextOffset != 0) obj["vo"] = bm.visibleTextOffset;
+    if (bm.imageIndex != UINT16_MAX) obj["im"] = bm.imageIndex;
     // The KOReader anchor: "xp" locates the mark, "xp1" the far end of a highlight. These
     // are what a crengine client places an annotation from — CrossPoint's own spine/word
     // coordinates mean nothing to it. Absent for a mark the device could not resolve.
@@ -968,6 +983,8 @@ bool BookmarkStore::parseFromJson(const char* json, std::vector<Bookmark>& outBm
     bm.endProgress = obj["ep"] | (obj["endProgress"] | bm.progress);
     bm.startWord = obj["sw"] | (obj["startWord"] | static_cast<uint16_t>(0));
     bm.endWord = obj["ew"] | (obj["endWord"] | static_cast<uint16_t>(0));
+    bm.visibleTextOffset = obj["vo"] | static_cast<uint32_t>(0);
+    bm.imageIndex = obj["im"] | static_cast<uint16_t>(UINT16_MAX);
     outBms.push_back(bm);
   }
 
@@ -1142,6 +1159,10 @@ size_t BookmarkStore::mergeFrom(const std::vector<Bookmark>& remoteBookmarks,
     uint16_t endWord;
     uint32_t version;
     const Bookmark* bm;  // non-null => bookmark wins this spot; null => tombstone wins
+    // Placement any copy of this spot carried. A winner from firmware that predates the
+    // fields (or a copy that never had them) must not erase what another copy knows.
+    uint32_t anyOffset;
+    uint16_t anyImage;
   };
   std::vector<Winner> winners;
   winners.reserve(bookmarks.size() + tombstones.size() + remoteBookmarks.size() + remoteTombstones.size());
@@ -1157,10 +1178,13 @@ size_t BookmarkStore::mergeFrom(const std::vector<Bookmark>& remoteBookmarks,
           w.version = version;
           w.bm = bm;
         }
+        if (bm && w.anyOffset == 0) w.anyOffset = bm->visibleTextOffset;
+        if (bm && w.anyImage == UINT16_MAX) w.anyImage = bm->imageIndex;
         return;
       }
     }
-    winners.push_back(Winner{quote, spine, para, prog, startW, endW, version, bm});
+    winners.push_back(Winner{quote, spine, para, prog, startW, endW, version, bm, bm ? bm->visibleTextOffset : 0u,
+                             bm ? bm->imageIndex : static_cast<uint16_t>(UINT16_MAX)});
   };
 
   for (const auto& b : bookmarks)
@@ -1186,6 +1210,8 @@ size_t BookmarkStore::mergeFrom(const std::vector<Bookmark>& remoteBookmarks,
         continue;
       }
       newBookmarks.push_back(*w.bm);
+      if (newBookmarks.back().visibleTextOffset == 0) newBookmarks.back().visibleTextOffset = w.anyOffset;
+      if (newBookmarks.back().imageIndex == UINT16_MAX) newBookmarks.back().imageIndex = w.anyImage;
     } else {
       newTombstones.push_back(
           Tombstone{w.spineIndex, w.paragraphIndex, w.progress, w.version, w.quote, w.startWord, w.endWord});
@@ -1204,8 +1230,10 @@ size_t BookmarkStore::mergeFrom(const std::vector<Bookmark>& remoteBookmarks,
   const auto bookmarkSetEqual = [](const std::vector<Bookmark>& a, const std::vector<Bookmark>& b) {
     if (a.size() != b.size()) return false;
     for (const auto& x : a) {
-      const bool match = std::any_of(b.begin(), b.end(),
-                                     [&](const Bookmark& y) { return sameBookmark(x, y) && x.version == y.version; });
+      const bool match = std::any_of(b.begin(), b.end(), [&](const Bookmark& y) {
+        return sameBookmark(x, y) && x.version == y.version && x.visibleTextOffset == y.visibleTextOffset &&
+               x.imageIndex == y.imageIndex;
+      });
       if (!match) return false;
     }
     return true;

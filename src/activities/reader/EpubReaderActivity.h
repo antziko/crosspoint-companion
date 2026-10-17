@@ -69,6 +69,9 @@ class EpubReaderActivity final : public Activity {
   int cachedSpineIndex = 0;
   int cachedChapterTotalPageCount = 0;
   std::optional<uint32_t> cachedVisibleTextOffset;
+  // The offset the last reflow landed on, carried into the next one while the page still shows it.
+  std::optional<uint32_t> reflowAnchor_;
+  int reflowAnchorSpine_ = -1;
   unsigned long lastPageTurnTime = 0UL;
   unsigned long pageTurnDuration = 0UL;
   // A turn that arrived while a render was in flight (or inside the debounce
@@ -100,6 +103,9 @@ class EpubReaderActivity final : public Activity {
   // peer's mark can sit mid-paragraph, and the paragraph alone lands on the page that
   // paragraph starts on.
   uint32_t pendingVisibleOffset = 0;
+  // An image-only page bookmark's image, UINT16_MAX for none: placed by finding the page that
+  // shows it, since photos with no text between them share one offset.
+  uint16_t pendingImageIndex_ = UINT16_MAX;
   bool pendingScreenshot = false;
   bool pendingSyncSaveError = false;
   // Consecutive page-load failures. Each failure drops the section and rebuilds on the next render,
@@ -336,6 +342,16 @@ class EpubReaderActivity final : public Activity {
   // or the lazy extension start retakes the heap before the image decodes. Set by the loop
   // task, cleared by the render task.
   std::atomic<bool> imageRetryHoldsBuild_{false};
+  // Spine whose build stopped for lack of heap (an image retry suspended it, or the build itself
+  // ran out), -1 for none. Its build is not restarted until the largest free block reaches
+  // BUILD_RESTART_MIN_LARGEST: a restart lays the chapter out again from page 0, and on the heap
+  // that just ran out it is the build most likely to fail -- which used to end on the index error.
+  std::atomic<int> buildAwaitsHeapSpine_{-1};
+  // A build ran out of heap and the reader fell back to the last page it laid out: say so once
+  // that page is on screen. Render task only.
+  bool showLowMemoryNotice_ = false;
+  // True while the current chapter's build must wait for the heap; clears the wait once it has recovered.
+  bool buildAwaitsHeap();
 
   // Last position persisted by render()'s saveProgress, used to skip redundant
   // writeAtomic calls on no-op re-renders (menu/bookmark/screenshot).
@@ -389,8 +405,12 @@ class EpubReaderActivity final : public Activity {
   mutable int spansSpine_ = -1;
   mutable int spansPageCount_ = -1;
   mutable uint32_t spansClock_ = 0;
+  mutable bool spansBuilding_ = false;
+  // Marks (by bookmark index) whose placement more laid-out pages cannot change: found, or
+  // their whole search window already laid out. A build that only adds pages skips them.
+  mutable uint8_t spansSettled_[32] = {};
   // Resolves bookmarkSpans_ for the current section when stale. A few page reads per
-  // bookmark, once per chapter pagination; nothing while the section is still building.
+  // bookmark, once per chapter pagination; mid-build, once per mark as its pages appear.
   void refreshBookmarkSpans() const;
   // Index into BOOKMARKS of a mark of this kind belonging to the current page, or -1: the page
   // its text was found on, or, for a mark not re-found, the page its saved position falls on.
@@ -483,6 +503,8 @@ class EpubReaderActivity final : public Activity {
   // per page rebuilt, this margin gives the rebuild ample runway to catch up (and finalize)
   // before the reader arrives.
   static constexpr int PARTIAL_REBUILD_START_MARGIN = 15;
+  // A build's own start floor tops out at 28KB (Section.cpp PARSE_FLOOR_MAX).
+  static constexpr size_t BUILD_RESTART_MIN_LARGEST = 28 * 1024;
   // Show the indexing popup when an initial build must lay out more than this many pages up front
   // (a deep resume/jump into a not-yet-built section), so it isn't a silent wait. Kept independent
   // of the small look-ahead window so ordinary landings stay popup-free.
@@ -775,6 +797,8 @@ class EpubReaderActivity final : public Activity {
   int pageTotal() const;
   // Remember the reading position (content offset + page) so the next layout lands on it.
   void rememberPositionForReflow();
+  // Whether the live layout's current page holds the character at `offset`.
+  bool currentPageShowsOffset(uint32_t offset) const;
   bool useVerticalText() const;
   // Whether the reader font can draw the book's script: vertical needs a CJK font.
   bool readerFontCoversScript() const;

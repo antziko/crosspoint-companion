@@ -322,6 +322,35 @@ void recordReadingSession(const std::string& cachePath, BookReadingStats& bookSt
   bookStats.save(cachePath);
 }
 
+// Chapter image number of the page's first image, UINT16_MAX when it shows none.
+uint16_t firstChapterImageIndex(const Page& page) {
+  for (const auto& el : page.elements) {
+    if (el->getTag() == TAG_PageImage) return static_cast<const PageImage&>(*el).getImageBlock().chapterImageIndex();
+  }
+  return UINT16_MAX;
+}
+
+// Pages at and after `from` searched for an image bookmark's image: the offset it carries
+// names the page right after the text before the image, and a run of photos with no text
+// between them follows from there.
+constexpr int kImageSearchPages = 8;
+
+// The page in [from, from + kImageSearchPages) that shows chapter image `imageIndex`, or -1.
+int pageShowingImage(Section& section, const int from, const int pageCount, const uint16_t imageIndex) {
+  if (imageIndex == UINT16_MAX) return -1;
+  for (int p = std::max(0, from); p < pageCount && p < from + kImageSearchPages; p++) {
+    const auto page = section.loadPage(p);
+    if (!page) continue;
+    for (const auto& el : page->elements) {
+      if (el->getTag() == TAG_PageImage &&
+          static_cast<const PageImage&>(*el).getImageBlock().chapterImageIndex() == imageIndex) {
+        return p;
+      }
+    }
+  }
+  return -1;
+}
+
 }  // namespace
 
 void EpubReaderActivity::onEnter() {
@@ -751,28 +780,35 @@ void EpubReaderActivity::seekSavedTextNearCurrentPage() {
 }
 
 void EpubReaderActivity::refreshBookmarkSpans() const {
-  if (!section || section->pageCount <= 0 || section->isBuilding()) {
-    // Page numbers are only a watermark mid-build; resolve once the build settles.
+  if (!section || section->pageCount <= 0) {
     bookmarkSpanCount_ = 0;
     spansValid_ = false;
     return;
   }
-  // A partial is resolved over the pages it has laid out. Reopening one does not resume its
-  // build until the reader nears the watermark, so waiting for completion would leave every
-  // quote to the progress fallback, whose page count is only an estimate.
+  // A partial or a building section is resolved over the pages it has laid out. A build only
+  // runs a few pages ahead of the reader, so waiting for completion would leave every quote to
+  // the progress fallback, whose page count is only an estimate.
   const int pageCount = section->pageCount;
   const bool partial = section->isPartial();
+  const bool building = section->isBuilding();
   const int totalPages = section->estimatedTotalPages();
-  if (spansValid_ && spansSection_ == section.get() && spansSpine_ == currentSpineIndex &&
-      spansPageCount_ == pageCount && spansClock_ == BOOKMARKS.clock()) {
-    return;
-  }
+  const bool sameBase = spansValid_ && spansSection_ == section.get() && spansSpine_ == currentSpineIndex &&
+                        spansClock_ == BOOKMARKS.clock();
+  if (sameBase && spansPageCount_ == pageCount && spansBuilding_ == building) return;
+  // Laid-out pages never change, so a build that only added pages keeps the settled marks.
+  const bool extend = sameBase && spansBuilding_ && building && pageCount > spansPageCount_;
   spansValid_ = true;
   spansSection_ = section.get();
   spansSpine_ = currentSpineIndex;
   spansPageCount_ = pageCount;
   spansClock_ = BOOKMARKS.clock();
-  bookmarkSpanCount_ = 0;
+  spansBuilding_ = building;
+  if (!extend) {
+    bookmarkSpanCount_ = 0;
+    memset(spansSettled_, 0, sizeof(spansSettled_));
+  }
+  const auto settle = [this](const size_t bi) { spansSettled_[bi >> 3] |= static_cast<uint8_t>(1u << (bi & 7)); };
+  const auto isSettled = [this](const size_t bi) { return (spansSettled_[bi >> 3] >> (bi & 7)) & 1u; };
 
   // How far either side of its saved page a bookmark's opening words are looked for. A
   // re-flow moves text a few pages at most from an offset-anchored landing. A page fraction
@@ -791,12 +827,27 @@ void EpubReaderActivity::refreshBookmarkSpans() const {
     if (b.spineIndex != static_cast<uint16_t>(currentSpineIndex)) continue;
     // A peer's highlight is placed by PageMarks from its own page span, not its opening words.
     if (b.quote && BookmarkStore::isForeignMark(b)) continue;
-    if (bookmarkSpanCount_ >= MAX_BOOKMARK_SPANS || bi > UINT8_MAX) {
+    if (bi > UINT8_MAX) break;
+    if (extend) {
+      if (isSettled(bi)) continue;
+      // Re-resolved over more pages: drop the span the last pass found for it.
+      uint8_t kept = 0;
+      for (uint8_t i = 0; i < bookmarkSpanCount_; i++) {
+        if (bookmarkSpans_[i].bmIndex != bi) bookmarkSpans_[kept++] = bookmarkSpans_[i];
+      }
+      bookmarkSpanCount_ = kept;
+    }
+    if (bookmarkSpanCount_ >= MAX_BOOKMARK_SPANS) {
       SdDebugLog::log("BMS", "spine=%d more than %u marks, rest placed by position", currentSpineIndex,
                       (unsigned)MAX_BOOKMARK_SPANS);
       break;
     }
     const bool scanChapter = b.quote && b.visibleTextOffset == 0 && b.snippet[0] != '\0';
+    // Mid-build, a whole-chapter scan waits for the finished layout, and an offset past the
+    // laid-out pages has no page yet.
+    if (building && (scanChapter || (b.visibleTextOffset != 0 && !visibleOffsetLaidOut(b.visibleTextOffset)))) {
+      continue;
+    }
     int landed = pageFromFraction(b.progress, totalPages);
     // Saved past the watermark: its page is not laid out yet, so there is nothing to search.
     if (!scanChapter && b.visibleTextOffset == 0 && landed >= pageCount + kSearchPages) continue;
@@ -813,29 +864,40 @@ void EpubReaderActivity::refreshBookmarkSpans() const {
     // sits on the page its offset names, and gets no margin mark. Without an offset it falls
     // back to its saved position, like any mark that is not found.
     if (b.snippet[0] == '\0') {
-      if (b.visibleTextOffset != 0) {
+      // Its image pins it exactly: photos with no text between them share one offset.
+      const int from = b.visibleTextOffset != 0 ? landed : landed - kImageSearchPages / 2;
+      const int imagePage = pageShowingImage(*section, from, pageCount, b.imageIndex);
+      if (imagePage >= 0) landed = imagePage;
+      if (imagePage >= 0 || from + kImageSearchPages < pageCount) settle(bi);
+      if (b.visibleTextOffset != 0 || imagePage >= 0) {
         BookmarkSpan span;
         span.bmIndex = static_cast<uint8_t>(bi);
         span.textless = true;
         span.startPage = span.endPage = static_cast<uint16_t>(landed);
         bookmarkSpans_[bookmarkSpanCount_++] = span;
-        if (!partial && BOOKMARKS.setDisplayPage(bi, span.startPage, static_cast<uint16_t>(pageCount))) repaged = true;
+        if (!partial && !building && BOOKMARKS.setDisplayPage(bi, span.startPage, static_cast<uint16_t>(pageCount))) {
+          repaged = true;
+        }
       }
-      SdDebugLog::log("BMS", "spine=%d textless landed=%d/%d vto=%u", currentSpineIndex, landed + 1, pageCount,
-                      b.visibleTextOffset);
+      SdDebugLog::log("BMS", "spine=%d textless landed=%d/%d vto=%u im=%u found=%d", currentSpineIndex, landed + 1,
+                      pageCount, b.visibleTextOffset, (unsigned)b.imageIndex, imagePage >= 0 ? 1 : 0);
       continue;
     }
 
     int startPage = -1;
     uint16_t startIndex = 0;
     bool runsOff = false;
+    // A short quote (one word) would match on any page nearby, so it is looked for only from the
+    // page its offset names onward: the text of the page it was made on starts there.
+    const bool shortQuote = b.visibleTextOffset != 0 && std::strlen(b.snippet) < PageMarks::kMinSnippetLen;
     const int reach = scanChapter ? std::max(landed, pageCount - 1 - landed) : kSearchPages;
     for (int i = 0; i <= 2 * reach; i++) {
-      const int p = landed + ((i % 2) ? (i + 1) / 2 : -(i / 2));  // landed, +1, -1, +2, -2, ...
+      const int p = shortQuote ? landed + i : landed + ((i % 2) ? (i + 1) / 2 : -(i / 2));  // landed, +1, -1, ...
+      if (shortQuote && i >= kSpanPages) break;
       if (p < 0 || p >= pageCount) continue;
       const auto page = section->loadPage(p);
       if (!page) continue;
-      const PageMarks::SnippetAt at = PageMarks::findSnippet(*page, b.snippet, nullptr, &startIndex);
+      const PageMarks::SnippetAt at = PageMarks::findSnippet(*page, b.snippet, nullptr, &startIndex, shortQuote);
       if (at != PageMarks::SnippetAt::None) {
         startPage = p;
         runsOff = at == PageMarks::SnippetAt::RunsOff;
@@ -843,8 +905,12 @@ void EpubReaderActivity::refreshBookmarkSpans() const {
       }
     }
     if (startPage < 0) {
-      SdDebugLog::log("BMS", "spine=%d q=%d landed=%d/%d reach=%d start not found \"%.40s\"", currentSpineIndex,
-                      b.quote ? 1 : 0, landed + 1, pageCount, reach, b.snippet);
+      // Searched in full only once every page of the window is laid out.
+      if (!building || landed + reach < pageCount - 1) {
+        settle(bi);
+        SdDebugLog::log("BMS", "spine=%d q=%d landed=%d/%d reach=%d start not found \"%.40s\"", currentSpineIndex,
+                        b.quote ? 1 : 0, landed + 1, pageCount, reach, b.snippet);
+      }
       continue;
     }
     // A character offset survives re-layout, so the next pagination lands on this page directly.
@@ -894,13 +960,21 @@ void EpubReaderActivity::refreshBookmarkSpans() const {
       }
     }
     bookmarkSpans_[bookmarkSpanCount_++] = span;
+    // Its end counted short at the last laid-out page may run further once more pages exist.
+    const bool endCut = lengthWords > 0 && span.endIndex == UINT16_MAX && span.endPage + 1 >= pageCount &&
+                        span.endPage < span.startPage + kSpanPages - 1;
+    if (!endCut) settle(bi);
     SdDebugLog::log(
-        "BMS", "spine=%d q=%d landed=%d start=%u:%u end=%u:%u words=%u runsOff=%d vto=%u pages=%d partial=%d",
+        "BMS",
+        "spine=%d q=%d landed=%d start=%u:%u end=%u:%u words=%u runsOff=%d vto=%u pages=%d partial=%d building=%d",
         currentSpineIndex, b.quote ? 1 : 0, landed + 1, span.startPage + 1, span.startIndex, span.endPage + 1,
-        span.endIndex, (unsigned)lengthWords, runsOff ? 1 : 0, b.visibleTextOffset, pageCount, partial ? 1 : 0);
+        span.endIndex, (unsigned)lengthWords, runsOff ? 1 : 0, b.visibleTextOffset, pageCount, partial ? 1 : 0,
+        building ? 1 : 0);
     // The list's "page X/Y" was the page count when the mark was made; show where it is now.
-    // Not from a partial: its page count is a watermark, not the chapter's.
-    if (!partial && BOOKMARKS.setDisplayPage(bi, span.startPage, static_cast<uint16_t>(pageCount))) repaged = true;
+    // Not from a partial or a build: its page count is a watermark, not the chapter's.
+    if (!partial && !building && BOOKMARKS.setDisplayPage(bi, span.startPage, static_cast<uint16_t>(pageCount))) {
+      repaged = true;
+    }
   }
   if (repaged || anchored) BOOKMARKS.saveToFile();  // one write per re-pagination, not per mark
 }
@@ -1033,6 +1107,13 @@ void EpubReaderActivity::commitReadingTime(uint32_t minDeltaSecs) {
   const bool dated = halClock.isAvailable() && halClock.getLocalDateTime(dayOfWeek, day, month, year, hour, minute);
   recordReadingSession(epub->getCachePath(), readingStats, deltaSecs, dated, year, month, day, dayOfWeek, hour, minute);
   sessionCommittedSecs += deltaSecs;
+}
+
+bool EpubReaderActivity::buildAwaitsHeap() {
+  if (buildAwaitsHeapSpine_ != currentSpineIndex) return false;
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < BUILD_RESTART_MIN_LARGEST) return true;
+  buildAwaitsHeapSpine_ = -1;
+  return false;
 }
 
 bool EpubReaderActivity::buildTickHeapGate() {
@@ -1169,6 +1250,7 @@ void EpubReaderActivity::loop() {
       if (section && section->isBuilding()) {
         section->suspendBuild();
         imageRetryHoldsBuild_ = true;
+        buildAwaitsHeapSpine_ = currentSpineIndex;
         how = "suspended";
       }
     }
@@ -1237,7 +1319,7 @@ void EpubReaderActivity::loop() {
   {
     RenderLock lock(RenderLock::Mode::Try);
     if (lock.ownsLock() && section && !section->isBuilding() && section->isPartial() && buildViewportWidth > 0 &&
-        !partialRebuildStartFailed && !imageRetryHoldsBuild_ &&
+        !partialRebuildStartFailed && !imageRetryHoldsBuild_ && !buildAwaitsHeap() &&
         section->currentPage + PARTIAL_REBUILD_START_MARGIN >= static_cast<int>(section->pageCount)) {
       const ReaderRenderSpec buildSpec = readerSpec(buildViewportWidth, buildViewportHeight);
       if (!section->startBuild(buildSpec)) {
@@ -1271,7 +1353,16 @@ void EpubReaderActivity::loop() {
         pageBufferStale = true;
         requestUpdate();
       }
-      if (!built) {
+      if (!built && section->lastBuildFailure().reason == Section::BuildFailure::Reason::LowHeap &&
+          section->pageCount > 0) {
+        // The build kept its pages as a partial (Section::buildSomeMore): keep reading from them
+        // and restart the build once the heap has recovered.
+        buildAwaitsHeapSpine_ = currentSpineIndex;
+        SdDebugLog::log("SCT", "BUILD-FAIL LOWHEAP spine=%d kept-partial=%u background=1 free=%u largest8=%u",
+                        currentSpineIndex, (unsigned)section->pageCount, (unsigned)ESP.getFreeHeap(),
+                        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        if (section->currentPage >= static_cast<int>(section->pageCount)) requestUpdate();
+      } else if (!built) {
         LOG_ERR("ERS", "Background section build failed");
         resetSections();
         requestUpdate();
@@ -2758,6 +2849,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
           pendingPercentJump = true;
           pendingParagraphAnchor = UINT16_MAX;
           pendingVisibleOffset = 0;
+          pendingImageIndex_ = UINT16_MAX;
           pendingSeekWord_ = jump->hasWord;
           pendingSeekMark_ = LookupMarks::Mark{};
           pendingSeekMark_.wordHash = jump->wordHash;
@@ -2845,6 +2937,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
                 // character offset, when one was recorded, beats both.
                 pendingParagraphAnchor = bm.paragraphIndex;
                 pendingVisibleOffset = bm.visibleTextOffset;
+                pendingImageIndex_ = bm.imageIndex;
                 pendingSeekSnippet_ = bm.snippet;
                 pendingSeekQuote_ = bm.quote;
                 resetSections();
@@ -3297,7 +3390,9 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     // reached from is exactly the one that must not be reopened on the next wake.
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-    GUI.drawPopup(renderer, tr(STR_INDEX_FAILED));
+    // Out of heap with no page laid out yet: the book is fine, so don't call it invalid.
+    GUI.drawPopup(renderer, bf.reason == Section::BuildFailure::Reason::LowHeap ? tr(STR_INDEX_LOW_MEMORY)
+                                                                                : tr(STR_INDEX_FAILED));
     // Same fields as the [E2] overlay, so a failure the user didn't photograph is still on record.
     SdDebugLog::log("SCT", "BUILD-FAIL %s:%s spine=%d heap=%u floor=%u html=%u free=%u largest8=%u",
                     Section::buildFailureTag(bf.reason),
@@ -3446,6 +3541,9 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     // Fresh section, fresh chance: a failed lazy extension start in a previous
     // section must not suppress watermark-triggered rebuilds for this one.
     partialRebuildStartFailed = false;
+    // The new section can reuse the freed one's address, so spansSection_ alone cannot tell
+    // them apart: marks resolved in the old layout would be drawn at their old word indices.
+    spansValid_ = false;
 
     // A finalized cache serves every page as-is. A partial cache (suspended build from a
     // previous session) serves its pages instantly too, but a build must still run to lay
@@ -3689,6 +3787,16 @@ void EpubReaderActivity::render(RenderLock&& lock) {
         seekSavedTextNearCurrentPage();
       }
     }
+    if (pendingImageIndex_ != UINT16_MAX && section->pageCount > 0) {
+      // Every route above lands at or just before the image's page; the fraction can overshoot.
+      const int imagePage =
+          pageShowingImage(*section, section->currentPage - 2, section->pageCount, pendingImageIndex_);
+      if (imagePage >= 0) section->currentPage = imagePage;
+      SdDebugLog::log("ERS", "jump spine=%d image=%u -> page %d/%u found=%d", currentSpineIndex,
+                      (unsigned)pendingImageIndex_, section->currentPage + 1, section->pageCount,
+                      imagePage >= 0 ? 1 : 0);
+      pendingImageIndex_ = UINT16_MAX;
+    }
     // A bookmark or quote opens on the page that prints its text, however its position was
     // resolved above.
     if (!pendingSeekSnippet_.empty() && section->pageCount > 0) seekSavedTextNearCurrentPage();
@@ -3703,6 +3811,20 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   // seconds on a giant spine. Show the indexing popup so it isn't a silent freeze
   // (the page that replaces it takes the HALF ghost-cleanup path). Ordinary window
   // catch-ups on a non-partial build are a page or two and stay popup-free.
+  // Out of heap is not the book's fault, and the section keeps the pages it laid out (a build that
+  // runs out suspends into a partial): show the last of them and say why the next one is missing.
+  // The background restart waits for the heap to recover (buildAwaitsHeap); a page turn past the
+  // last built page tries again at once.
+  const auto fallBackToBuiltPages = [this](const Section::BuildFailure& bf) {
+    if (bf.reason != Section::BuildFailure::Reason::LowHeap || section->pageCount == 0) return false;
+    SdDebugLog::log("SCT", "BUILD-FAIL LOWHEAP spine=%d kept-partial=%u wanted=%d free=%u largest8=%u",
+                    currentSpineIndex, (unsigned)section->pageCount, section->currentPage + 1,
+                    (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    buildAwaitsHeapSpine_ = currentSpineIndex;
+    section->currentPage = static_cast<int>(section->pageCount) - 1;
+    showLowMemoryNotice_ = true;
+    return true;
+  };
   if (section->isPartial() && section->currentPage >= static_cast<int>(section->pageCount)) {
     drawIndexingPopup();
   }
@@ -3711,6 +3833,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     if (!section->isBuilding() && !section->startBuild(readerSpec(viewportWidth, viewportHeight))) {
       LOG_ERR("ERS", "Failed to start partial extension build");
       const Section::BuildFailure bf = section->lastBuildFailure();
+      if (fallBackToBuiltPages(bf)) break;
       resetSections();
       showBuildError(bf);
       return;
@@ -3720,6 +3843,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
       if (!section->buildSomeMore(BUILD_PAGES_PER_CHUNK)) {
         LOG_ERR("ERS", "Failed during incremental section build");
         const Section::BuildFailure bf = section->lastBuildFailure();
+        if (fallBackToBuiltPages(bf)) break;
         resetSections();
         showBuildError(bf);
         return;
@@ -3733,6 +3857,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
       if (!section->buildSomeMore(BUILD_PAGES_PER_CHUNK)) {
         LOG_ERR("ERS", "Failed during incremental section build");
         const Section::BuildFailure bf = section->lastBuildFailure();
+        if (fallBackToBuiltPages(bf)) break;
         resetSections();
         showBuildError(bf);
         return;
@@ -3840,6 +3965,11 @@ void EpubReaderActivity::render(RenderLock&& lock) {
 
     const auto start = millis();
     renderContents(std::move(p), orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft);
+    if (showLowMemoryNotice_) {
+      showLowMemoryNotice_ = false;
+      GUI.drawPopup(renderer, tr(STR_LOW_MEMORY_PAGES));
+      pagesUntilFullRefresh = CrossPointSettings::REFRESH_COUNTDOWN_FORCE_FULL;  // the popup ghosts otherwise
+    }
     LOG_DBG("ERS", "Rendered page in %dms", millis() - start);
     lastRenderCompleteMs = millis();
     imageRetryHoldsBuild_ = false;
@@ -4545,6 +4675,12 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   page->render(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);
   drawPageMarks();
   renderStatusBar();
+  // An image ran out of heap and loop() is about to free memory and draw the page again: this
+  // frame would only push its empty box to the panel, at the cost of a refresh.
+  if (ImageBlock::heapRetryQueued()) {
+    SdDebugLog::log("ERS", "frame held for image retry spine=%d page=%d", currentSpineIndex, section->currentPage);
+    return;
+  }
   const auto tBwRender = millis();
 
   if (imagePageWithAA) {
@@ -5875,6 +6011,7 @@ void EpubReaderActivity::addBookmark(bool returnMark, bool lightRefresh) {
   // The page's exact starting character: unlike paragraphIndex, which names the paragraph the
   // page ENDS in, this re-finds the page's first line after a re-flow.
   uint32_t visibleOffset = 0;
+  uint16_t imageIndex = UINT16_MAX;
   if (verticalSection) {
     // A vertical page carries no paragraph table or word spans; its offset and text are enough.
     RenderLock lock(*this);
@@ -5895,13 +6032,14 @@ void EpubReaderActivity::addBookmark(bool returnMark, bool lightRefresh) {
     if (auto page = section->loadPage(section->currentPage)) {
       buildBookmarkSnippet(*page, snippet, sizeof(snippet));
       spanWords = PageMarks::countSpanWords(*page);
+      if (snippet[0] == '\0') imageIndex = firstChapterImageIndex(*page);
     }
   }
 
   LOG_DBG("ERS", "Adding bookmark at spine %d, page %d", currentSpineIndex, currentPage);
   const auto addResult = BOOKMARKS.addBookmark(spine, progress, pageCount, chapterTitle, paragraphIndex, snippet,
                                                returnMark, currentPage, spanWords, visibleOffset,
-                                               /*replaceSamePage=*/false);
+                                               /*replaceSamePage=*/false, imageIndex);
   if (addResult == BookmarkStore::AddResult::Added) {
     if (lightRefresh) {
       // Interactive toggle: update only the status-bar strip (image untouched).

@@ -66,7 +66,7 @@ constexpr size_t kMaxQuotesPerPage = 6;
 // saved, moves the text a few pages either way. Only snippets this long take part, since a
 // short one ("the") would match somewhere on any page.
 constexpr int kRelocatePages = 3;
-constexpr size_t kRelocateMinSnippet = 8;
+constexpr size_t kRelocateMinSnippet = kMinSnippetLen;
 
 // Looked-up words marked on a single page. A page holds a handful of lookups at most; the
 // extras are skipped rather than grown into, for the same stack-only reason as the quote cap.
@@ -428,8 +428,11 @@ bool pageHasWord(const Page& page, const LookupMarks::Mark& mark) {
   return false;
 }
 
-SnippetAt findSnippet(const Page& page, const char* snippet, SnippetMiss* miss, uint16_t* startIndex) {
-  if (!snippet || std::strlen(snippet) < kRelocateMinSnippet) return SnippetAt::None;
+SnippetAt findSnippet(const Page& page, const char* snippet, SnippetMiss* miss, uint16_t* startIndex,
+                      const bool allowShort) {
+  if (!snippet || snippet[0] == '\0' || (!allowShort && std::strlen(snippet) < kRelocateMinSnippet)) {
+    return SnippetAt::None;
+  }
   SnippetMatch::Matcher matcher;
   matcher.snippet = snippet;
   matcher.begin(BOOKMARK_SNIPPET_MAX);

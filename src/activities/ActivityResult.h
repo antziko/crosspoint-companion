@@ -81,6 +81,8 @@ struct BookmarkResult {
   // Exact character position in the chapter, 0 when unknown. Preferred over the paragraph
   // when set: see Bookmark::visibleTextOffset.
   uint32_t visibleTextOffset = 0;
+  // Bookmark::imageIndex: the image an image-only page bookmark shows, UINT16_MAX for none.
+  uint16_t imageIndex = std::numeric_limits<uint16_t>::max();
   // The mark's opening words (a quote's text, or the top of a bookmarked page), so the reader
   // can open the page that prints them. Empty when the mark saved none.
   std::string snippet;

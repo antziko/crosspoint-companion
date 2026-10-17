@@ -1484,6 +1484,13 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                 // observed on X3 (528x792): a 464x751 image at y=47 hit 798 > 792.
                 // Clamp here, where currentPageNextY is the final image top, so the
                 // image always fits regardless of how it was positioned.
+                // A large image alone at the top of its page loses its bottom margin when keeping it
+                // would shrink the image: nothing can follow it on this page anyway, so the margin
+                // would only be blank space taken out of the photo.
+                if (imageStartsPage && largeImage && imageMarginBottom > 0 &&
+                    displayHeight > self->viewportHeight - self->currentPageNextY - imageMarginBottom) {
+                  imageMarginBottom = 0;
+                }
                 const int availHeight = self->viewportHeight - self->currentPageNextY - imageMarginBottom;
                 if (availHeight > 0 && displayHeight > availHeight) {
                   if (dims.width > 0 && dims.height > 0) {

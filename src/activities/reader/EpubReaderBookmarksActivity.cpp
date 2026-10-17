@@ -79,7 +79,10 @@ void EpubReaderBookmarksActivity::rebuildRowItems() {
         }
       }
     } else {
-      rowLabels.emplace_back(bm.snippet[0] != '\0' ? bm.snippet : tr(STR_BOOKMARK_INSTRUCTIONS));
+      // No text: a page holding only an image, or nothing at all.
+      rowLabels.emplace_back(bm.snippet[0] != '\0'         ? bm.snippet
+                             : bm.imageIndex != UINT16_MAX ? tr(STR_BOOKMARK_IMAGE)
+                                                           : tr(STR_BOOKMARK_UNTITLED));
     }
 
     if (!snippetUsesSubtitle) {
@@ -134,7 +137,7 @@ void EpubReaderBookmarksActivity::openSelectedBookmark() {
         renderer, mappedInput, quoteIndex);
     return;
   }
-  BookmarkResult jump{bm.spineIndex, bm.progress, bm.paragraphIndex, bm.visibleTextOffset};
+  BookmarkResult jump{bm.spineIndex, bm.progress, bm.paragraphIndex, bm.visibleTextOffset, bm.imageIndex};
   jump.snippet = bm.snippet;
   setResult(std::move(jump));
   finish();

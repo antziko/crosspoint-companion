@@ -12,6 +12,9 @@ class ImageBlock final : public Block {
   ~ImageBlock() override = default;
 
   const std::string& getImagePath() const { return imagePath; }
+  // The image's number within its chapter: the n of the cache name ".../img_<spine>_<n>.<ext>",
+  // assigned in document order by the parser. UINT16_MAX when the name carries none.
+  uint16_t chapterImageIndex() const;
   int16_t getWidth() const { return width; }
   int16_t getHeight() const { return height; }
 
@@ -28,6 +31,8 @@ class ImageBlock final : public Block {
   // the reader frees memory and redraws the page. A second failure of the same image is
   // remembered as usual.
   static bool takeHeapRetry();
+  // Whether takeHeapRetry() would return true, without consuming it.
+  static bool heapRetryQueued();
 
   // A page render draws its image up to ~13 times (BW double-refresh plus every
   // grayscale band pass), and each draw streams the whole .pxc off SD. The

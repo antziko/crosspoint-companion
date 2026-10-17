@@ -67,9 +67,38 @@ int EpubReaderActivity::pageTotal() const {
   return cachedChapterTotalPageCount;
 }
 
+bool EpubReaderActivity::currentPageShowsOffset(const uint32_t offset) const {
+  const int page = pageIndex();
+  const int count = verticalSection ? verticalSection->pageCount : section->pageCount;
+  const auto startOf = [this](const int p) -> std::optional<uint32_t> {
+    if (verticalSection) return verticalSection->getVisibleTextOffsetForPage(p);
+    return section->getVisibleTextOffsetForPage(static_cast<uint16_t>(p));
+  };
+  if (page < 0 || page >= count) return false;
+  const auto start = startOf(page);
+  if (!start || *start > offset) return false;
+  if (page + 1 < count) {
+    const auto next = startOf(page + 1);
+    return next && *next > offset;
+  }
+  // The last page laid out so far holds everything after its start only once the layout is whole.
+  return verticalSection ? !verticalSection->isBuilding() : !section->isBuilding() && !section->isPartial();
+}
+
 void EpubReaderActivity::rememberPositionForReflow() {
   if (!hasPage()) return;
   rememberCurrentContentOffset();
+  // Each layout saves the start of its page, and a bigger page starts earlier: rotating there and
+  // back would land pages before where the reader was. While the page still shows the previous
+  // reflow's anchor (no turn since), carry that anchor instead.
+  const uint32_t pageStart = cachedVisibleTextOffset.value_or(0);
+  const bool carried = cachedVisibleTextOffset && reflowAnchor_ && reflowAnchorSpine_ == currentSpineIndex &&
+                       currentPageShowsOffset(*reflowAnchor_);
+  if (carried) cachedVisibleTextOffset = reflowAnchor_;
+  SdDebugLog::log("ERS", "reflow spine=%d page=%d start=%u anchor=%u carried=%d", currentSpineIndex, pageIndex() + 1,
+                  (unsigned)pageStart, (unsigned)cachedVisibleTextOffset.value_or(0), carried ? 1 : 0);
+  reflowAnchor_ = cachedVisibleTextOffset;
+  reflowAnchorSpine_ = currentSpineIndex;
   cachedSpineIndex = currentSpineIndex;
   cachedChapterTotalPageCount = section ? section->pageCount : verticalSection->pageCount;
   nextPageNumber = pageIndex();

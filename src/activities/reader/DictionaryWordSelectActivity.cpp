@@ -1705,8 +1705,9 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
   if (gloss_->fits && navigator.isVertical()) {
     // Across the page just below the selection, or just above it near the page foot. Every move
     // of the box repaints the whole vertical page, so it stays where it is while it is still
-    // clear of the selection and no more than its own height away from it. "Clear" also keeps the
-    // cell after the selection free: the navigation skips particles, and that is where one sits.
+    // clear of the selection and no more than its own height away from it. "Clear" also keeps one
+    // cell free either side of the selection: the navigation skips particles, so the cell after it
+    // is where one sits, and the cell before it gives the box the same spacing when it sits above.
     struct Span {
       int top;
       int bottom;
@@ -1723,10 +1724,10 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
     }
     if (selTop == INT_MAX) selTop = selBottom;
     const int nextCell = verticalCellPx_ > 0 ? verticalCellPx_ : selectionLineHeight;
-    spans[spanCount++] = {selTop, selBottom + nextCell};
+    spans[spanCount++] = {selTop - nextCell, selBottom + nextCell};
     for (const auto* end : {first, last}) {
       if (const auto* p = partnerOf(end); p && spanCount < 4) {
-        spans[spanCount++] = {p->screenY, p->screenY + p->width + nextCell};
+        spans[spanCount++] = {p->screenY - nextCell, p->screenY + p->width + nextCell};
       }
     }
     const int h = gloss_->height;
@@ -1739,7 +1740,7 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
     };
     const int held = gloss_->drawnY;
     const int below = selBottom + nextCell + kGlossClearance;
-    const int above = selTop - kGlossClearance - h;
+    const int above = selTop - nextCell - kGlossClearance - h;
     const bool heldNear = held >= selBottom ? held - selBottom <= h + nextCell : selTop - (held + h) <= h;
     if (held != kGlossNotDrawn && clear(held) && heldNear) {
       gloss_->y = held;
