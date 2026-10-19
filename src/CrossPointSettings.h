@@ -386,6 +386,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // When active, SETTINGS.getReaderFontId(), getReaderLineCompression(), and the
   // three getReader*() accessors below return values from this struct instead of
   // the global members.  Never serialised to settings.json.
+  // Holds an SD font family (folder) name plus its terminator; longer folders are not listed.
+  static constexpr size_t SD_FONT_FAMILY_NAME_SIZE = 64;
   struct ReaderOverride {
     bool active = false;
     uint8_t fontFamily = NOTOSERIF;
@@ -403,7 +405,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     // Literal (not SCREEN_MARGIN_MIN) because that constant is declared later in the
     // enclosing class and is not visible in this nested default initializer.
     uint8_t screenMargin = 5;
-    char sdFontFamilyName[32] = "";
+    char sdFontFamilyName[SD_FONT_FAMILY_NAME_SIZE] = "";
     // Per-book min-session threshold. 0xFF = inherit the global setting; otherwise an
     // index into CrossPointSettings::MIN_SESSION_SECONDS (0 = always commit). The field
     // name is kept for the settings/cache key, but it now holds an index, not minutes.
@@ -617,7 +619,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t focusReadingEnabled = 0;
   uint8_t readerMenuStyle = READER_MENU_LIST;
   // SD card font family name (empty = use built-in fontFamily)
-  char sdFontFamilyName[32] = "";
+  char sdFontFamilyName[SD_FONT_FAMILY_NAME_SIZE] = "";
   // Pinned fonts in the Font Family picker: newline-separated set of font keys
   // (built-in = "@b<index>", SD = "@s<familyName>"). Pinned fonts sort first.
   // 256 bytes covers ~8 typical SD names; appends are bounds-checked.

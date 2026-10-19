@@ -109,8 +109,12 @@ class SdCardFontSystem {
   // it with the renderer, and track it so ensureSdCardFontReady() rebuilds its
   // glyph set per page. registryWasDirty forces a reload even if unchanged.
   void loadTtfFamily(const SdCardFontFamilyInfo& family, GfxRenderer& renderer, bool registryWasDirty);
+  // loadTtfFamily's body at an explicit size, touching no settings (also serves the font preview).
+  void loadTtfFace(const SdCardFontFamilyInfo& family, GfxRenderer& renderer, bool registryWasDirty, uint8_t size);
   // Unregister + free the active TTF font (and its UI-size fallbacks), if any.
   void unloadTtf(GfxRenderer& renderer);
+  // Drop the dictionary-size face from ensureFontSize(), if any.
+  void releaseTtfDict(GfxRenderer& renderer);
   // Register the loaded TTF at each built-in UI size as a script fallback, so UI
   // text (book titles, list rows, menus, status bar) in scripts the built-in
   // fonts lack renders in the chosen TTF. Mirrors setupUiFallbacks for .cpfont.
@@ -151,6 +155,10 @@ class SdCardFontSystem {
   // UI-size TTF fallbacks (share ttfSources_); parallel to their renderer font ids.
   std::vector<std::unique_ptr<TtfEpdFont>> ttfUi_;
   std::vector<int> ttfUiIds_;
+  // Dictionary-size face from ensureFontSize() (shares ttfSources_); 0 id = none.
+  std::unique_ptr<TtfEpdFont> ttfDict_;
+  int ttfDictId_ = 0;
+  uint8_t ttfDictSize_ = 0;
 #endif  // CROSSPOINT_VECTOR_FONTS
 };
 

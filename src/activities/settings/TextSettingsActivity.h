@@ -167,7 +167,7 @@ class TextSettingsActivity final : public UiTabListActivity {
     uint8_t* paragraphIndent;
     uint8_t* screenMargin;
     uint8_t* hyphenationEnabled;
-    char* sdFontFamilyName;  // char[32] in both
+    char* sdFontFamilyName;  // char[SD_FONT_FAMILY_NAME_SIZE] in both
     uint8_t* wordSpacing;
     uint8_t* characterSpacing;
     uint8_t* embeddedStyle;

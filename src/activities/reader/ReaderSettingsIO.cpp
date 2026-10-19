@@ -30,7 +30,10 @@ namespace {
 // v11: appended wordSpacing, characterSpacing, embeddedStyle, textAntiAliasing, focusReadingEnabled;
 //      older files take the current globals.
 // v12: appended inlineGlossEnabled; older files take the global Inline Gloss Box setting.
-constexpr uint8_t READER_SETTINGS_FILE_VERSION = 12;
+// v13: sdFontFamilyName widened from 32 to SD_FONT_FAMILY_NAME_SIZE bytes; older files are read
+//      at the old width.
+constexpr uint8_t READER_SETTINGS_FILE_VERSION = 13;
+constexpr size_t LEGACY_SD_FONT_FAMILY_NAME_SIZE = 32;
 // Oldest layout load() still understands; everything from here up is read field by field.
 constexpr uint8_t READER_SETTINGS_MIN_READABLE_VERSION = 5;
 
@@ -73,8 +76,10 @@ bool load(const std::string& cachePath, CrossPointSettings::ReaderOverride& out)
     out.paragraphSpacing =
         out.paragraphSpacing ? CrossPointSettings::PARA_SPACING_NORMAL : CrossPointSettings::PARA_SPACING_OFF;
   }
-  f.read(reinterpret_cast<uint8_t*>(out.sdFontFamilyName), sizeof(out.sdFontFamilyName));
-  out.sdFontFamilyName[sizeof(out.sdFontFamilyName) - 1] = '\0';
+  static_assert(sizeof(out.sdFontFamilyName) >= LEGACY_SD_FONT_FAMILY_NAME_SIZE);
+  const size_t nameBytes = version >= 13 ? sizeof(out.sdFontFamilyName) : LEGACY_SD_FONT_FAMILY_NAME_SIZE;
+  f.read(reinterpret_cast<uint8_t*>(out.sdFontFamilyName), nameBytes);
+  out.sdFontFamilyName[nameBytes - 1] = '\0';
   serialization::readPod(f, out.minSessionMinutes);
   serialization::readPod(f, out.screenMargin);
   // Absent before v6; assign explicitly so a reused `out` cannot carry a stale value.

@@ -389,6 +389,10 @@ void SdCardFontRegistry::scanRoot(const char* rootPath, std::vector<SdCardFontFa
         }
       }
       if (exists) continue;
+      if (strlen(nameBuffer) > MAX_FAMILY_NAME_LEN) {
+        LOG_ERR("SDREG", "Font folder name over %u chars, skipped: %s", (unsigned)MAX_FAMILY_NAME_LEN, nameBuffer);
+        continue;
+      }
 
       char subDirPath[192];
       snprintf(subDirPath, sizeof(subDirPath), "%s/%s", rootPath, nameBuffer);

@@ -140,9 +140,17 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
   // Vector (.ttf/.otf) family selected: route through the FreeInkFont path and drop any
   // pre-rasterized (.cpfont) font that was loaded.
   if (wantedFamily[0] != '\0') {
-    const auto* wantedFam = registry_.findFamily(wantedFamily);
-    if (wantedFam && wantedFam->vector) {
+    const auto* catalogued = registry_.findFamily(wantedFamily);
+    if (catalogued && catalogued->vector) {
       if (!manager_.currentFamilyName().empty()) manager_.unloadAll(renderer);
+      // The catalogue entry carries no file listing; the loader needs it.
+      const auto* wantedFam = registry_.familyWithFiles(wantedFamily);
+      if (!wantedFam) {
+        LOG_DBG("SDFS", "Vector family has no font files: %s (clearing)", wantedFamily);
+        if (!ttfFamily_.empty()) unloadTtf(renderer);
+        clearWantedFamily();
+        return;
+      }
       loadTtfFamily(*wantedFam, renderer, registryWasDirty);
       return;
     }
@@ -250,7 +258,10 @@ void SdCardFontSystem::setupUiFallbacks(GfxRenderer& renderer) {
 int SdCardFontSystem::resolveFontId(const char* familyName, uint8_t pointSize) const {
 #if CROSSPOINT_VECTOR_FONTS
   // A loaded vector (.ttf) family answers first — it is not in the .cpfont manager.
-  if (ttfFontId_ != 0 && familyName && ttfFamily_ == familyName) return ttfFontId_;
+  if (ttfFontId_ != 0 && familyName && ttfFamily_ == familyName) {
+    if (ttfDictId_ != 0 && pointSize == ttfDictSize_) return ttfDictId_;
+    return ttfFontId_;
+  }
 #endif
   // Prefer an exactly-matching resident size. Normally there is only the reader-size
   // font and this is that font, but sizes can be loaded additively — the CJK UI
@@ -270,6 +281,33 @@ int SdCardFontSystem::resolveFontId(const char* familyName, uint8_t pointSize) c
 
 int SdCardFontSystem::ensureFontSize(const char* familyName, const uint8_t pointSize, GfxRenderer& renderer) {
   if (!familyName || !*familyName) return 0;
+#if CROSSPOINT_VECTOR_FONTS
+  if (ttf_ && ttfFamily_ == familyName) {
+    const uint8_t size =
+        snapToNearestPointSize(VECTOR_READER_POINT_SIZES, std::size(VECTOR_READER_POINT_SIZES), pointSize);
+    if (size == ttfPointSize_) return ttfFontId_;
+    if (ttfDictId_ != 0 && ttfDictSize_ == size) return ttfDictId_;
+    releaseTtfDict(renderer);
+    auto f = makeUniqueNoThrow<TtfEpdFont>();
+    if (!f) {
+      LOG_ERR("SDFS", "OOM: TtfEpdFont for dictionary @%upt", size);
+      return 0;
+    }
+    addTtfSources(*f);
+    // Glyph arenas are PSRAM-backed; a definition page uses far fewer glyphs than a book.
+    if (!f->load(size, /*twoBit=*/true, /*glyphCacheBytes=*/256 * 1024, /*maxGlyphs=*/1024)) {
+      LOG_ERR("SDFS", "%s failed to load at %upt for the dictionary", familyName, size);
+      return 0;
+    }
+    ttfDictId_ = computeTtfFontId((ttfFamily_ + "\x01dict").c_str(), size);
+    renderer.insertFont(ttfDictId_, f->family());
+    renderer.registerTtfFont(ttfDictId_, f.get());
+    ttfDict_ = std::move(f);
+    ttfDictSize_ = size;
+    LOG_DBG("SDFS", "Loaded TTF %s at %upt (asked %upt) for the dictionary", familyName, size, pointSize);
+    return ttfDictId_;
+  }
+#endif
   // Already resident (the common case: the wanted size IS the reader's size).
   const int existing = manager_.getFontIdAtSize(familyName, pointSize);
   if (existing != 0) return existing;
@@ -319,6 +357,9 @@ int SdCardFontSystem::ensureFontSize(const char* familyName, const uint8_t point
 }
 
 void SdCardFontSystem::releaseExtraSizes(GfxRenderer& renderer) {
+#if CROSSPOINT_VECTOR_FONTS
+  releaseTtfDict(renderer);
+#endif
   const uint32_t freeBefore = ESP.getFreeHeap();
   const int unloaded = manager_.unloadExtraSizes(renderer);
   if (unloaded > 0) {
@@ -338,6 +379,23 @@ int SdCardFontSystem::loadFamilyForPreview(const char* familyName, uint8_t point
     LOG_DBG("SDFS", "Preview family not found: %s", familyName);
     return 0;
   }
+#if CROSSPOINT_VECTOR_FONTS
+  if (family->vector) {
+    // The .cpfont manager rejects vector files; drive the TTF face at the preview size instead.
+    // ensureLoaded() afterwards swaps the user's selection back in.
+    if (family->files.empty()) return 0;
+    if (!manager_.currentFamilyName().empty()) {
+      manager_.unloadAll(renderer);
+      uiFallbacksFamily_.clear();
+    }
+    loadTtfFace(*family, renderer, /*registryWasDirty=*/false,
+                snapToNearestPointSize(VECTOR_READER_POINT_SIZES, std::size(VECTOR_READER_POINT_SIZES), pointSize));
+    return ttfFamily_ == family->name ? ttfFontId_ : 0;
+  }
+  // unloadAll below clears every renderer fallback, the TTF's UI fallbacks included, so drop the
+  // TTF whole; ensureLoaded() reloads it cleanly if it is the selection.
+  if (!ttfFamily_.empty()) unloadTtf(renderer);
+#endif
   manager_.unloadAll(renderer);  // one family resident at a time
   uiFallbacksFamily_.clear();    // unloadAll dropped them; ensureLoaded() puts them back
   if (!manager_.loadFamily(*family, renderer, pointSize)) {
@@ -360,8 +418,18 @@ void SdCardFontSystem::freeTtfSources() {
   }
 }
 
+void SdCardFontSystem::releaseTtfDict(GfxRenderer& renderer) {
+  if (ttfDictId_ == 0) return;
+  renderer.unregisterTtfFont(ttfDictId_);
+  renderer.removeFont(ttfDictId_);
+  ttfDict_.reset();
+  ttfDictId_ = 0;
+  ttfDictSize_ = 0;
+}
+
 void SdCardFontSystem::unloadTtf(GfxRenderer& renderer) {
   if (ttfFamily_.empty() && ttfFontId_ == 0 && ttfUiIds_.empty()) return;
+  releaseTtfDict(renderer);  // borrows ttfSources_
   // UI-size fallbacks first (they borrow ttfSources_).
   for (const int id : ttfUiIds_) {
     renderer.unregisterTtfFont(id);
@@ -531,8 +599,14 @@ void SdCardFontSystem::loadTtfFamily(const SdCardFontFamilyInfo& family, GfxRend
   // Keep sizes inherited from other families within the selectable vector range.
   snapFontPointSizeTo(
       snapToNearestPointSize(VECTOR_READER_POINT_SIZES, std::size(VECTOR_READER_POINT_SIZES), SETTINGS.fontPointSize));
-  const uint8_t size = SETTINGS.fontPointSize;
+  // The effective size, so a per-book override's size applies to a vector family too.
+  loadTtfFace(family, renderer, registryWasDirty,
+              snapToNearestPointSize(VECTOR_READER_POINT_SIZES, std::size(VECTOR_READER_POINT_SIZES),
+                                     SETTINGS.getReaderFontSize()));
+}
 
+void SdCardFontSystem::loadTtfFace(const SdCardFontFamilyInfo& family, GfxRenderer& renderer,
+                                   const bool registryWasDirty, const uint8_t size) {
   // Already loaded, same family + size, and disk unchanged → nothing to do.
   if (!registryWasDirty && ttf_ && ttfFamily_ == family.name && ttfPointSize_ == size) return;
 
@@ -569,8 +643,8 @@ void SdCardFontSystem::loadTtfFamily(const SdCardFontFamilyInfo& family, GfxRend
   unloadTtf(renderer);
 
   if (family.files.empty()) {
+    // Callers pass a familyWithFiles() listing, which is never empty; keep the selection.
     LOG_ERR("SDFS", "Vector family %s has no file", family.name.c_str());
-    SETTINGS.clearSdFontFamily();
     return;
   }
 

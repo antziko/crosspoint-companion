@@ -12,6 +12,7 @@ FontInstaller::FontInstaller(SdCardFontRegistry& registry) : registry_(registry)
 
 bool FontInstaller::isValidFamilyName(const char* name) {
   if (name == nullptr || name[0] == '\0') return false;
+  if (strlen(name) > SdCardFontRegistry::MAX_FAMILY_NAME_LEN) return false;
 
   // Reject path traversal
   if (strstr(name, "..") != nullptr) return false;

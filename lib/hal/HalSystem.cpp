@@ -24,6 +24,9 @@ RTC_NOINIT_ATTR HalSystem::StackFrame panicStack[MAX_PANIC_STACK_DEPTH];
 // (which writes no diagnostic) is indistinguishable from a real panic, and the crash
 // screen shows whatever stale bytes happen to sit in RTC memory.
 RTC_NOINIT_ATTR volatile uint32_t panicCaptureMarker;
+// Faulting PC, exception cause, fault address and return address of the panicking frame; the
+// stack window starts below the faulting function's own return address, so only these name it.
+RTC_NOINIT_ATTR uint32_t panicRegs[4];
 
 #ifdef TRACE_OOM_ALLOC
 // Diagnostic (dev builds only): with -fno-exceptions a failing throwing `new`
@@ -164,6 +167,20 @@ void IRAM_ATTR __wrap_panic_print_backtrace(const void* frame, int core) {
   for (size_t i = 0; i < MAX_PANIC_STACK_DEPTH; i++) {
     panicStack[i].sp = 0;
   }
+#if __riscv
+  const auto* rv = static_cast<const RvExcFrame*>(frame);
+  panicRegs[0] = rv->mepc;
+  panicRegs[1] = rv->mcause;
+  panicRegs[2] = rv->mtval;
+  panicRegs[3] = rv->ra;
+#else
+  const auto* xt = static_cast<const XtExcFrame*>(frame);
+  panicRegs[0] = xt->pc;
+  panicRegs[1] = xt->exccause;
+  panicRegs[2] = xt->excvaddr;
+  panicRegs[3] = xt->a0;
+#endif
+  panicCaptureMarker = PANIC_CAPTURE_MAGIC;
 
   // Stack window dump, mirroring components/esp_system/port/arch/*/panic_arch.c.
   // A hardware exception never reaches __wrap_panic_abort, so on both
@@ -245,6 +262,7 @@ void checkPanic() {
 void clearPanic() {
   panicCaptureMarker = 0;
   panicMessage[0] = '\0';
+  for (auto& r : panicRegs) r = 0;
   for (size_t i = 0; i < MAX_PANIC_STACK_DEPTH; i++) {
     panicStack[i].sp = 0;
   }
@@ -342,6 +360,13 @@ std::string getPanicInfo(bool full) {
     // from a true panic.
     info += "\n\nReset reason: " + std::string(resetReasonName(esp_reset_reason()));
     info += "\n\nPanic reason: " + std::string(panicMessage);
+    {
+      char regs[96];
+      snprintf(regs, sizeof(regs), "\n\nFault: pc=0x%08lX cause=%lu addr=0x%08lX ra=0x%08lX",
+               (unsigned long)panicRegs[0], (unsigned long)panicRegs[1], (unsigned long)panicRegs[2],
+               (unsigned long)panicRegs[3]);
+      info += regs;
+    }
 
 #ifdef TRACE_OOM_ALLOC
     // Only meaningful when the panic was an allocation failure; if the backtrace
