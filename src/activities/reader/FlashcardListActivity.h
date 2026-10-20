@@ -85,6 +85,9 @@ class FlashcardListActivity final : public Activity {
   const FlashcardDeck::Entry* entryAt(int uiIndex);  // word-only paged fetch
 
   void openDetail();  // load the selected card full -> phase = Detail
+  void flipDetail();  // look the detail card up in the dictionary
+  void jumpToDetailPage();
+  void deleteSelected();
   void resolveDetailPosition();
   void renderList();
   void renderDetail();
@@ -94,4 +97,18 @@ class FlashcardListActivity final : public Activity {
 
   // Rows the last render drew, so a tap can pick one (see ListTouchTarget).
   ListTouchTarget listTouch_;
+
+  // Touch boards draw no button-hint strip, so each hint gets an on-screen button instead
+  // (same bar as FlashcardReviewActivity's).
+  enum class Tap : uint8_t { Back, Flip, GoToPage, Delete, Cancel, ConfirmDelete };
+  static constexpr int MAX_TAP_ACTIONS = 4;
+  static constexpr int TAP_BUTTON_PADDING_Y = 12;
+  static constexpr int TAP_BUTTON_GAP = 10;
+  bool tapBar = false;
+  int buildTapActions(Tap* actions, const char** labels) const;
+  Rect tapBarRect() const;
+  int tapBarReserve() const;  // height the bar takes from the bottom of the content area
+  void drawTapBar();
+  bool handleTapBar();
+  void runTapAction(Tap action);
 };

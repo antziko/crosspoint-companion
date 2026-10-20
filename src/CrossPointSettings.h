@@ -131,10 +131,6 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // (OpenDyslexic) lands on "same as book", which resolves to the OpenDyslexic SD family its
   // reader font was migrated to in fromJson() — so no separate migration is needed.
   static constexpr uint8_t DICT_FONT_MATCH_READER = FONT_FAMILY_COUNT;
-  // The reader font size is a point size (see fontPointSize), NOT an enum slot.
-  // This enum survives only for the dictionary/definition viewer font size
-  // (dictionaryFontSize), which still uses discrete Small/Medium/Large/XL slots.
-  enum FONT_SIZE { SMALL = 0, MEDIUM = 1, LARGE = 2, EXTRA_LARGE = 3, FONT_SIZE_COUNT };
   // Legacy 1.4-and-earlier files stored the reader size as a 0..3 SMALL/MEDIUM/
   // LARGE/EXTRA_LARGE slot; fromJson()/ReaderSettingsIO fold that range up to the
   // point size it meant (see LEGACY_FONT_SIZE_MAX).
@@ -424,6 +420,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     uint8_t textAntiAliasing = 1;  // TEXT_AA enum
     uint8_t focusReadingEnabled = 0;
     uint8_t inlineGlossEnabled = 0;  // word-select gloss box; defaults to dictInlineGlossEnabled
+    // Line spacing of the gloss box and definition page: a LINE_COMPRESSION index, or
+    // DICT_LINE_SPACING_SAME_AS_TEXT to follow lineSpacing above.
+    static constexpr uint8_t DICT_LINE_SPACING_SAME_AS_TEXT = 0xFF;
+    uint8_t dictLineSpacing = DICT_LINE_SPACING_SAME_AS_TEXT;
   };
 
   // Night mode: inverted output polarity for the whole UI, resolved once per render
@@ -554,9 +554,13 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t paragraphAlignment = JUSTIFIED;
   // Definition viewer font: a built-in family, or DICT_FONT_MATCH_READER to follow the
   // reader's family (the only way to render definitions in an SD family — see
-  // getDefinitionFontId()). dictionaryFontSize applies in every mode, including that one.
+  // getDefinitionFontId()). dictionaryFontPointSize applies in every mode, including that one.
   uint8_t dictionaryFontFamily = NOTOSERIF;
-  uint8_t dictionaryFontSize = MEDIUM;
+  // Point size of the definition font, DICT_FONT_POINT_MIN..MAX. Each family snaps it to the
+  // sizes it has: built-ins to 12/14/16/18, a .cpfont to its files, a TTF renders it exactly.
+  static constexpr uint8_t DICT_FONT_POINT_MIN = 8;
+  static constexpr uint8_t DICT_FONT_POINT_MAX = 22;
+  uint8_t dictionaryFontPointSize = DEFAULT_FONT_POINT_SIZE;
   // Dictionary-lookup flashcards: card front style + review session card order.
   // Both are chosen on the FlashcardReviewActivity overview (not in SettingsList)
   // and persisted here as the remembered defaults. Default style = word+context.
@@ -807,7 +811,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // string means "use a built-in font"). Returned pointer is owned by settings.
   const char* getReaderSdFontFamilyName() const;
   int getDefinitionFontId() const;
-  // Point size the definition viewer renders at: dictionaryFontSize's slot, in points.
+  // Point size the definition viewer asks for: dictionaryFontPointSize, clamped to its range.
   // Used by the dictionary to make an SD family resident at that size (the font id
   // resolver cannot load anything itself — see getDefinitionFontId()).
   uint8_t getDefinitionPointSize() const;

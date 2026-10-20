@@ -66,6 +66,7 @@
 #include "SyncScopeSelectionActivity.h"
 #include "WordSelectionScan.h"
 #include "activities/util/ConfirmationActivity.h"
+#include "activities/util/IntervalSelectionActivity.h"
 #include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -425,6 +426,7 @@ void EpubReaderActivity::onEnter() {
       bookOverride.textAntiAliasing = SETTINGS.textAntiAliasing;
       bookOverride.focusReadingEnabled = SETTINGS.focusReadingEnabled;
       bookOverride.inlineGlossEnabled = SETTINGS.dictInlineGlossEnabled;
+      bookOverride.dictLineSpacing = CrossPointSettings::ReaderOverride::DICT_LINE_SPACING_SAME_AS_TEXT;
       static_assert(sizeof(bookOverride.sdFontFamilyName) == sizeof(SETTINGS.sdFontFamilyName),
                     "sdFontFamilyName size mismatch");
       strncpy(bookOverride.sdFontFamilyName, SETTINGS.sdFontFamilyName, sizeof(bookOverride.sdFontFamilyName) - 1);
@@ -2839,6 +2841,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
         ignoreBackUntilRelease = true;
         reloadLookupMarks();  // cards can be deleted here, dropping their page underline
         if (const auto* jump = result.isCancelled ? nullptr : std::get_if<FlashcardJumpResult>(&result.data)) {
+          markFlashcardReturn();
           // Go to page on a card: the chapter fraction it recorded, then the nearby page that
           // prints the word (the fraction drifts once the chapter re-paginates).
           RenderLock lock(*this);
@@ -5068,6 +5071,7 @@ void EpubReaderActivity::syncBookOverrideFromGlobals() {
   ov.textAntiAliasing = SETTINGS.textAntiAliasing;
   ov.focusReadingEnabled = SETTINGS.focusReadingEnabled;
   ov.inlineGlossEnabled = SETTINGS.dictInlineGlossEnabled;
+  ov.dictLineSpacing = CrossPointSettings::ReaderOverride::DICT_LINE_SPACING_SAME_AS_TEXT;
   static_assert(sizeof(ov.sdFontFamilyName) == sizeof(SETTINGS.sdFontFamilyName), "sdFontFamilyName size mismatch");
   strncpy(ov.sdFontFamilyName, SETTINGS.sdFontFamilyName, sizeof(ov.sdFontFamilyName) - 1);
   ov.sdFontFamilyName[sizeof(ov.sdFontFamilyName) - 1] = '\0';
@@ -5077,8 +5081,8 @@ void EpubReaderActivity::syncBookOverrideFromGlobals() {
 void EpubReaderActivity::showTextRowPopup(const int rowId) {
   switch (rowId) {
     case kTextRowSize: {
-      // The point sizes the active family actually ships.
-      const auto sizes = readerFontPointSizes(&sdFontSystem.registry(), SETTINGS.sdFontFamilyName);
+      // The point sizes the book's family actually ships (the size edited below is the book's too).
+      const auto sizes = readerFontPointSizes(&sdFontSystem.registry(), SETTINGS.getReaderOverride().sdFontFamilyName);
       if (sizes.empty()) return;
       std::vector<std::string> labels;
       labels.reserve(sizes.size());
@@ -5473,6 +5477,33 @@ void EpubReaderActivity::handleOverlayInput() {
       } else if (rowId == kTextRowFurigana) {
         cjkPrefs.furiganaOverride = cjkPrefs.furiganaOn() ? 0 : 1;
         applyCjkPrefsChange(/*languageChanged=*/false);
+      } else if (const auto sizes =
+                     rowId == kTextRowSize
+                         ? readerFontPointSizes(&sdFontSystem.registry(), SETTINGS.getReaderOverride().sdFontFamilyName)
+                         : std::vector<uint8_t>{};
+                 isContiguousPointRange(sizes)) {
+        // A vector family's 8..22 run is a slider, not a 15-row list.
+        const int returnRow = panelIndex;
+        if (!SETTINGS.getReaderOverride().active) syncBookOverrideFromGlobals();
+        overlay = Overlay::None;
+        overlayPopup.dismiss();
+        discardOverlayPage();
+        startActivityForResultNoThrow<IntervalSelectionActivity>(
+            [this, returnRow](const ActivityResult& result) {
+              if (!result.isCancelled) {
+                auto ov = SETTINGS.getReaderOverride();
+                ov.fontPointSize = static_cast<uint8_t>(std::get<IntervalResult>(result.data).value);
+                commitBookOverride(ov);
+              }
+              applyReaderTextSettings();
+              overlay = Overlay::Text;  // back to the Text panel
+              panelIndex = returnRow;
+              if (toolbarUi) toolbarUi->begin();
+              requestUpdate();
+            },
+            renderer, mappedInput, "ReaderFontSize", StrId::STR_FONT_SIZE,
+            snapToNearestPointSize(sizes, SETTINGS.getReaderOverride().fontPointSize), sizes.front(), sizes.back(), 1,
+            2, StrId::STR_POINT_SIZE_VALUE_FORMAT, /*readerActivity=*/true, /*ignoreInitialConfirmRelease=*/true);
       } else {
         // Enum rows open the Settings-style option picker.
         showTextRowPopup(rowId);
@@ -5975,7 +6006,21 @@ bool EpubReaderActivity::chapterJumpLeavesPage(const int spineIndex, const std::
   return destinationPage != section->currentPage;
 }
 
-void EpubReaderActivity::addBookmark(bool returnMark, bool lightRefresh) {
+void EpubReaderActivity::markFlashcardReturn() {
+  if (BOOKMARKS.hasCardReturnMark() || !hasPage() || pageTotal() == 0) return;
+  int existing;
+  {
+    RenderLock lock(*this);
+    existing = markIndexOnCurrentPage(false);
+  }
+  if (existing >= 0) {
+    BOOKMARKS.setCardReturn(static_cast<size_t>(existing));
+  } else {
+    addBookmark(/*returnMark=*/true, /*lightRefresh=*/true, /*cardReturn=*/true);
+  }
+}
+
+void EpubReaderActivity::addBookmark(bool returnMark, bool lightRefresh, bool cardReturn) {
   if (!hasPage() || !epub) {
     return;
   }
@@ -6039,7 +6084,7 @@ void EpubReaderActivity::addBookmark(bool returnMark, bool lightRefresh) {
   LOG_DBG("ERS", "Adding bookmark at spine %d, page %d", currentSpineIndex, currentPage);
   const auto addResult = BOOKMARKS.addBookmark(spine, progress, pageCount, chapterTitle, paragraphIndex, snippet,
                                                returnMark, currentPage, spanWords, visibleOffset,
-                                               /*replaceSamePage=*/false, imageIndex);
+                                               /*replaceSamePage=*/false, imageIndex, cardReturn);
   if (addResult == BookmarkStore::AddResult::Added) {
     if (lightRefresh) {
       // Interactive toggle: update only the status-bar strip (image untouched).

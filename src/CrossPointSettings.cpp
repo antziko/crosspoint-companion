@@ -292,6 +292,13 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
     needsResave = true;
   }
   fontPointSize = storedFontSize;
+  // Dictionary font size: the Small/Medium/Large/XL slot under "dictionaryFontSize" became a
+  // point size under "dictionaryFontPointSize"; fold the slot the same way as above.
+  if (doc["dictionaryFontPointSize"].isNull() && !doc["dictionaryFontSize"].isNull()) {
+    const uint8_t slot = doc["dictionaryFontSize"] | (uint8_t)1;
+    if (slot <= LEGACY_FONT_SIZE_MAX) s.dictionaryFontPointSize = 12 + slot * 2;
+    needsResave = true;
+  }
 
   // Font family — uses dynamic getter/setter in SettingsList so the generic loop skips it.
   const uint8_t storedFontFamily = doc["fontFamily"] | (uint8_t)0;
@@ -568,12 +575,7 @@ int CrossPointSettings::getEffectiveRefreshFrequency() const {
 }
 
 uint8_t CrossPointSettings::getDefinitionPointSize() const {
-  // dictionaryFontSize is a Small/Medium/Large/XL slot; these are the point sizes the
-  // built-in definition fonts are compiled at, so "Same as book" renders at the same
-  // size the other family options do.
-  static constexpr uint8_t DICT_POINT_SIZES[] = {12, 14, 16, 18};
-  const uint8_t slot = dictionaryFontSize < std::size(DICT_POINT_SIZES) ? dictionaryFontSize : MEDIUM;
-  return DICT_POINT_SIZES[slot];
+  return std::clamp(dictionaryFontPointSize, DICT_FONT_POINT_MIN, DICT_FONT_POINT_MAX);
 }
 
 int CrossPointSettings::getDefinitionFontId() const {
@@ -596,35 +598,8 @@ int CrossPointSettings::getDefinitionFontId() const {
     return computeBuiltinFontId(readerOverride.active ? readerOverride.fontFamily : fontFamily, pointSize);
   }
 
-  const FONT_FAMILY effFamily = static_cast<FONT_FAMILY>(dictionaryFontFamily);
-  const FONT_SIZE effSize = static_cast<FONT_SIZE>(dictionaryFontSize);
-  switch (effFamily) {
-    case NOTOSERIF:
-    default:
-      switch (effSize) {
-        case SMALL:
-          return NOTOSERIF_12_FONT_ID;
-        case MEDIUM:
-        default:
-          return NOTOSERIF_14_FONT_ID;
-        case LARGE:
-          return NOTOSERIF_16_FONT_ID;
-        case EXTRA_LARGE:
-          return NOTOSERIF_18_FONT_ID;
-      }
-    case NOTOSANS:
-      switch (effSize) {
-        case SMALL:
-          return NOTOSANS_12_FONT_ID;
-        case MEDIUM:
-        default:
-          return NOTOSANS_14_FONT_ID;
-        case LARGE:
-          return NOTOSANS_16_FONT_ID;
-        case EXTRA_LARGE:
-          return NOTOSANS_18_FONT_ID;
-      }
-  }
+  // A built-in dictionary family exists only at BUILTIN_READER_POINT_SIZES; this snaps to them.
+  return computeBuiltinFontId(dictionaryFontFamily, getDefinitionPointSize());
 }
 
 void CrossPointSettings::clearSdFontFamily() {
@@ -657,11 +632,20 @@ int CrossPointSettings::getReaderFontId() const {
 float CrossPointSettings::getDefinitionLineCompression() const {
   // Matches getDefinitionFontId(): when the definition font is the reader's, its line
   // compression must be too (computeLineCompression() handles the SD-font case).
-  if (dictionaryFontFamily == DICT_FONT_MATCH_READER) return getReaderLineCompression();
+  uint8_t spacing = readerOverride.active ? readerOverride.lineSpacing : lineSpacing;
+  if (readerOverride.active && readerOverride.dictLineSpacing < LINE_COMPRESSION_COUNT) {
+    spacing = readerOverride.dictLineSpacing;
+  }
+  if (dictionaryFontFamily == DICT_FONT_MATCH_READER) {
+    if (readerOverride.active) {
+      return computeLineCompression(readerOverride.fontFamily, spacing, readerOverride.sdFontFamilyName);
+    }
+    return computeLineCompression(fontFamily, spacing, sdFontFamilyName);
+  }
 
   // A dictionary family is always built-in (see the DICT_FONT_MATCH_READER sentinel), so
   // there is no SD font name to pass — the same contract as getDefinitionFontId() here.
-  return computeLineCompression(dictionaryFontFamily, lineSpacing, nullptr);
+  return computeLineCompression(dictionaryFontFamily, spacing, nullptr);
 }
 
 // static

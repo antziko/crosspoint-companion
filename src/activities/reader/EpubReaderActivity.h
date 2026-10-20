@@ -735,7 +735,12 @@ class EpubReaderActivity final : public Activity {
   // jumping to another chapter, so the user can get back to where they were.
   // lightRefresh=true performs a status-bar-only windowed panel update instead of a
   // full page re-render (use for interactive same-page toggles on image/AA pages).
-  void addBookmark(bool returnMark = false, bool lightRefresh = false);
+  // cardReturn=true tags it as the flashcard return mark (see markFlashcardReturn).
+  void addBookmark(bool returnMark = false, bool lightRefresh = false, bool cardReturn = false);
+  // Before a flashcard's Go to page: tag the page being left as the way back, unless an
+  // earlier card jump already placed that mark. A page that already holds a bookmark keeps
+  // it and gains the tag.
+  void markFlashcardReturn();
   // True when jumping away from the current page should offer a return mark: there is a
   // paginated page to mark and it does not already carry a point bookmark.
   bool canOfferReturnMark() const;

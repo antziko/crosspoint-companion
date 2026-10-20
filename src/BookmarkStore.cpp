@@ -24,6 +24,9 @@ constexpr uint8_t QUOTE_RANGE_VERSION = 8;     // adds quote flag + end anchor +
 constexpr uint8_t VISIBLE_OFFSET_VERSION = 9;  // adds visibleTextOffset (uint32), 0 when unknown
 constexpr uint8_t IMAGE_INDEX_VERSION = 10;    // adds imageIndex (uint16), UINT16_MAX when none
 constexpr uint8_t VERSION = 10;
+// Bits of the per-bookmark return byte (RETURN_MARK_VERSION).
+constexpr uint8_t RETURN_FLAG_MARK = 0x01;
+constexpr uint8_t RETURN_FLAG_CARD = 0x02;
 constexpr bool isKnownVersion(uint8_t v) {
   return v == LEGACY_VERSION || v == COUNT_U16_VERSION || v == PARAGRAPH_ANCHOR_VERSION || v == SNIPPET_VERSION ||
          v == RETURN_MARK_VERSION || v == CHAPTER_PAGES_VERSION || v == QUOTE_RANGE_VERSION ||
@@ -207,7 +210,7 @@ BookmarkStore::AddResult BookmarkStore::addBookmark(uint16_t spineIndex, float p
                                                     const char* chapterTitle, uint16_t paragraphIndex,
                                                     const char* snippet, bool returnMark, int currentPage,
                                                     uint16_t spanWords, uint32_t visibleTextOffset,
-                                                    bool replaceSamePage, uint16_t imageIndex) {
+                                                    bool replaceSamePage, uint16_t imageIndex, bool cardReturn) {
   if (replaceSamePage && pageCount > 0) {
     const float pageSlice = 1.0f / static_cast<float>(pageCount);
     const float pageStart = progress;
@@ -232,6 +235,7 @@ BookmarkStore::AddResult BookmarkStore::addBookmark(uint16_t spineIndex, float p
   bm.paragraphIndex = paragraphIndex;
   snprintf(bm.snippet, sizeof(bm.snippet), "%s", snippet ? snippet : "");
   bm.returnMark = returnMark;
+  bm.cardReturn = cardReturn;
   bm.chapterCurrentPage = static_cast<uint16_t>(currentPage < 0 ? 0 : currentPage);
   bm.chapterPageCount = static_cast<uint16_t>(pageCount < 0 ? 0 : pageCount);
   bm.endWord = spanWords;
@@ -504,6 +508,17 @@ bool BookmarkStore::removeReturnMarkAt(uint16_t spineIndex, uint16_t paragraphIn
   return true;
 }
 
+bool BookmarkStore::hasCardReturnMark() const {
+  return std::any_of(bookmarks.begin(), bookmarks.end(), [](const Bookmark& b) { return b.cardReturn; });
+}
+
+void BookmarkStore::setCardReturn(const size_t index) {
+  if (index >= bookmarks.size() || bookmarks[index].cardReturn) return;
+  bookmarks[index].cardReturn = true;  // device-only, like returnMark: no version bump
+  dirty = true;
+  saveToFile();
+}
+
 bool BookmarkStore::removeReturnMarkForPage(uint16_t spineIndex, float pageProgress, int pageCount) {
   if (pageCount <= 0) return false;
   const float pageSlice = 1.0f / static_cast<float>(pageCount);
@@ -709,7 +724,8 @@ bool BookmarkStore::readFromFile() {
         return false;
       }
       serialization::readPod(f, returnFlag);
-      bm.returnMark = returnFlag != 0;
+      bm.returnMark = (returnFlag & RETURN_FLAG_MARK) != 0;
+      bm.cardReturn = (returnFlag & RETURN_FLAG_CARD) != 0;
     } else {
       bm.returnMark = false;
     }
@@ -797,7 +813,7 @@ bool BookmarkStore::writeToFile() const {
     f.write(bm.chapterTitle, sizeof(bm.chapterTitle));
     serialization::writePod(f, bm.paragraphIndex);
     f.write(bm.snippet, sizeof(bm.snippet));
-    const uint8_t returnFlag = bm.returnMark ? 1 : 0;
+    const uint8_t returnFlag = (bm.returnMark ? RETURN_FLAG_MARK : 0) | (bm.cardReturn ? RETURN_FLAG_CARD : 0);
     serialization::writePod(f, returnFlag);
     serialization::writePod(f, bm.chapterCurrentPage);
     serialization::writePod(f, bm.chapterPageCount);

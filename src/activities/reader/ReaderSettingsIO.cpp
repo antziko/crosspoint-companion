@@ -32,7 +32,8 @@ namespace {
 // v12: appended inlineGlossEnabled; older files take the global Inline Gloss Box setting.
 // v13: sdFontFamilyName widened from 32 to SD_FONT_FAMILY_NAME_SIZE bytes; older files are read
 //      at the old width.
-constexpr uint8_t READER_SETTINGS_FILE_VERSION = 13;
+// v14: appended dictLineSpacing; older files follow the book's own line spacing.
+constexpr uint8_t READER_SETTINGS_FILE_VERSION = 14;
 constexpr size_t LEGACY_SD_FONT_FAMILY_NAME_SIZE = 32;
 // Oldest layout load() still understands; everything from here up is read field by field.
 constexpr uint8_t READER_SETTINGS_MIN_READABLE_VERSION = 5;
@@ -121,6 +122,13 @@ bool load(const std::string& cachePath, CrossPointSettings::ReaderOverride& out)
     serialization::readPod(f, out.inlineGlossEnabled);
     out.inlineGlossEnabled = out.inlineGlossEnabled ? 1 : 0;
   }
+  out.dictLineSpacing = CrossPointSettings::ReaderOverride::DICT_LINE_SPACING_SAME_AS_TEXT;
+  if (version >= 14) {
+    serialization::readPod(f, out.dictLineSpacing);
+    if (out.dictLineSpacing >= CrossPointSettings::LINE_COMPRESSION_COUNT) {
+      out.dictLineSpacing = CrossPointSettings::ReaderOverride::DICT_LINE_SPACING_SAME_AS_TEXT;
+    }
+  }
   out.active = true;
   return true;
 }
@@ -149,6 +157,7 @@ bool write(const std::string& cachePath, const CrossPointSettings::ReaderOverrid
   serialization::writePod(f, ov.textAntiAliasing);
   serialization::writePod(f, ov.focusReadingEnabled);
   serialization::writePod(f, ov.inlineGlossEnabled);
+  serialization::writePod(f, ov.dictLineSpacing);
   return true;
 }
 

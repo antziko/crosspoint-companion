@@ -64,6 +64,56 @@ inline SettingInfo buildFontSizeSetting(const SdCardFontRegistry* registry) {
   return s;
 }
 
+// Point sizes the definition font size setting offers, ascending. "Same as book" follows the
+// family of whichever book is open, which may differ from the global one listed here, so it
+// offers the whole range and each family snaps to what it has (a TTF renders it exactly).
+// The built-in families exist only at BUILTIN_READER_POINT_SIZES.
+inline std::vector<uint8_t> dictFontPointSizes() {
+  std::vector<uint8_t> sizes;
+  if (SETTINGS.dictionaryFontFamily == CrossPointSettings::DICT_FONT_MATCH_READER) {
+    sizes.reserve(CrossPointSettings::DICT_FONT_POINT_MAX - CrossPointSettings::DICT_FONT_POINT_MIN + 1);
+    for (uint8_t pt = CrossPointSettings::DICT_FONT_POINT_MIN; pt <= CrossPointSettings::DICT_FONT_POINT_MAX; ++pt) {
+      sizes.push_back(pt);
+    }
+  } else {
+    sizes.assign(std::begin(BUILTIN_READER_POINT_SIZES), std::end(BUILTIN_READER_POINT_SIZES));
+  }
+  return sizes;
+}
+
+// The definition font size row. Persisted through kPersistedSettings ("dictionaryFontPointSize"),
+// not by this row. SettingsActivity opens a slider instead of the list for a contiguous range.
+inline SettingInfo buildDictFontSizeSetting() {
+  const std::vector<uint8_t> sizes = dictFontPointSizes();
+
+  std::vector<std::string> labels;
+  labels.reserve(sizes.size());
+  for (const uint8_t pt : sizes) {
+    labels.push_back(std::to_string(pt) + " pt");
+  }
+
+  SettingInfo s;
+  s.nameId = StrId::STR_DICT_FONT_SIZE;
+  s.type = SettingType::ENUM;
+  s.enumStringValues = std::move(labels);
+  s.key = "dictionaryFontPointSize";
+  s.category = StrId::STR_READER_DICTIONARY;
+
+  s.dyn = std::make_shared<SettingInfo::DynamicAccessors>();
+  s.dyn->valueGetter = [sizes]() -> uint8_t {
+    const uint8_t pt = snapToNearestPointSize(sizes, SETTINGS.dictionaryFontPointSize);
+    for (int i = 0; i < static_cast<int>(sizes.size()); i++) {
+      if (sizes[i] == pt) return static_cast<uint8_t>(i);
+    }
+    return 0;
+  };
+  s.dyn->valueSetter = [sizes](uint8_t v) {
+    if (v < sizes.size()) SETTINGS.dictionaryFontPointSize = sizes[v];
+  };
+
+  return s;
+}
+
 // Build the font family setting dynamically. When registry is non-null, SD card fonts
 // are appended after the built-in fonts. Otherwise only built-in fonts are listed.
 inline SettingInfo buildFontFamilySetting(const SdCardFontRegistry* registry) {
@@ -321,9 +371,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   v.push_back(SettingInfo::Enum(StrId::STR_DICT_FONT_FAMILY, &CrossPointSettings::dictionaryFontFamily,
                                 {StrId::STR_NOTO_SERIF, StrId::STR_NOTO_SANS, StrId::STR_SAME_AS_BOOK},
                                 "dictionaryFontFamily", StrId::STR_READER_DICTIONARY));
-  v.push_back(SettingInfo::Enum(StrId::STR_DICT_FONT_SIZE, &CrossPointSettings::dictionaryFontSize,
-                                {StrId::STR_SMALL, StrId::STR_MEDIUM, StrId::STR_LARGE, StrId::STR_X_LARGE},
-                                "dictionaryFontSize", StrId::STR_READER_DICTIONARY));
+  // Placeholder carrying the persisted range; replaced by buildDictFontSizeSetting() below.
+  v.push_back(SettingInfo::Value(StrId::STR_DICT_FONT_SIZE, &CrossPointSettings::dictionaryFontPointSize,
+                                 {CrossPointSettings::DICT_FONT_POINT_MIN, CrossPointSettings::DICT_FONT_POINT_MAX, 1},
+                                 "dictionaryFontPointSize", StrId::STR_READER_DICTIONARY));
   v.push_back(SettingInfo::Enum(StrId::STR_LINE_SPACING, &CrossPointSettings::lineSpacing,
                                 {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_RELAXED, StrId::STR_SEMI_WIDE,
                                  StrId::STR_WIDE, StrId::STR_EXTRA_WIDE},
@@ -775,6 +826,15 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
     auto it = std::find_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_FONT_SIZE; });
     if (it != v.end()) {
       *it = buildFontSizeSetting(registry);
+    }
+  }
+  if (registry) {
+    // Registry-less callers (the persistence cross-check) keep the placeholder's valuePtr.
+    // The row itself needs no registry.
+    auto it =
+        std::find_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_DICT_FONT_SIZE; });
+    if (it != v.end()) {
+      *it = buildDictFontSizeSetting();
     }
   }
 

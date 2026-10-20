@@ -75,11 +75,13 @@ struct Bookmark {
   // between them), so this is what tells them apart; it comes from the HTML, not the layout.
   uint16_t imageIndex = UINT16_MAX;
 
-  // Session-only flag: true for the "return here" bookmark auto-dropped when the user
-  // jumps to another chapter, so the reader can show a distinct icon for it. Deliberately
-  // NOT serialized to the bookmark file and NOT synced — it is a within-session navigation
-  // aid, so it costs no on-disk format change and reverts to a plain bookmark on reload.
+  // True for the "return here" bookmark dropped when the user jumps away, so the reader can
+  // show a distinct icon for it. Saved in the bookmark file but never synced: a device-only
+  // navigation aid.
   bool returnMark = false;
+  // Marks the page a flashcard's Go to page first left. Rides on a return mark, or on the
+  // bookmark that page already held. One per book: later card jumps keep it.
+  bool cardReturn = false;
 
   // ---- Quote ("highlight") range (v8 additions) ----
   // A quote is a ranged mark capturing selected text; a point bookmark leaves these at
@@ -145,7 +147,7 @@ class BookmarkStore {
   AddResult addBookmark(uint16_t spineIndex, float progress, int pageCount, const char* chapterTitle,
                         uint16_t paragraphIndex = UINT16_MAX, const char* snippet = nullptr, bool returnMark = false,
                         int currentPage = 0, uint16_t spanWords = 0, uint32_t visibleTextOffset = 0,
-                        bool replaceSamePage = true, uint16_t imageIndex = UINT16_MAX);
+                        bool replaceSamePage = true, uint16_t imageIndex = UINT16_MAX, bool cardReturn = false);
 
   // Add a ranged quote ("highlight"). The anchor (spineIndex, progress, chapterTitle,
   // page snapshot) matches how a point bookmark anchors; startWord/endWord are the
@@ -291,6 +293,8 @@ class BookmarkStore {
   bool hasQuoteForPage(uint16_t spineIndex, float pageProgress, int pageCount);
   // True when the bookmark covering this page is the session "return here" mark.
   bool isReturnMarkForPage(uint16_t spineIndex, float pageProgress, int pageCount);
+  bool hasCardReturnMark() const;
+  void setCardReturn(size_t index);
   const std::vector<Bookmark>& getBookmarks() const { return bookmarks; }
 
   // ---- KOReader bookmark sync (self-hosted server extension) ----

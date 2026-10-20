@@ -106,8 +106,9 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
     // Dictionary font family adds "Same as book" (DICT_FONT_MATCH_READER) above the built-ins.
     persisted::enumerated("dictionaryFontFamily", &CrossPointSettings::dictionaryFontFamily,
                           CrossPointSettings::DICT_FONT_MATCH_READER),
-    persisted::enumerated("dictionaryFontSize", &CrossPointSettings::dictionaryFontSize,
-                          CrossPointSettings::FONT_SIZE_COUNT - 1),
+    // Legacy "dictionaryFontSize" slots are migrated in fromJson().
+    persisted::ranged("dictionaryFontPointSize", &CrossPointSettings::dictionaryFontPointSize,
+                      CrossPointSettings::DICT_FONT_POINT_MIN, CrossPointSettings::DICT_FONT_POINT_MAX),
     persisted::enumerated("lineSpacingV3", &CrossPointSettings::lineSpacing,
                           CrossPointSettings::LINE_COMPRESSION_COUNT - 1),
     persisted::ranged("screenMargin", &CrossPointSettings::screenMargin, CrossPointSettings::SCREEN_MARGIN_MIN,

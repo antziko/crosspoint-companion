@@ -426,6 +426,24 @@ void SettingsActivity::toggleCurrentSetting() {
                                                               renderer, mappedInput);
       return;
     }
+    if (setting.nameId == StrId::STR_DICT_FONT_SIZE) {
+      const std::vector<uint8_t> sizes = dictFontPointSizes();
+      if (isContiguousPointRange(sizes)) {
+        startActivityForResultNoThrow<IntervalSelectionActivity>(
+            [this](const ActivityResult& result) {
+              if (!result.isCancelled) {
+                SETTINGS.dictionaryFontPointSize = static_cast<uint8_t>(std::get<IntervalResult>(result.data).value);
+                SETTINGS.saveToFile();
+                rebuildSettingsLists();
+              }
+              requestUpdate();
+            },
+            renderer, mappedInput, "DictFontSize", StrId::STR_DICT_FONT_SIZE,
+            snapToNearestPointSize(sizes, SETTINGS.dictionaryFontPointSize), sizes.front(), sizes.back(), 1, 2,
+            StrId::STR_POINT_SIZE_VALUE_FORMAT, false, true);
+        return;
+      }
+    }
     const uint8_t totalValues = setting.enumStringValues.empty()
                                     ? static_cast<uint8_t>(setting.enumValues.size())
                                     : static_cast<uint8_t>(setting.enumStringValues.size());

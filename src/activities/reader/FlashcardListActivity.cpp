@@ -46,6 +46,7 @@ void FlashcardListActivity::onEnter() {
   uint16_t year = 0;
   clockOk = halClock.isAvailable() && halClock.getLocalDateTime(dayOfWeek, day, month, year, hour, minute);
   today = clockOk ? readingHistoryDayIndex(year, month, day) : 0;
+  tapBar = mappedInput.hasTouch();
 
   refreshCount();
   requestUpdate();
@@ -74,6 +75,56 @@ void FlashcardListActivity::openDetail() {
   if (FlashcardDeck::loadWindow(cachePath, selectedIndex, 1, &detail, /*wordsOnly=*/false) < 1) return;
   resolveDetailPosition();
   phase = Phase::Detail;
+  requestUpdate();
+}
+
+void FlashcardListActivity::flipDetail() {
+  // Same rule as the review screen's flip: look the word up in the dictionary the card was
+  // saved from, silently falling back to the active one when it is not installed. The two
+  // screens must agree — opening the same card from the list and from a review should not
+  // produce different definitions. Safe here for the same reason: loop() is the UI task and
+  // the controller has nothing in flight (Dictionary.h:94-99).
+  // Re-read first, for the same reason the review screen does: `detail` is a resident copy
+  // and the definition screen may have written a new dictionary onto this card since.
+  uint32_t recorded = 0;
+  if (FlashcardDeck::cardDict(cachePath, detail.word, recorded)) detail.dictHash = recorded;
+  DictUtils::applyCardDict(detail.dictHash);
+  controller.startLookup(detail.word);
+}
+
+void FlashcardListActivity::jumpToDetailPage() {
+  if (detailSpine < 0) return;
+  FlashcardJumpResult jump;
+  jump.spineIndex = static_cast<uint16_t>(detailSpine);
+  jump.progress = detailProgress;
+  // The word as the page prints it ("donned" for a card filed under "don"), as the underline.
+  int surfaceLen = 0;
+  const char* surface =
+      FlashcardDeck::findSurfaceForm(detail.word.c_str(), static_cast<int>(detail.word.size()), detail.excerpt.c_str(),
+                                     static_cast<int>(detail.excerpt.size()), &surfaceLen);
+  if (!surface || surfaceLen <= 0) {
+    surface = detail.word.c_str();
+    surfaceLen = static_cast<int>(detail.word.size());
+  }
+  LookupMarks::Mark mark;
+  if (LookupMarks::markFor(surface, surfaceLen, mark)) {
+    jump.hasWord = true;
+    jump.wordHash = mark.wordHash;
+    jump.headHash = mark.headHash;
+    jump.byteLen = mark.byteLen;
+    jump.word = detail.word;
+  }
+  setResult(ActivityResult{jump});
+  finish();
+}
+
+void FlashcardListActivity::deleteSelected() {
+  FlashcardDeck::removeAt(cachePath, fileIndexOf(selectedIndex));
+  refreshCount();
+  deleteConfirmMode = false;
+  if (selectedIndex >= totalCount) {
+    selectedIndex = std::max(0, totalCount - 1);
+  }
   requestUpdate();
 }
 
@@ -168,47 +219,22 @@ void FlashcardListActivity::loop() {
     return;
   }
 
+  // The on-screen buttons first: on a touch-only board they are the only route to these actions.
+  if (handleTapBar()) return;
+
   // ----- Detail phase: Confirm looks up the live definition, Back returns. -----
   if (phase == Phase::Detail) {
-    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-      // Same rule as the review screen's flip: look the word up in the dictionary the card was
-      // saved from, silently falling back to the active one when it is not installed. The two
-      // screens must agree — opening the same card from the list and from a review should not
-      // produce different definitions. Safe here for the same reason: loop() is the UI task and
-      // the controller has nothing in flight (Dictionary.h:94-99).
-      // Re-read first, for the same reason the review screen does: `detail` is a resident copy
-      // and the definition screen may have written a new dictionary onto this card since.
-      uint32_t recorded = 0;
-      if (FlashcardDeck::cardDict(cachePath, detail.word, recorded)) detail.dictHash = recorded;
-      DictUtils::applyCardDict(detail.dictHash);
-      controller.startLookup(detail.word);
+    int tapX = 0;
+    int tapY = 0;
+    // A tap anywhere on the card flips it, like Confirm.
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) || mappedInput.wasScreenTapped(tapX, tapY)) {
+      flipDetail();
       return;
     }
     // Right on the front row; Down too, because the X4 Pro has only the side pair.
     if (detailSpine >= 0 && (mappedInput.wasReleased(MappedInputManager::Button::Right) ||
                              mappedInput.wasReleased(MappedInputManager::Button::Down))) {
-      FlashcardJumpResult jump;
-      jump.spineIndex = static_cast<uint16_t>(detailSpine);
-      jump.progress = detailProgress;
-      // The word as the page prints it ("donned" for a card filed under "don"), as the underline.
-      int surfaceLen = 0;
-      const char* surface =
-          FlashcardDeck::findSurfaceForm(detail.word.c_str(), static_cast<int>(detail.word.size()),
-                                         detail.excerpt.c_str(), static_cast<int>(detail.excerpt.size()), &surfaceLen);
-      if (!surface || surfaceLen <= 0) {
-        surface = detail.word.c_str();
-        surfaceLen = static_cast<int>(detail.word.size());
-      }
-      LookupMarks::Mark mark;
-      if (LookupMarks::markFor(surface, surfaceLen, mark)) {
-        jump.hasWord = true;
-        jump.wordHash = mark.wordHash;
-        jump.headHash = mark.headHash;
-        jump.byteLen = mark.byteLen;
-        jump.word = detail.word;
-      }
-      setResult(ActivityResult{jump});
-      finish();
+      jumpToDetailPage();
       return;
     }
     if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
@@ -243,13 +269,7 @@ void FlashcardListActivity::loop() {
       return;
     }
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-      FlashcardDeck::removeAt(cachePath, fileIndexOf(selectedIndex));
-      refreshCount();
-      deleteConfirmMode = false;
-      if (selectedIndex >= totalCount) {
-        selectedIndex = std::max(0, totalCount - 1);
-      }
-      requestUpdate();
+      deleteSelected();
       return;
     }
     if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
@@ -261,7 +281,7 @@ void FlashcardListActivity::loop() {
   }
 
   const int totalItems = totalCount;
-  const int pageItems = UITheme::getNumberOfItemsPerPage(renderer, true, false, true, false);
+  const int pageItems = UITheme::getNumberOfItemsPerPage(renderer, true, false, true, false, tapBarReserve());
 
   buttonNavigator.onNextRelease([this, totalItems] {
     selectedIndex = ButtonNavigator::nextIndex(selectedIndex, totalItems);
@@ -333,7 +353,8 @@ void FlashcardListActivity::renderList() {
 
   const auto& metrics = UITheme::getInstance().getMetrics();
 
-  const int pageItems = std::max(1, UITheme::getNumberOfItemsPerPage(renderer, true, false, true, false));
+  const int pageItems =
+      std::max(1, UITheme::getNumberOfItemsPerPage(renderer, true, false, true, false, tapBarReserve()));
   const int curPage = selectedIndex / pageItems + 1;
   const int totalPages = std::max(1, (totalCount + pageItems - 1) / pageItems);
 
@@ -351,6 +372,7 @@ void FlashcardListActivity::renderList() {
     renderer.drawCenteredText(UI_10_FONT_ID, midY, tr(STR_FLASHCARDS_EMPTY));
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    drawTapBar();
     displayList();
     return;
   }
@@ -384,6 +406,7 @@ void FlashcardListActivity::renderList() {
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   }
+  drawTapBar();
 
   displayList();
 }
@@ -399,7 +422,7 @@ void FlashcardListActivity::renderDetail() {
   const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 
   const int contentTop = safe.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int contentBottom = safe.y + safe.height;
+  const int contentBottom = safe.y + safe.height - tapBarReserve();
 
   // Shared card face: bold word + excerpt (word underlined in context) + chapter.
   FlashcardCardFace::render(renderer, contentTop, contentBottom, safe.x, safe.width, detail.word, detail.excerpt,
@@ -429,6 +452,123 @@ void FlashcardListActivity::renderDetail() {
   const auto labels =
       mappedInput.mapLabels(tr(STR_BACK), tr(STR_FLASHCARD_FLIP), "", detailSpine >= 0 ? tr(STR_GO_TO_PAGE) : "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  drawTapBar();
 
   displayList();
+}
+
+int FlashcardListActivity::buildTapActions(Tap* actions, const char** labels) const {
+  if (!tapBar) return 0;
+  int count = 0;
+  const auto add = [&](const Tap action, const char* label) {
+    if (count >= MAX_TAP_ACTIONS) return;
+    actions[count] = action;
+    labels[count] = label;
+    ++count;
+  };
+  // Hint-strip order. Select needs no button in the list: a tap on a row opens it.
+  if (phase == Phase::Detail) {
+    add(Tap::Back, tr(STR_BACK));
+    add(Tap::Flip, tr(STR_FLASHCARD_FLIP));
+    if (detailSpine >= 0) add(Tap::GoToPage, tr(STR_GO_TO_PAGE));
+    // Long-press Confirm on the list deletes; a finger has no Confirm to hold.
+    add(Tap::Delete, tr(STR_DELETE));
+  } else if (deleteConfirmMode) {
+    add(Tap::Cancel, tr(STR_CANCEL));
+    add(Tap::ConfirmDelete, tr(STR_DELETE));
+  } else {
+    add(Tap::Back, tr(STR_BACK));
+  }
+  return count;
+}
+
+int FlashcardListActivity::tapBarReserve() const {
+  if (!tapBar) return 0;
+  return renderer.getLineHeight(UI_10_FONT_ID) + TAP_BUTTON_PADDING_Y * 2 +
+         UITheme::getInstance().getMetrics().verticalSpacing;
+}
+
+Rect FlashcardListActivity::tapBarRect() const {
+  if (!tapBar) return Rect{};
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int height = renderer.getLineHeight(UI_10_FONT_ID) + TAP_BUTTON_PADDING_Y * 2;
+  const int inset = metrics.contentSidePadding;
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int y = safe.y + safe.height - metrics.verticalSpacing - height;
+  return Rect{safe.x + inset, y, safe.width - inset * 2, height};
+}
+
+void FlashcardListActivity::drawTapBar() {
+  Tap actions[MAX_TAP_ACTIONS];
+  const char* labels[MAX_TAP_ACTIONS];
+  const int count = buildTapActions(actions, labels);
+  if (count <= 0) return;
+  const Rect bar = tapBarRect();
+  const int step = bar.width / count;
+  const int width = step - TAP_BUTTON_GAP;
+  const int radius = UITheme::getInstance().getMetrics().controlRadius;
+  const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  for (int i = 0; i < count; ++i) {
+    const int x = bar.x + step * i;
+    renderer.fillRect(x, bar.y, width, bar.height, false);
+    if (radius > 0) {
+      renderer.drawRoundedRect(x, bar.y, width, bar.height, 1, radius, true);
+    } else {
+      renderer.drawRect(x, bar.y, width, bar.height);
+    }
+    const int textWidth = renderer.getTextWidth(UI_10_FONT_ID, labels[i]);
+    renderer.drawText(UI_10_FONT_ID, x + (width - textWidth) / 2, bar.y + (bar.height - lineHeight) / 2, labels[i],
+                      true);
+  }
+}
+
+bool FlashcardListActivity::handleTapBar() {
+  Tap actions[MAX_TAP_ACTIONS];
+  const char* labels[MAX_TAP_ACTIONS];
+  const int count = buildTapActions(actions, labels);
+  if (count <= 0) return false;
+  const Rect bar = tapBarRect();
+  const int step = bar.width / count;
+  int column = 0;
+  // colWidth is the drawn width, not the step: a tap in the gap between two buttons does nothing.
+  if (mappedInput.colTouch(column, bar.x, step, count, bar.y, bar.y + bar.height, step - TAP_BUTTON_GAP) !=
+      MappedInputManager::RowTouch::Tap) {
+    return false;
+  }
+  if (column < 0 || column >= count) return false;
+  runTapAction(actions[column]);
+  return true;
+}
+
+void FlashcardListActivity::runTapAction(const Tap action) {
+  switch (action) {
+    case Tap::Back:
+      if (phase == Phase::Detail) {
+        phase = Phase::List;
+        requestUpdate();
+      } else {
+        DictUtils::cancelAndFinish(*this);
+      }
+      break;
+    case Tap::Flip:
+      flipDetail();
+      break;
+    case Tap::GoToPage:
+      jumpToDetailPage();
+      break;
+    case Tap::Delete:
+      // The detail card is the selected row, so the list's confirm prompt deletes it.
+      phase = Phase::List;
+      deleteConfirmMode = true;
+      confirmReleaseConsumed = false;
+      requestUpdate();
+      break;
+    case Tap::Cancel:
+      deleteConfirmMode = false;
+      requestUpdate();
+      break;
+    case Tap::ConfirmDelete:
+      deleteSelected();
+      break;
+  }
 }

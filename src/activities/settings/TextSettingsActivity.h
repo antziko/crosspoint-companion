@@ -63,7 +63,16 @@ class TextSettingsActivity final : public UiTabListActivity {
     ScreenMargin,
     Count
   };
-  enum class StyleRow { FocusReading, Hyphenation, EmbeddedStyle, AntiAliasing, WordSelectButtons, InlineGloss, Count };
+  enum class StyleRow {
+    FocusReading,
+    Hyphenation,
+    EmbeddedStyle,
+    AntiAliasing,
+    WordSelectButtons,
+    InlineGloss,
+    DictLineSpacing,
+    Count
+  };
 
   // --- UiTabListActivity contract ---
   int listCount() const override;

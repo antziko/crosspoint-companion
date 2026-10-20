@@ -31,3 +31,9 @@ uint8_t snapToNearestPointSize(const uint8_t* sizes, size_t count, uint8_t pt);
 inline uint8_t snapToNearestPointSize(const std::vector<uint8_t>& sizes, const uint8_t pt) {
   return sizes.empty() ? pt : snapToNearestPointSize(sizes.data(), sizes.size(), pt);
 }
+
+// True when `sizes` (ascending) holds every whole point size between its ends, as a vector
+// family does. Such a range is picked with a slider instead of a list.
+inline bool isContiguousPointRange(const std::vector<uint8_t>& sizes) {
+  return sizes.size() > 2 && static_cast<size_t>(sizes.back() - sizes.front()) + 1 == sizes.size();
+}

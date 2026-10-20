@@ -30,9 +30,9 @@ constexpr StrId TAB_NAME_IDS[] = {StrId::STR_FONT, StrId::STR_SIZE, StrId::STR_L
 constexpr StrId LAYOUT_ROW_NAME_IDS[] = {
     StrId::STR_LINE_SPACING,     StrId::STR_WORD_SPACING, StrId::STR_CHARACTER_SPACING, StrId::STR_EXTRA_SPACING,
     StrId::STR_PARAGRAPH_INDENT, StrId::STR_ALIGNMENT,    StrId::STR_SCREEN_MARGIN};
-constexpr StrId STYLE_ROW_NAME_IDS[] = {StrId::STR_FOCUS_READING,       StrId::STR_HYPHENATION,
-                                        StrId::STR_EMBEDDED_STYLE,      StrId::STR_TEXT_AA,
-                                        StrId::STR_WORD_SELECT_BUTTONS, StrId::STR_DICT_INLINE_GLOSS};
+constexpr StrId STYLE_ROW_NAME_IDS[] = {
+    StrId::STR_FOCUS_READING,       StrId::STR_HYPHENATION,       StrId::STR_EMBEDDED_STYLE,   StrId::STR_TEXT_AA,
+    StrId::STR_WORD_SELECT_BUTTONS, StrId::STR_DICT_INLINE_GLOSS, StrId::STR_DICT_LINE_SPACING};
 
 // LOCAL(feat): Hold Confirm this long on a Font-tab row to pin/unpin (vs a tap = commit).
 constexpr unsigned long kPinHoldMs = 700;
@@ -52,6 +52,12 @@ static_assert(std::size(PARA_INDENT_IDS) == CrossPointSettings::PARAGRAPH_INDENT
 constexpr StrId LINE_SPACING_IDS[] = {StrId::STR_TIGHT,     StrId::STR_NORMAL, StrId::STR_RELAXED,
                                       StrId::STR_SEMI_WIDE, StrId::STR_WIDE,   StrId::STR_EXTRA_WIDE};
 static_assert(std::size(LINE_SPACING_IDS) == CrossPointSettings::LINE_COMPRESSION_COUNT, "line spacing labels");
+// Popup index 0 is ReaderOverride::DICT_LINE_SPACING_SAME_AS_TEXT; index i is LINE_SPACING_IDS[i - 1].
+constexpr StrId DICT_LINE_SPACING_IDS[] = {StrId::STR_SAME_AS_TEXT, StrId::STR_TIGHT,     StrId::STR_NORMAL,
+                                           StrId::STR_RELAXED,      StrId::STR_SEMI_WIDE, StrId::STR_WIDE,
+                                           StrId::STR_EXTRA_WIDE};
+static_assert(std::size(DICT_LINE_SPACING_IDS) == CrossPointSettings::LINE_COMPRESSION_COUNT + 1,
+              "dictionary line spacing labels");
 constexpr StrId WORD_SPACING_IDS[] = {StrId::STR_SPACING_50_PERCENT,  StrId::STR_SPACING_75_PERCENT,
                                       StrId::STR_SPACING_100_PERCENT, StrId::STR_SPACING_125_PERCENT,
                                       StrId::STR_SPACING_150_PERCENT, StrId::STR_SPACING_175_PERCENT,
@@ -110,9 +116,12 @@ TextSettingsActivity::TextSettingsActivity(GfxRenderer& renderer, MappedInputMan
   }
   for (int r = 0; r < static_cast<int>(StyleRow::Count); r++) {
     const auto row = static_cast<StyleRow>(r);
-    // Word-select button pair and gloss box are per-book override fields: book modes only (the
-    // global gloss default lives in the Dictionary settings).
-    if (!bookMode() && (row == StyleRow::WordSelectButtons || row == StyleRow::InlineGloss)) continue;
+    // Word-select button pair, gloss box and dictionary spacing are per-book override fields: book
+    // modes only (the global gloss default lives in the Dictionary settings).
+    if (!bookMode() &&
+        (row == StyleRow::WordSelectButtons || row == StyleRow::InlineGloss || row == StyleRow::DictLineSpacing)) {
+      continue;
+    }
     addStyle(row);
   }
   if (tabIndex(tab_) < 0) tab_ = visibleTabs_[0];
@@ -812,6 +821,20 @@ void TextSettingsActivity::confirmStyleRow(int row) {
       persist();
       requestUpdate();
       return;
+    case StyleRow::DictLineSpacing: {
+      // Dictionary screens only: persisted with the book, nothing on the page to re-lay out.
+      const int cur =
+          book_.dictLineSpacing < CrossPointSettings::LINE_COMPRESSION_COUNT ? book_.dictLineSpacing + 1 : 0;
+      optionPopup_.show(StrId::STR_DICT_LINE_SPACING, DICT_LINE_SPACING_IDS,
+                        static_cast<int>(std::size(DICT_LINE_SPACING_IDS)), cur, [this](int idx) {
+                          book_.dictLineSpacing =
+                              idx == 0 ? CrossPointSettings::ReaderOverride::DICT_LINE_SPACING_SAME_AS_TEXT
+                                       : static_cast<uint8_t>(idx - 1);
+                          persist();
+                        });
+      requestUpdate();
+      return;
+    }
     case StyleRow::AntiAliasing:
       // Tri-state picker, not a toggle: negating it made Sharp unreachable (!2 == 0).
       optionPopup_.show(StrId::STR_TEXT_AA, TEXT_AA_IDS, static_cast<int>(std::size(TEXT_AA_IDS)), *f_.textAntiAliasing,
@@ -834,6 +857,10 @@ std::string TextSettingsActivity::styleValueText(int row) const {
     case StyleRow::WordSelectButtons:
       // Names the pair that steps word by word; the other pair moves between rows.
       return book_.swapWordSelectAxes ? tr(STR_WORD_SELECT_SIDE) : tr(STR_WORD_SELECT_FRONT);
+    case StyleRow::DictLineSpacing:
+      return book_.dictLineSpacing < CrossPointSettings::LINE_COMPRESSION_COUNT
+                 ? I18N.get(DICT_LINE_SPACING_IDS[book_.dictLineSpacing + 1])
+                 : tr(STR_SAME_AS_TEXT);
     case StyleRow::AntiAliasing: {
       const uint8_t v = *f_.textAntiAliasing;
       return v < std::size(TEXT_AA_IDS) ? I18N.get(TEXT_AA_IDS[v]) : I18N.get(StrId::STR_TEXT_AA_ANTIALIASED);
@@ -873,7 +900,7 @@ bool TextSettingsActivity::focusedRowHasNoPreview() const {
   if (ringPos() == 0 || tab_ != Tab::Style) return false;
   const StyleRow row = static_cast<StyleRow>(styleRowAt(ringPos() - 1));
   return row == StyleRow::Hyphenation || row == StyleRow::EmbeddedStyle || row == StyleRow::AntiAliasing ||
-         row == StyleRow::WordSelectButtons || row == StyleRow::InlineGloss;
+         row == StyleRow::WordSelectButtons || row == StyleRow::InlineGloss || row == StyleRow::DictLineSpacing;
 }
 
 void TextSettingsActivity::switchTab(int direction) {

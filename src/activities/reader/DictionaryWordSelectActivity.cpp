@@ -1157,10 +1157,12 @@ void DictionaryWordSelectActivity::resolveGlossFont() {
   // being true when the box moved to the definition font. So after Confirm → definition → Back,
   // this is what re-establishes the size and picks up whatever id is actually live now.
   const int fontId = SETTINGS.getDefinitionFontId();
-  if (fontId == gloss_->fontId) return;
+  // Same row pitch as the definition page (DictionaryDefinitionActivity::getLineHeight).
+  const int lineHeight = static_cast<int>(renderer.getLineHeight(fontId) * SETTINGS.getDefinitionLineCompression());
+  if (fontId == gloss_->fontId && lineHeight == gloss_->lineHeight) return;
 
   gloss_->fontId = fontId;
-  gloss_->lineHeight = renderer.getLineHeight(fontId);
+  gloss_->lineHeight = lineHeight;
   gloss_->height = DictGloss::GlossResult::kMaxRows * gloss_->lineHeight + 2 * (kGlossPad + kGlossFrame);
   // Height budget for an enlarged cell: the rows it spans, over the font's own ascender, which is
   // what a Han glyph fills. Width is settled per token in planGlossCells.

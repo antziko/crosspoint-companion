@@ -39,13 +39,19 @@ enum ItemIndex : int {
   VERTICAL_TEXT = 13,
   FURIGANA = 14,
   INLINE_GLOSS = 15,
+  DICT_LINE_SPACING = 16,
 };
 
 // Display order: the CJK rows sit above More Text Settings, which stays last.
-constexpr ItemIndex ROW_ORDER[] = {FONT_FAMILY,         FONT_SIZE,     LINE_SPACING,  PARA_ALIGNMENT,
-                                   HYPHENATION,         EXTRA_SPACING, PARA_INDENT,   SCREEN_MARGIN,
-                                   WORD_SELECT_BUTTONS, INLINE_GLOSS,  FOCUS_READING, MIN_SESSION,
-                                   BOOK_LANGUAGE,       VERTICAL_TEXT, FURIGANA,      MORE_TEXT_SETTINGS};
+constexpr ItemIndex ROW_ORDER[] = {
+    FONT_FAMILY, FONT_SIZE,     LINE_SPACING,        PARA_ALIGNMENT, HYPHENATION,       EXTRA_SPACING,
+    PARA_INDENT, SCREEN_MARGIN, WORD_SELECT_BUTTONS, INLINE_GLOSS,   DICT_LINE_SPACING, FOCUS_READING,
+    MIN_SESSION, BOOK_LANGUAGE, VERTICAL_TEXT,       FURIGANA,       MORE_TEXT_SETTINGS};
+
+// Must cover LINE_COMPRESSION_COUNT: values are bounded by the enum, so a short table is read off the end.
+constexpr StrId LINE_SPACING_LABELS[] = {StrId::STR_TIGHT,     StrId::STR_NORMAL, StrId::STR_RELAXED,
+                                         StrId::STR_SEMI_WIDE, StrId::STR_WIDE,   StrId::STR_EXTRA_WIDE};
+static_assert(std::size(LINE_SPACING_LABELS) == CrossPointSettings::LINE_COMPRESSION_COUNT, "line spacing labels");
 
 constexpr StrId BOOK_LANGUAGE_LABELS[] = {StrId::STR_BOOK_LANG_AUTO, StrId::STR_BOOK_LANG_JA,
                                           StrId::STR_BOOK_LANG_ZH_HANS, StrId::STR_BOOK_LANG_ZH_HANT,
@@ -342,6 +348,18 @@ void ReaderOptionsActivity::cycleCurrentItem() {
     case INLINE_GLOSS:
       localOverride.inlineGlossEnabled = localOverride.inlineGlossEnabled ? 0 : 1;
       break;
+    case DICT_LINE_SPACING: {
+      // Same as Text, then each spacing level, then back.
+      const uint8_t v = localOverride.dictLineSpacing;
+      if (v >= CrossPointSettings::LINE_COMPRESSION_COUNT) {
+        localOverride.dictLineSpacing = 0;
+      } else if (v + 1 >= CrossPointSettings::LINE_COMPRESSION_COUNT) {
+        localOverride.dictLineSpacing = CrossPointSettings::ReaderOverride::DICT_LINE_SPACING_SAME_AS_TEXT;
+      } else {
+        localOverride.dictLineSpacing = v + 1;
+      }
+      break;
+    }
     case MIN_SESSION: {
       // Find current position in cycle table and advance by one.
       int pos = 0;
@@ -361,7 +379,8 @@ void ReaderOptionsActivity::cycleCurrentItem() {
   // Most items cycled here feed the preview. MIN_SESSION (stats-only) and
   // WORD_SELECT_BUTTONS (input mapping) appear nowhere in PreviewKey, so they keep the
   // cheap list-only repaint.
-  if (currentItem() != MIN_SESSION && currentItem() != WORD_SELECT_BUTTONS && currentItem() != INLINE_GLOSS) {
+  if (currentItem() != MIN_SESSION && currentItem() != WORD_SELECT_BUTTONS && currentItem() != INLINE_GLOSS &&
+      currentItem() != DICT_LINE_SPACING) {
     fullRedraw_ = true;
   }
   // A size change must reload the resident SD font at the new size, or getReaderFontId()
@@ -400,6 +419,8 @@ const char* ReaderOptionsActivity::getItemName(const int index) const {
       return tr(STR_WORD_SELECT_BUTTONS);
     case INLINE_GLOSS:
       return tr(STR_DICT_INLINE_GLOSS);
+    case DICT_LINE_SPACING:
+      return tr(STR_DICT_LINE_SPACING);
     case FOCUS_READING:
       return tr(STR_FOCUS_READING);
     case MIN_SESSION:
@@ -436,15 +457,9 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
       return std::string(buf);
     }
     case LINE_SPACING: {
-      // Must cover LINE_COMPRESSION_COUNT: the bound below is the enum's, so a short table is read
-      // off the end (this array held three entries while the enum had four, so Extra Wide printed
-      // whatever sat next to it on the stack).
-      const StrId labels[] = {StrId::STR_TIGHT,     StrId::STR_NORMAL, StrId::STR_RELAXED,
-                              StrId::STR_SEMI_WIDE, StrId::STR_WIDE,   StrId::STR_EXTRA_WIDE};
-      static_assert(std::size(labels) == CrossPointSettings::LINE_COMPRESSION_COUNT, "line spacing labels");
       const uint8_t sp =
           localOverride.lineSpacing < CrossPointSettings::LINE_COMPRESSION_COUNT ? localOverride.lineSpacing : 0;
-      return I18N.get(labels[sp]);
+      return I18N.get(LINE_SPACING_LABELS[sp]);
     }
     case PARA_ALIGNMENT: {
       const StrId labels[] = {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, StrId::STR_CENTER, StrId::STR_ALIGN_RIGHT,
@@ -470,6 +485,10 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
       return localOverride.focusReadingEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     case INLINE_GLOSS:
       return localOverride.inlineGlossEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+    case DICT_LINE_SPACING:
+      return localOverride.dictLineSpacing < CrossPointSettings::LINE_COMPRESSION_COUNT
+                 ? I18N.get(LINE_SPACING_LABELS[localOverride.dictLineSpacing])
+                 : tr(STR_SAME_AS_TEXT);
     case MIN_SESSION: {
       const uint8_t v = localOverride.minSessionMinutes;
       if (v == CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL) {
