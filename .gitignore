@@ -31,3 +31,6 @@ lib/EpdFont/scripts/output/
 # Claude Code: keep local agent state out (worktrees, scheduled-task
 # locks, settings.local, scout CLEANUP.md).
 .claude/*
+
+# Local test books and photos
+/sample-books/
