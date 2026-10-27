@@ -18,6 +18,7 @@ class ContentOpfParser final : public Print {
     IN_BOOK_TITLE,
     IN_BOOK_AUTHOR,
     IN_BOOK_LANGUAGE,
+    IN_BOOK_DATE,
     IN_MANIFEST,
     IN_SPINE,
     IN_GUIDE,
@@ -32,6 +33,10 @@ class ContentOpfParser final : public Print {
   // Stop after the metadata block: the cover-grid path wants title/author/cover href
   // and never the manifest or spine, which is the expensive part of an OPF parse.
   const bool metadataOnly = false;
+  // metadataOnly: </metadata> was seen, so write() reports a short write to end the stream.
+  bool metadataDone = false;
+  // The captured dc:date carries opf:event="publication"; a later undated-event date can't replace it.
+  bool dateIsPublication = false;
   HalFile tempItemStore;
   std::string coverItemId;
   bool hasExplicitStartReference = false;
@@ -63,6 +68,7 @@ class ContentOpfParser final : public Print {
   std::string title;
   std::string author;
   std::string language;
+  std::string date;  // dc:date text, e.g. "2021-04-27T00:00:00+00:00"
   std::string tocNcxPath;
   std::string tocNavPath;  // EPUB 3 nav document path
   std::string coverItemHref;

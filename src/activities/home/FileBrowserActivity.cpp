@@ -1,5 +1,6 @@
 #include "FileBrowserActivity.h"
 
+#include <Epub.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
@@ -23,6 +24,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/BookCacheUtils.h"
+#include "util/BookYearCache.h"
 #include "util/PaintProbe.h"
 
 namespace {
@@ -131,6 +133,7 @@ void FileBrowserActivity::loadWindow(filewindow::WindowSelector::Mode mode_, std
   const auto& win = sel.window();
   files.reserve(win.size());
   for (const auto& e : win) files.push_back({e.name, e.size});
+  lookupCachedYears();
   if (files.empty()) {
     windowStartRank = 0;
     windowStartFileRank = 0;
@@ -194,6 +197,57 @@ void FileBrowserActivity::loadWindow(filewindow::WindowSelector::Mode mode_, std
   SdDebugLog::log("FBR", "window files=%u prewarm=%lums free=%u largest=%u", static_cast<unsigned>(files.size()),
                   millis() - tPrewarm, static_cast<unsigned>(esp_get_free_heap_size()),
                   static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+}
+
+void FileBrowserActivity::lookupCachedYears() {
+  yearsPending = false;
+  yearFound = false;
+  if (mode != Mode::Books) return;
+  std::string dir = basepath;
+  if (dir.back() != '/') dir += "/";
+  // Batches keep the stack small; a screen of rows is normally one batch, so one file pass.
+  constexpr size_t BATCH = 16;
+  BookYearCache::Query queries[BATCH];
+  size_t idx[BATCH];
+  size_t i = 0;
+  while (i < files.size()) {
+    size_t n = 0;
+    for (; i < files.size() && n < BATCH; ++i) {
+      if (!FsHelpers::hasEpubExtension(std::string_view{files[i].name})) continue;
+      queries[n] = {BookYearCache::pathHash(dir + files[i].name), files[i].size, BookYearCache::YEAR_UNKNOWN};
+      idx[n++] = i;
+    }
+    BookYearCache::lookup(queries, n);
+    for (size_t q = 0; q < n; ++q) {
+      files[idx[q]].year = queries[q].year;
+      if (queries[q].year == BookYearCache::YEAR_UNKNOWN) yearsPending = true;
+    }
+  }
+}
+
+// Reads one book per call, so input is still handled between books.
+void FileBrowserActivity::probeNextYear() {
+  if (!yearsPending) return;
+  std::string dir = basepath;
+  if (dir.back() != '/') dir += "/";
+  for (size_t i = 0; i < files.size(); ++i) {
+    if (files[i].year != BookYearCache::YEAR_UNKNOWN) continue;
+    const std::string path = dir + files[i].name;
+    uint16_t year = 0;
+    auto epub = makeUniqueNoThrow<Epub>(path, "/.crosspoint");
+    if (epub) {
+      year = epub->readPublicationYear();
+      BookYearCache::store(BookYearCache::pathHash(path), files[i].size, year);
+    } else {
+      LOG_ERR("FileBrowser", "OOM: Epub for year");
+    }
+    RenderLock lock(*this);
+    files[i].year = static_cast<int16_t>(year);
+    if (year > 0) yearFound = true;
+    return;
+  }
+  yearsPending = false;
+  if (yearFound) requestUpdate();
 }
 
 void FileBrowserActivity::loadFirstWindow() {
@@ -561,6 +615,7 @@ void FileBrowserActivity::loop() {
     if (!optionPopup.isActive()) swallowReleaseAfterPopup = true;
     return;
   }
+  probeNextYear();
   if (swallowReleaseAfterPopup) {
     if (!mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
         !mappedInput.isPressed(MappedInputManager::Button::Back)) {
@@ -914,11 +969,11 @@ void FileBrowserActivity::render(RenderLock&&) {
           return prefix + getFileName(files[index].name);
         },
         nullptr, [this](int index) { return UITheme::getFileIcon(files[index].name); },
-        // Trailing value: "<ext>  <size>" on one line (directories show nothing).
+        // Trailing value: "<year>  <size>", or just the size (directories show nothing).
         [this](int index) {
-          const std::string ext = getFileExtension(files[index].name);
-          if (ext.empty()) return std::string("");
-          return ext + "  " + formatFileSize(files[index].size);
+          if (files[index].name.empty() || files[index].name.back() == '/') return std::string("");
+          if (files[index].year <= 0) return formatFileSize(files[index].size);
+          return std::to_string(files[index].year) + "  " + formatFileSize(files[index].size);
         },
         false, nullptr, /*valueSmallFont=*/true);
   }

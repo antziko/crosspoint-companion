@@ -80,6 +80,11 @@ size_t ContentOpfParser::write(const uint8_t* buffer, const size_t size) {
     memcpy(buf, currentBufferPos, toRead);
 
     if (XML_ParseBuffer(parser, static_cast<int>(toRead), remainingSize == toRead) == XML_STATUS_ERROR) {
+      if (metadataDone) {
+        // Stopped on purpose at </metadata>: the short write ends the stream early.
+        destroyXmlParser(parser);
+        return 0;
+      }
       LOG_DBG("COF", "Parse error at line %lu: %s", XML_GetCurrentLineNumber(parser),
               XML_ErrorString(XML_GetErrorCode(parser)));
       destroyXmlParser(parser);
@@ -96,7 +101,6 @@ size_t ContentOpfParser::write(const uint8_t* buffer, const size_t size) {
 
 void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name, const XML_Char** atts) {
   auto* self = static_cast<ContentOpfParser*>(userData);
-  (void)atts;
 
   if (self->state == START && xmlLocalNameEquals(name, "package")) {
     self->state = IN_PACKAGE;
@@ -123,6 +127,20 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
 
   if (self->state == IN_METADATA && xmlLocalNameEquals(name, "language")) {
     self->state = IN_BOOK_LANGUAGE;
+    return;
+  }
+
+  if (self->state == IN_METADATA && xmlLocalNameEquals(name, "date")) {
+    // EPUB 2 may list creation/modification dates too; prefer the one marked as publication.
+    bool isPublication = false;
+    for (int i = 0; atts[i]; i += 2) {
+      if (xmlLocalNameEquals(atts[i], "event") && strcmp(atts[i + 1], "publication") == 0) isPublication = true;
+    }
+    if (self->date.empty() || (isPublication && !self->dateIsPublication)) {
+      self->date.clear();
+      self->dateIsPublication = isPublication;
+      self->state = IN_BOOK_DATE;
+    }
     return;
   }
 
@@ -365,6 +383,11 @@ void XMLCALL ContentOpfParser::characterData(void* userData, const XML_Char* s, 
     self->language.append(s, len);
     return;
   }
+
+  if (self->state == IN_BOOK_DATE) {
+    self->date.append(s, len);
+    return;
+  }
 }
 
 void XMLCALL ContentOpfParser::endElement(void* userData, const XML_Char* name) {
@@ -404,8 +427,17 @@ void XMLCALL ContentOpfParser::endElement(void* userData, const XML_Char* name) 
     return;
   }
 
+  if (self->state == IN_BOOK_DATE && xmlLocalNameEquals(name, "date")) {
+    self->state = IN_METADATA;
+    return;
+  }
+
   if (self->state == IN_METADATA && xmlLocalNameEquals(name, "metadata")) {
     self->state = IN_PACKAGE;
+    if (self->metadataOnly) {
+      self->metadataDone = true;
+      XML_StopParser(self->parser, XML_FALSE);
+    }
     return;
   }
 

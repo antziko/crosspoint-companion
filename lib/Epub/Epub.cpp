@@ -12,6 +12,7 @@
 #include <ZipFile.h>
 #include <esp_heap_caps.h>
 
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -27,6 +28,33 @@ Epub::Epub(std::string filepath, const std::string& cacheDir)
     : filepath(std::move(filepath)), textBook(FsHelpers::hasTextBookExtension(this->filepath)) {
   // create a cache key based on the filepath
   cachePath = cacheDir + "/epub_" + std::to_string(std::hash<std::string>{}(this->filepath));
+}
+
+uint16_t Epub::readPublicationYear() {
+  if (textBook) return 0;
+  // Heap, not stack: both exceed the small task stack budget (see generateThumbBmpFromSource).
+  auto metadata = makeUniqueNoThrow<BookMetadataCache::BookMetadata>();
+  auto zip = makeUniqueNoThrow<ZipFile>(filepath);
+  if (!metadata || !zip) {
+    LOG_ERR("EBP", "OOM: publication year");
+    return 0;
+  }
+  if (!zip->open()) return 0;
+  std::string date;
+  if (!parseContentOpf(*metadata, /*writeSpineEntries=*/false, /*metadataOnly=*/true, zip.get(), &date)) return 0;
+  // First run of four digits: "2021-04-27T…", "2021", "c. 1999". Calibre writes 0101-01-01 for
+  // an unknown date, which the range check drops.
+  for (size_t i = 0; i + 4 <= date.size(); ++i) {
+    if (!isdigit(static_cast<unsigned char>(date[i]))) continue;
+    size_t n = 0;
+    while (i + n < date.size() && isdigit(static_cast<unsigned char>(date[i + n]))) ++n;
+    if (n == 4) {
+      const int year = std::atoi(date.substr(i, 4).c_str());
+      return (year >= 1000 && year <= 2999) ? static_cast<uint16_t>(year) : 0;
+    }
+    i += n;
+  }
+  return 0;
 }
 
 bool Epub::findContentOpfFile(std::string* contentOpfFile, ZipFile* sharedZip) const {
@@ -67,7 +95,7 @@ bool Epub::findContentOpfFile(std::string* contentOpfFile, ZipFile* sharedZip) c
 }
 
 bool Epub::parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata, const bool writeSpineEntries,
-                           const bool metadataOnly, ZipFile* sharedZip) {
+                           const bool metadataOnly, ZipFile* sharedZip, std::string* outDate) {
   std::string contentOpfFilePath;
   if (!findContentOpfFile(&contentOpfFilePath, sharedZip)) {
     LOG_ERR("EBP", "Could not find content.opf in zip");
@@ -93,8 +121,8 @@ bool Epub::parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata, const 
     return false;
   }
 
-  const bool opfRead = sharedZip ? sharedZip->readFileToStream(contentOpfFilePath.c_str(), opfParser, 1024)
-                                 : readItemContentsToStream(contentOpfFilePath, opfParser, 1024);
+  const bool opfRead = sharedZip ? sharedZip->readFileToStream(contentOpfFilePath.c_str(), opfParser, 1024, metadataOnly)
+                                 : readItemContentsToStream(contentOpfFilePath, opfParser, 1024, metadataOnly);
   if (!opfRead) {
     LOG_ERR("EBP", "Could not read content.opf");
     return false;
@@ -107,6 +135,7 @@ bool Epub::parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata, const 
   bookMetadata.language = opfParser.language;
   bookMetadata.pageProgressionRtl = opfParser.pageProgressionRtl;
   bookMetadata.coverItemHref = opfParser.coverItemHref;
+  if (outDate) *outDate = std::move(opfParser.date);
 
   // Guide-based cover fallback: if no cover found via metadata/properties,
   // try extracting the image reference from the guide's cover page XHTML

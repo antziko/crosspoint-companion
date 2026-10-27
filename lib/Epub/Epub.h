@@ -45,7 +45,7 @@ class Epub {
 
   bool findContentOpfFile(std::string* contentOpfFile, ZipFile* sharedZip = nullptr) const;
   bool parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata, bool writeSpineEntries = true,
-                       bool metadataOnly = false, ZipFile* sharedZip = nullptr);
+                       bool metadataOnly = false, ZipFile* sharedZip = nullptr, std::string* outDate = nullptr);
   // thumbPath / targetWidth / targetHeight / crop are resolved by the public entry points
   // below, so the cover-fit and contain-fit variants share one decode path.
   bool generateThumbBmpForCover(const std::string& thumbPath, int targetWidth, int targetHeight, bool crop,
@@ -68,6 +68,8 @@ class Epub {
   ~Epub() = default;
   std::string& getBasePath() { return contentBasePath; }
   bool load(bool buildIfMissing = true, bool skipLoadingCss = false);
+  // Year from the OPF's dc:date, read without building the book cache; 0 when absent or unreadable.
+  uint16_t readPublicationYear();
   bool isTextBook() const { return textBook; }
   // Throw the cached CSS rules away and parse the stylesheets out of the EPUB again. The
   // section caches go with them: their pagination was flowed against the old rules, so keeping

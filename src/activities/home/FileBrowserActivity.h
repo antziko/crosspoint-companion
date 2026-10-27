@@ -65,10 +65,12 @@ class FileBrowserActivity final : public Activity {
   // One listed entry: display name (directories keep a trailing "/") plus the
   // file size in bytes (0 for directories). Size is read from the directory entry
   // during the window scan — no extra SD I/O — and kept beside the name so sorting
-  // never desyncs the two. +4 bytes/entry over a bare name.
+  // never desyncs the two. `year` is the EPUB's publication year: 0 when it has none or
+  // is not an EPUB, BookYearCache::YEAR_UNKNOWN until read (see probeNextYear).
   struct FileEntry {
     std::string name;
     uint32_t size = 0;
+    int16_t year = 0;
   };
 
   // Files state. `files` holds only ONE on-screen window of the folder, not the whole
@@ -102,6 +104,12 @@ class FileBrowserActivity final : public Activity {
   void pageDown();                                     // next window (wraps to first)
   void pageUp();                                       // previous window (wraps to last)
   size_t windowCapacity() const;                       // on-screen rows = window size
+  // Years: the window is drawn first, then loop() reads one missing year per pass and
+  // redraws once the window is done, if any year turned up.
+  void lookupCachedYears();
+  void probeNextYear();
+  bool yearsPending = false;
+  bool yearFound = false;
   bool accepts(const char* name, bool isDir) const;    // shared list filter
 
  public:
