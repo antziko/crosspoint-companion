@@ -748,13 +748,8 @@ int ParsedText::resolveFirstLineIndent(const bool isFirstLine, const GfxRenderer
   return 0;
 }
 // Consumes data to minimize memory usage
-void ParsedText::layoutAndExtractLines(const GfxRenderer& renderer, const int fontId, const uint16_t viewportWidth,
-                                       const std::function<void(std::shared_ptr<TextBlock>, uint32_t)>& processLine,
-                                       const bool includeLastLine, const int8_t characterSpacing,
-                                       const uint8_t wordSpacingPercent, const uint8_t paragraphIndent) {
-  if (words.empty()) {
-    return;
-  }
+void ParsedText::prepareLayout(const GfxRenderer& renderer, const int fontId, const int8_t characterSpacing,
+                               const uint8_t wordSpacingPercent, const uint8_t paragraphIndent) {
   // Stamped here rather than at construction: the parser replaces blockStyle as CSS resolves.
   blockStyle.characterSpacing = characterSpacing;
   this->wordSpacingPercent = wordSpacingPercent;
@@ -806,6 +801,49 @@ void ParsedText::layoutAndExtractLines(const GfxRenderer& renderer, const int fo
     renderer.ensureSdCardFontReady(fontId, segments.data(), segmentLens.data(), segments.size(), words.size() > 1,
                                    hyphenationEnabled, styleMask);
   }
+}
+
+void ParsedText::measureNaturalWidths(const GfxRenderer& renderer, const int fontId, const int8_t characterSpacing,
+                                      const uint8_t wordSpacingPercent, const uint8_t paragraphIndent,
+                                      uint16_t& minWidth, uint16_t& maxWidth) {
+  minWidth = 0;
+  maxWidth = 0;
+  if (words.empty()) {
+    return;
+  }
+  prepareLayout(renderer, fontId, characterSpacing, wordSpacingPercent, paragraphIndent);
+  const auto wordWidths = calculateWordWidths(renderer, fontId);
+  // The same gaps computeLineBreaks puts between words kept on one line.
+  int lineWidth = resolveFirstLineIndent(true, renderer, fontId);
+  int widest = 0;
+  for (size_t j = 0; j < wordWidths.size(); ++j) {
+    widest = std::max<int>(widest, wordWidths[j]);
+    if (j > 0) {
+      if (wordContinues[j]) {
+        lineWidth += renderer.getKerning(fontId, lastCodepoint(wordAt(j - 1)), firstCodepoint(wordAt(j)),
+                                         wordStyles[j - 1], blockStyle.characterSpacing);
+      } else if (wordNoSpaceBefore[j]) {
+        lineWidth += blockStyle.characterSpacing;
+      } else {
+        lineWidth += scaleSpace(renderer.getSpaceAdvance(fontId, lastCodepoint(wordAt(j - 1)),
+                                                         firstCodepoint(wordAt(j)), wordStyles[j - 1]),
+                                wordSpacingPercent);
+      }
+    }
+    lineWidth += wordWidths[j];
+  }
+  minWidth = static_cast<uint16_t>(std::min<int>(widest, UINT16_MAX));
+  maxWidth = static_cast<uint16_t>(std::clamp<int>(lineWidth, widest, UINT16_MAX));
+}
+
+void ParsedText::layoutAndExtractLines(const GfxRenderer& renderer, const int fontId, const uint16_t viewportWidth,
+                                       const std::function<void(std::shared_ptr<TextBlock>, uint32_t)>& processLine,
+                                       const bool includeLastLine, const int8_t characterSpacing,
+                                       const uint8_t wordSpacingPercent, const uint8_t paragraphIndent) {
+  if (words.empty()) {
+    return;
+  }
+  prepareLayout(renderer, fontId, characterSpacing, wordSpacingPercent, paragraphIndent);
 
   const int pageWidth = viewportWidth;
   auto wordWidths = calculateWordWidths(renderer, fontId);

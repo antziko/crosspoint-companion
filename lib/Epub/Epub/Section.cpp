@@ -150,7 +150,7 @@ namespace {
 // v70: An empty inline element with horizontal margin/padding (a spacer span) breaks the word.
 // v71: Header gains furiganaEnabled after paragraphIndent; with it off, <rt> text is dropped.
 // v72: A large image that starts its page drops its bottom margin when keeping it would shrink it.
-constexpr uint8_t SECTION_FILE_VERSION = 72;
+constexpr uint8_t SECTION_FILE_VERSION = 73;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects

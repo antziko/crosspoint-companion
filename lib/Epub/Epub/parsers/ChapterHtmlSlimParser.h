@@ -124,6 +124,9 @@ class ChapterHtmlSlimParser {
   bool insideTableCell = false;
   bool tableRowStacked = false;
   bool tableRowRtl = false;
+  // Column widths set by the table's first grid row (see sizeTableColumns); 0 columns = none yet.
+  std::array<uint16_t, MAX_GRID_TABLE_COLUMNS> tableColumnWidths{};
+  uint8_t tableColumnCount = 0;
   uint16_t tableRowsSpannedRemaining = 0;
   size_t tableCellTextBytes = 0;
   std::vector<std::unique_ptr<ParsedText>> tableRowCells;
@@ -211,6 +214,7 @@ class ChapterHtmlSlimParser {
   void flushPartWordBuffer();
   void fallbackTableRowToStacked();
   void closeTableCell();
+  void sizeTableColumns(size_t columnCount, uint16_t equalWidth, std::array<uint16_t, MAX_GRID_TABLE_COLUMNS>& widths);
   void finishTableRow();
   void addTableRowSeparator();
   void setCurrentPageVisibleOffset(uint32_t offset);

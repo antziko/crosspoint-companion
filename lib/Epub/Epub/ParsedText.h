@@ -115,6 +115,9 @@ class ParsedText {
                    const std::function<void(std::shared_ptr<TextBlock>, uint32_t)>& processLine,
                    const GfxRenderer& renderer, int fontId);
   std::vector<uint16_t> calculateWordWidths(const GfxRenderer& renderer, int fontId);
+  // Stamps the layout settings and readies SD font metrics; shared by layout and measurement.
+  void prepareLayout(const GfxRenderer& renderer, int fontId, int8_t characterSpacing, uint8_t wordSpacingPercent,
+                     uint8_t paragraphIndent);
 
  public:
   explicit ParsedText(const bool extraParagraphSpacing, const bool hyphenationEnabled = false,
@@ -162,6 +165,10 @@ class ParsedText {
     preformatted = true;
     preIndentSpaces = indentSpaces;
   }
+  // Widest single word, and the width of the whole block on one line (table column sizing).
+  void measureNaturalWidths(const GfxRenderer& renderer, int fontId, int8_t characterSpacing,
+                            uint8_t wordSpacingPercent, uint8_t paragraphIndent, uint16_t& minWidth,
+                            uint16_t& maxWidth);
   void layoutAndExtractLines(const GfxRenderer& renderer, int fontId, uint16_t viewportWidth,
                              const std::function<void(std::shared_ptr<TextBlock>, uint32_t)>& processLine,
                              bool includeLastLine = true, int8_t characterSpacing = 0, uint8_t wordSpacingPercent = 100,

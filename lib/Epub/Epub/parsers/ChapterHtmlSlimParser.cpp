@@ -765,6 +765,60 @@ void ChapterHtmlSlimParser::addTableRowSeparator() {
   currentPageNextY += TABLE_ROW_SEPARATOR_GAP;
 }
 
+// Browser-style auto layout: columns that fit on one line get their natural width, otherwise each
+// keeps its widest word and the rest of the row goes to the columns with the most text to wrap.
+// A row whose words cannot all fit keeps the equal split. The first grid row's widths are reused
+// by later rows with as many columns whose words fit them, so the column edges line up.
+void ChapterHtmlSlimParser::sizeTableColumns(const size_t columnCount, const uint16_t equalWidth,
+                                             std::array<uint16_t, MAX_GRID_TABLE_COLUMNS>& widths) {
+  constexpr int padding = TABLE_CELL_HORIZONTAL_PADDING * 2;
+  std::array<int, MAX_GRID_TABLE_COLUMNS> minWidths{};
+  std::array<int, MAX_GRID_TABLE_COLUMNS> maxWidths{};
+  int minTotal = 0;
+  int maxTotal = 0;
+  for (size_t column = 0; column < columnCount; ++column) {
+    widths[column] = equalWidth;
+    uint16_t minW = 0;
+    uint16_t maxW = 0;
+    tableRowCells[column]->measureNaturalWidths(renderer, fontId, characterSpacing, wordSpacingPercent,
+                                                paragraphIndent, minW, maxW);
+    minWidths[column] = std::min<int>(minW + padding, viewportWidth);
+    maxWidths[column] = std::min<int>(maxW + padding, viewportWidth);
+    minTotal += minWidths[column];
+    maxTotal += maxWidths[column];
+  }
+  if (tableColumnCount == columnCount) {
+    bool fits = true;
+    for (size_t column = 0; column < columnCount && fits; ++column) {
+      fits = minWidths[column] <= tableColumnWidths[column];
+    }
+    if (fits) {
+      std::copy_n(tableColumnWidths.begin(), columnCount, widths.begin());
+      return;
+    }
+  }
+  const bool lock = tableColumnCount == 0;
+  if (lock) tableColumnCount = static_cast<uint8_t>(columnCount);
+  if (minTotal > viewportWidth || maxTotal == 0) {
+    if (lock) tableColumnWidths = widths;
+    return;
+  }
+
+  const bool allFit = maxTotal <= viewportWidth;
+  const int base = allFit ? maxTotal : minTotal;
+  const int spread = allFit ? maxTotal : maxTotal - minTotal;
+  const int extra = viewportWidth - base;
+  int used = 0;
+  for (size_t column = 0; column < columnCount; ++column) {
+    const int weight = allFit ? maxWidths[column] : maxWidths[column] - minWidths[column];
+    const int share = spread > 0 ? static_cast<int>(static_cast<int64_t>(extra) * weight / spread) : 0;
+    widths[column] = static_cast<uint16_t>((allFit ? maxWidths[column] : minWidths[column]) + share);
+    used += widths[column];
+  }
+  widths[columnCount - 1] = static_cast<uint16_t>(widths[columnCount - 1] + viewportWidth - used);  // rounding
+  if (lock) tableColumnWidths = widths;
+}
+
 void ChapterHtmlSlimParser::finishTableRow() {
   closeTableCell();
 
@@ -803,7 +857,8 @@ void ChapterHtmlSlimParser::finishTableRow() {
     return;
   }
 
-  const uint16_t textWidth = static_cast<uint16_t>(cellWidth - TABLE_CELL_HORIZONTAL_PADDING * 2);
+  std::array<uint16_t, MAX_GRID_TABLE_COLUMNS> columnWidths{};
+  sizeTableColumns(columnCount, cellWidth, columnWidths);
   for (auto& lines : tableCellLines) {
     lines.clear();
   }
@@ -820,6 +875,7 @@ void ChapterHtmlSlimParser::finishTableRow() {
     if (lines.capacity() < MAX_GRID_TABLE_CELL_WORDS * 2) {
       lines.reserve(MAX_GRID_TABLE_CELL_WORDS * 2);
     }
+    const uint16_t textWidth = static_cast<uint16_t>(columnWidths[column] - TABLE_CELL_HORIZONTAL_PADDING * 2);
     tableRowCells[column]->layoutAndExtractLines(
         renderer, fontId, textWidth,
         [this, &lines](const std::shared_ptr<TextBlock>& line, const uint32_t offset) {
@@ -887,8 +943,10 @@ void ChapterHtmlSlimParser::finishTableRow() {
 
       auto& line = tableCellLines[column][lineIndex];
       auto style = line->getBlockStyle();
-      const size_t physicalColumn = rowRtl ? columnCount - column - 1 : column;
-      style.marginLeft = static_cast<int16_t>(physicalColumn * cellWidth + TABLE_CELL_HORIZONTAL_PADDING);
+      int columnX = 0;
+      for (size_t c = 0; c < column; ++c) columnX += columnWidths[c];
+      if (rowRtl) columnX = viewportWidth - columnX - columnWidths[column];
+      style.marginLeft = static_cast<int16_t>(columnX + TABLE_CELL_HORIZONTAL_PADDING);
       style.paddingLeft = 0;
       line->setBlockStyle(style);
 
@@ -1040,6 +1098,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
     self->tableRowStacked = false;
     self->tableRowRtl = cssStyle.hasDirection() && cssStyle.direction == CssTextDirection::Rtl;
     self->tableRowsSpannedRemaining = 0;
+    self->tableColumnCount = 0;
     self->tableCellBreakCount = 0;
     self->tableRowCellIndex = 0;
     self->pendingFirstCell.reset();
