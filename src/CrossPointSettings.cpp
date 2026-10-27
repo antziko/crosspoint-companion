@@ -712,6 +712,11 @@ int8_t CrossPointSettings::getReaderCharacterSpacing() const {
   return static_cast<int8_t>(v - CHARACTER_SPACING_OFFSET);
 }
 
+int8_t CrossPointSettings::getReaderTextWeight() const {
+  const uint8_t v = readerOverride.active ? readerOverride.textWeight : textWeight;
+  return static_cast<int8_t>(v - TEXT_WEIGHT_OFFSET);
+}
+
 uint8_t CrossPointSettings::getReaderEmbeddedStyle() const {
   return readerOverride.active ? readerOverride.embeddedStyle : embeddedStyle;
 }

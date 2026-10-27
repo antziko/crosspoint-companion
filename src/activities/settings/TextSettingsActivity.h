@@ -68,6 +68,7 @@ class TextSettingsActivity final : public UiTabListActivity {
     Hyphenation,
     EmbeddedStyle,
     AntiAliasing,
+    TextWeight,
     WordSelectButtons,
     InlineGloss,
     DictLineSpacing,
@@ -179,6 +180,7 @@ class TextSettingsActivity final : public UiTabListActivity {
     char* sdFontFamilyName;  // char[SD_FONT_FAMILY_NAME_SIZE] in both
     uint8_t* wordSpacing;
     uint8_t* characterSpacing;
+    uint8_t* textWeight;
     uint8_t* embeddedStyle;
     uint8_t* textAntiAliasing;
     uint8_t* focusReadingEnabled;

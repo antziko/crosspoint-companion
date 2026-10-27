@@ -294,6 +294,7 @@ int SdCardFontSystem::ensureFontSize(const char* familyName, const uint8_t point
       return 0;
     }
     addTtfSources(*f);
+    f->setTextWeight(ttfTextWeight_);
     // Glyph arenas are PSRAM-backed; a definition page uses far fewer glyphs than a book.
     if (!f->load(size, /*twoBit=*/true, /*glyphCacheBytes=*/256 * 1024, /*maxGlyphs=*/1024)) {
       LOG_ERR("SDFS", "%s failed to load at %upt for the dictionary", familyName, size);
@@ -607,8 +608,11 @@ void SdCardFontSystem::loadTtfFamily(const SdCardFontFamilyInfo& family, GfxRend
 
 void SdCardFontSystem::loadTtfFace(const SdCardFontFamilyInfo& family, GfxRenderer& renderer,
                                    const bool registryWasDirty, const uint8_t size) {
-  // Already loaded, same family + size, and disk unchanged → nothing to do.
-  if (!registryWasDirty && ttf_ && ttfFamily_ == family.name && ttfPointSize_ == size) return;
+  // Already loaded, same family + size + weight, and disk unchanged → nothing to do.
+  const int8_t weight = SETTINGS.getReaderTextWeight();
+  if (!registryWasDirty && ttf_ && ttfFamily_ == family.name && ttfPointSize_ == size && ttfTextWeight_ == weight) {
+    return;
+  }
 
   // Reader-face glyph-cache budget (used by both the resize fast path and the
   // full load below): the default 32 KB holds ~90 CJK glyphs, but a CJK page
@@ -622,19 +626,23 @@ void SdCardFontSystem::loadTtfFace(const SdCardFontFamilyInfo& family, GfxRender
   const size_t cacheBytes = havePsram ? 1024 * 1024 : 32 * 1024;
   const uint16_t maxGlyphs = havePsram ? 4096 : 768;
 
-  // Same family, only the reader size changed (size preview): the open style
-  // sources and the size-independent UI fallbacks don't need rebuilding — just
-  // re-drive the reader face at the new size, reusing the already-open files
-  // instead of reopening all four and rebuilding every UI fallback.
+  // Same family, only the reader size or weight changed (settings preview): the open
+  // style sources and the size-independent UI fallbacks don't need rebuilding — just
+  // re-drive the reader face, reusing the already-open files instead of reopening all
+  // four and rebuilding every UI fallback.
   if (!registryWasDirty && ttf_ && ttfFamily_ == family.name) {
+    // The dictionary face reloads at the new weight on its next ensureFontSize().
+    if (ttfTextWeight_ != weight) releaseTtfDict(renderer);
     renderer.unregisterTtfFont(ttfFontId_);
     renderer.removeFont(ttfFontId_);
+    ttf_->setTextWeight(weight);
     if (ttf_->load(size, /*twoBit=*/true, cacheBytes, maxGlyphs)) {
       ttf_->build(" ");
       ttfFontId_ = computeTtfFontId(family.name.c_str(), size);
       renderer.insertFont(ttfFontId_, ttf_->family());
       renderer.registerTtfFont(ttfFontId_, ttf_.get());
       ttfPointSize_ = size;
+      ttfTextWeight_ = weight;
       return;
     }
     // Resize failed: fall through to a clean full reload.
@@ -679,6 +687,7 @@ void SdCardFontSystem::loadTtfFace(const SdCardFontFamilyInfo& family, GfxRender
     return;
   }
   addTtfSources(*ttf_);
+  ttf_->setTextWeight(weight);
   const bool ok = ttf_->load(size, /*twoBit=*/true, cacheBytes, maxGlyphs);
   if (!ok) {
     // init failure is ambiguous (corrupt font vs. transient OOM inside
@@ -698,6 +707,7 @@ void SdCardFontSystem::loadTtfFace(const SdCardFontFamilyInfo& family, GfxRender
   renderer.registerTtfFont(ttfFontId_, ttf_.get());
   ttfFamily_ = family.name;
   ttfPointSize_ = size;
+  ttfTextWeight_ = weight;
   LOG_DBG("SDFS", "Reader TTF face loaded (heap free %u, max block %u)", (unsigned)ESP.getFreeHeap(),
           (unsigned)ESP.getMaxAllocHeap());
   setupTtfUiFallbacks(renderer);  // CJK/script UI fallback at the built-in UI sizes

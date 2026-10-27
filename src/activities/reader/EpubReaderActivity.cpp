@@ -422,6 +422,7 @@ void EpubReaderActivity::onEnter() {
       bookOverride.screenMargin = SETTINGS.screenMargin;
       bookOverride.wordSpacing = SETTINGS.wordSpacing;
       bookOverride.characterSpacing = SETTINGS.characterSpacing;
+      bookOverride.textWeight = SETTINGS.textWeight;
       bookOverride.embeddedStyle = SETTINGS.embeddedStyle;
       bookOverride.textAntiAliasing = SETTINGS.textAntiAliasing;
       bookOverride.focusReadingEnabled = SETTINGS.focusReadingEnabled;
@@ -5077,6 +5078,7 @@ void EpubReaderActivity::syncBookOverrideFromGlobals() {
   ov.screenMargin = SETTINGS.screenMargin;
   ov.wordSpacing = SETTINGS.wordSpacing;
   ov.characterSpacing = SETTINGS.characterSpacing;
+  ov.textWeight = SETTINGS.textWeight;
   ov.embeddedStyle = SETTINGS.embeddedStyle;
   ov.textAntiAliasing = SETTINGS.textAntiAliasing;
   ov.focusReadingEnabled = SETTINGS.focusReadingEnabled;

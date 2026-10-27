@@ -416,6 +416,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     // constants are declared later in the enclosing class).
     uint8_t wordSpacing = 100;     // percent, WORD_SPACING_MIN..MAX
     uint8_t characterSpacing = 2;  // CHARACTER_SPACING_OFFSET-based, 0..CHARACTER_SPACING_MAX
+    uint8_t textWeight = 3;        // TEXT_WEIGHT_OFFSET-based, 0..TEXT_WEIGHT_MAX
     uint8_t embeddedStyle = 1;     // use the book's CSS
     uint8_t textAntiAliasing = 1;  // TEXT_AA enum
     uint8_t focusReadingEnabled = 0;
@@ -598,6 +599,11 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   static constexpr uint8_t CHARACTER_SPACING_OFFSET = 2;
   static constexpr uint8_t CHARACTER_SPACING_MAX = 4;
   uint8_t characterSpacing = CHARACTER_SPACING_OFFSET;
+  // Stroke thickness of TTF/OTF reader fonts. Stored unsigned; 0..6 maps to -3..+3 steps
+  // (0 = the design weight) through getReaderTextWeight().
+  static constexpr uint8_t TEXT_WEIGHT_OFFSET = 3;
+  static constexpr uint8_t TEXT_WEIGHT_MAX = 6;
+  uint8_t textWeight = TEXT_WEIGHT_OFFSET;
 
   // Reader screen margin settings
   // LOCAL(feat-dictionary): margin bounds from #2605; screenMargin default unchanged (== MIN)
@@ -845,6 +851,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t getReaderWordSpacing() const;
   // Stored 0..4 as signed -2..+2 px of tracking.
   int8_t getReaderCharacterSpacing() const;
+  int8_t getReaderTextWeight() const;
   uint8_t getReaderEmbeddedStyle() const;
   uint8_t getReaderTextAntiAliasing() const;
   uint8_t getReaderFocusReading() const;

@@ -396,6 +396,15 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                                  StrId::STR_SPACING_PLUS_1, StrId::STR_SPACING_PLUS_2},
                                 "characterSpacing", StrId::STR_CAT_READER)
                   .withTextSettings());
+#ifdef BOARD_HAS_PSRAM  // CROSSPOINT_VECTOR_FONTS: only TTF/OTF fonts can change weight
+  // Stored 0..6, displayed -3..+3: an Enum row, so the picker labels carry the sign.
+  v.push_back(SettingInfo::Enum(StrId::STR_TEXT_WEIGHT, &CrossPointSettings::textWeight,
+                                {StrId::STR_TEXT_WEIGHT_MINUS_3, StrId::STR_TEXT_WEIGHT_MINUS_2,
+                                 StrId::STR_TEXT_WEIGHT_MINUS_1, StrId::STR_NORMAL, StrId::STR_TEXT_WEIGHT_PLUS_1,
+                                 StrId::STR_TEXT_WEIGHT_PLUS_2, StrId::STR_TEXT_WEIGHT_PLUS_3},
+                                "textWeight", StrId::STR_CAT_READER)
+                  .withTextSettings());
+#endif
   v.push_back(SettingInfo::Enum(StrId::STR_PARA_ALIGNMENT, &CrossPointSettings::paragraphAlignment,
                                 {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, StrId::STR_CENTER, StrId::STR_ALIGN_RIGHT,
                                  StrId::STR_BOOK_S_STYLE},

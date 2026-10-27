@@ -67,6 +67,11 @@ class TtfEpdFont {
   // Returns false if the regular source is missing or unparseable.
   bool load(uint16_t pointSize, bool twoBit = true, size_t glyphCacheBytes = 32 * 1024, uint16_t maxGlyphs = 768);
 
+  // Stroke thickness relative to the design weight (0): each step adds (or, negative, removes)
+  // a quarter of the faux-bold strength on every style. Advances are unchanged, so layout is
+  // too. Applies from the next load().
+  void setTextWeight(int8_t level) { textWeight_ = level; }
+
   EpdFontFamily family() const;
 
   // Per-scope reset (mirrors SdCardFont::clearCache): drop every face's cached
@@ -151,6 +156,7 @@ class TtfEpdFont {
   Source sources_[4];      // indexed by Style role
   Face faces_[4];          // 0=regular 1=bold 2=italic 3=bold-italic
   uint32_t size26_6_ = 0;  // exact 26.6 ppem (pt @150DPI), no whole-pixel rounding
+  int8_t textWeight_ = 0;
   bool loaded_ = false;
   // Set while a glyph fault runs reclaimHeap(): the reclaim hook calls
   // releaseResidentCaches() on every TTF font, and tearing down the very faces

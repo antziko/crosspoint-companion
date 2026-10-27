@@ -163,6 +163,9 @@ void TtfEpdFont::initFace(Face& f) {
     freeink::font::FtFont::RenderOptions ro;
     ro.hinting = freeink::font::FtFont::HintingMode::Auto;
     ro.stemDarkening = true;
+    // FtFont's faux bold is pixelSize/26; a text-weight step is a quarter of that,
+    // negative steps thinning the outline instead.
+    ro.embolden26_6 = textWeight_ * static_cast<int32_t>(size26_6_) / 104;
     if (!f.ft.setRenderOptions(ro)) {
       LOG_ERR("TTF", "Auto hinting unavailable (FREEINK_FONT_ENABLE_AUTOHINT not compiled)");
     }

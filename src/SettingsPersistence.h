@@ -124,6 +124,7 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
                       CrossPointSettings::WORD_SPACING_MAX),
     persisted::ranged("characterSpacing", &CrossPointSettings::characterSpacing, 0,
                       CrossPointSettings::CHARACTER_SPACING_MAX),
+    persisted::ranged("textWeight", &CrossPointSettings::textWeight, 0, CrossPointSettings::TEXT_WEIGHT_MAX),
     persisted::enumerated("orientation", &CrossPointSettings::orientation, CrossPointSettings::ORIENTATION_COUNT - 1),
     persisted::enumerated("paragraphSpacing", &CrossPointSettings::paragraphSpacing,
                           CrossPointSettings::PARAGRAPH_SPACING_COUNT - 1),

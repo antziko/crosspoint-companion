@@ -30,9 +30,10 @@ constexpr StrId TAB_NAME_IDS[] = {StrId::STR_FONT, StrId::STR_SIZE, StrId::STR_L
 constexpr StrId LAYOUT_ROW_NAME_IDS[] = {
     StrId::STR_LINE_SPACING,     StrId::STR_WORD_SPACING, StrId::STR_CHARACTER_SPACING, StrId::STR_EXTRA_SPACING,
     StrId::STR_PARAGRAPH_INDENT, StrId::STR_ALIGNMENT,    StrId::STR_SCREEN_MARGIN};
-constexpr StrId STYLE_ROW_NAME_IDS[] = {
-    StrId::STR_FOCUS_READING,       StrId::STR_HYPHENATION,       StrId::STR_EMBEDDED_STYLE,   StrId::STR_TEXT_AA,
-    StrId::STR_WORD_SELECT_BUTTONS, StrId::STR_DICT_INLINE_GLOSS, StrId::STR_DICT_LINE_SPACING};
+constexpr StrId STYLE_ROW_NAME_IDS[] = {StrId::STR_FOCUS_READING,     StrId::STR_HYPHENATION,
+                                        StrId::STR_EMBEDDED_STYLE,    StrId::STR_TEXT_AA,
+                                        StrId::STR_TEXT_WEIGHT,       StrId::STR_WORD_SELECT_BUTTONS,
+                                        StrId::STR_DICT_INLINE_GLOSS, StrId::STR_DICT_LINE_SPACING};
 
 // LOCAL(feat): Hold Confirm this long on a Font-tab row to pin/unpin (vs a tap = commit).
 constexpr unsigned long kPinHoldMs = 700;
@@ -68,6 +69,12 @@ constexpr StrId CHARACTER_SPACING_IDS[] = {StrId::STR_SPACING_MINUS_2, StrId::ST
                                            StrId::STR_SPACING_PLUS_2};
 static_assert(std::size(CHARACTER_SPACING_IDS) == CrossPointSettings::CHARACTER_SPACING_MAX + 1,
               "CHARACTER_SPACING_IDS must cover every stored tracking value");
+// Indices map straight onto the stored 0..6 value, which getReaderTextWeight() offsets to -3..+3.
+constexpr StrId TEXT_WEIGHT_IDS[] = {
+    StrId::STR_TEXT_WEIGHT_MINUS_3, StrId::STR_TEXT_WEIGHT_MINUS_2, StrId::STR_TEXT_WEIGHT_MINUS_1, StrId::STR_NORMAL,
+    StrId::STR_TEXT_WEIGHT_PLUS_1,  StrId::STR_TEXT_WEIGHT_PLUS_2,  StrId::STR_TEXT_WEIGHT_PLUS_3};
+static_assert(std::size(TEXT_WEIGHT_IDS) == CrossPointSettings::TEXT_WEIGHT_MAX + 1,
+              "TEXT_WEIGHT_IDS must cover every stored text weight");
 constexpr StrId ALIGNMENT_IDS[] = {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, StrId::STR_CENTER, StrId::STR_ALIGN_RIGHT,
                                    StrId::STR_BOOK_S_STYLE};
 // textAntiAliasing is a TEXT_AA enum (Off / Antialiased / Sharp), not a bool — indices must line up
@@ -122,22 +129,24 @@ TextSettingsActivity::TextSettingsActivity(GfxRenderer& renderer, MappedInputMan
         (row == StyleRow::WordSelectButtons || row == StyleRow::InlineGloss || row == StyleRow::DictLineSpacing)) {
       continue;
     }
+    // Only vector (TTF/OTF) fonts can change weight, and only PSRAM builds load them.
+    if (!CROSSPOINT_VECTOR_FONTS && row == StyleRow::TextWeight) continue;
     addStyle(row);
   }
   if (tabIndex(tab_) < 0) tab_ = visibleTabs_[0];
 
   if (bookMode()) {
     book_ = SETTINGS.getReaderOverride();
-    f_ = {&book_.fontFamily,       &book_.fontPointSize,      &book_.lineSpacing,      &book_.paragraphAlignment,
-          &book_.paragraphSpacing, &book_.paragraphIndent,    &book_.screenMargin,     &book_.hyphenationEnabled,
-          book_.sdFontFamilyName,  &book_.wordSpacing,        &book_.characterSpacing, &book_.embeddedStyle,
-          &book_.textAntiAliasing, &book_.focusReadingEnabled};
+    f_ = {&book_.fontFamily,       &book_.fontPointSize,    &book_.lineSpacing,        &book_.paragraphAlignment,
+          &book_.paragraphSpacing, &book_.paragraphIndent,  &book_.screenMargin,       &book_.hyphenationEnabled,
+          book_.sdFontFamilyName,  &book_.wordSpacing,      &book_.characterSpacing,   &book_.textWeight,
+          &book_.embeddedStyle,    &book_.textAntiAliasing, &book_.focusReadingEnabled};
   } else {
     f_ = {&SETTINGS.fontFamily,         &SETTINGS.fontPointSize,      &SETTINGS.lineSpacing,
           &SETTINGS.paragraphAlignment, &SETTINGS.paragraphSpacing,   &SETTINGS.paragraphIndent,
           &SETTINGS.screenMargin,       &SETTINGS.hyphenationEnabled, SETTINGS.sdFontFamilyName,
-          &SETTINGS.wordSpacing,        &SETTINGS.characterSpacing,   &SETTINGS.embeddedStyle,
-          &SETTINGS.textAntiAliasing,   &SETTINGS.focusReadingEnabled};
+          &SETTINGS.wordSpacing,        &SETTINGS.characterSpacing,   &SETTINGS.textWeight,
+          &SETTINGS.embeddedStyle,      &SETTINGS.textAntiAliasing,   &SETTINGS.focusReadingEnabled};
   }
 }
 
@@ -844,6 +853,21 @@ void TextSettingsActivity::confirmStyleRow(int row) {
                         });
       requestUpdate();
       return;
+    case StyleRow::TextWeight:
+      optionPopup_.show(StrId::STR_TEXT_WEIGHT, TEXT_WEIGHT_IDS, static_cast<int>(std::size(TEXT_WEIGHT_IDS)),
+                        *f_.textWeight, [this](int idx) {
+                          {
+                            // Same RenderLock rationale as applySize(): the reload replaces the
+                            // TTF face the render task may be drawing with.
+                            RenderLock lock;
+                            *f_.textWeight = static_cast<uint8_t>(idx);
+                            applyBook();
+                            sdFontSystem.ensureLoaded(renderer);
+                          }
+                          persist();  // persist immediately (#2806)
+                        });
+      requestUpdate();
+      return;
 
     default:
       return;
@@ -864,6 +888,10 @@ std::string TextSettingsActivity::styleValueText(int row) const {
     case StyleRow::AntiAliasing: {
       const uint8_t v = *f_.textAntiAliasing;
       return v < std::size(TEXT_AA_IDS) ? I18N.get(TEXT_AA_IDS[v]) : I18N.get(StrId::STR_TEXT_AA_ANTIALIASED);
+    }
+    case StyleRow::TextWeight: {
+      const uint8_t v = *f_.textWeight;
+      return v < std::size(TEXT_WEIGHT_IDS) ? I18N.get(TEXT_WEIGHT_IDS[v]) : I18N.get(StrId::STR_NORMAL);
     }
 
     default:

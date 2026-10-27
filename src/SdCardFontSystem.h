@@ -152,6 +152,7 @@ class SdCardFontSystem {
   std::string ttfFamily_;     // loaded vector family name ("" = none)
   int ttfFontId_ = 0;         // renderer font id for ttf_ (0 = none)
   uint8_t ttfPointSize_ = 0;  // size ttf_ was built at
+  int8_t ttfTextWeight_ = 0;  // text weight ttf_ (and ttfDict_) were built at
   // UI-size TTF fallbacks (share ttfSources_); parallel to their renderer font ids.
   std::vector<std::unique_ptr<TtfEpdFont>> ttfUi_;
   std::vector<int> ttfUiIds_;
