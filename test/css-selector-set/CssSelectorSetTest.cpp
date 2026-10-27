@@ -137,4 +137,23 @@ TEST(CssSelectorSet, LoadFromCacheKeepsOnlyChapterRules) {
   parser.deleteCache();
 }
 
+CssFontWeight weightOf(const char* declaration) { return CssParser::parseInlineStyle(declaration).fontWeight; }
+
+TEST(CssFontWeight, SemiboldAndHeavierAreBold) {
+  EXPECT_EQ(weightOf("font-weight: 600"), CssFontWeight::Bold);
+  EXPECT_EQ(weightOf("font-weight: 700"), CssFontWeight::Bold);
+  EXPECT_EQ(weightOf("font-weight: 900"), CssFontWeight::Bold);
+  EXPECT_EQ(weightOf("font-weight: bold"), CssFontWeight::Bold);
+  EXPECT_EQ(weightOf("font-weight: bolder"), CssFontWeight::Bold);
+}
+
+TEST(CssFontWeight, MediumAndLighterAreNormal) {
+  EXPECT_EQ(weightOf("font-weight: 500"), CssFontWeight::Normal);
+  EXPECT_EQ(weightOf("font-weight: 400"), CssFontWeight::Normal);
+  EXPECT_EQ(weightOf("font-weight: 100"), CssFontWeight::Normal);
+  EXPECT_EQ(weightOf("font-weight: normal"), CssFontWeight::Normal);
+  EXPECT_EQ(weightOf("font-weight: lighter"), CssFontWeight::Normal);
+  EXPECT_EQ(weightOf("font-weight: 600px"), CssFontWeight::Normal);  // not a bare number
+}
+
 }  // namespace

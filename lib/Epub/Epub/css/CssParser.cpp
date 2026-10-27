@@ -244,15 +244,14 @@ CssFontWeight CssParser::interpretFontWeight(const std::string& val) {
   if (v == "bold" || v == "bolder") return CssFontWeight::Bold;
   if (v == "normal" || v == "lighter") return CssFontWeight::Normal;
 
-  // Numeric values: 100-900
-  // CSS spec: 400 = normal, 700 = bold
-  // We use: 0-400 = normal, 700+ = bold, 500-600 = normal (conservative)
+  // Numeric values: 100-900. With only regular and bold faces, CSS font matching resolves
+  // weights above 500 to the heavier face, so 600 (semibold) is bold, as in browsers.
   char* endPtr = nullptr;
   const long numericWeight = std::strtol(v.c_str(), &endPtr, 10);
 
   // If we parsed a number and consumed the whole string
   if (endPtr != v.c_str() && *endPtr == '\0') {
-    return numericWeight >= 700 ? CssFontWeight::Bold : CssFontWeight::Normal;
+    return numericWeight >= 600 ? CssFontWeight::Bold : CssFontWeight::Normal;
   }
 
   return CssFontWeight::Normal;

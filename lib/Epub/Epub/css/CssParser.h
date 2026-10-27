@@ -38,7 +38,8 @@ class CssParser {
   //     declaration written "margin: 0 !important" is no longer discarded (upstream #3221)
   // v10: list-style-type is parsed and serialized (defined bit 18), so the style wire record
   //      grew by one byte (upstream #3500)
-  static constexpr uint8_t CSS_CACHE_VERSION = 10;
+  // v11: font-weight 600 is bold (the rule cache stores the interpreted weight)
+  static constexpr uint8_t CSS_CACHE_VERSION = 11;
 
   // The tag names and class tokens one chapter uses, so loadFromCache() keeps only the rules
   // resolveStyle() can match there. Hashes are case-insensitive FNV-1a; a class hashes with its
