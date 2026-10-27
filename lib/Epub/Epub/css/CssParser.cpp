@@ -2,12 +2,14 @@
 
 #include <Arduino.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <SdDebugLog.h>
 #include <esp_heap_caps.h>
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstring>
 #include <string_view>
 
 namespace {
@@ -88,7 +90,12 @@ constexpr size_t MIN_FREE_HEAP_FOR_CSS = 4 * 1024;
 // dropped (partial CSS -- still readable). Applied only on the cache path, which runs during builds
 // -- NOT the stream path, which can run standalone during initial metadata caching and must be free
 // to store the full stylesheet into the cache.
+// PSRAM boards have the heap to spare, so a 100+-rule calibre stylesheet keeps its late-sorting rules.
+#ifdef BOARD_HAS_PSRAM
+constexpr size_t CSS_CACHE_BYTE_BUDGET = 64 * 1024;
+#else
 constexpr size_t CSS_CACHE_BYTE_BUDGET = 12 * 1024;
+#endif
 
 // Rules always loaded before the budget above is allowed to stop the load. Guarantees that a small
 // stylesheet is never truncated to nothing by a transient heap dip mid-load; the hard largest-block
@@ -798,6 +805,175 @@ CssStyle CssParser::resolveStyle(const std::string& tagName, const std::string& 
   return result;
 }
 
+// Chapter selector set
+
+namespace {
+constexpr uint32_t FNV_OFFSET = 2166136261u;
+
+uint32_t fnvStep(const uint32_t h, const char c) {
+  return (h ^ static_cast<uint8_t>(std::tolower(static_cast<unsigned char>(c)))) * 16777619u;
+}
+
+uint32_t fnvHash(const char* s, const size_t len) {
+  uint32_t h = FNV_OFFSET;
+  for (size_t i = 0; i < len; ++i) h = fnvStep(h, s[i]);
+  return h;
+}
+
+bool isXmlSpace(const char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
+
+// Heap, not stack: the scan runs inside a section build whose stack is already deep.
+constexpr size_t SCAN_BUFFER_SIZE = 1024;
+}  // namespace
+
+bool CssParser::SelectorSet::insert(const uint32_t hash) {
+  uint32_t* const begin = hashes_.get();
+  uint32_t* const end = begin + count_;
+  uint32_t* const it = std::lower_bound(begin, end, hash);
+  if (it != end && *it == hash) return true;
+  if (count_ >= CAPACITY) return false;
+  memmove(it + 1, it, static_cast<size_t>(end - it) * sizeof(uint32_t));
+  *it = hash;
+  ++count_;
+  return true;
+}
+
+bool CssParser::SelectorSet::contains(const uint32_t hash) const {
+  const uint32_t* const begin = hashes_.get();
+  return std::binary_search(begin, begin + count_, hash);
+}
+
+bool CssParser::SelectorSet::wants(const std::string& key) const {
+  if (!hashes_) return true;
+  const size_t dot = key.find('.');
+  if (dot == std::string::npos) return contains(fnvHash(key.data(), key.size()));
+  if (!contains(fnvHash(key.data() + dot, key.size() - dot))) return false;
+  return dot == 0 || contains(fnvHash(key.data(), dot));
+}
+
+bool CssParser::SelectorSet::scan(HalFile& html) {
+  count_ = 0;
+  hashes_ = makeUniqueNoThrow<uint32_t[]>(CAPACITY);
+  const auto buf = makeUniqueNoThrow<char[]>(SCAN_BUFFER_SIZE);
+  if (!hashes_ || !buf) {
+    LOG_ERR("CSS", "OOM: chapter selector scan");
+    hashes_.reset();
+    return false;
+  }
+
+  // A tolerant tag/attribute tokenizer, not an XML parser: it only has to find every element
+  // name and class token expat will report. Extra names (from comments, say) just keep a rule.
+  enum class State : uint8_t { Text, Open, TagName, InTag, AttrName, AfterAttrName, BeforeValue, Value, Skip };
+  static constexpr char CLASS_ATTR[] = "class";
+  State state = State::Text;
+  uint32_t h = 0;
+  char quote = 0;
+  int classMatch = 0;  // chars of CLASS_ATTR matched so far; -1 once the name diverges
+  bool isClass = false;
+  bool inToken = false;
+  bool ok = true;
+
+  const auto startAttrName = [&](const char c) {
+    classMatch = c == CLASS_ATTR[0] ? 1 : -1;
+    state = State::AttrName;
+  };
+
+  int n;
+  while (ok && (n = static_cast<int>(html.read(buf.get(), SCAN_BUFFER_SIZE))) > 0) {
+    for (int i = 0; i < n && ok; ++i) {
+      const char c = buf[i];
+      switch (state) {
+        case State::Text:
+          if (c == '<') state = State::Open;
+          break;
+        case State::Open:
+          if (std::isalpha(static_cast<unsigned char>(c)) || c == '_' || c == ':') {
+            h = fnvStep(FNV_OFFSET, c);
+            state = State::TagName;
+          } else {
+            state = c == '>' ? State::Text : State::Skip;  // end tag, comment, <!DOCTYPE>, <?xml?>
+          }
+          break;
+        case State::TagName:
+          if (!isXmlSpace(c) && c != '>' && c != '/') {
+            h = fnvStep(h, c);
+            break;
+          }
+          ok = insert(h);
+          state = c == '>' ? State::Text : State::InTag;
+          break;
+        case State::InTag:
+          if (c == '>') {
+            state = State::Text;
+          } else if (c == '"' || c == '\'') {
+            quote = c;  // stray value: skip it so a '>' inside cannot end the tag
+            isClass = false;
+            state = State::Value;
+          } else if (!isXmlSpace(c) && c != '/') {
+            startAttrName(c);
+          }
+          break;
+        case State::AttrName:
+          if (c == '=' || c == '>' || c == '/' || isXmlSpace(c)) {
+            isClass = classMatch == static_cast<int>(sizeof(CLASS_ATTR) - 1);
+            state = c == '=' ? State::BeforeValue : c == '>' ? State::Text : State::AfterAttrName;
+          } else if (classMatch >= 0) {
+            classMatch = (static_cast<size_t>(classMatch) < sizeof(CLASS_ATTR) - 1 && c == CLASS_ATTR[classMatch])
+                             ? classMatch + 1
+                             : -1;
+          }
+          break;
+        case State::AfterAttrName:
+          if (c == '=') {
+            state = State::BeforeValue;
+          } else if (c == '>') {
+            state = State::Text;
+          } else if (!isXmlSpace(c) && c != '/') {
+            startAttrName(c);
+          }
+          break;
+        case State::BeforeValue:
+          if (c == '"' || c == '\'') {
+            quote = c;
+            inToken = false;
+            state = State::Value;
+          } else if (c == '>') {
+            state = State::Text;
+          } else if (!isXmlSpace(c)) {
+            state = State::InTag;  // unquoted value: not XML; skip it
+          }
+          break;
+        case State::Value:
+          if (c == quote) {
+            if (isClass && inToken) ok = insert(h);
+            inToken = false;
+            state = State::InTag;
+          } else if (isClass) {
+            if (isXmlSpace(c)) {
+              if (inToken) ok = insert(h);
+              inToken = false;
+            } else {
+              if (!inToken) h = fnvStep(FNV_OFFSET, '.');
+              h = fnvStep(h, c);
+              inToken = true;
+            }
+          }
+          break;
+        case State::Skip:
+          if (c == '>') state = State::Text;
+          break;
+      }
+    }
+  }
+  if (!ok || html.available() > 0) {
+    LOG_DBG("CSS", "Chapter selector scan unusable (%s) - loading every rule", ok ? "read error" : "too many names");
+    hashes_.reset();
+    count_ = 0;
+    return false;
+  }
+  return true;
+}
+
 // Inline style parsing (static - doesn't need rule database)
 
 CssStyle CssParser::parseInlineStyle(const std::string& styleValue) { return parseDeclarations(styleValue); }
@@ -896,7 +1072,7 @@ bool CssParser::saveToCache() const {
   return true;
 }
 
-bool CssParser::loadFromCache() {
+bool CssParser::loadFromCache(const SelectorSet* only) {
   if (cachePath.empty()) {
     return false;
   }
@@ -1111,7 +1287,8 @@ bool CssParser::loadFromCache() {
     // Defend against caches that still carry empty rules (see store-time note):
     // an empty style contributes nothing to resolveStyle, so don't hold its heap.
     // internStyle() deduplicates identical styles into the shared pool (the heap saving).
-    if (style.defined.anySet()) {
+    // `only` drops rules for tags/classes this chapter never uses before they cost any heap.
+    if (style.defined.anySet() && (!only || only->wants(selector))) {
       rulesBySelector_.emplace_back(std::move(selector), internStyle(style));
     }
   }

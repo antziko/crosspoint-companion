@@ -3,6 +3,7 @@
 #include <HalStorage.h>
 
 #include <deque>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -38,6 +39,26 @@ class CssParser {
   // v10: list-style-type is parsed and serialized (defined bit 18), so the style wire record
   //      grew by one byte (upstream #3500)
   static constexpr uint8_t CSS_CACHE_VERSION = 10;
+
+  // The tag names and class tokens one chapter uses, so loadFromCache() keeps only the rules
+  // resolveStyle() can match there. Hashes are case-insensitive FNV-1a; a class hashes with its
+  // leading '.', exactly as it appears in a ".class" selector. Fixed capacity, heap-allocated once.
+  class SelectorSet {
+   public:
+    static constexpr uint16_t CAPACITY = 512;
+    // Collects from the chapter's XHTML. False (set unusable: load every rule) on OOM, a read
+    // error, or more than CAPACITY distinct names.
+    bool scan(HalFile& html);
+    // Whether a stored selector key ("tag", ".class" or "tag.class") can match in this chapter.
+    [[nodiscard]] bool wants(const std::string& key) const;
+    [[nodiscard]] uint16_t size() const { return count_; }
+
+   private:
+    bool insert(uint32_t hash);
+    [[nodiscard]] bool contains(uint32_t hash) const;
+    std::unique_ptr<uint32_t[]> hashes_;  // sorted, unique
+    uint16_t count_ = 0;
+  };
 
   // Vertical-text interface, named as in matcha-reader so its VerticalSection compiles unchanged.
   // Our cache does not record which stylesheet a rule came from, so the filter admits everything.
@@ -144,9 +165,10 @@ class CssParser {
   /**
    * Load CSS rules from a cache file.
    * Clears any existing rules before loading.
+   * @param only If set, rules that cannot match any element in it are skipped.
    * @return true if cache was loaded successfully
    */
-  bool loadFromCache();
+  bool loadFromCache(const SelectorSet* only = nullptr);
 
  private:
   // Distinct style values, referenced by index from rulesBySelector_. Real stylesheets have many

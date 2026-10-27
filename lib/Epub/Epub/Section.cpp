@@ -150,7 +150,10 @@ namespace {
 // v70: An empty inline element with horizontal margin/padding (a spacer span) breaks the word.
 // v71: Header gains furiganaEnabled after paragraphIndent; with it off, <rt> text is dropped.
 // v72: A large image that starts its page drops its bottom margin when keeping it would shrink it.
-constexpr uint8_t SECTION_FILE_VERSION = 73;
+// v74: PSRAM boards load the whole stylesheet (see CSS_CACHE_BYTE_BUDGET); rebuild truncated-CSS layouts.
+// v75: Each build loads only the CSS rules its chapter's tags and classes can match, so a large
+//      stylesheet no longer loses its late-sorting rules to the load budget on any board.
+constexpr uint8_t SECTION_FILE_VERSION = 75;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
@@ -591,13 +594,24 @@ bool Section::startBuild(const ReaderRenderSpec& spec, const std::function<void(
     // the whole reading session, which caps the largest free block (~8KB observed) and starves every
     // subsequent build — so it is loaded per build and freed after, letting the heap recover between
     // chapters. The rules are pooled/deduplicated in RAM (CssParser) to keep this load small.
-    if (ctx->cssParser && !ctx->cssParser->loadFromCache()) {
-      LOG_ERR("SCT", "Failed to load CSS from cache");
+    // Only the rules this chapter's tags and classes can match, so a large book-wide stylesheet
+    // fits the load budget. The set (~2KB) is freed at the end of this block, before the parse.
+    unsigned chapterNames = 0;
+    if (ctx->cssParser) {
+      CssParser::SelectorSet used;
+      HalFile html;
+      const bool scanned = Storage.openFileForRead("SCT", ctx->parsePath, html) && used.scan(html);
+      chapterNames = used.size();
+      if (!ctx->cssParser->loadFromCache(scanned ? &used : nullptr)) {
+        LOG_ERR("SCT", "Failed to load CSS from cache");
+      }
     }
     // The one number that says whether this chapter will be styled at all. Every other signal on
     // this path is LOG_DBG/LOG_ERR, which the X3 cannot show — leaving "no CSS" undiagnosable.
-    SdDebugLog::log("SCT", "css spine=%u parser=%d rules=%u free=%u", (unsigned)spineIndex, ctx->cssParser ? 1 : 0,
-                    ctx->cssParser ? (unsigned)ctx->cssParser->ruleCount() : 0u, (unsigned)ESP.getFreeHeap());
+    // names=0 means the chapter scan failed and every rule was offered.
+    SdDebugLog::log("SCT", "css spine=%u parser=%d rules=%u names=%u free=%u", (unsigned)spineIndex,
+                    ctx->cssParser ? 1 : 0, ctx->cssParser ? (unsigned)ctx->cssParser->ruleCount() : 0u, chapterNames,
+                    (unsigned)ESP.getFreeHeap());
   } else {
     SdDebugLog::log("SCT", "css spine=%u DISABLED (embeddedStyle=0)", (unsigned)spineIndex);
   }
