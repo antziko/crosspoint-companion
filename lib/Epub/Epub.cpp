@@ -121,8 +121,9 @@ bool Epub::parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata, const 
     return false;
   }
 
-  const bool opfRead = sharedZip ? sharedZip->readFileToStream(contentOpfFilePath.c_str(), opfParser, 1024, metadataOnly)
-                                 : readItemContentsToStream(contentOpfFilePath, opfParser, 1024, metadataOnly);
+  const bool opfRead = sharedZip
+                           ? sharedZip->readFileToStream(contentOpfFilePath.c_str(), opfParser, 1024, metadataOnly)
+                           : readItemContentsToStream(contentOpfFilePath, opfParser, 1024, metadataOnly);
   if (!opfRead) {
     LOG_ERR("EBP", "Could not read content.opf");
     return false;

@@ -3,10 +3,9 @@
 #include <string>
 #include <vector>
 
+#include "VerticalClipCells.h"
 #include "util/CjkWordMerge.h"
 #include "util/WordSelectNavigator.h"
-
-#include "VerticalClipCells.h"
 
 class GfxRenderer;
 

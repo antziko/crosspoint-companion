@@ -110,7 +110,7 @@ class FileBrowserActivity final : public Activity {
   void probeNextYear();
   bool yearsPending = false;
   bool yearFound = false;
-  bool accepts(const char* name, bool isDir) const;    // shared list filter
+  bool accepts(const char* name, bool isDir) const;  // shared list filter
 
  public:
   explicit FileBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string initialPath = "/",

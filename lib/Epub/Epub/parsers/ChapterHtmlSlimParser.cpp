@@ -780,8 +780,8 @@ void ChapterHtmlSlimParser::sizeTableColumns(const size_t columnCount, const uin
     widths[column] = equalWidth;
     uint16_t minW = 0;
     uint16_t maxW = 0;
-    tableRowCells[column]->measureNaturalWidths(renderer, fontId, characterSpacing, wordSpacingPercent,
-                                                paragraphIndent, minW, maxW);
+    tableRowCells[column]->measureNaturalWidths(renderer, fontId, characterSpacing, wordSpacingPercent, paragraphIndent,
+                                                minW, maxW);
     minWidths[column] = std::min<int>(minW + padding, viewportWidth);
     maxWidths[column] = std::min<int>(maxW + padding, viewportWidth);
     minTotal += minWidths[column];

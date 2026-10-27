@@ -175,8 +175,8 @@ void VerticalTextBlock::render(GfxRenderer& renderer, int fontId, int offsetX, i
   drawGlyphs(renderer, page_, fontId, offsetX, offsetY, black);
 }
 
-void VerticalTextBlock::render(GfxRenderer& renderer, int fontId, int rubyFontId, int offsetX, int offsetY,
-                               bool black, const int rubyBottomY) const {
+void VerticalTextBlock::render(GfxRenderer& renderer, int fontId, int rubyFontId, int offsetX, int offsetY, bool black,
+                               const int rubyBottomY) const {
   const int cellPxLocal = drawGlyphs(renderer, page_, fontId, offsetX, offsetY, black);
 
   // JLREQ 3.3.2: ruby is half the size of its base and set solid, so one ruby character's body is

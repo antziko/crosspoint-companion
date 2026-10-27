@@ -56,9 +56,8 @@ struct TokenWalk {
 };
 }  // namespace
 
-void forEachVerticalToken(const GfxRenderer& renderer, const VerticalPage& page, const int fontId,
-                          const int marginLeft, const int marginTop, const int cellPx, void* ctx,
-                          const VerticalTokenVisitor visit) {
+void forEachVerticalToken(const GfxRenderer& renderer, const VerticalPage& page, const int fontId, const int marginLeft,
+                          const int marginTop, const int cellPx, void* ctx, const VerticalTokenVisitor visit) {
   TokenWalk walk{&page, ctx, visit};
   forEachVerticalClipCell(
       renderer, page, fontId, marginLeft, marginTop, &walk,
@@ -147,47 +146,48 @@ bool buildVerticalWordTokens(const GfxRenderer& renderer, const VerticalPage& pa
       uint16_t next = 0;
       for (size_t i = 0; i < page.glyphs.size(); i++) {
         const VerticalGlyph& g = page.glyphs[i];
-        const bool skipped = g.renderKind == VerticalGlyph::RotatedRun || VerticalParsedText::isImageMarker(g.codepoint);
+        const bool skipped =
+            g.renderKind == VerticalGlyph::RotatedRun || VerticalParsedText::isImageMarker(g.codepoint);
         scanIndex[i] = skipped ? CjkWordMerge::TokenGlyphs::kNoGlyph : next++;
       }
     }
   }
 
   BuildCtx build{&page, &words, &rows, &textPool, scanIndex.get(), scanCells};
-  forEachVerticalToken(
-      renderer, page, fontId, marginLeft, marginTop, cellPx, &build, [](void* ctx, const VerticalToken& t) {
-        auto* b = static_cast<BuildCtx*>(ctx);
-        const VerticalClipCell& cell = t.cell;
-        uint16_t offset = 0;
-        if (!TextPool::appendNoThrow(*b->pool, t.text, t.len, offset)) {
-          b->ok = false;
-          return false;
-        }
-        if (cell.column != b->lastColumn) {
-          // Row::yPos holds the column's x: a vertical row is a column.
-          b->rows->push_back({cell.x, static_cast<int16_t>(b->words->size()), 0});
-          b->lastColumn = cell.column;
-        }
-        WordSelectNavigator::WordInfo w;
-        w.textOffset = offset;
-        w.textLen = static_cast<uint16_t>(t.len);
-        w.lookupOffset = offset;
-        w.lookupLen = static_cast<uint16_t>(t.len);
-        w.screenX = cell.x;
-        w.screenY = cell.y;
-        w.width = cell.height;  // the extent down the column
-        w.row = static_cast<int16_t>(b->rows->size() - 1);
-        w.style = static_cast<EpdFontFamily::Style>(b->page->glyphs[cell.glyphIndex].style);
-        b->words->push_back(w);
-        b->rows->back().wordCount++;
-        if (b->scanCells) {
-          CjkWordMerge::TokenGlyphs tg;
-          tg.start = b->scanIndex[cell.glyphIndex];
-          tg.count = tg.start == CjkWordMerge::TokenGlyphs::kNoGlyph ? 0 : 1;
-          b->scanCells->push_back(tg);
-        }
-        return true;
-      });
+  forEachVerticalToken(renderer, page, fontId, marginLeft, marginTop, cellPx, &build,
+                       [](void* ctx, const VerticalToken& t) {
+                         auto* b = static_cast<BuildCtx*>(ctx);
+                         const VerticalClipCell& cell = t.cell;
+                         uint16_t offset = 0;
+                         if (!TextPool::appendNoThrow(*b->pool, t.text, t.len, offset)) {
+                           b->ok = false;
+                           return false;
+                         }
+                         if (cell.column != b->lastColumn) {
+                           // Row::yPos holds the column's x: a vertical row is a column.
+                           b->rows->push_back({cell.x, static_cast<int16_t>(b->words->size()), 0});
+                           b->lastColumn = cell.column;
+                         }
+                         WordSelectNavigator::WordInfo w;
+                         w.textOffset = offset;
+                         w.textLen = static_cast<uint16_t>(t.len);
+                         w.lookupOffset = offset;
+                         w.lookupLen = static_cast<uint16_t>(t.len);
+                         w.screenX = cell.x;
+                         w.screenY = cell.y;
+                         w.width = cell.height;  // the extent down the column
+                         w.row = static_cast<int16_t>(b->rows->size() - 1);
+                         w.style = static_cast<EpdFontFamily::Style>(b->page->glyphs[cell.glyphIndex].style);
+                         b->words->push_back(w);
+                         b->rows->back().wordCount++;
+                         if (b->scanCells) {
+                           CjkWordMerge::TokenGlyphs tg;
+                           tg.start = b->scanIndex[cell.glyphIndex];
+                           tg.count = tg.start == CjkWordMerge::TokenGlyphs::kNoGlyph ? 0 : 1;
+                           b->scanCells->push_back(tg);
+                         }
+                         return true;
+                       });
   if (!build.ok) {
     words.clear();
     rows.clear();
