@@ -288,4 +288,33 @@ TEST_F(ChapterHtmlSlimParserTest, PreIndentedLongLineWrapsWithoutBlankLines) {
   }
 }
 
+// The alignment of the cell opened by <table style=tableStyle><tr><td style=cellStyle>.
+CssTextAlign tableCellAlignment(ChapterHtmlSlimParser& parser, const CssTextAlign readerAlign, const char* tableStyle,
+                                const char* cellStyle) {
+  parser.paragraphAlignment = static_cast<uint8_t>(readerAlign);
+  const XML_Char* tableAtts[] = {"style", tableStyle, nullptr};
+  const XML_Char* cellAtts[] = {"style", cellStyle, nullptr};
+  parser.inlineStyleStack.clear();  // beginParse expects a fresh parser
+  parser.currentCssStyle.reset();
+  parser.updateEffectiveInlineStyle();
+  parser.beginParse();
+  parser.currentTextBlock.reset();
+  ChapterHtmlSlimParser::startElement(&parser, "table", tableStyle ? tableAtts : nullptr);
+  ChapterHtmlSlimParser::startElement(&parser, "tr", nullptr);
+  ChapterHtmlSlimParser::startElement(&parser, "td", cellStyle ? cellAtts : nullptr);
+  return parser.currentTextBlock ? parser.currentTextBlock->getBlockStyle().alignment : CssTextAlign::None;
+}
+
+TEST_F(ChapterHtmlSlimParserTest, ReaderAlignmentReplacesBookJustifyInTableCell) {
+  EXPECT_EQ(tableCellAlignment(parser, CssTextAlign::Left, nullptr, "text-align: justify"), CssTextAlign::Left);
+  EXPECT_EQ(tableCellAlignment(parser, CssTextAlign::Right, "text-align: justify", nullptr), CssTextAlign::Right);
+}
+
+TEST_F(ChapterHtmlSlimParserTest, TableCellKeepsBookAlignmentOtherwise) {
+  EXPECT_EQ(tableCellAlignment(parser, CssTextAlign::Left, nullptr, "text-align: center"), CssTextAlign::Center);
+  EXPECT_EQ(tableCellAlignment(parser, CssTextAlign::Justify, nullptr, "text-align: justify"), CssTextAlign::Justify);
+  EXPECT_EQ(tableCellAlignment(parser, CssTextAlign::None, nullptr, "text-align: justify"), CssTextAlign::Justify);
+  EXPECT_EQ(tableCellAlignment(parser, CssTextAlign::Justify, nullptr, nullptr), CssTextAlign::Left);
+}
+
 }  // namespace

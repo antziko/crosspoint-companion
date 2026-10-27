@@ -154,7 +154,8 @@ namespace {
 // v75: Each build loads only the CSS rules its chapter's tags and classes can match, so a large
 //      stylesheet no longer loses its late-sorting rules to the load budget on any board.
 // v76: font-weight 600 is bold (CSS cache v11); rebuild layouts made with it as normal weight.
-constexpr uint8_t SECTION_FILE_VERSION = 76;
+// v77: A left/center/right reader alignment replaces book justify in table cells.
+constexpr uint8_t SECTION_FILE_VERSION = 77;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects

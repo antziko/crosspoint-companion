@@ -1157,6 +1157,14 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                    ? self->effectiveTextAlign
                    : (cssStyle.hasDirection() && cssStyle.direction == CssTextDirection::Rtl ? CssTextAlign::Right
                                                                                              : CssTextAlign::Left));
+    // A non-justify reader alignment replaces book justify, which leaves wide gaps in narrow columns.
+    // Explicit left/center/right stays, as for headings.
+    const auto readerAlign = static_cast<CssTextAlign>(self->paragraphAlignment);
+    if (tableCellBlockStyle.alignment == CssTextAlign::Justify && readerAlign != CssTextAlign::Justify &&
+        readerAlign != CssTextAlign::None) {
+      tableCellBlockStyle.alignment = readerAlign;
+      tableCellBlockStyle.textAlignDefined = false;
+    }
     if (cssStyle.hasDirection()) {
       tableCellBlockStyle.directionDefined = true;
       tableCellBlockStyle.isRtl = cssStyle.direction == CssTextDirection::Rtl;
