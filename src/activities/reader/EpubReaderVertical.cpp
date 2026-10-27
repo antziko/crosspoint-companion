@@ -556,7 +556,7 @@ bool EpubReaderActivity::finishVerticalBuildNow() {
 }
 
 void EpubReaderActivity::openVerticalWordSelect(bool framebufferContainsPage, const int pointX, const int pointY,
-                                                const bool highlight) {
+                                                const bool highlight, const bool phrase) {
   // The background layout holds ~40KB that the whole-word scan needs, and cannot pause the way the
   // horizontal build does: finish it first (a one-time wait behind the indexing popup).
   if (verticalSection && verticalSection->isBuilding()) {
@@ -648,6 +648,8 @@ void EpubReaderActivity::openVerticalWordSelect(bool framebufferContainsPage, co
   wordSelect->setMarksReloader(this, &EpubReaderActivity::reloadLookupMarksThunk);
   if (!highlight) attachGlossCursorMemory(*wordSelect, currentPage, pageCount);
   wordSelect->setStartAtPageEdge(glossStartEdge_);
+  wordSelect->setPhraseStart(phrase);
+  if (phrase && pageActionHasMark_ && pageActionMark_.multiWord) wordSelect->setPhraseMark(pageActionMark_);
   if (wordScan) {
     wordSelect->setWordScan(std::move(wordScan), wordScanCachePath(), static_cast<uint16_t>(currentSpineIndex),
                             static_cast<uint16_t>(currentPage), std::move(scanCells));

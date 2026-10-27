@@ -2044,9 +2044,10 @@ void EpubReaderActivity::attachGlossCursorMemory(DictionaryWordSelectActivity& w
   wordSelect.setGlossCursorMemory(glossCursorWord_, &glossCursorWord_);
 }
 
-void EpubReaderActivity::openWordSelect(const bool framebufferContainsPage, const int pointX, const int pointY) {
+void EpubReaderActivity::openWordSelect(const bool framebufferContainsPage, const int pointX, const int pointY,
+                                        const bool phrase) {
   if (verticalSection) {
-    openVerticalWordSelect(framebufferContainsPage, pointX, pointY);
+    openVerticalWordSelect(framebufferContainsPage, pointX, pointY, /*highlight=*/false, phrase);
     return;
   }
   auto pageForLookup = section ? section->loadPage(section->currentPage) : nullptr;
@@ -2163,6 +2164,8 @@ void EpubReaderActivity::openWordSelect(const bool framebufferContainsPage, cons
   }
   attachGlossCursorMemory(*wordSelect, section->currentPage, section->pageCount);
   wordSelect->setStartAtPageEdge(glossStartEdge_);
+  wordSelect->setPhraseStart(phrase);
+  if (phrase && pageActionHasMark_ && pageActionMark_.multiWord) wordSelect->setPhraseMark(pageActionMark_);
   wordSelect->setPageMarkKey(currentPageMarkKey());
   wordSelect->setMarksReloader(this, &EpubReaderActivity::reloadLookupMarksThunk);
   if (wordScan) {
@@ -2206,16 +2209,19 @@ void EpubReaderActivity::openPageActionMenu(const int x, const int y) {
   // Parallel to `labels`, so a conditional row can never shift what an index means. The old
   // two-row form did the mapping with index arithmetic against `hasDict`; a third conditional
   // row makes that unreadable and one edit away from wrong.
-  enum class Act : uint8_t { LookUp, Highlight, DeleteCard };
-  const char* labels[3];
-  Act actions[3];
+  enum class Act : uint8_t { LookUp, LookUpPhrase, Highlight, DeleteCard };
+  const char* labels[4];
+  Act actions[4];
   int count = 0;
   const auto add = [&](const Act act, const char* label) {
     labels[count] = label;
     actions[count] = act;
     ++count;
   };
-  if (hasDict) add(Act::LookUp, tr(STR_LOOKUP_SHORT));
+  if (hasDict) {
+    add(Act::LookUp, tr(STR_LOOKUP_SHORT));
+    add(Act::LookUpPhrase, tr(STR_LOOKUP_PHRASE));
+  }
   add(Act::Highlight, tr(STR_ADD_HIGHLIGHT));
   if (count == 0) return;
 
@@ -2273,21 +2279,25 @@ void EpubReaderActivity::openPageActionMenu(const int x, const int y) {
   pageActionX_ = x;
   pageActionY_ = y;
   pageActionChose_ = false;
-  // actions is 3 bytes, so the closure still fits std::function's inline buffer -- no allocation
+  // actions is 4 bytes, so the closure still fits std::function's inline buffer -- no allocation
   // on a path the heap is already tight on.
   const Act a0 = actions[0];
   const Act a1 = count > 1 ? actions[1] : Act::Highlight;
   const Act a2 = count > 2 ? actions[2] : Act::Highlight;
-  pageActionPopup.show(titleText, labels, count, /*currentIndex=*/0, [this, a0, a1, a2, count](const int idx) {
+  const Act a3 = count > 3 ? actions[3] : Act::Highlight;
+  pageActionPopup.show(titleText, labels, count, /*currentIndex=*/0, [this, a0, a1, a2, a3, count](const int idx) {
     pageActionChose_ = true;
     if (idx < 0 || idx >= count) return;
-    const Act act = idx == 0 ? a0 : (idx == 1 ? a1 : a2);
+    const Act act = idx == 0 ? a0 : (idx == 1 ? a1 : (idx == 2 ? a2 : a3));
     // The popup is drawn over the page, so whatever this opens has to repaint it: the two
     // selection screens pass framebufferContainsPage = false and re-render from the Page
     // themselves, and the delete confirmation covers the dialog outright.
     switch (act) {
       case Act::LookUp:
         openWordSelect(/*framebufferContainsPage=*/false, pageActionX_, pageActionY_);
+        break;
+      case Act::LookUpPhrase:
+        openWordSelect(/*framebufferContainsPage=*/false, pageActionX_, pageActionY_, /*phrase=*/true);
         break;
       case Act::Highlight:
         openHighlightSelect(pageActionX_, pageActionY_);

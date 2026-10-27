@@ -101,6 +101,14 @@ class DictionaryWordSelectActivity final : public Activity {
   // The gloss box arrived here by running off the previous page (+1: open on the first word) or
   // the next one (-1: open on the last word). Overrides the gloss memory; a pointed word wins.
   void setStartAtPageEdge(const int edge) { startEdge_ = edge; }
+  // The pointed-at word anchors a phrase instead of being looked up; the next tapped word ends it.
+  void setPhraseStart(const bool on) { phraseStart_ = on; }
+  // The pointed-at word is part of this already-underlined phrase: look the whole phrase up at
+  // once instead of waiting for the end word.
+  void setPhraseMark(const LookupMarks::Mark& mark) {
+    phraseMark_ = mark;
+    hasPhraseMark_ = true;
+  }
 
   void onEnter() override;
   void onExit() override;
@@ -211,6 +219,15 @@ class DictionaryWordSelectActivity final : public Activity {
   // runs it instead of parking the cursor there and waiting for a tap that would only name
   // the word a second time.
   bool autoLookupPending_ = false;
+  bool phraseStart_ = false;  // see setPhraseStart
+  // An open range the next tap ends with a lookup of the whole phrase (Look Up Phrase, or a screen
+  // hold without the gloss box). Cleared whenever the range closes some other way.
+  bool phraseTapRanging_ = false;
+  LookupMarks::Mark phraseMark_{};  // see setPhraseMark
+  bool hasPhraseMark_ = false;
+  // The flat range [lo, hi] of phraseMark_'s underlined run that contains `cur`, matched by the
+  // same LookupMarks::step the underline is drawn with. False when the page shows no such run.
+  bool findMarkedRun(int cur, int& lo, int& hi) const;
 
   // See setGlossCursorMemory. glossCursorOut_ is written only for a session the gloss box ran in.
   PageMarks::PageKey markKey_;

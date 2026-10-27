@@ -32,6 +32,16 @@ bool isSkippedPunctuation(const uint32_t cp) {
   return utf8IsCjkPunctuation(cp) || (cp >= 0x2010 && cp <= 0x2027) || cp == 0x00B7;
 }
 
+// Bytes before the first space that has a word on both sides of it, or 0 for a single word.
+size_t firstWordLen(const char* text, const size_t len) {
+  size_t i = 0;
+  while (i < len && text[i] == ' ') i++;
+  while (i < len && text[i] != ' ') i++;
+  const size_t end = i;
+  while (i < len && text[i] == ' ') i++;
+  return i < len ? end : 0;
+}
+
 }  // namespace
 
 uint32_t LookupMarks::hashAppend(uint32_t h, const char* text, const size_t len, uint16_t* inOutLen) {
@@ -62,7 +72,7 @@ uint32_t LookupMarks::hashAppend(uint32_t h, const char* text, const size_t len,
 
 LookupMarks::Step LookupMarks::step(const Mark& m, RunState& r, const bool isCjk, const uint32_t tokenHash,
                                     const uint16_t tokenLen, const char* text, const size_t len, const int16_t rowY) {
-  if (!isCjk) {
+  if (!isCjk && !m.multiWord) {
     // One token, one word: the whole identity is here or it is not.
     return (tokenHash == m.wordHash && tokenLen == m.byteLen) ? Step::MatchedToken : Step::None;
   }
@@ -115,8 +125,10 @@ bool LookupMarks::markFor(const char* word, const int wordLen, Mark& out) {
   if (byteLen == 0) return false;
   out = Mark{};
   out.wordHash = wordHash;
-  out.headHash = hashWord(word, firstCodepointLen(word, static_cast<size_t>(wordLen)));
   out.byteLen = byteLen;
+  const size_t headWord = firstWordLen(word, static_cast<size_t>(wordLen));
+  out.multiWord = headWord > 0 ? 1 : 0;
+  out.headHash = hashWord(word, headWord > 0 ? headWord : firstCodepointLen(word, static_cast<size_t>(wordLen)));
   return true;
 }
 
@@ -135,9 +147,8 @@ bool LookupMarks::add(const char* word, const int wordLen, const char* chapterTi
     }
   }
 
-  uint16_t byteLen = 0;
-  const uint32_t wordHash = hashAppend(FNV_OFFSET, word, static_cast<size_t>(wordLen), &byteLen);
-  if (byteLen == 0) return false;  // nothing but punctuation
+  Mark identity;
+  if (!markFor(word, wordLen, identity)) return false;  // nothing but punctuation
 
   const uint32_t chapterHash = hashChapter(chapterTitle, titleLen > 0 ? static_cast<size_t>(titleLen) : 0);
   if (count_ == MAX_MARKS && hasPreferred_) {
@@ -155,14 +166,11 @@ bool LookupMarks::add(const char* word, const int wordLen, const char* chapterTi
     }
   }
 
-  const size_t headLen = firstCodepointLen(word, static_cast<size_t>(wordLen));
   Mark& m = marks_[writeIdx_];
+  m = identity;
   m.chapterHash = chapterHash;
-  m.wordHash = wordHash;
-  m.headHash = hashWord(word, headLen);
   m.page = static_cast<uint16_t>(page);
   m.pageCount = static_cast<uint16_t>(pageCount);
-  m.byteLen = byteLen;
 
   writeIdx_ = (writeIdx_ + 1) % MAX_MARKS;
   if (count_ < MAX_MARKS) count_++;

@@ -317,4 +317,50 @@ TEST_F(LookupMarksTest, StepOnlyOpensOnTheHeadCharacter) {
   EXPECT_FALSE(r.open);
 }
 
+// A phrase is one page token per word, so it is matched as a run opened on its first word. The
+// spaces between the tokens were never hashed, so the accumulated run equals the whole phrase.
+LookupMarks::Mark phraseMark(const char* phrase) {
+  LookupMarks::Mark m{};
+  EXPECT_TRUE(LookupMarks::markFor(phrase, static_cast<int>(std::strlen(phrase)), m));
+  return m;
+}
+
+TEST_F(LookupMarksTest, PhraseMarkOpensOnItsFirstWord) {
+  const LookupMarks::Mark m = phraseMark("look up");
+  EXPECT_EQ(m.multiWord, 1);
+  EXPECT_EQ(m.headHash, LookupMarks::hashWord("look", 4));
+  EXPECT_EQ(m.wordHash, LookupMarks::hashWord("lookup", 6));
+  // A single word keeps its first-letter head and the one-token comparison.
+  EXPECT_EQ(phraseMark("fork").multiWord, 0);
+  EXPECT_EQ(phraseMark(" fork ").multiWord, 0);
+}
+
+TEST_F(LookupMarksTest, StepMatchesAPhraseAcrossWordTokens) {
+  const LookupMarks::Mark m = phraseMark("look up");
+  LookupMarks::RunState r;
+  EXPECT_EQ(feed(m, r, /*isCjk=*/false, "to"), Step::None);
+  EXPECT_EQ(feed(m, r, /*isCjk=*/false, "Look"), Step::Opened);
+  EXPECT_EQ(feed(m, r, /*isCjk=*/false, "up,"), Step::MatchedRun);
+  EXPECT_FALSE(r.open);
+}
+
+// "look upon" shares the phrase's first word and prefix but is longer: the run overshoots and
+// marks nothing.
+TEST_F(LookupMarksTest, StepRejectsALongerPhraseSharingThePrefix) {
+  const LookupMarks::Mark m = phraseMark("look up");
+  LookupMarks::RunState r;
+  EXPECT_EQ(feed(m, r, /*isCjk=*/false, "look"), Step::Opened);
+  EXPECT_EQ(feed(m, r, /*isCjk=*/false, "upon"), Step::Extended);
+  EXPECT_FALSE(r.open);
+}
+
+TEST_F(LookupMarksTest, StepCarriesAPhraseAcrossOneLineBreak) {
+  const LookupMarks::Mark m = phraseMark("in spite of");
+  LookupMarks::RunState r;
+  EXPECT_EQ(feed(m, r, /*isCjk=*/false, "In", /*rowY=*/100), Step::Opened);
+  EXPECT_EQ(feed(m, r, /*isCjk=*/false, "spite", /*rowY=*/100), Step::Extended);
+  EXPECT_EQ(feed(m, r, /*isCjk=*/false, "of", /*rowY=*/140), Step::MatchedRun);
+  EXPECT_TRUE(r.wrapped);
+}
+
 }  // namespace

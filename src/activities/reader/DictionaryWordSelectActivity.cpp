@@ -216,6 +216,9 @@ void DictionaryWordSelectActivity::onEnter() {
       pointedAtWord = true;
       if (mode_ == Mode::HighlightRange) {
         navigator.beginMultiSelectAt(hit);
+      } else if (phraseStart_ && !hasPhraseMark_) {
+        navigator.beginMultiSelectAt(hit);
+        phraseTapRanging_ = true;
       } else {
         navigator.selectFlatIndex(hit);
         autoLookupPending_ = true;
@@ -231,7 +234,7 @@ void DictionaryWordSelectActivity::onEnter() {
   // requests, and the gloss is the optional extra.
   initGloss();
   // With the gloss box up a pointed-at word is previewed in the box; a tap on it looks it up.
-  if (gloss_) autoLookupPending_ = false;
+  if (gloss_ && !hasPhraseMark_) autoLookupPending_ = false;
   // With the gloss box up the cursor is read along the text rather than dropped where the eyes
   // were, so the dwell band is ignored: resume where this page's last session left off, else
   // start at its first paragraph. A pointed-at word still wins.
@@ -867,6 +870,23 @@ void DictionaryWordSelectActivity::loop() {
   // this tick, and its overlay is what renders, so the word-select screen never flashes past.
   if (autoLookupPending_) {
     autoLookupPending_ = false;
+    if (hasPhraseMark_) {
+      // Resolved here, after the entry scan's merge has renumbered the page; only the cursor is
+      // carried across that.
+      const int cur = navigator.getCurrentFlatIndex();
+      int lo = 0;
+      int hi = 0;
+      if (findMarkedRun(cur, lo, hi)) {
+        navigator.selectFlatIndex(hi);
+        controller.lookupOrPopup(navigator.buildPhrase(lo, hi));
+      } else {
+        // The page no longer shows the underline under the finger: pick the end word by tap.
+        navigator.beginMultiSelectAt(cur);
+        phraseTapRanging_ = true;
+        requestUpdate();
+      }
+      return;
+    }
     controller.lookupSelected(navigator);
     return;
   }
@@ -929,17 +949,21 @@ void DictionaryWordSelectActivity::loop() {
   // touch-only board has no Confirm to long-press into multi-select with.
   //
   // With the gloss box up, Dictionary mode ranges too: a screen hold anchors a range the side
-  // buttons then grow, a tap inside it looks the phrase up, a tap outside drops it.
+  // buttons then grow, a tap inside it looks the phrase up, a tap outside drops it. Without the
+  // box a screen hold anchors a phrase the next tapped word ends and looks up, as Look Up Phrase
+  // does.
   HangTrace::mark(HangTrace::Loop, HangTrace::DwsLoopRest);
+  if (!navigator.isMultiSelecting()) phraseTapRanging_ = false;
   const bool tapRanging = mode_ == Mode::HighlightRange;
   const bool autoRange = autoRangeActive();  // a card word picks like a single word
   const bool glossRanging = gloss_ && mode_ == Mode::Dictionary;
-  if (mappedInput.hasTouch() && (tapRanging || autoRange || glossRanging || !navigator.isMultiSelecting())) {
+  if (mappedInput.hasTouch() &&
+      (tapRanging || autoRange || glossRanging || phraseTapRanging_ || !navigator.isMultiSelecting())) {
     const int lineHeight = renderer.getLineHeight(SETTINGS.getReaderFontId());
     int tx = 0;
     int ty = 0;
     // wasScreenLongPress swallows the rest of the contact, so the lift cannot also tap.
-    if (glossRanging && mappedInput.wasScreenLongPress(tx, ty)) {
+    if (mode_ == Mode::Dictionary && mappedInput.wasScreenLongPress(tx, ty)) {
       const int hit = navigator.wordIndexAtPoint(tx, ty, lineHeight);
       touchDownSeen_ = false;
       if (hit >= 0) {
@@ -947,6 +971,7 @@ void DictionaryWordSelectActivity::loop() {
         if (navigator.isMultiSelecting()) navigator.endMultiSelect();
         autoLo_ = autoHi_ = -1;
         navigator.beginMultiSelectAt(hit);
+        phraseTapRanging_ = !gloss_;
         requestUpdate();
       }
       return;
@@ -975,6 +1000,14 @@ void DictionaryWordSelectActivity::loop() {
       const bool wasSelected = touchDownSeen_ ? touchDownWasSelected_ : (hit >= 0 && isSelectedHit(hit));
       touchDownSeen_ = false;
       if (hit >= 0) {
+        if (phraseTapRanging_) {
+          const int anchor = navigator.getAnchorFlatIndex();
+          navigator.endMultiSelect();
+          phraseTapRanging_ = false;
+          navigator.selectFlatIndex(hit);
+          controller.lookupOrPopup(navigator.buildPhrase(anchor, hit));
+          return;
+        }
         if (glossRanging && manualRangeActive()) {
           const int anchor = navigator.getAnchorFlatIndex();
           const int cursor = navigator.getCurrentFlatIndex();
@@ -1968,6 +2001,34 @@ void DictionaryWordSelectActivity::renderPageStrip(int y, int height) {
     el->render(renderer, fontId, marginLeft, marginTop);
   }
   drawPageMarks(y, y + height);
+}
+
+bool DictionaryWordSelectActivity::findMarkedRun(const int cur, int& lo, int& hi) const {
+  LookupMarks::RunState state;
+  int start = -1;
+  const int count = navigator.wordCount();
+  for (int i = 0; i < count; i++) {
+    const auto* w = navigator.getWordAt(i);
+    if (!w) continue;
+    const char* text = navigator.getDisplay(*w);
+    uint16_t tokenLen = 0;
+    const uint32_t tokenHash = LookupMarks::hashAppend(LookupMarks::FNV_OFFSET, text, w->textLen, &tokenLen);
+    switch (LookupMarks::step(phraseMark_, state, /*isCjk=*/false, tokenHash, tokenLen, text, w->textLen, w->row)) {
+      case LookupMarks::Step::Opened:
+        start = i;
+        break;
+      case LookupMarks::Step::MatchedRun:
+        if (start >= 0 && cur >= start && cur <= i) {
+          lo = start;
+          hi = i;
+          return true;
+        }
+        break;
+      default:
+        break;
+    }
+  }
+  return false;
 }
 
 void DictionaryWordSelectActivity::addLookupMark(const std::string& word, const std::string& excerpt) const {

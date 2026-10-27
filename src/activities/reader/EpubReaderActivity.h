@@ -628,7 +628,9 @@ class EpubReaderActivity final : public Activity {
   // message is already showing -- the caller must then stop returning early so the
   // message's own timeout can run.
   bool runReaderAction(HomeButtonAction action);
-  void openWordSelect(bool framebufferContainsPage, int pointX = -1, int pointY = -1);
+  // phrase: the long-press menu's Look Up Phrase -- the pointed word anchors a range and the next
+  // tapped word ends it and looks the phrase up.
+  void openWordSelect(bool framebufferContainsPage, int pointX = -1, int pointY = -1, bool phrase = false);
   // Hands word select the gloss cursor memory for this page, forgetting it first when the page
   // (or its layout) differs from the one it was left on.
   void attachGlossCursorMemory(DictionaryWordSelectActivity& wordSelect, int page, int pageCount);
@@ -835,7 +837,8 @@ class EpubReaderActivity final : public Activity {
   static std::string wordScanLookupTail(const Page& next);
   // Word lookup on a vertical page: tokens from its cells, the page redrawn by paintVerticalPage.
   // `highlight`: pick a range to save as a quote instead of a word to look up.
-  void openVerticalWordSelect(bool framebufferContainsPage, int pointX, int pointY, bool highlight = false);
+  void openVerticalWordSelect(bool framebufferContainsPage, int pointX, int pointY, bool highlight = false,
+                              bool phrase = false);
   static void paintVerticalPageThunk(void* ctx);
   static void reloadLookupMarksThunk(void* ctx) { static_cast<EpubReaderActivity*>(ctx)->reloadLookupMarks(); }
   int failedVerticalSpineIndex = -1;

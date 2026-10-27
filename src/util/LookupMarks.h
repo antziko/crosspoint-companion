@@ -25,16 +25,21 @@ class LookupMarks {
   struct Mark {
     uint32_t chapterHash;  // hash of the card's chapter title (the bytes before " X/Y")
     uint32_t wordHash;     // hash of the whole normalised word
-    // Hash of the word's FIRST codepoint. CJK is laid out one token per character, so a CJK
-    // word can only be matched by opening a run on its first character and accumulating from
-    // there; for a word that is one page token this is unused.
+    // Hash of the word's FIRST codepoint -- or, for a multiWord phrase, of its first word. CJK is
+    // laid out one token per character and a phrase one token per word, so either can only be
+    // matched by opening a run on its head and accumulating from there; for a word that is one
+    // page token this is unused.
     uint32_t headHash;
     uint16_t page;       // 1-based in-chapter page from the card's " X/Y"
     uint16_t pageCount;  // its Y: a chapter that has re-paginated no longer matches
-    uint16_t byteLen;    // normalised byte length — where a CJK run stops accumulating
+    uint16_t byteLen;    // normalised byte length — where a run stops accumulating
+    // Several space-separated words ("look up"): matched as a run opened on the first word, like
+    // a CJK word. Sits in what was the struct's tail padding.
+    uint8_t multiWord;
   };
+  static_assert(sizeof(Mark) <= 20, "Mark grew past its padded size: MAX_MARKS * sizeof(Mark) is resident");
 
-  // Newest N lookups of the book. 128 * 16 B = 2 KB, allocated once per book. Older marks are
+  // Newest N lookups of the book. 128 * 20 B = 2.5 KB, allocated once per book. Older marks are
   // dropped rather than grown into: the reader's heap is the constraint, and the words you
   // looked up recently are the ones you are still learning.
   static constexpr int MAX_MARKS = 128;
@@ -80,7 +85,9 @@ class LookupMarks {
   // comparison; CJK lays out one token per CHARACTER, so a marked CJK word is a RUN — opened on
   // a token whose hash matches the word's first character, then accumulating each following
   // token into the same FNV until the word's normalised byte length is reached, marking only if
-  // the accumulated hash matches the whole word. One RunState per mark on the page, stepped once
+  // the accumulated hash matches the whole word. A multiWord phrase is a run of word tokens,
+  // opened on its first word; the spaces between them were never hashed, so it accumulates the
+  // same way. One RunState per mark on the page, stepped once
   // per token in page order.
   //
   // A single forward pass with no backtracking: a word immediately preceded by its own first
