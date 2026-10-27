@@ -1,5 +1,6 @@
 #pragma once
 
+#include <climits>
 #include <utility>
 
 #include "../VerticalParsedText.h"
@@ -26,7 +27,10 @@ class VerticalTextBlock {
   explicit VerticalTextBlock(const VerticalPage& page) : page_(page) {}
 
   void render(GfxRenderer& renderer, int fontId, int offsetX = 0, int offsetY = 0, bool black = true) const;
-  void render(GfxRenderer& renderer, int fontId, int rubyFontId, int offsetX, int offsetY, bool black = true) const;
+  // rubyBottomY: screen y that ruby must not run past (the text area's foot, so an annotation at
+  // the end of a column stays clear of the status bar). INT_MAX = no limit.
+  void render(GfxRenderer& renderer, int fontId, int rubyFontId, int offsetX, int offsetY, bool black = true,
+              int rubyBottomY = INT_MAX) const;
 
   // Inline images only, at the positions render() puts them: the grayscale refine of an image on a
   // text page when its text stays B/W.

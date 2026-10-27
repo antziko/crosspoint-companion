@@ -176,7 +176,7 @@ void VerticalTextBlock::render(GfxRenderer& renderer, int fontId, int offsetX, i
 }
 
 void VerticalTextBlock::render(GfxRenderer& renderer, int fontId, int rubyFontId, int offsetX, int offsetY,
-                               bool black) const {
+                               bool black, const int rubyBottomY) const {
   const int cellPxLocal = drawGlyphs(renderer, page_, fontId, offsetX, offsetY, black);
 
   // JLREQ 3.3.2: ruby is half the size of its base and set solid, so one ruby character's body is
@@ -190,9 +190,6 @@ void VerticalTextBlock::render(GfxRenderer& renderer, int fontId, int rubyFontId
   const int rubyBaselineInBody = verticalCellBaselineOffset(renderer, rubyFontId, rubyEmPx) / 2;
   const auto rubyStyle = static_cast<EpdFontFamily::Style>(EpdFontFamily::SUP);
 
-  int prevRubyBottom = -9999;
-  uint16_t prevRubyColumn = UINT16_MAX;
-
   // JLREQ 3.3.8: ruby may hang over ordinary kana/kanji, but not over punctuation or brackets
   // (their half-em placement is what keeps them legible), nor over a character carrying its own.
   const auto hangoverAllowedOver = [this](const VerticalGlyph* n) {
@@ -202,14 +199,92 @@ void VerticalTextBlock::render(GfxRenderer& renderer, int fontId, int rubyFontId
     if (n->codepoint == 0) return false;
     return Kinsoku::verticalShiftType(n->codepoint) == 0 && !Kinsoku::needsVerticalRotation(n->codepoint);
   };
+  const auto hasRuby = [this](const VerticalGlyph& g) {
+    return !page_.glyphTextStr(g).empty() && !VerticalParsedText::isImageMarker(g.codepoint) &&
+           g.renderKind != VerticalGlyph::RotatedRun && g.renderKind != VerticalGlyph::UprightRun;
+  };
+  const auto rubyBlockHeight = [this, rubyLineH](const VerticalGlyph& g) {
+    int count = 0;
+    const auto* p = reinterpret_cast<const unsigned char*>(page_.glyphTextStr(g).c_str());
+    while (*p && utf8NextCodepoint(&p) != 0) count++;
+    return count * rubyLineH;
+  };
+
+  // Top of glyph gi's ruby body, set on its base character before any neighbour is considered.
+  // JLREQ 3.3.5 nakatsuki (中付き): the ruby text's vertical centre aligns with the base
+  // character's. Ruby is set solid, so its virtual length is N ruby bodies, and the alignment is
+  // on VIRTUAL BODIES rather than ink.
+  const auto naturalRubyTop = [&](const size_t gi, const int blockH) {
+    const VerticalGlyph& g = page_.glyphs[gi];
+    int top = g.y + offsetY + (cellPxLocal - blockH) / 2;
+    // JLREQ 3.3.8: nakatsuki spills half the overhang each way; where a neighbour cannot be hung
+    // over, its share moves to the other side.
+    const int overhang = blockH - cellPxLocal;
+    if (overhang > 0) {
+      const VerticalGlyph* before = nullptr;
+      const VerticalGlyph* after = nullptr;
+      if (gi > 0 && page_.glyphs[gi - 1].column == g.column) before = &page_.glyphs[gi - 1];
+      if (gi + 1 < page_.glyphs.size() && page_.glyphs[gi + 1].column == g.column) after = &page_.glyphs[gi + 1];
+      const bool canBefore = hangoverAllowedOver(before);
+      const bool canAfter = hangoverAllowedOver(after);
+      if (canAfter && !canBefore) {
+        top += overhang / 2;  // push it all onto the following character
+      } else if (canBefore && !canAfter) {
+        top -= overhang / 2;  // ... or all onto the preceding one
+      }
+      // both or neither: leave it centred; the forward pass below then favours the character
+      // after, as the spec prefers.
+    }
+    return top;
+  };
+
+  // Ruby body tops for the current column, planned when its first glyph is reached: forward so no
+  // annotation overlaps the one before it, then backward so the last one ends by rubyBottomY,
+  // lifting the ones above it only as far as that needs. A column with more ruby than fits here
+  // keeps the forward pass alone.
+  constexpr size_t MAX_COLUMN_RUBY = 48;
+  int16_t columnRubyTop[MAX_COLUMN_RUBY];
+  size_t columnRubyCount = 0;
+  size_t columnRubyNext = 0;
+  bool columnPlanned = false;
+  uint16_t plannedColumn = UINT16_MAX;
+  int prevRubyBottom = -9999;
 
   for (size_t gi = 0; gi < page_.glyphs.size(); gi++) {
     const VerticalGlyph& g = page_.glyphs[gi];
-    const std::string& rubyText = page_.glyphTextStr(g);
-    if (rubyText.empty() || VerticalParsedText::isImageMarker(g.codepoint) ||
-        g.renderKind == VerticalGlyph::RotatedRun || g.renderKind == VerticalGlyph::UprightRun) {
-      continue;
+    if (g.column != plannedColumn) {
+      plannedColumn = g.column;
+      prevRubyBottom = -9999;
+      columnRubyCount = 0;
+      columnRubyNext = 0;
+      size_t end = gi;
+      while (end < page_.glyphs.size() && page_.glyphs[end].column == g.column) end++;
+      columnPlanned = true;
+      int bottom = -9999;
+      int16_t blockHs[MAX_COLUMN_RUBY];
+      for (size_t j = gi; j < end; j++) {
+        if (!hasRuby(page_.glyphs[j])) continue;
+        if (columnRubyCount == MAX_COLUMN_RUBY) {
+          columnPlanned = false;
+          break;
+        }
+        const int blockH = rubyBlockHeight(page_.glyphs[j]);
+        const int top = std::max(naturalRubyTop(j, blockH), bottom + 1);
+        columnRubyTop[columnRubyCount] = static_cast<int16_t>(top);
+        blockHs[columnRubyCount++] = static_cast<int16_t>(blockH);
+        bottom = top + blockH;
+      }
+      if (columnPlanned && rubyBottomY != INT_MAX) {
+        int limit = rubyBottomY;
+        for (size_t k = columnRubyCount; k-- > 0;) {
+          if (columnRubyTop[k] + blockHs[k] <= limit) break;
+          columnRubyTop[k] = static_cast<int16_t>(limit - blockHs[k]);
+          limit = columnRubyTop[k] - 1;
+        }
+      }
     }
+    if (!hasRuby(g)) continue;
+    const std::string& rubyText = page_.glyphTextStr(g);
 
     // Walk the ruby string once: count its characters, and measure how far right its ink can
     // reach. Every ruby character in the stack is drawn at the same x, so the widest one decides.
@@ -244,39 +319,17 @@ void VerticalTextBlock::render(GfxRenderer& renderer, int fontId, int rubyFontId
     const int rubyReach = rubyInkRight > 0 ? rubyInkRight : std::max(1, cellPxLocal / 2);
     const int rubyX = std::min(g.x + offsetX + cellPxLocal, renderer.getScreenWidth() - rubyReach);
 
-    // JLREQ 3.3.5 nakatsuki (中付き): the ruby text's vertical centre aligns with the base
-    // character's. Ruby is set solid, so its virtual length is N ruby bodies, and the alignment is
-    // on VIRTUAL BODIES rather than ink. drawText() takes a top and puts the baseline
-    // textBaselineOffset() below it, so the top that lands the baseline where the body wants it
-    // is the body top plus the difference.
     const int rubyBlockH = static_cast<int>(rubyCharCount) * rubyLineH;
-    const int rubyBodyTop = g.y + offsetY + (cellPxLocal - rubyBlockH) / 2;
+    int rubyBodyTop;
+    if (columnPlanned) {
+      rubyBodyTop = columnRubyTop[columnRubyNext++];
+    } else {
+      rubyBodyTop = std::max(naturalRubyTop(gi, rubyBlockH), prevRubyBottom + 1);
+      prevRubyBottom = rubyBodyTop + rubyBlockH;
+    }
+    // drawText() takes a top and puts the baseline textBaselineOffset() below it, so the top that
+    // lands the baseline where the body wants it is the body top plus the difference.
     int rubyY = rubyBodyTop + rubyBaselineInBody - renderer.textBaselineOffset(rubyFontId, rubyText.c_str(), rubyStyle);
-
-    // JLREQ 3.3.8: nakatsuki spills half the overhang each way; where a neighbour cannot be hung
-    // over, its share moves to the other side.
-    const int overhang = rubyBlockH - cellPxLocal;
-    if (overhang > 0) {
-      const VerticalGlyph* before = nullptr;
-      const VerticalGlyph* after = nullptr;
-      if (gi > 0 && page_.glyphs[gi - 1].column == g.column) before = &page_.glyphs[gi - 1];
-      if (gi + 1 < page_.glyphs.size() && page_.glyphs[gi + 1].column == g.column) after = &page_.glyphs[gi + 1];
-      const bool canBefore = hangoverAllowedOver(before);
-      const bool canAfter = hangoverAllowedOver(after);
-      if (canAfter && !canBefore) {
-        rubyY += overhang / 2;  // push it all onto the following character
-      } else if (canBefore && !canAfter) {
-        rubyY -= overhang / 2;  // ... or all onto the preceding one
-      }
-      // both or neither: leave it centred; the forward-only check below then favours the
-      // character after, as the spec prefers.
-    }
-    if (g.column == prevRubyColumn && rubyY < prevRubyBottom + 1) {
-      rubyY = prevRubyBottom + 1;
-    }
-
-    prevRubyBottom = rubyY + rubyBlockH;
-    prevRubyColumn = g.column;
 
     size_t ri = 0;
     while (ri < rubyText.size()) {

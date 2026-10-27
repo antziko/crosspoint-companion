@@ -175,7 +175,8 @@ void EpubReaderActivity::renderVerticalPageBody(const VerticalPage& vpage, const
   const int fontId = SETTINGS.getReaderFontId();
   if (useFurigana()) {
     // Ruby in the body font: its SUP style draws at 50%, matching the half-em gap the layout keeps.
-    block.render(renderer, fontId, fontId, marginLeft, marginTop, true);
+    // It ends by the text area's foot, so a column's last annotation stays off the status bar.
+    block.render(renderer, fontId, fontId, marginLeft, marginTop, true, marginTop + buildViewportHeight);
   } else {
     block.render(renderer, fontId, marginLeft, marginTop, true);
   }
