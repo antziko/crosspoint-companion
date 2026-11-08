@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <string>
 
@@ -75,6 +76,8 @@ class ReaderToolbarUi : public UiAppHost {
   freeink::ui::ListNav& nav() { return nav_; }
   // Rows one page holds, measured after the first render.
   int visibleRows() const { return nav_.pageRows(); }
+  // Row (exclusive) the next render's viewport must reach -- see listSwipeScroll's pinEnd.
+  void setPinEnd(const int row) { pinEnd_ = row; }
 
  private:
   static void screenFn(UiScreen& screen, void* user);
@@ -86,6 +89,8 @@ class ReaderToolbarUi : public UiAppHost {
   Model model_;
   Routed pending_;
   freeink::ui::ListNav nav_;
+  // Set by the loop task after a backward page, consumed by render() on the render task.
+  std::atomic<int> pinEnd_{-1};
 
   // Row window materialised for the visible page only (a contents list runs to
   // hundreds of entries; labels are copied here so ListItem can point at them).

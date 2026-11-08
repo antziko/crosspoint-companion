@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "activities/Activity.h"
 #include "components/UITheme.h"  // Rect
 #include "components/UiAppHost.h"
@@ -116,6 +118,9 @@ class UiListActivity : public Activity, protected UiAppHost {
   void onBeforeRoute(const freeink::ui::InputSnapshot& snap) override;
 
   const bool wantsTouchLongPress;
+  // Row (exclusive) the next frame's viewport must reach after a backward swipe; -1 for
+  // none. Set by the loop task, consumed by renderListFrame() on the render task.
+  std::atomic<int> pinEnd_{-1};
   // Press-origin latches for the default handleButtons(): a release only acts when its
   // press landed in this activity, so a screen opened mid-hold ignores the stale release
   // that ends the launching gesture instead of self-activating.

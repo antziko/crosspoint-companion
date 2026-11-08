@@ -64,6 +64,9 @@ struct SyncScopeResult {
 
 struct FootnoteResult {
   std::string href;
+  // page->links index of the chosen link, so the reader can read its index entry (with the page
+  // before, where an entry can begin); -1 when unknown.
+  int linkIndex = -1;
 };
 
 struct WordResult {

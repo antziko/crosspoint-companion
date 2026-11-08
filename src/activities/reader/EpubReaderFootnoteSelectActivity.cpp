@@ -8,6 +8,7 @@
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "components/UITheme.h"
+#include "util/IndexTermPage.h"
 
 namespace {
 constexpr unsigned long WORD_REPEAT_START_MS = 500;
@@ -23,24 +24,22 @@ void EpubReaderFootnoteSelectActivity::onEnter() {
 
 void EpubReaderFootnoteSelectActivity::buildFootnoteLinks() {
   footnoteLinks.clear();
-  footnoteLinks.reserve(page->footnotes.size());
-
-  // Match each footnote entry to its PageLink on this page. Footnote links
-  // and footnote entries share the same href, so we can cross-reference them.
-  for (const auto& footnote : page->footnotes) {
-    const auto link = std::find_if(page->links.begin(), page->links.end(), [&footnote](const PageLink& candidate) {
-      return strcmp(candidate.href, footnote.href) == 0;
-    });
-    if (link != page->links.end()) {
-      footnoteLinks.push_back({&*link, &footnote});
-    }
+  footnoteLinks.reserve(page->links.size());
+  for (size_t i = 0; i < page->links.size(); i++) {
+    footnoteLinks.push_back({&page->links[i], i});
   }
 }
 
 void EpubReaderFootnoteSelectActivity::performJump() {
   if (footnoteLinks.empty()) return;
+  const FootnoteLink& chosen = footnoteLinks[selected];
+  FootnoteResult footnote;
+  footnote.href = chosen.link->href;
+  // Two entries can share one target ("Bob Hawke, 323" and "Dan Quayle, 323"): only the chosen
+  // link names the term, so the reader is told which one it was.
+  footnote.linkIndex = static_cast<int>(chosen.linkIndex);
   ActivityResult result;
-  result.data = FootnoteResult{footnoteLinks[selected].footnote->href};
+  result.data = std::move(footnote);
   setResult(std::move(result));
   finish();
 }
@@ -152,10 +151,10 @@ bool EpubReaderFootnoteSelectActivity::drawHighlightWithSnapshot() {
   snapshotIdx = saved ? selected : -1;
 
   renderer.fillRect(hx, hy, hw, hh, true);
-  // Draw a small marker (the footnote number) at the highlight position
-  const char* number = footnoteLinks[selected].footnote->number;
-  if (number[0]) {
-    renderer.drawText(SETTINGS.getReaderFontId(), x, y - 1, number, false);
+  // Redraw the link's own text inverted inside the highlight ("207", "3").
+  char label[FOOTNOTE_NUMBER_LEN];
+  if (IndexTermPage::linkLabel(*page, footnoteLinks[selected].linkIndex, label, sizeof(label))) {
+    renderer.drawText(SETTINGS.getReaderFontId(), x, y - 1, label, false);
   }
   return saved;
 }

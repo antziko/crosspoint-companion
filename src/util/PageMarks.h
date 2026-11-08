@@ -38,8 +38,18 @@ struct SnippetMiss {
 // A snippet under kMinSnippetLen is too common to trust on a guessed page; `allowShort` is for a
 // page already pinned by the mark's own offset.
 constexpr size_t kMinSnippetLen = 8;
+// `endIndex`, when given, receives the token a Whole match closed on. `caseFold` compares ASCII
+// letters case-insensitively (the index term search; marks keep exact matching).
 SnippetAt findSnippet(const Page& page, const char* snippet, SnippetMiss* miss = nullptr,
-                      uint16_t* startIndex = nullptr, bool allowShort = false);
+                      uint16_t* startIndex = nullptr, bool allowShort = false, uint16_t* endIndex = nullptr,
+                      bool caseFold = false);
+
+// A 3px box around the page-local tokens [start, end] (end UINT16_MAX: to the page end), one per
+// line the run occupies: the term an index jump landed on. Black outline only, so it reads apart
+// from quote bands, the link/lookup underlines and the selection fill. Call after Page::render()
+// on a black-and-white pass. Allocates nothing.
+void drawTermBox(const GfxRenderer& renderer, const Page& page, int fontId, int marginLeft, int marginTop,
+                 uint16_t start, uint16_t end);
 
 // A point bookmark's extent. It records how many words its page held and is re-found by its
 // opening words, so after a re-flow its end is that many words further on. A "span word" is a

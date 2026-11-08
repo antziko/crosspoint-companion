@@ -36,7 +36,7 @@ inline size_t withoutTrailingHyphen(const char* text, size_t len) {
  * Copies of one book routinely differ only in quote style -- a re-converted EPUB, or a mark made
  * on another device's copy -- and a mark saved against one must still find its words in the other.
  */
-inline char foldedUnit(const char* s, const size_t avail, size_t& n) {
+inline char foldedUnit(const char* s, const size_t avail, size_t& n, const bool caseFold = false) {
   if (avail >= 3 && static_cast<uint8_t>(s[0]) == 0xE2 && static_cast<uint8_t>(s[1]) == 0x80) {
     const uint8_t c = static_cast<uint8_t>(s[2]);
     if (c >= 0x98 && c <= 0x9B) {  // ‘ ’ ‚ ‛
@@ -49,6 +49,8 @@ inline char foldedUnit(const char* s, const size_t avail, size_t& n) {
     }
   }
   n = 1;
+  // ASCII only: an index entry's capitalisation ("Cooling-Off Day") need not match the text's.
+  if (caseFold && s[0] >= 'A' && s[0] <= 'Z') return static_cast<char>(s[0] - 'A' + 'a');
   return s[0];
 }
 
@@ -56,7 +58,8 @@ inline char foldedUnit(const char* s, const size_t avail, size_t& n) {
  * How many bytes of `a` the whole of `b` covers, comparing under foldedUnit; -1 when they
  * differ, or when `a` runs out first -- `aRanOut` is then set if everything up to there agreed.
  */
-inline int foldedPrefix(const char* a, const size_t alen, const char* b, const size_t blen, bool& aRanOut) {
+inline int foldedPrefix(const char* a, const size_t alen, const char* b, const size_t blen, bool& aRanOut,
+                        const bool caseFold = false) {
   aRanOut = false;
   size_t i = 0;
   size_t j = 0;
@@ -67,11 +70,57 @@ inline int foldedPrefix(const char* a, const size_t alen, const char* b, const s
     }
     size_t na = 0;
     size_t nb = 0;
-    if (foldedUnit(a + i, alen - i, na) != foldedUnit(b + j, blen - j, nb)) return -1;
+    if (foldedUnit(a + i, alen - i, na, caseFold) != foldedUnit(b + j, blen - j, nb, caseFold)) return -1;
     i += na;
     j += nb;
   }
   return static_cast<int>(i);
+}
+
+/**
+ * Narrows a page token to its word: leading and trailing punctuation and a trailing possessive
+ * dropped ("(Hawke", "Hawke,", "Hawke's" -> "Hawke"). The page keeps punctuation inside its
+ * tokens; a stored quote carries the same punctuation, but a searched name does not.
+ */
+inline void wordCore(const char*& text, size_t& len) {
+  const auto punctAt = [](const char* s, const size_t avail) -> size_t {
+    const uint8_t c = static_cast<uint8_t>(s[0]);
+    if (c < 0x80) {
+      const bool alnum = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+      return alnum ? 0 : 1;
+    }
+    // U+2010..U+203F: dashes, curly quotes, ellipsis
+    return (avail >= 3 && c == 0xE2 && static_cast<uint8_t>(s[1]) == 0x80) ? 3 : 0;
+  };
+  for (size_t n; len > 0 && (n = punctAt(text, len)) != 0 && n <= len;) {
+    text += n;
+    len -= n;
+  }
+  for (bool trimmed = true; trimmed && len > 0;) {
+    trimmed = false;
+    if (len >= 2 && (text[len - 1] == 's' || text[len - 1] == 'S') && text[len - 2] == '\'') {
+      len -= 2;
+      trimmed = true;
+    } else if (len >= 4 && (text[len - 1] == 's' || text[len - 1] == 'S') &&
+               static_cast<uint8_t>(text[len - 4]) == 0xE2 && static_cast<uint8_t>(text[len - 3]) == 0x80 &&
+               static_cast<uint8_t>(text[len - 2]) == 0x99) {
+      len -= 4;  // ’s
+      trimmed = true;
+    } else {
+      // Step back over one trailing punctuation unit (ASCII byte or a 3-byte U+20xx).
+      if (static_cast<uint8_t>(text[len - 1]) < 0x80) {
+        const char c = text[len - 1];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
+          len--;
+          trimmed = true;
+        }
+      } else if (len >= 3 && static_cast<uint8_t>(text[len - 3]) == 0xE2 &&
+                 static_cast<uint8_t>(text[len - 2]) == 0x80) {
+        len -= 3;
+        trimmed = true;
+      }
+    }
+  }
 }
 
 /** One quote being matched against the page, a token at a time. */
@@ -83,10 +132,14 @@ struct Matcher {
   uint8_t cursor = 0;      // where the scan for the part after it resumes
   uint8_t matchedLen = 0;  // how much of it the tokens so far have covered
   uint16_t start = 0;
+  uint16_t end = 0;  // the token the match completed on; valid once done
   bool open = false;
   bool done = false;
   bool lastPart = false;   // no further part follows the one being matched
   bool truncated = false;  // the snippet fills its buffer, so its tail may be a part word
+  // Index term search only: compare ASCII letters case-insensitively and match a page word without
+  // the punctuation around it (wordCore). Quotes and highlights keep exact matching.
+  bool caseFold = false;
 
   // PageTokens::nextTextPart applies the page's own tokenisation to the snippet, so the
   // two sequences line up: a word with no letter or digit is skipped on both sides, and
@@ -131,11 +184,12 @@ struct Matcher {
   bool offer(const char* text, size_t len, const uint16_t index) {
     if (done || partLen == 0) return false;
     len = withoutTrailingHyphen(text, len);
+    if (caseFold) wordCore(text, len);
     if (len == 0) return false;
 
     const size_t remaining = partLen - matchedLen;
     bool snippetRanOut = false;
-    const int covered = foldedPrefix(snippet + partStart + matchedLen, remaining, text, len, snippetRanOut);
+    const int covered = foldedPrefix(snippet + partStart + matchedLen, remaining, text, len, snippetRanOut, caseFold);
     // A snippet is cut to fit its buffer wherever the cut falls, so the last part of a
     // full one is usually the head of a longer word: "...playground, so l" for "let's".
     // Requiring the page's word to fit inside it fails every highlight over the cap.
@@ -146,6 +200,7 @@ struct Matcher {
         open = true;
         start = index;
       }
+      end = index;
       done = true;
       return true;
     }
@@ -167,6 +222,7 @@ struct Matcher {
 
     takePart(cursor);
     if (partLen == 0) {
+      end = index;
       done = true;
       return true;
     }

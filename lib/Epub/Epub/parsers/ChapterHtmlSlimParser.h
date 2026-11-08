@@ -89,6 +89,9 @@ class ChapterHtmlSlimParser {
   std::string contentBase;
   std::string imageBasePath;
   int imageCounter = 0;
+  // "[n]" markers written in place of a link's only content, a small image (a note icon): a link
+  // with no text has nothing to tap or list. Counted per chapter.
+  int imageNoteCounter = 0;
 
   // Style tracking (replaces depth-based approach)
   struct StyleStackEntry {
@@ -165,6 +168,36 @@ class ChapterHtmlSlimParser {
   std::deque<std::pair<std::string, uint16_t>> anchorData;
   std::string pendingAnchorId;          // deferred until after previous text block is flushed
   std::vector<std::string> tocAnchors;  // the list of anchors that are TOC chapter boundaries
+  // Inline anchors (<a id>, empty <span id/>) that sit mid-paragraph: recorded on the page of
+  // the line holding word `wordIndex` (counted like pendingFootnotes), not at the block start.
+  // Fixed pools so a chapter of markers costs no heap beyond each id's string (short ids fit
+  // std::string's inline buffer); a full pool falls back to the block-start path.
+  struct WordAnchor {
+    std::string id;
+    int wordIndex = 0;
+  };
+  static constexpr size_t MAX_PENDING_WORD_ANCHORS = 16;
+  std::array<WordAnchor, MAX_PENDING_WORD_ANCHORS> pendingWordAnchors;
+  uint8_t pendingWordAnchorCount = 0;
+  // Anchors inside a grid table row: the row is laid out (and may move to a new page) only
+  // when it ends, so they are recorded on the page its first line lands on.
+  static constexpr size_t MAX_PENDING_ROW_ANCHORS = 8;
+  std::array<std::string, MAX_PENDING_ROW_ANCHORS> pendingRowAnchors;
+  uint8_t pendingRowAnchorCount = 0;
+  // An open <span id> that may be an empty marker (<span id="x"/>); text inside cancels it,
+  // since converters wrap text in id'd spans by the thousand.
+  std::string spanAnchorId;
+  int spanAnchorDepth = -1;
+  bool splittingTableCell = false;  // emitTableCellParagraphs: a piece's end is not the block's end
+  // Per-build counts, reported by Section in the SD debug log.
+  struct AnchorStats {
+    uint16_t inlineAnchors = 0;  // resolved by word position
+    uint16_t rowAnchors = 0;     // resolved to their table row's page
+    uint16_t carried = 0;        // marker ended its paragraph; landed on the next block's first line
+    uint16_t capped = 0;         // dropped by MAX_ANCHORS_PER_CHAPTER
+    uint16_t poolFull = 0;       // a fixed pool was full; recorded by the fallback path instead
+  };
+  AnchorStats anchorStats;
   uint16_t xpathParagraphIndex = 0;
   uint16_t xpathListItemIndex = 0;
   // Canonical reading-position counter: zero-based Unicode codepoints in visible
@@ -211,7 +244,18 @@ class ChapterHtmlSlimParser {
   void updateEffectiveInlineStyle();
   void startNewTextBlock(const BlockStyle& blockStyle);
   void flushPendingAnchor();
+  bool isTocAnchor(const std::string& id) const;
+  bool anchorCapReached() const;
+  void placeInlineAnchor(std::string id);
+  void queueRowAnchor(std::string id);
+  void flushRowAnchors();
+  void deferRowAnchorsToNextLine();
+  void resolveWordAnchors();
+  void carryWordAnchorsToNextBlock();
+  void placeWordAnchorsOnCurrentPage();  // a non-text element (image, rule) follows them
+  void flushAllPendingAnchors(uint16_t page);
   void flushPartWordBuffer();
+  bool replaceLinkIconWithMarker(void* userData);
   void fallbackTableRowToStacked();
   void closeTableCell();
   void sizeTableColumns(size_t columnCount, uint16_t equalWidth, std::array<uint16_t, MAX_GRID_TABLE_COLUMNS>& widths);
@@ -301,6 +345,7 @@ class ChapterHtmlSlimParser {
 
   void addLineToPage(std::shared_ptr<TextBlock> line, uint32_t visibleOffset);
   const std::deque<std::pair<std::string, uint16_t>>& getAnchors() const { return anchorData; }
+  const AnchorStats& getAnchorStats() const { return anchorStats; }
 
   // Byte progress of the in-flight parse, used to estimate a still-building section's total page
   // count (a giant single-spine book never fully lays out, so its real count is unknown). Valid

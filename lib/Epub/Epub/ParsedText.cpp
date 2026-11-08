@@ -718,6 +718,11 @@ void ParsedText::ensureRubyCapacity() {
   // large contiguous realloc to avoid). Kept for call-site stability.
 }
 
+// A negative text-indent pulls the first line back over the block's own left inset ("margin-left:
+// 2em; text-indent: -2em", an index entry's hanging indent), never past it: the inset may be capped
+// (maxHorizontalInsetPx) or smaller than the pull, and the line would start in the page margin.
+int ParsedText::hangingIndent() const { return std::max<int>(blockStyle.textIndent, -blockStyle.leftInset()); }
+
 int ParsedText::resolveFirstLineIndent(const bool isFirstLine, const GfxRenderer& renderer, const int fontId) const {
   if (firstLineConsumed || !isFirstLine) {
     return 0;
@@ -731,13 +736,14 @@ int ParsedText::resolveFirstLineIndent(const bool isFirstLine, const GfxRenderer
   if (paragraphIndent != PARAGRAPH_INDENT_BOOK) {
     // A hanging indent is list/note structure, not paragraph style: keep it.
     if (blockStyle.textIndentDefined && blockStyle.textIndent < 0) {
-      return blockStyle.textIndent;
+      return hangingIndent();
     }
     return scaleSpace(renderer.getSpaceWidth(fontId, EpdFontFamily::REGULAR), wordSpacingPercent) *
            (paragraphIndent - 1);
   }
   if (blockStyle.textIndentDefined) {
-    if (blockStyle.textIndent < 0 || !extraParagraphSpacing) {
+    if (blockStyle.textIndent < 0) return hangingIndent();
+    if (!extraParagraphSpacing) {
       return blockStyle.textIndent;
     }
     return 0;

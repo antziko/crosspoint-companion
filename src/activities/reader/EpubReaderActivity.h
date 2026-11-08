@@ -6,6 +6,7 @@
 #include <Epub/VerticalSection.h>
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -23,6 +24,7 @@
 #include "components/OptionPopup.h"
 #include "components/themes/BaseTheme.h"  // Rect (indexing popup progress bar)
 #include "util/Dictionary.h"              // Dictionary::SessionOverrideScope member
+#include "util/IndexTerm.h"               // IndexTerm::kMaxEntry (pendingIndexTerm_)
 #include "util/LookupMarks.h"             // LookupMarks::Mark member (the held word's card anchor)
 #include "util/PageMarks.h"               // PageMarks::PageKey return type
 #include "util/WordSelectNavigator.h"
@@ -61,6 +63,25 @@ class EpubReaderActivity final : public Activity {
   // Set when navigating to a footnote href with a fragment (e.g. #note1).
   // Cleared on the next render after the new section loads and resolves it to a page.
   std::string pendingAnchor;
+  // An index entry's term ("Bob Hawke") riding with the pending anchor: an index links to where
+  // the printed page begins, so render() looks around it for the term itself. Consumed in the
+  // same pass as the anchor, resolved or not, so it can never apply to a later jump.
+  static constexpr int MAX_INDEX_SEEK_PAGES = 8;  // from the anchor's page on
+  // A printed page's worth of text, searched ahead of the anchor first and then behind it: an
+  // index is often a page off. Tuned on a full index (3,806 links) at 50 to 150 words a screen.
+  static constexpr int INDEX_PRINTED_PAGE_WORDS = 350;
+  char pendingIndexTerm_[IndexTerm::kMaxEntry] = {};
+  // The term the last index jump found, boxed on that one page until another page is drawn.
+  struct IndexTermMark {
+    bool active = false;
+    int spine = -1;
+    int page = -1;
+    uint16_t start = 0;
+    uint16_t end = 0;  // UINT16_MAX: runs off the page
+  };
+  IndexTermMark indexTermMark_;
+  // seekIndexTerm's search strings: 256 bytes, too many for the render task's stack.
+  char indexTermCandidates_[IndexTerm::kMaxCandidates][IndexTerm::kMaxTerm] = {};
   // Control-center orientation parked by onResume() for loop() to adopt. onResume()
   // runs with the render lock held (ActivityManager's pop path), and applyOrientation()
   // takes that same non-recursive lock — calling it there deadlocks the main task.
@@ -318,7 +339,6 @@ class EpubReaderActivity final : public Activity {
   std::atomic<bool> endOfBookOptionsReady{false};
 
   // Footnote support
-  std::vector<FootnoteEntry> currentPageFootnotes;
   std::vector<PageLink> currentPageLinks;
   int currentPageLinkMarginLeft = 0;
   int currentPageLinkMarginTop = 0;
@@ -746,6 +766,9 @@ class EpubReaderActivity final : public Activity {
   // True when jumping away from the current page should offer a return mark: there is a
   // paginated page to mark and it does not already carry a point bookmark.
   bool canOfferReturnMark() const;
+  // Asks Cancel / Skip / Mark before a jump away from this page; runs doNavigate on Skip
+  // and Mark (after adding the return mark), nothing on Cancel.
+  void promptReturnMarkThen(std::function<void()> doNavigate);
   // True when a contents jump to (spineIndex, anchor) would actually land on a different page.
   // Mirrors the Go-to-% path's targetPercent != initialPercent test. A spine-index comparison
   // alone is not enough: nested TOCs and multi-chapter XHTML files put several entries in one
@@ -759,7 +782,12 @@ class EpubReaderActivity final : public Activity {
   void lightStatusBarRefresh();
 
   // Footnote navigation
-  void navigateToHref(const std::string& href, bool savePosition = false);
+  // `indexTerm`: the index entry the link was picked from, if any (IndexTermPage::termForLink).
+  void navigateToHref(const std::string& href, bool savePosition = false, const char* indexTerm = nullptr);
+  // Moves section->currentPage from an index anchor to the first page printing the term.
+  void seekIndexTerm(int anchorPage);
+  // The term of currentPageLinks[linkIndex] when the current page is an index; false otherwise.
+  bool indexTermForCurrentLink(size_t linkIndex, char* out, size_t cap);
   void restoreSavedPosition();
   // Persist / restore the link back-stack across sleep (<cache>/links.bin, consumed on load).
   void saveLinkStack() const;
@@ -881,7 +909,7 @@ class EpubReaderActivity final : public Activity {
            (verticalSection && verticalSection->isBuilding());
   }
   bool isReaderActivity() const override { return true; }
-  bool hasFootnoteAction() const override { return footnoteDepth > 0 || (section && !currentPageFootnotes.empty()); }
+  bool hasFootnoteAction() const override { return footnoteDepth > 0 || (section && !currentPageLinks.empty()); }
   bool onManualSleepRequested() override;
   bool wantsManualSleepPrompt() const override;
   ScreenshotInfo getScreenshotInfo() const override;

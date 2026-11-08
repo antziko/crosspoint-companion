@@ -56,6 +56,17 @@ void ReaderToolbarUi::begin() {
 
 void ReaderToolbarUi::render() {
   renderUi();
+  // A backward page is sized by the page it left; taller rows above can leave the viewport
+  // short of the row it must reach (the old top, or the last row after wrapping). Advance
+  // by the rows that fell short; each pass moves top strictly forward.
+  const int pinEnd = pinEnd_.exchange(-1);
+  if (pinEnd > 0) {
+    const int end = std::min(pinEnd, std::max(0, model_.itemCount));
+    for (int pass = 0; pass < 4 && nav_.drawnRows > 0 && nav_.top + nav_.drawnRows < end; ++pass) {
+      nav_.top = end - nav_.drawnRows;
+      renderUi();
+    }
+  }
   // Wrapped rows can fit fewer than the fixed-height estimate; the nav then
   // advances the viewport after layout and asks for a rebuild. Converges (top
   // only moves forward toward the selection); the bound is a backstop.
@@ -343,14 +354,17 @@ void ReaderToolbarUi::buildPanel(UiScreen& screen) {
     screen.list(listProps_);
   }
 
-  const int pageRows = nav_.pageRows();
-  const int totalPages = pageRows > 0 ? (count + pageRows - 1) / pageRows : 0;
+  // The rows on screen out of the total. A page count would be count / rows-per-page, and
+  // rows per page change with every wrapped title, so its total jumped while paging.
   // pageIndicatorRect_ is empty when the estimate said one page but the measured layout
   // spans two (a wrapped row); the build after this one shows the line, having then got
   // the measurement to decide on.
-  if (totalPages > 1 && !pageIndicatorRect_.empty()) {
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%d/%d", nav_.top / pageRows + 1, totalPages);
+  const int shownRows = nav_.pageRows();
+  if (count > shownRows && !pageIndicatorRect_.empty()) {
+    const int first = std::clamp(nav_.top + 1, 1, count);
+    const int last = std::clamp(nav_.top + shownRows, first, count);
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%d-%d/%d", first, last, count);
     fui::TextStyle pageStyle = tokens.smallText;
     pageStyle.align = fui::TextAlign::Right;
     screen.target().text(pageIndicatorRect_, buf, pageStyle);

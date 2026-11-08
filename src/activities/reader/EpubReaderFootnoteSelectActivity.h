@@ -9,10 +9,11 @@
 
 #include "activities/Activity.h"
 
-// Footnote reference selection overlaid on the current reader page, modeled on
-// DictionaryWordSelectActivity: the page renders underneath and each footnote
-// reference marker gets a highlight box. Up/Down/Left/Right move between
-// markers, Confirm jumps to that footnote, Back returns to the reader.
+// Link selection overlaid on the current reader page, modeled on DictionaryWordSelectActivity:
+// the page renders underneath and each internal link (footnote marker, index page number,
+// cross-reference) gets a highlight box. Up/Down/Left/Right move between links, Confirm jumps,
+// Back returns to the reader. Lists the page's links, not its footnote entries, so a dense index
+// page (up to Page::MAX_LINKS_PER_PAGE links) is reachable past the footnote cap.
 class EpubReaderFootnoteSelectActivity final : public Activity {
  public:
   explicit EpubReaderFootnoteSelectActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
@@ -39,7 +40,7 @@ class EpubReaderFootnoteSelectActivity final : public Activity {
 
   struct FootnoteLink {
     const PageLink* link;
-    const FootnoteEntry* footnote;
+    size_t linkIndex;  // into page->links
   };
   std::vector<FootnoteLink> footnoteLinks;
   int selected = 0;

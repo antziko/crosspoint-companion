@@ -38,6 +38,16 @@ constexpr size_t PARSE_BUFFER_SIZE = 1024;
 constexpr float LARGE_IMAGE_WIDTH_FRAC = 0.4f;
 constexpr float LARGE_IMAGE_HEIGHT_FRAC = 0.25f;
 
+// Book images are drawn for CSS's reference text (16 px at a ~1.2 line height). Small images
+// are zoomed by the reader's line height over this, as a browser zooms images with its text,
+// so a scanned sum or an inline fraction keeps its size relative to the reading font.
+constexpr float CSS_REFERENCE_LINE_PX = 19.2f;
+constexpr float MAX_IMAGE_ZOOM = 3.0f;
+// A percentage width resolving to at least this share of the natural width stands in for the
+// natural size (converters write natural / reference width); below it, the book is shrinking
+// the image on purpose and the percentage is kept.
+constexpr float PERCENT_AS_NATURAL_FRAC = 0.5f;
+
 // This number comes from PR #73
 // If we have this many words buffered, lay them out and consume all but the last line, freeing a
 // lot of memory. A buffered text block holds ~7 parallel std::vectors (words/styles/ruby) plus the
@@ -351,11 +361,137 @@ void ChapterHtmlSlimParser::flushPendingAnchor() {
       currentPageNextY = 0;
       currentPageVisibleOffsetSet = false;
     }
+  } else if (pendingWordAnchorCount < MAX_PENDING_WORD_ANCHORS) {
+    // The block it starts is not laid out yet and may open the next page: land on the page of
+    // its first line (or image) instead of the page the previous block ended on.
+    auto& slot = pendingWordAnchors[pendingWordAnchorCount++];
+    slot.id = std::move(pendingAnchorId);
+    slot.wordIndex = 0;
+    pendingAnchorId.clear();
+    return;
   }
 
   // Record deferred anchor after previous block is flushed (and any TOC page break)
   anchorData.push_back({std::move(pendingAnchorId), static_cast<uint16_t>(completedPageCount)});
   pendingAnchorId.clear();
+}
+
+void ChapterHtmlSlimParser::placeWordAnchorsOnCurrentPage() {
+  for (uint8_t i = 0; i < pendingWordAnchorCount; i++) {
+    anchorData.push_back({std::move(pendingWordAnchors[i].id), static_cast<uint16_t>(completedPageCount)});
+    pendingWordAnchors[i].id.clear();
+  }
+  pendingWordAnchorCount = 0;
+}
+
+bool ChapterHtmlSlimParser::isTocAnchor(const std::string& id) const {
+  return std::find(tocAnchors.begin(), tocAnchors.end(), id) != tocAnchors.end();
+}
+
+bool ChapterHtmlSlimParser::anchorCapReached() const {
+  return anchorData.size() + pendingWordAnchorCount + pendingRowAnchorCount >= MAX_ANCHORS_PER_CHAPTER;
+}
+
+void ChapterHtmlSlimParser::placeInlineAnchor(std::string id) {
+  if (id.empty()) return;
+  if (anchorCapReached()) {
+    anchorStats.capped++;
+    return;
+  }
+  if (tableDepth >= 1 && insideTableCell && !tableRowStacked) {
+    queueRowAnchor(std::move(id));
+    return;
+  }
+  if (!currentTextBlock || pendingWordAnchorCount >= MAX_PENDING_WORD_ANCHORS) {
+    if (currentTextBlock) anchorStats.poolFull++;
+    if (!pendingAnchorId.empty()) flushPendingAnchor();
+    pendingAnchorId = std::move(id);
+    return;
+  }
+  // The word in the part-word buffer (if any) becomes index size(), so this names the word the
+  // marker sits in or before.
+  auto& slot = pendingWordAnchors[pendingWordAnchorCount++];
+  slot.id = std::move(id);
+  slot.wordIndex = wordsExtractedInBlock + static_cast<int>(currentTextBlock->size());
+  anchorStats.inlineAnchors++;
+}
+
+void ChapterHtmlSlimParser::queueRowAnchor(std::string id) {
+  if (pendingRowAnchorCount >= MAX_PENDING_ROW_ANCHORS) {
+    anchorStats.poolFull++;
+    anchorData.push_back({std::move(id), static_cast<uint16_t>(completedPageCount)});
+    return;
+  }
+  pendingRowAnchors[pendingRowAnchorCount++] = std::move(id);
+  anchorStats.rowAnchors++;
+}
+
+// A row laid out as stacked blocks: its anchors land on the page of the next line laid out (the
+// row's first), after any page break that line takes.
+void ChapterHtmlSlimParser::deferRowAnchorsToNextLine() {
+  for (uint8_t i = 0; i < pendingRowAnchorCount; i++) {
+    if (pendingWordAnchorCount < MAX_PENDING_WORD_ANCHORS) {
+      auto& slot = pendingWordAnchors[pendingWordAnchorCount++];
+      slot.id = std::move(pendingRowAnchors[i]);
+      slot.wordIndex = 0;
+    } else {
+      anchorStats.poolFull++;
+      anchorData.push_back({std::move(pendingRowAnchors[i]), static_cast<uint16_t>(completedPageCount)});
+    }
+    pendingRowAnchors[i].clear();
+  }
+  pendingRowAnchorCount = 0;
+}
+
+void ChapterHtmlSlimParser::flushRowAnchors() {
+  for (uint8_t i = 0; i < pendingRowAnchorCount; i++) {
+    anchorData.push_back({std::move(pendingRowAnchors[i]), static_cast<uint16_t>(completedPageCount)});
+    pendingRowAnchors[i].clear();
+  }
+  pendingRowAnchorCount = 0;
+}
+
+// Called by addLineToPage once the line is on currentPage and counted in wordsExtractedInBlock.
+void ChapterHtmlSlimParser::resolveWordAnchors() {
+  uint8_t kept = 0;
+  for (uint8_t i = 0; i < pendingWordAnchorCount; i++) {
+    auto& slot = pendingWordAnchors[i];
+    if (slot.wordIndex < wordsExtractedInBlock) {
+      anchorData.push_back({std::move(slot.id), static_cast<uint16_t>(completedPageCount)});
+      slot.id.clear();
+    } else {
+      if (kept != i) pendingWordAnchors[kept] = std::move(slot);
+      kept++;
+    }
+  }
+  pendingWordAnchorCount = kept;
+}
+
+// A marker after its block's last word belongs to whatever comes next: index 0 resolves on the
+// next laid-out line, after any page break that line takes.
+void ChapterHtmlSlimParser::carryWordAnchorsToNextBlock() {
+  if (splittingTableCell) return;
+  for (uint8_t i = 0; i < pendingWordAnchorCount; i++) {
+    if (pendingWordAnchors[i].wordIndex != 0) anchorStats.carried++;
+    pendingWordAnchors[i].wordIndex = 0;
+  }
+}
+
+void ChapterHtmlSlimParser::flushAllPendingAnchors(const uint16_t page) {
+  for (uint8_t i = 0; i < pendingWordAnchorCount; i++) {
+    anchorData.push_back({std::move(pendingWordAnchors[i].id), page});
+    pendingWordAnchors[i].id.clear();
+  }
+  pendingWordAnchorCount = 0;
+  for (uint8_t i = 0; i < pendingRowAnchorCount; i++) {
+    anchorData.push_back({std::move(pendingRowAnchors[i]), page});
+    pendingRowAnchors[i].clear();
+  }
+  pendingRowAnchorCount = 0;
+  if (!pendingAnchorId.empty()) {
+    anchorData.push_back({std::move(pendingAnchorId), page});
+    pendingAnchorId.clear();
+  }
 }
 
 void ChapterHtmlSlimParser::setCurrentPageVisibleOffset(const uint32_t offset) {
@@ -427,6 +563,22 @@ void ChapterHtmlSlimParser::flushPartWordBuffer() {
   partWordBufferIndex = 0;
   nextWordContinues = false;
   listItemBulletOnly = false;
+}
+
+bool ChapterHtmlSlimParser::replaceLinkIconWithMarker(void* userData) {
+  // Only a link with nothing in it yet: an icon beside the link's text is decoration.
+  if (!insideFootnoteLink || currentFootnoteLinkId == 0 || currentFootnoteLinkTextLen > 0 || partWordBufferIndex > 0) {
+    return false;
+  }
+  char marker[12];
+  const int len = snprintf(marker, sizeof(marker), "[%d]", ++imageNoteCounter);
+  if (len <= 0) return false;
+  // As if the book had written it: characterData lays it out and records it as the link's label.
+  syntheticCharacterData = true;
+  characterData(userData, marker, len);
+  syntheticCharacterData = false;
+  SdDebugLog::log("EHP", "link icon -> marker %s href=%.48s", marker, currentFootnote.href);
+  return true;
 }
 
 void ChapterHtmlSlimParser::flushLongTextBlockIfNeeded() {
@@ -634,6 +786,7 @@ void ChapterHtmlSlimParser::emitHorizontalRule(const BlockStyle& blockStyle) {
   currentPage->elements.push_back(pageRule);
   setCurrentPageVisibleOffset(visibleTextOffset);
   currentPageNextY = static_cast<int16_t>(currentPageNextY + ruleThickness + bottomSpacing);
+  if (!currentTextBlock || currentTextBlock->isEmpty()) placeWordAnchorsOnCurrentPage();
 
   if (!pendingAnchorId.empty()) {
     anchorData.push_back({std::move(pendingAnchorId), static_cast<uint16_t>(completedPageCount)});
@@ -648,6 +801,7 @@ void ChapterHtmlSlimParser::fallbackTableRowToStacked() {
 
   auto activeCell = std::move(currentTextBlock);
   tableRowStacked = true;
+  deferRowAnchorsToNextLine();  // onto the first stacked cell's first line
 
   for (auto& cell : tableRowCells) {
     currentTextBlock = std::move(cell);
@@ -699,6 +853,7 @@ void ChapterHtmlSlimParser::emitTableCellParagraphs(std::unique_ptr<ParsedText> 
   currentTextBlock = std::move(cell);
   wordsExtractedInBlock = 0;  // cumulative across the pieces, so footnote word indices still match
   size_t taken = 0;
+  splittingTableCell = true;  // anchors past a piece belong to a later piece, not the next block
   for (uint8_t i = 0; i < tableCellBreakCount && currentTextBlock; i++) {
     const size_t at = tableCellBreaks[i];
     if (at <= taken) continue;
@@ -710,6 +865,7 @@ void ChapterHtmlSlimParser::emitTableCellParagraphs(std::unique_ptr<ParsedText> 
     currentTextBlock = std::move(rest);
     taken = at;
   }
+  splittingTableCell = false;
   tableCellBreakCount = 0;
   if (currentTextBlock && !currentTextBlock->isEmpty()) makePages();
   currentTextBlock = std::move(outer);
@@ -823,8 +979,10 @@ void ChapterHtmlSlimParser::finishTableRow() {
   closeTableCell();
 
   if (pendingFirstCell) {
+    deferRowAnchorsToNextLine();
     emitTableCellParagraphs(std::move(pendingFirstCell));
   } else if (tableRowCells.size() == 1 && tableCellBreakCount > 0) {
+    deferRowAnchorsToNextLine();
     // A one-column grid row stacks anyway (columnCount < 2 below); this keeps its paragraphs.
     auto cell = std::move(tableRowCells.front());
     tableRowCells.clear();
@@ -835,6 +993,7 @@ void ChapterHtmlSlimParser::finishTableRow() {
   tableRowCellIndex = 0;
 
   if (tableRowCells.empty()) {
+    deferRowAnchorsToNextLine();
     if (tableRowStacked) {
       addTableRowSeparator();
     }
@@ -928,6 +1087,7 @@ void ChapterHtmlSlimParser::finishTableRow() {
       currentPageVisibleOffsetSet = false;
     }
 
+    if (lineIndex == 0) flushRowAnchors();  // after any page break the row's first line takes
     const int16_t rowY = currentPageNextY;
     const size_t requiredCapacity = currentPage->elements.size() + columnCount;
     if (currentPage->elements.capacity() < requiredCapacity) {
@@ -956,6 +1116,7 @@ void ChapterHtmlSlimParser::finishTableRow() {
     }
     currentPageNextY = static_cast<int16_t>(rowY + rowLineHeight);
   }
+  flushRowAnchors();  // a row with no lines
 
   addTableRowSeparator();
   tableRowStacked = false;
@@ -1006,7 +1167,21 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
         const char* idValue = atts[i + 1];
         const bool isTocAnchor =
             std::find(self->tocAnchors.begin(), self->tocAnchors.end(), idValue) != self->tocAnchors.end();
-        if (isTocAnchor || (!isNonNavigableInlineElement(name) && self->anchorData.size() < MAX_ANCHORS_PER_CHAPTER)) {
+        if (!isTocAnchor && isNonNavigableInlineElement(name)) {
+          // An empty <span id="x"/> is a deliberate marker (index entries, footnote back-links);
+          // endElement records it if no text arrived. One candidate at a time: an id'd span
+          // nested in another is a wrapper, not a marker.
+          if (self->spanAnchorDepth < 0) {
+            self->spanAnchorId = idValue;
+            self->spanAnchorDepth = self->depth;
+          }
+        } else if (!isTocAnchor && strcmp(name, "a") == 0) {
+          self->placeInlineAnchor(idValue);
+        } else if (!isTocAnchor && self->tableDepth >= 1 && self->insideTableCell && !self->tableRowStacked &&
+                   !isTableStructuralTag(name)) {
+          // A block id inside a grid cell: the cell's block markup never starts a new text block.
+          if (!self->anchorCapReached()) self->queueRowAnchor(idValue);
+        } else if (isTocAnchor || (!isNonNavigableInlineElement(name) && !self->anchorCapReached())) {
           // Flush a displaced anchor before overwriting. Consecutive non-block elements
           // (e.g. <aside id="fn1">text</aside><aside id="fn2">) with no intervening block
           // never trigger startNewTextBlock, so fn1 gets silently overwritten. That leaves
@@ -1181,7 +1356,13 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
     self->insideTableCell = true;
     self->tableCellTextBytes = 0;
     self->wordsExtractedInBlock = 0;
-    self->flushPendingAnchor();
+    if (!self->tableRowStacked && !self->pendingAnchorId.empty() && !self->isTocAnchor(self->pendingAnchorId)) {
+      // The cell's (or its row's) id: a grid row may still move to the next page when laid out.
+      self->queueRowAnchor(std::move(self->pendingAnchorId));
+      self->pendingAnchorId.clear();
+    } else {
+      self->flushPendingAnchor();
+    }
     self->pushTableTextStyleEntry(cssStyle);
 
     if (strcmp(name, "th") == 0 && (!cssStyle.hasFontWeight() || cssStyle.fontWeight == CssFontWeight::Bold)) {
@@ -1243,6 +1424,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
 
       // imageRendering: 0=display, 1=placeholder (alt text only), 2=suppress entirely
       if (self->imageRendering == 2) {
+        self->replaceLinkIconWithMarker(userData);
         self->skipUntilDepth = self->depth;
         self->depth += 1;
         return;
@@ -1331,12 +1513,32 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
               if (gotDimensions) {
                 LOG_DBG("EHP", "Image dimensions: %dx%d", dims.width, dims.height);
 
+                // A note icon as a link's only content (Duokan-style footnotes): a text marker in
+                // its place, inline, tappable and listed. Only an icon -- no taller than two lines
+                // of text -- so a linked figure or cover stays a picture.
+                const int iconMaxPx = 2 * self->renderer.getLineHeight(self->fontId);
+                if (dims.height > 0 && dims.height <= iconMaxPx && dims.width <= 2 * iconMaxPx &&
+                    self->replaceLinkIconWithMarker(userData)) {
+                  self->skipUntilDepth = self->depth;
+                  self->depth += 1;
+                  return;
+                }
+
                 int displayWidth = 0;
                 int displayHeight = 0;
                 const float emSize = static_cast<float>(self->renderer.getFontAscenderSize(self->fontId));
                 const CssStyle& imgStyle = cssStyle;
                 const bool hasCssHeight = imgStyle.hasImageHeight();
                 const bool hasCssWidth = imgStyle.hasImageWidth();
+                const float imageZoom =
+                    std::clamp(static_cast<float>(self->renderer.getLineHeight(self->fontId)) / CSS_REFERENCE_LINE_PX,
+                               1.0f, MAX_IMAGE_ZOOM);
+                // Absolute CSS lengths are reference pixels and zoom with the text; em already
+                // follows the font and a percentage follows the column.
+                const auto imageLengthPx = [&](const CssLength& len, const float reference) {
+                  const float px = len.toPixels(emSize, reference);
+                  return len.unit == CssUnit::Pixels || len.unit == CssUnit::Points ? px * imageZoom : px;
+                };
 
                 // Compute effective container width for percentage-based image sizes.
                 // If the image is inside a block with horizontal margins/padding (e.g.
@@ -1358,9 +1560,9 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                 if (hasCssHeight && hasCssWidth && dims.width > 0 && dims.height > 0) {
                   // Both CSS height and width set: resolve both, then clamp to viewport preserving requested ratio
                   displayHeight = static_cast<int>(
-                      imgStyle.imageHeight.toPixels(emSize, static_cast<float>(self->viewportHeight)) + 0.5f);
+                      imageLengthPx(imgStyle.imageHeight, static_cast<float>(self->viewportHeight)) + 0.5f);
                   displayWidth =
-                      static_cast<int>(imgStyle.imageWidth.toPixels(emSize, static_cast<float>(containerWidth)) + 0.5f);
+                      static_cast<int>(imageLengthPx(imgStyle.imageWidth, static_cast<float>(containerWidth)) + 0.5f);
                   if (displayHeight < 1) displayHeight = 1;
                   if (displayWidth < 1) displayWidth = 1;
                   if (displayWidth > containerWidth || displayHeight > self->viewportHeight) {
@@ -1379,7 +1581,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                 } else if (hasCssHeight && !hasCssWidth && dims.width > 0 && dims.height > 0) {
                   // Use CSS height (resolve % against viewport height) and derive width from aspect ratio
                   displayHeight = static_cast<int>(
-                      imgStyle.imageHeight.toPixels(emSize, static_cast<float>(self->viewportHeight)) + 0.5f);
+                      imageLengthPx(imgStyle.imageHeight, static_cast<float>(self->viewportHeight)) + 0.5f);
                   if (displayHeight < 1) displayHeight = 1;
                   displayWidth =
                       static_cast<int>(displayHeight * (static_cast<float>(dims.width) / dims.height) + 0.5f);
@@ -1402,7 +1604,11 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                 } else if (hasCssWidth && !hasCssHeight && dims.width > 0 && dims.height > 0) {
                   // Use CSS width (resolve % against container width) and derive height from aspect ratio
                   displayWidth =
-                      static_cast<int>(imgStyle.imageWidth.toPixels(emSize, static_cast<float>(containerWidth)) + 0.5f);
+                      static_cast<int>(imageLengthPx(imgStyle.imageWidth, static_cast<float>(containerWidth)) + 0.5f);
+                  if (!largeImage && imgStyle.imageWidth.unit == CssUnit::Percent &&
+                      displayWidth >= static_cast<int>(PERCENT_AS_NATURAL_FRAC * dims.width)) {
+                    displayWidth = std::max(displayWidth, static_cast<int>(dims.width * imageZoom + 0.5f));
+                  }
                   if (displayWidth > containerWidth) displayWidth = containerWidth;
                   if (displayWidth < 1) displayWidth = 1;
                   displayHeight =
@@ -1435,14 +1641,13 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                   if (displayHeight < 1) displayHeight = 1;
                   LOG_DBG("EHP", "Display size (full width): %dx%d", displayWidth, displayHeight);
                 } else {
-                  // Small image, no CSS size: keep natural size (never upscale),
-                  // scaled down only if it somehow exceeds the container/page.
-                  int maxWidth = containerWidth;
-                  int maxHeight = self->viewportHeight;
-                  float scaleX = (dims.width > maxWidth) ? (float)maxWidth / dims.width : 1.0f;
-                  float scaleY = (dims.height > maxHeight) ? (float)maxHeight / dims.height : 1.0f;
-                  float scale = (scaleX < scaleY) ? scaleX : scaleY;
-                  if (scale > 1.0f) scale = 1.0f;
+                  // Small image, no CSS size: its natural size zoomed with the text, scaled
+                  // down to the container/page.
+                  const int maxWidth = containerWidth;
+                  const int maxHeight = self->viewportHeight;
+                  float scale = imageZoom;
+                  if (dims.width * scale > maxWidth) scale = static_cast<float>(maxWidth) / dims.width;
+                  if (dims.height * scale > maxHeight) scale = static_cast<float>(maxHeight) / dims.height;
 
                   displayWidth = (int)(dims.width * scale);
                   displayHeight = (int)(dims.height * scale);
@@ -1595,6 +1800,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                   return;
                 }
                 self->currentPage->elements.push_back(pageImage);
+                self->placeWordAnchorsOnCurrentPage();  // preceding text was flushed above
                 self->setCurrentPageVisibleOffset(self->visibleTextOffset);
                 self->currentPageNextY += displayHeight + imageMarginBottom;
 
@@ -1637,7 +1843,8 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
         return;
       }
 
-      // No alt text, skip
+      // No alt text, skip. As a link's only content, still leave the link something to tap.
+      self->replaceLinkIconWithMarker(userData);
       self->skipUntilDepth = self->depth;
       self->depth += 1;
       return;
@@ -1997,10 +2204,12 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
   auto* self = static_cast<ChapterHtmlSlimParser*>(userData);
   const bool countVisibleOffsets = self->insideBody && self->nonVisibleTextDepth == 0 && !self->syntheticCharacterData;
   const uint32_t callbackVisibleOffset = self->visibleTextOffset;
-  if (self->spacerGapDepth >= 0) {
+  if (self->spacerGapDepth >= 0 || self->spanAnchorDepth >= 0) {
     for (int i = 0; i < len; i++) {
       if (!isspace(static_cast<unsigned char>(s[i]))) {
-        self->spacerGapDepth = -1;  // has text: not a spacer
+        self->spacerGapDepth = -1;   // has text: not a spacer
+        self->spanAnchorDepth = -1;  // has text: a wrapper span, not a marker
+        self->spanAnchorId.clear();
         break;
       }
     }
@@ -2469,6 +2678,12 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
     self->breakInlineWord();
   }
 
+  if (self->spanAnchorDepth >= 0 && self->spanAnchorDepth >= self->depth) {
+    self->spanAnchorDepth = -1;
+    self->placeInlineAnchor(std::move(self->spanAnchorId));
+    self->spanAnchorId.clear();
+  }
+
   // Pop from inline style stack if we pushed an entry at this depth
   // This handles all inline elements: b, i, u, span, etc.
   if (!self->inlineStyleStack.empty() && self->inlineStyleStack.back().depth == self->depth) {
@@ -2665,16 +2880,15 @@ bool ChapterHtmlSlimParser::finishParse() {
   // Process last page if there is still text
   if (currentTextBlock) {
     makePages();
-    if (!pendingAnchorId.empty()) {
-      anchorData.push_back({std::move(pendingAnchorId), static_cast<uint16_t>(completedPageCount)});
-      pendingAnchorId.clear();
-    }
+    flushAllPendingAnchors(static_cast<uint16_t>(completedPageCount));  // the trailing page
     setCurrentPageVisibleOffset(visibleTextOffset);
     completePageFn(std::move(currentPage), xpathParagraphIndex, xpathListItemIndex, currentPageVisibleOffset);
     completedPageCount++;
     currentPage.reset();
     currentTextBlock.reset();
   }
+  // No trailing block: anything still pending goes on the last emitted page.
+  flushAllPendingAnchors(static_cast<uint16_t>(completedPageCount > 0 ? completedPageCount - 1 : 0));
 
   // makePages() above can latch outOfMemory_ for the trailing block. Report it: the XML
   // parser is already torn down here, so parseStep() will never see this one.
@@ -2754,6 +2968,7 @@ void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line, const
     ++footnoteIt;
   }
   pendingFootnotes.erase(pendingFootnotes.begin(), footnoteIt);
+  if (pendingWordAnchorCount > 0) resolveWordAnchors();
 
   // Apply horizontal left inset (margin + padding) as x position offset
   const int16_t xOffset = line->getBlockStyle().leftInset();
@@ -2839,6 +3054,7 @@ void ChapterHtmlSlimParser::makePages() {
     }
     pendingFootnotes.clear();
   }
+  carryWordAnchorsToNextBlock();
 
   // Apply bottom spacing after the paragraph (stored in pixels)
   if (blockStyle.marginBottom > 0) {

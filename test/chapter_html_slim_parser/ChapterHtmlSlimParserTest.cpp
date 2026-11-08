@@ -1,5 +1,6 @@
 #include <Epub/Page.h>
 #include <GfxRenderer.h>
+#include <expat.h>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -318,3 +319,173 @@ TEST_F(ChapterHtmlSlimParserTest, TableCellKeepsBookAlignmentOtherwise) {
 }
 
 }  // namespace
+
+// ---- Anchor placement ----
+// A one-line viewport (the stub's line height is 16) makes every laid-out line its own page, so an
+// anchor's page is the index of the line it sits on.
+struct AnchorParse {
+  GfxRenderer renderer;
+  CssParser css{"/tmp"};
+  std::string path = "anchors.xhtml";
+  int pagesCompleted = 0;
+  std::unique_ptr<ChapterHtmlSlimParser> parser;
+
+  explicit AnchorParse(const std::string& body, std::vector<std::string> tocAnchors = {}) {
+    parser = std::make_unique<ChapterHtmlSlimParser>(
+        nullptr, path, renderer, 0, 1.0f, false, 0, static_cast<uint16_t>(renderer.getScreenWidth()), 16, false, false,
+        [this](std::unique_ptr<Page>, uint16_t, uint16_t, uint32_t) { pagesCompleted++; }, true, "", "", 0,
+        std::move(tocAnchors), nullptr, &css);
+    const std::string html = "<html><body>" + body + "</body></html>";
+    parser->beginParse();
+    XML_Parser xml = XML_ParserCreate(nullptr);
+    XML_SetUserData(xml, parser.get());
+    XML_SetElementHandler(xml, ChapterHtmlSlimParser::startElement, ChapterHtmlSlimParser::endElement);
+    XML_SetCharacterDataHandler(xml, ChapterHtmlSlimParser::characterData);
+    EXPECT_NE(XML_Parse(xml, html.data(), static_cast<int>(html.size()), 1), XML_STATUS_ERROR)
+        << XML_ErrorString(XML_GetErrorCode(xml));
+    XML_ParserFree(xml);
+    parser->xmlParser_ = nullptr;  // freed above; finishParse must not free it again
+    parser->finishParse();
+  }
+
+  int pageOf(const char* id) const {
+    for (const auto& [key, page] : parser->getAnchors()) {
+      if (key == id) return page;
+    }
+    return -1;
+  }
+};
+
+// n four-letter words, with `<marker>` inserted before each listed word index.
+std::string wordsWithMarkers(const int n, const std::vector<std::pair<int, std::string>>& markers) {
+  std::string out;
+  for (int i = 0; i < n; i++) {
+    for (const auto& [at, marker] : markers) {
+      if (at == i) out += marker;
+    }
+    out += "wwww ";
+  }
+  return out;
+}
+
+TEST(ChapterHtmlSlimParserAnchors, EmptySpanMarkerLandsOnItsLine) {
+  AnchorParse p(
+      "<p>" +
+      wordsWithMarkers(40, {{2, "<span id=\"early\"/>"}, {20, "<span id=\"mid\"/>"}, {39, "<span id=\"late\"/>"}}) +
+      "</p>");
+  const int lines = p.pagesCompleted;
+  ASSERT_GE(lines, 3);
+  EXPECT_EQ(p.pageOf("early"), 0);
+  EXPECT_GT(p.pageOf("mid"), 0);
+  EXPECT_LT(p.pageOf("mid"), lines - 1);
+  EXPECT_EQ(p.pageOf("late"), lines - 1);
+}
+
+TEST(ChapterHtmlSlimParserAnchors, InlineAnchorElementLandsOnItsLine) {
+  AnchorParse p("<p>" + wordsWithMarkers(40, {{39, "<a id=\"late\"></a>"}}) + "</p>");
+  EXPECT_EQ(p.pageOf("late"), p.pagesCompleted - 1);
+}
+
+TEST(ChapterHtmlSlimParserAnchors, SpanWrappingTextIsNotAnAnchor) {
+  AnchorParse p("<p>one <span id=\"kobo.1.1\">two</span> three<span id=\"ws\"> </span></p>");
+  EXPECT_EQ(p.pageOf("kobo.1.1"), -1);
+  EXPECT_EQ(p.pageOf("ws"), 0);  // whitespace-only content still counts as empty
+}
+
+TEST(ChapterHtmlSlimParserAnchors, MarkerEndingParagraphLandsOnNextBlock) {
+  AnchorParse p("<p>first <span id=\"end\"/></p><p>second</p>");
+  ASSERT_EQ(p.pagesCompleted, 2);
+  EXPECT_EQ(p.pageOf("end"), 1);
+}
+
+TEST(ChapterHtmlSlimParserAnchors, NestedEmptySpansRecordOuterOnly) {
+  AnchorParse p("<p>one <span id=\"outer\"><span id=\"inner\"/></span>two</p>");
+  EXPECT_EQ(p.pageOf("outer"), 0);
+  EXPECT_EQ(p.pageOf("inner"), -1);
+}
+
+TEST(ChapterHtmlSlimParserAnchors, GridRowAnchorsUseTheRowsPage) {
+  AnchorParse p(
+      "<table><tr><td id=\"r1\">1</td><td>first note</td></tr>"
+      "<tr><td id=\"r2\">2</td><td><span id=\"s2\"/>second note</td></tr></table>");
+  ASSERT_EQ(p.pagesCompleted, 2);
+  EXPECT_EQ(p.pageOf("r1"), 0);
+  EXPECT_EQ(p.pageOf("r2"), 1);
+  EXPECT_EQ(p.pageOf("s2"), 1);
+}
+
+TEST(ChapterHtmlSlimParserAnchors, MarkerGluedToWordLandsOnThatWord) {
+  // history.<span id/><a>1</a>: a footnote back-link target sits on the reference's line.
+  AnchorParse p("<p>first<span id=\"ref\"/></p><p>second</p>");
+  EXPECT_EQ(p.pageOf("ref"), 0);
+}
+
+TEST(ChapterHtmlSlimParserAnchors, TocSpanWrappingTextIsStillRecorded) {
+  AnchorParse p("<p>intro</p><p><span id=\"toc1\">Chapter</span> text</p>", {"toc1"});
+  EXPECT_GE(p.pageOf("toc1"), 1);
+}
+
+TEST(ChapterHtmlSlimParserAnchors, BlockIdLandsOnPageOfItsFirstLine) {
+  AnchorParse p("<p>intro</p><p id=\"p2\">body</p>");
+  ASSERT_EQ(p.pagesCompleted, 2);
+  EXPECT_EQ(p.pageOf("p2"), 1);
+}
+
+TEST(ChapterHtmlSlimParserAnchors, AnchorsSurviveAnEndOfChapterTable) {
+  AnchorParse p("<p>text <span id=\"m\"/>more</p><table><tr><td id=\"n1\">1</td><td>note</td></tr></table>");
+  EXPECT_EQ(p.pageOf("m"), 0);
+  EXPECT_EQ(p.pageOf("n1"), 1);
+}
+
+TEST(ChapterHtmlSlimParserAnchors, StackedRowAnchorLandsOnItsFirstLine) {
+  // The note's text overflows the grid cell limit, so the row falls back to stacked cells
+  // after its anchor was queued; "1" then opens the next page.
+  AnchorParse p("<p>intro</p><table><tr><td id=\"n1\">1</td><td>" + wordsWithMarkers(40, {}) + "</td></tr></table>");
+  ASSERT_GE(p.pagesCompleted, 3);
+  EXPECT_EQ(p.pageOf("n1"), 1);
+}
+
+namespace {
+// Footnote entries a chapter's pages carry, laid out with images suppressed (no image file reads).
+std::vector<FootnoteEntry> footnotesOf(const std::string& body) {
+  GfxRenderer renderer;
+  CssParser css{"/tmp"};
+  std::vector<FootnoteEntry> out;
+  ChapterHtmlSlimParser parser(
+      nullptr, "notes.xhtml", renderer, 0, 1.0f, false, 0, static_cast<uint16_t>(renderer.getScreenWidth()), 400, false,
+      false,
+      [&out](std::unique_ptr<Page> page, uint16_t, uint16_t, uint32_t) {
+        for (const auto& f : page->footnotes) out.push_back(f);
+      },
+      true, "", "", /*imageRendering=*/2, {}, nullptr, &css);
+  const std::string html = "<html><body>" + body + "</body></html>";
+  parser.beginParse();
+  XML_Parser xml = XML_ParserCreate(nullptr);
+  XML_SetUserData(xml, &parser);
+  XML_SetElementHandler(xml, ChapterHtmlSlimParser::startElement, ChapterHtmlSlimParser::endElement);
+  XML_SetCharacterDataHandler(xml, ChapterHtmlSlimParser::characterData);
+  EXPECT_NE(XML_Parse(xml, html.data(), static_cast<int>(html.size()), 1), XML_STATUS_ERROR);
+  XML_ParserFree(xml);
+  parser.xmlParser_ = nullptr;
+  parser.finishParse();
+  return out;
+}
+}  // namespace
+
+TEST(ChapterHtmlSlimParserLinkIcons, IconOnlyLinkBecomesNumberedMarker) {
+  const auto notes = footnotesOf(
+      "<p>spell<sup><a href=\"#footnote1\"><img src=\"icon.jpg\"/>&#13;</a></sup> and more"
+      "<sup><a href=\"#footnote2\"><img src=\"icon.jpg\"/></a></sup> text</p>");
+  ASSERT_EQ(notes.size(), 2u);
+  EXPECT_STREQ(notes[0].number, "1");
+  EXPECT_STREQ(notes[0].href, "#footnote1");
+  EXPECT_STREQ(notes[1].number, "2");
+  EXPECT_STREQ(notes[1].href, "#footnote2");
+}
+
+TEST(ChapterHtmlSlimParserLinkIcons, LinkWithTextKeepsItsOwnLabel) {
+  const auto notes = footnotesOf("<p>word<a href=\"#n7\">7<img src=\"icon.jpg\"/></a> and <a href=\"#n8\">8</a></p>");
+  ASSERT_EQ(notes.size(), 2u);
+  EXPECT_STREQ(notes[0].number, "7");
+  EXPECT_STREQ(notes[1].number, "8");
+}

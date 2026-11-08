@@ -100,6 +100,7 @@ class ParsedText {
   void eraseVisibleOffsetPrefix(size_t count);
   // Releases and erases the first `consumed` words from every per-word array.
   void dropPrefix(size_t consumed);
+  int hangingIndent() const;
   int resolveFirstLineIndent(bool isFirstLine, const GfxRenderer& renderer, int fontId) const;
   std::vector<size_t> computeLineBreaks(const GfxRenderer& renderer, int fontId, int pageWidth,
                                         std::vector<uint16_t>& wordWidths, std::vector<bool>& continuesVec,

@@ -1,4 +1,4 @@
-#include "SleepSyncPromptActivity.h"
+#include "ChoicePromptActivity.h"
 
 #include <I18n.h>
 
@@ -7,11 +7,14 @@
 #include "HalDisplay.h"
 #include "components/UITheme.h"
 
-SleepSyncPromptActivity::SleepSyncPromptActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                                 std::string heading, std::string body)
-    : Activity("SleepSyncPrompt", renderer, mappedInput), heading(std::move(heading)), body(std::move(body)) {}
+ChoicePromptActivity::ChoicePromptActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string heading,
+                                           std::string body, std::string primaryLabel)
+    : Activity("ChoicePrompt", renderer, mappedInput),
+      heading(std::move(heading)),
+      body(std::move(body)),
+      primaryLabel(std::move(primaryLabel)) {}
 
-void SleepSyncPromptActivity::onEnter() {
+void ChoicePromptActivity::onEnter() {
   Activity::onEnter();
 
   lineHeight = renderer.getLineHeight(fontId);
@@ -20,7 +23,7 @@ void SleepSyncPromptActivity::onEnter() {
 
   // Line budget = the hint-safe area minus top/bottom margins and the heading/body gap,
   // so the wrapped text cannot ride under the hints in any orientation.
-  actionBar_.layout(renderer, mappedInput.hasTouch(), fontId, 2);
+  actionBar_.layout(renderer, mappedInput.hasTouch(), fontId, 3);
   const int available = safe.height - (margin * 2) - actionBar_.reservedHeight() - spacing;
   const int maxLines = std::max(1, available / lineHeight);
 
@@ -40,7 +43,7 @@ void SleepSyncPromptActivity::onEnter() {
   requestUpdate(true);
 }
 
-void SleepSyncPromptActivity::render(RenderLock&& lock) {
+void ChoicePromptActivity::render(RenderLock&& lock) {
   renderer.clearScreen();
 
   const Rect area = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
@@ -55,42 +58,50 @@ void SleepSyncPromptActivity::render(RenderLock&& lock) {
     currentY += lineHeight;
   }
 
-  // Back = Cancel (stay awake), Left = Skip (sleep, no sync), Right = Sync.
-  const auto labels =
-      mappedInput.mapLabels(I18N.get(StrId::STR_CANCEL), "", I18N.get(StrId::STR_SKIP), I18N.get(StrId::STR_SYNC));
+  const char* cancelLabel = I18N.get(StrId::STR_CANCEL);
+  const char* skipLabel = I18N.get(StrId::STR_SKIP);
+  const auto labels = mappedInput.mapLabels(cancelLabel, primaryLabel.c_str(), skipLabel, primaryLabel.c_str());
   if (actionBar_.active()) {
-    const char* barLabels[] = {I18N.get(StrId::STR_SKIP), I18N.get(StrId::STR_SYNC)};
-    actionBar_.draw(renderer, fontId, barLabels, /*primaryIndex=*/1);
+    const char* barLabels[] = {cancelLabel, skipLabel, primaryLabel.c_str()};
+    actionBar_.draw(renderer, fontId, barLabels, /*primaryIndex=*/2);
   }
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer(HalDisplay::RefreshMode::FAST_REFRESH);
 }
 
-void SleepSyncPromptActivity::finishWith(int action) {
+void ChoicePromptActivity::finishWith(int action) {
   setResult(MenuResult{action});
   finish();
 }
 
-void SleepSyncPromptActivity::loop() {
+void ChoicePromptActivity::cancel() {
+  ActivityResult res;
+  res.isCancelled = true;
+  setResult(std::move(res));
+  finish();
+}
+
+void ChoicePromptActivity::loop() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-    ActivityResult res;
-    res.isCancelled = true;
-    setResult(std::move(res));
-    finish();
+    cancel();
     return;
   }
   int tapX = 0;
   int tapY = 0;
   if (mappedInput.wasScreenTapped(tapX, tapY)) {
-    const int hit = actionBar_.hitAt(tapX, tapY);
-    if (hit == 0) {
-      finishWith(ACTION_SKIP);
-      return;
-    }
-    if (hit == 1) {
-      finishWith(ACTION_SYNC);
-      return;
+    switch (actionBar_.hitAt(tapX, tapY)) {
+      case 0:
+        cancel();
+        return;
+      case 1:
+        finishWith(ACTION_SKIP);
+        return;
+      case 2:
+        finishWith(ACTION_PRIMARY);
+        return;
+      default:
+        break;
     }
   }
 
@@ -98,8 +109,10 @@ void SleepSyncPromptActivity::loop() {
     finishWith(ACTION_SKIP);
     return;
   }
-  if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
-    finishWith(ACTION_SYNC);
+  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) confirmArmed = true;
+  if (mappedInput.wasReleased(MappedInputManager::Button::Right) ||
+      (confirmArmed && mappedInput.wasReleased(MappedInputManager::Button::Confirm))) {
+    finishWith(ACTION_PRIMARY);
     return;
   }
 }

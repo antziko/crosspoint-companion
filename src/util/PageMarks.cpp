@@ -429,12 +429,13 @@ bool pageHasWord(const Page& page, const LookupMarks::Mark& mark) {
 }
 
 SnippetAt findSnippet(const Page& page, const char* snippet, SnippetMiss* miss, uint16_t* startIndex,
-                      const bool allowShort) {
+                      const bool allowShort, uint16_t* endIndex, const bool caseFold) {
   if (!snippet || snippet[0] == '\0' || (!allowShort && std::strlen(snippet) < kRelocateMinSnippet)) {
     return SnippetAt::None;
   }
   SnippetMatch::Matcher matcher;
   matcher.snippet = snippet;
+  matcher.caseFold = caseFold;
   matcher.begin(BOOKMARK_SNIPPET_MAX);
   uint16_t index = 0;
   for (const auto& element : page.elements) {
@@ -456,6 +457,7 @@ SnippetAt findSnippet(const Page& page, const char* snippet, SnippetMiss* miss, 
         const size_t partLen = unsplit ? len : parts[pi].end - parts[pi].start;
         if (offerNoting(matcher, text + partStart, partLen, index, miss)) {
           if (startIndex) *startIndex = matcher.start;
+          if (endIndex) *endIndex = matcher.end;
           return SnippetAt::Whole;
         }
       }
@@ -1076,4 +1078,63 @@ const LookupMarks::Mark* lookupMarkAtPoint(const GfxRenderer& renderer, const Pa
   return nullptr;
 }
 
+void drawTermBox(const GfxRenderer& renderer, const Page& page, const int fontId, const int marginLeft,
+                 const int marginTop, const uint16_t start, const uint16_t end) {
+  if (end < start) return;
+  const int lineHeight = renderer.getLineHeight(fontId);
+  const int ascender = renderer.getFontAscenderSize(fontId);
+  constexpr int kThick = 3;  // stroke
+  constexpr int kGap = 3;    // clear space between the stroke and the words
+  // One box per line the term occupies: a wrapped term gets a box on each of its lines.
+  bool runOpen = false;
+  int runY = 0;
+  int runX0 = 0;
+  int runX1 = 0;
+  const auto flush = [&]() {
+    if (!runOpen) return;
+    runOpen = false;
+    // Never into the left margin, where bookmark bars sit.
+    const int left = std::max(marginLeft - 1, runX0 - kGap - kThick);
+    const int right = std::min(renderer.getScreenWidth() - 1, runX1 + kGap + kThick);
+    // The line box itself, one pixel taller each way: its leading clears the glyphs, and the
+    // stroke grows inward so a neighbouring line's text is never touched.
+    renderer.drawRect(left, runY - 1, right - left, lineHeight + 2, kThick, true);
+  };
+  uint16_t index = 0;
+  for (const auto& element : page.elements) {
+    if (element->getTag() != TAG_PageLine) continue;
+    const auto* line = static_cast<const PageLine*>(element.get());
+    const auto& block = line->getBlock();
+    if (!block) continue;
+    const int8_t tracking = block->getBlockStyle().characterSpacing;
+    const int rowY = line->yPos + marginTop + block->getRubyShift(ascender);
+    const uint16_t blockWordCount = block->wordCount();
+    for (uint16_t w = 0; w < blockWordCount && index <= end; w++) {
+      const char* text = block->wordText(w);
+      const size_t len = block->wordTextLen(w);
+      bool isCjk = false;
+      if (!PageTokens::isSelectable(text, len, isCjk)) continue;
+      PageTokens::Part parts[PageTokens::kMaxTokenParts];
+      const size_t partCount = PageTokens::collectParts(text, len, parts, PageTokens::kMaxTokenParts);
+      const uint16_t first = index;
+      index = static_cast<uint16_t>(index + partCount);
+      // The whole word, punctuation and all, whenever any part of it is in the term: a box edge
+      // through "Apple-NeXT" or before "computer)," would cut the word it is meant to frame.
+      if (first > end || index <= start) continue;
+      const int x = line->xPos + block->wordXpos(w) + marginLeft;
+      const int width = PageTokens::measureAdvance(renderer, fontId, text, block->wordStyle(w), tracking);
+      if (runOpen && runY != rowY) flush();
+      if (!runOpen) {
+        runOpen = true;
+        runY = rowY;
+        runX0 = x;
+        runX1 = x + width;
+      } else {
+        runX1 = std::max(runX1, x + width);
+      }
+    }
+    if (index > end) break;
+  }
+  flush();
+}
 }  // namespace PageMarks

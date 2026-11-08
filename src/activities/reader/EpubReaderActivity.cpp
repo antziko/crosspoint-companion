@@ -62,9 +62,9 @@
 #include "ReadingTimeHistory.h"
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
-#include "SleepSyncPromptActivity.h"
 #include "SyncScopeSelectionActivity.h"
 #include "WordSelectionScan.h"
+#include "activities/util/ChoicePromptActivity.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "activities/util/IntervalSelectionActivity.h"
 #include "components/UIScale.h"
@@ -76,6 +76,8 @@
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
 #include "util/FlashcardDeck.h"
+#include "util/IndexTermPage.h"
+#include "util/ListSwipeScroll.h"
 #include "util/LoanDue.h"
 #include "util/LookupMarks.h"
 #include "util/PageMarks.h"
@@ -1163,9 +1165,10 @@ void EpubReaderActivity::showBuildPopup() {
 }
 
 void EpubReaderActivity::openFootnoteSelect(const bool reopenMenuOnCancel) {
-  if (!section || currentPageFootnotes.empty()) return;
-  if (currentPageFootnotes.size() == 1) {
-    navigateToHref(currentPageFootnotes[0].href, true);
+  if (!section || currentPageLinks.empty()) return;
+  // One link: follow it. A page with a single link cannot read as an index, so no term.
+  if (currentPageLinks.size() == 1) {
+    navigateToHref(currentPageLinks[0].href, true);
     return;
   }
 
@@ -1193,7 +1196,11 @@ void EpubReaderActivity::openFootnoteSelect(const bool reopenMenuOnCancel) {
       return;
     }
     const auto& footnoteResult = std::get<FootnoteResult>(result.data);
-    navigateToHref(footnoteResult.href, true);
+    // The selector listed this same page's links, and the section stays loaded under it.
+    char term[IndexTerm::kMaxEntry];
+    const bool fromIndex = footnoteResult.linkIndex >= 0 &&
+                           indexTermForCurrentLink(static_cast<size_t>(footnoteResult.linkIndex), term, sizeof(term));
+    navigateToHref(footnoteResult.href, true, fromIndex ? term : nullptr);
     requestUpdate();
   });
 }
@@ -1593,7 +1600,10 @@ void EpubReaderActivity::loop() {
       const auto* link = EpubReaderUtils::linkAtPoint(currentPageLinks, touchX, touchY, currentPageLinkMarginLeft,
                                                       currentPageLinkMarginTop);
       if (link) {
-        navigateToHref(link->href, true);
+        char term[IndexTerm::kMaxEntry];
+        const size_t linkIndex = static_cast<size_t>(link - currentPageLinks.data());
+        const bool fromIndex = indexTermForCurrentLink(linkIndex, term, sizeof(term));
+        navigateToHref(link->href, true, fromIndex ? term : nullptr);
         return;
       }
     }
@@ -1967,7 +1977,7 @@ void EpubReaderActivity::openReaderMenu() {
         }
       },
       renderer, mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent,
-      APP_STATE.activeOrientation, !currentPageFootnotes.empty(), Dictionary::exists(epub->getCachePath().c_str()),
+      APP_STATE.activeOrientation, !currentPageLinks.empty(), Dictionary::exists(epub->getCachePath().c_str()),
       std::move(activeDictName), std::move(loanLine));
 }
 
@@ -2624,14 +2634,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
               };
 
               if (chapterJumpLeavesPage(chapterResult.spineIndex, chapterResult.anchor) && canOfferReturnMark()) {
-                startActivityForResultNoThrow<ConfirmationActivity>(
-                    [this, doNavigate](const ActivityResult& confirmResult) {
-                      if (!confirmResult.isCancelled) {
-                        addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
-                      }
-                      doNavigate();
-                    },
-                    renderer, mappedInput, tr(STR_CONFIRM_ADD_RETURN_MARK), "");
+                promptReturnMarkThen(doNavigate);
                 return;
               }
               doNavigate();
@@ -2662,14 +2665,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
               auto doNavigate = [this, targetPercent]() { jumpToPercent(targetPercent); };
 
               if (targetPercent != initialPercent && canOfferReturnMark()) {
-                startActivityForResultNoThrow<ConfirmationActivity>(
-                    [this, doNavigate](const ActivityResult& confirmResult) {
-                      if (!confirmResult.isCancelled) {
-                        addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
-                      }
-                      doNavigate();
-                    },
-                    renderer, mappedInput, tr(STR_CONFIRM_ADD_RETURN_MARK), "");
+                promptReturnMarkThen(doNavigate);
                 return;
               }
               doNavigate();
@@ -2964,14 +2960,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
                   pageUnmarked = markIndexOnCurrentPage(false) < 0;
                 }
                 if (pageUnmarked) {
-                  startActivityForResultNoThrow<ConfirmationActivity>(
-                      [this, doNavigate](const ActivityResult& confirmResult) {
-                        if (!confirmResult.isCancelled) {
-                          addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
-                        }
-                        doNavigate();
-                      },
-                      renderer, mappedInput, tr(STR_CONFIRM_ADD_RETURN_MARK), "");
+                  promptReturnMarkThen(doNavigate);
                   return;
                 }
               }
@@ -3693,7 +3682,16 @@ void EpubReaderActivity::render(RenderLock&& lock) {
             failBuild();
             return;
           }
-          while (!section->isBuildComplete() && (anchorJump   ? !section->findAnchor(pendingAnchor)
+          // The parser records an anchor on the page it is still filling, so finding it is not
+          // enough: that page must also be complete before it can be shown.
+          // An index jump also needs the pages its term search reads (seekIndexTerm).
+          const auto anchorPageBuilt = [this]() {
+            const auto page = section->findAnchor(pendingAnchor);
+            if (!page.has_value()) return false;
+            const int needed = *page + 1 + (pendingIndexTerm_[0] ? MAX_INDEX_SEEK_PAGES - 1 : 0);
+            return needed <= static_cast<int>(section->pageCount);
+          };
+          while (!section->isBuildComplete() && (anchorJump   ? !anchorPageBuilt()
                                                  : offsetJump ? !visibleOffsetLaidOut(*cachedVisibleTextOffset)
                                                               : static_cast<int>(section->pageCount) <= target)) {
             // Anchor jump: build until the anchor's page is laid out (usually page 0), checking a
@@ -3735,15 +3733,35 @@ void EpubReaderActivity::render(RenderLock&& lock) {
 
     if (!pendingAnchor.empty()) {
       // Resolve from the pages laid out so far and/or the on-disk map (finalized or partial).
-      const auto page = section->findAnchor(pendingAnchor);
+      auto page = section->findAnchor(pendingAnchor);
+      if (page && *page >= section->pageCount && section->pageCount > 0) {
+        // Recorded on a page the build had not finished; its predecessor is the nearest one there.
+        SdDebugLog::log("ERS", "anchor spine=%d id=%.40s page %d not built (pages=%u); clamped", currentSpineIndex,
+                        pendingAnchor.c_str(), *page + 1, section->pageCount);
+        page = static_cast<uint16_t>(section->pageCount - 1);
+      }
       if (page) {
         section->currentPage = *page;
         LOG_DBG("ERS", "Resolved anchor '%s' to page %d", pendingAnchor.c_str(), *page);
+        // The landed page's opening text, to check a jump against the book without the device.
+        std::string head;
+        if (const auto landed = section->loadPage(*page)) head = PageTextExtractor::fromHorizontalPage(*landed);
+        for (char& c : head) {
+          if (c == '\n' || c == '"') c = ' ';
+        }
+        SdDebugLog::log("ERS", "anchor spine=%d id=%.40s -> page %d/%u partial=%d head=\"%.60s\"", currentSpineIndex,
+                        pendingAnchor.c_str(), *page + 1, section->pageCount, section->isPartial() ? 1 : 0,
+                        head.c_str());
+        if (pendingIndexTerm_[0]) seekIndexTerm(*page);
       } else {
         LOG_DBG("ERS", "Anchor '%s' not found in section %d", pendingAnchor.c_str(), currentSpineIndex);
+        SdDebugLog::log("ERS", "anchor spine=%d id=%.40s UNRESOLVED -> page %d/%u partial=%d", currentSpineIndex,
+                        pendingAnchor.c_str(), section->currentPage + 1, section->pageCount,
+                        section->isPartial() ? 1 : 0);
       }
       pendingAnchor.clear();
     }
+    pendingIndexTerm_[0] = '\0';  // consumed with its anchor, found or not
 
     // An exact character offset is the best anchor there is: like the paragraph it names
     // the text rather than the layout, so it survives a re-flow, but it also keeps the
@@ -3971,8 +3989,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     }
     pageLoadRetryCount = 0;  // Reset the retry counter once a page loads cleanly
 
-    // Collect footnotes from the loaded page
-    currentPageFootnotes = std::move(p->footnotes);
+    // The page's links; the link list and index jumps work from these, not Page::footnotes.
     currentPageLinks = std::move(p->links);
     currentPageLinkMarginLeft = orientedMarginLeft;
     currentPageLinkMarginTop = orientedMarginTop;
@@ -4447,7 +4464,7 @@ bool EpubReaderActivity::onManualSleepRequested() {
   //   Cancel (Back)  -> abort the sleep, stay reading
   //   Skip   (Left)  -> sleep now, no sync
   //   Sync   (Right) -> sync then deep-sleep on success
-  startActivityForResultNoThrow<SleepSyncPromptActivity>(
+  startActivityForResultNoThrow<ChoicePromptActivity>(
       [this](const ActivityResult& res) {
         if (res.isCancelled) {
           // Cancel: don't sleep. Swallow the answering button's release so it
@@ -4457,7 +4474,7 @@ bool EpubReaderActivity::onManualSleepRequested() {
           return;
         }
         const auto* menu = std::get_if<MenuResult>(&res.data);
-        if (menu && menu->action == SleepSyncPromptActivity::ACTION_SYNC) {
+        if (menu && menu->action == ChoicePromptActivity::ACTION_PRIMARY) {
           // Sync -> hand off; KOReaderSyncActivity deep-sleeps on success (sleepWhenDone).
           // If the pre-sync save failed, don't strand the user awake — sleep anyway.
           if (!launchKoSync(/*sleepWhenDone=*/true)) {
@@ -4470,7 +4487,7 @@ bool EpubReaderActivity::onManualSleepRequested() {
         recordSyncPromptSkip();
         APP_STATE.requestManualSleep = true;
       },
-      renderer, mappedInput, tr(STR_SYNC_BEFORE_SLEEP), tr(STR_SYNC_BEFORE_SLEEP_BODY));
+      renderer, mappedInput, tr(STR_SYNC_BEFORE_SLEEP), tr(STR_SYNC_BEFORE_SLEEP_BODY), tr(STR_SYNC));
   return true;
 }
 
@@ -4628,6 +4645,15 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   // draws nothing.
   const auto drawPageMarks = [&]() {
     quoteOnThisPaint_ = false;
+    // The term an index jump landed on, on that page only: any other page drawn ends it.
+    if (indexTermMark_.active) {
+      if (indexTermMark_.spine == currentSpineIndex && indexTermMark_.page == section->currentPage) {
+        PageMarks::drawTermBox(renderer, *page, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop,
+                               indexTermMark_.start, indexTermMark_.end);
+      } else {
+        indexTermMark_.active = false;
+      }
+    }
     const PageMarks::PageKey key = currentPageMarkKey();
     if (!key.valid) return;
     // A full table holds the chapter it was built in first; a new chapter needs its own.
@@ -5543,14 +5569,7 @@ void EpubReaderActivity::handleOverlayInput() {
       };
 
       if (offerReturnMark) {
-        startActivityForResultNoThrow<ConfirmationActivity>(
-            [this, doNavigate](const ActivityResult& confirmResult) {
-              if (!confirmResult.isCancelled) {
-                addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
-              }
-              doNavigate();
-            },
-            renderer, mappedInput, tr(STR_CONFIRM_ADD_RETURN_MARK), "");
+        promptReturnMarkThen(doNavigate);
         return;
       }
       doNavigate();
@@ -5580,18 +5599,29 @@ void EpubReaderActivity::handleOverlayInput() {
     requestUpdate();
   };
 
-  // Pages the list by one screen of rows through the nav (measured page size,
-  // no-op at the ends). A shown cursor rides along so the buttons continue
-  // from what is visible; on touch boards only the viewport moves.
+  // Pages the list by one screen of rows, wrapping at both ends like the list screens'
+  // swipes. A shown cursor moves a page (to the other end from the first/last row) and the
+  // viewport follows it; on touch boards only the viewport moves.
   const auto pageList = [this, count, pageRows, &fastRedraw](int direction) {
     if (count <= 0) return;
-    const bool moved = toolbarUi->nav().scrollBy(direction * pageRows, count);
     if (panelCursorShown) {
-      panelIndex = std::clamp(panelIndex + direction * pageRows, 0, count - 1);
+      if (direction > 0) {
+        panelIndex = panelIndex >= count - 1 ? 0 : std::min(panelIndex + pageRows, count - 1);
+      } else {
+        panelIndex = panelIndex <= 0 ? count - 1 : std::max(panelIndex - pageRows, 0);
+      }
       fastRedraw();
       return;
     }
-    if (moved) fastRedraw();
+    auto& nav = toolbarUi->nav();
+    const int topBefore = nav.top;
+    int pinEnd = -1;
+    const bool moved = listSwipeScroll(nav, direction > 0, count, &pinEnd);
+    SdDebugLog::log("TBR", "page %s top %d->%d drawn=%d count=%d pin=%d", direction > 0 ? "next" : "prev", topBefore,
+                    nav.top, nav.drawnRows, count, pinEnd);
+    if (!moved) return;
+    toolbarUi->setPinEnd(pinEnd);
+    fastRedraw();
   };
 
   switch (routed.event) {
@@ -5705,7 +5735,7 @@ void EpubReaderActivity::buildMoreActions() {
   using MA = EpubReaderMenuActivity::MenuAction;
   // feat's builder returns the vector and gates on hasDictionary (see its
   // LOCAL(feat) note) rather than upstream's out-param + hasBookmarks.
-  moreItems = EpubReaderMenuActivity::buildMenuItems(!currentPageFootnotes.empty(),
+  moreItems = EpubReaderMenuActivity::buildMenuItems(!currentPageLinks.empty(),
                                                      Dictionary::exists(epub->getCachePath().c_str()));
   // READER_OPTIONS is this fork's equivalent of upstream's TEXT_SETTINGS row:
   // both are what the Text tool already covers.
@@ -5864,7 +5894,7 @@ void EpubReaderActivity::lightStatusBarRefresh() {
   lastPageUsedGrayscale = false;
 }
 
-void EpubReaderActivity::navigateToHref(const std::string& hrefStr, const bool savePosition) {
+void EpubReaderActivity::navigateToHref(const std::string& hrefStr, const bool savePosition, const char* indexTerm) {
   if (!epub) return;
 
   // Extract fragment anchor (e.g. "#note1" or "chapter2.xhtml#note1")
@@ -5886,8 +5916,17 @@ void EpubReaderActivity::navigateToHref(const std::string& hrefStr, const bool s
 
   if (targetSpineIndex < 0) {
     LOG_DBG("ERS", "Could not resolve href: %s", hrefStr.c_str());
+    SdDebugLog::log("ERS", "link href=%.64s UNRESOLVED from spine=%d", hrefStr.c_str(), currentSpineIndex);
     return;
   }
+  // Only a jump out of the index to an anchor elsewhere searches for its term: a "see also"
+  // stays inside the index, and without an anchor there is no printed-page start to correct.
+  const bool seekTerm = indexTerm && indexTerm[0] && !anchor.empty() && targetSpineIndex != currentSpineIndex;
+  // The term alone; a sub-entry's heading follows its separator and is logged by IDX.
+  const int termLen = seekTerm ? static_cast<int>(std::strcspn(indexTerm, "\x1F")) : 0;
+  SdDebugLog::log("ERS", "link href=%.64s spine=%d page=%d -> spine=%d save=%d depth=%d term=\"%.*s\"", hrefStr.c_str(),
+                  currentSpineIndex, pageIndex() + 1, targetSpineIndex, savePosition ? 1 : 0, footnoteDepth, termLen,
+                  seekTerm ? indexTerm : "");
 
   if (savePosition) {
     // Full: drop the oldest entry so Back always returns from the newest jump.
@@ -5907,12 +5946,95 @@ void EpubReaderActivity::navigateToHref(const std::string& hrefStr, const bool s
     RenderLock lock(*this);
     clearDeferredReposition();
     pendingAnchor = std::move(anchor);
+    if (seekTerm) {
+      strncpy(pendingIndexTerm_, indexTerm, sizeof(pendingIndexTerm_) - 1);
+      pendingIndexTerm_[sizeof(pendingIndexTerm_) - 1] = '\0';
+    } else {
+      pendingIndexTerm_[0] = '\0';
+    }
+    indexTermMark_.active = false;
     currentSpineIndex = targetSpineIndex;
     nextPageNumber = 0;
     resetSections();
   }
   requestUpdate();
   LOG_DBG("ERS", "Navigated to spine %d for href: %s", targetSpineIndex, hrefStr.c_str());
+}
+
+bool EpubReaderActivity::indexTermForCurrentLink(const size_t linkIndex, char* out, const size_t cap) {
+  out[0] = '\0';
+  if (!section || linkIndex >= currentPageLinks.size()) return false;
+  // The displayed page's words are not kept once drawn; read it back, with the page before: an
+  // entry, or the heading of its sub-entries, can begin there (two SD reads, on a tap).
+  std::unique_ptr<Page> page;
+  std::unique_ptr<Page> before;
+  {
+    RenderLock lock(*this);
+    page = section->loadPage(section->currentPage);
+    if (page && section->currentPage > 0) before = section->loadPage(section->currentPage - 1);
+  }
+  return page && IndexTermPage::termForLink(*page, before.get(), linkIndex, out, cap);
+}
+
+void EpubReaderActivity::seekIndexTerm(const int anchorPage) {
+  auto& candidates = indexTermCandidates_;
+  const size_t candidateCount = IndexTerm::buildCandidates(pendingIndexTerm_, candidates, IndexTerm::kMaxCandidates);
+  // The anchor marks where the printed page begins, so the term most often follows within about a
+  // printed page. An index is as often a page off, the mention sitting in the printed page before,
+  // so that comes next, nearest first; then the rest of the window ahead. "A printed page" is
+  // INDEX_PRINTED_PAGE_WORDS of text, as many screen pages as the font fits it on. Each page is read
+  // once and tried against every candidate still better than the best found, so a more specific
+  // candidate on a later page beats a fallback on an earlier one within the first stretch; the
+  // later stretches are only read while nothing has matched.
+  size_t best = candidateCount;
+  int bestPage = -1;
+  uint16_t bestStart = 0;
+  uint16_t bestEnd = 0;
+  int pagesRead = 0;
+  uint16_t screenWords = 0;  // the most words on a page read so far
+  const int pageCount = section->pageCount;
+  const auto tryPage = [&](const int p) {
+    if (p < 0 || p >= pageCount) return;
+    const auto page = section->loadPage(p);
+    if (!page) return;
+    pagesRead++;
+    screenWords = std::max(screenWords, PageMarks::countSpanWords(*page));
+    for (size_t c = 0; c < best; c++) {
+      uint16_t start = 0;
+      uint16_t end = 0;
+      const PageMarks::SnippetAt at = PageMarks::findSnippet(*page, candidates[c], nullptr, &start,
+                                                             /*allowShort=*/true, &end, /*caseFold=*/true);
+      // Whole only: a term running off the page bottom matched just its first word ("Fred" of
+      // "Fred Anderson"), which says nothing about the page.
+      if (at != PageMarks::SnippetAt::Whole) continue;
+      best = c;
+      bestPage = p;
+      bestStart = start;
+      bestEnd = end;
+      return;
+    }
+  };
+  // The anchor's page and the next give the words a screen page holds (a chapter's opening page
+  // alone can be nearly empty).
+  tryPage(anchorPage);
+  if (best > 0) tryPage(anchorPage + 1);
+  const int perPrinted =
+      screenWords > 0 ? (INDEX_PRINTED_PAGE_WORDS + screenWords - 1) / screenWords : MAX_INDEX_SEEK_PAGES;
+  const int span = std::clamp(perPrinted, 2, MAX_INDEX_SEEK_PAGES);
+  for (int i = 2; i < span && best > 0; i++) tryPage(anchorPage + i);
+  for (int i = 1; i <= span && best == candidateCount; i++) tryPage(anchorPage - i);
+  for (int i = span; i < MAX_INDEX_SEEK_PAGES && best == candidateCount; i++) tryPage(anchorPage + i);
+  SdDebugLog::log("ERS",
+                  "index-term \"%.*s\" cands=%u found=%d/\"%.40s\" anchor=%d -> page %d (read %d of %u, span %d at %u "
+                  "words) mark=%u-%u free=%u",
+                  std::min<int>(40, static_cast<int>(std::strcspn(pendingIndexTerm_, "\x1F"))), pendingIndexTerm_,
+                  (unsigned)candidateCount, best < candidateCount ? (int)best : -1,
+                  best < candidateCount ? candidates[best] : "", anchorPage + 1,
+                  (bestPage >= 0 ? bestPage : anchorPage) + 1, pagesRead, section->pageCount, span,
+                  (unsigned)screenWords, bestStart, bestEnd, (unsigned)esp_get_free_heap_size());
+  if (bestPage < 0) return;  // not in reach: stay where the index pointed
+  section->currentPage = bestPage;
+  indexTermMark_ = {true, currentSpineIndex, bestPage, bestStart, bestEnd};
 }
 
 bool EpubReaderActivity::handleHomeGesture() {
@@ -5984,15 +6106,37 @@ void EpubReaderActivity::restoreSavedPosition() {
   footnoteDepth--;
   const auto& pos = savedPositions[footnoteDepth];
   LOG_DBG("ERS", "Restoring position [%d]: spine %d, page %d", footnoteDepth, pos.spineIndex, pos.pageNumber);
+  SdDebugLog::log("ERS", "link-back depth=%d -> spine=%d page=%d", footnoteDepth, pos.spineIndex, pos.pageNumber + 1);
 
   {
     RenderLock lock(*this);
     clearDeferredReposition();
+    pendingIndexTerm_[0] = '\0';
+    indexTermMark_.active = false;
     currentSpineIndex = pos.spineIndex;
     nextPageNumber = pos.pageNumber;
     resetSections();
   }
   requestUpdate();
+}
+
+void EpubReaderActivity::promptReturnMarkThen(std::function<void()> doNavigate) {
+  // Cancel stays on the current page; Skip jumps without a mark; Mark marks, then jumps.
+  startActivityForResultNoThrow<ChoicePromptActivity>(
+      [this, doNavigate = std::move(doNavigate)](const ActivityResult& res) {
+        if (res.isCancelled) {
+          suppressPageTurnUntilRelease_ = true;
+          ignoreBackUntilRelease = true;
+          requestUpdate();
+          return;
+        }
+        const auto* choice = std::get_if<MenuResult>(&res.data);
+        if (choice && choice->action == ChoicePromptActivity::ACTION_PRIMARY) {
+          addBookmark(/*returnMark=*/true, /*lightRefresh=*/true);
+        }
+        doNavigate();
+      },
+      renderer, mappedInput, tr(STR_CONFIRM_ADD_RETURN_MARK), tr(STR_RETURN_MARK_BODY), tr(STR_MARK));
 }
 
 bool EpubReaderActivity::canOfferReturnMark() const {

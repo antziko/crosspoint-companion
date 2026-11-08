@@ -155,7 +155,13 @@ namespace {
 //      stylesheet no longer loses its late-sorting rules to the load budget on any board.
 // v76: font-weight 600 is bold (CSS cache v11); rebuild layouts made with it as normal weight.
 // v77: A left/center/right reader alignment replaces book justify in table cells.
-constexpr uint8_t SECTION_FILE_VERSION = 77;
+// v78: The anchor map records empty <span id/> markers, places inline anchors on the page of
+//      their word, and table-row anchors on the page the row's first line lands on.
+// v79: A table row that falls back to stacked cells records its anchors on its first line's page.
+// v80: A hanging indent (negative text-indent) never pulls a first line past its block's left inset.
+// v81: A small image that is a link's only content (a note icon) becomes a "[n]" text marker.
+// v82: Small images zoom with the reading font (line height over CSS's 19.2 px reference).
+constexpr uint8_t SECTION_FILE_VERSION = 82;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
@@ -838,6 +844,14 @@ bool Section::commitBuildFile(const uint8_t version, const uint32_t bytesConsume
     if (asPartial && page >= builtPageCount_) continue;
     serialization::writeString(file, anchor);
     serialization::writePod(file, page);
+  }
+  if (!asPartial) {
+    // inline = placed by word position (<a id>, empty <span id/>), row = on their table row's
+    // page, carried = marker ended its paragraph, capped/poolFull = fell back or dropped.
+    const auto& stats = build_->parser->getAnchorStats();
+    SdDebugLog::log("SCT", "anchors spine=%d total=%u inline=%u row=%u carried=%u capped=%u poolFull=%u", spineIndex,
+                    (unsigned)anchorCount, (unsigned)stats.inlineAnchors, (unsigned)stats.rowAnchors,
+                    (unsigned)stats.carried, (unsigned)stats.capped, (unsigned)stats.poolFull);
   }
 
   const uint32_t paragraphLutOffset = file.position();

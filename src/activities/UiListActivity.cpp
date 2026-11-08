@@ -2,6 +2,7 @@
 
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <SdDebugLog.h>
 
 #include <algorithm>
 
@@ -101,6 +102,7 @@ bool UiListActivity::routeListTouch() {
 }
 
 void UiListActivity::moveSelectionTo(const int index) {
+  pinEnd_ = -1;
   // No render lock: `selected` is written only here, on the main task, and the
   // viewport pull is deferred to the next build, where ListNav::syncToProps
   // consumes followOnBuild. Taking the lock parked the main loop for a whole
@@ -127,7 +129,14 @@ void UiListActivity::loop() {
       // Same nav-vs-render race as moveSelectionTo: the render task writes
       // top/drawnRows mid-build, so read and mutate under one lock.
       RenderLock lock(*this);
-      moved = listSwipeScroll(activeNav(), swipe == MappedInputManager::SwipeDir::Up, listCount());
+      auto& n = activeNav();
+      const int topBefore = n.top;
+      int pinEnd = -1;
+      moved = listSwipeScroll(n, swipe == MappedInputManager::SwipeDir::Up, listCount(), &pinEnd);
+      if (moved) pinEnd_ = pinEnd;
+      SdDebugLog::log("ULA", "%s swipe %s top %d->%d drawn=%d visible=%d count=%d pin=%d", name.c_str(),
+                      swipe == MappedInputManager::SwipeDir::Up ? "up" : "down", topBefore, n.top, n.drawnRows,
+                      n.visibleRows, listCount(), pinEnd);
     }
     if (moved) requestUpdate();
     return;
@@ -228,6 +237,19 @@ void UiListActivity::drawFooter() {
 
 void UiListActivity::renderListFrame(void (*drawFrame)(void*), void* ctx) {
   drawFrame(ctx);
+  // A backward swipe sized its step by the page it left; when the rows above are taller,
+  // the drawn viewport ends before the row it must reach (the old top, or the last row
+  // after wrapping). Advance by the rows that fell short until it is drawn. Each pass
+  // moves top strictly forward, so the cap only guards unstable row heights.
+  const int pinEnd = pinEnd_.exchange(-1);
+  if (pinEnd > 0) {
+    auto& n = activeNav();
+    const int end = std::min(pinEnd, listCount());
+    for (int pass = 0; pass < 8 && n.drawnRows > 0 && n.top + n.drawnRows < end; ++pass) {
+      n.top = end - n.drawnRows;
+      drawFrame(ctx);
+    }
+  }
   // Bounded: onListRendered() moves top strictly forward toward the selection
   // each pass, and a viewport starting at the selection always draws it, so
   // this converges well inside the cap. The cap is belt-and-braces against a

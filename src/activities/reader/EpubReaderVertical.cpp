@@ -403,7 +403,7 @@ void EpubReaderActivity::renderVertical(const int marginRight, const uint16_t vi
         showError(StrId::STR_PAGE_LOAD_ERROR);
         return;
       }
-      currentPageFootnotes.clear();  // vertical sections collect no footnotes
+      currentPageLinks.clear();  // vertical sections collect no links
       if (!verticalSection->loadSectionFile(spec, /*retryDegraded=*/true)) {
         LOG_DBG("ERS", "Vertical cache not found, building...");
         drawIndexingPopup();
