@@ -150,3 +150,12 @@ void ensureCacheContentId(const std::string& bookPath, const std::string& cacheP
 // if a cache was recovered. Call BEFORE setupCacheDir() at reader open — an empty dir
 // created first would mask the recovery condition.
 bool tryRecoverBookCache(const std::string& bookPath);
+
+// True when bookPath has saved reading progress (progress.bin in its cache dir).
+bool bookHasProgress(const std::string& bookPath);
+
+// Moves an older copy's cache (progress, bookmarks, highlights, stats) onto newPath,
+// replacing whatever newPath had, via relocateBookSidecars(). The caller removes the
+// old book file first. When the two files differ in content, the layout caches
+// (book.bin, stylesheet, sections) are dropped so the new file is indexed afresh.
+void adoptBookCache(const std::string& oldPath, const std::string& newPath);

@@ -163,6 +163,8 @@ class RecentBooksActivity final : public UiListActivity {
   // Load the window starting near `first` unless it already covers
   // [first, first + count). Render task, or loop task under the render lock.
   void ensureWindow(int first, int count);
+  // Prefixes the author with "Expired" for a loan past its due date.
+  static void markIfExpired(RecentBook& book);
   // The window's book at absolute `index`, or null outside it.
   const RecentBook* windowBook(int index) const;
   // A copy of the book at `index`, from the window or the store. Loop task only:

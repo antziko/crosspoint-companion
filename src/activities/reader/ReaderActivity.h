@@ -31,6 +31,8 @@ class ReaderActivity final : public Activity {
   // an unverified date offer a Wi-Fi time sync that reopens the book.
   void showProtectionError();
   void beginLoanTimeSync();
+  // Expired loan outside /Expired: Cancel / Keep / Move to the Expired folder.
+  void showExpiredLoanPrompt();
   // Loan ends within a few days: say when, then open the book.
   void showLoanDueReminder(std::unique_ptr<Epub> epub);
   int initialRefreshCountdown() const;

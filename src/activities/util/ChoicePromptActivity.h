@@ -17,8 +17,9 @@ class ChoicePromptActivity final : public Activity {
   static constexpr int ACTION_SKIP = 0;
   static constexpr int ACTION_PRIMARY = 1;
 
+  // An empty skipLabel shows "Skip".
   ChoicePromptActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string heading, std::string body,
-                       std::string primaryLabel);
+                       std::string primaryLabel, std::string skipLabel = "");
 
   void onEnter() override;
   void loop() override;
@@ -31,6 +32,7 @@ class ChoicePromptActivity final : public Activity {
   std::string heading;
   std::string body;
   std::string primaryLabel;
+  std::string skipLabel;
 
   static constexpr int margin = 20;
   static constexpr int spacing = 30;

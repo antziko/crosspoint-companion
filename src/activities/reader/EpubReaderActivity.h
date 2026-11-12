@@ -168,6 +168,10 @@ class EpubReaderActivity final : public Activity {
   // Set when the reader is left at end-of-book and SETTINGS.moveFinishedToReadFolder is on.
   // Consumed in onExit() to relocate the finished book into /Read/.
   bool pendingReadFolderMove = false;
+  // Set when the user answers "Move" on the leave prompt; onExit() moves only then.
+  bool readFolderMoveConfirmed = false;
+  // Set on "Skip": the book is leaving unfinished-by-choice, so it stays in Recent Books.
+  bool keepInRecentsOnExit = false;
 
   // Toolbar reader menu (SETTINGS.readerMenuStyle == READER_MENU_TOOLBAR): drawn
   // over the page instead of pushing the full-screen list menu. Select opens the
@@ -769,6 +773,9 @@ class EpubReaderActivity final : public Activity {
   // Asks Cancel / Skip / Mark before a jump away from this page; runs doNavigate on Skip
   // and Mark (after adding the return mark), nothing on Cancel.
   void promptReturnMarkThen(std::function<void()> doNavigate);
+  // Runs leave() to exit the reader, first asking Cancel / Skip / Move when the book sits
+  // on the end screen with a read-folder move armed. Cancel keeps the reader open.
+  void leaveReader(std::function<void()> leave);
   // True when a contents jump to (spineIndex, anchor) would actually land on a different page.
   // Mirrors the Go-to-% path's targetPercent != initialPercent test. A spine-index comparison
   // alone is not enough: nested TOCs and multi-chapter XHTML files put several entries in one

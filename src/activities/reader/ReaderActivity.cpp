@@ -22,12 +22,14 @@
 #include "XtcReaderActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/util/BmpViewerActivity.h"
+#include "activities/util/ChoicePromptActivity.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "activities/util/FullScreenMessageActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/NtpBgState.h"
 #include "util/LoanDue.h"
+#include "util/LoanExpiry.h"
 
 namespace {
 // The boot-time background NTP sync (X4 only — gated on no hardware RTC, see
@@ -88,6 +90,10 @@ std::unique_ptr<Epub> ReaderActivity::loadEpub(const std::string& path) {
     LOG_ERR("READER", "File does not exist: %s", path.c_str());
     return nullptr;
   }
+
+  // A re-borrowed loan picks up its expired copy's progress and marks before its own
+  // cache dir is looked at below.
+  loanexpiry::adoptExpiredCopy(path);
 
   auto epub = makeUniqueNoThrow<Epub>(path, "/.crosspoint");
   if (!epub) {
@@ -266,6 +272,10 @@ void ReaderActivity::showProtectionError() {
   StrId msg = StrId::STR_DRM_PROTECTED_FILE;
   bool offerSync = false;
   if (loadProtectionError == "access expired") {
+    if (!loanexpiry::inExpiredFolder(initialBookPath)) {
+      showExpiredLoanPrompt();
+      return;
+    }
     msg = StrId::STR_LOAN_EXPIRED;
   } else if (loadProtectionError == "loan date unverified") {
     msg = StrId::STR_LOAN_TIME_UNVERIFIED;
@@ -281,6 +291,20 @@ void ReaderActivity::showProtectionError() {
       },
       renderer, mappedInput, "", I18N.get(msg), offerSync ? tr(STR_OK_BUTTON) : "",
       I18N.get(offerSync ? StrId::STR_CLOCK_SYNC_NOW : StrId::STR_OK_BUTTON));
+  if (!shown) onGoBack();
+}
+
+void ReaderActivity::showExpiredLoanPrompt() {
+  // Cancel and Keep both leave the book where it is; Move files it under /Expired.
+  const bool shown = startActivityForResultNoThrow<ChoicePromptActivity>(
+      [this](const ActivityResult& result) {
+        const auto* choice = std::get_if<MenuResult>(&result.data);
+        if (!result.isCancelled && choice && choice->action == ChoicePromptActivity::ACTION_PRIMARY) {
+          loanexpiry::moveToExpiredFolder(initialBookPath);
+        }
+        onGoBack();
+      },
+      renderer, mappedInput, tr(STR_MOVE_TO_EXPIRED_PROMPT), tr(STR_LOAN_EXPIRED), tr(STR_MOVE), tr(STR_KEEP));
   if (!shown) onGoBack();
 }
 

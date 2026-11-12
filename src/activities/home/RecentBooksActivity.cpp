@@ -25,6 +25,7 @@
 #include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
+#include "util/LoanExpiry.h"
 #include "util/RecentBooksLine.h"
 #include "util/StringUtils.h"
 
@@ -51,6 +52,7 @@ std::vector<std::string> filterFolders() {
     if (!server.name.empty()) add(StringUtils::sanitizeFilename(server.name));
   }
   add(LIBBY_FOLDER);
+  add(loanexpiry::FOLDER_NAME);
   return folders;
 }
 
@@ -179,6 +181,17 @@ void RecentBooksActivity::rescan() {
   }
 }
 
+// Loans (Libby and /Expired only, to keep the key-file reads off every other row) whose
+// due date has passed show "Expired" in front of the author.
+void RecentBooksActivity::markIfExpired(RecentBook& book) {
+  const std::string_view top = recentline::topFolder(book.path);
+  if (top != LIBBY_FOLDER && top != loanexpiry::FOLDER_NAME) return;
+  if (!loanexpiry::isExpired(book.path)) return;
+  std::string label = tr(STR_LOAN_EXPIRED_LABEL);
+  if (!book.author.empty()) label += " · " + book.author;
+  book.author = std::move(label);
+}
+
 void RecentBooksActivity::ensureWindow(const int first, const int count) {
   const int total = listCount();
   if (total == 0) {
@@ -199,6 +212,7 @@ void RecentBooksActivity::ensureWindow(const int first, const int count) {
   for (int i = 0; i < size; i++) {
     RecentBook book;
     if (!RECENT_BOOKS.readAt(offsets[start + i], book)) LOG_ERR("RBA", "Unreadable recent entry %d", start + i);
+    markIfExpired(book);
     recentBooks.push_back(std::move(book));
   }
   windowStart = start;

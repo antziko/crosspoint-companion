@@ -620,7 +620,8 @@ void EpubReaderActivity::onExit() {
   if (footnoteDepth > 0 && epub) saveLinkStack();
 
   resetSections();
-  if (pendingReadFolderMove && epub) {
+  // Only an answered "Move" relocates the book; sleep, sync and other exits leave it in place.
+  if (pendingReadFolderMove && readFolderMoveConfirmed && epub) {
     const std::string srcPath = epub->getPath();
     const std::string dstPath = buildReadFolderDestination(srcPath);
     epub.reset();  // release the Epub (and any open handles) before renaming on the SD card
@@ -1405,7 +1406,7 @@ void EpubReaderActivity::loop() {
   // Drop this book from the Recent Books list; if the reader then pages back into the book,
   // re-add it. So removal only sticks if the reader leaves while still on the End-of-Book
   // screen. Acts only on the transition (guarded by recentsEntryRemoved) — no per-frame writes.
-  if (SETTINGS.removeReadBooksFromRecents) {
+  if (SETTINGS.removeReadBooksFromRecents && !keepInRecentsOnExit) {
     if (atEndOfBook && !recentsEntryRemoved) {
       // Only treat the book as "removed by us" if it was actually in the list, so the
       // re-add branch below doesn't insert a book the feature never removed.
@@ -1562,10 +1563,10 @@ void EpubReaderActivity::loop() {
     std::string openPath;
     switch (endOfBookOptions->handleMenuInput(mappedInput, &openPath)) {
       case EndOfBookOptions::Action::OpenBook:
-        activityManager.goToReader(openPath);
+        leaveReader([openPath] { activityManager.goToReader(openPath); });
         return;
       case EndOfBookOptions::Action::GoHome:
-        onGoHome();
+        leaveReader([this] { onGoHome(); });
         return;
       case EndOfBookOptions::Action::LastPage:
         currentSpineIndex = std::max(epub->getSpineItemsCount() - 1, 0);
@@ -1676,11 +1677,13 @@ void EpubReaderActivity::loop() {
       restoreSavedPosition();
       return;
     }
-    if (SETTINGS.backShortToFileBrowser) {
-      activityManager.goToFileBrowser(epub ? epub->getPath() : "");
-    } else {
-      onGoHome();
-    }
+    leaveReader([this] {
+      if (SETTINGS.backShortToFileBrowser) {
+        activityManager.goToFileBrowser(epub ? epub->getPath() : "");
+      } else {
+        onGoHome();
+      }
+    });
     return;
   }
 
@@ -1754,7 +1757,7 @@ void EpubReaderActivity::loop() {
       return;
     }
     if (nextTriggered) {
-      onGoHome();
+      leaveReader([this] { onGoHome(); });
     } else {
       currentSpineIndex = epub->getSpineItemsCount() - 1;
       nextPageNumber = 0;
@@ -2695,7 +2698,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       break;
     }
     case EpubReaderMenuActivity::MenuAction::GO_HOME: {
-      onGoHome();
+      leaveReader([this] { onGoHome(); });
       return;
     }
     case EpubReaderMenuActivity::MenuAction::REPAGINATE: {
@@ -6118,6 +6121,37 @@ void EpubReaderActivity::restoreSavedPosition() {
     resetSections();
   }
   requestUpdate();
+}
+
+void EpubReaderActivity::leaveReader(std::function<void()> leave) {
+  if (!pendingReadFolderMove || readFolderMoveConfirmed || !epub) {
+    leave();
+    return;
+  }
+  // Cancel stays on the end screen with the move still armed; Skip leaves the book where
+  // it is (and back in Recents); Move lets onExit() relocate it.
+  startActivityForResultNoThrow<ChoicePromptActivity>(
+      [this, leave = std::move(leave)](const ActivityResult& res) {
+        if (res.isCancelled) {
+          suppressPageTurnUntilRelease_ = true;
+          ignoreBackUntilRelease = true;
+          requestUpdate();
+          return;
+        }
+        const auto* choice = std::get_if<MenuResult>(&res.data);
+        if (choice && choice->action == ChoicePromptActivity::ACTION_PRIMARY) {
+          readFolderMoveConfirmed = true;
+        } else {
+          pendingReadFolderMove = false;
+          keepInRecentsOnExit = true;  // the loop must not drop it again before onExit()
+          if (recentsEntryRemoved && epub) {
+            RECENT_BOOKS.addBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), epub->getThumbBmpPath());
+            recentsEntryRemoved = false;
+          }
+        }
+        leave();
+      },
+      renderer, mappedInput, tr(STR_MOVE_TO_READ_PROMPT), tr(STR_MOVE_TO_READ_BODY), tr(STR_MOVE));
 }
 
 void EpubReaderActivity::promptReturnMarkThen(std::function<void()> doNavigate) {

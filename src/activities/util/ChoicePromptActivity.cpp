@@ -8,11 +8,12 @@
 #include "components/UITheme.h"
 
 ChoicePromptActivity::ChoicePromptActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string heading,
-                                           std::string body, std::string primaryLabel)
+                                           std::string body, std::string primaryLabel, std::string skipLabel)
     : Activity("ChoicePrompt", renderer, mappedInput),
       heading(std::move(heading)),
       body(std::move(body)),
-      primaryLabel(std::move(primaryLabel)) {}
+      primaryLabel(std::move(primaryLabel)),
+      skipLabel(std::move(skipLabel)) {}
 
 void ChoicePromptActivity::onEnter() {
   Activity::onEnter();
@@ -59,10 +60,10 @@ void ChoicePromptActivity::render(RenderLock&& lock) {
   }
 
   const char* cancelLabel = I18N.get(StrId::STR_CANCEL);
-  const char* skipLabel = I18N.get(StrId::STR_SKIP);
-  const auto labels = mappedInput.mapLabels(cancelLabel, primaryLabel.c_str(), skipLabel, primaryLabel.c_str());
+  const char* skip = skipLabel.empty() ? I18N.get(StrId::STR_SKIP) : skipLabel.c_str();
+  const auto labels = mappedInput.mapLabels(cancelLabel, primaryLabel.c_str(), skip, primaryLabel.c_str());
   if (actionBar_.active()) {
-    const char* barLabels[] = {cancelLabel, skipLabel, primaryLabel.c_str()};
+    const char* barLabels[] = {cancelLabel, skip, primaryLabel.c_str()};
     actionBar_.draw(renderer, fontId, barLabels, /*primaryIndex=*/2);
   }
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

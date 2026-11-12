@@ -435,6 +435,36 @@ bool tryRecoverBookCache(const std::string& bookPath) {
   return false;
 }
 
+bool bookHasProgress(const std::string& bookPath) {
+  const char* prefix = cacheDirPrefixForPath(bookPath);
+  if (!prefix) return false;
+  return Storage.exists((cacheDirForPath(prefix, bookPath) + "/progress.bin").c_str());
+}
+
+void adoptBookCache(const std::string& oldPath, const std::string& newPath) {
+  const char* prefix = cacheDirPrefixForPath(newPath);
+  if (!prefix) return;
+  relocateBookSidecars(oldPath, newPath);
+  const std::string dir = cacheDirForPath(prefix, newPath);
+  if (!Storage.exists(dir.c_str())) return;
+
+  const std::string newId = KOReaderDocumentId::calculate(newPath);
+  std::string oldId;
+  std::string recordedPath;
+  const bool sameContent = readContentId(dir, oldId, recordedPath) && oldId == newId;
+  if (!sameContent) {
+    LOG_INF("BookCache", "Adopted cache from a different file; dropping layout caches");
+    static constexpr const char* LAYOUT_FILES[] = {"/book.bin", "/css_rules.cache"};
+    for (const char* name : LAYOUT_FILES) Storage.remove((dir + name).c_str());
+    static constexpr const char* LAYOUT_DIRS[] = {"/sections", "/vsections"};
+    for (const char* name : LAYOUT_DIRS) {
+      const std::string sub = dir + name;
+      if (Storage.exists(sub.c_str())) Storage.removeDir(sub.c_str());
+    }
+  }
+  if (newId.size() == CONTENT_ID_MD5_LEN) writeContentId(dir, newId, newPath);
+}
+
 CachePruneResult scanOrphanCaches(std::vector<std::string>& orphanDirNames) {
   CachePruneResult res;
 
