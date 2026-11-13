@@ -1986,6 +1986,18 @@ int SdCardFont::buildAdvanceTableRange(Iter begin, Iter end, bool includeSpace, 
 
   unsigned long startMs = millis();
 
+  // A full table takes no more entries (mergeIntoAdvanceTable), so once every requested style is
+  // full there is nothing to collect. The table is only cleared on unload, so on CJK text this is
+  // most layout passes.
+  bool anyOpen = false;
+  for (uint8_t si = 0; si < MAX_STYLES && !anyOpen; si++) {
+    anyOpen = (styleMask & (1 << si)) && hasStyle(si) && advanceTableSize_[si] < ADVANCE_CACHE_LIMIT;
+  }
+  if (!anyOpen) {
+    stats_.prewarmTotalMs = millis() - startMs;
+    return 0;
+  }
+
   // +2 reserved slots for space and hyphen injected after the main scan.
   static constexpr uint32_t MAX_UNIQUE_CODEPOINTS = 4096;
   static constexpr size_t CODEPOINTS_BYTES = (MAX_UNIQUE_CODEPOINTS + 2) * sizeof(uint32_t);  // ~16KB
