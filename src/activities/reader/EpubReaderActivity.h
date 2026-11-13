@@ -477,9 +477,17 @@ class EpubReaderActivity final : public Activity {
   // any single allocation can actually have it. 16 KB also keeps the advance-table
   // batch path (16 KB scratch) viable during builds.
   static constexpr size_t BACKGROUND_BUILD_MIN_MAX_ALLOC = 16 * 1024;
-  // True when the section still owes pages the reader is about to need. Says nothing
-  // about heap admission — buildTickHeapGate() decides that separately.
+  // True while a started build still owes pages. Says nothing about heap admission —
+  // buildTickHeapGate() decides that separately.
   bool backgroundBuildWanted() const;
+  // One bounded build step on the loop task, in a frame whose input did nothing. Lays out about
+  // BACKGROUND_BUILD_PAGES_PER_TICK pages (one 1 KB parse step may add more) and hands the loop
+  // back as soon as a button is down, so a short press is seen before more pages are built.
+  void backgroundBuildTick();
+  bool anyButtonPressed() const;
+  // A background build failed in this spine. The error would likely recur, so from then on the
+  // spine is built only as far as the reader goes.
+  int backgroundBuildFailedSpine = -1;
   // Records the open book once its first page has reached the panel.
   OpenBookRecord openBookRecord;
   void commitOpenBook();
@@ -512,14 +520,6 @@ class EpubReaderActivity final : public Activity {
   // window so it skips cleanly rather than failing loudly. Pure optimization: a
   // skipped pre-index just means the chapter lays out when the reader opens it.
   static constexpr size_t SILENT_INDEX_MIN_MAX_ALLOC = 36 * 1024;
-  // How many pages to keep laid out ahead of the reader for a still-building section. A page
-  // turn is ~1s on e-ink and a page builds in ~30ms, so the reader can't out-click the builder
-  // -- a tiny buffer is enough. The background build stops once the watermark is this far
-  // ahead and resumes as the reader advances; building unbounded instead locked up input by
-  // monopolizing the RenderLock. A giant single-spine book therefore never finalizes its .bin
-  // in one sitting -- instant reopen comes from Section::suspendBuild() persisting the pages
-  // already laid out as a partial file on exit/sleep.
-  static constexpr int BUILD_WINDOW_AHEAD = 5;
   // Reopening a partial does NOT immediately restart its extension build (a whole-chapter
   // re-layout from page 0 -- minutes of background CPU + SD writes on a giant spine, wasted
   // when the reader never crosses the watermark that session). Instead loop() starts it once
@@ -907,11 +907,12 @@ class EpubReaderActivity final : public Activity {
   // and while the build is heap-paused (no work is happening, so spinning at full
   // speed would only burn battery; the paused gate still retries every loop pass).
   // Shares backgroundBuildWanted() with the build tick in loop() so the two can never
-  // disagree: once a first-open build has laid out its look-ahead window it parks
-  // (isBuilding() stays true but loop() stops pumping it), and keying only on
-  // isBuilding() would spin at full clock indefinitely while idle on a page -- doing no
-  // build work and blocking idle light-sleep. The main loop queries this under the
-  // render lock, so the section cannot change underneath it.
+  // disagree: a spine whose background build failed keeps isBuilding() true with no
+  // build work, and keying only on isBuilding() would spin at full clock indefinitely.
+  // It keeps yielding while a button is down: a press that starts inside a long build
+  // step gets its second debounce sample ~5 ms after the step instead of after a 10 ms
+  // sleep. The main loop queries this under the render lock, so the section cannot
+  // change underneath it.
   bool skipLoopDelay() override {
     return (overlay == Overlay::None && !buildHeapPaused && backgroundBuildWanted()) ||
            (verticalSection && verticalSection->isBuilding());

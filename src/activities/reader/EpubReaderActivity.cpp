@@ -357,6 +357,10 @@ int pageShowingImage(Section& section, const int from, const int pageCount, cons
   return -1;
 }
 
+// A button contact is closed right now. Reads the Xteink ADC ladder and power pin only; on other
+// boards a press stops the build once the loop has debounced it.
+bool buttonContactClosed() { return gpio.rawInputActive(); }
+
 }  // namespace
 
 void EpubReaderActivity::onEnter() {
@@ -1213,6 +1217,55 @@ void EpubReaderActivity::openFootnoteSelect(const bool reopenMenuOnCancel) {
   });
 }
 
+// Debounced state of every button. Covers the frame between a raw release and its debounced
+// release edge, which would otherwise run a build step before the page turn.
+bool EpubReaderActivity::anyButtonPressed() const {
+  using Button = MappedInputManager::Button;
+  for (const Button button :
+       {Button::Back, Button::Confirm, Button::Left, Button::Right, Button::Up, Button::Down, Button::Power}) {
+    if (mappedInput.isPressed(button)) return true;
+  }
+  return false;
+}
+
+// The try-lock keeps the step off a pending render: every predicate below is evaluated with the
+// lock held, so the render task cannot finalize the build or expand retained glyph buffers between
+// the test and the step.
+void EpubReaderActivity::backgroundBuildTick() {
+  RenderLock lock(RenderLock::Mode::Try);
+  // Not under an open toolbar or panel: those repaint straight onto the page in the framebuffer.
+  if (!lock.ownsLock() || overlay != Overlay::None || !backgroundBuildWanted()) return;
+  // A button is down or a page turn is queued: the next loop frames act on it first.
+  if (buttonContactClosed() || anyButtonPressed() || pendingManualTurn != 0 || !buildTickHeapGate()) return;
+  // A build step can lend the framebuffer (image probes), which hands it back white while the
+  // panel still shows the page; redraw so nothing is later painted over the blank buffer.
+  const uint32_t loansBefore = renderer.frameBufferLoanCount();
+  const bool built = section->buildSomeMore(BACKGROUND_BUILD_PAGES_PER_TICK, &buttonContactClosed);
+  if (renderer.frameBufferLoanCount() != loansBefore) {
+    pageBufferStale = true;
+    requestUpdate();
+  }
+  if (!built && section->lastBuildFailure().reason == Section::BuildFailure::Reason::LowHeap &&
+      section->pageCount > 0) {
+    // The build kept its pages as a partial (Section::buildSomeMore): keep reading from them
+    // and restart the build once the heap has recovered.
+    buildAwaitsHeapSpine_ = currentSpineIndex;
+    SdDebugLog::log("SCT", "BUILD-FAIL LOWHEAP spine=%d kept-partial=%u background=1 free=%u largest8=%u",
+                    currentSpineIndex, (unsigned)section->pageCount, (unsigned)ESP.getFreeHeap(),
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    if (section->currentPage >= static_cast<int>(section->pageCount)) requestUpdate();
+  } else if (!built) {
+    LOG_ERR("ERS", "Background section build failed");
+    backgroundBuildFailedSpine = currentSpineIndex;
+    resetSections();
+    requestUpdate();
+  } else if (section->isBuildComplete() && applyDeferredReposition()) {
+    // The chapter re-paginated since the saved progress (settings changed): we now know the
+    // real page count, so re-render at the remapped page. No-op for an unchanged resume.
+    requestUpdate();
+  }
+}
+
 void EpubReaderActivity::loop() {
   commitOpenBook();
   if (!epub) {
@@ -1348,46 +1401,6 @@ void EpubReaderActivity::loop() {
       } else {
         LOG_DBG("ERS", "Reader near partial watermark (%d/%d), resuming extension build", section->currentPage,
                 section->pageCount);
-      }
-    }
-  }
-
-  // Drive any in-progress incremental section build forward, off the page-turn critical path,
-  // but only within a small window ahead of the reader: an unbounded build monopolized the
-  // RenderLock and locked out page turns. The build follows the reader instead, and instant
-  // reopen comes from suspendBuild() persisting the laid-out pages as a partial on exit.
-  // The try-lock is what keeps it off a pending render: every predicate below is evaluated
-  // with the lock already held, so there is no window in which the render task can finalize
-  // the build or expand retained glyph buffers between the test and the tick.
-  {
-    RenderLock lock(RenderLock::Mode::Try);
-    // Not under an open toolbar or panel: those repaint straight onto the page in the framebuffer.
-    if (lock.ownsLock() && overlay == Overlay::None && backgroundBuildWanted() && buildTickHeapGate()) {
-      // A build step can lend the framebuffer (image probes), which hands it back white while the
-      // panel still shows the page; redraw so nothing is later painted over the blank buffer.
-      const uint32_t loansBefore = renderer.frameBufferLoanCount();
-      const bool built = section->buildSomeMore(BACKGROUND_BUILD_PAGES_PER_TICK);
-      if (renderer.frameBufferLoanCount() != loansBefore) {
-        pageBufferStale = true;
-        requestUpdate();
-      }
-      if (!built && section->lastBuildFailure().reason == Section::BuildFailure::Reason::LowHeap &&
-          section->pageCount > 0) {
-        // The build kept its pages as a partial (Section::buildSomeMore): keep reading from them
-        // and restart the build once the heap has recovered.
-        buildAwaitsHeapSpine_ = currentSpineIndex;
-        SdDebugLog::log("SCT", "BUILD-FAIL LOWHEAP spine=%d kept-partial=%u background=1 free=%u largest8=%u",
-                        currentSpineIndex, (unsigned)section->pageCount, (unsigned)ESP.getFreeHeap(),
-                        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-        if (section->currentPage >= static_cast<int>(section->pageCount)) requestUpdate();
-      } else if (!built) {
-        LOG_ERR("ERS", "Background section build failed");
-        resetSections();
-        requestUpdate();
-      } else if (section->isBuildComplete() && applyDeferredReposition()) {
-        // The chapter re-paginated since the saved progress (settings changed): we now know the
-        // real page count, so re-render at the remapped page. No-op for an unchanged resume.
-        requestUpdate();
       }
     }
   }
@@ -1649,6 +1662,7 @@ void EpubReaderActivity::loop() {
     } else {
       openReaderMenu();
     }
+    return;  // no build step before the menu shows
   }
 
   // Suppress Back bleed-through after dictionary chain exit. Capture the flag BEFORE
@@ -1749,6 +1763,8 @@ void EpubReaderActivity::loop() {
   prevTriggered = prevTriggered || touch.prev;
   nextTriggered = nextTriggered || touch.next;
   if (!prevTriggered && !nextTriggered) {
+    // Nothing to act on in this frame: build more of the chapter.
+    backgroundBuildTick();
     return;
   }
 
@@ -3370,13 +3386,10 @@ void EpubReaderActivity::commitOpenBook() {
   pluginevents::emit(pluginevents::Event::ReaderOpen, openVars, 1);
 }
 
+// A started build runs to the end of the chapter, one bounded step per idle loop frame, so the
+// parser and its page LUT are freed soon. Not in a spine whose background build failed.
 bool EpubReaderActivity::backgroundBuildWanted() const {
-  // While extending a partial (rebuild from a previous session), pageCount is pinned at the
-  // partial's watermark until the build catches up, so the window check would wrongly read
-  // "far enough ahead" and stall the build at 0 pages -- then the first turn past the
-  // watermark re-parses the whole chapter synchronously. Keep ticking until it finalizes.
-  return section && section->isBuilding() &&
-         (section->isPartial() || static_cast<int>(section->pageCount) < section->currentPage + BUILD_WINDOW_AHEAD);
+  return section && section->isBuilding() && currentSpineIndex != backgroundBuildFailedSpine;
 }
 
 void EpubReaderActivity::render(RenderLock&& lock) {

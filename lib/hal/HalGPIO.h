@@ -143,6 +143,10 @@ class HalGPIO {
   // ~10 ms after the first; at the 50 ms light-sleep cadence a short tap can
   // otherwise appear in a single sample and never commit (dropped press).
   bool isDebouncePending() const;
+  // True when any button contact is closed right now, read straight from the
+  // hardware (ADC ladder off its idle rail, or the power GPIO asserted), without
+  // going through the debounced state. Cheap enough to call every few ms.
+  bool rawInputActive();
   unsigned long getHeldTime() const;
   unsigned long getPowerButtonHeldTime() const;
   bool hasTouch() const;
