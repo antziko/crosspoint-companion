@@ -208,7 +208,7 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
       } else if (isEpub) {
         Epub epub(book.path, "/.crosspoint");
         // Skip loading css since we only need metadata here
-        epub.load(false, true);
+        const bool cacheLoaded = epub.load(false, true);
 
         // Try to generate thumbnail image for Continue Reading card
         if (!showingLoading) {
@@ -230,8 +230,11 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
         bool ok;
         {
           GfxRenderer::FrameBufferLoan loan(renderer);
-          ok = wantFitThumb ? epub.generateThumbFitBmp(thumbSpec.width, thumbSpec.height)
-                            : epub.generateThumbBmp(coverHeight);
+          // Without a book cache (e.g. after "Delete Book Cache") there is no cached metadata, so the
+          // plain thumb reads the cover location straight from the EPUB.
+          ok = wantFitThumb  ? epub.generateThumbFitBmp(thumbSpec.width, thumbSpec.height)
+               : cacheLoaded ? epub.generateThumbBmp(coverHeight)
+                             : epub.generateThumbBmpFromSource(coverHeight);
         }
         SdDebugLog::log("COVER", "epub thumb %s: free=%u largest=%u path=%s", ok ? "ok" : "FAILED",
                         (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
