@@ -75,8 +75,12 @@ const char* touchControllerName(const BoardConfig::TouchController c) {
       return "FT6336U";
     case BoardConfig::TouchController::Gslx680:
       return "GSLX680";
+    case BoardConfig::TouchController::Cst816s:
+      return "CST816S";
+    case BoardConfig::TouchController::Tma525c:
+      return "TMA525C";
   }
-  return nullptr;
+  return "?";
 }
 }  // namespace
 
@@ -103,7 +107,11 @@ void AboutActivity::onEnter() {
   rowValues_[ITEM_CHIP] = buf;
   snprintf(buf, sizeof(buf), "%u MB", static_cast<unsigned>(ESP.getFlashChipSize() / (1024u * 1024u)));
   rowValues_[ITEM_FLASH] = buf;
-  rowValues_[ITEM_DISPLAY] = displayControllerName(BoardConfig::ACTIVE.displayController);
+  // The profile names a boot default; boards that probe their panel (Picco,
+  // Sticky) can run another driver, and the driver knows which.
+  const char* liveController = display.controllerName();
+  rowValues_[ITEM_DISPLAY] =
+      liveController ? liveController : displayControllerName(BoardConfig::ACTIVE.displayController);
   snprintf(buf, sizeof(buf), "%ux%u", static_cast<unsigned>(BoardConfig::ACTIVE.displayWidth),
            static_cast<unsigned>(BoardConfig::ACTIVE.displayHeight));
   rowValues_[ITEM_RESOLUTION] = buf;

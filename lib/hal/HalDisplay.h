@@ -4,6 +4,9 @@
 
 class HalDisplay {
  public:
+  // Controller of the driver chosen at boot (null if the driver does not say).
+  const char* controllerName() const { return einkDisplay.getControllerName(); }
+
   // Constructor with pin configuration
   HalDisplay();
 
