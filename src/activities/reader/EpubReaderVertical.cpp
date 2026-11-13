@@ -631,7 +631,7 @@ void EpubReaderActivity::openVerticalWordSelect(bool framebufferContainsPage, co
   }
   // Same strip the horizontal path reports: the status bar band the page left below the text.
   const uint8_t statusBarHeight = UITheme::getInstance().getStatusBarHeight();
-  const int reservedBottomHeight = std::max<int>(SETTINGS.getReaderScreenMargin(), statusBarHeight);
+  const int reservedBottomHeight = SETTINGS.getReaderScreenMargin() + statusBarHeight;
   const WordSelectNavigator::InitialMarker initialMarker = computeWordSelectMarker();
   pauseMarkerDwell();
   accumulateVisibleSegment();

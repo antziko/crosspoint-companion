@@ -2089,10 +2089,9 @@ void EpubReaderActivity::openWordSelect(const bool framebufferContainsPage, cons
   const int reservedBottomHeight =
       (automaticPageTurnActive &&
        (statusBarHeight == 0 || statusBarHeight == UITheme::getInstance().getProgressBarHeight()))
-          ? std::max(
-                SETTINGS.getReaderScreenMargin(),
-                static_cast<uint8_t>(statusBarHeight + UITheme::getInstance().getMetrics().statusBarVerticalMargin))
-          : std::max(SETTINGS.getReaderScreenMargin(), statusBarHeight);
+          ? SETTINGS.getReaderScreenMargin() + statusBarHeight +
+                UITheme::getInstance().getMetrics().statusBarVerticalMargin
+          : SETTINGS.getReaderScreenMargin() + statusBarHeight;
   // Runs before the word scan's heap check, which needs what this frees.
   // An in-flight chapter build pins its parser and CSS parser for as long as that chapter is
   // being read — finalizeBuild() only runs once the chapter is fully consumed, so on device
@@ -3506,11 +3505,10 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   // reserves space for automatic page turn indicator when no status bar or progress bar only
   if (automaticPageTurnActive &&
       (statusBarHeight == 0 || statusBarHeight == UITheme::getInstance().getProgressBarHeight())) {
-    orientedMarginBottom +=
-        std::max(SETTINGS.getReaderScreenMargin(),
-                 static_cast<uint8_t>(statusBarHeight + UITheme::getInstance().getMetrics().statusBarVerticalMargin));
+    orientedMarginBottom += SETTINGS.getReaderScreenMargin() + statusBarHeight +
+                            UITheme::getInstance().getMetrics().statusBarVerticalMargin;
   } else {
-    orientedMarginBottom += std::max(SETTINGS.getReaderScreenMargin(), statusBarHeight);
+    orientedMarginBottom += SETTINGS.getReaderScreenMargin() + statusBarHeight;
   }
 
   const uint16_t viewportWidth = renderer.getScreenWidth() - orientedMarginLeft - orientedMarginRight;
