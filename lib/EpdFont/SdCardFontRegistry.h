@@ -72,7 +72,8 @@ class SdCardFontRegistry {
                         size_t outBufSize);
 
   // Scan SD card, populate families_ (names + roots only). Returns true if any
-  // families found. Invalidates the file cache.
+  // families found. Invalidates the file cache and any pointer or reference
+  // obtained from getFamilies()/findFamily().
   bool discover();
 
   const std::vector<SdCardFontFamilyInfo>& getFamilies() const { return families_; }

@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <HalStorage.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <SdDebugLog.h>
 #include <esp_heap_caps.h>
 #include <strings.h>  // strcasecmp / strncasecmp
@@ -442,6 +443,8 @@ bool SdCardFontRegistry::discover() {
   if (static_cast<int>(families_.size()) > MAX_SD_FAMILIES) {
     families_.resize(MAX_SD_FAMILIES);
   }
+  // The catalogue is read-only until the next scan; hand back the rest of the MAX_SD_FAMILIES reserve.
+  if (!shrinkToFit(families_)) LOG_ERR("SDREG", "OOM: trimming %d families", static_cast<int>(families_.size()));
 
   multi_heap_info_t after;
   heap_caps_get_info(&after, MALLOC_CAP_8BIT);

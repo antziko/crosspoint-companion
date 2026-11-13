@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <iterator>
 #include <memory>
 #include <new>
 #include <string>
@@ -56,6 +57,24 @@ template <typename T>
   if (!probe) return false;
   ::operator delete(probe, std::nothrow);
   v.reserve(n);
+  return true;
+}
+
+// Trim a vector's capacity to its size once it has stopped growing. std::vector::shrink_to_fit()
+// is a no-op in libstdc++ when exceptions are disabled, so the elements move into a fresh buffer
+// instead. Same probe as reserveNoThrow: on OOM `v` keeps its larger buffer and this returns
+// false. Invalidates pointers and iterators into `v`.
+template <typename T>
+bool shrinkToFit(std::vector<T>& v) {
+  if (v.capacity() == v.size()) return true;
+  if (v.empty()) {
+    std::vector<T>().swap(v);
+    return true;
+  }
+  void* probe = ::operator new(v.size() * sizeof(T), std::nothrow);
+  if (!probe) return false;
+  ::operator delete(probe, std::nothrow);
+  std::vector<T>(std::make_move_iterator(v.begin()), std::make_move_iterator(v.end())).swap(v);
   return true;
 }
 

@@ -147,8 +147,8 @@ bool BookMetadataCache::endTocPass() {
   tocFile.close();
   spineFile.close();
 
+  // clear() frees all but one deque node; shrink_to_fit() is a no-op without exceptions.
   spineHrefIndex.clear();
-  spineHrefIndex.shrink_to_fit();
   useSpineHrefIndex = false;
 
   return flushed;
