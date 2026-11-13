@@ -120,16 +120,16 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   };
 
   // Font family options (built-in fonts only; SD card fonts use sdFontFamilyName)
-  enum FONT_FAMILY { NOTOSERIF = 0, NOTOSANS = 1, FONT_FAMILY_COUNT };
+  enum FONT_FAMILY { NOTOSANS = 0, FONT_FAMILY_COUNT };
+  static constexpr uint8_t LEGACY_NOTOSERIF = 0;
+  // Persisted IDs stay stable even though the built-in menu now starts at zero.
+  static constexpr uint8_t STORED_NOTOSANS = 1;
   static constexpr uint8_t LEGACY_OPENDYSLEXIC = 2;
   static constexpr uint8_t BUILTIN_FONT_COUNT = FONT_FAMILY_COUNT;
   // dictionaryFontFamily accepts the FONT_FAMILY values plus this sentinel, meaning
   // "use the reader's effective font" (SD family or built-in, per-book override included).
   // NOT a FONT_FAMILY member: buildFontFamilySetting() indexes SD families from
   // BUILTIN_FONT_COUNT, so growing that enum would shift every SD font's index.
-  // Deliberately equal to LEGACY_OPENDYSLEXIC: a pre-1.5 file storing dictionaryFontFamily=2
-  // (OpenDyslexic) lands on "same as book", which resolves to the OpenDyslexic SD family its
-  // reader font was migrated to in fromJson() — so no separate migration is needed.
   static constexpr uint8_t DICT_FONT_MATCH_READER = FONT_FAMILY_COUNT;
   // Legacy 1.4-and-earlier files stored the reader size as a 0..3 SMALL/MEDIUM/
   // LARGE/EXTRA_LARGE slot; fromJson()/ReaderSettingsIO fold that range up to the
@@ -386,7 +386,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   static constexpr size_t SD_FONT_FAMILY_NAME_SIZE = 64;
   struct ReaderOverride {
     bool active = false;
-    uint8_t fontFamily = NOTOSERIF;
+    uint8_t fontFamily = NOTOSANS;
     // Per-book reader font size, an actual point size (matches CrossPointSettings::
     // fontPointSize). Persisted per-book by ReaderSettingsIO, which folds the legacy
     // 0..3 slot up on read.
@@ -546,7 +546,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // LandscapeCW: swap the two side buttons (reader page-turn + menu Up/Down). Off by default.
   uint8_t swapSideButtonsCW = 0;
   // Reader font settings
-  uint8_t fontFamily = NOTOSERIF;
+  uint8_t fontFamily = NOTOSANS;
   // Point size of the reader font. Only sizes the active family actually ships
   // are selectable; SdCardFontSystem::ensureLoaded() snaps this to the nearest
   // available size (and persists the snap) whenever the family changes.
@@ -556,7 +556,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Definition viewer font: a built-in family, or DICT_FONT_MATCH_READER to follow the
   // reader's family (the only way to render definitions in an SD family — see
   // getDefinitionFontId()). dictionaryFontPointSize applies in every mode, including that one.
-  uint8_t dictionaryFontFamily = NOTOSERIF;
+  uint8_t dictionaryFontFamily = NOTOSANS;
   // Point size of the definition font, DICT_FONT_POINT_MIN..MAX. Each family snaps it to the
   // sizes it has: built-ins to 12/14/16/18, a .cpfont to its files, a TTF renders it exactly.
   static constexpr uint8_t DICT_FONT_POINT_MIN = 8;

@@ -28,8 +28,9 @@ void FontComparePane::build(const SdCardFontRegistry* registry, uint8_t currentB
   fonts_.clear();
   fonts_.reserve(CrossPointSettings::BUILTIN_FONT_COUNT + (registry ? registry->getFamilyCount() : 0));
 
-  fonts_.push_back({I18N.get(StrId::STR_NOTO_SERIF), true, 0, "@b0", false});
-  fonts_.push_back({I18N.get(StrId::STR_NOTO_SANS), true, 1, "@b1", false});
+  // "@b1" is the pin key Noto Sans had beside the former built-in Noto Serif; kept so pins survive.
+  fonts_.push_back(
+      {I18N.get(StrId::STR_NOTO_SANS), true, static_cast<uint8_t>(CrossPointSettings::NOTOSANS), "@b1", false});
 
   if (registry) {
     const auto& families = registry->getFamilies();

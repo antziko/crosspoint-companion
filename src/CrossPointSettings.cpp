@@ -141,7 +141,7 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   doc["frontButtonRightCW"] = s.frontButtonRightCW;
   // Font family and size — both use dynamic getter/setters in SettingsList (the
   // option lists depend on the SD font registry), so the generic loop skips them.
-  doc["fontFamily"] = s.fontFamily;
+  doc["fontFamily"] = STORED_NOTOSANS;
   doc["fontSize"] = s.fontPointSize;
   // SD card font family name — not in SettingsList, save manually.
   if (s.sdFontFamilyName[0] != '\0') {
@@ -310,8 +310,8 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   }
 
   // Font family — uses dynamic getter/setter in SettingsList so the generic loop skips it.
-  const uint8_t storedFontFamily = doc["fontFamily"] | (uint8_t)0;
-  s.fontFamily = clamp(storedFontFamily, BUILTIN_FONT_COUNT, 0);
+  const uint8_t storedFontFamily = doc["fontFamily"] | STORED_NOTOSANS;
+  s.fontFamily = NOTOSANS;
   // SD card font family name — not in SettingsList, load manually.
 
   // The Home key's long press used to run holdConfirmAction. Carry that choice into the
@@ -335,12 +335,18 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   const char* pf = doc["pinnedFonts"] | "";
   strncpy(s.pinnedFonts, pf, sizeof(s.pinnedFonts) - 1);
   s.pinnedFonts[sizeof(s.pinnedFonts) - 1] = '\0';
-  if (storedFontFamily == LEGACY_OPENDYSLEXIC && s.sdFontFamilyName[0] == '\0') {
-    s.fontFamily = NOTOSERIF;
-    strncpy(s.sdFontFamilyName, "OpenDyslexic", sizeof(s.sdFontFamilyName) - 1);
+  // The former built-in Noto Serif and OpenDyslexic are SD families now.
+  if (s.sdFontFamilyName[0] == '\0') {
+    const char* legacyFamily = storedFontFamily == LEGACY_NOTOSERIF      ? "NotoSerif"
+                               : storedFontFamily == LEGACY_OPENDYSLEXIC ? "OpenDyslexic"
+                                                                         : "";
+    strncpy(s.sdFontFamilyName, legacyFamily, sizeof(s.sdFontFamilyName) - 1);
     s.sdFontFamilyName[sizeof(s.sdFontFamilyName) - 1] = '\0';
-    needsResave = true;
-  } else if (storedFontFamily >= BUILTIN_FONT_COUNT) {
+  }
+  if (storedFontFamily != STORED_NOTOSANS) needsResave = true;
+  // Dictionary font: the old key stored 0 Noto Serif, 1 Noto Sans, 2 Same as book.
+  if (doc["dictionaryFontFamilyV2"].isNull() && doc["dictionaryFontFamily"].is<uint8_t>()) {
+    s.dictionaryFontFamily = doc["dictionaryFontFamily"].as<uint8_t>() == 2 ? DICT_FONT_MATCH_READER : NOTOSANS;
     needsResave = true;
   }
 
@@ -427,46 +433,23 @@ float CrossPointSettings::computeLineCompression(const uint8_t family, const uin
   }
 
   // The built-in steps are pinned by pixel rounding, not taste: getLineHeight() rounds
-  // advanceY * compression to whole pixels, and advanceY is 34/40/45/51 px at 12/14/16/18pt, so
-  // a step only reads as different if it lands on a different integer at EVERY size.
-  // NOTOSERIF 1.05 -> 36/42/47/54 between NORMAL's 34/40/45/51 and WIDE's 37/44/50/56; 1.08 would
-  // collide with WIDE at 12pt. NOTOSANS 0.975 -> 33/39/44/50 between 32/38/43/48 and 34/40/45/51.
-  // RELAXED: NOTOSERIF 1.025 -> 35/41/46/52, the only integers left between NORMAL and SEMI_WIDE.
-  // NOTOSANS has no integer between 32 and 33 at 12pt, so RELAXED shares SEMI_WIDE's value there.
-  // Do not "round" any of these to something tidier without redoing that arithmetic.
-  switch (family) {
-    case NOTOSERIF:
+  // advanceY * compression to whole pixels. NOTOSANS 0.975 -> 33/39/44/50 between 32/38/43/48
+  // and 34/40/45/51; there is no integer between 32 and 33 at 12pt, so RELAXED shares
+  // SEMI_WIDE's value. Do not "round" these without redoing that arithmetic.
+  (void)family;
+  switch (lineSpacing) {
+    case TIGHT:
+      return 0.90f;
+    case NORMAL:
     default:
-      switch (lineSpacing) {
-        case TIGHT:
-          return 0.95f;
-        case NORMAL:
-        default:
-          return 1.0f;
-        case RELAXED:
-          return 1.025f;
-        case SEMI_WIDE:
-          return 1.05f;
-        case WIDE:
-          return 1.1f;
-        case EXTRA_WIDE:
-          return 1.2f;
-      }
-    case NOTOSANS:
-      switch (lineSpacing) {
-        case TIGHT:
-          return 0.90f;
-        case NORMAL:
-        default:
-          return 0.95f;
-        case RELAXED:
-        case SEMI_WIDE:
-          return 0.975f;
-        case WIDE:
-          return 1.0f;
-        case EXTRA_WIDE:
-          return 1.05f;
-      }
+      return 0.95f;
+    case RELAXED:
+    case SEMI_WIDE:
+      return 0.975f;
+    case WIDE:
+      return 1.0f;
+    case EXTRA_WIDE:
+      return 1.05f;
   }
 }
 
@@ -664,17 +647,17 @@ float CrossPointSettings::getDefinitionLineCompression() const {
 int CrossPointSettings::computeBuiltinFontId(const uint8_t family, const uint8_t pointSize) {
   const uint8_t pt =
       snapToNearestPointSize(BUILTIN_READER_POINT_SIZES, std::size(BUILTIN_READER_POINT_SIZES), pointSize);
-  const bool sans = (family == NOTOSANS);
+  (void)family;
   switch (pt) {
     case 12:
-      return sans ? NOTOSANS_12_FONT_ID : NOTOSERIF_12_FONT_ID;
+      return NOTOSANS_12_FONT_ID;
     case 16:
-      return sans ? NOTOSANS_16_FONT_ID : NOTOSERIF_16_FONT_ID;
+      return NOTOSANS_16_FONT_ID;
     case 18:
-      return sans ? NOTOSANS_18_FONT_ID : NOTOSERIF_18_FONT_ID;
+      return NOTOSANS_18_FONT_ID;
     case 14:
     default:
-      return sans ? NOTOSANS_14_FONT_ID : NOTOSERIF_14_FONT_ID;
+      return NOTOSANS_14_FONT_ID;
   }
 }
 

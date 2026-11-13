@@ -240,8 +240,8 @@ The Settings screen allows you to configure the device's behavior. There are a f
 
 - **Reader Font Family**: Choose the font used for reading:
   
-  - "Noto Serif" (default) - Google's serif font
-  - "Noto Sans" - Google's sans-serif font
+  - "Noto Sans" (default) - Google's sans-serif font
+  - Installed SD card families
 
 - **Reader Font Size**: Adjust the text size for reading; options are "Small", "Medium" (default), "Large", or "X Large".
 
@@ -528,7 +528,12 @@ To use custom sleep images, set the sleep screen mode to **Custom** or **Cover +
 
 ### 3.8 Custom Fonts (SD Card)
 
-CrossPoint supports loading additional fonts from the SD card, extending beyond the two built-in families (Noto Serif, Noto Sans). Custom fonts can include extended Unicode coverage, enabling CJK (Chinese, Japanese, Korean) and other scripts.
+Noto Serif and OpenDyslexic are optional SD card fonts. Install `NotoSerif` to use
+the former built-in serif family. On upgrade, an existing Noto Serif selection
+uses `NotoSerif` if installed; otherwise, the reader switches to Noto Sans. After
+installing the family later, select it in **Settings → Reader → Font Family**.
+
+CrossPoint supports loading additional fonts from the SD card, extending beyond the built-in Noto Sans family. Custom fonts can include extended Unicode coverage, enabling CJK (Chinese, Japanese, Korean) and other scripts.
 
 There are three ways to install fonts:
 

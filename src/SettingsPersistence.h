@@ -102,9 +102,10 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
                           CrossPointSettings::ORIENTATION_COUNT - 1),
 
     // --- Reader ---
-    persisted::enumerated("fontFamily", &CrossPointSettings::fontFamily, CrossPointSettings::FONT_FAMILY_COUNT - 1),
+    // "fontFamily" is saved and loaded by hand: its stored IDs differ from the enum (see fromJson).
     // Dictionary font family adds "Same as book" (DICT_FONT_MATCH_READER) above the built-ins.
-    persisted::enumerated("dictionaryFontFamily", &CrossPointSettings::dictionaryFontFamily,
+    // "V2": the built-in Noto Serif option was removed; fromJson() maps the old key.
+    persisted::enumerated("dictionaryFontFamilyV2", &CrossPointSettings::dictionaryFontFamily,
                           CrossPointSettings::DICT_FONT_MATCH_READER),
     // Legacy "dictionaryFontSize" slots are migrated in fromJson().
     persisted::ranged("dictionaryFontPointSize", &CrossPointSettings::dictionaryFontPointSize,

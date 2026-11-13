@@ -1010,7 +1010,7 @@ void FlashcardReviewActivity::renderSummary(int contentTop, int contentBottom, i
 
   int y = contentTop + metrics.listRowHeight;
   char buf[64];
-  UITheme::drawCenteredText(renderer, asRect(contentArea_), NOTOSERIF_16_FONT_ID, y, tr(STR_FLASHCARD_SUMMARY_TITLE),
+  UITheme::drawCenteredText(renderer, asRect(contentArea_), NOTOSANS_16_FONT_ID, y, tr(STR_FLASHCARD_SUMMARY_TITLE),
                             true, EpdFontFamily::BOLD);
   y += metrics.listRowHeight * 2;
 

@@ -5,6 +5,7 @@
 #include <Serialization.h>
 
 #include <algorithm>
+#include <cstring>
 
 namespace {
 
@@ -34,7 +35,9 @@ namespace {
 //      at the old width.
 // v14: appended dictLineSpacing; older files follow the book's own line spacing.
 // v15: appended textWeight; older files take the global.
-constexpr uint8_t READER_SETTINGS_FILE_VERSION = 15;
+// v16: built-in Noto Serif removed, so fontFamily 0 is Noto Sans; older files stored 0 Noto Serif
+//      (now the "NotoSerif" SD family) and 1 Noto Sans.
+constexpr uint8_t READER_SETTINGS_FILE_VERSION = 16;
 constexpr size_t LEGACY_SD_FONT_FAMILY_NAME_SIZE = 32;
 // Oldest layout load() still understands; everything from here up is read field by field.
 constexpr uint8_t READER_SETTINGS_MIN_READABLE_VERSION = 5;
@@ -134,6 +137,14 @@ bool load(const std::string& cachePath, CrossPointSettings::ReaderOverride& out)
   if (version >= 15) {
     serialization::readPod(f, out.textWeight);
     if (out.textWeight > CrossPointSettings::TEXT_WEIGHT_MAX) out.textWeight = CrossPointSettings::TEXT_WEIGHT_OFFSET;
+  }
+  if (version < 16) {
+    if (out.fontFamily == 0 && out.sdFontFamilyName[0] == '\0') {
+      strncpy(out.sdFontFamilyName, "NotoSerif", sizeof(out.sdFontFamilyName) - 1);
+    }
+    out.fontFamily = CrossPointSettings::NOTOSANS;
+  } else if (out.fontFamily >= CrossPointSettings::FONT_FAMILY_COUNT) {
+    out.fontFamily = CrossPointSettings::NOTOSANS;
   }
   out.active = true;
   return true;

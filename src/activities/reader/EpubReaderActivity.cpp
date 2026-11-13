@@ -5072,7 +5072,7 @@ std::string EpubReaderActivity::textRowName(const int row) const {
 }
 
 std::string EpubReaderActivity::textRowValue(const int row) const {
-  static constexpr StrId kFamily[] = {StrId::STR_NOTO_SERIF, StrId::STR_NOTO_SANS};
+  static constexpr StrId kFamily[] = {StrId::STR_NOTO_SANS};
   // Show what the PAGE is laid out from -- the per-book override -- so the panel
   // can never display a global the book is not using.
   const auto& ov = SETTINGS.getReaderOverride();

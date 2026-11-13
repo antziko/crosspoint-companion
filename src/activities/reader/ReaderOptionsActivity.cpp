@@ -444,10 +444,7 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
       if (localOverride.sdFontFamilyName[0] != '\0') {
         return std::string(localOverride.sdFontFamilyName);
       }
-      const StrId labels[] = {StrId::STR_NOTO_SERIF, StrId::STR_NOTO_SANS};
-      const uint8_t family =
-          localOverride.fontFamily < CrossPointSettings::BUILTIN_FONT_COUNT ? localOverride.fontFamily : 0;
-      return I18N.get(labels[family]);
+      return I18N.get(StrId::STR_NOTO_SANS);
     }
     case FONT_SIZE: {
       // "pt" is the typographic unit symbol — deliberately not translated (matches

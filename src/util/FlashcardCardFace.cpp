@@ -67,9 +67,9 @@ struct HeadwordLayout {
 HeadwordLayout drawHeadword(GfxRenderer& renderer, const int bodyFont, const int bandTop, const int bandHeight,
                             const Rect area, const std::string& word) {
   if (!containsCjk(word.c_str())) {
-    UITheme::drawCenteredText(renderer, area, NOTOSERIF_18_FONT_ID, bandTop, word.c_str(), true, EpdFontFamily::BOLD);
-    return {renderer.getTextWidth(NOTOSERIF_18_FONT_ID, word.c_str(), EpdFontFamily::BOLD),
-            renderer.getLineHeight(NOTOSERIF_18_FONT_ID), bandTop};
+    UITheme::drawCenteredText(renderer, area, NOTOSANS_18_FONT_ID, bandTop, word.c_str(), true, EpdFontFamily::BOLD);
+    return {renderer.getTextWidth(NOTOSANS_18_FONT_ID, word.c_str(), EpdFontFamily::BOLD),
+            renderer.getLineHeight(NOTOSANS_18_FONT_ID), bandTop};
   }
 
   const int fontId = cjkCapableFontId(renderer, bodyFont, word.c_str());
@@ -304,7 +304,7 @@ void render(GfxRenderer& renderer, int contentTop, int contentBottom, int left, 
     if (lookupCount > 1) {
       char cbuf[12];
       snprintf(cbuf, sizeof(cbuf), "x%lu", static_cast<unsigned long>(lookupCount));
-      const int gap = renderer.getTextWidth(NOTOSERIF_18_FONT_ID, "  ", EpdFontFamily::BOLD);  // ~2 word-spaces
+      const int gap = renderer.getTextWidth(NOTOSANS_18_FONT_ID, "  ", EpdFontFamily::BOLD);  // ~2 word-spaces
       const int x = left + (width + head.width) / 2 + gap;  // right edge of the centered word + the gap
       const int dy = head.lineHeight - renderer.getLineHeight(SMALL_FONT_ID);
       renderer.drawText(SMALL_FONT_ID, x, head.top + dy, cbuf, true);

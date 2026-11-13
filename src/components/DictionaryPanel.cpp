@@ -37,7 +37,7 @@ constexpr int MIN_RADIUS = 6;
 
 // The headword is part of the entry, not part of the chrome, so it is set in the same serif the
 // definition uses. A CJK headword is routed to a CJK face by the renderer's own font resolution.
-constexpr int HEADWORD_FONT_ID = NOTOSERIF_12_FONT_ID;
+constexpr int HEADWORD_FONT_ID = NOTOSANS_12_FONT_ID;
 
 // The save-sentence button: the icon's size, and the extra reach around it a finger gets.
 constexpr int ADD_ICON_SIZE = 24;

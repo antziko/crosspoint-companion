@@ -119,7 +119,7 @@ inline SettingInfo buildDictFontSizeSetting() {
 // are appended after the built-in fonts. Otherwise only built-in fonts are listed.
 inline SettingInfo buildFontFamilySetting(const SdCardFontRegistry* registry) {
   // Built-in font labels (StrId)
-  std::vector<StrId> enumValues = {StrId::STR_NOTO_SERIF, StrId::STR_NOTO_SANS};
+  std::vector<StrId> enumValues = {StrId::STR_NOTO_SANS};
   // Runtime string labels for SD card fonts
   std::vector<std::string> enumStringValues;
 
@@ -140,7 +140,6 @@ inline SettingInfo buildFontFamilySetting(const SdCardFontRegistry* registry) {
   // with all options when SD fonts are present.
   std::vector<std::string> allStringValues;
   if (sdFontCount > 0) {
-    allStringValues.push_back(I18N.get(StrId::STR_NOTO_SERIF));
     allStringValues.push_back(I18N.get(StrId::STR_NOTO_SANS));
     allStringValues.insert(allStringValues.end(), enumStringValues.begin(), enumStringValues.end());
   }
@@ -357,21 +356,21 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
 
   // --- Reader ---
   // Built-in font-family entry. Replaced per-call with a registry-aware version when SD fonts installed.
-  v.push_back(SettingInfo::Enum(StrId::STR_FONT_FAMILY, &CrossPointSettings::fontFamily,
-                                {StrId::STR_NOTO_SERIF, StrId::STR_NOTO_SANS}, "fontFamily", StrId::STR_CAT_READER)
+  v.push_back(SettingInfo::Enum(StrId::STR_FONT_FAMILY, &CrossPointSettings::fontFamily, {StrId::STR_NOTO_SANS},
+                                "fontFamily", StrId::STR_CAT_READER)
                   .withTextSettings());
   // Placeholder: the selectable sizes depend on the active font family, so this
   // entry is always replaced by buildFontSizeSetting() below. It only fixes the
   // setting's position in the Reader category.
   v.push_back(
       SettingInfo::Enum(StrId::STR_FONT_SIZE, nullptr, {}, "fontSize", StrId::STR_CAT_READER).withTextSettings());
-  // Third option = CrossPointSettings::DICT_FONT_MATCH_READER, the only way to get an SD
+  // Last option = CrossPointSettings::DICT_FONT_MATCH_READER, the only way to get an SD
   // family in the definition viewer. It follows the reader's FAMILY only — the size below
   // still applies. The option count is load-bearing: fromJson() clamps ENUM values to
-  // enumValues.size(), so dropping it would silently reset saved value 2.
+  // enumValues.size(), so dropping it would silently reset "Same as book".
   v.push_back(SettingInfo::Enum(StrId::STR_DICT_FONT_FAMILY, &CrossPointSettings::dictionaryFontFamily,
-                                {StrId::STR_NOTO_SERIF, StrId::STR_NOTO_SANS, StrId::STR_SAME_AS_BOOK},
-                                "dictionaryFontFamily", StrId::STR_READER_DICTIONARY));
+                                {StrId::STR_NOTO_SANS, StrId::STR_SAME_AS_BOOK}, "dictionaryFontFamilyV2",
+                                StrId::STR_READER_DICTIONARY));
   // Placeholder carrying the persisted range; replaced by buildDictFontSizeSetting() below.
   v.push_back(SettingInfo::Value(StrId::STR_DICT_FONT_SIZE, &CrossPointSettings::dictionaryFontPointSize,
                                  {CrossPointSettings::DICT_FONT_POINT_MIN, CrossPointSettings::DICT_FONT_POINT_MAX, 1},
