@@ -22,6 +22,7 @@ void ButtonRemapActivity::onEnter() {
 
   // Start with all roles unassigned to avoid duplicate blocking.
   currentStep = 0;
+  exitAction = ExitAction::None;
   tempMapping[0] = kUnassigned;
   tempMapping[1] = kUnassigned;
   tempMapping[2] = kUnassigned;
@@ -42,30 +43,37 @@ void ButtonRemapActivity::loop() {
     return;
   }
 
-  // Side buttons:
-  // - Up: reset mapping to defaults and exit.
-  // - Down: cancel without saving.
-  if (mappedInput.wasPressed(MappedInputManager::Button::Up)) {
-    // Persist default mapping immediately so the user can recover quickly.
-    if (cwMode) {
-      SETTINGS.frontButtonBackCW = CrossPointSettings::FRONT_HW_BACK;
-      SETTINGS.frontButtonConfirmCW = CrossPointSettings::FRONT_HW_CONFIRM;
-      SETTINGS.frontButtonLeftCW = CrossPointSettings::FRONT_HW_LEFT;
-      SETTINGS.frontButtonRightCW = CrossPointSettings::FRONT_HW_RIGHT;
-    } else {
-      SETTINGS.frontButtonBack = CrossPointSettings::FRONT_HW_BACK;
-      SETTINGS.frontButtonConfirm = CrossPointSettings::FRONT_HW_CONFIRM;
-      SETTINGS.frontButtonLeft = CrossPointSettings::FRONT_HW_LEFT;
-      SETTINGS.frontButtonRight = CrossPointSettings::FRONT_HW_RIGHT;
+  // Finish the whole gesture before leaving or changing the live mapping, so the release of the
+  // press that ended the remap is not read by the next screen under the new mapping.
+  if (exitAction != ExitAction::None) {
+    if (mappedInput.isPressed(MappedInputManager::Button::Back) ||
+        mappedInput.isPressed(MappedInputManager::Button::Confirm) ||
+        mappedInput.isPressed(MappedInputManager::Button::Left) ||
+        mappedInput.isPressed(MappedInputManager::Button::Right) ||
+        mappedInput.isPressed(MappedInputManager::Button::Up) ||
+        mappedInput.isPressed(MappedInputManager::Button::Down)) {
+      return;
     }
-    SETTINGS.saveToFile();
+    if (exitAction == ExitAction::Save) {
+      applyTempMapping();
+      SETTINGS.saveToFile();
+    } else if (exitAction == ExitAction::Reset) {
+      resetToDefaults();
+    }
     finish();
     return;
   }
 
+  // Side buttons:
+  // - Up: reset mapping to defaults and exit.
+  // - Down: cancel without saving.
+  if (mappedInput.wasPressed(MappedInputManager::Button::Up)) {
+    exitAction = ExitAction::Reset;
+    return;
+  }
+
   if (mappedInput.wasPressed(MappedInputManager::Button::Down)) {
-    // Exit without changing settings.
-    finish();
+    exitAction = ExitAction::Cancel;
     return;
   }
 
@@ -90,15 +98,29 @@ void ButtonRemapActivity::loop() {
     currentStep++;
 
     if (currentStep >= kRoleCount) {
-      // All roles assigned; save to settings and exit.
-      applyTempMapping();
-      SETTINGS.saveToFile();
-      finish();
+      // All roles assigned; save and exit once the buttons are released.
+      exitAction = ExitAction::Save;
+      requestUpdate();
       return;
     }
 
     requestUpdate();
   }
+}
+
+void ButtonRemapActivity::resetToDefaults() {
+  if (cwMode) {
+    SETTINGS.frontButtonBackCW = CrossPointSettings::FRONT_HW_BACK;
+    SETTINGS.frontButtonConfirmCW = CrossPointSettings::FRONT_HW_CONFIRM;
+    SETTINGS.frontButtonLeftCW = CrossPointSettings::FRONT_HW_LEFT;
+    SETTINGS.frontButtonRightCW = CrossPointSettings::FRONT_HW_RIGHT;
+  } else {
+    SETTINGS.frontButtonBack = CrossPointSettings::FRONT_HW_BACK;
+    SETTINGS.frontButtonConfirm = CrossPointSettings::FRONT_HW_CONFIRM;
+    SETTINGS.frontButtonLeft = CrossPointSettings::FRONT_HW_LEFT;
+    SETTINGS.frontButtonRight = CrossPointSettings::FRONT_HW_RIGHT;
+  }
+  SETTINGS.saveToFile();
 }
 
 void ButtonRemapActivity::render(RenderLock&&) {

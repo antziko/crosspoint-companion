@@ -24,6 +24,9 @@ class ButtonRemapActivity final : public Activity {
   const bool cwMode = false;
   // Index of the logical role currently awaiting input.
   uint8_t currentStep = 0;
+  // Set when the remap ends; applied once every button is released (see loop()).
+  enum class ExitAction : uint8_t { None, Save, Reset, Cancel };
+  ExitAction exitAction = ExitAction::None;
   // Temporary mapping from logical role -> hardware button index.
   uint8_t tempMapping[4] = {0xFF, 0xFF, 0xFF, 0xFF};
   // Error banner timing (used when reassigning duplicate buttons).
@@ -32,6 +35,7 @@ class ButtonRemapActivity final : public Activity {
 
   // Commit temporary mapping to settings.
   void applyTempMapping();
+  void resetToDefaults();
   // Returns false if a hardware button is already assigned to a different role.
   bool validateUnassigned(uint8_t pressedButton);
   // Labels for UI display.
