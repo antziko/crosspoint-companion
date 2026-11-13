@@ -556,10 +556,14 @@ void EpubReaderActivity::onExit() {
   // durable before a subscriber can act on the exit notification.
   flushReaderSession();
   if (epub && !pluginDocument && pluginevents::anySubscriber(pluginevents::Event::ReaderExit)) {
+    const ScreenshotInfo info = getScreenshotInfo();
     char percent[8];
-    snprintf(percent, sizeof(percent), "%d", getScreenshotInfo().progressPercent);
-    const pluginevents::Var vars[] = {{"book", epub->getPath().c_str()}, {"percent", percent}};
-    pluginevents::emit(pluginevents::Event::ReaderExit, vars, 2);
+    char endPercent[8];
+    snprintf(percent, sizeof(percent), "%d", info.progressPercent);
+    snprintf(endPercent, sizeof(endPercent), "%d", info.endProgressPercent);
+    const pluginevents::Var vars[] = {
+        {"book", epub->getPath().c_str()}, {"percent", percent}, {"end_percent", endPercent}};
+    pluginevents::emit(pluginevents::Event::ReaderExit, vars, 3);
   }
 
   // The lazy-image extractor holds a raw pointer to this activity's epub; drop it
@@ -6341,8 +6345,17 @@ ScreenshotInfo EpubReaderActivity::getScreenshotInfo() const {
       if (pct < 0) pct = 0;
       if (pct > 100) pct = 100;
       info.progressPercent = pct;
+      // 100 only on the last page of a fully laid-out chapter: rounding must not
+      // report a long book finished early.
+      const bool lastPage = section && currentSpineIndex == epub->getSpineItemsCount() - 1 && !section->isBuilding() &&
+                            !section->isPartial() && info.currentPage >= info.totalPages;
+      const float chapterEnd = static_cast<float>(info.currentPage) / static_cast<float>(info.totalPages);
+      const int endPct = static_cast<int>(epub->calculateProgress(currentSpineIndex, chapterEnd) * 100.0f);
+      info.endProgressPercent = lastPage ? 100 : std::clamp(endPct, 0, 99);
     }
   }
+  // Past the last spine item: the end-of-book screen.
+  if (epub && currentSpineIndex > 0 && currentSpineIndex >= epub->getSpineItemsCount()) info.endProgressPercent = 100;
   return info;
 }
 
