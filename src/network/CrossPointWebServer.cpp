@@ -10,6 +10,7 @@
 #include <HalMemory.h>
 #include <HalStorage.h>
 #include <Logging.h>
+#include <MD5Builder.h>
 #include <Memory.h>
 #include <ResumableFetch.h>
 #include <SdDebugLog.h>
@@ -282,9 +283,11 @@ void CrossPointWebServer::begin() {
   LOG_DBG("WEB", "[MEM] Free heap after route setup: %d bytes", ESP.getFreeHeap());
 
   // Collect WebDAV headers and register handler
-  // Host is collected for the captive-portal check.
-  const char* collectedHeaders[] = {"Depth", "Destination", "Overwrite", "If", "Lock-Token", "Timeout", "Host"};
-  server->collectHeaders(collectedHeaders, 7);
+  // Host is collected for the captive-portal check; If-None-Match lets plugin
+  // files answer conditional GETs with 304.
+  const char* collectedHeaders[] = {"Depth",      "Destination", "Overwrite", "If",
+                                    "Lock-Token", "Timeout",     "Host",      "If-None-Match"};
+  server->collectHeaders(collectedHeaders, sizeof(collectedHeaders) / sizeof(collectedHeaders[0]));
   // Raw new (std::nothrow), not makeUniqueNoThrow: addHandler takes ownership and
   // WebServer deletes it when the server stops. On OOM, carry on without WebDAV --
   // plain HTTP file transfer still works, which is better than a reboot.
@@ -1863,6 +1866,30 @@ void CrossPointWebServer::handlePluginFile() const {
     return;
   }
 
+  // A content hash, not size and date: without a set clock files can share a
+  // timestamp, and a plugin update can keep the same size.
+  MD5Builder md5;
+  md5.begin();
+  uint8_t chunk[512];
+  int got;
+  while ((got = f.read(chunk, sizeof(chunk))) > 0) {
+    md5.add(chunk, static_cast<size_t>(got));
+    resetTaskWatchdogIfSubscribed();
+  }
+  if (got < 0 || !f.seek(0)) {
+    LOG_ERR("WEB", "Plugin file read failed: %s", path.c_str());
+    server->send(500, "text/plain", "Failed to read file");
+    return;
+  }
+  md5.calculate();
+  const String etag = "\"" + md5.toString() + "\"";
+  // no-cache: the browser keeps the file but revalidates it on every load.
+  server->sendHeader("ETag", etag);
+  server->sendHeader("Cache-Control", "no-cache");
+  if (server->header("If-None-Match") == etag) {
+    server->send(304);
+    return;
+  }
   server->setContentLength(f.size());
   server->send(200, pluginContentType(file), "");
   streamFileToClient(f);
