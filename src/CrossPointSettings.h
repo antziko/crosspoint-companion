@@ -634,6 +634,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // (built-in = "@b<index>", SD = "@s<familyName>"). Pinned fonts sort first.
   // 256 bytes covers ~8 typical SD names; appends are bounds-checked.
   char pinnedFonts[256] = "";
+  // Master switch for all SD-card plugin discovery/execution. New installs keep
+  // this disabled; settings migration enables it when pre-existing plugin files
+  // are found so a firmware update never silently disables an existing setup.
+  uint8_t pluginsEnabled = 0;
+  // User hid the Plugin Hub install row; cleared when plugins are turned back on.
+  uint8_t pluginHubPromptHidden = 0;
   // Show hidden files/directories (starting with '.') in the file browser (0 = hidden, 1 = show)
   uint8_t showHiddenFiles = 0;
   // How the Recent Books screen renders: a list, or a bookshelf of cover

@@ -34,7 +34,6 @@
 #include "StatusBarSettingsActivity.h"
 #include "TextSettingsActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
-#include "activities/plugins/PluginCatalogActivity.h"
 #include "activities/reader/DictNotesActivity.h"
 #include "activities/util/IntervalSelectionActivity.h"
 #include "components/UITheme.h"
@@ -44,6 +43,7 @@
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
 #include "util/DictionaryRegistry.h"
+#include "util/PluginEvents.h"
 
 namespace fui = freeink::ui;
 
@@ -596,9 +596,6 @@ void SettingsActivity::toggleCurrentSetting() {
       case SettingAction::SdFirmwareUpdate:
         startActivityForResultNoThrow<SdFirmwareUpdateActivity>(resultHandler, renderer, mappedInput);
         break;
-      case SettingAction::Plugins:
-        startActivityForResultNoThrow<PluginCatalogActivity>(resultHandler, renderer, mappedInput);
-        break;
       case SettingAction::DownloadFonts:
         startActivityForResultNoThrow<FontDownloadActivity>(
             [this](const ActivityResult&) {
@@ -626,6 +623,21 @@ void SettingsActivity::toggleCurrentSetting() {
             },
             renderer, mappedInput);
         break;
+      case SettingAction::Plugins: {
+        static constexpr StrId OPTIONS[] = {StrId::STR_ENABLED, StrId::STR_DISABLED, StrId::STR_CANCEL};
+        optionPopup.show(StrId::STR_PLUGINS, OPTIONS, 3, SETTINGS.pluginsEnabled ? 0 : 1, [this](const int idx) {
+          if (idx == 2) return;
+          SETTINGS.pluginsEnabled = idx == 0 ? 1 : 0;
+          // Turning plugins on brings back a dismissed Plugin Hub install row.
+          if (SETTINGS.pluginsEnabled) SETTINGS.pluginHubPromptHidden = 0;
+          SETTINGS.saveToFile();
+          // Applies to event delivery now, not after a reboot.
+          pluginevents::refreshSubscriptions();
+          rebuildSettingsLists();
+        });
+        requestUpdate();
+        return;
+      }
       case SettingAction::KeyboardLayouts:
         if (auto activity = makeUniqueNoThrow<KeyboardLayoutsActivity>(renderer, mappedInput)) {
           startActivityForResult(std::move(activity), nullptr);
@@ -746,6 +758,7 @@ std::string SettingsActivity::settingValueText(const SettingInfo& setting) {
   if (setting.type == SettingType::TOGGLE && setting.valuePtr != nullptr) {
     return SETTINGS.*(setting.valuePtr) ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
   }
+  if (setting.action == SettingAction::Plugins) return SETTINGS.pluginsEnabled ? tr(STR_ENABLED) : tr(STR_DISABLED);
   if (setting.type == SettingType::ENUM && setting.valuePtr != nullptr) {
     // Guard like the valueGetter branch below: a corrupt/migrated settings
     // byte must not index past the enum table.

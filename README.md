@@ -40,6 +40,8 @@ CrossPoint is open-source e-reader firmware - community-built, fully hackable, f
 
 - **Localization**: 24 UI languages and counting. RTL support.
 
+- **SD-card plugins**: Optional plugin support can be enabled from **Settings → System → Maintenance → Plugins**. Sideloaded plugins work independently of Plugin Hub. See the [User Guide](USER_GUIDE.md) and [SD-card plugin documentation](docs/sd-plugins.md).
+
 ### Coming soon:
 
 - Dictionary lookup — inline word lookup without leaving the reader.

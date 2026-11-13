@@ -27,7 +27,6 @@
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
 #include "SilentRestart.h"
-#include "activities/plugins/PluginCatalogActivity.h"  // anyPluginInstalled()
 #include "activities/reader/GlobalReadingStats.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
@@ -280,7 +279,10 @@ void HomeActivity::onEnter() {
   SdDebugLog::log("HOME", "enter");
 
   hasOpdsServers = OPDS_STORE.hasServers();
-  hasPlugins = anyPluginInstalled();
+  // Plugin System is the global opt-in. Once enabled, expose the Plugins entry
+  // even when no SD plugins are installed yet so Plugin Hub can be installed
+  // from inside the Plugins screen (or users can sideload plugins manually).
+  hasPlugins = SETTINGS.pluginsEnabled != 0;
 
   // Brief heap probe (struct embeds a ~785-byte ReadingTimeHistory — never a
   // stack local) just to decide whether the menu entry should be shown.

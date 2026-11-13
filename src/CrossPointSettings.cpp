@@ -13,6 +13,7 @@
 #include "ReaderFontSizes.h"
 #include "SettingsPersistence.h"
 #include "fontIds.h"
+#include "util/PluginLocations.h"
 
 namespace {
 
@@ -210,6 +211,14 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
       v = fieldDefault;
     }
     s.*(p.ptr) = v;
+  }
+
+  // Plugin System did not exist in older settings files. Preserve the behavior
+  // of users who already have SD plugins installed, while keeping the new
+  // default disabled on clean installs.
+  if (doc["pluginsEnabled"].isNull()) {
+    s.pluginsEnabled = PluginLocations::anyPluginInstalledOnDisk() ? 1 : 0;
+    needsResave = true;
   }
 
   // Older files stored one combined touch mode under "touchReaderControls":

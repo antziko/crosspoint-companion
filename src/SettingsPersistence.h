@@ -210,6 +210,10 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
     persisted::toggle("pwrBtnFootnoteBack", &CrossPointSettings::pwrBtnFootnoteBack),
     persisted::toggle("backShortToFileBrowser", &CrossPointSettings::backShortToFileBrowser),
 
+    // --- Plugins (set from System -> Maintenance -> Plugins) ---
+    persisted::toggle("pluginsEnabled", &CrossPointSettings::pluginsEnabled),
+    persisted::toggle("pluginHubPromptHidden", &CrossPointSettings::pluginHubPromptHidden),
+
     // --- Power ---
     persisted::ranged("sleepTimeoutMinutes", &CrossPointSettings::sleepTimeoutMinutes,
                       CrossPointSettings::MIN_SLEEP_TIMEOUT_MINUTES, CrossPointSettings::MAX_SLEEP_TIMEOUT_MINUTES),
