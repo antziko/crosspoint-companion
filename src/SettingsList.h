@@ -2,6 +2,7 @@
 
 #include <BoardConfig.h>
 #include <HalClock.h>
+#include <HalFrontlight.h>
 #include <HalTiltSensor.h>
 #include <I18n.h>
 #include <SdCardFontRegistry.h>
@@ -822,6 +823,14 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                                       home_button::KEYS[i], StrId::STR_CAT_CONTROLS));
       }
     }
+  }
+  // Frontlit and lightless variants of a board share one binary (EEGO A4); presence is the
+  // I2C probe result from Frontlight.begin(). UI-only: persistence walks kPersistedSettings,
+  // so the probe never drops a saved key.
+  if (!Frontlight.present()) {
+    v.erase(std::remove_if(v.begin(), v.end(),
+                           [](const SettingInfo& s) { return s.nameId == StrId::STR_RESTORE_LIGHT_ON_WAKE; }),
+            v.end());
   }
   if (registry && registry->getFamilyCount() > 0) {
     auto it = std::find_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_FONT_FAMILY; });

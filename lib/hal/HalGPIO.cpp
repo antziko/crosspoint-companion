@@ -240,6 +240,10 @@ bool HalGPIO::readBatteryTempDeciC(int16_t& out) const {
   return true;
 }
 
+void HalGPIO::prepareForDeepSleep() {
+  if (!inputMgr.prepareForDeepSleep()) LOG_ERR("GPIO", "Failed to put touch controller to sleep");
+}
+
 bool HalGPIO::isPressed(uint8_t buttonIndex) const {
   return buttonIndex <= BTN_POWER && (levelMask >> buttonIndex) & 1;
 }

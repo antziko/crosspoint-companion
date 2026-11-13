@@ -1240,7 +1240,8 @@ void WifiSelectionActivity::drawHeaderBand(const Rect& screen, const ThemeMetric
   // so 32 truncated it. See ClockSyncActivity for the same class of bug.
   char countStr[64];
   snprintf(countStr, sizeof(countStr), tr(STR_NETWORKS_FOUND), realNetworkCount);
-  GUI.drawHeader(renderer, Rect{screen.x, screen.y + metrics.topPadding, screen.width, metrics.headerHeight},
+  // drawHeader self-insets by the board's viewable margins, so it takes a full-width rect.
+  GUI.drawHeader(renderer, Rect{0, screen.y + metrics.topPadding, renderer.getScreenWidth(), metrics.headerHeight},
                  tr(STR_WIFI_NETWORKS), countStr);
   GUI.drawSubHeader(
       renderer,

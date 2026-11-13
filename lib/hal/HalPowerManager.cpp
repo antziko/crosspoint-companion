@@ -15,6 +15,10 @@
 #include "HalClock.h"
 #include "HalGPIO.h"
 
+#if FREEINK_DEVICE_EEGO_A4
+#include <HalFrontlight.h>
+#endif
+
 HalPowerManager powerManager;  // Singleton instance
 
 namespace {
@@ -100,6 +104,11 @@ void HalPowerManager::setPowerSaving(bool enabled) {
 }
 
 void HalPowerManager::startDeepSleep(HalGPIO& gpio) const {
+#if FREEINK_DEVICE_EEGO_A4
+  // LM3630A and GSL share I2C; turn the light off before touch releases the bus.
+  Frontlight.setOn(false);
+  gpio.prepareForDeepSleep();
+#endif
 #ifdef ENABLE_SERIAL_LOG
   // Tear down HWCDC so the host sees a clean disconnect and the peripheral
   // doesn't hold power domains that interfere with USB-powered GPIO wake.

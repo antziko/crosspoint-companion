@@ -157,7 +157,7 @@ namespace {
 // helper also gates power management). Overlay refresh choices are per-panel:
 // this family runs the grayscale anti-aliasing pass, so chrome painted over a
 // fresh page needs the HALF ghost-cleanup and closing re-renders the page.
-bool xteinkClassPanel() { return gpio.isXteinkDevice() || BoardConfig::isX4Pro(); }
+bool xteinkClassPanel() { return gpio.isXteinkDevice() || BoardConfig::isX4Pro() || BoardConfig::isEegoA4(); }
 
 // Boards that render images as a 1-bit halftone instead of 4-level grayscale.
 //
@@ -172,7 +172,9 @@ bool xteinkClassPanel() { return gpio.isXteinkDevice() || BoardConfig::isX4Pro()
 // for a related reason ("plain OTP waveform, no custom grayscale LUT"). Revisit this
 // entry if the grayscale planes are ever made to drive on this board -- 4 working
 // levels would beat the halftone.
-bool oneBitImagePanel(const GfxRenderer& renderer) { return renderer.isX3() || BoardConfig::isX4Pro(); }
+bool oneBitImagePanel(const GfxRenderer& renderer) {
+  return renderer.isX3() || BoardConfig::isX4Pro() || BoardConfig::isEegoA4();
+}
 
 // pagesPerRefresh now comes from SETTINGS.getRefreshFrequency()
 // pages per minute, first item is 1 to prevent division by zero if accessed
@@ -4639,6 +4641,8 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     } else {
       page->renderImages(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);
     }
+    // A4 replaces the whole frame with its gray planes, including the status bar.
+    if (BoardConfig::isEegoA4()) renderStatusBar();
   };
 
   // Saved highlights sit on top of the freshly drawn page, on every BW pass that paints it.
@@ -5257,14 +5261,13 @@ void EpubReaderActivity::openOverlay(Overlay target) {
   }
 }
 
-// Close the overlay back to the reading page. Boards without the Xteink
-// grayscale-AA pass restore the page snapshot and push one FAST refresh -- no
-// re-render, no flash; Xteink boards re-render to restore the AA planes.
+// Grayscale panels re-render to restore AA; other boards restore the B/W snapshot.
 void EpubReaderActivity::closeOverlayToPage() {
   mappedInput.resetHomeButtonInput();
   overlay = Overlay::None;
   overlayPopup.dismiss();  // an option picker cannot outlive its panel
   toolbarUi.reset();       // ~1 KB of interaction table + props, only needed while open
+  if (BoardConfig::isEegoA4()) pagesUntilFullRefresh = 1;
   if (!xteinkClassPanel() && overlayPageStored) {
     RenderLock lock;  // the render task shares the framebuffer
     // No baseline resync: the glass shows the chrome, and erasing it needs
