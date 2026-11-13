@@ -329,6 +329,8 @@ bool HomeActivity::storeCoverBuffer() {
   // cloning the whole framebuffer.
   if (coverRectW <= 0 || coverRectH <= 0) return false;
   freeCoverBuffer();
+  // Night mode stores images pre-inverted, so the snapshot is only valid in this polarity.
+  coverBufferInverted = display.isInverted();
 
   const size_t total = renderer.getRegionByteSize(coverRectX, coverRectY, coverRectW, coverRectH);
   if (total == 0) return false;
@@ -851,6 +853,12 @@ void HomeActivity::render(RenderLock&&) {
       requestUpdate();
     }
     return;
+  }
+  // A snapshot from the other output polarity holds the other byte form: pasting it back after a
+  // theme switch showed the cover as a negative. Redraw it instead.
+  if (coverBufferStored && coverBufferInverted != display.isInverted()) {
+    freeCoverBuffer();
+    coverRendered = false;
   }
   bool bufferRestored = coverRendered && coverBufferStored && restoreCoverBuffer();
 

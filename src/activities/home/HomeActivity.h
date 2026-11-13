@@ -25,6 +25,7 @@ class HomeActivity final : public Activity {
   bool hasReadingStats = false;
   bool coverRendered = false;       // Track if cover has been rendered once
   bool coverBufferStored = false;   // Track if cover buffer is stored
+  bool coverBufferInverted = false;  // output polarity the cover snapshot was taken in
   bool longPressFired = false;      // Swallow Confirm release after a long-press fired
   bool backLongPressFired = false;  // Swallow Back release after a hold-Back fired
   // Home can be entered while Back is still held (leaving Settings with Back):
