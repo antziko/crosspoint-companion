@@ -39,6 +39,10 @@ class HalStorage {
   // stopped; open HalFiles become invalid. A deep-sleep wake resets the MCU and
   // mounts storage again through begin().
   void prepareForDeepSleep();
+  // Card capacity and used space (the first used-space call scans the FAT; the SDK caches it ~20 s).
+  uint64_t sdTotalBytes();
+  // False means unavailable, including a failed scan; zero can also be a valid result.
+  bool sdUsedBytes(uint64_t& usedBytes);
   std::vector<String> listFiles(const char* path = "/", int maxFiles = 200);
   // Read the entire file at `path` into a String. Returns empty string on failure.
   String readFile(const char* path);
