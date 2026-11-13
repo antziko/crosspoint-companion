@@ -2558,6 +2558,14 @@ void EpubReaderActivity::launchHighlightWordSelect(const int pointX, const int p
   });
 }
 
+int EpubReaderActivity::currentTocIndex() const {
+  if (!epub) return 0;
+  if (section) return std::max(0, section->getTocIndexForPage(section->currentPage));
+  // Child screens may have released the section; its saved anchor map remains readable.
+  Section cachedSection(epub, currentSpineIndex, renderer);
+  return std::max(0, cachedSection.getTocIndexForPage(nextPageNumber));
+}
+
 void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action) {
   auto progressChangeResultHandler = [this](const ActivityResult& result) {
     if (!result.isCancelled) {
@@ -2618,7 +2626,11 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       break;
     }
     case EpubReaderMenuActivity::MenuAction::SELECT_CHAPTER: {
-      const int spineIdx = currentSpineIndex;
+      int tocIndex;
+      {
+        RenderLock lock(*this);  // the section is the render task's
+        tocIndex = currentTocIndex();
+      }
       startActivityForResultNoThrow<EpubReaderChapterSelectionActivity>(
           [this](const ActivityResult& result) {
             // Cancelled (Back / back gesture) steps one level back to the
@@ -2645,7 +2657,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
               doNavigate();
             }
           },
-          renderer, mappedInput, epub, spineIdx);
+          renderer, mappedInput, epub, tocIndex);
       break;
     }
     case EpubReaderMenuActivity::MenuAction::FOOTNOTES: {
@@ -5205,12 +5217,14 @@ void EpubReaderActivity::openOverlay(Overlay target) {
     case Overlay::Toolbar:
       focusedTool = 0;
       break;
-    case Overlay::Contents:
-      panelIndex = std::max(0, epub->getTocIndexForSpineIndex(currentSpineIndex));
+    case Overlay::Contents: {
+      RenderLock lock;
+      panelIndex = currentTocIndex();
       // Fresh viewport opening on the current chapter, cursor shown or not.
       toolbarUi->nav().reset(panelIndex);
       toolbarUi->nav().top = panelIndex;
       break;
+    }
     case Overlay::Text:
       panelIndex = 0;
       toolbarUi->nav().reset();
