@@ -91,7 +91,42 @@ class CrossPointHttpServer final : public WebServer {
     }
     _postArgsLen = 0;
   }
+
+ protected:
+  // NetworkClient::write gives up after ten seconds without progress and
+  // returns a short count, but WebServer ignores it and writes the next chunk,
+  // so a stalled reply blocks the server for minutes. Close the client instead:
+  // later writes then fail at once and the handler soon returns.
+  size_t _currentClientWrite(const char* b, const size_t l) override {
+    return checkedWrite(l, WebServer::_currentClientWrite(b, l));
+  }
+  size_t _currentClientWrite_P(PGM_P b, const size_t l) override {
+    return checkedWrite(l, WebServer::_currentClientWrite_P(b, l));
+  }
+
+ private:
+  size_t checkedWrite(const size_t wanted, const size_t sent) {
+    if (sent < wanted && _currentClient.connected()) {
+      LOG_ERR("WEB", "Client stalled after %u of %u bytes, closing it", static_cast<unsigned>(sent),
+              static_cast<unsigned>(wanted));
+      _currentClient.stop();
+    }
+    return sent;
+  }
 };
+
+// True if key is one of the comma-separated names in list.
+bool listContainsKey(const String& list, const char* key) {
+  const size_t keyLen = strlen(key);
+  for (const char* p = list.c_str(); *p;) {
+    const char* comma = strchr(p, ',');
+    const size_t len = comma ? static_cast<size_t>(comma - p) : strlen(p);
+    if (len == keyLen && strncmp(p, key, len) == 0) return true;
+    if (!comma) break;
+    p = comma + 1;
+  }
+  return false;
+}
 
 void releaseRequestArguments(WebServer* server) {
   static_cast<CrossPointHttpServer*>(server)->releaseRequestArguments();
@@ -261,8 +296,7 @@ void CrossPointWebServer::begin() {
   server->on("/files", HTTP_GET, [this] { handleFileList(); });
   server->on("/js/jszip.min.js", HTTP_GET, [this] { handleJszip(); });
   server->on("/js/epub-optimizer.js", HTTP_GET, [this] {
-    sendStaticContent(server.get(), epub_optimizerJs, sizeof(epub_optimizerJs),
-                      "application/javascript");
+    sendStaticContent(server.get(), epub_optimizerJs, sizeof(epub_optimizerJs), "application/javascript");
   });
   server->on("/js/plugin-host.js", HTTP_GET, [this] {
     sendStaticContent(server.get(), plugin_hostJs, sizeof(plugin_hostJs), "application/javascript");
@@ -1459,6 +1493,8 @@ void CrossPointWebServer::handleGetSettings() const {
   // includes SD-resident families — otherwise the web API only exposes the
   // three built-in fonts.
   const auto& settings = getSettingsList(&sdFontSystem.registry(), &dictionaryRegistry);
+  // ?keys=a,b returns only those settings, so a plugin need not read the whole list.
+  const String keys = server->arg("keys");
 
   server->setContentLength(CONTENT_LENGTH_UNKNOWN);
   server->send(200, "application/json", "");
@@ -1471,6 +1507,7 @@ void CrossPointWebServer::handleGetSettings() const {
 
   for (const auto& s : settings) {
     if (!s.key || s.webHidden) continue;  // Skip ACTION-only entries
+    if (!keys.isEmpty() && !listContainsKey(keys, s.key)) continue;
 
     doc.clear();
     doc["key"] = s.key;
