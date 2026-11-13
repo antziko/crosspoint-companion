@@ -233,11 +233,12 @@ void EpubReaderActivity::presentVerticalPage(const VerticalPage& vpage, const bo
 
   renderer.setImageDitherMode(SETTINGS.imageDither);
   const uint8_t aaMode = SETTINGS.getReaderTextAntiAliasing();
-  renderer.setOneBitImages(oneBitImagePanel(renderer) || aaMode == CrossPointSettings::TEXT_AA_OFF);
+  const bool bwImages = SETTINGS.imageRendering == CrossPointSettings::IMAGES_DISPLAY_BW;
+  renderer.setOneBitImages(oneBitImagePanel(renderer) || aaMode == CrossPointSettings::TEXT_AA_OFF || bwImages);
   renderer.setTextAntiAlias(aaMode == CrossPointSettings::TEXT_AA_ANTIALIASED);
 
   const bool hasImages = vpage.isImagePage() || VerticalTextBlock(vpage).hasImages();
-  const bool grayImages = hasImages && !oneBitImagePanel(renderer) && aaMode != CrossPointSettings::TEXT_AA_OFF;
+  const bool grayImages = hasImages && !renderer.oneBitImages();
   const bool doGray = aaMode == CrossPointSettings::TEXT_AA_ANTIALIASED || grayImages;
   // Antialiased: the text contributes gray too. Otherwise the planes only carry the images.
   const bool grayImagesOnly = aaMode != CrossPointSettings::TEXT_AA_ANTIALIASED;

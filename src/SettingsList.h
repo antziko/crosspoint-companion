@@ -440,7 +440,8 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                                 "textAntiAliasing", StrId::STR_READER_TEXT)
                   .withTextSettings());
   v.push_back(SettingInfo::Enum(StrId::STR_IMAGES, &CrossPointSettings::imageRendering,
-                                {StrId::STR_IMAGES_DISPLAY, StrId::STR_IMAGES_PLACEHOLDER, StrId::STR_IMAGES_SUPPRESS},
+                                {StrId::STR_IMAGES_DISPLAY, StrId::STR_IMAGES_PLACEHOLDER, StrId::STR_IMAGES_SUPPRESS,
+                                 StrId::STR_IMAGES_DISPLAY_BW},
                                 "imageRendering", StrId::STR_READER_TEXT));
   // Toolbar is a touch-first overlay (tap targets, a drag scrub bar), so the
   // row is offered only where those work; button boards stay on the list.

@@ -55,9 +55,9 @@
 #include "ProgressMapper.h"
 #include "QrDisplayActivity.h"
 #include "ReaderFontSizes.h"
+#include "ReaderLineSpacing.h"
 #include "ReaderOptionsActivity.h"
 #include "ReaderSettingsIO.h"
-#include "ReaderLineSpacing.h"
 #include "ReaderToolbarUi.h"
 #include "ReaderUtils.h"
 #include "ReadingTimeHistory.h"
@@ -4595,10 +4595,11 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   renderer.setImageDitherMode(SETTINGS.imageDither);
 
   // Text AA mode (X4): Off = 1-bit images + black text; Antialiased = grey images +
-  // grey (AA) text; Sharp = grey images + true-black text. Images are 1-bit only in
-  // Off mode; text contributes grey to the grayscale planes only in Antialiased mode.
+  // grey (AA) text; Sharp = grey images + true-black text. Images are 1-bit in Off
+  // mode and with Images set to Black & White; text contributes grey to the grayscale planes only in Antialiased mode.
   const uint8_t aaMode = SETTINGS.getReaderTextAntiAliasing();
-  renderer.setOneBitImages(oneBitImagePanel(renderer) || aaMode == CrossPointSettings::TEXT_AA_OFF);
+  const bool bwImages = SETTINGS.imageRendering == CrossPointSettings::IMAGES_DISPLAY_BW;
+  renderer.setOneBitImages(oneBitImagePanel(renderer) || aaMode == CrossPointSettings::TEXT_AA_OFF || bwImages);
   renderer.setTextAntiAlias(aaMode == CrossPointSettings::TEXT_AA_ANTIALIASED);
 
   // Font prewarm: scan pass accumulates text, then prewarm, then real render
@@ -4631,7 +4632,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   const bool hasLargeImage = page->hasLargeImages(IMAGE_LARGE_MIN_PX);
 
   lastPageHadImages = hasLargeImage;  // gates the bookmark light-refresh (see header)
-  const bool grayImages = page->hasImages() && !oneBitImagePanel(renderer) && aaMode != CrossPointSettings::TEXT_AA_OFF;
+  const bool grayImages = page->hasImages() && !renderer.oneBitImages();
   // Antialiased always runs the gray pass (text AA, even text-only pages). Sharp runs
   // it only for image pages — pure-text Sharp pages stay single-pass solid black.
   const bool doGrayscalePass = (aaMode == CrossPointSettings::TEXT_AA_ANTIALIASED) || grayImages;

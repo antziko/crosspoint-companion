@@ -296,7 +296,15 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   enum UI_THEME { CLASSIC = 0, LYRA = 1, LYRA_3_COVERS = 2, ROUNDEDRAFF = 3, VEGA = 4, COVER_GRID = 5 };
 
   // Image rendering in EPUB reader
-  enum IMAGE_RENDERING { IMAGES_DISPLAY = 0, IMAGES_PLACEHOLDER = 1, IMAGES_SUPPRESS = 2, IMAGE_RENDERING_COUNT };
+  // IMAGES_DISPLAY_BW lays images out like IMAGES_DISPLAY but draws them as the 1-bit
+  // halftone, so image pages skip the grayscale image refresh.
+  enum IMAGE_RENDERING {
+    IMAGES_DISPLAY = 0,
+    IMAGES_PLACEHOLDER = 1,
+    IMAGES_SUPPRESS = 2,
+    IMAGES_DISPLAY_BW = 3,
+    IMAGE_RENDERING_COUNT
+  };
 
   // How the reader menu opens: the classic full-screen list, or a toolbar
   // overlay (a bottom sheet with Contents / Text / More panels) painted over
