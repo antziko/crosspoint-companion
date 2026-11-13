@@ -37,6 +37,13 @@ OVERRIDES = f"""
 #ifndef HAVE_SESSION_TICKET
 #define HAVE_SESSION_TICKET
 #endif
+/* Arduino-wolfSSL always defines DEBUG_WOLFSSL, but SecureClient turns the
+   trace on only in FREEINK_WOLFSSL_DEBUG builds. Drop it otherwise so the trace
+   code and strings are not linked. Set the flag for all sources (build_flags),
+   not just SecureNet, to keep the trace. */
+#ifndef FREEINK_WOLFSSL_DEBUG
+#undef DEBUG_WOLFSSL
+#endif
 """
 
 
