@@ -394,9 +394,9 @@ void FileBrowserActivity::promptDeleteSelectedEntry() {
     }
   };
 
-  const std::string heading = tr(STR_DELETE) + std::string("? ");
   // Compose the display copy; `entry` stays raw for the delete path itself.
-  startActivityForResultNoThrow<ConfirmationActivity>(handler, renderer, mappedInput, heading, utf8ComposeNfc(entry));
+  startActivityForResultNoThrow<ConfirmationActivity>(handler, renderer, mappedInput, tr(STR_DELETE_ITEM_CONFIRM),
+                                                      utf8ComposeNfc(entry));
 }
 
 // Hold menu for files[selectorIndex]. Directories get no Rename row: renaming one would

@@ -14,8 +14,8 @@
 #include <algorithm>
 
 #include "CrossPointSettings.h"
-#include "activities/util/ConfirmationActivity.h"
 #include "activities/boot_sleep/SleepImageRender.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -323,7 +323,7 @@ void BmpViewerActivity::loop() {
         doSetSleepCover();
       };
       startActivityForResultNoThrow<ConfirmationActivity>(std::move(handler), renderer, mappedInput,
-                                                          tr(STR_SET_SLEEP_COVER) + std::string("?"),
+                                                          tr(STR_SET_SLEEP_COVER_CONFIRM),
                                                           filePath.substr(filePath.find_last_of('/') + 1));
     }
     return;
