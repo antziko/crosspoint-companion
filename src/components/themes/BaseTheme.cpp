@@ -1176,12 +1176,27 @@ void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
       renderer.drawCenteredText(UI_10_FONT_ID, continueY, tr(STR_CONTINUE_READING), !bookSelected);
     }
   } else {
-    // No book to continue reading
+    // No book to continue reading. Keep each line inside the empty cover frame: a longer translation
+    // steps the title down to the small font; wrapping is only the last resort.
     const int titleFontId = uiScaleSpec().titleFontId;
     const int smallFontId = uiScaleSpec().smallFontId;
-    const int y = bookY + (bookHeight - renderer.getLineHeight(titleFontId) - renderer.getLineHeight(smallFontId)) / 2;
-    renderer.drawCenteredText(titleFontId, y, "No open book");
-    renderer.drawCenteredText(smallFontId, y + renderer.getLineHeight(titleFontId), "Start reading below");
+    const int textWidth = std::max(1, bookWidth - 16);
+    const int titleFont =
+        renderer.getTextWidth(titleFontId, tr(STR_NO_OPEN_BOOK)) <= textWidth ? titleFontId : smallFontId;
+    const auto title = renderer.wrappedText(titleFont, tr(STR_NO_OPEN_BOOK), textWidth, 3);
+    const auto hint = renderer.wrappedText(smallFontId, tr(STR_START_READING), textWidth, 3);
+    const int titleLine = renderer.getLineHeight(titleFont);
+    const int hintLine = renderer.getLineHeight(smallFontId);
+    int y = bookY +
+            (bookHeight - static_cast<int>(title.size()) * titleLine - static_cast<int>(hint.size()) * hintLine) / 2;
+    for (const auto& line : title) {
+      renderer.drawCenteredText(titleFont, y, line.c_str());
+      y += titleLine;
+    }
+    for (const auto& line : hint) {
+      renderer.drawCenteredText(smallFontId, y, line.c_str());
+      y += hintLine;
+    }
   }
 }
 
