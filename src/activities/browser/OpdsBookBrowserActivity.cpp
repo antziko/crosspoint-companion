@@ -34,6 +34,7 @@
 #include "network/HttpDownloader.h"
 #include "util/BookCacheUtils.h"
 #include "util/ListSwipeScroll.h"
+#include "util/OpdsFeedError.h"
 #include "util/OpdsFilename.h"
 #include "util/StringUtils.h"
 #include "util/UrlUtils.h"
@@ -41,6 +42,22 @@
 namespace fui = freeink::ui;
 
 namespace {
+// Tells a dead server from a catalog that wants a password; both are a bare
+// "failed" to the fetch itself. Read right after a failed fetch.
+const char* feedFailureMessage() {
+  switch (classifyFeedFailure(HttpDownloader::lastStatus())) {
+    case OpdsFeedError::Unreachable:
+      return tr(STR_FEED_UNREACHABLE);
+    case OpdsFeedError::Unauthorized:
+      return tr(STR_FEED_UNAUTHORIZED);
+    case OpdsFeedError::ServerError:
+      return tr(STR_FEED_SERVER_ERROR);
+    case OpdsFeedError::Other:
+      break;
+  }
+  return tr(STR_FETCH_FEED_FAILED);
+}
+
 constexpr unsigned long GO_HOME_MS = 1000;  // hold BACK this long to jump to home
 // Minimum contiguous heap required before bringing up an HTTPS connection. Below
 // this the connect or an in-flight read can fail as an OOM-in-disguise and stall,
@@ -950,8 +967,9 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path, const bool allo
       Storage.remove(feedPath.c_str());
       state = BrowserState::ERROR;
       // Append the real cause so a user without a serial cable sees it on screen.
-      errorMessage = httpDetail.empty() ? std::string(tr(STR_FETCH_FEED_FAILED))
-                                        : std::string(tr(STR_FETCH_FEED_FAILED)) + ": " + httpDetail;
+      // A FILE_ERROR is the SD card, and may return before any request was made.
+      const char* headline = dl == HttpDownloader::FILE_ERROR ? tr(STR_FETCH_FEED_FAILED) : feedFailureMessage();
+      errorMessage = httpDetail.empty() ? std::string(headline) : std::string(headline) + ": " + httpDetail;
       requestUpdate();
       return;
     }

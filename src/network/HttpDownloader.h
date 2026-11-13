@@ -29,6 +29,13 @@ class HttpDownloader {
   using Header = std::pair<std::string, std::string>;
 
   /**
+   * HTTP status of the last request, or 0 when it never got a response (DNS,
+   * connect, TLS, timeout). Lets a caller tell a dead server from a catalog that
+   * wants a password. Not thread-safe by design: one fetch runs at a time.
+   */
+  static int lastStatus();
+
+  /**
    * Fetch text content from a URL with optional credentials.
    */
   static bool fetchUrl(const std::string& url, std::string& outContent, const std::string& username = "",

@@ -444,6 +444,10 @@ void setDetail(std::string* out, const char* fmt, ...) {
   out->assign(buf);
 }
 
+// HTTP status of the last answer, or 0 when no response arrived. Written by runGet on the
+// fetching task and read by the UI right after a failure.
+int g_lastStatus = 0;
+
 bool isRedirect(int status) {
   return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
 }
@@ -502,6 +506,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
                                      const char* caPemRedirect = nullptr) {
   // Hold WiFi out of modem-sleep for the whole transfer (see NoWifiSleep).
   const NoWifiSleep noWifiSleep;
+  g_lastStatus = 0;
   (void)caPemOverride;
   (void)caPemRedirect;
 
@@ -881,6 +886,7 @@ HttpDownloader::DownloadError runGet(const std::string& startUrl, const std::str
       waitAllMs += trailingGapMs;
     }
 
+    g_lastStatus = status < 0 ? 0 : status;
     if (http.aborted()) return HttpDownloader::ABORTED;
     if (status < 0) {
       const SdDebugLog::NetSnapshot s = SdDebugLog::captureNetSnapshot();
@@ -1611,6 +1617,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   // Hold WiFi out of modem-sleep for the whole transfer (see NoWifiSleep). Scoped
   // to runGet so it covers the handshake, body read loop, and every early return.
   const NoWifiSleep noWifiSleep;
+  g_lastStatus = 0;
 
   // Entry snapshot: the cleanest heap state for this request (before the read
   // buffer, the esp_http_client struct, or the TLS arena exist). The delta from
@@ -1740,6 +1747,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
     }
     outLen = esp_http_client_fetch_headers(c);
     outStatus = esp_http_client_get_status_code(c);
+    g_lastStatus = outStatus < 0 ? 0 : outStatus;
     outClient = c;
     return HttpDownloader::OK;
   };
@@ -1944,6 +1952,8 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
 }
 #endif  // FREEINK_NET_WOLFSSL
 }  // namespace
+
+int HttpDownloader::lastStatus() { return g_lastStatus; }
 
 bool HttpDownloader::fetchUrl(const std::string& url, Stream& outContent, const std::string& username,
                               const std::string& password) {
