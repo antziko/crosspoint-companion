@@ -49,7 +49,7 @@ class ChapterXPathResolver {
    *
    * @param offsets    `count` zero-based visible-codepoint offsets; need not be sorted.
    * @param outXPaths  Caller-owned array of `count` strings, cleared on entry. An entry is
-   *                   left empty when its offset fell outside paragraph/list-item text.
+   *                   left empty when no text exists at or after its offset.
    * @param endOfRange Optional `count` flags. An entry marked true is the exclusive end of
    *                   a range, and resolves to an offset just past the last character of
    *                   the text node holding it rather than to the start of whatever text
@@ -88,8 +88,8 @@ class ChapterXPathResolver {
    * @return How many needles were located unambiguously.
    */
   //
-  // `anyBlock` widens the search from <p>/<li> text to all visible body text. Its offsets are
-  // NOT in the space findXPathsForOffsets consumes; it only says whether text occurs at all.
+  // `anyBlock` marks a diagnostic pass: it also records each needle's longest partial match and
+  // logs it. The search space is the same either way (all visible body text).
   static size_t findTextRanges(const std::shared_ptr<Epub>& epub, int spineIndex, const std::string* needles,
                                TextRange* outRanges, size_t count, bool anyBlock = false);
 
@@ -97,11 +97,15 @@ class ChapterXPathResolver {
    * Resolve a zero-based visible-codepoint offset in a spine item to its real
    * XHTML ancestry path plus text-node offset.
    *
+   * Offsets count every body codepoint the way ChapterHtmlSlimParser does, so the
+   * text may live in any element (<p>, <div>, <span>, <li>, headings, ...).
+   * Whitespace-only runs are never used as anchors; a target inside one resolves
+   * at the start of the next text run.
+   *
    * Returns a KOReader-compatible path like:
    * /body/DocFragment[8]/body/div[2]/section[1]/p[4]/text()[1].0
    *
-   * An empty string means parsing failed or the offset did not resolve inside
-   * paragraph/list-item text.
+   * An empty string means parsing failed or no text exists at or after the offset.
    */
   static std::string findXPathForVisibleTextOffset(const std::shared_ptr<Epub>& epub, int spineIndex,
                                                    uint32_t visibleTextOffset);

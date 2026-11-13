@@ -140,8 +140,8 @@ int anchorPointsByProgress(const std::shared_ptr<Epub>& epub, const BookmarkStor
 }
 
 // Why quotes' text was not located, in one extra chapter stream that only failures pay for:
-// occurring more than once, sitting in text outside <p>/<li> (the only text the anchor space
-// counts), or differing from the chapter part way in (its opening still matches).
+// occurring more than once, or differing from the chapter part way in (its opening still
+// matches).
 void logQuoteMisses(const std::shared_ptr<Epub>& epub, const uint16_t spine, const std::string* needles,
                     const ChapterXPathResolver::TextRange* ranges, const size_t k) {
   constexpr size_t kPrefixBytes = 24;
