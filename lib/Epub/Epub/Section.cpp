@@ -161,7 +161,9 @@ namespace {
 // v80: A hanging indent (negative text-indent) never pulls a first line past its block's left inset.
 // v81: A small image that is a link's only content (a note icon) becomes a "[n]" text marker.
 // v82: Small images zoom with the reading font (line height over CSS's 19.2 px reference).
-constexpr uint8_t SECTION_FILE_VERSION = 82;
+// v83: Text running into a block or heading stays in its own paragraph; CSS font-weight/style
+//      `inherit` keeps the parent's emphasis.
+constexpr uint8_t SECTION_FILE_VERSION = 83;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects

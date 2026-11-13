@@ -318,6 +318,62 @@ TEST_F(ChapterHtmlSlimParserTest, TableCellKeepsBookAlignmentOtherwise) {
   EXPECT_EQ(tableCellAlignment(parser, CssTextAlign::Justify, nullptr, nullptr), CssTextAlign::Left);
 }
 
+// Text running straight into a block ("one<div>two</div>") belongs to the paragraph before it.
+class BlockStartTest : public ChapterHtmlSlimParserTest {};
+
+TEST_P(BlockStartTest, TextBeforeBlockStaysInItsOwnParagraph) {
+  const char* blockTag = GetParam();
+  parser.beginParse();
+  parser.currentTextBlock.reset();
+  ChapterHtmlSlimParser::startElement(&parser, "body", nullptr);
+  ChapterHtmlSlimParser::startElement(&parser, "div", nullptr);
+  ChapterHtmlSlimParser::characterData(&parser, "one", 3);
+  ChapterHtmlSlimParser::startElement(&parser, blockTag, nullptr);
+  ChapterHtmlSlimParser::characterData(&parser, "two", 3);
+  ChapterHtmlSlimParser::endElement(&parser, blockTag);
+  ChapterHtmlSlimParser::endElement(&parser, "div");
+  ChapterHtmlSlimParser::endElement(&parser, "body");
+  parser.makePages();
+
+  EXPECT_EQ(lineRows(parser).size(), 2u);
+}
+
+INSTANTIATE_TEST_SUITE_P(BlockStarts, BlockStartTest, ::testing::Values("div", "p", "h3"));
+
+// CSS `inherit` on font-weight/font-style keeps the parent's emphasis instead of resetting it.
+// The parent's emphasis comes from CSS, not <b>/<i>, which are tracked separately by depth.
+uint8_t styleOfInnerWord(ChapterHtmlSlimParser& parser, const char* outerStyle, const char* innerStyle) {
+  const XML_Char* outer[] = {"style", outerStyle, nullptr};
+  const XML_Char* inner[] = {"style", innerStyle, nullptr};
+  parser.beginParse();
+  ChapterHtmlSlimParser::startElement(&parser, "p", nullptr);
+  ChapterHtmlSlimParser::startElement(&parser, "span", outer);
+  ChapterHtmlSlimParser::startElement(&parser, "span", inner);
+  ChapterHtmlSlimParser::characterData(&parser, "word ", 5);
+  ChapterHtmlSlimParser::endElement(&parser, "span");
+  ChapterHtmlSlimParser::endElement(&parser, "span");
+  if (parser.currentTextBlock->size() == 0) return 0xFF;
+  return static_cast<uint8_t>(parser.currentTextBlock->getWordStyleAt(0));
+}
+
+TEST_F(ChapterHtmlSlimParserTest, FontWeightInheritKeepsParentBold) {
+  const uint8_t style = styleOfInnerWord(parser, "font-weight: bold", "font-weight: inherit");
+  ASSERT_NE(style, 0xFF);
+  EXPECT_NE(style & EpdFontFamily::BOLD, 0);
+}
+
+TEST_F(ChapterHtmlSlimParserTest, FontStyleInheritKeepsParentItalic) {
+  const uint8_t style = styleOfInnerWord(parser, "font-style: italic", "font-style: inherit");
+  ASSERT_NE(style, 0xFF);
+  EXPECT_NE(style & EpdFontFamily::ITALIC, 0);
+}
+
+TEST_F(ChapterHtmlSlimParserTest, FontWeightNormalStillOverridesParentBold) {
+  const uint8_t style = styleOfInnerWord(parser, "font-weight: bold", "font-weight: normal");
+  ASSERT_NE(style, 0xFF);
+  EXPECT_EQ(style & EpdFontFamily::BOLD, 0);
+}
+
 }  // namespace
 
 // ---- Anchor placement ----

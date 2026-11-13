@@ -233,6 +233,7 @@ CssTextAlign CssParser::interpretAlignment(const std::string& val) {
 CssFontStyle CssParser::interpretFontStyle(const std::string& val) {
   const std::string v = normalized(val);
 
+  if (v == "inherit") return CssFontStyle::Inherit;
   if (v == "italic" || v == "oblique") return CssFontStyle::Italic;
   return CssFontStyle::Normal;
 }
@@ -240,6 +241,7 @@ CssFontStyle CssParser::interpretFontStyle(const std::string& val) {
 CssFontWeight CssParser::interpretFontWeight(const std::string& val) {
   const std::string v = normalized(val);
 
+  if (v == "inherit") return CssFontWeight::Inherit;
   // Named values
   if (v == "bold" || v == "bolder") return CssFontWeight::Bold;
   if (v == "normal" || v == "lighter") return CssFontWeight::Normal;
