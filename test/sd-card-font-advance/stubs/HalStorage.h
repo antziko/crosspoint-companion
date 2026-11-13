@@ -28,6 +28,7 @@ class HalFile {
     position_ += count;
     return static_cast<int>(count);
   }
+  size_t fileSize() const { return sdFontTestFile.size(); }
   bool isOpen() const { return opened_; }
   void close() { opened_ = false; }
   void open() {
