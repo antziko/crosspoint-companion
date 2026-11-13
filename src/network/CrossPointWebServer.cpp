@@ -1501,10 +1501,19 @@ void CrossPointWebServer::handleGetSettings() const {
         continue;
     }
 
-    const size_t written = serializeJson(doc, output, outputSize);
-    if (written >= outputSize) {
-      LOG_DBG("WEB", "Skipping oversized setting JSON for: %s", s.key);
-      continue;
+    const char* json = output;
+    // Only entries over the stack buffer use the heap, e.g. fontFamily with many SD families.
+    std::unique_ptr<char[]> large;
+    size_t len = serializeJson(doc, output, outputSize);
+    if (len >= outputSize) {
+      len = measureJson(doc);
+      large.reset(new (std::nothrow) char[len + 1]);
+      if (!large) {
+        LOG_ERR("WEB", "OOM: setting JSON for %s (%zu bytes)", s.key, len);
+        continue;
+      }
+      serializeJson(doc, large.get(), len + 1);
+      json = large.get();
     }
 
     if (seenFirst) {
@@ -1512,7 +1521,7 @@ void CrossPointWebServer::handleGetSettings() const {
     } else {
       seenFirst = true;
     }
-    server->sendContent(output);
+    server->sendContent(json, len);
     yield();                          // Yield to allow WiFi and other tasks to process during a slow send
     resetTaskWatchdogIfSubscribed();  // Reset watchdog: each sendContent() is a blocking network write
   }
@@ -3022,50 +3031,77 @@ void CrossPointWebServer::handleFontList() const {
   const_cast<SdCardFontSystem&>(sdFontSystem).refreshIfDirty();
   const auto& families = sdFontSystem.registry().getFamilies();
 
-  JsonDocument doc;
-  JsonArray arr = doc["families"].to<JsonArray>();
-  doc["maxFamilies"] = SdCardFontRegistry::MAX_SD_FAMILIES;
+  // Stream one family per chunk: with many families, the whole document plus
+  // its serialized copy does not fit in the heap of a DRAM-only board.
+  server->setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server->send(200, "application/json", "");
+  char head[80];
   // Vector (.ttf/.otf) fonts need PSRAM to stay resident; DRAM-only boards
   // only take pre-rendered .cpfont uploads.
-  doc["vectorFonts"] = HalMemory::getPsramHeap().totalBytes > 0;
+  snprintf(head, sizeof(head), "{\"maxFamilies\":%d,\"vectorFonts\":%s,\"families\":[",
+           SdCardFontRegistry::MAX_SD_FAMILIES, HalMemory::getPsramHeap().totalBytes > 0 ? "true" : "false");
+  server->sendContent(head);
 
-  // The only caller that needs every family's listing at once. The registry keeps a
-  // catalogue (name + root) and scans one family at a time, so this walks the catalogue
-  // and pulls each listing in turn. Iterating families_ directly is safe: familyWithFiles()
-  // touches only the cache entry it returns, never the catalogue being walked.
+  JsonDocument doc;
+  // Reused for every family; reallocated only for a larger entry (a few hundred bytes).
+  std::unique_ptr<char[]> buf;
+  size_t bufSize = 0;
+  bool first = true;
+  // The registry keeps a catalogue (name + root) and scans one family at a time, so this
+  // walks the catalogue and pulls each listing in turn. Iterating families_ directly is
+  // safe: familyWithFiles() touches only the cache entry it returns, never the catalogue.
   for (const auto& entry : families) {
-    JsonObject fObj = arr.add<JsonObject>();
-    fObj["name"] = entry.name;
+    doc.clear();
+    doc["name"] = entry.name;
 
     const SdCardFontFamilyInfo* family = sdFontSystem.registry().familyWithFiles(entry.name);
-    JsonArray sizes = fObj["sizes"].to<JsonArray>();
-    JsonArray files = fObj["files"].to<JsonArray>();
-    if (!family) continue;  // deleted between discovery and here
+    JsonArray sizes = doc["sizes"].to<JsonArray>();
+    JsonArray files = doc["files"].to<JsonArray>();
+    if (family) {  // null when deleted between discovery and here
+      for (uint8_t s : family->availableSizes()) {
+        sizes.add(s);
+      }
 
-    for (uint8_t s : family->availableSizes()) {
-      sizes.add(s);
-    }
+      for (const auto& file : family->files) {
+        JsonObject fileObj = files.add<JsonObject>();
+        fileObj["name"] = file.filename;
 
-    for (const auto& file : family->files) {
-      JsonObject fileObj = files.add<JsonObject>();
-      fileObj["name"] = file.filename;
-
-      // Stat the file for size
-      char path[192];
-      SdCardFontRegistry::buildPath(*family, file, path, sizeof(path));
-      HalFile f;
-      if (Storage.openFileForRead("WEB", path, f)) {
-        fileObj["size"] = static_cast<unsigned long>(f.size());
-        f.close();
-      } else {
-        fileObj["size"] = 0;
+        // Stat the file for size
+        char path[192];
+        SdCardFontRegistry::buildPath(*family, file, path, sizeof(path));
+        HalFile f;
+        if (Storage.openFileForRead("WEB", path, f)) {
+          fileObj["size"] = static_cast<unsigned long>(f.size());
+          f.close();
+        } else {
+          fileObj["size"] = 0;
+        }
       }
     }
+
+    const size_t len = 1 + measureJson(doc);  // leading comma + entry
+    if (!doc.overflowed() && len + 1 > bufSize) {
+      buf.reset();  // free first so two buffers are never held at once
+      buf.reset(new (std::nothrow) char[len + 1]);
+      bufSize = buf ? len + 1 : 0;
+    }
+    if (doc.overflowed() || !buf) {
+      // Leave the JSON unterminated so the page reports a failed load, not a short list.
+      LOG_ERR("WEB", "OOM: font list entry");
+      server->sendContent("");
+      return;
+    }
+    buf[0] = ',';
+    serializeJson(doc, buf.get() + 1, bufSize - 1);
+    const size_t skip = first ? 1 : 0;  // no comma before the first entry
+    first = false;
+    server->sendContent(buf.get() + skip, len - skip);
+    yield();
+    resetTaskWatchdogIfSubscribed();  // each sendContent() is a blocking network write
   }
 
-  String json;
-  serializeJson(doc, json);
-  server->send(200, "application/json", json);
+  server->sendContent("]}");
+  server->sendContent("");
 }
 
 void CrossPointWebServer::handleFontUploadData() {
