@@ -566,6 +566,24 @@ bool BaseTheme::listIndexFromPoint(const GfxRenderer&, const Rect rect, const in
   return true;
 }
 
+freeink::ui::Rect BaseTheme::headerBand(const GfxRenderer& renderer, const freeink::ui::Rect rect,
+                                        freeink::ui::HeaderProps& props) {
+  int top, right, bottom, left;
+  renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
+  const auto l = static_cast<int16_t>(left);
+  const auto r = static_cast<int16_t>(right);
+  const int16_t offset = BoardConfig::ACTIVE.headerOffsetY;
+  props.bleed = freeink::ui::Insets{0, r, 0, l};
+  return freeink::ui::Rect{static_cast<int16_t>(rect.x + l), static_cast<int16_t>(rect.y + offset),
+                           static_cast<int16_t>(rect.width - l - r), static_cast<int16_t>(rect.height - offset)};
+}
+
+int BaseTheme::headerCornerClearance(const GfxRenderer& renderer) {
+  int top, right, bottom, left;
+  renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
+  return std::max(0, BoardConfig::ACTIVE.cornerRadius - std::min(left, right));
+}
+
 int BaseTheme::headerStatusInset() {
   const ThemeMetrics& metrics = UITheme::getInstance().getMetrics();
   return metrics.headerBatteryDetached ? 12 : metrics.headerSidePadding;
@@ -599,14 +617,12 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
   // subtitles.
   ui.target.setFont(fui::GfxRendererTarget::FONT_SMALL, SMALL_FONT_ID);
   const ThemeMetrics& metrics = UITheme::getInstance().getMetrics();
-  // Callers pass a full-width header rect, so the battery/title would sit at the
-  // true screen edges — clipped on rounded-corner panels (EEGO A4). Inset the band
-  // horizontally by the board's viewable insets so header chrome clears the bezel.
-  int hMarginTop, hMarginRight, hMarginBottom, hMarginLeft;
-  renderer.getOrientedViewableTRBL(&hMarginTop, &hMarginRight, &hMarginBottom, &hMarginLeft);
-  const fui::Rect band{static_cast<int16_t>(rect.x + hMarginLeft), static_cast<int16_t>(rect.y),
-                       static_cast<int16_t>(rect.width - hMarginLeft - hMarginRight),
-                       static_cast<int16_t>(rect.height)};
+  fui::HeaderProps props;
+  // Callers pass a full-width header rect; headerBand fits it to the board's bezel.
+  const fui::Rect band = headerBand(renderer,
+                                    fui::Rect{static_cast<int16_t>(rect.x), static_cast<int16_t>(rect.y),
+                                              static_cast<int16_t>(rect.width), static_cast<int16_t>(rect.height)},
+                                    props);
 
   const bool showBatteryPercentage =
       SETTINGS.hideBatteryPercentage != CrossPointSettings::HIDE_BATTERY_PERCENTAGE::HIDE_ALWAYS;
@@ -647,7 +663,6 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
     clockText[0] = '\0';
   }
 
-  fui::HeaderProps props;
   props.title = title;
   props.rightLabel = subtitle;  // firmware headers right-align the secondary text
   const bool batteryLeft = metrics.headerBatterySide == 1;
@@ -681,7 +696,7 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
   props.titleText.align = tokens.headerTitleAlign;
   props.subtitleText = tokens.smallText;
   props.styles = tokens.popup;
-  props.sidePadding = tokens.headerSidePadding;
+  props.sidePadding = static_cast<int16_t>(tokens.headerSidePadding + headerCornerClearance(renderer));
   if (batteryDetached) {
     // Battery in its own corner strip; the title owns the full width of the
     // lower sub-band, so long book titles span the header (Lyra layout).
@@ -1363,7 +1378,9 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
   static constexpr int bmIconGap = 4;
   static constexpr int bmNotchDepth = 5;
   static constexpr int quoteIconW = 9;
-  int leftClusterX = metrics.statusBarHorizontalMargin + orientedMarginLeft + 1;
+  // The side clusters sit in the bottom corners: clear the panel's rounded corners too.
+  const int corner = BoardConfig::ACTIVE.cornerRadius;
+  int leftClusterX = metrics.statusBarHorizontalMargin + std::max(orientedMarginLeft, corner) + 1;
   // A way back from a followed link leads the left cluster: "« Back", full ink (it is an action,
   // not page furniture), then the indicators and battery after it.
   int backWidth = 0;
@@ -1451,8 +1468,8 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
       dateTextWidth + lightIconWidth + clockTextWidth + (clusterParts > 1 ? clusterGap * (clusterParts - 1) : 0);
 
   if (totalDateClockWidth > 0) {
-    const int rightEdge = renderer.getScreenWidth() - metrics.statusBarHorizontalMargin - orientedMarginRight -
-                          progressTextWidth - (progressTextWidth > 0 ? 10 : 0);
+    const int rightEdge = renderer.getScreenWidth() - metrics.statusBarHorizontalMargin -
+                          std::max(orientedMarginRight, corner) - progressTextWidth - (progressTextWidth > 0 ? 10 : 0);
     int x = rightEdge - totalDateClockWidth;
     if (dateTextWidth > 0) {
       renderer.drawText(SMALL_FONT_ID, x, textY, dateBuf);

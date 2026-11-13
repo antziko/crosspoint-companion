@@ -90,15 +90,32 @@ void CoverGridHomeUi::draw(UiScreen& screen) {
   coverCache.prepare();
   const auto& theme = screen.theme();
   const auto safe = UITheme::getInstance().getScreenSafeArea(renderer, true);
-  screen.setContentMarginFromScreen(fui::Insets{
-      static_cast<int16_t>(safe.y), static_cast<int16_t>(renderer.getScreenWidth() - safe.x - safe.width),
-      static_cast<int16_t>(renderer.getScreenHeight() - safe.y - safe.height), static_cast<int16_t>(safe.x)});
+  // Sides clear the rounded corners like the header, so the grid lines up under it.
+  const int corner = BoardConfig::ACTIVE.cornerRadius;
+  const auto left = static_cast<int16_t>(std::max(safe.x, corner));
+  const auto right = static_cast<int16_t>(std::max(renderer.getScreenWidth() - safe.x - safe.width, corner));
+  screen.setContentMarginFromScreen(fui::Insets{static_cast<int16_t>(safe.y), right,
+                                                static_cast<int16_t>(renderer.getScreenHeight() - safe.y - safe.height),
+                                                left});
   screen.insetContent(fui::Insets{theme.spaceSm, theme.spaceLg, theme.spaceSm, theme.spaceLg});
   const bool landscape = renderer.getScreenWidth() > renderer.getScreenHeight();
   const auto header = screen.takeTop(UITheme::getInstance().getMetrics().batteryBarHeight);
+  const auto& board = BoardConfig::ACTIVE;
   auto tabRect = screen.takeBottom(UITheme::getInstance().getMetrics().coverGridTabBarHeight, theme.spaceMd);
+  // The board's tab height sits at the bottom of the theme's slot, then its
+  // offset lower; the slot itself is unchanged, so the grid keeps its size.
+  const auto tabHeight = static_cast<int16_t>(tabRect.height * board.tabBarHeightPct / 100);
+  tabRect.y = static_cast<int16_t>(tabRect.y + tabRect.height - tabHeight + board.tabBarOffsetY);
+  tabRect.height = tabHeight;
+  // The board's share of the row the tabs spread across, centered.
+  const auto fitTabWidth = [&board](fui::Rect rect) {
+    const auto width = static_cast<int16_t>(rect.width * board.tabBarWidthPct / 100);
+    rect.x = static_cast<int16_t>(rect.x + (rect.width - width) / 2);
+    rect.width = width;
+    return rect;
+  };
   if (books->empty()) {
-    drawTabs(screen, tabRect.inset(fui::Insets{0, 6, 0, 6}));
+    drawTabs(screen, fitTabWidth(tabRect.inset(fui::Insets{0, 6, 0, 6})));
     drawEmpty(screen);
     drawHeaderBand(header, tabRect.x + 6, tabRect.x + tabRect.width - 6);
     return;
@@ -123,7 +140,7 @@ void CoverGridHomeUi::draw(UiScreen& screen) {
   headingRect.x = tabRect.x;
   headingRect.width = tabRect.width;
   screen.target().text(headingRect, hasContinueReading ? tr(STR_CONTINUE_READING) : tr(STR_START_READING), headingText);
-  drawTabs(screen, tabRect);
+  drawTabs(screen, fitTabWidth(tabRect));
   // Drawn last so it can borrow the grid geometry, like the tab bar above.
   drawHeaderBand(header, tabRect.x, tabRect.x + tabRect.width);
 }
@@ -289,8 +306,8 @@ void CoverGridHomeUi::drawTabs(UiScreen& screen, fui::Rect rect) {
     self.renderer.drawIcon(ICONS[icon], iconRect.x, iconRect.y, iconRect.width);
     return true;
   };
-  tabs.tabStyles.normal.background = fui::Paint::solid(fui::Color::White);
-  tabs.tabStyles.selected.background = fui::Paint::solid(fui::Color::White);
+  // No pill fill; the underline marks the selected tab.
+  tabs.tabStyles.explicitlySet = true;
   tabs.selectedUnderline = 2;
   tabs.distributedSlotWidth = 0;
   fui::tabBar(screen.frame(), rect, tabs);

@@ -12,6 +12,7 @@ struct RecentBook;
 namespace freeink {
 namespace ui {
 struct HeaderProps;
+struct Rect;
 struct BitmapRef;
 struct ListItem;
 }  // namespace ui
@@ -320,6 +321,13 @@ class BaseTheme {
   // Edge inset drawHeader uses for the clock/battery status line (detached
   // layouts hug the corner with a legacy 12px inset instead of the padding).
   static int headerStatusInset();
+  // The header band every screen draws in: the caller's full-width rect inset by the
+  // board's side insets, its top edge lowered by the board's headerOffsetY (bottom edge
+  // fixed). Sets props.bleed so the fill and rule still span `rect`.
+  static freeink::ui::Rect headerBand(const GfxRenderer& renderer, freeink::ui::Rect rect,
+                                      freeink::ui::HeaderProps& props);
+  // Extra header side padding that keeps the title and status clear of rounded corners.
+  static int headerCornerClearance(const GfxRenderer& renderer);
   virtual void drawSubHeader(const GfxRenderer& renderer, Rect rect, const char* label,
                              const char* rightLabel = nullptr) const;
   virtual void drawTabBar(const GfxRenderer& renderer, Rect rect, const std::vector<TabInfo>& tabs,
