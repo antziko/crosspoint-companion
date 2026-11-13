@@ -115,7 +115,7 @@ void DictNotesActivity::goBack() {
     case Mode::Note:
       mode_ = Mode::List;
       wrappedLines_.clear();  // the list does not need it, and this screen sits on the reader
-      wrappedLines_.shrink_to_fit();
+      shrinkToFit(wrappedLines_);
       listTouch_.clear();
       requestUpdate();
       return;

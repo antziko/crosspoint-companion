@@ -444,7 +444,6 @@ void RecentBooksActivity::onExit() {
   rowItems.clear();
   recentBooks.clear();
   offsets.clear();
-  offsets.shrink_to_fit();
   folders.clear();
   windowValid = false;
 }
