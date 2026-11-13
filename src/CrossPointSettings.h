@@ -768,6 +768,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     HOLD_CONFIRM_KOSYNC = 3,
     HOLD_CONFIRM_READER_MENU = 4,
     HOLD_CONFIRM_REFRESH_SCREEN = 5,
+    HOLD_CONFIRM_FOOTNOTES = 6,
     HOLD_CONFIRM_ACTION_COUNT
   };
   uint8_t holdConfirmAction = HOLD_CONFIRM_OFF;

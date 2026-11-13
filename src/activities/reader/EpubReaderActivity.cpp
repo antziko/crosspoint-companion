@@ -2022,6 +2022,8 @@ bool EpubReaderActivity::runHoldAction() {
       return runReaderAction(HomeButtonAction::ReaderMenu);
     case CrossPointSettings::HOLD_CONFIRM_REFRESH_SCREEN:
       return runReaderAction(HomeButtonAction::Refresh);
+    case CrossPointSettings::HOLD_CONFIRM_FOOTNOTES:
+      return runReaderAction(HomeButtonAction::Footnotes);
     default:
       return false;
   }
@@ -2062,6 +2064,15 @@ bool EpubReaderActivity::runReaderAction(const HomeButtonAction action) {
       // no differential state across a render, so requestUpdate() is enough -- unlike the popup
       // paths above, which only ask for a light repaint.
       requestUpdate();
+      return true;
+    case HomeButtonAction::Footnotes:
+      // Nothing to follow or return from: unhandled, so the hold falls back to a Confirm tap.
+      if (!hasFootnoteAction()) return false;
+      if (footnoteDepth > 0) {
+        restoreSavedPosition();
+      } else {
+        openFootnoteSelect(/*reopenMenuOnCancel=*/false);
+      }
       return true;
     default:
       return false;

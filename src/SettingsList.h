@@ -529,11 +529,11 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // bound lives in a constexpr table that cannot hold a board-conditional value,
   // and a gated list without a gated bound trips the CPSVFY verifier. On a
   // button board the extra entry is redundant, not broken.
-  v.push_back(
-      SettingInfo::Enum(StrId::STR_LONG_PRESS_MENU, &CrossPointSettings::holdConfirmAction,
-                        {StrId::STR_STATE_OFF, StrId::STR_HOLD_CONFIRM_BOOKMARK, StrId::STR_HOLD_CONFIRM_DICT,
-                         StrId::STR_KOSYNC, StrId::STR_HOLD_CONFIRM_READER_MENU, StrId::STR_HOLD_CONFIRM_REFRESH},
-                        "holdConfirmAction", StrId::STR_CAT_CONTROLS));
+  v.push_back(SettingInfo::Enum(
+      StrId::STR_LONG_PRESS_MENU, &CrossPointSettings::holdConfirmAction,
+      {StrId::STR_STATE_OFF, StrId::STR_HOLD_CONFIRM_BOOKMARK, StrId::STR_HOLD_CONFIRM_DICT, StrId::STR_KOSYNC,
+       StrId::STR_HOLD_CONFIRM_READER_MENU, StrId::STR_HOLD_CONFIRM_REFRESH, StrId::STR_FOOTNOTES},
+      "holdConfirmAction", StrId::STR_CAT_CONTROLS));
 
   // Side buttons
   v.push_back(SettingInfo::Enum(

@@ -322,9 +322,9 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   // holdConfirmAction itself stays: it still owns the Confirm hold on boards without a
   // Home key, and carries REFRESH_SCREEN, which has no Home-key equivalent.
   if (BoardConfig::hasHomeKey() && doc["homeButtonLongPressAction"].isNull() && !doc["holdConfirmAction"].isNull()) {
-    static constexpr HomeButtonAction LEGACY[] = {HomeButtonAction::Ignore,     HomeButtonAction::Bookmark,
-                                                  HomeButtonAction::Dictionary, HomeButtonAction::Sync,
-                                                  HomeButtonAction::ReaderMenu, HomeButtonAction::Refresh};
+    static constexpr HomeButtonAction LEGACY[] = {
+        HomeButtonAction::Ignore,     HomeButtonAction::Bookmark, HomeButtonAction::Dictionary, HomeButtonAction::Sync,
+        HomeButtonAction::ReaderMenu, HomeButtonAction::Refresh,  HomeButtonAction::Footnotes};
     static_assert(sizeof(LEGACY) / sizeof(LEGACY[0]) == HOLD_CONFIRM_ACTION_COUNT);
     if (s.holdConfirmAction < HOLD_CONFIRM_ACTION_COUNT) {
       s.homeButtonLongPressAction = static_cast<uint8_t>(LEGACY[s.holdConfirmAction]);
