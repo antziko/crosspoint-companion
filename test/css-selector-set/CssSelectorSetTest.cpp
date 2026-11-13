@@ -7,7 +7,11 @@
 
 namespace {
 
-std::string tempPath(const char* name) { return ::testing::TempDir() + name; }
+// ctest runs each case as its own process, in parallel: prefix the case name so they never share a file.
+std::string tempPath(const char* name) {
+  const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+  return ::testing::TempDir() + (info ? std::string(info->name()) + "_" : std::string()) + name;
+}
 
 void writeFile(const std::string& path, const std::string& content) {
   std::FILE* f = std::fopen(path.c_str(), "wb");
