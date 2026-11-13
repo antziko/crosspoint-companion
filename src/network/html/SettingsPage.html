@@ -84,13 +84,27 @@
     }
 
     if (setting.type === 'value') {
+      const step = setting.step > 0 ? setting.step : 1;
+      const optionCount = Math.floor((setting.max - setting.min) / step) + 1;
+      // Small ranges render as a dropdown; larger ones stay a number input so we
+      // don't build a huge <select>. The option value is the actual stored number,
+      // so getValue()/getControlValue()/setControlValue() need no special-casing.
+      if (optionCount >= 2 && optionCount <= 16) {
+        let html = '<select id="' + id + '" onchange="handleSettingChanged(\'' + setting.key + '\')">';
+        for (let v = setting.min; v <= setting.max; v += step) {
+          const selected = v === setting.value ? ' selected' : '';
+          html += '<option value="' + v + '"' + selected + '>' + v + '</option>';
+        }
+        html += '</select>';
+        return html;
+      }
       return '<input type="number" id="' + id + '" value="' + setting.value + '"' +
         ' min="' + setting.min + '" max="' + setting.max + '" step="' + setting.step + '"' +
         ' onchange="handleSettingChanged(\'' + setting.key + '\')">';
     }
 
     if (setting.type === 'string') {
-      const isPassword = 'hasPassword' in setting;
+      const isPassword = 'hasPassword' in setting || setting.name.toLowerCase().includes('password');
       const inputType = isPassword ? 'password' : 'text';
       const val = setting.value || '';
       return '<input type="' + inputType + '" id="' + id + '" value="' + escapeHtml(val) + '"' +
@@ -460,26 +474,6 @@
   // the "(unchanged)" placeholder indicates an existing password is preserved on save.
   let opdsServers = [];
 
-  const OPDS_MAX_CUSTOM_HEADERS = 2;
-
-  function renderOpdsHeaderRows(srv, id) {
-    const headers = srv.headers || [];
-    let html = '';
-    for (let i = 0; i < OPDS_MAX_CUSTOM_HEADERS; i++) {
-      const header = headers[i] || {name: '', hasValue: false};
-      html +=
-        '<div class="setting-row">' +
-          '<span class="setting-name">Header ' + (i + 1) + ' Name</span>' +
-          '<span class="setting-control"><input type="text" id="opds-header' + i + '-name-' + id + '" value="' + escapeHtml(header.name || '') + '"></span>' +
-        '</div>' +
-        '<div class="setting-row">' +
-          '<span class="setting-name">Header ' + (i + 1) + ' Value</span>' +
-          '<span class="setting-control"><input type="password" id="opds-header' + i + '-value-' + id + '" placeholder="' + (header.hasValue ? '(unchanged)' : '') + '"></span>' +
-        '</div>';
-    }
-    return html;
-  }
-
   function renderOpdsServer(srv, idx) {
     const isNew = idx === -1;
     const id = isNew ? 'new' : idx;
@@ -500,7 +494,6 @@
         '<span class="setting-name">Password</span>' +
         '<span class="setting-control"><input type="password" id="opds-pass-' + id + '" placeholder="' + (srv.hasPassword ? '(unchanged)' : '') + '"></span>' +
       '</div>' +
-      renderOpdsHeaderRows(srv, id) +
       '<div class="item-actions">' +
         '<button class="btn-small btn-save-server" onclick="saveOpdsServer(' + idx + ')" disabled>Save</button>' +
         (isNew ? '' : '<button class="btn-small btn-delete" onclick="deleteOpdsServer(' + idx + ')">Delete</button>') +
@@ -543,7 +536,7 @@
     const addBtn = card.querySelector('.btn-add').parentElement;
     // Prevent multiple unsaved new-server forms at once (idx -1 → id "new")
     if (document.getElementById('opds-new')) return;
-    addBtn.insertAdjacentHTML('beforebegin', renderOpdsServer({name:'',url:'',username:'',hasPassword:false,headers:[]}, -1));
+    addBtn.insertAdjacentHTML('beforebegin', renderOpdsServer({name:'',url:'',username:'',hasPassword:false}, -1));
   }
 
   async function saveOpdsServer(idx) {
@@ -557,20 +550,6 @@
     // omitting it tells the server to keep the existing password.
     const pass = document.getElementById('opds-pass-' + id).value;
     if (pass) data.password = pass;
-
-    // Same rule per header: omit "value" to keep that slot's existing value unchanged.
-    const headers = [];
-    for (let i = 0; i < OPDS_MAX_CUSTOM_HEADERS; i++) {
-      const name = document.getElementById('opds-header' + i + '-name-' + id).value.trim();
-      const value = document.getElementById('opds-header' + i + '-value-' + id).value;
-      const header = {name: name};
-      // Also send an explicit (empty) value when the name was cleared, so the
-      // server can tell "delete this header" apart from "leave value unchanged".
-      if (value || !name) header.value = value;
-      headers.push(header);
-    }
-    data.headers = headers;
-
     if (idx >= 0) data.index = idx;
 
     try {

@@ -8,7 +8,7 @@
           alt=""
           width="32"
           height="32"
-        />CrossPoint <span class="brand-reader">Reader</span></a
+        /><span id="brandName">CrossPoint <span class="brand-reader">Reader</span></span></a
       >
     </h1>
     <nav class="nav-links desktop-nav">
@@ -40,5 +40,13 @@
     if (!document.cookie.split('; ').includes('cpPlugins=1')) {
       document.querySelectorAll('.brand a[href="/plugins"]').forEach((a) => a.remove());
     }
+    // Swap the generic brand for this unit's name (matches the per-device AP SSID)
+    // as early as possible, before the page's heavier loads.
+    fetch('/api/status').then((r) => r.json()).then((d) => {
+      if (!d || !d.name) return;
+      const brand = document.getElementById('brandName');
+      if (brand) brand.textContent = d.name;
+      document.title = document.title.replace('CrossPoint Reader', d.name);
+    }).catch(() => {});
   </script>
 </header>
