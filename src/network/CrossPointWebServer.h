@@ -2,11 +2,11 @@
 
 #include <ArduinoJson.h>
 #include <HalStorage.h>
-#include <NetworkUdp.h>
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -75,10 +75,12 @@ class CrossPointWebServer {
   bool running = false;
   bool apMode = false;  // true when running in AP mode, false for STA mode
   uint16_t port = 80;
-  uint16_t wsPort = 81;  // WebSocket port
-  NetworkUDP udp;
-  bool udpActive = false;
+  uint16_t wsPort = 81;      // WebSocket port
+  int discoverySocket = -1;  // UDP discovery, -1 when closed
   bool mdnsSuspended = false;
+  void openDiscoverySocket();
+  void closeDiscoverySocket();
+  void answerDiscovery() const;
 
   // WebSocket upload state
   void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length);
@@ -176,8 +178,8 @@ class CrossPointWebServer {
   // {plugin, action, args}; any open page hosting the plugin (File Manager,
   // Settings, or the headless /plugins-run page) claims and executes it, then
   // posts the result. The firmware only stores small JSON blobs; plugin logic
-  // never runs on-device. Fixed pool inside this (heap-allocated, web-session
-  // lifetime) object: no allocation per job, oldest finished slot recycled.
+  // never runs on-device. A fixed pool, allocated by the first job and kept for the
+  // web session: no allocation per job, oldest finished slot recycled.
   struct PluginJob {
     uint32_t id = 0;         // 0 = empty slot
     uint32_t claim = 0;      // current claim; a completion must echo it
@@ -195,7 +197,9 @@ class CrossPointWebServer {
   static constexpr uint8_t JOB_ERROR = 4;
   static constexpr size_t MAX_PLUGIN_JOBS = 6;
   static constexpr uint32_t PLUGIN_JOB_LEASE_MS = 10UL * 60 * 1000;
-  PluginJob pluginJobs[MAX_PLUGIN_JOBS];
+  // Allocated by the first job submit: most sessions never use plugin jobs.
+  std::unique_ptr<PluginJob[]> pluginJobs;
+  std::span<PluginJob> pluginJobSlots() { return {pluginJobs.get(), pluginJobs ? MAX_PLUGIN_JOBS : 0}; }
   uint32_t nextPluginJobId = 1;
   uint32_t nextPluginJobClaim = 1;
   PluginJob* allocPluginJob();
