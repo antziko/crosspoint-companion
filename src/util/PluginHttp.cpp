@@ -1,5 +1,6 @@
 #include "PluginHttp.h"
 
+#include <HalMemory.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <SdDebugLog.h>
@@ -206,7 +207,7 @@ void loadConfigFile(const std::string& file, Headers& out) {
 
 int request(freeink::SecureHttpClient* session, const std::string& url, const std::string& method,
             const std::string& body, const Headers& headers, String& out, const size_t maxResponse,
-            Headers* responseHeaders, const std::function<bool()>& shouldAbort) {
+            Headers* responseHeaders, const std::function<bool()>& shouldAbort, const size_t heapReserve) {
   WifiPowerSaveGuard psGuard;
   freeink::SecureHttpClient tmp;
   freeink::SecureHttpClient* httpPtr = openClient(session, tmp, url, headers, shouldAbort);
@@ -229,14 +230,33 @@ int request(freeink::SecureHttpClient* session, const std::string& url, const st
         }
         const size_t needed = out.length() + len;
         if (needed > reserved) {
-          // A known length gets one exact allocation: growing alongside a live
-          // TLS session needs the old and new blocks at once, which a few-KB
-          // reply already cannot get. Without one, grow geometrically.
-          if (reserved == 0 && http.hasContentLength() && http.getContentLength() <= maxResponse) {
-            reserved = std::max(needed, http.getContentLength());
-          } else {
-            reserved = std::min(maxResponse, std::max(needed, reserved * 2));
+          // Reserve the whole body once when its length is known; otherwise grow
+          // geometrically instead of reallocating for every network chunk. A
+          // chunked body's Content-Length, if any, is not its size.
+          const bool knownLength = http.hasContentLength() && http.getHeader("transfer-encoding").empty();
+          size_t want = knownLength ? std::max(needed, http.getContentLength())
+                                    : std::min(maxResponse, std::max(needed, reserved * 2));
+          if (want > maxResponse) {
+            LOG_ERR("PHTP", "Response of %u bytes is over the %u byte cap", (unsigned)want, (unsigned)maxResponse);
+            overflow = true;
+            return false;
           }
+          // Counts the old and new buffer together, as realloc may move it, and
+          // the up to 16 bytes String adds to the block.
+          const auto fits = [&](size_t size) {
+            if (heapReserve == 0) return true;
+            const HalMemory::HeapStats heap = HalMemory::getDefaultHeap();
+            return heap.freeBytes >= size + heapReserve && heap.largestBlockBytes >= size + 16;
+          };
+          if (!knownLength && !fits(want)) want = needed;
+          if (!fits(want)) {
+            const HalMemory::HeapStats heap = HalMemory::getDefaultHeap();
+            LOG_ERR("PHTP", "Response needs %u bytes, only %u free (largest block %u)", (unsigned)want,
+                    (unsigned)heap.freeBytes, (unsigned)heap.largestBlockBytes);
+            overflow = true;
+            return false;
+          }
+          reserved = want;
         }
         if (!out.reserve(reserved) || !out.concat(reinterpret_cast<const char*>(data), len)) {
           outOfMemory = true;
