@@ -14,6 +14,16 @@
       padding: 12px;
       margin: 10px 0;
     }
+    .controls-group {
+      margin-top: 24px;
+    }
+    .controls-group h3 {
+      margin: 0 0 8px;
+    }
+    .controls-group .setting-control,
+    .controls-group select {
+      max-width: 100%;
+    }
     .item-actions {
       display: flex;
       gap: 8px;
@@ -252,6 +262,43 @@
     markChanged();
   }
 
+  function renderSettingRow(setting) {
+    return '<div class="setting-row" id="row-setting-' + setting.key + '">' +
+      '<label class="setting-name" for="setting-' + setting.key + '">' + escapeHtml(setting.name) + '</label>' +
+      '<span class="setting-control">' + renderControl(setting) + '</span></div>';
+  }
+
+  // Controls sub-groups by key; keys a board does not expose are skipped, and empty groups are omitted.
+  const CONTROL_GROUPS = [
+    ['Home button gestures', ['homeButtonTapAction', 'homeButtonDoubleTapAction', 'homeButtonLongPressAction']],
+    ['Front buttons', ['frontButtonFollowOrientation', 'longPressButtonBehavior', 'holdConfirmAction',
+      'backDoubleClickAction', 'backShortToFileBrowser']],
+    ['Side buttons', ['sideButtonLayout', 'swapSideButtonsCW', 'sideLongPressButtonBehavior']],
+    ['Power button', ['shortPwrBtn', 'powerDoubleClickAction', 'pwrBtnFootnoteBack']],
+    ['Taps and gestures', ['touchReaderControls', 'pageTurnGesture', 'previousPageGesture', 'tapForReaderMenu']],
+    ['Control Center', ['panelTile1', 'panelTile2', 'panelTile3', 'panelTile4']],
+    ['Tilt', ['tiltPageTurn']]
+  ];
+
+  function renderCategory(settings) {
+    const assigned = new Set();
+    let grouped = '';
+    CONTROL_GROUPS.forEach(function(group) {
+      const rows = group[1].map(function(key) {
+        return settings.find(function(s) { return s.key === key; });
+      }).filter(Boolean);
+      if (rows.length === 0) return;
+      grouped += '<section class="controls-group"><h3>' + escapeHtml(group[0]) + '</h3>';
+      rows.forEach(function(s) {
+        grouped += renderSettingRow(s);
+        assigned.add(s.key);
+      });
+      grouped += '</section>';
+    });
+    // Unmapped settings stay visible, including board-specific controls.
+    return settings.filter(function(s) { return !assigned.has(s.key); }).map(renderSettingRow).join('') + grouped;
+  }
+
   async function loadSettings() {
     try {
       const response = await fetch('/api/settings');
@@ -278,12 +325,7 @@
 
       for (const category in groups) {
         html += '<div class="card"><h2>' + escapeHtml(category) + '</h2>';
-        groups[category].forEach(function(s) {
-          html += '<div class="setting-row" id="row-setting-' + s.key + '">' +
-            '<label class="setting-name" for="setting-' + s.key + '">' + escapeHtml(s.name) + '</label>' +
-            '<span class="setting-control">' + renderControl(s) + '</span>' +
-            '</div>';
-        });
+        html += renderCategory(groups[category]);
         html += '</div>';
       }
 
