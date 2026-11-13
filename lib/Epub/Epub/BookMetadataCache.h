@@ -77,14 +77,14 @@ class BookMetadataCache {
   std::unique_ptr<uint32_t[]> cumulativeSizes;
   uint16_t cumulativeSizeCount = 0;
 
-  // Index for fast href→spineIndex lookup during the TOC pass
+  // Index for fast href→spineIndex lookup. Exists only during a large EPUB's
+  // TOC pass; a bare deque member would hold its first node for every open book.
   struct SpineHrefIndexEntry {
     uint64_t hrefHash;  // FNV-1a 64-bit hash
     uint16_t hrefLen;   // length for collision reduction
     int16_t spineIndex;
   };
-  std::deque<SpineHrefIndexEntry> spineHrefIndex;
-  bool useSpineHrefIndex = false;
+  std::unique_ptr<std::deque<SpineHrefIndexEntry>> spineHrefIndex;
 
   static constexpr uint16_t LARGE_SPINE_THRESHOLD = 400;
   // Without the index every TOC entry re-reads the spine from SD (194 entries x 196 spine items
