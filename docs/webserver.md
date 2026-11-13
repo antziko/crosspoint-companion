@@ -12,7 +12,7 @@ The web server is available while the device is in **File Transfer** or
 - Create folders
 - Edit many device settings from a browser
 - Manage saved Wi-Fi networks and OPDS servers
-- Upload and delete `.cpfont` SD-card font families
+- Upload and delete SD-card font families
 - Accept WebDAV clients and Calibre wireless uploads
 
 The server does not require authentication. Use it only on trusted private
@@ -77,7 +77,7 @@ OPDS server.
 
 ## Web Interface
 
-The browser UI has four primary pages.
+The browser UI has five primary pages.
 
 ### Home
 
@@ -117,12 +117,19 @@ not returned by the API.
 ### Fonts
 
 The Fonts page lists installed SD-card font families and lets you upload
-`.cpfont` files. Upload files from one font family at a time. The server validates
-the font family name, filename, and `.cpfont` magic bytes before accepting the
-upload.
+`.cpfont` files, plus `.ttf` and `.otf` files on devices with external RAM.
+Choose the folder that contains one font family; the picker selects folders,
+not single files. The server validates the font family name, filename, and
+font magic bytes before accepting the upload.
 
 Installed fonts appear in **Settings > Reader > Font Family** after the font
 registry refreshes.
+
+### Plugins
+
+The Plugins page shows the web settings cards of installed SD-card plugins.
+Its navigation link appears only while **Settings > System > Maintenance > Plugins**
+is enabled on the device. See [SD-card plugins](./sd-plugins.md).
 
 ## Command Line Use
 

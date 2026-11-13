@@ -50,6 +50,7 @@
 #include "html/FilesPageHtml.generated.h"
 #include "html/FontsPageHtml.generated.h"
 #include "html/HomePageHtml.generated.h"
+#include "html/PluginsPageHtml.generated.h"
 #include "html/RunnerPageHtml.generated.h"
 #include "html/SettingsPageHtml.generated.h"
 #include "html/assets/crosspoint_iconSvg.generated.h"
@@ -313,6 +314,7 @@ void CrossPointWebServer::begin() {
   // Browser-side plugins (JS on the SD card) + their generic capabilities.
   server->on("/api/plugins", HTTP_GET, [this] { handlePluginList(); });
   server->on("/plugin", HTTP_GET, [this] { handlePluginFile(); });
+  server->on("/plugins", HTTP_GET, [this] { handlePluginsPage(); });
   server->on("/plugins-run", HTTP_GET, [this] { handlePluginRunnerPage(); });
   server->on("/api/plugin-jobs", HTTP_POST, [this] { handlePluginJobSubmit(); });
   server->on("/api/plugin-jobs/claim", HTTP_GET, [this] { handlePluginJobClaim(); });
@@ -569,6 +571,10 @@ CrossPointWebServer::WsUploadStatus CrossPointWebServer::getWsUploadStatus() con
 }
 
 static void sendHtmlContent(WebServer* server, const char* data, size_t len) {
+  // Read by the page header to hide the Plugins link, so it stays current on
+  // every navigation without an extra request.
+  server->sendHeader("Set-Cookie", SETTINGS.pluginsEnabled ? "cpPlugins=1; Path=/; SameSite=Strict"
+                                                           : "cpPlugins=0; Path=/; SameSite=Strict");
   server->sendHeader("Content-Encoding", "gzip");
   server->send_P(200, "text/html", data, len);
 }
@@ -2723,6 +2729,12 @@ void CrossPointWebServer::handleBookKey() {
     return;
   }
   server->send(200, "application/json", "{\"ok\":true}");
+}
+
+// Served even while plugins are disabled: its empty state tells the user how to enable them.
+void CrossPointWebServer::handlePluginsPage() const {
+  sendHtmlContent(server.get(), PluginsPageHtml, sizeof(PluginsPageHtml));
+  LOG_DBG("WEB", "Served plugins page");
 }
 
 void CrossPointWebServer::handlePluginRunnerPage() const {
