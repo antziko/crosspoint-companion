@@ -16,7 +16,7 @@ class ScreenshotUtil {
   // restoring the underlying screen either way. Returns true without prompting if the
   // screen can't be stored/restored (no scratch buffer) — falls back to old behavior.
   static bool confirmScreenshot(GfxRenderer& renderer, MappedInputManager& input);
-  static bool saveFramebufferAsBmp(const char* filename, const uint8_t* framebuffer, int width, int height);
+  static bool saveFramebufferAsBmp(const char* filename, const GfxRenderer& renderer);
 
  private:
   static void buildFilename(const ScreenshotInfo& info, char* buf, size_t bufSize);
