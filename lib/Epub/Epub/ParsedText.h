@@ -143,6 +143,8 @@ class ParsedText {
   std::string getRubyTextAt(size_t index) const { return index < rubyTexts.size() ? rubyTexts[index] : std::string(); }
   void ensureRubyCapacity();
   void setBlockStyle(const BlockStyle& blockStyle) { this->blockStyle = blockStyle; }
+  void setHyphenationEnabled(const bool enabled) { hyphenationEnabled = enabled; }
+  bool isHyphenationEnabled() const { return hyphenationEnabled; }
   BlockStyle& getBlockStyle() { return blockStyle; }
   // Moves the first `count` words into a new block with the same style, so a block can be laid
   // out as separate paragraphs. Null (and this block untouched) on OOM or a count that would leave
