@@ -14,6 +14,7 @@
 #include <algorithm>
 
 #include "CrossPointSettings.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "activities/boot_sleep/SleepImageRender.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -313,7 +314,17 @@ void BmpViewerActivity::loop() {
     if (coverExists) {
       doClearSleepCover();
     } else if (canSetSleepCover()) {
-      doSetSleepCover();
+      // Ask first: a stray Confirm would otherwise replace the current sleep cover.
+      auto handler = [this](const ActivityResult& result) {
+        if (result.isCancelled) {
+          onEnter();
+          return;
+        }
+        doSetSleepCover();
+      };
+      startActivityForResultNoThrow<ConfirmationActivity>(std::move(handler), renderer, mappedInput,
+                                                          tr(STR_SET_SLEEP_COVER) + std::string("?"),
+                                                          filePath.substr(filePath.find_last_of('/') + 1));
     }
     return;
   }
