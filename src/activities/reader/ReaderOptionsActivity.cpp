@@ -13,6 +13,7 @@
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "ReaderFontSizes.h"
+#include "ReaderLineSpacing.h"
 #include "ReaderSettingsIO.h"
 #include "SdCardFontSystem.h"
 #include "activities/settings/TextSettingsActivity.h"
@@ -47,11 +48,6 @@ constexpr ItemIndex ROW_ORDER[] = {
     FONT_FAMILY, FONT_SIZE,     LINE_SPACING,        PARA_ALIGNMENT, HYPHENATION,       EXTRA_SPACING,
     PARA_INDENT, SCREEN_MARGIN, WORD_SELECT_BUTTONS, INLINE_GLOSS,   DICT_LINE_SPACING, FOCUS_READING,
     MIN_SESSION, BOOK_LANGUAGE, VERTICAL_TEXT,       FURIGANA,       MORE_TEXT_SETTINGS};
-
-// Must cover LINE_COMPRESSION_COUNT: values are bounded by the enum, so a short table is read off the end.
-constexpr StrId LINE_SPACING_LABELS[] = {StrId::STR_TIGHT,     StrId::STR_NORMAL, StrId::STR_RELAXED,
-                                         StrId::STR_SEMI_WIDE, StrId::STR_WIDE,   StrId::STR_EXTRA_WIDE};
-static_assert(std::size(LINE_SPACING_LABELS) == CrossPointSettings::LINE_COMPRESSION_COUNT, "line spacing labels");
 
 constexpr StrId BOOK_LANGUAGE_LABELS[] = {StrId::STR_BOOK_LANG_AUTO, StrId::STR_BOOK_LANG_JA,
                                           StrId::STR_BOOK_LANG_ZH_HANS, StrId::STR_BOOK_LANG_ZH_HANT,
@@ -455,8 +451,9 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
     }
     case LINE_SPACING: {
       const uint8_t sp =
-          localOverride.lineSpacing < CrossPointSettings::LINE_COMPRESSION_COUNT ? localOverride.lineSpacing : 0;
-      return I18N.get(LINE_SPACING_LABELS[sp]);
+          localOverride.lineSpacing < CrossPointSettings::LINE_COMPRESSION_COUNT ? localOverride.lineSpacing
+                                                                                 : CrossPointSettings::LINE_SPACING_120;
+      return I18N.get(LINE_SPACING_IDS[sp]);
     }
     case PARA_ALIGNMENT: {
       const StrId labels[] = {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, StrId::STR_CENTER, StrId::STR_ALIGN_RIGHT,
@@ -484,7 +481,7 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
       return localOverride.inlineGlossEnabled ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     case DICT_LINE_SPACING:
       return localOverride.dictLineSpacing < CrossPointSettings::LINE_COMPRESSION_COUNT
-                 ? I18N.get(LINE_SPACING_LABELS[localOverride.dictLineSpacing])
+                 ? I18N.get(LINE_SPACING_IDS[localOverride.dictLineSpacing])
                  : tr(STR_SAME_AS_TEXT);
     case MIN_SESSION: {
       const uint8_t v = localOverride.minSessionMinutes;

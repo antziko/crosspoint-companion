@@ -136,22 +136,21 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // point size it meant (see LEGACY_FONT_SIZE_MAX).
   static constexpr uint8_t LEGACY_FONT_SIZE_MAX = 3;
   static constexpr uint8_t DEFAULT_FONT_POINT_SIZE = 14;
-  // SEMI_WIDE and then RELAXED were each inserted at index 2, shifting the steps above them. The
-  // two older numberings are carried forward by remapLegacyLineSpacing() from both stores that
-  // hold an index: settings.json (via the lineSpacingV3 key) and per-book reader_settings.bin.
+  // Line height as a percent of font size.
   enum LINE_COMPRESSION {
-    TIGHT = 0,
-    NORMAL = 1,
-    RELAXED = 2,
-    SEMI_WIDE = 3,
-    WIDE = 4,
-    EXTRA_WIDE = 5,
+    LINE_SPACING_100 = 0,
+    LINE_SPACING_110 = 1,
+    LINE_SPACING_120 = 2,
+    LINE_SPACING_130 = 3,
+    LINE_SPACING_145 = 4,
+    LINE_SPACING_160 = 5,
+    LINE_SPACING_175 = 6,
     LINE_COMPRESSION_COUNT
   };
-  // Old index -> new. hadSemiWide selects the numbering: false for the original 0..3
-  // (Tight/Normal/Wide/Extra Wide), true for the 0..4 one that added Semi-Wide. Shared by the two
-  // migrations so they cannot disagree.
-  static uint8_t remapLegacyLineSpacing(uint8_t legacy, bool hadSemiWide);
+  // Old named step -> percent step. legacySteps (4, 5 or 6) names the numbering:
+  // Tight/Normal/Wide/Extra Wide, then Semi-Wide inserted at 2, then Relaxed inserted at 2.
+  // Shared by settings.json and per-book reader_settings.bin so they cannot disagree.
+  static uint8_t remapLegacyLineSpacing(uint8_t legacy, uint8_t legacySteps);
   enum PARAGRAPH_ALIGNMENT {
     JUSTIFIED = 0,
     LEFT_ALIGN = 1,
@@ -391,7 +390,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     // fontPointSize). Persisted per-book by ReaderSettingsIO, which folds the legacy
     // 0..3 slot up on read.
     uint8_t fontPointSize = DEFAULT_FONT_POINT_SIZE;
-    uint8_t lineSpacing = NORMAL;
+    uint8_t lineSpacing = LINE_SPACING_120;
     uint8_t paragraphAlignment = JUSTIFIED;
     uint8_t hyphenationEnabled = 0;
     uint8_t paragraphSpacing = PARA_SPACING_NORMAL;
@@ -551,7 +550,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // are selectable; SdCardFontSystem::ensureLoaded() snaps this to the nearest
   // available size (and persists the snap) whenever the family changes.
   uint8_t fontPointSize = DEFAULT_FONT_POINT_SIZE;
-  uint8_t lineSpacing = NORMAL;
+  uint8_t lineSpacing = LINE_SPACING_120;
   uint8_t paragraphAlignment = JUSTIFIED;
   // Definition viewer font: a built-in family, or DICT_FONT_MATCH_READER to follow the
   // reader's family (the only way to render definitions in an SD family — see
@@ -886,7 +885,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   ReaderOverride readerOverride;
 
   // Shared computation helpers used by both global and override code paths.
-  static float computeLineCompression(uint8_t family, uint8_t lineSpacing, const char* sdFontName);
+  static float lineSpacingMultiplier(uint8_t lineSpacing);
 
  public:
   // Pure helper: built-in family + size enum -> fontId. Public so the font

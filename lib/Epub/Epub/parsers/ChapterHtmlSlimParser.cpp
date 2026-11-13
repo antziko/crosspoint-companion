@@ -388,6 +388,16 @@ bool ChapterHtmlSlimParser::isTocAnchor(const std::string& id) const {
   return std::find(tocAnchors.begin(), tocAnchors.end(), id) != tocAnchors.end();
 }
 
+// Glyphs of the page's last text line, which can reach below its spacing; 0 if no line ends the page.
+// Non-text content placed after text starts at or below this, applied before its page-fit check.
+int ChapterHtmlSlimParser::lastLineGlyphBottom() const {
+  if (!currentPage || currentPage->elements.empty()) return 0;
+  const PageElement& last = *currentPage->elements.back();
+  if (last.getTag() != TAG_PageLine) return 0;
+  const TextBlock& line = *static_cast<const PageLine&>(last).getBlock();
+  return last.yPos + renderer.getLineHeight(fontId) + line.getRubyShift(renderer.getFontAscenderSize(fontId));
+}
+
 bool ChapterHtmlSlimParser::anchorCapReached() const {
   return anchorData.size() + pendingWordAnchorCount + pendingRowAnchorCount >= MAX_ANCHORS_PER_CHAPTER;
 }
@@ -762,7 +772,8 @@ void ChapterHtmlSlimParser::emitHorizontalRule(const BlockStyle& blockStyle) {
       std::max<int16_t>(1, static_cast<int16_t>(viewportWidth - blockStyle.totalHorizontalInset()));
   const int16_t width = std::max<int16_t>(1, static_cast<int16_t>(availableWidth / 4));
   const int16_t xPos = static_cast<int16_t>(blockStyle.leftInset() + ((availableWidth - width) / 2));
-  const int16_t totalHeight = static_cast<int16_t>(topSpacing + ruleThickness + bottomSpacing);
+  const int clearTopSpacing = std::max<int>(topSpacing, lastLineGlyphBottom() - currentPageNextY);
+  const int16_t totalHeight = static_cast<int16_t>(clearTopSpacing + ruleThickness + bottomSpacing);
 
   if (!currentPage->elements.empty() && currentPageNextY + totalHeight > viewportHeight) {
     setCurrentPageVisibleOffset(visibleTextOffset);
@@ -777,7 +788,8 @@ void ChapterHtmlSlimParser::emitHorizontalRule(const BlockStyle& blockStyle) {
     currentPageVisibleOffsetSet = false;
   }
 
-  currentPageNextY += topSpacing;
+  // The rule starts below the previous line's glyphs; its top spacing can cover them.
+  currentPageNextY += std::max<int>(topSpacing, lastLineGlyphBottom() - currentPageNextY);
 
   auto pageRule = std::shared_ptr<PageHorizontalRule>(
       new (std::nothrow) PageHorizontalRule(width, ruleThickness, xPos, currentPageNextY));
@@ -905,8 +917,10 @@ void ChapterHtmlSlimParser::closeTableCell() {
 }
 
 void ChapterHtmlSlimParser::addTableRowSeparator() {
+  // The rule starts below the row's last glyphs.
+  const int top = std::max<int>(currentPageNextY, lastLineGlyphBottom());
   if (!currentPage || currentPage->elements.empty() || viewportWidth == 0 ||
-      currentPageNextY + TABLE_ROW_SEPARATOR_GAP > viewportHeight) {
+      top + TABLE_ROW_SEPARATOR_GAP > viewportHeight) {
     return;
   }
 
@@ -920,7 +934,7 @@ void ChapterHtmlSlimParser::addTableRowSeparator() {
     currentPage->elements.reserve(currentPage->elements.size() + 1);
   }
   currentPage->elements.push_back(std::move(separator));
-  currentPageNextY += TABLE_ROW_SEPARATOR_GAP;
+  currentPageNextY = static_cast<int16_t>(top + TABLE_ROW_SEPARATOR_GAP);
 }
 
 // Browser-style auto layout: columns that fit on one line get their natural width, otherwise each
@@ -1004,7 +1018,7 @@ void ChapterHtmlSlimParser::finishTableRow() {
   }
 
   const int16_t lineHeight =
-      std::max<int16_t>(1, static_cast<int16_t>(renderer.getLineHeight(fontId) * lineCompression));
+      std::max<int16_t>(1, static_cast<int16_t>(renderer.getLineHeight(fontId, lineCompression)));
   const size_t columnCount = tableRowCells.size();
   const uint16_t cellWidth = static_cast<uint16_t>(viewportWidth / columnCount);
 
@@ -1729,10 +1743,13 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                 static constexpr int16_t IMAGE_MAX_MARGIN_PX = 50;
                 if (imageMarginTop > IMAGE_MAX_MARGIN_PX) imageMarginTop = IMAGE_MAX_MARGIN_PX;
                 if (imageMarginBottom > IMAGE_MAX_MARGIN_PX) imageMarginBottom = IMAGE_MAX_MARGIN_PX;
+                // The image starts below the previous line's glyphs; its top margin can cover them.
+                const int clearMarginTop =
+                    std::max<int>(imageMarginTop, self->lastLineGlyphBottom() - self->currentPageNextY);
 
                 // Create page for image - only break if image won't fit remaining space
                 if (self->currentPage && !self->currentPage->elements.empty() &&
-                    (self->currentPageNextY + imageMarginTop + displayHeight + imageMarginBottom >
+                    (self->currentPageNextY + clearMarginTop + displayHeight + imageMarginBottom >
                      self->viewportHeight)) {
                   self->completePageFn(std::move(self->currentPage), self->xpathParagraphIndex,
                                        self->xpathListItemIndex, self->currentPageVisibleOffset);
@@ -1767,6 +1784,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                 }
 
                 // Apply top margin from container block
+                if (!imageStartsPage) imageMarginTop = static_cast<int16_t>(clearMarginTop);
                 self->currentPageNextY += imageMarginTop;
 
                 // Final fit clamp against the ACTUAL remaining page space below the

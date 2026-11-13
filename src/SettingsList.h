@@ -17,6 +17,7 @@
 #include "HomeButtonSettings.h"
 #include "KOReaderCredentialStore.h"
 #include "ReaderFontSizes.h"
+#include "ReaderLineSpacing.h"
 #include "activities/settings/SettingsActivity.h"
 #include "components/UITheme.h"
 #include "util/Dictionary.h"
@@ -375,10 +376,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   v.push_back(SettingInfo::Value(StrId::STR_DICT_FONT_SIZE, &CrossPointSettings::dictionaryFontPointSize,
                                  {CrossPointSettings::DICT_FONT_POINT_MIN, CrossPointSettings::DICT_FONT_POINT_MAX, 1},
                                  "dictionaryFontPointSize", StrId::STR_READER_DICTIONARY));
+  // "lineHeight": fromJson() maps the older named-step keys (lineSpacing, V2, V3).
   v.push_back(SettingInfo::Enum(StrId::STR_LINE_SPACING, &CrossPointSettings::lineSpacing,
-                                {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_RELAXED, StrId::STR_SEMI_WIDE,
-                                 StrId::STR_WIDE, StrId::STR_EXTRA_WIDE},
-                                "lineSpacingV3", StrId::STR_CAT_READER)
+                                std::vector<StrId>(std::begin(LINE_SPACING_IDS), std::end(LINE_SPACING_IDS)),
+                                "lineHeight", StrId::STR_CAT_READER)
                   .withTextSettings());
   v.push_back(SettingInfo::Value(StrId::STR_SCREEN_MARGIN, &CrossPointSettings::screenMargin,
                                  {CrossPointSettings::SCREEN_MARGIN_MIN, CrossPointSettings::SCREEN_MARGIN_MAX,

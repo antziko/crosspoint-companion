@@ -57,6 +57,7 @@
 #include "ReaderFontSizes.h"
 #include "ReaderOptionsActivity.h"
 #include "ReaderSettingsIO.h"
+#include "ReaderLineSpacing.h"
 #include "ReaderToolbarUi.h"
 #include "ReaderUtils.h"
 #include "ReadingTimeHistory.h"
@@ -4991,14 +4992,11 @@ constexpr TextRowId kLatinTextRows[] = {kTextRowFont,  kTextRowSize,         kTe
 // text, and no Focus Reading (it bolds the head of Latin words).
 constexpr TextRowId kCjkTextRows[] = {kTextRowFont,     kTextRowSize,  kTextRowSpacing,      kTextRowVertical,
                                       kTextRowFurigana, kTextRowAlign, kTextRowBookLanguage, kTextRowMore};
-constexpr StrId kSpacingIds[] = {StrId::STR_TIGHT,     StrId::STR_NORMAL, StrId::STR_RELAXED,
-                                 StrId::STR_SEMI_WIDE, StrId::STR_WIDE,   StrId::STR_EXTRA_WIDE};
 constexpr StrId kAlignIds[] = {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, StrId::STR_CENTER, StrId::STR_ALIGN_RIGHT,
                                StrId::STR_BOOK_S_STYLE};
 constexpr StrId kBookLanguageIds[] = {StrId::STR_BOOK_LANG_AUTO, StrId::STR_BOOK_LANG_JA, StrId::STR_BOOK_LANG_ZH_HANS,
                                       StrId::STR_BOOK_LANG_ZH_HANT, StrId::STR_BOOK_LANG_YUE};
 static_assert(std::size(kBookLanguageIds) == cjk::LANGUAGE_CHOICE_COUNT, "book language labels");
-static_assert(std::size(kSpacingIds) == CrossPointSettings::LINE_COMPRESSION_COUNT, "line spacing labels");
 static_assert(std::size(kAlignIds) == CrossPointSettings::PARAGRAPH_ALIGNMENT_COUNT, "alignment labels");
 }  // namespace
 
@@ -5083,7 +5081,7 @@ std::string EpubReaderActivity::textRowValue(const int row) const {
     case kTextRowSize:
       return std::to_string(ov.fontPointSize) + " pt";
     case kTextRowSpacing:
-      return I18N.get(kSpacingIds[ov.lineSpacing % CrossPointSettings::LINE_COMPRESSION_COUNT]);
+      return I18N.get(LINE_SPACING_IDS[ov.lineSpacing % CrossPointSettings::LINE_COMPRESSION_COUNT]);
     case kTextRowAlign:
       return I18N.get(kAlignIds[ov.paragraphAlignment % CrossPointSettings::PARAGRAPH_ALIGNMENT_COUNT]);
     case kTextRowBookLanguage:
@@ -5161,7 +5159,7 @@ void EpubReaderActivity::showTextRowPopup(const int rowId) {
       break;
     }
     case kTextRowSpacing:
-      overlayPopup.show(StrId::STR_LINE_SPACING, kSpacingIds, static_cast<int>(std::size(kSpacingIds)),
+      overlayPopup.show(StrId::STR_LINE_SPACING, LINE_SPACING_IDS, static_cast<int>(std::size(LINE_SPACING_IDS)),
                         SETTINGS.getReaderOverride().lineSpacing % CrossPointSettings::LINE_COMPRESSION_COUNT,
                         [this](int idx) {
                           auto ov = SETTINGS.getReaderOverride();

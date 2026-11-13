@@ -40,10 +40,10 @@ constexpr int kGrayStripRows = 80;
 // Same panels the horizontal path treats as 1-bit image panels (EpubReaderActivity.cpp).
 bool oneBitImagePanel(const GfxRenderer& renderer) { return renderer.isX3() || BoardConfig::isX4Pro(); }
 
-// matcha's column-gap table has three steps (tight, normal, wide); ours has six line spacings.
+// matcha's column-gap table has three steps (tight, normal, wide); ours has seven line spacings.
 uint8_t verticalLineSpacingLevel(const uint8_t lineSpacing) {
-  if (lineSpacing == CrossPointSettings::TIGHT) return 0;
-  if (lineSpacing <= CrossPointSettings::RELAXED) return 1;
+  if (lineSpacing <= CrossPointSettings::LINE_SPACING_110) return 0;
+  if (lineSpacing <= CrossPointSettings::LINE_SPACING_130) return 1;
   return 2;
 }
 

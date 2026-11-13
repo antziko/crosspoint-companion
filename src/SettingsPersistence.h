@@ -110,7 +110,7 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
     // Legacy "dictionaryFontSize" slots are migrated in fromJson().
     persisted::ranged("dictionaryFontPointSize", &CrossPointSettings::dictionaryFontPointSize,
                       CrossPointSettings::DICT_FONT_POINT_MIN, CrossPointSettings::DICT_FONT_POINT_MAX),
-    persisted::enumerated("lineSpacingV3", &CrossPointSettings::lineSpacing,
+    persisted::enumerated("lineHeight", &CrossPointSettings::lineSpacing,
                           CrossPointSettings::LINE_COMPRESSION_COUNT - 1),
     persisted::ranged("screenMargin", &CrossPointSettings::screenMargin, CrossPointSettings::SCREEN_MARGIN_MIN,
                       CrossPointSettings::SCREEN_MARGIN_MAX),

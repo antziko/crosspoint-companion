@@ -11,6 +11,7 @@
 
 #include "I18nKeys.h"
 #include "ReaderFontSizes.h"
+#include "ReaderLineSpacing.h"
 #include "SettingsPersistence.h"
 #include "fontIds.h"
 #include "util/PluginLocations.h"
@@ -237,17 +238,19 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
     }
   }
 
-  // Line spacing was renumbered twice by steps inserted at index 2 (SEMI_WIDE, then RELAXED). The
-  // key is renamed each time so the newest key present identifies the numbering; remap once, or
-  // every upgrading reader silently shifts a step AND re-paginates every book (the section cache
-  // keys on the resulting float — Section.cpp:271).
-  if (doc["lineSpacingV3"].isNull()) {
-    if (!doc["lineSpacingV2"].isNull()) {
-      s.lineSpacing = remapLegacyLineSpacing(doc["lineSpacingV2"] | (uint8_t)NORMAL, true);
-      needsResave = true;
-    } else if (!doc["lineSpacing"].isNull()) {
-      s.lineSpacing = remapLegacyLineSpacing(doc["lineSpacing"] | (uint8_t)NORMAL, false);
-      needsResave = true;
+  // Line spacing is a percent step under "lineHeight". The older named-step keys were renamed at
+  // each renumbering, so the newest key present identifies the numbering; remap it once.
+  if (doc["lineHeight"].isNull()) {
+    static constexpr struct {
+      const char* key;
+      uint8_t steps;
+    } kLegacyLineSpacing[] = {{"lineSpacingV3", 6}, {"lineSpacingV2", 5}, {"lineSpacing", 4}};
+    for (const auto& legacy : kLegacyLineSpacing) {
+      if (doc[legacy.key].is<uint8_t>()) {
+        s.lineSpacing = remapLegacyLineSpacing(doc[legacy.key].as<uint8_t>(), legacy.steps);
+        needsResave = true;
+        break;
+      }
     }
   }
 
@@ -390,75 +393,26 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
 }
 
 // static
-uint8_t CrossPointSettings::remapLegacyLineSpacing(const uint8_t legacy, const bool hadSemiWide) {
-  // Numbering before SEMI_WIDE was inserted at index 2.
-  static constexpr uint8_t V1[] = {TIGHT, NORMAL, WIDE, EXTRA_WIDE};
-  // Numbering before RELAXED was inserted at index 2.
-  static constexpr uint8_t V2[] = {TIGHT, NORMAL, SEMI_WIDE, WIDE, EXTRA_WIDE};
-  static_assert(std::size(V1) == LINE_COMPRESSION_COUNT - 2, "V1 must cover every pre-SEMI_WIDE value");
-  static_assert(std::size(V2) == LINE_COMPRESSION_COUNT - 1, "V2 must cover every pre-RELAXED value");
-  if (hadSemiWide) {
-    return legacy < std::size(V2) ? V2[legacy] : static_cast<uint8_t>(NORMAL);
-  }
-  return legacy < std::size(V1) ? V1[legacy] : static_cast<uint8_t>(NORMAL);
+uint8_t CrossPointSettings::remapLegacyLineSpacing(const uint8_t legacy, const uint8_t legacySteps) {
+  // Tight/Normal/Wide/Extra Wide.
+  static constexpr uint8_t V1[] = {LINE_SPACING_110, LINE_SPACING_120, LINE_SPACING_160, LINE_SPACING_175};
+  // Semi-Wide inserted at index 2.
+  static constexpr uint8_t V2[] = {LINE_SPACING_110, LINE_SPACING_120, LINE_SPACING_145, LINE_SPACING_160,
+                                   LINE_SPACING_175};
+  // Relaxed inserted at index 2.
+  static constexpr uint8_t V3[] = {LINE_SPACING_110, LINE_SPACING_120, LINE_SPACING_130,
+                                   LINE_SPACING_145, LINE_SPACING_160, LINE_SPACING_175};
+  const uint8_t* table = legacySteps == 4 ? V1 : legacySteps == 5 ? V2 : V3;
+  return legacy < legacySteps && legacySteps <= std::size(V3) ? table[legacy] : static_cast<uint8_t>(LINE_SPACING_120);
 }
 
 // static
-float CrossPointSettings::computeLineCompression(const uint8_t family, const uint8_t lineSpacing,
-                                                 const char* sdFontName) {
-  // SD card and vector fonts get a wider scale than the built-ins: their faces carry their
-  // own (often generous) natural line height, so the old Bookerly-tuned 1.1/1.2 steps were
-  // visually near-indistinguishable. At 12pt in portrait (~760px viewport) this scale spans
-  // ~26/24/22/20/19/15 lines per page — each step reads as a clearly different density.
-  //
-  // SEMI_WIDE sits deliberately close to WIDE rather than midway: this is the only ramp with
-  // room for a step (NORMAL->WIDE is +30% here against +10% and +5% for the built-ins), and the
-  // ask was for "slightly less than Wide". RELAXED is the midpoint of NORMAL and SEMI_WIDE.
-  if (sdFontName && sdFontName[0] != '\0') {
-    switch (lineSpacing) {
-      case TIGHT:
-        return 0.95f;
-      case NORMAL:
-      default:
-        return 1.0f;
-      case RELAXED:
-        return 1.11f;
-      case SEMI_WIDE:
-        return 1.22f;
-      case WIDE:
-        return 1.3f;
-      case EXTRA_WIDE:
-        return 1.6f;
-    }
-  }
-
-  // The built-in steps are pinned by pixel rounding, not taste: getLineHeight() rounds
-  // advanceY * compression to whole pixels. NOTOSANS 0.975 -> 33/39/44/50 between 32/38/43/48
-  // and 34/40/45/51; there is no integer between 32 and 33 at 12pt, so RELAXED shares
-  // SEMI_WIDE's value. Do not "round" these without redoing that arithmetic.
-  (void)family;
-  switch (lineSpacing) {
-    case TIGHT:
-      return 0.90f;
-    case NORMAL:
-    default:
-      return 0.95f;
-    case RELAXED:
-    case SEMI_WIDE:
-      return 0.975f;
-    case WIDE:
-      return 1.0f;
-    case EXTRA_WIDE:
-      return 1.05f;
-  }
+float CrossPointSettings::lineSpacingMultiplier(const uint8_t lineSpacing) {
+  return LINE_SPACING_MULTIPLIERS[lineSpacing < LINE_COMPRESSION_COUNT ? lineSpacing : LINE_SPACING_120];
 }
 
 float CrossPointSettings::getReaderLineCompression() const {
-  if (readerOverride.active) {
-    return computeLineCompression(readerOverride.fontFamily, readerOverride.lineSpacing,
-                                  readerOverride.sdFontFamilyName);
-  }
-  return computeLineCompression(fontFamily, lineSpacing, sdFontFamilyName);
+  return lineSpacingMultiplier(readerOverride.active ? readerOverride.lineSpacing : lineSpacing);
 }
 
 bool CrossPointSettings::isFontPinned(const char* key) const {
@@ -622,22 +576,11 @@ int CrossPointSettings::getReaderFontId() const {
 }
 
 float CrossPointSettings::getDefinitionLineCompression() const {
-  // Matches getDefinitionFontId(): when the definition font is the reader's, its line
-  // compression must be too (computeLineCompression() handles the SD-font case).
   uint8_t spacing = readerOverride.active ? readerOverride.lineSpacing : lineSpacing;
   if (readerOverride.active && readerOverride.dictLineSpacing < LINE_COMPRESSION_COUNT) {
     spacing = readerOverride.dictLineSpacing;
   }
-  if (dictionaryFontFamily == DICT_FONT_MATCH_READER) {
-    if (readerOverride.active) {
-      return computeLineCompression(readerOverride.fontFamily, spacing, readerOverride.sdFontFamilyName);
-    }
-    return computeLineCompression(fontFamily, spacing, sdFontFamilyName);
-  }
-
-  // A dictionary family is always built-in (see the DICT_FONT_MATCH_READER sentinel), so
-  // there is no SD font name to pass — the same contract as getDefinitionFontId() here.
-  return computeLineCompression(dictionaryFontFamily, spacing, nullptr);
+  return lineSpacingMultiplier(spacing);
 }
 
 // static

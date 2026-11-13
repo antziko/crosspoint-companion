@@ -168,7 +168,9 @@ namespace {
 //      widths snap per glyph like drawText; lines may break after a glued hyphen or dash;
 //      headings are not hyphenated.
 // v85: Ruby layout follows Chromium's ruby-align: space-around and ruby-overhang: auto.
-constexpr uint8_t SECTION_FILE_VERSION = 85;
+// v86: Line spacing multiplies font size instead of advanceY; rules, table separators and images
+//      start below the previous line's glyphs.
+constexpr uint8_t SECTION_FILE_VERSION = 86;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects

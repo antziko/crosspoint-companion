@@ -389,7 +389,7 @@ void DictionaryDefinitionActivity::onExit() {
 }
 
 int DictionaryDefinitionActivity::getLineHeight() const {
-  return static_cast<int>(renderer.getLineHeight(defFontId_) * SETTINGS.getDefinitionLineCompression());
+  return renderer.getLineHeight(defFontId_, SETTINGS.getDefinitionLineCompression());
 }
 
 // ---------------------------------------------------------------------------

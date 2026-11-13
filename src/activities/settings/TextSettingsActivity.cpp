@@ -14,6 +14,7 @@
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "ReaderFontSizes.h"
+#include "ReaderLineSpacing.h"
 #include "SdCardFontSystem.h"
 #include "TextSettingsPreview.h"
 #include "activities/reader/ReaderSettingsIO.h"
@@ -50,13 +51,11 @@ constexpr StrId PARA_INDENT_IDS[] = {StrId::STR_BOOK,
                                      StrId::STR_INDENT_4_SPACES,
                                      StrId::STR_INDENT_5_SPACES};
 static_assert(std::size(PARA_INDENT_IDS) == CrossPointSettings::PARAGRAPH_INDENT_COUNT, "paragraph indent labels");
-constexpr StrId LINE_SPACING_IDS[] = {StrId::STR_TIGHT,     StrId::STR_NORMAL, StrId::STR_RELAXED,
-                                      StrId::STR_SEMI_WIDE, StrId::STR_WIDE,   StrId::STR_EXTRA_WIDE};
-static_assert(std::size(LINE_SPACING_IDS) == CrossPointSettings::LINE_COMPRESSION_COUNT, "line spacing labels");
 // Popup index 0 is ReaderOverride::DICT_LINE_SPACING_SAME_AS_TEXT; index i is LINE_SPACING_IDS[i - 1].
-constexpr StrId DICT_LINE_SPACING_IDS[] = {StrId::STR_SAME_AS_TEXT, StrId::STR_TIGHT,     StrId::STR_NORMAL,
-                                           StrId::STR_RELAXED,      StrId::STR_SEMI_WIDE, StrId::STR_WIDE,
-                                           StrId::STR_EXTRA_WIDE};
+constexpr StrId DICT_LINE_SPACING_IDS[] = {
+    StrId::STR_SAME_AS_TEXT,           StrId::STR_SPACING_0_PERCENT,       StrId::STR_SPACING_PLUS_10_PERCENT,
+    StrId::STR_SPACING_PLUS_20_PERCENT_DEFAULT, StrId::STR_SPACING_PLUS_30_PERCENT, StrId::STR_SPACING_PLUS_45_PERCENT,
+    StrId::STR_SPACING_PLUS_60_PERCENT, StrId::STR_SPACING_PLUS_75_PERCENT};
 static_assert(std::size(DICT_LINE_SPACING_IDS) == CrossPointSettings::LINE_COMPRESSION_COUNT + 1,
               "dictionary line spacing labels");
 constexpr StrId WORD_SPACING_IDS[] = {StrId::STR_SPACING_50_PERCENT,  StrId::STR_SPACING_75_PERCENT,
@@ -777,7 +776,7 @@ std::string TextSettingsActivity::layoutValueText(int row) const {
   switch (static_cast<LayoutRow>(row)) {
     case LayoutRow::LineSpacing: {
       const uint8_t v = *f_.lineSpacing;
-      return v < std::size(LINE_SPACING_IDS) ? I18N.get(LINE_SPACING_IDS[v]) : I18N.get(StrId::STR_NORMAL);
+      return I18N.get(LINE_SPACING_IDS[v < std::size(LINE_SPACING_IDS) ? v : CrossPointSettings::LINE_SPACING_120]);
     }
     case LayoutRow::ParaSpacing: {
       const uint8_t v = *f_.paragraphSpacing;

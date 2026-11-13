@@ -158,6 +158,7 @@ class TtfEpdFont {
   Face faces_[4];          // 0=regular 1=bold 2=italic 3=bold-italic
   uint32_t size26_6_ = 0;  // exact 26.6 ppem (pt @150DPI), no whole-pixel rounding
   int8_t textWeight_ = 0;
+  uint16_t pointSize_ = 0;
   bool loaded_ = false;
   // Set while a glyph fault runs reclaimHeap(): the reclaim hook calls
   // releaseResidentCaches() on every TTF font, and tearing down the very faces

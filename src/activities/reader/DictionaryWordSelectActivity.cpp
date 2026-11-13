@@ -1191,7 +1191,7 @@ void DictionaryWordSelectActivity::resolveGlossFont() {
   // this is what re-establishes the size and picks up whatever id is actually live now.
   const int fontId = SETTINGS.getDefinitionFontId();
   // Same row pitch as the definition page (DictionaryDefinitionActivity::getLineHeight).
-  const int lineHeight = static_cast<int>(renderer.getLineHeight(fontId) * SETTINGS.getDefinitionLineCompression());
+  const int lineHeight = renderer.getLineHeight(fontId, SETTINGS.getDefinitionLineCompression());
   if (fontId == gloss_->fontId && lineHeight == gloss_->lineHeight) return;
 
   gloss_->fontId = fontId;

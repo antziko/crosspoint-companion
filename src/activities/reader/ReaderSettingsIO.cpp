@@ -37,7 +37,8 @@ namespace {
 // v15: appended textWeight; older files take the global.
 // v16: built-in Noto Serif removed, so fontFamily 0 is Noto Sans; older files stored 0 Noto Serif
 //      (now the "NotoSerif" SD family) and 1 Noto Sans.
-constexpr uint8_t READER_SETTINGS_FILE_VERSION = 16;
+// v17: lineSpacing and dictLineSpacing are percent steps; older files hold the six named steps.
+constexpr uint8_t READER_SETTINGS_FILE_VERSION = 17;
 constexpr size_t LEGACY_SD_FONT_FAMILY_NAME_SIZE = 32;
 // Oldest layout load() still understands; everything from here up is read field by field.
 constexpr uint8_t READER_SETTINGS_MIN_READABLE_VERSION = 5;
@@ -71,8 +72,8 @@ bool load(const std::string& cachePath, CrossPointSettings::ReaderOverride& out)
   serialization::readPod(f, out.lineSpacing);
   // Written under an older numbering; carry the book's choice across rather than letting it shift
   // a step (and needlessly re-paginate).
-  if (version < 8) {
-    out.lineSpacing = CrossPointSettings::remapLegacyLineSpacing(out.lineSpacing, version == 7);
+  if (version < 17) {
+    out.lineSpacing = CrossPointSettings::remapLegacyLineSpacing(out.lineSpacing, version < 7 ? 4 : version == 7 ? 5 : 6);
   }
   serialization::readPod(f, out.paragraphAlignment);
   serialization::readPod(f, out.hyphenationEnabled);
@@ -129,6 +130,10 @@ bool load(const std::string& cachePath, CrossPointSettings::ReaderOverride& out)
   out.dictLineSpacing = CrossPointSettings::ReaderOverride::DICT_LINE_SPACING_SAME_AS_TEXT;
   if (version >= 14) {
     serialization::readPod(f, out.dictLineSpacing);
+    // v14..v16 held the six named steps (always the Relaxed numbering).
+    if (version < 17 && out.dictLineSpacing != CrossPointSettings::ReaderOverride::DICT_LINE_SPACING_SAME_AS_TEXT) {
+      out.dictLineSpacing = CrossPointSettings::remapLegacyLineSpacing(out.dictLineSpacing, 6);
+    }
     if (out.dictLineSpacing >= CrossPointSettings::LINE_COMPRESSION_COUNT) {
       out.dictLineSpacing = CrossPointSettings::ReaderOverride::DICT_LINE_SPACING_SAME_AS_TEXT;
     }

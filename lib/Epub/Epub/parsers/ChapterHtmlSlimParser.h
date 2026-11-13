@@ -250,6 +250,7 @@ class ChapterHtmlSlimParser {
   void flushPendingAnchor();
   bool isTocAnchor(const std::string& id) const;
   bool anchorCapReached() const;
+  int lastLineGlyphBottom() const;
   void placeInlineAnchor(std::string id);
   void queueRowAnchor(std::string id);
   void flushRowAnchors();
