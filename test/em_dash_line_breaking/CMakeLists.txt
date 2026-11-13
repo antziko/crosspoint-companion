@@ -13,6 +13,7 @@ add_executable(EmDashLineBreakingTest
 )
 
 target_include_directories(EmDashLineBreakingTest PRIVATE
+  ${REPO_ROOT}/test/korean_line_breaking/stubs
   ${REPO_ROOT}/test/chapter_html_slim_parser/stubs
   ${REPO_ROOT}/lib
   ${REPO_ROOT}/lib/Epub

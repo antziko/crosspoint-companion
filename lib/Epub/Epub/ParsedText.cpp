@@ -625,7 +625,7 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle,
         const std::string_view token(word.data() + tokenStart, breakOffset - tokenStart);
         pushToken(token, firstToken ? effectiveAttachToPrevious : true, firstToken ? effectiveNoSpaceBefore : true,
                   /*focusBoundary=*/0, tokenVisibleOffset);
-        tokenVisibleOffset = sourceOffsetAfter(tokenVisibleOffset, countCodepoints(token));
+        tokenVisibleOffset += countCodepoints(token);
         firstToken = false;
         tokenStart = breakOffset;
       }
@@ -1548,7 +1548,7 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
   const size_t lineBreak = lineBreakIndices[breakIndex];
   size_t lastBreakAt = breakIndex > 0 ? lineBreakIndices[breakIndex - 1] : 0;
   // A no-break space carried across a soft wrap must not indent the next line.
-  if (breakIndex > 0 || paragraphStartEmitted) {
+  if (breakIndex > 0 || firstLineConsumed) {
     while (lastBreakAt + 1 < lineBreak && continuesVec[lastBreakAt] && wordAt(lastBreakAt) == " ") {
       ++lastBreakAt;
     }

@@ -20,10 +20,10 @@ std::vector<Line> layout(const std::vector<const char*>& words, const bool hyphe
   BlockStyle style;
   style.alignment = CssTextAlign::Justify;
   style.textIndentDefined = true;
-  ParsedText text(hyphenation, false, style, 0);
+  ParsedText text(false, hyphenation, false, style);
   for (const char* word : words) text.addWord(word, EpdFontFamily::REGULAR);
   std::vector<Line> lines;
-  text.layoutAndExtractLines(renderer, 0, width, [&](std::unique_ptr<TextBlock> block, auto) {
+  text.layoutAndExtractLines(renderer, 0, width, [&](std::shared_ptr<TextBlock> block, auto) {
     auto& line = lines.emplace_back();
     for (uint16_t i = 0; i < block->wordCount(); ++i) {
       line.words.emplace_back(block->wordText(i));
