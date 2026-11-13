@@ -163,7 +163,10 @@ namespace {
 // v82: Small images zoom with the reading font (line height over CSS's 19.2 px reference).
 // v83: Text running into a block or heading stays in its own paragraph; CSS font-weight/style
 //      `inherit` keeps the parent's emphasis.
-constexpr uint8_t SECTION_FILE_VERSION = 83;
+// v84: Justified gaps count only stretchable literal spaces; TTF advances and SD-font layout
+//      widths snap per glyph like drawText; lines may break after a glued hyphen or dash;
+//      headings are not hyphenated.
+constexpr uint8_t SECTION_FILE_VERSION = 84;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
