@@ -506,7 +506,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
     return NO_CREDENTIALS;
   }
 
-  const std::string url = KOREADER_STORE.getBaseUrl() + "/syncs/progress/" + documentHash;
+  const std::string url =
+      KOREADER_STORE.getBaseUrl() + "/syncs/progress/" + documentHash + "?position_kinds=locator,percentage";
   const KoResponse resp = koPerform("GET", url, nullptr, "PROGRESS_GET");
   LOG_DBG("KOSync", "Get progress response: %d", resp.status);
 
