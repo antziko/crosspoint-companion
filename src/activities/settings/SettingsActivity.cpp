@@ -63,6 +63,8 @@ SettingsSection sectionFor(const SettingInfo& setting) {
 // device UI (it stays in the shared list for the web settings API).
 bool showOnDevice(const SettingInfo& setting) {
   if (home_button::isSetting(setting.valuePtr)) return false;
+  // The EEGO driver ignores the fading fix's power-off (Uc8279cA4Driver::display).
+  if (setting.valuePtr == &CrossPointSettings::fadingFix && BoardConfig::isEegoA4()) return false;
   // Merged into the Text Settings screen.
   if (setting.inTextSettings) return false;
   if (BoardConfig::hasHomeKey() && setting.valuePtr == &CrossPointSettings::holdConfirmAction) return false;

@@ -1299,7 +1299,8 @@ void loop() {
     if (lock.ownsLock()) BatteryLog::tick(gpio.isUsbConnectedCached());
   }
 
-  renderer.setFadingFix(SETTINGS.fadingFix);
+  // The EEGO driver ignores the power-off request, so the fix would only cost async refreshes.
+  renderer.setFadingFix(SETTINGS.fadingFix && !BoardConfig::isEegoA4());
   activityManager.syncCleanGapScrub();
 
   // The ROM console does not depend on Arduino USB CDC's connection state.
