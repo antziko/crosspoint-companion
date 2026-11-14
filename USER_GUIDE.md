@@ -269,8 +269,8 @@ The Settings screen allows you to configure the device's behavior. There are a f
 
 - **Text Anti-Aliasing**: Whether to show smooth grey edges (anti-aliasing) on text in reading mode. Note this slows down page turns slightly.
 
-- **Images**: How embedded images (JPG/PNG) in EPUB files are shown.
-  - **Display** (default): images in gray levels. Pages with images take an extra grayscale refresh.
+- **Images**: How embedded images (JPG/PNG/GIF) in EPUB files are shown.
+  - **Display** (default): images in gray levels. GIFs show their first frame; interlaced GIFs are not supported. Pages with images take an extra grayscale refresh.
   - **Placeholder**: the image's alt text in place of the image.
   - **Suppress**: images are left out.
   - **Black & White**: images drawn as a black-and-white dot pattern. Pages with images turn like text pages, without the extra refresh.
@@ -651,7 +651,7 @@ Bookmarks are stored in the `.crosspoint/bookmarks` folder in the JSON format.
 Please note that this firmware is currently in active development. The following features are **not yet supported** but are planned for future updates:
 
 * **Cover Images:** Large cover images embedded into EPUB require several seconds (~10s for ~2000 pixel tall image) to convert for sleep screen and home screen thumbnail. Consider optimizing the EPUB with e.g. https://github.com/bigbag/epub-to-xtc-converter to speed this up.
-* **Unsupported Image Formats:** Most JPG and PNG images in EPUBs render correctly. GIFs and progressive JPEGs are not supported and will fall back to an `[Image]` placeholder.
+* **Unsupported Image Formats:** Most JPG, PNG and non-interlaced GIF images in EPUBs render correctly (animated GIFs show their first frame). Interlaced GIFs and progressive JPEGs are not supported and fall back to an `[Image]` placeholder.
 * 
 * **Dictionary Lookup:** Inline word lookup is not yet implemented.
 
