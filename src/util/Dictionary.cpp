@@ -2,6 +2,7 @@
 
 #include <HalStorage.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <SdDebugLog.h>
 #include <Utf8.h>
 
@@ -1114,15 +1115,17 @@ std::string Dictionary::wordAtOrdinal(const std::string& folderPath, uint32_t or
   return std::string(wordBuf, static_cast<size_t>(len));
 }
 
-std::string Dictionary::resolveAltForm(const std::string& word, const char* cachePath) {
+void Dictionary::resolveAltForms(const std::string& word, const char* cachePath, std::vector<std::string>& out,
+                                 const size_t max) {
+  out.clear();
   std::string folderPath = activeDictPath(cachePath);
-  if (folderPath.empty()) return "";
+  if (folderPath.empty() || max == 0) return;
 
   DictPaths dp(folderPath);
-  if (!Storage.exists(dp.syn().c_str())) return "";
+  if (!Storage.exists(dp.syn().c_str())) return;
 
   HalFile syn;
-  if (!Storage.openFileForRead("DICT", dp.syn().c_str(), syn)) return "";
+  if (!Storage.openFileForRead("DICT", dp.syn().c_str(), syn)) return;
 
   const uint32_t synFileSize = static_cast<uint32_t>(syn.fileSize());
   uint32_t startByte = 0;
@@ -1130,35 +1133,91 @@ std::string Dictionary::resolveAltForm(const std::string& word, const char* cach
 
   resolveScanBounds(dp.synOftCspt().c_str(), dp.synOft().c_str(), syn, synFileSize, word.c_str(), &startByte, &endByte);
 
-  // The .idx ordinal the matching .syn entry points at; -1 until the scan finds one.
-  // Resolved AFTER the scanner is gone, not inside the loop: wordAtOrdinal opens a scanner of
-  // its own, and IdxScanner shares one static window (as wordBuf does), so two live scanners
-  // must never both be read from.
-  int64_t originalIdx = -1;
+  // The .idx ordinals the matching .syn entries point at, in .syn order. Resolved AFTER the
+  // scanner is gone, not inside the loop: wordAtOrdinal opens a scanner of its own, and
+  // IdxScanner shares one static window (as wordBuf does), so two live scanners must never
+  // both be read from.
+  static constexpr size_t MAX_FORMS = DictLocation::MAX_EXTRA + 1;
+  uint32_t ordinals[MAX_FORMS];
+  size_t count = 0;
+  const size_t limit = std::min(max, MAX_FORMS);
+  const auto take = [&](const uint8_t* be) {
+    const uint32_t ordinal = readBe32(be);
+    for (size_t i = 0; i < count; i++) {
+      if (ordinals[i] == ordinal) return true;
+    }
+    if (count >= limit) return false;
+    ordinals[count++] = ordinal;
+    return true;
+  };
   {
+    // Matching entries are adjacent. Until the first one, the page bounds apply; after it the
+    // run is followed to its end, which can lie past the page.
     IdxScanner scan(syn, startByte);
-    while (scan.position() < endByte) {
-      int len = readWordInto(scan, wordBuf, sizeof(wordBuf));
-      if (len < 0) break;
-
-      uint8_t idxBuf[4];
-      if (!scan.readBytes(idxBuf, 4)) break;
-
-      int cmp = cistrcmp(wordBuf, word.c_str());
+    uint32_t firstHit = UINT32_MAX;
+    uint8_t idxBuf[4];
+    while (scan.position() < synFileSize && (firstHit != UINT32_MAX || scan.position() < endByte)) {
+      const uint32_t entryStart = scan.position();
+      if (readWordInto(scan, wordBuf, sizeof(wordBuf)) < 0 || !scan.readBytes(idxBuf, 4)) break;
+      const int cmp = cistrcmp(wordBuf, word.c_str());
       if (cmp == 0) {
-        // Big-endian original word index in .idx
-        originalIdx = (static_cast<uint32_t>(idxBuf[0]) << 24) | (static_cast<uint32_t>(idxBuf[1]) << 16) |
-                      (static_cast<uint32_t>(idxBuf[2]) << 8) | static_cast<uint32_t>(idxBuf[3]);
-        break;
+        if (firstHit == UINT32_MAX) firstHit = entryStart;
+        if (!take(idxBuf)) break;
+        continue;
       }
+      if (firstHit != UINT32_MAX || cmp > 0) break;
+    }
 
-      if (cmp > 0) break;
+    // A hit on the page's first entry can have run members on the page before (see
+    // collectRun). Those come first in .syn order.
+    if (firstHit == startByte && startByte > 0) {
+      HalFile index;
+      bool isCspt = false;
+      bool opened = false;
+      uint8_t hdr[CSPT_HEADER_SIZE];
+      if (Storage.openFileForRead("DICT", dp.synOftCspt().c_str(), index) &&
+          index.read(hdr, CSPT_HEADER_SIZE) == static_cast<int>(CSPT_HEADER_SIZE) && memcmp(hdr, CSPT_MAGIC, 4) == 0 &&
+          hdr[4] == CSPT_VERSION) {
+        isCspt = true;
+        opened = true;
+      } else {
+        index.close();
+        opened = Storage.openFileForRead("DICT", dp.synOft().c_str(), index);
+      }
+      if (opened) {
+        uint32_t pageStart = 0;
+        uint32_t pageEnd = 0;
+        widenScanBoundsIn(index, isCspt, synFileSize, startByte, &pageStart, &pageEnd, /*radius=*/1);
+        uint32_t earlier[MAX_FORMS];
+        size_t earlierCount = 0;
+        scan.seek(pageStart);
+        while (scan.position() < startByte && earlierCount < limit) {
+          if (readWordInto(scan, wordBuf, sizeof(wordBuf)) < 0 || !scan.readBytes(idxBuf, 4)) break;
+          if (cistrcmp(wordBuf, word.c_str()) == 0) earlier[earlierCount++] = readBe32(idxBuf);
+        }
+        if (earlierCount > 0) {
+          const size_t keep = std::min(count, limit - earlierCount);
+          std::memmove(ordinals + earlierCount, ordinals, keep * sizeof(ordinals[0]));
+          std::memcpy(ordinals, earlier, earlierCount * sizeof(earlier[0]));
+          count = earlierCount + keep;
+        }
+      }
     }
   }
-
   syn.close();
-  if (originalIdx < 0) return "";
-  return wordAtOrdinal(folderPath, static_cast<uint32_t>(originalIdx));
+
+  if (!reserveNoThrow(out, count)) {
+    LOG_ERR("DICT", "OOM: %u alt forms", static_cast<unsigned>(count));
+    return;
+  }
+  for (size_t i = 0; i < count; i++) {
+    std::string canonical = wordAtOrdinal(folderPath, ordinals[i]);
+    if (canonical.empty()) continue;
+    const bool repeated = std::any_of(out.begin(), out.end(), [&canonical](const std::string& seen) {
+      return cistrcmp(seen.c_str(), canonical.c_str()) == 0;
+    });
+    if (!repeated) out.push_back(std::move(canonical));
+  }
 }
 
 // ---------------------------------------------------------------------------

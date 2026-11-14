@@ -15,6 +15,7 @@ target_include_directories(DictGlossTest PRIVATE
   ${REPO_ROOT}/lib/DictHtmlRenderer  # StyledSpan, via DictLayout.h
   ${REPO_ROOT}/lib/EpdFont           # EpdFontFamily::Style
   ${REPO_ROOT}/lib/Utf8
+  ${REPO_ROOT}/lib/Memory
   ${REPO_ROOT}/lib/expat             # expat.h only: DictLayout calls no XML_* function
 )
 

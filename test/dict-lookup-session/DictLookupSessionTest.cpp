@@ -707,3 +707,71 @@ TEST(DictLocationEntries, ALabelThatDoesNotFitIsDroppedNotCut) {
   EXPECT_STREQ(loc.label(1), "");
   EXPECT_STREQ(loc.label(2), "ok");
 }
+
+// --- Every .syn target of one form ---------------------------------------------
+
+namespace {
+
+// Appends one .syn entry: form, NUL, big-endian .idx ordinal.
+void appendSynEntry(std::string& syn, const std::string& form, uint32_t ordinal) {
+  syn += form;
+  syn += '\0';
+  for (int shift : {24, 16, 8, 0}) syn += static_cast<char>((ordinal >> shift) & 0xFF);
+}
+
+}  // namespace
+
+TEST_F(DictLookupSession, AltFormsReturnsEveryHeadwordAFormPointsAt) {
+  const fs::path dir = root_ / "dictionaries/syn";
+  writeIndexedDictionary(dir, "syn", {{"yobu", 10, 1}, {"yomu", 20, 1}, {"zzz", 30, 1}}, /*withOft=*/false);
+  std::string syn;
+  appendSynEntry(syn, "yonda", 1);
+  appendSynEntry(syn, "yonde", 1);
+  appendSynEntry(syn, "yonde", 0);
+  appendSynEntry(syn, "yonde", 1);  // repeated target
+  appendSynEntry(syn, "yondo", 2);
+  std::ofstream(dir / "syn.syn", std::ios::binary).write(syn.data(), static_cast<std::streamsize>(syn.size()));
+  writeDictBin("/dictionaries/syn/syn");
+
+  std::vector<std::string> forms;
+  Dictionary::resolveAltForms("yonde", nullptr, forms, 6);
+  EXPECT_EQ(forms, (std::vector<std::string>{"yomu", "yobu"}));
+
+  Dictionary::resolveAltForms("yonda", nullptr, forms, 6);
+  EXPECT_EQ(forms, (std::vector<std::string>{"yomu"}));
+  Dictionary::resolveAltForms("absent", nullptr, forms, 6);
+  EXPECT_TRUE(forms.empty());
+}
+
+TEST_F(DictLookupSession, AltFormsFindsRunMembersOnThePreviousSynPage) {
+  // 40 idx headwords; the .syn has filler forms then "yonde" at entries 30..33 with a page
+  // boundary at entry 32, so the search lands on page 1 and two targets sit on page 0.
+  const fs::path dir = root_ / "dictionaries/syn";
+  std::vector<IdxEntry> idxEntries;
+  for (int i = 0; i < 40; i++) {
+    idxEntries.push_back(
+        {"h" + std::string(3 - std::to_string(i).size(), '0') + std::to_string(i), static_cast<uint32_t>(i), 1});
+  }
+  writeIndexedDictionary(dir, "syn", idxEntries, /*withOft=*/false);
+  std::string syn;
+  std::string oft(38, '\0');
+  for (int i = 0; i < 40; i++) {
+    if (i > 0 && i % 32 == 0) {
+      const auto start = static_cast<uint32_t>(syn.size());
+      for (int shift : {0, 8, 16, 24}) oft += static_cast<char>((start >> shift) & 0xFF);
+    }
+    if (i >= 30 && i < 34) {
+      appendSynEntry(syn, "yonde", static_cast<uint32_t>(i - 30));
+    } else {
+      appendSynEntry(syn, (i < 30 ? "a" : "z") + std::string(3 - std::to_string(i).size(), '0') + std::to_string(i),
+                     static_cast<uint32_t>(i));
+    }
+  }
+  std::ofstream(dir / "syn.syn", std::ios::binary).write(syn.data(), static_cast<std::streamsize>(syn.size()));
+  std::ofstream(dir / "syn.syn.oft", std::ios::binary).write(oft.data(), static_cast<std::streamsize>(oft.size()));
+  writeDictBin("/dictionaries/syn/syn");
+
+  std::vector<std::string> forms;
+  Dictionary::resolveAltForms("yonde", nullptr, forms, 6);
+  EXPECT_EQ(forms, (std::vector<std::string>{"h000", "h001", "h002", "h003"}));
+}

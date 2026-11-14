@@ -7,6 +7,7 @@ target_include_directories(DictLookupSessionTest PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/stubs       # HalStorage / Logging stubs (must win)
   ${REPO_ROOT}/src                        # util/Dictionary.h
   ${REPO_ROOT}/lib/Utf8                   # utf8IsCjkPunctuation (inline, no link needed)
+  ${REPO_ROOT}/lib/Memory                 # reserveNoThrow (header-only)
 )
 
 # Fixture dictionaries are copied out of the repo at run time, not baked in.

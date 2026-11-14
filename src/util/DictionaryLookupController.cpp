@@ -12,6 +12,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <cstring>
+
 #include "../activities/Activity.h"
 #include "../activities/reader/DictionarySuggestionsActivity.h"
 #include "CrossPointSettings.h"
@@ -258,17 +260,40 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
       // Restart the clock: everything between "altprompt" and here was the user deciding,
       // and folding that into a duration would make the number useless for diagnosing speed.
       lookupStartMs_ = millis();
-      std::string canonical = Dictionary::resolveAltForm(altFormWord, cachePath.c_str());
-      if (!canonical.empty()) {
-        auto loc = Dictionary::locate(canonical, {}, cachePath.c_str(), /*collectAll=*/true);
-        if (loc.found) {
-          foundWord = canonical;
-          foundLocation = std::move(loc);
-          foundStatus = nextIsSuggestion ? FoundStatus::Suggestion : FoundStatus::AltForm;
-          nextIsSuggestion = false;
-          logLookupOutcome("altform");
-          return LookupEvent::FoundDefinition;
+      // A form can point at several headwords (よんで -> 読む and 呼ぶ). One reads as before;
+      // several are shown together under the form looked up, each entry labelled.
+      std::vector<std::string> canonicals;
+      Dictionary::resolveAltForms(altFormWord, cachePath.c_str(), canonicals, DictLocation::MAX_EXTRA + 1);
+      DictLocation merged;
+      std::string firstFound;
+      size_t headwordsFound = 0;
+      Dictionary::LookupCtx ctx;
+      if (!canonicals.empty() && Dictionary::openLookupCtx(ctx, cachePath.c_str())) {
+        for (const auto& canonical : canonicals) {
+          const DictLocation loc = Dictionary::locateIn(ctx, canonical, {}, /*collectAll=*/true);
+          if (!loc.found) continue;
+          if (headwordsFound++ == 0) {
+            merged.folderPath = loc.folderPath;
+            firstFound = canonical;
+          }
+          bool room = true;
+          for (uint8_t i = 0; i < loc.entryCount() && room; i++) {
+            const DictLocation::Range range = loc.entry(i);
+            room = merged.addEntry(range.offset, range.size, canonical.c_str());
+          }
+          if (!room) break;
         }
+      }
+      if (merged.found) {
+        // Several headwords found: the form is the title and each entry names its headword.
+        // Just one: that headword is the title, so its entries need no label of their own.
+        if (headwordsFound == 1) memset(merged.labels, 0, sizeof(merged.labels));
+        foundWord = headwordsFound > 1 ? altFormWord : firstFound;
+        foundLocation = std::move(merged);
+        foundStatus = nextIsSuggestion ? FoundStatus::Suggestion : FoundStatus::AltForm;
+        nextIsSuggestion = false;
+        logLookupOutcome("altform");
+        return LookupEvent::FoundDefinition;
       }
       handleLookupFailed();
       return LookupEvent::None;

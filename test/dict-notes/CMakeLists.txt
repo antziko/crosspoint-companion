@@ -13,6 +13,7 @@ target_include_directories(DictNotesTest PRIVATE
   ${REPO_ROOT}/test/dict-lookup-session/stubs
   ${REPO_ROOT}/src
   ${REPO_ROOT}/lib/Utf8   # utf8IsCjkPunctuation (inline), via Dictionary.cpp
+  ${REPO_ROOT}/lib/Memory # reserveNoThrow (header-only), via Dictionary.cpp
 )
 
 target_link_libraries(DictNotesTest PRIVATE

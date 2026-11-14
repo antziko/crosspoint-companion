@@ -280,9 +280,11 @@ class Dictionary {
   // never materialised in RAM — a definition can be tens of KB and this heap cannot take it.
   // Callers locate() first, then stream from the returned offset/size.
 
-  // Look up word in .syn (via .syn.oft if present).
-  // Returns the canonical headword from .idx, or empty string if not found.
-  static std::string resolveAltForm(const std::string& word, const char* cachePath = nullptr);
+  // Look up word in .syn (via .syn.oft if present). Fills `out` with every canonical headword
+  // from .idx the form points at, in .syn order and without repeats, at most `max` of them
+  // (capped at DictLocation::MAX_EXTRA + 1). Empty when the form is not listed.
+  static void resolveAltForms(const std::string& word, const char* cachePath, std::vector<std::string>& out,
+                              size_t max);
 
   static std::string cleanWord(const std::string& word);
   static std::vector<std::string> getStemVariants(const std::string& word);
