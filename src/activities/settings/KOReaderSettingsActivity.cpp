@@ -9,7 +9,7 @@
 #include "KOReaderAuthActivity.h"
 #include "KOReaderCredentialStore.h"
 #include "MappedInputManager.h"
-#include "activities/util/ConfirmationActivity.h"
+#include "ServerDeletePrompt.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
@@ -234,21 +234,18 @@ void KOReaderSettingsActivity::handleSelection() {
     // Delete only available when more than one server exists
     if (KOREADER_STORE.getCount() <= 1) return;
     // Confirm first so a mis-press on this row can't silently destroy a server.
-    const int idx = serverIndex;
-    const std::string& body = editServer.name.empty() ? editServer.serverUrl : editServer.name;
-    startActivityForResultNoThrow<ConfirmationActivity>(
-        [this, idx](const ActivityResult& res) {
-          if (res.isCancelled) return;
-          if (!KOREADER_STORE.removeServer(static_cast<size_t>(idx))) {
-            LOG_ERR("KRS", "Failed to remove KOReader sync server at index %d", idx);
-            showSaveError = true;
-            requestUpdate();
-            return;
-          }
-          finish();
-        },
-        renderer, mappedInput, tr(STR_DELETE_SERVER), body);
+    promptDeleteKOReaderServer(*this, renderer, mappedInput, serverIndex, &onServerDeleted);
   }
+}
+
+void KOReaderSettingsActivity::onServerDeleted(Activity& host, int, const bool removed) {
+  auto& self = static_cast<KOReaderSettingsActivity&>(host);
+  if (!removed) {
+    self.showSaveError = true;
+    self.requestUpdate();
+    return;
+  }
+  self.finish();
 }
 
 void KOReaderSettingsActivity::buildScreen(UiScreen& screen) {

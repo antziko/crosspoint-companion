@@ -10,6 +10,7 @@
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "OpdsSettingsActivity.h"
+#include "ServerDeletePrompt.h"
 #include "activities/ActivityManager.h"
 #include "activities/browser/OpdsBookBrowserActivity.h"
 #include "activities/util/ConfirmationActivity.h"
@@ -203,26 +204,17 @@ bool OpdsServerListActivity::canSwipeDelete(const int index) const {
   return !pickerMode && !optionPopup.isActive() && index < static_cast<int>(OPDS_STORE.getCount());
 }
 
-void OpdsServerListActivity::swipeDelete(const int index) { promptDeleteServer(index); }
+void OpdsServerListActivity::swipeDelete(const int index) {
+  promptDeleteOpdsServer(*this, renderer, mappedInput, index, &onServerDeleted);
+}
 
-// The editor's Delete Server prompt (OpdsSettingsActivity::handleSelection), from the list.
-void OpdsServerListActivity::promptDeleteServer(const int index) {
-  const auto* server = OPDS_STORE.getServer(static_cast<size_t>(index));
-  if (!server) return;
-  const std::string body = server->name.empty() ? server->url : server->name;
-  startActivityForResultNoThrow<ConfirmationActivity>(
-      [this, index](const ActivityResult& res) {
-        if (res.isCancelled) return;
-        if (!OPDS_STORE.removeServer(static_cast<size_t>(index))) {
-          LOG_ERR("OPS", "Failed to remove OPDS server at index %d", index);
-          return;
-        }
-        // The rows shrank; rebuild under the render lock, see the editor result handler.
-        RenderLock lock(*this);
-        rebuildRowItems();
-        nav.selected = std::min(index, std::max(0, static_cast<int>(rowItems_.size()) - 1));
-      },
-      renderer, mappedInput, tr(STR_DELETE_SERVER), body);
+void OpdsServerListActivity::onServerDeleted(Activity& host, const int index, const bool removed) {
+  if (!removed) return;
+  auto& self = static_cast<OpdsServerListActivity&>(host);
+  // The rows shrank; rebuild under the render lock, see the editor result handler.
+  RenderLock lock(self);
+  self.rebuildRowItems();
+  self.nav.selected = std::min(index, std::max(0, static_cast<int>(self.rowItems_.size()) - 1));
 }
 
 void OpdsServerListActivity::handleSelection() {

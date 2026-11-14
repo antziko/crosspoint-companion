@@ -6,7 +6,7 @@
 
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
-#include "activities/util/ConfirmationActivity.h"
+#include "ServerDeletePrompt.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
 
@@ -234,21 +234,18 @@ void OpdsSettingsActivity::handleSelection() {
   } else if (nav.selected == 6 && !isNewServer) {
     // Delete flow is only available for existing servers. Confirm first so a
     // mis-press on this row can't silently destroy a configured server.
-    const int idx = serverIndex;
-    const std::string& body = editServer.name.empty() ? editServer.url : editServer.name;
-    startActivityForResultNoThrow<ConfirmationActivity>(
-        [this, idx](const ActivityResult& res) {
-          if (res.isCancelled) return;
-          if (!OPDS_STORE.removeServer(static_cast<size_t>(idx))) {
-            LOG_ERR("OPS", "Failed to remove OPDS server at index %d", idx);
-            showSaveError = true;
-            requestUpdate();
-            return;
-          }
-          finish();
-        },
-        renderer, mappedInput, tr(STR_DELETE_SERVER), body);
+    promptDeleteOpdsServer(*this, renderer, mappedInput, serverIndex, &onServerDeleted);
   }
+}
+
+void OpdsSettingsActivity::onServerDeleted(Activity& host, int, const bool removed) {
+  auto& self = static_cast<OpdsSettingsActivity&>(host);
+  if (!removed) {
+    self.showSaveError = true;
+    self.requestUpdate();
+    return;
+  }
+  self.finish();
 }
 
 void OpdsSettingsActivity::buildScreen(UiScreen& screen) {

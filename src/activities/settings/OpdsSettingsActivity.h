@@ -43,6 +43,8 @@ class OpdsSettingsActivity final : public UiListActivity {
   void togglePasswordReveal();
   void handleSelection();
   bool saveServer();
+  // ServerDeletePrompt continuation.
+  static void onServerDeleted(Activity& host, int index, bool removed);
 
   // Row storage: at most 7 rows (Name/URL/Username/Password/Sort A-Z/Extra
   // query + Delete, see BASE_ITEMS in the .cpp), so a fixed-capacity array

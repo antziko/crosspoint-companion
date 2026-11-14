@@ -29,7 +29,8 @@ class KOReaderServerListActivity final : public Activity {
   int getItemCount() const;
   void handleSelection();
   void duplicateSelectedServer();
-  void promptDeleteServer(int index);
+  // ServerDeletePrompt continuation.
+  static void onServerDeleted(Activity& host, int index, bool removed);
 
   // Rows the last render drew, so a tap can pick one (see ListTouchTarget).
   ListTouchTarget listTouch_;

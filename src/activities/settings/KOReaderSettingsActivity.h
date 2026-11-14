@@ -47,6 +47,8 @@ class KOReaderSettingsActivity final : public UiListActivity {
   std::string rowValues_[MAX_MENU_ITEMS];
   freeink::ui::ListItem rowItems_[MAX_MENU_ITEMS]{};
 
+  // ServerDeletePrompt continuation.
+  static void onServerDeleted(Activity& host, int index, bool removed);
   int getMenuItemCount() const;
   void handleSelection();
   bool saveServer();
