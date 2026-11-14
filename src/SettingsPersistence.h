@@ -211,7 +211,7 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
     persisted::toggle("pwrBtnFootnoteBack", &CrossPointSettings::pwrBtnFootnoteBack),
     persisted::toggle("backShortToFileBrowser", &CrossPointSettings::backShortToFileBrowser),
 
-    // --- Plugins (set from System -> Maintenance -> Plugins) ---
+    // --- Plugins (set from Connectivity -> Plugins) ---
     persisted::toggle("pluginsEnabled", &CrossPointSettings::pluginsEnabled),
     persisted::toggle("pluginHubPromptHidden", &CrossPointSettings::pluginHubPromptHidden),
 

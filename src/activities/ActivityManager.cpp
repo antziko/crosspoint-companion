@@ -27,7 +27,7 @@
 #include "reader/ReaderActivity.h"
 #include "reader/ReadingStatsActivity.h"
 #include "settings/OpdsServerListActivity.h"
-#include "settings/SettingsActivity.h"
+#include "settings/SettingsListActivity.h"
 #include "util/HangTrace.h"
 #if FREEINK_CAP_FRONTLIGHT
 #include "util/FrontlightPanelActivity.h"
@@ -375,8 +375,8 @@ void ActivityManager::goToUsbDrive() {
 #endif
 }
 
-void ActivityManager::goToSettings(int initialCategory) {
-  replaceActivityNoThrow<SettingsActivity>("Settings", renderer, mappedInput, initialCategory);
+void ActivityManager::goToSettings(const SettingsSection openSection) {
+  replaceActivityNoThrow<SettingsListActivity>("Settings", renderer, mappedInput, openSection);
 }
 
 void ActivityManager::goToFileBrowser(std::string path) {

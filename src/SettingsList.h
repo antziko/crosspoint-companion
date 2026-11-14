@@ -687,7 +687,7 @@ inline void forEachSetting(const SdCardFontRegistry* registry, const DictionaryR
       StrId::STR_TIME_TO_SLEEP, &CrossPointSettings::sleepTimeoutMinutes,
       {CrossPointSettings::MIN_SLEEP_TIMEOUT_MINUTES, CrossPointSettings::MAX_SLEEP_TIMEOUT_MINUTES, 1},
       "sleepTimeoutMinutes", StrId::STR_CAT_SYSTEM));
-  // --- System > Sync Prompts sub-group (category STR_SYS_SYNC_PROMPTS) ---
+  // --- Connectivity > Sync Prompts sub-group (category STR_SYS_SYNC_PROMPTS) ---
   // KOReader sync-before-sleep / sync-before-reading prompts: master toggles + shared
   // reading-minutes-since-last-sync threshold.
   v.push_back(SettingInfo::Toggle(StrId::STR_SYNC_PROMPT_ON_SLEEP, &CrossPointSettings::syncPromptOnSleep,
@@ -698,7 +698,7 @@ inline void forEachSetting(const SdCardFontRegistry* registry, const DictionaryR
                                 {StrId::STR_MIN_3, StrId::STR_MIN_5, StrId::STR_MIN_10, StrId::STR_MIN_15,
                                  StrId::STR_MIN_20, StrId::STR_MIN_25, StrId::STR_MIN_30},
                                 "syncPromptMinutesIdx", StrId::STR_SYS_SYNC_PROMPTS));
-  // --- System > Library & Storage sub-group (category STR_SYS_LIBRARY; + Clear Cache action) ---
+  // --- Library & Storage section (category STR_SYS_LIBRARY; + Clear Cache action) ---
   v.push_back(SettingInfo::Toggle(StrId::STR_SHOW_HIDDEN_FILES, &CrossPointSettings::showHiddenFiles, "showHiddenFiles",
                                   StrId::STR_SYS_LIBRARY));
   v.push_back(SettingInfo::Toggle(StrId::STR_REMOVE_READ_FROM_RECENTS, &CrossPointSettings::removeReadBooksFromRecents,

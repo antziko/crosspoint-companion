@@ -47,220 +47,176 @@
 
 namespace fui = freeink::ui;
 
-SettingsActivity::SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const int initialCategory)
-    : UiTabListActivity("Settings", renderer, mappedInput), initialCategory(initialCategory) {}
+namespace {
+// Section a shared-list row belongs on (End = none: sub-screen categories such
+// as STR_READER_TEXT surface only inside their sub-screen).
+SettingsSection sectionFor(const SettingInfo& setting) {
+  if (setting.category == StrId::STR_CAT_DISPLAY) return SettingsSection::Display;
+  if (setting.category == StrId::STR_CAT_READER) return SettingsSection::Reader;
+  if (setting.category == StrId::STR_CAT_CONTROLS) return SettingsSection::Controls;
+  if (setting.category == StrId::STR_CAT_SYSTEM) return SettingsSection::General;
+  if (setting.category == StrId::STR_SYS_LIBRARY) return SettingsSection::Library;
+  return SettingsSection::End;
+}
+
+// Board/state filtering on top of the section; false drops the row from the
+// device UI (it stays in the shared list for the web settings API).
+bool showOnDevice(const SettingInfo& setting) {
+  if (home_button::isSetting(setting.valuePtr)) return false;
+  // Merged into the Text Settings screen.
+  if (setting.inTextSettings) return false;
+  if (BoardConfig::hasHomeKey() && setting.valuePtr == &CrossPointSettings::holdConfirmAction) return false;
+  if (setting.valuePtr == &CrossPointSettings::pwrBtnFootnoteBack &&
+      SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::FOOTNOTES) {
+    return false;
+  }
+  return true;
+}
+
+// Device-only rows added per screen, beyond the shared list.
+constexpr size_t EXTRA_ROWS_PER_SCREEN = 8;
+}  // namespace
+
+SettingsActivity::SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
+                                   const SettingsSection section)
+    : UiListActivity("Settings", renderer, mappedInput), section(section) {}
 
 SettingsActivity::SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const StrId subCategory,
                                    const StrId subTitle)
-    : UiTabListActivity("Settings", renderer, mappedInput), subCategory_(subCategory), subTitle_(subTitle) {}
+    : UiListActivity("Settings", renderer, mappedInput), subCategory_(subCategory), subTitle_(subTitle) {}
 
-void SettingsActivity::rebuildSettingsLists() {
-  displaySettings.clear();
-  readerSettings.clear();
-  controlsSettings.clear();
-  systemSettings.clear();
-
+void SettingsActivity::rebuildSettings() {
   // Pick up any fonts uploaded/deleted over the web server since the last
   // reader activity ran — otherwise the font-family picker shows stale list.
   sdFontSystem.refreshIfDirty();
   dictionaryRegistry.refreshIfDirty();
 
-  // Sub-screen mode: build a single flat list of every setting tagged subCategory_.
-  // Reuses readerSettings as the backing vector (currentSettings points at it).
-  if (isSubScreen()) {
-    for (auto& setting : getSettingsList(&sdFontSystem.registry(), &dictionaryRegistry)) {
-      if (setting.category == subCategory_) {
-        // LOCAL(feat-dictionary): settings consolidated into the Text Settings screen (#2605) are
-        // hidden from their sub-screen too (e.g. STR_READER_TEXT), staying only in the web list.
-        if (setting.inTextSettings) continue;
-        readerSettings.push_back(setting);
-      }
+  auto all = getSettingsList(&sdFontSystem.registry(), &dictionaryRegistry);
+  const auto belongs = [this](const SettingInfo& setting) {
+    if (isSubScreen()) return setting.category == subCategory_ && !setting.inTextSettings;
+    return sectionFor(setting) == section && showOnDevice(setting);
+  };
+  settings.clear();
+  settings.reserve(std::count_if(all.begin(), all.end(), belongs) + EXTRA_ROWS_PER_SCREEN);
+  const auto addAction = [this](StrId name, SettingAction action) {
+    settings.push_back(SettingInfo::Action(name, action));
+  };
+  const auto addShared = [this, &all, &belongs] {
+    for (auto& setting : all) {
+      if (belongs(setting)) settings.push_back(std::move(setting));
     }
-    // Device-only ACTION rows aren't in the shared (web) list, so append them per sub-group here,
-    // mirroring how the top-level screen appends its actions below.
+  };
+
+  if (isSubScreen()) {
+    addShared();
+    // Device-only ACTION rows aren't in the shared (web) list, so append them per sub-group here.
     if (subCategory_ == StrId::STR_READER_DICTIONARY) {
       // Marker-by-dwell options inline here (rather than a further nested sub-screen). These are
       // device-only — CrossPointSettings::toJson/fromJson persists them via explicit fields, not a SettingInfo key — so
       // they carry no key and are edited in place via their member pointers.
-      readerSettings.push_back(
+      settings.push_back(
           SettingInfo::Toggle(StrId::STR_DICT_MARKER_DWELL, &CrossPointSettings::dictMarkerDwellEnabled));
-      readerSettings.push_back(
+      settings.push_back(
           SettingInfo::Toggle(StrId::STR_DICT_INLINE_GLOSS, &CrossPointSettings::dictInlineGlossEnabled));
-      readerSettings.push_back(
-          SettingInfo::Enum(StrId::STR_DICT_MARKER_T1, &CrossPointSettings::dictMarkerT1Idx,
-                            {StrId::STR_SEC_3, StrId::STR_SEC_5, StrId::STR_SEC_8, StrId::STR_SEC_10}));
-      readerSettings.push_back(
-          SettingInfo::Enum(StrId::STR_DICT_MARKER_T2, &CrossPointSettings::dictMarkerT2Idx,
-                            {StrId::STR_SEC_7, StrId::STR_SEC_9, StrId::STR_SEC_12, StrId::STR_SEC_15}));
+      settings.push_back(SettingInfo::Enum(StrId::STR_DICT_MARKER_T1, &CrossPointSettings::dictMarkerT1Idx,
+                                           {StrId::STR_SEC_3, StrId::STR_SEC_5, StrId::STR_SEC_8, StrId::STR_SEC_10}));
+      settings.push_back(SettingInfo::Enum(StrId::STR_DICT_MARKER_T2, &CrossPointSettings::dictMarkerT2Idx,
+                                           {StrId::STR_SEC_7, StrId::STR_SEC_9, StrId::STR_SEC_12, StrId::STR_SEC_15}));
       // Notes are scoped to the dictionary, so they are reachable with no book open. The reader
       // menu has the same row for the book's active dictionary.
-      readerSettings.push_back(SettingInfo::Action(StrId::STR_DICT_NOTES, SettingAction::DictNotes));
-    } else if (subCategory_ == StrId::STR_SYS_LIBRARY) {
-      readerSettings.push_back(SettingInfo::Action(StrId::STR_CLEAR_READING_CACHE, SettingAction::ClearCache));
-      readerSettings.push_back(SettingInfo::Action(StrId::STR_REMOVE_ORPHANED_CACHES, SettingAction::PruneCache));
-      readerSettings.push_back(SettingInfo::Action(StrId::STR_REPAGINATE_BOOKS, SettingAction::RepaginateCache));
-      readerSettings.push_back(SettingInfo::Action(StrId::STR_REBUILD_COVERS, SettingAction::RebuildCovers));
-    } else if (subCategory_ == StrId::STR_SYS_MAINTENANCE) {
-      readerSettings.push_back(SettingInfo::Action(StrId::STR_CHECK_UPDATES, SettingAction::CheckForUpdates));
-      readerSettings.push_back(SettingInfo::Action(StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate));
-      readerSettings.push_back(SettingInfo::Action(StrId::STR_PLUGINS, SettingAction::Plugins));
-      readerSettings.push_back(SettingInfo::Action(StrId::STR_LANGUAGE, SettingAction::Language));
-      readerSettings.push_back(SettingInfo::Action(StrId::STR_KEYBOARD_LAYOUTS, SettingAction::KeyboardLayouts));
-      readerSettings.push_back(SettingInfo::Action(StrId::STR_BATTERY, SettingAction::Battery));
-      readerSettings.push_back(SettingInfo::Action(StrId::STR_ABOUT, SettingAction::About));
+      addAction(StrId::STR_DICT_NOTES, SettingAction::DictNotes);
     }
-    currentSettings = &readerSettings;
-    settingsCount = static_cast<int>(currentSettings->size());
-    // A sub-screen never calls selectCategory(), so this is the only place its
-    // rows get built. buildScreen() indexes rowValues_/rowItems_ by row without
-    // a bounds check, so skipping this would write past two empty vectors.
     rebuildRowItems();
     return;
   }
 
-  // Top-level screen: bucket the four device categories. Settings tagged with a Reader sub-group
-  // category (STR_READER_TEXT / _DICTIONARY / _TRACKING) match none of these and are intentionally
-  // dropped here — they surface only inside their sub-screen, reached via the SubScreen rows below.
-  for (auto& setting : getSettingsList(&sdFontSystem.registry(), &dictionaryRegistry)) {
-    if (home_button::isSetting(setting.valuePtr)) continue;
-    if (setting.category == StrId::STR_CAT_DISPLAY) {
-      // The sunlight fading fix is shown on every board, the X4 Pro included. It used to be
-      // dropped here as "a grayscale-waveform compensation with no custom grayscale LUT on this
-      // board", but that is not what the flag does: it is the `turnOffScreen` argument threaded
-      // through displayBuffer (GfxRenderer.cpp:2122 -> FreeInkDisplay.cpp:602), and the X4 Pro's
-      // actual controller honours it on the plain B/W path -- Uc8279X4Driver latches it as
-      // _pendingTurnOff and issues POWER_OFF once the refresh completes (Uc8279X4Driver.cpp:491,
-      // 510). With it off the panel's DC-DC stays energised between refreshes for a whole reading
-      // session, which is the bias this setting exists to remove.
-      displaySettings.push_back(setting);
-    } else if (setting.category == StrId::STR_CAT_READER) {
-      // Settings merged into "Text Settings"
-      // (they stay in the shared list for the web settings API)
-      if (setting.inTextSettings) continue;
-      readerSettings.push_back(setting);
-    } else if (setting.category == StrId::STR_CAT_CONTROLS) {
-      if (BoardConfig::hasHomeKey() && setting.valuePtr == &CrossPointSettings::holdConfirmAction) continue;
-      if (setting.valuePtr == &CrossPointSettings::pwrBtnFootnoteBack &&
-          SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::FOOTNOTES) {
-        continue;
+  switch (section) {
+    case SettingsSection::General:
+      // Language leads so a user stuck in an unfamiliar language finds it first.
+      addAction(StrId::STR_LANGUAGE, SettingAction::Language);
+      addAction(StrId::STR_KEYBOARD_LAYOUTS, SettingAction::KeyboardLayouts);
+      addShared();
+      // Clock configuration (timezone, DST, format, manual sync). Shown wherever the device CAN
+      // have a clock: a board with an RTC, or one that gets time from NTP over WiFi. Upstream
+      // gates on halClock.isAvailable(), which is false on an RTC-less board until the first
+      // sync — and this screen is where that sync is started, so that gate would hide itself.
+      if (halClock.isAvailable() || !halClock.hasHardwareRtc()) {
+        addAction(StrId::STR_CLOCK, SettingAction::ClockSettings);
       }
-      controlsSettings.push_back(setting);
-    } else if (setting.category == StrId::STR_CAT_SYSTEM) {
-      systemSettings.push_back(setting);
-    }
-  }
-
-  // Append device-only ACTION items. The remap rows are skipped on a board with no
-  // front buttons (X4 Pro): ButtonRemapActivity captures raw front presses to assign
-  // the four roles, so there it can never get past its first step.
-  if (mappedInput.hasFrontButtons()) {
-    controlsSettings.insert(controlsSettings.begin(),
-                            SettingInfo::Action(StrId::STR_REMAP_FRONT_BUTTONS, SettingAction::RemapFrontButtons));
-    controlsSettings.insert(controlsSettings.begin() + 1,
-                            SettingInfo::Action(StrId::STR_REMAP_FRONT_BUTTONS_CW, SettingAction::RemapFrontButtonsCW));
-  }
-  if (BoardConfig::hasHomeKey()) {
-    controlsSettings.insert(controlsSettings.begin(),
-                            SettingInfo::Action(StrId::STR_HOME_BUTTON, SettingAction::HomeButton));
-  }
-  // System top level: keep the frequently-used Wi-Fi / Time to Sleep / KOReader Sync flat (Time to
-  // Sleep arrives from the category loop as the first systemSettings entry); the rest of the System
-  // items live one level down. OPDS / Clear Cache / Updates / SD Firmware / Language are appended
-  // inside their sub-screen branch above.
-  systemSettings.insert(systemSettings.begin(), SettingInfo::Action(StrId::STR_WIFI_NETWORKS, SettingAction::Network));
-  // Clock configuration (timezone, DST, format, manual sync). Shown wherever the device CAN
-  // have a clock: a board with an RTC, or one that gets time from NTP over WiFi. Upstream
-  // gates on halClock.isAvailable(), which is false on an RTC-less board until the first
-  // sync — and this screen is where that sync is started, so that gate would hide itself.
-  if (halClock.isAvailable() || !halClock.hasHardwareRtc()) {
-    systemSettings.push_back(SettingInfo::Action(StrId::STR_CLOCK, SettingAction::ClockSettings));
-  }
-  systemSettings.push_back(SettingInfo::Action(StrId::STR_KOREADER_SYNC, SettingAction::KOReaderSync));
-  systemSettings.push_back(SettingInfo::Action(StrId::STR_OPDS_SERVERS, SettingAction::OPDSBrowser));
-  systemSettings.push_back(SettingInfo::SubScreen(StrId::STR_SYS_SYNC_PROMPTS, StrId::STR_SYS_SYNC_PROMPTS));
-  systemSettings.push_back(SettingInfo::SubScreen(StrId::STR_SYS_LIBRARY, StrId::STR_SYS_LIBRARY));
-  systemSettings.push_back(SettingInfo::SubScreen(StrId::STR_SYS_MAINTENANCE, StrId::STR_SYS_MAINTENANCE));
-  // LOCAL(feat-dictionary): #2605 — "Text Settings" opens the unified font/size/layout/style
-  // screen; the font-family flat row is now hidden (inTextSettings), so this is the top Reader entry.
-  readerSettings.insert(readerSettings.begin(),
-                        SettingInfo::Action(StrId::STR_TEXT_SETTINGS, SettingAction::TextSettings));
-  readerSettings.insert(readerSettings.begin() + 1,
-                        SettingInfo::Action(StrId::STR_MANAGE_FONTS, SettingAction::DownloadFonts));
-  // Reader sub-screens: advanced text/rendering, dictionary, and reading-tracking settings live one
-  // level down to keep the top-level Reader list short. Each opens a category-scoped SettingsActivity.
-  readerSettings.push_back(SettingInfo::SubScreen(StrId::STR_READER_TEXT, StrId::STR_READER_TEXT));
-  readerSettings.push_back(SettingInfo::SubScreen(StrId::STR_READER_DICTIONARY, StrId::STR_READER_DICTIONARY));
-  readerSettings.push_back(SettingInfo::SubScreen(StrId::STR_READER_TRACKING, StrId::STR_READER_TRACKING));
-  readerSettings.push_back(SettingInfo::Action(StrId::STR_CUSTOMISE_STATUS_BAR, SettingAction::CustomiseStatusBar));
-  displaySettings.push_back(SettingInfo::Action(StrId::STR_CUSTOMISE_TOP_BAR, SettingAction::CustomiseTopBar));
-  // Display sub-screens: sleep-screen/wallpaper and e-ink refresh tuning live one level down; the
-  // appearance basics (theme, orientation, battery, top bar) stay flat at the Display top level.
-  displaySettings.push_back(SettingInfo::SubScreen(StrId::STR_DISP_SLEEP, StrId::STR_DISP_SLEEP));
-  displaySettings.push_back(SettingInfo::SubScreen(StrId::STR_DISP_EINK, StrId::STR_DISP_EINK));
-
-  // Update currentSettings pointer and count for the active category
-  switch (selectedCategoryIndex) {
-    case 0:
-      currentSettings = &displaySettings;
+      addAction(StrId::STR_BATTERY, SettingAction::Battery);
+      // OTA fetches this board's own release asset (see OtaUpdater); boards whose
+      // asset isn't published yet just report no update available.
+      addAction(StrId::STR_CHECK_UPDATES, SettingAction::CheckForUpdates);
+      addAction(StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate);
+      addAction(StrId::STR_ABOUT, SettingAction::About);
       break;
-    case 1:
-      currentSettings = &readerSettings;
+    case SettingsSection::Display:
+      addShared();
+      addAction(StrId::STR_CUSTOMISE_TOP_BAR, SettingAction::CustomiseTopBar);
+      // Sleep-screen/wallpaper and e-ink refresh tuning live one level down; the appearance
+      // basics (theme, orientation, battery, top bar) stay flat here.
+      settings.push_back(SettingInfo::SubScreen(StrId::STR_DISP_SLEEP, StrId::STR_DISP_SLEEP));
+      settings.push_back(SettingInfo::SubScreen(StrId::STR_DISP_EINK, StrId::STR_DISP_EINK));
       break;
-    case 2:
-      currentSettings = &controlsSettings;
+    case SettingsSection::Reader:
+      // LOCAL(feat-dictionary): #2605 — "Text Settings" opens the unified font/size/layout/style
+      // screen; the font-family flat row is hidden (inTextSettings), so this is the top entry.
+      addAction(StrId::STR_TEXT_SETTINGS, SettingAction::TextSettings);
+      addAction(StrId::STR_MANAGE_FONTS, SettingAction::DownloadFonts);
+      addShared();
+      // Advanced text/rendering, dictionary, and reading-tracking settings live one level down
+      // to keep this list short. Each opens a category-scoped SettingsActivity.
+      settings.push_back(SettingInfo::SubScreen(StrId::STR_READER_TEXT, StrId::STR_READER_TEXT));
+      settings.push_back(SettingInfo::SubScreen(StrId::STR_READER_DICTIONARY, StrId::STR_READER_DICTIONARY));
+      settings.push_back(SettingInfo::SubScreen(StrId::STR_READER_TRACKING, StrId::STR_READER_TRACKING));
+      addAction(StrId::STR_CUSTOMISE_STATUS_BAR, SettingAction::CustomiseStatusBar);
       break;
-    case 3:
-      currentSettings = &systemSettings;
+    case SettingsSection::Controls:
+      if (BoardConfig::hasHomeKey()) addAction(StrId::STR_HOME_BUTTON, SettingAction::HomeButton);
+      // Skipped on a board with no front buttons (X4 Pro): ButtonRemapActivity captures raw
+      // front presses to assign the four roles, so there it can never get past its first step.
+      if (mappedInput.hasFrontButtons()) {
+        addAction(StrId::STR_REMAP_FRONT_BUTTONS, SettingAction::RemapFrontButtons);
+        addAction(StrId::STR_REMAP_FRONT_BUTTONS_CW, SettingAction::RemapFrontButtonsCW);
+      }
+      addShared();
+      break;
+    case SettingsSection::Library:
+      addShared();
+      addAction(StrId::STR_CLEAR_READING_CACHE, SettingAction::ClearCache);
+      addAction(StrId::STR_REMOVE_ORPHANED_CACHES, SettingAction::PruneCache);
+      addAction(StrId::STR_REPAGINATE_BOOKS, SettingAction::RepaginateCache);
+      addAction(StrId::STR_REBUILD_COVERS, SettingAction::RebuildCovers);
+      break;
+    case SettingsSection::Network:
+      addAction(StrId::STR_WIFI_NETWORKS, SettingAction::Network);
+      addAction(StrId::STR_KOREADER_SYNC, SettingAction::KOReaderSync);
+      addAction(StrId::STR_OPDS_SERVERS, SettingAction::OPDSBrowser);
+      addAction(StrId::STR_PLUGINS, SettingAction::Plugins);
+      settings.push_back(SettingInfo::SubScreen(StrId::STR_SYS_SYNC_PROMPTS, StrId::STR_SYS_SYNC_PROMPTS));
+      break;
+    case SettingsSection::End:
       break;
   }
-  settingsCount = static_cast<int>(currentSettings->size());
   rebuildRowItems();
 }
 
 void SettingsActivity::onEnter() {
-  UiTabListActivity::onEnter();
+  UiListActivity::onEnter();
 
-  // LOCAL(feat): open on the requested category (default 0 = Display), not
-  // always the first. Ring position comes from the base's per-tab nav reset:
-  // 0 (the tab bar) in tab mode, but a sub-screen has no tab bar, so its ring
-  // starts on the first row.
-  selectedCategoryIndex = isSubScreen() ? 0 : initialCategory;
-  if (isSubScreen()) activeNav().selected = 1;
   preserveQuickResumeTimeoutOn =
       SETTINGS.quickResumeSleepScreen == CrossPointSettings::QUICK_RESUME_SLEEP_SCREEN::QUICK_RESUME_AFTER_TIMEOUT;
   quickResumeTimeoutAutoEnabled = false;
   syncQuickResumeTimeoutForSleepScreen(/*sleepScreenChanged=*/true, /*quickResumeTimeoutChanged=*/false);
 
-  rebuildSettingsLists();
+  rebuildSettings();
 }
 
-void SettingsActivity::selectCategory(const int categoryIndex) {
-  selectedCategoryIndex = categoryIndex;
-  switch (selectedCategoryIndex) {
-    case 0:
-      currentSettings = &displaySettings;
-      break;
-    case 1:
-      currentSettings = &readerSettings;
-      break;
-    case 2:
-      currentSettings = &controlsSettings;
-      break;
-    case 3:
-      currentSettings = &systemSettings;
-      break;
-  }
-  settingsCount = static_cast<int>(currentSettings->size());
-  activeNav().top = 0;  // category switches start the list at the top (no per-tab memory here)
-  rebuildRowItems();
-}
-
-// Rebuilds rowValues_/rowItems_ (label + actionValue) for *currentSettings.
-// Structural — call only when the active category or a category's setting
-// list changes, never from buildScreen(), which only refreshes rowValues_
-// content and rowItems_[].value pointers in place.
+// Rebuilds rowValues_/rowItems_ (label + actionValue) for settings.
+// Structural — call only when the setting list changes, never from
+// buildScreen(), which only refreshes rowValues_ content and rowItems_[].value
+// pointers in place.
 void SettingsActivity::rebuildRowItems() {
-  const auto& settings = *currentSettings;
   rowValues_.assign(settings.size(), std::string());
   rowItems_.clear();
   rowItems_.reserve(settings.size());
@@ -272,37 +228,23 @@ void SettingsActivity::rebuildRowItems() {
   }
 }
 
-void SettingsActivity::onTabAction(const int index) {
-  if (optionPopup.isActive()) return;
-  selectCategory(index);
-  activeNav().selected = 0;  // tab taps land with the tab bar focused
-  // The switched-to tab repaints as the selected pill; a flash overlay on top
-  // of it just repaints the pill in the focused style.
-  app.clearTapFlash();
+const char* SettingsActivity::headerTitle() const {
+  return isSubScreen() ? I18N.get(subTitle_) : I18N.get(SETTINGS_SECTION_TITLES[static_cast<size_t>(section)]);
 }
 
 void SettingsActivity::activateIndex(const int index) {
   if (optionPopup.isActive()) return;
-  (void)index;  // toggleCurrentSetting reads the ring position
   // Most rows repaint a different surface (popup, sub-activity, new value);
   // a lingering tap flash would gray an unrelated element.
   app.clearTapFlash();
-  toggleCurrentSetting();
-  // Tap-first: a tapped row is not a cursor position. Leaving it focused
-  // (inverted) after the tap meant the row stayed black once its sub-screen or
-  // popup closed, and Back then had to clear that focus before a second Back
-  // left Settings. Hand the focus back to the tab band; the viewport stays put.
-  // LOCAL(feat): a sub-screen has no tab bar, so ring slot 0 does not exist
-  // there and the first row (1) is the resting position instead.
-  if (mappedInput.hasTouch()) {
-    activeNav().selected = isSubScreen() ? 1 : 0;
-  }
+  nav.selected = index;
+  toggleSelectedSetting();
+  requestUpdate();
 }
 
-void SettingsActivity::onExit() {
-  Activity::onExit();
-
-  UITheme::getInstance().reload();  // Re-apply theme in case it was changed
+void SettingsActivity::onBackButton() {
+  SETTINGS.saveToFile();
+  finish();
 }
 
 void SettingsActivity::applyUiSettingChange(uint8_t CrossPointSettings::* valuePtr) {
@@ -321,72 +263,14 @@ bool SettingsActivity::handleCustomInput() {
   return optionPopup.handleInput(mappedInput, [this] { requestUpdate(); });
 }
 
-void SettingsActivity::stepTab(const int direction) {
-  // LOCAL(feat): a sub-screen shows one fixed category, so there is nothing to
-  // step to. Side-button category switching was always a top-level affordance.
-  if (isSubScreen()) return;
-  // Ring position 0 stays on the tab bar; a row selection collapses to the
-  // new category's first row (per-tab memory is deliberately not kept here).
-  const bool onTabBar = ringPos() == 0;
-  selectedCategoryIndex = direction > 0 ? ButtonNavigator::nextIndex(selectedCategoryIndex, categoryCount)
-                                        : ButtonNavigator::previousIndex(selectedCategoryIndex, categoryCount);
-  selectCategory(selectedCategoryIndex);
-  activeNav().selected = onTabBar ? 0 : 1;
-  requestUpdate();
-}
-
-// LOCAL(feat): a sub-screen has no tab bar, so its ring must stay on the rows
-// (1..listCount) instead of wrapping through position 0. Tab mode keeps the
-// base's ring walk verbatim.
-void SettingsActivity::navigateButtons() {
-  if (!isSubScreen()) {
-    UiTabListActivity::navigateButtons();
-    return;
-  }
-  const int count = listCount();
-  if (count <= 0) return;
-  buttonNavigator.onNextRelease([this, count] { moveRingTo(ButtonNavigator::nextIndex(ringPos() - 1, count) + 1); });
-  buttonNavigator.onPreviousRelease(
-      [this, count] { moveRingTo(ButtonNavigator::previousIndex(ringPos() - 1, count) + 1); });
-}
-
-bool SettingsActivity::handleButtons() {
-  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
-    if (!isSubScreen() && ringPos() == 0) {
-      stepTab(1);
-    } else {
-      toggleCurrentSetting();
-      requestUpdate();
-    }
-    return true;
-  }
-
-  if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-    if (isSubScreen()) {
-      // No tab row to fall back to — Back returns to the parent settings screen.
-      SETTINGS.saveToFile();
-      finish();
-    } else if (ringPos() > 0) {
-      activeNav().selected = 0;
-      requestUpdate();
-    } else {
-      SETTINGS.saveToFile();
-      onGoHome();
-    }
-    return true;
-  }
-
-  return false;
-}
-
-void SettingsActivity::toggleCurrentSetting() {
+void SettingsActivity::toggleSelectedSetting() {
   mappedInput.resetHomeButtonInput();
-  int selectedSetting = ringPos() - 1;
-  if (selectedSetting < 0 || selectedSetting >= settingsCount) {
+  const int selectedSetting = nav.selected;
+  if (selectedSetting < 0 || selectedSetting >= static_cast<int>(settings.size())) {
     return;
   }
 
-  const auto& setting = (*currentSettings)[selectedSetting];
+  const auto& setting = settings[selectedSetting];
   const bool sleepScreenChanged = setting.valuePtr == &CrossPointSettings::sleepScreen;
   const bool quickResumeTimeoutChanged = setting.valuePtr == &CrossPointSettings::quickResumeSleepScreen;
 
@@ -409,7 +293,7 @@ void SettingsActivity::toggleCurrentSetting() {
                          SETTINGS.*valuePtr = idx;
                          syncQuickResumeTimeoutForSleepScreen(sleepScreenChanged, quickResumeTimeoutChanged);
                          SETTINGS.saveToFile();
-                         rebuildSettingsLists();
+                         rebuildSettings();
                          applyUiSettingChange(valuePtr);
                        });
       requestUpdate();
@@ -422,7 +306,7 @@ void SettingsActivity::toggleCurrentSetting() {
     if (setting.nameId == StrId::STR_DICTIONARY) {
       // Launch the dictionary picker (rich metadata/preparation flow) instead of cycling.
       // The picker writes the selection to dictionary.bin itself; just refresh on return.
-      startActivityForResultNoThrow<DictionarySelectActivity>([this](const ActivityResult&) { rebuildSettingsLists(); },
+      startActivityForResultNoThrow<DictionarySelectActivity>([this](const ActivityResult&) { rebuildSettings(); },
                                                               renderer, mappedInput);
       return;
     }
@@ -434,7 +318,7 @@ void SettingsActivity::toggleCurrentSetting() {
               if (!result.isCancelled) {
                 SETTINGS.dictionaryFontPointSize = static_cast<uint8_t>(std::get<IntervalResult>(result.data).value);
                 SETTINGS.saveToFile();
-                rebuildSettingsLists();
+                rebuildSettings();
               }
               requestUpdate();
             },
@@ -457,7 +341,7 @@ void SettingsActivity::toggleCurrentSetting() {
         valueSetter(idx);
         syncQuickResumeTimeoutForSleepScreen(sleepScreenChanged, quickResumeTimeoutChanged);
         SETTINGS.saveToFile();
-        rebuildSettingsLists();
+        rebuildSettings();
       };
       if (!setting.enumStringValues.empty()) {
         optionPopup.show(setting.nameId, setting.enumStringValues, cur, std::move(onSelect));
@@ -496,7 +380,7 @@ void SettingsActivity::toggleCurrentSetting() {
       optionPopup.show(setting.nameId, labels, currentIndex, [this, valuePtr, minValue, step](int idx) {
         SETTINGS.*valuePtr = static_cast<uint8_t>(minValue + idx * step);
         SETTINGS.saveToFile();
-        rebuildSettingsLists();
+        rebuildSettings();
         applyUiSettingChange(valuePtr);
       });
       requestUpdate();
@@ -571,7 +455,7 @@ void SettingsActivity::toggleCurrentSetting() {
               // Unlike the onExit() teardowns this runs from the loop task with no lock
               // held, so the restart popup needs one to paint.
               RenderLock lock;
-              silentRestartToSettings(/*System=*/3);
+              silentRestartToSettings(SettingsSection::Network);
             },
             renderer, mappedInput);
         break;
@@ -600,7 +484,7 @@ void SettingsActivity::toggleCurrentSetting() {
         startActivityForResultNoThrow<FontDownloadActivity>(
             [this](const ActivityResult&) {
               SETTINGS.saveToFile();
-              rebuildSettingsLists();
+              rebuildSettings();
             },
             renderer, mappedInput);
         break;
@@ -608,18 +492,18 @@ void SettingsActivity::toggleCurrentSetting() {
         startActivityForResultNoThrow<TextSettingsActivity>(
             [this](const ActivityResult&) {
               SETTINGS.saveToFile();
-              rebuildSettingsLists();
+              rebuildSettings();
             },
             renderer, mappedInput, &sdFontSystem.registry(), TextSettingsActivity::Tab::Family);
         break;
       case SettingAction::Language:
-        // Row labels are translated once in rebuildSettingsLists() and nothing
+        // Row labels are translated once in rebuildSettings() and nothing
         // re-runs it on Pop (there is no onResume), so a language switch needs an
         // explicit rebuild here rather than the generic resultHandler.
         startActivityForResultNoThrow<LanguageSelectActivity>(
             [this](const ActivityResult&) {
               SETTINGS.saveToFile();
-              rebuildSettingsLists();
+              rebuildSettings();
             },
             renderer, mappedInput);
         break;
@@ -633,7 +517,7 @@ void SettingsActivity::toggleCurrentSetting() {
           SETTINGS.saveToFile();
           // Applies to event delivery now, not after a reboot.
           pluginevents::refreshSubscriptions();
-          rebuildSettingsLists();
+          rebuildSettings();
         });
         requestUpdate();
         return;
@@ -681,9 +565,11 @@ void SettingsActivity::toggleCurrentSetting() {
 
   syncQuickResumeTimeoutForSleepScreen(sleepScreenChanged, quickResumeTimeoutChanged);
   SETTINGS.saveToFile();
-  rebuildSettingsLists();
-  applyUiSettingChange(setting.valuePtr);
-  activeNav().selected = std::min(ringPos(), settingsCount);
+  const auto valuePtr = setting.valuePtr;  // rebuildSettings() replaces `setting`
+  rebuildSettings();
+  applyUiSettingChange(valuePtr);
+  // Rows can appear/disappear with a change (e.g. the footnote-back toggle).
+  nav.selected = std::min(selectedSetting, static_cast<int>(settings.size()) - 1);
 }
 
 void SettingsActivity::syncQuickResumeTimeoutForSleepScreen(bool sleepScreenChanged, bool quickResumeTimeoutChanged) {
@@ -797,20 +683,11 @@ void SettingsActivity::buildScreen(UiScreen& screen) {
   // Content below the header band, clear of the button hints in any orientation.
   screen.setContentMargin(safeContentInsets(renderer, metrics.topPadding + metrics.headerHeight));
 
-  // LOCAL(feat): the tab bar is a top-level affordance; a sub-screen shows one
-  // fixed category and reclaims that vertical space.
-  if (!isSubScreen()) {
-    buildTabBar(screen);
-  } else {
-    screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
-  }
+  screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
 
-  // rowItems_ (label/actionValue) was built by rebuildRowItems() when the
-  // category was last selected/rebuilt; only the live value text needs
-  // refreshing here, by assigning into the existing rowValues_ strings (no
-  // vector growth) rather than building a new items/values vector on every
-  // render.
-  const auto& settings = *currentSettings;
+  // rowItems_ (label/actionValue) was built by rebuildRowItems(); only the
+  // live value text needs refreshing here, by assigning into the existing
+  // rowValues_ strings (no vector growth).
   // Self-heal rather than index past the end: the loop below writes by row with
   // no bounds check, and a missed rebuild would corrupt the heap instead of just
   // drawing the wrong list.
@@ -831,7 +708,7 @@ void SettingsActivity::buildScreen(UiScreen& screen) {
     } else {
       rowValues_[i] = settingValueText(setting);
       rowItems_[i].value = rowValues_[i].empty() ? nullptr : rowValues_[i].c_str();
-      rowItems_[i].toggle = false;  // rowItems_ slots are reused across categories
+      rowItems_[i].toggle = false;  // a row can switch between checkbox and value text
     }
   }
 
@@ -850,42 +727,22 @@ void SettingsActivity::buildScreen(UiScreen& screen) {
   // common fits-on-one-line case takes the renderer's fast path anyway.
   props.labelText = screen.theme().smallText;
   props.labelText.maxLines = 2;
-  syncTabListViewport(screen, props);
+  syncListViewport(screen, props);
   screen.list(props);
 }
 
-void SettingsActivity::drawChrome() {
-  const auto& metrics = UITheme::getInstance().getMetrics();
-
-  // Header via GUI.drawHeader (already FreeInkUI-themed) for the battery
-  // indicator; the rest of the screen renders through the app.
-  // Version rides in the header's trailing label slot: the footer position
-  // conflicts with button hints on non-touch devices.
-  // LOCAL(feat): a sub-screen shows its group name and no version.
-  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer),
-                 isSubScreen() ? I18N.get(subTitle_) : tr(STR_SETTINGS_TITLE), isSubScreen() ? "" : CROSSPOINT_VERSION);
-}
-
 void SettingsActivity::drawFooter() {
-  // Top-level ring position 0 is the tab switcher (the hint shows the next
-  // category name); otherwise the Confirm label reflects the focused row:
-  // "Select" for pickers and actions, else "Toggle".
-  const int ring = ringPos();
-  const char* confirmLabel;
-  if (!isSubScreen() && ring == 0) {
-    confirmLabel = I18N.get(categoryNames[(selectedCategoryIndex + 1) % categoryCount]);
-  } else {
-    // LOCAL(feat): ACTION rows say "Select" too — upstream only special-cased
-    // the sleep-timeout picker, so every sub-screen and action row read
-    // "Toggle" even though Confirm opens something.
-    const int sel = ring - 1;
-    const bool selectRow = sel >= 0 && sel < settingsCount &&
-                           ((*currentSettings)[sel].nameId == StrId::STR_TIME_TO_SLEEP ||
-                            (*currentSettings)[sel].type == SettingType::ACTION);
-    confirmLabel = selectRow ? tr(STR_SELECT) : tr(STR_TOGGLE);
-  }
-
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  // The Confirm label reflects the focused row: "Select" for pickers and
+  // actions, else "Toggle".
+  // LOCAL(feat): ACTION rows say "Select" too — upstream only special-cased
+  // the sleep-timeout picker, so every sub-screen and action row read
+  // "Toggle" even though Confirm opens something.
+  const int sel = nav.selected;
+  const bool selectRow =
+      sel >= 0 && sel < static_cast<int>(settings.size()) &&
+      (settings[sel].nameId == StrId::STR_TIME_TO_SLEEP || settings[sel].type == SettingType::ACTION);
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), selectRow ? tr(STR_SELECT) : tr(STR_TOGGLE), tr(STR_DIR_UP),
+                                            tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
 

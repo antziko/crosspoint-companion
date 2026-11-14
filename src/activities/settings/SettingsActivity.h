@@ -7,7 +7,8 @@
 #include <vector>
 
 #include "CrossPointSettings.h"
-#include "activities/UiTabListActivity.h"
+#include "SettingsSection.h"
+#include "activities/UiListActivity.h"
 #include "components/OptionPopup.h"
 
 enum class SettingType { TOGGLE, ENUM, ACTION, VALUE, STRING };
@@ -196,81 +197,54 @@ struct SettingInfo {
   }
 };
 
-class SettingsActivity final : public UiTabListActivity {
-  int initialCategory = 0;        // Category to open on first onEnter()
-  int selectedCategoryIndex = 0;  // Currently selected category
-  int settingsCount = 0;
+// The rows of one SettingsSection, or of one sub-screen category; activating a
+// row toggles/cycles it, opens its option popup, or launches its sub-screen.
+class SettingsActivity final : public UiListActivity {
+  // End on a sub-screen (subCategory_ set instead).
+  const SettingsSection section = SettingsSection::End;
 
-  // Sub-screen mode: when subCategory_ != STR_NONE_OPT this instance renders a single flat list
-  // of every setting tagged with that category (no tab bar, no category switching, Back pops).
-  // subTitle_ is the header/label. Default (STR_NONE_OPT) is the normal 4-tab top-level screen.
+  // Sub-screen mode: when subCategory_ != STR_NONE_OPT this instance lists every setting tagged
+  // with that category. subTitle_ is the header/label.
   StrId subCategory_ = StrId::STR_NONE_OPT;
   StrId subTitle_ = StrId::STR_NONE_OPT;
   bool isSubScreen() const { return subCategory_ != StrId::STR_NONE_OPT; }
 
-  // Per-category settings derived from shared list + device-only actions
-  std::vector<SettingInfo> displaySettings;
-  std::vector<SettingInfo> readerSettings;
-  std::vector<SettingInfo> controlsSettings;
-  std::vector<SettingInfo> systemSettings;
-  const std::vector<SettingInfo>* currentSettings = nullptr;
+  // Shared list rows for this screen plus its device-only actions.
+  std::vector<SettingInfo> settings;
 
   bool preserveQuickResumeTimeoutOn = false;
   bool quickResumeTimeoutAutoEnabled = false;
 
   OptionPopup optionPopup;
 
-  // Row structure (label/actionValue) for *currentSettings, rebuilt only when
-  // the active category or a category's setting list changes
-  // (rebuildRowItems(), called from selectCategory()/rebuildSettingsLists())
-  // — not on every repaint. rowValues_ holds the live per-row value text,
-  // refreshed every buildScreen() call by assigning into the existing
-  // strings (no vector growth).
+  // Row structure (label/actionValue), rebuilt only when the setting list
+  // changes; rowValues_ holds the live value text, refreshed every
+  // buildScreen() by assigning into the existing strings (no vector growth).
   std::vector<std::string> rowValues_;
   std::vector<freeink::ui::ListItem> rowItems_;
+
+  void rebuildSettings();
   void rebuildRowItems();
-
-  static constexpr int categoryCount = 4;
-  static constexpr StrId categoryNames[categoryCount] = {StrId::STR_CAT_DISPLAY, StrId::STR_CAT_READER,
-                                                         StrId::STR_CAT_CONTROLS, StrId::STR_CAT_SYSTEM};
-
-  // --- UiTabListActivity contract ---
-  int listCount() const override { return settingsCount; }
-  // LOCAL(feat): a sub-screen has no tab bar, but the base sizes tabNavs from
-  // tabCount() and ringPos() returns a hardcoded 0 when that vector is empty.
-  // Reporting one dummy tab keeps the ring model intact; buildScreen() simply
-  // never calls buildTabBar(), and navigateButtons() keeps the ring off 0.
-  int tabCount() const override { return isSubScreen() ? 1 : categoryCount; }
-  int activeTab() const override { return isSubScreen() ? 0 : selectedCategoryIndex; }
-  const char* tabLabel(int index) const override { return I18N.get(categoryNames[index]); }
-  void buildScreen(UiScreen& screen) override;
-  void activateIndex(int index) override;
-  void onTabAction(int index) override;
-  void stepTab(int direction) override;
-  void navigateButtons() override;
-  bool handleButtons() override;
-  bool handleCustomInput() override;
-
+  void toggleSelectedSetting();
+  void openSleepTimeoutPicker();
+  void applyUiSettingChange(uint8_t CrossPointSettings::* valuePtr);
+  void syncQuickResumeTimeoutForSleepScreen(bool sleepScreenChanged, bool quickResumeTimeoutChanged);
   static std::string settingValueText(const SettingInfo& setting);
   // Format one candidate value of a VALUE setting (the row's own text, and each popup row).
   static std::string settingValueOptionText(const SettingInfo& setting, uint8_t value);
-  void selectCategory(int categoryIndex);
-  void applyUiSettingChange(uint8_t CrossPointSettings::* valuePtr);
 
-  void enterCategory(int categoryIndex);
-  void toggleCurrentSetting();
-  void openSleepTimeoutPicker();
-  void rebuildSettingsLists();
-  void syncQuickResumeTimeoutForSleepScreen(bool sleepScreenChanged, bool quickResumeTimeoutChanged);
-
-  void drawChrome() override;
+  int listCount() const override { return static_cast<int>(settings.size()); }
+  void buildScreen(UiScreen& screen) override;
+  void activateIndex(int index) override;
+  bool handleCustomInput() override;
+  void onBackButton() override;
+  const char* headerTitle() const override;
   void drawFooter() override;
 
  public:
-  explicit SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, int initialCategory = 0);
+  SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, SettingsSection section);
   // Sub-screen constructor: render only the settings tagged `subCategory`, titled `subTitle`.
   SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, StrId subCategory, StrId subTitle);
   void onEnter() override;
-  void onExit() override;
   void render(RenderLock&& lock) override;
 };

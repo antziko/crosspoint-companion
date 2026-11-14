@@ -15,7 +15,7 @@ and the firmware carries no vendor names, URLs, or file-format knowledge.
 ```
 
 **Discovery and the on-device list.** The plugin subsystem is controlled by
-**Settings → System → Maintenance → Plugins**. When enabled, **Plugins** is
+**Settings → Connectivity → Plugins**. When enabled, **Plugins** is
 shown on the Home screen even when no plugins are installed. Every plugin folder
 (anything holding a `manifest.json`, `plugin.js`, or `device.json`) appears under
 **Home → Plugins**, showing its `title` and one-line `description`. Selecting a
@@ -70,7 +70,7 @@ discover, and update plugins** entry. Selecting it offers:
   sideloaded plugins continue to work normally.
 - **Cancel** — leave the entry visible and make no changes.
 
-The **Hide** preference persists across reboots. Setting **Settings → System →
+The **Hide** preference persists across reboots. Setting **Settings → Connectivity →
 Plugins** to **Enabled** clears it, which brings the installer entry back.
 
 For users who prefer manual installation, Plugin Hub can be downloaded directly
@@ -497,7 +497,7 @@ JSON catalogs may also map `description`, `detail_author`, and `repository` for 
 ### Testing a new manifest
 
 1. Copy the plugin folder to `/.crosspoint/plugins/<name>/` on the SD card.
-2. Enable **Settings → System → Maintenance → Plugins**, then open **Home → Plugins → your title**. With no token and no `auth`
+2. Enable **Settings → Connectivity → Plugins**, then open **Home → Plugins → your title**. With no token and no `auth`
    block you should see the not-signed-in screen; with `auth`, the code/QR
    screen.
 3. Watch serial (`[PCAT]` tag) for request/parse failures — the log includes

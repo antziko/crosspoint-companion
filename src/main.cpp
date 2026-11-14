@@ -154,7 +154,7 @@ EpdFontFamily ui12FontFamily(12, &ui12MediumFont, &ui12BoldFont);
 // Definitions for SilentRestart.h. RTC_NOINIT survives ESP.restart() but not power loss.
 RTC_NOINIT_ATTR uint32_t silentRebootMagic;
 RTC_NOINIT_ATTR uint32_t silentRebootTarget;
-RTC_NOINIT_ATTR uint32_t silentRebootSettingsCategory;  // category index for SETTINGS target
+RTC_NOINIT_ATTR uint32_t silentRebootSettingsCategory;  // SettingsSection for SETTINGS target
 RTC_NOINIT_ATTR uint32_t silentRebootHomeItem;          // HomeMenuItem for HOME target
 // LIVE frontlight state carried across the reboot. SETTINGS.frontlightOn is the saved
 // PREFERENCE and legitimately diverges from the live state — a wake with Restore Light on
@@ -171,7 +171,7 @@ RTC_DATA_ATTR uint32_t sleepFrameEpochS;
 constexpr uint32_t SILENT_REBOOT_MAGIC = 0xC1EAB007;
 constexpr uint32_t SILENT_REBOOT_TARGET_HOME = 0;
 constexpr uint32_t SILENT_REBOOT_TARGET_READER = 1;
-constexpr uint32_t SILENT_REBOOT_TARGET_SETTINGS = 2;      // settings list (category in silentRebootSettingsCategory)
+constexpr uint32_t SILENT_REBOOT_TARGET_SETTINGS = 2;      // settings (section in silentRebootSettingsCategory)
 constexpr uint32_t SILENT_REBOOT_TARGET_JOIN_NETWORK = 3;  // File Transfer > Join Network
 constexpr uint32_t SILENT_REBOOT_TARGET_TRANSLATE = 4;     // page translation (text stashed on SD)
 constexpr uint32_t SILENT_REBOOT_TARGET_MAX = SILENT_REBOOT_TARGET_TRANSLATE;
@@ -257,11 +257,11 @@ void restartToHomeAfterStorageHandoff() {
   ESP.restart();
 }
 
-void silentRestartToSettings(int category) {
+void silentRestartToSettings(const SettingsSection section) {
   if (deepSleepInProgress) return;  // sleeping supersedes the heap-defrag reboot
   armSilentReboot(SILENT_REBOOT_TARGET_SETTINGS);
-  silentRebootSettingsCategory = static_cast<uint32_t>(category);
-  LOG_DBG("MAIN", "Silent restart (target=settings,cat=%d)", category);
+  silentRebootSettingsCategory = static_cast<uint32_t>(section);
+  LOG_DBG("MAIN", "Silent restart (target=settings,section=%d)", static_cast<int>(section));
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
   halClock.persistTimeAcrossReboot();  // X4: carry NTP-synced time across the soft reset
   delay(50);
@@ -625,10 +625,10 @@ void setup() {
   const bool isSilentReboot = (silentRebootMagic == SILENT_REBOOT_MAGIC);
   const uint32_t snapshotTarget =
       (isSilentReboot && silentRebootTarget <= SILENT_REBOOT_TARGET_MAX) ? silentRebootTarget : 0;
-  // Clamp category to valid range (0-3); RTC_NOINIT can hold garbage on cold boot.
-  static constexpr uint32_t SETTINGS_CATEGORY_COUNT = 4;
-  const uint32_t snapshotSettingsCategory =
-      (isSilentReboot && silentRebootSettingsCategory < SETTINGS_CATEGORY_COUNT) ? silentRebootSettingsCategory : 0;
+  // Clamp to a real section; RTC_NOINIT can hold garbage on cold boot (End = the section list).
+  const auto snapshotSettingsSection = (isSilentReboot && silentRebootSettingsCategory < SETTINGS_SECTION_COUNT)
+                                           ? static_cast<SettingsSection>(silentRebootSettingsCategory)
+                                           : SettingsSection::End;
   const auto snapshotHomeItem = (isSilentReboot && snapshotTarget == SILENT_REBOOT_TARGET_HOME &&
                                  silentRebootHomeItem <= static_cast<uint32_t>(HomeMenuItem::SETTINGS_MENU))
                                     ? static_cast<HomeMenuItem>(silentRebootHomeItem)
@@ -980,8 +980,8 @@ void setup() {
     // resume that flow directly instead of landing on home.
     activityManager.goToJoinNetwork();
   } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_SETTINGS) {
-    // Return to the settings category the user was in before the WiFi reboot.
-    activityManager.goToSettings(static_cast<int>(snapshotSettingsCategory));
+    // Return to the settings section the user was in before the WiFi reboot.
+    activityManager.goToSettings(snapshotSettingsSection);
   } else if (resume == BootResume::Silent) {
     // target == home (or reader with no open book): land on home — don't fall
     // through to the sleep-wake "resume reader" logic, which fires on stale

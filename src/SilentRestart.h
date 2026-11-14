@@ -15,8 +15,8 @@
 
 // home screen, with the selector on homeItem
 void silentRestart(HomeMenuItem homeItem = HomeMenuItem::NONE);
-void silentRestartToReader();                // currently-open EPUB (APP_STATE.openEpubPath)
-void silentRestartToSettings(int category);  // settings list at the given category index (0-3)
+void silentRestartToReader();                           // currently-open EPUB (APP_STATE.openEpubPath)
+void silentRestartToSettings(SettingsSection section);  // settings, reopened on that section
 // Reboot into the File Transfer > Join Network flow on a pristine heap, so the
 // WiFi + TLS working set has the contiguous RAM it needs on tight boards. A
 // no-op on touch boards; the caller then proceeds without a reboot.

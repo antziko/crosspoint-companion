@@ -128,7 +128,7 @@ registry refreshes.
 ### Plugins
 
 The Plugins page shows the web settings cards of installed SD-card plugins.
-Its navigation link appears only while **Settings > System > Maintenance > Plugins**
+Its navigation link appears only while **Settings > Connectivity > Plugins**
 is enabled on the device. See [SD-card plugins](./sd-plugins.md).
 
 ## Command Line Use

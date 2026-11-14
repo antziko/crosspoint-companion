@@ -139,7 +139,7 @@ void FontDownloadActivity::onExit() {
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(false);
     delay(30);
-    silentRestartToSettings(/*Reader=*/1);
+    silentRestartToSettings(SettingsSection::Reader);
   }
 }
 
