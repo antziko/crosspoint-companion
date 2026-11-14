@@ -175,9 +175,9 @@ class Dictionary {
   // Returns true if a dictionary is configured and all required files exist.
   static bool exists(const char* cachePath = nullptr);
 
-  // Returns true if a .syn file exists for the active dictionary.
+  // Returns true if a .syn file exists for the dictionary at basePath.
   // Gates all alternate-form UI — checked at runtime against the physical file.
-  static bool hasAltForms(const char* cachePath = nullptr);
+  static bool hasAltFormsAt(const char* basePath);
 
   // Validates the dictionary path stored in /.crosspoint/dictionary.bin against the SD card.
   // If the path is missing or the required files are gone, clears the file. Returns true if valid.
@@ -284,7 +284,9 @@ class Dictionary {
   // from .idx the form points at, in .syn order and without repeats, at most `max` of them
   // (capped at DictLocation::MAX_EXTRA + 1). Empty when the form is not listed.
   // Uses the dictionary `ctx` is open on, so the caller can locateIn() the results on it.
-  static void resolveAltForms(LookupCtx& ctx, const std::string& word, std::vector<std::string>& out, size_t max);
+  // cbs.shouldCancel stops it early with a partial (possibly empty) result.
+  static void resolveAltForms(LookupCtx& ctx, const std::string& word, std::vector<std::string>& out, size_t max,
+                              const DictLookupCallbacks& cbs = {});
 
   static std::string cleanWord(const std::string& word);
   static std::vector<std::string> getStemVariants(const std::string& word);
@@ -376,7 +378,7 @@ class Dictionary {
   static bool buildPath(char* buf, size_t bufSize, const char* base, const char* suffix);
 
   // The headword at 0-based `ordinal` in the ctx's .idx, seeking via its page index.
-  static std::string wordAtOrdinalIn(LookupCtx& ctx, uint32_t ordinal);
+  static std::string wordAtOrdinalIn(LookupCtx& ctx, uint32_t ordinal, const DictLookupCallbacks& cbs);
 
   // Binary search .oft to find the page boundary bytes in src containing target.
   // On return, *startByte and *endByte delimit the 32-word page to scan linearly.

@@ -201,10 +201,10 @@ bool Dictionary::exists(const char* cachePath) {
   return Storage.exists(dp.dict().c_str());
 }
 
-bool Dictionary::hasAltForms(const char* cachePath) {
-  std::string folderPath = activeDictPath(cachePath);
-  if (folderPath.empty()) return false;
-  return Storage.exists(DictPaths(folderPath).syn().c_str());
+bool Dictionary::hasAltFormsAt(const char* basePath) {
+  char path[160];
+  return basePath != nullptr && basePath[0] != '\0' && buildPath(path, sizeof(path), basePath, ".syn") &&
+         Storage.exists(path);
 }
 
 bool Dictionary::isValidDictionary() {
@@ -501,11 +501,22 @@ static int cistrcmp(const char* a, const char* b) {
   return std::tolower(static_cast<unsigned char>(*a)) - std::tolower(static_cast<unsigned char>(*b));
 }
 
+struct CsptHeader {
+  uint8_t prefixLen;
+  uint16_t stride;  // .idx entries between samples
+  uint32_t entryCount;
+};
+
 // Reads the 12-byte .cspt header from the start of the file; false when short or not v1 "CSPT".
-static bool readCsptHeader(HalFile& cspt, uint8_t (&hdr)[CSPT_HEADER_SIZE]) {
+static bool readCsptHeader(HalFile& cspt, CsptHeader* out) {
+  uint8_t hdr[CSPT_HEADER_SIZE];
   cspt.seekSet(0);
   if (cspt.read(hdr, CSPT_HEADER_SIZE) != static_cast<int>(CSPT_HEADER_SIZE)) return false;
-  return memcmp(hdr, CSPT_MAGIC, 4) == 0 && hdr[4] == CSPT_VERSION;
+  if (memcmp(hdr, CSPT_MAGIC, 4) != 0 || hdr[4] != CSPT_VERSION) return false;
+  out->prefixLen = hdr[5];
+  memcpy(&out->stride, hdr + 6, 2);      // LE
+  memcpy(&out->entryCount, hdr + 8, 4);  // LE
+  return true;
 }
 
 // CLEANUP: on Auto-only commit, delete only this line (readCsptEntryCount below stays)
@@ -514,23 +525,16 @@ uint32_t Dictionary::readCsptEntryCount(const char* cachePath) {
   if (folderPath.empty()) return 0;
   HalFile cspt;
   if (!Storage.openFileForRead("DICT", DictPaths(folderPath).idxOftCspt().c_str(), cspt)) return 0;
-  uint8_t hdr[CSPT_HEADER_SIZE];
-  if (!readCsptHeader(cspt, hdr)) return 0;
-  uint32_t entryCount;
-  memcpy(&entryCount, hdr + 8, 4);  // LE, matches binarySearchCspt
-  return entryCount;
+  CsptHeader hdr;
+  return readCsptHeader(cspt, &hdr) ? hdr.entryCount : 0;
 }
 
 bool Dictionary::binarySearchCspt(HalFile& cspt, const char* target, uint32_t idxFileSize, uint32_t* startByte,
                                   uint32_t* endByte) {
-  uint8_t hdr[CSPT_HEADER_SIZE];
-  if (!readCsptHeader(cspt, hdr)) return false;
-
-  const uint8_t prefixLen = hdr[5];
-  uint16_t stride;
-  memcpy(&stride, hdr + 6, 2);  // LE
-  uint32_t entryCount;
-  memcpy(&entryCount, hdr + 8, 4);  // LE
+  CsptHeader hdr;
+  if (!readCsptHeader(cspt, &hdr)) return false;
+  const uint8_t prefixLen = hdr.prefixLen;
+  const uint32_t entryCount = hdr.entryCount;
 
   if (entryCount == 0 || prefixLen == 0 || prefixLen > 128) {
     *startByte = 0;
@@ -1076,7 +1080,7 @@ DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const
 
 // The headword at 0-based `ordinal` in .idx, seeking through whichever page index the ctx
 // holds: .oft pages hold OFT_STRIDE entries; .cspt entry k is the start of ordinal k * stride.
-std::string Dictionary::wordAtOrdinalIn(LookupCtx& ctx, const uint32_t ordinal) {
+std::string Dictionary::wordAtOrdinalIn(LookupCtx& ctx, const uint32_t ordinal, const DictLookupCallbacks& cbs) {
   uint32_t start = 0;
   uint32_t skip = ordinal;
   if (ctx.hasOftFallback || (ctx.hasPageIndex && !ctx.pageIndexIsCspt)) {
@@ -1085,27 +1089,22 @@ std::string Dictionary::wordAtOrdinalIn(LookupCtx& ctx, const uint32_t ordinal) 
     const uint32_t page = std::min(ordinal / OFT_STRIDE, numEntries);
     if (readIndexPageStart(oft, /*isCspt=*/false, numEntries, page, &start)) skip = ordinal - page * OFT_STRIDE;
   } else if (ctx.hasPageIndex) {
-    uint8_t hdr[CSPT_HEADER_SIZE];
-    if (readCsptHeader(ctx.pageIndex, hdr)) {
-      const uint8_t prefixLen = hdr[5];
-      uint16_t stride;
-      memcpy(&stride, hdr + 6, 2);  // LE
-      uint32_t entryCount;
-      memcpy(&entryCount, hdr + 8, 4);  // LE
-      if (stride > 0 && entryCount > 0) {
-        const uint32_t k = std::min(ordinal / stride, entryCount - 1);
-        ctx.pageIndex.seekSet(CSPT_HEADER_SIZE + k * (prefixLen + 4u) + prefixLen);
-        uint8_t raw[4];
-        if (ctx.pageIndex.read(raw, 4) == 4) {
-          memcpy(&start, raw, 4);  // LE
-          skip = ordinal - k * stride;
-        }
+    CsptHeader hdr;
+    if (readCsptHeader(ctx.pageIndex, &hdr) && hdr.stride > 0 && hdr.entryCount > 0) {
+      const uint32_t k = std::min(ordinal / hdr.stride, hdr.entryCount - 1);
+      ctx.pageIndex.seekSet(CSPT_HEADER_SIZE + k * (hdr.prefixLen + 4u) + hdr.prefixLen);
+      uint8_t raw[4];
+      if (ctx.pageIndex.read(raw, 4) == 4) {
+        memcpy(&start, raw, 4);  // LE
+        skip = ordinal - k * hdr.stride;
       }
     }
   }
 
   IdxScanner scan(ctx.idx, start);
   for (uint32_t i = 0; i < skip; i++) {
+    // Only long without a page index, where the skip starts at byte 0.
+    if (i % 64 == 63 && cbs.shouldCancel && cbs.shouldCancel(cbs.ctx)) return "";
     uint8_t suffix[8];
     if (readWordInto(scan, wordBuf, sizeof(wordBuf)) < 0 || !scan.readBytes(suffix, 8)) return "";
   }
@@ -1115,7 +1114,7 @@ std::string Dictionary::wordAtOrdinalIn(LookupCtx& ctx, const uint32_t ordinal) 
 }
 
 void Dictionary::resolveAltForms(LookupCtx& ctx, const std::string& word, std::vector<std::string>& out,
-                                 const size_t max) {
+                                 const size_t max, const DictLookupCallbacks& cbs) {
   out.clear();
   if (!ctx.valid || max == 0) return;
 
@@ -1169,6 +1168,7 @@ void Dictionary::resolveAltForms(LookupCtx& ctx, const std::string& word, std::v
       uint32_t firstHit = UINT32_MAX;
       uint8_t idxBuf[4];
       while (scan.position() < synFileSize && (firstHit != UINT32_MAX || scan.position() < endByte)) {
+        if (cbs.shouldCancel && cbs.shouldCancel(cbs.ctx)) return;
         const uint32_t entryStart = scan.position();
         if (readWordInto(scan, wordBuf, sizeof(wordBuf)) < 0 || !scan.readBytes(idxBuf, 4)) break;
         const int cmp = cistrcmp(wordBuf, word.c_str());
@@ -1206,7 +1206,8 @@ void Dictionary::resolveAltForms(LookupCtx& ctx, const std::string& word, std::v
     return;
   }
   for (size_t i = 0; i < count; i++) {
-    std::string canonical = wordAtOrdinalIn(ctx, ordinals[i]);
+    if (cbs.shouldCancel && cbs.shouldCancel(cbs.ctx)) return;
+    std::string canonical = wordAtOrdinalIn(ctx, ordinals[i], cbs);
     if (canonical.empty()) continue;
     const bool repeated = std::any_of(out.begin(), out.end(), [&canonical](const std::string& seen) {
       return cistrcmp(seen.c_str(), canonical.c_str()) == 0;

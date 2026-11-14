@@ -156,6 +156,9 @@ class DictionaryLookupController {
   bool altFormSearch_ = false;
   // The title runAltFormLookup() chose. Published by the lookupDone barrier like stemWord_.
   std::string altFoundWord_;
+  // The searched dictionary when a miss there can offer the alt-form prompt (it has a .syn);
+  // empty otherwise. Written on the lookup task, published by lookupDone like stemWord_.
+  std::string altFormBase_;
 
   // Set by the sweep in runLookup() when a dictionary OTHER than the active one answered;
   // empty otherwise. Written on the lookup task and read on the UI task, published by the same

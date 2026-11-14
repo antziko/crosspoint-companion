@@ -842,3 +842,16 @@ TEST_F(DictLookupSession, AltFormsResolveFarOrdinalsThroughEveryPageIndex) {
     EXPECT_EQ(opens(), 1) << static_cast<int>(pageIndex);
   }
 }
+
+TEST_F(DictLookupSession, AltFormsStopWhenCancelled) {
+  writeFarOrdinalDictionary(root_ / "dictionaries/syn", IdxPageIndex::None);
+  writeDictBin("/dictionaries/syn/syn");
+  Dictionary::LookupCtx ctx;
+  ASSERT_TRUE(Dictionary::openLookupCtx(ctx));
+
+  DictLookupCallbacks cancelled;
+  cancelled.shouldCancel = [](void*) { return true; };
+  std::vector<std::string> forms;
+  Dictionary::resolveAltForms(ctx, "yonde", forms, 6, cancelled);
+  EXPECT_TRUE(forms.empty());
+}

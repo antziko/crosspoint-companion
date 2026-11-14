@@ -80,6 +80,7 @@ void DictionaryLookupController::startLookup(const std::string& word, bool recor
   stemWord_.clear();
   altFormSearch_ = false;
   altFoundWord_.clear();
+  altFormBase_.clear();
   state = LookupState::LookingUp;
   // CLEANUP: on Auto-only commit, delete only this line (gate below stays — it's the Auto check)
   const bool showPopup = shouldShowPopup();
@@ -254,7 +255,8 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
       // Stem variants ran on the lookup task, before the group sweep — see runLookup().
 
       // Try alt forms
-      if (Dictionary::hasAltForms(cachePath.c_str())) {
+      // Checked on the lookup task, against the dictionary it searched (see runLookup).
+      if (!altFormBase_.empty()) {
         altFormWord = lookupWord;
         state = LookupState::AltFormPrompt;
         // The machine search stops here and waits for the user. Log what it cost so far;
@@ -593,16 +595,16 @@ void DictionaryLookupController::probeTabs() {
 void DictionaryLookupController::runAltFormLookup() {
   // A form can point at several headwords (よんで -> 読む and 呼ぶ). One reads as before;
   // several are shown together under the form looked up, each entry labelled.
-  // One ctx for the .syn search and every headword probe: one dictionary.bin read, one open
-  // of .idx and its page index.
-  Dictionary::LookupCtx ctx;
-  std::vector<std::string> canonicals;
-  if (Dictionary::openLookupCtx(ctx, cachePath.c_str())) {
-    Dictionary::resolveAltForms(ctx, altFormWord, canonicals, DictLocation::MAX_EXTRA + 1);
-  }
+  // One ctx for the .syn search and every headword probe: .idx and its page index open once,
+  // and no dictionary.bin read, since runLookup already resolved the dictionary.
   DictLookupCallbacks probeCbs;
   probeCbs.ctx = this;
   probeCbs.shouldCancel = &DictionaryLookupController::cancelCallback;
+  Dictionary::LookupCtx ctx;
+  std::vector<std::string> canonicals;
+  if (Dictionary::openLookupCtxAt(ctx, altFormBase_.c_str())) {
+    Dictionary::resolveAltForms(ctx, altFormWord, canonicals, DictLocation::MAX_EXTRA + 1, probeCbs);
+  }
   DictLocation merged;
   std::string firstFound;
   size_t headwordsFound = 0;
@@ -706,6 +708,11 @@ void DictionaryLookupController::runLookup() {
     foundLocation.folderPath = ctx.base;
   }
   if (!foundLocation.found) foundLocation = sweepGroup(ctx, activeBase, foundLocation, cbs);
+  // Whether the miss can offer the alt-form prompt, decided here so the UI task reads no SD.
+  if (!foundLocation.found && !lookupCancelRequested && foundLocation.status != LookupStatus::NoDictionary &&
+      foundLocation.status != LookupStatus::ReadError && Dictionary::hasAltFormsAt(activeBase.c_str())) {
+    altFormBase_ = activeBase;
+  }
   foundSlots_ = 0;
   if (foundLocation.found && !lookupCancelRequested) probeTabs();
 
