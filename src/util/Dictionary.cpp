@@ -501,6 +501,13 @@ static int cistrcmp(const char* a, const char* b) {
   return std::tolower(static_cast<unsigned char>(*a)) - std::tolower(static_cast<unsigned char>(*b));
 }
 
+// Reads the 12-byte .cspt header from the start of the file; false when short or not v1 "CSPT".
+static bool readCsptHeader(HalFile& cspt, uint8_t (&hdr)[CSPT_HEADER_SIZE]) {
+  cspt.seekSet(0);
+  if (cspt.read(hdr, CSPT_HEADER_SIZE) != static_cast<int>(CSPT_HEADER_SIZE)) return false;
+  return memcmp(hdr, CSPT_MAGIC, 4) == 0 && hdr[4] == CSPT_VERSION;
+}
+
 // CLEANUP: on Auto-only commit, delete only this line (readCsptEntryCount below stays)
 uint32_t Dictionary::readCsptEntryCount(const char* cachePath) {
   std::string folderPath = activeDictPath(cachePath);
@@ -508,11 +515,7 @@ uint32_t Dictionary::readCsptEntryCount(const char* cachePath) {
   HalFile cspt;
   if (!Storage.openFileForRead("DICT", DictPaths(folderPath).idxOftCspt().c_str(), cspt)) return 0;
   uint8_t hdr[CSPT_HEADER_SIZE];
-  cspt.seekSet(0);
-  const bool read_ok = (cspt.read(hdr, CSPT_HEADER_SIZE) == static_cast<int>(CSPT_HEADER_SIZE));
-  cspt.close();
-  if (!read_ok) return 0;
-  if (memcmp(hdr, CSPT_MAGIC, 4) != 0 || hdr[4] != CSPT_VERSION) return 0;
+  if (!readCsptHeader(cspt, hdr)) return 0;
   uint32_t entryCount;
   memcpy(&entryCount, hdr + 8, 4);  // LE, matches binarySearchCspt
   return entryCount;
@@ -520,11 +523,8 @@ uint32_t Dictionary::readCsptEntryCount(const char* cachePath) {
 
 bool Dictionary::binarySearchCspt(HalFile& cspt, const char* target, uint32_t idxFileSize, uint32_t* startByte,
                                   uint32_t* endByte) {
-  // Read and validate header (12 bytes).
   uint8_t hdr[CSPT_HEADER_SIZE];
-  cspt.seekSet(0);
-  if (cspt.read(hdr, CSPT_HEADER_SIZE) != static_cast<int>(CSPT_HEADER_SIZE)) return false;
-  if (memcmp(hdr, CSPT_MAGIC, 4) != 0 || hdr[4] != CSPT_VERSION) return false;
+  if (!readCsptHeader(cspt, hdr)) return false;
 
   const uint8_t prefixLen = hdr[5];
   uint16_t stride;
@@ -611,19 +611,8 @@ static uint32_t pageIndexEntryCount(HalFile& index, bool isCspt) {
   return sz > OFT_HEADER_SIZE ? (sz - OFT_HEADER_SIZE) / 4 : 0;
 }
 
-// Expand a single-page window to PAGE_RADIUS pages either side of it, on real page boundaries.
-// Defaults to the whole file when no page index exists (then it is already one page).
-// Open-handle form: the caller already holds the page index, so the miss path no longer
-// reopens the file resolveScanBounds just finished with.
-static void widenScanBoundsIn(HalFile& index, bool isCspt, uint32_t srcFileSize, uint32_t centerStart,
-                              uint32_t* outStart, uint32_t* outEnd, const uint32_t radius = PAGE_RADIUS) {
-  *outStart = 0;
-  *outEnd = srcFileSize;
-
-  const uint32_t numEntries = pageIndexEntryCount(index, isCspt);
-  if (numEntries == 0) return;
-
-  // Page starts are monotonically increasing, so binary search for the page holding centerStart.
+// The page holding byte `pos`: page starts are monotonically increasing, so binary search them.
+static uint32_t landedPage(HalFile& index, bool isCspt, uint32_t numEntries, uint32_t pos) {
   uint32_t lo = 0;
   uint32_t hi = numEntries;
   uint32_t landed = 0;
@@ -631,7 +620,7 @@ static void widenScanBoundsIn(HalFile& index, bool isCspt, uint32_t srcFileSize,
     const uint32_t mid = lo + (hi - lo) / 2;
     uint32_t start = 0;
     if (!readIndexPageStart(index, isCspt, numEntries, mid, &start)) break;
-    if (start <= centerStart) {
+    if (start <= pos) {
       landed = mid;
       lo = mid + 1;
     } else {
@@ -639,13 +628,40 @@ static void widenScanBoundsIn(HalFile& index, bool isCspt, uint32_t srcFileSize,
       hi = mid - 1;
     }
   }
+  return landed;
+}
+
+// When `pos` is the first byte of a page other than page 0, the start of the page before it.
+// A run of equal headwords that begins at a page start may have members on that earlier page.
+static bool previousPageStart(HalFile& index, bool isCspt, uint32_t pos, uint32_t* out) {
+  if (pos == 0) return false;
+  const uint32_t numEntries = pageIndexEntryCount(index, isCspt);
+  if (numEntries == 0) return false;
+  const uint32_t page = landedPage(index, isCspt, numEntries, pos);
+  uint32_t start = 0;
+  if (page == 0 || !readIndexPageStart(index, isCspt, numEntries, page, &start) || start != pos) return false;
+  return readIndexPageStart(index, isCspt, numEntries, page - 1, out);
+}
+
+// Expand a single-page window to PAGE_RADIUS pages either side of it, on real page boundaries.
+// Defaults to the whole file when no page index exists (then it is already one page).
+// The caller already holds the page index that resolveScanBoundsIn used.
+static void widenScanBoundsIn(HalFile& index, bool isCspt, uint32_t srcFileSize, uint32_t centerStart,
+                              uint32_t* outStart, uint32_t* outEnd) {
+  *outStart = 0;
+  *outEnd = srcFileSize;
+
+  const uint32_t numEntries = pageIndexEntryCount(index, isCspt);
+  if (numEntries == 0) return;
+
+  const uint32_t landed = landedPage(index, isCspt, numEntries, centerStart);
 
   uint32_t bound = 0;
-  if (readIndexPageStart(index, isCspt, numEntries, landed > radius ? landed - radius : 0, &bound)) {
+  if (readIndexPageStart(index, isCspt, numEntries, landed > PAGE_RADIUS ? landed - PAGE_RADIUS : 0, &bound)) {
     *outStart = bound;
   }
   // End of the last page in the window == start of the page after it; past the end, the file end.
-  if (readIndexPageStart(index, isCspt, numEntries, landed + radius + 1, &bound)) {
+  if (readIndexPageStart(index, isCspt, numEntries, landed + PAGE_RADIUS + 1, &bound)) {
     *outEnd = bound;
   }
 }
@@ -660,9 +676,9 @@ void Dictionary::resolveScanBoundsIn(LookupCtx& ctx, const char* target, uint32_
 
   if (binarySearchCspt(ctx.pageIndex, target, ctx.idxSize, startByte, endByte)) return;
 
-  // .cspt is stale or malformed. The path-based form falls back to .oft here, and dropping
-  // that would turn every probe into a full-file scan on a large dictionary — so keep it,
-  // but open .oft lazily and once: the fallback costs nothing until a bad sidecar needs it.
+  // .cspt is stale or malformed. Without the .oft fallback every probe would become a
+  // full-file scan on a large dictionary, so keep it, but open .oft lazily and once: the
+  // fallback costs nothing until a bad sidecar needs it.
   if (!ctx.oftTried) {
     ctx.oftTried = true;
     char path[160];
@@ -672,24 +688,6 @@ void Dictionary::resolveScanBoundsIn(LookupCtx& ctx, const char* target, uint32_
   }
   if (ctx.hasOftFallback) {
     findPageBounds(ctx.oftFallback, ctx.idx, ctx.idxSize, target, startByte, endByte);
-  }
-}
-
-void Dictionary::resolveScanBounds(const char* csptPath, const char* oftPath, HalFile& src, uint32_t srcFileSize,
-                                   const char* target, uint32_t* startByte, uint32_t* endByte) {
-  // Try .cspt first (CrossPoint optimized index), fall back to .oft.
-  bool boundsResolved = false;
-  HalFile cspt;
-  if (Storage.openFileForRead("DICT", csptPath, cspt)) {
-    boundsResolved = binarySearchCspt(cspt, target, srcFileSize, startByte, endByte);
-    cspt.close();
-  }
-  if (!boundsResolved) {
-    HalFile oft;
-    if (Storage.openFileForRead("DICT", oftPath, oft)) {
-      findPageBounds(oft, src, srcFileSize, target, startByte, endByte);
-      oft.close();
-    }
   }
 }
 
@@ -793,7 +791,7 @@ bool Dictionary::openLookupCtxAt(LookupCtx& ctx, const char* basePath) {
   ctx.idxSize = static_cast<uint32_t>(ctx.idx.fileSize());
 
   // Page index is optional — without it locate() falls back to a full scan. .cspt first,
-  // matching resolveScanBounds' preference order.
+  // matching resolveScanBoundsIn's preference order.
   if (buildPath(path, sizeof(path), ctx.base, ".idx.oft.cspt") &&
       Storage.openFileForRead("DICT", path, ctx.pageIndex)) {
     ctx.pageIndexIsCspt = true;
@@ -918,14 +916,11 @@ void Dictionary::collectRun(LookupCtx& ctx, IdxScanner& scan, const char* word, 
                             const uint32_t hitOffset, const uint32_t hitSize, DictLocation& result) {
   const uint32_t afterHit = scan.position();
   uint8_t suffix[8];
-  if (hitStart > 0 && (ctx.hasOftFallback || ctx.hasPageIndex)) {
+  if (ctx.hasOftFallback || ctx.hasPageIndex) {
     HalFile& index = ctx.hasOftFallback ? ctx.oftFallback : ctx.pageIndex;
     const bool isCspt = !ctx.hasOftFallback && ctx.pageIndexIsCspt;
     uint32_t pageStart = 0;
-    uint32_t pageEnd = 0;
-    widenScanBoundsIn(index, isCspt, ctx.idxSize, hitStart, &pageStart, &pageEnd, /*radius=*/0);
-    if (pageStart == hitStart) {
-      widenScanBoundsIn(index, isCspt, ctx.idxSize, hitStart, &pageStart, &pageEnd, /*radius=*/1);
+    if (previousPageStart(index, isCspt, hitStart, &pageStart)) {
       scan.seek(pageStart);
       while (scan.position() < hitStart) {
         if (readWordInto(scan, wordBuf, sizeof(wordBuf)) < 0 || !scan.readBytes(suffix, 8)) break;
@@ -1044,16 +1039,21 @@ DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const
       scan.seek(wideStart);
       while (scan.position() < wideEnd) {
         if (cbs.shouldCancel && cbs.shouldCancel(cbs.ctx)) break;
+        const uint32_t entryStart = scan.position();
         const int len = readWordInto(scan, wordBuf, sizeof(wordBuf));
         if (len < 0) break;
         uint8_t suffix[8];
         if (!scan.readBytes(suffix, 8)) break;
         if (len == 0 || cistrcmp(wordBuf, word.c_str()) != 0) continue;
 
-        result.offset = readBe32(suffix);
-        result.size = readBe32(suffix + 4);
-        result.found = true;
-        result.status = LookupStatus::Found;
+        if (collectAll) {
+          collectRun(ctx, scan, word.c_str(), entryStart, readBe32(suffix), readBe32(suffix + 4), result);
+        } else {
+          result.offset = readBe32(suffix);
+          result.size = readBe32(suffix + 4);
+          result.found = true;
+          result.status = LookupStatus::Found;
+        }
         // Logged to SD because it is the signal that a dictionary's sort order disagrees with
         // cistrcmp: a hit here is one the single-page scan should have found and did not.
         SdDebugLog::log("DICT", "locate: widened scan hit, page window %u-%u vs %u-%u, %uB", (unsigned)wideStart,
@@ -1131,7 +1131,21 @@ void Dictionary::resolveAltForms(const std::string& word, const char* cachePath,
   uint32_t startByte = 0;
   uint32_t endByte = synFileSize;
 
-  resolveScanBounds(dp.synOftCspt().c_str(), dp.synOft().c_str(), syn, synFileSize, word.c_str(), &startByte, &endByte);
+  // .cspt first, else .oft; whichever bounded the search stays open for the back-scan below.
+  HalFile index;
+  bool isCspt = false;
+  bool hasIndex = false;
+  if (Storage.openFileForRead("DICT", dp.synOftCspt().c_str(), index) &&
+      binarySearchCspt(index, word.c_str(), synFileSize, &startByte, &endByte)) {
+    isCspt = true;
+    hasIndex = true;
+  } else {
+    index.close();
+    if (Storage.openFileForRead("DICT", dp.synOft().c_str(), index)) {
+      findPageBounds(index, syn, synFileSize, word.c_str(), &startByte, &endByte);
+      hasIndex = true;
+    }
+  }
 
   // The .idx ordinals the matching .syn entries point at, in .syn order. Resolved AFTER the
   // scanner is gone, not inside the loop: wordAtOrdinal opens a scanner of its own, and
@@ -1170,40 +1184,24 @@ void Dictionary::resolveAltForms(const std::string& word, const char* cachePath,
 
     // A hit on the page's first entry can have run members on the page before (see
     // collectRun). Those come first in .syn order.
-    if (firstHit == startByte && startByte > 0) {
-      HalFile index;
-      bool isCspt = false;
-      bool opened = false;
-      uint8_t hdr[CSPT_HEADER_SIZE];
-      if (Storage.openFileForRead("DICT", dp.synOftCspt().c_str(), index) &&
-          index.read(hdr, CSPT_HEADER_SIZE) == static_cast<int>(CSPT_HEADER_SIZE) && memcmp(hdr, CSPT_MAGIC, 4) == 0 &&
-          hdr[4] == CSPT_VERSION) {
-        isCspt = true;
-        opened = true;
-      } else {
-        index.close();
-        opened = Storage.openFileForRead("DICT", dp.synOft().c_str(), index);
+    uint32_t pageStart = 0;
+    if (hasIndex && firstHit == startByte && previousPageStart(index, isCspt, startByte, &pageStart)) {
+      uint32_t earlier[MAX_FORMS];
+      size_t earlierCount = 0;
+      scan.seek(pageStart);
+      while (scan.position() < startByte && earlierCount < limit) {
+        if (readWordInto(scan, wordBuf, sizeof(wordBuf)) < 0 || !scan.readBytes(idxBuf, 4)) break;
+        if (cistrcmp(wordBuf, word.c_str()) == 0) earlier[earlierCount++] = readBe32(idxBuf);
       }
-      if (opened) {
-        uint32_t pageStart = 0;
-        uint32_t pageEnd = 0;
-        widenScanBoundsIn(index, isCspt, synFileSize, startByte, &pageStart, &pageEnd, /*radius=*/1);
-        uint32_t earlier[MAX_FORMS];
-        size_t earlierCount = 0;
-        scan.seek(pageStart);
-        while (scan.position() < startByte && earlierCount < limit) {
-          if (readWordInto(scan, wordBuf, sizeof(wordBuf)) < 0 || !scan.readBytes(idxBuf, 4)) break;
-          if (cistrcmp(wordBuf, word.c_str()) == 0) earlier[earlierCount++] = readBe32(idxBuf);
-        }
-        if (earlierCount > 0) {
-          const size_t keep = std::min(count, limit - earlierCount);
-          std::memmove(ordinals + earlierCount, ordinals, keep * sizeof(ordinals[0]));
-          std::memcpy(ordinals, earlier, earlierCount * sizeof(earlier[0]));
-          count = earlierCount + keep;
-        }
+      if (earlierCount > 0) {
+        const size_t keep = std::min(count, limit - earlierCount);
+        std::memmove(ordinals + earlierCount, ordinals, keep * sizeof(ordinals[0]));
+        std::memcpy(ordinals, earlier, earlierCount * sizeof(earlier[0]));
+        count = earlierCount + keep;
       }
     }
   }
+  index.close();
   syn.close();
 
   if (!reserveNoThrow(out, count)) {

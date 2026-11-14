@@ -78,6 +78,8 @@ void DictionaryLookupController::startLookup(const std::string& word, bool recor
   fallbackDictPath_.clear();
   fallbackHops_ = 0;
   stemWord_.clear();
+  altFormSearch_ = false;
+  altFoundWord_.clear();
   state = LookupState::LookingUp;
   // CLEANUP: on Auto-only commit, delete only this line (gate below stays — it's the Auto check)
   const bool showPopup = shouldShowPopup();
@@ -93,14 +95,7 @@ void DictionaryLookupController::startLookup(const std::string& word, bool recor
   //
   // (The SPI contention this might look like is not one: the framebuffer push is short and the
   // rest of the refresh is a BUSY wait with the bus idle, which is when the SD reads happen.)
-  task = makeUniqueNoThrow<DictLookupTask>(*this);
-  if (!task) {
-    LOG_ERR("DICT", "OOM: DictLookupTask");
-    showMemoryErrorAndReset();
-    return;
-  }
-  // 6 KB: matcha's DictIndex lookups (dictionary forms, tab probe) left ~0.5 KB of 4 KB.
-  task->start("DictLookup", 6144, 1);
+  if (!startTask()) return;
 
   if (showPopup) {
     // Toast overlay: draw popup directly over whatever the user is currently viewing.
@@ -121,6 +116,18 @@ void DictionaryLookupController::startLookup(const std::string& word, bool recor
     // in the transition needs a full waveform. Opening the definition from the reader is still
     // driven clean under night mode, by ActivityManager::armEntryScrub on the same paint.
   }
+}
+
+bool DictionaryLookupController::startTask() {
+  task = makeUniqueNoThrow<DictLookupTask>(*this);
+  if (!task) {
+    LOG_ERR("DICT", "OOM: DictLookupTask");
+    showMemoryErrorAndReset();
+    return false;
+  }
+  // 6 KB: matcha's DictIndex lookups (dictionary forms, tab probe) left ~0.5 KB of 4 KB.
+  task->start("DictLookup", 6144, 1);
+  return true;
 }
 
 void DictionaryLookupController::startLookupAsSuggestion(const std::string& word) {
@@ -182,11 +189,26 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
       state = LookupState::Idle;
       task.reset();
 
+      const bool altFormSearch = altFormSearch_;
+      altFormSearch_ = false;
+
       if (lookupCancelled) {
         nextIsSuggestion = false;
         restoreSuspendedPromotion();  // same reason as setNotFound(): the old entry stays on screen
         logLookupOutcome("cancelled");
         return LookupEvent::Cancelled;
+      }
+
+      if (altFormSearch) {
+        if (!foundLocation.found) {
+          handleLookupFailed();
+          return LookupEvent::None;
+        }
+        foundWord = altFoundWord_;
+        foundStatus = nextIsSuggestion ? FoundStatus::Suggestion : FoundStatus::AltForm;
+        nextIsSuggestion = false;
+        logLookupOutcome("altform");
+        return LookupEvent::FoundDefinition;
       }
 
       if (foundLocation.found) {
@@ -256,46 +278,19 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
 
   if (state == LookupState::AltFormPrompt) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-      state = LookupState::Idle;
       // Restart the clock: everything between "altprompt" and here was the user deciding,
       // and folding that into a duration would make the number useless for diagnosing speed.
       lookupStartMs_ = millis();
-      // A form can point at several headwords (よんで -> 読む and 呼ぶ). One reads as before;
-      // several are shown together under the form looked up, each entry labelled.
-      std::vector<std::string> canonicals;
-      Dictionary::resolveAltForms(altFormWord, cachePath.c_str(), canonicals, DictLocation::MAX_EXTRA + 1);
-      DictLocation merged;
-      std::string firstFound;
-      size_t headwordsFound = 0;
-      Dictionary::LookupCtx ctx;
-      if (!canonicals.empty() && Dictionary::openLookupCtx(ctx, cachePath.c_str())) {
-        for (const auto& canonical : canonicals) {
-          const DictLocation loc = Dictionary::locateIn(ctx, canonical, {}, /*collectAll=*/true);
-          if (!loc.found) continue;
-          if (headwordsFound++ == 0) {
-            merged.folderPath = loc.folderPath;
-            firstFound = canonical;
-          }
-          bool room = true;
-          for (uint8_t i = 0; i < loc.entryCount() && room; i++) {
-            const DictLocation::Range range = loc.entry(i);
-            room = merged.addEntry(range.offset, range.size, canonical.c_str());
-          }
-          if (!room) break;
-        }
-      }
-      if (merged.found) {
-        // Several headwords found: the form is the title and each entry names its headword.
-        // Just one: that headword is the title, so its entries need no label of their own.
-        if (headwordsFound == 1) memset(merged.labels, 0, sizeof(merged.labels));
-        foundWord = headwordsFound > 1 ? altFormWord : firstFound;
-        foundLocation = std::move(merged);
-        foundStatus = nextIsSuggestion ? FoundStatus::Suggestion : FoundStatus::AltForm;
-        nextIsSuggestion = false;
-        logLookupOutcome("altform");
-        return LookupEvent::FoundDefinition;
-      }
-      handleLookupFailed();
+      // Back on the lookup task like the first search, so it is cancellable and the UI stays
+      // live; the prompt stays on screen until the definition replaces it.
+      foundLocation = DictLocation{};
+      lookupProgress = 0;
+      lookupDone = false;
+      lookupCancelled = false;
+      lookupCancelRequested = false;
+      altFormSearch_ = true;
+      state = LookupState::LookingUp;
+      startTask();
       return LookupEvent::None;
     }
     if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
@@ -595,7 +590,52 @@ void DictionaryLookupController::probeTabs() {
   SdDebugLog::log("DICT", "tabs mask=%x installed=%x %lums", foundSlots_, installed, millis() - t0);
 }
 
+void DictionaryLookupController::runAltFormLookup() {
+  // A form can point at several headwords (よんで -> 読む and 呼ぶ). One reads as before;
+  // several are shown together under the form looked up, each entry labelled.
+  std::vector<std::string> canonicals;
+  Dictionary::resolveAltForms(altFormWord, cachePath.c_str(), canonicals, DictLocation::MAX_EXTRA + 1);
+  DictLookupCallbacks probeCbs;
+  probeCbs.ctx = this;
+  probeCbs.shouldCancel = &DictionaryLookupController::cancelCallback;
+  DictLocation merged;
+  std::string firstFound;
+  size_t headwordsFound = 0;
+  Dictionary::LookupCtx ctx;
+  if (!canonicals.empty() && Dictionary::openLookupCtx(ctx, cachePath.c_str())) {
+    for (const auto& canonical : canonicals) {
+      if (lookupCancelRequested) break;
+      const DictLocation loc = Dictionary::locateIn(ctx, canonical, probeCbs, /*collectAll=*/true);
+      if (!loc.found) continue;
+      if (headwordsFound++ == 0) {
+        merged.folderPath = loc.folderPath;
+        firstFound = canonical;
+      }
+      bool room = true;
+      for (uint8_t i = 0; i < loc.entryCount() && room; i++) {
+        const DictLocation::Range range = loc.entry(i);
+        room = merged.addEntry(range.offset, range.size, canonical.c_str());
+      }
+      if (!room) break;
+    }
+  }
+  if (merged.found) {
+    // Several headwords found: the form is the title and each entry names its headword.
+    // Just one: that headword is the title, so its entries need no label of their own.
+    if (headwordsFound == 1) memset(merged.labels, 0, sizeof(merged.labels));
+    altFoundWord_ = headwordsFound > 1 ? altFormWord : firstFound;
+  }
+  foundLocation = std::move(merged);
+}
+
 void DictionaryLookupController::runLookup() {
+  if (altFormSearch_) {
+    runAltFormLookup();
+    lookupCancelled = lookupCancelRequested;
+    lookupDone = true;
+    return;
+  }
+
   DictLookupCallbacks cbs;
   cbs.ctx = this;
   cbs.onProgress = &DictionaryLookupController::progressCallback;

@@ -151,6 +151,11 @@ class DictionaryLookupController {
   DictLocation foundLocation;
   uint8_t foundSlots_ = 0;
   std::string altFormWord;
+  // Set on the UI task before the lookup task starts, when the user confirms the alt-form
+  // prompt; the task then runs runAltFormLookup() instead of the word search.
+  bool altFormSearch_ = false;
+  // The title runAltFormLookup() chose. Published by the lookupDone barrier like stemWord_.
+  std::string altFoundWord_;
 
   // Set by the sweep in runLookup() when a dictionary OTHER than the active one answered;
   // empty otherwise. Written on the lookup task and read on the UI task, published by the same
@@ -213,6 +218,10 @@ class DictionaryLookupController {
   void logLookupOutcome(const char* outcome) const;
 
   void runLookup();
+  // The .syn search the alt-form prompt asks for (lookup task).
+  void runAltFormLookup();
+  // Creates and starts the lookup task; false (with the memory error shown) on OOM.
+  bool startTask();
   // Fills foundSlots_ for the word just found (lookup task).
   void probeTabs();
   // The same-category sweep runLookup() delegates to once the active dictionary has missed.

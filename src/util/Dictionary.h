@@ -199,7 +199,7 @@ class Dictionary {
   // sequence opens them once instead of once per probe.
   //
   // A miss costs four SD opens per locate(): dictionary.bin (via activeDictPath), .idx,
-  // the page index inside resolveScanBounds(), and the SAME page index again inside the
+  // the page index inside resolveScanBoundsIn(), and the SAME page index again inside the
   // widened-retry path. The stem-variant fallback runs up to six probes, so a missed word
   // was costing ~28 opens and ~42 transient std::strings (every DictPaths accessor returns
   // by value) before findSimilar() even started — heap churn on precisely the path whose
@@ -215,7 +215,7 @@ class Dictionary {
     HalFile idx;
     HalFile pageIndex;  // .idx.oft.cspt when present, else .idx.oft
     // Opened lazily, and only if a .cspt search fails (stale/malformed sidecar), to preserve
-    // the .cspt -> .oft fallback the path-based resolveScanBounds has. Without it a bad
+    // the .cspt -> .oft fallback. Without it a bad
     // sidecar would demote every probe to a full-file scan.
     HalFile oftFallback;
     bool pageIndexIsCspt = false;
@@ -390,15 +390,9 @@ class Dictionary {
   static bool binarySearchCspt(HalFile& cspt, const char* target, uint32_t idxFileSize, uint32_t* startByte,
                                uint32_t* endByte);
 
-  // Resolve the byte range in src to scan for target. Tries .cspt first; on miss or
-  // absence, falls back to .oft. Callers must initialize *startByte=0, *endByte=srcFileSize
-  // before calling — when both .cspt and .oft are absent, the bounds are left untouched
-  // (full-file scan). Used by both .idx (locate) and .syn (resolveAltForm) lookups.
-  static void resolveScanBounds(const char* csptPath, const char* oftPath, HalFile& src, uint32_t srcFileSize,
-                                const char* target, uint32_t* startByte, uint32_t* endByte);
-
-  // resolveScanBounds against an already-open ctx. Same .cspt-then-.oft preference order as
-  // the path-based form; takes the whole ctx because the .oft fallback is opened lazily.
+  // The byte range of .idx to scan for target, against an already-open ctx: .cspt first, then
+  // .oft. Takes the whole ctx because the .oft fallback is opened lazily. Leaves the caller's
+  // full-file bounds when no page index exists.
   static void resolveScanBoundsIn(LookupCtx& ctx, const char* target, uint32_t* startByte, uint32_t* endByte);
 
   static int editDistance(const std::string& a, const std::string& b, int maxDist);

@@ -9,7 +9,7 @@
 
 // Dictionary::LookupCtx exists so a probe sequence opens its files once instead of once per
 // probe. Before it, every Dictionary::locate() call re-opened four files: dictionary.bin (via
-// activeDictPath), .idx, the page index inside resolveScanBounds, and the SAME page index
+// activeDictPath), .idx, the page index inside resolveScanBoundsIn, and the SAME page index
 // again inside the widened-retry path taken on every miss. The stem-variant fallback in
 // DictionaryLookupController runs up to six probes, so a missed word cost ~28 SD opens and
 // ~42 transient std::strings before findSimilar() even started.
@@ -237,7 +237,7 @@ TEST_F(DictLookupSession, WorksWithoutAPageIndex) {
 
 TEST_F(DictLookupSession, StaleCsptFallsBackToOftNotAFullScan) {
   // A .cspt whose magic no longer validates (the shape of a format-version bump) must fall
-  // back to .oft, exactly as the path-based resolveScanBounds does. Losing that fallback is
+  // back to .oft. Losing that fallback is
   // invisible in results — every word is still found by full scan — but on a large
   // dictionary it turns every probe into a whole-file read, so assert the .oft actually gets
   // opened rather than trusting the answer.
@@ -676,6 +676,24 @@ TEST_F(DictLookupSession, CollectAllStopsAtTheCap) {
   const auto loc = Dictionary::locateIn(ctx, "ox", {}, /*collectAll=*/true);
   EXPECT_EQ(loc.entryCount(), 1 + DictLocation::MAX_EXTRA);
   EXPECT_EQ(loc.entry(0).offset, 1000u);
+}
+
+TEST_F(DictLookupSession, CollectAllWorksOnTheWidenedRetryHit) {
+  // Out of cistrcmp order: page 1 opens with "pa", so the page search scans page 0 and misses,
+  // and only the widened retry reaches the "ox" run behind it.
+  std::vector<IdxEntry> entries = indexWithRun(32, 0, 0);
+  entries.push_back({"pa", 900, 1});
+  for (uint32_t i = 0; i < 3; i++) entries.push_back({"ox", 1000 + i, 10});
+  for (uint32_t i = 0; i < 40; i++) entries.push_back({"z" + std::to_string(100 + i), 5000 + i, 1});
+  writeIndexedDictionary(root_ / "dictionaries/run", "run", entries, /*withOft=*/true);
+  writeDictBin("/dictionaries/run/run");
+  Dictionary::LookupCtx ctx;
+  ASSERT_TRUE(Dictionary::openLookupCtx(ctx));
+
+  const auto loc = Dictionary::locateIn(ctx, "ox", {}, /*collectAll=*/true);
+  ASSERT_TRUE(loc.found);
+  ASSERT_EQ(loc.entryCount(), 3);
+  for (uint8_t i = 0; i < 3; i++) EXPECT_EQ(loc.entry(i).offset, 1000u + i) << int(i);
 }
 
 TEST(DictLocationEntries, RepeatedRangeIsOneEntry) {
