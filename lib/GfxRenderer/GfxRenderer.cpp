@@ -3213,6 +3213,16 @@ void GfxRenderer::displayGrayscaleBase(HalDisplay::RefreshMode fallback) const {
   doseTrace_.noteGlobal(PanelDoseTrace::Gray);
 }
 
+void GfxRenderer::displayCombinedGrayscaleBase(const HalDisplay::RefreshMode refreshMode) const {
+  HalDisplay::RefreshMode mode = applyDwellScrub(applyPromotedRefresh(refreshMode));
+  if (forceCleanRefreshOnce_) {
+    mode = HalDisplay::SCRUB_REFRESH;
+    forceCleanRefreshOnce_ = false;
+  }
+  display.displayGrayscaleBase(mode, fadingFix);
+  notePaint(mode);
+}
+
 void GfxRenderer::preconditionGrayscale() const {
   display.preconditionGrayscale();
   doseTrace_.noteGlobal(PanelDoseTrace::Gray);

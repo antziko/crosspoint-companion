@@ -3,6 +3,7 @@
 #include <CrossPointSettings.h>
 #include <CrossPointState.h>
 #include <GfxRenderer.h>
+#include <HalDisplay.h>
 #include <HalGPIO.h>
 #include <HalTiltSensor.h>
 #include <Logging.h>
@@ -371,6 +372,22 @@ inline void displayWithRefreshCycle(const GfxRenderer& renderer, int& pagesUntil
   }
 }
 
+// The combined-base form of displayWithRefreshCycle: stashes the B/W base without activating
+// it, so the displayGrayBuffer() that follows commits base and grays as one waveform. The caller
+// checks display.combinedGrayscaleBase() first, inside a ReaderRefreshScope.
+inline void displayBaseWithRefreshCycle(const GfxRenderer& renderer, int& pagesUntilFullRefresh) {
+  const bool disabled = (pagesUntilFullRefresh == CrossPointSettings::REFRESH_COUNTDOWN_DISABLED);
+  const bool maintenanceDue = !disabled && pagesUntilFullRefresh <= 1;
+  if (maintenanceDue) {
+    SdDebugLog::log("RFRSH", "maint x3=%d countdown=%d", (int)renderer.isX3(), pagesUntilFullRefresh);
+    renderer.displayCombinedGrayscaleBase(HalDisplay::HALF_REFRESH);
+    pagesUntilFullRefresh = SETTINGS.getEffectiveRefreshFrequency();
+  } else {
+    renderer.displayCombinedGrayscaleBase(HalDisplay::FAST_REFRESH);
+    if (!disabled) pagesUntilFullRefresh--;
+  }
+}
+
 // Grayscale anti-aliasing pass. Renders content twice (LSB + MSB) to build
 // the grayscale buffer. Only the content callback is re-rendered — status bars
 // and other overlays should be drawn before calling this.
@@ -397,6 +414,14 @@ void renderAntiAliased(GfxRenderer& renderer, RenderFn&& renderFn) {
 
   renderer.restoreBwBuffer();
 }
+
+// Book page presentation: lets the panel use its reading waveform.
+struct ReaderRefreshScope {
+  ReaderRefreshScope() { display.setReaderRefresh(true); }
+  ~ReaderRefreshScope() { display.setReaderRefresh(false); }
+  ReaderRefreshScope(const ReaderRefreshScope&) = delete;
+  ReaderRefreshScope& operator=(const ReaderRefreshScope&) = delete;
+};
 
 struct BackNavCallback {
   void* ctx;

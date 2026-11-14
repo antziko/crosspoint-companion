@@ -286,6 +286,7 @@ void XtcReaderActivity::renderStatusBarOverlay(const StatusBarOverlayPosition po
 }
 
 void XtcReaderActivity::renderPage() {
+  const ReaderUtils::ReaderRefreshScope readerRefresh;
   const uint16_t pageWidth = xtc->getPageWidth();
   const uint16_t pageHeight = xtc->getPageHeight();
   const uint8_t bitDepth = xtc->getBitDepth();

@@ -160,6 +160,19 @@ namespace {
 // fresh page needs the HALF ghost-cleanup and closing re-renders the page.
 bool xteinkClassPanel() { return gpio.isXteinkDevice() || BoardConfig::isX4Pro() || BoardConfig::isEegoA4(); }
 
+// Bottom reserve for the status bar under the page text, past the screen margin. The EEGO A4
+// draws its progress bar inside the bezel inset and lowers the status line by
+// statusBarOffsetY (BaseTheme::drawStatusBar); the text follows it down.
+int readerStatusBarReserve(const bool automaticPageTurnActive) {
+  const int statusBarHeight = UITheme::getReaderStatusBarHeight();
+  if (automaticPageTurnActive &&
+      (statusBarHeight == 0 || statusBarHeight == UITheme::getInstance().getProgressBarHeight())) {
+    return statusBarHeight + UITheme::getInstance().getMetrics().statusBarVerticalMargin;
+  }
+  const bool textLane = UITheme::getStatusBarHeight() > UITheme::getProgressBarHeight();
+  return textLane ? std::max(0, statusBarHeight - BoardConfig::ACTIVE.statusBarOffsetY) : statusBarHeight;
+}
+
 // Boards that render images as a 1-bit halftone instead of 4-level grayscale.
 //
 // X3: its 4-level grayscale waveform is too weak to carry an image.
@@ -2113,13 +2126,7 @@ void EpubReaderActivity::openWordSelect(const bool framebufferContainsPage, cons
   // word-select activity uses this to clear exactly the strip we drew the
   // status-bar / auto-turn label into, so its first frame matches the menu
   // path which wipes everything via clearScreen + page->render.
-  const uint8_t statusBarHeight = UITheme::getInstance().getStatusBarHeight();
-  const int reservedBottomHeight =
-      (automaticPageTurnActive &&
-       (statusBarHeight == 0 || statusBarHeight == UITheme::getInstance().getProgressBarHeight()))
-          ? SETTINGS.getReaderScreenMargin() + statusBarHeight +
-                UITheme::getInstance().getMetrics().statusBarVerticalMargin
-          : SETTINGS.getReaderScreenMargin() + statusBarHeight;
+  const int reservedBottomHeight = SETTINGS.getReaderScreenMargin() + readerStatusBarReserve(automaticPageTurnActive);
   // Runs before the word scan's heap check, which needs what this frees.
   // An in-flight chapter build pins its parser and CSS parser for as long as that chapter is
   // being read — finalizeBuild() only runs once the chapter is fully consumed, so on device
@@ -3525,16 +3532,8 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   orientedMarginLeft += SETTINGS.getReaderScreenMargin();
   orientedMarginRight += SETTINGS.getReaderScreenMargin();
 
-  const uint8_t statusBarHeight = UITheme::getInstance().getStatusBarHeight();
-
-  // reserves space for automatic page turn indicator when no status bar or progress bar only
-  if (automaticPageTurnActive &&
-      (statusBarHeight == 0 || statusBarHeight == UITheme::getInstance().getProgressBarHeight())) {
-    orientedMarginBottom += SETTINGS.getReaderScreenMargin() + statusBarHeight +
-                            UITheme::getInstance().getMetrics().statusBarVerticalMargin;
-  } else {
-    orientedMarginBottom += SETTINGS.getReaderScreenMargin() + statusBarHeight;
-  }
+  // Reserves space for the automatic page turn indicator when no status bar or progress bar only.
+  orientedMarginBottom += SETTINGS.getReaderScreenMargin() + readerStatusBarReserve(automaticPageTurnActive);
 
   const uint16_t viewportWidth = renderer.getScreenWidth() - orientedMarginLeft - orientedMarginRight;
   const uint16_t viewportHeight = renderer.getScreenHeight() - orientedMarginTop - orientedMarginBottom;
@@ -4602,6 +4601,7 @@ void EpubReaderActivity::maybeSaveProgress(int spineIndex, int currentPage, int 
 void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int orientedMarginTop,
                                         const int orientedMarginRight, const int orientedMarginBottom,
                                         const int orientedMarginLeft) {
+  const ReaderUtils::ReaderRefreshScope readerRefresh;
   const auto t0 = millis();
   lastPageUsedGrayscale = false;  // cleared here; set below if grayscale pass runs
 
@@ -4660,6 +4660,9 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   // Antialiased always runs the gray pass (text AA, even text-only pages). Sharp runs
   // it only for image pages — pure-text Sharp pages stay single-pass solid black.
   const bool doGrayscalePass = (aaMode == CrossPointSettings::TEXT_AA_ANTIALIASED) || grayImages;
+  // X4 Pro text pages: the B/W base and the gray planes go out as one waveform.
+  const bool combinedGrayscaleBase =
+      doGrayscalePass && !page->hasImages() && renderer.supportsStripGrayscale() && display.combinedGrayscaleBase();
   // Any grayscale image page must use the FAST_REFRESH blanking dance below
   // (even with text AA off): a HALF/FULL refresh sets the e-ink particles too
   // firmly for the following grayscale LUT to adjust, which washed image pages
@@ -4826,8 +4829,12 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     }
     // The strip grayscale pass below writes planes over this base, so tell the
     // helper when the panel needs its controller-specific grayscale base (X3).
-    ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh, /*async=*/false,
-                                         /*grayscaleFollows=*/doGrayscalePass && renderer.supportsStripGrayscale());
+    if (combinedGrayscaleBase) {
+      ReaderUtils::displayBaseWithRefreshCycle(renderer, pagesUntilFullRefresh);
+    } else {
+      ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh, /*async=*/false,
+                                           /*grayscaleFollows=*/doGrayscalePass && renderer.supportsStripGrayscale());
+    }
     // Halftone image residue: 1-bit halftone dots leave charge that FAST_REFRESH
     // can't fully clear on the next page. Force HALF on the next page to drive every
     // pixel to its target — same fix as the X4 grayscale residue path above. Applies
@@ -4854,6 +4861,8 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     auto scratch = makeUniqueNoThrow<uint8_t[]>(static_cast<size_t>(gwBytes) * STRIP_ROWS);
     if (!scratch) {
       LOG_ERR("ERS", "OOM: grayscale strip scratch (%d bytes); skipping AA this page", gwBytes * STRIP_ROWS);
+      // The combined base is still deferred; flush it so the page reaches the panel in B/W.
+      if (combinedGrayscaleBase) renderer.cleanupGrayscaleWithFrameBuffer();
     } else {
       // Bands may be streamed in any order: X4 windows each via setRamArea, X3
       // via PTL.
@@ -5928,7 +5937,8 @@ void EpubReaderActivity::lightStatusBarRefresh() {
   // BOOKMARK_TAB_EXTRA=20 did, erasing the page's bottom text line — visible as cut
   // text, worst in landscape). The only above-bar content is the progress text, which
   // does not change on a bookmark toggle, so it needs no blank/redraw region here.
-  int stripY = sh - barH - orientedBottom;
+  // The band the page leaves the bar (EEGO A4: the text runs into the full bar's height).
+  int stripY = sh - readerStatusBarReserve(false) - orientedBottom;
   if (stripY < 0) stripY = 0;
   const int stripH = sh - stripY;
   renderer.fillRect(0, stripY, sw, stripH, false);

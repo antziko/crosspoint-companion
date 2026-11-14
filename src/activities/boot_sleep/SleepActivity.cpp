@@ -15,6 +15,7 @@
 #include <esp_random.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 
 #include "CrossPointSettings.h"
@@ -670,8 +671,16 @@ void SleepActivity::renderCoverSleepScreen() const {
 }
 
 void SleepActivity::renderLastScreenSleepScreen() const {
-  const auto pageHeight = renderer.getScreenHeight();
-  renderer.drawImage(MoonIcon, 0, pageHeight - MOONICON_HEIGHT, MOONICON_WIDTH, MOONICON_HEIGHT);
+  int top, right, bottom, left;
+  renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
+  // Clear the rounded bottom corner too: how far its arc cuts in at the icon's bottom row.
+  const int radius = BoardConfig::ACTIVE.bottomCornerRadius != 0 ? BoardConfig::ACTIVE.bottomCornerRadius
+                                                                 : BoardConfig::ACTIVE.cornerRadius;
+  const int d = std::max(0, radius - bottom);
+  const int intrusion =
+      radius > 0 ? static_cast<int>(std::ceil(radius - std::sqrt(static_cast<float>(radius * radius - d * d)))) : 0;
+  renderer.drawImage(MoonIcon, std::max(left, intrusion), renderer.getScreenHeight() - bottom - MOONICON_HEIGHT,
+                     MOONICON_WIDTH, MOONICON_HEIGHT);
   // Only the moon differs from the frame already on the glass, so a differential
   // update adds it without a clean pass. HALF sweeps the panel through the inverse
   // first, which on a night-mode page is a full white flash as the device sleeps --

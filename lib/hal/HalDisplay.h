@@ -6,6 +6,13 @@ class HalDisplay {
  public:
   // Controller of the driver chosen at boot (null if the driver does not say).
   const char* controllerName() const { return einkDisplay.getControllerName(); }
+  // True while book pages are presented; panels with a reading waveform use it.
+  void setReaderRefresh(bool reading) { einkDisplay.setReaderRefresh(reading); }
+  // True when the panel joins the B/W base and the gray planes in one waveform (X4 Pro
+  // one-pass text AA while reading): the base is stashed, displayGrayBuffer() commits both.
+  bool combinedGrayscaleBase() const {
+    return einkDisplay.grayscaleCapabilities().base == freeink::GrayscaleBase::Combined;
+  }
 
   // Constructor with pin configuration
   HalDisplay();
