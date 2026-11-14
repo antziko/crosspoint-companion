@@ -251,35 +251,96 @@ inline std::vector<StrId> homeThemeValues() {
   return {VALUES, VALUES + count};
 }
 
-// Shared settings list used by both the device settings UI and the web settings API.
-// Each entry has a key (for JSON API) and category (for grouping).
-// ACTION-type entries and entries without a key are device-only.
-//
-// The list is rebuilt on each call rather than cached in a static, so its ~10-12 KB of
-// SettingInfo entries is not held resident while reading (where RAM is tightest) — it only
-// lives for the duration of a settings load/save/render. When an SdCardFontRegistry with SD
-// fonts (or a DictionaryRegistry) is supplied, the font-family / dictionary entries are built
-// in their registry-aware form.
-inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* registry = nullptr,
-                                                const DictionaryRegistry* dictRegistry = nullptr) {
-  // Built fresh on each call (not a static cache) so the ~10-12 KB of SettingInfo entries is not
-  // held resident while reading — it lives only for the duration of a settings load/save/render,
-  // all of which are off the render loop. Callers are infrequent (boot load, settings change, web
-  // settings, settings-screen open). Use push_back, not brace-init, to avoid placing all ~56
-  // SettingInfo temporaries on the stack at once via std::initializer_list, which would overflow
-  // the 8 KB loopTask stack; push_back keeps peak stack usage to ~sizeof(SettingInfo).
-  std::vector<SettingInfo> v;
-  // Must be >= the number of push_back calls below. It was 60 against 74 entries, so every
-  // call allocated 60 x sizeof(SettingInfo), then reallocated to 120 while still holding the
-  // first block — two contiguous allocations and a copy where one would do. The 8640-byte
-  // growth allocation is what aborted (and rebooted the device) when settings were saved at
-  // low heap; see SettingsPersistence.h. Keep headroom above the real count.
+// Receives the settings list one entry at a time. getSettingsList() collects the entries into a
+// vector; the web settings API writes each one out as it arrives, so it never holds the whole
+// list (108 x sizeof(SettingInfo) in one block, plus every entry's label vector) at once.
+struct SettingSink {
+  void* ctx = nullptr;
+  void (*fn)(void* ctx, SettingInfo&& setting) = nullptr;
+};
+
+namespace settings_list_detail {
+
+// Board-specific visibility and the registry-aware rebuilds, applied to each entry as the builder
+// produces it. False drops the entry.
+inline bool finalizeSetting(SettingInfo& s, const SdCardFontRegistry* registry,
+                            const DictionaryRegistry* dictRegistry) {
+  const StrId id = s.nameId;
+  // Tilt page turn needs the QMI8658 IMU (X3).
+  if (id == StrId::STR_TILT_PAGE_TURN && !halTiltSensor.isAvailable()) return false;
+  if ((id == StrId::STR_DBL_CLICK_PWR || id == StrId::STR_DBL_CLICK_BACK) && BoardConfig::hasHomeKey()) return false;
+  if (id == StrId::STR_DICTIONARY && dictRegistry) s = buildDictionarySetting(dictRegistry);
+  // Frontlit and lightless variants of a board share one binary (EEGO A4); presence is the
+  // I2C probe result from Frontlight.begin(). UI-only: persistence walks kPersistedSettings,
+  // so the probe never drops a saved key.
+  if (id == StrId::STR_RESTORE_LIGHT_ON_WAKE && !Frontlight.present()) return false;
+  if (id == StrId::STR_FONT_FAMILY && registry && registry->getFamilyCount() > 0) {
+    s = buildFontFamilySetting(registry);
+  }
+  // Unconditional: even with no SD fonts installed the sizes come from the
+  // built-in family rather than a fixed Small/Medium/Large/XL enum.
+  if (id == StrId::STR_FONT_SIZE) s = buildFontSizeSetting(registry);
+  // Registry-less callers (the persistence cross-check) keep the placeholder's valuePtr.
+  // The row itself needs no registry.
+  if (id == StrId::STR_DICT_FONT_SIZE && registry) s = buildDictFontSizeSetting();
+  // The menu-gesture choice only makes sense where the menu stays reachable
+  // without the tap (the capacitive Home key) AND the bottom edge is free;
+  // everywhere else the tap is the primary path into the reader menu and the
+  // bottom edge is Home, so the row is hidden and resolveShowReaderMenu()
+  // treats a stored Swipe Up as Tap.
+  if (id == StrId::STR_SHOW_READER_MENU && !BoardConfig::hasHomeKey()) return false;
+  // Touch-vs-button setting visibility (#2481, corrected per #2689). Non-touch boards (X3/X4)
+  // hide the touch-only control; touch boards hide the front-button orientation follow, having no
+  // front buttons to orient.
   //
-  // Derived, not guessed: 107 push_back sites below. One is the Home-key loop (which reserves its
-  // own rows), one the 4-row Control Center tile loop, and the two shortPwrBtn branches never
-  // both compile, so at most 108 rows here. 116 keeps headroom for the next few rows.
-  constexpr size_t kSettingCount = 116;
-  v.reserve(kSettingCount);
+  // The sunlight fading fix used to be dropped here too, as a frontlight-device irrelevance. It is
+  // not one: the flag is the `turnOffScreen` argument threaded through displayBuffer
+  // (GfxRenderer.cpp:2122 -> FreeInkDisplay.cpp:602), so with it off the panel's DC-DC stays
+  // energised between refreshes on any board. That bias is panel-wide, not a property of how the
+  // device is lit, and on the X4 Pro the erase made the one existing mitigation for it unreachable
+  // from both the device and the web settings API.
+  if (!BoardConfig::hasTouch()) {
+    if (id == StrId::STR_TOUCH_READER_CONTROLS || id == StrId::STR_NEXT_PAGE_GESTURE ||
+        id == StrId::STR_PREV_PAGE_GESTURE || id == StrId::STR_PANEL_TILE_1 || id == StrId::STR_PANEL_TILE_2 ||
+        id == StrId::STR_PANEL_TILE_3 || id == StrId::STR_PANEL_TILE_4) {
+      return false;
+    }
+  } else if (id == StrId::STR_FRONT_BTN_FOLLOW_ORIENTATION) {
+    return false;
+  }
+  return true;
+}
+
+// The builder's `v`: each push_back is finalized and handed straight to the sink.
+class SettingEmitter {
+ public:
+  SettingEmitter(const SettingSink sink, const SdCardFontRegistry* registry, const DictionaryRegistry* dictRegistry)
+      : sink_(sink), registry_(registry), dictRegistry_(dictRegistry) {}
+  void push_back(SettingInfo&& s) {
+    if (finalizeSetting(s, registry_, dictRegistry_)) sink_.fn(sink_.ctx, std::move(s));
+  }
+  // Builder calls ending in a chained modifier (.withTextSettings()) hand over an lvalue.
+  void push_back(const SettingInfo& s) { push_back(SettingInfo(s)); }
+
+ private:
+  SettingSink sink_;
+  const SdCardFontRegistry* registry_;
+  const DictionaryRegistry* dictRegistry_;
+};
+
+}  // namespace settings_list_detail
+
+// Shared settings list used by both the device settings UI and the web settings API, produced
+// one entry at a time into `sink`. Each entry has a key (for JSON API) and category (for
+// grouping). ACTION-type entries and entries without a key are device-only. When an
+// SdCardFontRegistry with SD fonts (or a DictionaryRegistry) is supplied, the font-family /
+// dictionary entries are built in their registry-aware form.
+inline void forEachSetting(const SdCardFontRegistry* registry, const DictionaryRegistry* dictRegistry,
+                           const SettingSink sink) {
+  // Use push_back, not brace-init, to avoid placing all ~56 SettingInfo temporaries on the stack
+  // at once via std::initializer_list, which would overflow the 8 KB loopTask stack; push_back
+  // keeps peak stack usage to ~sizeof(SettingInfo).
+  settings_list_detail::SettingEmitter v(sink, registry, dictRegistry);
 
   // --- Display ---
   // Appearance basics stay at the Display top level; sleep-screen and e-ink refresh tuning live in
@@ -792,106 +853,40 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   v.push_back(SettingInfo::Toggle(StrId::STR_FRONTLIGHT, &CrossPointSettings::frontlightOn, "frontlightOn"));
 #endif
 
-  // Tilt page turn needs the QMI8658 IMU (X3). Erasing keeps the list at its
-  // initial allocation; the row was pushed in position above.
-  if (!halTiltSensor.isAvailable()) {
-    v.erase(
-        std::remove_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_TILT_PAGE_TURN; }),
-        v.end());
+  // Home-key gestures. Built with this fork's vector-backed Enum rather than upstream's
+  // StaticEnum/span, which would mean threading a second representation through every
+  // SettingInfo consumer.
+  if (dictRegistry && BoardConfig::hasHomeKey()) {
+    const std::vector<StrId> actions(std::begin(home_button::ACTION_LABELS), std::end(home_button::ACTION_LABELS));
+    for (unsigned i = 0; i < 3; ++i) {
+      v.push_back(SettingInfo::Enum(home_button::GESTURE_LABELS[i], home_button::FIELDS[i], actions,
+                                    home_button::KEYS[i], StrId::STR_CAT_CONTROLS));
+    }
   }
-  if (BoardConfig::hasHomeKey()) {
-    v.erase(std::remove_if(v.begin(), v.end(),
-                           [](const SettingInfo& s) {
-                             return s.nameId == StrId::STR_DBL_CLICK_PWR || s.nameId == StrId::STR_DBL_CLICK_BACK;
-                           }),
-            v.end());
-  }
+}
 
-  if (dictRegistry) {
-    auto it = std::find_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_DICTIONARY; });
-    if (it != v.end()) {
-      *it = buildDictionarySetting(dictRegistry);
-    }
-
-    // Home-key gestures. Built with this fork's vector-backed Enum rather than upstream's
-    // StaticEnum/span, which would mean threading a second representation through every
-    // SettingInfo consumer.
-    if (BoardConfig::hasHomeKey()) {
-      const std::vector<StrId> actions(std::begin(home_button::ACTION_LABELS), std::end(home_button::ACTION_LABELS));
-      v.reserve(v.size() + 3);
-      for (unsigned i = 0; i < 3; ++i) {
-        v.push_back(SettingInfo::Enum(home_button::GESTURE_LABELS[i], home_button::FIELDS[i], actions,
-                                      home_button::KEYS[i], StrId::STR_CAT_CONTROLS));
-      }
-    }
-  }
-  // Frontlit and lightless variants of a board share one binary (EEGO A4); presence is the
-  // I2C probe result from Frontlight.begin(). UI-only: persistence walks kPersistedSettings,
-  // so the probe never drops a saved key.
-  if (!Frontlight.present()) {
-    v.erase(std::remove_if(v.begin(), v.end(),
-                           [](const SettingInfo& s) { return s.nameId == StrId::STR_RESTORE_LIGHT_ON_WAKE; }),
-            v.end());
-  }
-  if (registry && registry->getFamilyCount() > 0) {
-    auto it = std::find_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_FONT_FAMILY; });
-    if (it != v.end()) {
-      *it = buildFontFamilySetting(registry);
-    }
-  }
-  {
-    // Unconditional: even with no SD fonts installed the sizes come from the
-    // built-in family rather than a fixed Small/Medium/Large/XL enum.
-    auto it = std::find_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_FONT_SIZE; });
-    if (it != v.end()) {
-      *it = buildFontSizeSetting(registry);
-    }
-  }
-  if (registry) {
-    // Registry-less callers (the persistence cross-check) keep the placeholder's valuePtr.
-    // The row itself needs no registry.
-    auto it =
-        std::find_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_DICT_FONT_SIZE; });
-    if (it != v.end()) {
-      *it = buildDictFontSizeSetting();
-    }
-  }
-
-  // The menu-gesture choice only makes sense where the menu stays reachable
-  // without the tap (the capacitive Home key) AND the bottom edge is free;
-  // everywhere else the tap is the primary path into the reader menu and the
-  // bottom edge is Home, so the row is hidden and resolveShowReaderMenu()
-  // treats a stored Swipe Up as Tap.
-  if (!BoardConfig::hasHomeKey()) {
-    v.erase(std::remove_if(v.begin(), v.end(),
-                           [](const SettingInfo& s) { return s.nameId == StrId::STR_SHOW_READER_MENU; }),
-            v.end());
-  }
-
-  // Touch-vs-button setting visibility (#2481, corrected per #2689). Non-touch boards (X3/X4)
-  // hide the touch-only control; touch boards hide the front-button orientation follow, having no
-  // front buttons to orient.
+// The whole list as a vector, for the settings screen and the persistence cross-check.
+//
+// Rebuilt on each call rather than cached in a static, so its ~10-12 KB of SettingInfo entries
+// is not held resident while reading (where RAM is tightest) — it only lives for the duration of
+// a settings render or check, all of which are off the render loop.
+inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* registry = nullptr,
+                                                const DictionaryRegistry* dictRegistry = nullptr) {
+  std::vector<SettingInfo> v;
+  // Must be >= the number of entries produced. It was 60 against 74 entries, so every call
+  // allocated 60 x sizeof(SettingInfo), then reallocated to 120 while still holding the first
+  // block — two contiguous allocations and a copy where one would do. The 8640-byte growth
+  // allocation is what aborted (and rebooted the device) when settings were saved at low heap;
+  // see SettingsPersistence.h. Keep headroom above the real count.
   //
-  // The sunlight fading fix used to be dropped here too, as a frontlight-device irrelevance. It is
-  // not one: the flag is the `turnOffScreen` argument threaded through displayBuffer
-  // (GfxRenderer.cpp:2122 -> FreeInkDisplay.cpp:602), so with it off the panel's DC-DC stays
-  // energised between refreshes on any board. That bias is panel-wide, not a property of how the
-  // device is lit, and on the X4 Pro the erase made the one existing mitigation for it unreachable
-  // from both the device and the web settings API.
-  if (!BoardConfig::hasTouch()) {
-    v.erase(std::remove_if(v.begin(), v.end(),
-                           [](const SettingInfo& s) {
-                             return s.nameId == StrId::STR_TOUCH_READER_CONTROLS ||
-                                    s.nameId == StrId::STR_NEXT_PAGE_GESTURE ||
-                                    s.nameId == StrId::STR_PREV_PAGE_GESTURE || s.nameId == StrId::STR_PANEL_TILE_1 ||
-                                    s.nameId == StrId::STR_PANEL_TILE_2 || s.nameId == StrId::STR_PANEL_TILE_3 ||
-                                    s.nameId == StrId::STR_PANEL_TILE_4;
-                           }),
-            v.end());
-  } else {
-    v.erase(std::remove_if(v.begin(), v.end(),
-                           [](const SettingInfo& s) { return s.nameId == StrId::STR_FRONT_BTN_FOLLOW_ORIENTATION; }),
-            v.end());
-  }
+  // Derived, not guessed: 107 push_back sites in forEachSetting. One is the Home-key loop
+  // (3 rows), one the 4-row Control Center tile loop, and the two shortPwrBtn branches never
+  // both compile, so at most 111 rows. 116 keeps headroom for the next few rows.
+  constexpr size_t kSettingCount = 116;
+  v.reserve(kSettingCount);
+  forEachSetting(registry, dictRegistry,
+                 SettingSink{&v, [](void* ctx, SettingInfo&& s) {
+                               static_cast<std::vector<SettingInfo>*>(ctx)->push_back(std::move(s));
+                             }});
   return v;
 }

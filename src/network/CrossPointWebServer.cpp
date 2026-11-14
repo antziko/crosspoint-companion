@@ -1532,11 +1532,196 @@ void CrossPointWebServer::handleSettingsPage() const {
   LOG_DBG("WEB", "Served settings page");
 }
 
+namespace {
+
+// One /api/settings entry, written as forEachSetting produces it.
+struct SettingsReply {
+  WebServer* server;
+  const String& keys;
+  JsonDocument doc;
+  char output[512];
+  bool seenFirst = false;
+};
+
+void sendSettingEntry(void* ctx, SettingInfo&& setting) {
+  auto& reply = *static_cast<SettingsReply*>(ctx);
+  WebServer* server = reply.server;
+  const String& keys = reply.keys;
+  JsonDocument& doc = reply.doc;
+  char* output = reply.output;
+  constexpr size_t outputSize = sizeof(reply.output);
+  bool& seenFirst = reply.seenFirst;
+  const SettingInfo& s = setting;
+  if (!s.key || s.webHidden) return;  // Skip ACTION-only entries
+  if (!keys.isEmpty() && !listContainsKey(keys, s.key)) return;
+
+  doc.clear();
+  doc["key"] = s.key;
+  doc["name"] = I18N.get(s.nameId);
+  doc["category"] = I18N.get(s.category);
+
+  switch (s.type) {
+    case SettingType::TOGGLE: {
+      doc["type"] = "toggle";
+      if (s.valuePtr) {
+        doc["value"] = static_cast<int>(SETTINGS.*(s.valuePtr));
+      }
+      break;
+    }
+    case SettingType::ENUM: {
+      const auto& labels = s.enumValues;
+      const bool toggle = s.enumStringValues.empty() && labels.size() == 2 && labels[0] == StrId::STR_STATE_OFF &&
+                          labels[1] == StrId::STR_STATE_ON;
+      doc["type"] = toggle ? "toggle" : "enum";
+      if (s.valuePtr) {
+        doc["value"] = static_cast<int>(SETTINGS.*(s.valuePtr));
+      } else if (s.dyn && s.dyn->valueGetter) {
+        doc["value"] = static_cast<int>(s.dyn->valueGetter());
+      }
+      if (toggle) break;
+      JsonArray options = doc["options"].to<JsonArray>();
+      if (!s.enumStringValues.empty()) {
+        for (const auto& opt : s.enumStringValues) {
+          options.add(opt);
+        }
+      } else {
+        for (const auto& opt : s.enumValues) {
+          options.add(I18N.get(opt));
+        }
+      }
+      break;
+    }
+    case SettingType::VALUE: {
+      doc["type"] = "value";
+      if (s.valuePtr) {
+        doc["value"] = static_cast<int>(SETTINGS.*(s.valuePtr));
+      }
+      doc["min"] = s.valueRange.min;
+      doc["max"] = s.valueRange.max;
+      doc["step"] = s.valueRange.step;
+      break;
+    }
+    case SettingType::STRING: {
+      doc["type"] = "string";
+      if (s.obfuscated) {
+        // Passwords never leave the device; the page only learns whether one is set.
+        doc["value"] = nullptr;
+        doc["hasPassword"] =
+            (s.dyn && s.dyn->stringGetter)
+                ? !s.dyn->stringGetter().empty()
+                : s.stringMaxLen > 0 && *(reinterpret_cast<const char*>(&SETTINGS) + s.stringOffset) != '\0';
+      } else if (s.dyn && s.dyn->stringGetter) {
+        doc["value"] = s.dyn->stringGetter();
+      } else if (s.stringMaxLen > 0) {
+        doc["value"] = reinterpret_cast<const char*>(&SETTINGS) + s.stringOffset;
+      }
+      break;
+    }
+    default:
+      return;
+  }
+
+  const char* json = output;
+  // Only entries over the stack buffer use the heap, e.g. fontFamily with many SD families.
+  std::unique_ptr<char[]> large;
+  size_t len = serializeJson(doc, output, outputSize);
+  if (len >= outputSize) {
+    len = measureJson(doc);
+    large.reset(new (std::nothrow) char[len + 1]);
+    if (!large) {
+      LOG_ERR("WEB", "OOM: setting JSON for %s (%zu bytes)", s.key, len);
+      return;
+    }
+    serializeJson(doc, large.get(), len + 1);
+    json = large.get();
+  }
+
+  if (seenFirst) {
+    server->sendContent(",");
+  } else {
+    seenFirst = true;
+  }
+  server->sendContent(json, len);
+  yield();                          // Yield to allow WiFi and other tasks to process during a slow send
+  resetTaskWatchdogIfSubscribed();  // Reset watchdog: each sendContent() is a blocking network write
+}
+
+// Applies the posted value, if any, of one entry as forEachSetting produces it.
+struct SettingsUpdate {
+  const JsonDocument& doc;
+  int applied = 0;
+};
+
+void applySettingEntry(void* ctx, SettingInfo&& setting) {
+  auto& update = *static_cast<SettingsUpdate*>(ctx);
+  const JsonDocument& doc = update.doc;
+  int& applied = update.applied;
+  const SettingInfo& s = setting;
+  if (!s.key || s.webHidden) return;
+  if (!doc[s.key].is<JsonVariant>()) return;
+
+  switch (s.type) {
+    case SettingType::TOGGLE: {
+      const int val = doc[s.key].as<int>() ? 1 : 0;
+      if (s.valuePtr) {
+        SETTINGS.*(s.valuePtr) = val;
+      }
+      applied++;
+      break;
+    }
+    case SettingType::ENUM: {
+      const int val = doc[s.key].as<int>();
+      const int maxVal = s.enumStringValues.empty() ? static_cast<int>(s.enumValues.size())
+                                                    : static_cast<int>(s.enumStringValues.size());
+      if (val >= 0 && val < maxVal) {
+        if (s.valuePtr) {
+          SETTINGS.*(s.valuePtr) = static_cast<uint8_t>(val);
+        } else if (s.dyn && s.dyn->valueSetter) {
+          s.dyn->valueSetter(static_cast<uint8_t>(val));
+        }
+        applied++;
+      }
+      break;
+    }
+    case SettingType::VALUE: {
+      int val = doc[s.key].as<int>();
+      if (val >= s.valueRange.min && val <= s.valueRange.max) {
+        // Snap to the nearest valid step. The device cycler only ever produces
+        // (min + k*step) values, and main.cpp rejects non-step-multiples on
+        // boot (resetting to default), so a web-supplied off-step value must be
+        // aligned here or it would silently revert on the next reboot.
+        if (s.valueRange.step > 1) {
+          const int rel = val - s.valueRange.min;
+          val = s.valueRange.min + ((rel + s.valueRange.step / 2) / s.valueRange.step) * s.valueRange.step;
+          if (val > s.valueRange.max) val = s.valueRange.max;
+        }
+        if (s.valuePtr) {
+          SETTINGS.*(s.valuePtr) = static_cast<uint8_t>(val);
+        }
+        applied++;
+      }
+      break;
+    }
+    case SettingType::STRING: {
+      const std::string val = doc[s.key].as<std::string>();
+      if (s.dyn && s.dyn->stringSetter) {
+        s.dyn->stringSetter(val);
+      } else if (s.stringMaxLen > 0) {
+        char* ptr = reinterpret_cast<char*>(&SETTINGS) + s.stringOffset;
+        strncpy(ptr, val.c_str(), s.stringMaxLen - 1);
+        ptr[s.stringMaxLen - 1] = '\0';
+      }
+      applied++;
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+}  // namespace
+
 void CrossPointWebServer::handleGetSettings() const {
-  // Pass the SD font registry so the fontFamily setting's enumStringValues
-  // includes SD-resident families — otherwise the web API only exposes the
-  // three built-in fonts.
-  const auto& settings = getSettingsList(&sdFontSystem.registry(), &dictionaryRegistry);
   // ?keys=a,b returns only those settings, so a plugin need not read the whole list.
   const String keys = server->arg("keys");
 
@@ -1544,105 +1729,12 @@ void CrossPointWebServer::handleGetSettings() const {
   server->send(200, "application/json", "");
   server->sendContent("[");
 
-  char output[512];
-  constexpr size_t outputSize = sizeof(output);
-  bool seenFirst = false;
-  JsonDocument doc;
-
-  for (const auto& s : settings) {
-    if (!s.key || s.webHidden) continue;  // Skip ACTION-only entries
-    if (!keys.isEmpty() && !listContainsKey(keys, s.key)) continue;
-
-    doc.clear();
-    doc["key"] = s.key;
-    doc["name"] = I18N.get(s.nameId);
-    doc["category"] = I18N.get(s.category);
-
-    switch (s.type) {
-      case SettingType::TOGGLE: {
-        doc["type"] = "toggle";
-        if (s.valuePtr) {
-          doc["value"] = static_cast<int>(SETTINGS.*(s.valuePtr));
-        }
-        break;
-      }
-      case SettingType::ENUM: {
-        const auto& labels = s.enumValues;
-        const bool toggle = s.enumStringValues.empty() && labels.size() == 2 && labels[0] == StrId::STR_STATE_OFF &&
-                            labels[1] == StrId::STR_STATE_ON;
-        doc["type"] = toggle ? "toggle" : "enum";
-        if (s.valuePtr) {
-          doc["value"] = static_cast<int>(SETTINGS.*(s.valuePtr));
-        } else if (s.dyn && s.dyn->valueGetter) {
-          doc["value"] = static_cast<int>(s.dyn->valueGetter());
-        }
-        if (toggle) break;
-        JsonArray options = doc["options"].to<JsonArray>();
-        if (!s.enumStringValues.empty()) {
-          for (const auto& opt : s.enumStringValues) {
-            options.add(opt);
-          }
-        } else {
-          for (const auto& opt : s.enumValues) {
-            options.add(I18N.get(opt));
-          }
-        }
-        break;
-      }
-      case SettingType::VALUE: {
-        doc["type"] = "value";
-        if (s.valuePtr) {
-          doc["value"] = static_cast<int>(SETTINGS.*(s.valuePtr));
-        }
-        doc["min"] = s.valueRange.min;
-        doc["max"] = s.valueRange.max;
-        doc["step"] = s.valueRange.step;
-        break;
-      }
-      case SettingType::STRING: {
-        doc["type"] = "string";
-        if (s.obfuscated) {
-          // Passwords never leave the device; the page only learns whether one is set.
-          doc["value"] = nullptr;
-          doc["hasPassword"] =
-              (s.dyn && s.dyn->stringGetter)
-                  ? !s.dyn->stringGetter().empty()
-                  : s.stringMaxLen > 0 && *(reinterpret_cast<const char*>(&SETTINGS) + s.stringOffset) != '\0';
-        } else if (s.dyn && s.dyn->stringGetter) {
-          doc["value"] = s.dyn->stringGetter();
-        } else if (s.stringMaxLen > 0) {
-          doc["value"] = reinterpret_cast<const char*>(&SETTINGS) + s.stringOffset;
-        }
-        break;
-      }
-      default:
-        continue;
-    }
-
-    const char* json = output;
-    // Only entries over the stack buffer use the heap, e.g. fontFamily with many SD families.
-    std::unique_ptr<char[]> large;
-    size_t len = serializeJson(doc, output, outputSize);
-    if (len >= outputSize) {
-      len = measureJson(doc);
-      large.reset(new (std::nothrow) char[len + 1]);
-      if (!large) {
-        LOG_ERR("WEB", "OOM: setting JSON for %s (%zu bytes)", s.key, len);
-        continue;
-      }
-      serializeJson(doc, large.get(), len + 1);
-      json = large.get();
-    }
-
-    if (seenFirst) {
-      server->sendContent(",");
-    } else {
-      seenFirst = true;
-    }
-    server->sendContent(json, len);
-    yield();                          // Yield to allow WiFi and other tasks to process during a slow send
-    resetTaskWatchdogIfSubscribed();  // Reset watchdog: each sendContent() is a blocking network write
-  }
+  // Pass the SD font registry so the fontFamily setting's enumStringValues
+  // includes SD-resident families — otherwise the web API only exposes the
+  // three built-in fonts. One entry at a time: the whole list is ~8 KB in one
+  // block, requested while Wi-Fi holds most of the heap.
+  SettingsReply reply{server.get(), keys};
+  forEachSetting(&sdFontSystem.registry(), &dictionaryRegistry, SettingSink{&reply, &sendSettingEntry});
 
   server->sendContent("]");
   server->sendContent("");
@@ -1663,71 +1755,9 @@ void CrossPointWebServer::handlePostSettings() {
     return;
   }
 
-  const auto& settings = getSettingsList(&sdFontSystem.registry(), &dictionaryRegistry);
-  int applied = 0;
-
-  for (const auto& s : settings) {
-    if (!s.key || s.webHidden) continue;
-    if (!doc[s.key].is<JsonVariant>()) continue;
-
-    switch (s.type) {
-      case SettingType::TOGGLE: {
-        const int val = doc[s.key].as<int>() ? 1 : 0;
-        if (s.valuePtr) {
-          SETTINGS.*(s.valuePtr) = val;
-        }
-        applied++;
-        break;
-      }
-      case SettingType::ENUM: {
-        const int val = doc[s.key].as<int>();
-        const int maxVal = s.enumStringValues.empty() ? static_cast<int>(s.enumValues.size())
-                                                      : static_cast<int>(s.enumStringValues.size());
-        if (val >= 0 && val < maxVal) {
-          if (s.valuePtr) {
-            SETTINGS.*(s.valuePtr) = static_cast<uint8_t>(val);
-          } else if (s.dyn && s.dyn->valueSetter) {
-            s.dyn->valueSetter(static_cast<uint8_t>(val));
-          }
-          applied++;
-        }
-        break;
-      }
-      case SettingType::VALUE: {
-        int val = doc[s.key].as<int>();
-        if (val >= s.valueRange.min && val <= s.valueRange.max) {
-          // Snap to the nearest valid step. The device cycler only ever produces
-          // (min + k*step) values, and main.cpp rejects non-step-multiples on
-          // boot (resetting to default), so a web-supplied off-step value must be
-          // aligned here or it would silently revert on the next reboot.
-          if (s.valueRange.step > 1) {
-            const int rel = val - s.valueRange.min;
-            val = s.valueRange.min + ((rel + s.valueRange.step / 2) / s.valueRange.step) * s.valueRange.step;
-            if (val > s.valueRange.max) val = s.valueRange.max;
-          }
-          if (s.valuePtr) {
-            SETTINGS.*(s.valuePtr) = static_cast<uint8_t>(val);
-          }
-          applied++;
-        }
-        break;
-      }
-      case SettingType::STRING: {
-        const std::string val = doc[s.key].as<std::string>();
-        if (s.dyn && s.dyn->stringSetter) {
-          s.dyn->stringSetter(val);
-        } else if (s.stringMaxLen > 0) {
-          char* ptr = reinterpret_cast<char*>(&SETTINGS) + s.stringOffset;
-          strncpy(ptr, val.c_str(), s.stringMaxLen - 1);
-          ptr[s.stringMaxLen - 1] = '\0';
-        }
-        applied++;
-        break;
-      }
-      default:
-        break;
-    }
-  }
+  SettingsUpdate update{doc};
+  forEachSetting(&sdFontSystem.registry(), &dictionaryRegistry, SettingSink{&update, &applySettingEntry});
+  const int applied = update.applied;
 
   SETTINGS.saveToFile();
 
