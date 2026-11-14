@@ -75,13 +75,48 @@ bool showOnDevice(const SettingInfo& setting) {
   return true;
 }
 
+// Group titles, indexed by ControlsGroup (Root uses the section title).
+constexpr StrId CONTROLS_GROUP_TITLES[] = {StrId::STR_CAT_CONTROLS, StrId::STR_POWER_BUTTON, StrId::STR_FRONT_BUTTONS,
+                                           StrId::STR_SIDE_BUTTONS, StrId::STR_TAPS_AND_GESTURES};
+
+ControlsGroup controlsGroupOf(const SettingInfo& setting) {
+  const auto field = setting.valuePtr;
+  if (field == &CrossPointSettings::shortPwrBtn || field == &CrossPointSettings::powerDoubleClickAction ||
+      field == &CrossPointSettings::pwrBtnFootnoteBack) {
+    return ControlsGroup::Power;
+  }
+  // backShortToFileBrowser stays in Root: touch boards without front buttons send Back from
+  // the left-edge swipe, so the row still applies there.
+  if (field == &CrossPointSettings::frontButtonFollowOrientation ||
+      field == &CrossPointSettings::longPressButtonBehavior || field == &CrossPointSettings::holdConfirmAction ||
+      field == &CrossPointSettings::backDoubleClickAction) {
+    return ControlsGroup::Front;
+  }
+  if (field == &CrossPointSettings::sideButtonLayout || field == &CrossPointSettings::swapSideButtonsCW ||
+      field == &CrossPointSettings::sideLongPressButtonBehavior) {
+    return ControlsGroup::Side;
+  }
+  if (field == &CrossPointSettings::touchReaderControls || field == &CrossPointSettings::pageTurnGesture ||
+      field == &CrossPointSettings::previousPageGesture || field == &CrossPointSettings::showReaderMenu) {
+    return ControlsGroup::Touch;
+  }
+  return ControlsGroup::Root;
+}
+
+ControlsGroup controlsGroupForTitle(const StrId title) {
+  for (size_t i = 1; i < std::size(CONTROLS_GROUP_TITLES); ++i) {
+    if (CONTROLS_GROUP_TITLES[i] == title) return static_cast<ControlsGroup>(i);
+  }
+  return ControlsGroup::Root;
+}
+
 // Device-only rows added per screen, beyond the shared list.
 constexpr size_t EXTRA_ROWS_PER_SCREEN = 8;
 }  // namespace
 
 SettingsActivity::SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                   const SettingsSection section)
-    : UiListActivity("Settings", renderer, mappedInput), section(section) {}
+                                   const SettingsSection section, const ControlsGroup controlsGroup)
+    : UiListActivity("Settings", renderer, mappedInput), section(section), controlsGroup(controlsGroup) {}
 
 SettingsActivity::SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const StrId subCategory,
                                    const StrId subTitle)
@@ -96,7 +131,8 @@ void SettingsActivity::rebuildSettings() {
   auto all = getSettingsList(&sdFontSystem.registry(), &dictionaryRegistry);
   const auto belongs = [this](const SettingInfo& setting) {
     if (isSubScreen()) return setting.category == subCategory_ && !setting.inTextSettings;
-    return sectionFor(setting) == section && showOnDevice(setting);
+    return sectionFor(setting) == section && showOnDevice(setting) &&
+           (section != SettingsSection::Controls || controlsGroupOf(setting) == controlsGroup);
   };
   settings.clear();
   settings.reserve(std::count_if(all.begin(), all.end(), belongs) + EXTRA_ROWS_PER_SCREEN);
@@ -174,10 +210,21 @@ void SettingsActivity::rebuildSettings() {
       addAction(StrId::STR_CUSTOMISE_STATUS_BAR, SettingAction::CustomiseStatusBar);
       break;
     case SettingsSection::Controls:
-      if (BoardConfig::hasHomeKey()) addAction(StrId::STR_HOME_BUTTON, SettingAction::HomeButton);
-      // Skipped on a board with no front buttons (X4 Pro): ButtonRemapActivity captures raw
-      // front presses to assign the four roles, so there it can never get past its first step.
-      if (mappedInput.hasFrontButtons()) {
+      if (controlsGroup == ControlsGroup::Root) {
+        if (BoardConfig::hasHomeKey()) addAction(StrId::STR_HOME_BUTTON, SettingAction::HomeButton);
+        // A group row only where it has rows. Front buttons also needs the buttons themselves:
+        // on a board without them (X4 Pro) its rows configure nothing.
+        for (size_t i = 1; i < std::size(CONTROLS_GROUP_TITLES); ++i) {
+          const auto group = static_cast<ControlsGroup>(i);
+          if (group == ControlsGroup::Front && !mappedInput.hasFrontButtons()) continue;
+          const bool hasRows = std::any_of(all.begin(), all.end(), [group](const SettingInfo& setting) {
+            return sectionFor(setting) == SettingsSection::Controls && showOnDevice(setting) &&
+                   controlsGroupOf(setting) == group;
+          });
+          if (hasRows) addAction(CONTROLS_GROUP_TITLES[i], SettingAction::OpenControlsGroup);
+        }
+      } else if (controlsGroup == ControlsGroup::Front) {
+        // ButtonRemapActivity captures raw front presses to assign the four roles.
         addAction(StrId::STR_REMAP_FRONT_BUTTONS, SettingAction::RemapFrontButtons);
         addAction(StrId::STR_REMAP_FRONT_BUTTONS_CW, SettingAction::RemapFrontButtonsCW);
       }
@@ -231,7 +278,9 @@ void SettingsActivity::rebuildRowItems() {
 }
 
 const char* SettingsActivity::headerTitle() const {
-  return isSubScreen() ? I18N.get(subTitle_) : I18N.get(SETTINGS_SECTION_TITLES[static_cast<size_t>(section)]);
+  if (isSubScreen()) return I18N.get(subTitle_);
+  if (controlsGroup != ControlsGroup::Root) return I18N.get(CONTROLS_GROUP_TITLES[static_cast<size_t>(controlsGroup)]);
+  return I18N.get(SETTINGS_SECTION_TITLES[static_cast<size_t>(section)]);
 }
 
 void SettingsActivity::activateIndex(const int index) {
@@ -241,6 +290,10 @@ void SettingsActivity::activateIndex(const int index) {
   app.clearTapFlash();
   nav.selected = index;
   toggleSelectedSetting();
+  // Tap-first: a tapped row is not a cursor position. Left selected, it would stay
+  // highlighted once its popup or sub-screen closed; row 0 is hidden by ListCursor until a
+  // nav button is pressed, and the viewport does not follow a plain selection change.
+  if (mappedInput.hasTouch()) nav.selected = 0;
   requestUpdate();
 }
 
@@ -420,6 +473,10 @@ void SettingsActivity::toggleSelectedSetting() {
         // Open a nested category-scoped settings screen (reuses this activity in sub-screen mode).
         startActivityForResultNoThrow<SettingsActivity>(resultHandler, renderer, mappedInput, setting.subCategory,
                                                         setting.nameId);
+        break;
+      case SettingAction::OpenControlsGroup:
+        startActivityForResultNoThrow<SettingsActivity>(resultHandler, renderer, mappedInput, SettingsSection::Controls,
+                                                        controlsGroupForTitle(setting.nameId));
         break;
       case SettingAction::CustomiseTopBar:
         startActivityForResultNoThrow<HomeTopBarSettingsActivity>(resultHandler, renderer, mappedInput);

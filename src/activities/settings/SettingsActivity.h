@@ -34,8 +34,9 @@ enum class SettingAction {
   // Open a nested settings sub-screen listing every setting in SettingInfo::subCategory.
   // Rendered by a category-scoped SettingsActivity instance — see SettingInfo::SubScreen.
   OpenSubCategory,
-  TextSettings,  // LOCAL(feat-dictionary): #2605 Text Settings screen
-  DictNotes,     // LOCAL(feat-dictionary): the active dictionary's saved highlights
+  OpenControlsGroup,  // Controls > one ControlsGroup; the row's nameId is the group's title
+  TextSettings,       // LOCAL(feat-dictionary): #2605 Text Settings screen
+  DictNotes,          // LOCAL(feat-dictionary): the active dictionary's saved highlights
   Plugins,
   KeyboardLayouts,
   About,
@@ -197,11 +198,17 @@ struct SettingInfo {
   }
 };
 
+// Controls rows grouped by the physical control they configure. Root is the
+// Controls screen itself: the group rows plus what fits no group.
+enum class ControlsGroup : uint8_t { Root, Power, Front, Side, Touch };
+
 // The rows of one SettingsSection, or of one sub-screen category; activating a
 // row toggles/cycles it, opens its option popup, or launches its sub-screen.
 class SettingsActivity final : public UiListActivity {
   // End on a sub-screen (subCategory_ set instead).
   const SettingsSection section = SettingsSection::End;
+  // Which Controls group this screen lists; Root outside the Controls section.
+  const ControlsGroup controlsGroup = ControlsGroup::Root;
 
   // Sub-screen mode: when subCategory_ != STR_NONE_OPT this instance lists every setting tagged
   // with that category. subTitle_ is the header/label.
@@ -242,7 +249,8 @@ class SettingsActivity final : public UiListActivity {
   void drawFooter() override;
 
  public:
-  SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, SettingsSection section);
+  SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, SettingsSection section,
+                   ControlsGroup controlsGroup = ControlsGroup::Root);
   // Sub-screen constructor: render only the settings tagged `subCategory`, titled `subTitle`.
   SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, StrId subCategory, StrId subTitle);
   void onEnter() override;

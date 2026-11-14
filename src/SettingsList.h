@@ -571,8 +571,7 @@ inline void forEachSetting(const SdCardFontRegistry* registry, const DictionaryR
   // --- Controls ---
   // Grouped by physical button family so related options sit together:
   //   Front buttons -> Side buttons -> Power -> Tilt.
-  // The RemapFrontButtons / RemapFrontButtonsCW ACTION rows are inserted ahead of
-  // these by SettingsActivity, so the front-button group leads the Controls screen.
+  // On the device SettingsActivity splits these into Controls groups (controlsGroupOf).
 
   // Front buttons
   v.push_back(SettingInfo::Toggle(StrId::STR_FRONT_BTN_FOLLOW_ORIENTATION,

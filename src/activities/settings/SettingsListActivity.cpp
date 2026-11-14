@@ -75,6 +75,8 @@ void SettingsListActivity::activateIndex(const int index) {
   // unrelated element on return.
   app.clearTapFlash();
   openSection(static_cast<SettingsSection>(index));
+  // Tap-first: a tapped row is not a cursor position (see SettingsActivity::activateIndex).
+  if (mappedInput.hasTouch()) nav.selected = 0;
 }
 
 void SettingsListActivity::openSection(const SettingsSection section) {

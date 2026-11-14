@@ -279,6 +279,8 @@ The Settings screen lists six groups: **System**, **Display**, **Reader**, **Con
 
 #### 3.6.3 Controls
 
+Controls opens on four groups: **Power button**, **Front buttons**, **Side buttons** and **Taps and gestures**. A group only shows on boards that have that control, so the X4 Pro and EEGO A4 have no Front buttons group. Control Center tiles, tilt page turning and Back to file browser stay on the Controls screen itself.
+
 - **Remap Front Buttons**: A menu for customising the function of each bottom edge button.
 
 - **Side Button Layout (reader)**: Swap the order of the up and down volume buttons from "Prev/Next" (default) to "Next/Prev". You can also disable them entirely. This change is only in effect when reading.
