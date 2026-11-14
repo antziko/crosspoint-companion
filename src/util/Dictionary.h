@@ -283,8 +283,8 @@ class Dictionary {
   // Look up word in .syn (via .syn.oft if present). Fills `out` with every canonical headword
   // from .idx the form points at, in .syn order and without repeats, at most `max` of them
   // (capped at DictLocation::MAX_EXTRA + 1). Empty when the form is not listed.
-  static void resolveAltForms(const std::string& word, const char* cachePath, std::vector<std::string>& out,
-                              size_t max);
+  // Uses the dictionary `ctx` is open on, so the caller can locateIn() the results on it.
+  static void resolveAltForms(LookupCtx& ctx, const std::string& word, std::vector<std::string>& out, size_t max);
 
   static std::string cleanWord(const std::string& word);
   static std::vector<std::string> getStemVariants(const std::string& word);
@@ -375,9 +375,8 @@ class Dictionary {
   // Returns false when the result would be truncated.
   static bool buildPath(char* buf, size_t bufSize, const char* base, const char* suffix);
 
-  // Read the word at ordinal `ordinal` in .idx.
-  // folderPath is the dictionary base path (e.g. /dictionary/dict-en-en/dict-data).
-  static std::string wordAtOrdinal(const std::string& folderPath, uint32_t ordinal);
+  // The headword at 0-based `ordinal` in the ctx's .idx, seeking via its page index.
+  static std::string wordAtOrdinalIn(LookupCtx& ctx, uint32_t ordinal);
 
   // Binary search .oft to find the page boundary bytes in src containing target.
   // On return, *startByte and *endByte delimit the 32-word page to scan linearly.

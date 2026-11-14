@@ -593,31 +593,33 @@ void DictionaryLookupController::probeTabs() {
 void DictionaryLookupController::runAltFormLookup() {
   // A form can point at several headwords (よんで -> 読む and 呼ぶ). One reads as before;
   // several are shown together under the form looked up, each entry labelled.
+  // One ctx for the .syn search and every headword probe: one dictionary.bin read, one open
+  // of .idx and its page index.
+  Dictionary::LookupCtx ctx;
   std::vector<std::string> canonicals;
-  Dictionary::resolveAltForms(altFormWord, cachePath.c_str(), canonicals, DictLocation::MAX_EXTRA + 1);
+  if (Dictionary::openLookupCtx(ctx, cachePath.c_str())) {
+    Dictionary::resolveAltForms(ctx, altFormWord, canonicals, DictLocation::MAX_EXTRA + 1);
+  }
   DictLookupCallbacks probeCbs;
   probeCbs.ctx = this;
   probeCbs.shouldCancel = &DictionaryLookupController::cancelCallback;
   DictLocation merged;
   std::string firstFound;
   size_t headwordsFound = 0;
-  Dictionary::LookupCtx ctx;
-  if (!canonicals.empty() && Dictionary::openLookupCtx(ctx, cachePath.c_str())) {
-    for (const auto& canonical : canonicals) {
-      if (lookupCancelRequested) break;
-      const DictLocation loc = Dictionary::locateIn(ctx, canonical, probeCbs, /*collectAll=*/true);
-      if (!loc.found) continue;
-      if (headwordsFound++ == 0) {
-        merged.folderPath = loc.folderPath;
-        firstFound = canonical;
-      }
-      bool room = true;
-      for (uint8_t i = 0; i < loc.entryCount() && room; i++) {
-        const DictLocation::Range range = loc.entry(i);
-        room = merged.addEntry(range.offset, range.size, canonical.c_str());
-      }
-      if (!room) break;
+  for (const auto& canonical : canonicals) {
+    if (lookupCancelRequested) break;
+    const DictLocation loc = Dictionary::locateIn(ctx, canonical, probeCbs, /*collectAll=*/true);
+    if (!loc.found) continue;
+    if (headwordsFound++ == 0) {
+      merged.folderPath = loc.folderPath;
+      firstFound = canonical;
     }
+    bool room = true;
+    for (uint8_t i = 0; i < loc.entryCount() && room; i++) {
+      const DictLocation::Range range = loc.entry(i);
+      room = merged.addEntry(range.offset, range.size, canonical.c_str());
+    }
+    if (!room) break;
   }
   if (merged.found) {
     // Several headwords found: the form is the title and each entry names its headword.

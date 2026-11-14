@@ -616,13 +616,9 @@ TEST_F(DictLookupSession, CollectAllFindsTheRunStartOnThePreviousPage) {
   for (uint8_t i = 0; i < 5; i++) EXPECT_EQ(loc.entry(i).offset, 1000u + i) << int(i);
 }
 
-TEST_F(DictLookupSession, CollectAllFindsThePreviousSampleThroughACspt) {
-  // Same shape against a .cspt (what Prepare builds): one sample every 16 entries, entry 0 at
-  // byte 0, each a 16-byte null-padded prefix plus the LE .idx offset. Entries 14..18 are "ox",
-  // so the search lands on the sample at entry 16 and entries 14 and 15 are behind it.
-  const auto entries = indexWithRun(14, 5, 40);
-  const fs::path dir = root_ / "dictionaries/run";
-  writeIndexedDictionary(dir, "run", entries, /*withOft=*/true);
+// Writes a .idx .cspt the way Prepare builds one: a sample every 16 entries, entry 0 at byte 0,
+// each a 16-byte null-padded prefix plus the LE .idx offset.
+static void writeIdxCspt(const fs::path& path, const std::vector<IdxEntry>& entries) {
   std::string cspt = "CSPT";
   cspt += static_cast<char>(1);        // version
   cspt += static_cast<char>(16);       // prefix length
@@ -642,8 +638,16 @@ TEST_F(DictLookupSession, CollectAllFindsThePreviousSampleThroughACspt) {
   }
   for (int shift : {0, 8, 16, 24}) cspt += static_cast<char>((count >> shift) & 0xFF);
   cspt += samples;
-  std::ofstream(dir / "run.idx.oft.cspt", std::ios::binary)
-      .write(cspt.data(), static_cast<std::streamsize>(cspt.size()));
+  std::ofstream(path, std::ios::binary).write(cspt.data(), static_cast<std::streamsize>(cspt.size()));
+}
+
+TEST_F(DictLookupSession, CollectAllFindsThePreviousSampleThroughACspt) {
+  // Same shape against a .cspt. Entries 14..18 are "ox",
+  // so the search lands on the sample at entry 16 and entries 14 and 15 are behind it.
+  const auto entries = indexWithRun(14, 5, 40);
+  const fs::path dir = root_ / "dictionaries/run";
+  writeIndexedDictionary(dir, "run", entries, /*withOft=*/true);
+  writeIdxCspt(dir / "run.idx.oft.cspt", entries);
   writeDictBin("/dictionaries/run/run");
 
   Dictionary::LookupCtx ctx;
@@ -751,13 +755,15 @@ TEST_F(DictLookupSession, AltFormsReturnsEveryHeadwordAFormPointsAt) {
   std::ofstream(dir / "syn.syn", std::ios::binary).write(syn.data(), static_cast<std::streamsize>(syn.size()));
   writeDictBin("/dictionaries/syn/syn");
 
+  Dictionary::LookupCtx ctx;
+  ASSERT_TRUE(Dictionary::openLookupCtx(ctx));
   std::vector<std::string> forms;
-  Dictionary::resolveAltForms("yonde", nullptr, forms, 6);
+  Dictionary::resolveAltForms(ctx, "yonde", forms, 6);
   EXPECT_EQ(forms, (std::vector<std::string>{"yomu", "yobu"}));
 
-  Dictionary::resolveAltForms("yonda", nullptr, forms, 6);
+  Dictionary::resolveAltForms(ctx, "yonda", forms, 6);
   EXPECT_EQ(forms, (std::vector<std::string>{"yomu"}));
-  Dictionary::resolveAltForms("absent", nullptr, forms, 6);
+  Dictionary::resolveAltForms(ctx, "absent", forms, 6);
   EXPECT_TRUE(forms.empty());
 }
 
@@ -789,7 +795,50 @@ TEST_F(DictLookupSession, AltFormsFindsRunMembersOnThePreviousSynPage) {
   std::ofstream(dir / "syn.syn.oft", std::ios::binary).write(oft.data(), static_cast<std::streamsize>(oft.size()));
   writeDictBin("/dictionaries/syn/syn");
 
+  Dictionary::LookupCtx ctx;
+  ASSERT_TRUE(Dictionary::openLookupCtx(ctx));
   std::vector<std::string> forms;
-  Dictionary::resolveAltForms("yonde", nullptr, forms, 6);
+  Dictionary::resolveAltForms(ctx, "yonde", forms, 6);
   EXPECT_EQ(forms, (std::vector<std::string>{"h000", "h001", "h002", "h003"}));
+}
+
+namespace {
+
+enum class IdxPageIndex { None, Oft, Cspt };
+
+// 80 headwords "h000".."h079" and a .syn whose one form points at ordinals 70 and 33, past
+// the first .oft page and the first .cspt sample.
+void writeFarOrdinalDictionary(const fs::path& dir, const IdxPageIndex pageIndex) {
+  std::vector<IdxEntry> entries;
+  for (int i = 0; i < 80; i++) {
+    entries.push_back(
+        {"h" + std::string(3 - std::to_string(i).size(), '0') + std::to_string(i), static_cast<uint32_t>(i), 1});
+  }
+  writeIndexedDictionary(dir, "syn", entries, pageIndex == IdxPageIndex::Oft);
+  if (pageIndex == IdxPageIndex::Cspt) writeIdxCspt(dir / "syn.idx.oft.cspt", entries);
+  std::string syn;
+  appendSynEntry(syn, "yonde", 70);
+  appendSynEntry(syn, "yonde", 33);
+  std::ofstream(dir / "syn.syn", std::ios::binary).write(syn.data(), static_cast<std::streamsize>(syn.size()));
+}
+
+}  // namespace
+
+TEST_F(DictLookupSession, AltFormsResolveFarOrdinalsThroughEveryPageIndex) {
+  for (const auto pageIndex : {IdxPageIndex::None, IdxPageIndex::Oft, IdxPageIndex::Cspt}) {
+    fs::remove_all(root_ / "dictionaries/syn");
+    writeFarOrdinalDictionary(root_ / "dictionaries/syn", pageIndex);
+    writeDictBin("/dictionaries/syn/syn");
+    Dictionary::LookupCtx ctx;
+    ASSERT_TRUE(Dictionary::openLookupCtx(ctx));
+    ASSERT_EQ(ctx.hasPageIndex, pageIndex != IdxPageIndex::None);
+    ASSERT_EQ(ctx.pageIndexIsCspt, pageIndex == IdxPageIndex::Cspt);
+
+    resetOpens();
+    std::vector<std::string> forms;
+    Dictionary::resolveAltForms(ctx, "yonde", forms, 6);
+    EXPECT_EQ(forms, (std::vector<std::string>{"h070", "h033"})) << static_cast<int>(pageIndex);
+    // Only the .syn itself: the headwords are read through the ctx's open .idx.
+    EXPECT_EQ(opens(), 1) << static_cast<int>(pageIndex);
+  }
 }
