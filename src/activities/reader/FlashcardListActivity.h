@@ -4,6 +4,7 @@
 
 #include "../Activity.h"
 #include "activities/ListTouchTarget.h"
+#include "activities/SwipeDeleteReveal.h"
 #include "util/ButtonNavigator.h"
 #include "util/DictionaryLookupController.h"
 #include "util/FlashcardDeck.h"
@@ -97,6 +98,8 @@ class FlashcardListActivity final : public Activity {
 
   // Rows the last render drew, so a tap can pick one (see ListTouchTarget).
   ListTouchTarget listTouch_;
+  // Left swipe on a row reveals a trash button; tapping it opens the delete-confirm mode.
+  SwipeDeleteReveal swipeDelete_;
 
   // Touch boards draw no button-hint strip, so each hint gets an on-screen button instead
   // (same bar as FlashcardReviewActivity's).

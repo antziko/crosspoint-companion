@@ -624,6 +624,27 @@ void FileBrowserActivity::loop() {
     return;
   }
 
+  // Swipe to delete, ahead of every other gesture: while the trash shows, input only hides it.
+  if (mode == Mode::Books) {
+    const auto swipe = swipeDelete_.handle(
+        mappedInput, renderer, listTouch_,
+        [](void* self, const int row) {
+          return row < static_cast<int>(static_cast<FileBrowserActivity*>(self)->files.size());
+        },
+        this);
+    if (swipe.kind != SwipeDeleteReveal::Kind::None) {
+      if (swipe.kind == SwipeDeleteReveal::Kind::Delete) {
+        {
+          RenderLock lock(*this);
+          selectorIndex = swipe.row;
+        }
+        promptDeleteSelectedEntry();
+      }
+      requestUpdate();
+      return;
+    }
+  }
+
   // Hold Back at root (button reads "Home") toggles show-hidden-files and reloads the list.
   if (mode == Mode::Books && basepath == "/" && !lockLongPressBack && !hiddenToggleFired &&
       mappedInput.isPressed(MappedInputManager::Button::Back) && mappedInput.getHeldTime() >= GO_HOME_MS) {
@@ -976,6 +997,7 @@ void FileBrowserActivity::render(RenderLock&&) {
           return std::to_string(files[index].year) + "  " + formatFileSize(files[index].size);
         },
         false, nullptr, /*valueSmallFont=*/true);
+    swipeDelete_.draw(renderer);
   }
 
   // Full path display

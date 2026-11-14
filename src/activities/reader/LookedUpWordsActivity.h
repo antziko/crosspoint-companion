@@ -4,6 +4,7 @@
 
 #include "../Activity.h"
 #include "activities/ListTouchTarget.h"
+#include "activities/SwipeDeleteReveal.h"
 #include "util/ButtonNavigator.h"
 #include "util/DictionaryLookupController.h"
 #include "util/LookupHistory.h"
@@ -56,6 +57,8 @@ class LookedUpWordsActivity final : public Activity {
 
   // Refresh totalCount from SD and invalidate the cached window.
   void refreshCount();
+  // Touch delete: the Confirm-only delete mode cannot be answered without a Confirm button.
+  void promptDeleteAt(int uiIndex);
   // Fetch entry at a newest-first UI index, paging the window in if needed.
   // Returns nullptr only if the index is out of range.
   const LookupHistory::Entry* entryAt(int uiIndex);
@@ -64,4 +67,6 @@ class LookedUpWordsActivity final : public Activity {
 
   // Rows the last render drew, so a tap can pick one (see ListTouchTarget).
   ListTouchTarget listTouch_;
+  // Left swipe on a row reveals a trash button.
+  SwipeDeleteReveal swipeDelete_;
 };

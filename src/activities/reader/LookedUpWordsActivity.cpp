@@ -9,6 +9,7 @@
 #include "CrossPointSettings.h"
 #include "DictionaryDefinitionActivity.h"
 #include "MappedInputManager.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/Dictionary.h"
@@ -16,6 +17,21 @@
 #include "util/FlashcardDeck.h"
 #include "util/ListSwipeScroll.h"
 #include "util/LookupHistory.h"
+
+void LookedUpWordsActivity::promptDeleteAt(const int uiIndex) {
+  const auto* e = entryAt(uiIndex);
+  if (!e) return;
+  // The index is resolved now: the window may page before the prompt answers.
+  const int fileIndex = fileIndexOf(uiIndex);
+  startActivityForResultNoThrow<ConfirmationActivity>(
+      [this, fileIndex](const ActivityResult& res) {
+        if (res.isCancelled) return;
+        LookupHistory::removeAt(cachePath, fileIndex);
+        refreshCount();
+        if (selectedIndex >= totalCount) selectedIndex = std::max(0, totalCount - 1);
+      },
+      renderer, mappedInput, tr(STR_DELETE), e->word);
+}
 
 const char* LookedUpWordsActivity::glyphFor(LookupHistory::Status s) {
   switch (s) {
@@ -114,6 +130,21 @@ void LookedUpWordsActivity::loop() {
       DictUtils::cancelAndFinish(*this);
     }
     return;
+  }
+
+  // Swipe to delete, ahead of the delete mode: while the trash shows, input only hides it.
+  if (!deleteConfirmMode) {
+    const auto swipe = swipeDelete_.handle(
+        mappedInput, renderer, listTouch_,
+        [](void* self, const int row) { return row < static_cast<LookedUpWordsActivity*>(self)->totalCount; }, this);
+    if (swipe.kind != SwipeDeleteReveal::Kind::None) {
+      if (swipe.kind == SwipeDeleteReveal::Kind::Delete) {
+        selectedIndex = swipe.row;
+        promptDeleteAt(swipe.row);
+      }
+      requestUpdate();
+      return;
+    }
   }
 
   // Long press Confirm: enter delete-confirm mode (fire at threshold).
@@ -275,6 +306,7 @@ void LookedUpWordsActivity::render(RenderLock&&) {
         return std::string(glyphFor(e->status)) + " " + e->word;
       },
       nullptr, nullptr, nullptr, false);
+  swipeDelete_.draw(renderer);
 
   if (deleteConfirmMode) {
     char buf[128];

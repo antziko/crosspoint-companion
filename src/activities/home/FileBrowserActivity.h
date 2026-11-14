@@ -8,6 +8,7 @@
 #include "RecentBooksStore.h"
 #include "activities/Activity.h"
 #include "activities/ListTouchTarget.h"
+#include "activities/SwipeDeleteReveal.h"
 #include "components/OptionPopup.h"
 #include "util/ButtonNavigator.h"
 #include "util/FileWindowSelect.h"
@@ -40,6 +41,8 @@ class FileBrowserActivity final : public Activity {
   ButtonNavigator buttonNavigator;
   // Rows the last render drew, so a tap can pick one (see ListTouchTarget).
   ListTouchTarget listTouch_;
+  // Left swipe on a row reveals a trash button (Books mode).
+  SwipeDeleteReveal swipeDelete_;
   // The header band the last render drew, so a tap on the title can toggle hidden files
   // (the touch counterpart of the Back-hold gesture). Zero-width until the first paint,
   // which is what makes the hit test fail safely before then.

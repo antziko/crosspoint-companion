@@ -2,6 +2,9 @@
 
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <Logging.h>
+
+#include <algorithm>
 
 #include "KOReaderCredentialStore.h"
 #include "KOReaderSettingsActivity.h"
@@ -32,6 +35,19 @@ void KOReaderServerListActivity::onEnter() {
 void KOReaderServerListActivity::onExit() { Activity::onExit(); }
 
 void KOReaderServerListActivity::loop() {
+  // Swipe to delete, ahead of the buttons: while the trash shows, input only hides it.
+  const auto swipe = swipeDelete_.handle(
+      mappedInput, renderer, listTouch_,
+      [](void*, const int row) { return row < static_cast<int>(KOREADER_STORE.getCount()); }, nullptr);
+  if (swipe.kind != SwipeDeleteReveal::Kind::None) {
+    if (swipe.kind == SwipeDeleteReveal::Kind::Delete) {
+      selectedIndex = swipe.row;
+      promptDeleteServer(swipe.row);
+    }
+    requestUpdate();
+    return;
+  }
+
   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
     finish();
     return;
@@ -201,8 +217,27 @@ void KOReaderServerListActivity::render(RenderLock&&) {
         return std::string("");
       });
 
+  swipeDelete_.draw(renderer);
+
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer();
+}
+
+// The editor's Delete Server prompt (KOReaderSettingsActivity::handleSelection), from the list.
+void KOReaderServerListActivity::promptDeleteServer(const int index) {
+  const auto* server = KOREADER_STORE.getServer(static_cast<size_t>(index));
+  if (!server) return;
+  const std::string body = server->name.empty() ? server->serverUrl : server->name;
+  startActivityForResultNoThrow<ConfirmationActivity>(
+      [this, index](const ActivityResult& res) {
+        if (res.isCancelled) return;
+        if (!KOREADER_STORE.removeServer(static_cast<size_t>(index))) {
+          LOG_ERR("KRS", "Failed to remove KOReader sync server at index %d", index);
+          return;
+        }
+        selectedIndex = std::min(index, getItemCount() - 1);
+      },
+      renderer, mappedInput, tr(STR_DELETE_SERVER), body);
 }

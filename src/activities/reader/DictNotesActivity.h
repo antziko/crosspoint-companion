@@ -5,6 +5,7 @@
 
 #include "../Activity.h"
 #include "activities/ListTouchTarget.h"
+#include "activities/SwipeDeleteReveal.h"
 #include "util/ButtonNavigator.h"
 #include "util/DictNotes.h"
 #include "util/DictionaryLookupController.h"
@@ -134,6 +135,8 @@ class DictNotesActivity final : public Activity {
   ButtonNavigator buttonNavigator;
   // Rows the last render drew, so a tap can pick one (see ListTouchTarget).
   ListTouchTarget listTouch_;
+  // Left swipe on a note row reveals a trash button (the notes list only).
+  SwipeDeleteReveal swipeDelete_;
 
   bool skipLoopDelay() override { return controller_.skipLoopDelay(); }
 };

@@ -253,6 +253,22 @@ void FlashcardListActivity::loop() {
     return;
   }
 
+  // Swipe to delete, ahead of the delete mode: while the trash shows, input only hides it.
+  if (!deleteConfirmMode) {
+    const auto swipe = swipeDelete_.handle(
+        mappedInput, renderer, listTouch_,
+        [](void* self, const int row) { return row < static_cast<FlashcardListActivity*>(self)->totalCount; }, this);
+    if (swipe.kind != SwipeDeleteReveal::Kind::None) {
+      if (swipe.kind == SwipeDeleteReveal::Kind::Delete) {
+        // The same Cancel/Delete prompt as the Confirm hold, answered from the tap bar.
+        selectedIndex = swipe.row;
+        deleteConfirmMode = true;
+      }
+      requestUpdate();
+      return;
+    }
+  }
+
   // Long press Confirm: enter delete-confirm mode (fire at threshold).
   if (!deleteConfirmMode && mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
       mappedInput.getHeldTime() >= Dictionary::LONG_PRESS_MS) {
@@ -394,6 +410,7 @@ void FlashcardListActivity::renderList() {
         return row;
       },
       nullptr, nullptr, nullptr, false);
+  swipeDelete_.draw(renderer);
 
   if (deleteConfirmMode) {
     char buf[128];

@@ -370,6 +370,19 @@ void DictNotesActivity::loop() {
     return;
   }
 
+  // Swipe to delete, ahead of the holds below: while the trash shows, input only hides it.
+  const auto swipe = swipeDelete_.handle(
+      mappedInput, renderer, listTouch_,
+      [](void* self, const int row) { return row < static_cast<DictNotesActivity*>(self)->totalCount; }, this);
+  if (swipe.kind != SwipeDeleteReveal::Kind::None) {
+    if (swipe.kind == SwipeDeleteReveal::Kind::Delete) {
+      selectedIndex = swipe.row;
+      promptDelete();
+    }
+    requestUpdate();
+    return;
+  }
+
   // Hold to delete. Two gestures for one action: Confirm on a board with buttons, a long press
   // on the row itself where there is no Confirm pin to hold (BoardConfig.h, XTEINK_X4_PRO).
   if (mappedInput.isPressed(B::Confirm) && mappedInput.getHeldTime() >= Dictionary::LONG_PRESS_MS) {
@@ -540,6 +553,7 @@ void DictNotesActivity::renderList() {
         return e->word + " - " + e->text;
       },
       nullptr, nullptr, nullptr, false);
+  swipeDelete_.draw(renderer);
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
