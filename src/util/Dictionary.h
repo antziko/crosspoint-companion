@@ -71,6 +71,28 @@ struct DictLocation {
   uint32_t size = 0;       // byte length in .dict file
   bool found = false;
   LookupStatus status = LookupStatus::NotFound;
+
+  // Further entries one lookup matched, after the one above: an index can list a headword more
+  // than once (one entry per part of speech), and a .syn form can point at several headwords.
+  // Fixed-size so the location stays copyable without a heap allocation.
+  static constexpr uint8_t MAX_EXTRA = 5;
+  struct Range {
+    uint32_t offset = 0;
+    uint32_t size = 0;
+  };
+  uint8_t extraCount = 0;
+  Range extra[MAX_EXTRA];
+  // One label per entry (primary first), NUL-separated. "" means the looked-up headword itself.
+  char labels[80] = {};
+
+  uint8_t entryCount() const { return found ? static_cast<uint8_t>(1 + extraCount) : 0; }
+  Range entry(uint8_t i) const { return i == 0 ? Range{offset, size} : extra[i - 1]; }
+  // Label of entry i, "" when it is unlabelled.
+  const char* label(uint8_t i) const;
+  // Appends an entry, the first one becoming the primary. A range already held is not added
+  // again; a label that does not fit is dropped rather than truncated mid-character. False
+  // once full.
+  bool addEntry(uint32_t entryOffset, uint32_t entrySize, const char* entryLabel = "");
 };
 
 class Dictionary {
@@ -219,7 +241,10 @@ class Dictionary {
 
   // locate() against an already-open ctx. Identical semantics to locate(); this is the form
   // to use when probing several candidate spellings for one word.
-  static DictLocation locateIn(LookupCtx& ctx, const std::string& word, const DictLookupCallbacks& cbs = {});
+  // collectAll also gathers every further entry listed under the same headword into the
+  // location's extras, the primary becoming the first of them in index order.
+  static DictLocation locateIn(LookupCtx& ctx, const std::string& word, const DictLookupCallbacks& cbs = {},
+                               bool collectAll = false);
 
   // What probePrefixIn found for one string: whether it is a headword, and whether it is the
   // start of one (a headword is the start of itself).
@@ -248,7 +273,7 @@ class Dictionary {
   // Search .idx for word (via .idx.oft if present). Returns file location without reading content.
   // Thin wrapper: opens a LookupCtx and calls locateIn(). Prefer the ctx form for probe loops.
   static DictLocation locate(const std::string& word, const DictLookupCallbacks& cbs = {},
-                             const char* cachePath = nullptr);
+                             const char* cachePath = nullptr, bool collectAll = false);
 
   // NOTE: there is deliberately no lookup()-returns-the-definition entry point. Definitions
   // are streamed from .dict in 512-byte chunks (DictHtmlRenderer::renderFromFileStreaming),
@@ -334,6 +359,10 @@ class Dictionary {
 
   // readWordInto against a scanner window. Same contract as the HalFile form.
   static int readWordInto(IdxScanner& scanner, char* buf, size_t bufSize);
+
+  // locateIn's collectAll: every entry of the run around the hit at hitStart, in index order.
+  static void collectRun(LookupCtx& ctx, IdxScanner& scan, const char* word, uint32_t hitStart, uint32_t hitOffset,
+                         uint32_t hitSize, DictLocation& result);
 
   // Build "<base><suffix>" into a caller-supplied buffer. The hot lookup path uses this
   // instead of the DictPaths accessors, which return std::string by value — ~60-char paths

@@ -527,3 +527,183 @@ TEST_F(DictLookupSession, AMissThatRunsToEndOfFileDoesNotPoisonTheNextProbe) {
   EXPECT_FALSE(Dictionary::locateIn(ctx, "zzzzzznotaword").found);
   EXPECT_TRUE(Dictionary::locateIn(ctx, "echo").found);
 }
+
+// --- Every entry of one headword (collectAll) ---------------------------------
+//
+// An index may list a headword several times (one entry per part of speech). Those entries are
+// adjacent, but the page search lands on the last page whose first headword is <= the word, so
+// a run that begins before a page boundary is entered at that page's first entry. collectAll
+// must still return the whole run, first entry first.
+
+namespace {
+
+struct IdxEntry {
+  std::string word;
+  uint32_t offset;
+  uint32_t size;
+};
+
+// Writes <dir>/<name>.idx and, when withOft, a .idx.oft whose pages hold 32 entries each.
+void writeIndexedDictionary(const fs::path& dir, const std::string& name, const std::vector<IdxEntry>& entries,
+                            const bool withOft) {
+  fs::create_directories(dir);
+  std::string idx;
+  std::string oft(38, '\0');  // OFT_HEADER_SIZE; the reader does not validate its text
+  for (size_t i = 0; i < entries.size(); i++) {
+    if (i > 0 && i % 32 == 0) {
+      const auto start = static_cast<uint32_t>(idx.size());
+      for (int shift : {0, 8, 16, 24}) oft += static_cast<char>((start >> shift) & 0xFF);  // LE
+    }
+    appendIdxEntry(idx, entries[i].word, entries[i].offset, entries[i].size);
+  }
+  std::ofstream(dir / (name + ".idx"), std::ios::binary).write(idx.data(), static_cast<std::streamsize>(idx.size()));
+  if (withOft) {
+    std::ofstream(dir / (name + ".idx.oft"), std::ios::binary)
+        .write(oft.data(), static_cast<std::streamsize>(oft.size()));
+  }
+}
+
+// Filler headwords sorting before "ox" ("a000".."a099") and after it ("z000"..).
+std::vector<IdxEntry> indexWithRun(const int fillerBefore, const int runLength, const int fillerAfter) {
+  std::vector<IdxEntry> entries;
+  for (int i = 0; i < fillerBefore; i++) {
+    entries.push_back(
+        {"a" + std::string(3 - std::to_string(i).size(), '0') + std::to_string(i), static_cast<uint32_t>(i), 1});
+  }
+  for (int i = 0; i < runLength; i++) entries.push_back({"ox", static_cast<uint32_t>(1000 + i), 10});
+  for (int i = 0; i < fillerAfter; i++) {
+    entries.push_back(
+        {"z" + std::string(3 - std::to_string(i).size(), '0') + std::to_string(i), static_cast<uint32_t>(5000 + i), 1});
+  }
+  return entries;
+}
+
+}  // namespace
+
+TEST_F(DictLookupSession, CollectAllReturnsARunWithinOnePage) {
+  writeIndexedDictionary(root_ / "dictionaries/run", "run", indexWithRun(10, 3, 40), /*withOft=*/true);
+  writeDictBin("/dictionaries/run/run");
+  Dictionary::LookupCtx ctx;
+  ASSERT_TRUE(Dictionary::openLookupCtx(ctx));
+  ASSERT_TRUE(ctx.hasPageIndex);
+
+  const auto loc = Dictionary::locateIn(ctx, "ox", {}, /*collectAll=*/true);
+  ASSERT_TRUE(loc.found);
+  ASSERT_EQ(loc.entryCount(), 3);
+  for (uint8_t i = 0; i < 3; i++) {
+    EXPECT_EQ(loc.entry(i).offset, 1000u + i);
+    EXPECT_STREQ(loc.label(i), "");
+  }
+
+  // Without collectAll the answer is the one it always was.
+  const auto single = Dictionary::locateIn(ctx, "ox");
+  ASSERT_TRUE(single.found);
+  EXPECT_EQ(single.entryCount(), 1);
+  EXPECT_EQ(single.offset, 1000u);
+}
+
+TEST_F(DictLookupSession, CollectAllFindsTheRunStartOnThePreviousPage) {
+  // Entries 30..34 are "ox"; page 1 starts at entry 32, so the search lands on page 1 and the
+  // run's first two entries sit on page 0.
+  writeIndexedDictionary(root_ / "dictionaries/run", "run", indexWithRun(30, 5, 40), /*withOft=*/true);
+  writeDictBin("/dictionaries/run/run");
+  Dictionary::LookupCtx ctx;
+  ASSERT_TRUE(Dictionary::openLookupCtx(ctx));
+
+  const auto loc = Dictionary::locateIn(ctx, "ox", {}, /*collectAll=*/true);
+  ASSERT_TRUE(loc.found);
+  ASSERT_EQ(loc.entryCount(), 5);
+  for (uint8_t i = 0; i < 5; i++) EXPECT_EQ(loc.entry(i).offset, 1000u + i) << int(i);
+}
+
+TEST_F(DictLookupSession, CollectAllFindsThePreviousSampleThroughACspt) {
+  // Same shape against a .cspt (what Prepare builds): one sample every 16 entries, entry 0 at
+  // byte 0, each a 16-byte null-padded prefix plus the LE .idx offset. Entries 14..18 are "ox",
+  // so the search lands on the sample at entry 16 and entries 14 and 15 are behind it.
+  const auto entries = indexWithRun(14, 5, 40);
+  const fs::path dir = root_ / "dictionaries/run";
+  writeIndexedDictionary(dir, "run", entries, /*withOft=*/true);
+  std::string cspt = "CSPT";
+  cspt += static_cast<char>(1);        // version
+  cspt += static_cast<char>(16);       // prefix length
+  cspt += std::string("\x10\x00", 2);  // stride 16, LE
+  std::string samples;
+  uint32_t count = 0;
+  uint32_t pos = 0;
+  for (size_t i = 0; i < entries.size(); i++) {
+    if (i % 16 == 0) {
+      std::string prefix = entries[i].word.substr(0, 16);
+      prefix.resize(16, '\0');
+      samples += prefix;
+      for (int shift : {0, 8, 16, 24}) samples += static_cast<char>((pos >> shift) & 0xFF);
+      count++;
+    }
+    pos += static_cast<uint32_t>(entries[i].word.size() + 1 + 8);
+  }
+  for (int shift : {0, 8, 16, 24}) cspt += static_cast<char>((count >> shift) & 0xFF);
+  cspt += samples;
+  std::ofstream(dir / "run.idx.oft.cspt", std::ios::binary)
+      .write(cspt.data(), static_cast<std::streamsize>(cspt.size()));
+  writeDictBin("/dictionaries/run/run");
+
+  Dictionary::LookupCtx ctx;
+  ASSERT_TRUE(Dictionary::openLookupCtx(ctx));
+  ASSERT_TRUE(ctx.pageIndexIsCspt);
+  const auto loc = Dictionary::locateIn(ctx, "ox", {}, /*collectAll=*/true);
+  ASSERT_EQ(loc.entryCount(), 5);
+  for (uint8_t i = 0; i < 5; i++) EXPECT_EQ(loc.entry(i).offset, 1000u + i) << int(i);
+  EXPECT_FALSE(ctx.hasOftFallback) << "the .cspt must have validated";
+}
+
+TEST_F(DictLookupSession, CollectAllWorksWithoutAPageIndex) {
+  writeIndexedDictionary(root_ / "dictionaries/run", "run", indexWithRun(30, 4, 5), /*withOft=*/false);
+  writeDictBin("/dictionaries/run/run");
+  Dictionary::LookupCtx ctx;
+  ASSERT_TRUE(Dictionary::openLookupCtx(ctx));
+  ASSERT_FALSE(ctx.hasPageIndex);
+
+  const auto loc = Dictionary::locateIn(ctx, "ox", {}, /*collectAll=*/true);
+  ASSERT_EQ(loc.entryCount(), 4);
+  EXPECT_EQ(loc.entry(3).offset, 1003u);
+}
+
+TEST_F(DictLookupSession, CollectAllStopsAtTheCap) {
+  writeIndexedDictionary(root_ / "dictionaries/run", "run", indexWithRun(10, 9, 10), /*withOft=*/true);
+  writeDictBin("/dictionaries/run/run");
+  Dictionary::LookupCtx ctx;
+  ASSERT_TRUE(Dictionary::openLookupCtx(ctx));
+
+  const auto loc = Dictionary::locateIn(ctx, "ox", {}, /*collectAll=*/true);
+  EXPECT_EQ(loc.entryCount(), 1 + DictLocation::MAX_EXTRA);
+  EXPECT_EQ(loc.entry(0).offset, 1000u);
+}
+
+TEST(DictLocationEntries, RepeatedRangeIsOneEntry) {
+  DictLocation loc;
+  EXPECT_TRUE(loc.addEntry(10, 5));
+  EXPECT_TRUE(loc.addEntry(10, 5));
+  EXPECT_TRUE(loc.addEntry(10, 6));  // same offset, different range: a different definition
+  EXPECT_EQ(loc.entryCount(), 2);
+}
+
+TEST(DictLocationEntries, LabelsStayWithTheirEntries) {
+  DictLocation loc;
+  loc.addEntry(1, 1, "\xE3\x82\x88\xE3\x82\x80");  // よむ
+  loc.addEntry(2, 1);
+  loc.addEntry(3, 1, "\xE3\x82\x88\xE3\x81\xB6");  // よぶ
+  EXPECT_STREQ(loc.label(0), "\xE3\x82\x88\xE3\x82\x80");
+  EXPECT_STREQ(loc.label(1), "");
+  EXPECT_STREQ(loc.label(2), "\xE3\x82\x88\xE3\x81\xB6");
+}
+
+TEST(DictLocationEntries, ALabelThatDoesNotFitIsDroppedNotCut) {
+  DictLocation loc;
+  const std::string longLabel(70, 'x');
+  loc.addEntry(1, 1, longLabel.c_str());
+  loc.addEntry(2, 1, longLabel.c_str());  // 71 + 71 > 80: dropped
+  loc.addEntry(3, 1, "ok");
+  EXPECT_EQ(loc.entryCount(), 3);
+  EXPECT_EQ(std::string(loc.label(0)), longLabel);
+  EXPECT_STREQ(loc.label(1), "");
+  EXPECT_STREQ(loc.label(2), "ok");
+}

@@ -615,7 +615,7 @@ static uint32_t pageIndexEntryCount(HalFile& index, bool isCspt) {
 // Open-handle form: the caller already holds the page index, so the miss path no longer
 // reopens the file resolveScanBounds just finished with.
 static void widenScanBoundsIn(HalFile& index, bool isCspt, uint32_t srcFileSize, uint32_t centerStart,
-                              uint32_t* outStart, uint32_t* outEnd) {
+                              uint32_t* outStart, uint32_t* outEnd, const uint32_t radius = PAGE_RADIUS) {
   *outStart = 0;
   *outEnd = srcFileSize;
 
@@ -640,11 +640,11 @@ static void widenScanBoundsIn(HalFile& index, bool isCspt, uint32_t srcFileSize,
   }
 
   uint32_t bound = 0;
-  if (readIndexPageStart(index, isCspt, numEntries, landed > PAGE_RADIUS ? landed - PAGE_RADIUS : 0, &bound)) {
+  if (readIndexPageStart(index, isCspt, numEntries, landed > radius ? landed - radius : 0, &bound)) {
     *outStart = bound;
   }
   // End of the last page in the window == start of the page after it; past the end, the file end.
-  if (readIndexPageStart(index, isCspt, numEntries, landed + PAGE_RADIUS + 1, &bound)) {
+  if (readIndexPageStart(index, isCspt, numEntries, landed + radius + 1, &bound)) {
     *outEnd = bound;
   }
 }
@@ -807,7 +807,42 @@ bool Dictionary::openLookupCtxAt(LookupCtx& ctx, const char* basePath) {
   return true;
 }
 
-DictLocation Dictionary::locate(const std::string& word, const DictLookupCallbacks& cbs, const char* cachePath) {
+const char* DictLocation::label(const uint8_t i) const {
+  const char* p = labels;
+  const char* const end = labels + sizeof(labels);
+  for (uint8_t k = 0; k < i && p < end; k++) p += strlen(p) + 1;
+  return p < end ? p : "";
+}
+
+bool DictLocation::addEntry(const uint32_t entryOffset, const uint32_t entrySize, const char* entryLabel) {
+  for (uint8_t i = 0; i < entryCount(); i++) {
+    const Range r = entry(i);
+    if (r.offset == entryOffset && r.size == entrySize) return true;  // same range = same definition
+  }
+  const uint8_t index = entryCount();
+  if (index > MAX_EXTRA) return false;
+  // Labels are packed in entry order, so this one starts after every earlier label's NUL.
+  size_t used = 0;
+  for (uint8_t i = 0; i < index && used < sizeof(labels); i++) used += strlen(labels + used) + 1;
+  const size_t len = strlen(entryLabel);
+  if (used + len + 1 <= sizeof(labels)) {
+    memcpy(labels + used, entryLabel, len + 1);
+  } else if (used < sizeof(labels)) {
+    labels[used] = '\0';
+  }
+  if (index == 0) {
+    offset = entryOffset;
+    size = entrySize;
+    found = true;
+    status = LookupStatus::Found;
+  } else {
+    extra[extraCount++] = Range{entryOffset, entrySize};
+  }
+  return true;
+}
+
+DictLocation Dictionary::locate(const std::string& word, const DictLookupCallbacks& cbs, const char* cachePath,
+                                const bool collectAll) {
   LookupCtx ctx;
   if (!openLookupCtx(ctx, cachePath)) {
     DictLocation result;
@@ -817,7 +852,7 @@ DictLocation Dictionary::locate(const std::string& word, const DictLookupCallbac
     result.folderPath = ctx.base;  // "" when no dictionary is configured
     return result;
   }
-  return locateIn(ctx, word, cbs);
+  return locateIn(ctx, word, cbs, collectAll);
 }
 
 Dictionary::PrefixProbe Dictionary::probePrefixIn(LookupCtx& ctx, const char* text) {
@@ -874,7 +909,39 @@ Dictionary::PrefixProbe Dictionary::probePrefixIn(LookupCtx& ctx, const char* te
   return result;
 }
 
-DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const DictLookupCallbacks& cbs) {
+// Entries sharing one headword are adjacent in the sorted index, but the page search lands on
+// the last page whose first headword is <= the word, so a run can begin on the page before
+// (the hit is then that page's first entry) and can continue past the page end. Both edges are
+// followed here, by equality only, so the primary is the run's first entry in index order.
+void Dictionary::collectRun(LookupCtx& ctx, IdxScanner& scan, const char* word, const uint32_t hitStart,
+                            const uint32_t hitOffset, const uint32_t hitSize, DictLocation& result) {
+  const uint32_t afterHit = scan.position();
+  uint8_t suffix[8];
+  if (hitStart > 0 && (ctx.hasOftFallback || ctx.hasPageIndex)) {
+    HalFile& index = ctx.hasOftFallback ? ctx.oftFallback : ctx.pageIndex;
+    const bool isCspt = !ctx.hasOftFallback && ctx.pageIndexIsCspt;
+    uint32_t pageStart = 0;
+    uint32_t pageEnd = 0;
+    widenScanBoundsIn(index, isCspt, ctx.idxSize, hitStart, &pageStart, &pageEnd, /*radius=*/0);
+    if (pageStart == hitStart) {
+      widenScanBoundsIn(index, isCspt, ctx.idxSize, hitStart, &pageStart, &pageEnd, /*radius=*/1);
+      scan.seek(pageStart);
+      while (scan.position() < hitStart) {
+        if (readWordInto(scan, wordBuf, sizeof(wordBuf)) < 0 || !scan.readBytes(suffix, 8)) break;
+        if (cistrcmp(wordBuf, word) == 0 && !result.addEntry(readBe32(suffix), readBe32(suffix + 4))) break;
+      }
+    }
+  }
+  result.addEntry(hitOffset, hitSize);
+  scan.seek(afterHit);
+  while (scan.position() < ctx.idxSize) {
+    if (readWordInto(scan, wordBuf, sizeof(wordBuf)) < 0 || !scan.readBytes(suffix, 8)) break;
+    if (cistrcmp(wordBuf, word) != 0 || !result.addEntry(readBe32(suffix), readBe32(suffix + 4))) break;
+  }
+}
+
+DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const DictLookupCallbacks& cbs,
+                                  const bool collectAll) {
   DictLocation result;
   if (!ctx.valid) {
     result.status = ctx.base[0] == '\0' ? LookupStatus::NoDictionary : LookupStatus::ReadError;
@@ -897,6 +964,7 @@ DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const
   while (scan.position() < endByte) {
     if (cbs.shouldCancel && cbs.shouldCancel(cbs.ctx)) return result;
 
+    const uint32_t entryStart = scan.position();
     int len = readWordInto(scan, wordBuf, sizeof(wordBuf));
     if (len < 0) break;
 
@@ -905,10 +973,14 @@ DictLocation Dictionary::locateIn(LookupCtx& ctx, const std::string& word, const
 
     int cmp = cistrcmp(wordBuf, word.c_str());
     if (cmp == 0) {
-      result.offset = readBe32(suffix);
-      result.size = readBe32(suffix + 4);
-      result.found = true;
-      result.status = LookupStatus::Found;
+      if (collectAll) {
+        collectRun(ctx, scan, word.c_str(), entryStart, readBe32(suffix), readBe32(suffix + 4), result);
+      } else {
+        result.offset = readBe32(suffix);
+        result.size = readBe32(suffix + 4);
+        result.found = true;
+        result.status = LookupStatus::Found;
+      }
       if (cbs.onProgress) cbs.onProgress(cbs.ctx, 100);
       return result;
     }

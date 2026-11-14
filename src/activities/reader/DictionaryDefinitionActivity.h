@@ -355,6 +355,9 @@ class DictionaryDefinitionActivity final : public Activity {
   // Span sink bridge: forwards each streamed span from DictHtmlRenderer into the
   // DictLayout::Wrapper. ctx is the Wrapper*.
   static void feedSpanToWrapper(void* ctx, const StyledSpan& span);
+  // Bold label shown above entry i when the lookup matched several entries.
+  const char* entryLabel(uint8_t entry) const;
+  void streamMarkupEntries(const char* dictPath, const DictHtmlRenderer::SpanSink& sink);
   // Span sink for the prewarm scan pass: collects unique codepoints + styles instead
   // of measuring. ctx is a PrewarmCollector* (file-local to the .cpp).
   static void collectSpanForPrewarm(void* ctx, const StyledSpan& span);

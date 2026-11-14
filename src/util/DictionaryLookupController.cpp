@@ -260,7 +260,7 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
       lookupStartMs_ = millis();
       std::string canonical = Dictionary::resolveAltForm(altFormWord, cachePath.c_str());
       if (!canonical.empty()) {
-        auto loc = Dictionary::locate(canonical, {}, cachePath.c_str());
+        auto loc = Dictionary::locate(canonical, {}, cachePath.c_str(), /*collectAll=*/true);
         if (loc.found) {
           foundWord = canonical;
           foundLocation = std::move(loc);
@@ -494,7 +494,7 @@ DictLocation DictionaryLookupController::sweepGroup(Dictionary::LookupCtx& ctx, 
       continue;
     }
     const uint32_t hopStartMs = millis();
-    DictLocation loc = Dictionary::locateIn(ctx, lookupWord, cbs);
+    DictLocation loc = Dictionary::locateIn(ctx, lookupWord, cbs, /*collectAll=*/true);
     const uint32_t hopMs = millis() - hopStartMs;
     // Only slow hops, so this stays quiet in normal use. An indexed dictionary answers a probe
     // in tens of milliseconds; anything near a second means that dictionary is the reason a
@@ -590,7 +590,8 @@ void DictionaryLookupController::runLookup() {
   // One ctx for the active dictionary and every fallback hop — see sweepGroup.
   Dictionary::LookupCtx ctx;
   if (Dictionary::openLookupCtxAt(ctx, activeBase.c_str())) {
-    foundLocation = Dictionary::locateIn(ctx, lookupWord, cbs);
+    // collectAll: a headword listed several times (one entry per part of speech) shows them all.
+    foundLocation = Dictionary::locateIn(ctx, lookupWord, cbs, /*collectAll=*/true);
 
     // Stems BEFORE the group sweep, and against the ctx that is already open.
     //
@@ -614,7 +615,7 @@ void DictionaryLookupController::runLookup() {
       dictionaryForms(lookupWord, forms);
       for (const auto& form : forms) {
         if (lookupCancelRequested) break;
-        DictLocation loc = Dictionary::locateIn(ctx, form, probeCbs);
+        DictLocation loc = Dictionary::locateIn(ctx, form, probeCbs, /*collectAll=*/true);
         if (!loc.found) continue;
         stemWord_ = form;
         foundLocation = std::move(loc);
@@ -623,7 +624,7 @@ void DictionaryLookupController::runLookup() {
     }
     if (!foundLocation.found && !lookupCancelRequested) {
       for (const auto& stem : Dictionary::getStemVariants(lookupWord)) {
-        DictLocation loc = Dictionary::locateIn(ctx, stem, probeCbs);
+        DictLocation loc = Dictionary::locateIn(ctx, stem, probeCbs, /*collectAll=*/true);
         if (!loc.found) continue;
         stemWord_ = stem;
         foundLocation = std::move(loc);

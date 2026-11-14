@@ -598,36 +598,42 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
     // Same streaming producer the wrap uses, with a collecting sink instead of the
     // measuring Wrapper — so the styles seen here are exactly the styles drawn later.
     const DictHtmlRenderer::SpanSink sink{collector.get(), &DictionaryDefinitionActivity::collectSpanForPrewarm};
-    htmlRenderer_.renderFromFileStreaming(dictPath, foundLocation.offset, foundLocation.size, sink);
+    streamMarkupEntries(dictPath, sink);
   } else {
     HalFile dictFile;
     if (!Storage.openFileForRead("DICT", dictPath, dictFile)) return;
-    dictFile.seekSet(foundLocation.offset);
-
-    uint32_t remaining = foundLocation.size;
-    int carry = 0;  // bytes of an incomplete UTF-8 sequence held back from the last chunk
-    while (remaining > 0) {
-      const uint32_t space = static_cast<uint32_t>(PrewarmCollector::CHUNK_SIZE - carry);
-      const uint32_t toRead = remaining < space ? remaining : space;
-      const int n = dictFile.read(reinterpret_cast<uint8_t*>(collector->chunk) + carry, static_cast<int>(toRead));
-      if (n <= 0) break;
-      remaining -= static_cast<uint32_t>(n);
-
-      const int total = carry + n;
-      const int safe = utf8SafeTruncateBuffer(collector->chunk, total);
-      // Save the straddling tail before the null terminator overwrites it, then move it
-      // to the front for the next chunk.
-      char tail[4] = {};
-      const int tailLen = total - safe;
-      memcpy(tail, collector->chunk + safe, static_cast<size_t>(tailLen));
-      collector->chunk[safe] = '\0';
-      // Plain text is all REGULAR; the IPA runs inside it still route to the IPA font.
-      if (collector->addText(collector->chunk)) {
-        collector->styleMask |= spanStyleBit(false, false);
-        collector->styleBytes[spanStyleIndex(false, false)] += static_cast<uint32_t>(safe);
+    for (uint8_t e = 0; e < foundLocation.entryCount(); e++) {
+      const DictLocation::Range range = foundLocation.entry(e);
+      if (foundLocation.entryCount() > 1 && collector->addText(entryLabel(e))) {
+        collector->styleMask |= spanStyleBit(true, false);
       }
-      memcpy(collector->chunk, tail, static_cast<size_t>(tailLen));
-      carry = tailLen;
+      dictFile.seekSet(range.offset);
+
+      uint32_t remaining = range.size;
+      int carry = 0;  // bytes of an incomplete UTF-8 sequence held back from the last chunk
+      while (remaining > 0) {
+        const uint32_t space = static_cast<uint32_t>(PrewarmCollector::CHUNK_SIZE - carry);
+        const uint32_t toRead = remaining < space ? remaining : space;
+        const int n = dictFile.read(reinterpret_cast<uint8_t*>(collector->chunk) + carry, static_cast<int>(toRead));
+        if (n <= 0) break;
+        remaining -= static_cast<uint32_t>(n);
+
+        const int total = carry + n;
+        const int safe = utf8SafeTruncateBuffer(collector->chunk, total);
+        // Save the straddling tail before the null terminator overwrites it, then move it
+        // to the front for the next chunk.
+        char tail[4] = {};
+        const int tailLen = total - safe;
+        memcpy(tail, collector->chunk + safe, static_cast<size_t>(tailLen));
+        collector->chunk[safe] = '\0';
+        // Plain text is all REGULAR; the IPA runs inside it still route to the IPA font.
+        if (collector->addText(collector->chunk)) {
+          collector->styleMask |= spanStyleBit(false, false);
+          collector->styleBytes[spanStyleIndex(false, false)] += static_cast<uint32_t>(safe);
+        }
+        memcpy(collector->chunk, tail, static_cast<size_t>(tailLen));
+        carry = tailLen;
+      }
     }
   }
 
@@ -1026,7 +1032,7 @@ void DictionaryDefinitionActivity::wrapHtml() {
   char dictPath[128];
   buildDictPath(dictPath, sizeof(dictPath), foundLocation.folderPath);
   const DictHtmlRenderer::SpanSink spanSink{&wrapper, &DictionaryDefinitionActivity::feedSpanToWrapper};
-  htmlRenderer_.renderFromFileStreaming(dictPath, foundLocation.offset, foundLocation.size, spanSink);
+  streamMarkupEntries(dictPath, spanSink);
   wrapper.finish();
   // The wrapper's own transient strings are allocated on the same starved heap as everything
   // else here, and it stops rather than aborting when one fails. Folding its flag into
@@ -1039,6 +1045,49 @@ void DictionaryDefinitionActivity::wrapHtml() {
 
 void DictionaryDefinitionActivity::feedSpanToWrapper(void* ctx, const StyledSpan& span) {
   static_cast<DictLayout::Wrapper*>(ctx)->onSpan(span);
+}
+
+const char* DictionaryDefinitionActivity::entryLabel(const uint8_t entry) const {
+  const char* label = foundLocation.label(entry);
+  return label[0] ? label : headword.c_str();
+}
+
+namespace {
+// Starts the next span on a new line: an entry's first span follows its label line.
+struct EntryBreakSink {
+  DictHtmlRenderer::SpanSink inner;
+  bool breakNext = false;
+  static void feed(void* ctx, const StyledSpan& span) {
+    auto* self = static_cast<EntryBreakSink*>(ctx);
+    if (!self->breakNext) return self->inner(span);
+    self->breakNext = false;
+    StyledSpan broken = span;
+    broken.newlineBefore = true;
+    self->inner(broken);
+  }
+};
+}  // namespace
+
+// Every entry of the lookup in turn. With several, each one opens with a bold line naming its
+// headword.
+void DictionaryDefinitionActivity::streamMarkupEntries(const char* dictPath, const DictHtmlRenderer::SpanSink& sink) {
+  const uint8_t count = foundLocation.entryCount();
+  if (count <= 1) {
+    htmlRenderer_.renderFromFileStreaming(dictPath, foundLocation.offset, foundLocation.size, sink);
+    return;
+  }
+  EntryBreakSink breaker{sink};
+  const DictHtmlRenderer::SpanSink entrySink{&breaker, &EntryBreakSink::feed};
+  for (uint8_t e = 0; e < count; e++) {
+    StyledSpan label;
+    label.text = entryLabel(e);
+    label.bold = true;
+    label.newlineBefore = e > 0;
+    sink(label);
+    breaker.breakNext = true;
+    const DictLocation::Range range = foundLocation.entry(e);
+    htmlRenderer_.renderFromFileStreaming(dictPath, range.offset, range.size, entrySink);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1114,26 +1163,40 @@ void DictionaryDefinitionActivity::wrapPlain() {
   buildDictPath(dictPath, sizeof(dictPath), foundLocation.folderPath);
   HalFile dictFile;
   if (!Storage.openFileForRead("DICT", dictPath, dictFile)) return;
-  dictFile.seekSet(foundLocation.offset);
-
-  uint32_t remaining = foundLocation.size;
   char chunk[512];
 
-  while (remaining > 0) {
-    uint32_t toRead = remaining < sizeof(chunk) ? remaining : static_cast<uint32_t>(sizeof(chunk));
-    int n = dictFile.read(reinterpret_cast<uint8_t*>(chunk), static_cast<int>(toRead));
-    if (n <= 0) break;
-    remaining -= static_cast<uint32_t>(n);
-
-    for (int ci = 0; ci < n; ci++) {
-      char c = chunk[ci];
-      if (c == '\n') {
-        tryAppendWord();
-        flushLine();
-      } else if (c == ' ') {
-        tryAppendWord();
+  for (uint8_t e = 0; e < foundLocation.entryCount(); e++) {
+    const DictLocation::Range range = foundLocation.entry(e);
+    if (foundLocation.entryCount() > 1) {
+      tryAppendWord();
+      flushLine();
+      DictLayout::LayoutLine labelLine;
+      if (reserveNoThrow(labelLine.segments, 1)) {
+        labelLine.segments.push_back({entryLabel(e), EpdFontFamily::BOLD, false});
       } else {
-        currentWord += c;
+        collectOom_ = true;
+      }
+      sink(std::move(labelLine));
+    }
+    dictFile.seekSet(range.offset);
+    uint32_t remaining = range.size;
+
+    while (remaining > 0) {
+      uint32_t toRead = remaining < sizeof(chunk) ? remaining : static_cast<uint32_t>(sizeof(chunk));
+      int n = dictFile.read(reinterpret_cast<uint8_t*>(chunk), static_cast<int>(toRead));
+      if (n <= 0) break;
+      remaining -= static_cast<uint32_t>(n);
+
+      for (int ci = 0; ci < n; ci++) {
+        char c = chunk[ci];
+        if (c == '\n') {
+          tryAppendWord();
+          flushLine();
+        } else if (c == ' ') {
+          tryAppendWord();
+        } else {
+          currentWord += c;
+        }
       }
     }
   }
