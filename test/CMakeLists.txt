@@ -108,6 +108,7 @@ add_subdirectory(plugin_manifest_classification)
 add_subdirectory(plugin_picker_layout)
 add_subdirectory(protected_paths)
 add_subdirectory(css-selector-set)
+add_subdirectory(xtc_parser)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME confirmation_translations COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_confirmation_translations.py)
