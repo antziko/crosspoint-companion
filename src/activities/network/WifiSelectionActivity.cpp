@@ -93,6 +93,11 @@ void WifiSelectionActivity::onPromptEvent(const fui::ActionEvent& event, void* u
   }
 }
 
+bool WifiSelectionActivity::canForgetRow(void* user, const int index) {
+  const auto* self = static_cast<const WifiSelectionActivity*>(user);
+  return index >= 0 && index < static_cast<int>(self->networks.size()) && self->networks[index].hasSavedPassword;
+}
+
 void WifiSelectionActivity::onEnter() {
   Activity::onEnter();
 
@@ -274,6 +279,7 @@ void WifiSelectionActivity::startWifiScan(const bool autoScan) {
   autoConnecting = autoScan;
   manualNetworkListRequested = false;
   listNav.reset();
+  closeSwipeDelete();  // the rows are about to be replaced
   state = WifiSelectionState::SCANNING;
   networks.clear();
   requestUpdate();
@@ -968,6 +974,15 @@ void WifiSelectionActivity::loop() {
 
   // Handle network list state
   if (state == WifiSelectionState::NETWORK_LIST) {
+    // This screen acts on presses, so a showing trash is hidden here before Back or Confirm
+    // can act on the list underneath it.
+    if (swipeDeleteOpen() && (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
+                              mappedInput.wasPressed(MappedInputManager::Button::Confirm))) {
+      closeSwipeDelete();
+      requestUpdate();
+      return;
+    }
+
     // Check for Back button to exit (cancel)
     if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
       onComplete(false);
@@ -999,6 +1014,20 @@ void WifiSelectionActivity::loop() {
         requestUpdate();
         return;
       }
+    }
+
+    // Swipe a saved network left to reveal the trash; tapping it is the long press's forget.
+    const auto swipeDel =
+        handleSwipeDelete(mappedInput, ACTION_ROW, /*withLongPress=*/true, &WifiSelectionActivity::canForgetRow, this);
+    if (swipeDel.kind != SwipeDelete::Kind::None) {
+      if (swipeDel.kind == SwipeDelete::Kind::Delete) {
+        selectedNetworkIndex = static_cast<size_t>(swipeDel.row);
+        selectedSSID = networks[selectedNetworkIndex].ssid;
+        state = WifiSelectionState::FORGET_PROMPT;
+        forgetPromptSelection = 0;  // Default to "Cancel"
+      }
+      requestUpdate();
+      return;
     }
 
     // Touch goes through the FreeInkApp: render() registered the row hit
@@ -1176,6 +1205,7 @@ void WifiSelectionActivity::buildListScreen(UiScreen& screen) {
   const int16_t rowHeight = static_cast<int16_t>(metrics.listRowHeight);
   props.rowHeight = rowHeight;
   listNav.syncToProps(screen.body(), rowHeight, screen.theme().listRowGap, static_cast<int>(networks.size()), props);
+  configureSwipeDelete(screen, props);
   screen.list(props);
 }
 

@@ -44,6 +44,12 @@ class UiListActivity : public Activity, protected UiAppHost {
   // Touch long-press on a row; only fires when the subclass opted in via the
   // wantsTouchLongPress constructor flag (rows must also carry InputLongPress).
   virtual void onRowLongPress(int index) {}
+  // Swipe to delete (touch boards): whether a left swipe may reveal the trash on row `index`,
+  // and what tapping that trash does. The base keeps the row selected first; the override
+  // normally opens the screen's existing delete confirmation. A list opts in by also calling
+  // configureSwipeDelete(screen, props) right before screen.list(props).
+  virtual bool canSwipeDelete(int index) const { return false; }
+  virtual void swipeDelete(int index) {}
   // The selection/viewport state the loop, sync, and row dispatch operate on.
   // Default is the single `nav` member; UiTabListActivity redirects it to the
   // active tab's per-tab state.
@@ -111,6 +117,7 @@ class UiListActivity : public Activity, protected UiAppHost {
  private:
   static void screenTrampoline(UiScreen& screen, void* user);
   static void rowActionTrampoline(const freeink::ui::ActionEvent& event, void* user);
+  static bool canSwipeDeleteTrampoline(void* user, int index);
   // Named apart from UiAppHost::routeTouch so the host overload stays visible
   // (not name-hidden) to subclasses with extra touch surfaces.
   bool routeListTouch();

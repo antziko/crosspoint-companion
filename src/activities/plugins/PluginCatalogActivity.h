@@ -207,6 +207,8 @@ class PluginCatalogActivity final : public CatalogActivity {
   // Row dispatch: pager rows page, picker rows pick, item rows open/download.
   void activateIndex(int index) override;
   void onRowLongPress(int index) override;
+  bool canSwipeDelete(int index) const override;
+  void swipeDelete(int index) override;
   bool handleButtons() override;
   void confirmUninstallPlugin(int pickerIndex);
   void render(RenderLock&& lock) override;

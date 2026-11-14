@@ -74,6 +74,28 @@ class UiAppHost {
   // before dispatch (e.g. a handler that reads "was this a release" state).
   freeink::ui::ActionEvent route(const freeink::ui::InputSnapshot& snap);
 
+  // --- Swipe to delete (touch boards) ------------------------------------------
+  // A left swipe on a list row reveals a trash button at the row's end; tapping it asks the
+  // screen to delete that row. A right swipe, Back, Confirm, or a tap anywhere else hides it,
+  // and an up/down swipe hides it and still scrolls.
+  //
+  // Reserved for the trash button, far above any screen's own action ids.
+  static constexpr freeink::ui::ActionId ACTION_SWIPE_DELETE = 0xFF00;
+  struct SwipeDelete {
+    enum class Kind : uint8_t { None, Consumed, Delete };
+    Kind kind = Kind::None;
+    int row = -1;  // the row to delete, for Kind::Delete
+  };
+  // Loop task, before routeTouch(). rowAction is the list's row action; canDelete(ctx, row)
+  // says whether that row may be revealed. Consumed and Delete both want a repaint.
+  SwipeDelete handleSwipeDelete(const MappedInputManager& input, freeink::ui::ActionId rowAction, bool withLongPress,
+                                bool (*canDelete)(void*, int), void* ctx);
+  // Render task, right before screen.list(props): shows the trash on the revealed row.
+  void configureSwipeDelete(const UiScreen& screen, freeink::ui::ListProps& props);
+  // Hides the trash. True when one was showing, so the caller knows to repaint.
+  bool closeSwipeDelete() { return revealedRow.exchange(-1) >= 0; }
+  bool swipeDeleteOpen() const { return revealedRow.load() >= 0; }
+
   // Close the routing gate outside a render, e.g. when the data the
   // interaction table indexes is released mid-state. Reopens on renderUi().
   void closeRouting() { uiReady = false; }
@@ -86,4 +108,8 @@ class UiAppHost {
   // Opened by the render task after publication and closed on lifecycle/state
   // resets; read by the loop task (route*).
   std::atomic<bool> uiReady{false};
+  // Row whose trash button shows, or -1. Written by the loop task, read by the render task.
+  std::atomic<int16_t> revealedRow{-1};
+  // Filled on the render task for props.reveal; ListProps only points at it.
+  freeink::ui::ListRevealAction swipeReveal{};
 };

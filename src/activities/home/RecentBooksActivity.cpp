@@ -481,6 +481,14 @@ void RecentBooksActivity::onRowLongPress(const int index) {
   promptBookActions(index);
 }
 
+// List view only: the bookshelf's covers are not rows, and reorder mode owns the gestures.
+bool RecentBooksActivity::canSwipeDelete(const int /*index*/) const { return !isShelf() && !reorderMode; }
+
+void RecentBooksActivity::swipeDelete(const int index) {
+  const RecentBook book = entryAt(index);
+  promptRemoveBook(book.path, book.title);
+}
+
 // Left/Right reorder on any board that has them, so a hold there keeps meaning exactly one
 // thing (remove) and needs no menu in front of it. A touch-only board wires neither, which
 // leaves the hold as the only way in to either action.
@@ -1295,6 +1303,7 @@ void RecentBooksActivity::buildScreen(UiScreen& screen) {
   } else if (ListCursor::hidden()) {
     props.selectedIndex = -1;
   }
+  configureSwipeDelete(screen, props);
   screen.list(props);
 }
 

@@ -659,6 +659,15 @@ void PluginCatalogActivity::enterPluginPicker() {
   requestUpdate();
 }
 
+// Installed plugins only: the OPDS and Plugin Hub rows above them are entry points.
+bool PluginCatalogActivity::canSwipeDelete(const int index) const {
+  if (state != State::PLUGIN_PICKER) return false;
+  const int pluginIndex = index - (showOpds ? 1 : 0) - (showPluginHubInstallRow ? 1 : 0);
+  return pluginIndex >= 0 && pluginIndex < static_cast<int>(installedPlugins.size());
+}
+
+void PluginCatalogActivity::swipeDelete(const int index) { confirmUninstallPlugin(index); }
+
 void PluginCatalogActivity::confirmUninstallPlugin(const int pickerIndex) {
   if (state != State::PLUGIN_PICKER) return;
   const int offset = (showOpds ? 1 : 0) + (showPluginHubInstallRow ? 1 : 0);
@@ -1999,6 +2008,7 @@ void PluginCatalogActivity::buildBrowsingScreen(UiScreen& screen) {
   if (state == State::PLUGIN_PICKER) {
     fitPluginSubtitleToViewport(screen.target(), screen.body().height, props);
   }
+  configureSwipeDelete(screen, props);
   screen.list(props);
 }
 

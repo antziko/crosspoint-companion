@@ -163,6 +163,10 @@ void EpubReaderBookmarksActivity::onRowLongPress(const int index) {
   showDeleteConfirmation();
 }
 
+bool EpubReaderBookmarksActivity::canSwipeDelete(const int /*index*/) const { return !confirmPopup.isActive(); }
+
+void EpubReaderBookmarksActivity::swipeDelete(const int /*index*/) { showDeleteConfirmation(); }
+
 bool EpubReaderBookmarksActivity::handleCustomInput() {
   if (confirmPopup.handleInput(mappedInput, [this] { requestUpdate(); })) {
     // The popup acts on button press; if that input closed it, the trailing
@@ -286,6 +290,7 @@ void EpubReaderBookmarksActivity::buildScreen(UiScreen& screen) {
   label.bold = true;
   props.labelText = label;
   syncListViewport(screen, props, /*hasSubtitle=*/true);
+  configureSwipeDelete(screen, props);
   screen.list(props);
 }
 

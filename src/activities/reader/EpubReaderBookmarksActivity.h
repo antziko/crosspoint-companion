@@ -41,6 +41,8 @@ class EpubReaderBookmarksActivity final : public UiListActivity {
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;
   void onRowLongPress(int index) override;
+  bool canSwipeDelete(int index) const override;
+  void swipeDelete(int index) override;
   // Popup handling runs before everything else each pass.
   bool handleCustomInput() override;
   // Back cancels with a result; Confirm opens on RELEASE, a hold deletes.

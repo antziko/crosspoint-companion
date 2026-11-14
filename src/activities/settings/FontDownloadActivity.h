@@ -135,6 +135,8 @@ class FontDownloadActivity final : public UiListActivity {
   int listCount() const override;
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;
+  bool canSwipeDelete(int index) const override;
+  void swipeDelete(int index) override;
   freeink::ui::ListNav& activeNav() override;
   void onBackButton() override;
   // Non-list states (loading, downloading, complete, error) consume the loop
@@ -176,7 +178,8 @@ class FontDownloadActivity final : public UiListActivity {
   int specialRowCount() const;
   bool isDownloadAllRow(int index) const;
   bool isUpdateAllRow(int index) const;
-  bool isSelectedFamilyDeletable() const;
+  bool isSelectedFamilyDeletable() const { return isFamilyDeletableAt(nav.selected); }
+  bool isFamilyDeletableAt(int row) const;
   void promptDeleteSelectedFamily();
   void onDeleteConfirmationResult(const ActivityResult& result);
   int familyIndexFromList(int listIndex) const;

@@ -46,7 +46,13 @@ void UiListActivity::rowActionTrampoline(const fui::ActionEvent& event, void* us
   self->onRowAction(event);
 }
 
+bool UiListActivity::canSwipeDeleteTrampoline(void* user, const int index) {
+  const auto* self = static_cast<const UiListActivity*>(user);
+  return index >= 0 && index < self->listCount() && self->canSwipeDelete(index);
+}
+
 void UiListActivity::onRowAction(const fui::ActionEvent& event) {
+  closeSwipeDelete();
   activeNav().selected = event.value;
   if (event.longPress) {
     onRowLongPress(event.value);
@@ -117,6 +123,17 @@ void UiListActivity::moveSelectionTo(const int index) {
 
 void UiListActivity::loop() {
   if (handleCustomInput()) return;
+  // Ahead of the buttons: while the trash shows, Back and Confirm only hide it.
+  const auto swipeDel =
+      handleSwipeDelete(mappedInput, ACTION_ROW, wantsTouchLongPress, &UiListActivity::canSwipeDeleteTrampoline, this);
+  if (swipeDel.kind != SwipeDelete::Kind::None) {
+    requestUpdate();
+    if (swipeDel.kind == SwipeDelete::Kind::Delete) {
+      activeNav().selected = swipeDel.row;
+      swipeDelete(swipeDel.row);
+    }
+    return;
+  }
   if (handleButtons()) return;
   if (routeListTouch()) return;
 

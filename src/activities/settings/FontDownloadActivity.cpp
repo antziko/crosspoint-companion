@@ -891,12 +891,18 @@ void FontDownloadActivity::onDeleteConfirmationResult(const ActivityResult& resu
   requestUpdate();
 }
 
-bool FontDownloadActivity::isSelectedFamilyDeletable() const {
-  if (isDownloadAllRow(nav.selected) || isUpdateAllRow(nav.selected)) return false;
-  if (nav.selected < specialRowCount() || nav.selected >= listItemCount()) return false;
-  const auto& family = families_[familyIndexFromList(nav.selected)];
+bool FontDownloadActivity::isFamilyDeletableAt(const int row) const {
+  if (isDownloadAllRow(row) || isUpdateAllRow(row)) return false;
+  if (row < specialRowCount() || row >= listItemCount()) return false;
+  const auto& family = families_[familyIndexFromList(row)];
   return family.installed && !family.hasUpdate;
 }
+
+bool FontDownloadActivity::canSwipeDelete(const int index) const {
+  return state_ == FAMILY_LIST && isFamilyDeletableAt(index);
+}
+
+void FontDownloadActivity::swipeDelete(const int /*index*/) { promptDeleteSelectedFamily(); }
 
 void FontDownloadActivity::activateSelected() {
   if (filteredIndices_.empty()) return;
@@ -979,6 +985,7 @@ void FontDownloadActivity::buildScreen(UiScreen& screen) {
   props.labelText = screen.theme().smallText;
   props.labelText.maxLines = 2;
   syncListViewport(screen, props, /*hasSubtitle=*/state_ == FAMILY_LIST);
+  configureSwipeDelete(screen, props);
   screen.list(props);
 }
 

@@ -157,6 +157,7 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
 
   static void listScreen(UiScreen& screen, void* user);
   static void onRowEvent(const freeink::ui::ActionEvent& event, void* user);
+  static bool canForgetRow(void* user, int index);
   static void onScanEvent(const freeink::ui::ActionEvent& event, void* user);
   static void onPromptEvent(const freeink::ui::ActionEvent& event, void* user);
   void buildListScreen(UiScreen& screen);

@@ -26,6 +26,8 @@ class OpdsServerListActivity final : public UiListActivity {
   // Touch hold on a server row duplicates it — the buttonless boards' only
   // route to the gesture handleButtons() offers on Confirm.
   void onRowLongPress(int index) override;
+  bool canSwipeDelete(int index) const override;
+  void swipeDelete(int index) override;
   // Popup input goes first; while it is open it consumes the pass.
   bool handleCustomInput() override;
   // Picker mode backs out to the home menu rather than finishing.
@@ -54,4 +56,5 @@ class OpdsServerListActivity final : public UiListActivity {
   int getItemCount() const;
   void handleSelection();
   void duplicateSelectedServer();
+  void promptDeleteServer(int index);
 };

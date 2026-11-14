@@ -2,6 +2,9 @@
 
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <Logging.h>
+
+#include <algorithm>
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
@@ -195,6 +198,33 @@ void OpdsServerListActivity::onRowLongPress(const int index) {
   duplicateSelectedServer();
 }
 
+// Server rows in settings mode; the picker only chooses where to browse.
+bool OpdsServerListActivity::canSwipeDelete(const int index) const {
+  return !pickerMode && !optionPopup.isActive() && index < static_cast<int>(OPDS_STORE.getCount());
+}
+
+void OpdsServerListActivity::swipeDelete(const int index) { promptDeleteServer(index); }
+
+// The editor's Delete Server prompt (OpdsSettingsActivity::handleSelection), from the list.
+void OpdsServerListActivity::promptDeleteServer(const int index) {
+  const auto* server = OPDS_STORE.getServer(static_cast<size_t>(index));
+  if (!server) return;
+  const std::string body = server->name.empty() ? server->url : server->name;
+  startActivityForResultNoThrow<ConfirmationActivity>(
+      [this, index](const ActivityResult& res) {
+        if (res.isCancelled) return;
+        if (!OPDS_STORE.removeServer(static_cast<size_t>(index))) {
+          LOG_ERR("OPS", "Failed to remove OPDS server at index %d", index);
+          return;
+        }
+        // The rows shrank; rebuild under the render lock, see the editor result handler.
+        RenderLock lock(*this);
+        rebuildRowItems();
+        nav.selected = std::min(index, std::max(0, static_cast<int>(rowItems_.size()) - 1));
+      },
+      renderer, mappedInput, tr(STR_DELETE_SERVER), body);
+}
+
 void OpdsServerListActivity::handleSelection() {
   const auto serverCount = static_cast<int>(OPDS_STORE.getCount());
 
@@ -344,6 +374,7 @@ void OpdsServerListActivity::buildScreen(UiScreen& screen) {
   props.labelText = screen.theme().smallText;
   props.labelText.maxLines = 2;
   syncListViewport(screen, props, /*hasSubtitle=*/false);
+  configureSwipeDelete(screen, props);
   screen.list(props);
 }
 

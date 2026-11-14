@@ -22,6 +22,8 @@ class RecentBooksActivity final : public UiListActivity {
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;
   void onRowLongPress(int index) override;
+  bool canSwipeDelete(int index) const override;
+  void swipeDelete(int index) override;
   // Grid cursor step, clamped rather than wrapped: wrapping a 2-D cursor is
   // disorienting, and clamping to the last book keeps a partial final row
   // reachable. delta is +/-1 along the row, +/-columns for a row jump.
