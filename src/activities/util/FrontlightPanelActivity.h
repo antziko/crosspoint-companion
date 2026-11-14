@@ -7,11 +7,11 @@
 
 // Top-anchored control center opened by a top-edge down-swipe, a status-bar tap,
 // or a button bound to "Control Center" (iOS Control Center style): a grabber,
-// the frontlight brightness/warmth sliders (on boards with a light), and a grid
-// of four user-chosen quick tiles (night mode, ghost-cleanup refresh, reading
-// orientation, touch controls, or a reader action such as footnotes). The
-// frontlight controls are always there: they are what the panel is for. Pure
-// 1-bit: no dithered fills, selection reads as a filled tile. The grabber sits
+// the frontlight brightness/warmth sliders (on boards with a light), and a row
+// of four user-chosen quick-setting icons (night mode, ghost-cleanup refresh,
+// reading orientation, touch controls, or a reader action such as footnotes).
+// The frontlight controls are always there: they are what the panel is for.
+// Pure 1-bit: a toggle that is on draws a filled circle. The grabber sits
 // along the panel's bottom edge, the edge the sheet is dragged from.
 class FrontlightPanelActivity final : public Activity, private UiAppHost {
   ButtonNavigator buttonNavigator;
@@ -43,24 +43,21 @@ class FrontlightPanelActivity final : public Activity, private UiAppHost {
   uint8_t orientationShown = 0;
   int panelBottom = 0;
 
-  // Quick-setting tiles, 2 columns. Each slot shows the tile chosen in Settings -> Controls
+  // Quick-setting icons, one row. Each slot shows the tile chosen in Settings -> Controls
   // (panelTile1-4): one of the panel's toggles, or a reader action that closes the panel and
   // runs underneath. Shown on touch boards, absent elsewhere.
   static constexpr int kTileCount = 4;
-  // Slots shown this session, in grid order. Reader-action tiles are left out away from a book,
+  // Slots shown this session, left to right. Reader-action tiles are left out away from a book,
   // where there is nothing for them to act on. Filled in onEnter().
   uint8_t visibleSlots[kTileCount] = {};
   int visibleTileCount = 0;
 
-  // fui::SliderRowProps and fui::TileGridProps embed a 324-byte fui::StyleSet,
-  // so the props the render path fills in live here instead of on the stack
-  // (AGENTS.md: locals stay under 256 bytes). The components take them by
-  // const reference and draw immediately, so one instance per call site is
-  // enough — every field either is reassigned on each use or keeps its
-  // constructed default.
+  // fui::SliderRowProps embeds a 324-byte fui::StyleSet, so the props the render
+  // path fills in live here instead of on the stack (AGENTS.md: locals stay under
+  // 256 bytes). sliderRow takes them by const reference and draws immediately, so
+  // one instance is enough — every field either is reassigned on each use or keeps
+  // its constructed default.
   freeink::ui::SliderRowProps rowProps;
-  freeink::ui::TileGridProps gridProps;
-  freeink::ui::TileGridItem gridItems[kTileCount];
 
   static void panelScreen(UiScreen& screen, void* user);
   static void onBrightnessEvent(const freeink::ui::ActionEvent& event, void* user);
@@ -76,6 +73,7 @@ class FrontlightPanelActivity final : public Activity, private UiAppHost {
   // when showToggle is set (the brightness row).
   void addSliderRow(UiScreen& screen, const char* label, uint8_t value, freeink::ui::ActionId sliderAction,
                     freeink::ui::ActionId stepAction, bool showToggle);
+  void addQuickRow(UiScreen& screen);
   int computePanelBottom() const;
   void adjustBrightness(int delta);
   void adjustWarmth(int delta);

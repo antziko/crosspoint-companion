@@ -18,6 +18,7 @@
 #include "components/UIThemeTokens.h"
 #include "components/icons/customListIcons.h"
 #include "components/icons/listIcons.h"
+#include "components/icons/readerToolbarIcons.h"
 
 namespace fui = freeink::ui;
 
@@ -30,15 +31,14 @@ constexpr fui::ActionId ACTION_WARMTH_STEP = 5;
 constexpr fui::ActionId ACTION_TILE = 6;  // value = tile index
 
 // iOS-style geometry. The panel is a card hanging from the top of the screen:
-// a grabber, full-width slider pills, then a 2-column tile grid. The chrome
-// itself is fui::sheet / fui::sliderRow / fui::tileGrid; these constants only
-// size the bands, and computePanelBottom() mirrors them.
+// a grabber, full-width slider pills, then a row of quick-setting icons. The
+// chrome itself is fui::sheet / fui::sliderRow; these constants only size the
+// bands, and computePanelBottom() mirrors them.
 constexpr int16_t kPanelSideMargin = 16;
-constexpr int16_t kGrabberHeight = 5;     // fui::SheetProps default, mirrored here
-constexpr int16_t kSliderRowHeight = 56;  // the pill itself (finger-sized)
-constexpr int16_t kTileHeight = 84;
-constexpr int16_t kTileGap = 16;
-constexpr int kTileCols = 2;
+constexpr int16_t kGrabberHeight = 5;      // fui::SheetProps default, mirrored here
+constexpr int16_t kSliderRowHeight = 56;   // the pill itself (finger-sized)
+constexpr int16_t kQuickControlSize = 48;  // the circle behind each icon
+constexpr int16_t kQuickIconSize = 32;
 // One percent per press, on the -/+ buttons and on the physical Left/Right keys
 // alike (both repeat while held), so a level can be set exactly.
 constexpr int BRIGHTNESS_STEP = 1;
@@ -394,10 +394,9 @@ int FrontlightPanelActivity::computePanelBottom() const {
     }
     y += tokens.spaceSm;
   }
-  // Tiles are touch targets, so a buttons-only board gets no grid and the
-  // sheet is exactly the frontlight controls.
-  const int tileCount = mappedInput.hasTouch() ? visibleTileCount : 0;
-  y += fui::tileGridHeight(static_cast<uint16_t>(tileCount), kTileCols, kTileHeight, kTileGap);
+  // Icons are touch targets, so a buttons-only board gets no row and the
+  // sheet is exactly the frontlight controls. addQuickRow() takes the same band.
+  if (mappedInput.hasTouch() && visibleTileCount > 0) y += kQuickControlSize + tokens.spaceSm + lineHeight;
   // The sheet's grabber band: content margin + grabber + air to the edge.
   // buildPanelScreen() feeds the same theme spacings into SheetProps.
   y += tokens.spaceLg + kGrabberHeight + tokens.spaceLg + tokens.spaceMd;
@@ -473,51 +472,117 @@ void FrontlightPanelActivity::buildPanelScreen(UiScreen& screen) {
     screen.spacer(theme.spaceSm);
   }
 
-  // Quick-setting tiles. Two columns of finger-sized cards; a tile whose
-  // setting is currently on draws filled (StateChecked -> selected style).
-  // Touch boards only — the tiles are touch targets.
-  if (mappedInput.hasTouch() && visibleTileCount > 0) {
-    static constexpr StrId kOrientNames[CrossPointSettings::ORIENTATION_COUNT] = {
-        StrId::STR_PORTRAIT, StrId::STR_LANDSCAPE_CW, StrId::STR_ORIENTATION_INVERTED, StrId::STR_LANDSCAPE_CCW};
-    // The orientation tile is labelled with just the current mode ("Portrait"):
-    // the mode names say what the tile is about on their own.
-    const char* orientLabel = I18N.get(kOrientNames[orientationShown % CrossPointSettings::ORIENTATION_COUNT]);
-    // "Touch On" / "Touch Off", from the existing state strings: the label
-    // names the current state of the touch-reader-controls setting.
-    const bool touchOn = SETTINGS.touchReaderControls != CrossPointSettings::TOUCH_READER_OFF;
+  if (mappedInput.hasTouch() && visibleTileCount > 0) addQuickRow(screen);
+}
 
-    static constexpr StrId kTileNames[CrossPointSettings::PANEL_TILE_COUNT] = {
-        StrId::STR_NIGHT_MODE,        StrId::STR_FORCE_REFRESH, StrId::STR_ORIENTATION,
-        StrId::STR_TOUCH_TOGGLE,      StrId::STR_FOOTNOTES,     StrId::STR_BOOKMARK_OPTION,
-        StrId::STR_DICTIONARY,        StrId::STR_KOSYNC,        StrId::STR_HOLD_CONFIRM_READER_MENU,
-        StrId::STR_TOGGLE_STATUS_BAR, StrId::STR_HOME_SHORTCUT};
+// One row of equal slots, as the reader toolbar lays its icons out: a circle with the tile's
+// icon, its name underneath, and the whole slot as the touch target. Touch boards only.
+void FrontlightPanelActivity::addQuickRow(UiScreen& screen) {
+  const auto& theme = screen.theme();
+  static constexpr StrId kOrientNames[CrossPointSettings::ORIENTATION_COUNT] = {
+      StrId::STR_PORTRAIT, StrId::STR_LANDSCAPE_CW, StrId::STR_ORIENTATION_INVERTED, StrId::STR_LANDSCAPE_CCW};
+  static constexpr StrId kTileNames[CrossPointSettings::PANEL_TILE_COUNT] = {
+      StrId::STR_NIGHT_MODE,        StrId::STR_FORCE_REFRESH, StrId::STR_ORIENTATION,
+      StrId::STR_TOUCH_TOGGLE,      StrId::STR_FOOTNOTES,     StrId::STR_BOOKMARK_OPTION,
+      StrId::STR_DICTIONARY,        StrId::STR_KOSYNC,        StrId::STR_HOLD_CONFIRM_READER_MENU,
+      StrId::STR_TOGGLE_STATUS_BAR, StrId::STR_HOME_SHORTCUT};
+  // The orientation icon is the toolbar's T, turned to the mode it names; the underline
+  // rotates with it around the same 32px square.
+  static constexpr fui::Rotation kRotations[CrossPointSettings::ORIENTATION_COUNT] = {
+      fui::Rotation::None, fui::Rotation::CW90, fui::Rotation::R180, fui::Rotation::CCW90};
+  static constexpr fui::Rect kUnderlines[CrossPointSettings::ORIENTATION_COUNT] = {
+      {4, 29, 24, 3}, {0, 4, 3, 24}, {4, 0, 24, 3}, {29, 4, 3, 24}};
 
-    for (int id = 0; id < visibleTileCount; ++id) {
-      const uint8_t kind = tileKind(visibleSlots[id]);
-      fui::State state = fui::StateNormal;
-      fui::BitmapRef icon{};
-      const char* label = kind < CrossPointSettings::PANEL_TILE_COUNT ? I18N.get(kTileNames[kind]) : "";
-      if (kind == CrossPointSettings::PANEL_TILE_NIGHT_MODE && SETTINGS.screenInverted) {
-        state = fui::StateChecked;
-      } else if (kind == CrossPointSettings::PANEL_TILE_ORIENTATION) {
-        label = orientLabel;
-      } else if (kind == CrossPointSettings::PANEL_TILE_TOUCH) {
-        // Filled when touch reader controls are OFF — the non-default, attention-worthy state.
-        state = touchOn ? fui::StateNormal : fui::StateChecked;
-        icon = GUI.checkboxIcon(touchOn);
-      }
-      gridItems[id].label = label;
-      gridItems[id].value = static_cast<int16_t>(visibleSlots[id]);
-      gridItems[id].state = state;
-      gridItems[id].icon = icon;
+  const int orientation = orientationShown % CrossPointSettings::ORIENTATION_COUNT;
+  const bool touchOn = SETTINGS.touchReaderControls != CrossPointSettings::TOUCH_READER_OFF;
+  const int16_t labelHeight = screen.target().lineHeight(theme.smallText.font);
+  const fui::Rect row = screen.takeTop(static_cast<int16_t>(kQuickControlSize + theme.spaceSm + labelHeight));
+  const fui::Paint ink = fui::Paint::solid(fui::Color::Black);
+
+  for (int id = 0; id < visibleTileCount; ++id) {
+    const uint8_t kind = tileKind(visibleSlots[id]);
+    fui::BitmapRef icon{};
+    switch (kind) {
+      case CrossPointSettings::PANEL_TILE_NIGHT_MODE:
+        icon = fui::bitmapFromIcon(icon_moon_32);
+        break;
+      case CrossPointSettings::PANEL_TILE_REFRESH:
+        icon = fui::bitmapFromIcon(icon_refresh_cw_32);
+        break;
+      case CrossPointSettings::PANEL_TILE_ORIENTATION:
+        icon = fui::bitmapFromIcon(icon_reader_text_24);
+        break;
+      case CrossPointSettings::PANEL_TILE_TOUCH:
+        icon = fui::bitmapFromIcon(icon_pointer_32);
+        break;
+      case CrossPointSettings::PANEL_TILE_FOOTNOTES:
+        icon = fui::bitmapFromIcon(icon_superscript_32);
+        break;
+      case CrossPointSettings::PANEL_TILE_BOOKMARK:
+        icon = fui::bitmapFromIcon(icon_bookmark_32);
+        break;
+      case CrossPointSettings::PANEL_TILE_DICTIONARY:
+        icon = fui::bitmapFromIcon(icon_book_a_32);
+        break;
+      case CrossPointSettings::PANEL_TILE_SYNC:
+        icon = fui::bitmapFromIcon(icon_cloud_32);
+        break;
+      case CrossPointSettings::PANEL_TILE_READER_MENU:
+        icon = fui::bitmapFromIcon(icon_menu_32);
+        break;
+      case CrossPointSettings::PANEL_TILE_STATUS_BAR:
+        icon = fui::bitmapFromIcon(icon_panel_bottom_32);
+        break;
+      case CrossPointSettings::PANEL_TILE_HOME:
+        icon = fui::bitmapFromIcon(icon_house_32);
+        break;
+      default:
+        break;
     }
-    gridProps.items = gridItems;
-    gridProps.count = static_cast<uint16_t>(visibleTileCount);
-    gridProps.action = ACTION_TILE;
-    gridProps.tileHeight = kTileHeight;
-    gridProps.gap = kTileGap;
-    gridProps.iconOnRight = true;
-    screen.tileGrid(gridProps);
+    const bool toggle =
+        kind == CrossPointSettings::PANEL_TILE_NIGHT_MODE || kind == CrossPointSettings::PANEL_TILE_TOUCH;
+    const bool enabled = kind == CrossPointSettings::PANEL_TILE_NIGHT_MODE ? SETTINGS.screenInverted != 0
+                         : kind == CrossPointSettings::PANEL_TILE_TOUCH    ? touchOn
+                                                                           : false;
+    const char* label = toggle ? I18N.get(enabled ? StrId::STR_STATE_ON : StrId::STR_STATE_OFF)
+                        : kind == CrossPointSettings::PANEL_TILE_ORIENTATION ? I18N.get(kOrientNames[orientation])
+                        : kind < CrossPointSettings::PANEL_TILE_COUNT        ? I18N.get(kTileNames[kind])
+                                                                             : "";
+
+    const int16_t left = static_cast<int16_t>(row.x + row.width * id / visibleTileCount);
+    const int16_t right = static_cast<int16_t>(row.x + row.width * (id + 1) / visibleTileCount);
+    const fui::Rect slot{left, row.y, static_cast<int16_t>(right - left), row.height};
+    const fui::Rect circle{static_cast<int16_t>(slot.x + (slot.width - kQuickControlSize) / 2), row.y,
+                           kQuickControlSize, kQuickControlSize};
+    // A toggle shows its state at rest: filled when on, outlined when off. The other tiles
+    // are one-shot actions and only outline while pressed.
+    const int16_t value = static_cast<int16_t>(visibleSlots[id]);
+    if (toggle && enabled) {
+      screen.target().fill(circle, ink, kQuickControlSize / 2);
+    } else if (toggle || fui::hasState(screen.frame().stateFor(ACTION_TILE, value), fui::StateActive)) {
+      screen.target().stroke(circle, ink, 2, kQuickControlSize / 2);
+    }
+    const fui::Rect iconRect{static_cast<int16_t>(circle.x + (circle.width - kQuickIconSize) / 2),
+                             static_cast<int16_t>(circle.y + (circle.height - kQuickIconSize) / 2), kQuickIconSize,
+                             kQuickIconSize};
+    const bool isOrientation = kind == CrossPointSettings::PANEL_TILE_ORIENTATION;
+    screen.target().bitmap(iconRect, icon, fui::BitmapMode::Center,
+                           fui::Paint::solid(enabled ? fui::Color::White : fui::Color::Black),
+                           isOrientation ? kRotations[orientation] : fui::Rotation::None);
+    if (isOrientation) {
+      const auto& line = kUnderlines[orientation];
+      screen.target().fill(fui::Rect{static_cast<int16_t>(iconRect.x + line.x),
+                                     static_cast<int16_t>(iconRect.y + line.y), line.width, line.height},
+                           ink);
+    }
+    // One line, ellipsised to the slot: four names share the sheet's width.
+    fui::TextStyle text = theme.smallText;
+    text.align = fui::TextAlign::Center;
+    text.maxLines = 1;
+    screen.target().text(
+        fui::Rect{slot.x, static_cast<int16_t>(row.y + kQuickControlSize + theme.spaceSm), slot.width, labelHeight},
+        label, text);
+    screen.frame().hit(slot, ACTION_TILE, value, fui::InputTouch);
   }
 }
 
