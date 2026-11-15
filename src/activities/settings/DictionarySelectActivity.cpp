@@ -100,6 +100,8 @@ void DictionarySelectActivity::onEnter() {
 
   totalItems = 1 + static_cast<int>(dictFolders.size());
   showingInfo = false;
+  infoBar_.layout(renderer, mappedInput.hasTouch(), UI_10_FONT_ID, 2);
+  rawBar_.layout(renderer, mappedInput.hasTouch(), UI_10_FONT_ID, 1);
 
   requestUpdate();
 }
@@ -178,18 +180,23 @@ void DictionarySelectActivity::applySelection() {
 
 void DictionarySelectActivity::loop() {
   if (showingInfo) {
+    // A tap on the on-screen buttons answers as the front buttons do (touch boards only).
+    int tapX = 0;
+    int tapY = 0;
+    const bool tapped = mappedInput.wasScreenTapped(tapX, tapY);
     if (showingRaw) {
       // Raw view: Back returns to parsed metadata view.
-      if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+      if (mappedInput.wasReleased(MappedInputManager::Button::Back) || (tapped && rawBar_.hitAt(tapX, tapY) == 0)) {
         showingRaw = false;
         requestUpdate();
       }
     } else {
       // Parsed metadata view: Back exits to picker; Confirm switches to raw view.
-      if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+      const int hit = tapped ? infoBar_.hitAt(tapX, tapY) : -1;
+      if (mappedInput.wasReleased(MappedInputManager::Button::Back) || hit == 0) {
         showingInfo = false;
         requestUpdate();
-      } else if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+      } else if (mappedInput.wasPressed(MappedInputManager::Button::Confirm) || hit == 1) {
         showingRaw = true;
         requestUpdate();
       }
@@ -307,7 +314,8 @@ void DictionarySelectActivity::render(RenderLock&&) {
     int y = infoArea.y + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
     const int x = infoArea.x + metrics.contentSidePadding;
     const int maxWidth = infoArea.width - metrics.contentSidePadding * 2;
-    const int maxY = infoArea.y + infoArea.height - metrics.verticalSpacing;
+    // Both bars share one height; nothing is drawn under them.
+    const int maxY = infoArea.y + infoArea.height - metrics.verticalSpacing - infoBar_.reservedHeight();
 
     if (showingRaw) {
       // --- Raw view: forward-only SD streaming, character-wrapped per line ---
@@ -378,6 +386,10 @@ void DictionarySelectActivity::render(RenderLock&&) {
         ifoFile.close();
       }
 
+      if (rawBar_.active()) {
+        const char* barLabels[] = {tr(STR_BACK)};
+        rawBar_.draw(renderer, UI_10_FONT_ID, barLabels, /*primaryIndex=*/0);
+      }
       const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     } else {
@@ -441,6 +453,10 @@ void DictionarySelectActivity::render(RenderLock&&) {
         }
       }
 
+      if (infoBar_.active()) {
+        const char* barLabels[] = {tr(STR_BACK), tr(STR_DICT_VIEW_RAW)};
+        infoBar_.draw(renderer, UI_10_FONT_ID, barLabels, /*primaryIndex=*/1);
+      }
       const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_DICT_VIEW_RAW), "", "");
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     }

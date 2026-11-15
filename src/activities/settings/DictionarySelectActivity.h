@@ -6,6 +6,7 @@
 
 #include "../Activity.h"
 #include "activities/ListTouchTarget.h"
+#include "activities/TouchActionBar.h"
 #include "util/ButtonNavigator.h"
 #include "util/Dictionary.h"
 
@@ -38,6 +39,10 @@ class DictionarySelectActivity final : public Activity {
   bool showingInfo = false;
   // When showingInfo is true: false = parsed field view, true = raw .ifo text view.
   bool showingRaw = false;
+  // On-screen buttons for the info screen on touch boards, laid out once in onEnter (the render
+  // task draws them). Inert on button boards.
+  TouchActionBar infoBar_;  // Back / View raw
+  TouchActionBar rawBar_;   // Back
   // Parsed metadata from the .ifo file (populated on long-press).
   DictInfo currentInfo;
   // Suppresses the Confirm release that bleeds through from the parent activity launch.
