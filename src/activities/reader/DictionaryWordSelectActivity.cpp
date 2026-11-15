@@ -1865,8 +1865,14 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
         lastRow = std::max<int>(lastRow, p->row);
       }
     }
+    // A heading laid out at its own size is taller than a body line: clear all of it.
+    int lastRowHeight = selectionLineHeight;
+    for (const auto* end : {first, last, partnerOf(first), partnerOf(last)}) {
+      if (end && end->row == lastRow)
+        lastRowHeight = std::max(lastRowHeight, navigator.lineHeightFor(*end, selectionLineHeight));
+    }
     const int above = navigator.rowY(firstRow) - kGlossClearance - gloss_->height;
-    const int below = navigator.rowY(lastRow) + selectionLineHeight + kGlossClearance;
+    const int below = navigator.rowY(lastRow) + lastRowHeight + kGlossClearance;
     if (above >= gloss_->topY) {
       gloss_->y = above;
       gloss_->place = true;
