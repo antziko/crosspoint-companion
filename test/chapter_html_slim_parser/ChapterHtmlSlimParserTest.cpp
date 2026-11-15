@@ -583,12 +583,13 @@ struct PageParse {
   // order; boxFirst records that they come ahead of the page's other elements.
   std::vector<std::string> boxes;
   std::vector<int> boxHeights;
+  std::vector<int> linePts;  // each line's own built-in size, 0 = the section font
   bool boxFirst = true;
   std::unique_ptr<ChapterHtmlSlimParser> parser;
 
-  PageParse(const std::string& body, const int lines) {
+  PageParse(const std::string& body, const int lines, const int fontId = 0, const bool embeddedStyle = true) {
     parser = std::make_unique<ChapterHtmlSlimParser>(
-        nullptr, path, renderer, 0, 1.0f, false, 0, static_cast<uint16_t>(renderer.getScreenWidth()),
+        nullptr, path, renderer, fontId, 1.0f, false, 0, static_cast<uint16_t>(renderer.getScreenWidth()),
         static_cast<uint16_t>(lines * 16), false, false,
         [this](std::unique_ptr<Page> page, uint16_t, uint16_t, uint32_t) {
           std::string tags;
@@ -608,13 +609,15 @@ struct PageParse {
             }
             sawOther = true;
             if (element->getTag() != TAG_PageLine) continue;
-            const auto align = static_cast<const PageLine&>(*element).getBlock()->getBlockStyle().alignment;
+            const auto& lineStyle = static_cast<const PageLine&>(*element).getBlock()->getBlockStyle();
+            linePts.push_back(lineStyle.fontPt);
+            const auto align = lineStyle.alignment;
             tags += align == CssTextAlign::Center ? 'C' : 'L';
           }
           pages.push_back(std::move(tags));
           boxes.push_back(std::move(pageBoxes));
         },
-        true, "", "", 0, std::vector<std::string>{}, nullptr, &css);
+        embeddedStyle, "", "", 0, std::vector<std::string>{}, nullptr, &css);
     const std::string html = "<html><body>" + body + "</body></html>";
     parser->beginParse();
     XML_Parser xml = XML_ParserCreate(nullptr);
@@ -834,4 +837,61 @@ TEST(ChapterHtmlSlimParserBoxes, AHeadingsRuleMovesWithTheHeading) {
   EXPECT_EQ(p.boxes[0], "");
   EXPECT_EQ(p.pages[1].substr(0, 2), "CL");
   EXPECT_EQ(p.boxes[1], "[--B--]");
+}
+
+// ---- Block font sizes on the built-in font ----
+TEST(BuiltinFontSizes, VariantsSnapToTheBuiltInSizes) {
+  EXPECT_EQ(BuiltinFontSizes::variantPt(NOTOSANS_14_FONT_ID, 1.0f), 0);   // no change
+  EXPECT_EQ(BuiltinFontSizes::variantPt(NOTOSANS_14_FONT_ID, 1.03f), 0);  // too small a change
+  EXPECT_EQ(BuiltinFontSizes::variantPt(NOTOSANS_14_FONT_ID, 2.0f), 18);  // capped at the top
+  EXPECT_EQ(BuiltinFontSizes::variantPt(NOTOSANS_14_FONT_ID, 1.17f), 16);
+  EXPECT_EQ(BuiltinFontSizes::variantPt(NOTOSANS_14_FONT_ID, 0.8f), 12);  // shrinking rounds down
+  EXPECT_EQ(BuiltinFontSizes::variantPt(NOTOSANS_12_FONT_ID, 0.6f), 0);   // already the smallest
+  EXPECT_EQ(BuiltinFontSizes::variantPt(NOTOSANS_18_FONT_ID, 1.5f), 0);   // already the largest
+  EXPECT_EQ(BuiltinFontSizes::variantPt(0, 2.0f), 0);                     // not a built-in font
+  EXPECT_EQ(BuiltinFontSizes::fontIdForPt(16), NOTOSANS_16_FONT_ID);
+  EXPECT_EQ(BuiltinFontSizes::fontIdForPt(13), 0);
+}
+
+TEST(CssFontSize, RelativeSizesAndKeywordsParse) {
+  EXPECT_EQ(CssParser::parseInlineStyle("font-size: 0.8em").fontSize, (CssLength{0.8f, CssUnit::Em}));
+  EXPECT_EQ(CssParser::parseInlineStyle("font-size: 120%").fontSize, (CssLength{120.0f, CssUnit::Percent}));
+  EXPECT_EQ(CssParser::parseInlineStyle("font-size: x-large").fontSize, (CssLength{1.5f, CssUnit::Em}));
+  EXPECT_TRUE(CssParser::parseInlineStyle("font-size: 12px").hasFontSize());
+  EXPECT_FALSE(CssParser::parseInlineStyle("font-size: inherit").hasFontSize());
+}
+
+TEST(ChapterHtmlSlimParserFontSizes, HeadingsGrowAndSmallPrintShrinks) {
+  PageParse p("<h1>Title</h1><p>body</p><div style=\"font-size: 0.8em\"><p>note</p></div>", 12, NOTOSANS_14_FONT_ID);
+  ASSERT_EQ(p.linePts.size(), 3u);
+  EXPECT_EQ(p.linePts[0], 18);
+  EXPECT_EQ(p.linePts[1], 0);
+  EXPECT_EQ(p.linePts[2], 12);
+}
+
+TEST(ChapterHtmlSlimParserFontSizes, AbsoluteAndRootSizesLeaveTheReaderSize) {
+  PageParse p("<div style=\"font-size: 30px\"><p>px</p></div>", 12, NOTOSANS_14_FONT_ID);
+  ASSERT_EQ(p.linePts.size(), 1u);
+  EXPECT_EQ(p.linePts[0], 0);
+}
+
+TEST(ChapterHtmlSlimParserFontSizes, BookStylesOffKeepsEveryLineAtTheReaderSize) {
+  PageParse p("<h1>Title</h1><p>body</p>", 12, NOTOSANS_14_FONT_ID, /*embeddedStyle=*/false);
+  ASSERT_EQ(p.linePts.size(), 2u);
+  EXPECT_EQ(p.linePts[0], 0);
+  EXPECT_EQ(p.linePts[1], 0);
+}
+
+TEST(ChapterHtmlSlimParserFontSizes, NestedSizesMultiply) {
+  // 1.5em inside 0.67em: back to the reader size.
+  PageParse p("<div style=\"font-size: 0.67em\"><div style=\"font-size: 1.5em\"><p>x</p></div></div>", 12,
+              NOTOSANS_14_FONT_ID);
+  ASSERT_EQ(p.linePts.size(), 1u);
+  EXPECT_EQ(p.linePts[0], 0);
+}
+
+TEST(ChapterHtmlSlimParserFontSizes, ANonBuiltInFontKeepsOneSize) {
+  PageParse p("<h1>Title</h1>", 12, /*fontId=*/0);
+  ASSERT_EQ(p.linePts.size(), 1u);
+  EXPECT_EQ(p.linePts[0], 0);
 }

@@ -323,6 +323,10 @@ class ChapterHtmlSlimParser {
   void openBoxScope(BlockStyle& ownStyle, const CssStyle& cssStyle);
   void closeBoxScope();
   void emitBoxSegment(const BoxScope& box, bool closing);
+  // CSS font-size and heading defaults onto an element's own block style (book styles only).
+  void applyBlockFontScale(BlockStyle& ownStyle, const CssStyle& cssStyle, const char* tagName) const;
+  // Font to lay the current text block out in; records its built-in size on the block.
+  int layoutFontFor(ParsedText& block) const;
   bool insidePre() const { return preDepth != INT_MAX && tableDepth == 0; }
   void breakPreLine();
   void emitPreBox();

@@ -40,7 +40,7 @@ class CssParser {
   //      grew by one byte (upstream #3500)
   // v11: font-weight 600 is bold (the rule cache stores the interpreted weight)
   // v12: font-weight/font-style `inherit` is stored as its own value
-  static constexpr uint8_t CSS_CACHE_VERSION = 14;
+  static constexpr uint8_t CSS_CACHE_VERSION = 15;
   // Per-rule border record in the cache: width + style for 4 sides, declared masks, shade.
   static constexpr size_t BORDER_RECORD_BYTES = 10;
 

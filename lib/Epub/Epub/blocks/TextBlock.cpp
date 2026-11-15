@@ -134,10 +134,11 @@ bool TextBlock::hasRuby() const {
   return false;
 }
 
-void TextBlock::wordPlacements(const GfxRenderer& renderer, const int fontId, const int x, const int y,
+void TextBlock::wordPlacements(const GfxRenderer& renderer, const int sectionFontId, const int x, const int y,
                                const bool suppressRuby, std::vector<WordPlacement>& out) const {
   out.clear();
   if (!isValid) return;
+  const int fontId = blockFontId(sectionFontId);
   const int wordY = y + (suppressRuby ? 0 : getRubyShift(renderer.getFontAscenderSize(fontId)));
   out.reserve(numWords);
   for (uint16_t i = 0; i < numWords; i++) {
@@ -145,11 +146,12 @@ void TextBlock::wordPlacements(const GfxRenderer& renderer, const int fontId, co
   }
 }
 
-void TextBlock::render(const GfxRenderer& renderer, const int fontId, const int x, const int y) const {
+void TextBlock::render(const GfxRenderer& renderer, const int sectionFontId, const int x, const int y) const {
   if (!isValid) {
     LOG_ERR("TXB", "Render skipped: invalid block");
     return;
   }
+  const int fontId = blockFontId(sectionFontId);
 
   const int8_t tracking = blockStyle.characterSpacing;
 
@@ -433,6 +435,7 @@ bool TextBlock::serialize(HalFile& file) const {
   serialization::writePod(file, blockStyle.isRtl);
   serialization::writePod(file, blockStyle.directionDefined);
   serialization::writePod(file, blockStyle.characterSpacing);
+  serialization::writePod(file, blockStyle.fontPt);
 
   return true;
 }
@@ -532,6 +535,8 @@ std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {
   serialization::readPod(file, blockStyle.isRtl);
   serialization::readPod(file, blockStyle.directionDefined);
   serialization::readPod(file, blockStyle.characterSpacing);
+  serialization::readPod(file, blockStyle.fontPt);
+  if (blockStyle.fontPt != 0 && BuiltinFontSizes::fontIdForPt(blockStyle.fontPt) == 0) blockStyle.fontPt = 0;
 
   return block;
 }

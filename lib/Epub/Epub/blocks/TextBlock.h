@@ -9,6 +9,7 @@
 
 #include "Block.h"
 #include "BlockStyle.h"
+#include "BuiltinFontSizes.h"
 #include "Epub/FootnoteEntry.h"
 
 // Represents a line of text on a page.
@@ -114,6 +115,13 @@ class TextBlock final : public Block {
   const std::vector<std::string>& getRubyTexts() const { return rubyTexts; }
   std::vector<LinkSpan> takeLinkSpans() { return std::move(linkSpans); }
 
+  // The font this line was laid out in: its own built-in size, else the section font.
+  int blockFontId(const int sectionFontId) const {
+    const int sized = blockStyle.fontPt ? BuiltinFontSizes::fontIdForPt(blockStyle.fontPt) : 0;
+    return sized ? sized : sectionFontId;
+  }
+
+  // `fontId` is the section font; a line laid out at its own size draws in that instead.
   void render(const GfxRenderer& renderer, int fontId, int x, int y) const;
   BlockType getType() override { return TEXT_BLOCK; }
   bool serialize(HalFile& file) const;

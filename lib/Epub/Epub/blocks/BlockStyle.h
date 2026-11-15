@@ -46,6 +46,12 @@ struct BlockStyle {
   bool keepWithNext = false;
   bool pageBreakBefore = false;
   bool pageBreakAfter = false;
+  // Text size against the reader font (CSS font-size, heading defaults), resolved down the block
+  // stack; layout only. fontPt is the built-in size the lines were laid out at, 0 = the reader
+  // font, and is the part a cached line keeps.
+  float fontScale = 1.0f;
+  bool fontScaleDefined = false;
+  uint8_t fontPt = 0;
 
   // Combined insets (margin + padding)
   [[nodiscard]] int16_t leftInset() const { return marginLeft + paddingLeft; }
@@ -101,6 +107,10 @@ struct BlockStyle {
       if (!child.textAlignDefined && textAlignDefined) {
         result.alignment = alignment;
         result.textAlignDefined = true;
+      }
+      if (!child.fontScaleDefined) {
+        result.fontScale = fontScale;
+        result.fontScaleDefined = fontScaleDefined;
       }
     } else {
       result.marginTop = std::max(child.marginTop, marginTop);

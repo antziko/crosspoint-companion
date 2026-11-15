@@ -395,7 +395,8 @@ int ChapterHtmlSlimParser::lastLineGlyphBottom() const {
   const PageElement& last = *currentPage->elements.back();
   if (last.getTag() != TAG_PageLine) return 0;
   const TextBlock& line = *static_cast<const PageLine&>(last).getBlock();
-  return last.yPos + renderer.getLineHeight(fontId) + line.getRubyShift(renderer.getFontAscenderSize(fontId));
+  const int lineFont = line.blockFontId(fontId);
+  return last.yPos + renderer.getLineHeight(lineFont) + line.getRubyShift(renderer.getFontAscenderSize(lineFont));
 }
 
 bool ChapterHtmlSlimParser::anchorCapReached() const {
@@ -639,8 +640,9 @@ void ChapterHtmlSlimParser::flushLongTextBlockIfNeeded() {
   // The flush keeps the paragraph's last line back, so nothing here can be its lone last line.
   if (!currentTextBlock->firstLineEmitted()) applyPendingPageBreak();
   layoutParagraph = insideTableCell ? nullptr : currentTextBlock.get();
+  const int blockFont = layoutFontFor(*currentTextBlock);
   currentTextBlock->layoutAndExtractLines(
-      renderer, fontId, effectiveWidth,
+      renderer, blockFont, effectiveWidth,
       [this, &topPending](const std::shared_ptr<TextBlock>& textBlock, const uint32_t offset) {
         if (topPending) applyBlockTopSpacing();
         topPending = false;
@@ -2026,6 +2028,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
     }
     self->headingDepth = std::min(self->headingDepth, self->depth);
     headerBlockStyle.keepWithNext = true;
+    self->applyBlockFontScale(headerBlockStyle, cssStyle, name);
     if (self->embeddedStyle) self->openBoxScope(headerBlockStyle, cssStyle);
     const auto accumulated =
         self->blockStyleStack.back().getCombinedBlockStyle(headerBlockStyle, BlockStyle::CombineAxis::Horizontal);
@@ -2067,6 +2070,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
       }
       self->currentCssStyle = cssStyle;
       auto ownBlockStyle = userAlignmentBlockStyle;
+      self->applyBlockFontScale(ownBlockStyle, cssStyle, name);
       if (self->embeddedStyle && strcmp(name, "pre") != 0) self->openBoxScope(ownBlockStyle, cssStyle);
       const auto accumulated =
           self->blockStyleStack.back().getCombinedBlockStyle(ownBlockStyle, BlockStyle::CombineAxis::Horizontal);
@@ -2996,8 +3000,9 @@ void ChapterHtmlSlimParser::signalOutOfMemory(const char* where) {
 }
 
 void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line, const uint32_t visibleOffset) {
+  const int lineFont = line->blockFontId(fontId);
   const int lineHeight =
-      renderer.getLineHeight(fontId, lineCompression) + line->getRubyShift(renderer.getFontAscenderSize(fontId));
+      renderer.getLineHeight(lineFont, lineCompression) + line->getRubyShift(renderer.getFontAscenderSize(lineFont));
 
   if (!currentPage) {
     currentPage.reset(new (std::nothrow) Page());
@@ -3269,6 +3274,48 @@ void ChapterHtmlSlimParser::breakPageCarryingLines(const size_t carry, const siz
   keepWithNextLines = 0;  // what moved is now at the top of its page
 }
 
+void ChapterHtmlSlimParser::applyBlockFontScale(BlockStyle& ownStyle, const CssStyle& cssStyle,
+                                                const char* tagName) const {
+  if (!embeddedStyle || blockStyleStack.empty()) return;
+  // The reader's chosen size is the user's: the root elements and absolute sizes never move it.
+  if (strcmp(tagName, "html") == 0 || strcmp(tagName, "body") == 0) return;
+  const float parent = blockStyleStack.back().fontScale;
+  float scale = parent;
+  bool defined = false;
+  if (cssStyle.hasFontSize()) {
+    const CssLength& size = cssStyle.fontSize;
+    if (size.unit == CssUnit::Em) {
+      scale = parent * size.value;
+      defined = true;
+    } else if (size.unit == CssUnit::Percent) {
+      scale = parent * size.value / 100.0f;
+      defined = true;
+    } else if (size.unit == CssUnit::Rem) {
+      scale = size.value;
+      defined = true;
+    }
+  }
+  if (!defined && tagName[0] == 'h' && tagName[1] >= '1' && tagName[1] <= '6' && tagName[2] == '\0') {
+    // Browser defaults: h1 2em down to h6 0.67em.
+    static constexpr float HEADING_SCALES[] = {2.0f, 1.5f, 1.17f, 1.0f, 0.83f, 0.67f};
+    scale = parent * HEADING_SCALES[tagName[1] - '1'];
+    defined = true;
+  }
+  if (!defined) return;
+  ownStyle.fontScale = std::clamp(scale, 0.5f, 3.0f);
+  ownStyle.fontScaleDefined = true;
+}
+
+int ChapterHtmlSlimParser::layoutFontFor(ParsedText& block) const {
+  BlockStyle& style = block.getBlockStyle();
+  // Tables, <pre> and the reader without book styles keep the section font.
+  style.fontPt = embeddedStyle && tableDepth == 0 && !insideTableCell && !insidePre()
+                     ? BuiltinFontSizes::variantPt(fontId, style.fontScale)
+                     : 0;
+  const int sized = style.fontPt ? BuiltinFontSizes::fontIdForPt(style.fontPt) : 0;
+  return sized ? sized : fontId;
+}
+
 void ChapterHtmlSlimParser::emitCurrentPage() {
   // Open boxes are sliced at the page break and continue on the next page.
   for (uint8_t b = 0; b < boxScopeCount; ++b) {
@@ -3461,8 +3508,9 @@ void ChapterHtmlSlimParser::makePages() {
 
   if (recentLinesPage != completedPageCount) paragraphLinesOnPage = 0;
   layoutParagraph = currentTextBlock.get();
+  const int blockFont = layoutFontFor(*currentTextBlock);
   currentTextBlock->layoutAndExtractLines(
-      renderer, fontId, effectiveWidth,
+      renderer, blockFont, effectiveWidth,
       [this, &topPending](const std::shared_ptr<TextBlock>& textBlock, const uint32_t offset) {
         if (topPending) applyBlockTopSpacing();
         topPending = false;

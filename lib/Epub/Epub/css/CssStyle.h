@@ -121,6 +121,7 @@ struct CssPropertyFlags {
   uint16_t borderBottom : 1;
   uint16_t borderLeft : 1;
   uint16_t shaded : 1;
+  uint16_t fontSize : 1;
 
   CssPropertyFlags()
       : textAlign(0),
@@ -148,13 +149,14 @@ struct CssPropertyFlags {
         borderRight(0),
         borderBottom(0),
         borderLeft(0),
-        shaded(0) {}
+        shaded(0),
+        fontSize(0) {}
 
   [[nodiscard]] bool anySet() const {
     return textAlign || fontStyle || fontWeight || textDecoration || textIndent || marginTop || marginBottom ||
            marginLeft || marginRight || paddingTop || paddingBottom || paddingLeft || paddingRight || imageHeight ||
            imageWidth || display || direction || verticalAlign || listStyleType || pageBreakBefore || pageBreakAfter ||
-           borderTop || borderRight || borderBottom || borderLeft || shaded;
+           borderTop || borderRight || borderBottom || borderLeft || shaded || fontSize;
   }
 
   void clearAll() {
@@ -163,7 +165,7 @@ struct CssPropertyFlags {
     paddingTop = paddingBottom = paddingLeft = paddingRight = 0;
     imageHeight = imageWidth = display = direction = verticalAlign = listStyleType = 0;
     pageBreakBefore = pageBreakAfter = 0;
-    borderTop = borderRight = borderBottom = borderLeft = shaded = 0;
+    borderTop = borderRight = borderBottom = borderLeft = shaded = fontSize = 0;
   }
 
   // Field-by-field equality (NOT memcmp: the bitfield has unused padding bits that the
@@ -177,14 +179,14 @@ struct CssPropertyFlags {
            display == o.display && direction == o.direction && verticalAlign == o.verticalAlign &&
            listStyleType == o.listStyleType && pageBreakBefore == o.pageBreakBefore &&
            pageBreakAfter == o.pageBreakAfter && borderTop == o.borderTop && borderRight == o.borderRight &&
-           borderBottom == o.borderBottom && borderLeft == o.borderLeft && shaded == o.shaded;
+           borderBottom == o.borderBottom && borderLeft == o.borderLeft && shaded == o.shaded && fontSize == o.fontSize;
   }
 };
 
 // Cache serializes defined flags as uint32_t with bit indices 0..20.
 static_assert(sizeof(CssPropertyFlags) <= sizeof(uint32_t),
               "CssPropertyFlags exceeds 32 bits; update cache read/write in CssParser.cpp");
-static_assert(sizeof(CssPropertyFlags) * 8 >= 26,
+static_assert(sizeof(CssPropertyFlags) * 8 >= 27,
               "CssPropertyFlags has fewer bits than properties; update bitfield widths");
 
 // Represents a collection of CSS style properties
@@ -217,6 +219,9 @@ struct CssStyle {
   uint8_t borderWidthsDefined = 0;
   uint8_t borderStylesDefined = 0;
   bool shaded = false;  // a light background-color, drawn as a gray fill
+  // font-size as declared; keywords are stored as their em scale. The layout uses only the
+  // relative units (em, rem, %).
+  CssLength fontSize;
 
   CssPropertyFlags defined;  // Tracks which properties were explicitly set
 
@@ -327,12 +332,17 @@ struct CssStyle {
       shaded = base.shaded;
       defined.shaded = 1;
     }
+    if (base.defined.fontSize) {
+      fontSize = base.fontSize;
+      defined.fontSize = 1;
+    }
   }
 
   [[nodiscard]] bool hasVisibleBorder() const {
     return borderTop.visible() || borderRight.visible() || borderBottom.visible() || borderLeft.visible();
   }
   [[nodiscard]] bool isShaded() const { return defined.shaded && shaded; }
+  [[nodiscard]] bool hasFontSize() const { return defined.fontSize; }
 
   [[nodiscard]] bool hasTextAlign() const { return defined.textAlign; }
   [[nodiscard]] bool hasFontStyle() const { return defined.fontStyle; }
@@ -372,6 +382,7 @@ struct CssStyle {
     borderTop = borderRight = borderBottom = borderLeft = CssBorderSide{};
     borderWidthsDefined = borderStylesDefined = 0;
     shaded = false;
+    fontSize = CssLength{};
     defined.clearAll();
   }
 
@@ -388,6 +399,6 @@ struct CssStyle {
            listStyleType == o.listStyleType && borderTop == o.borderTop && borderRight == o.borderRight &&
            borderBottom == o.borderBottom && borderLeft == o.borderLeft &&
            borderWidthsDefined == o.borderWidthsDefined && borderStylesDefined == o.borderStylesDefined &&
-           shaded == o.shaded && defined == o.defined;
+           shaded == o.shaded && fontSize == o.fontSize && defined == o.defined;
   }
 };

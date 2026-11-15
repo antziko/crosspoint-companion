@@ -655,6 +655,30 @@ void CssParser::parseDeclarationIntoStyle(const std::string& decl, CssStyle& sty
     // propValueBuf is already normalized and !important-stripped (see normalizedInto).
     style.listStyleType = (propValueBuf == "none") ? CssListStyleType::None : CssListStyleType::Disc;
     style.defined.listStyleType = 1;
+  } else if (propNameBuf == "font-size") {
+    // Keywords as their usual scale against the parent (medium = 1em).
+    struct Keyword {
+      std::string_view name;
+      float em;
+    };
+    static constexpr Keyword KEYWORDS[] = {
+        {"xx-small", 0.6f}, {"x-small", 0.75f}, {"small", 0.89f},   {"medium", 1.0f}, {"large", 1.2f},
+        {"x-large", 1.5f},  {"xx-large", 2.0f}, {"smaller", 0.83f}, {"larger", 1.2f},
+    };
+    bool matched = false;
+    for (const Keyword& keyword : KEYWORDS) {
+      if (propValueBuf == keyword.name) {
+        style.fontSize = CssLength{keyword.em, CssUnit::Em};
+        matched = true;
+        break;
+      }
+    }
+    CssLength len;
+    if (!matched && tryInterpretLength(propValueBuf, len) && len.value > 0.0f) {
+      style.fontSize = len;
+      matched = true;
+    }
+    if (matched) style.defined.fontSize = 1;
   } else if (propNameBuf == "background-color" || propNameBuf == "background") {
     style.shaded = interpretShade(propValueBuf);
     style.defined.shaded = 1;
@@ -1309,6 +1333,7 @@ bool CssParser::saveToCache() const {
     if (style.defined.borderBottom) definedBits |= 1 << 23;
     if (style.defined.borderLeft) definedBits |= 1 << 24;
     if (style.defined.shaded) definedBits |= 1 << 25;
+    if (style.defined.fontSize) definedBits |= 1 << 26;
     file.write(reinterpret_cast<const uint8_t*>(&definedBits), sizeof(definedBits));
 
     // Borders: width + style per side (top, right, bottom, left), the declared-part masks, shade.
@@ -1321,6 +1346,7 @@ bool CssParser::saveToCache() const {
     border[at++] = static_cast<uint8_t>(style.borderWidthsDefined | (style.borderStylesDefined << 4));
     border[at++] = style.shaded ? 1 : 0;
     file.write(border, sizeof(border));
+    writeLength(style.fontSize);
   }
 
   LOG_DBG("CSS", "Saved %u rules to cache", ruleCount);
@@ -1545,6 +1571,7 @@ bool CssParser::loadFromCache(const SelectorSet* only) {
     style.defined.borderBottom = (definedBits & 1 << 23) != 0;
     style.defined.borderLeft = (definedBits & 1 << 24) != 0;
     style.defined.shaded = (definedBits & 1 << 25) != 0;
+    style.defined.fontSize = (definedBits & 1 << 26) != 0;
 
     uint8_t border[BORDER_RECORD_BYTES];
     if (file.read(border, sizeof(border)) != sizeof(border)) {
@@ -1567,6 +1594,15 @@ bool CssParser::loadFromCache(const SelectorSet* only) {
         return false;
       }
       style.shaded = border[at] != 0;
+    }
+    {
+      uint8_t unit = 0;
+      if (file.read(&style.fontSize.value, sizeof(float)) != sizeof(float) || file.read(&unit, 1) != 1 ||
+          unit > static_cast<uint8_t>(CssUnit::Percent)) {
+        rulesBySelector_.clear();
+        return false;
+      }
+      style.fontSize.unit = static_cast<CssUnit>(unit);
     }
 
     // Defend against caches that still carry empty rules (see store-time note):
@@ -1621,7 +1657,7 @@ size_t CssParser::collectVerticalStyles(std::vector<VerticalBlockRule>& out, con
   if (out.capacity() < maxOut) out.reserve(maxOut);
 
   // Record layout, as loadFromCache() reads it: selector, 5 enum bytes, 11 lengths (float + unit),
-  // display, verticalAlign, listStyleType, defined bits, border record.
+  // display, verticalAlign, listStyleType, defined bits, border record, font-size length.
   constexpr size_t kLengthCount = 11;
   std::string selector;
   for (uint16_t i = 0; i < ruleCount && out.size() < maxOut; i++) {
@@ -1647,7 +1683,7 @@ size_t CssParser::collectVerticalStyles(std::vector<VerticalBlockRule>& out, con
     if (!lenOk) break;
     uint8_t tail[3];  // display, verticalAlign, listStyleType
     uint32_t definedBits = 0;
-    uint8_t border[BORDER_RECORD_BYTES];  // unused by the vertical engine
+    uint8_t border[BORDER_RECORD_BYTES + 5];  // borders and font-size: unused by the vertical engine
     if (file.read(tail, sizeof(tail)) != sizeof(tail) ||
         file.read(&definedBits, sizeof(definedBits)) != sizeof(definedBits) ||
         file.read(border, sizeof(border)) != sizeof(border)) {
