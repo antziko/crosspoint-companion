@@ -99,6 +99,10 @@ void elementExtent(const PageElement& el, int marginTop, int pad, int& outTop, i
   int bottom = top;
   if (el.getTag() == TAG_PageImage) {
     bottom = top + static_cast<const PageImage&>(el).getImageBlock().getHeight();
+  } else if (el.getTag() == TAG_PageBorderBox) {
+    bottom = top + static_cast<const PageBorderBox&>(el).getHeight();
+  } else if (el.getTag() == TAG_PageBox) {
+    bottom = top + static_cast<const PageBox&>(el).getHeight();
   }
   outTop = top - pad;
   outBottom = bottom + pad;
@@ -1993,13 +1997,13 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
 
   // A move matters only when the framebuffer actually holds a box somewhere else. Giving that
   // strip back to the page is normally a handful of text lines (restoreVacatedGlossStrip), which
-  // keeps a row change on the differential path. An image in the strip is the one thing that
-  // cannot be put back cheaply — it may need decoding — so that case alone falls to the full
-  // repaint, which redraws the page anyway.
+  // keeps a row change on the differential path. An image (it may need decoding) or a box that
+  // runs past the strip cannot be put back cheaply, so those fall to the full repaint, which
+  // redraws the page anyway.
   const bool moving = gloss_->drawnY != kGlossNotDrawn && (!gloss_->place || gloss_->drawnY != gloss_->y);
   // A band of columns cannot be re-rendered on its own: the vertical page is redrawn whole.
   if (navigator.isVertical()) return moving;
-  return moving && stripHasImage(gloss_->drawnY, gloss_->height);
+  return moving && stripNeedsFullRepaint(gloss_->drawnY, gloss_->height);
 }
 
 void DictionaryWordSelectActivity::drawPage() const {
@@ -2098,11 +2102,14 @@ void DictionaryWordSelectActivity::drawPageMarks(const int bandTop, const int ba
                          markKey_.markPageCount, bandTop, bandBottom);
 }
 
-bool DictionaryWordSelectActivity::stripHasImage(int y, int height) const {
+// An image may need decoding; a border box or <pre> outline would be redrawn whole over text
+// outside the strip (a shade fill writes both inks), or lose its edges inside it.
+bool DictionaryWordSelectActivity::stripNeedsFullRepaint(int y, int height) const {
   if (!page) return false;
   const int pad = renderer.getLineHeight(SETTINGS.getReaderFontId());
   for (const auto& el : page->elements) {
-    if (el->getTag() != TAG_PageImage) continue;
+    const PageElementTag tag = el->getTag();
+    if (tag != TAG_PageImage && tag != TAG_PageBorderBox && tag != TAG_PageBox) continue;
     int top, bottom;
     elementExtent(*el, marginTop, pad, top, bottom);
     if (bottom > y && top < y + height) return true;

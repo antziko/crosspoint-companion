@@ -588,9 +588,10 @@ class DictionaryWordSelectActivity final : public Activity {
   // correct paints identical pixels, whereas missing one leaves a white gap.
   void renderPageStrip(int y, int height);
 
-  // True if a PageImage intersects [y, y+height). Text and rules are cheap to re-render;
-  // an image may need decoding, so a strip containing one is left to the full-repaint path.
-  bool stripHasImage(int y, int height) const;
+  // True if an image, border box or <pre> outline intersects [y, y+height). Text and rules are
+  // cheap to re-render; those cannot be redrawn for a strip alone, so it is left to the
+  // full-repaint path.
+  bool stripNeedsFullRepaint(int y, int height) const;
 
   // Paint the box at gloss_->y: clear, frame, rows. No panel push — the caller's single
   // displayBuffer covers the highlight and the box in one refresh.
