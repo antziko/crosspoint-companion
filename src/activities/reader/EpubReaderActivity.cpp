@@ -1053,8 +1053,10 @@ int EpubReaderActivity::markIndexOnCurrentPage(const bool quote) const {
         break;
       }
     }
-    const bool here =
-        placed ? placed->startPage == cur : (b.progress >= pageStart && b.progress < pageStart + pageSlice);
+    // A point mark belongs to its start page; a quote to every page it runs across.
+    const float endProgress = quote ? std::max(b.progress, b.endProgress) : b.progress;
+    const bool here = placed ? placed->startPage == cur || (quote && placed->startPage < cur && cur <= placed->endPage)
+                             : (endProgress >= pageStart && b.progress < pageStart + pageSlice);
     if (here) return static_cast<int>(bi);
   }
   return -1;

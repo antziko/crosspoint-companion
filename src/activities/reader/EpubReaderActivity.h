@@ -457,7 +457,8 @@ class EpubReaderActivity final : public Activity {
   // bookmark, once per chapter pagination; mid-build, once per mark as its pages appear.
   void refreshBookmarkSpans() const;
   // Index into BOOKMARKS of a mark of this kind belonging to the current page, or -1: the page
-  // its text was found on, or, for a mark not re-found, the page its saved position falls on.
+  // its text was found on (for a quote, any page it runs across), or, for a mark not re-found,
+  // the page its saved position falls on.
   int markIndexOnCurrentPage(bool quote) const;
   // Whether the current page carries a bookmark's margin block, from the resolved spans.
   bool pageHasMarginMark() const;
