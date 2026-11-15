@@ -689,11 +689,7 @@ void EpubReaderActivity::openVerticalWordSelect(bool framebufferContainsPage, co
                                            static_cast<uint16_t>(std::max(0, hr->endWordIndex)), pageCount,
                                            quoteChapter.empty() ? nullptr : quoteChapter.c_str(),
                                            hr->previewText.c_str(), currentPage, startOffset);
-    if (addRes == BookmarkStore::AddResult::LimitReached) {
-      RenderLock lock(*this);
-      GUI.drawPopup(renderer, tr(STR_MARK_LIMIT));
-      activityManager.holdForReading(900);
-    }
+    if (addRes == BookmarkStore::AddResult::LimitReached) showMarkNotice(tr(STR_MARK_LIMIT));
     requestUpdate();
   });
 }

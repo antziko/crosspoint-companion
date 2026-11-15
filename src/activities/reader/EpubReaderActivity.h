@@ -696,6 +696,8 @@ class EpubReaderActivity final : public Activity {
   void savePendingQuote(uint16_t endWord, int endPage, bool cutShort);
   // Saves the open highlight as far as the pages already passed (it ends on endPage's last word).
   void savePendingQuoteSoFar(int endPage);
+  // Shows a short notice over the page (a mark that could not be saved, a highlight cut short).
+  void showMarkNotice(const char* message);
   // The page long-press menu (touch boards): offer Look Up / Highlight for the word at
   // (x, y), plus Delete when that word is one this book already has a flashcard for. The point
   // is not resolved to a word for the first two -- the activity each choice opens does that,

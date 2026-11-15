@@ -2650,13 +2650,7 @@ void EpubReaderActivity::launchHighlightWordSelect(const int pointX, const int p
                                                static_cast<uint16_t>(std::max(0, hr->endWordIndex)), pageCount,
                                                chapterTitle.empty() ? nullptr : chapterTitle.c_str(),
                                                hr->previewText.c_str(), currentPage, visibleOffset);
-        if (addRes == BookmarkStore::AddResult::LimitReached) {
-          RenderLock lock(*this);
-          // drawPopup refreshes internally (BaseTheme.cpp:803); a second displayBuffer here
-          // was a second full-panel FAST refresh of the same pixels.
-          GUI.drawPopup(renderer, tr(STR_MARK_LIMIT));
-          activityManager.holdForReading(900);
-        }
+        if (addRes == BookmarkStore::AddResult::LimitReached) showMarkNotice(tr(STR_MARK_LIMIT));
       }
     }
     requestUpdate();
@@ -2679,11 +2673,13 @@ void EpubReaderActivity::savePendingQuote(const uint16_t endWord, const int endP
   const char* message = addRes == BookmarkStore::AddResult::LimitReached ? tr(STR_MARK_LIMIT)
                         : cutShort                                       ? tr(STR_HIGHLIGHT_ENDS_HERE)
                                                                          : nullptr;
-  if (message) {
-    RenderLock lock(*this);
-    GUI.drawPopup(renderer, message);  // refreshes internally
-    activityManager.holdForReading(900);
-  }
+  if (message) showMarkNotice(message);
+}
+
+void EpubReaderActivity::showMarkNotice(const char* message) {
+  RenderLock lock(*this);
+  GUI.drawPopup(renderer, message);  // refreshes internally (BaseTheme.cpp:803)
+  activityManager.holdForReading(900);
 }
 
 void EpubReaderActivity::savePendingQuoteSoFar(const int endPage) {
@@ -6451,9 +6447,7 @@ void EpubReaderActivity::addBookmark(bool returnMark, bool lightRefresh, bool ca
     LOG_ERR("ERS", "Bookmark limit reached");
     // Tell the user (a deliberate add only — auto-dropped return marks stay silent).
     if (!returnMark) {
-      RenderLock lock(*this);
-      GUI.drawPopup(renderer, tr(STR_MARK_LIMIT));  // refreshes internally (BaseTheme.cpp:803)
-      activityManager.holdForReading(900);
+      showMarkNotice(tr(STR_MARK_LIMIT));
       requestUpdate();
     }
   }
