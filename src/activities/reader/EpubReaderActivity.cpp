@@ -1261,6 +1261,16 @@ void EpubReaderActivity::backgroundBuildTick() {
     pageBufferStale = true;
     requestUpdate();
   }
+  if (built && section->isBuildComplete()) {
+    // Heap left once a chapter is fully paginated, and the build's low-water mark: the budget any
+    // extra resident font sizes would have to fit in.
+    LOG_INF("MEM", "chapter-built spine=%d pages=%u free=%u largest=%u minEver=%u", currentSpineIndex,
+            (unsigned)section->pageCount, (unsigned)ESP.getFreeHeap(),
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), (unsigned)ESP.getMinFreeHeap());
+    SdDebugLog::log("MEM", "chapter-built spine=%d pages=%u free=%u largest=%u minEver=%u", currentSpineIndex,
+                    (unsigned)section->pageCount, (unsigned)ESP.getFreeHeap(),
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), (unsigned)ESP.getMinFreeHeap());
+  }
   if (!built && section->lastBuildFailure().reason == Section::BuildFailure::Reason::LowHeap &&
       section->pageCount > 0) {
     // The build kept its pages as a partial (Section::buildSomeMore): keep reading from them
