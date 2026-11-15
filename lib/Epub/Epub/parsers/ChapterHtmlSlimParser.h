@@ -19,6 +19,7 @@
 #include "Epub/css/CssStyle.h"
 
 class Page;
+class PageElement;
 class GfxRenderer;
 class Epub;
 
@@ -242,6 +243,16 @@ class ChapterHtmlSlimParser {
   static constexpr size_t MAX_BOX_SCOPES = 2;
   BoxScope boxScopes[MAX_BOX_SCOPES];
   uint8_t boxScopeCount = 0;
+  // Boxes closed on the current page, newest last: a carry moves those holding only carried
+  // lines (a bordered heading kept with its text) to the next page.
+  struct ClosedBox {
+    PageElement* element = nullptr;
+    int16_t contentTop = 0;
+  };
+  static constexpr size_t MAX_CLOSED_BOXES = 4;
+  ClosedBox closedBoxes[MAX_CLOSED_BOXES];
+  uint8_t closedBoxCount = 0;
+  int closedBoxesPage = -1;  // completedPageCount they are on
   bool insideBody = false;
   bool htmlEnded_ = false;
   bool syntheticCharacterData = false;

@@ -3128,7 +3128,9 @@ bool ChapterHtmlSlimParser::canCarry(const size_t carry) const {
     return false;
   }
   const auto& elements = currentPage->elements;
-  if (elements.size() <= carry) return false;
+  const auto boxes = static_cast<size_t>(std::count_if(
+      elements.begin(), elements.end(), [](const auto& el) { return el->getTag() == TAG_PageBorderBox; }));
+  if (elements.size() <= carry + boxes) return false;  // the page keeps some of its content
   for (size_t i = 0; i < carry; ++i) {
     if (elements[elements.size() - 1 - i]->getTag() != TAG_PageLine) return false;
   }
@@ -3182,17 +3184,47 @@ void ChapterHtmlSlimParser::breakPageCarryingLines(const size_t carry, const siz
     }
   }
 
-  // A box around the carried lines ends this page at their top and goes on with them; one that
-  // holds only carried lines moves to the next page whole.
+  // Boxes that hold only carried lines move with them, frame and all; the carried block lands
+  // `shiftTop` lower on the next page than it sat, so their top edge still fits above it.
+  if (closedBoxesPage != completedPageCount) closedBoxCount = 0;
+  int16_t shiftTop = carriedTop;
+  bool moveClosed[MAX_CLOSED_BOXES] = {};
+  for (uint8_t c = 0; c < closedBoxCount && carry > 0; ++c) {
+    if (closedBoxes[c].contentTop < carriedTop) continue;
+    moveClosed[c] = true;
+    shiftTop = std::min(shiftTop, std::max<int16_t>(0, closedBoxes[c].element->yPos));
+  }
+  for (uint8_t b = 0; b < boxScopeCount && carry > 0; ++b) {
+    const BoxScope& box = boxScopes[b];
+    if (box.top >= carriedTop) shiftTop = std::min(shiftTop, std::max<int16_t>(0, box.top - box.padTop));
+  }
+  // Moved closed boxes keep their order, ahead of the next page's text.
+  uint8_t movedClosed = 0;
+  for (uint8_t c = 0; c < closedBoxCount; ++c) {
+    if (!moveClosed[c]) continue;
+    auto& elements = currentPage->elements;
+    const auto it = std::find_if(elements.begin(), elements.end(),
+                                 [&](const auto& el) { return el.get() == closedBoxes[c].element; });
+    if (it == elements.end()) continue;
+    std::shared_ptr<PageElement> box = std::move(*it);
+    elements.erase(it);
+    box->yPos = static_cast<int16_t>(box->yPos - shiftTop);
+    nextPage->elements.insert(nextPage->elements.begin() + movedClosed, std::move(box));
+    closedBoxes[movedClosed++] = {closedBoxes[c].element, static_cast<int16_t>(closedBoxes[c].contentTop - shiftTop)};
+  }
+  closedBoxCount = movedClosed;
+
+  // An open box around the carried lines ends this page at their top and goes on with them; one
+  // that holds only carried lines moves to the next page whole.
   int16_t movedTop[MAX_BOX_SCOPES];
   int16_t movedBottom[MAX_BOX_SCOPES];
   for (uint8_t b = 0; b < boxScopeCount; ++b) {
     BoxScope& box = boxScopes[b];
     movedTop[b] = movedBottom[b] = -1;
     if (carry == 0 || box.top < 0 || box.bottom <= carriedTop) continue;
-    movedBottom[b] = static_cast<int16_t>(box.bottom - carriedTop);
+    movedBottom[b] = static_cast<int16_t>(box.bottom - shiftTop);
     if (box.top >= carriedTop) {
-      movedTop[b] = static_cast<int16_t>(box.top - carriedTop);
+      movedTop[b] = static_cast<int16_t>(box.top - shiftTop);
       box.top = box.bottom = -1;
     } else {
       movedTop[b] = 0;
@@ -3221,16 +3253,17 @@ void ChapterHtmlSlimParser::breakPageCarryingLines(const size_t carry, const siz
   recentLineCount = 0;
 
   for (size_t i = 0; i < carry; ++i) {
-    carried[i]->yPos = static_cast<int16_t>(carried[i]->yPos - carriedTop);
+    carried[i]->yPos = static_cast<int16_t>(carried[i]->yPos - shiftTop);
     setCurrentPageVisibleOffset(carriedOffsets[i]);
     currentPage->elements.push_back(std::move(carried[i]));
     recentLineOffsets[recentLineCount] = carriedOffsets[i];
     recentLineAnchors[recentLineCount] = carriedAnchors[i];
     recentLineCount++;
   }
-  if (carry > 0) currentPageNextY = static_cast<int16_t>(carriedBottom - carriedTop);
+  if (carry > 0) currentPageNextY = static_cast<int16_t>(carriedBottom - shiftTop);
+  closedBoxesPage = completedPageCount;
   for (const PageLink& link : carriedLinks) {
-    currentPage->addLink(link.href, link.x, static_cast<int16_t>(link.y - carriedTop), link.width, link.height);
+    currentPage->addLink(link.href, link.x, static_cast<int16_t>(link.y - shiftTop), link.width, link.height);
   }
   paragraphLinesOnPage = static_cast<uint8_t>(paragraphLines);
   keepWithNextLines = 0;  // what moved is now at the top of its page
@@ -3354,6 +3387,17 @@ void ChapterHtmlSlimParser::emitBoxSegment(const BoxScope& box, const bool closi
   if (!element) {
     LOG_ERR("EHP", "OOM: PageBorderBox");
     return;
+  }
+  if (closing) {
+    if (closedBoxesPage != completedPageCount) {
+      closedBoxCount = 0;
+      closedBoxesPage = completedPageCount;
+    }
+    if (closedBoxCount == MAX_CLOSED_BOXES) {
+      std::move(closedBoxes + 1, closedBoxes + MAX_CLOSED_BOXES, closedBoxes);
+      closedBoxCount--;
+    }
+    closedBoxes[closedBoxCount++] = {element.get(), box.top};
   }
   // Ahead of the page's text, so its shade is painted first; an enclosing box closes later and
   // goes ahead of this one.

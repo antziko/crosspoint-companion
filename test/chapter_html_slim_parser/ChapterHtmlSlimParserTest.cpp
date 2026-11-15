@@ -823,3 +823,15 @@ TEST(ChapterHtmlSlimParserBoxes, ALineCarriedOutOfABoxTakesTheBoxWithIt) {
   ASSERT_EQ(p.boxHeights.size(), 2u);
   EXPECT_EQ(p.boxHeights[0], 5 + 3 * 16);
 }
+
+TEST(ChapterHtmlSlimParserBoxes, AHeadingsRuleMovesWithTheHeading) {
+  ASSERT_GT(wordsPerLine(), 1);
+  // A heading underlined by its border, at the foot of a page: it moves to keep with its text,
+  // and its rule must go with it rather than stay behind under nothing.
+  PageParse p(paragraph(3) + "<h2 style=\"border-bottom: 1px solid\">Head</h2>" + paragraph(3), 5);
+  ASSERT_EQ(p.pages.size(), 2u);
+  EXPECT_EQ(p.pages[0], "LLL");
+  EXPECT_EQ(p.boxes[0], "");
+  EXPECT_EQ(p.pages[1].substr(0, 2), "CL");
+  EXPECT_EQ(p.boxes[1], "[--B--]");
+}
