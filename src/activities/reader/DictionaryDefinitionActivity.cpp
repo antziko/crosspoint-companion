@@ -647,7 +647,7 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
 
   // Release the previous definition's glyph cache before allocating this one's. Two
   // reasons: FontDecompressor::prewarmCache() consumes a fresh page slot per call and
-  // there are only MAX_PAGE_SLOTS (4) of them, and freeing first gives the allocations
+  // there are only MAX_PAGE_SLOTS of them, and freeing first gives the allocations
   // below the largest contiguous blocks on an already-fragmented heap.
   fcm->clearCache();
 

@@ -69,12 +69,13 @@ class FontCacheManager {
   enum class ScanMode : uint8_t { None, Scanning };
   ScanMode scanMode_ = ScanMode::None;
 
-  // Per-font scan accumulators. A page mixes font ids -- the reader font, the UI font, and
-  // the SD fallback that any CJK-bearing string resolves to -- and prewarming only the
+  // Per-font scan accumulators. A page mixes font ids -- the reader font, the UI font, the
+  // SD fallback that any CJK-bearing string resolves to, and the built-in sizes headings are
+  // laid out at -- and prewarming only the
   // first-recorded id left the other fonts to fault in glyph by glyph during the real draw
   // pass. Fixed-size: a render pass touches a handful of ids, and anything past the cap is
   // simply not batched (it falls back to the per-string prewarm in GfxRenderer).
-  static constexpr uint8_t MAX_SCAN_FONTS = 4;
+  static constexpr uint8_t MAX_SCAN_FONTS = 6;
   struct ScanEntry {
     // Occupancy is tracked separately rather than with a sentinel id: SD font ids come from
     // SdCardFontManager::computeFontId, an FNV hash cast to int, so roughly half of them are
