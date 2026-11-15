@@ -525,6 +525,36 @@ static void testTheEndFractionAndStopIndex() {
   CHECK(QuoteSpan::endFraction(0.90f, 0.50f, 0.25f) == 255, "an end past the page clamps to full");
 }
 
+static void testACrossPageEndWordIsTheQuoteLength() {
+  std::printf("a quote carried across a break is saved with its length in tokens\n");
+  // Starts at token 40 of a 100-token page (60 tokens there), ends at token 9 of the next.
+  const uint16_t end = QuoteSpan::crossPageEndWord(40, 60, 9);
+  CHECK(end == 109, "start + tokens before + end index");
+  CHECK(end - 40 + 1 == 70, "endWord - startWord + 1 counts every covered token");
+  // Ends on the start page's last word: the same arithmetic as a single-page quote.
+  CHECK(QuoteSpan::crossPageEndWord(40, 59, 0) == 99, "a quote cut at its page end");
+  CHECK(QuoteSpan::crossPageEndWord(0xBF00, 0x1000, 0) == 0xBFFF, "stays below the peers' 0xC000 band");
+}
+
+static void testContinuedQuoteTextJoins() {
+  std::printf("the next page's part of a quote joins the text so far\n");
+  std::string text = "one two";
+  QuoteSpan::appendContinued(text, "three");
+  CHECK(text == "one two three", "joined with one space");
+  text = "exter-";
+  QuoteSpan::appendContinued(text, "nity began");
+  CHECK(text == "externity began", "a hyphen across the break rejoins the word");
+  text = "exter\xC2\xAD";
+  QuoteSpan::appendContinued(text, "nity");
+  CHECK(text == "externity", "a soft hyphen too");
+  text.clear();
+  QuoteSpan::appendContinued(text, "first");
+  CHECK(text == "first", "nothing before it");
+  text = "kept";
+  QuoteSpan::appendContinued(text, "");
+  CHECK(text == "kept", "an empty part adds nothing");
+}
+
 int main() {
   testPartsMatchOriginalSplit();
   testUnsplitTokenIsWholeToken();
@@ -550,6 +580,8 @@ int main() {
   testTheLastPageOfAChapterIsReachable();
   testAnInvertedEndIsTreatedAsNoSpan();
   testTheEndFractionAndStopIndex();
+  testACrossPageEndWordIsTheQuoteLength();
+  testContinuedQuoteTextJoins();
   std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

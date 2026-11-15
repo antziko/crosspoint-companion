@@ -173,6 +173,9 @@ class WordSelectNavigator {
   // reported by takePageEdge() instead: +1 past the end, -1 before the start, 0 none. The gloss
   // box turns the page on it. Not in multi-select, which keeps wrapping.
   void setStopAtPageEdges(bool enabled) { stopAtPageEdges_ = enabled; }
+  // The multi-select counterpart, forward only: a step past the last word while a range is open
+  // reports +1 instead of wrapping, so a highlight can carry on onto the next page.
+  void setRangeStopsAtPageEnd(bool enabled) { rangeStopsAtPageEnd_ = enabled; }
   int takePageEdge() {
     const int edge = pageEdge_;
     pageEdge_ = 0;
@@ -464,6 +467,7 @@ class WordSelectNavigator {
   uint16_t wordRepeatArmed_ = 0;
   bool holdJumps_ = false;
   bool stopAtPageEdges_ = false;
+  bool rangeStopsAtPageEnd_ = false;
   int8_t pageEdge_ = 0;
   // Same arming rule as wordRepeatArmed_, for the four jump directions; and the directions whose
   // jump has fired this hold, so its release is not also a step.

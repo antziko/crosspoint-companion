@@ -243,6 +243,12 @@ void DictionaryWordSelectActivity::onEnter() {
   navigator.setHoldJumps(gloss_ != nullptr);
   // Past the first or last word the gloss box turns the page instead of wrapping.
   navigator.setStopAtPageEdges(gloss_ != nullptr);
+  // A highlight range runs on past the last word instead of wrapping: the reader turns the page.
+  // Not on a vertical page, whose reader keeps highlights to one page.
+  if (mode_ == Mode::HighlightRange && !navigator.isVertical()) {
+    navigator.setRangeStopsAtPageEnd(true);
+    if (continuingHighlight_) navigator.beginMultiSelectAt(0);
+  }
   glossTracksCursor_ = gloss_ && glossCursorOut_;
   if (gloss_ && startEdge_ != 0 && !pointedAtWord) {
     const int start = startEdge_ > 0 ? findFirstBodyWord() : navigator.wordCount() - 1;
@@ -933,6 +939,10 @@ void DictionaryWordSelectActivity::loop() {
   }
   // The gloss box ran off the page: the reader turns it and opens this screen again there.
   if (const int edge = navigator.takePageEdge(); edge != 0) {
+    if (mode_ == Mode::HighlightRange) {
+      if (edge > 0 && navigator.isMultiSelecting()) emitContinueResult();
+      return;
+    }
     SdDebugLog::log("DWS", "gloss page edge dir=%d", edge);
     setResult(ActivityResult{GlossPageTurnResult{edge > 0}});
     finish();
@@ -957,6 +967,12 @@ void DictionaryWordSelectActivity::loop() {
   const bool tapRanging = mode_ == Mode::HighlightRange;
   const bool autoRange = autoRangeActive();  // a card word picks like a single word
   const bool glossRanging = gloss_ && mode_ == Mode::Dictionary;
+  // A forward swipe while a highlight range is open carries it on to the next page.
+  if (tapRanging && navigator.isMultiSelecting() && !navigator.isVertical() && mappedInput.hasTouch() &&
+      mappedInput.wasSwipe() == MappedInputManager::SwipeDir::Left) {
+    emitContinueResult();
+    return;
+  }
   if (mappedInput.hasTouch() &&
       (tapRanging || autoRange || glossRanging || phraseTapRanging_ || !navigator.isMultiSelecting())) {
     const int lineHeight = renderer.getLineHeight(SETTINGS.getReaderFontId());
@@ -1121,6 +1137,9 @@ void DictionaryWordSelectActivity::handleHighlightInput() {
   if (act != WordSelectNavigator::MultiSelectAction::None) {
     if (act == WordSelectNavigator::MultiSelectAction::PhraseReady) {
       emitQuoteResult(navigator.getAnchorFlatIndex(), navigator.getCurrentFlatIndex(), std::move(phrase));
+    } else if (act == WordSelectNavigator::MultiSelectAction::ExitedMultiSelect && continuingHighlight_) {
+      // The range began on an earlier page, so there is no single-word selection to drop back to.
+      DictUtils::cancelAndFinish(*this);
     } else {
       // Entered/Exited multi-select, or a consumed long-press carryover — just repaint
       // so the highlight reflects the new selection state.
@@ -1157,6 +1176,26 @@ void DictionaryWordSelectActivity::emitQuoteResult(int fromFlatIdx, int toFlatId
   result.startWordIndex = charLoOf(lo);
   result.endWordIndex = charHiOf(hi);
   result.previewText = std::move(previewText);
+  setResult(ActivityResult{std::move(result)});
+  finish();
+}
+
+void DictionaryWordSelectActivity::emitContinueResult() {
+  const int last = static_cast<int>(navigator.wordCount()) - 1;
+  const int anchor = navigator.getAnchorFlatIndex();
+  if (last < 0 || anchor < 0) {
+    DictUtils::cancelAndFinish(*this);
+    return;
+  }
+  // The range runs from its anchor to the page end; the cursor's own position no longer matters.
+  int lo = std::min(anchor, last);
+  if (const auto* w = navigator.getWordAt(lo); w && w->continuationOf >= 0) lo = w->continuationOf;
+  HighlightContinueResult result;
+  result.startWordIndex = charLoOf(lo);
+  result.pageTokenCount = charHiOf(last) + 1;
+  result.previewText = navigator.buildPhrase(lo, last);
+  SdDebugLog::log("DWS", "highlight continues sw=%d tokens=%d", result.startWordIndex, result.pageTokenCount);
+  navigator.endMultiSelect();
   setResult(ActivityResult{std::move(result)});
   finish();
 }

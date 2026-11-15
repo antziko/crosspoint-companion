@@ -84,6 +84,7 @@
 #include "util/PageMarks.h"
 #include "util/PluginEvents.h"
 #include "util/PluginLocations.h"
+#include "util/QuoteSpan.h"
 #include "util/ReaderStatusBar.h"
 #include "util/ScreenRefresh.h"
 #include "util/ScreenshotUtil.h"
@@ -1310,6 +1311,26 @@ void EpubReaderActivity::loop() {
       glossStartEdge_ = forward ? 1 : -1;
       openWordSelect(/*framebufferContainsPage=*/true);
       glossStartEdge_ = 0;
+    }
+    return;
+  }
+
+  // A highlight range ran off the page: turn it and pick the highlight's end there. A turn that
+  // did not land on the next page of the same chapter keeps what was selected.
+  if (highlightPageTurn_ && !RenderLock::peek()) {
+    highlightPageTurn_ = false;
+    const int before = section ? section->currentPage : -1;
+    pageTurn(true);
+    requestUpdateAndWait();
+    const bool landed = pendingQuote_.active && section && currentSpineIndex == pendingQuote_.spine &&
+                        section->currentPage == before + 1;
+    if (landed) {
+      launchHighlightWordSelect();
+    } else if (pendingQuote_.active) {
+      const uint32_t covered = pendingQuote_.tokensBefore;
+      savePendingQuote(QuoteSpan::crossPageEndWord(pendingQuote_.startWord, covered > 0 ? covered - 1 : 0, 0), before,
+                       true);
+      requestUpdate();
     }
     return;
   }
@@ -2569,14 +2590,54 @@ void EpubReaderActivity::launchHighlightWordSelect(const int pointX, const int p
     return;
   }
   highlightSelect->setPageMarkKey(currentPageMarkKey());
+  highlightSelect->setContinuingHighlight(pendingQuote_.active);
   if (wordScan) {
     highlightSelect->setWordScan(std::move(wordScan), wordScanCachePath(), spine, static_cast<uint16_t>(currentPage));
   }
   startActivityForResult(std::move(highlightSelect), [this, spine, progress, pageCount, currentPage, chapterTitle,
                                                       visibleOffset](const ActivityResult& result) {
     ignoreBackUntilRelease = true;
-    if (!result.isCancelled) {
-      if (const auto* hr = std::get_if<HighlightRangeResult>(&result.data)) {
+    if (result.isCancelled) {
+      pendingQuote_ = PendingQuote{};
+    } else if (const auto* cont = std::get_if<HighlightContinueResult>(&result.data)) {
+      auto& q = pendingQuote_;
+      const uint32_t pageTokens = static_cast<uint32_t>(std::max(0, cont->pageTokenCount));
+      if (!q.active) {
+        q.active = true;
+        q.spine = spine;
+        q.progress = progress;
+        q.pageCount = pageCount;
+        q.startPage = currentPage;
+        q.startWord = static_cast<uint16_t>(std::max(0, cont->startWordIndex));
+        q.visibleOffset = visibleOffset;
+        q.tokensBefore = pageTokens > q.startWord ? pageTokens - q.startWord : 0;
+        q.pagesAdded = 0;
+        q.chapterTitle = chapterTitle;
+        q.preview = cont->previewText;
+      } else {
+        q.tokensBefore += pageTokens;
+        QuoteSpan::appendContinued(q.preview, cont->previewText);
+        q.pagesAdded++;
+      }
+      // Within the chapter, the span resolver's reach (kSpanPages) and the text the sync anchors by.
+      constexpr uint8_t kMaxExtraPages = 3;
+      const bool canContinue = q.pagesAdded < kMaxExtraPages && currentPage + 1 < pageCount &&
+                               q.preview.size() < QUOTE_PREVIEW_MAX && q.tokensBefore > 0;
+      if (canContinue) {
+        highlightPageTurn_ = true;  // loop() turns the page and reopens highlight select
+        return;
+      }
+      // Nowhere further to go: keep what is selected, ending at this page's last word.
+      savePendingQuote(QuoteSpan::crossPageEndWord(q.startWord, q.tokensBefore > 0 ? q.tokensBefore - 1 : 0, 0),
+                       currentPage, true);
+    } else if (const auto* hr = std::get_if<HighlightRangeResult>(&result.data)) {
+      if (pendingQuote_.active) {
+        auto& q = pendingQuote_;
+        QuoteSpan::appendContinued(q.preview, hr->previewText);
+        savePendingQuote(QuoteSpan::crossPageEndWord(q.startWord, q.tokensBefore,
+                                                     static_cast<uint16_t>(std::max(0, hr->endWordIndex))),
+                         currentPage, false);
+      } else {
         SdDebugLog::log("PGM", "save spine=%u page=%d/%d progress=%.4f sw=%d ew=%d \"%.63s\"", spine, currentPage + 1,
                         pageCount, progress, hr->startWordIndex, hr->endWordIndex, hr->previewText.c_str());
         const auto addRes = BOOKMARKS.addQuote(spine, progress, static_cast<uint16_t>(std::max(0, hr->startWordIndex)),
@@ -2594,6 +2655,29 @@ void EpubReaderActivity::launchHighlightWordSelect(const int pointX, const int p
     }
     requestUpdate();
   });
+}
+
+// Saves the highlight pendingQuote_ holds, ending at endWord (QuoteSpan::crossPageEndWord) on
+// chapter page endPage, then clears it. `cutShort` says it stopped before the user ended it.
+void EpubReaderActivity::savePendingQuote(const uint16_t endWord, const int endPage, const bool cutShort) {
+  auto& q = pendingQuote_;
+  if (!q.active) return;
+  const float endProgress =
+      q.pageCount > 0 ? static_cast<float>(endPage) / static_cast<float>(q.pageCount) : q.progress;
+  SdDebugLog::log("PGM", "save cross-page spine=%u pages=%d..%d sw=%u ew=%u cut=%d \"%.63s\"", q.spine, q.startPage + 1,
+                  endPage + 1, q.startWord, endWord, cutShort ? 1 : 0, q.preview.c_str());
+  const auto addRes = BOOKMARKS.addQuote(q.spine, q.progress, q.startWord, endWord, q.pageCount,
+                                         q.chapterTitle.empty() ? nullptr : q.chapterTitle.c_str(), q.preview.c_str(),
+                                         q.startPage, q.visibleOffset, endProgress);
+  pendingQuote_ = PendingQuote{};
+  const char* message = addRes == BookmarkStore::AddResult::LimitReached ? tr(STR_MARK_LIMIT)
+                        : cutShort                                       ? tr(STR_HIGHLIGHT_ENDS_HERE)
+                                                                         : nullptr;
+  if (message) {
+    RenderLock lock(*this);
+    GUI.drawPopup(renderer, message);  // refreshes internally
+    activityManager.holdForReading(900);
+  }
 }
 
 int EpubReaderActivity::currentTocIndex() const {

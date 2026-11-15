@@ -156,10 +156,11 @@ class BookmarkStore {
   // the resident snippet teaser used by the list and by sync. Shares the same
   // MAX_BOOKMARKS limit as point bookmarks (one combined budget per book).
   // `visibleTextOffset` is where the highlighted page starts (see Bookmark::visibleTextOffset),
-  // 0 when unknown.
+  // 0 when unknown. `endProgress` is the chapter fraction of the page the quote ends on, for one carried
+  // past a page break (endWord is then QuoteSpan::crossPageEndWord); below 0 = ends on its start page.
   AddResult addQuote(uint16_t spineIndex, float progress, uint16_t startWord, uint16_t endWord, int pageCount,
-                     const char* chapterTitle, const char* preview, int currentPage = 0,
-                     uint32_t visibleTextOffset = 0);
+                     const char* chapterTitle, const char* preview, int currentPage = 0, uint32_t visibleTextOffset = 0,
+                     float endProgress = -1.0f);
 
   // Remove a quote identified by its range key (spineIndex, startWord, endWord). Writes
   // a tombstone so the delete propagates on sync. No-op (returns false) if not found.

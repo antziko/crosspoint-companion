@@ -133,6 +133,16 @@ struct FlashcardJumpResult {
   std::string word;  // the card, so the reader can save the page it found the word on
 };
 
+// A highlight range stepped past the page's last word: the reader turns the page and opens
+// HighlightRange again there with the range already running. startWordIndex is the range's
+// first character token on this page, pageTokenCount the page's token count (the index
+// space PageTokenScan defines), previewText this page's part of the quote.
+struct HighlightContinueResult {
+  int startWordIndex = -1;
+  int pageTokenCount = 0;
+  std::string previewText;
+};
+
 // The gloss box stepped past the first or last word: turn the page and reopen word select there.
 struct GlossPageTurnResult {
   bool forward = true;
@@ -142,7 +152,7 @@ using ResultVariant =
     std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, IntervalResult,
                  PageResult, ProgressChangeResult, NetworkModeResult, FootnoteResult, WordResult, FilePathResult,
                  BookmarkResult, FontSelectionResult, HighlightRangeResult, SyncScopeResult, FlashcardReviewResult,
-                 FlashcardJumpResult, GlossPageTurnResult>;
+                 FlashcardJumpResult, GlossPageTurnResult, HighlightContinueResult>;
 
 struct ActivityResult {
   bool isCancelled = false;

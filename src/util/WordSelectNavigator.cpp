@@ -639,11 +639,12 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
     }
   }
 
-  if (stopAtPageEdges_ && !inMultiSelectMode && edgeFromFlat >= 0) {
+  const bool rangeEdge = rangeStopsAtPageEnd_ && inMultiSelectMode;
+  if (((stopAtPageEdges_ && !inMultiSelectMode) || rangeEdge) && edgeFromFlat >= 0) {
     const int now = getCurrentFlatIndex();
     const bool forward = rowNextPressed || wordNextPressed;
     const bool backward = rowPrevPressed || wordPrevPressed;
-    if ((forward && now <= edgeFromFlat) || (backward && !forward && now >= edgeFromFlat)) {
+    if ((forward && now <= edgeFromFlat) || (!rangeEdge && backward && !forward && now >= edgeFromFlat)) {
       currentRow = edgeFromRow;
       currentWordInRow = edgeFromWordInRow;
       pendingSnapIdx = edgeFromSnap;

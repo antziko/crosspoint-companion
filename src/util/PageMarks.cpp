@@ -587,8 +587,8 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
         r.checked = true;  // located by its text already; neither foreign nor local resolution
         continue;
       }
-      // endProgress equals progress for a quote made here -- a selection on this device
-      // cannot cross a page break -- so this reduces to the old start-page test for them.
+      // endProgress equals progress for most quotes made here, so this reduces to the old
+      // start-page test for them; one carried past a page break gets the later pages too.
       const QuoteSpan::Role role = QuoteSpan::pageRole(b.progress, b.endProgress, pageProgress, pageSlice);
       const bool foreign = BookmarkStore::isForeignMark(b);
       // A local quote is single-page (endProgress == progress); one saved for a nearby page
@@ -614,6 +614,12 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
       r.startsHere = nearby || role == QuoteSpan::Role::Whole || role == QuoteSpan::Role::Starts;
       r.endsHere = nearby || role == QuoteSpan::Role::Whole || role == QuoteSpan::Role::Ends;
       r.endFracInPage = QuoteSpan::endFraction(b.endProgress, pageProgress, pageSlice);
+      // A local quote on a page it only continues onto: its saved start word belongs to the
+      // start page, so place it from the page top by its span, as a peer's continuation is.
+      if (r.local && !r.startsHere) {
+        r.local = false;
+        r.foreign = true;
+      }
     }
     resolveForeignRanges(page, ranges, rangeCount, pageNumber, pageCount);
   }

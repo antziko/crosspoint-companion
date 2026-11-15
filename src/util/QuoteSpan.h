@@ -1,14 +1,15 @@
 #pragma once
 #include <cstdint>
+#include <string>
 
 /**
  * Which part of a quote a given page holds.
  *
- * A quote is stored as a pair of page fractions within its chapter. A selection made on
- * this device cannot cross a page break, so its end equals its start and it always falls
- * in one page. A selection made on a KOReader peer is made against that reader's larger
- * page and routinely covers two or three here, so the quote has to be drawn as the part
- * of it each page actually holds.
+ * A quote is stored as a pair of page fractions within its chapter. Most selections made on
+ * this device fall in one page, so their end equals their start; one carried on past a page
+ * break (crossPageEndWord) ends on a later page. A selection made on a KOReader peer is made
+ * against that reader's larger page and routinely covers two or three here, so the quote has
+ * to be drawn as the part of it each page actually holds.
  *
  * Pure arithmetic, kept out of PageMarks so the boundaries can be tested directly: an
  * off-by-one here draws a band over text the reader never highlighted, or none at all,
@@ -60,6 +61,45 @@ inline uint8_t endFraction(const float end, const float pageStart, const float p
 inline uint16_t stopIndex(const uint8_t frac, const uint16_t lastIndex) {
   const uint32_t est = static_cast<uint32_t>(frac) * (static_cast<uint32_t>(lastIndex) + 1u) / 255u;
   return static_cast<uint16_t>(est > lastIndex ? lastIndex : est);
+}
+
+/**
+ * The endWord a quote carried across page breaks is saved with. Word indices are page-local,
+ * so the end is stored as if the start page ran on: startWord plus every token the quote
+ * covers before its last page, plus the end's index there. endWord - startWord + 1 is then
+ * the quote's length in tokens, which is what the reader's span resolver follows across pages,
+ * and the (spine, startWord, endWord) identity stays unique. Clamped below 0xC000, the band
+ * BookmarkStore keeps for peers' marks (FOREIGN_KEY_BASE).
+ *
+ * @param startWord     the first token on the start page
+ * @param tokensBefore  tokens the quote covers on the pages before its last one
+ * @param endOnLastPage the last token on the last page
+ */
+inline uint16_t crossPageEndWord(const uint16_t startWord, const uint32_t tokensBefore, const uint16_t endOnLastPage) {
+  const uint32_t end = static_cast<uint32_t>(startWord) + tokensBefore + endOnLastPage;
+  constexpr uint32_t kMaxLocal = 0xBFFFu;
+  return static_cast<uint16_t>(end > kMaxLocal ? kMaxLocal : end);
+}
+
+/**
+ * Append the next page's part of a quote to the text so far. A word hyphenated across the
+ * break joins without its hyphen or a space; anything else is joined with one space.
+ */
+inline void appendContinued(std::string& text, const std::string& next) {
+  if (next.empty()) return;
+  if (text.empty()) {
+    text = next;
+    return;
+  }
+  if (text.back() == '-') {
+    text.pop_back();
+  } else if (text.size() >= 2 && static_cast<uint8_t>(text[text.size() - 2]) == 0xC2 &&
+             static_cast<uint8_t>(text.back()) == 0xAD) {
+    text.resize(text.size() - 2);  // soft hyphen
+  } else {
+    text.push_back(' ');
+  }
+  text += next;
 }
 
 }  // namespace QuoteSpan

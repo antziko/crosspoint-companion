@@ -101,6 +101,9 @@ class DictionaryWordSelectActivity final : public Activity {
   // The gloss box arrived here by running off the previous page (+1: open on the first word) or
   // the next one (-1: open on the last word). Overrides the gloss memory; a pointed word wins.
   void setStartAtPageEdge(const int edge) { startEdge_ = edge; }
+  // HighlightRange: this page carries on a highlight begun on an earlier one. The range opens
+  // already anchored on the first word, and Back drops the whole highlight.
+  void setContinuingHighlight(const bool on) { continuingHighlight_ = on; }
   // The pointed-at word anchors a phrase instead of being looked up; the next tapped word ends it.
   void setPhraseStart(const bool on) { phraseStart_ = on; }
   // The pointed-at word is part of this already-underlined phrase: look the whole phrase up at
@@ -258,6 +261,8 @@ class DictionaryWordSelectActivity final : public Activity {
   // in Dictionary mode.
   void handleHighlightInput();
   void emitQuoteResult(int fromFlatIdx, int toFlatIdx, std::string previewText);
+  // The open range runs on past this page: hand its part here to the reader, which turns the page.
+  void emitContinueResult();
 
   // Confirm-button hint label, shown on the only labeled (full-height) button so the
   // user can tell the two near-identical selection modes apart: "Highlight" in
@@ -317,6 +322,7 @@ class DictionaryWordSelectActivity final : public Activity {
   // Set by the render task once a frame has been pushed; read by the loop's scan step.
   std::atomic<bool> firstFrameShown_{false};
   int startEdge_ = 0;
+  bool continuingHighlight_ = false;
   bool scanCompactTried_ = false;
   // Word grouping as the gloss box reports it. Written by the loop's scan step, read by the
   // render task, which records what it last drew so a change gets one repaint.

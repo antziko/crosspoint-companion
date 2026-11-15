@@ -270,6 +270,24 @@ class EpubReaderActivity final : public Activity {
   int8_t glossPageTurn_ = 0;
   // Where the reopened gloss box starts (see DictionaryWordSelectActivity::setStartAtPageEdge).
   int8_t glossStartEdge_ = 0;
+  // A highlight carried past a page break, held while the user picks its end on a later page.
+  // Strings are empty (no heap) while no highlight is open; cleared on save or cancel.
+  struct PendingQuote {
+    bool active = false;
+    uint16_t spine = 0;
+    float progress = 0.0f;  // the start page's fraction, on pageCount's scale
+    int pageCount = 0;
+    int startPage = 0;
+    uint16_t startWord = 0;
+    uint32_t visibleOffset = 0;
+    uint32_t tokensBefore = 0;  // tokens the quote covers before the page it is on now
+    uint8_t pagesAdded = 0;
+    std::string chapterTitle;
+    std::string preview;
+  };
+  PendingQuote pendingQuote_;
+  // A highlight range ran off the page: loop() turns it and reopens highlight select there.
+  bool highlightPageTurn_ = false;
   // Translate Page was picked: loop() repaints the page under the menu, then opens the panel.
   bool translatePending_ = false;
   // The translation panel for this page (names follow matcha-reader).
@@ -673,6 +691,7 @@ class EpubReaderActivity final : public Activity {
   // Launch word-select in HighlightRange mode; saves the returned range as a quote via
   // BookmarkStore::addQuote. Shared by the no-existing-quote path and the "Add new" choice.
   void launchHighlightWordSelect(int pointX = -1, int pointY = -1);
+  void savePendingQuote(uint16_t endWord, int endPage, bool cutShort);
   // The page long-press menu (touch boards): offer Look Up / Highlight for the word at
   // (x, y), plus Delete when that word is one this book already has a flashcard for. The point
   // is not resolved to a word for the first two -- the activity each choice opens does that,
