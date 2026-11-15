@@ -123,6 +123,8 @@ void DictPrepareActivity::onEnter() {
     return;
   }
 
+  confirmBar_.layout(renderer, mappedInput.hasTouch(), UI_10_FONT_ID, 2);
+  singleBar_.layout(renderer, mappedInput.hasTouch(), UI_10_FONT_ID, 1);
   requestUpdate();
 }
 
@@ -175,32 +177,18 @@ void DictPrepareActivity::onExit() {
 // ---------------------------------------------------------------------------
 
 void DictPrepareActivity::loop() {
+  // A tap on the on-screen buttons answers the same as the front buttons (touch boards only).
+  int tapX = 0;
+  int tapY = 0;
+  const bool tapped = mappedInput.wasScreenTapped(tapX, tapY);
+
   if (state == State::CONFIRM) {
-    if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+    const int hit = tapped ? confirmBar_.hitAt(tapX, tapY) : -1;
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back) || hit == 0) {
       DictUtils::cancelAndFinish(*this);
       return;
     }
-    if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
-      state = State::PROCESSING;
-      prepareDone = false;
-      prepareSucceeded = false;
-      currentStep = 0;
-      for (int i = 0; i < stepCount; i++) {
-        steps[i].status = StepStatus::PENDING;
-        steps[i].progress = 0;
-        steps[i].total = 0;
-      }
-      requestUpdateAndWait();
-      task = makeUniqueNoThrow<DictPrepareTask>(*this);
-      if (!task) {
-        LOG_ERR("DICT_PREP", "OOM: DictPrepareTask");
-        state = State::FAILED;
-        requestUpdate();
-        return;
-      }
-      task->start("DictPrep", 4096, 1);
-      return;
-    }
+    if (mappedInput.wasPressed(MappedInputManager::Button::Confirm) || hit == 1) startPreparing();
     return;
   }
 
@@ -208,25 +196,52 @@ void DictPrepareActivity::loop() {
     if (prepareDone) {
       state = cancelRequested ? State::CANCELLED : (prepareSucceeded ? State::SUCCESS : State::FAILED);
       requestUpdate();
-    } else if (!cancelRequested && mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+    } else if (!cancelRequested && (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
+                                    (tapped && singleBar_.hitAt(tapX, tapY) == 0))) {
       cancelRequested = true;
-      requestUpdate();  // re-render immediately to remove the Cancel button hint
+      requestUpdate();  // re-render immediately to remove the Cancel button
     }
     return;
   }
 
   if (state == State::SUCCESS || state == State::FAILED || state == State::CANCELLED) {
-    if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-      if (state == State::FAILED || state == State::CANCELLED) {
-        ActivityResult r;
-        r.isCancelled = true;
-        setResult(std::move(r));
-      }
-      // SUCCESS: default result (isCancelled=false) signals caller to apply selection.
-      finish();
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back) || (tapped && singleBar_.hitAt(tapX, tapY) == 0)) {
+      exitWithResult();
     }
     return;
   }
+}
+
+void DictPrepareActivity::startPreparing() {
+  state = State::PROCESSING;
+  prepareDone = false;
+  prepareSucceeded = false;
+  currentStep = 0;
+  for (int i = 0; i < stepCount; i++) {
+    steps[i].status = StepStatus::PENDING;
+    steps[i].progress = 0;
+    steps[i].total = 0;
+  }
+  requestUpdateAndWait();
+  task = makeUniqueNoThrow<DictPrepareTask>(*this);
+  if (!task) {
+    LOG_ERR("DICT_PREP", "OOM: DictPrepareTask");
+    state = State::FAILED;
+    requestUpdate();
+    return;
+  }
+  task->start("DictPrep", 4096, 1);
+}
+
+// SUCCESS keeps the default result (isCancelled=false), which tells the caller to apply the
+// selection; FAILED and CANCELLED report a cancel.
+void DictPrepareActivity::exitWithResult() {
+  if (state == State::FAILED || state == State::CANCELLED) {
+    ActivityResult r;
+    r.isCancelled = true;
+    setResult(std::move(r));
+  }
+  finish();
 }
 
 // ---------------------------------------------------------------------------
@@ -732,6 +747,10 @@ void DictPrepareActivity::render(RenderLock&&) {
     y += lineHeight + STEP_SPACING;
     UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, y, tr(STR_DICT_PREPARE_WARN_2));
 
+    if (confirmBar_.active()) {
+      const char* barLabels[] = {tr(STR_CANCEL), tr(STR_CONFIRM)};
+      confirmBar_.draw(renderer, UI_10_FONT_ID, barLabels, /*primaryIndex=*/1);
+    }
     const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), tr(STR_CONFIRM), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer();
@@ -783,6 +802,10 @@ void DictPrepareActivity::render(RenderLock&&) {
   }
 
   if (state == State::PROCESSING && !cancelRequested) {
+    if (singleBar_.active()) {
+      const char* barLabels[] = {tr(STR_CANCEL)};
+      singleBar_.draw(renderer, UI_10_FONT_ID, barLabels);
+    }
     const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   }
@@ -798,6 +821,10 @@ void DictPrepareActivity::render(RenderLock&&) {
       msg = tr(STR_DICT_PREPARE_FAILED);
     UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, y, msg, true, EpdFontFamily::BOLD);
 
+    if (singleBar_.active()) {
+      const char* barLabels[] = {tr(STR_BACK)};
+      singleBar_.draw(renderer, UI_10_FONT_ID, barLabels, /*primaryIndex=*/0);
+    }
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   }

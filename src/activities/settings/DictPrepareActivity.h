@@ -5,6 +5,7 @@
 #include <string>
 
 #include "activities/Activity.h"
+#include "activities/TouchActionBar.h"
 
 class DictPrepareTask;
 
@@ -65,6 +66,14 @@ class DictPrepareActivity final : public Activity {
   volatile bool prepareSucceeded = false;
 
   std::unique_ptr<DictPrepareTask> task;
+
+  // On-screen buttons for touch boards, laid out once in onEnter: the render task draws them
+  // while the preparing task keeps requesting frames. Inert on button boards.
+  TouchActionBar confirmBar_;  // Cancel / Confirm
+  TouchActionBar singleBar_;   // Cancel while preparing, Back when done
+
+  void startPreparing();
+  void exitWithResult();
 
   void detectSteps();
   bool updateProgressIfPercentChanged(Step& step, size_t progress, int& lastPercent);
