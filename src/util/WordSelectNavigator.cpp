@@ -153,7 +153,8 @@ int WordSelectNavigator::wordIndexAtPoint(const int x, const int y, const int li
     // drawYFor, not screenY: an IPA run is drawn on a shifted baseline, so its box is
     // where it was painted rather than where the row nominally starts.
     const int top = drawYFor(w);
-    if (x >= w.screenX - slop && x < w.screenX + w.width + slop && y >= top - slop && y < top + lineHeight + slop) {
+    if (x >= w.screenX - slop && x < w.screenX + w.width + slop && y >= top - slop &&
+        y < top + lineHeightFor(w, lineHeight) + slop) {
       return i;
     }
   }
@@ -857,7 +858,8 @@ WordSelectNavigator::Rect WordSelectNavigator::boundsForWord(int wordIndex, int 
   }
   const int padX = w->padX;
   return Rect{static_cast<int>(w->screenX) + inkLeft - padX, top,
-              static_cast<int>(w->width) - inkLeft - inkRight + 2 * padX, lineHeight + 4 + (dy < 0 ? -dy : dy)};
+              static_cast<int>(w->width) - inkLeft - inkRight + 2 * padX,
+              lineHeightFor(*w, lineHeight) + 4 + (dy < 0 ? -dy : dy)};
 }
 
 WordSelectNavigator::Rect WordSelectNavigator::computeDirtyRect(int prevWordIdx, int currWordIdx, int lineHeight,

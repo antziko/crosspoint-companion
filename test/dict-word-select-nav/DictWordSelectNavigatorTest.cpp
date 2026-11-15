@@ -1853,9 +1853,40 @@ static void testPageEdgesStopAndReport() {
   CHECK(wrap.takePageEdge() == 0 && wrap.getCurrentFlatIndex() == 0, "edges off: Next wraps to the first word");
 }
 
+// A heading laid out at its own built-in size taps and highlights with that size's line
+// height and font; body words keep the caller's.
+static void testSizedWordUsesItsOwnLineHeight() {
+  std::printf("testSizedWordUsesItsOwnLineHeight\n");
+  std::string pool;
+  WordSelectNavigator::WordInfo heading = mkWord("Title", 10, 0, 60, 0);
+  heading.textOffset = poolAppendString(pool, "Title");
+  heading.lookupOffset = heading.textOffset;
+  heading.sizeIndex = WordSelectNavigator::sizeIndexForPt(18);
+  WordSelectNavigator::WordInfo body = mkWord("body", 10, 40, 40, 1);
+  body.textOffset = poolAppendString(pool, "body");
+  body.lookupOffset = body.textOffset;
+  std::vector<WordSelectNavigator::WordInfo> words = {heading, body};
+  std::vector<WordSelectNavigator::Row> rows;
+  WordSelectNavigator::organizeIntoRows(words, rows);
+
+  WordSelectNavigator nav;
+  nav.setFonts(7);
+  const uint8_t heights[std::size(BuiltinFontSizes::POINTS)] = {18, 21, 24, 30};
+  nav.setSizedLineHeights(heights);
+  nav.load(std::move(words), std::move(rows), std::move(pool));
+
+  CHECK(WordSelectNavigator::sizeIndexForPt(13) == 0, "a size the font lacks has no index");
+  CHECK(nav.fontIdFor(*nav.getWordAt(0)) == NOTOSANS_18_FONT_ID, "the heading draws in its own font");
+  CHECK(nav.fontIdFor(*nav.getWordAt(1)) == 7, "a body word draws in the body font");
+  // y = 27 is past a 16 px body line but inside the heading's 30 px one.
+  CHECK(nav.wordIndexAtPoint(20, 27, 16, 0) == 0, "a tap low on the heading still hits it");
+  CHECK(nav.wordIndexAtPoint(20, 45, 16, 0) == 1, "the body word keeps the caller's height");
+}
+
 int main() {
   std::printf("=== WordSelectNavigator host litmus ===\n");
   testOrganizeIntoRows();
+  testSizedWordUsesItsOwnLineHeight();
   testPageEdgesStopAndReport();
   testHyphenatedNavBackward();
   testHyphenatedNavForward();

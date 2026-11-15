@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "../../lib/Epub/Epub/blocks/BuiltinFontSizes.h"
+
 class GfxRenderer;
 class MappedInputManager;
 
@@ -48,9 +50,12 @@ class WordSelectNavigator {
     // Centre the band on the word's ink rather than its advance box (see inkInsets). Set for
     // book-text Latin words, whose first and last glyphs sit unevenly in their cells.
     bool inkCentred : 1 = false;
-    // Horizontal padding of the highlight band (see bandPadX). These three share one byte, so
-    // a page of words costs no more than before.
-    uint8_t padX : 6 = 2;
+    // Horizontal padding of the highlight band (see bandPadX, at most kMaxBandPadX). These four
+    // share one byte, so a page of words costs no more than before.
+    uint8_t padX : 3 = 2;
+    // A line the book sized apart from the reader font (a heading): 1 + its index in
+    // BuiltinFontSizes::POINTS, 0 = the body font. See sizeIndexForPt.
+    uint8_t sizeIndex : 3 = 0;
   };
 
   // Horizontal highlight padding for a Latin word on a line whose inter-word gap is
@@ -59,7 +64,7 @@ class WordSelectNavigator {
   // cap keeps a stretched justified line from growing wide slabs. CJK and dash-split parts
   // have no gap to their neighbour and keep the default.
   static constexpr uint8_t kMinBandPadX = 2;
-  static constexpr uint8_t kMaxBandPadX = 6;
+  static constexpr uint8_t kMaxBandPadX = 6;  // fits WordInfo::padX's 3 bits
   static constexpr uint8_t bandPadX(const int lineGapWidth) {
     return static_cast<uint8_t>(
         std::max<int>(kMinBandPadX, std::min<int>({lineGapWidth / 2, lineGapWidth - 2, kMaxBandPadX})));
@@ -156,7 +161,25 @@ class WordSelectNavigator {
     ipaFontId_ = ipaFontId != 0 ? ipaFontId : bodyFontId;
     ipaDy_ = ipaFontId_ != bodyFontId_ ? ipaDy : 0;
   }
-  int fontIdFor(const WordInfo& w) const { return w.isIpa ? ipaFontId_ : bodyFontId_; }
+  int fontIdFor(const WordInfo& w) const {
+    if (w.isIpa) return ipaFontId_;
+    return w.sizeIndex ? BuiltinFontSizes::FONT_IDS[w.sizeIndex - 1] : bodyFontId_;
+  }
+  // The word's line height: its own size's, else the caller's (the body font's).
+  int lineHeightFor(const WordInfo& w, const int lineHeight) const {
+    return w.sizeIndex && sizedLineHeights_[w.sizeIndex - 1] ? sizedLineHeights_[w.sizeIndex - 1] : lineHeight;
+  }
+  static uint8_t sizeIndexForPt(const uint8_t pt) {
+    for (size_t i = 0; i < std::size(BuiltinFontSizes::POINTS); ++i) {
+      if (BuiltinFontSizes::POINTS[i] == pt) return static_cast<uint8_t>(i + 1);
+    }
+    return 0;
+  }
+  // Line heights of the built-in sizes (BuiltinFontSizes::FONT_IDS order), for words laid out
+  // at one of them. Call before load().
+  void setSizedLineHeights(const uint8_t (&heights)[std::size(BuiltinFontSizes::POINTS)]) {
+    std::copy(std::begin(heights), std::end(heights), sizedLineHeights_);
+  }
   int drawYFor(const WordInfo& w) const { return w.screenY + (w.isIpa ? ipaDy_ : 0); }
 
   // Whether the cursor avoids DictStopwords closed-class words ("the", "a", "you"): it is
@@ -402,6 +425,7 @@ class WordSelectNavigator {
   // raised glyph is neither clipped by the inverse fill nor left behind by a differential
   // restore, which only repaints boundsForWord's rect.
   int ipaDy_ = 0;
+  uint8_t sizedLineHeights_[std::size(BuiltinFontSizes::POINTS)] = {};
   bool skipStopwords_ = true;
   bool vertical_ = false;
   int columnWidth_ = 0;

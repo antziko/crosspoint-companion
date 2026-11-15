@@ -125,6 +125,7 @@ struct Range {
   // these sit on a render-path frame, and 1/255 of a page is already finer than the
   // interpolation it feeds.
   uint8_t endFracInPage = 255;
+  const PageLine* runLine = nullptr;  // the line the open run is on
   bool runOpen = false;
   int16_t runY = 0;
   int16_t runX0 = 0;
@@ -509,25 +510,27 @@ bool advanceSpan(const Page& page, const uint16_t fromIndex, uint16_t& remaining
   return false;
 }
 
-void drawBookmarkSpan(const GfxRenderer& renderer, const Page& page, const int fontId, const int marginTop,
+void drawBookmarkSpan(const GfxRenderer& renderer, const Page& page, const int sectionFontId, const int marginTop,
                       const int barX, const uint16_t fromIndex, const uint16_t toIndex, const bool startsHere,
                       const bool endsHere, const bool hasLength, const int blockWidth) {
   constexpr int kMinWidth = 2;
-
-  const int lineHeight = renderer.getLineHeight(fontId);
-  const int ascender = renderer.getFontAscenderSize(fontId);
 
   // Only rows are needed: everything is drawn in the margin, nothing inside a line.
   int firstRow = -1;
   int startRow = -1;
   int endRow = -1;
+  int startHeight = 0;
+  int endHeight = 0;
   uint16_t index = 0;
   for (const auto& element : page.elements) {
     if (element->getTag() != TAG_PageLine) continue;
     const auto* line = static_cast<const PageLine*>(element.get());
     const auto& block = line->getBlock();
     if (!block) continue;
-    const int rowY = line->yPos + marginTop + block->getRubyShift(ascender);
+    // A line the book sized apart (a heading) has its own font, so its own height.
+    const int lineFont = block->blockFontId(sectionFontId);
+    const int lineHeight = renderer.getLineHeight(lineFont);
+    const int rowY = line->yPos + marginTop + block->getRubyShift(renderer.getFontAscenderSize(lineFont));
     const uint16_t blockWordCount = block->wordCount();
     for (uint16_t w = 0; w < blockWordCount; w++) {
       const char* text = block->wordText(w);
@@ -538,8 +541,14 @@ void drawBookmarkSpan(const GfxRenderer& renderer, const Page& page, const int f
       const size_t partCount = PageTokens::collectParts(text, len, parts, PageTokens::kMaxTokenParts);
       for (size_t pi = 0; pi < partCount; pi++, index++) {
         if (firstRow < 0) firstRow = rowY;
-        if (index == fromIndex) startRow = rowY;
-        if (index == toIndex) endRow = rowY;
+        if (index == fromIndex) {
+          startRow = rowY;
+          startHeight = lineHeight;
+        }
+        if (index == toIndex) {
+          endRow = rowY;
+          endHeight = lineHeight;
+        }
       }
     }
   }
@@ -549,9 +558,9 @@ void drawBookmarkSpan(const GfxRenderer& renderer, const Page& page, const int f
   // One block the height of the line beside the line it starts on, and one beside the line it
   // ends on; nothing between, so a bookmark the layout has not moved is not a rule down the page.
   const int width = std::max(kMinWidth, blockWidth);
-  if (startsHere) renderer.fillRect(barX, startRow, width, lineHeight, true);
+  if (startsHere) renderer.fillRect(barX, startRow, width, startHeight, true);
   // Without a recorded length the end is unknown, and the start block is the whole mark.
-  if (hasLength && endsHere && endRow >= 0) renderer.fillRect(barX, endRow, width, lineHeight, true);
+  if (hasLength && endsHere && endRow >= 0) renderer.fillRect(barX, endRow, width, endHeight, true);
 }
 
 void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int marginLeft, int marginTop,
@@ -637,20 +646,22 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
 
   if (rangeCount == 0 && lookupCount == 0) return;  // the common case: nothing walked, nothing measured
 
-  const int lineHeight = renderer.getLineHeight(fontId);
-  const int ascender = renderer.getFontAscenderSize(fontId);
+  // A line the book sized apart (a heading) has its own font, so its own height and ascender.
+  const auto heightOf = [&](const PageLine* l) {
+    return renderer.getLineHeight(l && l->getBlock() ? l->getBlock()->blockFontId(fontId) : fontId);
+  };
 
   // One rule under a span of a line: solid for a quote in the underline style, dotted for a
   // looked-up word.
-  const auto inBand = [&](const int rowY) { return rowY < bandBottom && rowY + lineHeight > bandTop; };
+  const auto inBand = [&](const int rowY, const int h) { return rowY < bandBottom && rowY + h > bandTop; };
 
-  const auto underlineSpan = [&](int16_t x0, int width, int16_t rowY) {
-    if (width > 0 && inBand(rowY))
-      renderer.fillRect(x0, rowY + lineHeight - kUnderlineThickness, width, kUnderlineThickness, true);
+  const auto underlineSpan = [&](int16_t x0, int width, int16_t rowY, const int h) {
+    if (width > 0 && inBand(rowY, h))
+      renderer.fillRect(x0, rowY + h - kUnderlineThickness, width, kUnderlineThickness, true);
   };
-  const auto lookupSpan = [&](int16_t x0, int width, int16_t rowY) {
-    if (width <= 0 || !inBand(rowY)) return;
-    const int y = rowY + lineHeight - kUnderlineThickness;
+  const auto lookupSpan = [&](int16_t x0, int width, int16_t rowY, const int h) {
+    if (width <= 0 || !inBand(rowY, h)) return;
+    const int y = rowY + h - kUnderlineThickness;
     for (int dx = 0; dx < width; dx += kLookupDotPitch) {
       renderer.fillRect(x0 + dx, y, std::min(kUnderlineThickness, width - dx), kUnderlineThickness, true);
     }
@@ -659,14 +670,15 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
   const auto flush = [&](Range& r) {
     if (!r.runOpen) return;
     const int width = r.runX1 - r.runX0;
+    const int h = heightOf(r.runLine);
     if (width > 0) {
       if (markStyle == CrossPointSettings::QUOTE_STYLE_UNDERLINE) {
-        underlineSpan(r.runX0, width, r.runY);
+        underlineSpan(r.runX0, width, r.runY, h);
       } else {
         // washRectDither, not fillRectDither: the text is already drawn here, and the plain
         // dither fill writes both inks and would wipe the glyphs out from under the band.
-        if (inBand(r.runY)) {
-          renderer.washRectDither(r.runX0 - kBandPadX, r.runY, width + 2 * kBandPadX, lineHeight, Color::LightGray);
+        if (inBand(r.runY, h)) {
+          renderer.washRectDither(r.runX0 - kBandPadX, r.runY, width + 2 * kBandPadX, h, Color::LightGray);
         }
       }
     }
@@ -680,10 +692,12 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
     const auto& block = line->getBlock();
     if (!block) continue;
     const int8_t tracking = block->getBlockStyle().characterSpacing;
+    const int lineFont = block->blockFontId(fontId);
 
     // Ruby-annotated lines shift their base text down by half an ascender, exactly as
     // extractWords moves the selection boxes in lockstep with them.
-    const int16_t rowY = static_cast<int16_t>(line->yPos + marginTop + block->getRubyShift(ascender));
+    const int16_t rowY =
+        static_cast<int16_t>(line->yPos + marginTop + block->getRubyShift(renderer.getFontAscenderSize(lineFont)));
     const uint16_t blockWordCount = block->wordCount();
 
     // A looked-up CJK word is also thickened by redrawing its glyphs offset right, down and
@@ -693,8 +707,10 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
     // reproduced here.
     const auto emboldenCjk = [&](const PageLine* segLine, const uint16_t wFirst, const uint16_t wLast) {
       const auto& segBlock = segLine->getBlock();
-      const int16_t segY = static_cast<int16_t>(segLine->yPos + marginTop + segBlock->getRubyShift(ascender));
-      if (!inBand(segY)) return;
+      const int segFont = segBlock->blockFontId(fontId);
+      const int16_t segY = static_cast<int16_t>(segLine->yPos + marginTop +
+                                                segBlock->getRubyShift(renderer.getFontAscenderSize(segFont)));
+      if (!inBand(segY, heightOf(segLine))) return;
       for (uint16_t wi = wFirst; wi <= wLast; wi++) {
         const char* t = segBlock->wordText(wi);
         bool cjk = false;
@@ -702,9 +718,9 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
         const EpdFontFamily::Style style = segBlock->wordStyle(wi);
         if ((style & (EpdFontFamily::SUP | EpdFontFamily::SUB)) != 0) continue;
         const int x0 = segLine->xPos + segBlock->wordXpos(wi) + marginLeft;
-        renderer.drawText(fontId, x0 + 1, segY, t, true, style);
-        renderer.drawText(fontId, x0, segY + 1, t, true, style);
-        renderer.drawText(fontId, x0 + 1, segY + 1, t, true, style);
+        renderer.drawText(segFont, x0 + 1, segY, t, true, style);
+        renderer.drawText(segFont, x0, segY + 1, t, true, style);
+        renderer.drawText(segFont, x0 + 1, segY + 1, t, true, style);
       }
     };
 
@@ -738,10 +754,10 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
           measured = true;
           const EpdFontFamily::Style style = block->wordStyle(w);
           x = static_cast<int16_t>(line->xPos + block->wordXpos(w) + marginLeft);
-          if (partStart > 0) x += PageTokens::measureAdvance(renderer, fontId, text, partStart, style, tracking);
+          if (partStart > 0) x += PageTokens::measureAdvance(renderer, lineFont, text, partStart, style, tracking);
           // The whole-token form copies nothing; only a dash-split part needs the sub-range one.
-          width = unsplit ? PageTokens::measureAdvance(renderer, fontId, text, style, tracking)
-                          : PageTokens::measureAdvance(renderer, fontId, text + partStart, partLen, style, tracking);
+          width = unsplit ? PageTokens::measureAdvance(renderer, lineFont, text, style, tracking)
+                          : PageTokens::measureAdvance(renderer, lineFont, text + partStart, partLen, style, tracking);
         };
 
         for (size_t i = 0; i < rangeCount; i++) {
@@ -761,6 +777,7 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
           if (!r.runOpen) {
             r.runOpen = true;
             r.runY = rowY;
+            r.runLine = line;
             r.runX0 = x;
             r.runX1 = static_cast<int16_t>(x + width);
           } else {
@@ -793,8 +810,8 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
           if ((lead == 0 && trail == 0) || lead + trail >= partLen) return;
           const EpdFontFamily::Style style = block->wordStyle(w);
           if (lead > 0)
-            lx = static_cast<int16_t>(x + PageTokens::measureAdvance(renderer, fontId, t, lead, style, tracking));
-          lw = PageTokens::measureAdvance(renderer, fontId, t + lead, partLen - lead - trail, style, tracking);
+            lx = static_cast<int16_t>(x + PageTokens::measureAdvance(renderer, lineFont, t, lead, style, tracking));
+          lw = PageTokens::measureAdvance(renderer, lineFont, t + lead, partLen - lead - trail, style, tracking);
         };
 
         for (size_t i = 0; i < lookupCount; i++) {
@@ -835,14 +852,15 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
               break;
             case Step::MatchedRun:
               if (r.state.wrapped) {
-                lookupSpan(r.headX0, r.headX1 - r.headX0, r.headY);
+                lookupSpan(r.headX0, r.headX1 - r.headX0, r.headY, heightOf(r.headLine));
                 emboldenCjk(r.headLine, r.headWStart, r.headWLast);
               }
-              lookupSpan(r.x0, std::max<int16_t>(r.x1, static_cast<int16_t>(lx + lw)) - r.x0, r.state.y);
+              lookupSpan(r.x0, std::max<int16_t>(r.x1, static_cast<int16_t>(lx + lw)) - r.x0, r.state.y,
+                         heightOf(r.line));
               emboldenCjk(line, r.wStart, w);
               break;
             case Step::MatchedToken:
-              lookupSpan(lx, lw, rowY);
+              lookupSpan(lx, lw, rowY, heightOf(line));
               if (isCjk) emboldenCjk(line, w, w);
               break;
             case Step::None:
@@ -856,7 +874,7 @@ void drawForPage(const GfxRenderer& renderer, const Page& page, int fontId, int 
   for (size_t i = 0; i < rangeCount; i++) flush(ranges[i]);
 }
 
-bool invertWordAtPoint(const GfxRenderer& renderer, const Page& page, const int fontId, const int marginLeft,
+bool invertWordAtPoint(const GfxRenderer& renderer, const Page& page, const int sectionFontId, const int marginLeft,
                        const int marginTop, const int x, const int y, WordHit& out) {
   // Same slop as WordSelectNavigator::wordIndexAtPoint's default, so a tap that lands in the
   // padding of a box here lands in the same box there.
@@ -864,16 +882,15 @@ bool invertWordAtPoint(const GfxRenderer& renderer, const Page& page, const int 
   // Band padding, and therefore the pushed rect: WordSelectNavigator::boundsForWord.
   constexpr int kBandPad = 2;  // vertical; horizontal is WordSelectNavigator::bandPadX
 
-  const int lineHeight = renderer.getLineHeight(fontId);
-  const int ascender = renderer.getFontAscenderSize(fontId);
-  // Fallback for blocks with no derivable per-line gap, as in extractWords.
-  const int16_t naturalSpaceWidth = static_cast<int16_t>(renderer.getTextAdvanceX(fontId, " ", EpdFontFamily::REGULAR));
-
   for (const auto& element : page.elements) {
     if (element->getTag() != TAG_PageLine) continue;
     const auto* line = static_cast<const PageLine*>(element.get());
     const auto& block = line->getBlock();
     if (!block) continue;
+    // A line the book sized apart (a heading) is measured in its own font, as extractWords does.
+    const int fontId = block->blockFontId(sectionFontId);
+    const int lineHeight = renderer.getLineHeight(fontId);
+    const int ascender = renderer.getFontAscenderSize(fontId);
     const int8_t tracking = block->getBlockStyle().characterSpacing;
 
     const uint16_t blockWordCount = block->wordCount();
@@ -881,6 +898,9 @@ bool invertWordAtPoint(const GfxRenderer& renderer, const Page& page, const int 
     // with them, so the band has to follow too.
     const int16_t rowY = static_cast<int16_t>(line->yPos + marginTop + block->getRubyShift(ascender));
     if (y < rowY - kSlop || y >= rowY + lineHeight + kSlop) continue;  // wrong row: no measuring
+    // Fallback for blocks with no derivable per-line gap, as in extractWords.
+    const int16_t naturalSpaceWidth =
+        static_cast<int16_t>(renderer.getTextAdvanceX(fontId, " ", EpdFontFamily::REGULAR));
 
     // Per-line inter-word gap, derived from the first word's xpos diff; a justified line
     // stretches it, so it cannot be a global space width. The half-space threshold separates a
@@ -970,7 +990,7 @@ bool invertWordAtPoint(const GfxRenderer& renderer, const Page& page, const int 
   return false;
 }
 
-const LookupMarks::Mark* lookupMarkAtPoint(const GfxRenderer& renderer, const Page& page, const int fontId,
+const LookupMarks::Mark* lookupMarkAtPoint(const GfxRenderer& renderer, const Page& page, const int sectionFontId,
                                            const int marginLeft, const int marginTop, const int x, const int y,
                                            const uint32_t chapterHash, const int pageNumber, const int pageCount) {
   // Same forgiveness the tap boxes carry, so a point on the edge of an underlined word still
@@ -984,8 +1004,7 @@ const LookupMarks::Mark* lookupMarkAtPoint(const GfxRenderer& renderer, const Pa
       LookupMarks::getInstance().collectForPage(chapterHash, pageNumber, pageCount, lookups, kMaxLookupsPerPage));
   if (lookupCount == 0) return nullptr;
 
-  const int lineHeight = renderer.getLineHeight(fontId);
-  const int ascender = renderer.getFontAscenderSize(fontId);
+  int lineHeight = renderer.getLineHeight(sectionFontId);  // the current line's, set per line below
 
   // The point falls on a span drawn at rowY, within kSlop of both edges.
   const auto covers = [&](const int16_t x0, const int16_t spanWidth, const int16_t rowY) {
@@ -1003,6 +1022,9 @@ const LookupMarks::Mark* lookupMarkAtPoint(const GfxRenderer& renderer, const Pa
     const auto* line = static_cast<const PageLine*>(element.get());
     const auto& block = line->getBlock();
     if (!block) continue;
+    const int fontId = block->blockFontId(sectionFontId);
+    lineHeight = renderer.getLineHeight(fontId);
+    const int ascender = renderer.getFontAscenderSize(fontId);
     const int8_t tracking = block->getBlockStyle().characterSpacing;
 
     const int16_t rowY = static_cast<int16_t>(line->yPos + marginTop + block->getRubyShift(ascender));
@@ -1084,11 +1106,9 @@ const LookupMarks::Mark* lookupMarkAtPoint(const GfxRenderer& renderer, const Pa
   return nullptr;
 }
 
-void drawTermBox(const GfxRenderer& renderer, const Page& page, const int fontId, const int marginLeft,
+void drawTermBox(const GfxRenderer& renderer, const Page& page, const int sectionFontId, const int marginLeft,
                  const int marginTop, const uint16_t start, const uint16_t end) {
   if (end < start) return;
-  const int lineHeight = renderer.getLineHeight(fontId);
-  const int ascender = renderer.getFontAscenderSize(fontId);
   constexpr int kThick = 3;  // stroke
   constexpr int kGap = 3;    // clear space between the stroke and the words
   // One box per line the term occupies: a wrapped term gets a box on each of its lines.
@@ -1096,6 +1116,7 @@ void drawTermBox(const GfxRenderer& renderer, const Page& page, const int fontId
   int runY = 0;
   int runX0 = 0;
   int runX1 = 0;
+  int runHeight = 0;
   const auto flush = [&]() {
     if (!runOpen) return;
     runOpen = false;
@@ -1104,7 +1125,7 @@ void drawTermBox(const GfxRenderer& renderer, const Page& page, const int fontId
     const int right = std::min(renderer.getScreenWidth() - 1, runX1 + kGap + kThick);
     // The line box itself, one pixel taller each way: its leading clears the glyphs, and the
     // stroke grows inward so a neighbouring line's text is never touched.
-    renderer.drawRect(left, runY - 1, right - left, lineHeight + 2, kThick, true);
+    renderer.drawRect(left, runY - 1, right - left, runHeight + 2, kThick, true);
   };
   uint16_t index = 0;
   for (const auto& element : page.elements) {
@@ -1112,6 +1133,10 @@ void drawTermBox(const GfxRenderer& renderer, const Page& page, const int fontId
     const auto* line = static_cast<const PageLine*>(element.get());
     const auto& block = line->getBlock();
     if (!block) continue;
+    // A line the book sized apart (a heading) has its own font, so its own height.
+    const int fontId = block->blockFontId(sectionFontId);
+    const int lineHeight = renderer.getLineHeight(fontId);
+    const int ascender = renderer.getFontAscenderSize(fontId);
     const int8_t tracking = block->getBlockStyle().characterSpacing;
     const int rowY = line->yPos + marginTop + block->getRubyShift(ascender);
     const uint16_t blockWordCount = block->wordCount();
@@ -1133,6 +1158,7 @@ void drawTermBox(const GfxRenderer& renderer, const Page& page, const int fontId
       if (!runOpen) {
         runOpen = true;
         runY = rowY;
+        runHeight = lineHeight;
         runX0 = x;
         runX1 = x + width;
       } else {

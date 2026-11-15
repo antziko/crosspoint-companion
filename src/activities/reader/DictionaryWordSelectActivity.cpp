@@ -204,6 +204,14 @@ void DictionaryWordSelectActivity::onEnter() {
   const bool consumeInitialConfirm = mappedInput.isPressed(MappedInputManager::Button::Confirm);
   // Book text is all one font; no IPA runs here, so the second slot defaults to the first.
   navigator.setFonts(SETTINGS.getReaderFontId());
+  {
+    // Heading lines laid out at a built-in size of their own get that size's band height.
+    uint8_t sizedHeights[std::size(BuiltinFontSizes::POINTS)] = {};
+    for (size_t i = 0; i < std::size(sizedHeights); ++i) {
+      sizedHeights[i] = static_cast<uint8_t>(std::min(255, renderer.getLineHeight(BuiltinFontSizes::FONT_IDS[i])));
+    }
+    navigator.setSizedLineHeights(sizedHeights);
+  }
   // A quote is saved verbatim, so highlight selection has to reach "the" and "of" like any
   // other word; a lookup never wants them, so there the cursor walks past them.
   navigator.setSkipStopwords(mode_ == Mode::Dictionary);
@@ -437,6 +445,13 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
     const uint16_t scanLine = lineIndex++;
     uint16_t scanOrdinal = 0;
     const int8_t tracking = block->getBlockStyle().characterSpacing;
+    // A line the book sized apart (a heading) is measured in its own font.
+    const int lineFont = block->blockFontId(SETTINGS.getReaderFontId());
+    const uint8_t lineFontPt = lineFont == SETTINGS.getReaderFontId() ? 0 : block->getBlockStyle().fontPt;
+    const uint8_t lineSizeIndex = WordSelectNavigator::sizeIndexForPt(lineFontPt);
+    const int16_t lineSpaceWidth =
+        lineFontPt ? static_cast<int16_t>(renderer.getTextAdvanceX(lineFont, " ", EpdFontFamily::REGULAR))
+                   : naturalSpaceWidth;
 
     // Flat per-word storage (TextBlock stores words back-to-back in a single
     // NUL-terminated arena; wordText(i) is a stable const char*, wordTextLen(i)
@@ -446,12 +461,11 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
     // Per-line gap = xPos[1] - xPos[0] - firstWordWidth. Justified blocks
     // stretch the gap (ParsedText.cpp:514-553 adds justifyExtra), so a
     // global space-width can't be reused — we measure per-block.
-    int16_t lineGapWidth = naturalSpaceWidth;
+    int16_t lineGapWidth = lineSpaceWidth;
     if (blockWordCount >= 2 && block->wordTextLen(0) > 0) {
       const EpdFontFamily::Style firstStyle = block->wordStyle(0);
       const std::string firstWord(block->wordText(0), block->wordTextLen(0));
-      const int16_t firstWidth =
-          PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), firstWord, firstStyle, tracking);
+      const int16_t firstWidth = PageTokens::measureAdvance(renderer, lineFont, firstWord, firstStyle, tracking);
       const int16_t derivedGap = static_cast<int16_t>(block->wordXpos(1) - block->wordXpos(0) - firstWidth);
       // When wordList[1] is a continuation (attached punctuation etc., ParsedText.cpp:537-544)
       // the layout inserts no inter-word gap, so derivedGap collapses to the kerning offset
@@ -460,13 +474,13 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
       // expose continuesVec. Without the threshold, an undersized lineGapWidth propagates as
       // a per-word width overestimate (~4-6 px) — the highlight rectangle bleeds past the
       // word into the inter-word space.
-      if (derivedGap > naturalSpaceWidth / 2) lineGapWidth = derivedGap;
+      if (derivedGap > lineSpaceWidth / 2) lineGapWidth = derivedGap;
     }
 
     // Ruby-annotated lines shift their base text down by half an ascender (see
     // TextBlock::getRubyShift). Move the tap targets in lockstep so the selection
     // boxes stay aligned with the rendered word positions.
-    const int rubyShift = block->getRubyShift(renderer.getFontAscenderSize(SETTINGS.getReaderFontId()));
+    const int rubyShift = block->getRubyShift(renderer.getFontAscenderSize(lineFont));
 
     for (uint16_t wIdx = 0; wIdx < blockWordCount; wIdx++) {
       int16_t screenX = line->xPos + block->wordXpos(wIdx) + marginLeft;
@@ -528,7 +542,7 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
           // land inside the box either. Measuring is exact and costs nothing here — CJK
           // tokens are single characters and prebuildAdvanceTable() already made this an
           // in-RAM advance-table hit.
-          wordWidth = PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), wordText, wordStyle, tracking);
+          wordWidth = PageTokens::measureAdvance(renderer, lineFont, wordText, wordStyle, tracking);
         } else if (wIdx + 1 < blockWordCount && block->focusBoundary(wIdx) > 0) {
           // A Focus Reading word draws a bold prefix that a plain measure undercounts, so it
           // keeps the layout's xpos diff with the trailing gap removed.
@@ -539,7 +553,7 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
           // against both flanking letters and the left word's style, so the first pair's gap is a
           // pixel or two off for many words, which clipped the band's right edge. Capped at the
           // distance to the next token so the band never runs into it.
-          wordWidth = PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), wordText, wordStyle, tracking);
+          wordWidth = PageTokens::measureAdvance(renderer, lineFont, wordText, wordStyle, tracking);
           if (wIdx + 1 < blockWordCount) {
             const int16_t raw = static_cast<int16_t>(block->wordXpos(wIdx + 1) - block->wordXpos(wIdx));
             wordWidth = std::max(static_cast<int16_t>(1), std::min(wordWidth, raw));
@@ -556,6 +570,7 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
           wi.screenY = screenY;
           wi.width = wordWidth;
           wi.style = wordStyle;
+          wi.sizeIndex = lineSizeIndex;
           if (!isCjkToken) {
             wi.padX = WordSelectNavigator::bandPadX(lineGapWidth);
             wi.inkCentred = true;
@@ -575,11 +590,9 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
           // Dash-split words are rare (~0-2 per page); per-part measurement
           // is fine here. Soft-hyphen stripping matches the rest of
           // extractWords and matches layout's preprocessor.
-          int16_t offsetX = prefix.empty() ? 0
-                                           : PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), prefix,
-                                                                        wordStyle, tracking);
-          int16_t partWidth =
-              PageTokens::measureAdvance(renderer, SETTINGS.getReaderFontId(), part, wordStyle, tracking);
+          int16_t offsetX =
+              prefix.empty() ? 0 : PageTokens::measureAdvance(renderer, lineFont, prefix, wordStyle, tracking);
+          int16_t partWidth = PageTokens::measureAdvance(renderer, lineFont, part, wordStyle, tracking);
           {
             uint16_t off = WordSelectNavigator::poolAppend(textPool, part.c_str(), part.size());
             WordSelectNavigator::WordInfo wi;
@@ -591,6 +604,8 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
             wi.screenY = screenY;
             wi.width = partWidth;
             wi.style = wordStyle;
+            wi.sizeIndex = lineSizeIndex;
+            wi.sizeIndex = lineSizeIndex;
             words.push_back(wi);
             if (scan_) {
               tokenCells_.push_back(
