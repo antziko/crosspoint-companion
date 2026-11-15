@@ -309,7 +309,8 @@ void ReaderToolbarUi::buildPanel(UiScreen& screen) {
   listProps_.toggleWidth = 28;
   listProps_.toggleHeight = 28;
   // The label column starts flush with the panel title (no list-side padding
-  // on top of the sheet's own inset).
+  // on top of the sheet's own inset), except on RoundedRaff, whose rounded
+  // selection shape would clip a flush label and value.
   // smallText, matching SettingsActivity: the list's default labelText is
   // bodyText while its valueText is smallText, so the default leaves the two
   // sides of a row at different sizes. maxLines also marks the style as
@@ -317,7 +318,8 @@ void ReaderToolbarUi::buildPanel(UiScreen& screen) {
   // list would substitute bodyText straight back.
   listProps_.labelText = tokens.smallText;
   listProps_.labelText.maxLines = 2;
-  listProps_.sidePadding = 0;
+  listProps_.sidePadding =
+      SETTINGS.uiTheme == CrossPointSettings::UI_THEME::ROUNDEDRAFF ? tokens.listSidePadding : int16_t{0};
   // The list band spans the sheet's full width -- the scroll track hugs the
   // panel edge (theme bezel inset included) exactly like a full-screen list.
   // rowInset pulls the rows back to the title's spaceLg alignment.
