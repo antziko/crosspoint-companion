@@ -3077,8 +3077,8 @@ void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line, const
     signalOutOfMemory("addLineToPage: PageLine");
     return;
   }
-  const int rubyShift = line->getRubyShift(renderer.getFontAscenderSize(fontId));
-  const int baseLineHeight = renderer.getLineHeight(fontId, lineCompression);
+  const int rubyShift = line->getRubyShift(renderer.getFontAscenderSize(lineFont));
+  const int baseLineHeight = renderer.getLineHeight(lineFont, lineCompression);
   for (const auto& link : line->takeLinkSpans()) {
     if (!currentPage->addLink(link.href, static_cast<int16_t>(xOffset + link.x),
                               static_cast<int16_t>(currentPageNextY + rubyShift - link.topLift), link.width,

@@ -93,11 +93,18 @@ uint32_t singleCjkCodepoint(const char* text) {
 // carries no height at all, and even an element that does know its height can draw outside it —
 // ruby annotations sit above the line, descenders below. So every extent is padded by one reader
 // line either side. Erring wide only repaints pixels that are already correct; erring narrow
-// leaves a white gap where the box used to be.
-void elementExtent(const PageElement& el, int marginTop, int pad, int& outTop, int& outBottom) {
+// leaves a white gap where the box used to be. A line laid out at its own larger size (a heading)
+// is taller than that padding by the difference.
+void elementExtent(const GfxRenderer& renderer, const PageElement& el, int marginTop, int pad, int& outTop,
+                   int& outBottom) {
   const int top = el.yPos + marginTop;
   int bottom = top;
-  if (el.getTag() == TAG_PageImage) {
+  if (el.getTag() == TAG_PageLine) {
+    const auto& block = static_cast<const PageLine&>(el).getBlock();
+    if (block && block->getBlockStyle().fontPt != 0) {
+      bottom = top + std::max(0, renderer.getLineHeight(block->blockFontId(SETTINGS.getReaderFontId())) - pad);
+    }
+  } else if (el.getTag() == TAG_PageImage) {
     bottom = top + static_cast<const PageImage&>(el).getImageBlock().getHeight();
   } else if (el.getTag() == TAG_PageBorderBox) {
     bottom = top + static_cast<const PageBorderBox&>(el).getHeight();
@@ -623,12 +630,12 @@ void DictionaryWordSelectActivity::extractWords(std::vector<WordSelectNavigator:
 
 int DictionaryWordSelectActivity::findFirstBodyWord() const {
   if (!page) return navigator.isEmpty() ? -1 : 0;  // vertical: the first column's head
-  const int rubyAscender = renderer.getFontAscenderSize(SETTINGS.getReaderFontId());
   for (const auto& element : page->elements) {
     if (element->getTag() != TAG_PageLine) continue;
     const auto* line = static_cast<const PageLine*>(element.get());
     const auto& block = line->getBlock();
     if (!block) continue;
+    const int rubyAscender = renderer.getFontAscenderSize(block->blockFontId(SETTINGS.getReaderFontId()));
     // A title is centred (the header default, ChapterHtmlSlimParser.cpp:1559) or wholly bold.
     bool anySelectable = false;
     bool allBold = true;
@@ -2045,7 +2052,7 @@ void DictionaryWordSelectActivity::renderPageStrip(int y, int height) {
     auto scope = fcm->createPrewarmScope();
     for (const auto& el : page->elements) {
       int top, bottom;
-      elementExtent(*el, marginTop, pad, top, bottom);
+      elementExtent(renderer, *el, marginTop, pad, top, bottom);
       if (bottom <= y || top >= y + height) continue;
       el->render(renderer, fontId, marginLeft, marginTop);
     }
@@ -2054,7 +2061,7 @@ void DictionaryWordSelectActivity::renderPageStrip(int y, int height) {
 
   for (const auto& el : page->elements) {
     int top, bottom;
-    elementExtent(*el, marginTop, pad, top, bottom);
+    elementExtent(renderer, *el, marginTop, pad, top, bottom);
     if (bottom <= y || top >= y + height) continue;
     el->render(renderer, fontId, marginLeft, marginTop);
   }
@@ -2126,7 +2133,7 @@ bool DictionaryWordSelectActivity::stripNeedsFullRepaint(int y, int height) cons
     const PageElementTag tag = el->getTag();
     if (tag != TAG_PageImage && tag != TAG_PageBorderBox && tag != TAG_PageBox) continue;
     int top, bottom;
-    elementExtent(*el, marginTop, pad, top, bottom);
+    elementExtent(renderer, *el, marginTop, pad, top, bottom);
     if (bottom > y && top < y + height) return true;
   }
   return false;
