@@ -569,3 +569,129 @@ TEST(ChapterHtmlSlimParserLinkIcons, LinkWithTextKeepsItsOwnLabel) {
   EXPECT_STREQ(notes[0].number, "7");
   EXPECT_STREQ(notes[1].number, "8");
 }
+
+// ---- Page-foot line carrying and CSS page breaks ----
+// A viewport `lines` lines tall (the stub's line height is 16). This suite's TextBlock stub keeps
+// no text, so each line is recorded by its block's alignment: 'C' for a (centred) heading, 'L'
+// for any other line. The reader's paragraph alignment replaces a book's, so only headings stand out.
+struct PageParse {
+  GfxRenderer renderer;
+  CssParser css{"/tmp"};
+  std::string path = "pages.xhtml";
+  std::vector<std::string> pages;
+  std::unique_ptr<ChapterHtmlSlimParser> parser;
+
+  PageParse(const std::string& body, const int lines) {
+    parser = std::make_unique<ChapterHtmlSlimParser>(
+        nullptr, path, renderer, 0, 1.0f, false, 0, static_cast<uint16_t>(renderer.getScreenWidth()),
+        static_cast<uint16_t>(lines * 16), false, false,
+        [this](std::unique_ptr<Page> page, uint16_t, uint16_t, uint32_t) {
+          std::string tags;
+          for (const auto& element : page->elements) {
+            if (element->getTag() != TAG_PageLine) continue;
+            const auto align = static_cast<const PageLine&>(*element).getBlock()->getBlockStyle().alignment;
+            tags += align == CssTextAlign::Center ? 'C' : 'L';
+          }
+          pages.push_back(std::move(tags));
+        },
+        true, "", "", 0, std::vector<std::string>{}, nullptr, &css);
+    const std::string html = "<html><body>" + body + "</body></html>";
+    parser->beginParse();
+    XML_Parser xml = XML_ParserCreate(nullptr);
+    XML_SetUserData(xml, parser.get());
+    XML_SetElementHandler(xml, ChapterHtmlSlimParser::startElement, ChapterHtmlSlimParser::endElement);
+    XML_SetCharacterDataHandler(xml, ChapterHtmlSlimParser::characterData);
+    EXPECT_NE(XML_Parse(xml, html.data(), static_cast<int>(html.size()), 1), XML_STATUS_ERROR)
+        << XML_ErrorString(XML_GetErrorCode(xml));
+    XML_ParserFree(xml);
+    parser->xmlParser_ = nullptr;  // freed above; finishParse must not free it again
+    parser->finishParse();
+  }
+};
+
+// How many four-letter words fill exactly one line.
+int wordsPerLine() {
+  static const int cached = [] {
+    for (int n = 2; n < 200; n++) {
+      AnchorParse p("<p>" + wordsWithMarkers(n, {}) + "</p>");
+      if (p.pagesCompleted > 1) return n - 1;
+    }
+    return 0;
+  }();
+  return cached;
+}
+
+// A paragraph exactly `lines` lines long.
+std::string paragraph(const int lines) { return "<p>" + wordsWithMarkers(lines * wordsPerLine(), {}) + "</p>"; }
+
+TEST(ChapterHtmlSlimParserPagination, ALoneFirstLineMovesToTheNextPage) {
+  ASSERT_GT(wordsPerLine(), 1);
+  // Three lines, then a paragraph whose first line would be its only one on the page.
+  PageParse p(paragraph(3) + paragraph(3), 4);
+  ASSERT_EQ(p.pages.size(), 2u);
+  EXPECT_EQ(p.pages[0], "LLL");
+  EXPECT_EQ(p.pages[1], "LLL");
+}
+
+TEST(ChapterHtmlSlimParserPagination, ALoneLastLineTakesALineWithIt) {
+  ASSERT_GT(wordsPerLine(), 1);
+  // One line, then four: only the second paragraph's last line would open page 2.
+  PageParse p(paragraph(1) + paragraph(4), 4);
+  ASSERT_EQ(p.pages.size(), 2u);
+  EXPECT_EQ(p.pages[0], "LLL");
+  EXPECT_EQ(p.pages[1], "LL");
+}
+
+TEST(ChapterHtmlSlimParserPagination, AHeadingStaysWithItsText) {
+  ASSERT_GT(wordsPerLine(), 1);
+  PageParse p(paragraph(3) + "<h2>Head</h2>" + paragraph(3), 4);
+  ASSERT_EQ(p.pages.size(), 2u);
+  EXPECT_EQ(p.pages[0], "LLL");
+  EXPECT_EQ(p.pages[1].substr(0, 2), "CL");
+}
+
+TEST(ChapterHtmlSlimParserPagination, AFullPageParagraphStillBreaks) {
+  ASSERT_GT(wordsPerLine(), 1);
+  // Nothing to keep together: the page simply fills.
+  PageParse p(paragraph(6), 4);
+  ASSERT_EQ(p.pages.size(), 2u);
+  EXPECT_EQ(p.pages[0], "LLLL");
+  EXPECT_EQ(p.pages[1], "LL");
+}
+
+TEST(ChapterHtmlSlimParserPagination, CssPageBreakBeforeStartsAPage) {
+  PageParse p("<p>one</p><p style=\"page-break-before: always\">two</p><p>three</p>", 8);
+  ASSERT_EQ(p.pages.size(), 2u);
+  EXPECT_EQ(p.pages[0], "L");
+  EXPECT_EQ(p.pages[1], "LL");
+}
+
+TEST(ChapterHtmlSlimParserPagination, CssBreakAfterStartsTheNextBlockOnAPage) {
+  PageParse p("<div style=\"break-after: page\"><p>one</p></div><p>two</p>", 8);
+  ASSERT_EQ(p.pages.size(), 2u);
+  EXPECT_EQ(p.pages[0], "L");
+  EXPECT_EQ(p.pages[1], "L");
+}
+
+TEST(ChapterHtmlSlimParserPagination, AutoPageBreaksDoNotBreak) {
+  PageParse p("<p>one</p><p style=\"page-break-before: auto\">two</p>", 8);
+  EXPECT_EQ(p.pages.size(), 1u);
+}
+
+TEST(ChapterHtmlSlimParserPagination, AFirstBlockWithAPageBreakAddsNoBlankPage) {
+  PageParse p("<p style=\"page-break-before: always\">one</p><p>two</p>", 8);
+  ASSERT_EQ(p.pages.size(), 1u);
+  EXPECT_EQ(p.pages[0], "LL");
+}
+
+TEST(ChapterHtmlSlimParserPagination, AnAnchorOnACarriedLineMovesWithIt) {
+  ASSERT_GT(wordsPerLine(), 1);
+  // The second paragraph's lone first line moves, and its id must name the page it now opens.
+  PageParse p(paragraph(3) + "<p id=\"second\">" + wordsWithMarkers(3 * wordsPerLine(), {}) + "</p>", 4);
+  ASSERT_EQ(p.pages.size(), 2u);
+  int page = -1;
+  for (const auto& [key, at] : p.parser->getAnchors()) {
+    if (key == "second") page = at;
+  }
+  EXPECT_EQ(page, 1);
+}

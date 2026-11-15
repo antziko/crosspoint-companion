@@ -102,6 +102,9 @@ struct CssPropertyFlags {
   uint16_t direction : 1;
   uint16_t verticalAlign : 1;
   uint16_t listStyleType : 1;
+  // Value-is-flag: set only for a forced break (always/page/left/right); auto/avoid are ignored.
+  uint16_t pageBreakBefore : 1;
+  uint16_t pageBreakAfter : 1;
 
   CssPropertyFlags()
       : textAlign(0),
@@ -122,12 +125,14 @@ struct CssPropertyFlags {
         display(0),
         direction(0),
         verticalAlign(0),
-        listStyleType(0) {}
+        listStyleType(0),
+        pageBreakBefore(0),
+        pageBreakAfter(0) {}
 
   [[nodiscard]] bool anySet() const {
     return textAlign || fontStyle || fontWeight || textDecoration || textIndent || marginTop || marginBottom ||
            marginLeft || marginRight || paddingTop || paddingBottom || paddingLeft || paddingRight || imageHeight ||
-           imageWidth || display || direction || verticalAlign || listStyleType;
+           imageWidth || display || direction || verticalAlign || listStyleType || pageBreakBefore || pageBreakAfter;
   }
 
   void clearAll() {
@@ -135,6 +140,7 @@ struct CssPropertyFlags {
     marginTop = marginBottom = marginLeft = marginRight = 0;
     paddingTop = paddingBottom = paddingLeft = paddingRight = 0;
     imageHeight = imageWidth = display = direction = verticalAlign = listStyleType = 0;
+    pageBreakBefore = pageBreakAfter = 0;
   }
 
   // Field-by-field equality (NOT memcmp: the bitfield has unused padding bits that the
@@ -145,14 +151,16 @@ struct CssPropertyFlags {
            marginBottom == o.marginBottom && marginLeft == o.marginLeft && marginRight == o.marginRight &&
            paddingTop == o.paddingTop && paddingBottom == o.paddingBottom && paddingLeft == o.paddingLeft &&
            paddingRight == o.paddingRight && imageHeight == o.imageHeight && imageWidth == o.imageWidth &&
-           display == o.display && direction == o.direction && verticalAlign == o.verticalAlign;
+           display == o.display && direction == o.direction && verticalAlign == o.verticalAlign &&
+           listStyleType == o.listStyleType && pageBreakBefore == o.pageBreakBefore &&
+           pageBreakAfter == o.pageBreakAfter;
   }
 };
 
-// Cache serializes defined flags as uint32_t with bit indices 0..18.
+// Cache serializes defined flags as uint32_t with bit indices 0..20.
 static_assert(sizeof(CssPropertyFlags) <= sizeof(uint32_t),
               "CssPropertyFlags exceeds 32 bits; update cache read/write in CssParser.cpp");
-static_assert(sizeof(CssPropertyFlags) * 8 >= 19,
+static_assert(sizeof(CssPropertyFlags) * 8 >= 21,
               "CssPropertyFlags has fewer bits than properties; update bitfield widths");
 
 // Represents a collection of CSS style properties
@@ -261,6 +269,8 @@ struct CssStyle {
       listStyleType = base.listStyleType;
       defined.listStyleType = 1;
     }
+    if (base.hasPageBreakBefore()) defined.pageBreakBefore = 1;
+    if (base.hasPageBreakAfter()) defined.pageBreakAfter = 1;
   }
 
   [[nodiscard]] bool hasTextAlign() const { return defined.textAlign; }
@@ -282,6 +292,8 @@ struct CssStyle {
   [[nodiscard]] bool hasDirection() const { return defined.direction; }
   [[nodiscard]] bool hasVerticalAlign() const { return defined.verticalAlign; }
   [[nodiscard]] bool hasListStyleType() const { return defined.listStyleType; }
+  [[nodiscard]] bool hasPageBreakBefore() const { return defined.pageBreakBefore; }
+  [[nodiscard]] bool hasPageBreakAfter() const { return defined.pageBreakAfter; }
 
   void reset() {
     textAlign = CssTextAlign::Left;

@@ -41,6 +41,12 @@ struct BlockStyle {
   // NOT propagated through getCombinedBlockStyle so it can't leak into sibling blocks.
   bool fromBrElement = false;
 
+  // Pagination hints, read while the chapter is laid out and never serialized: a heading keeps
+  // its lines with what follows it, and CSS page-break-before/after start a fresh page.
+  bool keepWithNext = false;
+  bool pageBreakBefore = false;
+  bool pageBreakAfter = false;
+
   // Combined insets (margin + padding)
   [[nodiscard]] int16_t leftInset() const { return marginLeft + paddingLeft; }
   [[nodiscard]] int16_t rightInset() const { return marginRight + paddingRight; }
@@ -101,6 +107,8 @@ struct BlockStyle {
       result.marginBottom = std::max(child.marginBottom, marginBottom);
       result.paddingTop = static_cast<int16_t>(child.paddingTop + paddingTop);
       result.paddingBottom = static_cast<int16_t>(child.paddingBottom + paddingBottom);
+      // A container's page-break-before still applies when its first child takes the block over.
+      result.pageBreakBefore = child.pageBreakBefore || pageBreakBefore;
     }
 
     // Direction is not axis-specific. Inherit from parent when child doesn't define it.
@@ -152,6 +160,8 @@ struct BlockStyle {
       blockStyle.isRtl = (cssStyle.direction == CssTextDirection::Rtl);
       blockStyle.directionDefined = true;
     }
+    blockStyle.pageBreakBefore = cssStyle.hasPageBreakBefore();
+    blockStyle.pageBreakAfter = cssStyle.hasPageBreakAfter();
     return blockStyle;
   }
 };

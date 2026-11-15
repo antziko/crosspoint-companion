@@ -636,6 +636,9 @@ void ChapterHtmlSlimParser::flushLongTextBlockIfNeeded() {
       (horizontalInset < viewportWidth) ? static_cast<uint16_t>(viewportWidth - horizontalInset) : viewportWidth;
   const size_t wordsBeforeFlush = currentTextBlock->size();
   bool topPending = !currentTextBlock->firstLineEmitted();
+  // The flush keeps the paragraph's last line back, so nothing here can be its lone last line.
+  if (!currentTextBlock->firstLineEmitted()) applyPendingPageBreak();
+  layoutParagraph = insideTableCell ? nullptr : currentTextBlock.get();
   currentTextBlock->layoutAndExtractLines(
       renderer, fontId, effectiveWidth,
       [this, &topPending](const std::shared_ptr<TextBlock>& textBlock, const uint32_t offset) {
@@ -644,6 +647,7 @@ void ChapterHtmlSlimParser::flushLongTextBlockIfNeeded() {
         this->addLineToPage(textBlock, offset);
       },
       false, characterSpacing, wordSpacingPercent, paragraphIndent);
+  layoutParagraph = nullptr;
   if (insideTableCell) shiftTableCellBreaks(wordsBeforeFlush - currentTextBlock->size());
   // A dropped word means the arena could not allocate. Route it through the existing
   // out-of-heap path so the build is abandoned rather than committing a cache whose text
@@ -697,8 +701,8 @@ void ChapterHtmlSlimParser::startNewTextBlock(const BlockStyle& blockStyle) {
   // If the pending anchor is a TOC chapter boundary, force a page break after the previous
   // block is flushed so the chapter starts on a fresh page.
   flushPendingAnchor();
-  currentTextBlock.reset(new (std::nothrow)
-                             ParsedText(paragraphSpacing != 0, blockHyphenationEnabled(), focusReadingEnabled, blockStyle));
+  currentTextBlock.reset(
+      new (std::nothrow) ParsedText(paragraphSpacing != 0, blockHyphenationEnabled(), focusReadingEnabled, blockStyle));
   if (!currentTextBlock) {
     signalOutOfMemory("startNewTextBlock: ParsedText");
     return;
@@ -1747,20 +1751,15 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                 const int clearMarginTop =
                     std::max<int>(imageMarginTop, self->lastLineGlyphBottom() - self->currentPageNextY);
 
-                // Create page for image - only break if image won't fit remaining space
+                self->applyPendingPageBreak();  // page-break-after / -before ahead of the image
+                if (self->outOfMemory_) return;
+                // Create page for image - only break if image won't fit remaining space. A heading
+                // at the page foot moves with the image it introduces.
                 if (self->currentPage && !self->currentPage->elements.empty() &&
                     (self->currentPageNextY + clearMarginTop + displayHeight + imageMarginBottom >
                      self->viewportHeight)) {
-                  self->completePageFn(std::move(self->currentPage), self->xpathParagraphIndex,
-                                       self->xpathListItemIndex, self->currentPageVisibleOffset);
-                  self->completedPageCount++;
-                  self->currentPage.reset(new (std::nothrow) Page());
-                  if (!self->currentPage) {
-                    self->signalOutOfMemory("image: page break");
-                    return;
-                  }
-                  self->currentPageNextY = 0;
-                  self->currentPageVisibleOffsetSet = false;
+                  self->breakPageCarryingLines(self->keepWithNextCarry(), 0, self->visibleTextOffset);
+                  if (self->outOfMemory_) return;
                 } else if (!self->currentPage) {
                   self->currentPage.reset(new (std::nothrow) Page());
                   if (!self->currentPage) {
@@ -2024,10 +2023,14 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
       headerBlockStyle.alignment = cssStyle.textAlign;
     }
     self->headingDepth = std::min(self->headingDepth, self->depth);
+    headerBlockStyle.keepWithNext = true;
     const auto accumulated =
         self->blockStyleStack.back().getCombinedBlockStyle(headerBlockStyle, BlockStyle::CombineAxis::Horizontal);
     self->blockStyleStack.push_back(accumulated);
     self->startNewTextBlock(accumulated.withoutBottom());
+    // The break belongs to the element's first block; blocks restarted from the stack after a
+    // child closes must not break again.
+    self->blockStyleStack.back().pageBreakBefore = false;
     self->boldUntilDepth = std::min(self->boldUntilDepth, self->depth);
     self->updateEffectiveInlineStyle();
   } else if (matches(name, BLOCK_TAGS, std::size(BLOCK_TAGS))) {
@@ -2092,6 +2095,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
         self->preBoxPadV = padV;
       }
       self->startNewTextBlock(self->blockStyleStack.back().withoutBottom());
+      self->blockStyleStack.back().pageBreakBefore = false;  // the element's first block only
       // Set after startNewTextBlock, which may still be laying out the preceding paragraph.
       if (opensPre) {
         // Replace, don't merge, spacing deposited by what came before (a trailing <br>'s blank
@@ -2760,12 +2764,15 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
         const auto style = self->currentTextBlock->getBlockStyle();
         self->currentTextBlock->setBlockStyle(style.addBottom(self->blockStyleStack.back()));
       }
+      const bool breakAfter = self->blockStyleStack.back().pageBreakAfter;
       self->blockStyleStack.pop_back();
       // Start a new text block with the parent style to prevent subsequent bare text
       // from inheriting the closed block style (e.g. alignment or margins).
       // Vertical margins and paddings are stripped
       self->startNewTextBlock(self->blockStyleStack.back().withoutTop().withoutBottom());
       self->updateEffectiveInlineStyle();
+      // Set after the closing element's own text was laid out above.
+      if (breakAfter) self->pendingPageBreak = true;
     }
 
     // </li> closes: if the bullet never got inline text (empty <li> or <li> with only
@@ -2994,9 +3001,24 @@ void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line, const
     currentPageVisibleOffsetSet = false;
   }
 
+  // The lines tracked for carrying are this page's; a page any other path completed has none.
+  if (recentLinesPage != completedPageCount) {
+    recentLineCount = 0;
+    paragraphLinesOnPage = 0;
+    keepWithNextLines = 0;
+    recentLinesPage = completedPageCount;
+  }
+
   // An open <pre> keeps room for its bottom padding and restarts its outline on the next page.
   const int boxPad = preBoxActive ? preBoxPadV : 0;
-  if (currentPageNextY + lineHeight + boxPad > viewportHeight) {
+  size_t paragraphLines = 0;
+  const size_t carry = currentPageNextY + lineHeight + boxPad > viewportHeight && !preBoxActive && tableDepth == 0
+                           ? linesToCarry(paragraphLines)
+                           : 0;
+  if (carry > 0) {
+    breakPageCarryingLines(carry, paragraphLines, visibleOffset);
+    if (outOfMemory_) return;
+  } else if (currentPageNextY + lineHeight + boxPad > viewportHeight) {
     if (preBoxActive) emitPreBox();
     setCurrentPageVisibleOffset(visibleOffset);
     completePageFn(std::move(currentPage), xpathParagraphIndex, xpathListItemIndex, currentPageVisibleOffset);
@@ -3008,6 +3030,10 @@ void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line, const
     }
     currentPageNextY = static_cast<int16_t>(boxPad);
     currentPageVisibleOffsetSet = false;
+    recentLineCount = 0;
+    paragraphLinesOnPage = 0;
+    keepWithNextLines = 0;
+    recentLinesPage = completedPageCount;
   }
   setCurrentPageVisibleOffset(visibleOffset);
   if (preBoxActive) {
@@ -3023,6 +3049,7 @@ void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line, const
     ++footnoteIt;
   }
   pendingFootnotes.erase(pendingFootnotes.begin(), footnoteIt);
+  const auto anchorsBefore = static_cast<uint32_t>(anchorData.size());
   if (pendingWordAnchorCount > 0) resolveWordAnchors();
 
   // Apply horizontal left inset (margin + padding) as x position offset
@@ -3048,6 +3075,149 @@ void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line, const
   }
   currentPage->elements.push_back(pageLine);
   currentPageNextY += lineHeight;
+  if (layoutParagraph && paragraphLinesOnPage < UINT8_MAX) paragraphLinesOnPage++;
+  if (recentLineCount == MAX_CARRIED_LINES) {
+    memmove(recentLineOffsets, recentLineOffsets + 1, sizeof(recentLineOffsets[0]) * (MAX_CARRIED_LINES - 1));
+    memmove(recentLineAnchors, recentLineAnchors + 1, sizeof(recentLineAnchors[0]) * (MAX_CARRIED_LINES - 1));
+    recentLineCount--;
+  }
+  recentLineOffsets[recentLineCount] = visibleOffset;
+  recentLineAnchors[recentLineCount] = anchorsBefore;
+  recentLineCount++;
+}
+
+// How many trailing lines the line that no longer fits takes to the next page with it. A
+// paragraph's single first line would sit alone at the page foot; its last line would open the
+// next page alone, so one line goes with it (two when that would leave one behind). A heading
+// whose following text would all move goes too.
+size_t ChapterHtmlSlimParser::linesToCarry(size_t& paragraphLines) const {
+  paragraphLines = 0;
+  if (layoutParagraph) {
+    if (paragraphLinesOnPage == 1) {
+      paragraphLines = 1;
+    } else if (paragraphLinesOnPage >= 2 && layoutParagraph->extractingLastLine()) {
+      paragraphLines = paragraphLinesOnPage >= 3 ? 1 : 2;
+    }
+  }
+  size_t carry = paragraphLines;
+  if (keepWithNextLines > 0 && paragraphLines == paragraphLinesOnPage) carry += keepWithNextLines;
+  if (canCarry(carry)) return carry;
+  if (canCarry(paragraphLines)) return paragraphLines;
+  paragraphLines = 0;
+  return 0;
+}
+
+size_t ChapterHtmlSlimParser::keepWithNextCarry() const {
+  if (recentLinesPage != completedPageCount) return 0;
+  return canCarry(keepWithNextLines) ? keepWithNextLines : 0;
+}
+
+// Only the page's trailing text lines move, and never everything on the page.
+bool ChapterHtmlSlimParser::canCarry(const size_t carry) const {
+  if (carry == 0) return true;
+  if (!currentPage || recentLinesPage != completedPageCount || carry > recentLineCount || carry > MAX_CARRIED_LINES) {
+    return false;
+  }
+  const auto& elements = currentPage->elements;
+  if (elements.size() <= carry) return false;
+  for (size_t i = 0; i < carry; ++i) {
+    if (elements[elements.size() - 1 - i]->getTag() != TAG_PageLine) return false;
+  }
+  return true;
+}
+
+// Completes the page, moving its last `carry` lines (validated by canCarry) with their links,
+// footnotes and anchors to the top of the next page, their spacing intact.
+void ChapterHtmlSlimParser::breakPageCarryingLines(const size_t carry, const size_t paragraphLines,
+                                                   const uint32_t visibleOffset) {
+  auto nextPage = std::unique_ptr<Page>(new (std::nothrow) Page());
+  if (!nextPage) {
+    signalOutOfMemory("carry: page break");
+    return;
+  }
+  std::shared_ptr<PageElement> carried[MAX_CARRIED_LINES];
+  uint32_t carriedOffsets[MAX_CARRIED_LINES] = {};
+  uint32_t carriedAnchors[MAX_CARRIED_LINES] = {};
+  for (size_t i = 0; i < carry; ++i) {
+    carried[carry - 1 - i] = std::move(currentPage->elements.back());
+    currentPage->elements.pop_back();
+    carriedOffsets[carry - 1 - i] = recentLineOffsets[recentLineCount - 1 - i];
+    carriedAnchors[carry - 1 - i] = recentLineAnchors[recentLineCount - 1 - i];
+  }
+  const int16_t carriedTop = carry > 0 ? carried[0]->yPos : 0;
+  const int16_t carriedBottom = currentPageNextY;
+  // Rare (a link on a page-foot line), and bounded by MAX_LINKS_PER_PAGE.
+  std::vector<PageLink> carriedLinks;
+  if (carry > 0) {
+    auto& links = currentPage->links;
+    for (auto it = links.begin(); it != links.end();) {
+      if (it->y + it->height > carriedTop) {
+        if (carriedLinks.empty()) carriedLinks.reserve(links.size());
+        carriedLinks.push_back(*it);
+        it = links.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    auto& footnotes = currentPage->footnotes;
+    for (auto it = footnotes.begin(); it != footnotes.end();) {
+      const auto refersToNote = [&it](const PageLink& link) { return strcmp(link.href, it->href) == 0; };
+      if (std::any_of(carriedLinks.begin(), carriedLinks.end(), refersToNote)) {
+        nextPage->addFootnote(it->number, it->href);
+        if (std::none_of(links.begin(), links.end(), refersToNote)) {
+          it = footnotes.erase(it);
+          continue;
+        }
+      }
+      ++it;
+    }
+  }
+
+  setCurrentPageVisibleOffset(visibleOffset);
+  completePageFn(std::move(currentPage), xpathParagraphIndex, xpathListItemIndex, currentPageVisibleOffset);
+  const auto leftPage = static_cast<uint16_t>(completedPageCount);
+  completedPageCount++;
+  // Anchors resolved on the carried lines name the page those lines now open.
+  if (carry > 0) {
+    for (size_t a = carriedAnchors[0]; a < anchorData.size(); ++a) {
+      if (anchorData[a].second == leftPage) anchorData[a].second = static_cast<uint16_t>(completedPageCount);
+    }
+  }
+  currentPage = std::move(nextPage);
+  currentPageNextY = 0;
+  currentPageVisibleOffsetSet = false;
+  recentLinesPage = completedPageCount;
+  recentLineCount = 0;
+
+  for (size_t i = 0; i < carry; ++i) {
+    carried[i]->yPos = static_cast<int16_t>(carried[i]->yPos - carriedTop);
+    setCurrentPageVisibleOffset(carriedOffsets[i]);
+    currentPage->elements.push_back(std::move(carried[i]));
+    recentLineOffsets[recentLineCount] = carriedOffsets[i];
+    recentLineAnchors[recentLineCount] = carriedAnchors[i];
+    recentLineCount++;
+  }
+  if (carry > 0) currentPageNextY = static_cast<int16_t>(carriedBottom - carriedTop);
+  for (const PageLink& link : carriedLinks) {
+    currentPage->addLink(link.href, link.x, static_cast<int16_t>(link.y - carriedTop), link.width, link.height);
+  }
+  paragraphLinesOnPage = static_cast<uint8_t>(paragraphLines);
+  keepWithNextLines = 0;  // what moved is now at the top of its page
+}
+
+// Honours a pending page-break-after and the current block's page-break-before, once, before
+// the block (or an image) places its first content. A heading at the page foot comes along.
+void ChapterHtmlSlimParser::applyPendingPageBreak() {
+  bool requested = pendingPageBreak;
+  pendingPageBreak = false;
+  if (currentTextBlock) {
+    BlockStyle& blockStyle = currentTextBlock->getBlockStyle();
+    requested = requested || blockStyle.pageBreakBefore;
+    blockStyle.pageBreakBefore = false;
+  }
+  if (!requested || !currentPage || currentPage->elements.empty()) return;
+  if (preBoxActive) emitPreBox();
+  breakPageCarryingLines(keepWithNextCarry(), 0, visibleTextOffset);
 }
 
 void ChapterHtmlSlimParser::applyBlockTopSpacing() {
@@ -3075,6 +3245,8 @@ void ChapterHtmlSlimParser::makePages() {
     currentPageNextY = 0;
     currentPageVisibleOffsetSet = false;
   }
+  if (!currentTextBlock->isEmpty()) applyPendingPageBreak();
+  if (outOfMemory_) return;
 
   const int lineHeight = renderer.getLineHeight(fontId, lineCompression);
 
@@ -3088,6 +3260,8 @@ void ChapterHtmlSlimParser::makePages() {
   const uint16_t effectiveWidth =
       (horizontalInset < viewportWidth) ? static_cast<uint16_t>(viewportWidth - horizontalInset) : viewportWidth;
 
+  if (recentLinesPage != completedPageCount) paragraphLinesOnPage = 0;
+  layoutParagraph = currentTextBlock.get();
   currentTextBlock->layoutAndExtractLines(
       renderer, fontId, effectiveWidth,
       [this, &topPending](const std::shared_ptr<TextBlock>& textBlock, const uint32_t offset) {
@@ -3096,6 +3270,13 @@ void ChapterHtmlSlimParser::makePages() {
         addLineToPage(textBlock, offset);
       },
       true, characterSpacing, wordSpacingPercent, paragraphIndent);
+  layoutParagraph = nullptr;
+  // A heading's lines at the page foot wait to move with what follows it.
+  keepWithNextLines =
+      blockStyle.keepWithNext && recentLinesPage == completedPageCount
+          ? static_cast<uint8_t>(std::min<size_t>(MAX_CARRIED_LINES, keepWithNextLines + paragraphLinesOnPage))
+          : 0;
+  paragraphLinesOnPage = 0;
   // An empty block still takes its top spacing, as before.
   if (topPending) applyBlockTopSpacing();
   if (currentTextBlock->hadDroppedWords()) signalOutOfMemory("layout: word arena");

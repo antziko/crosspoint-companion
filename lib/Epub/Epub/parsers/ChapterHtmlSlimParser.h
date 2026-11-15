@@ -211,6 +211,20 @@ class ChapterHtmlSlimParser {
   uint32_t partWordVisibleOffset = 0;
   uint32_t currentPageVisibleOffset = 0;
   bool currentPageVisibleOffsetSet = false;
+
+  // Page-foot line carrying: a paragraph's lone first or last line, and a heading with none of
+  // what follows it, move to the next page with their neighbours. Only the page's trailing text
+  // lines are tracked; a page completed by any other path (images, tables) resets them.
+  static constexpr size_t MAX_CARRIED_LINES = 6;
+  const ParsedText* layoutParagraph = nullptr;  // the block whose lines addLineToPage is placing
+  uint8_t paragraphLinesOnPage = 0;             // its lines on the current page
+  uint8_t keepWithNextLines = 0;                // a closed heading's lines at the page foot
+  uint8_t recentLineCount = 0;
+  uint32_t recentLineOffsets[MAX_CARRIED_LINES] = {};  // visible offsets of the last lines, newest last
+  uint32_t recentLineAnchors[MAX_CARRIED_LINES] = {};  // anchorData size before each of them
+  int recentLinesPage = -1;                            // completedPageCount the tracked lines are on
+  // A page-break-after waiting for the next block or image; see applyPendingPageBreak.
+  bool pendingPageBreak = false;
   bool insideBody = false;
   bool htmlEnded_ = false;
   bool syntheticCharacterData = false;
@@ -270,6 +284,11 @@ class ChapterHtmlSlimParser {
   void flushLongTextBlockIfNeeded();
   void applyBlockTopSpacing();
   void makePages();
+  size_t linesToCarry(size_t& paragraphLines) const;
+  size_t keepWithNextCarry() const;
+  bool canCarry(size_t carry) const;
+  void breakPageCarryingLines(size_t carry, size_t paragraphLines, uint32_t visibleOffset);
+  void applyPendingPageBreak();
   bool insidePre() const { return preDepth != INT_MAX && tableDepth == 0; }
   void breakPreLine();
   void emitPreBox();

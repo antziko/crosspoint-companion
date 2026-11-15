@@ -40,7 +40,7 @@ class CssParser {
   //      grew by one byte (upstream #3500)
   // v11: font-weight 600 is bold (the rule cache stores the interpreted weight)
   // v12: font-weight/font-style `inherit` is stored as its own value
-  static constexpr uint8_t CSS_CACHE_VERSION = 12;
+  static constexpr uint8_t CSS_CACHE_VERSION = 13;
 
   // The tag names and class tokens one chapter uses, so loadFromCache() keeps only the rules
   // resolveStyle() can match there. Hashes are case-insensitive FNV-1a; a class hashes with its

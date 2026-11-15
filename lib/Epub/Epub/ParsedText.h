@@ -76,6 +76,7 @@ class ParsedText {
   static inline uint32_t droppedLinkLines = 0;
   // A soft flush already emitted this paragraph's first line: the rest continues it, unindented.
   bool firstLineConsumed = false;
+  bool extractingLastLine_ = false;
   // A <pre> line: its first-line indent is exactly its leading spaces, never the reader's.
   bool preformatted = false;
   uint8_t preIndentSpaces = 0;
@@ -176,4 +177,6 @@ class ParsedText {
                              const std::function<void(std::shared_ptr<TextBlock>, uint32_t)>& processLine,
                              bool includeLastLine = true, int8_t characterSpacing = 0, uint8_t wordSpacingPercent = 100,
                              uint8_t paragraphIndent = PARAGRAPH_INDENT_BOOK);
+  // While processLine runs: whether the line it was handed ends the paragraph.
+  [[nodiscard]] bool extractingLastLine() const { return extractingLastLine_; }
 };

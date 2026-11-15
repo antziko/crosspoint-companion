@@ -436,6 +436,18 @@ void CssParser::parseDeclarationIntoStyle(const std::string& decl, CssStyle& sty
     // propValueBuf is already normalized and !important-stripped (see normalizedInto).
     style.listStyleType = (propValueBuf == "none") ? CssListStyleType::None : CssListStyleType::Disc;
     style.defined.listStyleType = 1;
+  } else if (propNameBuf == "page-break-before" || propNameBuf == "break-before" || propNameBuf == "page-break-after" ||
+             propNameBuf == "break-after") {
+    // Only a forced break is recorded; auto and avoid leave the layout to the reader.
+    const bool forced = propValueBuf == "always" || propValueBuf == "page" || propValueBuf == "left" ||
+                        propValueBuf == "right" || propValueBuf == "recto" || propValueBuf == "verso";
+    if (forced) {
+      if (propNameBuf.find("before") != std::string::npos) {
+        style.defined.pageBreakBefore = 1;
+      } else {
+        style.defined.pageBreakAfter = 1;
+      }
+    }
   }
 }
 
@@ -1066,6 +1078,8 @@ bool CssParser::saveToCache() const {
     if (style.defined.direction) definedBits |= 1 << 16;
     if (style.defined.verticalAlign) definedBits |= 1 << 17;
     if (style.defined.listStyleType) definedBits |= 1 << 18;
+    if (style.defined.pageBreakBefore) definedBits |= 1 << 19;
+    if (style.defined.pageBreakAfter) definedBits |= 1 << 20;
     file.write(reinterpret_cast<const uint8_t*>(&definedBits), sizeof(definedBits));
   }
 
@@ -1284,6 +1298,8 @@ bool CssParser::loadFromCache(const SelectorSet* only) {
     style.defined.direction = (definedBits & 1 << 16) != 0;
     style.defined.verticalAlign = (definedBits & 1 << 17) != 0;
     style.defined.listStyleType = (definedBits & 1 << 18) != 0;
+    style.defined.pageBreakBefore = (definedBits & 1 << 19) != 0;
+    style.defined.pageBreakAfter = (definedBits & 1 << 20) != 0;
 
     // Defend against caches that still carry empty rules (see store-time note):
     // an empty style contributes nothing to resolveStyle, so don't hold its heap.
