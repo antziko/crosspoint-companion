@@ -1327,9 +1327,7 @@ void EpubReaderActivity::loop() {
     if (landed) {
       launchHighlightWordSelect();
     } else if (pendingQuote_.active) {
-      const uint32_t covered = pendingQuote_.tokensBefore;
-      savePendingQuote(QuoteSpan::crossPageEndWord(pendingQuote_.startWord, covered > 0 ? covered - 1 : 0, 0), before,
-                       true);
+      savePendingQuoteSoFar(before);
       requestUpdate();
     }
     return;
@@ -2541,6 +2539,8 @@ void EpubReaderActivity::launchHighlightWordSelect(const int pointX, const int p
   }
   auto pageForSelect = section ? section->loadPage(section->currentPage) : nullptr;
   if (!pageForSelect) {
+    // A highlight carried onto this page keeps what the earlier pages selected.
+    savePendingQuoteSoFar(section ? section->currentPage - 1 : pendingQuote_.startPage);
     requestUpdate();
     return;
   }
@@ -2552,6 +2552,7 @@ void EpubReaderActivity::launchHighlightWordSelect(const int pointX, const int p
     currentPage = section->currentPage;
   }
   if (pageCount == 0) {
+    savePendingQuoteSoFar(currentPage - 1);
     requestUpdate();
     return;
   }
@@ -2587,10 +2588,17 @@ void EpubReaderActivity::launchHighlightWordSelect(const int pointX, const int p
       false, 0, DictionaryWordSelectActivity::Mode::HighlightRange, initialMarker, "", pointX, pointY);
   if (!highlightSelect) {
     LOG_ERR("EPUB", "OOM: DictionaryWordSelectActivity (highlight)");
+    savePendingQuoteSoFar(currentPage - 1);
+    requestUpdate();
     return;
   }
   highlightSelect->setPageMarkKey(currentPageMarkKey());
   highlightSelect->setContinuingHighlight(pendingQuote_.active);
+  // Running past the last word turns the page only while a next page of the chapter can take it.
+  highlightSelect->setHighlightCanContinue(
+      currentPage + 1 < pageCount &&
+      (!pendingQuote_.active ||
+       (pendingQuote_.pagesAdded + 1 < MAX_HIGHLIGHT_EXTRA_PAGES && pendingQuote_.preview.size() < QUOTE_PREVIEW_MAX)));
   if (wordScan) {
     highlightSelect->setWordScan(std::move(wordScan), wordScanCachePath(), spine, static_cast<uint16_t>(currentPage));
   }
@@ -2620,16 +2628,14 @@ void EpubReaderActivity::launchHighlightWordSelect(const int pointX, const int p
         q.pagesAdded++;
       }
       // Within the chapter, the span resolver's reach (kSpanPages) and the text the sync anchors by.
-      constexpr uint8_t kMaxExtraPages = 3;
-      const bool canContinue = q.pagesAdded < kMaxExtraPages && currentPage + 1 < pageCount &&
+      const bool canContinue = q.pagesAdded < MAX_HIGHLIGHT_EXTRA_PAGES && currentPage + 1 < pageCount &&
                                q.preview.size() < QUOTE_PREVIEW_MAX && q.tokensBefore > 0;
       if (canContinue) {
         highlightPageTurn_ = true;  // loop() turns the page and reopens highlight select
         return;
       }
       // Nowhere further to go: keep what is selected, ending at this page's last word.
-      savePendingQuote(QuoteSpan::crossPageEndWord(q.startWord, q.tokensBefore > 0 ? q.tokensBefore - 1 : 0, 0),
-                       currentPage, true);
+      savePendingQuoteSoFar(currentPage);
     } else if (const auto* hr = std::get_if<HighlightRangeResult>(&result.data)) {
       if (pendingQuote_.active) {
         auto& q = pendingQuote_;
@@ -2678,6 +2684,13 @@ void EpubReaderActivity::savePendingQuote(const uint16_t endWord, const int endP
     GUI.drawPopup(renderer, message);  // refreshes internally
     activityManager.holdForReading(900);
   }
+}
+
+void EpubReaderActivity::savePendingQuoteSoFar(const int endPage) {
+  if (!pendingQuote_.active) return;
+  const uint32_t covered = pendingQuote_.tokensBefore;
+  savePendingQuote(QuoteSpan::crossPageEndWord(pendingQuote_.startWord, covered > 0 ? covered - 1 : 0, 0),
+                   std::max(endPage, pendingQuote_.startPage), true);
 }
 
 int EpubReaderActivity::currentTocIndex() const {

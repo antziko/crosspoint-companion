@@ -104,6 +104,9 @@ class DictionaryWordSelectActivity final : public Activity {
   // HighlightRange: this page carries on a highlight begun on an earlier one. The range opens
   // already anchored on the first word, and Back drops the whole highlight.
   void setContinuingHighlight(const bool on) { continuingHighlight_ = on; }
+  // HighlightRange: a next page can take the range, so running past the last word (or a forward
+  // swipe) carries it on there.
+  void setHighlightCanContinue(const bool on) { highlightCanContinue_ = on; }
   // The pointed-at word anchors a phrase instead of being looked up; the next tapped word ends it.
   void setPhraseStart(const bool on) { phraseStart_ = on; }
   // The pointed-at word is part of this already-underlined phrase: look the whole phrase up at
@@ -323,6 +326,7 @@ class DictionaryWordSelectActivity final : public Activity {
   std::atomic<bool> firstFrameShown_{false};
   int startEdge_ = 0;
   bool continuingHighlight_ = false;
+  bool highlightCanContinue_ = false;
   bool scanCompactTried_ = false;
   // Word grouping as the gloss box reports it. Written by the loop's scan step, read by the
   // render task, which records what it last drew so a change gets one repaint.

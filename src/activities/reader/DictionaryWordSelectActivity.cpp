@@ -243,10 +243,10 @@ void DictionaryWordSelectActivity::onEnter() {
   navigator.setHoldJumps(gloss_ != nullptr);
   // Past the first or last word the gloss box turns the page instead of wrapping.
   navigator.setStopAtPageEdges(gloss_ != nullptr);
-  // A highlight range runs on past the last word instead of wrapping: the reader turns the page.
-  // Not on a vertical page, whose reader keeps highlights to one page.
+  // A highlight range runs on past the last word instead of wrapping when a next page can take it:
+  // the reader turns the page. Not on a vertical page, whose reader keeps highlights to one page.
   if (mode_ == Mode::HighlightRange && !navigator.isVertical()) {
-    navigator.setRangeStopsAtPageEnd(true);
+    navigator.setRangeStopsAtPageEnd(highlightCanContinue_);
     if (continuingHighlight_) navigator.beginMultiSelectAt(0);
   }
   glossTracksCursor_ = gloss_ && glossCursorOut_;
@@ -968,8 +968,8 @@ void DictionaryWordSelectActivity::loop() {
   const bool autoRange = autoRangeActive();  // a card word picks like a single word
   const bool glossRanging = gloss_ && mode_ == Mode::Dictionary;
   // A forward swipe while a highlight range is open carries it on to the next page.
-  if (tapRanging && navigator.isMultiSelecting() && !navigator.isVertical() && mappedInput.hasTouch() &&
-      mappedInput.wasSwipe() == MappedInputManager::SwipeDir::Left) {
+  if (tapRanging && highlightCanContinue_ && navigator.isMultiSelecting() && !navigator.isVertical() &&
+      mappedInput.hasTouch() && mappedInput.wasSwipe() == MappedInputManager::SwipeDir::Left) {
     emitContinueResult();
     return;
   }

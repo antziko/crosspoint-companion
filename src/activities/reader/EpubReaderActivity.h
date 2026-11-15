@@ -286,6 +286,8 @@ class EpubReaderActivity final : public Activity {
     std::string preview;
   };
   PendingQuote pendingQuote_;
+  // Pages a highlight may run on past its start page: the span resolver's reach (kSpanPages).
+  static constexpr uint8_t MAX_HIGHLIGHT_EXTRA_PAGES = 3;
   // A highlight range ran off the page: loop() turns it and reopens highlight select there.
   bool highlightPageTurn_ = false;
   // Translate Page was picked: loop() repaints the page under the menu, then opens the panel.
@@ -692,6 +694,8 @@ class EpubReaderActivity final : public Activity {
   // BookmarkStore::addQuote. Shared by the no-existing-quote path and the "Add new" choice.
   void launchHighlightWordSelect(int pointX = -1, int pointY = -1);
   void savePendingQuote(uint16_t endWord, int endPage, bool cutShort);
+  // Saves the open highlight as far as the pages already passed (it ends on endPage's last word).
+  void savePendingQuoteSoFar(int endPage);
   // The page long-press menu (touch boards): offer Look Up / Highlight for the word at
   // (x, y), plus Delete when that word is one this book already has a flashcard for. The point
   // is not resolved to a word for the first two -- the activity each choice opens does that,
