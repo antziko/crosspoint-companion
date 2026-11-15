@@ -57,3 +57,5 @@ void PageHorizontalRule::render(GfxRenderer&, int, int, int) {}
 bool PageHorizontalRule::serialize(HalFile&) { return false; }
 void PageBox::render(GfxRenderer&, int, int, int) {}
 bool PageBox::serialize(HalFile&) { return false; }
+void PageBorderBox::render(GfxRenderer&, int, int, int) {}
+bool PageBorderBox::serialize(HalFile&) { return false; }

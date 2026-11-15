@@ -12,12 +12,14 @@
 #include "PageLink.h"
 #include "blocks/ImageBlock.h"
 #include "blocks/TextBlock.h"
+#include "css/CssStyle.h"
 
 enum PageElementTag : uint8_t {
   TAG_PageLine = 1,
   TAG_PageImage = 2,
   TAG_PageHorizontalRule = 3,
   TAG_PageBox = 4,
+  TAG_PageBorderBox = 5,
 };
 
 // represents something that has been added to a page
@@ -90,6 +92,33 @@ class PageBox final : public PageElement {
   bool serialize(HalFile& file) override;
   PageElementTag getTag() const override { return TAG_PageBox; }
   static std::unique_ptr<PageBox> deserialize(HalFile& file);
+};
+
+// A CSS border and/or light shade around a block's content; one per page the block spans, with
+// the edges a page break cuts left open. Kept ahead of the page's text in `elements`, so the
+// shade is painted before (under) the words.
+class PageBorderBox final : public PageElement {
+  uint16_t width;
+  uint16_t height;
+  CssBorderSide sides[4];  // top, right, bottom, left
+  bool shaded;
+
+ public:
+  PageBorderBox(uint16_t width, uint16_t height, const CssBorderSide (&sides)[4], bool shaded, int16_t xPos,
+                int16_t yPos)
+      : PageElement(xPos, yPos),
+        width(width),
+        height(height),
+        sides{sides[0], sides[1], sides[2], sides[3]},
+        shaded(shaded) {}
+  uint16_t getHeight() const { return height; }
+  const CssBorderSide& side(const int i) const { return sides[i]; }  // 0 top, 1 right, 2 bottom, 3 left
+  bool isShaded() const { return shaded; }
+
+  void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset) override;
+  bool serialize(HalFile& file) override;
+  PageElementTag getTag() const override { return TAG_PageBorderBox; }
+  static std::unique_ptr<PageBorderBox> deserialize(HalFile& file);
 };
 
 class Page {

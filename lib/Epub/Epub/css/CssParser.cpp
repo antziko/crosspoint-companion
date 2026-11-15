@@ -132,6 +132,225 @@ std::string_view stripTrailingImportant(std::string_view value) {
   return value;
 }
 
+// Calls fn(token) for each space-separated token of an already-normalized value.
+template <typename Fn>
+void forEachSpaceToken(const std::string_view value, Fn&& fn) {
+  size_t start = 0;
+  while (start < value.size()) {
+    size_t end = value.find(' ', start);
+    if (end == std::string_view::npos) end = value.size();
+    if (end > start) fn(value.substr(start, end - start));
+    start = end + 1;
+  }
+}
+
+// CSS pixels for a border width token (thin/medium/thick or a length); false if not a width.
+bool interpretBorderWidth(const std::string_view token, uint8_t& out) {
+  static constexpr std::string_view KEYWORDS[] = {"thin", "medium", "thick"};
+  for (uint8_t i = 0; i < std::size(KEYWORDS); ++i) {
+    if (token == KEYWORDS[i]) {
+      out = i + 1;
+      return true;
+    }
+  }
+  size_t unitStart = 0;
+  float number = 0.0f;
+  float scale = 0.0f;  // > 0 once past the decimal point
+  bool digits = false;
+  for (; unitStart < token.size(); ++unitStart) {
+    const char c = token[unitStart];
+    if (c >= '0' && c <= '9') {
+      digits = true;
+      if (scale > 0.0f) {
+        number += static_cast<float>(c - '0') * scale;
+        scale *= 0.1f;
+      } else {
+        number = number * 10.0f + static_cast<float>(c - '0');
+      }
+    } else if (c == '.' && scale == 0.0f) {
+      scale = 0.1f;
+    } else {
+      break;
+    }
+  }
+  if (!digits) return false;
+  const std::string_view unit = token.substr(unitStart);
+  if (unit == "pt") {
+    number = number * 4.0f / 3.0f;
+  } else if (unit == "em" || unit == "rem") {
+    number *= 16.0f;
+  } else if (!unit.empty() && unit != "px") {
+    return false;
+  }
+  // Hairlines stay visible; very thick borders are capped.
+  out = number <= 0.0f ? 0 : static_cast<uint8_t>(std::clamp(number + 0.5f, 1.0f, 16.0f));
+  return true;
+}
+
+bool interpretBorderStyle(const std::string_view token, CssBorderStyle& out) {
+  if (token == "none" || token == "hidden") {
+    out = CssBorderStyle::None;
+  } else if (token == "solid" || token == "groove" || token == "ridge" || token == "inset" || token == "outset") {
+    out = CssBorderStyle::Solid;
+  } else if (token == "double") {
+    out = CssBorderStyle::Double;
+  } else if (token == "dotted") {
+    out = CssBorderStyle::Dotted;
+  } else if (token == "dashed") {
+    out = CssBorderStyle::Dashed;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+// "1px solid #000" -> width and style; colours are ignored (borders draw black).
+CssBorderSide interpretBorderShorthand(const std::string_view value) {
+  CssBorderSide side;
+  bool hasWidth = false;
+  forEachSpaceToken(value, [&](const std::string_view token) {
+    uint8_t width = 0;
+    CssBorderStyle style = CssBorderStyle::None;
+    if (interpretBorderWidth(token, width)) {
+      side.width = width;
+      hasWidth = true;
+    } else if (interpretBorderStyle(token, style)) {
+      side.style = style;
+    }
+  });
+  if (!hasWidth) side.width = 2;  // medium
+  return side;
+}
+
+int hexNibble(const char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  return c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+}
+
+// Perceived brightness (0-255) of the first colour in a background value, or -1.
+int colorLuminance(const std::string_view value) {
+  const auto luminance = [](const int r, const int g, const int b) { return (r * 299 + g * 587 + b * 114) / 1000; };
+  const size_t rgb = value.find("rgb");
+  if (rgb != std::string_view::npos) {
+    int channels[3] = {};
+    int count = 0;
+    int current = -1;
+    for (size_t i = value.find('(', rgb); i != std::string_view::npos && i < value.size() && count < 3; ++i) {
+      if (value[i] >= '0' && value[i] <= '9') {
+        current = (current < 0 ? 0 : current * 10) + (value[i] - '0');
+      } else if (current >= 0) {
+        channels[count++] = value[i] == '%' ? current * 255 / 100 : std::min(current, 255);
+        current = -1;
+      }
+    }
+    return count == 3 ? luminance(channels[0], channels[1], channels[2]) : -1;
+  }
+
+  struct Named {
+    std::string_view name;
+    int luminance;
+  };
+  static constexpr Named NAMED[] = {
+      {"white", 255},   {"whitesmoke", 245}, {"gainsboro", 220},   {"lightgray", 211}, {"lightgrey", 211},
+      {"silver", 192},  {"darkgray", 169},   {"darkgrey", 169},    {"gray", 128},      {"grey", 128},
+      {"dimgray", 105}, {"dimgrey", 105},    {"black", 0},         {"ivory", 254},     {"beige", 243},
+      {"linen", 244},   {"lavender", 235},   {"transparent", 255},
+  };
+  int result = -1;
+  forEachSpaceToken(value, [&](const std::string_view token) {
+    if (result >= 0) return;
+    if (token.size() > 1 && token[0] == '#') {
+      const std::string_view hex = token.substr(1);
+      int c[3] = {-1, -1, -1};
+      if (hex.size() == 3 || hex.size() == 4) {
+        for (int i = 0; i < 3; ++i) c[i] = hexNibble(hex[i]) < 0 ? -1 : hexNibble(hex[i]) * 17;
+      } else if (hex.size() == 6 || hex.size() == 8) {
+        for (int i = 0; i < 3; ++i) {
+          const int hi = hexNibble(hex[2 * i]);
+          const int lo = hexNibble(hex[2 * i + 1]);
+          c[i] = hi < 0 || lo < 0 ? -1 : hi * 16 + lo;
+        }
+      }
+      if (c[0] >= 0 && c[1] >= 0 && c[2] >= 0) result = luminance(c[0], c[1], c[2]);
+      return;
+    }
+    for (const Named& named : NAMED) {
+      if (token == named.name) {
+        result = named.luminance;
+        return;
+      }
+    }
+  });
+  return result;
+}
+
+// Light backgrounds shade the box; white is invisible on paper, and dark ones are skipped
+// because the text inside stays black.
+bool interpretShade(const std::string_view value) {
+  const int luminance = colorLuminance(value);
+  return luminance >= 128 && luminance < 240;
+}
+
+// border, border-width, border-style, border-<side>, border-<side>-width, border-<side>-style.
+// Colours are ignored. Returns false for a name that is not one of these.
+bool parseBorderDeclaration(const std::string_view name, const std::string_view value, CssStyle& style) {
+  CssBorderSide* sides[4] = {&style.borderTop, &style.borderRight, &style.borderBottom, &style.borderLeft};
+  const auto markDefined = [&style](const size_t side, const bool width, const bool borderStyle) {
+    if (width) style.borderWidthsDefined |= 1u << side;
+    if (borderStyle) style.borderStylesDefined |= 1u << side;
+    if (side == 0) style.defined.borderTop = 1;
+    if (side == 1) style.defined.borderRight = 1;
+    if (side == 2) style.defined.borderBottom = 1;
+    if (side == 3) style.defined.borderLeft = 1;
+  };
+  if (name == "border") {
+    const CssBorderSide side = interpretBorderShorthand(value);
+    for (size_t i = 0; i < 4; ++i) {
+      *sides[i] = side;
+      markDefined(i, true, true);
+    }
+    return true;
+  }
+  // border-width / border-style take 1-4 edge values (top, right, bottom, left).
+  const bool edgeWidths = name == "border-width";
+  if (edgeWidths || name == "border-style") {
+    std::string_view tokens[4];
+    size_t count = 0;
+    forEachSpaceToken(value, [&](const std::string_view token) {
+      if (count < 4) tokens[count++] = token;
+    });
+    if (count == 0) return true;
+    const size_t source[4] = {0, count >= 2 ? 1u : 0u, count >= 3 ? 2u : 0u, count >= 4 ? 3u : (count >= 2 ? 1u : 0u)};
+    for (size_t i = 0; i < 4; ++i) {
+      const std::string_view token = tokens[source[i]];
+      if (edgeWidths ? interpretBorderWidth(token, sides[i]->width) : interpretBorderStyle(token, sides[i]->style)) {
+        markDefined(i, edgeWidths, !edgeWidths);
+      }
+    }
+    return true;
+  }
+  static constexpr std::string_view PREFIX = "border-";
+  static constexpr std::string_view SIDE_NAMES[] = {"top", "right", "bottom", "left"};
+  if (name.size() <= PREFIX.size() || name.substr(0, PREFIX.size()) != PREFIX) return false;
+  const std::string_view rest = name.substr(PREFIX.size());
+  for (size_t i = 0; i < 4; ++i) {
+    if (rest.substr(0, SIDE_NAMES[i].size()) != SIDE_NAMES[i]) continue;
+    const std::string_view suffix = rest.substr(SIDE_NAMES[i].size());
+    if (suffix.empty()) {
+      *sides[i] = interpretBorderShorthand(value);
+      markDefined(i, true, true);
+    } else if (suffix == "-width") {
+      if (interpretBorderWidth(value, sides[i]->width)) markDefined(i, true, false);
+    } else if (suffix == "-style") {
+      if (interpretBorderStyle(value, sides[i]->style)) markDefined(i, false, true);
+    } else {
+      return false;
+    }
+    return true;
+  }
+  return false;
+}
+
 }  // anonymous namespace
 
 // String utilities implementation
@@ -436,6 +655,11 @@ void CssParser::parseDeclarationIntoStyle(const std::string& decl, CssStyle& sty
     // propValueBuf is already normalized and !important-stripped (see normalizedInto).
     style.listStyleType = (propValueBuf == "none") ? CssListStyleType::None : CssListStyleType::Disc;
     style.defined.listStyleType = 1;
+  } else if (propNameBuf == "background-color" || propNameBuf == "background") {
+    style.shaded = interpretShade(propValueBuf);
+    style.defined.shaded = 1;
+  } else if (propNameBuf.compare(0, 6, "border") == 0) {
+    parseBorderDeclaration(propNameBuf, propValueBuf, style);
   } else if (propNameBuf == "page-break-before" || propNameBuf == "break-before" || propNameBuf == "page-break-after" ||
              propNameBuf == "break-after") {
     // Only a forced break is recorded; auto and avoid leave the layout to the reader.
@@ -1080,7 +1304,23 @@ bool CssParser::saveToCache() const {
     if (style.defined.listStyleType) definedBits |= 1 << 18;
     if (style.defined.pageBreakBefore) definedBits |= 1 << 19;
     if (style.defined.pageBreakAfter) definedBits |= 1 << 20;
+    if (style.defined.borderTop) definedBits |= 1 << 21;
+    if (style.defined.borderRight) definedBits |= 1 << 22;
+    if (style.defined.borderBottom) definedBits |= 1 << 23;
+    if (style.defined.borderLeft) definedBits |= 1 << 24;
+    if (style.defined.shaded) definedBits |= 1 << 25;
     file.write(reinterpret_cast<const uint8_t*>(&definedBits), sizeof(definedBits));
+
+    // Borders: width + style per side (top, right, bottom, left), the declared-part masks, shade.
+    uint8_t border[BORDER_RECORD_BYTES];
+    size_t at = 0;
+    for (const CssBorderSide* side : {&style.borderTop, &style.borderRight, &style.borderBottom, &style.borderLeft}) {
+      border[at++] = side->width;
+      border[at++] = static_cast<uint8_t>(side->style);
+    }
+    border[at++] = static_cast<uint8_t>(style.borderWidthsDefined | (style.borderStylesDefined << 4));
+    border[at++] = style.shaded ? 1 : 0;
+    file.write(border, sizeof(border));
   }
 
   LOG_DBG("CSS", "Saved %u rules to cache", ruleCount);
@@ -1300,6 +1540,34 @@ bool CssParser::loadFromCache(const SelectorSet* only) {
     style.defined.listStyleType = (definedBits & 1 << 18) != 0;
     style.defined.pageBreakBefore = (definedBits & 1 << 19) != 0;
     style.defined.pageBreakAfter = (definedBits & 1 << 20) != 0;
+    style.defined.borderTop = (definedBits & 1 << 21) != 0;
+    style.defined.borderRight = (definedBits & 1 << 22) != 0;
+    style.defined.borderBottom = (definedBits & 1 << 23) != 0;
+    style.defined.borderLeft = (definedBits & 1 << 24) != 0;
+    style.defined.shaded = (definedBits & 1 << 25) != 0;
+
+    uint8_t border[BORDER_RECORD_BYTES];
+    if (file.read(border, sizeof(border)) != sizeof(border)) {
+      rulesBySelector_.clear();
+      return false;
+    }
+    {
+      size_t at = 0;
+      bool borderOk = true;
+      for (CssBorderSide* side : {&style.borderTop, &style.borderRight, &style.borderBottom, &style.borderLeft}) {
+        side->width = border[at++];
+        const uint8_t borderStyle = border[at++];
+        if (borderStyle > static_cast<uint8_t>(CssBorderStyle::Dashed)) borderOk = false;
+        side->style = static_cast<CssBorderStyle>(borderStyle);
+      }
+      style.borderWidthsDefined = border[at] & 0x0f;
+      style.borderStylesDefined = border[at++] >> 4;
+      if (border[at] > 1 || !borderOk) {
+        rulesBySelector_.clear();
+        return false;
+      }
+      style.shaded = border[at] != 0;
+    }
 
     // Defend against caches that still carry empty rules (see store-time note):
     // an empty style contributes nothing to resolveStyle, so don't hold its heap.
@@ -1353,7 +1621,7 @@ size_t CssParser::collectVerticalStyles(std::vector<VerticalBlockRule>& out, con
   if (out.capacity() < maxOut) out.reserve(maxOut);
 
   // Record layout, as loadFromCache() reads it: selector, 5 enum bytes, 11 lengths (float + unit),
-  // display, verticalAlign, listStyleType, defined bits.
+  // display, verticalAlign, listStyleType, defined bits, border record.
   constexpr size_t kLengthCount = 11;
   std::string selector;
   for (uint16_t i = 0; i < ruleCount && out.size() < maxOut; i++) {
@@ -1379,8 +1647,10 @@ size_t CssParser::collectVerticalStyles(std::vector<VerticalBlockRule>& out, con
     if (!lenOk) break;
     uint8_t tail[3];  // display, verticalAlign, listStyleType
     uint32_t definedBits = 0;
+    uint8_t border[BORDER_RECORD_BYTES];  // unused by the vertical engine
     if (file.read(tail, sizeof(tail)) != sizeof(tail) ||
-        file.read(&definedBits, sizeof(definedBits)) != sizeof(definedBits)) {
+        file.read(&definedBits, sizeof(definedBits)) != sizeof(definedBits) ||
+        file.read(border, sizeof(border)) != sizeof(border)) {
       break;
     }
 

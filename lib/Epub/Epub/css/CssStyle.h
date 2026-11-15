@@ -81,6 +81,17 @@ enum class CssVerticalAlign : uint8_t { Baseline = 0, Super = 1, Sub = 2 };
 // list-style-type — only None and Disc (bullet) are relevant for rendering
 enum class CssListStyleType : uint8_t { Disc = 0, None = 1 };
 
+enum class CssBorderStyle : uint8_t { None = 0, Solid = 1, Double = 2, Dotted = 3, Dashed = 4 };
+
+// One box edge. Width is in CSS pixels; a side draws only when both width and style are set.
+struct CssBorderSide {
+  uint8_t width = 0;
+  CssBorderStyle style = CssBorderStyle::None;
+
+  [[nodiscard]] bool visible() const { return width > 0 && style != CssBorderStyle::None; }
+  bool operator==(const CssBorderSide& o) const { return width == o.width && style == o.style; }
+};
+
 // Bitmask for tracking which properties have been explicitly set
 struct CssPropertyFlags {
   uint16_t textAlign : 1;
@@ -105,6 +116,11 @@ struct CssPropertyFlags {
   // Value-is-flag: set only for a forced break (always/page/left/right); auto/avoid are ignored.
   uint16_t pageBreakBefore : 1;
   uint16_t pageBreakAfter : 1;
+  uint16_t borderTop : 1;
+  uint16_t borderRight : 1;
+  uint16_t borderBottom : 1;
+  uint16_t borderLeft : 1;
+  uint16_t shaded : 1;
 
   CssPropertyFlags()
       : textAlign(0),
@@ -127,12 +143,18 @@ struct CssPropertyFlags {
         verticalAlign(0),
         listStyleType(0),
         pageBreakBefore(0),
-        pageBreakAfter(0) {}
+        pageBreakAfter(0),
+        borderTop(0),
+        borderRight(0),
+        borderBottom(0),
+        borderLeft(0),
+        shaded(0) {}
 
   [[nodiscard]] bool anySet() const {
     return textAlign || fontStyle || fontWeight || textDecoration || textIndent || marginTop || marginBottom ||
            marginLeft || marginRight || paddingTop || paddingBottom || paddingLeft || paddingRight || imageHeight ||
-           imageWidth || display || direction || verticalAlign || listStyleType || pageBreakBefore || pageBreakAfter;
+           imageWidth || display || direction || verticalAlign || listStyleType || pageBreakBefore || pageBreakAfter ||
+           borderTop || borderRight || borderBottom || borderLeft || shaded;
   }
 
   void clearAll() {
@@ -141,6 +163,7 @@ struct CssPropertyFlags {
     paddingTop = paddingBottom = paddingLeft = paddingRight = 0;
     imageHeight = imageWidth = display = direction = verticalAlign = listStyleType = 0;
     pageBreakBefore = pageBreakAfter = 0;
+    borderTop = borderRight = borderBottom = borderLeft = shaded = 0;
   }
 
   // Field-by-field equality (NOT memcmp: the bitfield has unused padding bits that the
@@ -153,14 +176,15 @@ struct CssPropertyFlags {
            paddingRight == o.paddingRight && imageHeight == o.imageHeight && imageWidth == o.imageWidth &&
            display == o.display && direction == o.direction && verticalAlign == o.verticalAlign &&
            listStyleType == o.listStyleType && pageBreakBefore == o.pageBreakBefore &&
-           pageBreakAfter == o.pageBreakAfter;
+           pageBreakAfter == o.pageBreakAfter && borderTop == o.borderTop && borderRight == o.borderRight &&
+           borderBottom == o.borderBottom && borderLeft == o.borderLeft && shaded == o.shaded;
   }
 };
 
 // Cache serializes defined flags as uint32_t with bit indices 0..20.
 static_assert(sizeof(CssPropertyFlags) <= sizeof(uint32_t),
               "CssPropertyFlags exceeds 32 bits; update cache read/write in CssParser.cpp");
-static_assert(sizeof(CssPropertyFlags) * 8 >= 21,
+static_assert(sizeof(CssPropertyFlags) * 8 >= 26,
               "CssPropertyFlags has fewer bits than properties; update bitfield widths");
 
 // Represents a collection of CSS style properties
@@ -187,6 +211,12 @@ struct CssStyle {
   CssDisplay display = CssDisplay::Block;                       // display property (Block or None)
   CssVerticalAlign verticalAlign = CssVerticalAlign::Baseline;  // vertical-align (super/sub positioning)
   CssListStyleType listStyleType = CssListStyleType::Disc;      // list-style-type (Disc or None)
+  CssBorderSide borderTop, borderRight, borderBottom, borderLeft;
+  // Which parts of each side were declared, one bit per side (top, right, bottom, left), so a
+  // later border-width keeps an earlier border-style and the reverse.
+  uint8_t borderWidthsDefined = 0;
+  uint8_t borderStylesDefined = 0;
+  bool shaded = false;  // a light background-color, drawn as a gray fill
 
   CssPropertyFlags defined;  // Tracks which properties were explicitly set
 
@@ -271,7 +301,38 @@ struct CssStyle {
     }
     if (base.hasPageBreakBefore()) defined.pageBreakBefore = 1;
     if (base.hasPageBreakAfter()) defined.pageBreakAfter = 1;
+    const auto applyBorder = [&](CssBorderSide& side, const CssBorderSide& incoming, const uint8_t bit) {
+      if (base.borderWidthsDefined & bit) side.width = incoming.width;
+      if (base.borderStylesDefined & bit) side.style = incoming.style;
+    };
+    borderWidthsDefined |= base.borderWidthsDefined;
+    borderStylesDefined |= base.borderStylesDefined;
+    if (base.defined.borderTop) {
+      applyBorder(borderTop, base.borderTop, 1);
+      defined.borderTop = 1;
+    }
+    if (base.defined.borderRight) {
+      applyBorder(borderRight, base.borderRight, 2);
+      defined.borderRight = 1;
+    }
+    if (base.defined.borderBottom) {
+      applyBorder(borderBottom, base.borderBottom, 4);
+      defined.borderBottom = 1;
+    }
+    if (base.defined.borderLeft) {
+      applyBorder(borderLeft, base.borderLeft, 8);
+      defined.borderLeft = 1;
+    }
+    if (base.defined.shaded) {
+      shaded = base.shaded;
+      defined.shaded = 1;
+    }
   }
+
+  [[nodiscard]] bool hasVisibleBorder() const {
+    return borderTop.visible() || borderRight.visible() || borderBottom.visible() || borderLeft.visible();
+  }
+  [[nodiscard]] bool isShaded() const { return defined.shaded && shaded; }
 
   [[nodiscard]] bool hasTextAlign() const { return defined.textAlign; }
   [[nodiscard]] bool hasFontStyle() const { return defined.fontStyle; }
@@ -308,6 +369,9 @@ struct CssStyle {
     display = CssDisplay::Block;
     verticalAlign = CssVerticalAlign::Baseline;
     listStyleType = CssListStyleType::Disc;
+    borderTop = borderRight = borderBottom = borderLeft = CssBorderSide{};
+    borderWidthsDefined = borderStylesDefined = 0;
+    shaded = false;
     defined.clearAll();
   }
 
@@ -321,6 +385,9 @@ struct CssStyle {
            marginRight == o.marginRight && paddingTop == o.paddingTop && paddingBottom == o.paddingBottom &&
            paddingLeft == o.paddingLeft && paddingRight == o.paddingRight && imageHeight == o.imageHeight &&
            imageWidth == o.imageWidth && display == o.display && verticalAlign == o.verticalAlign &&
-           defined == o.defined;
+           listStyleType == o.listStyleType && borderTop == o.borderTop && borderRight == o.borderRight &&
+           borderBottom == o.borderBottom && borderLeft == o.borderLeft &&
+           borderWidthsDefined == o.borderWidthsDefined && borderStylesDefined == o.borderStylesDefined &&
+           shaded == o.shaded && defined == o.defined;
   }
 };

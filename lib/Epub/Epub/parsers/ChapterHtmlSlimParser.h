@@ -225,6 +225,23 @@ class ChapterHtmlSlimParser {
   int recentLinesPage = -1;                            // completedPageCount the tracked lines are on
   // A page-break-after waiting for the next block or image; see applyPendingPageBreak.
   bool pendingPageBreak = false;
+  // Open elements with a CSS border or light shade; each emits a PageBorderBox around its
+  // content on every page it spans. Deeper nesting than this draws no further boxes.
+  struct BoxScope {
+    int depth = 0;
+    int16_t left = 0;
+    int16_t right = 0;
+    int16_t padTop = 0;  // outer edge to content, border included
+    int16_t padBottom = 0;
+    CssBorderSide sides[4];  // top, right, bottom, left
+    bool shaded = false;
+    int16_t top = -1;  // content extent on the current page, -1 while it has none
+    int16_t bottom = -1;
+    bool continued = false;  // began on an earlier page
+  };
+  static constexpr size_t MAX_BOX_SCOPES = 2;
+  BoxScope boxScopes[MAX_BOX_SCOPES];
+  uint8_t boxScopeCount = 0;
   bool insideBody = false;
   bool htmlEnded_ = false;
   bool syntheticCharacterData = false;
@@ -289,6 +306,12 @@ class ChapterHtmlSlimParser {
   bool canCarry(size_t carry) const;
   void breakPageCarryingLines(size_t carry, size_t paragraphLines, uint32_t visibleOffset);
   void applyPendingPageBreak();
+  // Hands the current page to completePageFn, first closing each open box's slice on it.
+  void emitCurrentPage();
+  void noteContent(int top, int bottom);
+  void openBoxScope(BlockStyle& ownStyle, const CssStyle& cssStyle);
+  void closeBoxScope();
+  void emitBoxSegment(const BoxScope& box, bool closing);
   bool insidePre() const { return preDepth != INT_MAX && tableDepth == 0; }
   void breakPreLine();
   void emitPreBox();

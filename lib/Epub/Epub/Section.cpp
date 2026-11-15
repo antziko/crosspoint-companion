@@ -171,7 +171,7 @@ namespace {
 // v86: Line spacing multiplies font size instead of advanceY; rules, table separators and images
 //      start below the previous line's glyphs.
 // v87: Static GIF images are decoded and laid out instead of skipped.
-constexpr uint8_t SECTION_FILE_VERSION = 88;
+constexpr uint8_t SECTION_FILE_VERSION = 89;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects

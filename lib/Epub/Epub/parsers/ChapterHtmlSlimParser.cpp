@@ -351,7 +351,7 @@ void ChapterHtmlSlimParser::flushPendingAnchor() {
   // block is flushed so the chapter starts on a fresh page.
   if (std::find(tocAnchors.begin(), tocAnchors.end(), pendingAnchorId) != tocAnchors.end()) {
     if (currentPage && !currentPage->elements.empty()) {
-      completePageFn(std::move(currentPage), xpathParagraphIndex, xpathListItemIndex, currentPageVisibleOffset);
+      emitCurrentPage();
       completedPageCount++;
       currentPage.reset(new (std::nothrow) Page());
       if (!currentPage) {
@@ -781,7 +781,7 @@ void ChapterHtmlSlimParser::emitHorizontalRule(const BlockStyle& blockStyle) {
 
   if (!currentPage->elements.empty() && currentPageNextY + totalHeight > viewportHeight) {
     setCurrentPageVisibleOffset(visibleTextOffset);
-    completePageFn(std::move(currentPage), xpathParagraphIndex, xpathListItemIndex, currentPageVisibleOffset);
+    emitCurrentPage();
     completedPageCount++;
     currentPage.reset(new (std::nothrow) Page());
     if (!currentPage) {
@@ -802,6 +802,7 @@ void ChapterHtmlSlimParser::emitHorizontalRule(const BlockStyle& blockStyle) {
     return;
   }
   currentPage->elements.push_back(pageRule);
+  noteContent(currentPageNextY, currentPageNextY + ruleThickness);
   setCurrentPageVisibleOffset(visibleTextOffset);
   currentPageNextY = static_cast<int16_t>(currentPageNextY + ruleThickness + bottomSpacing);
   if (!currentTextBlock || currentTextBlock->isEmpty()) placeWordAnchorsOnCurrentPage();
@@ -1094,7 +1095,7 @@ void ChapterHtmlSlimParser::finishTableRow() {
     if (!currentPage || pageFull) {
       if (pageFull) {
         setCurrentPageVisibleOffset(lineVisibleOffset);
-        completePageFn(std::move(currentPage), xpathParagraphIndex, xpathListItemIndex, currentPageVisibleOffset);
+        emitCurrentPage();
         completedPageCount++;
       }
       currentPage = makeUniqueNoThrow<Page>();
@@ -1839,6 +1840,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                   return;
                 }
                 self->currentPage->elements.push_back(pageImage);
+                self->noteContent(self->currentPageNextY, self->currentPageNextY + displayHeight);
                 self->placeWordAnchorsOnCurrentPage();  // preceding text was flushed above
                 self->setCurrentPageVisibleOffset(self->visibleTextOffset);
                 self->currentPageNextY += displayHeight + imageMarginBottom;
@@ -2024,6 +2026,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
     }
     self->headingDepth = std::min(self->headingDepth, self->depth);
     headerBlockStyle.keepWithNext = true;
+    if (self->embeddedStyle) self->openBoxScope(headerBlockStyle, cssStyle);
     const auto accumulated =
         self->blockStyleStack.back().getCombinedBlockStyle(headerBlockStyle, BlockStyle::CombineAxis::Horizontal);
     self->blockStyleStack.push_back(accumulated);
@@ -2063,8 +2066,10 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
         self->flushPartWordBuffer();
       }
       self->currentCssStyle = cssStyle;
-      const auto accumulated = self->blockStyleStack.back().getCombinedBlockStyle(userAlignmentBlockStyle,
-                                                                                  BlockStyle::CombineAxis::Horizontal);
+      auto ownBlockStyle = userAlignmentBlockStyle;
+      if (self->embeddedStyle && strcmp(name, "pre") != 0) self->openBoxScope(ownBlockStyle, cssStyle);
+      const auto accumulated =
+          self->blockStyleStack.back().getCombinedBlockStyle(ownBlockStyle, BlockStyle::CombineAxis::Horizontal);
       self->blockStyleStack.push_back(accumulated);
       const bool opensPre = strcmp(name, "pre") == 0 && self->preDepth == INT_MAX && self->tableDepth == 0;
       if (opensPre) {
@@ -2771,6 +2776,9 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
       // Vertical margins and paddings are stripped
       self->startNewTextBlock(self->blockStyleStack.back().withoutTop().withoutBottom());
       self->updateEffectiveInlineStyle();
+      if (self->boxScopeCount > 0 && self->boxScopes[self->boxScopeCount - 1].depth == self->depth) {
+        self->closeBoxScope();
+      }
       // Set after the closing element's own text was laid out above.
       if (breakAfter) self->pendingPageBreak = true;
     }
@@ -2944,7 +2952,7 @@ bool ChapterHtmlSlimParser::finishParse() {
     makePages();
     flushAllPendingAnchors(static_cast<uint16_t>(completedPageCount));  // the trailing page
     setCurrentPageVisibleOffset(visibleTextOffset);
-    completePageFn(std::move(currentPage), xpathParagraphIndex, xpathListItemIndex, currentPageVisibleOffset);
+    emitCurrentPage();
     completedPageCount++;
     currentPage.reset();
     currentTextBlock.reset();
@@ -3021,7 +3029,7 @@ void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line, const
   } else if (currentPageNextY + lineHeight + boxPad > viewportHeight) {
     if (preBoxActive) emitPreBox();
     setCurrentPageVisibleOffset(visibleOffset);
-    completePageFn(std::move(currentPage), xpathParagraphIndex, xpathListItemIndex, currentPageVisibleOffset);
+    emitCurrentPage();
     completedPageCount++;
     currentPage.reset(new (std::nothrow) Page());
     if (!currentPage) {
@@ -3074,6 +3082,7 @@ void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line, const
     }
   }
   currentPage->elements.push_back(pageLine);
+  noteContent(currentPageNextY, currentPageNextY + lineHeight);
   currentPageNextY += lineHeight;
   if (layoutParagraph && paragraphLinesOnPage < UINT8_MAX) paragraphLinesOnPage++;
   if (recentLineCount == MAX_CARRIED_LINES) {
@@ -3173,8 +3182,30 @@ void ChapterHtmlSlimParser::breakPageCarryingLines(const size_t carry, const siz
     }
   }
 
+  // A box around the carried lines ends this page at their top and goes on with them; one that
+  // holds only carried lines moves to the next page whole.
+  int16_t movedTop[MAX_BOX_SCOPES];
+  int16_t movedBottom[MAX_BOX_SCOPES];
+  for (uint8_t b = 0; b < boxScopeCount; ++b) {
+    BoxScope& box = boxScopes[b];
+    movedTop[b] = movedBottom[b] = -1;
+    if (carry == 0 || box.top < 0 || box.bottom <= carriedTop) continue;
+    movedBottom[b] = static_cast<int16_t>(box.bottom - carriedTop);
+    if (box.top >= carriedTop) {
+      movedTop[b] = static_cast<int16_t>(box.top - carriedTop);
+      box.top = box.bottom = -1;
+    } else {
+      movedTop[b] = 0;
+      box.bottom = carriedTop;
+    }
+  }
   setCurrentPageVisibleOffset(visibleOffset);
-  completePageFn(std::move(currentPage), xpathParagraphIndex, xpathListItemIndex, currentPageVisibleOffset);
+  emitCurrentPage();
+  for (uint8_t b = 0; b < boxScopeCount; ++b) {
+    if (movedTop[b] < 0) continue;
+    boxScopes[b].top = movedTop[b];
+    boxScopes[b].bottom = movedBottom[b];
+  }
   const auto leftPage = static_cast<uint16_t>(completedPageCount);
   completedPageCount++;
   // Anchors resolved on the carried lines name the page those lines now open.
@@ -3203,6 +3234,130 @@ void ChapterHtmlSlimParser::breakPageCarryingLines(const size_t carry, const siz
   }
   paragraphLinesOnPage = static_cast<uint8_t>(paragraphLines);
   keepWithNextLines = 0;  // what moved is now at the top of its page
+}
+
+void ChapterHtmlSlimParser::emitCurrentPage() {
+  // Open boxes are sliced at the page break and continue on the next page.
+  for (uint8_t b = 0; b < boxScopeCount; ++b) {
+    BoxScope& box = boxScopes[b];
+    emitBoxSegment(box, false);
+    if (box.top >= 0) box.continued = true;
+    box.top = box.bottom = -1;
+  }
+  completePageFn(std::move(currentPage), xpathParagraphIndex, xpathListItemIndex, currentPageVisibleOffset);
+}
+
+void ChapterHtmlSlimParser::noteContent(const int top, const int bottom) {
+  for (uint8_t b = 0; b < boxScopeCount; ++b) {
+    BoxScope& box = boxScopes[b];
+    if (box.top < 0) box.top = static_cast<int16_t>(top);
+    box.bottom = static_cast<int16_t>(std::max<int>(box.bottom, bottom));
+  }
+}
+
+// Called with the element's own style before it joins the stack: the border and a small gap
+// join its padding, so its text sits inside the frame.
+void ChapterHtmlSlimParser::openBoxScope(BlockStyle& ownStyle, const CssStyle& cssStyle) {
+  const bool shaded = cssStyle.isShaded();
+  if (tableDepth > 0 || preDepth != INT_MAX || boxScopeCount >= MAX_BOX_SCOPES ||
+      (!cssStyle.hasVisibleBorder() && !shaded)) {
+    return;
+  }
+  BoxScope box;
+  box.depth = depth;
+  box.shaded = shaded;
+  const CssBorderSide* sides[4] = {&cssStyle.borderTop, &cssStyle.borderRight, &cssStyle.borderBottom,
+                                   &cssStyle.borderLeft};
+  for (size_t i = 0; i < 4; ++i) {
+    if (sides[i]->visible()) box.sides[i] = *sides[i];
+    // Rendered 1-3 px: a book's 5px rule would read as a black bar on e-ink.
+    box.sides[i].width = std::min<uint8_t>(box.sides[i].width, 3);
+  }
+  const BlockStyle& parent = blockStyleStack.back();
+  box.left = static_cast<int16_t>(parent.leftInset() + std::max<int16_t>(0, ownStyle.marginLeft));
+  box.right = static_cast<int16_t>(viewportWidth - parent.rightInset() - std::max<int16_t>(0, ownStyle.marginRight));
+  if (box.right - box.left < 8) return;
+
+  // The border sits between margin and padding, so it joins the padding. Text also keeps a
+  // small gap from the frame even when the book sets no padding.
+  constexpr int16_t MIN_FRAME_GAP = 4;
+  const auto pad = [&](int16_t& padding, const CssBorderSide& side) {
+    if (side.width == 0 && !box.shaded) return;
+    padding = static_cast<int16_t>(std::max(padding, MIN_FRAME_GAP) + side.width);
+  };
+  pad(ownStyle.paddingTop, box.sides[0]);
+  pad(ownStyle.paddingRight, box.sides[1]);
+  pad(ownStyle.paddingBottom, box.sides[2]);
+  pad(ownStyle.paddingLeft, box.sides[3]);
+  box.padTop = ownStyle.paddingTop;
+  box.padBottom = ownStyle.paddingBottom;
+  boxScopes[boxScopeCount++] = box;
+}
+
+void ChapterHtmlSlimParser::closeBoxScope() {
+  BoxScope box = boxScopes[--boxScopeCount];
+  if (box.top < 0 && !box.continued) {
+    // An element without content (a rule drawn with borders) gets its own height. Its spacing
+    // still sits on the empty text block; consume it here instead.
+    const int height = box.padTop + box.padBottom;
+    if (height <= 0) return;
+    int above = 0;
+    int below = 0;
+    if (currentTextBlock && currentTextBlock->isEmpty()) {
+      BlockStyle& pending = currentTextBlock->getBlockStyle();
+      above = std::max<int>(0, pending.marginTop);
+      below = std::max<int>(0, pending.marginBottom);
+      pending.marginTop = pending.paddingTop = pending.marginBottom = pending.paddingBottom = 0;
+    }
+    if (!currentPage) {
+      currentPage.reset(new (std::nothrow) Page());
+      if (!currentPage) {
+        signalOutOfMemory("closeBoxScope: page");
+        return;
+      }
+      currentPageNextY = 0;
+      currentPageVisibleOffsetSet = false;
+    }
+    if (!currentPage->elements.empty() && currentPageNextY + above + height > viewportHeight) {
+      setCurrentPageVisibleOffset(visibleTextOffset);
+      emitCurrentPage();
+      completedPageCount++;
+      currentPage.reset(new (std::nothrow) Page());
+      if (!currentPage) {
+        signalOutOfMemory("closeBoxScope: page break");
+        return;
+      }
+      currentPageNextY = 0;
+      currentPageVisibleOffsetSet = false;
+      above = 0;
+    }
+    const int top = currentPageNextY + above;
+    box.top = static_cast<int16_t>(top + box.padTop);
+    box.bottom = box.top;
+    currentPageNextY = static_cast<int16_t>(top + height + below);
+    noteContent(top, top + height);  // the enclosing boxes hold it too
+  }
+  emitBoxSegment(box, true);
+}
+
+void ChapterHtmlSlimParser::emitBoxSegment(const BoxScope& box, const bool closing) {
+  if (box.top < 0 || !currentPage) return;
+  const int top = std::max(0, box.top - box.padTop);
+  const int bottom = std::min<int>(viewportHeight, box.bottom + (closing ? box.padBottom : 0));
+  if (bottom <= top) return;
+  // A page break slices the box: the continuing edges are left open.
+  const CssBorderSide sides[4] = {box.continued ? CssBorderSide{} : box.sides[0], box.sides[1],
+                                  closing ? box.sides[2] : CssBorderSide{}, box.sides[3]};
+  auto element = std::shared_ptr<PageBorderBox>(
+      new (std::nothrow) PageBorderBox(static_cast<uint16_t>(box.right - box.left), static_cast<uint16_t>(bottom - top),
+                                       sides, box.shaded, box.left, static_cast<int16_t>(top)));
+  if (!element) {
+    LOG_ERR("EHP", "OOM: PageBorderBox");
+    return;
+  }
+  // Ahead of the page's text, so its shade is painted first; an enclosing box closes later and
+  // goes ahead of this one.
+  currentPage->elements.insert(currentPage->elements.begin(), std::move(element));
 }
 
 // Honours a pending page-break-after and the current block's page-break-before, once, before

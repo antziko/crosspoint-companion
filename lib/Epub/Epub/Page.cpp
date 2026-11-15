@@ -155,6 +155,103 @@ std::unique_ptr<PageBox> PageBox::deserialize(HalFile& file) {
   return makeUniqueNoThrow<PageBox>(width, height, thickness, xPos, yPos);
 }
 
+namespace {
+
+// One edge of a PageBorderBox, `length` px long, as a line of the side's width and style.
+void drawBorderEdge(const GfxRenderer& renderer, const int x, const int y, const int length, const CssBorderSide& side,
+                    const bool horizontal) {
+  const int thickness = std::max<int>(1, side.width);
+  const auto fill = [&](const int along, const int span, const int offset, const int depth) {
+    if (horizontal) {
+      renderer.fillRect(x + along, y + offset, span, depth, true);
+    } else {
+      renderer.fillRect(x + offset, y + along, depth, span, true);
+    }
+  };
+  switch (side.style) {
+    case CssBorderStyle::Double: {
+      if (thickness < 3) {
+        fill(0, length, 0, thickness);
+        break;
+      }
+      const int line = std::max(1, thickness / 3);
+      fill(0, length, 0, line);
+      fill(0, length, thickness - line, line);
+      break;
+    }
+    case CssBorderStyle::Dotted:
+    case CssBorderStyle::Dashed: {
+      const int dash = side.style == CssBorderStyle::Dotted ? thickness : std::max(3, thickness * 3);
+      const int gap = side.style == CssBorderStyle::Dotted ? std::max(2, thickness) : std::max(2, thickness * 2);
+      for (int at = 0; at < length; at += dash + gap) fill(at, std::min(dash, length - at), 0, thickness);
+      break;
+    }
+    default:
+      fill(0, length, 0, thickness);
+      break;
+  }
+}
+
+}  // namespace
+
+void PageBorderBox::render(GfxRenderer& renderer, const int, const int xOffset, const int yOffset) {
+  const int x = xPos + xOffset;
+  const int y = yPos + yOffset;
+  if (shaded) renderer.fillRectDither(x, y, width, height, Color::LightGray);
+  const CssBorderSide& top = sides[0];
+  const CssBorderSide& right = sides[1];
+  const CssBorderSide& bottom = sides[2];
+  const CssBorderSide& left = sides[3];
+  if (top.visible()) drawBorderEdge(renderer, x, y, width, top, true);
+  if (bottom.visible()) drawBorderEdge(renderer, x, y + height - bottom.width, width, bottom, true);
+  if (left.visible()) drawBorderEdge(renderer, x, y, height, left, false);
+  if (right.visible()) drawBorderEdge(renderer, x + width - right.width, y, height, right, false);
+}
+
+bool PageBorderBox::serialize(HalFile& file) {
+  serialization::writePod(file, xPos);
+  serialization::writePod(file, yPos);
+  serialization::writePod(file, width);
+  serialization::writePod(file, height);
+  for (const CssBorderSide& side : sides) {
+    serialization::writePod(file, side.width);
+    serialization::writePod(file, static_cast<uint8_t>(side.style));
+  }
+  serialization::writePod(file, static_cast<uint8_t>(shaded ? 1 : 0));
+  return true;
+}
+
+std::unique_ptr<PageBorderBox> PageBorderBox::deserialize(HalFile& file) {
+  int16_t xPos = 0;
+  int16_t yPos = 0;
+  uint16_t width = 0;
+  uint16_t height = 0;
+  CssBorderSide sides[4];
+  uint8_t shaded = 0;
+  serialization::readPod(file, xPos);
+  serialization::readPod(file, yPos);
+  serialization::readPod(file, width);
+  serialization::readPod(file, height);
+  for (CssBorderSide& side : sides) {
+    uint8_t style = 0;
+    serialization::readPod(file, side.width);
+    serialization::readPod(file, style);
+    if (style > static_cast<uint8_t>(CssBorderStyle::Dashed)) {
+      LOG_ERR("PGE", "Deserialization failed: invalid border style %u", style);
+      return nullptr;
+    }
+    side.style = static_cast<CssBorderStyle>(style);
+  }
+  serialization::readPod(file, shaded);
+  if (width == 0 || height == 0 || shaded > 1) {
+    LOG_ERR("PGE", "Deserialization failed: invalid border box (%ux%u)", width, height);
+    return nullptr;
+  }
+  auto box = makeUniqueNoThrow<PageBorderBox>(width, height, sides, shaded != 0, xPos, yPos);
+  if (!box) LOG_ERR("PGE", "Deserialization failed: could not allocate PageBorderBox");
+  return box;
+}
+
 void Page::render(GfxRenderer& renderer, const int fontId, const int xOffset, const int yOffset) const {
   renderFilteredPageElements(elements, renderer, fontId, xOffset, yOffset, [](const PageElement&) { return true; });
 }
@@ -257,6 +354,12 @@ std::unique_ptr<Page> Page::deserialize(HalFile& file) {
       page->elements.push_back(std::move(rule));
     } else if (tag == TAG_PageBox) {
       auto box = PageBox::deserialize(file);
+      if (!box) {
+        return nullptr;
+      }
+      page->elements.push_back(std::move(box));
+    } else if (tag == TAG_PageBorderBox) {
+      auto box = PageBorderBox::deserialize(file);
       if (!box) {
         return nullptr;
       }

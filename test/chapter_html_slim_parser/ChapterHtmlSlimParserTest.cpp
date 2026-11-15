@@ -579,6 +579,11 @@ struct PageParse {
   CssParser css{"/tmp"};
   std::string path = "pages.xhtml";
   std::vector<std::string> pages;
+  // Per page, each PageBorderBox as "[TRBLS]" with '-' for an open side or no shade, in element
+  // order; boxFirst records that they come ahead of the page's other elements.
+  std::vector<std::string> boxes;
+  std::vector<int> boxHeights;
+  bool boxFirst = true;
   std::unique_ptr<ChapterHtmlSlimParser> parser;
 
   PageParse(const std::string& body, const int lines) {
@@ -587,12 +592,27 @@ struct PageParse {
         static_cast<uint16_t>(lines * 16), false, false,
         [this](std::unique_ptr<Page> page, uint16_t, uint16_t, uint32_t) {
           std::string tags;
+          std::string pageBoxes;
+          bool sawOther = false;
           for (const auto& element : page->elements) {
+            if (element->getTag() == TAG_PageBorderBox) {
+              const auto& box = static_cast<const PageBorderBox&>(*element);
+              if (sawOther) boxFirst = false;
+              pageBoxes += '[';
+              const char names[] = "TRBL";
+              for (int i = 0; i < 4; ++i) pageBoxes += box.side(i).visible() ? names[i] : '-';
+              pageBoxes += box.isShaded() ? 'S' : '-';
+              pageBoxes += ']';
+              boxHeights.push_back(box.getHeight());
+              continue;
+            }
+            sawOther = true;
             if (element->getTag() != TAG_PageLine) continue;
             const auto align = static_cast<const PageLine&>(*element).getBlock()->getBlockStyle().alignment;
             tags += align == CssTextAlign::Center ? 'C' : 'L';
           }
           pages.push_back(std::move(tags));
+          boxes.push_back(std::move(pageBoxes));
         },
         true, "", "", 0, std::vector<std::string>{}, nullptr, &css);
     const std::string html = "<html><body>" + body + "</body></html>";
@@ -694,4 +714,112 @@ TEST(ChapterHtmlSlimParserPagination, AnAnchorOnACarriedLineMovesWithIt) {
     if (key == "second") page = at;
   }
   EXPECT_EQ(page, 1);
+}
+
+// ---- CSS borders and shading ----
+TEST(CssBorders, ShorthandSetsEverySide) {
+  const CssStyle style = CssParser::parseInlineStyle("border: 1px solid #000");
+  EXPECT_TRUE(style.hasVisibleBorder());
+  for (const CssBorderSide* side : {&style.borderTop, &style.borderRight, &style.borderBottom, &style.borderLeft}) {
+    EXPECT_EQ(side->width, 1);
+    EXPECT_EQ(side->style, CssBorderStyle::Solid);
+  }
+}
+
+TEST(CssBorders, SideWidthAndStyleCombine) {
+  const CssStyle style = CssParser::parseInlineStyle("border-left-style: dashed; border-left-width: thick");
+  EXPECT_EQ(style.borderLeft.width, 3);
+  EXPECT_EQ(style.borderLeft.style, CssBorderStyle::Dashed);
+  EXPECT_FALSE(style.borderTop.visible());
+}
+
+TEST(CssBorders, EdgeValuesFollowTheShorthandRule) {
+  const CssStyle style = CssParser::parseInlineStyle("border-style: solid none; border-width: 2px");
+  EXPECT_TRUE(style.borderTop.visible());
+  EXPECT_FALSE(style.borderRight.visible());
+  EXPECT_TRUE(style.borderBottom.visible());
+  EXPECT_FALSE(style.borderLeft.visible());
+}
+
+TEST(CssBorders, WidthWithoutStyleDrawsNothing) {
+  EXPECT_FALSE(CssParser::parseInlineStyle("border-width: 2px").hasVisibleBorder());
+  EXPECT_FALSE(CssParser::parseInlineStyle("border: none").hasVisibleBorder());
+  EXPECT_FALSE(CssParser::parseInlineStyle("border-collapse: collapse").hasVisibleBorder());
+}
+
+TEST(CssBorders, InheritedRulesMergeSideParts) {
+  CssStyle base = CssParser::parseInlineStyle("border-top-style: solid");
+  base.applyOver(CssParser::parseInlineStyle("border-top-width: 2px"));
+  EXPECT_EQ(base.borderTop.width, 2);
+  EXPECT_EQ(base.borderTop.style, CssBorderStyle::Solid);
+}
+
+TEST(CssShade, LightBackgroundsShadeOthersDoNot) {
+  EXPECT_TRUE(CssParser::parseInlineStyle("background-color: #ddd").isShaded());
+  EXPECT_TRUE(CssParser::parseInlineStyle("background: lightgray").isShaded());
+  EXPECT_TRUE(CssParser::parseInlineStyle("background-color: rgb(200, 200, 200)").isShaded());
+  EXPECT_FALSE(CssParser::parseInlineStyle("background-color: #fff").isShaded());
+  EXPECT_FALSE(CssParser::parseInlineStyle("background-color: black").isShaded());
+  EXPECT_FALSE(CssParser::parseInlineStyle("background: none").isShaded());
+}
+
+TEST(CssStylePool, ListStyleTypeKeepsStylesApart) {
+  // Identical except for the bullet: pooling them together would give one list the other's marker.
+  EXPECT_FALSE(CssParser::parseInlineStyle("list-style-type: none") ==
+               CssParser::parseInlineStyle("list-style-type: disc"));
+}
+
+TEST(ChapterHtmlSlimParserBoxes, ABorderedBlockGetsOneClosedBox) {
+  PageParse p("<p>before</p><div style=\"border: 1px solid\"><p>inside</p></div><p>after</p>", 12);
+  ASSERT_EQ(p.pages.size(), 1u);
+  EXPECT_EQ(p.boxes[0], "[TRBL-]");
+  EXPECT_TRUE(p.boxFirst);
+  ASSERT_EQ(p.boxHeights.size(), 1u);
+  EXPECT_GE(p.boxHeights[0], 16 + 2 * 5);  // the line plus the frame gap and border on both edges
+}
+
+TEST(ChapterHtmlSlimParserBoxes, ShadingAloneDrawsAShadedBoxWithoutSides) {
+  PageParse p("<div style=\"background-color: #e0e0e0\"><p>inside</p></div>", 12);
+  ASSERT_EQ(p.pages.size(), 1u);
+  EXPECT_EQ(p.boxes[0], "[----S]");
+}
+
+TEST(ChapterHtmlSlimParserBoxes, APageBreakLeavesTheCutEdgesOpen) {
+  ASSERT_GT(wordsPerLine(), 1);
+  PageParse p("<div style=\"border: 1px solid\">" + paragraph(10) + "</div>", 4);
+  ASSERT_GE(p.pages.size(), 3u);
+  EXPECT_EQ(p.boxes.front(), "[TR-L-]");
+  for (size_t i = 1; i + 1 < p.boxes.size(); ++i) EXPECT_EQ(p.boxes[i], "[-R-L-]") << "page " << i;
+  EXPECT_EQ(p.boxes.back(), "[-RBL-]");
+}
+
+TEST(ChapterHtmlSlimParserBoxes, AnEmptyBorderedBlockIsARule) {
+  PageParse p("<p>one</p><div style=\"border-top: 1px solid\"></div><p>two</p>", 12);
+  ASSERT_EQ(p.pages.size(), 1u);
+  EXPECT_EQ(p.boxes[0], "[T----]");
+}
+
+TEST(ChapterHtmlSlimParserBoxes, NestingDrawsAtMostTwoBoxes) {
+  PageParse p(
+      "<div style=\"border: 1px solid\"><div style=\"border: 1px solid\"><div style=\"border: 1px solid\">"
+      "<p>deep</p></div></div></div>",
+      16);
+  ASSERT_EQ(p.pages.size(), 1u);
+  EXPECT_EQ(p.boxes[0], "[TRBL-][TRBL-]");
+}
+
+TEST(ChapterHtmlSlimParserBoxes, ALineCarriedOutOfABoxTakesTheBoxWithIt) {
+  ASSERT_GT(wordsPerLine(), 1);
+  // Top and bottom rules only, so the text keeps its width. 1px + 4px gap above the text: four
+  // lines fit, so the second paragraph's first line would sit alone at the foot and moves. The
+  // box must end where that line used to start.
+  PageParse p(
+      "<div style=\"border-top: 1px solid; border-bottom: 1px solid\">" + paragraph(3) + paragraph(3) + "</div>", 5);
+  ASSERT_EQ(p.pages.size(), 2u);
+  EXPECT_EQ(p.pages[0], "LLL");
+  EXPECT_EQ(p.pages[1], "LLL");
+  EXPECT_EQ(p.boxes[0], "[T----]");
+  EXPECT_EQ(p.boxes[1], "[--B--]");
+  ASSERT_EQ(p.boxHeights.size(), 2u);
+  EXPECT_EQ(p.boxHeights[0], 5 + 3 * 16);
 }
