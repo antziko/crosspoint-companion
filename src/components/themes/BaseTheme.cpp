@@ -450,7 +450,7 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
   for (int i = pageStartIndex; i < itemCount && i < pageStartIndex + pageItems; i++) {
     const int itemY = rect.y + (i % pageItems) * rowHeight;
 
-    int rowTextWidth = contentWidth - BaseMetrics::values.contentSidePadding * 2;
+    int rowTextWidth = contentWidth - UITheme::getInstance().getMetrics().contentSidePadding * 2;
     std::string valueText;
     if (rowValue != nullptr) {
       valueText = rowValue(i);
@@ -465,13 +465,14 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
     auto itemName = rowTitle(i);
     auto font = UI_10_FONT_ID;
     auto item = renderer.truncatedText(font, itemName.c_str(), rowTextWidth);
-    renderer.drawText(font, rect.x + BaseMetrics::values.contentSidePadding, itemY, item.c_str(), i != cursorIndex);
+    renderer.drawText(font, rect.x + UITheme::getInstance().getMetrics().contentSidePadding, itemY, item.c_str(),
+                      i != cursorIndex);
 
     // Apply checkerboard dither to create gray text effect for dimmed items
     if (rowDimmed && rowDimmed(i) && i != cursorIndex) {
       const int titleWidth = renderer.getTextWidth(font, item.c_str());
       const int lineH = renderer.getLineHeight(font);
-      const int tx = rect.x + BaseMetrics::values.contentSidePadding;
+      const int tx = rect.x + UITheme::getInstance().getMetrics().contentSidePadding;
       renderer.dimRegionCheckerboard(tx, itemY, titleWidth, lineH);
     }
 
@@ -480,8 +481,8 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
       if (!subtitleText.empty()) {
         const auto subFont = (rowSubtitleLarge && rowSubtitleLarge(i)) ? UI_10_FONT_ID : SMALL_FONT_ID;
         auto subtitle = renderer.truncatedText(subFont, subtitleText.c_str(), rowTextWidth);
-        renderer.drawText(subFont, rect.x + BaseMetrics::values.contentSidePadding, itemY + 22, subtitle.c_str(),
-                          i != cursorIndex);
+        renderer.drawText(subFont, rect.x + UITheme::getInstance().getMetrics().contentSidePadding, itemY + 22,
+                          subtitle.c_str(), i != cursorIndex);
       }
     }
 
@@ -491,7 +492,8 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
       if (rowSubtitle != nullptr) {
         valueY = itemY + 10;
       }
-      renderer.drawText(valueFont, rect.x + contentWidth - BaseMetrics::values.contentSidePadding - valueTextWidth,
+      renderer.drawText(valueFont,
+                        rect.x + contentWidth - UITheme::getInstance().getMetrics().contentSidePadding - valueTextWidth,
                         valueY, valueText.c_str(), i != cursorIndex);
     }
   }
@@ -838,13 +840,14 @@ void BaseTheme::drawTopBarClockDate(const GfxRenderer& renderer, int y) const {
 
 void BaseTheme::drawSubHeader(const GfxRenderer& renderer, Rect rect, const char* label, const char* rightLabel) const {
   constexpr int labelGap = 10;
-  const int contentWidth = std::max(0, rect.width - BaseMetrics::values.contentSidePadding * 2);
+  const int contentWidth = std::max(0, rect.width - UITheme::getInstance().getMetrics().contentSidePadding * 2);
 
   int labelWidth = contentWidth;
   if (rightLabel) {
     auto truncatedRightLabel = renderer.truncatedText(SMALL_FONT_ID, rightLabel, contentWidth, EpdFontFamily::REGULAR);
     const int rightLabelWidth = renderer.getTextWidth(SMALL_FONT_ID, truncatedRightLabel.c_str());
-    renderer.drawText(SMALL_FONT_ID, rect.x + rect.width - BaseMetrics::values.contentSidePadding - rightLabelWidth,
+    renderer.drawText(SMALL_FONT_ID,
+                      rect.x + rect.width - UITheme::getInstance().getMetrics().contentSidePadding - rightLabelWidth,
                       rect.y + 7, truncatedRightLabel.c_str());
     labelWidth = std::max(0, contentWidth - rightLabelWidth - labelGap);
   }
@@ -852,8 +855,8 @@ void BaseTheme::drawSubHeader(const GfxRenderer& renderer, Rect rect, const char
   if (labelWidth > 0) {
     const int labelFontId = uiScaleSpec().titleFontId;
     auto truncatedLabel = renderer.truncatedText(labelFontId, label, labelWidth, EpdFontFamily::REGULAR);
-    renderer.drawText(labelFontId, rect.x + BaseMetrics::values.contentSidePadding, rect.y, truncatedLabel.c_str(),
-                      true, EpdFontFamily::REGULAR);
+    renderer.drawText(labelFontId, rect.x + UITheme::getInstance().getMetrics().contentSidePadding, rect.y,
+                      truncatedLabel.c_str(), true, EpdFontFamily::REGULAR);
   }
 }
 
@@ -867,7 +870,7 @@ void BaseTheme::drawTabBar(const GfxRenderer& renderer, const Rect rect, const s
   const int tabFontId = uiScaleSpec().titleFontId;
   const int lineHeight = renderer.getLineHeight(tabFontId);
 
-  int currentX = rect.x + BaseMetrics::values.contentSidePadding;
+  int currentX = rect.x + UITheme::getInstance().getMetrics().contentSidePadding;
 
   for (const auto& tab : tabs) {
     const int textWidth =
@@ -897,7 +900,7 @@ bool BaseTheme::tabIndexFromPoint(const GfxRenderer& renderer, const Rect rect, 
   }
 
   const int tabFontId = uiScaleSpec().titleFontId;  // same tier drawTabBar() lays the labels out with
-  int currentX = rect.x + BaseMetrics::values.contentSidePadding;
+  int currentX = rect.x + UITheme::getInstance().getMetrics().contentSidePadding;
   for (size_t i = 0; i < tabs.size(); i++) {
     const auto& tab = tabs[i];
     const int textWidth =
@@ -1212,11 +1215,13 @@ void BaseTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
     const bool selected = selectedIndex == i;
 
     if (selected) {
-      renderer.fillRect(rect.x + BaseMetrics::values.contentSidePadding, tileY,
-                        rect.width - BaseMetrics::values.contentSidePadding * 2, BaseMetrics::values.menuRowHeight);
+      renderer.fillRect(rect.x + UITheme::getInstance().getMetrics().contentSidePadding, tileY,
+                        rect.width - UITheme::getInstance().getMetrics().contentSidePadding * 2,
+                        BaseMetrics::values.menuRowHeight);
     } else {
-      renderer.drawRect(rect.x + BaseMetrics::values.contentSidePadding, tileY,
-                        rect.width - BaseMetrics::values.contentSidePadding * 2, BaseMetrics::values.menuRowHeight);
+      renderer.drawRect(rect.x + UITheme::getInstance().getMetrics().contentSidePadding, tileY,
+                        rect.width - UITheme::getInstance().getMetrics().contentSidePadding * 2,
+                        BaseMetrics::values.menuRowHeight);
     }
 
     std::string labelStr = buttonLabel(i);

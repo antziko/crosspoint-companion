@@ -128,13 +128,12 @@ const ThemeMetrics& UITheme::getMetrics() const {
   // does not vanish — it keeps the screen title; drawHeader() drops the battery, WiFi bars,
   // clock and rule around it. 0 means "top bar shown", and doubles as the cache key.
   const int compactHeader = isTopBarHidden() ? compactHeaderHeight() : 0;
-  // Lists follow the reader's Screen Margin, so one setting sets how close text
-  // sits to the bezel everywhere. Only on a theme that draws a row BAND
-  // (listInset > 0): a theme without one -- Classic -- carries its whole indent
-  // as listSidePadding, which is text padding inside the row, not a margin.
-  const int listInset = currentMetrics->listInset > 0 ? SETTINGS.screenMargin : currentMetrics->listInset;
-  if (!metricsValid || touch != metricsForTouch || compactHeader != metricsCompactHeader ||
-      listInset != metricsListInset) {
+  // One content edge for every screen: the reader's Screen Margin inside the bezel clearance,
+  // where the book's own text starts (the open book's margin while one is open). Titles, list
+  // text and Home content sit on it; a row band or selection tile reaches outward from it by its
+  // own padding, shrinking that padding rather than pushing text in where the margin is smaller.
+  const int margin = SETTINGS.getReaderScreenMargin();
+  if (!metricsValid || touch != metricsForTouch || compactHeader != metricsCompactHeader || margin != metricsMargin) {
     adjustedMetrics = *currentMetrics;
     if (touch) {
       adjustedMetrics.buttonHintsHeight = 0;
@@ -143,10 +142,19 @@ const ThemeMetrics& UITheme::getMetrics() const {
     if (compactHeader > 0 && compactHeader < adjustedMetrics.headerHeight) {
       adjustedMetrics.headerHeight = compactHeader;
     }
-    adjustedMetrics.listInset = listInset;
+    adjustedMetrics.contentSidePadding = margin;
+    adjustedMetrics.headerSidePadding = margin;
+    if (currentMetrics->listInset > 0) {
+      // A theme that draws a row BAND: the band edge sits listSidePadding outside the text.
+      adjustedMetrics.listInset = std::max(0, margin - currentMetrics->listSidePadding);
+      adjustedMetrics.listSidePadding = margin - adjustedMetrics.listInset;
+    } else {
+      // No band (Classic): the whole indent is text padding inside the row.
+      adjustedMetrics.listSidePadding = margin;
+    }
     metricsForTouch = touch;
     metricsCompactHeader = compactHeader;
-    metricsListInset = listInset;
+    metricsMargin = margin;
     metricsValid = true;
   }
   return adjustedMetrics;

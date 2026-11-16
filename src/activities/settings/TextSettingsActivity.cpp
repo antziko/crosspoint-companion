@@ -52,10 +52,14 @@ constexpr StrId PARA_INDENT_IDS[] = {StrId::STR_BOOK,
                                      StrId::STR_INDENT_5_SPACES};
 static_assert(std::size(PARA_INDENT_IDS) == CrossPointSettings::PARAGRAPH_INDENT_COUNT, "paragraph indent labels");
 // Popup index 0 is ReaderOverride::DICT_LINE_SPACING_SAME_AS_TEXT; index i is LINE_SPACING_IDS[i - 1].
-constexpr StrId DICT_LINE_SPACING_IDS[] = {
-    StrId::STR_SAME_AS_TEXT,           StrId::STR_SPACING_0_PERCENT,       StrId::STR_SPACING_PLUS_10_PERCENT,
-    StrId::STR_SPACING_PLUS_20_PERCENT_DEFAULT, StrId::STR_SPACING_PLUS_30_PERCENT, StrId::STR_SPACING_PLUS_45_PERCENT,
-    StrId::STR_SPACING_PLUS_60_PERCENT, StrId::STR_SPACING_PLUS_75_PERCENT};
+constexpr StrId DICT_LINE_SPACING_IDS[] = {StrId::STR_SAME_AS_TEXT,
+                                           StrId::STR_SPACING_0_PERCENT,
+                                           StrId::STR_SPACING_PLUS_10_PERCENT,
+                                           StrId::STR_SPACING_PLUS_20_PERCENT_DEFAULT,
+                                           StrId::STR_SPACING_PLUS_30_PERCENT,
+                                           StrId::STR_SPACING_PLUS_45_PERCENT,
+                                           StrId::STR_SPACING_PLUS_60_PERCENT,
+                                           StrId::STR_SPACING_PLUS_75_PERCENT};
 static_assert(std::size(DICT_LINE_SPACING_IDS) == CrossPointSettings::LINE_COMPRESSION_COUNT + 1,
               "dictionary line spacing labels");
 constexpr StrId WORD_SPACING_IDS[] = {StrId::STR_SPACING_50_PERCENT,  StrId::STR_SPACING_75_PERCENT,
@@ -80,9 +84,6 @@ constexpr StrId ALIGNMENT_IDS[] = {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, St
 // with the enum values so the picker index maps straight onto the stored value.
 constexpr StrId TEXT_AA_IDS[] = {StrId::STR_TEXT_AA_OFF, StrId::STR_TEXT_AA_ANTIALIASED, StrId::STR_TEXT_AA_SHARP};
 static_assert(std::size(TEXT_AA_IDS) == CrossPointSettings::TEXT_AA_COUNT, "TEXT_AA_IDS must cover every TEXT_AA mode");
-constexpr int MARGIN_MIN = CrossPointSettings::SCREEN_MARGIN_MIN;
-constexpr int MARGIN_MAX = CrossPointSettings::SCREEN_MARGIN_MAX;
-constexpr int MARGIN_STEP = CrossPointSettings::SCREEN_MARGIN_STEP;
 constexpr int WORD_SPACING_MIN = CrossPointSettings::WORD_SPACING_MIN;
 constexpr int WORD_SPACING_MAX = CrossPointSettings::WORD_SPACING_MAX;
 constexpr int WORD_SPACING_STEP = CrossPointSettings::WORD_SPACING_STEP;
@@ -756,11 +757,13 @@ void TextSettingsActivity::confirmLayoutRow(int row) {
       break;
     case LayoutRow::ScreenMargin: {
       std::vector<std::string> options;
-      options.reserve((MARGIN_MAX - MARGIN_MIN) / MARGIN_STEP + 1);
-      for (int m = MARGIN_MIN; m <= MARGIN_MAX; m += MARGIN_STEP) options.push_back(std::to_string(m));
-      const int cur = (std::clamp<int>(*f_.screenMargin, MARGIN_MIN, MARGIN_MAX) - MARGIN_MIN) / MARGIN_STEP;
+      options.reserve(CrossPointSettings::SCREEN_MARGIN_OPTION_COUNT);
+      for (int i = 0; i < CrossPointSettings::SCREEN_MARGIN_OPTION_COUNT; ++i) {
+        options.push_back(std::to_string(CrossPointSettings::screenMarginOption(i)));
+      }
+      const int cur = CrossPointSettings::screenMarginIndex(*f_.screenMargin);
       optionPopup_.show(StrId::STR_SCREEN_MARGIN, options, cur, [this](int idx) {
-        *f_.screenMargin = static_cast<uint8_t>(MARGIN_MIN + idx * MARGIN_STEP);
+        *f_.screenMargin = CrossPointSettings::screenMarginOption(idx);
         persist();  // persist immediately (#2806)
       });
       requestUpdate();

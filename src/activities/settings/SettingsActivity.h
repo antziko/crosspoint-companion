@@ -56,6 +56,10 @@ struct SettingInfo {
     uint8_t min;
     uint8_t max;
     uint8_t step;
+    // Optional extra choice below min, off the step grid (Screen Margin's 3 before 5, 10...).
+    // 0 = none. The setting's real lower bound is then `first`.
+    uint8_t first = 0;
+    uint8_t lowest() const { return first > 0 ? first : min; }
   };
   ValueRange valueRange = {};
 

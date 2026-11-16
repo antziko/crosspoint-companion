@@ -420,20 +420,23 @@ void SettingsActivity::toggleSelectedSetting() {
     // values out of reach entirely. Those keep cycling until the popup can scroll.
     const int step = setting.valueRange.step > 0 ? setting.valueRange.step : 1;
     const int span = static_cast<int>(setting.valueRange.max) - static_cast<int>(setting.valueRange.min);
-    const int optionCount = span >= 0 ? (span / step) + 1 : 0;
+    // An off-grid `first` choice leads the list, so option index 0 is it and the grid shifts by one.
+    const uint8_t first = setting.valueRange.first;
+    const int lead = first > 0 ? 1 : 0;
+    const int optionCount = span >= 0 ? (span / step) + 1 + lead : 0;
     if (optionCount > 2 && optionCount <= OptionPopup::MAX_OPTIONS) {
       std::vector<std::string> labels;
       labels.reserve(optionCount);
       int currentIndex = 0;
       for (int i = 0; i < optionCount; i++) {
-        const uint8_t v = static_cast<uint8_t>(setting.valueRange.min + i * step);
+        const uint8_t v = i < lead ? first : static_cast<uint8_t>(setting.valueRange.min + (i - lead) * step);
         if (v <= currentValue) currentIndex = i;  // nearest option at or below a stale value
         labels.push_back(settingValueOptionText(setting, v));
       }
       const auto valuePtr = setting.valuePtr;
       const uint8_t minValue = setting.valueRange.min;
-      optionPopup.show(setting.nameId, labels, currentIndex, [this, valuePtr, minValue, step](int idx) {
-        SETTINGS.*valuePtr = static_cast<uint8_t>(minValue + idx * step);
+      optionPopup.show(setting.nameId, labels, currentIndex, [this, valuePtr, minValue, step, first, lead](int idx) {
+        SETTINGS.*valuePtr = idx < lead ? first : static_cast<uint8_t>(minValue + (idx - lead) * step);
         SETTINGS.saveToFile();
         rebuildSettings();
         applyUiSettingChange(valuePtr);
@@ -441,8 +444,10 @@ void SettingsActivity::toggleSelectedSetting() {
       requestUpdate();
       return;
     }
-    if (currentValue + setting.valueRange.step > setting.valueRange.max) {
-      SETTINGS.*(setting.valuePtr) = setting.valueRange.min;
+    if (currentValue < setting.valueRange.min) {
+      SETTINGS.*(setting.valuePtr) = setting.valueRange.min;  // from the `first` choice onto the grid
+    } else if (currentValue + setting.valueRange.step > setting.valueRange.max) {
+      SETTINGS.*(setting.valuePtr) = setting.valueRange.lowest();
     } else {
       SETTINGS.*(setting.valuePtr) = currentValue + setting.valueRange.step;
     }

@@ -612,12 +612,25 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   static constexpr uint8_t TEXT_WEIGHT_MAX = 6;
   uint8_t textWeight = TEXT_WEIGHT_OFFSET;
 
-  // Reader screen margin settings
-  // LOCAL(feat-dictionary): margin bounds from #2605; screenMargin default unchanged (== MIN)
-  static constexpr uint8_t SCREEN_MARGIN_MIN = 5;
+  // Reader screen margin (px inside the bezel clearance). Choices: SCREEN_MARGIN_MIN, a tight
+  // edge for reading straight on, then SCREEN_MARGIN_RAMP_START..MAX in SCREEN_MARGIN_STEP steps.
+  static constexpr uint8_t SCREEN_MARGIN_MIN = 3;
+  static constexpr uint8_t SCREEN_MARGIN_RAMP_START = 5;
   static constexpr uint8_t SCREEN_MARGIN_MAX = 40;
   static constexpr uint8_t SCREEN_MARGIN_STEP = 5;
-  uint8_t screenMargin = SCREEN_MARGIN_MIN;
+  static constexpr int SCREEN_MARGIN_OPTION_COUNT =
+      1 + (SCREEN_MARGIN_MAX - SCREEN_MARGIN_RAMP_START) / SCREEN_MARGIN_STEP;
+  static constexpr uint8_t screenMarginOption(const int index) {
+    return index <= 0 ? SCREEN_MARGIN_MIN
+                      : static_cast<uint8_t>(SCREEN_MARGIN_RAMP_START + (index - 1) * SCREEN_MARGIN_STEP);
+  }
+  // Index of the choice at or below `margin` (a stale off-ramp value lands on its neighbour).
+  static constexpr int screenMarginIndex(const uint8_t margin) {
+    if (margin < SCREEN_MARGIN_RAMP_START) return 0;
+    const int clamped = margin > SCREEN_MARGIN_MAX ? SCREEN_MARGIN_MAX : margin;
+    return 1 + (clamped - SCREEN_MARGIN_RAMP_START) / SCREEN_MARGIN_STEP;
+  }
+  uint8_t screenMargin = SCREEN_MARGIN_RAMP_START;
   // Hide battery percentage
   uint8_t hideBatteryPercentage = HIDE_NEVER;
   // Long-press behavior for FRONT page-turn buttons (Left/Right)

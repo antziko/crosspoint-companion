@@ -330,12 +330,10 @@ void ReaderOptionsActivity::cycleCurrentItem() {
           (localOverride.paragraphIndent + 1) % static_cast<uint8_t>(CrossPointSettings::PARAGRAPH_INDENT_COUNT);
       break;
     case SCREEN_MARGIN: {
-      // Step through [MIN, MAX] and wrap; clamp guards a stale/out-of-range stored value.
-      const int cur = std::clamp<int>(localOverride.screenMargin, CrossPointSettings::SCREEN_MARGIN_MIN,
-                                      CrossPointSettings::SCREEN_MARGIN_MAX);
-      int next = cur + CrossPointSettings::SCREEN_MARGIN_STEP;
-      if (next > CrossPointSettings::SCREEN_MARGIN_MAX) next = CrossPointSettings::SCREEN_MARGIN_MIN;
-      localOverride.screenMargin = static_cast<uint8_t>(next);
+      // Step through the margin choices and wrap.
+      const int next = (CrossPointSettings::screenMarginIndex(localOverride.screenMargin) + 1) %
+                       CrossPointSettings::SCREEN_MARGIN_OPTION_COUNT;
+      localOverride.screenMargin = CrossPointSettings::screenMarginOption(next);
       break;
     }
     case WORD_SELECT_BUTTONS:
@@ -450,9 +448,9 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
       return std::string(buf);
     }
     case LINE_SPACING: {
-      const uint8_t sp =
-          localOverride.lineSpacing < CrossPointSettings::LINE_COMPRESSION_COUNT ? localOverride.lineSpacing
-                                                                                 : CrossPointSettings::LINE_SPACING_120;
+      const uint8_t sp = localOverride.lineSpacing < CrossPointSettings::LINE_COMPRESSION_COUNT
+                             ? localOverride.lineSpacing
+                             : CrossPointSettings::LINE_SPACING_120;
       return I18N.get(LINE_SPACING_IDS[sp]);
     }
     case PARA_ALIGNMENT: {

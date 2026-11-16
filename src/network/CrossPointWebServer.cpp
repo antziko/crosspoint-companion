@@ -1599,6 +1599,7 @@ void sendSettingEntry(void* ctx, SettingInfo&& setting) {
       doc["min"] = s.valueRange.min;
       doc["max"] = s.valueRange.max;
       doc["step"] = s.valueRange.step;
+      if (s.valueRange.first > 0) doc["first"] = s.valueRange.first;
       break;
     }
     case SettingType::STRING: {
@@ -1685,12 +1686,17 @@ void applySettingEntry(void* ctx, SettingInfo&& setting) {
     }
     case SettingType::VALUE: {
       int val = doc[s.key].as<int>();
-      if (val >= s.valueRange.min && val <= s.valueRange.max) {
+      if (s.valueRange.first > 0 && val >= s.valueRange.first && val < s.valueRange.min) {
+        // Below the grid: the off-grid first choice, or the grid's start, whichever is nearer.
+        val = (val - s.valueRange.first) * 2 < (s.valueRange.min - s.valueRange.first) ? s.valueRange.first
+                                                                                       : s.valueRange.min;
+      }
+      if (val >= s.valueRange.lowest() && val <= s.valueRange.max) {
         // Snap to the nearest valid step. The device cycler only ever produces
         // (min + k*step) values, and main.cpp rejects non-step-multiples on
         // boot (resetting to default), so a web-supplied off-step value must be
         // aligned here or it would silently revert on the next reboot.
-        if (s.valueRange.step > 1) {
+        if (s.valueRange.step > 1 && val >= s.valueRange.min) {
           const int rel = val - s.valueRange.min;
           val = s.valueRange.min + ((rel + s.valueRange.step / 2) / s.valueRange.step) * s.valueRange.step;
           if (val > s.valueRange.max) val = s.valueRange.max;

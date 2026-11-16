@@ -17,10 +17,12 @@
 namespace {
 constexpr int hPaddingInSelection = 8;
 constexpr int cornerRadius = 6;
+// Tile edge, hPaddingInSelection outside the shared content edge so the cover inside sits on it.
+int coverSide() { return std::max(0, UITheme::getInstance().getMetrics().contentSidePadding - hPaddingInSelection); }
 }  // namespace
 
 int Lyra3CoversTheme::homeCoverThumbHeight(const GfxRenderer& renderer) const {
-  const int tileWidth = (renderer.getScreenWidth() - 2 * Lyra3CoversMetrics::values.contentSidePadding) / 3;
+  const int tileWidth = (renderer.getScreenWidth() - 2 * coverSide()) / 3;
   // Thumbs cover a (0.6*h, h) target box; in landscape the tile is wider than
   // 0.6 aspect, so request a taller thumb and let the draw crop vertically.
   return std::max(Lyra3CoversMetrics::values.homeCoverHeight, (tileWidth - 2 * hPaddingInSelection) * 5 / 3 + 2);
@@ -29,7 +31,7 @@ int Lyra3CoversTheme::homeCoverThumbHeight(const GfxRenderer& renderer) const {
 void Lyra3CoversTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std::vector<RecentBook>& recentBooks,
                                            const int selectorIndex, bool& coverRendered, bool& coverBufferStored,
                                            bool& bufferRestored, std::function<bool()> storeCoverBuffer) const {
-  const int tileWidth = (rect.width - 2 * Lyra3CoversMetrics::values.contentSidePadding) / 3;
+  const int tileWidth = (rect.width - 2 * coverSide()) / 3;
   const int tileY = rect.y;
   const bool hasContinueReading = !recentBooks.empty();
 
@@ -42,7 +44,7 @@ void Lyra3CoversTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, con
            i < std::min(static_cast<int>(recentBooks.size()), Lyra3CoversMetrics::values.homeRecentBooksCount); i++) {
         std::string coverPath = recentBooks[i].coverBmpPath;
         bool hasCover = true;
-        int tileX = rect.x + Lyra3CoversMetrics::values.contentSidePadding + tileWidth * i;
+        int tileX = rect.x + coverSide() + tileWidth * i;
         if (coverPath.empty()) {
           hasCover = false;
         } else {
@@ -86,7 +88,7 @@ void Lyra3CoversTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, con
          i++) {
       bool bookSelected = (selectorIndex == i);
 
-      int tileX = rect.x + Lyra3CoversMetrics::values.contentSidePadding + tileWidth * i;
+      int tileX = rect.x + coverSide() + tileWidth * i;
 
       const int maxLineWidth = tileWidth - 2 * hPaddingInSelection;
 

@@ -74,7 +74,7 @@ void verifySettingsPersistenceTable() {
         hi = static_cast<uint8_t>(info.enumValues.size() - 1);
         break;
       case SettingType::VALUE:
-        lo = info.valueRange.min;
+        lo = info.valueRange.lowest();
         hi = info.valueRange.max;
         clampToRange = true;
         break;

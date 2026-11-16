@@ -107,7 +107,7 @@ bool RoundedRaffTheme::tabIndexFromPoint(const GfxRenderer& renderer, const Rect
 void RoundedRaffTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std::vector<RecentBook>& recentBooks,
                                            const int selectorIndex, bool& coverRendered, bool& coverBufferStored,
                                            bool& bufferRestored, std::function<bool()> storeCoverBuffer) const {
-  const int tileWidth = rect.width - 2 * RoundedRaffMetrics::values.contentSidePadding;
+  const int tileWidth = rect.width - 2 * UITheme::getInstance().getMetrics().contentSidePadding;
   const int tileHeight = rect.height;
   const int tileY = rect.y;
   const bool hasContinueReading = !recentBooks.empty();
@@ -115,7 +115,7 @@ void RoundedRaffTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, con
     coverWidth = RoundedRaffMetrics::values.homeCoverHeight * 0.6;
   }
   const int imgY = tileY + (tileHeight - RoundedRaffMetrics::values.homeCoverHeight) / 2;
-  const int tileX = rect.x + RoundedRaffMetrics::values.contentSidePadding;
+  const int tileX = rect.x + UITheme::getInstance().getMetrics().contentSidePadding;
 
   // Draw book card regardless, fill with message based on `hasContinueReading`
   // Draw cover image as background if available (inside the box)
@@ -194,7 +194,7 @@ void RoundedRaffTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int butt
                                       const std::function<std::string(int index)>& buttonLabel,
                                       const std::function<UIIcon(int index)>& rowIcon) const {
   (void)rowIcon;
-  const int sidePadding = RoundedRaffMetrics::values.contentSidePadding;
+  const int sidePadding = UITheme::getInstance().getMetrics().contentSidePadding;
   const int rowX = rect.x + sidePadding;
   const int rowHeight = getMenuRowHeight(renderer);  // shared with HomeActivity's touch grid
   const int rowGap = kSelectableRowGap;
@@ -270,7 +270,7 @@ bool RoundedRaffTheme::listIndexFromPoint(const GfxRenderer& renderer, const Rec
   const int rowStep = rowHeight + kSelectableRowGap;
   if (rowStep <= 0) return false;
   const int pageItems = std::max(1, rect.height / rowStep);
-  const int sidePadding = RoundedRaffMetrics::values.contentSidePadding;
+  const int sidePadding = UITheme::getInstance().getMetrics().contentSidePadding;
   if (x < rect.x + sidePadding || x >= rect.x + rect.width - sidePadding || y < rect.y) return false;
   const int row = (y - rect.y) / rowStep;
   if (row >= pageItems) return false;

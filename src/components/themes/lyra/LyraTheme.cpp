@@ -120,20 +120,21 @@ void LyraTheme::fillBatteryIcon(const GfxRenderer& renderer, Rect rect, uint16_t
 }
 
 void LyraTheme::drawSubHeader(const GfxRenderer& renderer, Rect rect, const char* label, const char* rightLabel) const {
-  const int contentWidth = std::max(0, rect.width - LyraMetrics::values.contentSidePadding * 2);
+  const int contentWidth = std::max(0, rect.width - UITheme::getInstance().getMetrics().contentSidePadding * 2);
 
   int labelWidth = contentWidth;
   if (rightLabel) {
     auto truncatedRightLabel = renderer.truncatedText(SMALL_FONT_ID, rightLabel, contentWidth, EpdFontFamily::REGULAR);
     const int rightLabelWidth = renderer.getTextWidth(SMALL_FONT_ID, truncatedRightLabel.c_str());
-    renderer.drawText(SMALL_FONT_ID, rect.x + rect.width - LyraMetrics::values.contentSidePadding - rightLabelWidth,
+    renderer.drawText(SMALL_FONT_ID,
+                      rect.x + rect.width - UITheme::getInstance().getMetrics().contentSidePadding - rightLabelWidth,
                       rect.y + 7, truncatedRightLabel.c_str());
     labelWidth = std::max(0, contentWidth - rightLabelWidth - hPaddingInSelection);
   }
 
   if (labelWidth > 0) {
     auto truncatedLabel = renderer.truncatedText(UI_10_FONT_ID, label, labelWidth, EpdFontFamily::REGULAR);
-    renderer.drawText(UI_10_FONT_ID, rect.x + LyraMetrics::values.contentSidePadding, rect.y + 6,
+    renderer.drawText(UI_10_FONT_ID, rect.x + UITheme::getInstance().getMetrics().contentSidePadding, rect.y + 6,
                       truncatedLabel.c_str(), true, EpdFontFamily::REGULAR);
   }
 
@@ -142,7 +143,7 @@ void LyraTheme::drawSubHeader(const GfxRenderer& renderer, Rect rect, const char
 
 void LyraTheme::drawTabBar(const GfxRenderer& renderer, Rect rect, const std::vector<TabInfo>& tabs,
                            bool selected) const {
-  int currentX = rect.x + LyraMetrics::values.contentSidePadding;
+  int currentX = rect.x + UITheme::getInstance().getMetrics().contentSidePadding;
 
   if (selected) {
     renderer.fillRectDither(rect.x, rect.y, rect.width, rect.height, Color::LightGray);
@@ -178,7 +179,7 @@ bool LyraTheme::tabIndexFromPoint(const GfxRenderer& renderer, const Rect rect, 
     return false;
   }
 
-  int currentX = rect.x + LyraMetrics::values.contentSidePadding;
+  int currentX = rect.x + UITheme::getInstance().getMetrics().contentSidePadding;
   for (size_t i = 0; i < tabs.size(); i++) {
     const int textWidth = renderer.getTextWidth(UI_10_FONT_ID, tabs[i].label, EpdFontFamily::REGULAR);
     const int tabWidth = textWidth + 2 * hPaddingInSelection;
@@ -267,8 +268,10 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
   //
   // Icon column is reserved per-row: a row whose icon is None lets its title use
   // the full width, while a row with an icon indents past it.
-  const int baseTextX = rect.x + listInset + hPaddingInSelection;
-  const int baseTextWidth = contentWidth - listInset * 2 - hPaddingInSelection * 2;
+  // Text sits listSidePadding inside the band: together they put it on the screen-margin edge.
+  const int textPad = UITheme::getInstance().getMetrics().listSidePadding;
+  const int baseTextX = rect.x + listInset + textPad;
+  const int baseTextWidth = contentWidth - listInset * 2 - textPad * 2;
   const int iconSize = (rowIcon != nullptr) ? ((rowSubtitle != nullptr) ? mainMenuIconSize : listIconSize) : 0;
 
   // Draw all items
@@ -322,11 +325,11 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
       renderer.drawText(subFont, textX, itemY + 30, subtitle.c_str(), true);
     }
 
-    // Draw value. Inset from the row's edge by hPaddingInSelection, the same
-    // padding the title gets on the left and that FreeInkUI lists apply as
-    // listSidePadding -- so both sides of a row, and both renderers, agree.
+    // Draw value. Inset from the row's edge by listSidePadding, the same padding
+    // the title gets on the left and FreeInkUI lists apply -- so both sides of a
+    // row, and both renderers, agree.
     if (!valueText.empty()) {
-      const int valueX = rect.x + contentWidth - listInset - hPaddingInSelection - valueTextWidth;
+      const int valueX = rect.x + contentWidth - listInset - textPad - valueTextWidth;
       if (i == cursorIndex && highlightValue) {
         renderer.fillRoundedRect(valueX - hPaddingInSelection, itemY, valueTextWidth + hPaddingInSelection * 2,
                                  rowHeight, cornerRadius, Color::Black);
@@ -465,7 +468,13 @@ void LyraTheme::drawSideButtonHints(const GfxRenderer& renderer, const char* top
 void LyraTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std::vector<RecentBook>& recentBooks,
                                     const int selectorIndex, bool& coverRendered, bool& coverBufferStored,
                                     bool& bufferRestored, std::function<bool()> storeCoverBuffer) const {
-  const int tileWidth = rect.width - 2 * LyraMetrics::values.contentSidePadding;
+  // The selection tile reaches hPaddingInSelection outside the content edge, so the cover
+  // inside it lines up with the page text; never off-screen.
+  const int tileX = std::max(0, rect.x + UITheme::getInstance().getMetrics().contentSidePadding - hPaddingInSelection);
+  const int tileRight =
+      std::min(renderer.getScreenWidth(),
+               rect.x + rect.width - UITheme::getInstance().getMetrics().contentSidePadding + hPaddingInSelection);
+  const int tileWidth = tileRight - tileX;
   const int tileHeight = rect.height;
   const int tileY = rect.y;
   const bool hasContinueReading = !recentBooks.empty();
@@ -481,7 +490,6 @@ void LyraTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
     if (!coverRendered) {
       std::string coverPath = book.coverBmpPath;
       bool hasCover = true;
-      int tileX = rect.x + LyraMetrics::values.contentSidePadding;
       if (coverPath.empty()) {
         hasCover = false;
       } else {
@@ -520,7 +528,6 @@ void LyraTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
 
     bool bookSelected = (selectorIndex == 0);
 
-    int tileX = rect.x + LyraMetrics::values.contentSidePadding;
     int textWidth = tileWidth - 2 * hPaddingInSelection - LyraMetrics::values.verticalSpacing - coverWidth;
 
     if (bookSelected) {
@@ -571,10 +578,15 @@ void LyraTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
                                const std::function<std::string(int index)>& buttonLabel,
                                const std::function<UIIcon(int index)>& rowIcon) const {
   for (int i = 0; i < buttonCount; ++i) {
-    int tileWidth = rect.width - LyraMetrics::values.contentSidePadding * 2;
-    Rect tileRect = Rect{rect.x + LyraMetrics::values.contentSidePadding,
-                         rect.y + i * (LyraMetrics::values.menuRowHeight + LyraMetrics::values.menuSpacing), tileWidth,
-                         LyraMetrics::values.menuRowHeight};
+    // Tile reaches hPaddingInSelection outside the content edge; the icon/label sit on it.
+    const int tileX =
+        std::max(0, rect.x + UITheme::getInstance().getMetrics().contentSidePadding - hPaddingInSelection);
+    const int tileWidth =
+        std::min(renderer.getScreenWidth(),
+                 rect.x + rect.width - UITheme::getInstance().getMetrics().contentSidePadding + hPaddingInSelection) -
+        tileX;
+    Rect tileRect = Rect{tileX, rect.y + i * (LyraMetrics::values.menuRowHeight + LyraMetrics::values.menuSpacing),
+                         tileWidth, LyraMetrics::values.menuRowHeight};
 
     const bool selected = selectedIndex == i;
 
@@ -584,7 +596,7 @@ void LyraTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
 
     std::string labelStr = buttonLabel(i);
     const char* label = labelStr.c_str();
-    int textX = tileRect.x + 16;
+    int textX = tileRect.x + hPaddingInSelection;
     // Menu rows read at the one UI size, like BaseTheme's tile labels.
     const int labelFontId = uiScaleSpec().bodyFontId;
     const int lineHeight = renderer.getLineHeight(labelFontId);

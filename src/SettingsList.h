@@ -443,8 +443,8 @@ inline void forEachSetting(const SdCardFontRegistry* registry, const DictionaryR
                                 "lineHeight", StrId::STR_CAT_READER)
                   .withTextSettings());
   v.push_back(SettingInfo::Value(StrId::STR_SCREEN_MARGIN, &CrossPointSettings::screenMargin,
-                                 {CrossPointSettings::SCREEN_MARGIN_MIN, CrossPointSettings::SCREEN_MARGIN_MAX,
-                                  CrossPointSettings::SCREEN_MARGIN_STEP},
+                                 {CrossPointSettings::SCREEN_MARGIN_RAMP_START, CrossPointSettings::SCREEN_MARGIN_MAX,
+                                  CrossPointSettings::SCREEN_MARGIN_STEP, CrossPointSettings::SCREEN_MARGIN_MIN},
                                  "screenMargin", StrId::STR_CAT_READER)
                   .withTextSettings());
   v.push_back(SettingInfo::Value(StrId::STR_WORD_SPACING, &CrossPointSettings::wordSpacing,
