@@ -5569,6 +5569,17 @@ void EpubReaderActivity::handleOverlayInput() {
   const auto toolOverlay = [](int tool) {
     return tool == 0 ? Overlay::Contents : (tool == 1 ? Overlay::Text : Overlay::More);
   };
+  // Tool 2 (Bookmarks) is no panel: it opens the bookmark list, as a leaf More row does.
+  const auto openTool = [this, &toolOverlay](int tool) {
+    focusedTool = tool;
+    if (tool == kToolBookmarks) {
+      overlay = Overlay::None;
+      discardOverlayPage();
+      onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction::VIEW_BOOKMARKS);
+      return;
+    }
+    openOverlay(toolOverlay(tool));
+  };
 
   // Touch first: FreeInkUI routes the frame against the tap targets the last
   // render registered and hands back the action it mapped to.
@@ -5581,8 +5592,7 @@ void EpubReaderActivity::handleOverlayInput() {
         closeOverlayToPage();
         return;
       case ReaderToolbarUi::Event::Tool:
-        focusedTool = routed.value;
-        openOverlay(toolOverlay(focusedTool));
+        openTool(routed.value);
         return;
       case ReaderToolbarUi::Event::PrevChapter:
         gotoSpine(currentSpineIndex - 1);
@@ -5605,19 +5615,19 @@ void EpubReaderActivity::handleOverlayInput() {
       return;
     }
     if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
-      focusedTool = (focusedTool + 2) % 3;
+      focusedTool = (focusedTool + kToolCount - 1) % kToolCount;
       panelCursorShown = true;
       fastRedraw();
       return;
     }
     if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
-      focusedTool = (focusedTool + 1) % 3;
+      focusedTool = (focusedTool + 1) % kToolCount;
       panelCursorShown = true;
       fastRedraw();
       return;
     }
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-      openOverlay(toolOverlay(focusedTool));
+      openTool(focusedTool);
       return;
     }
     const bool prev = mappedInput.wasReleased(MappedInputManager::Button::Up);
@@ -5789,12 +5799,8 @@ void EpubReaderActivity::handleOverlayInput() {
       closeOverlayToPage();
       return;
     case ReaderToolbarUi::Event::Tool: {
-      // Sheet-bottom tool switcher: hop straight to another panel.
-      const Overlay target = toolOverlay(routed.value);
-      if (target != overlay) {
-        focusedTool = routed.value;
-        openOverlay(target);
-      }
+      // Sheet-bottom tool switcher: hop straight to another panel (or the bookmark list).
+      if (routed.value == kToolBookmarks || toolOverlay(routed.value) != overlay) openTool(routed.value);
       return;
     }
     case ReaderToolbarUi::Event::Row:
@@ -5905,7 +5911,8 @@ void EpubReaderActivity::buildMoreActions() {
   // both are what the Text tool already covers.
   moreItems.erase(std::remove_if(moreItems.begin(), moreItems.end(),
                                  [](const auto& item) {
-                                   return item.action == MA::SELECT_CHAPTER || item.action == MA::READER_OPTIONS;
+                                   return item.action == MA::SELECT_CHAPTER || item.action == MA::READER_OPTIONS ||
+                                          item.action == MA::VIEW_BOOKMARKS;
                                  }),
                   moreItems.end());
 }

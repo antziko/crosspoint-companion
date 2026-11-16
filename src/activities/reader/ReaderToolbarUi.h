@@ -14,7 +14,7 @@ class MappedInputManager;
 // Menu Style -> Toolbar), painted over the page that is already on screen:
 //
 //  - Toolbar: a bottom sheet holding a chapter scrub row (< capsule >) and a
-//    Contents / Text / More tile row; the page above it stays untouched.
+//    Contents / Text / Bookmarks / More tile row; the page above it stays untouched.
 //  - Panel: a taller bottom sheet with a title, a paged row list (name left,
 //    value right) and the same tile row as a switcher.
 //
@@ -41,7 +41,7 @@ class ReaderToolbarUi : public UiAppHost {
     std::function<std::string(int)> rowValue;
     void (*rowCheckbox)(void* ctx, int index, freeink::ui::ListItem& item) = nullptr;
     void* rowCheckboxContext = nullptr;
-    // Tile row: the tool in focus (toolbar) / the open panel (panel). 0..2.
+    // Tile row: the tool in focus (toolbar) / the open panel (panel). 0..3.
     int activeTool = 0;
     // Pixels kept free along the screen's bottom edge under the panel sheet
     // (the button-hint row on boards without touch). 0 on touch boards.
