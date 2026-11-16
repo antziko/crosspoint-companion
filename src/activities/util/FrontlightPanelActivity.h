@@ -47,10 +47,9 @@ class FrontlightPanelActivity final : public Activity, private UiAppHost {
   // (panelTile1-4): one of the panel's toggles, or a reader action that closes the panel and
   // runs underneath. Shown on touch boards, absent elsewhere.
   static constexpr int kTileCount = 4;
-  // Slots shown this session, left to right. Reader-action tiles are left out away from a book,
-  // where there is nothing for them to act on. Filled in onEnter().
-  uint8_t visibleSlots[kTileCount] = {};
-  int visibleTileCount = 0;
+  // Reader-action tiles act on the book underneath; away from one they stay in their slot but
+  // draw dimmed and take no taps. Set in onEnter().
+  bool overBook = false;
 
   // fui::SliderRowProps embeds a 324-byte fui::StyleSet, so the props the render
   // path fills in live here instead of on the stack (AGENTS.md: locals stay under
@@ -79,6 +78,8 @@ class FrontlightPanelActivity final : public Activity, private UiAppHost {
   void adjustWarmth(int delta);
   void toggleLight();
   void runTile(int idx);
+  bool tileAvailable(uint8_t kind) const;
+  void dimToHalf(int x, int y, int width, int height) const;
   // Copy the panel's live brightness/warmth/lightOn into SETTINGS and save if
   // anything actually changed. onExit() runs it on every way out.
   void persistLightSettings();

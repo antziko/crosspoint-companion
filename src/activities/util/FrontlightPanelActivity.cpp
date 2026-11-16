@@ -110,13 +110,7 @@ void FrontlightPanelActivity::onEnter() {
   // everywhere else activeOrientation mirrors the global default anyway.
   orientationShown = static_cast<uint8_t>(APP_STATE.activeOrientation % CrossPointSettings::ORIENTATION_COUNT);
 
-  const bool overBook = activityManager.isInReaderContext();
-  visibleTileCount = 0;
-  for (int slot = 0; slot < kTileCount; ++slot) {
-    const HomeButtonAction action = tileAction(tileKind(slot));
-    if (!overBook && action != HomeButtonAction::Ignore && action != HomeButtonAction::Home) continue;
-    visibleSlots[visibleTileCount++] = static_cast<uint8_t>(slot);
-  }
+  overBook = activityManager.isInReaderContext();
 
   resetUi();
   app.on(ACTION_BRIGHTNESS, &FrontlightPanelActivity::onBrightnessEvent, this);
@@ -185,6 +179,22 @@ void FrontlightPanelActivity::onTileEvent(const fui::ActionEvent& event, void* u
   static_cast<FrontlightPanelActivity*>(user)->runTile(event.value);
 }
 
+// Fades ink already drawn in the rect to 50% by clearing every other pixel. Neither the bitmap
+// nor the text path here has a gray paint (text falls back to solid black).
+void FrontlightPanelActivity::dimToHalf(const int x, const int y, const int width, const int height) const {
+  for (int py = y; py < y + height; ++py) {
+    for (int px = x + ((py & 1) ^ 1); px < x + width; px += 2) {
+      renderer.drawPixel(px, py, false);
+    }
+  }
+}
+
+// The panel's own toggles and Home work anywhere; the other reader actions need a book.
+bool FrontlightPanelActivity::tileAvailable(const uint8_t kind) const {
+  const HomeButtonAction action = tileAction(kind);
+  return overBook || action == HomeButtonAction::Ignore || action == HomeButtonAction::Home;
+}
+
 void FrontlightPanelActivity::runTile(const int idx) {
   // Every tile either flips a setting the tile itself displays, or leaves the
   // panel. The tap flash (FreeInkApp arms it after this handler returns, and it
@@ -195,6 +205,7 @@ void FrontlightPanelActivity::runTile(const int idx) {
   app.clearTapFlash();
 
   const uint8_t kind = tileKind(idx);
+  if (!tileAvailable(kind)) return;
   const HomeButtonAction action = tileAction(kind);
   if (action != HomeButtonAction::Ignore) {
     // Close first: the action belongs to the screen underneath, which runs it on the next
@@ -396,7 +407,7 @@ int FrontlightPanelActivity::computePanelBottom() const {
   }
   // Icons are touch targets, so a buttons-only board gets no row and the
   // sheet is exactly the frontlight controls. addQuickRow() takes the same band.
-  if (mappedInput.hasTouch() && visibleTileCount > 0) y += kQuickControlSize + tokens.spaceSm + lineHeight;
+  if (mappedInput.hasTouch()) y += kQuickControlSize + tokens.spaceSm + lineHeight;
   // The sheet's grabber band: content margin + grabber + air to the edge.
   // buildPanelScreen() feeds the same theme spacings into SheetProps.
   y += tokens.spaceLg + kGrabberHeight + tokens.spaceLg + tokens.spaceMd;
@@ -472,7 +483,7 @@ void FrontlightPanelActivity::buildPanelScreen(UiScreen& screen) {
     screen.spacer(theme.spaceSm);
   }
 
-  if (mappedInput.hasTouch() && visibleTileCount > 0) addQuickRow(screen);
+  if (mappedInput.hasTouch()) addQuickRow(screen);
 }
 
 // One row of equal slots, as the reader toolbar lays its icons out: a circle with the tile's
@@ -499,8 +510,9 @@ void FrontlightPanelActivity::addQuickRow(UiScreen& screen) {
   const fui::Rect row = screen.takeTop(static_cast<int16_t>(kQuickControlSize + theme.spaceSm + labelHeight));
   const fui::Paint ink = fui::Paint::solid(fui::Color::Black);
 
-  for (int id = 0; id < visibleTileCount; ++id) {
-    const uint8_t kind = tileKind(visibleSlots[id]);
+  for (int id = 0; id < kTileCount; ++id) {
+    const uint8_t kind = tileKind(id);
+    const bool available = tileAvailable(kind);
     fui::BitmapRef icon{};
     switch (kind) {
       case CrossPointSettings::PANEL_TILE_NIGHT_MODE:
@@ -549,14 +561,14 @@ void FrontlightPanelActivity::addQuickRow(UiScreen& screen) {
                         : kind < CrossPointSettings::PANEL_TILE_COUNT        ? I18N.get(kTileNames[kind])
                                                                              : "";
 
-    const int16_t left = static_cast<int16_t>(row.x + row.width * id / visibleTileCount);
-    const int16_t right = static_cast<int16_t>(row.x + row.width * (id + 1) / visibleTileCount);
+    const int16_t left = static_cast<int16_t>(row.x + row.width * id / kTileCount);
+    const int16_t right = static_cast<int16_t>(row.x + row.width * (id + 1) / kTileCount);
     const fui::Rect slot{left, row.y, static_cast<int16_t>(right - left), row.height};
     const fui::Rect circle{static_cast<int16_t>(slot.x + (slot.width - kQuickControlSize) / 2), row.y,
                            kQuickControlSize, kQuickControlSize};
     // A toggle shows its state at rest: filled when on, outlined when off. The other tiles
     // are one-shot actions and only outline while pressed.
-    const int16_t value = static_cast<int16_t>(visibleSlots[id]);
+    const int16_t value = static_cast<int16_t>(id);
     if (toggle && enabled) {
       screen.target().fill(circle, ink, kQuickControlSize / 2);
     } else if (toggle || fui::hasState(screen.frame().stateFor(ACTION_TILE, value), fui::StateActive)) {
@@ -569,6 +581,7 @@ void FrontlightPanelActivity::addQuickRow(UiScreen& screen) {
     screen.target().bitmap(iconRect, icon, fui::BitmapMode::Center,
                            fui::Paint::solid(enabled ? fui::Color::White : fui::Color::Black),
                            isOrientation ? kRotations[orientation] : fui::Rotation::None);
+    if (!available) dimToHalf(iconRect.x, iconRect.y, iconRect.width, iconRect.height);
     if (isOrientation) {
       const auto& line = kUnderlines[orientation];
       screen.target().fill(fui::Rect{static_cast<int16_t>(iconRect.x + line.x),
@@ -579,10 +592,11 @@ void FrontlightPanelActivity::addQuickRow(UiScreen& screen) {
     fui::TextStyle text = theme.smallText;
     text.align = fui::TextAlign::Center;
     text.maxLines = 1;
-    screen.target().text(
-        fui::Rect{slot.x, static_cast<int16_t>(row.y + kQuickControlSize + theme.spaceSm), slot.width, labelHeight},
-        label, text);
-    screen.frame().hit(slot, ACTION_TILE, value, fui::InputTouch);
+    const fui::Rect labelRect{slot.x, static_cast<int16_t>(row.y + kQuickControlSize + theme.spaceSm), slot.width,
+                              labelHeight};
+    screen.target().text(labelRect, label, text);
+    if (!available) dimToHalf(labelRect.x, labelRect.y, labelRect.width, labelRect.height);
+    if (available) screen.frame().hit(slot, ACTION_TILE, value, fui::InputTouch);
   }
 }
 
