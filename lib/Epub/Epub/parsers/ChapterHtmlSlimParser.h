@@ -224,6 +224,32 @@ class ChapterHtmlSlimParser {
   uint32_t recentLineOffsets[MAX_CARRIED_LINES] = {};  // visible offsets of the last lines, newest last
   uint32_t recentLineAnchors[MAX_CARRIED_LINES] = {};  // anchorData size before each of them
   int recentLinesPage = -1;                            // completedPageCount the tracked lines are on
+  // Set by a widow/orphan/heading carry for the page it completes: emitCurrentPage widens that
+  // page's gaps into the room the carried lines leave, measured from carriedTopY (their old top).
+  bool pageLostCarriedLines = false;
+  int16_t carriedTopY = -1;
+
+  // Vertical justification by paragraph gaps. Each blank between two text lines of a page (the
+  // paragraph gap plus block margins) is recorded as laid out; a line that misses the page foot
+  // by a little tightens them to fit, and a page that lost lines to widow/orphan/heading carrying
+  // widens them so its text still reaches the foot. Only plain-flow pages (pageAdjustable).
+  struct PageGap {
+    int16_t y;     // where the blank starts (bottom of the line above it)
+    int16_t base;  // its laid-out size
+    int16_t cur;   // its size now
+  };
+  static constexpr size_t MAX_PAGE_GAPS = 24;
+  static constexpr int MIN_ADJUSTABLE_GAP = 4;
+  PageGap pageGaps[MAX_PAGE_GAPS] = {};
+  uint8_t pageGapCount = 0;
+  int pageGapsPage = -1;  // completedPageCount the gaps are on
+  bool pageAdjustable() const;
+  void notePageGap();
+  void shiftPageBelow(int y, int delta);
+  int spreadOverGaps(int amount, const int (&room)[MAX_PAGE_GAPS], int totalRoom, int sign);
+  bool shrinkGapsToFit(int deficit);
+  int expandGaps(int roomAtFoot);
+  bool gapsCanAbsorbCarry(size_t carry) const;
   // A page-break-after waiting for the next block or image; see applyPendingPageBreak.
   bool pendingPageBreak = false;
   // Open elements with a CSS border or light shade; each emits a PageBorderBox around its

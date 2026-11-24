@@ -26,6 +26,7 @@ class GfxRenderer {
   int getScreenHeight() const { return 800; }
   int getLineHeight(int, float = 1.0f) const { return 16; }
   int getFontAscenderSize(int) const { return 12; }
+  int getFontInkHeight(int) const { return 16; }
   int getSpaceWidth(int, EpdFontFamily::Style) const { return 4; }
   static int trackingBetween(uint32_t left, uint32_t right, int8_t tracking) {
     return left == 0 || left == ' ' || right == ' ' ? 0 : tracking;

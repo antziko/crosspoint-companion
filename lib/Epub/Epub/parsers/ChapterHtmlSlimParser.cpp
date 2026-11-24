@@ -3024,14 +3024,27 @@ void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line, const
 
   // An open <pre> keeps room for its bottom padding and restarts its outline on the next page.
   const int boxPad = preBoxActive ? preBoxPadV : 0;
+  // The line fits when its glyphs do: the line spacing below them is only needed when another
+  // line follows, so the page's last line may end its glyph box at the viewport's foot.
+  const int fitHeight = std::min(
+      lineHeight, line->getRubyShift(renderer.getFontAscenderSize(lineFont)) + renderer.getFontInkHeight(lineFont));
+  notePageGap();
+  bool fits = currentPageNextY + fitHeight + boxPad <= viewportHeight;
+  // A line that misses by a little goes on this page with the page's paragraph gaps tightened.
+  if (!fits) fits = shrinkGapsToFit(currentPageNextY + fitHeight + boxPad - viewportHeight);
   size_t paragraphLines = 0;
-  const size_t carry = currentPageNextY + lineHeight + boxPad > viewportHeight && !preBoxActive && tableDepth == 0
-                           ? linesToCarry(paragraphLines)
-                           : 0;
+  size_t carry = !fits && !preBoxActive && tableDepth == 0 ? linesToCarry(paragraphLines) : 0;
+  // A paragraph's lone first or last line moves only when the page's gaps can take up the room it
+  // leaves; otherwise the page fills and the line stands alone. A heading still always moves.
+  if (carry > 0 && carry == paragraphLines && !gapsCanAbsorbCarry(carry)) {
+    carry = 0;
+    paragraphLines = 0;
+  }
   if (carry > 0) {
+    pageLostCarriedLines = true;
     breakPageCarryingLines(carry, paragraphLines, visibleOffset);
     if (outOfMemory_) return;
-  } else if (currentPageNextY + lineHeight + boxPad > viewportHeight) {
+  } else if (!fits) {
     if (preBoxActive) emitPreBox();
     setCurrentPageVisibleOffset(visibleOffset);
     emitCurrentPage();
@@ -3161,6 +3174,7 @@ void ChapterHtmlSlimParser::breakPageCarryingLines(const size_t carry, const siz
     carriedAnchors[carry - 1 - i] = recentLineAnchors[recentLineCount - 1 - i];
   }
   const int16_t carriedTop = carry > 0 ? carried[0]->yPos : 0;
+  if (carry > 0) carriedTopY = carriedTop;
   const int16_t carriedBottom = currentPageNextY;
   // Rare (a link on a page-foot line), and bounded by MAX_LINKS_PER_PAGE.
   std::vector<PageLink> carriedLinks;
@@ -3316,7 +3330,122 @@ int ChapterHtmlSlimParser::layoutFontFor(ParsedText& block) const {
   return sized ? sized : fontId;
 }
 
+// Pages whose content is plain flow: lines, images and rules. Boxes, tables and <pre> frames track
+// their own outline heights while the page builds, so their pages keep the spacing as laid out.
+bool ChapterHtmlSlimParser::pageAdjustable() const {
+  if (!currentPage || preBoxActive || tableDepth > 0 || insideTableCell || boxScopeCount > 0) return false;
+  if (closedBoxesPage == completedPageCount && closedBoxCount > 0) return false;
+  return std::all_of(currentPage->elements.begin(), currentPage->elements.end(), [](const auto& el) {
+    const auto tag = el->getTag();
+    return tag == TAG_PageLine || tag == TAG_PageImage || tag == TAG_PageHorizontalRule;
+  });
+}
+
+// Records the blank between the page's last text line and the line about to be placed: the
+// paragraph gap and block margins that adjustPageGaps may tighten or widen.
+void ChapterHtmlSlimParser::notePageGap() {
+  if (pageGapsPage != completedPageCount) {
+    pageGapCount = 0;
+    pageGapsPage = completedPageCount;
+  }
+  if (!currentPage || currentPage->elements.empty() || pageGapCount >= MAX_PAGE_GAPS) return;
+  const PageElement& last = *currentPage->elements.back();
+  if (last.getTag() != TAG_PageLine) return;
+  const TextBlock& prev = *static_cast<const PageLine&>(last).getBlock();
+  const int prevFont = prev.blockFontId(fontId);
+  const int bottom = last.yPos + renderer.getLineHeight(prevFont, lineCompression) +
+                     prev.getRubyShift(renderer.getFontAscenderSize(prevFont));
+  const int gap = currentPageNextY - bottom;
+  if (gap < MIN_ADJUSTABLE_GAP) return;
+  pageGaps[pageGapCount++] = {static_cast<int16_t>(bottom), static_cast<int16_t>(gap), static_cast<int16_t>(gap)};
+}
+
+// Moves everything at or below `y` (elements, tap targets, later gaps) by `delta`.
+void ChapterHtmlSlimParser::shiftPageBelow(const int y, const int delta) {
+  for (auto& el : currentPage->elements) {
+    if (el->yPos >= y) el->yPos = static_cast<int16_t>(el->yPos + delta);
+  }
+  for (auto& link : currentPage->links) {
+    if (link.y + link.height > y) link.y = static_cast<int16_t>(link.y + delta);
+  }
+  for (uint8_t i = 0; i < pageGapCount; ++i) {
+    if (pageGaps[i].y >= y) pageGaps[i].y = static_cast<int16_t>(pageGaps[i].y + delta);
+  }
+}
+
+// Spreads `amount` over the gaps by their room (room[i] each), top to bottom; returns what moved.
+// `sign` is -1 to tighten, +1 to widen.
+int ChapterHtmlSlimParser::spreadOverGaps(const int amount, const int (&room)[MAX_PAGE_GAPS], const int totalRoom,
+                                          const int sign) {
+  int left = amount;
+  for (uint8_t i = 0; i < pageGapCount && left > 0; ++i) {
+    if (room[i] <= 0) continue;
+    int part = static_cast<int>((static_cast<int64_t>(amount) * room[i] + totalRoom - 1) / totalRoom);
+    part = std::min({part, room[i], left});
+    PageGap& g = pageGaps[i];
+    shiftPageBelow(g.y + g.cur, sign * part);
+    g.cur = static_cast<int16_t>(g.cur + sign * part);
+    left -= part;
+  }
+  return amount - left;
+}
+
+// The line about to be placed misses the page foot by `deficit` px: tighten the page's gaps (each
+// to no less than two thirds of its laid-out size) so it fits. The pending gap above the line counts.
+bool ChapterHtmlSlimParser::shrinkGapsToFit(const int deficit) {
+  if (deficit <= 0 || pageGapsPage != completedPageCount || pageGapCount == 0 || !pageAdjustable()) return false;
+  int room[MAX_PAGE_GAPS] = {};
+  int totalRoom = 0;
+  for (uint8_t i = 0; i < pageGapCount; ++i) {
+    room[i] = std::max(0, pageGaps[i].cur - (pageGaps[i].base * 2 + 2) / 3);
+    totalRoom += room[i];
+  }
+  if (totalRoom < deficit) return false;
+  const int moved = spreadOverGaps(deficit, room, totalRoom, -1);
+  currentPageNextY = static_cast<int16_t>(currentPageNextY - moved);
+  return moved == deficit;
+}
+
+// Whether expandGaps could take up the height of the page's last `carry` lines (validated by
+// canCarry): the gaps that would still have text below them, each widened to at most twice its size.
+bool ChapterHtmlSlimParser::gapsCanAbsorbCarry(const size_t carry) const {
+  if (pageGapsPage != completedPageCount || pageGapCount == 0 || !pageAdjustable()) return false;
+  const auto& elements = currentPage->elements;
+  if (elements.size() <= carry) return false;
+  const int carriedTop = elements[elements.size() - carry]->yPos;
+  const int lastTop = elements[elements.size() - carry - 1]->yPos;
+  int capacity = 0;
+  for (uint8_t i = 0; i < pageGapCount; ++i) {
+    const PageGap& g = pageGaps[i];
+    if (g.y + g.cur <= lastTop) capacity += std::max(0, g.base * 2 - g.cur);
+  }
+  return capacity >= currentPageNextY - carriedTop;
+}
+
+// The page lost lines to the next page (widow, orphan, heading): spread the room they leave over
+// the page's gaps that have text below them, each to at most twice its laid-out size.
+int ChapterHtmlSlimParser::expandGaps(const int roomAtFoot) {
+  if (roomAtFoot <= 0 || pageGapsPage != completedPageCount || pageGapCount == 0 || !pageAdjustable() ||
+      currentPage->elements.empty()) {
+    return 0;
+  }
+  const int lastTop = currentPage->elements.back()->yPos;
+  int room[MAX_PAGE_GAPS] = {};
+  int totalRoom = 0;
+  for (uint8_t i = 0; i < pageGapCount; ++i) {
+    const PageGap& g = pageGaps[i];
+    if (g.y + g.cur > lastTop) continue;  // nothing on this page below it
+    room[i] = std::max(0, g.base * 2 - g.cur);
+    totalRoom += room[i];
+  }
+  if (totalRoom == 0) return 0;
+  return spreadOverGaps(std::min(roomAtFoot, totalRoom), room, totalRoom, +1);
+}
+
 void ChapterHtmlSlimParser::emitCurrentPage() {
+  if (pageLostCarriedLines && carriedTopY >= 0) expandGaps(static_cast<int>(viewportHeight) - carriedTopY);
+  pageLostCarriedLines = false;
+  carriedTopY = -1;
   // Open boxes are sliced at the page break and continue on the next page.
   for (uint8_t b = 0; b < boxScopeCount; ++b) {
     BoxScope& box = boxScopes[b];

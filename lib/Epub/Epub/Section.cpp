@@ -171,7 +171,12 @@ namespace {
 // v86: Line spacing multiplies font size instead of advanceY; rules, table separators and images
 //      start below the previous line's glyphs.
 // v87: Static GIF images are decoded and laid out instead of skipped.
-constexpr uint8_t SECTION_FILE_VERSION = 90;
+// v91: A page's last line fits when its glyph box does, not its full line spacing.
+// v92: Re-index for the PAGEFILL diagnostic (no format change).
+// v93: (overhang, replaced by v94)
+// v94: Paragraph gaps tighten to fit a page's last line, and widen on widow/orphan pages.
+// v95: A lone first/last line moves only when the page's gaps can take up the room it leaves.
+constexpr uint8_t SECTION_FILE_VERSION = 95;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects

@@ -583,16 +583,20 @@ struct PageParse {
   // order; boxFirst records that they come ahead of the page's other elements.
   std::vector<std::string> boxes;
   std::vector<int> boxHeights;
-  std::vector<int> linePts;  // each line's own built-in size, 0 = the section font
+  std::vector<int> linePts;              // each line's own built-in size, 0 = the section font
+  std::vector<std::vector<int>> lineYs;  // per page, each line's y
   bool boxFirst = true;
   std::unique_ptr<ChapterHtmlSlimParser> parser;
 
-  PageParse(const std::string& body, const int lines, const int fontId = 0, const bool embeddedStyle = true) {
+  // `lines` sets the page height in 16 px stub lines, unless `heightPx` gives it in pixels.
+  PageParse(const std::string& body, const int lines, const int fontId = 0, const bool embeddedStyle = true,
+            const uint8_t paragraphSpacing = 0, const int heightPx = 0) {
     parser = std::make_unique<ChapterHtmlSlimParser>(
-        nullptr, path, renderer, fontId, 1.0f, false, 0, static_cast<uint16_t>(renderer.getScreenWidth()),
-        static_cast<uint16_t>(lines * 16), false, false,
+        nullptr, path, renderer, fontId, 1.0f, paragraphSpacing, 0, static_cast<uint16_t>(renderer.getScreenWidth()),
+        static_cast<uint16_t>(heightPx > 0 ? heightPx : lines * 16), false, false,
         [this](std::unique_ptr<Page> page, uint16_t, uint16_t, uint32_t) {
           std::string tags;
+          std::vector<int> ys;
           std::string pageBoxes;
           bool sawOther = false;
           for (const auto& element : page->elements) {
@@ -609,12 +613,14 @@ struct PageParse {
             }
             sawOther = true;
             if (element->getTag() != TAG_PageLine) continue;
+            ys.push_back(element->yPos);
             const auto& lineStyle = static_cast<const PageLine&>(*element).getBlock()->getBlockStyle();
             linePts.push_back(lineStyle.fontPt);
             const auto align = lineStyle.alignment;
             tags += align == CssTextAlign::Center ? 'C' : 'L';
           }
           pages.push_back(std::move(tags));
+          lineYs.push_back(std::move(ys));
           boxes.push_back(std::move(pageBoxes));
         },
         embeddedStyle, "", "", 0, std::vector<std::string>{}, nullptr, &css);
@@ -647,22 +653,46 @@ int wordsPerLine() {
 // A paragraph exactly `lines` lines long.
 std::string paragraph(const int lines) { return "<p>" + wordsWithMarkers(lines * wordsPerLine(), {}) + "</p>"; }
 
-TEST(ChapterHtmlSlimParserPagination, ALoneFirstLineMovesToTheNextPage) {
+// Stub lines are 16 px; spacing level 3 puts an 8 px gap after each paragraph, which may tighten to
+// 6 or widen to 16.
+TEST(ChapterHtmlSlimParserPagination, ALoneFirstLineMovesWhenTheGapsHideTheHole) {
   ASSERT_GT(wordsPerLine(), 1);
-  // Three lines, then a paragraph whose first line would be its only one on the page.
-  PageParse p(paragraph(3) + paragraph(3), 4);
+  // Three one-line paragraphs, then one whose first line would be its only one on the page; the
+  // two gaps above the last kept line widen by 8 each to fill the 16 px it leaves.
+  PageParse p(paragraph(1) + paragraph(1) + paragraph(1) + paragraph(2), 0, 0, true, 3, 96);
   ASSERT_EQ(p.pages.size(), 2u);
   EXPECT_EQ(p.pages[0], "LLL");
-  EXPECT_EQ(p.pages[1], "LLL");
+  EXPECT_EQ(p.lineYs[0], (std::vector<int>{0, 32, 64}));
+  EXPECT_EQ(p.pages[1], "LL");
 }
 
-TEST(ChapterHtmlSlimParserPagination, ALoneLastLineTakesALineWithIt) {
+TEST(ChapterHtmlSlimParserPagination, ALoneFirstLineStaysWhenNothingCanHideTheHole) {
   ASSERT_GT(wordsPerLine(), 1);
-  // One line, then four: only the second paragraph's last line would open page 2.
+  // No gap has text below it once the line would move, so the page fills instead.
+  PageParse p(paragraph(3) + paragraph(2), 0, 0, true, 3, 80);
+  ASSERT_EQ(p.pages.size(), 2u);
+  EXPECT_EQ(p.pages[0], "LLLL");
+  EXPECT_EQ(p.pages[1], "L");
+}
+
+TEST(ChapterHtmlSlimParserPagination, ALoneLastLineTakesALineWithItWhenTheGapsHideTheHole) {
+  ASSERT_GT(wordsPerLine(), 1);
+  // The fourth paragraph's last line would open page 2 alone; its third line goes with it and
+  // the three gaps above widen by 8 each.
+  PageParse p(paragraph(1) + paragraph(1) + paragraph(1) + paragraph(4), 0, 0, true, 3, 128);
+  ASSERT_EQ(p.pages.size(), 2u);
+  EXPECT_EQ(p.pages[0], "LLLLL");
+  EXPECT_EQ(p.lineYs[0], (std::vector<int>{0, 32, 64, 96, 112}));
+  EXPECT_EQ(p.pages[1], "LL");
+}
+
+TEST(ChapterHtmlSlimParserPagination, OneLongParagraphFillsThePage) {
+  ASSERT_GT(wordsPerLine(), 1);
+  // No paragraph gaps at all: a lone last line opens page 2 rather than leave a hole.
   PageParse p(paragraph(1) + paragraph(4), 4);
   ASSERT_EQ(p.pages.size(), 2u);
-  EXPECT_EQ(p.pages[0], "LLL");
-  EXPECT_EQ(p.pages[1], "LL");
+  EXPECT_EQ(p.pages[0], "LLLL");
+  EXPECT_EQ(p.pages[1], "L");
 }
 
 TEST(ChapterHtmlSlimParserPagination, AHeadingStaysWithItsText) {
@@ -680,6 +710,25 @@ TEST(ChapterHtmlSlimParserPagination, AFullPageParagraphStillBreaks) {
   ASSERT_EQ(p.pages.size(), 2u);
   EXPECT_EQ(p.pages[0], "LLLL");
   EXPECT_EQ(p.pages[1], "LL");
+}
+
+TEST(ChapterHtmlSlimParserPagination, ALineThatMissesByLittleFitsByTighteningGaps) {
+  ASSERT_GT(wordsPerLine(), 1);
+  // 2 lines, gap, 3 lines need 88 px; the page has 86, so the last line misses by 2.
+  PageParse p(paragraph(2) + paragraph(3), 0, 0, true, 3, 86);
+  ASSERT_EQ(p.pages.size(), 1u);
+  EXPECT_EQ(p.pages[0], "LLLLL");
+  EXPECT_EQ(p.lineYs[0], (std::vector<int>{0, 16, 38, 54, 70}));
+}
+
+TEST(ChapterHtmlSlimParserPagination, ALastLineStaysAloneWhenTheGapsCannotHideTwoLines) {
+  ASSERT_GT(wordsPerLine(), 1);
+  // Moving the third paragraph's two lines would leave 32 px; the one gap with text below it can
+  // only widen by 8, so the page keeps them and the last line opens page 2.
+  PageParse p(paragraph(1) + paragraph(1) + paragraph(3), 0, 0, true, 3, 90);
+  ASSERT_EQ(p.pages.size(), 2u);
+  EXPECT_EQ(p.pages[0], "LLLL");
+  EXPECT_EQ(p.pages[1], "L");
 }
 
 TEST(ChapterHtmlSlimParserPagination, CssPageBreakBeforeStartsAPage) {
@@ -709,8 +758,10 @@ TEST(ChapterHtmlSlimParserPagination, AFirstBlockWithAPageBreakAddsNoBlankPage) 
 
 TEST(ChapterHtmlSlimParserPagination, AnAnchorOnACarriedLineMovesWithIt) {
   ASSERT_GT(wordsPerLine(), 1);
-  // The second paragraph's lone first line moves, and its id must name the page it now opens.
-  PageParse p(paragraph(3) + "<p id=\"second\">" + wordsWithMarkers(3 * wordsPerLine(), {}) + "</p>", 4);
+  // The fourth paragraph's lone first line moves, and its id must name the page it now opens.
+  PageParse p(paragraph(1) + paragraph(1) + paragraph(1) + "<p id=\"second\">" +
+                  wordsWithMarkers(2 * wordsPerLine(), {}) + "</p>",
+              0, 0, true, 3, 96);
   ASSERT_EQ(p.pages.size(), 2u);
   int page = -1;
   for (const auto& [key, at] : p.parser->getAnchors()) {
@@ -814,13 +865,15 @@ TEST(ChapterHtmlSlimParserBoxes, NestingDrawsAtMostTwoBoxes) {
 TEST(ChapterHtmlSlimParserBoxes, ALineCarriedOutOfABoxTakesTheBoxWithIt) {
   ASSERT_GT(wordsPerLine(), 1);
   // Top and bottom rules only, so the text keeps its width. 1px + 4px gap above the text: four
-  // lines fit, so the second paragraph's first line would sit alone at the foot and moves. The
-  // box must end where that line used to start.
-  PageParse p(
-      "<div style=\"border-top: 1px solid; border-bottom: 1px solid\">" + paragraph(3) + paragraph(3) + "</div>", 5);
+  // lines fit, so the heading would sit alone at the foot and moves with its text (a lone
+  // paragraph line in a box stays: a box page cannot hide the hole). The box must end where the
+  // heading used to start.
+  PageParse p("<div style=\"border-top: 1px solid; border-bottom: 1px solid\">" + paragraph(3) + "<h2>Head</h2>" +
+                  paragraph(3) + "</div>",
+              5);
   ASSERT_EQ(p.pages.size(), 2u);
   EXPECT_EQ(p.pages[0], "LLL");
-  EXPECT_EQ(p.pages[1], "LLL");
+  EXPECT_EQ(p.pages[1].substr(0, 2), "CL");
   EXPECT_EQ(p.boxes[0], "[T----]");
   EXPECT_EQ(p.boxes[1], "[--B--]");
   ASSERT_EQ(p.boxHeights.size(), 2u);
