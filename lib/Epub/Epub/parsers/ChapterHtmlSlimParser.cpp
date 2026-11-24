@@ -107,6 +107,18 @@ constexpr uint8_t PRE_BOX_THICKNESS = 1;
 
 bool isWhitespace(const char c) { return c == ' ' || c == '\r' || c == '\n' || c == '\t'; }
 
+// Byte length of a breakable Unicode space at s[i] (U+2000-U+2006, U+2008-U+200A, U+205F),
+// or 0. These separate words like an ASCII space; fonts carry no glyph for them.
+// U+2007 (figure space) is no-break and goes through the U+202F path instead.
+int unicodeSpaceLen(const char* s, const int i, const int len) {
+  if (i + 2 >= len || static_cast<uint8_t>(s[i]) != 0xE2) return 0;
+  const auto b1 = static_cast<uint8_t>(s[i + 1]);
+  const auto b2 = static_cast<uint8_t>(s[i + 2]);
+  if (b1 == 0x80 && b2 >= 0x80 && b2 <= 0x8A && b2 != 0x87) return 3;
+  if (b1 == 0x81 && b2 == 0x9F) return 3;
+  return 0;
+}
+
 std::string trimAndNormalize(const std::string& str) {
   if (str.empty()) return "";
   size_t start = 0;
@@ -2393,14 +2405,16 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
       }
     }
 
-    if (isWhitespace(s[i])) {
+    const int uspace = unicodeSpaceLen(s, i, len);
+    if (isWhitespace(s[i]) || uspace > 0) {
       // Currently looking at whitespace, if there's anything in the partWordBuffer, flush it
       if (self->partWordBufferIndex > 0) {
         self->flushPartWordBuffer();
       }
       // Whitespace is a real word boundary — reset continuation state
       self->nextWordContinues = false;
-      // Skip the whitespace char
+      // Skip the whitespace char (continuation bytes add nothing to the visible offset)
+      if (uspace > 0) i += uspace - 1;
       continue;
     }
 
@@ -2440,9 +2454,9 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
       continue;
     }
 
-    // U+202F (narrow no-break space) — identical logic to U+00A0 above.
+    // U+202F (narrow no-break space) and U+2007 (figure space) — identical logic to U+00A0 above.
     if (static_cast<uint8_t>(s[i]) == 0xE2 && i + 2 < len && static_cast<uint8_t>(s[i + 1]) == 0x80 &&
-        static_cast<uint8_t>(s[i + 2]) == 0xAF) {
+        (static_cast<uint8_t>(s[i + 2]) == 0xAF || static_cast<uint8_t>(s[i + 2]) == 0x87)) {
       if (self->partWordBufferIndex > 0) {
         self->flushPartWordBuffer();
       }
@@ -2456,7 +2470,7 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
 
       self->nextWordContinues = true;
 
-      i += 2;  // Skip the remaining two bytes (0x80 0xAF)
+      i += 2;  // Skip the remaining two bytes
       continue;
     }
 

@@ -76,17 +76,29 @@ size_t countDashes(const char* text, size_t len) {
 }
 
 namespace {
-bool isSpaceByte(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
+// Byte length of the separator at text[pos], or 0. U+2000-U+200A (except no-break U+2007) and
+// U+205F count: the chapter parser splits words on them, and snippets saved before it did
+// still carry them inside a word.
+size_t spaceLenAt(const char* text, const size_t pos) {
+  const char c = text[pos];
+  if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v') return 1;
+  if (static_cast<uint8_t>(c) != 0xE2 || text[pos + 1] == '\0' || text[pos + 2] == '\0') return 0;
+  const auto b1 = static_cast<uint8_t>(text[pos + 1]);
+  const auto b2 = static_cast<uint8_t>(text[pos + 2]);
+  if (b1 == 0x80 && b2 >= 0x80 && b2 <= 0x8A && b2 != 0x87) return 3;
+  if (b1 == 0x81 && b2 == 0x9F) return 3;
+  return 0;
+}
 }  // namespace
 
 bool nextTextPart(const char* text, size_t from, size_t& outStart, size_t& outLen, size_t& outNext) {
   if (!text) return false;
   size_t pos = from;
   for (;;) {
-    while (isSpaceByte(text[pos])) pos++;
+    while (const size_t sp = spaceLenAt(text, pos)) pos += sp;
     if (text[pos] == '\0') return false;
     size_t end = pos;
-    while (text[end] != '\0' && !isSpaceByte(text[end])) end++;
+    while (text[end] != '\0' && spaceLenAt(text, end) == 0) end++;
 
     bool isCjk = false;
     if (isSelectable(text + pos, end - pos, isCjk)) {

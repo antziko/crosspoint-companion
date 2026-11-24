@@ -173,6 +173,42 @@ TEST_F(ChapterHtmlSlimParserTest, PaddedSpanWithTextStillJoinsWord) {
   EXPECT_EQ(block->wordAt(0), "The");
 }
 
+TEST_F(ChapterHtmlSlimParserTest, UnicodeSpacesSeparateWords) {
+  // "A:<em space>I'd<thin space>say<medium math space>so ok" -- no glyph for any of them.
+  const char text[] = "A:\xE2\x80\x83I'd\xE2\x80\x89say\xE2\x81\x9Fso ok";
+
+  parser.beginParse();
+  ChapterHtmlSlimParser::startElement(&parser, "p", nullptr);
+  ChapterHtmlSlimParser::characterData(&parser, text, static_cast<int>(sizeof(text) - 1));
+
+  // "ok" is still in the part-word buffer.
+  ParsedText* block = parser.currentTextBlock.get();
+  ASSERT_NE(block, nullptr);
+  ASSERT_EQ(block->size(), 4);
+  EXPECT_EQ(block->wordAt(0), "A:");
+  EXPECT_EQ(block->wordAt(1), "I'd");
+  EXPECT_EQ(block->wordAt(2), "say");
+  EXPECT_EQ(block->wordAt(3), "so");
+  EXPECT_FALSE(block->wordContinues[1]);
+}
+
+TEST_F(ChapterHtmlSlimParserTest, FigureSpaceStaysNoBreak) {
+  const char text[] = "200\xE2\x80\x87km ok";
+
+  parser.beginParse();
+  ChapterHtmlSlimParser::startElement(&parser, "p", nullptr);
+  ChapterHtmlSlimParser::characterData(&parser, text, static_cast<int>(sizeof(text) - 1));
+
+  ParsedText* block = parser.currentTextBlock.get();
+  ASSERT_NE(block, nullptr);
+  ASSERT_EQ(block->size(), 3);
+  EXPECT_EQ(block->wordAt(0), "200");
+  EXPECT_EQ(block->wordAt(1), " ");
+  EXPECT_TRUE(block->wordContinues[1]);
+  EXPECT_EQ(block->wordAt(2), "km");
+  EXPECT_TRUE(block->wordContinues[2]);
+}
+
 TEST_F(ChapterHtmlSlimParserTest, DivWithHiddenAttributeContentShouldBeSkipped) {
   const XML_Char* attributes[] = {"hidden", "hidden", nullptr};
 
