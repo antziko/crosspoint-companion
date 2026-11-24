@@ -36,6 +36,7 @@
 #include "BookmarkStore.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "DailyReadingLog.h"
 #include "DictNotesActivity.h"
 #include "DictionaryWordSelectActivity.h"
 #include "EpubReaderBookmarksActivity.h"
@@ -323,6 +324,8 @@ void recordReadingSession(const std::string& cachePath, BookReadingStats& bookSt
         bookHistory->recordDay(year, month, day, dayOfWeek, sessionSecs);
         ReadingTimeHistory::save(historyPath, *bookHistory);
       }
+      DailyReadingLog::add((cachePath + "/book_daily.bin").c_str(), readingHistoryDayIndex(year, month, day),
+                           sessionSecs);
     } else {
       bookStats.unattributedSeconds += sessionSecs;
     }
@@ -333,6 +336,7 @@ void recordReadingSession(const std::string& cachePath, BookReadingStats& bookSt
       global->totalReadingSeconds += sessionSecs;
       if (dated) {
         global->history.recordDay(year, month, day, dayOfWeek, sessionSecs);
+        DailyReadingLog::add(DailyReadingLog::PATH, readingHistoryDayIndex(year, month, day), sessionSecs);
       } else {
         global->unattributedSeconds += sessionSecs;
       }

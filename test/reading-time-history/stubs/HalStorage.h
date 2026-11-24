@@ -31,6 +31,7 @@ class HalFile {
     if (!fp_) return 0;
     return std::fwrite(buf, 1, n, fp_);
   }
+  bool seek(size_t pos) { return fp_ && std::fseek(fp_, static_cast<long>(pos), SEEK_SET) == 0; }
   int available() {
     if (!fp_) return 0;
     const long cur = std::ftell(fp_);

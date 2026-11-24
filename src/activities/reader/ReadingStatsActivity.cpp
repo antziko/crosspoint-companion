@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "BookReadingStats.h"
+#include "DailyReadingLog.h"
 #include "MappedInputManager.h"
 #include "ReaderUtils.h"
 #include "activities/util/ConfirmationActivity.h"
@@ -68,6 +69,7 @@ void ReadingStatsActivity::onEnter() {
     } else {
       timeline.build(stats->history);  // OOM fallback: local-only view
     }
+    weekPicker.init(DailyReadingLog::PATH, stats->remoteOtherSeconds > 0, displayHist ? *displayHist : stats->history);
     timeline.scrollToSelection(renderer, contentRect());
   }
 
@@ -238,7 +240,8 @@ void ReadingStatsActivity::selectTab(const int index) {
   const Tab next = TAB_ORDER[index];
   if (next == selectedTab) return;
   selectedTab = next;
-  timeline.resetFocus();   // leaving Timeline: drop any year/month cursor
+  timeline.resetFocus();  // leaving Timeline: drop any year/month cursor
+  weekPicker.resetFocus();
   booksScrollOffset = 0;   // re-entering Books starts at the top
   booksSelectedIndex = 0;  // ...with the first row selected
   requestUpdate();
@@ -258,6 +261,27 @@ bool ReadingStatsActivity::handleTouch() {
   }
 
   const Rect content = contentRect();
+
+  if (selectedTab == Tab::Heatmap) {
+    const ReadingTimeHistory* h = displayHist ? displayHist.get() : (stats ? &stats->history : nullptr);
+    if (!h) return false;
+    // A swipe steps one week (right = older), the Left/Right counterpart.
+    if (!mappedInput.wasBackGesture()) {
+      const auto swipe = mappedInput.wasSwipe();
+      const int delta = swipe == MappedInputManager::SwipeDir::Right  ? 1
+                        : swipe == MappedInputManager::SwipeDir::Left ? -1
+                                                                      : 0;
+      if (delta != 0) {
+        if (weekPicker.step(*h, delta)) requestUpdate();
+        return true;
+      }
+    }
+    if (mappedInput.wasScreenTapped(tx, ty) && weekPicker.selectAtPoint(renderer, content, *h, tx, ty)) {
+      requestUpdate();
+      return true;
+    }
+    return false;
+  }
 
   if (selectedTab == Tab::Books) {
     if (bookRows.empty()) return false;
@@ -328,7 +352,9 @@ void ReadingStatsActivity::loop() {
   if (mappedInput.hasTouch() && handleTouch()) return;
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
-    if (timeline.focus() == StatsTimelineView::Focus::None) {
+    if (selectedTab == Tab::Heatmap && weekPicker.focused()) {
+      if (h && weekPicker.step(*h, 1)) requestUpdate();
+    } else if (timeline.focus() == StatsTimelineView::Focus::None) {
       cycleTab(-1);
     } else if (h && timeline.selectPrev(*h)) {
       timeline.scrollToSelection(renderer, contentRect());
@@ -337,7 +363,9 @@ void ReadingStatsActivity::loop() {
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
-    if (timeline.focus() == StatsTimelineView::Focus::None) {
+    if (selectedTab == Tab::Heatmap && weekPicker.focused()) {
+      if (h && weekPicker.step(*h, -1)) requestUpdate();
+    } else if (timeline.focus() == StatsTimelineView::Focus::None) {
       cycleTab(1);
     } else if (h && timeline.selectNext(*h)) {
       timeline.scrollToSelection(renderer, contentRect());
@@ -353,6 +381,8 @@ void ReadingStatsActivity::loop() {
     case ReaderUtils::SideNavAction::STEP:
       if (selectedTab == Tab::Timeline && h && timeline.focusIn()) {
         timeline.scrollToSelection(renderer, contentRect());
+        requestUpdate();
+      } else if (selectedTab == Tab::Heatmap && h && h->hasAnyData() && weekPicker.focusIn()) {
         requestUpdate();
       } else if (selectedTab == Tab::Books && booksSelectedIndex + 1 < static_cast<int>(bookRows.size())) {
         booksSelectedIndex++;
@@ -371,6 +401,8 @@ void ReadingStatsActivity::loop() {
     case ReaderUtils::SideNavAction::STEP:
       if (selectedTab == Tab::Timeline && timeline.focusOut()) {
         timeline.scrollToSelection(renderer, contentRect());
+        requestUpdate();
+      } else if (selectedTab == Tab::Heatmap && weekPicker.focusOut()) {
         requestUpdate();
       } else if (selectedTab == Tab::Books && booksSelectedIndex > 0) {
         booksSelectedIndex--;
@@ -450,9 +482,9 @@ void ReadingStatsActivity::render(RenderLock&&) {
   } else if (selectedTab == Tab::Books) {
     renderBooksTab(content);
   } else if (displayHist) {
-    StatsTimelineView::renderHeatmap(renderer, content, *displayHist);
+    weekPicker.render(renderer, content, *displayHist);
   } else if (stats) {
-    StatsTimelineView::renderHeatmap(renderer, content, stats->history);
+    weekPicker.render(renderer, content, stats->history);
   } else {
     StatsTimelineView::renderEmptyState(renderer, content);
   }

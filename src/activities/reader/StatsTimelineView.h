@@ -58,7 +58,24 @@ class StatsTimelineView {
   void renderList(GfxRenderer& renderer, const Rect& rect) const;
 
   // Heatmap tab + shared empty state, used directly by the activities.
-  static void renderHeatmap(GfxRenderer& renderer, const Rect& rect, const ReadingTimeHistory& history);
+  // endWeeksBack: weeks before the newest shown in the rightmost column (scroll).
+  // selectedWeeksBack: the framed week, -1 for none; `focused` doubles its frame.
+  static void renderHeatmap(GfxRenderer& renderer, const Rect& rect, const ReadingTimeHistory& history,
+                            int endWeeksBack = 0, int selectedWeeksBack = -1, bool focused = false);
+  // Columns a heatmap in `rect` shows.
+  static int heatmapColumns(GfxRenderer& renderer, const Rect& rect);
+  // Weeks back of the column under (x, y), -1 when outside the grid.
+  static int heatmapWeekAtPoint(GfxRenderer& renderer, const Rect& rect, const ReadingTimeHistory& history,
+                                int endWeeksBack, int x, int y);
+  // Monday day index of the newest week, and the oldest week the grid can show.
+  static uint32_t heatmapAnchorMonday(const ReadingTimeHistory& history);
+  static int heatmapMaxWeeksBack(const ReadingTimeHistory& history);
+  // Height of a heatmap at its smallest cells, for stacking the week chart below it.
+  static int heatmapCompactHeight(GfxRenderer& renderer);
+  // Mon..Sun bars for the week starting `monday`. `deviceNote` labels the bars as this
+  // device's time (the heatmap above also counts other devices).
+  static void renderWeekChart(GfxRenderer& renderer, const Rect& rect, const ReadingTimeHistory& history,
+                              uint32_t monday, const uint16_t seconds[7], bool deviceNote);
   static void renderEmptyState(GfxRenderer& renderer, const Rect& rect);
 
  private:

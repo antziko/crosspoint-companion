@@ -88,6 +88,30 @@ void mergeBuckets(Entry (&dst)[N], const Entry (&src)[N], KeyFn key) {
   }
   memcpy(dst, merged, sizeof(merged));
 }
+
+// Keeps the buckets with a real date, in their order, closing up the holes. A history from
+// another device (or an old file) can carry a bucket such as month 0, which the stats screen
+// shows as "?".
+template <typename Entry, size_t N, typename ValidFn>
+void dropBadBuckets(Entry (&a)[N], ValidFn valid) {
+  size_t out = 0;
+  for (size_t i = 0; i < N; i++) {
+    if (a[i].seconds > 0 && valid(a[i])) a[out++] = a[i];
+  }
+  for (; out < N; out++) a[out] = Entry{};
+}
+
+bool validYear(uint16_t year) { return year >= 2000 && year <= 2099; }
+
+void dropBadBuckets(ReadingTimeHistory& h) {
+  using H = ReadingTimeHistory;
+  dropBadBuckets(h.weekly, [](const H::WeekEntry& e) {
+    return validYear(e.year) && e.month >= 1 && e.month <= 12 && e.day >= 1 &&
+           e.day <= readingHistoryDaysInMonth(e.year, e.month);
+  });
+  dropBadBuckets(h.monthly, [](const H::MonthEntry& e) { return validYear(e.year) && e.month >= 1 && e.month <= 12; });
+  dropBadBuckets(h.yearly, [](const H::YearEntry& e) { return validYear(e.year); });
+}
 }  // namespace
 
 uint8_t readingHistoryDaysInMonth(uint16_t year, uint8_t month) {
@@ -223,6 +247,7 @@ bool ReadingTimeHistory::load(const std::string& path, ReadingTimeHistory& out) 
   serialization::readPod(f, out.heatmapAnchorDay);
   serialization::readPod(f, out.heatmapAnchorSeconds);
   f.close();
+  dropBadBuckets(out);
   return true;
 }
 
@@ -308,5 +333,6 @@ bool ReadingTimeHistory::deserializeBlob(const uint8_t* data, size_t len) {
   get(heatmapBits, sizeof(heatmapBits));
   get(&heatmapAnchorDay, sizeof(heatmapAnchorDay));
   // heatmapAnchorSeconds stays 0 (not transmitted) — fine, merge uses levels.
+  dropBadBuckets(*this);
   return true;
 }

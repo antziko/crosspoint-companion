@@ -340,6 +340,13 @@ bool importSiblingStatsIfNew(const std::string& bookPath, const std::string& cac
     }
   }
 
+  // Per-day seconds for the heatmap's week chart, the same way.
+  const std::string dstDaily = cachePath + "/book_daily.bin";
+  const std::string srcDaily = originCache + "/book_daily.bin";
+  if (!Storage.exists(dstDaily.c_str()) && Storage.exists(srcDaily.c_str()) && copySmallFile(srcDaily, dstDaily)) {
+    imported = true;
+  }
+
   // Total seconds + last-read. KOReader sync self-heals these too, but copying
   // makes them correct immediately on first open, before any sync.
   const std::string srcStats = originCache + "/stats.bin";

@@ -9,6 +9,7 @@
 #include "BookReadingStats.h"
 #include "ReadingTimeHistory.h"
 #include "StatsTimelineView.h"
+#include "StatsWeekPicker.h"
 #include "activities/Activity.h"
 #include "util/ButtonNavigator.h"
 
@@ -56,6 +57,8 @@ class BookStatsActivity final : public Activity {
   Tab selectedTab = Tab::Timeline;
   // Shared Timeline/Heatmap presentation (stacked Yearly/Monthly/Weekly + scroll).
   StatsTimelineView timeline;
+  // Heatmap tab: selected week + its daily chart.
+  StatsWeekPicker weekPicker;
 
   ButtonNavigator buttonNavigator;
 

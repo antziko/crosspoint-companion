@@ -28,6 +28,7 @@ void BookStatsActivity::onEnter() {
   if (history) {
     ReadingTimeHistory::load(cachePath + "/book_time_history.bin", *history);
     timeline.build(*history);
+    weekPicker.init(cachePath + "/book_daily.bin", false, *history);
     timeline.scrollToSelection(renderer, contentRect());
   }
 
@@ -61,6 +62,17 @@ std::vector<TabInfo> BookStatsActivity::buildTabs() const {
 bool BookStatsActivity::handleTouch() {
   int tx = 0;
   int ty = 0;
+  // Heatmap: a swipe steps one week (right = older), the Left/Right counterpart.
+  if (selectedTab == Tab::Heatmap && history && !mappedInput.wasBackGesture()) {
+    const auto swipe = mappedInput.wasSwipe();
+    const int delta = swipe == MappedInputManager::SwipeDir::Right  ? 1
+                      : swipe == MappedInputManager::SwipeDir::Left ? -1
+                                                                    : 0;
+    if (delta != 0) {
+      if (weekPicker.step(*history, delta)) requestUpdate();
+      return true;
+    }
+  }
   if (!mappedInput.wasScreenTapped(tx, ty)) return false;
 
   // Tab bar: a tap picks a tab outright instead of stepping towards it.
@@ -70,6 +82,12 @@ bool BookStatsActivity::handleTouch() {
     if (next == selectedTab) return true;
     selectedTab = next;
     timeline.resetFocus();  // leaving Timeline: drop any year/month cursor
+    weekPicker.resetFocus();
+    requestUpdate();
+    return true;
+  }
+
+  if (selectedTab == Tab::Heatmap && history && weekPicker.selectAtPoint(renderer, contentRect(), *history, tx, ty)) {
     requestUpdate();
     return true;
   }
@@ -93,7 +111,9 @@ void BookStatsActivity::loop() {
   // Left/Right: at the tab bar (focus None) switch Timeline/Heatmap; inside a
   // focused section move the year/month selection.
   if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
-    if (timeline.focus() == StatsTimelineView::Focus::None) {
+    if (selectedTab == Tab::Heatmap && weekPicker.focused()) {
+      if (history && weekPicker.step(*history, 1)) requestUpdate();
+    } else if (timeline.focus() == StatsTimelineView::Focus::None) {
       if (selectedTab != Tab::Timeline) {
         selectedTab = Tab::Timeline;
         requestUpdate();
@@ -105,7 +125,9 @@ void BookStatsActivity::loop() {
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
-    if (timeline.focus() == StatsTimelineView::Focus::None) {
+    if (selectedTab == Tab::Heatmap && weekPicker.focused()) {
+      if (history && weekPicker.step(*history, -1)) requestUpdate();
+    } else if (timeline.focus() == StatsTimelineView::Focus::None) {
       if (selectedTab != Tab::Heatmap) {
         selectedTab = Tab::Heatmap;
         timeline.resetFocus();
@@ -123,11 +145,15 @@ void BookStatsActivity::loop() {
     if (selectedTab == Tab::Timeline && history && timeline.focusIn()) {
       timeline.scrollToSelection(renderer, contentRect());
       requestUpdate();
+    } else if (selectedTab == Tab::Heatmap && history && history->hasAnyData() && weekPicker.focusIn()) {
+      requestUpdate();
     }
   });
   buttonNavigator.onRelease({MappedInputManager::Button::Up}, [this] {
     if (selectedTab == Tab::Timeline && timeline.focusOut()) {
       timeline.scrollToSelection(renderer, contentRect());
+      requestUpdate();
+    } else if (selectedTab == Tab::Heatmap && weekPicker.focusOut()) {
       requestUpdate();
     }
   });
@@ -237,5 +263,5 @@ void BookStatsActivity::renderHeatmapTab(const Rect& rect) const {
     StatsTimelineView::renderEmptyState(renderer, rect);
     return;
   }
-  StatsTimelineView::renderHeatmap(renderer, rect, *history);
+  weekPicker.render(renderer, rect, *history);
 }

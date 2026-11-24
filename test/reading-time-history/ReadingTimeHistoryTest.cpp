@@ -363,3 +363,22 @@ TEST(ReadingTimeHistoryHeatmap, PresenceWrapperAgreesWithLevelAcrossStates) {
   EXPECT_EQ(h.getHeatmapLevel(500), HeatmapLevel::None);
   EXPECT_FALSE(h.isHeatmapDaySet(500));
 }
+
+TEST(ReadingTimeHistoryBlob, BucketsWithImpossibleDatesAreDropped) {
+  ReadingTimeHistory sent;
+  record(sent, 2026, 6, 10, 600);
+  sent.monthly[1] = {2026, 0, 0, 178};  // the "?" bucket another device uploaded
+  sent.weekly[1] = {2026, 13, 1, 50};
+  sent.yearly[1] = {1999, 0, 70};
+
+  uint8_t buf[ReadingTimeHistory::BLOB_MAX_BYTES];
+  const size_t n = sent.serializeBlob(buf, sizeof(buf));
+  ReadingTimeHistory got;
+  ASSERT_TRUE(got.deserializeBlob(buf, n));
+
+  EXPECT_EQ(got.monthly[0].month, 6);
+  EXPECT_EQ(got.monthly[0].seconds, 600u);
+  EXPECT_EQ(got.monthly[1].seconds, 0u);
+  EXPECT_EQ(got.weekly[1].seconds, 0u);
+  EXPECT_EQ(got.yearly[1].seconds, 0u);
+}

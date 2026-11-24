@@ -406,7 +406,157 @@ void StatsTimelineView::renderEmptyState(GfxRenderer& renderer, const Rect& rect
   }
 }
 
-void StatsTimelineView::renderHeatmap(GfxRenderer& renderer, const Rect& rect, const ReadingTimeHistory& history) {
+namespace {
+constexpr int HEATMAP_ROWS = 7;
+constexpr int HEATMAP_MAX_COLUMNS =
+    static_cast<int>((ReadingTimeHistory::HEATMAP_DAYS + 2 * HEATMAP_ROWS - 1) / HEATMAP_ROWS);
+constexpr int HEATMAP_MIN_CELL_SIZE = 8;
+constexpr int HEATMAP_MARGIN = 4;
+constexpr int HEATMAP_CELL_GAP = 2;
+
+// Grid geometry for a heatmap drawn in `rect`; shared by the draw and the tap hit test.
+struct HeatmapLayout {
+  int smallLineH, cellFloor, dayLabelW, headerH, cellSize, columns, gridX, gridY, gridWidth, gridHeight;
+};
+
+HeatmapLayout heatmapLayout(GfxRenderer& renderer, const Rect& rect) {
+  HeatmapLayout l{};
+  l.smallLineH = renderer.getLineHeight(SMALL_FONT_ID);
+  // Each row must be at least one line-height tall, or the day-of-week initial
+  // drawn in it overlaps its neighbours and the column turns into an illegible smear.
+  l.cellFloor = std::max(HEATMAP_MIN_CELL_SIZE, l.smallLineH);
+  l.dayLabelW = std::max(renderer.getTextWidth(SMALL_FONT_ID, "M"), renderer.getTextWidth(SMALL_FONT_ID, "W")) + 4;
+  l.headerH = l.smallLineH * 2 + 4;
+  const int gridAreaX = rect.x + HEATMAP_MARGIN + l.dayLabelW;
+  const int gridAreaY = rect.y + HEATMAP_MARGIN + l.headerH;
+  const int gridAreaWidth = std::max(HEATMAP_ROWS * l.cellFloor, rect.width - HEATMAP_MARGIN * 2 - l.dayLabelW);
+  const int gridAreaHeight = std::max(HEATMAP_ROWS * l.cellFloor, rect.height - HEATMAP_MARGIN * 2 - l.headerH);
+  l.cellSize = std::max(l.cellFloor, gridAreaWidth / HEATMAP_MAX_COLUMNS);
+  l.cellSize = std::min(l.cellSize, std::max(l.cellFloor, gridAreaHeight / HEATMAP_ROWS));
+  l.columns = std::min(HEATMAP_MAX_COLUMNS, std::max(1, gridAreaWidth / l.cellSize));
+  l.gridWidth = l.columns * l.cellSize;
+  l.gridHeight = HEATMAP_ROWS * l.cellSize;
+  l.gridX = gridAreaX + std::max(0, (gridAreaWidth - l.gridWidth) / 2);
+  l.gridY = gridAreaY + std::max(0, (gridAreaHeight - l.gridHeight) / 2);
+  return l;
+}
+}  // namespace
+
+int StatsTimelineView::heatmapCompactHeight(GfxRenderer& renderer) {
+  const int smallLineH = renderer.getLineHeight(SMALL_FONT_ID);
+  const int cellFloor = std::max(HEATMAP_MIN_CELL_SIZE, smallLineH);
+  return HEATMAP_MARGIN * 2 + smallLineH * 2 + 4 + HEATMAP_ROWS * cellFloor + 4;
+}
+
+void StatsTimelineView::renderWeekChart(GfxRenderer& renderer, const Rect& rect, const ReadingTimeHistory& history,
+                                        uint32_t monday, const uint16_t seconds[7], bool deviceNote) {
+  static constexpr const char* DAY_INITIAL[7] = {"M", "T", "W", "T", "F", "S", "S"};
+  const int lineH = renderer.getLineHeight(SMALL_FONT_ID);
+  const int pad = HEATMAP_MARGIN + 4;
+
+  uint32_t total = 0;
+  uint32_t maxSecs = 0;
+  for (int i = 0; i < 7; i++) {
+    total += seconds[i];
+    maxSecs = std::max<uint32_t>(maxSecs, seconds[i]);
+  }
+
+  // Title: "Week of 16 Nov '26  5'12", with "This device" on the right when the heatmap
+  // above also counts other devices.
+  uint16_t y;
+  uint8_t m, d;
+  readingHistoryDateFromDayIndex(monday, y, m, d);
+  char date[24];
+  snprintf(date, sizeof(date), "%u %s '%02u", static_cast<unsigned>(d), monthAbbr(m), static_cast<unsigned>(y % 100));
+  char title[64];
+  snprintf(title, sizeof(title), tr(STR_STATS_WEEK_OF_FORMAT), date);
+  char totalBuf[16];
+  formatDurationCompact(total, totalBuf, sizeof(totalBuf));
+  char line[96];
+  snprintf(line, sizeof(line), "%s  %s", title, totalBuf);
+  const int titleY = rect.y + 4;
+  renderer.drawText(SMALL_FONT_ID, rect.x + pad, titleY, line, true, EpdFontFamily::BOLD);
+  if (deviceNote) {
+    const char* note = tr(STR_STATS_THIS_DEVICE);
+    renderer.drawText(SMALL_FONT_ID, rect.x + rect.width - pad - renderer.getTextWidth(SMALL_FONT_ID, note), titleY,
+                      note);
+  }
+
+  // Bars between the value labels (one line above the tallest) and two label lines below
+  // the baseline (day initial, day of month).
+  const int barsTop = titleY + lineH + 6 + lineH;
+  const int baseline = rect.y + rect.height - 2 * lineH - 6;
+  const int barMaxH = baseline - barsTop;
+  if (barMaxH < 4) return;
+  const int slotW = (rect.width - 2 * pad) / 7;
+  const int barW = std::max(4, slotW * 3 / 5);
+  renderer.drawLine(rect.x + pad, baseline, rect.x + pad + slotW * 7 - 1, baseline);
+
+  const uint32_t anchorDay = history.heatmapAnchorDay;
+  for (int i = 0; i < 7; i++) {
+    const uint32_t day = monday + static_cast<uint32_t>(i);
+    const int slotX = rect.x + pad + i * slotW;
+    const int centerX = slotX + slotW / 2;
+
+    const auto drawCentered = [&](int textY, const char* text) {
+      renderer.drawText(SMALL_FONT_ID, centerX - renderer.getTextWidth(SMALL_FONT_ID, text) / 2, textY, text);
+    };
+    drawCentered(baseline + 3, DAY_INITIAL[i]);
+    uint16_t dy;
+    uint8_t dm, dd;
+    readingHistoryDateFromDayIndex(day, dy, dm, dd);
+    char dom[4];
+    snprintf(dom, sizeof(dom), "%u", static_cast<unsigned>(dd));
+    drawCentered(baseline + 3 + lineH, dom);
+
+    if (day > anchorDay) continue;  // after the newest recorded day
+    if (seconds[i] > 0) {
+      const int h = std::max(2, static_cast<int>(static_cast<uint64_t>(seconds[i]) * barMaxH / maxSecs));
+      renderer.fillRect(centerX - barW / 2, baseline - h, barW, h, true);
+      char value[16];
+      formatDurationCompact(seconds[i], value, sizeof(value));
+      drawCentered(baseline - h - lineH - 1, value);
+    } else if (history.isHeatmapDaySet(anchorDay - day)) {
+      // Shaded on the heatmap but no time here: another device, or read before daily times.
+      drawCentered(baseline - lineH - 1, "-");
+    }
+  }
+}
+
+uint32_t StatsTimelineView::heatmapAnchorMonday(const ReadingTimeHistory& history) {
+  // HalClock's day-of-week convention is 1=Sunday..7=Saturday (readingHistoryDayOfWeek
+  // matches it); the number of days past that week's Monday is `(dow + 5) % 7`, which
+  // doubles as the Mon=0..Sun=6 row index for any day index.
+  const uint32_t anchorDay = history.heatmapAnchorDay;
+  return anchorDay - (static_cast<uint32_t>(readingHistoryDayOfWeek(anchorDay)) + 5U) % 7U;
+}
+
+int StatsTimelineView::heatmapMaxWeeksBack(const ReadingTimeHistory& history) {
+  const int byWindow = HEATMAP_MAX_COLUMNS - 1;
+  const int byEpoch = static_cast<int>(heatmapAnchorMonday(history) / 7U);
+  return std::min(byWindow, byEpoch);
+}
+
+int StatsTimelineView::heatmapColumns(GfxRenderer& renderer, const Rect& rect) {
+  return heatmapLayout(renderer, rect).columns;
+}
+
+int StatsTimelineView::heatmapWeekAtPoint(GfxRenderer& renderer, const Rect& rect, const ReadingTimeHistory& history,
+                                          int endWeeksBack, int x, int y) {
+  if (!history.hasAnyData()) return -1;
+  const HeatmapLayout l = heatmapLayout(renderer, rect);
+  // The month ticks above the grid count too: a column is an easy target only if its whole
+  // height takes the tap.
+  if (x < l.gridX || x >= l.gridX + l.gridWidth || y < l.gridY - l.smallLineH - 2 || y >= l.gridY + l.gridHeight) {
+    return -1;
+  }
+  const int col = (x - l.gridX) / l.cellSize;
+  const int back = endWeeksBack + (l.columns - 1 - col);
+  return back <= heatmapMaxWeeksBack(history) ? back : -1;
+}
+
+void StatsTimelineView::renderHeatmap(GfxRenderer& renderer, const Rect& rect, const ReadingTimeHistory& history,
+                                      int endWeeksBack, int selectedWeeksBack, bool focused) {
   if (!history.hasAnyData()) {
     renderEmptyState(renderer, rect);
     return;
@@ -418,53 +568,33 @@ void StatsTimelineView::renderHeatmap(GfxRenderer& renderer, const Rect& rect, c
   // the tracked range (before the oldest recorded day, or after today) are left
   // blank, so "no data yet" reads differently from "no reading that day". A
   // summary line and month ticks sit above the grid; cell size adapts to the
-  // remaining space with a floor — in portrait that floor clips the oldest
-  // columns, landscape is wide enough to fit them all at the floor size or larger.
-  constexpr int ROWS = 7;
-  constexpr int MAX_COLUMNS = static_cast<int>((ReadingTimeHistory::HEATMAP_DAYS + 2 * ROWS - 1) / ROWS);
-  constexpr int MIN_CELL_SIZE = 8;
-  constexpr int MARGIN = 4;
-  constexpr int CELL_GAP = 2;
+  // remaining space with a floor. When the columns do not all fit, the rightmost one
+  // shows the week `endWeeksBack` weeks before the newest.
+  constexpr int ROWS = HEATMAP_ROWS;
+  constexpr int CELL_GAP = HEATMAP_CELL_GAP;
+  constexpr int MARGIN = HEATMAP_MARGIN;
   // Fixed Mon..Sun row order (ISO week) — the legend never rotates with "today",
   // unlike a most-recent-day-relative layout whose labels would cycle through the
   // week and stop matching whichever weekday lands in row 0.
   static constexpr const char* DAY_INITIAL[ROWS] = {"M", "T", "W", "T", "F", "S", "S"};
 
-  const int smallLineH = renderer.getLineHeight(SMALL_FONT_ID);
-  // Each row must be at least one line-height tall, or the day-of-week initial
-  // drawn in it overlaps its neighbours and the column turns into an illegible smear.
-  const int cellFloor = std::max(MIN_CELL_SIZE, smallLineH);
-  const int dayLabelW =
-      std::max(renderer.getTextWidth(SMALL_FONT_ID, "M"), renderer.getTextWidth(SMALL_FONT_ID, "W")) + 4;
-  const int headerH = smallLineH * 2 + 4;
+  const HeatmapLayout l = heatmapLayout(renderer, rect);
+  const int smallLineH = l.smallLineH;
+  const int cellSize = l.cellSize;
+  const int columns = l.columns;
+  const int gridWidth = l.gridWidth;
+  const int gridHeight = l.gridHeight;
+  const int gridX = l.gridX;
+  const int gridY = l.gridY;
 
-  const int gridAreaX = rect.x + MARGIN + dayLabelW;
-  const int gridAreaY = rect.y + MARGIN + headerH;
-  const int gridAreaWidth = std::max(ROWS * cellFloor, rect.width - MARGIN * 2 - dayLabelW);
-  const int gridAreaHeight = std::max(ROWS * cellFloor, rect.height - MARGIN * 2 - headerH);
-
-  int cellSize = std::max(cellFloor, gridAreaWidth / MAX_COLUMNS);
-  cellSize = std::min(cellSize, std::max(cellFloor, gridAreaHeight / ROWS));
-  const int columns = std::min(MAX_COLUMNS, std::max(1, gridAreaWidth / cellSize));
-
-  const int gridWidth = columns * cellSize;
-  const int gridHeight = ROWS * cellSize;
-  const int gridX = gridAreaX + std::max(0, (gridAreaWidth - gridWidth) / 2);
-  const int gridY = gridAreaY + std::max(0, (gridAreaHeight - gridHeight) / 2);
-
-  // Anchor week: the Monday on/before heatmapAnchorDay. HalClock's day-of-week
-  // convention is 1=Sunday..7=Saturday (readingHistoryDayOfWeek matches it); the
-  // number of days past that week's Monday is `(dow + 5) % 7`, which doubles as
-  // the Mon=0..Sun=6 row index for any day index.
   const uint32_t anchorDay = history.heatmapAnchorDay;
-  const uint32_t anchorRow = (static_cast<uint32_t>(readingHistoryDayOfWeek(anchorDay)) + 5U) % 7U;
-  const uint32_t anchorWeekMonday = anchorDay - anchorRow;
+  const uint32_t anchorWeekMonday = heatmapAnchorMonday(history);
   const uint32_t oldestTrackedDay =
       anchorDay >= ReadingTimeHistory::HEATMAP_DAYS - 1 ? anchorDay - (ReadingTimeHistory::HEATMAP_DAYS - 1) : 0;
 
   // Monday day-index of the week drawn in column `col` (0 = oldest/leftmost).
   const auto weekMonday = [&](int col) -> uint32_t {
-    const uint32_t back = static_cast<uint32_t>(columns - 1 - col) * 7U;
+    const uint32_t back = static_cast<uint32_t>(endWeeksBack + columns - 1 - col) * 7U;
     return anchorWeekMonday >= back ? anchorWeekMonday - back : 0;
   };
 
@@ -561,4 +691,14 @@ void StatsTimelineView::renderHeatmap(GfxRenderer& renderer, const Rect& rect, c
   // edge cell never merges into it. gridWidth/gridHeight include the trailing
   // right/bottom CELL_GAP, so subtract it before adding the gutter + frame.
   renderer.drawRect(gridX - 2, gridY - 2, gridWidth - CELL_GAP + 4, gridHeight - CELL_GAP + 4, true);
+
+  // Selected week: a frame around its column, doubled while the buttons move it.
+  const int selCol = columns - 1 - (selectedWeeksBack - endWeeksBack);
+  if (selectedWeeksBack >= 0 && selCol >= 0 && selCol < columns) {
+    const int fx = gridX + selCol * cellSize - 2;
+    const int fw = cellSize - CELL_GAP + 4;
+    const int fh = gridHeight - CELL_GAP + 4;
+    renderer.drawRect(fx, gridY - 2, fw, fh, true);
+    if (focused) renderer.drawRect(fx - 1, gridY - 3, fw + 2, fh + 2, true);
+  }
 }
