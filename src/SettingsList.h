@@ -234,7 +234,9 @@ inline SettingInfo buildDictionarySetting(const DictionaryRegistry* registry) {
     if (v == 0 || v > basePaths.size()) {
       Dictionary::saveGlobalDictPath("");  // clear selection
     } else {
-      Dictionary::saveGlobalDictPath(basePaths[v - 1].c_str());
+      const std::string& path = basePaths[v - 1];
+      Dictionary::saveLangDictPath(static_cast<uint8_t>(DictionaryRegistry::langForBasePath(path)), path.c_str());
+      Dictionary::saveGlobalDictPath(path.c_str());
     }
   };
 

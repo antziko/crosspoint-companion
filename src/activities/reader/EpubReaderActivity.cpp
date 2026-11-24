@@ -77,6 +77,7 @@
 #include "util/ButtonNavigator.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
+#include "util/DictionaryRegistry.h"
 #include "util/FlashcardDeck.h"
 #include "util/IndexTermPage.h"
 #include "util/ListSwipeScroll.h"
@@ -574,6 +575,7 @@ void EpubReaderActivity::onEnter() {
 
 void EpubReaderActivity::onExit() {
   Activity::onExit();
+  applyBookDictLang(Dictionary::kNoBookLang);  // screens outside the book see every dictionary
 
   // Flush BEFORE the ReaderExit event: the session's final progress must be
   // durable before a subscriber can act on the exit notification.

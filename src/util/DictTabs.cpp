@@ -24,10 +24,10 @@ constexpr int kMaxMembers = 16;
 int groupOf(const int registryIdx, int* members) {
   const auto& entries = dictionaryRegistry.getEntries();
   if (registryIdx < 0 || registryIdx >= static_cast<int>(entries.size())) return 0;
-  const bool st = entries[registryIdx].nameIsSt;
+  const DictLang lang = entries[registryIdx].lang;
   int n = 0;
   for (int i = 0; i < static_cast<int>(entries.size()) && n < kMaxMembers; i++) {
-    if (entries[i].nameIsSt == st) members[n++] = i;
+    if (entries[i].lang == lang) members[n++] = i;
   }
   return n;
 }

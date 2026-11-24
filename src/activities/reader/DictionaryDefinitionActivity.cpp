@@ -1509,8 +1509,8 @@ bool DictionaryDefinitionActivity::cycleDictionary() {
 
   const std::string current = Dictionary::activeDictPath(cachePath.empty() ? nullptr : cachePath.c_str());
   const int curIdx = dictionaryRegistry.indexOf(current);
-  // Partitioned by folder name (DictionaryRegistry::nameIsStGroup): an "st-" dictionary
-  // cycles only to another "st-", everything else only among themselves. Returns -1 when
+  // Partitioned by language group (DictionaryRegistry::langForName): a Chinese dictionary
+  // cycles only to another Chinese one, and so on. Returns -1 when
   // this is the only dictionary in its group, and the guard below then leaves the screen
   // untouched.
   //
@@ -1520,8 +1520,8 @@ bool DictionaryDefinitionActivity::cycleDictionary() {
   // partition. Decline instead: crossing it is exactly what this gesture prevents.
   const int nextIdx = curIdx < 0 ? -1 : dictionaryRegistry.nextEntryIndexInGroup(curIdx);
   if (nextIdx < 0) {
-    SdDebugLog::log("DDA", "dict switch declined: cur=%d group=%s count=%d", curIdx,
-                    curIdx < 0 ? "?" : (dictionaryRegistry.getEntries()[curIdx].nameIsSt ? "st" : "other"),
+    SdDebugLog::log("DDA", "dict switch declined: cur=%d lang=%d count=%d", curIdx,
+                    curIdx < 0 ? -1 : static_cast<int>(dictionaryRegistry.getEntries()[curIdx].lang),
                     dictionaryRegistry.count());
     return false;
   }
@@ -1535,10 +1535,10 @@ int DictionaryDefinitionActivity::collectDictGroup(const int curIdx, const char*
   if (curIdx < 0) return 0;
   const auto& entries = dictionaryRegistry.getEntries();
   if (curIdx >= static_cast<int>(entries.size())) return 0;
-  const bool wantSt = entries[curIdx].nameIsSt;
+  const DictLang wantLang = entries[curIdx].lang;
   int count = 0;
   for (int i = 0; i < static_cast<int>(entries.size()); ++i) {
-    if (entries[i].nameIsSt != wantSt) continue;
+    if (entries[i].lang != wantLang) continue;
     if (count < cap) {
       // Borrowed, not copied: the registry outlives this screen, and building a
       // vector<string> here would allocate a list OptionPopup::show is about to copy anyway.
@@ -1651,10 +1651,11 @@ void DictionaryDefinitionActivity::applyDictSwitch(const int curIdx, const int n
   LOG_DBG("DDA", "dict switch -> %s", dictionaryRegistry.getEntries()[nextIdx].name.c_str());
   // To SD as well as serial: a wrong-group hop is only diagnosable from the pair of group
   // flags, and the SD log is what actually comes back from a device session.
-  SdDebugLog::log("DDA", "dict switch: %s(%s) -> %s(%s)", dictionaryRegistry.getEntries()[curIdx].name.c_str(),
-                  dictionaryRegistry.getEntries()[curIdx].nameIsSt ? "st" : "other",
+  SdDebugLog::log("DDA", "dict switch: %s(lang=%d) -> %s(lang=%d)",
+                  dictionaryRegistry.getEntries()[curIdx].name.c_str(),
+                  static_cast<int>(dictionaryRegistry.getEntries()[curIdx].lang),
                   dictionaryRegistry.getEntries()[nextIdx].name.c_str(),
-                  dictionaryRegistry.getEntries()[nextIdx].nameIsSt ? "st" : "other");
+                  static_cast<int>(dictionaryRegistry.getEntries()[nextIdx].lang));
   // recordHistory=false: the word is already in history from the original lookup.
   controller.startLookup(headword, false);
 }

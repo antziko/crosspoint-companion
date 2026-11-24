@@ -231,6 +231,14 @@ class DictionaryLookupController {
   // Returns the winning location, or `primary` untouched when nothing in the group has the word.
   DictLocation sweepGroup(Dictionary::LookupCtx& ctx, const std::string& activeBase, const DictLocation& primary,
                           const DictLookupCallbacks& cbs);
+  // Book language group, snapshotted on the UI task in startTask() before the lookup task exists
+  // (task creation is the barrier); runLookup and sweepOtherLang read only these.
+  uint8_t bookLangSnap_ = 0xFF;
+  char bookDefaultSnap_[128] = "";
+  DictLocation sweepOtherLang(Dictionary::LookupCtx& ctx, const std::string& activeBase, const DictLocation& primary,
+                              const DictLookupCallbacks& cbs);
+  bool probeFallback(Dictionary::LookupCtx& ctx, int idx, const DictLookupCallbacks& cbs, int& skipped,
+                     DictLocation& out);
   void handleLookupFailed();
   // Put back a promotion suspended by startLookup. No-op when none is held.
   void restoreSuspendedPromotion();

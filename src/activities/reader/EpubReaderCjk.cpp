@@ -19,6 +19,7 @@
 #include "CrossPointSettings.h"
 #include "EpubReaderActivity.h"
 #include "WordSelectionScan.h"
+#include "util/DictionaryRegistry.h"
 
 namespace {
 // Print sink for the language sniff: feeds the sample and stops the stream once it has enough.
@@ -52,6 +53,11 @@ void EpubReaderActivity::refreshBookScript() {
   // The converted /dictionaries/<folder> word-select segments with (also process-wide).
   // installedFolderFor: Cantonese falls back to the Mandarin dictionary when only that is installed.
   DictIndex::setLanguageFolder(DictIndex::installedFolderFor(cjk::dictFolderFor(effectiveLanguage_, bookScript_)));
+  // StarDict dictionaries follow the same language: a Chinese book offers the Chinese group.
+  const DictLang dictLang = bookScript_ == CjkScript::Japanese ? DictLang::Japanese
+                            : bookScript_ == CjkScript::None   ? DictLang::Other
+                                                               : DictLang::Chinese;
+  applyBookDictLang(static_cast<uint8_t>(dictLang));
 }
 
 void EpubReaderActivity::sniffLanguageIfNeeded() {

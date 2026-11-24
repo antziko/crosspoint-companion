@@ -18,6 +18,8 @@ uint8_t Dictionary::IdxScanner::buf_[Dictionary::IdxScanner::BUF_SIZE] = {};
 char Dictionary::sessionPath[128] = "";
 char Dictionary::preFallbackPath[128] = "";
 bool Dictionary::sessionPathIsFallback = false;
+uint8_t Dictionary::bookLang_ = Dictionary::kNoBookLang;
+char Dictionary::bookLangDefault_[128] = "";
 
 namespace {
 constexpr char DICT_BIN[] = "dictionary.bin";
@@ -96,6 +98,10 @@ static constexpr uint32_t CSPT_ENTRY_SIZE = CSPT_PREFIX_LEN + 4;  // 20 bytes
 // ---------------------------------------------------------------------------
 
 std::string Dictionary::readDictPath(const char* cachePath) {
+  return readDictPathFor(cachePath, bookLang_, bookLangDefault_);
+}
+
+std::string Dictionary::readDictPathFor(const char* cachePath, const uint8_t bookLang, const char* bookDefault) {
   char binPath[128];
 
   // Try per-book dictionary.bin first when cachePath is provided.
@@ -116,7 +122,8 @@ std::string Dictionary::readDictPath(const char* cachePath) {
         f.close();
       }
     }
-    // Per-book file absent or empty ("Use Global") — fall through to global.
+    // Per-book file absent or empty ("Use Global") — the book's language default, then global.
+    if (bookLang != kNoBookLang && bookDefault && bookDefault[0] != '\0') return bookDefault;
   }
 
   // Read global dictionary.bin.
@@ -148,6 +155,52 @@ void Dictionary::saveGlobalDictPath(const char* folderPath) {
     f.write(reinterpret_cast<const uint8_t*>(folderPath), strlen(folderPath));
   }
   f.close();
+}
+
+namespace {
+// File code per DictLang value (Other, Chinese, Japanese).
+const char* langFileCode(const uint8_t lang) {
+  switch (lang) {
+    case 1:
+      return "zh";
+    case 2:
+      return "ja";
+    default:
+      return "en";
+  }
+}
+}  // namespace
+
+void Dictionary::setBookLang(const uint8_t lang, const char* defaultPath) {
+  bookLang_ = lang;
+  snprintf(bookLangDefault_, sizeof(bookLangDefault_), "%s", lang != kNoBookLang && defaultPath ? defaultPath : "");
+}
+
+std::string Dictionary::readLangDictPath(const uint8_t lang) {
+  char binPath[64];
+  snprintf(binPath, sizeof(binPath), "%s/dictionary-%s.bin", GLOBAL_DICT_DIR, langFileCode(lang));
+  HalFile f;
+  if (!Storage.openFileForRead("DICT", binPath, f)) return "";
+  char buf[128];
+  const int n = f.read(reinterpret_cast<uint8_t*>(buf), sizeof(buf) - 1);
+  if (n <= 0) return "";
+  buf[n] = '\0';
+  return buf;
+}
+
+void Dictionary::saveLangDictPath(const uint8_t lang, const char* folderPath) {
+  if (!folderPath || folderPath[0] == '\0') return;  // clearing the global keeps each language's choice
+  char binPath[64];
+  snprintf(binPath, sizeof(binPath), "%s/dictionary-%s.bin", GLOBAL_DICT_DIR, langFileCode(lang));
+  HalFile f;
+  if (!Storage.openFileForWrite("DICT", binPath, f)) {
+    LOG_ERR("DICT", "Could not write %s", binPath);
+    return;
+  }
+  f.write(reinterpret_cast<const uint8_t*>(folderPath), strlen(folderPath));
+  f.close();
+  // An open book of that language picks the new choice up for its next lookup.
+  if (bookLang_ == lang) setBookLang(lang, folderPath);
 }
 
 void Dictionary::setSessionDictPath(const char* folderPath) {
@@ -187,6 +240,11 @@ std::string Dictionary::takeFallbackPromotion() {
 std::string Dictionary::activeDictPath(const char* cachePath) {
   if (sessionPath[0] != '\0') return sessionPath;
   return readDictPath(cachePath);
+}
+
+std::string Dictionary::activeDictPathFor(const char* cachePath, const uint8_t bookLang, const char* bookDefault) {
+  if (sessionPath[0] != '\0') return sessionPath;
+  return readDictPathFor(cachePath, bookLang, bookDefault);
 }
 
 // ---------------------------------------------------------------------------

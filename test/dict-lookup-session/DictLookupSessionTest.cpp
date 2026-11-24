@@ -41,6 +41,7 @@ class DictLookupSession : public ::testing::Test {
 
   void TearDown() override {
     Dictionary::setSessionDictPath("");
+    Dictionary::setBookLang(Dictionary::kNoBookLang, nullptr);
     HalStorage::getInstance().setRoot("");
     std::error_code ec;
     fs::remove_all(root_, ec);
@@ -74,6 +75,42 @@ class DictLookupSession : public ::testing::Test {
 int DictLookupSession::counter_ = 0;
 
 }  // namespace
+
+// --- Book language group ---------------------------------------------------------
+
+// Inside a book with no per-book choice, the book language's default replaces the global one;
+// a per-book choice still wins, and outside a book (no cachePath) the global one stands.
+TEST_F(DictLookupSession, BookLanguageDefaultResolvesBetweenPerBookAndGlobal) {
+  writeDictBin("/dictionaries/Cambridge/cam");
+  const fs::path book = root_ / "book";
+  fs::create_directories(book);
+  const std::string cache = "/book";
+
+  EXPECT_EQ(Dictionary::readDictPath(cache.c_str()), "/dictionaries/Cambridge/cam");
+  Dictionary::setBookLang(1, "/dictionaries/st-xhzd/xhzd");
+  EXPECT_EQ(Dictionary::readDictPath(cache.c_str()), "/dictionaries/st-xhzd/xhzd");
+  EXPECT_EQ(Dictionary::readDictPath(nullptr), "/dictionaries/Cambridge/cam");
+
+  std::ofstream(book / "dictionary.bin", std::ios::binary) << "/dictionaries/chosen/chosen";
+  EXPECT_EQ(Dictionary::readDictPath(cache.c_str()), "/dictionaries/chosen/chosen");
+
+  Dictionary::setBookLang(Dictionary::kNoBookLang, "/dictionaries/st-xhzd/xhzd");
+  fs::remove(book / "dictionary.bin");
+  EXPECT_EQ(Dictionary::readDictPath(cache.c_str()), "/dictionaries/Cambridge/cam");
+}
+
+// Saving a language's choice is read back per language, and refreshes an open book of that language.
+TEST_F(DictLookupSession, LanguageChoiceIsRememberedPerLanguage) {
+  Dictionary::saveLangDictPath(1, "/dictionaries/st-xhzd/xhzd");
+  Dictionary::saveLangDictPath(0, "/dictionaries/Cambridge/cam");
+  EXPECT_EQ(Dictionary::readLangDictPath(1), "/dictionaries/st-xhzd/xhzd");
+  EXPECT_EQ(Dictionary::readLangDictPath(0), "/dictionaries/Cambridge/cam");
+  EXPECT_EQ(Dictionary::readLangDictPath(2), "");
+
+  Dictionary::setBookLang(1, "/dictionaries/st-old/old");
+  Dictionary::saveLangDictPath(1, "/dictionaries/st-new/new");
+  EXPECT_STREQ(Dictionary::bookLangDefault(), "/dictionaries/st-new/new");
+}
 
 // --- Baseline: the refactored locate() still finds words ----------------------
 

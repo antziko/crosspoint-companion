@@ -7,6 +7,8 @@
 #include <cctype>
 #include <cstring>
 
+#include "Dictionary.h"
+
 // Candidate SD card root directories for dictionaries, checked in priority order.
 // The first directory found on the SD card is used; the rest are ignored.
 static constexpr const char* DICT_ROOT_CANDIDATES[] = {
@@ -109,7 +111,8 @@ bool DictionaryRegistry::discover() {
       // Classify now so the long-press switch never touches the SD card from an input path.
       // Free, unlike the .ifo read this replaced: the name is already in hand.
       e.nameIsSt = nameIsStGroup(name);
-      LOG_DBG("DREG", "Found dictionary: %s/%s (group=%s)", name, foundStem, e.nameIsSt ? "st" : "other");
+      e.lang = langForName(name);
+      LOG_DBG("DREG", "Found dictionary: %s/%s (lang=%u)", name, foundStem, static_cast<unsigned>(e.lang));
       entries_.push_back(std::move(e));
     }
   }
@@ -136,7 +139,9 @@ bool DictionaryRegistry::discover() {
 int DictionaryRegistry::nextEntryIndexInGroup(int current) const {
   return nextIndexInGroup(
       current, count(),
-      [](const void* ctx, int index) { return static_cast<const DictionaryRegistry*>(ctx)->entries_[index].nameIsSt; },
+      [](const void* ctx, int index) {
+        return static_cast<int>(static_cast<const DictionaryRegistry*>(ctx)->entries_[index].lang);
+      },
       this);
 }
 
@@ -154,4 +159,25 @@ int DictionaryRegistry::indexOfHash(const uint32_t hash) const {
     if (nameHash(entries_[i].name.c_str()) == hash) return static_cast<int>(i);
   }
   return -1;
+}
+
+void applyBookDictLang(const uint8_t lang) {
+  if (lang == Dictionary::kNoBookLang) {
+    Dictionary::setBookLang(Dictionary::kNoBookLang, nullptr);
+    return;
+  }
+  const auto want = static_cast<DictLang>(lang);
+  const auto inGroup = [&](const std::string& path) {
+    const int idx = dictionaryRegistry.indexOf(path);
+    return idx >= 0 && dictionaryRegistry.getEntries()[idx].lang == want;
+  };
+  std::string path = Dictionary::readLangDictPath(lang);
+  if (!inGroup(path)) path = Dictionary::readDictPath(nullptr);
+  if (!inGroup(path)) {
+    const int first = dictionaryRegistry.firstIndexInLang(want);
+    path = first >= 0 ? dictionaryRegistry.getEntries()[first].basePath : std::string();
+  }
+  Dictionary::setBookLang(lang, path.c_str());
+  LOG_DBG("DREG", "book dictionary group %u -> %s", static_cast<unsigned>(lang),
+          path.empty() ? "(global)" : path.c_str());
 }

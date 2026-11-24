@@ -78,22 +78,18 @@ void DictionarySelectActivity::onEnter() {
       }
     }
 
-    // Build augmented "Use Global" label showing the active global dictionary name.
+    // Build augmented "Use Global" label showing the dictionary it resolves to: the book
+    // language's default when one is in force, else the global dictionary.
     // Path format: <dictRoot>/<folder>/<stem> — extract <folder>.
-    const std::string globalPath = Dictionary::readDictPath();
+    const std::string globalPath = Dictionary::bookLang() != Dictionary::kNoBookLang && Dictionary::bookLangDefault()[0]
+                                       ? std::string(Dictionary::bookLangDefault())
+                                       : Dictionary::readDictPath();
     std::string globalFolderName;
     if (globalPath.empty()) {
       globalFolderName = tr(STR_DICT_NONE);
     } else {
-      const size_t lastSlash = globalPath.rfind('/');
-      if (lastSlash != std::string::npos && lastSlash > 0) {
-        const size_t prevSlash = globalPath.rfind('/', lastSlash - 1);
-        globalFolderName = (prevSlash != std::string::npos)
-                               ? globalPath.substr(prevSlash + 1, lastSlash - prevSlash - 1)
-                               : globalPath.substr(0, lastSlash);
-      } else {
-        globalFolderName = globalPath;
-      }
+      const std::string_view folder = DictionaryRegistry::folderOfBasePath(globalPath);
+      globalFolderName = folder.empty() ? globalPath : std::string(folder);
     }
     useGlobalLabel = std::string(tr(STR_DICT_USE_GLOBAL)) + " (" + globalFolderName + ")";
   }
@@ -123,7 +119,12 @@ void DictionarySelectActivity::scanDictionaries() {
   const auto& entries = dictionaryRegistry.getEntries();
   dictFolders.reserve(entries.size());
   dictStems.reserve(entries.size());
+  // Per-book mode lists only the book's language group, unless that group has nothing installed.
+  const uint8_t bookLang = bookCachePath.empty() ? Dictionary::kNoBookLang : Dictionary::bookLang();
+  const bool filter =
+      bookLang != Dictionary::kNoBookLang && dictionaryRegistry.firstIndexInLang(static_cast<DictLang>(bookLang)) >= 0;
   for (const auto& e : entries) {
+    if (filter && e.lang != static_cast<DictLang>(bookLang)) continue;
     dictFolders.push_back(e.name);
     dictStems.push_back(e.stem);
   }
@@ -158,7 +159,10 @@ void DictionarySelectActivity::applySelection() {
   std::string folder = folderForIndex(selectedIndex);
 
   if (bookCachePath.empty()) {
-    // Settings mode: update global dictionary.bin.
+    // Settings mode: update global dictionary.bin, and remember the choice for its language group.
+    if (!folder.empty()) {
+      Dictionary::saveLangDictPath(static_cast<uint8_t>(DictionaryRegistry::langForBasePath(folder)), folder.c_str());
+    }
     if (Dictionary::readDictPath() == folder) return;
     Dictionary::saveGlobalDictPath(folder.c_str());
   } else {

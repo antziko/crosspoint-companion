@@ -64,7 +64,7 @@ TEST(DictRegistryCycle, FullCycleReturnsToStart) {
 
 namespace {
 // Captureless, so it converts to the plain function pointer nextIndexInGroup takes.
-bool groupFromArray(const void* ctx, int index) { return static_cast<const bool*>(ctx)[index]; }
+int groupFromArray(const void* ctx, int index) { return static_cast<const bool*>(ctx)[index] ? 1 : 0; }
 
 int nextInGroup(int current, const bool* isSt, int count) {
   return DictionaryRegistry::nextIndexInGroup(current, count, groupFromArray, isSt);
@@ -167,4 +167,58 @@ TEST(DictRegistryStGroup, ClassifiesFolderNames) {
   EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("best-dict"));  // prefix, not substring
   EXPECT_FALSE(DictionaryRegistry::nameIsStGroup("st"));         // shorter than the prefix
   EXPECT_FALSE(DictionaryRegistry::nameIsStGroup(nullptr));
+}
+
+// langForName: the language group a dictionary folder belongs to.
+TEST(DictRegistryLang, FolderNamesOnTheCard) {
+  EXPECT_EQ(DictionaryRegistry::langForName("st-langdao-ce-gb-2.4.2"), DictLang::Chinese);
+  EXPECT_EQ(DictionaryRegistry::langForName("st-mdbg-cc-cedict-zh-cn-2.4.2"), DictLang::Chinese);
+  EXPECT_EQ(DictionaryRegistry::langForName("zh-cedict"), DictLang::Chinese);
+  EXPECT_EQ(DictionaryRegistry::langForName("ZH-Cedict"), DictLang::Chinese);
+  EXPECT_EQ(DictionaryRegistry::langForName("jmdict-ja-en"), DictLang::Japanese);
+  EXPECT_EQ(DictionaryRegistry::langForName("jmnedict-ja-names"), DictLang::Japanese);
+  EXPECT_EQ(DictionaryRegistry::langForName("ja-jmdict"), DictLang::Japanese);
+  EXPECT_EQ(DictionaryRegistry::langForName("x-JA-y"), DictLang::Japanese);
+  EXPECT_EQ(DictionaryRegistry::langForName("Cambridge"), DictLang::Other);
+  EXPECT_EQ(DictionaryRegistry::langForName("Oxford English"), DictLang::Other);
+  EXPECT_EQ(DictionaryRegistry::langForName("en-en"), DictLang::Other);
+  EXPECT_EQ(DictionaryRegistry::langForName("java-dict"), DictLang::Other);  // "ja" without the hyphens
+  EXPECT_EQ(DictionaryRegistry::langForName("kaja-"), DictLang::Other);      // needs "-ja-"
+  EXPECT_EQ(DictionaryRegistry::langForName(nullptr), DictLang::Other);
+}
+
+TEST(DictRegistryLang, BasePathUsesTheFolder) {
+  EXPECT_EQ(DictionaryRegistry::langForBasePath("/.dictionaries/st-xhzd-2.4.2/xhzd"), DictLang::Chinese);
+  EXPECT_EQ(DictionaryRegistry::langForBasePath("/.dictionaries/jmdict-ja-en/jmdict-ja-en"), DictLang::Japanese);
+  EXPECT_EQ(DictionaryRegistry::langForBasePath("/.dictionaries/Cambridge/english-Cambridge-ALD-3ed"), DictLang::Other);
+  // The stem never decides: an English folder with a "zh-" stem stays English.
+  EXPECT_EQ(DictionaryRegistry::langForBasePath("/.dictionaries/en-en/zh-x"), DictLang::Other);
+  EXPECT_EQ(DictionaryRegistry::langForBasePath(""), DictLang::Other);
+  EXPECT_EQ(DictionaryRegistry::langForBasePath("noslash"), DictLang::Other);
+}
+
+namespace {
+int langFromArray(const void* ctx, int index) { return static_cast<int>(static_cast<const DictLang*>(ctx)[index]); }
+}  // namespace
+
+// Three groups: each cycles only through its own members.
+TEST(DictRegistryLang, CyclesWithinThreeGroups) {
+  const DictLang langs[] = {DictLang::Other, DictLang::Chinese, DictLang::Japanese,
+                            DictLang::Other, DictLang::Chinese, DictLang::Japanese};
+  const auto next = [&](int cur) { return DictionaryRegistry::nextIndexInGroup(cur, 6, langFromArray, langs); };
+  EXPECT_EQ(next(0), 3);
+  EXPECT_EQ(next(3), 0);
+  EXPECT_EQ(next(1), 4);
+  EXPECT_EQ(next(4), 1);
+  EXPECT_EQ(next(2), 5);
+  EXPECT_EQ(next(5), 2);
+}
+
+TEST(DictRegistryLang, FolderOfBasePath) {
+  EXPECT_EQ(DictionaryRegistry::folderOfBasePath("/.dictionaries/Oxford English/english-Oxford-2005"),
+            "Oxford English");
+  EXPECT_EQ(DictionaryRegistry::folderOfBasePath("folder/stem"), "folder");
+  EXPECT_EQ(DictionaryRegistry::folderOfBasePath("/stem"), "");
+  EXPECT_EQ(DictionaryRegistry::folderOfBasePath("stem"), "");
+  EXPECT_EQ(DictionaryRegistry::folderOfBasePath(""), "");
 }

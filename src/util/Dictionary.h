@@ -108,10 +108,30 @@ class Dictionary {
   // Otherwise reads /.crosspoint/dictionary.bin (global setting).
   // Returns empty string if no dictionary is configured or the file cannot be read.
   static std::string readDictPath(const char* cachePath = nullptr);
+  // readDictPath with the book language group passed in rather than read from the shared
+  // state. The lookup task resolves through this with a snapshot the UI task took before
+  // creating it (DictionaryLookupController::startTask), so setBookLang never races it.
+  static std::string readDictPathFor(const char* cachePath, uint8_t bookLang, const char* bookDefault);
 
   // Writes folderPath to /.crosspoint/dictionary.bin (global setting).
   // Pass empty string to clear the global dictionary.
   static void saveGlobalDictPath(const char* folderPath);
+
+  // --- Book language group --------------------------------------------------
+  // The open book's dictionary language group (DictLang as uint8_t), or kNoBookLang outside a
+  // book. While set, readDictPath(cachePath) resolves a book with no per-book choice to
+  // bookLangDefault instead of the global dictionary. Set from the UI task by the reader
+  // (applyBookDictLang in DictionaryRegistry.cpp) and Settings. The lookup task never reads this
+  // shared copy; it works from a snapshot (readDictPathFor), so these may be set at any time.
+  static constexpr uint8_t kNoBookLang = 0xFF;
+  static void setBookLang(uint8_t lang, const char* defaultPath);
+  static uint8_t bookLang() { return bookLang_; }
+  static const char* bookLangDefault() { return bookLangDefault_; }
+
+  // Remembered dictionary per language group: /.crosspoint/dictionary-<en|zh|ja>.bin.
+  // Saving the global dictionary from Settings also saves it here for its own group.
+  static std::string readLangDictPath(uint8_t lang);
+  static void saveLangDictPath(uint8_t lang, const char* folderPath);
 
   // --- Session override -----------------------------------------------------
   // A dictionary chosen for the current reading session only. Nothing is written
@@ -159,6 +179,8 @@ class Dictionary {
   // The session override if one is set, otherwise the configured path for cachePath.
   // This is what every lookup resolves through; readDictPath() is the configured value.
   static std::string activeDictPath(const char* cachePath = nullptr);
+  // activeDictPath over a book-language snapshot — see readDictPathFor.
+  static std::string activeDictPathFor(const char* cachePath, uint8_t bookLang, const char* bookDefault);
 
   // RAII clear for the session override. Held as a member by every activity that can
   // host the lookup flow, so the override cannot outlive the screen that set it —
@@ -315,6 +337,8 @@ class Dictionary {
   // largest free block can be a few KB.
   static char preFallbackPath[128];
   static bool sessionPathIsFallback;
+  static uint8_t bookLang_;
+  static char bookLangDefault_[128];  // "" = fall through to the global dictionary
 
   // Read a null-terminated word from an open file into buf (max bufSize-1 chars).
   // Returns the number of characters read (excluding null), or -1 on error.

@@ -1,9 +1,16 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <vector>
+
+// Which language group a dictionary belongs to, from its folder name (DictionaryRegistry::langForName).
+// Switching and fallback stay inside one group, and a book shows only its own language's group.
+enum class DictLang : uint8_t { Other = 0, Chinese = 1, Japanese = 2 };
 
 // One installed StarDict dictionary discovered on the SD card.
 struct DictionaryEntry {
@@ -19,6 +26,8 @@ struct DictionaryEntry {
   // dictionary in the wrong group with nothing on screen to show it had happened. A folder
   // name is visible in the settings list and cannot be misread.
   bool nameIsSt = false;
+  // Language group, from the folder name at discover() time (langForName).
+  DictLang lang = DictLang::Other;
 };
 
 // Discovers installed dictionaries on the SD card. Mirrors SdCardFontRegistry:
@@ -83,6 +92,39 @@ class DictionaryRegistry {
   // discovery half of this class, the same reason nextIndex is split out.
   static bool nameIsStGroup(const char* name) { return name != nullptr && strncasecmp(name, "st-", 3) == 0; }
 
+  // Language group of a dictionary folder: "st-" or "zh-" prefix is Chinese, a "ja-" prefix or a
+  // "-ja-" anywhere (jmdict-ja-en) is Japanese, anything else is the English / other group.
+  // Folder names, not the .ifo's optional lang=, for the reason nameIsSt gives above.
+  static DictLang langForName(const char* name) {
+    if (!name) return DictLang::Other;
+    if (nameIsStGroup(name) || strncasecmp(name, "zh-", 3) == 0) return DictLang::Chinese;
+    if (strncasecmp(name, "ja-", 3) == 0) return DictLang::Japanese;
+    for (const char* p = name; p[0] && p[1] && p[2] && p[3]; p++) {
+      if (p[0] == '-' && (p[1] | 0x20) == 'j' && (p[2] | 0x20) == 'a' && p[3] == '-') return DictLang::Japanese;
+    }
+    return DictLang::Other;
+  }
+
+  // The folder component of a dictionary base path ("<root>/<folder>/<stem>"), or "" when the
+  // path has no folder. Shared by langForBasePath and the dictionary picker's labels.
+  static std::string_view folderOfBasePath(std::string_view basePath) {
+    const size_t slash = basePath.rfind('/');
+    if (slash == std::string_view::npos || slash == 0) return {};
+    const size_t start = basePath.rfind('/', slash - 1);
+    const size_t from = start == std::string_view::npos ? 0 : start + 1;
+    return basePath.substr(from, slash - from);
+  }
+
+  // langForName for a dictionary base path: the folder decides, never the stem.
+  static DictLang langForBasePath(std::string_view basePath) {
+    const std::string_view folder = folderOfBasePath(basePath);
+    char name[64];
+    const size_t len = std::min(folder.size(), sizeof(name) - 1);
+    memcpy(name, folder.data(), len);
+    name[len] = '\0';
+    return langForName(name);
+  }
+
   // Next index after `current` in a list of `count` items, wrapping at the end.
   // Returns -1 for an empty list. Any out-of-range `current` — including the -1
   // indexOf() returns when the configured dictionary isn't among the installed
@@ -95,8 +137,8 @@ class DictionaryRegistry {
   }
 
   // Next index after `current` whose group matches current's, wrapping at the end.
-  // Grouping is the name partition described on nameIsStGroup above: an "st-" dictionary
-  // only ever cycles to another "st-" one, and a non-"st-" only to another non-"st-".
+  // The production grouping is the language partition (langForName): a Chinese dictionary only
+  // ever cycles to another Chinese one, and so on.
   //
   // Returns -1 when the group has no other member, which is what makes a long press on
   // the only dictionary of its type do nothing rather than pointlessly re-running the
@@ -111,10 +153,10 @@ class DictionaryRegistry {
   // accessor also means the instance wrapper below shares this scan instead of carrying
   // a second copy of it. Function pointer + ctx rather than std::function for the usual
   // reason (see DictLookupCallbacks in Dictionary.h): no heap, no vtable, no bloat.
-  static int nextIndexInGroup(int current, int count, bool (*groupOf)(const void* ctx, int index), const void* ctx) {
+  static int nextIndexInGroup(int current, int count, int (*groupOf)(const void* ctx, int index), const void* ctx) {
     if (count <= 0 || groupOf == nullptr) return -1;
     if (current < 0 || current >= count) return 0;
-    const bool wanted = groupOf(ctx, current);
+    const int wanted = groupOf(ctx, current);
     for (int i = 1; i < count; i++) {
       const int candidate = (current + i) % count;
       if (groupOf(ctx, candidate) == wanted) return candidate;
@@ -124,6 +166,14 @@ class DictionaryRegistry {
 
   // nextIndexInGroup over the installed entries. No SD access — safe from an input path.
   int nextEntryIndexInGroup(int current) const;
+
+  // First installed dictionary of `lang`, or -1. No SD access.
+  int firstIndexInLang(DictLang lang) const {
+    for (size_t i = 0; i < entries_.size(); i++) {
+      if (entries_[i].lang == lang) return static_cast<int>(i);
+    }
+    return -1;
+  }
 
   // Mark the registry as needing a re-scan. Thread-safe (callable from the web task).
   void markDirty() { dirty_.store(true, std::memory_order_release); }
@@ -141,3 +191,10 @@ class DictionaryRegistry {
 
 // Global dictionary registry instance (defined in main.cpp).
 extern DictionaryRegistry dictionaryRegistry;
+
+// Tell the dictionary layer which language group the open book reads in (Dictionary::setBookLang)
+// and resolve that group's default: the remembered choice for the language, else the global
+// dictionary when it is in the group, else the group's first installed dictionary. A group with
+// nothing installed leaves the book unfiltered on the global dictionary. Pass
+// Dictionary::kNoBookLang when no book is open. UI task only.
+void applyBookDictLang(uint8_t lang);

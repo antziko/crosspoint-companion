@@ -120,6 +120,8 @@ void DictionaryLookupController::startLookup(const std::string& word, bool recor
 }
 
 bool DictionaryLookupController::startTask() {
+  bookLangSnap_ = Dictionary::bookLang();
+  snprintf(bookDefaultSnap_, sizeof(bookDefaultSnap_), "%s", Dictionary::bookLangDefault());
   task = makeUniqueNoThrow<DictLookupTask>(*this);
   if (!task) {
     LOG_ERR("DICT", "OOM: DictLookupTask");
@@ -466,9 +468,85 @@ bool DictionaryLookupController::cancelCallback(void* ctx) {
   return static_cast<DictionaryLookupController*>(ctx)->lookupCancelRequested;
 }
 
+// One fallback hop: open dictionary `idx` in the caller's ctx and look the word up. False when it
+// is skipped (no page index) or misses.
+bool DictionaryLookupController::probeFallback(Dictionary::LookupCtx& ctx, const int idx,
+                                               const DictLookupCallbacks& cbs, int& skipped, DictLocation& out) {
+  const auto& entries = dictionaryRegistry.getEntries();
+  // Reuses the caller's ctx: openLookupCtxAt resets it first, so the previous hop's handles are
+  // released before this one opens and only ever one dictionary is open at a time.
+  if (!Dictionary::openLookupCtxAt(ctx, entries[idx].basePath.c_str())) return false;
+  // openLookupCtxAt tries .idx.oft.cspt then .idx.oft, so no page index here proves neither
+  // sidecar exists — and without one, locateIn's bounds stay at 0..idxFileSize
+  // (Dictionary.cpp: resolveScanBoundsIn returns immediately) and it scans the entire index.
+  // That measured 7.5-10.2s per lookup on a ~1.4MB .idx, on the critical path of every miss.
+  //
+  // A fallback hop is opportunistic, so decline it rather than pay that. The active
+  // dictionary is deliberately NOT protected this way: scanning the one the user configured
+  // is correct behaviour. The fix for the skipped dictionary is Prepare, which builds both
+  // sidecars — hence naming it in the summary.
+  if (!ctx.hasPageIndex) {
+    skipped++;
+    return false;
+  }
+  const uint32_t hopStartMs = millis();
+  out = Dictionary::locateIn(ctx, lookupWord, cbs, /*collectAll=*/true);
+  const uint32_t hopMs = millis() - hopStartMs;
+  // Only slow hops, so this stays quiet in normal use. An indexed dictionary answers a probe
+  // in tens of milliseconds; anything near a second means that dictionary is the reason a
+  // lookup felt slow, and naming it is what turns "the dictionary is slow" into one line.
+  if (hopMs >= SLOW_HOP_LOG_MS) {
+    SdDebugLog::log("DICT", "sweep: slow hop %s %lums", entries[idx].name.c_str(), static_cast<unsigned long>(hopMs));
+  }
+  return out.found;
+}
+
+// A Latin-script word in a Chinese or Japanese book: after the book's own dictionaries miss,
+// try the English / other group too. Not gated on dictFallbackGroup — without it, every English
+// word in such a book is "not found". Only on a miss, so found lookups cost nothing.
+DictLocation DictionaryLookupController::sweepOtherLang(Dictionary::LookupCtx& ctx, const std::string& activeBase,
+                                                        const DictLocation& primary, const DictLookupCallbacks& cbs) {
+  const uint8_t bookLang = bookLangSnap_;
+  if (bookLang != static_cast<uint8_t>(DictLang::Chinese) && bookLang != static_cast<uint8_t>(DictLang::Japanese)) {
+    return primary;
+  }
+  if (primary.status == LookupStatus::NoDictionary) return primary;
+  const uint32_t first = utf8FirstCodepoint(lookupWord.c_str());
+  const bool latin =
+      (first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z') || (first >= 0xC0 && first < 0x250);
+  if (!latin) return primary;
+  // The active dictionary already being English means the user chose it; sweepGroup owns that case.
+  if (DictionaryRegistry::langForBasePath(activeBase) == DictLang::Other) return primary;
+
+  const auto& entries = dictionaryRegistry.getEntries();
+  const uint32_t sweepStartMs = millis();
+  int hops = 0;
+  int skipped = 0;
+  // The user's English choice first (Settings), then the rest of the group in folder order.
+  const int preferred = dictionaryRegistry.indexOf(Dictionary::readLangDictPath(static_cast<uint8_t>(DictLang::Other)));
+  for (int pass = 0; pass < 2; pass++) {
+    for (int idx = 0; idx < dictionaryRegistry.count(); idx++) {
+      if (cbs.shouldCancel && cbs.shouldCancel(cbs.ctx)) return primary;
+      if (entries[idx].lang != DictLang::Other) continue;
+      if ((pass == 0) != (idx == preferred)) continue;
+      hops++;
+      DictLocation loc;
+      if (!probeFallback(ctx, idx, cbs, skipped, loc)) continue;
+      fallbackDictPath_ = entries[idx].basePath;
+      fallbackHops_ = hops;
+      SdDebugLog::log("DICT", "fallback (latin word): -> %s after %d, %lums", entries[idx].name.c_str(), hops,
+                      static_cast<unsigned long>(millis() - sweepStartMs));
+      return loc;
+    }
+  }
+  SdDebugLog::log("DICT", "latin sweep: miss hops=%d skipped=%d %lums", hops, skipped,
+                  static_cast<unsigned long>(millis() - sweepStartMs));
+  return primary;
+}
+
 // Try the exact word in each OTHER dictionary of the active one's category before giving up.
-// Category is the folder-name partition in DictionaryRegistry::nameIsStGroup: an "st-" dictionary
-// only ever falls back to another "st-" one. Exact match only — stems, alt forms and suggestions
+// Category is the language group (DictionaryRegistry::langForName): a Chinese dictionary only ever
+// falls back to another Chinese one. Exact match only — stems, alt forms and suggestions
 // stay with the active dictionary, which keeps every hop on this task (cancellable, with the
 // toast already on glass) and never multiplies the user-blocking alt-form prompt.
 DictLocation DictionaryLookupController::sweepGroup(Dictionary::LookupCtx& ctx, const std::string& activeBase,
@@ -498,40 +576,15 @@ DictLocation DictionaryLookupController::sweepGroup(Dictionary::LookupCtx& ctx, 
     idx = dictionaryRegistry.nextEntryIndexInGroup(idx);
     if (idx < 0 || idx == startIdx) break;  // sole member of its group, or wrapped back to the start
     hops++;
-    // Reuses the caller's ctx: openLookupCtxAt resets it first, so the previous hop's handles are
-    // released before this one opens and only ever one dictionary is open at a time.
-    if (!Dictionary::openLookupCtxAt(ctx, entries[idx].basePath.c_str())) continue;
-    // openLookupCtxAt tries .idx.oft.cspt then .idx.oft, so no page index here proves neither
-    // sidecar exists — and without one, locateIn's bounds stay at 0..idxFileSize
-    // (Dictionary.cpp: resolveScanBoundsIn returns immediately) and it scans the entire index.
-    // That measured 7.5-10.2s per lookup on a ~1.4MB .idx, on the critical path of every miss,
-    // and logged nothing because the widened-retry line only fires when widening widens.
-    //
-    // A fallback hop is opportunistic, so decline it rather than pay that. The active
-    // dictionary is deliberately NOT protected this way: scanning the one the user configured
-    // is correct behaviour. The fix for the skipped dictionary is Prepare, which builds both
-    // sidecars — hence naming it in the summary below.
-    if (!ctx.hasPageIndex) {
-      skipped++;
-      continue;
-    }
-    const uint32_t hopStartMs = millis();
-    DictLocation loc = Dictionary::locateIn(ctx, lookupWord, cbs, /*collectAll=*/true);
-    const uint32_t hopMs = millis() - hopStartMs;
-    // Only slow hops, so this stays quiet in normal use. An indexed dictionary answers a probe
-    // in tens of milliseconds; anything near a second means that dictionary is the reason a
-    // lookup felt slow, and naming it is what turns "the dictionary is slow" into one line.
-    if (hopMs >= SLOW_HOP_LOG_MS) {
-      SdDebugLog::log("DICT", "sweep: slow hop %s %lums", entries[idx].name.c_str(), static_cast<unsigned long>(hopMs));
-    }
-    if (!loc.found) continue;
+    DictLocation loc;
+    if (!probeFallback(ctx, idx, cbs, skipped, loc)) continue;
     fallbackDictPath_ = entries[idx].basePath;
     fallbackHops_ = hops;
     // To SD as well as serial: which dictionary answered, and whether it stayed in the right
     // group, is only diagnosable from a device session — same reason the long-press logs here.
-    SdDebugLog::log("DICT", "fallback: %s(%s) -> %s(%s) after %d, %lums", entries[startIdx].name.c_str(),
-                    entries[startIdx].nameIsSt ? "st" : "other", entries[idx].name.c_str(),
-                    entries[idx].nameIsSt ? "st" : "other", hops, static_cast<unsigned long>(millis() - sweepStartMs));
+    SdDebugLog::log("DICT", "fallback: %s(lang=%d) -> %s(lang=%d) after %d, %lums", entries[startIdx].name.c_str(),
+                    static_cast<int>(entries[startIdx].lang), entries[idx].name.c_str(),
+                    static_cast<int>(entries[idx].lang), hops, static_cast<unsigned long>(millis() - sweepStartMs));
     return loc;
   }
   // The sweep is the expensive half of a missed lookup and until now said nothing when it
@@ -648,7 +701,7 @@ void DictionaryLookupController::runLookup() {
   // Resolved once and handed to sweepGroup for its registry lookup: activeDictPath() reads
   // dictionary.bin off SD whenever no session override is set, so re-deriving it on the miss
   // path would cost a second open.
-  const std::string activeBase = Dictionary::activeDictPath(cachePath.c_str());
+  const std::string activeBase = Dictionary::activeDictPathFor(cachePath.c_str(), bookLangSnap_, bookDefaultSnap_);
 
   // Stem probes get cancellation but not progress: onProgress would drive the bar back to 70
   // on every extra probe, so a word with six variants would appear to restart six times.
@@ -708,6 +761,8 @@ void DictionaryLookupController::runLookup() {
     foundLocation.folderPath = ctx.base;
   }
   if (!foundLocation.found) foundLocation = sweepGroup(ctx, activeBase, foundLocation, cbs);
+  if (!foundLocation.found && !lookupCancelRequested)
+    foundLocation = sweepOtherLang(ctx, activeBase, foundLocation, cbs);
   // Whether the miss can offer the alt-form prompt, decided here so the UI task reads no SD.
   if (!foundLocation.found && !lookupCancelRequested && foundLocation.status != LookupStatus::NoDictionary &&
       foundLocation.status != LookupStatus::ReadError && Dictionary::hasAltFormsAt(activeBase.c_str())) {
