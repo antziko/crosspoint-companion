@@ -22,6 +22,9 @@ struct CjkBookPrefs {
   int8_t furiganaOverride = -1;
 
   static constexpr uint8_t SNIFFED_NONE = 0xFF;
+  // Bumped when the sniff learns something new (v1: Cantonese), so a book sniffed before is
+  // looked at again; the override and the toggles are kept.
+  static constexpr uint8_t SNIFF_VERSION = 1;
   bool operator==(const CjkBookPrefs&) const = default;
 
   // The language the book is read as: the override, else the tag when it names a CJK language,
@@ -30,8 +33,11 @@ struct CjkBookPrefs {
     if (const char* forced = cjk::languageTagForChoice(languageOverride)) return forced;
     if (cjk::isUnscriptedChinese(tag)) {
       // Plain "zh": the text decides between the two scripts.
-      return detectedLanguage == cjk::LANG_ZH_HANT ? cjk::languageTagForChoice(detectedLanguage) : tag;
+      return detectedLanguage == cjk::LANG_ZH_HANT || detectedLanguage == cjk::LANG_YUE
+                 ? cjk::languageTagForChoice(detectedLanguage)
+                 : tag;
     }
+    if (cjk::isHongKongChinese(tag) && detectedLanguage == cjk::LANG_YUE) return "yue";
     if (cjk::scriptForLanguage(tag) != CjkScript::None) return tag;
     if (const char* sniffed = cjk::languageTagForChoice(detectedLanguage)) return sniffed;
     return tag;
@@ -54,10 +60,14 @@ struct CjkBookPrefs {
     HalFile f;
     if (!Storage.exists(path(cachePath).c_str())) return false;
     if (!Storage.openFileForRead("CJK", path(cachePath), f)) return false;
-    uint8_t data[4] = {0, 0, 0xFF, 0xFF};
-    if (f.read(data, sizeof(data)) < 1) return false;
+    uint8_t data[5] = {0, 0, 0xFF, 0xFF, 0};
+    const int n = f.read(data, sizeof(data));
+    if (n < 1) return false;
     if (data[0] < cjk::LANGUAGE_CHOICE_COUNT) languageOverride = data[0];
-    if (data[1] < cjk::LANGUAGE_CHOICE_COUNT || data[1] == SNIFFED_NONE) detectedLanguage = data[1];
+    // A sniff from an older version is dropped, so the next open sniffs again.
+    if (n >= 5 && data[4] == SNIFF_VERSION && (data[1] < cjk::LANGUAGE_CHOICE_COUNT || data[1] == SNIFFED_NONE)) {
+      detectedLanguage = data[1];
+    }
     const auto tri = [](const uint8_t b) -> int8_t { return b <= 1 ? static_cast<int8_t>(b) : -1; };
     verticalOverride = tri(data[2]);
     furiganaOverride = tri(data[3]);
@@ -70,8 +80,8 @@ struct CjkBookPrefs {
       LOG_ERR("CJK", "Cannot save cjk.bin");
       return false;
     }
-    const uint8_t data[4] = {languageOverride, detectedLanguage, static_cast<uint8_t>(verticalOverride),
-                             static_cast<uint8_t>(furiganaOverride)};
+    const uint8_t data[5] = {languageOverride, detectedLanguage, static_cast<uint8_t>(verticalOverride),
+                             static_cast<uint8_t>(furiganaOverride), SNIFF_VERSION};
     return f.write(data, sizeof(data)) == sizeof(data);
   }
 };

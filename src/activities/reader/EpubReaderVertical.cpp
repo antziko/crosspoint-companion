@@ -600,7 +600,7 @@ void EpubReaderActivity::openVerticalWordSelect(bool framebufferContainsPage, co
     }
     if (wordScan) {
       if (scanCells.size() == words.size()) {
-        wordScan->initFromVerticalPage(*vpage);
+        wordScan->initFromVerticalPage(*vpage, cellPx);
       } else {
         wordScan.reset();
       }

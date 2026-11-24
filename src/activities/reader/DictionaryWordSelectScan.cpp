@@ -262,6 +262,8 @@ void DictionaryWordSelectActivity::startWordScan() {
     setGlossNote(kNoteReopen, "no cell map");
     return;
   }
+  // Names the book annotates select as one word (matcha 80ccb27e); part of the cache fingerprint.
+  scan_->setBookGlossary(cachePath);
   const unsigned long t0 = millis();
   const bool cached = !scanCachePath_.empty() && scan_->tryLoadCache(scanCachePath_, scanSpine_, scanPage_);
   scanCacheSaved_ = cached;

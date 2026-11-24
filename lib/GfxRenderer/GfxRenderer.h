@@ -522,6 +522,8 @@ class GfxRenderer {
                       TextMeasureMode mode = TextMeasureMode::Layout) const;
   int getFontAscenderSize(int fontId) const;
   int getLineHeight(int fontId) const;
+  // Vertical extent of the font's glyph box: ascender above the baseline plus descender below.
+  int getFontInkHeight(int fontId) const;
   // Explicit line spacing scales font size; the one-argument form returns font metrics.
   int getLineHeight(int fontId, float compression) const;
   std::string truncatedText(int fontId, const char* text, int maxWidth,
@@ -550,12 +552,25 @@ class GfxRenderer {
                                       bool black = true, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   // Where drawCharVerticalRotatedInCell() would put this glyph's ink (top y, height), without drawing.
   bool verticalPunctInkBox(int fontId, uint32_t cp, EpdFontFamily::Style style, int cellTopY, int cellSize,
-                           int shiftType, int* inkTop, int* inkHeight) const;
+                           int shiftType, int* inkTop, int* inkHeight, uint16_t scale = 256) const;
   // One codepoint rotated 90° CCW inside a vertical cell. shiftType is Kinsoku::verticalShiftType():
   // 0 = no bias, 2 = closing bracket, 3 = opening bracket, 4 = dash/choonpu.
   void drawCharVerticalRotatedInCell(int fontId, int cellLeftX, int cellTopY, int cellSize, uint32_t cp, int shiftType,
                                      bool black = true, EpdFontFamily::Style style = EpdFontFamily::REGULAR,
-                                     int* inkTopOut = nullptr, int* inkHeightOut = nullptr) const;
+                                     int* inkTopOut = nullptr, int* inkHeightOut = nullptr, uint16_t scale = 256) const;
+  // matcha's scaled draws (8.8 fixed point, 256 = as is). We have no scaled glyph path; the
+  // vertical engine only calls these at 256 since its text keeps the body size, so `scale` is
+  // ignored, as it is by the two vertical-cell functions above.
+  void drawTextScaled(int fontId, int x, int y, const char* text, uint16_t scale, bool black = true,
+                      EpdFontFamily::Style style = EpdFontFamily::REGULAR) const {
+    (void)scale;
+    drawText(fontId, x, y, text, black, style);
+  }
+  void drawTextRotated90CCWScaled(int fontId, int x, int y, const char* text, uint16_t scale, bool black = true,
+                                  EpdFontFamily::Style style = EpdFontFamily::REGULAR) const {
+    (void)scale;
+    drawTextRotated90CCW(fontId, x, y, text, black, style);
+  }
   int getTextHeight(int fontId) const;
 
   // Grayscale functions

@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "CrossPointSettings.h"
+#include "util/TranslationTarget.h"
 
 // Flash-resident description of every setting that CrossPointSettings persists to
 // settings.json.
@@ -152,6 +153,7 @@ inline constexpr PersistedU8 kPersistedSettings[] = {
                           lastIndex(CrossPointSettings::FC_INLINE_MINUTES)),
     persisted::enumerated("flashcardInlineCardsIdx", &CrossPointSettings::flashcardInlineCardsIdx,
                           lastIndex(CrossPointSettings::FC_INLINE_CARDS)),
+    persisted::enumerated("translationTarget", &CrossPointSettings::translationTarget, translation::TARGET_CUSTOM),
     persisted::enumerated("holdConfirmAction", &CrossPointSettings::holdConfirmAction,
                           CrossPointSettings::HOLD_CONFIRM_ACTION_COUNT - 1),
     // Home-key gestures (X4 Pro). Board-conditional rows need a board-conditional BOUND

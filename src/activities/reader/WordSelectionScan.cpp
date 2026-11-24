@@ -1,22 +1,44 @@
 #include "WordSelectionScan.h"
 
 #include <Arduino.h>
+#include <CounterReading.h>
 #include <DictIndex.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <SdDebugLog.h>
+#include <Utf8.h>
 #include <WordLookup.h>
 
 #include <algorithm>
 #include <cstring>
+#include <iterator>
+#include <numeric>
 
 #include "Epub/Kinsoku.h"
 #include "Epub/Page.h"
+#include "VerticalClipCells.h"
 #include "util/CjkScript.h"
 
 namespace {
+
+size_t utf8Len(const unsigned char lead) {
+  return lead < 0x80 ? 1 : (lead & 0xE0) == 0xC0 ? 2 : (lead & 0xF0) == 0xE0 ? 3 : 4;
+}
+
+// First codepoint of a UTF-8 string (0 when empty or truncated).
+uint32_t decodeFirst(const std::string_view s) {
+  if (s.empty()) return 0;
+  const auto c0 = static_cast<unsigned char>(s[0]);
+  const size_t len = utf8Len(c0);
+  if (s.size() < len) return 0;
+  if (len == 1) return c0;
+  const uint32_t lead = c0 & (len == 2 ? 0x1Fu : len == 3 ? 0x0Fu : 0x07u);
+  return std::accumulate(
+      s.begin() + 1, s.begin() + static_cast<std::ptrdiff_t>(len), lead,
+      [](const uint32_t cp, const char c) { return (cp << 6) | (static_cast<unsigned char>(c) & 0x3Fu); });
+}
 // Bare vector growth (reserve()/push_back() past capacity) calls operator new, which aborts the
 // whole device on OOM under -fno-exceptions instead of returning nullptr (see CLAUDE.md). Word
 // Lookup can be opened right after a heap-starved chapter build (a furigana-dense CJK page can
@@ -63,10 +85,6 @@ bool WordSelectionScan::isLookupableChar(uint32_t cp) {
 
 bool WordSelectionScan::isKatakana(uint32_t cp) {
   return (cp >= 0x30A0 && cp <= 0x30FF) || cp == 0x30FC || (Kinsoku::isSmallKana(cp) && cp >= 0x30A0);
-}
-
-bool WordSelectionScan::isHiragana(uint32_t cp) {
-  return (cp >= 0x3040 && cp <= 0x309F) || (Kinsoku::isSmallKana(cp) && cp < 0x30A0);
 }
 
 bool WordSelectionScan::isCJK(uint32_t cp) { return cjk::isHan(cp); }
@@ -145,14 +163,23 @@ bool WordSelectionScan::stripTrailingParticle(const std::string& text, WordLooku
   // 私は→私). Kana stems are ambiguous — ちょっと's と is part of the word, not a
   // particle — so never strip after kana.
   if (!isCJK(prevCp)) return false;
-
   std::string stem = text.substr(0, lastStart);
   WordLookupResult sr;
-  if (WordLookup::lookup(stem, 0, sr, needDefinition) && sr.matchLength == stem.size()) {
-    result = std::move(sr);
-    return true;
+  if (!WordLookup::lookup(stem, 0, sr, needDefinition) || sr.matchLength != stem.size()) return false;
+  // An adverb the dictionary lists with its に (急に, 特に) keeps it when it is at least as common
+  // as the bare word; 時に and 次に are rarer than 時 and 次, so その時に stays 時 + に. Only に:
+  // 今日は and 彼の are headwords too, but in running text they are 今日 and 彼 before a particle.
+  if (lastCp == 0x306B && !result.deinflected && result.entry.sourceDict == DictIndex::DICT_JMDICT &&
+      result.entry.priority >= sr.entry.priority) {
+    return false;
   }
-  return false;
+  result = std::move(sr);
+  return true;
+}
+
+bool WordSelectionScan::isCaseParticle(const uint32_t cp) {
+  return cp == 0x306B || cp == 0x306E || cp == 0x3068 || cp == 0x304C || cp == 0x306F || cp == 0x3092 || cp == 0x3082 ||
+         cp == 0x3067 || cp == 0x3078 || cp == 0x3084 || cp == 0x304B || cp == 0x306A || cp == 0x3093;
 }
 
 void WordSelectionScan::encodeUtf8(uint32_t cp, std::string& out) {
@@ -208,8 +235,22 @@ bool WordSelectionScan::pushGlyphSafe(std::vector<GlyphRef>& vec, const GlyphRef
   return false;
 }
 
+// The page's furigana is short and sparse (a few dozen strings on a dense page); past the index
+// space, or when the heap is tight, a glyph simply keeps no furigana and lookup ranks as before.
+uint16_t WordSelectionScan::keepRuby(const std::string& ruby) {
+  if (ruby.empty() || ruby.size() > kMaxRubyBytes || rubies_.size() >= kRubyCovered) return kNoRuby;
+  // The grown vector and the copy coexist: budget both, then grow before copying.
+  const size_t newCapacity = rubies_.size() < rubies_.capacity() ? rubies_.capacity() : rubies_.capacity() * 2 + 8;
+  const size_t growBytes = newCapacity == rubies_.capacity() ? 0 : newCapacity * sizeof(std::string);
+  if (!fitsWithMargin(growBytes + ruby.size() + 1)) return kNoRuby;
+  rubies_.reserve(newCapacity);
+  rubies_.push_back(ruby);
+  return static_cast<uint16_t>(rubies_.size() - 1);
+}
+
 void WordSelectionScan::reset() {
   allGlyphs.clear();
+  rubies_.clear();
   selectableGlyphs.clear();
   selectToAllIdx.clear();
   // Chinese and Cantonese both segment whole runs; Japanese keeps the deinflecting greedy scan.
@@ -245,14 +286,53 @@ void WordSelectionScan::restartStepScan() {
   restoredCursorIndex = kNoRestoredCursor;
 }
 
-void WordSelectionScan::initFromVerticalPage(const VerticalPage& page) {
+void WordSelectionScan::initFromVerticalPage(const VerticalPage& page, const int cellPx) {
   reset();
   reserveGlyphsSafe(allGlyphs, page.glyphs.size());
-  for (const auto& g : page.glyphs) {
-    if (g.renderKind == VerticalGlyph::RotatedRun) continue;
+  std::vector<int> columnX;
+  verticalColumnXs(page, columnX);
+  for (size_t i = 0; i < page.glyphs.size(); i++) {
+    const auto& g = page.glyphs[i];
+    const bool run = g.renderKind == VerticalGlyph::RotatedRun || g.renderKind == VerticalGlyph::UprightRun;
+    // A number set as one upright or sideways run (21, 1582, 5km) is split back into its characters,
+    // all in the run's cell, so it reads as digits plus counter. Other runs are not lookup text.
+    const std::string& runText = page.glyphTextStr(g);
+    const bool numberRun = run && !runText.empty() && isDigitCp(decodeFirst(runText));
+    if (g.renderKind == VerticalGlyph::RotatedRun && !numberRun) continue;
     if (VerticalParsedText::isImageMarker(g.codepoint)) continue;  // an inline image, not text
-    GlyphRef ref{g.x, g.y, g.column, g.row, g.codepoint, g.paragraphIndex, 0};
-    if (!pushGlyphSafe(allGlyphs, ref)) {
+    const int x = g.column < columnX.size() && columnX[g.column] >= 0 ? columnX[g.column] : g.x;
+    const int y = std::max(0, verticalCellTop(page, i, cellPx));
+    GlyphRef ref{static_cast<uint16_t>(x), static_cast<uint16_t>(y), g.column, g.row, g.codepoint, g.paragraphIndex, 0};
+    ref.width = static_cast<uint8_t>(std::min(255, glyphCellPx(g, cellPx)));
+    if (!run && g.textId != VerticalGlyph::NO_TEXT) {
+      ref.ruby = keepRuby(page.glyphTextStr(g));
+    } else if (!run && ((g.style & EpdFontFamily::RUBY_CONTINUE) ||
+                        (i + 1 < page.glyphs.size() && (page.glyphs[i + 1].style & EpdFontFamily::RUBY_CONTINUE)))) {
+      ref.ruby = kRubyCovered;  // a group glyph whose share of the reading is empty (百 of 百舌鳥/もず)
+    }
+    bool pushed = true;
+    if (numberRun) {
+      // A sideways run spans down to the next cell in its column; its characters are spread over
+      // that extent so the highlight and the touch targets cover the whole run. An upright run
+      // stays in one cell.
+      size_t chars = 0;
+      for (size_t b = 0; b < runText.size(); b += utf8Len(static_cast<unsigned char>(runText[b]))) chars++;
+      int spread = 0;
+      if (g.renderKind == VerticalGlyph::RotatedRun && chars > 1 && i + 1 < page.glyphs.size() &&
+          page.glyphs[i + 1].column == g.column) {
+        spread = std::max(0, verticalCellTop(page, i + 1, cellPx) - y - glyphCellPx(g, cellPx));
+      }
+      size_t k = 0;
+      for (size_t b = 0; b < runText.size() && pushed; k++) {
+        ref.codepoint = decodeFirst(std::string_view(runText).substr(b));
+        ref.y = static_cast<uint16_t>(y + (chars > 1 ? spread * static_cast<int>(k) / static_cast<int>(chars - 1) : 0));
+        b += utf8Len(static_cast<unsigned char>(runText[b]));
+        pushed = pushGlyphSafe(allGlyphs, ref);
+      }
+    } else {
+      pushed = pushGlyphSafe(allGlyphs, ref);
+    }
+    if (!pushed) {
       scanTruncated = true;
       break;
     }
@@ -440,6 +520,13 @@ void WordSelectionScan::initFromPage(const Page& page, const LineGeometry* geome
         }
       }
       joinToPrevious = joinHyphen;
+      // A word's furigana goes on its first glyph; a group reading continues over later words.
+      const auto& rubyTexts = block.getRubyTexts();
+      uint16_t wordRuby = wi < rubyTexts.size() && !rubyTexts[wi].empty() ? keepRuby(rubyTexts[wi]) : kNoRuby;
+      // The rest of an annotated word, and every word continuing a group reading, sit under it.
+      uint16_t restRuby =
+          wordRuby != kNoRuby || (block.wordStyle(wi) & EpdFontFamily::RUBY_CONTINUE) ? kRubyCovered : kNoRuby;
+      if (block.wordStyle(wi) & EpdFontFamily::RUBY_CONTINUE) wordRuby = kRubyCovered;
       size_t b = 0;
       while (b < word.size()) {
         auto c0 = static_cast<unsigned char>(word[b]);
@@ -460,6 +547,8 @@ void WordSelectionScan::initFromPage(const Page& page, const LineGeometry* geome
           b += 4;
         }
         GlyphRef ref{0, 0, column, 0, cp, 0, 0, 0};
+        ref.ruby = wordRuby;
+        wordRuby = restRuby;
         if (geometry && boxAt < geometry->count) {
           const GlyphBox& box = geometry->boxes[boxAt];
           ref.x = box.x;
@@ -558,20 +647,39 @@ void WordSelectionScan::aimAtGlyph(const size_t glyphIndex) {
   // Already segmented: nothing to aim at, and re-reading it would only cost SD time.
   if (isGlyphMapped(glyphIndex)) return;
   // The walk is already within context range of this target, so it will reach it on its own in
-  // the next few positions. Re-aiming would rewind scanPos by kMaxLookupChars to re-read context
+  // the next few positions. Re-aiming would rewind scanPos by kMaxMatchChars to re-read context
   // the walk is about to read anyway -- and a caller that re-aims on EVERY tick (the parked
   // column jump in resolvePendingMove(), whose nearest-unmapped target shifts by one cell as each
   // is mapped) then cancels out exactly what stepScan() advances. The frontier stops dead, so the
   // scan never finishes, so the move never resolves, and handleSelectInput() swallows Confirm the
   // whole time: the panel is frozen (device: scanPos pinned at 36/90 for as long as it was left).
   // A genuine jump -- backwards, or far enough ahead to be worth skipping to -- still re-aims.
-  if (glyphIndex >= scanPos && glyphIndex - scanPos <= static_cast<size_t>(kMaxLookupChars)) return;
+  if (glyphIndex >= scanPos && glyphIndex - scanPos <= static_cast<size_t>(kMaxMatchChars)) return;
   recordFrom = glyphIndex;
   // Back up for context so a word overlapping the target is segmented as that word rather than
-  // as a fragment starting mid-way through it. kMaxLookupChars bounds how far back a word can
+  // as a fragment starting mid-way through it. kMaxMatchChars bounds how far back a word can
   // begin, so this is always far enough.
-  scanPos = glyphIndex > static_cast<size_t>(kMaxLookupChars) ? glyphIndex - kMaxLookupChars : 0;
+  scanPos = glyphIndex > static_cast<size_t>(kMaxMatchChars) ? glyphIndex - kMaxMatchChars : 0;
   skipUntil = scanPos;
+}
+
+int WordSelectionScan::wordAtOrAfter(const size_t glyphIndex) const {
+  int after = -1;
+  size_t afterStart = SIZE_MAX;
+  for (size_t i = 0; i < selectToAllIdx.size(); i++) {
+    const size_t start = selectToAllIdx[i];
+    const size_t len = std::max<size_t>(selectableGlyphs[i].matchLen, 1);
+    if (start <= glyphIndex && glyphIndex < start + len) return static_cast<int>(i);
+    if (start > glyphIndex && start < afterStart) {
+      after = static_cast<int>(i);
+      afterStart = start;
+    }
+  }
+  if (after < 0) return -1;
+  for (size_t g = glyphIndex; g < afterStart; g++) {
+    if (!isGlyphMapped(g)) return -1;
+  }
+  return after;
 }
 
 bool WordSelectionScan::step(const uint32_t maxMillis) {
@@ -599,7 +707,7 @@ bool WordSelectionScan::step(const uint32_t maxMillis) {
         break;
       }
       recordFrom = resume;
-      scanPos = resume > static_cast<size_t>(kMaxLookupChars) ? resume - kMaxLookupChars : 0;
+      scanPos = resume > static_cast<size_t>(kMaxMatchChars) ? resume - kMaxMatchChars : 0;
       skipUntil = scanPos;
       continue;
     }
@@ -620,13 +728,13 @@ namespace {
 // rebuilt, which is the right outcome for a disposable cache.
 //
 // Bump this whenever a change alters what a scan of the SAME page produces. The entry is
-// validated on glyphHash (codepoints + paragraph indices) and dictSize, neither of which moves
+// validated on glyphHash (codepoints + paragraph indices) and segFingerprint, neither of which moves
 // when the segmentation logic changes -- so a cache written by a version that segmented wrongly
 // still validates and is served back, and the fix never reaches the reader. That happened with
 // the tate-chu-yoko NUL truncation, where a match claimed the cells of the word after an upright
 // "!?" run: the word stayed unselectable on that page for good, since nothing re-examined a
 // cache that looked valid. Rebuilding costs one rescan (~300 ms, once per page).
-constexpr uint32_t WLSCAN_MULTI_MAGIC = 0x324D4C57;  // "WLM2" -- was "WLSM" before the tcy fix
+constexpr uint32_t WLSCAN_MULTI_MAGIC = 0x424D4C57;  // "WLMB": bumped whenever segmentation changes
 constexpr uint16_t WLSCAN_MAX_PAGES = 8;
 constexpr size_t WLSCAN_MAX_CARRY_BYTES = 4096;  // bound on the older entries carried forward
 
@@ -643,7 +751,7 @@ struct Header {
   uint16_t spine;
   uint16_t page;
   uint32_t glyphHash;
-  uint32_t dictSize;
+  uint32_t segFingerprint;  // segmentationFingerprint()
   uint16_t count;
   uint16_t lastCursor;
 } __attribute__((packed));
@@ -686,6 +794,35 @@ uint32_t WordSelectionScan::glyphContentHash() const {
   return h;
 }
 
+// Dictionary size plus glossary record count. The glossary only grows as chapters are parsed, so
+// its count changes whenever a name is harvested and a scan made before that is redone.
+uint32_t WordSelectionScan::segmentationFingerprint() const {
+  return dictFingerprint() ^ (static_cast<uint32_t>(glossaryCount_) * 2654435761u);
+}
+
+void WordSelectionScan::setBookGlossary(const std::string& bookCachePath) {
+  glossaryCount_ = RubyGlossary::loadSpanKeys(bookCachePath, glossaryKeys_);
+}
+
+int WordSelectionScan::glossarySpanAt(const std::string_view text, const int maxChars) const {
+  if (glossaryKeys_.empty()) return 0;
+  int best = 0;
+  int chars = 0;
+  for (size_t pos = 0; pos < text.size() && chars < maxChars;) {
+    pos++;
+    while (pos < text.size() && (static_cast<unsigned char>(text[pos]) & 0xC0) == 0x80) pos++;
+    chars++;
+    if (chars < 2) continue;
+    const uint32_t h = RubyGlossary::hashText(text.data(), pos);
+    auto it = std::lower_bound(glossaryKeys_.begin(), glossaryKeys_.end(), h,
+                               [](const RubyGlossary::SpanKey& k, uint32_t v) { return k.hash < v; });
+    for (; it != glossaryKeys_.end() && it->hash == h; ++it) {
+      if (it->chars == chars) best = chars;
+    }
+  }
+  return best;
+}
+
 bool WordSelectionScan::tryLoadCache(const std::string& path, const uint16_t spineIndex, const uint16_t pageIndex) {
   HalFile f;
   if (!Storage.openFileForRead("WLS", path, f)) {
@@ -702,13 +839,13 @@ bool WordSelectionScan::tryLoadCache(const std::string& path, const uint16_t spi
   // Walk the entries, skipping over the records of the ones that do not match. Entries are small
   // and there are at most WLSCAN_MAX_PAGES, so this costs a read or two.
   const uint32_t wantHash = glyphContentHash();
-  const uint32_t wantDict = dictFingerprint();
+  const uint32_t wantDict = segmentationFingerprint();
   bool found = false;
   for (uint16_t e = 0; e < fileHdr.entryCount && e < WLSCAN_MAX_PAGES; e++) {
     if (f.read(reinterpret_cast<uint8_t*>(&hdr), sizeof(hdr)) != static_cast<int>(sizeof(hdr))) return false;
     if (hdr.magic != WLSCAN_MAGIC) return false;
-    if (hdr.spine == spineIndex && hdr.page == pageIndex && hdr.glyphHash == wantHash && hdr.dictSize == wantDict &&
-        hdr.count <= allGlyphs.size()) {
+    if (hdr.spine == spineIndex && hdr.page == pageIndex && hdr.glyphHash == wantHash &&
+        hdr.segFingerprint == wantDict && hdr.count <= allGlyphs.size()) {
       found = true;
       break;
     }
@@ -751,11 +888,16 @@ bool WordSelectionScan::tryLoadCache(const std::string& path, const uint16_t spi
     // the page every open); only the span is restored from the record.
     GlyphRef entry = allGlyphs[idx];
     entry.matchLen = rec[sizeof(idx)];
-    if (!pushGlyphSafe(selectableGlyphs, entry)) {
+    // companion: the index list grows guarded too -- a skipped reserve above leaves it to grow,
+    // and a bare push_back past capacity aborts on OOM. A miss just rescans the page.
+    const bool indexFits = selectToAllIdx.size() < selectToAllIdx.capacity() ||
+                           fitsWithMargin((selectToAllIdx.capacity() + 16) * sizeof(size_t));
+    if (!indexFits || !pushGlyphSafe(selectableGlyphs, entry)) {
       selectableGlyphs.clear();
       selectToAllIdx.clear();
       return false;
     }
+    if (selectToAllIdx.size() == selectToAllIdx.capacity()) selectToAllIdx.reserve(selectToAllIdx.capacity() + 16);
     selectToAllIdx.push_back(idx);
   }
   phase = Phase::Done;
@@ -831,7 +973,7 @@ bool WordSelectionScan::saveCache(const std::string& path, const uint16_t spineI
   hdr.spine = spineIndex;
   hdr.page = pageIndex;
   hdr.glyphHash = glyphContentHash();
-  hdr.dictSize = dictFingerprint();
+  hdr.segFingerprint = segmentationFingerprint();
   hdr.count = static_cast<uint16_t>(selectToAllIdx.size());
   hdr.lastCursor = cursorIndex < hdr.count ? cursorIndex : 0;
   f.write(reinterpret_cast<const uint8_t*>(&hdr), sizeof(hdr));
@@ -942,6 +1084,16 @@ void WordSelectionScan::scanOnePosition() {
     encodeUtf8(allGlyphs[j].codepoint, text);
     charCount++;
   }
+  // A conjugation running on in hiragana past the window (食べさせられなかった) gets the rest of
+  // the run, up to MAX_CONJUGATION_CHARS; WordLookup reads past the window only then.
+  const bool fullWindow = charCount == kMaxLookupChars;
+  for (size_t j = scanStart + charCount;
+       fullWindow && j < allGlyphs.size() && charCount < WordLookup::MAX_CONJUGATION_CHARS; j++) {
+    const uint32_t cp = allGlyphs[j].codepoint;
+    if (allGlyphs[j].paragraphIndex != paraIdx || cp < 0x3041 || cp > 0x3096) break;
+    encodeUtf8(cp, text);
+    charCount++;
+  }
 
   // Try dictionary lookup to find match length. The definition text is only consulted by the
   // hiragana/[kana] suppression check below, which only runs for positions that start with
@@ -954,6 +1106,19 @@ void WordSelectionScan::scanOnePosition() {
   // っ-start positions accept exact entries only (see the small-kana skip above): a deinflected
   // hit there is a conjugation fragment (って→う), not the quotative って.
   if (sokuonTeStart && hasMatch && result.deinflected) hasMatch = false;
+  // After digits the counter is one unit with the number even where the dictionary stops short of
+  // it or lacks it: 3日目, 5万円, 5km. Japanese only: Chinese reads 3名 by its own dictionary.
+  if (digitGlyphs > 0 && std::strcmp(DictIndex::languageFolder(), "jp") == 0) {
+    const size_t counterBytes = CounterReading::matchCounter(text);
+    // A name that runs past the counter (日後 of 5日後) gives way to it.
+    const bool nameRunsOn =
+        hasMatch && result.entry.sourceDict == DictIndex::DICT_NAMES && result.matchLength > counterBytes;
+    if (counterBytes > 0 && (!hasMatch || counterBytes > result.matchLength || nameRunsOn)) {
+      hasMatch = true;
+      result.matchLength = counterBytes;
+      result.deinflected = false;
+    }
+  }
   // Declared out here so the push below can record the match's cell span (see GlyphRef::matchLen).
   int matchChars = 0;
   if (hasMatch) {
@@ -1022,12 +1187,37 @@ void WordSelectionScan::scanOnePosition() {
         // both are simply never suppressed. Priority scales: Jitendex = score+128 (128 = no
         // frequency data); jmdict-simplified = 200 common / 100 rest.
         constexpr uint8_t kMinKanaExactPriority = 200;
+        // A long phrase that ends at a word boundary is the phrase itself written in kana
+        // (「おかまいなく」), not a fragment that happens to spell a reading.
+        const size_t afterMatch = scanStart + static_cast<size_t>(matchChars);
+        const bool endsAtBoundary =
+            afterMatch >= allGlyphs.size() || allGlyphs[afterMatch].paragraphIndex != paraIdx ||
+            (!isCJK(allGlyphs[afterMatch].codepoint) && !isKatakana(allGlyphs[afterMatch].codepoint) &&
+             !(allGlyphs[afterMatch].codepoint >= 0x3041 && allGlyphs[afterMatch].codepoint <= 0x309F));
+        const bool kanaPhrase = matchChars >= 5 && endsAtBoundary;
         if (hasMatch && !result.deinflected && matchChars >= 2 &&
-            (result.entry.posFlags & DictIndexRecord::POS_READING) != 0 && !usuallyKana &&
+            (result.entry.posFlags & DictIndexRecord::POS_READING) != 0 && !usuallyKana && !kanaPhrase &&
             result.entry.priority < kMinKanaExactPriority) {
           hasMatch = false;
         }
+        // A reading record that opens with the copula な or the nominaliser の straight after
+        // other text is grammar on the page, not the word: なのか in 誰なのか matched 七日 even
+        // though that record is common. Other particle kana stay, so でんわ and はな still match.
+        const uint32_t lead = allGlyphs[scanStart].codepoint;
+        const bool afterText = scanStart > 0 && allGlyphs[scanStart - 1].paragraphIndex == paraIdx;
+        if (hasMatch && !result.deinflected && (lead == 0x306A || lead == 0x306E) && afterText && !usuallyKana &&
+            (result.entry.posFlags & DictIndexRecord::POS_READING) != 0) {
+          hasMatch = false;
+        }
       }
+    }
+
+    // A name that opens with the copula な right after hiragana: な子 in 哀れな子 is な plus 子,
+    // not a name. の is left alone: before a name it is the possessive (妹ののり子).
+    if (hasMatch && result.entry.sourceDict == DictIndex::DICT_NAMES && scanStart > 0 &&
+        allGlyphs[scanStart - 1].paragraphIndex == paraIdx) {
+      const uint32_t prev = allGlyphs[scanStart - 1].codepoint;
+      if (allGlyphs[scanStart].codepoint == 0x306A && prev >= 0x3041 && prev <= 0x309F) hasMatch = false;
     }
 
     // A match that STARTS with a case/topic particle usually mis-segments: the particle should
@@ -1039,10 +1229,7 @@ void WordSelectionScan::scanOnePosition() {
     // is what keeps genuine words that merely begin with a particle-kana intact: とても (3) has
     // remainder ても (2) < 3 so it stays, ところ/における likewise, while 羽蟻's remainder
     // ありません (5) >= 3 correctly loses to the split.
-    auto isCaseParticle = [](uint32_t cp) {
-      return cp == 0x306B || cp == 0x306E || cp == 0x3068 || cp == 0x304C || cp == 0x306F || cp == 0x3092 ||
-             cp == 0x3082 || cp == 0x3067 || cp == 0x3078 || cp == 0x3084 || cp == 0x304B || cp == 0x306A;
-    };
+    // The explanatory ん counts too: んだろう must split as ん だろう, not んだ ろう (労).
     if (hasMatch && matchChars >= 2 && isCaseParticle(allGlyphs[scanStart].codepoint) &&
         scanStart + 1 < allGlyphs.size() && allGlyphs[scanStart + 1].paragraphIndex == paraIdx) {
       std::string nextText;
@@ -1071,8 +1258,25 @@ void WordSelectionScan::scanOnePosition() {
         }
         // >= matchChars keeps the original 2-char behavior (nmc>=2) and extends it to longer
         // particle-led mis-segmentations without disturbing real particle-initial words.
-        if (nmc >= matchChars) hasMatch = false;  // let the next char start the longer word
+        // A は right after に/で/と is the second half of には/では/とは, so a word one char shorter
+        // still wins over a conjugation: 笑わずには いられない, not はいられ (入る). An exact
+        // headword (友達にはなす, 話す) stays.
+        const uint32_t prevCp = scanStart > 0 && allGlyphs[scanStart - 1].paragraphIndex == paraIdx
+                                    ? allGlyphs[scanStart - 1].codepoint
+                                    : 0;
+        const bool compoundParticle =
+            allGlyphs[scanStart].codepoint == 0x306F && (prevCp == 0x306B || prevCp == 0x3067 || prevCp == 0x3068);
+        if (nmc >= matchChars || (compoundParticle && result.deinflected && nmc >= 2 && nmc + 1 >= matchChars)) {
+          hasMatch = false;  // let the next char start the longer word
+        }
       }
+    }
+
+    // A name the book annotated: select it whole when the dictionary only covers a part (緋 of
+    // 緋倉美津子). Only extends a dictionary match, so a kanji the dictionary lacks stays unselected.
+    if (digitGlyphs == 0 && isCJK(allGlyphs[scanStart].codepoint)) {
+      const int glossChars = glossarySpanAt(text);
+      if (glossChars > matchChars) matchChars = glossChars;
     }
 
     // Fictional katakana name + honorific: group the whole run as one selectable unit even when
@@ -1178,6 +1382,17 @@ bool WordSelectionScan::pushSelectable(const GlyphRef& entry, const size_t cell,
   return false;
 }
 
+namespace {
+// Characters that usually stand alone as a preposition or marker: 把 被 在 给/給 对/對 从/從 向 让/讓 将/將 跟.
+bool isGrammarLead(const uint32_t cp) {
+  static constexpr uint16_t kLeads[] = {0x628A, 0x88AB, 0x5728, 0x7ED9, 0x7D66, 0x5BF9, 0x5C0D, 0x4ECE,
+                                        0x5F9E, 0x5411, 0x8BA9, 0x8B93, 0x5C06, 0x5C07, 0x8DDF};
+  return std::find(std::begin(kLeads), std::end(kLeads), cp) != std::end(kLeads);
+}
+// Four e-folds of word cost (see scanChineseRun): the word must be ~50x commoner than the split.
+constexpr int16_t kGrammarLeadPenalty = 48;
+}  // namespace
+
 bool WordSelectionScan::scanChineseRun(const size_t from) {
   const uint32_t paraIdx = allGlyphs[from].paragraphIndex;
   // The run: consecutive hanzi of one paragraph. Punctuation, digits, Latin and tate-chu-yoko
@@ -1204,6 +1419,13 @@ bool WordSelectionScan::scanChineseRun(const size_t from) {
   for (size_t p = 0; p < n; p++) {
     std::memset(runPriority_[p], 0, sizeof(runPriority_[p]));
     runFound_[p] = WordLookup::lookupAll(text, byteAt[p], runPriority_[p], kChineseMaxWindow);
+    // A name the book annotated as one ruby group (王小明) is a word, though the dictionary only
+    // knows its characters; it is scored as a common one.
+    const int gloss = glossarySpanAt(std::string_view(text).substr(byteAt[p]), kMaxLookupChars);
+    if (gloss >= 2) {
+      runFound_[p] |= static_cast<uint8_t>(1u << (gloss - 1));
+      runPriority_[p][gloss - 1] = std::max<uint8_t>(runPriority_[p][gloss - 1], 200);
+    }
   }
 
   // Best split of cells [p, n) by total word cost, the unigram model every Chinese segmenter
@@ -1225,7 +1447,12 @@ bool WordSelectionScan::scanChineseRun(const size_t from) {
       // A word may run past the run's end (into the tail or the next call's cells): it ends the
       // run and is scored as one word.
       const size_t next = std::min(n, p + static_cast<size_t>(len));
-      const int16_t score = static_cast<int16_t>(runBest_[next] + kWordCost + runPriority_[p][len - 1]);
+      int16_t score = static_cast<int16_t>(runBest_[next] + kWordCost + runPriority_[p][len - 1]);
+      // 把, 被, 在 and their like mostly stand alone before a noun (把门关上 is 把 + 门), so a
+      // word they start must be clearly commoner than the split to win.
+      if (len > 1 && runFound_[p] & 1u && isGrammarLead(allGlyphs[from + p].codepoint)) {
+        score = static_cast<int16_t>(score - kGrammarLeadPenalty);
+      }
       if (score > best || (score == best && len > bestLen)) {
         best = score;
         bestLen = static_cast<uint8_t>(len);
@@ -1267,11 +1494,10 @@ bool WordSelectionScan::scanChineseRun(const size_t from) {
   return true;
 }
 
-namespace {
 // Post-scan display filter: single-char entries that are common particles or conjugation
 // fragments. These are valid in the scan (so から, ところ etc. get found correctly) but useless
 // as standalone lookup results.
-bool isDisplayNoise(uint32_t cp) {
+bool WordSelectionScan::isDisplayNoise(const uint32_t cp) {
   switch (cp) {
     case 0x306F:  // は
     case 0x304C:  // が
@@ -1320,7 +1546,55 @@ bool isDisplayNoise(uint32_t cp) {
       return false;
   }
 }
-}  // namespace
+
+bool WordSelectionScan::startsWithConjugationNoise(const std::string_view text) {
+  static constexpr std::string_view patterns[] = {
+      "\xe3\x81\xbe\xe3\x81\x97\xe3\x81\x9f",  // ました
+      "\xe3\x81\xbe\xe3\x81\x9b\xe3\x82\x93",  // ません
+      "\xe3\x81\xa7\xe3\x81\x97\xe3\x81\x9f",  // でした
+      "\xe3\x81\xa7\xe3\x81\x99",              // です
+      "\xe3\x81\xbe\xe3\x81\x99",              // ます
+  };
+  return std::any_of(std::begin(patterns), std::end(patterns),
+                     [text](const std::string_view pattern) { return text.substr(0, pattern.size()) == pattern; });
+}
+
+// Exact-match colloquial/grammatical contractions that are never useful as standalone
+// vocabulary (なくちゃ→ちゃ, じゃ, etc.). Exact, so real words (茶碗/ちゃわん) are not filtered.
+// そうに/そうな/そうだ are the ～そう "seeming/appears" auxiliary (心配そうに); their only
+// dictionary hit is the rare homophone 僧尼 ("monks and nuns") and no grammar entry covers
+// them, so as standalone lookups they are just misleading -- filter them out.
+bool WordSelectionScan::isExactNoise(const std::string_view match) {
+  static constexpr std::string_view exactNoise[] = {
+      "\xe3\x81\xa1\xe3\x82\x83",              // ちゃ
+      "\xe3\x81\x98\xe3\x82\x83",              // じゃ
+      "\xe3\x81\xa1\xe3\x82\x83\xe3\x81\x86",  // ちゃう
+      "\xe3\x81\xa3\xe3\x81\xa6",              // って
+      "\xe3\x81\x9d\xe3\x81\x86\xe3\x81\xab",  // そうに
+      "\xe3\x81\x9d\xe3\x81\x86\xe3\x81\xaa",  // そうな
+      "\xe3\x81\x9d\xe3\x81\x86\xe3\x81\xa0",  // そうだ
+  };
+  return std::any_of(std::begin(exactNoise), std::end(exactNoise),
+                     [match](const std::string_view noise) { return match == noise; });
+}
+
+bool WordSelectionScan::isNoiseMatch(const std::string_view text, const size_t matchBytes) {
+  const std::string_view match = text.substr(0, matchBytes);
+  // A short match made only of noise kana (は, が, には, では); see passesDisplayFilter.
+  int chars = 0;
+  bool allNoise = true;
+  for (size_t pos = 0; pos < match.size() && allNoise;) {
+    const auto* at = reinterpret_cast<const unsigned char*>(match.data() + pos);
+    const auto* next = at;
+    const uint32_t cp = utf8NextCodepoint(&next);
+    if (next == at) break;
+    pos += static_cast<size_t>(next - at);
+    allNoise = isDisplayNoise(cp);
+    chars++;
+  }
+  if (allNoise && chars <= 2) return true;
+  return isExactNoise(match) || startsWithConjugationNoise(text);
+}
 
 // Examine a matched position the way performLookup() would display it; false = display noise
 // (bare particles, conjugation fragments) that should not become a selectable entry.
@@ -1337,17 +1611,7 @@ bool WordSelectionScan::passesDisplayFilter(const size_t allIdx, const int match
       encodeUtf8(allGlyphs[j].codepoint, matched);
       mLen++;
     }
-    static const char* const patterns[] = {"\xe3\x81\xbe\xe3\x81\x97\xe3\x81\x9f",  // ました
-                                           "\xe3\x81\xbe\xe3\x81\x9b\xe3\x82\x93",  // ません
-                                           "\xe3\x81\xa7\xe3\x81\x97\xe3\x81\x9f",  // でした
-                                           "\xe3\x81\xa7\xe3\x81\x99",              // です
-                                           "\xe3\x81\xbe\xe3\x81\x99",              // ます
-                                           nullptr};
-    for (int p = 0; patterns[p]; p++) {
-      size_t plen = strlen(patterns[p]);
-      if (matched.size() >= plen && matched.substr(0, plen) == patterns[p]) return true;
-    }
-    return false;
+    return startsWithConjugationNoise(matched);
   };
 
   if (!lookupText.empty() && matchBytes > 0) {
@@ -1366,24 +1630,7 @@ bool WordSelectionScan::passesDisplayFilter(const size_t allIdx, const int match
     }
     if (allNoise) return false;
 
-    // Exact-match colloquial/grammatical contractions that are never useful as
-    // standalone vocabulary (なくちゃ→ちゃ, じゃ, etc.). Use the exact matched
-    // text so real words (茶碗/ちゃわん) are not filtered.
-    // そうに/そうな/そうだ are the ～そう "seeming/appears" auxiliary (心配そうに); their only
-    // dictionary hit is the rare homophone 僧尼 ("monks and nuns") and no grammar entry covers
-    // them, so as standalone lookups they are just misleading -- filter them out.
-    static const char* const exactNoise[] = {"\xe3\x81\xa1\xe3\x82\x83",              // ちゃ
-                                             "\xe3\x81\x98\xe3\x82\x83",              // じゃ
-                                             "\xe3\x81\xa1\xe3\x82\x83\xe3\x81\x86",  // ちゃう
-                                             "\xe3\x81\xa3\xe3\x81\xa6",              // って
-                                             "\xe3\x81\x9d\xe3\x81\x86\xe3\x81\xab",  // そうに
-                                             "\xe3\x81\x9d\xe3\x81\x86\xe3\x81\xaa",  // そうな
-                                             "\xe3\x81\x9d\xe3\x81\x86\xe3\x81\xa0",  // そうだ
-                                             nullptr};
-    for (int e = 0; exactNoise[e]; e++) {
-      const size_t noiseBytes = strlen(exactNoise[e]);
-      if (matchBytes == noiseBytes && lookupText.compare(0, matchBytes, exactNoise[e]) == 0) return false;
-    }
+    if (isExactNoise(std::string_view(lookupText).substr(0, matchBytes))) return false;
   }
   if (isConjugationNoise()) {
     return false;

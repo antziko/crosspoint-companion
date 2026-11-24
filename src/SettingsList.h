@@ -22,6 +22,7 @@
 #include "components/UITheme.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryRegistry.h"
+#include "util/TranslationTarget.h"
 
 // Build the font size setting dynamically: the options are the point sizes the
 // active family actually ships, so an SD family built at 10/12/14 offers three
@@ -554,6 +555,15 @@ inline void forEachSetting(const SdCardFontRegistry* registry, const DictionaryR
   // defaults. Hand-persisted in CrossPointSettings::toJson/fromJson (like dictMarker).
   v.push_back(SettingInfo::Toggle(StrId::STR_DICT_FALLBACK, &CrossPointSettings::dictFallbackGroup, "dictFallbackGroup",
                                   StrId::STR_READER_DICTIONARY));
+  {
+    // Translate Page's target language; Custom reads gemini.lang.
+    std::vector<StrId> labels;
+    labels.reserve(translation::TARGET_LANGUAGE_COUNT + 1);
+    for (const auto& lang : translation::TARGET_LANGUAGES) labels.push_back(lang.label);
+    labels.push_back(StrId::STR_XLAT_LANG_CUSTOM);
+    v.push_back(SettingInfo::Enum(StrId::STR_TRANSLATE_TO, &CrossPointSettings::translationTarget, std::move(labels),
+                                  "translationTarget", StrId::STR_READER_DICTIONARY));
+  }
   // --- Reader > Reading Tracking sub-group (category STR_READER_TRACKING) ---
   v.push_back(SettingInfo::Enum(
       StrId::STR_MIN_SESSION_FOR_STATS, &CrossPointSettings::minSessionMinutes,

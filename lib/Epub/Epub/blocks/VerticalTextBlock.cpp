@@ -3,9 +3,11 @@
 #include <Utf8.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 
+#include "../BookFontMap.h"
 #include "GfxRenderer.h"
 #include "ImageBlock.h"
 #include "Kinsoku.h"
@@ -59,6 +61,26 @@ SesameMask makeSesameMask(const int cellPx) {
   return m;
 }
 
+// The body font's cell metrics at the size a glyph is set at (VerticalGlyph::scale8): the bitmaps
+// are drawn scaled, so every measurement scales with them. At the body size, exactly the body's.
+struct SizedCell {
+  uint16_t scale = 256;  // 8.8 fixed point, for the scaled draw calls
+  int cellPx = 0;
+  int ascender = 0;
+  int baselineInCell = 0;
+  int at(const int v) const { return scale == 256 ? v : static_cast<int>(std::lround(v * scale / 256.0)); }
+};
+SizedCell sizedCell(const SizedCell& body, const uint8_t scale8) {
+  const int s8 = scale8 == 0 ? 8 : scale8;
+  if (s8 == 8) return body;
+  SizedCell c;
+  c.scale = static_cast<uint16_t>(s8 * 32);
+  c.cellPx = std::max(1, c.at(body.cellPx));
+  c.ascender = c.at(body.ascender);
+  c.baselineInCell = c.at(body.baselineInCell);
+  return c;
+}
+
 // Returns the cell size it drew with, so a caller needing the same geometry (ruby) reuses it
 // instead of re-deriving it -- every derivation probes the reference glyph out of the SD font.
 int drawGlyphs(GfxRenderer& renderer, const VerticalPage& page, int fontId, int offsetX, int offsetY, bool black) {
@@ -70,8 +92,26 @@ int drawGlyphs(GfxRenderer& renderer, const VerticalPage& page, int fontId, int 
   //   drawChar*InCell       - the cell's top-left, positioning within the cell from metrics
   const int ascender = renderer.getFontAscenderSize(fontId);
   const int baselineInCell = verticalCellBaselineOffset(renderer, fontId, cellPx);
-  const int uprightTopAdjust = baselineInCell - ascender;
-  const SesameMask sesame = makeSesameMask(cellPx);
+  const SizedCell body{256, cellPx, ascender, baselineInCell};
+  SesameMask sesame = makeSesameMask(cellPx);
+  int sesameCell = cellPx;
+  // A publisher font (VerticalGlyph::fontSlot) is set in the same cells, on its own baseline.
+  SizedCell slotBodies[4] = {body, body, body, body};
+  bool slotReady[4] = {true, false, false, false};
+  const auto fontOfSlot = [&](const uint8_t slot) {
+    const int id = bookfonts::fontIdForSlot(slot);
+    return id != 0 ? id : fontId;
+  };
+  const auto bodyOfSlot = [&](const uint8_t slot) -> const SizedCell& {
+    const int id = bookfonts::fontIdForSlot(slot);
+    if (id == 0 || slot >= 4) return body;
+    if (!slotReady[slot]) {
+      slotBodies[slot] =
+          SizedCell{256, cellPx, renderer.getFontAscenderSize(id), verticalCellBaselineOffset(renderer, id, cellPx)};
+      slotReady[slot] = true;
+    }
+    return slotBodies[slot];
+  };
 
   // Styled-block borders (kakomi boxes, .k-solid-top separator rules). Rects share the glyphs'
   // cell-top coordinate space and the same offsets. `edges` says which lines to draw; EXTEND_*
@@ -98,19 +138,22 @@ int drawGlyphs(GfxRenderer& renderer, const VerticalPage& page, int fontId, int 
       if (!renderer.isFontCacheScanning()) drawInlineImage(renderer, page, g, dx, cellTop);
       continue;
     }
+    const int gFont = fontOfSlot(g.fontSlot);
+    const SizedCell sized = sizedCell(bodyOfSlot(g.fontSlot), g.scale8);
     int dy = cellTop;
     if (g.renderKind == VerticalGlyph::Upright || g.renderKind == VerticalGlyph::UprightRun) {
-      dy = cellTop + uprightTopAdjust;
+      dy = cellTop + sized.baselineInCell - sized.ascender;
     }
 
     if (g.renderKind == VerticalGlyph::RotatedRun) {
-      renderer.drawTextRotated90CCW(fontId, dx, dy, page.glyphText(g), black,
-                                    static_cast<EpdFontFamily::Style>(g.style));
+      renderer.drawTextRotated90CCWScaled(gFont, dx, dy, page.glyphText(g), sized.scale, black,
+                                          static_cast<EpdFontFamily::Style>(g.style));
       continue;
     }
 
     if (g.renderKind == VerticalGlyph::UprightRun) {
-      renderer.drawText(fontId, dx, dy, page.glyphText(g), black, static_cast<EpdFontFamily::Style>(g.style));
+      renderer.drawTextScaled(gFont, dx, dy, page.glyphText(g), sized.scale, black,
+                              static_cast<EpdFontFamily::Style>(g.style));
       continue;
     }
 
@@ -121,14 +164,14 @@ int drawGlyphs(GfxRenderer& renderer, const VerticalPage& page, int fontId, int 
       // starting a column is set flush to the head, so it is handed a cell half an em higher and its
       // second-half placement lands on the line head. The layout flags which brackets those are (it knows
       // where columns start, indents included) and removes the same half em from the rest of the column.
-      if (g.lineHeadFlush) dy -= cellPx / 2;
-      renderer.drawCharVerticalRotatedInCell(fontId, dx, dy, cellPx, g.codepoint, shiftType, black,
-                                             static_cast<EpdFontFamily::Style>(g.style));
+      if (g.lineHeadFlush) dy -= sized.cellPx / 2;
+      renderer.drawCharVerticalRotatedInCell(gFont, dx, dy, sized.cellPx, g.codepoint, shiftType, black,
+                                             static_cast<EpdFontFamily::Style>(g.style), nullptr, nullptr, sized.scale);
       continue;
     }
 
     if (g.renderKind == VerticalGlyph::SmallKanaCorner) {
-      renderer.drawCharVerticalCornerTopRight(fontId, dx, dy, cellPx, g.codepoint, black,
+      renderer.drawCharVerticalCornerTopRight(gFont, dx, dy, cellPx, g.codepoint, black,
                                               static_cast<EpdFontFamily::Style>(g.style));
       continue;
     }
@@ -142,23 +185,27 @@ int drawGlyphs(GfxRenderer& renderer, const VerticalPage& page, int fontId, int 
     int uprightDy = dy;
     {
       GlyphInk ink;
-      if (measureGlyphInk(renderer, fontId, g.codepoint, g.style, &ink) && ink.height > 0 && ink.height < ink.top) {
+      if (measureGlyphInk(renderer, gFont, g.codepoint, g.style, &ink) && ink.height > 0 && ink.height < ink.top) {
         // Thin glyph (一): ink sits near the middle of the em-box, not the top, so centre its
         // ink in the cell instead of using the common baseline. Same space conversion as
         // uprightTopFor: derive the cell's top, then hand drawText a TOP (it adds the ascender).
-        uprightDy = cellTop + cellPx / 2 + ink.top - ink.height / 2 - ascender;
+        uprightDy = cellTop + sized.cellPx / 2 + sized.at(ink.top) - sized.at(ink.height) / 2 - sized.ascender;
       }
     }
-    renderer.drawText(fontId, dx, uprightDy, utf8Char.c_str(), black, static_cast<EpdFontFamily::Style>(g.style));
+    renderer.drawTextScaled(gFont, dx, uprightDy, utf8Char.c_str(), sized.scale, black,
+                            static_cast<EpdFontFamily::Style>(g.style));
 
     if (g.emphasis) {
-      // Sesame dot centred in the half-em band beside the character, where ruby goes (JLREQ: an
-      // emphasis mark takes the ruby position). The ruby band starts at the cell's edge; adding an
-      // ink gap on top pushed the dot out between the columns, visibly apart from its character.
-      // Clamped to the panel like ruby, for the first column. Stamped from a mask, not drawn as
-      // U+FE45: the built-in fonts lack that block, so a glyph showed as the missing-character box.
-      const int left = std::min(dx + cellPx + cellPx / 4 - sesame.size / 2, renderer.getScreenWidth() - sesame.size);
-      const int top = cellTop + (cellPx - sesame.size) / 2;
+      // Sesame dot beside the character, in the ruby band (JLREQ: an emphasis mark takes the ruby
+      // position). It starts at the cell edge: centred in the band it read as floating between the
+      // columns. Clamped to the panel like ruby, for the first column. Stamped from a mask, not drawn
+      // as U+FE45: the built-in fonts lack that block, so a glyph showed as the missing-character box.
+      if (sesameCell != sized.cellPx) {
+        sesame = makeSesameMask(sized.cellPx);
+        sesameCell = sized.cellPx;
+      }
+      const int left = std::min(dx + sized.cellPx, renderer.getScreenWidth() - sesame.size);
+      const int top = cellTop + (sized.cellPx - sesame.size) / 2;
       for (int row = 0; row < sesame.size; ++row) {
         for (int col = 0; col < sesame.size; ++col) {
           if (sesame.rows[row] & (1u << col)) renderer.drawPixel(left + col, top + row, black);
@@ -184,107 +231,73 @@ void VerticalTextBlock::render(GfxRenderer& renderer, int fontId, int rubyFontId
   // against a 33px em in Noto Serif JP), which stepped the ruby 45% too far apart and ran every
   // annotation past the foot of its base.
   const int rubyEmPx = verticalCellPx(renderer, rubyFontId);
-  const int rubyLineH = (rubyEmPx + 1) / 2;
+  const int rubyLineHBody = (rubyEmPx + 1) / 2;
   // Baseline of a ruby character below the top of its body: the base text's measured figure,
   // halved with the glyph.
-  const int rubyBaselineInBody = verticalCellBaselineOffset(renderer, rubyFontId, rubyEmPx) / 2;
+  const int rubyBaselineInBodyBody = verticalCellBaselineOffset(renderer, rubyFontId, rubyEmPx) / 2;
+  const int rubyAscender = renderer.getFontAscenderSize(rubyFontId);
   const auto rubyStyle = static_cast<EpdFontFamily::Style>(EpdFontFamily::SUP);
 
-  // JLREQ 3.3.8: ruby may hang over ordinary kana/kanji, but not over punctuation or brackets
-  // (their half-em placement is what keeps them legible), nor over a character carrying its own.
-  const auto hangoverAllowedOver = [this](const VerticalGlyph* n) {
-    if (!n) return false;                               // page/column edge
-    if (!page_.glyphTextStr(*n).empty()) return false;  // it has ruby of its own
-    if (n->renderKind == VerticalGlyph::RotatedRun || n->renderKind == VerticalGlyph::UprightRun) return false;
-    if (n->codepoint == 0) return false;
-    return Kinsoku::verticalShiftType(n->codepoint) == 0 && !Kinsoku::needsVerticalRotation(n->codepoint);
-  };
-  const auto hasRuby = [this](const VerticalGlyph& g) {
-    return !page_.glyphTextStr(g).empty() && !VerticalParsedText::isImageMarker(g.codepoint) &&
-           g.renderKind != VerticalGlyph::RotatedRun && g.renderKind != VerticalGlyph::UprightRun;
-  };
-  const auto rubyBlockHeight = [this, rubyLineH](const VerticalGlyph& g) {
-    int count = 0;
-    const auto* p = reinterpret_cast<const unsigned char*>(page_.glyphTextStr(g).c_str());
-    while (*p && utf8NextCodepoint(&p) != 0) count++;
-    return count * rubyLineH;
-  };
-
-  // Top of glyph gi's ruby body, set on its base character before any neighbour is considered.
-  // JLREQ 3.3.5 nakatsuki (中付き): the ruby text's vertical centre aligns with the base
-  // character's. Ruby is set solid, so its virtual length is N ruby bodies, and the alignment is
-  // on VIRTUAL BODIES rather than ink.
-  const auto naturalRubyTop = [&](const size_t gi, const int blockH) {
-    const VerticalGlyph& g = page_.glyphs[gi];
-    int top = g.y + offsetY + (cellPxLocal - blockH) / 2;
-    // JLREQ 3.3.8: nakatsuki spills half the overhang each way; where a neighbour cannot be hung
-    // over, its share moves to the other side.
-    const int overhang = blockH - cellPxLocal;
-    if (overhang > 0) {
-      const VerticalGlyph* before = nullptr;
-      const VerticalGlyph* after = nullptr;
-      if (gi > 0 && page_.glyphs[gi - 1].column == g.column) before = &page_.glyphs[gi - 1];
-      if (gi + 1 < page_.glyphs.size() && page_.glyphs[gi + 1].column == g.column) after = &page_.glyphs[gi + 1];
-      const bool canBefore = hangoverAllowedOver(before);
-      const bool canAfter = hangoverAllowedOver(after);
-      if (canAfter && !canBefore) {
-        top += overhang / 2;  // push it all onto the following character
-      } else if (canBefore && !canAfter) {
-        top -= overhang / 2;  // ... or all onto the preceding one
-      }
-      // both or neither: leave it centred; the forward pass below then favours the character
-      // after, as the spec prefers.
-    }
-    return top;
-  };
-
-  // Ruby body tops for the current column, planned when its first glyph is reached: forward so no
-  // annotation overlaps the one before it, then backward so the last one ends by rubyBottomY,
-  // lifting the ones above it only as far as that needs. A column with more ruby than fits here
-  // keeps the forward pass alone.
-  constexpr size_t MAX_COLUMN_RUBY = 48;
-  int16_t columnRubyTop[MAX_COLUMN_RUBY];
-  size_t columnRubyCount = 0;
-  size_t columnRubyNext = 0;
-  bool columnPlanned = false;
-  uint16_t plannedColumn = UINT16_MAX;
   int prevRubyBottom = -9999;
+  uint16_t prevRubyColumn = UINT16_MAX;
 
+  const auto isGroupFollower = [this](const size_t i) {
+    const VerticalGlyph& n = page_.glyphs[i];
+    return (n.style & EpdFontFamily::RUBY_CONTINUE) != 0 && n.renderKind != VerticalGlyph::RotatedRun &&
+           n.renderKind != VerticalGlyph::UprightRun && !VerticalParsedText::isImageMarker(n.codepoint);
+  };
+  // JLREQ 3.3.8: ruby longer than its base may hang over a neighbouring kana by up to one ruby
+  // character, and over the blank half of a closing bracket or 、。 before it or an opening
+  // bracket after it. Never over kanji, nor over a character carrying ruby of its own.
+  const auto hangoverAllowed = [this](const VerticalGlyph* n, const bool before) {
+    if (!n) return false;                               // column edge
+    if (!page_.glyphTextStr(*n).empty()) return false;  // it has ruby of its own
+    // ... or is part of a group that has (its own share may be empty)
+    if ((n->style & EpdFontFamily::RUBY_CONTINUE) != 0) return false;
+    const size_t at = static_cast<size_t>(n - page_.glyphs.data());
+    if (at + 1 < page_.glyphs.size() && (page_.glyphs[at + 1].style & EpdFontFamily::RUBY_CONTINUE) != 0) return false;
+    if (n->renderKind == VerticalGlyph::RotatedRun || n->renderKind == VerticalGlyph::UprightRun) return false;
+    const uint32_t cp = n->codepoint;
+    if ((cp >= 0x3041 && cp <= 0x309F) || (cp >= 0x30A1 && cp <= 0x30FA)) return true;  // kana, not ー
+    const int shift = Kinsoku::verticalShiftType(cp);
+    return before ? (shift == 1 || shift == 2) : shift == 3;
+  };
+
+  size_t segmentEnd = 0;
   for (size_t gi = 0; gi < page_.glyphs.size(); gi++) {
+    if (gi < segmentEnd) continue;  // set with the group that starts before it
     const VerticalGlyph& g = page_.glyphs[gi];
-    if (g.column != plannedColumn) {
-      plannedColumn = g.column;
-      prevRubyBottom = -9999;
-      columnRubyCount = 0;
-      columnRubyNext = 0;
-      size_t end = gi;
-      while (end < page_.glyphs.size() && page_.glyphs[end].column == g.column) end++;
-      columnPlanned = true;
-      int bottom = -9999;
-      int16_t blockHs[MAX_COLUMN_RUBY];
-      for (size_t j = gi; j < end; j++) {
-        if (!hasRuby(page_.glyphs[j])) continue;
-        if (columnRubyCount == MAX_COLUMN_RUBY) {
-          columnPlanned = false;
-          break;
-        }
-        const int blockH = rubyBlockHeight(page_.glyphs[j]);
-        const int top = std::max(naturalRubyTop(j, blockH), bottom + 1);
-        columnRubyTop[columnRubyCount] = static_cast<int16_t>(top);
-        blockHs[columnRubyCount++] = static_cast<int16_t>(blockH);
-        bottom = top + blockH;
-      }
-      if (columnPlanned && rubyBottomY != INT_MAX) {
-        int limit = rubyBottomY;
-        for (size_t k = columnRubyCount; k-- > 0;) {
-          if (columnRubyTop[k] + blockHs[k] <= limit) break;
-          columnRubyTop[k] = static_cast<int16_t>(limit - blockHs[k]);
-          limit = columnRubyTop[k] - 1;
-        }
-      }
+    if (VerticalParsedText::isImageMarker(g.codepoint) || g.renderKind == VerticalGlyph::RotatedRun ||
+        g.renderKind == VerticalGlyph::UprightRun) {
+      continue;
     }
-    if (!hasRuby(g)) continue;
-    const std::string& rubyText = page_.glyphTextStr(g);
+
+    // The annotation goes over its whole group (JLREQ 3.3.6): this glyph and the group's glyphs
+    // that follow it down the same column. Each carries a share of the reading; together they are
+    // the reading. A group split across columns or pages is set per part.
+    segmentEnd = gi + 1;
+    while (segmentEnd < page_.glyphs.size() && page_.glyphs[segmentEnd].column == g.column &&
+           isGroupFollower(segmentEnd)) {
+      segmentEnd++;
+    }
+    std::string groupText;
+    const std::string* text = &page_.glyphTextStr(g);
+    if (segmentEnd > gi + 1) {
+      for (size_t k = gi; k < segmentEnd; k++) groupText += page_.glyphTextStr(page_.glyphs[k]);
+      text = &groupText;
+    }
+    const std::string& rubyText = *text;
+    if (rubyText.empty()) continue;
+
+    // A base set at a CSS font-size takes ruby half ITS size, beside its own cell.
+    const int s8 = g.scale8 == 0 ? 8 : g.scale8;
+    const uint16_t rubyScale = static_cast<uint16_t>(s8 * 32);  // the base's scale; ruby draws at half
+    const auto atBase = [rubyScale](const int v) {
+      return rubyScale == 256 ? v : static_cast<int>(std::lround(v * rubyScale / 256.0));
+    };
+    const int cellG = atBase(cellPxLocal);
+    const int rubyLineH = atBase(rubyLineHBody);
+    const int rubyBaselineInBody = atBase(rubyBaselineInBodyBody);
 
     // Walk the ruby string once: count its characters, and measure how far right its ink can
     // reach. Every ruby character in the stack is drawn at the same x, so the widest one decides.
@@ -303,7 +316,7 @@ void VerticalTextBlock::render(GfxRenderer& renderer, int fontId, int rubyFontId
         GlyphInk ink;
         if (measureGlyphInk(renderer, rubyFontId, cp, static_cast<uint8_t>(rubyStyle), &ink) && ink.width > 0) {
           // SUP draws the glyph at 50%, so its metrics halve too.
-          rubyInkRight = std::max(rubyInkRight, (ink.left + ink.width + 1) / 2);
+          rubyInkRight = std::max(rubyInkRight, (atBase(ink.left + ink.width) + 1) / 2);
           if (uprightInkTop < 0 && ink.height > 0 && !Kinsoku::needsVerticalRotation(cp)) {
             uprightInkTop = ink.top;
             uprightInkHeight = ink.height;
@@ -316,20 +329,67 @@ void VerticalTextBlock::render(GfxRenderer& renderer, int fontId, int rubyFontId
     // Ruby's virtual body starts where the base character's cell ENDS, beside it, not over it.
     // At the text edge that puts it in the margin, per JLREQ Fig 2.37 -- clamped to the panel by
     // its measured ink reach, since a margin here is only a few px.
-    const int rubyReach = rubyInkRight > 0 ? rubyInkRight : std::max(1, cellPxLocal / 2);
-    const int rubyX = std::min(g.x + offsetX + cellPxLocal, renderer.getScreenWidth() - rubyReach);
+    const int rubyReach = rubyInkRight > 0 ? rubyInkRight : std::max(1, cellG / 2);
+    const int rubyX = std::min(g.x + offsetX + cellG, renderer.getScreenWidth() - rubyReach);
 
+    // The base the annotation is set against: from the group's first cell to its last.
+    const int baseTop = g.y + offsetY;
+    const int baseLen = page_.glyphs[segmentEnd - 1].y + offsetY + cellG - baseTop;
+    // Ruby is set solid, so its virtual length is N ruby bodies; alignment is on VIRTUAL BODIES
+    // rather than ink.
     const int rubyBlockH = static_cast<int>(rubyCharCount) * rubyLineH;
-    int rubyBodyTop;
-    if (columnPlanned) {
-      rubyBodyTop = columnRubyTop[columnRubyNext++];
+    int bodyTop;
+    int step = rubyLineH;
+    if (rubyBlockH <= baseLen) {
+      // JLREQ 3.3.5 nakatsuki: centred on the base. A shorter annotation over a group is spread
+      // to its length 1:2:1 -- half as much space at each end as between two characters.
+      const int unit = (baseLen - rubyBlockH) / static_cast<int>(2 * rubyCharCount);
+      bodyTop = segmentEnd > gi + 1 ? baseTop + unit : baseTop + (baseLen - rubyBlockH) / 2;
+      if (segmentEnd > gi + 1) step = rubyLineH + 2 * unit;
     } else {
-      rubyBodyTop = std::max(naturalRubyTop(gi, rubyBlockH), prevRubyBottom + 1);
-      prevRubyBottom = rubyBodyTop + rubyBlockH;
+      // Longer: centred, taking half the excess each way where there is room (JLREQ 3.3.8). What a
+      // side cannot take moves to the other. Layout spaced the base so that the room suffices, and
+      // at a column's head left room above it, so the reading starts with the column (3.3.9).
+      const VerticalGlyph* before = gi > 0 && page_.glyphs[gi - 1].column == g.column ? &page_.glyphs[gi - 1] : nullptr;
+      const VerticalGlyph* after = segmentEnd < page_.glyphs.size() && page_.glyphs[segmentEnd].column == g.column
+                                       ? &page_.glyphs[segmentEnd]
+                                       : nullptr;
+      const int overhang = rubyBlockH - baseLen;
+      // Room beside the base first: the space layout left when it spaced the base out to the
+      // reading, then one ruby character over a neighbour that may be hung over.
+      const int lastBottom = page_.glyphs[segmentEnd - 1].y + cellG;
+      // At a column's head the room is what layout left above the base, up to the text area's top;
+      // at its foot the reading may run on into the margin.
+      const int maxBefore =
+          before ? std::max(0, g.y - (before->y + cellG)) + (hangoverAllowed(before, true) ? rubyLineH : 0)
+                 : static_cast<int>(g.y);
+      const int maxAfter =
+          after ? std::max(0, after->y - lastBottom) + (hangoverAllowed(after, false) ? rubyLineH : 0) : overhang;
+      int hangBefore = std::min(overhang / 2, maxBefore);
+      const int hangAfter = std::min(overhang - hangBefore, maxAfter);
+      hangBefore = std::min(overhang - hangAfter, maxBefore);
+      // More than the neighbours allow: the excess goes on past them, away from a column edge.
+      const int excess = overhang - hangBefore - hangAfter;
+      if (excess > 0) {
+        if (before && !after) {
+          hangBefore += excess;
+        } else if (before && after) {
+          hangBefore += excess / 2;
+        }  // at the column head it all goes below
+      }
+      bodyTop = baseTop - hangBefore;
+      // companion: a reading at the column foot ends by the text area's foot, not in the status bar.
+      if (bodyTop + rubyBlockH > rubyBottomY) bodyTop = std::max(baseTop - overhang, rubyBottomY - rubyBlockH);
     }
-    // drawText() takes a top and puts the baseline textBaselineOffset() below it, so the top that
-    // lands the baseline where the body wants it is the body top plus the difference.
-    int rubyY = rubyBodyTop + rubyBaselineInBody - renderer.textBaselineOffset(rubyFontId, rubyText.c_str(), rubyStyle);
+    // drawText takes a TOP; the scaled path puts the baseline the scaled ascender below it.
+    int rubyY = rubyScale == 256 ? bodyTop + rubyBaselineInBody -
+                                       renderer.textBaselineOffset(rubyFontId, rubyText.c_str(), rubyStyle)
+                                 : bodyTop + rubyBaselineInBody - atBase(rubyAscender) / 2;
+    if (g.column == prevRubyColumn && rubyY < prevRubyBottom + 1) {
+      rubyY = prevRubyBottom + 1;
+    }
+    prevRubyBottom = rubyY + step * static_cast<int>(rubyCharCount - 1) + rubyLineH;
+    prevRubyColumn = g.column;
 
     size_t ri = 0;
     while (ri < rubyText.size()) {
@@ -370,18 +430,29 @@ void VerticalTextBlock::render(GfxRenderer& renderer, int fontId, int rubyFontId
         int cell = std::max(1, rubyLineH);
         GlyphInk rot;
         if (measureGlyphInk(renderer, rubyFontId, cp, static_cast<uint8_t>(rubyStyle), &rot) && rot.width > 0) {
-          cell = std::max({cell, (rot.width + 1) / 2, (rot.height + 1) / 2});
+          cell = std::max({cell, (atBase(rot.width) + 1) / 2, (atBase(rot.height) + 1) / 2});
         }
-        const int baseline = rubyY + renderer.textBaselineOffset(rubyFontId, rubyText.c_str(), rubyStyle);
+        const int baseline = rubyScale == 256
+                                 ? rubyY + renderer.textBaselineOffset(rubyFontId, rubyText.c_str(), rubyStyle)
+                                 : rubyY + atBase(rubyAscender) / 2;
         // No upright neighbour to measure (an all-dash annotation): fall back to the slot centre.
         const int centre =
             uprightInkTop >= 0 ? baseline - uprightInkTop / 2 + uprightInkHeight / 4 : rubyY + rubyLineH / 2;
-        renderer.drawCharVerticalRotatedInCell(rubyFontId, rubyX, centre - cell / 2, cell, cp,
-                                               Kinsoku::verticalShiftType(cp), black, rubyStyle);
-      } else {
+        if (rubyScale == 256) {
+          renderer.drawCharVerticalRotatedInCell(rubyFontId, rubyX, centre - cell / 2, cell, cp,
+                                                 Kinsoku::verticalShiftType(cp), black, rubyStyle);
+        } else {
+          // SUP would override the scale, so its half size is folded into the scale instead.
+          renderer.drawCharVerticalRotatedInCell(rubyFontId, rubyX, centre - cell / 2, cell, cp,
+                                                 Kinsoku::verticalShiftType(cp), black, EpdFontFamily::REGULAR, nullptr,
+                                                 nullptr, static_cast<uint16_t>(rubyScale / 2));
+        }
+      } else if (rubyScale == 256) {
         renderer.drawText(rubyFontId, rubyX, rubyY, buf, black, rubyStyle);
+      } else {
+        renderer.drawTextScaled(rubyFontId, rubyX, rubyY, buf, static_cast<uint16_t>(rubyScale / 2), black);
       }
-      rubyY += rubyLineH;
+      rubyY += step;
       ri += charLen;
     }
   }

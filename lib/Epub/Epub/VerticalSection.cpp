@@ -4,11 +4,11 @@
 #include <FontCacheManager.h>
 #include <FontDecompressor.h>
 #include <FsHelpers.h>
+#include <GaijiText.h>
 #include <HalPowerManager.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
-#include <SdDebugLog.h>
 #include <Serialization.h>
 #include <XmlParserUtils.h>
 #include <expat.h>
@@ -17,12 +17,15 @@
 #include <cstring>
 #include <string>
 
+#include "BookFontMap.h"
 #include "Epub/RubyGlossary.h"
+#include "Epub/VerticalBatch.h"
 #include "Epub/blocks/ImageBlock.h"
 #include "Epub/converters/ImageDecoderFactory.h"
 #include "Epub/converters/ImageDimsProbe.h"
 #include "Epub/parsers/XhtmlDoctype.h"
 #include "GfxRenderer.h"
+#include "ReaderFontScale.h"
 #include "VisibleTextUtils.h"
 
 namespace {
@@ -101,7 +104,41 @@ namespace {
 // v146: no format change. A column squeezed twice (……？) took a second half em from the same
 // marks, swallowing a 　 and drawing the next character over a 。, and pushing ？ out split ……
 // across columns; cached pages carry either.
-constexpr uint8_t VSECTION_FILE_VERSION = 146;
+// v147: no format change. That second squeeze still took from 。、, measured from their ink
+// rather than their cell, and drew the next character over them; oidashi now carries the
+// character before a group that may not head a column (た。……, 者……).
+// v148: no format change. A chapter applies the stylesheets its linked ones @import (EBPAJ boxes,
+// rules and indents), a block holding only an image no longer swallows the styled blocks after it,
+// and styled elements nested in a block before its first text merge into it.
+// v149: no format change. Content after a merged nested element continues in a block of its own
+// with the outer element's params, so a sibling after an inner box is no longer framed with it.
+// v150: no format change. Upstream merge: static GIF images are decoded, so a GIF page stores
+// the image's own size (and rotation) instead of the full-page placeholder.
+// v151: no format change. Group ruby's glyphs after the first carry RUBY_CONTINUE, so the group stays
+// in one column and its annotation is set over the whole group; a reading longer than its base and
+// what its neighbours may take spaces the base out (JLREQ 3.3), and jukugo with such a reading is
+// set as group ruby.
+// v152: no format change. An opening bracket after 。 or 、 keeps half an em between them, not a
+// whole em (JLREQ 3.1.4). Dash pairs, a number and its unit, and a sign before a number are no longer
+// split across columns, a character that may not start a column moves its predecessor across a page
+// break too (3.1.7, 3.1.10), and a paragraph's first column honours the book's CSS text-indent.
+// v153: no format change. A paragraph that starts a page starts in its first column; when the
+// previous paragraph ended at the foot of the last column, the page used to open with a blank one.
+// v154: no format change. An opening bracket before a ruby group that moves to the next column moves
+// with it, instead of being left at the foot of the column.
+// v155: no format change. A chapter cached without block styling on low heap is rebuilt styled once
+// an open has more room; chapters cached unstyled before this are rebuilt once.
+// v156: no format change. A column oidashi shortened spreads by at most an eighth of an em per gap
+// and otherwise ends short of the foot.
+// v157: no format change. A paragraph nested in another block whose text ends inside an inline element starts
+// its own column again; it used to run on from the previous paragraph.
+// v158: no format change. text-align: right/end sets a column at the foot, and auto head/foot margins
+// (EBPAJ .block-align-center / -end) centre a block along the column or push it to the foot.
+// v159: each glyph records its CSS font-size (scale8). Columns are as wide as their largest text,
+// and characters advance down a column by their own size.
+// v161: no format change. A column squeezed to pull a character in no longer takes the half em a
+// line-head opening bracket has already given up; the next characters printed over the bracket.
+constexpr uint8_t VSECTION_FILE_VERSION = 161;
 // Top bit of an anchor's stored offset: no text lies between the anchor and the next image. An
 // image page adds no visible characters, so it shares its start offset with the text page after
 // it; this is what tells the two apart.
@@ -136,6 +173,8 @@ struct ParagraphSink {
   // Styled-block boundaries -- a block element whose CSS carries vertical layout parameters
   // (border box, start offset, hanging indent, centering, before/after gaps).
   virtual void onBlockStyleStart(const VerticalBlockParams& /*params*/) {}
+  // The open block, before any of its text, takes these params (a nested element merged in or out).
+  virtual void onBlockStyleSet(const VerticalBlockParams& /*params*/) {}
   virtual void onBlockStyleEnd() {}
 };
 
@@ -172,7 +211,25 @@ struct TextExtractor {
   // Styled-block detection: (selector -> vertical layout params) distilled from the CSS cache.
   // boxOpenedAtDepth is the elementDepth of the styled element while inside one, else -1.
   const std::vector<CssParser::VerticalBlockRule>* blockStyles = nullptr;
+  // The text-indent of the block elements open now, innermost last (CSS inherits it). Runs carry it
+  // so the layout can indent each paragraph's first column.
+  struct IndentLevel {
+    int depth;
+    uint8_t quarters;
+  };
+  static constexpr int MAX_INDENT_LEVELS = 16;
+  IndentLevel indentLevels[MAX_INDENT_LEVELS] = {};
+  int indentCount = 0;
+  uint8_t currentIndent() const { return indentCount > 0 ? indentLevels[indentCount - 1].quarters : 0; }
   int boxOpenedAtDepth = -1;
+  // Whether the open styled block has had any text yet. Until it has, styled elements nested in it
+  // (EBPAJ wraps a rule in indent divs: start-1em > k-solid-top > start-1em) merge into it.
+  bool boxHasText = false;
+  // The open block's params as merged so far, and as they were before the first merge. When the
+  // first merged element closes, its siblings continue in a block with the outer params again.
+  VerticalBlockParams openParams;
+  VerticalBlockParams preMergeParams;
+  int mergedAtDepth = -1;
 
   // Ruby parsing state
   bool inRuby = false;
@@ -223,6 +280,9 @@ struct TextExtractor {
   std::string rubyElemBase;
   std::string rubyElemRuby;
   int rubyElemRunCount = 0;
+  // Runs this <ruby> element added, from currentRuns[rubyElemFirstRun] (jukugo, see endElement).
+  size_t rubyElemFirstRun = 0;
+  size_t rubyElemRuns = 0;
 
   // Style tracking — each entry records the elementDepth at which
   // bold/italic was activated. On endElement, if we're leaving that
@@ -258,6 +318,75 @@ struct TextExtractor {
   StyleStack boldStack;
   StyleStack italicStack;
   StyleStack emphasisStack;
+
+  // CSS font-size, nested: each sized element's size, as a multiple of the body text, and the depth
+  // that opened it. em and % compound through the sized ancestors; px, rem and keywords do not.
+  float fontScales[MAX_STYLE_STACK] = {};
+  int fontScaleOpenedAt[MAX_STYLE_STACK] = {};
+  int fontScaleCount = 0;
+  float currentFontScale() const { return fontScaleCount > 0 ? fontScales[fontScaleCount - 1] : 1.0f; }
+  void closeFontScaleAt(int depth) {
+    if (fontScaleCount > 0 && fontScaleOpenedAt[fontScaleCount - 1] - 1 == depth) {
+      flushCurrentText();
+      fontScaleCount--;
+    }
+  }
+  // CSS font-family, nested like font-size: the bookfonts slot each element selects.
+  uint8_t fontSlots[MAX_STYLE_STACK] = {};
+  int fontSlotOpenedAt[MAX_STYLE_STACK] = {};
+  int fontSlotCount = 0;
+  // The slot a run records: 0 for the reader font, whether inherited or chosen explicitly.
+  uint8_t currentFontSlot() const {
+    const uint8_t slot = fontSlotCount > 0 ? fontSlots[fontSlotCount - 1] : 0;
+    return slot == bookfonts::READER_SLOT ? 0 : slot;
+  }
+  void closeFontSlotAt(int depth) {
+    if (fontSlotCount > 0 && fontSlotOpenedAt[fontSlotCount - 1] - 1 == depth) {
+      flushCurrentText();
+      fontSlotCount--;
+    }
+  }
+  // This element's own font-family slot, as resolveFontScale() finds its size; 0 when none sets it.
+  uint8_t resolveFontSlot(const char* name, const char** atts) const {
+    uint8_t slot = 0;
+    if (blockStyles && !blockStyles->empty()) {
+      const uint32_t tagHash = CssParser::blockSelectorHash(name, strlen(name));
+      for (const auto& rule : *blockStyles) {
+        if (rule.style.fontSlot == 0 || (rule.tagHash != 0 && rule.tagHash != tagHash)) continue;
+        if (rule.classHash != 0 && !hasClassHash(atts, rule.classHash)) continue;
+        slot = rule.style.fontSlot;
+      }
+    }
+    CssParser::VerticalBlockStyle own;
+    if (inlineBlockStyle(atts, own) && own.fontSlot != 0) slot = own.fontSlot;
+    return slot;
+  }
+  // The size in eighths of the body, snapped as horizontal text snaps it (fontScaleTagForScale).
+  uint8_t currentScale8() const {
+    const int32_t tag = fontScaleTagForScale(currentFontScale());
+    return tag == 0 ? 8 : static_cast<uint8_t>(-tag / 32);
+  }
+  // This element's own font-size: its rules, then its style="" over them. False when none sets it.
+  bool resolveFontScale(const char* name, const char** atts, float& scale, bool& ofParent) const {
+    bool found = false;
+    if (blockStyles && !blockStyles->empty()) {
+      const uint32_t tagHash = CssParser::blockSelectorHash(name, strlen(name));
+      for (const auto& rule : *blockStyles) {
+        if (rule.style.fontScale32 == 0 || (rule.tagHash != 0 && rule.tagHash != tagHash)) continue;
+        if (rule.classHash != 0 && !hasClassHash(atts, rule.classHash)) continue;
+        scale = rule.style.fontScale();
+        ofParent = rule.style.fontScaleOfParent;
+        found = true;
+      }
+    }
+    CssParser::VerticalBlockStyle own;
+    if (inlineBlockStyle(atts, own) && own.fontScale32 != 0) {
+      scale = own.fontScale();
+      ofParent = own.fontScaleOfParent;
+      found = true;
+    }
+    return found;
+  }
 
   bool hasEmphasis() const { return emphasisStack.active(); }
 
@@ -315,7 +444,9 @@ struct TextExtractor {
 
   // Headroom to leave behind a growth here, so serving it never takes the last usable block.
   static constexpr uint32_t GROWTH_MARGIN = 2048;
-  static bool canAllocate(const size_t bytes) { return ESP.getMaxAllocHeap() >= bytes + GROWTH_MARGIN; }
+  static bool canAllocate(const size_t bytes) {
+    return vertical_batch::largestBlockFor(bytes) >= bytes + GROWTH_MARGIN;
+  }
 
   // Appends through the same throwing operator new: a string's growth step (it doubles) is refused
   // up front when the heap cannot hold it. A tight heap drops the text and flags the build as
@@ -343,7 +474,34 @@ struct TextExtractor {
       currentRuns.clear();
       midParagraph = true;
     }
+    run.indentQuarters = currentIndent();
+    run.scale8 = currentScale8();
+    run.fontSlot = currentFontSlot();
     currentRuns.push_back(std::move(run));
+  }
+
+  // Jukugo ruby (one reading per character of a compound) where one reading is longer than its
+  // character: set as group ruby over the whole compound, as JLREQ 3.3.7 permits and simple-ruby
+  // prescribes, rather than spacing that character out on its own.
+  void mergeJukugo() {
+    const auto chars = [](const std::string& t) {
+      return std::count_if(t.begin(), t.end(), [](const char c) { return (static_cast<uint8_t>(c) & 0xC0) != 0x80; });
+    };
+    const size_t first = rubyElemFirstRun;
+    if (rubyElemRuns < 2 || currentRuns.size() != first + rubyElemRuns) return;  // drained mid-element
+    bool longer = false;
+    for (size_t i = first; i < currentRuns.size(); i++) {
+      const RubyRun& r = currentRuns[i];
+      if (r.rubyText.empty() || r.style != currentRuns[first].style) return;
+      if (chars(r.rubyText) > 2 * chars(r.baseText)) longer = true;
+    }
+    if (!longer) return;
+    RubyRun& head = currentRuns[first];
+    for (size_t i = first + 1; i < currentRuns.size(); i++) {
+      head.baseText += currentRuns[i].baseText;
+      head.rubyText += currentRuns[i].rubyText;
+    }
+    currentRuns.erase(currentRuns.begin() + static_cast<std::ptrdiff_t>(first + 1), currentRuns.end());
   }
 
   void flushCurrentText() {
@@ -369,8 +527,10 @@ struct TextExtractor {
   // its RubyRun copies here per forced-split "paragraph" -- transient peaks and buffer growth
   // that shredded the heap's largest block. With a ~2KB cadence every buffer on this layer
   // stays small and stable for the whole build.
-  static constexpr size_t SOFT_FLUSH_BYTES = 2048;
+  // More text per batch on PSRAM boards, where the layout then sees further (vertical_batch::kScale).
+  static constexpr size_t SOFT_FLUSH_BYTES = 2048 * vertical_batch::kScale;
   static constexpr size_t SOFT_FLUSH_RUNS = 48;
+  static_assert(SOFT_FLUSH_BYTES * 2 <= MAX_PARAGRAPH_BYTES, "a soft flush must come well before the paragraph split");
   bool midParagraph = false;
 
   static bool isAsciiWordByte(const unsigned char c) {
@@ -446,7 +606,18 @@ struct TextExtractor {
   // forms the CSS map stores: "tag", ".class", "tag.class" (case-insensitive, class-attr token
   // match). Returns true if anything matched.
   bool resolveBlockStyle(const char* name, const char** atts, VerticalBlockParams& params) const {
-    if (!blockStyles || blockStyles->empty()) return false;
+    bool matched = false;
+    if (blockStyles && !blockStyles->empty()) matched = resolveRules(name, atts, params);
+    // The element's own style="" goes over its rules.
+    CssParser::VerticalBlockStyle own;
+    if (inlineBlockStyle(atts, own) && own.any()) {
+      matched = true;
+      applyBlockStyle(own, params);
+    }
+    return matched;
+  }
+
+  bool resolveRules(const char* name, const char** atts, VerticalBlockParams& params) const {
     // The element's tag and class tokens, hashed once; rules match on the same hashes.
     const uint32_t tagHash = CssParser::blockSelectorHash(name, strlen(name));
     constexpr int MAX_CLASSES = 16;
@@ -469,16 +640,70 @@ struct TextExtractor {
           std::find(classHashes, classHashes + classCount, rule.classHash) == classHashes + classCount) {
         continue;
       }
-      const auto& vs = rule.style;
       matched = true;
-      if (vs.startEm > 0) params.startEm = vs.startEm;
-      if (vs.beforeEm > 0) params.beforeEm = vs.beforeEm;
-      if (vs.afterEm > 0) params.afterEm = vs.afterEm;
-      if (vs.hangEm > 0) params.hangEm = vs.hangEm;
-      params.alignCenter = params.alignCenter || vs.alignCenter;
-      if (vs.borderEdges != 0) params.borderEdges = vs.borderEdges;
+      applyBlockStyle(rule.style, params);
     }
     return matched;
+  }
+
+  static void applyBlockStyle(const CssParser::VerticalBlockStyle& vs, VerticalBlockParams& params) {
+    if (vs.startEm > 0) params.startEm = vs.startEm;
+    if (vs.beforeEm > 0) params.beforeEm = vs.beforeEm;
+    if (vs.afterEm > 0) params.afterEm = vs.afterEm;
+    if (vs.hangEm > 0) params.hangEm = vs.hangEm;
+    if (vs.alignCenter || vs.alignEnd) {  // a later text-align replaces the earlier one
+      params.alignCenter = vs.alignCenter;
+      params.alignEnd = vs.alignEnd;
+    }
+    if (vs.blockAlign == CssParser::VERTICAL_BLOCK_CENTER) params.blockAlign = VerticalBlockParams::BlockAlign::Center;
+    if (vs.blockAlign == CssParser::VERTICAL_BLOCK_END) params.blockAlign = VerticalBlockParams::BlockAlign::End;
+    if (vs.borderEdges != 0) params.borderEdges = vs.borderEdges;
+  }
+
+  // The element's style="" attribute, as the vertical engine reads styles. False without one.
+  static bool inlineBlockStyle(const char** atts, CssParser::VerticalBlockStyle& out) {
+    for (int i = 0; atts && atts[i]; i += 2) {
+      if (strcasecmp(atts[i], "style") != 0 || !atts[i + 1] || !*atts[i + 1]) continue;
+      out = CssParser::verticalBlockStyleOf(CssParser::parseInlineStyle(atts[i + 1]));
+      return true;
+    }
+    return false;
+  }
+
+  // This element's own text-indent, in quarter ems (capped at the 7 bits a character carries). False
+  // when no rule sets it, so it inherits its parent's.
+  bool resolveIndent(const char* name, const char** atts, uint8_t& quarters) const {
+    const auto toQuarters = [](const float em) { return static_cast<uint8_t>(std::min(127.0f, em * 4 + 0.5f)); };
+    // The element's own style="" wins over its rules.
+    CssParser::VerticalBlockStyle own;
+    if (inlineBlockStyle(atts, own) && own.indentEm >= 0) {
+      quarters = toQuarters(own.indentEm);
+      return true;
+    }
+    if (!blockStyles || blockStyles->empty()) return false;
+    const uint32_t tagHash = CssParser::blockSelectorHash(name, strlen(name));
+    bool found = false;
+    for (const auto& rule : *blockStyles) {
+      if (rule.style.indentEm < 0 || (rule.tagHash != 0 && rule.tagHash != tagHash)) continue;
+      if (rule.classHash != 0 && !hasClassHash(atts, rule.classHash)) continue;
+      quarters = toQuarters(rule.style.indentEm);
+      found = true;
+    }
+    return found;
+  }
+
+  static bool hasClassHash(const char** atts, const uint32_t hash) {
+    for (int i = 0; atts && atts[i]; i += 2) {
+      if (strcasecmp(atts[i], "class") != 0 || !atts[i + 1]) continue;
+      const char* val = atts[i + 1];
+      while (*val) {
+        while (*val == ' ') val++;
+        const char* start = val;
+        while (*val && *val != ' ') val++;
+        if (val > start && CssParser::blockSelectorHash(start, val - start) == hash) return true;
+      }
+    }
+    return false;
   }
 
   static bool hasClass(const char** atts, const char* cls) {
@@ -528,16 +753,32 @@ struct TextExtractor {
         }
       }
     }
-    if (self->boxOpenedAtDepth < 0) {
+    if (self->boxOpenedAtDepth >= 0 && !self->boxHasText) {
       VerticalBlockParams params;
-      if (self->resolveBlockStyle(name, atts, params) &&
-          (params.startEm > 0 || params.beforeEm > 0 || params.afterEm > 0 || params.hangEm > 0 || params.alignCenter ||
-           params.borderEdges != 0)) {
+      if (self->resolveBlockStyle(name, atts, params) && params.any()) {
+        LOG_DBG("VSC", "styled block merge: <%s> start=%.1f hang=%.1f edges=0x%X", name, params.startEm, params.hangEm,
+                params.borderEdges);
+        if (self->mergedAtDepth < 0) {
+          self->preMergeParams = self->openParams;
+          self->mergedAtDepth = self->elementDepth;
+        }
+        mergeBlockParams(self->openParams, params);
+        if (self->sink) self->sink->onBlockStyleSet(self->openParams);
+      }
+    } else if (self->boxOpenedAtDepth < 0) {
+      VerticalBlockParams params;
+      if (self->resolveBlockStyle(name, atts, params) && params.any()) {
         self->flushParagraph();
-        LOG_DBG("VSC", "styled block open: <%s> start=%.1f hang=%.1f before=%.1f after=%.1f center=%d edges=0x%X", name,
-                params.startEm, params.hangEm, params.beforeEm, params.afterEm, params.alignCenter, params.borderEdges);
+        LOG_DBG(
+            "VSC",
+            "styled block open: <%s> start=%.1f hang=%.1f before=%.1f after=%.1f center=%d end=%d block=%d edges=0x%X",
+            name, params.startEm, params.hangEm, params.beforeEm, params.afterEm, params.alignCenter, params.alignEnd,
+            static_cast<int>(params.blockAlign), params.borderEdges);
         if (self->sink) self->sink->onBlockStyleStart(params);
         self->boxOpenedAtDepth = self->elementDepth;
+        self->boxHasText = false;
+        self->openParams = params;
+        self->mergedAtDepth = -1;
       }
     }
     if (isBlockTag(name)) {
@@ -545,6 +786,12 @@ struct TextExtractor {
         self->flushParagraph();
       }
       self->blockDepth++;
+      uint8_t quarters = 0;
+      if (self->indentCount < MAX_INDENT_LEVELS && self->resolveIndent(name, atts, quarters)) {
+        // Text before it keeps the indent it was written under.
+        if (quarters != self->currentIndent()) self->flushCurrentText();
+        self->indentLevels[self->indentCount++] = {self->elementDepth, quarters};
+      }
     }
     if (strcasecmp(name, "ruby") == 0) {
       self->flushCurrentText();
@@ -556,12 +803,36 @@ struct TextExtractor {
       self->rubyElemBase.clear();
       self->rubyElemRuby.clear();
       self->rubyElemRunCount = 0;
+      self->rubyElemFirstRun = self->currentRuns.size();
+      self->rubyElemRuns = 0;
     } else if (strcasecmp(name, "rt") == 0) {
       self->inRt = true;
       self->rubyAnnotation.clear();
       self->rubyAnnotation.reserve(RUBY_RESERVE_HINT);
     } else if (strcasecmp(name, "rp") == 0) {
       self->inRp = true;
+    }
+    {
+      float scale = 0;
+      bool ofParent = false;
+      // Annotation size is fixed relative to its base, so <rt>/<rp> sizes are ignored.
+      if (!self->inRt && !self->inRp && self->fontScaleCount < MAX_STYLE_STACK &&
+          self->resolveFontScale(name, atts, scale, ofParent)) {
+        // Before the change, so the run built so far keeps the OLD size.
+        self->flushCurrentText();
+        self->fontScales[self->fontScaleCount] = ofParent ? self->currentFontScale() * scale : scale;
+        self->fontScaleOpenedAt[self->fontScaleCount] = self->elementDepth;
+        self->fontScaleCount++;
+      }
+      if (!self->inRt && !self->inRp && self->fontSlotCount < MAX_STYLE_STACK) {
+        const uint8_t slot = self->resolveFontSlot(name, atts);
+        if (slot != 0) {
+          self->flushCurrentText();
+          self->fontSlots[self->fontSlotCount] = slot;
+          self->fontSlotOpenedAt[self->fontSlotCount] = self->elementDepth;
+          self->fontSlotCount++;
+        }
+      }
     }
     if (isBoldTag(name) || hasClass(atts, "bold")) {
       if (self->boldStack.canOpen()) {
@@ -650,10 +921,28 @@ struct TextExtractor {
     // </body> occupies no visible position, and the two counters only mean the same thing while
     // they agree on where the body ends.
     if (strcasecmp(name, "body") == 0) self->insideBody = false;
+    if (self->mergedAtDepth >= 0 && self->elementDepth == self->mergedAtDepth - 1) {
+      // The merged element closes: what follows belongs to the outer element alone.
+      self->mergedAtDepth = -1;
+      self->openParams = self->preMergeParams;
+      if (self->boxHasText) {
+        self->flushParagraph();
+        VerticalBlockParams rest = self->preMergeParams;
+        rest.beforeEm = 0;  // the same element continuing, not a new block to set apart
+        if (self->sink) {
+          self->sink->onBlockStyleEnd();
+          self->sink->onBlockStyleStart(rest);
+        }
+        self->boxHasText = false;
+      } else if (self->sink) {
+        self->sink->onBlockStyleSet(self->openParams);
+      }
+    }
     if (self->boxOpenedAtDepth >= 0 && self->elementDepth == self->boxOpenedAtDepth - 1) {
       self->flushParagraph();
       if (self->sink) self->sink->onBlockStyleEnd();
       self->boxOpenedAtDepth = -1;
+      self->mergedAtDepth = -1;
     }
     if (strcasecmp(name, "rp") == 0) {
       self->inRp = false;
@@ -672,6 +961,7 @@ struct TextExtractor {
         }
         self->pushRun(RubyRun{std::move(self->rubyBase), std::move(self->rubyAnnotation), self->currentStyle(),
                               self->hasEmphasis(), self->rubyBaseOffset});
+        self->rubyElemRuns++;
         self->rubyBase.clear();
         self->rubyBase.reserve(RUBY_RESERVE_HINT);
       }
@@ -695,12 +985,17 @@ struct TextExtractor {
       self->rubyElemBase.clear();
       self->rubyElemRuby.clear();
       self->rubyElemRunCount = 0;
+      self->mergeJukugo();
       self->inRuby = false;
       // Furigana-dense text accumulates many small runs without currentText ever growing;
       // stream them onward at the same cadence as the byte bound (see SOFT_FLUSH_RUNS).
       if (self->currentRuns.size() >= SOFT_FLUSH_RUNS) self->emitRuns(false);
+      self->closeFontScaleAt(self->elementDepth);
+      self->closeFontSlotAt(self->elementDepth);
       return;
     }
+    self->closeFontScaleAt(self->elementDepth);
+    self->closeFontSlotAt(self->elementDepth);
     if (self->boldStack.closesHere(self->elementDepth)) {
       self->flushCurrentText();
       self->boldStack.close();
@@ -714,9 +1009,18 @@ struct TextExtractor {
       self->emphasisStack.close();
     }
     if (isBlockTag(name)) {
+      if (self->indentCount > 0 && self->indentLevels[self->indentCount - 1].depth - 1 == self->elementDepth) {
+        self->flushCurrentText();
+        self->indentCount--;
+      }
       self->blockDepth--;
       if (self->blockDepth <= 0) {
         self->blockDepth = 0;
+        self->flushParagraph();
+      } else {
+        // A nested block ends its paragraph too. The source newline after </p> cannot be relied on: it
+        // is dropped as leading whitespace when the text ended inside an inline element (Kobo books
+        // wrap every sentence in a span). Also clears midParagraph after a streaming drain.
         self->flushParagraph();
       }
     }
@@ -748,6 +1052,7 @@ struct TextExtractor {
       self->appendChecked(self->rubyAnnotation, s, static_cast<size_t>(len));
     } else if (self->inRuby) {
       self->anchorsPending = 0;
+      if (self->boxOpenedAtDepth >= 0) self->boxHasText = true;  // a ruby word is the block's text too
       if (self->rubyBase.empty()) self->rubyBaseOffset = offsetOfThisRun;
       self->appendChecked(self->rubyBase, s, static_cast<size_t>(len));
     } else {
@@ -769,6 +1074,7 @@ struct TextExtractor {
           firstInk++;
         }
         if (firstInk == len) return;
+        if (self->boxOpenedAtDepth >= 0) self->boxHasText = true;
         s += firstInk;
         len -= firstInk;
         // The dropped whitespace was counted above, so the surviving text starts that many
@@ -866,18 +1172,44 @@ struct PodWriteArchive {
 // G is const on the write side, mutable on the read side.
 template <typename Ar, typename G>
 void visitGlyphFields(Ar& ar, G& g) {
-  ar(g.codepoint);
-  ar(g.column);
-  ar(g.row);
+  // The record keeps its full-width fields; VerticalGlyph packs some into bit-fields, which cannot
+  // be bound to the archive's references, so they pass through locals.
+  uint32_t codepoint = g.codepoint;
+  uint16_t column = g.column;
+  uint16_t row = g.row;
+  uint32_t paragraphIndex = g.paragraphIndex;
+  uint8_t renderKind = g.renderKind;
+  uint8_t style = g.style;
+  bool emphasis = g.emphasis;
+  uint8_t lineHeadFlush = g.lineHeadFlush;
+  uint8_t scale8 = g.scale8;
+  uint8_t fontSlot = g.fontSlot;
+  ar(codepoint);
+  ar(column);
+  ar(row);
   ar(g.x);
   ar(g.y);
-  ar(g.paragraphIndex);
+  ar(paragraphIndex);
   ar(g.byteOffset);
-  ar(g.renderKind);
-  ar(g.style);
-  ar(g.emphasis);
-  ar(g.lineHeadFlush);
+  ar(renderKind);
+  ar(style);
+  ar(emphasis);
+  ar(lineHeadFlush);
+  ar(scale8);
+  ar(fontSlot);
   ar(g.textId);
+  if constexpr (!std::is_const_v<G>) {
+    g.codepoint = codepoint;
+    g.column = static_cast<uint8_t>(column);
+    g.row = static_cast<uint8_t>(row);
+    g.paragraphIndex = paragraphIndex;
+    g.renderKind = renderKind;
+    g.style = style;
+    g.emphasis = emphasis;
+    g.lineHeadFlush = lineHeadFlush;
+    g.scale8 = scale8;
+    g.fontSlot = fontSlot;
+  }
 }
 
 template <typename Ar, typename R>
@@ -988,7 +1320,7 @@ ReadResult readPage(HalFile& file, VerticalPage& page) {
     return ReadResult::Corrupt;
   }
   // reserve() throws-and-ABORTS under -fno-exceptions; verify the block actually exists
-  // first. A corrupt count within the format bound can still demand ~98KB -- observed on
+  // first. A corrupt count within the format bound can still demand ~80KB -- observed on
   // device as an abort inside this exact reserve during a mid-build read-back. The margin
   // is deliberately small: the page is transient (rendered, then freed), and an over-strict
   // margin starved mid-build page-turn serves for entire dense stretches.
@@ -1098,6 +1430,7 @@ struct LayoutPageSink final : ParagraphSink {
   std::vector<RubyGlossary::Pair> rubyHarvest;
 
   void onBlockStyleStart(const VerticalBlockParams& params) override { layout.markBlockStart(params); }
+  void onBlockStyleSet(const VerticalBlockParams& params) override { layout.setOpenBlockParams(params); }
   void onBlockStyleEnd() override { layout.markBlockEnd(); }
 
   // ~1-2 screens of text per layout batch. A batch boundary lands between paragraphs, which
@@ -1145,12 +1478,6 @@ struct LayoutPageSink final : ParagraphSink {
   // own starved measurements to judge whether its layout is approximate; a draw's misses are not
   // layout, and counting them stamped a correct chapter stale for a rebuild on the next open.
   uint32_t starvedWhileDrawing = 0;
-
-  // Build heap diagnostics for the SD summary: the lowest largest-free-block seen as pages were
-  // written, and the first page written after content was dropped.
-  uint32_t minMaxAlloc = UINT32_MAX;
-  int firstDropPage = -1;
-
   void renderEarly(const VerticalPage& page, const int pageIndex) {
     FontDecompressor* fd = nullptr;
     if (auto* fcm = renderer.getFontCacheManager()) fd = fcm->getDecompressor();
@@ -1277,6 +1604,7 @@ struct LayoutPageSink final : ParagraphSink {
     // pending: the pending page (whose content PRECEDES the image) landed in the cache AFTER
     // the image page, and post-image text silently merged onto it -- confirmed on a real device
     // as dialogue continuing mid-column across a scene-break graphic instead of starting fresh.
+    layout.releaseRecycledPage();  // the extraction wants one contiguous 32KB inflate block
     VerticalPage imagePage = makeImagePage(src);
     if (failed) return;  // cancelled during the image extraction
     // An image narrow enough to sit among the columns flows with the text: it takes the columns
@@ -1335,7 +1663,7 @@ struct LayoutPageSink final : ParagraphSink {
     layout.reset();
     for (auto& p : pages) {
       writeOne(p);
-      layout.recycleGlyphs(std::move(p.glyphs));
+      layout.recyclePage(std::move(p));
     }
   }
 
@@ -1376,13 +1704,6 @@ struct LayoutPageSink final : ParagraphSink {
       }
     }
     pageOffsets.push_back(static_cast<uint32_t>(out.position()));
-    minMaxAlloc = std::min<uint32_t>(minMaxAlloc, ESP.getMaxAllocHeap());
-    if (pageOffsets.size() == 1) {
-      SdDebugLog::log("VSC", "first page free=%u largest=%u glyphs=%u cap=%u texts=%u", ESP.getFreeHeap(),
-                      ESP.getMaxAllocHeap(), static_cast<unsigned>(p.glyphs.size()),
-                      static_cast<unsigned>(p.glyphs.capacity()), static_cast<unsigned>(p.texts.size()));
-    }
-    if (firstDropPage < 0 && layout.heapDropCount() > 0) firstDropPage = static_cast<int>(pageOffsets.size()) - 1;
     // TRANSIENT staging buffer: allocated for this one write, freed before layout resumes.
     // Holding it resident across the whole build deepened the layout's low-heap dips by
     // roughly its own size (device evidence: maxAlloc bottoms 14324 without it vs
@@ -1390,22 +1711,17 @@ struct LayoutPageSink final : ParagraphSink {
     // speed buffer. As a per-page transient the layout never coexists with it, and the
     // same-size alloc/free per page reuses the same hole instead of fragmenting. If the
     // allocation fails at a tight moment, this page just takes the direct field-wise path.
-    // Sized to this page's record (a counting pass), not the cap: a typical page needs 3-5KB,
-    // which the X3's fragmented heap can serve when a fixed 12KB block cannot.
-    serialization::BufWriter counter(nullptr, 0);
-    writePage(counter, p);
-    const size_t recordBytes = counter.len;
-    auto pageBuf = recordBytes <= kPageBufCap ? makeUniqueNoThrow<uint8_t[]>(recordBytes) : nullptr;
+    auto pageBuf = makeUniqueNoThrow<uint8_t[]>(kPageBufCap);
     bool ok = false;
     if (pageBuf) {
-      serialization::BufWriter w(pageBuf.get(), recordBytes);
+      serialization::BufWriter w(pageBuf.get(), kPageBufCap);
       if (writePage(w, p) && !w.overflow) {
         ok = out.write(pageBuf.get(), w.len) == w.len;
       } else if (w.overflow) {
-        ok = writePage(out, p);
+        ok = writePage(out, p);  // page larger than the staging buffer: direct path
       }
     } else {
-      ok = writePage(out, p);  // record larger than the cap, or no block for it: direct path
+      ok = writePage(out, p);
     }
     if (!ok) {
       LOG_ERR("VSC", "Failed to write page %zu to cache", pageOffsets.size() - 1);
@@ -1677,7 +1993,8 @@ constexpr size_t HEADER_PAGECOUNT_OFFSET = sizeof(uint8_t)      // version
                                            + sizeof(uint8_t)    // lineSpacing
                                            + sizeof(uint8_t)    // furiganaFlag
                                            + sizeof(int8_t)     // characterSpacing
-                                           + sizeof(uint16_t);  // rightMarginPx
+                                           + sizeof(uint16_t)   // rightMarginPx
+                                           + sizeof(uint32_t);  // bookFontsSignature
 
 }  // namespace
 
@@ -1685,16 +2002,14 @@ constexpr size_t HEADER_PAGECOUNT_OFFSET = sizeof(uint8_t)      // version
 // (a partial one silently drops whichever selectors sit late in the file), so it is skipped rather
 // than truncated.
 //
-// Derived from what the table actually costs rather than guessed. collectVerticalStyles() now
-// reserves its cap in ONE allocation, so the contiguous requirement is exactly that reservation;
-// the selector strings it copies are many small allocations that need free heap, not a big block.
-// The old flat 48KB predated SD CJK fonts, and a resident CJK font cache holds maxAlloc under it
-// for a whole session: on device this book was skipped -- and so rendered unstyled -- with 46996
-// bytes still available in the largest free block, a miss of barely 4KB.
-constexpr size_t MIN_STYLES_SHRINK_HEADROOM = 1024;
+// collectVerticalStyles() reserves its cap in ONE allocation, so the contiguous requirement is
+// exactly that reservation plus a little slack (it checks again right before reserving). The
+// working room the rest of the build needs is free heap, not part of the same block.
 constexpr size_t STYLED_BLOCK_TABLE_ENTRIES = 256;  // must match collectVerticalStyles()'s maxOut default
-constexpr uint32_t MIN_MAX_ALLOC_FOR_STYLED_BLOCKS =
-    static_cast<uint32_t>(STYLED_BLOCK_TABLE_ENTRIES * sizeof(CssParser::VerticalBlockRule)) + 12 * 1024;
+constexpr uint32_t STYLED_BLOCK_TABLE_BYTES =
+    static_cast<uint32_t>(STYLED_BLOCK_TABLE_ENTRIES * sizeof(CssParser::VerticalBlockRule));
+constexpr uint32_t MIN_MAX_ALLOC_FOR_STYLED_BLOCKS = STYLED_BLOCK_TABLE_BYTES + 2 * 1024;
+constexpr uint32_t MIN_FREE_FOR_STYLED_BLOCKS = STYLED_BLOCK_TABLE_BYTES + 12 * 1024;
 
 namespace {
 uint32_t starvedGlyphCount(GfxRenderer& renderer) {
@@ -1797,7 +2112,7 @@ bool VerticalSection::startBuild(const ReaderRenderSpec& spec) {
   pageCount = 0;
   lastBuildCancelled_ = false;
   lastBuildDroppedForHeap_ = false;
-  lastBuildLostText_ = false;
+  lastBuildLostText_ = false;  // companion
   lastBuildUnstyledForHeap_ = false;
 
   const uint32_t buildStartMs = millis();
@@ -1805,8 +2120,6 @@ bool VerticalSection::startBuild(const ReaderRenderSpec& spec) {
   lastBuildStartMaxAlloc_ = ESP.getMaxAllocHeap();
   LOG_INF("VSC", "streamParseAndLayout start spine=%d free=%u maxAlloc=%u", spineIndex, ESP.getFreeHeap(),
           lastBuildStartMaxAlloc_);
-  SdDebugLog::log("VSC", "BUILD-START spine=%d free=%u largest=%u stale=%d", spineIndex, ESP.getFreeHeap(),
-                  lastBuildStartMaxAlloc_, rebuildingFromStale_ ? 1 : 0);
   // Vertical placement measures each glyph's real ink extents (burasage, half-em pairing, the 3.8
   // squeeze deficits), and those measurements go through the font decompressor. A heap too tight for a
   // glyph group makes them fall back to nominal metrics silently, and the result is written to the
@@ -1859,13 +2172,6 @@ bool VerticalSection::startBuild(const ReaderRenderSpec& spec) {
   // isolates whether it's the HTML-to-tempfile copy (zip inflate window), the ruby-tag scan, or
   // XML_ParserCreate's own setup.
   LOG_DBG("VSC", "after readItemContentsToStream: maxAlloc=%u", ESP.getMaxAllocHeap());
-  // Free/largest after each start-up step, logged together once the build is ready.
-  struct HeapMark {
-    uint32_t free;
-    uint32_t largest;
-  };
-  const auto heapMark = [] { return HeapMark{ESP.getFreeHeap(), ESP.getMaxAllocHeap()}; };
-  const HeapMark mHtml = heapMark();
 
   // Resolve image paths relative to the chapter's directory in the EPUB.
   std::string chapterDir;
@@ -1904,14 +2210,13 @@ bool VerticalSection::startBuild(const ReaderRenderSpec& spec) {
   serialization::writePod(b.out, furiganaFlag);
   serialization::writePod(b.out, spec.characterSpacing);
   serialization::writePod(b.out, spec.rightMarginPx);
+  serialization::writePod(b.out, spec.bookFontsSignature);
   const uint16_t pageCountPlaceholder = 0;
   const uint32_t indexOffsetPlaceholder = 0;
   serialization::writePod(b.out, pageCountPlaceholder);
   serialization::writePod(b.out, indexOffsetPlaceholder);
 
-  const HeapMark mCtx = heapMark();
   b.layout.preallocateStream();
-  const HeapMark mStream = heapMark();
   // Column gap (行間) in EMS -- the unit the constraint is stated in. Ruby is half an em (JLREQ
   // 3.3.3) and is drawn in this gap beside its base column, so with furigana ON the floor is half
   // an em, and the settings span the half-to-full em Japanese body text conventionally uses. With
@@ -1926,30 +2231,14 @@ bool VerticalSection::startBuild(const ReaderRenderSpec& spec) {
       furiganaEnabled ? kGapQuarterEmsWithRuby[clampedLineSpacing] : kGapQuarterEmsPlain[clampedLineSpacing];
   b.layout.setColumnGapPx(std::max(2, emPx * gapQuarterEms / 4));
   b.layout.setCharacterSpacingPx(spec.characterSpacing);
+  b.layout.setRubyShown(furiganaEnabled);
   // The first column's ruby sits in the right margin (JLREQ Fig 2.37) and is half an em wide.
   // Where the margin is narrower than that -- a large font at a small screen margin -- the ruby
   // would be drawn back over its own base characters, so the text area gives up the shortfall
   // and no more: at a margin that already holds the ruby, the column stays flush right.
-  const HeapMark mFont = heapMark();
   if (furiganaEnabled) {
     b.layout.setRightPaddingPx(std::max(0, (emPx + 1) / 2 - static_cast<int>(spec.rightMarginPx)));
   }
-  {
-    // A page's cell count by the layout's own formulas (layoutPages: cell = em; rows step by the
-    // row pitch; columns by cell + 行間), with the full width -- the right padding only removes
-    // columns.
-    const int columnGap = std::max(2, emPx * gapQuarterEms / 4);
-    const int rowPitch = std::max((emPx + 1) / 2, emPx + static_cast<int>(spec.characterSpacing));
-    const size_t rows =
-        static_cast<size_t>(std::max(1, (static_cast<int>(viewportHeight) + rowPitch - emPx) / rowPitch));
-    const size_t cols =
-        static_cast<size_t>(std::max(1, (static_cast<int>(viewportWidth) + columnGap) / (emPx + columnGap)));
-    // A page can carry more glyphs than cells (runs, ruby, paired punctuation; device: 129 on a
-    // 126-cell page), and the layout keeps 16 slots of growth headroom free, so pad both.
-    const size_t cells = rows * cols;
-    b.layout.preallocatePageGlyphs(cells + cells / 4 + 16);
-  }
-  const HeapMark mPages = heapMark();
 
   b.sink.earlyRenderFn = earlyRenderFn_;
   b.sink.earlyRenderCtx = earlyRenderCtx_;
@@ -1981,22 +2270,23 @@ bool VerticalSection::startBuild(const ReaderRenderSpec& spec) {
     // .k-solid boxes vanishing at a 64-entry cap). Either the full table fits, or the build
     // runs unstyled -- text-complete and still cached, see lastBuildUnstyledForHeap_.
     const uint32_t maxAllocNow = ESP.getMaxAllocHeap();
-    LOG_DBG("VSC", "styled-block table needs %u bytes contiguous (%u entries x %u); maxAlloc=%u",
+    const uint32_t freeNow = ESP.getFreeHeap();
+    LOG_DBG("VSC", "styled-block table needs %u bytes contiguous (%u entries x %u); maxAlloc=%u free=%u",
             static_cast<unsigned>(MIN_MAX_ALLOC_FOR_STYLED_BLOCKS), static_cast<unsigned>(STYLED_BLOCK_TABLE_ENTRIES),
-            static_cast<unsigned>(sizeof(CssParser::VerticalBlockRule)), maxAllocNow);
-    if (maxAllocNow < MIN_MAX_ALLOC_FOR_STYLED_BLOCKS) {
-      LOG_ERR("VSC", "Heap too tight for styled blocks (maxAlloc=%u, need %u); building unstyled", maxAllocNow,
-              static_cast<unsigned>(MIN_MAX_ALLOC_FOR_STYLED_BLOCKS));
+            static_cast<unsigned>(sizeof(CssParser::VerticalBlockRule)), maxAllocNow, freeNow);
+    if (maxAllocNow < MIN_MAX_ALLOC_FOR_STYLED_BLOCKS || freeNow < MIN_FREE_FOR_STYLED_BLOCKS) {
+      LOG_ERR("VSC", "Heap too tight for styled blocks (maxAlloc=%u, free=%u); building unstyled", maxAllocNow,
+              freeNow);
       lastBuildUnstyledForHeap_ = true;
     } else {
       const CssParser::StylesheetFilter stylesheets = epub->stylesheetFilterFor(b.tmpHtmlPath, b.localPath);
       epub->getCssParser()->collectVerticalStyles(b.blockStyles, STYLED_BLOCK_TABLE_ENTRIES, &stylesheets);
-      // The collector reserves its whole 256-entry table (~7KB); a book uses a few dozen at most.
-      // Moving to an exact-size copy frees the rest for the build.
-      const size_t usedBytes = b.blockStyles.size() * sizeof(CssParser::VerticalBlockRule);
-      if (b.blockStyles.size() < b.blockStyles.capacity() &&
-          ESP.getMaxAllocHeap() >= usedBytes + MIN_STYLES_SHRINK_HEADROOM) {
-        std::vector<CssParser::VerticalBlockRule>(b.blockStyles.begin(), b.blockStyles.end()).swap(b.blockStyles);
+      if (b.blockStyles.capacity() < STYLED_BLOCK_TABLE_ENTRIES) {
+        LOG_ERR("VSC", "Styled-block table refused at reserve (maxAlloc=%u); building unstyled", ESP.getMaxAllocHeap());
+        lastBuildUnstyledForHeap_ = true;
+      } else if (const size_t own = epub->getCssParser()->appendChapterVerticalStyles(b.tmpHtmlPath, b.blockStyles)) {
+        // The chapter's own <style> blocks, after the book's stylesheets.
+        LOG_DBG("VSC", "%u styled-block selectors from the chapter's <style>", static_cast<unsigned>(own));
       }
       if (!b.blockStyles.empty()) {
         LOG_DBG("VSC", "%u styled-block selectors active", static_cast<unsigned>(b.blockStyles.size()));
@@ -2004,7 +2294,6 @@ bool VerticalSection::startBuild(const ReaderRenderSpec& spec) {
     }
   }
 
-  const HeapMark mStyles = heapMark();
   b.extractor.sink = &b.sink;
   b.extractor.rubyHarvest = &b.sink.rubyHarvest;
   b.extractor.blockStyles = &b.blockStyles;
@@ -2049,7 +2338,6 @@ bool VerticalSection::startBuild(const ReaderRenderSpec& spec) {
     buildAnchors_.reserve(kInitialAnchorCapacity);
   }
 
-  const HeapMark mReserves = heapMark();
   b.parser = XML_ParserCreate(nullptr);
   if (!b.parser) {
     LOG_ERR("VSC", "OOM: XML parser");
@@ -2069,14 +2357,6 @@ bool VerticalSection::startBuild(const ReaderRenderSpec& spec) {
     return false;
   }
   b.starvedInLayout = starvedGlyphCount(renderer) - b.starvedGlyphsAtStart;
-  const HeapMark mXml = heapMark();
-  SdDebugLog::log("VSC",
-                  "BUILD-MEM free/largest html=%u/%u ctx=%u/%u stream=%u/%u font=%u/%u pages=%u/%u styles=%u/%u(%u) "
-                  "reserves=%u/%u xml=%u/%u",
-                  mHtml.free, mHtml.largest, mCtx.free, mCtx.largest, mStream.free, mStream.largest, mFont.free,
-                  mFont.largest, mPages.free, mPages.largest, mStyles.free, mStyles.largest,
-                  static_cast<unsigned>(b.blockStyles.size()), mReserves.free, mReserves.largest, mXml.free,
-                  mXml.largest);
   return true;
 }
 
@@ -2201,8 +2481,8 @@ bool VerticalSection::finishBuild(const bool parseOk) {
   // rebuildingFromStale_ guard breaks the loop when a retry degrades again).
   lastBuildDroppedForHeap_ = lastBuildDroppedForHeap_ || b.layout.everDroppedForHeap() || b.layout.everSplitForHeap() ||
                              b.extractor.droppedTextForHeap;
-  lastBuildLostText_ = b.layout.everDroppedForHeap() || b.extractor.droppedTextForHeap;
   if (b.extractor.droppedTextForHeap) LOG_ERR("VSC", "Text dropped on low heap; chapter is incomplete");
+  lastBuildLostText_ = b.layout.everDroppedForHeap() || b.extractor.droppedTextForHeap;  // companion
   if (b.drawnBetweenSlices) {
     // A full page render ran next to the layout's resident working set, and on device the
     // pagination came out different without any starved-glyph trace (342 pages for a chapter that
@@ -2242,12 +2522,15 @@ bool VerticalSection::finishBuild(const bool parseOk) {
   }
   serialization::writePod(file, pageCount);
   serialization::writePod(file, indexOffset);
-  // Styling was skipped but every character is present, so the file is correct as text and is
-  // kept valid. Restamping it stale would rebuild the chapter on every open for a cosmetic
-  // difference -- and while a large SD CJK font is resident the condition never clears, so the
-  // rebuild would never win. Reported apart from a content drop because the two are not alike.
+  // Styling was skipped but every character is present, so the file stays valid for this and later
+  // opens. It is still best-effort: record the headroom like a degraded build, so an open with
+  // clearly more room rebuilds it styled. Restamping it stale instead would rebuild on every open,
+  // which never wins while a large SD CJK font is resident.
   if (lastBuildUnstyledForHeap_ && !lastBuildDroppedForHeap_) {
-    LOG_INF("VSC", "Chapter cached without block styling (text complete)");
+    LOG_INF("VSC", "Chapter cached without block styling (text complete); styled rebuild when heap allows");
+    HalFile deg;
+    const uint32_t headroom = lastLoadMaxAlloc_ ? lastLoadMaxAlloc_ : lastBuildStartMaxAlloc_;
+    if (Storage.openFileForWrite("VSC", degradedPath(), deg)) serialization::writePod(deg, headroom);
   }
 
   // A build that dropped content on low heap produced sparse pages. Keep the file usable for
@@ -2275,17 +2558,11 @@ bool VerticalSection::finishBuild(const bool parseOk) {
     // on the densest pages beat re-indexing on every single open.
     LOG_ERR("VSC", "Stale-rebuild dropped glyphs again; keeping best-effort cache to break the rebuild loop");
   }
-  SdDebugLog::log("VSC",
-                  "BUILD-END spine=%d pages=%u ms=%u largest start=%u min=%u drops=%u firstDrop=p%d@%u textDrop=%d "
-                  "splits=%u starved=%u drawn=%d -> %s",
-                  spineIndex, (unsigned)pageCount, (unsigned)(millis() - b.buildStartMs), lastBuildStartMaxAlloc_,
-                  b.sink.minMaxAlloc == UINT32_MAX ? 0u : b.sink.minMaxAlloc, b.layout.heapDropCount(),
-                  b.sink.firstDropPage, b.layout.firstDropMaxAlloc(), b.extractor.droppedTextForHeap ? 1 : 0,
-                  b.layout.heapSplitCount(), b.starvedInLayout, b.drawnBetweenSlices ? 1 : 0,
-                  !lastBuildDroppedForHeap_ ? "ok" : (rebuildingFromStale_ ? "kept" : "stale"));
   file.close();
   build_.reset();
-  if (!lastBuildDroppedForHeap_ && Storage.exists(degradedPath().c_str())) Storage.remove(degradedPath().c_str());
+  if (!lastBuildDroppedForHeap_ && !lastBuildUnstyledForHeap_ && Storage.exists(degradedPath().c_str())) {
+    Storage.remove(degradedPath().c_str());
+  }
 
   // Last page's source position. The horizontal build logs the same number ("SCT: chapter
   // spans"), and the two counters are supposed to agree character for character -- if these
@@ -2355,10 +2632,13 @@ bool VerticalSection::loadSectionFile(const ReaderRenderSpec& spec, const bool r
   serialization::readPod(file, cachedCharacterSpacing);
   uint16_t cachedRightMargin;
   serialization::readPod(file, cachedRightMargin);
+  uint32_t cachedBookFonts;
+  serialization::readPod(file, cachedBookFonts);
 
   if (cachedFontId != fontId || cachedWidth != viewportWidth || cachedHeight != viewportHeight ||
       cachedLineSpacing != lineSpacing || cachedFurigana != (furiganaEnabled ? 1 : 0) ||
-      cachedCharacterSpacing != spec.characterSpacing || cachedRightMargin != spec.rightMarginPx) {
+      cachedCharacterSpacing != spec.characterSpacing || cachedRightMargin != spec.rightMarginPx ||
+      cachedBookFonts != spec.bookFontsSignature) {
     file.close();
     LOG_DBG("VSC", "Parameter mismatch, clearing cache");
     clearCache();
@@ -2373,8 +2653,17 @@ bool VerticalSection::loadSectionFile(const ReaderRenderSpec& spec, const bool r
   pageOffsets_.clear();
   loadedPageIndex_ = -1;
 
+  // finishBuild() always patches in a real index offset, even for a chapter with no pages. Zero is
+  // the header's placeholder: the build never finished (power cut, reset), or is still running.
+  // Not cleared here -- a build in progress owns the file; the caller's rebuild overwrites it.
+  if (indexOffset == 0) {
+    file.close();
+    LOG_ERR("VSC", "Unfinished cache (no page index), rebuilding");
+    return false;
+  }
+
   if (cachedPageCount > 0) {
-    if (indexOffset == 0 || !file.seek(indexOffset)) {
+    if (!file.seek(indexOffset)) {
       file.close();
       LOG_ERR("VSC", "Bad page index offset in cache");
       clearCache();
@@ -2517,6 +2806,31 @@ std::optional<int> VerticalSection::getPageForVisibleTextOffset(const uint32_t o
     }
   }
   return best;
+}
+
+bool VerticalSection::abandonBuildKeepingPage(const int pageIndex, VerticalPage& page) {
+  bool kept = false;
+  if (pageIndex == loadedPageIndex_) {
+    page = std::move(loadedPage_);
+    kept = true;
+  }
+  if (build_) {
+    const std::string tmpHtmlPath = build_->tmpHtmlPath;
+    build_.reset();                           // closes (and so flushes) the section file, frees the parser
+    if (!kept) loadedPage_ = VerticalPage();  // another page's buffers must not sit beside the read
+    if (!kept && pageIndex >= 0 && pageIndex < static_cast<int>(pageOffsets_.size())) {
+      HalFile file;
+      if (Storage.openFileForRead("VSC", filePath, file) && file.seek(pageOffsets_[static_cast<size_t>(pageIndex)])) {
+        kept = readPage(file, page) == ReadResult::Ok;
+      }
+    }
+    Storage.remove(tmpHtmlPath.c_str());
+    Storage.remove(filePath.c_str());
+  }
+  pageOffsets_.clear();
+  pageCount = 0;
+  loadedPageIndex_ = -1;
+  return kept;
 }
 
 const VerticalPage* VerticalSection::getPage() const { return getPage(currentPage); }

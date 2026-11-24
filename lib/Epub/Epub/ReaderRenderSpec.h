@@ -54,4 +54,6 @@ struct ReaderRenderSpec {
   // The margin right of the text area, bezel inset included: the first column's ruby is drawn
   // there. 0 reserves the full ruby width.
   uint16_t rightMarginPx = 0;
+  // Publisher fonts loaded for the book (matcha's BookFonts); we load none, so always 0.
+  uint32_t bookFontsSignature = 0;
 };

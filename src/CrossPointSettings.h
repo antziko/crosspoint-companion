@@ -762,6 +762,9 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // raw 1..10 VALUE (cycled in place on Confirm) would not.
   static constexpr uint8_t FC_INLINE_CARDS[] = {1, 2, 3, 5, 10};
   uint8_t flashcardInlineCardsIdx = 2;  // default 3 cards
+  // Translate Page's target language: an index into translation::TARGET_LANGUAGES, or
+  // TARGET_CUSTOM for gemini.lang (0 = English).
+  uint8_t translationTarget = 0;
   // When the active dictionary misses, probe the exact word in each other dictionary of the same
   // category (DictionaryRegistry::nameIsStGroup) before falling back to stems / alt forms /
   // suggestions. Off by default: it only ever costs time on the miss path, which is already the

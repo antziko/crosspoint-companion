@@ -3,12 +3,14 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <ResidentFiles.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -78,6 +80,8 @@ bool g_heapLimited = false;
 // answer the caller's release-fonts-and-retry from the memo before it could reach the SD card.
 // Reset at the top of every lookupExact().
 bool g_lookupIncomplete = false;
+// Whether a headword longer than the last lookupExact() key may start with it (see longerHeadwordMayExist).
+bool g_longerMayExist = true;
 static uint32_t g_missMemoHits = 0;  // lookups answered from the negative memo (no SD traffic)
 uint32_t g_recordCacheHits = 0;
 uint32_t g_recordCacheMisses = 0;
@@ -121,6 +125,9 @@ struct DictFileHandles {
   size_t fineCacheBytes = 0;          // allocated size (cstride * SPX_KEY_SIZE)
   uint32_t fineCacheLo = UINT32_MAX;  // fine index of fineCache[0]; UINT32_MAX = empty
   size_t fineCacheCount = 0;          // number of 32-byte keys currently cached
+  // The whole fine tier, resident in PSRAM across lookup sessions (PSRAM boards): spxNarrow()
+  // then reads no SD at all. Invalid elsewhere, or once evicted.
+  ResidentFiles::Ref fineAll;
 
   // Free every cache and close every file, returning ALL memory to the pool. Next lookup relearns
   // lazily. Called via DictIndex::releaseCaches() when a Word Lookup activity exits.
@@ -144,6 +151,7 @@ struct DictFileHandles {
     fineCacheBytes = 0;
     fineCacheLo = UINT32_MAX;
     fineCacheCount = 0;
+    fineAll = {};
   }
 };
 
@@ -437,6 +445,9 @@ void loadSpx(DictFileHandles& h, const char* idxPath, size_t recordCount) {
   h.spxCStride = cstride;
   h.spxCoarseCount = coarseCount;
   h.spxOk = true;
+  // Matched on both counts, so a regenerated dictionary loads fresh.
+  h.fineAll = ResidentFiles::acquire(spxPath, idxCount * 31u + fineCount, h.spxFile, SPX_HEADER_SIZE,
+                                     static_cast<size_t>(fineCount) * SPX_KEY_SIZE);
   LOG_INF("DICT", "spx %s: %u checkpoints, %u coarse in RAM (%u B)", spxPath, fineCount,
           static_cast<unsigned>(coarseCount), static_cast<unsigned>(coarseCount * sizeof(CoarseEntry)));
 }
@@ -461,9 +472,13 @@ bool spxNarrow(DictFileHandles& h, const char* key, size_t recordCount, size_t& 
   const size_t sliceCount = fHi - fLo;
   if (sliceCount == 0 || sliceCount * SPX_KEY_SIZE > h.fineCacheBytes || !h.fineCache) return false;
 
-  // 2) Fetch the fine slice (from the one-slot cache when the coarse bracket is unchanged),
-  //    then binary-search it in RAM: largest f with fine[fLo+f] <= key.
-  if (h.fineCacheLo != fLo || h.fineCacheCount != sliceCount) {
+  // 2) The fine slice: straight from the resident tier when there is one, else fetched (from
+  //    the one-slot cache when the coarse bracket is unchanged).
+  const uint8_t* all = ResidentFiles::data(h.fineAll);
+  const uint8_t* slice = all ? all + static_cast<size_t>(fLo) * SPX_KEY_SIZE : nullptr;
+  if (slice) {
+    g_fineHits++;
+  } else if (h.fineCacheLo != fLo || h.fineCacheCount != sliceCount) {
     g_fineReads++;
     h.spxFile.seek(SPX_HEADER_SIZE + static_cast<size_t>(fLo) * SPX_KEY_SIZE);
     const size_t bytes = sliceCount * SPX_KEY_SIZE;
@@ -476,10 +491,12 @@ bool spxNarrow(DictFileHandles& h, const char* key, size_t recordCount, size_t& 
   } else {
     g_fineHits++;
   }
+  if (!slice) slice = h.fineCache.get();
+  // Binary-search the slice in RAM: largest f with fine[fLo+f] <= key.
   size_t flo = 0, fhi = sliceCount;
   while (flo < fhi) {
     const size_t mid = flo + (fhi - flo) / 2;
-    if (std::memcmp(h.fineCache.get() + mid * SPX_KEY_SIZE, key, SPX_KEY_SIZE) <= 0) {
+    if (std::memcmp(slice + mid * SPX_KEY_SIZE, key, SPX_KEY_SIZE) <= 0) {
       flo = mid + 1;
     } else {
       fhi = mid;
@@ -550,6 +567,15 @@ const char* DictIndex::grammarDatPath() { return datFor(grammarIdxPath(), g_gram
 
 bool DictIndex::isAvailable() { return Storage.exists(vocabIdxPath()) && Storage.exists(vocabDatPath()); }
 
+bool DictIndex::isInstalled(const char* folder) {
+  char previous[sizeof(g_languageFolder)];
+  std::strncpy(previous, g_languageFolder, sizeof(previous));
+  setLanguageFolder(folder);
+  const bool installed = isAvailable();
+  setLanguageFolder(previous);
+  return installed;
+}
+
 void DictIndex::setLanguageFolder(const char* folder) {
   if (!folder || folder[0] == '\0') folder = "jp";
   if (std::strcmp(g_languageFolder, folder) == 0) return;
@@ -558,6 +584,12 @@ void DictIndex::setLanguageFolder(const char* folder) {
   std::strncpy(g_languageFolder, folder, sizeof(g_languageFolder) - 1);
   g_languageFolder[sizeof(g_languageFolder) - 1] = '\0';
   LOG_DBG("DICT", "Dictionary folder: %s", g_languageFolder);
+}
+
+const char* DictIndex::installedFolderFor(const char* folder) {
+  if (!folder || std::strcmp(folder, "yue") != 0 || isInstalled("yue") || !isInstalled("zh")) return folder;
+  LOG_INF("DICT", "No Cantonese dictionary; using the Mandarin one");
+  return "zh";
 }
 
 const char* DictIndex::languageFolder() { return g_languageFolder; }
@@ -667,6 +699,7 @@ bool DictIndex::lookupInFile(const char* headword, const char* idxPath, const ch
     } else if (cmp > 0) {
       lo = mid + 1;
     } else {
+      g_longerMayExist = true;  // the headword exists, so longer ones may too; not checked
       // POS gate: a record with flags counts only if it intersects the caller's mask; a record
       // with posFlags==0 (no POS data, e.g. a pre-flags dict file) always counts. posMask==0
       // means the caller doesn't care (exact surface-form lookups).
@@ -790,9 +823,9 @@ bool DictIndex::lookupInFile(const char* headword, const char* idxPath, const ch
       struct Entry {
         std::string def;
         uint8_t priority;
+        uint8_t posFlags;
       };
       std::vector<Entry> entries;
-      uint8_t bestFlags = 0;  // posFlags of the first (highest-priority) entry actually read
       constexpr int kMaxEntries = 5;
       for (size_t s = 0; s < sibs.size() && static_cast<int>(entries.size()) < kMaxEntries; s++) {
         // def.resize() is a bare allocation that abort()s on OOM under -fno-exceptions -- confirmed
@@ -815,15 +848,27 @@ bool DictIndex::lookupInFile(const char* headword, const char* idxPath, const ch
           g_lookupIncomplete = true;
           continue;
         }
-        if (entries.empty()) bestFlags = sibs[s].posFlags;
-        entries.push_back({std::move(def), sibs[s].priority});
+        entries.push_back({std::move(def), sibs[s].priority, sibs[s].posFlags});
       }
 
       if (entries.empty()) return false;
+      // Equal priority keeps index order, which put the suffix 中 (じゅう), the prefix 前 (ぜん)
+      // and the abbreviation 日 (にち, "Sunday") ahead of the nouns なか, まえ and ひ. A standalone
+      // match is rarely an affix or an abbreviation, so on a tie those go last.
+      const auto isAffix = [](const std::string& def) {
+        const size_t tagEnd = std::min<size_t>(def.size(), 96);
+        const std::string_view head(def.data(), tagEnd);
+        return head.find("[suffix]") != std::string_view::npos || head.find("[prefix]") != std::string_view::npos ||
+               head.find("[abbr.]") != std::string_view::npos;
+      };
+      std::stable_sort(entries.begin(), entries.end(), [&](const Entry& a, const Entry& b) {
+        if (a.priority != b.priority) return a.priority > b.priority;
+        return !isAffix(a.def) && isAffix(b.def);
+      });
 
       out.headword = headword;
       out.priority = entries[0].priority;
-      out.posFlags = bestFlags;
+      out.posFlags = entries[0].posFlags;
       if (entries.size() == 1) {
         out.definition = std::move(entries[0].def);
       } else {
@@ -849,6 +894,16 @@ bool DictIndex::lookupInFile(const char* headword, const char* idxPath, const ch
     }
   }
 
+  // A miss leaves lo at the key's insertion point: the record there is the next headword in sort
+  // order, and a longer word beginning with the key would sort right there.
+  if (lo < recordCount && !g_lookupIncomplete) {
+    if (!readIndexRecord(h, lo, recordCount, rec)) {
+      g_lookupIncomplete = true;
+    } else if (std::memcmp(rec.headword, key, len) == 0) {
+      g_longerMayExist = true;
+    }
+  }
+  if (g_lookupIncomplete) g_longerMayExist = true;
   return false;
 }
 
@@ -914,8 +969,11 @@ bool DictIndex::lookupExact(const char* headword, DictEntry& out, uint8_t dictMa
   const uint64_t missTag = missTagFor(headword, dictMask, posMask);
   if (g_missMemo && g_missMemo[missTag % kMissMemoSlots] == missTag) {
     g_missMemoHits++;
+    g_longerMayExist = true;  // the memo keeps only the miss
     return false;
   }
+  // Each searched file that could hold a longer word sets it (lookupInFile).
+  g_longerMayExist = false;
   // No Storage.exists() pre-checks needed here -- lookupInFile()'s own open-once cache already
   // makes a missing optional dictionary (grammar, jmnedict) a cheap no-op after the first attempt,
   // and an existence check would itself be a filesystem call repeated on every lookup otherwise.
@@ -936,6 +994,10 @@ bool DictIndex::lookupExact(const char* headword, DictEntry& out, uint8_t dictMa
   if (!g_lookupIncomplete) rememberMiss(missTag);
   return false;
 }
+
+bool DictIndex::longerHeadwordMayExist() { return g_longerMayExist; }
+
+bool DictIndex::fitsInHeap(const size_t bytes) { return dictFitsWithReserve(bytes); }
 
 bool DictIndex::consumeHeapLimited() {
   const bool limited = g_heapLimited;

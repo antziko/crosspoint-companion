@@ -5,6 +5,7 @@
 #include <deque>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -69,16 +70,31 @@ class CssParser {
   struct StylesheetFilter {
     [[nodiscard]] bool allows(uint8_t) const { return true; }
   };
+  // VerticalBlockStyle::blockAlign values. Our CssUnit has no `auto`, so blockAlign stays 0.
+  static constexpr uint8_t VERTICAL_BLOCK_CENTER = 1;
+  static constexpr uint8_t VERTICAL_BLOCK_END = 2;
   // Distilled per-block layout parameters the VERTICAL engine consumes, in em units.
   struct VerticalBlockStyle {
-    float startEm = 0;         // margin-top: every column of the block starts this many cells down
-    float beforeEm = 0;        // margin-right: extra gap before the block's first column
-    float afterEm = 0;         // margin-left: extra gap after the block's last column
-    float hangEm = 0;          // padding-top + negative text-indent: hanging indent for wrapped lines
-    bool alignCenter = false;  // text-align: center -> column content vertically centered
-    uint8_t borderEdges = 0;   // border edge mask; our cache records no borders, so always 0
+    float startEm = 0;             // margin-top: every column of the block starts this many cells down
+    float beforeEm = 0;            // margin-right: extra gap before the block's first column
+    float afterEm = 0;             // margin-left: extra gap after the block's last column
+    float hangEm = 0;              // padding-top + negative text-indent: hanging indent for wrapped lines
+    float indentEm = -1;           // text-indent: a paragraph's first column starts this far down; -1 = not set
+    bool alignCenter : 1 = false;  // text-align: center -> column content vertically centered
+    bool alignEnd : 1 = false;     // text-align: right/end -> each column ends at the foot
+    // font-size relative to the parent's size (em, %) rather than the body's (rem, px, pt).
+    bool fontScaleOfParent : 1 = false;
+    // font-family as a bookfonts slot; publisher fonts are not loaded here, so always 0.
+    uint8_t fontSlot : 2 = 0;
+    uint8_t blockAlign = 0;   // VERTICAL_BLOCK_*
+    uint8_t borderEdges = 0;  // TOP/RIGHT/BOTTOM/LEFT bits of the visible border sides
+    // font-size as a multiple of the parent or body size, in 32nds; always 0 here (see
+    // verticalBlockStyleOf), so vertical text keeps the body size.
+    uint8_t fontScale32 = 0;
+    [[nodiscard]] float fontScale() const { return fontScale32 / 32.0f; }
     [[nodiscard]] bool any() const {
-      return startEm > 0 || beforeEm > 0 || afterEm > 0 || hangEm > 0 || alignCenter || borderEdges != 0;
+      return startEm > 0 || beforeEm > 0 || afterEm > 0 || hangEm > 0 || alignCenter || alignEnd || blockAlign != 0 ||
+             borderEdges != 0 || indentEm >= 0 || fontScale32 != 0 || fontSlot != 0;
     }
   };
   // One styled-block rule keyed by hashes: the vertical engine matches "tag", ".class" and
@@ -88,12 +104,21 @@ class CssParser {
     uint32_t classHash = 0;
     VerticalBlockStyle style;
   };
+  // What the vertical engine takes from a style; the cache records and a style="" attribute map
+  // the same way.
+  [[nodiscard]] static VerticalBlockStyle verticalBlockStyleOf(const CssStyle& css);
   // Case-insensitive FNV-1a over a selector piece (tag name or class token). Never 0.
   static uint32_t blockSelectorHash(const char* s, size_t len);
   // Stream the on-disk rules cache and collect a VerticalBlockRule for every simple selector with
   // a vertical-relevant property, without materializing the rule map. Returns the count (<= maxOut).
   size_t collectVerticalStyles(std::vector<VerticalBlockRule>& out, size_t maxOut = 256,
                                const StylesheetFilter* stylesheets = nullptr) const;
+  // A chapter's own <style> blocks, which the book's CSS cache does not hold. Capped, so one
+  // chapter cannot take the heap.
+  static constexpr size_t MAX_CHAPTER_STYLE_BYTES = 16 * 1024;
+  // The rules of htmlPath's <style> blocks, merged into `out` within its reserved capacity. Uses
+  // and then clears this parser's rule table. Returns how many were added.
+  size_t appendChapterVerticalStyles(const std::string& htmlPath, std::vector<VerticalBlockRule>& out);
 
   explicit CssParser(std::string cachePath) : cachePath(std::move(cachePath)) {}
   ~CssParser() = default;
@@ -191,6 +216,10 @@ class CssParser {
   // block, no doubling copy. It still supports the sorted-vector algorithm — random-access
   // iterators for findRule()'s std::lower_bound binary search and the cache-load std::sort.
   std::deque<std::pair<std::string, uint16_t>> rulesBySelector_;
+
+  // Vertical-rule helpers: see collectVerticalStyles / appendChapterVerticalStyles.
+  static void addVerticalRule(std::vector<VerticalBlockRule>& out, std::string_view selector, const CssStyle& css);
+  static bool extractStyleBlocks(const std::string& htmlPath, const std::string& cssPath);
 
   // Find-or-append `style` in stylePool_, returning its index. Linear scan (the pool is small:
   // bounded by the count of DISTINCT styles). Never mutates an existing entry, so indices already

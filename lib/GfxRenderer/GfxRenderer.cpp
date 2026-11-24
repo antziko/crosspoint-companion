@@ -2855,6 +2855,17 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, EpdFontFami
   return widthPx;
 }
 
+int GfxRenderer::getFontInkHeight(const int fontId) const {
+  const auto fontIt = fontMap.find(fontId);
+  if (fontIt == fontMap.end()) {
+    LOG_ERR("GFX", "Font %d not found", fontId);
+    return 0;
+  }
+  const EpdFontData* data = fontIt->second.getData(EpdFontFamily::REGULAR);
+  // Built-in and SD fonts store the descender below zero, TTF faces above it.
+  return data->ascender + std::abs(data->descender);
+}
+
 int GfxRenderer::getFontAscenderSize(const int fontId) const {
   const auto fontIt = fontMap.find(fontId);
   if (fontIt == fontMap.end()) {
@@ -3116,7 +3127,7 @@ static bool isSymmetricBracket(const uint32_t cp) {
 void GfxRenderer::drawCharVerticalRotatedInCell(const int fontId, const int cellLeftX, const int cellTopY,
                                                 const int cellSize, const uint32_t cp, const int shiftType,
                                                 const bool black, const EpdFontFamily::Style style, int* inkTopOut,
-                                                int* inkHeightOut) const {
+                                                int* inkHeightOut, const uint16_t /*scale*/) const {
   // Ellipsis glyphs are designed horizontally and come out too tall rotated; draw a centred
   // vertical dot stack instead.
   if (cp == 0x2026 || cp == 0x2025) {
@@ -3194,7 +3205,7 @@ void GfxRenderer::drawCharVerticalRotatedInCell(const int fontId, const int cell
 
 bool GfxRenderer::verticalPunctInkBox(const int fontId, const uint32_t cp, const EpdFontFamily::Style style,
                                       const int cellTopY, const int cellSize, const int shiftType, int* inkTop,
-                                      int* inkHeight) const {
+                                      int* inkHeight, const uint16_t /*scale*/) const {
   if (!inkTop || !inkHeight) return false;
   *inkTop = INT32_MIN;
   drawCharVerticalRotatedInCell(fontId, 0, cellTopY, cellSize, cp, shiftType, true, style, inkTop, inkHeight);

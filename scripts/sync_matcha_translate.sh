@@ -10,7 +10,7 @@
 # After resolving and building, set LAST_SYNC to the printed HEAD.
 set -euo pipefail
 
-LAST_SYNC=2576f466
+LAST_SYNC=13f08dee
 MATCHA=${1:-../matcha-reader}
 
 FILES=(

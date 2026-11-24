@@ -27,6 +27,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/ClockSyncPolicy.h"
+#include "util/TranslationTarget.h"
 
 // crosspoint: every log line of this screen also goes to the SD debug log; a device in the field
 // has no serial, and a failed translation is otherwise invisible.
@@ -385,11 +386,13 @@ bool EpubReaderTranslationActivity::callGeminiApi(const std::string& apiKey, con
   auto textPart = parts.add<JsonObject>();
   // crosspoint: numbered, close-to-literal sentences. A fluent translation of a published book
   // reproduces its published English edition, which Gemini withholds as RECITATION.
-  textPart["text"] = std::string(
-                         "Translate the following text to English sentence by sentence. Number each sentence "
-                         "and start it on a new line. Keep each close and literal to the original wording, "
-                         "but easy to read. Return only the translation, no commentary.\n\n") +
-                     sourceText;
+  std::string prompt = "Translate the following text to ";
+  prompt += translation::targetLanguageName(SETTINGS.translationTarget);
+  prompt +=
+      " sentence by sentence. Number each sentence and start it on a new line. Keep each close and literal to "
+      "the original wording, but easy to read. Return only the translation, no commentary.\n\n";
+  prompt += sourceText;
+  textPart["text"] = prompt;
 
   auto config = reqDoc["generationConfig"].to<JsonObject>();
   config["maxOutputTokens"] = 2048;

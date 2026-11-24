@@ -59,12 +59,12 @@ class VerticalSection {
   // file with version 0 so the next open sees a version mismatch and rebuilds the chapter --
   // instead of the truncation living on disk as a permanently sparse chapter.
   bool lastBuildDroppedForHeap_ = false;
-  // Characters were actually lost (not just approximate layout or early page breaks).
-  bool lastBuildLostText_ = false;
   // Set when only the styled-block table was skipped. The chapter's TEXT is complete; the book's
   // own block styling is not. Kept apart from lastBuildDroppedForHeap_ because the two differ in
   // kind: this one is cosmetic and must not be reported, or cached, as lost content.
   bool lastBuildUnstyledForHeap_ = false;
+  // companion: characters were actually lost (not just approximate layout or early page breaks).
+  bool lastBuildLostText_ = false;
   // Set by loadSectionFile when the on-disk cache carried the version-0 stale stamp (a prior
   // build dropped glyphs). If THIS build drops again, createSectionFile keeps the best-effort
   // cache valid instead of re-stamping: the drop conditions are deterministic per book, so
@@ -148,8 +148,8 @@ class VerticalSection {
   // True when the last createSectionFile() returned false because the cancel hook fired, as
   // opposed to a real failure. Lets a speculative caller back off quietly instead of logging.
   bool lastBuildCancelled() const { return lastBuildCancelled_; }
-  // The finished build lost characters on low heap and stamped its file stale (first attempt).
-  // Reopening the section now rebuilds it once more; a second loss is kept best-effort.
+  // companion: the finished build lost characters on low heap and stamped its file stale (first
+  // attempt). Reopening the section now rebuilds it once more; a second loss is kept best-effort.
   bool lostTextNeedsRebuild() const { return lastBuildLostText_ && !rebuildingFromStale_; }
 
   // furiganaEnabled is part of the cache key: the column gap only has to clear ruby when ruby is
@@ -173,6 +173,10 @@ class VerticalSection {
   bool isBuilding() const { return static_cast<bool>(build_); }
   // Drops a running build and its partial file; the next load rebuilds the chapter.
   void abandonBuild();
+  // abandonBuild(), keeping one page it already wrote. The page is read back after the build's
+  // parser and buffers are freed, so a heap the build had exhausted can still hold it. False when
+  // the page was not written or could not be read.
+  bool abandonBuildKeepingPage(int pageIndex, VerticalPage& page);
   // The reader drew a page between two slices (a menu over the page): the build's result is then
   // used for this session but stamped stale, see finishBuild().
   void notePageDrawnBetweenSlices();

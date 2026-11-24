@@ -50,14 +50,19 @@ void EpubReaderActivity::refreshBookScript() {
   // corner. Process-wide, so settled here before any vertical layout runs.
   Kinsoku::setCentredPunctuation(bookScript_ == CjkScript::TraditionalChinese);
   // The converted /dictionaries/<folder> word-select segments with (also process-wide).
-  DictIndex::setLanguageFolder(cjk::dictFolderFor(effectiveLanguage_, bookScript_));
+  // installedFolderFor: Cantonese falls back to the Mandarin dictionary when only that is installed.
+  DictIndex::setLanguageFolder(DictIndex::installedFolderFor(cjk::dictFolderFor(effectiveLanguage_, bookScript_)));
 }
 
 void EpubReaderActivity::sniffLanguageIfNeeded() {
   if (!epub || cjkPrefs.languageOverride != cjk::LANG_AUTO || cjkPrefs.detectedLanguage != 0) return;
-  // The tag is enough -- unless it is Chinese without a script, where it is only a default.
+  // The tag is enough -- unless it is Chinese without a script, where it is only a default, or
+  // Hong Kong Chinese, which may be Cantonese.
   const std::string& tag = epub->getLanguage();
-  if (cjk::scriptForLanguage(tag) != CjkScript::None && !cjk::isUnscriptedChinese(tag)) return;
+  if (cjk::scriptForLanguage(tag) != CjkScript::None && !cjk::isUnscriptedChinese(tag) &&
+      !cjk::isHongKongChinese(tag)) {
+    return;
+  }
   const int spineCount = epub->getSpineItemsCount();
   if (currentSpineIndex < 0 || currentSpineIndex >= spineCount) return;
   // Up to three items are read, each judged on its own: an English copyright page ahead of the
@@ -86,11 +91,13 @@ void EpubReaderActivity::sniffLanguageIfNeeded() {
     case CjkScript::Japanese:
       cjkPrefs.detectedLanguage = cjk::LANG_JA;
       break;
+    // Cantonese particles decide it before the script does: a short sample may hold none of the
+    // traditional-only characters the script count looks for.
     case CjkScript::SimplifiedChinese:
-      cjkPrefs.detectedLanguage = cjk::LANG_ZH_HANS;
+      cjkPrefs.detectedLanguage = sink->sniff.isCantonese() ? cjk::LANG_YUE : cjk::LANG_ZH_HANS;
       break;
     case CjkScript::TraditionalChinese:
-      cjkPrefs.detectedLanguage = cjk::LANG_ZH_HANT;
+      cjkPrefs.detectedLanguage = sink->sniff.isCantonese() ? cjk::LANG_YUE : cjk::LANG_ZH_HANT;
       break;
     default:
       cjkPrefs.detectedLanguage = CjkBookPrefs::SNIFFED_NONE;

@@ -20,11 +20,15 @@ Copy the output folder into /dictionaries/ (or /.dictionaries/) on the SD card.
 """
 
 import argparse
+import re
 import struct
 import sys
 from pathlib import Path
 
 RECORD = struct.Struct("<32sIHBB")
+
+
+FURIGANA_RE = re.compile(r"｛[^｝]*｝")
 
 
 def read_records(idx_path: Path, dat_path: Path):
@@ -39,6 +43,9 @@ def read_records(idx_path: Path, dat_path: Path):
         if not headword or offset + length > len(dat):
             continue
         definition = dat[offset : offset + length].decode("utf-8", errors="replace").strip()
+        # matcha's converter may append Anki-style furigana to the reading line as ｛...｝; only its
+        # own firmware reads that, so it is dropped here.
+        definition = FURIGANA_RE.sub("", definition)
         if definition:
             yield headword, definition, priority
 

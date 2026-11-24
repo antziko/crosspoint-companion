@@ -27,8 +27,8 @@ class VerticalTextBlock {
   explicit VerticalTextBlock(const VerticalPage& page) : page_(page) {}
 
   void render(GfxRenderer& renderer, int fontId, int offsetX = 0, int offsetY = 0, bool black = true) const;
-  // rubyBottomY: screen y that ruby must not run past (the text area's foot, so an annotation at
-  // the end of a column stays clear of the status bar). INT_MAX = no limit.
+  // companion: rubyBottomY is the screen row ruby must end by (the text area's foot), so a reading
+  // longer than its base at a column foot stays off the status bar.
   void render(GfxRenderer& renderer, int fontId, int rubyFontId, int offsetX, int offsetY, bool black = true,
               int rubyBottomY = INT_MAX) const;
 
