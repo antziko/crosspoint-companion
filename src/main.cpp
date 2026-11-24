@@ -140,8 +140,16 @@ EpdFontFamily notosans18FontFamily(18, &notosans18RegularFont, &notosans18BoldFo
 EpdFont smallFont(&notosans_8_regular);
 EpdFontFamily smallFontFamily(8, &smallFont);
 
+// Dictionary pronunciation faces, one per built-in reader size (DictionaryDefinitionActivity
+// picks the one whose x-height is closest to the body font's).
+EpdFont ipa12Font(&ipa_12_regular);
+EpdFontFamily ipa12FontFamily(12, &ipa12Font);
+EpdFont ipa14Font(&ipa_14_regular);
+EpdFontFamily ipa14FontFamily(14, &ipa14Font);
 EpdFont ipaFont(&ipa_16_regular);
 EpdFontFamily ipaFontFamily(16, &ipaFont);
+EpdFont ipa18Font(&ipa_18_regular);
+EpdFontFamily ipa18FontFamily(18, &ipa18Font);
 
 EpdFont ui10MediumFont(&ubuntu_10_medium);
 EpdFont ui10BoldFont(&ubuntu_10_bold);
@@ -459,7 +467,10 @@ void setupDisplayAndFonts(bool seamless = false) {
   renderer.insertFont(UI_10_FONT_ID, ui10FontFamily);
   renderer.insertFont(UI_12_FONT_ID, ui12FontFamily);
   renderer.insertFont(SMALL_FONT_ID, smallFontFamily);
+  renderer.insertFont(IPA_12_FONT_ID, ipa12FontFamily);
+  renderer.insertFont(IPA_14_FONT_ID, ipa14FontFamily);
   renderer.insertFont(IPA_FONT_ID, ipaFontFamily);
+  renderer.insertFont(IPA_18_FONT_ID, ipa18FontFamily);
 
   // Discover and load SD card fonts
   sdFontSystem.begin(renderer);

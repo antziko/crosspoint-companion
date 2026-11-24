@@ -249,20 +249,21 @@ class DictionaryDefinitionActivity final : public Activity {
   // resolved once alongside defFontId_.
   bool defIsMarkup_ = false;
 
-  // True only when prewarmDefinitionFont() confirmed the IPA font's glyphs are resident.
-  // The IPA font is a built-in compressed font whose non-prewarmed draw path inflates a whole
-  // ~11KB group per glyph (FontDecompressor.cpp:182); on a fragmented heap that allocation
-  // fails and the glyph is silently DROPPED, which is what device logs showed as blank
-  // phonetics. When this is false the IPA segments are drawn in the body font instead —
-  // an SD font, whose per-glyph loads are small and can never make that request.
-  // Decided before loadPage() so measurement and drawing agree; read only via ipaFontId().
-  // Defaults true for the built-in-body-font case, which returns from prewarmDefinitionFont()
-  // before the gate ever runs: those fonts have a different heap profile and used the IPA font
-  // unconditionally before this existed. The SD path resets it to false and re-earns it.
-  bool ipaWarm_ = true;
-  // Font the IPA segments are measured AND drawn with. Both must use this: picking the font
-  // differently in the two passes lays out widths for glyphs that are never drawn.
-  int ipaFontId() const { return ipaWarm_ ? IPA_FONT_ID : defFontId_; }
+  // True when prewarmDefinitionFont() made the IPA glyphs resident. Diagnostic only (the SD log's
+  // ipaWarm=): unwarmed glyphs still draw from the IPA font, one small group at a time.
+  bool ipaWarm_ = false;
+  // The IPA face sized to the body font (selectIpaFont). Words go to it only when the body font
+  // cannot draw them (ipaCoverageThunk), so it is the right font for those words whether or not the
+  // prewarm landed. Measurement and drawing both read it through ipaFontId().
+  int ipaFontId_ = IPA_FONT_ID;
+  int ipaFontId() const { return ipaFontId_; }
+  // Picks ipaFontId_ for defFontId_; called once per definition, before the prewarm and wrap.
+  void selectIpaFont();
+  int ipaPointSize() const;         // for the SD log
+  size_t ipaMaxGroupBytes() const;  // largest inflate the IPA font can ask for
+  // IpaFontCoverage callback: whether the body or the IPA font can draw cp. ctx is `this`.
+  static bool ipaCoverageThunk(void* ctx, bool ipaFont, uint32_t cp);
+  IpaFontCoverage ipaCoverage() { return IpaFontCoverage{this, &DictionaryDefinitionActivity::ipaCoverageThunk}; }
   // drawText positions a run by the top of its cell, so its baseline lands at y + ascender.
   // The IPA font is a fixed built-in whose ascender differs from the body font's, so drawing
   // both runs at the same y puts them on two different baselines. Shift the IPA run by this
@@ -330,8 +331,8 @@ class DictionaryDefinitionActivity final : public Activity {
   // Load every glyph this definition needs — IPA runs first, then the body font — once per
   // definition, BEFORE any measuring happens. Without it each body codepoint falls through
   // to SdCardFont::onGlyphMiss (one file open + 2 seeks + 2 reads per glyph through an
-  // 8-slot ring) and every IPA glyph needs an ~11KB contiguous group buffer it cannot get
-  // once the body prewarm has run. No-op for built-in body fonts (they cache lazily).
+  // 8-slot ring) and every IPA glyph inflates its whole group into the slot body glyphs share.
+  // The body half is a no-op for built-in body fonts (they cache lazily).
   void prewarmDefinitionFont();
   // Re-parse the definition and lay out ONLY page `page` into layoutLines,
   // discarding other pages as they are produced; also recomputes totalPages.

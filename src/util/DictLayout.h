@@ -65,7 +65,8 @@ struct LineSink {
 // wrapSpans(); that overload is a thin loop over this class.
 class Wrapper {
  public:
-  Wrapper(const WrapMetrics& metrics, const Measurer& measure, const LineSink& sink);
+  // cov decides which words draw with the IPA font (see splitIpaRuns); default is the built-in assumption.
+  Wrapper(const WrapMetrics& metrics, const Measurer& measure, const LineSink& sink, const IpaFontCoverage& cov = {});
 
   void onSpan(const StyledSpan& span);  // process one span; emit completed lines to the sink
   void finish();                        // flush the trailing in-progress line
@@ -86,7 +87,8 @@ class Wrapper {
   void flushLine();
   void startLine(uint8_t indent, bool listItem);
   void appendToLine(const char* text, size_t len, EpdFontFamily::Style style, bool isIpa, int width);
-  void appendMixed(const char* text, EpdFontFamily::Style style);
+  // forceWordIpa: -1 classifies each word; 0/1 forces it (a piece of an already-classified word).
+  void appendMixed(const char* text, EpdFontFamily::Style style, int forceWordIpa = -1);
   void breakToken(const char* tok, EpdFontFamily::Style style, uint8_t indentLevel);
 
   const int maxWidth_;
@@ -94,6 +96,7 @@ class Wrapper {
   const int bulletWidth_;
   Measurer measure_;
   LineSink sink_;
+  IpaFontCoverage cov_;
   LayoutLine currentLine_;
   int currentX_ = 0;
   bool oom_ = false;

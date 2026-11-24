@@ -208,6 +208,78 @@ static void testPageCollectorMatchesOracle() {
   }
 }
 
+// Coverage fixture: a body font that draws IPA symbols but not combining marks.
+static bool bodyHasIpaNoMarks(void* /*ctx*/, bool ipaFont, uint32_t cp) {
+  if (ipaFont) return (cp >= 0x20 && cp <= 0x7E) || isIpaCandidate(cp);
+  return !utf8IsCombiningMark(cp);
+}
+
+static std::string runsDesc(const std::vector<IpaTextSpan>& runs) {
+  std::string out;
+  for (const auto& r : runs) {
+    out += r.isIpa ? "I[" : "B[";
+    out += r.text;
+    out += "]";
+  }
+  return out;
+}
+
+static void testIpaWordMovesWhole() {
+  std::printf("testIpaWordMovesWhole\n");
+  // Built-in assumption: the pronunciation word, letters included, goes to the IPA font.
+  std::vector<IpaTextSpan> runs;
+  CHECK(splitIpaRuns("UK [\xC9\x99\xCB\x88ku\xCB\x90.tr\xC9\x99] noun", runs), "split ok");
+  CHECK(runsDesc(runs) == "B[UK ]I[[\xC9\x99\xCB\x88ku\xCB\x90.tr\xC9\x99] ]B[noun]", runsDesc(runs).c_str());
+}
+
+static void testCombiningMarkFollowsLatinBase() {
+  std::printf("testCombiningMarkFollowsLatinBase\n");
+  // [t + U+032C] alone: the body font lacks the mark, so the word, base included, moves.
+  std::vector<IpaTextSpan> runs;
+  CHECK(splitIpaRuns("US t\xCC\xAC", runs), "split ok");
+  CHECK(runsDesc(runs) == "B[US ]I[t\xCC\xAC]", runsDesc(runs).c_str());
+  CHECK(textHasIpa("t\xCC\xAC"), "a lone combining mark the body lacks needs the IPA font");
+  // Cambridge: "\xC9\x99\xCB\x88ku\xCB\x90.t \xCC\xAC\xC9\x9A-" -- the mark opens the word after a space.
+  runs.clear();
+  CHECK(splitIpaRuns("US [k.t \xCC\xAC\xC9\x9A-]", runs), "split ok");
+  CHECK(runsDesc(runs) == "B[US [k.t ]I[\xCC\xAC\xC9\x9A-]]", runsDesc(runs).c_str());
+}
+
+static void testBodyThatCoversIpaKeepsIt() {
+  std::printf("testBodyThatCoversIpaKeepsIt\n");
+  const IpaFontCoverage cov{nullptr, &bodyHasIpaNoMarks};
+  std::vector<IpaTextSpan> runs;
+  CHECK(splitIpaRuns("[\xC9\x99\xCB\x88ku\xCB\x90] x", runs, cov), "split ok");
+  CHECK(runsDesc(runs) == "B[[\xC9\x99\xCB\x88ku\xCB\x90] x]", runsDesc(runs).c_str());
+  CHECK(!textHasIpa("[\xC9\x99\xCB\x88ku\xCB\x90]", cov), "fast path agrees");
+  runs.clear();
+  CHECK(splitIpaRuns("\xC9\x99t\xCC\xAC", runs, cov), "split ok");
+  CHECK(runsDesc(runs) == "I[\xC9\x99t\xCC\xAC]", runsDesc(runs).c_str());
+}
+
+static void testIpaWordKeepsCharsItLacksInBody() {
+  std::printf("testIpaWordKeepsCharsItLacksInBody\n");
+  // U+2013 (en dash) is not in the IPA font: it stays body inside an IPA word.
+  std::vector<IpaTextSpan> runs;
+  CHECK(splitIpaRuns("\xC9\x99\xE2\x80\x93k", runs), "split ok");
+  CHECK(runsDesc(runs) == "I[\xC9\x99]B[\xE2\x80\x93]I[k]", runsDesc(runs).c_str());
+}
+
+static void testBrokenIpaTokenKeepsClass() {
+  std::printf("testBrokenIpaTokenKeepsClass\n");
+  // A token wider than the line is broken; every piece keeps the word's IPA class, so the
+  // piece "tr" (no IPA symbol of its own) is still drawn with the IPA font.
+  const std::vector<StyledSpan> spans = {mkSpan("\xC9\x99\xC9\x99tr")};
+  std::vector<DictLayout::LayoutLine> out;
+  DictLayout::wrapSpans(spans, DictLayout::WrapMetrics{4, 1, 1}, DictLayout::Measurer{nullptr, &fakeMeasure}, out);
+  CHECK(out.size() == 2, "token broken across two lines");
+  if (out.size() == 2) {
+    CHECK(lineText(out[0]) == "\xC9\x99\xC9\x99", "first piece");
+    CHECK(lineText(out[1]) == "tr", "second piece");
+    CHECK(out[1].segments.size() == 1 && out[1].segments[0].isIpa, "second piece stays IPA");
+  }
+}
+
 int main() {
   std::printf("=== DictLayout host litmus ===\n");
   testSpanFitsOneLine();
@@ -217,6 +289,11 @@ int main() {
   testAdjacentSameStyleMerges();
   testPaginate();
   testPageCollectorMatchesOracle();
+  testIpaWordMovesWhole();
+  testCombiningMarkFollowsLatinBase();
+  testBodyThatCoversIpaKeepsIt();
+  testIpaWordKeepsCharsItLacksInBody();
+  testBrokenIpaTokenKeepsClass();
 
   std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;

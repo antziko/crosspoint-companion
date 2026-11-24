@@ -11,12 +11,13 @@
 
 namespace DictLayout {
 
-Wrapper::Wrapper(const WrapMetrics& metrics, const Measurer& measure, const LineSink& sink)
+Wrapper::Wrapper(const WrapMetrics& metrics, const Measurer& measure, const LineSink& sink, const IpaFontCoverage& cov)
     : maxWidth_(metrics.maxWidth),
       indentStep_(metrics.indentStep),
       bulletWidth_(metrics.bulletWidth),
       measure_(measure),
-      sink_(sink) {
+      sink_(sink),
+      cov_(cov) {
   ipaRuns_.reserve(4);
   startLine(0, false);
 }
@@ -31,9 +32,9 @@ Wrapper::Wrapper(const WrapMetrics& metrics, const Measurer& measure, const Line
 // is the same arithmetic over the same single run.
 int Wrapper::getMixedWidth(const char* text, EpdFontFamily::Style style) {
   if (!text || !text[0]) return 0;
-  if (!textHasIpa(text)) return measure_(text, style, false);
+  if (!textHasIpa(text, cov_)) return measure_(text, style, false);
   ipaRuns_.clear();
-  if (!splitIpaRuns(text, ipaRuns_)) {
+  if (!splitIpaRuns(text, ipaRuns_, cov_)) {
     oom_ = true;
     return 0;
   }
@@ -81,16 +82,16 @@ void Wrapper::appendToLine(const char* text, size_t len, EpdFontFamily::Style st
   currentX_ += width;
 }
 
-void Wrapper::appendMixed(const char* text, EpdFontFamily::Style style) {
+void Wrapper::appendMixed(const char* text, EpdFontFamily::Style style, const int forceWordIpa) {
   if (!text || !text[0]) return;
   // Same fast path as getMixedWidth(), and it must stay in lockstep with it: one non-IPA run
   // covering the whole string is exactly what splitIpaRuns() would have produced.
-  if (!textHasIpa(text)) {
+  if (forceWordIpa == 0 || (forceWordIpa < 0 && !textHasIpa(text, cov_))) {
     appendToLine(text, strlen(text), style, false, measure_(text, style, false));
     return;
   }
   ipaRuns_.clear();
-  if (!splitIpaRuns(text, ipaRuns_)) {
+  if (!splitIpaRuns(text, ipaRuns_, cov_, forceWordIpa)) {
     oom_ = true;
     return;
   }
@@ -100,7 +101,8 @@ void Wrapper::appendMixed(const char* text, EpdFontFamily::Style style) {
 }
 
 // Break a single token at codepoint boundaries when it is wider than the available line width.
-// IPA combining-mark handling (pendingIsIpa) mirrors splitIpaRuns and must be preserved.
+// The token is classified once, as a whole word, and every piece keeps that classification:
+// measuring a piece and drawing it must pick the same font per codepoint (splitIpaRuns rules).
 //
 // This is the hot path for CJK: the script has no spaces, so a definition's whole run arrives
 // as one token that always overflows and always lands here. The per-codepoint std::string this
@@ -108,27 +110,27 @@ void Wrapper::appendMixed(const char* text, EpdFontFamily::Style style) {
 // nothing left — replaced by a stack buffer, with pending_ a reused member so its capacity
 // carries across tokens.
 void Wrapper::breakToken(const char* tok, EpdFontFamily::Style style, uint8_t indentLevel) {
+  const bool tokIsIpa = wordNeedsIpaFont(tok, tok + strlen(tok), cov_);
+  const int force = tokIsIpa ? 1 : 0;
   const auto* bp = reinterpret_cast<const uint8_t*>(tok);
   pending_.clear();
   int pendingWidth = 0;
-  bool pendingIsIpa = false;
+  bool prevIsIpa = false;
   uint32_t cp;
   while ((cp = utf8NextCodepoint(&bp))) {
     if (oom_) return;
-    const bool combining = utf8IsCombiningMark(cp);
-    const bool cpIsIpa = combining ? pendingIsIpa : isIpaCodepoint(cp);
-    if (pending_.empty()) pendingIsIpa = cpIsIpa;
+    const bool cpIsIpa = utf8IsCombiningMark(cp) && !pending_.empty() ? prevIsIpa : tokIsIpa && cov_.has(true, cp);
+    prevIsIpa = cpIsIpa;
     char cpBuf[5];
     const int cpLen = utf8EncodeCodepoint(cp, cpBuf);
     cpBuf[cpLen] = '\0';  // measure_ takes a C string
     const int cpWidth = measure_(cpBuf, style, cpIsIpa);
     if (!pending_.empty() && currentX_ + pendingWidth + cpWidth > maxWidth_) {
-      appendMixed(pending_.c_str(), style);
+      appendMixed(pending_.c_str(), style, force);
       flushLine();
       startLine(indentLevel, false);
       pending_.clear();
       pendingWidth = 0;
-      pendingIsIpa = cpIsIpa;
     }
     if (!appendNoThrow(pending_, cpBuf, static_cast<size_t>(cpLen))) {
       oom_ = true;
@@ -136,7 +138,7 @@ void Wrapper::breakToken(const char* tok, EpdFontFamily::Style style, uint8_t in
     }
     pendingWidth += cpWidth;
   }
-  if (!pending_.empty()) appendMixed(pending_.c_str(), style);
+  if (!pending_.empty()) appendMixed(pending_.c_str(), style, force);
 }
 
 void Wrapper::onSpan(const StyledSpan& span) {

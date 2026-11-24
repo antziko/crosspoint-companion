@@ -88,6 +88,10 @@ struct PrewarmCollector {
   uint16_t uniqueCount = 0;
   uint32_t ipaSeen[MAX_IPA] = {};
   uint8_t ipaCount = 0;
+  // ASCII drawn with the IPA font (letters inside a pronunciation), deduped apart from ipaSeen.
+  bool ipaSeenAscii[128] = {};
+  // Which font draws what; set by prewarmDefinitionFont() to the activity's own coverage.
+  IpaFontCoverage cov;
   uint8_t styleMask = 0;
   // Body bytes seen per style (index = SdCardFont style index). Only used to order the
   // budgeted prewarm below, so that if the heap runs out it is the least-used style that
@@ -106,7 +110,7 @@ struct PrewarmCollector {
   // and the two cannot drift apart: at most 128 distinct ASCII at 1 byte each, plus
   // MAX_NON_ASCII distinct non-ASCII at the 4-byte UTF-8 maximum.
   static constexpr uint16_t UTF8_CAP = 128 * 1 + MAX_NON_ASCII * 4;
-  static constexpr uint16_t IPA_CAP = MAX_IPA * 4;
+  static constexpr uint16_t IPA_CAP = 128 * 1 + MAX_IPA * 4;
 
   char utf8[UTF8_CAP + 1] = {};
   char ipaUtf8[IPA_CAP + 1] = {};
@@ -135,24 +139,50 @@ struct PrewarmCollector {
   // Append every not-yet-seen codepoint in `text` (null-terminated) to utf8 / ipaUtf8.
   // Returns true if the text contains any body (non-IPA) codepoint, i.e. whether the
   // caller's style will actually be drawn in the body font.
+  //
+  // Same word classification splitIpaRuns() applies at layout time, so both agree on which
+  // font draws each codepoint. A word cut by a chunk boundary may be classified per half;
+  // that costs an on-demand glyph load, never a wrong draw.
   bool addText(const char* text) {
-    const auto* p = reinterpret_cast<const unsigned char*>(text);
+    bool sawBody = false;
+    const char* word = text;
+    while (*word) {
+      const char* wordEnd = word;
+      while (*wordEnd && !isAsciiSpace(*wordEnd)) ++wordEnd;
+      if (wordEnd == word) wordEnd++;  // a lone separator is a body codepoint of its own
+      const bool wordIsIpa = wordNeedsIpaFont(word, wordEnd, cov);
+      sawBody |= addWord(word, wordEnd, wordIsIpa);
+      word = wordEnd;
+    }
+    return sawBody;
+  }
+
+  static bool isAsciiSpace(const char c) { return c == ' ' || c == '\n' || c == '\r' || c == '\t'; }
+
+  bool addWord(const char* begin, const char* end, const bool wordIsIpa) {
+    const auto* p = reinterpret_cast<const unsigned char*>(begin);
+    const auto* e = reinterpret_cast<const unsigned char*>(end);
     bool sawBody = false;
     bool prevIsIpa = false;
-    while (*p) {
+    bool first = true;
+    while (p < e) {
       const unsigned char* seqStart = p;
       const uint32_t cp = utf8NextCodepoint(&p);
       if (cp == 0) break;
       const size_t seqLen = static_cast<size_t>(p - seqStart);
       const auto* seqBytes = reinterpret_cast<const char*>(seqStart);
 
-      // Same run classification splitIpaRuns() applies at layout time (combining marks
-      // inherit the current run), so both agree on which font draws each codepoint.
-      const bool combining = utf8IsCombiningMark(cp);
-      const bool isIpa = combining ? prevIsIpa : isIpaCodepoint(cp);
+      const bool isIpa = utf8IsCombiningMark(cp) && !first ? prevIsIpa : wordIsIpa && cov.has(true, cp);
       prevIsIpa = isIpa;
+      first = false;
 
       if (isIpa) {
+        if (cp < 128) {
+          if (ipaSeenAscii[cp]) continue;
+          ipaSeenAscii[cp] = true;
+          appendIpa(seqBytes, seqLen);
+          continue;
+        }
         bool seen = false;
         for (uint8_t i = 0; i < ipaCount; i++) {
           if (ipaSeen[i] == cp) {
@@ -161,7 +191,7 @@ struct PrewarmCollector {
           }
         }
         if (seen) continue;
-        if (ipaCount >= MAX_IPA) continue;  // table full: let it fall back to the hot group
+        if (ipaCount >= MAX_IPA) continue;  // table full: let it load on demand
         ipaSeen[ipaCount++] = cp;
         appendIpa(seqBytes, seqLen);
         continue;
@@ -471,6 +501,7 @@ void DictionaryDefinitionActivity::wrapText() {
   // Must precede every measuring pass: loadPage() below measures the whole definition,
   // and so does every subsequent page turn (they call loadPage directly, so the glyphs
   // this warms have to stay resident for the life of the definition).
+  selectIpaFont();
   prewarmDefinitionFont();
   planHeadBand();
 
@@ -561,6 +592,69 @@ void DictionaryDefinitionActivity::collectSpanForPrewarm(void* ctx, const Styled
   collector->styleBytes[spanStyleIndex(span.bold, span.italic)] += strlen(span.text);
 }
 
+bool DictionaryDefinitionActivity::ipaCoverageThunk(void* ctx, const bool ipaFont, const uint32_t cp) {
+  const auto* self = static_cast<const DictionaryDefinitionActivity*>(ctx);
+  const auto& fonts = self->renderer.getFontMap();
+  const auto it = fonts.find(ipaFont ? self->ipaFontId_ : self->defFontId_);
+  return it != fonts.end() && it->second.hasCodepoint(cp);
+}
+
+namespace {
+// Height of the 'x' glyph, or 0 when the font has none.
+int xHeightOf(const EpdFontFamily& family) {
+  if (!family.hasCodepoint('x')) return 0;
+  const EpdGlyph* glyph = family.getGlyph('x');
+  return glyph ? glyph->height : 0;
+}
+}  // namespace
+
+void DictionaryDefinitionActivity::selectIpaFont() {
+  // Matched on x-height, not point size: a pronunciation is mostly lowercase, and Doulos SIL's
+  // lowercase is shorter than a typical sans at the same size.
+  static constexpr int kIpaFontIds[] = {IPA_12_FONT_ID, IPA_14_FONT_ID, IPA_FONT_ID, IPA_18_FONT_ID};
+  ipaFontId_ = IPA_FONT_ID;
+  const auto& fonts = renderer.getFontMap();
+  const auto bodyIt = fonts.find(defFontId_);
+  if (bodyIt == fonts.end()) return;
+  const int bodyX = xHeightOf(bodyIt->second);
+  if (bodyX <= 0) return;
+  int bestDiff = INT32_MAX;
+  for (const int id : kIpaFontIds) {
+    const auto it = fonts.find(id);
+    if (it == fonts.end()) continue;
+    const int diff = std::abs(xHeightOf(it->second) - bodyX);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      ipaFontId_ = id;
+    }
+  }
+}
+
+int DictionaryDefinitionActivity::ipaPointSize() const {
+  switch (ipaFontId_) {
+    case IPA_12_FONT_ID:
+      return 12;
+    case IPA_14_FONT_ID:
+      return 14;
+    case IPA_18_FONT_ID:
+      return 18;
+    default:
+      return 16;
+  }
+}
+
+size_t DictionaryDefinitionActivity::ipaMaxGroupBytes() const {
+  const auto& fonts = renderer.getFontMap();
+  const auto it = fonts.find(ipaFontId_);
+  if (it == fonts.end()) return 0;
+  const EpdFontData* data = it->second.getData();
+  size_t largest = 0;
+  for (uint16_t g = 0; data && data->groups && g < data->groupCount; g++) {
+    largest = std::max<size_t>(largest, data->groups[g].uncompressedSize);
+  }
+  return largest;
+}
+
 void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   auto* fcm = renderer.getFontCacheManager();
   if (!fcm) return;
@@ -568,20 +662,12 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   // Built-in body fonts decompress into a RAM cache on first use, so they never pay per-glyph
   // SD I/O and the BODY half of this function is pure overhead for them.
   //
-  // The IPA half is not. It used to sit behind an early return here, which meant a built-in
-  // body font skipped the IPA prewarm as well — and since ipaWarm_ defaults to true, the IPA
-  // font was still selected for drawing and every phonetic glyph came off the per-glyph
-  // hot-group path. That path inflates a whole ~11KB group per group touched, GROWING its
-  // buffer while still holding the previous one, and silently returns nullptr when the
-  // contiguous block is not there ("OOM hot group ... glyph skipped", FontDecompressor.cpp:195).
-  // The result is a phonetic transcription that renders correctly one time and drops a glyph
-  // the next, with nothing on screen or in the log to say why: [reɪθ] became [reɪ ].
+  // The IPA half is not: an unwarmed IPA glyph comes off the per-glyph hot-group path, which
+  // inflates its whole group into the one slot body glyphs also use, and silently returns
+  // nullptr when the contiguous block is not there ("OOM hot group ... glyph skipped",
+  // FontDecompressor.cpp:195). The IPA faces are built with 4 KB groups to keep that small.
   const bool bodyIsSd = renderer.isSdCardFont(defFontId_);
 
-  // Pessimistic from here: ipaWarm_ has to be earned at the gate below. Every early return
-  // past this point (collector OOM, dictionary file unreadable) is itself evidence of a
-  // starved heap, which is exactly when the per-glyph group inflation drops glyphs — so those
-  // paths should land on the body-font fallback too.
   ipaWarm_ = false;
 
   const unsigned long t0 = millis();
@@ -590,6 +676,7 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
     LOG_ERR("DDA", "OOM: prewarm collector (%u bytes)", static_cast<unsigned>(sizeof(PrewarmCollector)));
     return;  // not fatal: glyphs still load on demand, just slowly
   }
+  collector->cov = ipaCoverage();
   // No reserve here: collector->utf8 is a fixed buffer sized from the dedup caps, so there
   // is nothing to grow and nothing that can abort. See PrewarmCollector's UTF8_CAP.
   char dictPath[128];
@@ -669,7 +756,7 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   constexpr size_t kMinBlockForStyle = 8 * 1024;
 
   // IPA before the body font, deliberately. IPA runs are drawn with a built-in font whose
-  // non-prewarmed path decompresses a whole ~11KB group per glyph (FontDecompressor.cpp:182);
+  // non-prewarmed path decompresses a whole group per glyph (FontDecompressor.cpp:182);
   // once the body prewarm below has taken its share, that contiguous block no longer exists
   // and every IPA glyph is silently skipped ("OOM hot group ... glyph skipped"). Prewarming
   // it first, while the heap is least fragmented, both fixes that and drops the per-glyph
@@ -685,13 +772,13 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
   // decompress — exactly what already happens whenever this prewarm fails.
   //
   // That gate tests the largest free BLOCK as well as total free heap, because what it is
-  // authorising is a single contiguous malloc of group.uncompressedSize (11131 bytes for the
-  // IPA font, FontDecompressor.cpp:487). On this activity's heap the two numbers diverge
-  // badly — device logs routinely show free=15492 largest=9716 and free=9964 largest=4084 —
-  // so a free-total gate happily passes an allocation that cannot succeed, and the failure
-  // then resurfaces at draw time as dropped glyphs. Same rule as the body-style gates below
-  // and as FontCacheManager.cpp:93-98.
-  constexpr size_t kIpaGroupReserve = 12 * 1024;  // one FontDecompressor group, with margin
+  // authorising is a single contiguous malloc of group.uncompressedSize (FontDecompressor.cpp:487). On this activity's
+  // heap the two numbers diverge badly — device logs routinely show free=15492 largest=9716 and free=9964 largest=4084
+  // — so a free-total gate happily passes an allocation that cannot succeed, and the failure then resurfaces at draw
+  // time as dropped glyphs. Same rule as the body-style gates below and as FontCacheManager.cpp:93-98. The IPA font's
+  // largest group, read from the font rather than chosen: a round number above the real need declines prewarms that
+  // would have fitted (the heap settles just below any constant).
+  const size_t kIpaGroupReserve = ipaMaxGroupBytes() + 512;
   const char* ipaOutcome = "none";
   if (collector->ipaLen != 0) {
     // Gate only when there is a body prewarm to protect this from. With a BUILT-IN body font
@@ -716,21 +803,10 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
     if (attempt) {
       // A prewarm that reports missed groups leaves those glyphs on the same failing
       // hot-group path, so only a clean 0 counts as warm.
-      const int missed = fcm->prewarmCache(IPA_FONT_ID, collector->ipaUtf8, 0x01);
+      const int missed = fcm->prewarmCache(ipaFontId_, collector->ipaUtf8, 0x01);
       ipaWarm_ = (missed == 0);
       ipaOutcome = ipaWarm_ ? "ok" : "miss";
     }
-    // A BUILT-IN body font cannot stand in for the IPA font: it is a subset face carrying no
-    // phonetic block, so falling back to it replaces the transcription with U+FFFD marks. Draw
-    // from the IPA font whether or not the prewarm landed. Unwarmed it goes back through the
-    // hot group, which is what this build already did -- still strictly better than a row of
-    // question marks. The prewarm's value here is not permission to use the font, it is
-    // getting the IPA groups OUT of the single hot-group slot that body glyphs are competing
-    // for; that thrash is what fdcOom counts.
-    //
-    // An SD body font is the opposite case -- a full face that may well carry IPA itself -- so
-    // it keeps the pessimistic rule above.
-    if (!bodyIsSd) ipaWarm_ = true;
   }
   const unsigned long tIpa = millis();
 
@@ -800,16 +876,16 @@ void DictionaryDefinitionActivity::prewarmDefinitionFont() {
           tAdv - tIpa, millis() - tAdv, static_cast<unsigned>(ESP.getFreeHeap()),
           static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
   // warmed=0x00 here is the signature of a slow open: nothing prewarmed means every glyph
-  // is fetched individually downstream. ipaWarm= is the phonetics equivalent. Read it with
-  // sd=: at sd=1 anything but "ok" means the IPA segments fell back to the body font (see
-  // ipaFontId()), while at sd=0 the IPA font is used regardless and a non-"ok" means those
-  // glyphs are on the hot-group path -- watch fdcOom= on the render line for dropped ones.
-  SdDebugLog::log("DDA",
-                  "prewarm sd=%d body=%u ipa=%u ipaWarm=%s mask=0x%02X warmed=0x%02X adv=%lums body=%lums free=%u "
-                  "largest=%u",
-                  bodyIsSd ? 1 : 0, collector->uniqueCount, collector->ipaCount, ipaOutcome, collector->styleMask,
-                  warmedMask, tAdv - tIpa, millis() - tAdv, static_cast<unsigned>(ESP.getFreeHeap()),
-                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+  // is fetched individually downstream. ipaWarm= is the phonetics equivalent: anything but "ok"
+  // means those glyphs are on the hot-group path -- watch fdcOom= on the render line for dropped
+  // ones. ipaFont= is the IPA face's point size.
+  SdDebugLog::log(
+      "DDA",
+      "prewarm sd=%d body=%u ipa=%u ipaWarm=%s ipaFont=%d mask=0x%02X warmed=0x%02X adv=%lums body=%lums free=%u "
+      "largest=%u",
+      bodyIsSd ? 1 : 0, collector->uniqueCount, collector->ipaCount, ipaOutcome, ipaPointSize(), collector->styleMask,
+      warmedMask, tAdv - tIpa, millis() - tAdv, static_cast<unsigned>(ESP.getFreeHeap()),
+      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
 }
 
 // Re-parse the definition and lay out ONLY `page` into layoutLines. The wrap
@@ -981,9 +1057,10 @@ int DictionaryDefinitionActivity::getMixedWidth(std::vector<IpaTextSpan>& ipaRun
   // Mirrors DictLayout::Wrapper::getMixedWidth: text without IPA is one non-IPA run, so
   // measure it directly rather than copying it onto a heap that has a few KB left.
   if (!text || !text[0]) return 0;
-  if (!textHasIpa(text)) return renderer.getTextAdvanceX(defFontId_, text, style);
+  const IpaFontCoverage cov = ipaCoverage();
+  if (!textHasIpa(text, cov)) return renderer.getTextAdvanceX(defFontId_, text, style);
   ipaRuns.clear();
-  if (!splitIpaRuns(text, ipaRuns)) {
+  if (!splitIpaRuns(text, ipaRuns, cov)) {
     collectOom_ = true;
     return 0;
   }
@@ -1024,7 +1101,8 @@ void DictionaryDefinitionActivity::wrapHtml() {
   // nor all pages of lines (here) is ever materialized.
   DictLayout::Measurer measure{this, &DictionaryDefinitionActivity::measureWidthAdapter};
   DictLayout::LineSink lineSink{this, &DictionaryDefinitionActivity::collectLineSink};
-  DictLayout::Wrapper wrapper(DictLayout::WrapMetrics{maxWidth, indentStep, bulletWidth}, measure, lineSink);
+  DictLayout::Wrapper wrapper(DictLayout::WrapMetrics{maxWidth, indentStep, bulletWidth}, measure, lineSink,
+                              ipaCoverage());
 
   // Renderer is a reused activity member (3.1-A): renderFromFileStreaming resets
   // it each call (XML_ParserReset, not free+create), so no per-turn object/parser
@@ -1111,7 +1189,7 @@ void DictionaryDefinitionActivity::wrapPlain() {
     ipaRuns.clear();
     // A failed split leaves partial runs, which would render the line with text missing —
     // drop the segments and let the truncation report stand instead.
-    if (!splitIpaRuns(currentLineText.c_str(), ipaRuns)) {
+    if (!splitIpaRuns(currentLineText.c_str(), ipaRuns, ipaCoverage())) {
       collectOom_ = true;
       ipaRuns.clear();
     }

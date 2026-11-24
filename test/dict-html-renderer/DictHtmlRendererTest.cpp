@@ -903,21 +903,21 @@ int main(int argc, char** argv) {
       if (!ok) allPass = false;
     }
 
-    // Mixed: "abc" + U+0250 + "xyz" → 3 runs
+    // Mixed words: "abc " + U+0250 + "x xyz" → body, IPA word, body (the word moves whole)
     {
-      std::string mixed = "abc";
+      std::string mixed = "abc ";
       mixed += '\xC9';
       mixed += '\x90';
-      mixed += "xyz";
+      mixed += "x xyz";
       std::vector<IpaTextSpan> runs;
       const bool split = splitIpaRuns(mixed.c_str(), runs);
-      const bool ok = split && runs.size() == 3 && !runs[0].isIpa && runs[0].text == "abc" && runs[1].isIpa &&
-                      !runs[2].isIpa && runs[2].text == "xyz";
-      printf("  \"abc\"+U+0250+\"xyz\" → %zu run(s) (expected 3)%s\n", runs.size(), ok ? "" : " FAIL");
+      const bool ok = split && runs.size() == 3 && !runs[0].isIpa && runs[0].text == "abc " && runs[1].isIpa &&
+                      runs[1].text == "\xC9\x90x " && !runs[2].isIpa && runs[2].text == "xyz";
+      printf("  \"abc \"+U+0250+\"x xyz\" → %zu run(s) (expected 3)%s\n", runs.size(), ok ? "" : " FAIL");
       if (!ok) allPass = false;
     }
 
-    // Consecutive IPA → 1 IPA run: "ab" + U+0250 + U+0251 + "cd" → 3 runs
+    // One word with IPA → one IPA run, letters included: "ab" + U+0250 + U+0251 + "cd"
     {
       std::string s = "ab";
       s += '\xC9';
@@ -927,10 +927,8 @@ int main(int argc, char** argv) {
       s += "cd";
       std::vector<IpaTextSpan> runs;
       const bool split = splitIpaRuns(s.c_str(), runs);
-      const bool ok = split && runs.size() == 3 && !runs[0].isIpa && runs[0].text == "ab" && runs[1].isIpa &&
-                      runs[1].text.size() == 4 && !runs[2].isIpa && runs[2].text == "cd";
-      printf("  \"ab\"+U+0250+U+0251+\"cd\" → %zu run(s) (expected 3, IPA run len 4)%s\n", runs.size(),
-             ok ? "" : " FAIL");
+      const bool ok = split && runs.size() == 1 && runs[0].isIpa && runs[0].text == s;
+      printf("  \"ab\"+U+0250+U+0251+\"cd\" → %zu run(s) (expected 1 IPA)%s\n", runs.size(), ok ? "" : " FAIL");
       if (!ok) allPass = false;
     }
 
