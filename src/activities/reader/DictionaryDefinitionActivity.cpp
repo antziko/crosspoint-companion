@@ -1656,8 +1656,10 @@ void DictionaryDefinitionActivity::applyDictSwitch(const int curIdx, const int n
                   static_cast<int>(dictionaryRegistry.getEntries()[curIdx].lang),
                   dictionaryRegistry.getEntries()[nextIdx].name.c_str(),
                   static_cast<int>(dictionaryRegistry.getEntries()[nextIdx].lang));
+  // The word the user looked up, not `headword`: after a stem hit headword holds the stem, and
+  // re-resolving that would skip the next dictionary's exact match ("interloper" -> "interlope").
   // recordHistory=false: the word is already in history from the original lookup.
-  controller.startLookup(headword, false);
+  controller.startLookup(currentWord_.empty() ? headword : currentWord_, false);
 }
 
 bool DictionaryDefinitionActivity::cardActionable() const {
@@ -1747,10 +1749,8 @@ void DictionaryDefinitionActivity::promptDeleteCard() {
 bool DictionaryDefinitionActivity::setCardDictToActive() {
   const uint32_t activeHash = DictUtils::activeDictHash(cachePath.empty() ? nullptr : cachePath.c_str());
   if (!setOfferStands(activeHash)) return false;
-  // Keyed on historyWord, NOT controller.getLookupWord(): the two are equal on the way in, but
-  // a switch re-looks-up `headword`, so afterwards getLookupWord() holds the FOUND word. Look
-  // "running" up, let a dictionary answer "run", and this would name "run" while the card is
-  // filed under "running" — setCardDict would silently miss.
+  // Keyed on historyWord, NOT controller.getLookupWord(): the two diverge on a chain-forward,
+  // and the card is filed under the word enrolled at word-select.
   if (!FlashcardDeck::setCardDict(cachePath, historyWord, activeHash)) {
     // Two different failures share that false: the card went away underneath us (deleted from
     // the list, or by a sync), or the deck rewrite itself failed. Ask which. Retiring the offer
@@ -1961,10 +1961,8 @@ void DictionaryDefinitionActivity::loop() {
         }
         isWordSelectMode = false;
         // Follow the word now on screen. NOT on a dictionary switch: that re-resolves the SAME
-        // word, and getLookupWord() holds the FOUND word afterwards -- using it as a card key
-        // there would file the card under whatever the new dictionary matched instead of what the
-        // user looked up. Chain-forward and chain-back both arrive here with getLookupWord() equal
-        // to the word being displayed, so one rule covers them.
+        // word (currentWord_ itself), so there is nothing to follow. Chain-forward and chain-back
+        // both arrive here with getLookupWord() equal to the word being displayed.
         if (!wasDictSwitch) {
           currentWord_ = controller.getLookupWord();
           probeCurrentCard();
