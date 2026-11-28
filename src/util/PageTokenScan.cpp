@@ -61,6 +61,58 @@ bool isSelectable(const char* text, size_t len, bool& outIsCjk) {
   return outIsCjk || containsAsciiAlnum(text, len);
 }
 
+namespace {
+// Opening quotes and brackets: they lead the character after them.
+bool isOpeningMark(const uint32_t cp) {
+  switch (cp) {
+    case 0x2018:  // ‘
+    case 0x201C:  // “
+    case 0x3008:  // 〈
+    case 0x300A:  // 《
+    case 0x300C:  // 「
+    case 0x300E:  // 『
+    case 0x3010:  // 【
+    case 0x3014:  // 〔
+    case 0x3016:  // 〖
+    case 0x3018:  // 〘
+    case 0x301A:  // 〚
+    case 0x301D:  // 〝
+    case 0xFF08:  // （
+    case 0xFF3B:  // ［
+    case 0xFF5B:  // ｛
+      return true;
+    default:
+      return false;
+  }
+}
+
+// End of the part starting at `from`: the next dash, or the next CJK letter once the part holds
+// one, taking any opening marks before it along. Layout gives CJK one token per character but
+// glues punctuation to both neighbours, so 础”“出 arrives as one token; it splits as 础” and “出.
+size_t partEnd(const char* text, const size_t len, const size_t from) {
+  bool hasCjkLetter = false;
+  size_t openStart = len;
+  for (size_t i = from; i < len;) {
+    if (dashLenAt(text, len, i) > 0) return i;
+    const auto* p = reinterpret_cast<const unsigned char*>(text + i);
+    const uint32_t cp = utf8NextCodepoint(&p);
+    const size_t next = std::min(len, static_cast<size_t>(reinterpret_cast<const char*>(p) - text));
+    if (cp == 0 || next <= i) return len;
+    if (utf8IsCjkBreakable(cp) && !utf8IsCjkPunctuation(cp)) {
+      if (hasCjkLetter) return openStart < len ? openStart : i;
+      hasCjkLetter = true;
+      openStart = len;
+    } else if (isOpeningMark(cp)) {
+      if (openStart == len) openStart = i;
+    } else {
+      openStart = len;
+    }
+    i = next;
+  }
+  return len;
+}
+}  // namespace
+
 size_t countDashes(const char* text, size_t len) {
   size_t n = 0;
   for (size_t i = 0; i < len;) {
@@ -68,9 +120,10 @@ size_t countDashes(const char* text, size_t len) {
     if (d > 0) {
       n++;
       i += d;
-    } else {
-      i++;
+      continue;
     }
+    i = partEnd(text, len, i);
+    if (i < len && dashLenAt(text, len, i) == 0) n++;  // a CJK split
   }
   return n;
 }
@@ -110,8 +163,7 @@ bool nextTextPart(const char* text, size_t from, size_t& outStart, size_t& outLe
         pos += d;
       }
       if (pos < end) {
-        size_t stop = pos;
-        while (stop < end && dashLenAt(text, end, stop) == 0) stop++;
+        const size_t stop = partEnd(text, end, pos);
         outStart = pos;
         outLen = stop - pos;
         outNext = stop;
@@ -126,7 +178,6 @@ size_t collectParts(const char* text, size_t len, Part* out, size_t maxParts) {
   if (!out || maxParts == 0 || len == 0) return 0;
 
   size_t n = 0;
-  size_t partStart = 0;
   // The separator's own bytes belong to neither neighbour, so a part ends where its
   // separator begins. A stretch that is nothing but separators contributes no index.
   const auto emit = [&](size_t start, size_t end) {
@@ -137,14 +188,13 @@ size_t collectParts(const char* text, size_t len, Part* out, size_t maxParts) {
   for (size_t i = 0; i < len;) {
     const size_t d = dashLenAt(text, len, i);
     if (d > 0) {
-      emit(partStart, i);
       i += d;
-      partStart = i;
-    } else {
-      i++;
+      continue;
     }
+    const size_t stop = partEnd(text, len, i);
+    emit(i, stop);
+    i = stop;
   }
-  emit(partStart, len);
 
   return n;
 }

@@ -1,8 +1,10 @@
 #include "CjkWordMerge.h"
 
 #include <Memory.h>
+#include <Utf8.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 
 #include "util/TextPool.h"
@@ -37,6 +39,43 @@ bool joinText(const std::vector<WordInfo>& words, const std::string& pool, const
   return true;
 }
 
+// Byte offset of codepoint `n` in s[0, len), or len.
+size_t codepointOffset(const char* s, const size_t len, const size_t n) {
+  size_t seen = 0;
+  for (size_t i = 0; i < len; i++) {
+    if ((static_cast<unsigned char>(s[i]) & 0xC0) == 0x80) continue;
+    if (seen++ == n) return i;
+  }
+  return len;
+}
+
+// Keeps codepoints [skip, skip + keep) of buf.
+void sliceCodepoints(char (&buf)[kMaxJoinedBytes], size_t& len, const size_t skip, const size_t keep) {
+  const size_t from = codepointOffset(buf, len, skip);
+  const size_t to = from + codepointOffset(buf + from, len - from, keep);
+  memmove(buf, buf + from, to - from);
+  len = to - from;
+  buf[len] = '\0';
+}
+
+// Leading codepoints of a token that carry no letter or digit: the opening quote glued to the
+// character after it (“出).
+size_t leadingMarks(const char* s, const size_t len) {
+  const auto* p = reinterpret_cast<const unsigned char*>(s);
+  const auto* end = p + len;
+  size_t n = 0;
+  while (p < end) {
+    const uint32_t cp = utf8NextCodepoint(&p);
+    if (cp == 0) break;
+    if (cp < 0x80 ? std::isalnum(static_cast<int>(cp)) != 0
+                  : !utf8IsCjkPunctuation(cp) && cp != 0x2018 && cp != 0x201C) {
+      break;
+    }
+    n++;
+  }
+  return n;
+}
+
 }  // namespace
 
 bool merge(const std::vector<WordInfo>& words, const std::vector<Row>& rows, const std::string& pool,
@@ -55,12 +94,18 @@ bool merge(const std::vector<WordInfo>& words, const std::vector<Row>& rows, con
   std::vector<int16_t> cellToken;
   std::vector<int16_t> groupEnd;
   std::vector<uint8_t> claimed;
-  if (!reserveNoThrow(cellToken, cellCount) || !reserveNoThrow(groupEnd, n) || !reserveNoThrow(claimed, n)) {
+  // For the group starting at token t: the word's length in cells, and the marks before it in t.
+  std::vector<uint8_t> wordCells;
+  std::vector<uint8_t> wordLead;
+  if (!reserveNoThrow(cellToken, cellCount) || !reserveNoThrow(groupEnd, n) || !reserveNoThrow(claimed, n) ||
+      !reserveNoThrow(wordCells, n) || !reserveNoThrow(wordLead, n)) {
     return false;
   }
   cellToken.assign(cellCount, -1);
   groupEnd.assign(n, -1);
   claimed.assign(n, 0);
+  wordCells.assign(n, 0);
+  wordLead.assign(n, 0);
   for (int t = 0; t < n; t++) {
     const TokenGlyphs& g = glyphs[t];
     if (g.start == TokenGlyphs::kNoGlyph) continue;
@@ -74,7 +119,10 @@ bool merge(const std::vector<WordInfo>& words, const std::vector<Row>& rows, con
     if (sw.length < 2 || sw.start >= cellCount) continue;
     const size_t end = std::min<size_t>(cellCount, static_cast<size_t>(sw.start) + sw.length);
     const int first = cellToken[sw.start];
-    if (first < 0 || claimed[first] || glyphs[first].start != sw.start) continue;
+    if (first < 0 || claimed[first]) continue;
+    // A word may start past its token's opening marks (“出版), never mid-letter.
+    const size_t lead = sw.start - glyphs[first].start;
+    if (lead > 0 && lead > leadingMarks(pool.data() + words[first].textOffset, words[first].textLen)) continue;
     int last = first;
     bool ok = true;
     while (static_cast<size_t>(glyphs[last].start) + glyphs[last].count < end) {
@@ -95,6 +143,8 @@ bool merge(const std::vector<WordInfo>& words, const std::vector<Row>& rows, con
     if (rowBreaks > 1) continue;
     for (int t = first; t <= last; t++) claimed[t] = 1;
     groupEnd[first] = static_cast<int16_t>(last);
+    wordCells[first] = static_cast<uint8_t>(end - sw.start);
+    wordLead[first] = static_cast<uint8_t>(lead);
     groups++;
   }
 
@@ -174,6 +224,12 @@ bool merge(const std::vector<WordInfo>& words, const std::vector<Row>& rows, con
       // Too long to carry as one token: leave the group's tokens single.
       groupEnd[t] = -1;
       continue;
+    }
+    // The tokens may run past the word at either end: an opening mark before it (“出), glued
+    // punctuation after it (础”). The lookup is the word alone.
+    if (wordLead[t] > 0 || static_cast<size_t>(glyphs[last].start) + glyphs[last].count >
+                               static_cast<size_t>(glyphs[t].start) + wordLead[t] + wordCells[t]) {
+      sliceCodepoints(buf, len, wordLead[t], wordCells[t]);
     }
     uint16_t lookupOff = 0;
     appendText(buf, len, lookupOff);

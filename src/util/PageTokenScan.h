@@ -29,9 +29,10 @@ namespace PageTokens {
 // traffic in front of the very reserve that count exists to protect.
 bool isSelectable(const char* text, size_t len, bool& outIsCjk);
 
-// Number of dash separators in the token: en-dash (U+2013), em-dash (U+2014), and any run
-// of two or more ASCII hyphens, which is how a typewriter em-dash reaches an EPUB. Each one
-// splits its token into an extra index, so a counting pass needs the same tally the
+// Number of separators in the token: en-dash (U+2013), em-dash (U+2014), any run of two or
+// more ASCII hyphens (how a typewriter em-dash reaches an EPUB), and each CJK letter after the
+// first (punctuation glues CJK characters into one layout token, 础”“出). Each one splits its
+// token into an extra index, so a counting pass needs the same tally the
 // extraction pass derives from the parts below. A token ending in a separator counts one
 // more than it yields parts; callers use this to size a reservation, where erring high is
 // free.
@@ -49,8 +50,9 @@ struct Part {
   uint16_t end;
 };
 
-// Split a selectable token on its dash separators (see countDashes) into the parts that each
-// become one word index. Separator bytes belong to no part, so "east--west" yields "east"
+// Split a selectable token on its separators (see countDashes) into the parts that each
+// become one word index. A CJK split drops nothing: 础”“出 yields 础” and “出, opening marks
+// going with the character after them. Dash bytes belong to no part, so "east--west" yields "east"
 // and "west" and a trailing "word--" yields just "word" — which is also what stops the
 // hyphenated-pair merge from mistaking that dash for a line-break hyphen.
 // Writes at most maxParts entries and returns how many were written. A token containing no

@@ -215,6 +215,36 @@ static void testAsciiDoubleHyphenSplits() {
 }
 
 // --------------------------------------------------------------------------
+// CJK glue: punctuation joins two characters into one layout token
+// --------------------------------------------------------------------------
+static void testCjkGlueSplits() {
+  std::printf("collectParts splits CJK characters glued by punctuation\n");
+  PageTokens::Part parts[PageTokens::kMaxTokenParts];
+  const auto partText = [&](const std::string& t, size_t i) {
+    return t.substr(parts[i].start, parts[i].end - parts[i].start);
+  };
+
+  const std::string quotes = "础\xE2\x80\x9D\xE2\x80\x9C出";  // 础”“出
+  size_t n = PageTokens::collectParts(quotes.data(), quotes.size(), parts, PageTokens::kMaxTokenParts);
+  CHECK(n == 2, "础”“出 yields two parts");
+  CHECK(n == 2 && partText(quotes, 0) == "础\xE2\x80\x9D", "the closing quote stays with 础");
+  CHECK(n == 2 && partText(quotes, 1) == "\xE2\x80\x9C出", "the opening quote goes with 出");
+  CHECK(PageTokens::countDashes(quotes.data(), quotes.size()) == 1, "the split is counted for the reserve");
+
+  const std::string comma = "国，人";
+  n = PageTokens::collectParts(comma.data(), comma.size(), parts, PageTokens::kMaxTokenParts);
+  CHECK(n == 2 && partText(comma, 0) == "国，" && partText(comma, 1) == "人", "国，人 splits after the comma");
+
+  const std::string single = "「国」";
+  n = PageTokens::collectParts(single.data(), single.size(), parts, PageTokens::kMaxTokenParts);
+  CHECK(n == 1 && parts[0].start == 0 && parts[0].end == single.size(), "one character with its marks is unsplit");
+
+  const std::string digits = "15人";
+  n = PageTokens::collectParts(digits.data(), digits.size(), parts, PageTokens::kMaxTokenParts);
+  CHECK(n == 1, "digits before one character stay whole");
+}
+
+// --------------------------------------------------------------------------
 // Selection predicate
 // --------------------------------------------------------------------------
 static void testSelectablePredicate() {
@@ -559,6 +589,7 @@ int main() {
   testPartsMatchOriginalSplit();
   testUnsplitTokenIsWholeToken();
   testAsciiDoubleHyphenSplits();
+  testCjkGlueSplits();
   testSelectablePredicate();
   testMeasureStripsSoftHyphen();
   testTextPartsSkipUnselectableWords();

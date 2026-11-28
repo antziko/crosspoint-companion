@@ -1687,6 +1687,49 @@ static void testCjkMergeJoinsWord() {
   CHECK(CjkWordMerge::mergedIndexOf(spans, 2) == 0 && CjkWordMerge::mergedIndexOf(spans, 4) == 1, "index map");
 }
 
+// The line keeps 础”“出 as one token (no break between closing and opening quote). The word
+// 基础 ends inside it, so its lookup must stop at the word, not carry the quotes and 出.
+static void testCjkMergeLookupStopsAtWordEnd() {
+  std::printf("testCjkMergeLookupStopsAtWordEnd\n");
+  const char* chars[] = {"国", "基", "础\xE2\x80\x9D\xE2\x80\x9C出", "阵"};
+  CjkPage p = mkCjkPage(chars, 4, 10);
+  p.glyphs[2] = {2, 4};
+  p.glyphs[3] = {6, 1};
+  std::vector<CjkWordMerge::ScanWord> scan = {{1, 2}};
+  std::vector<WordSelectNavigator::WordInfo> w;
+  std::vector<WordSelectNavigator::Row> r;
+  std::string pool;
+  std::vector<CjkWordMerge::Span> spans;
+  CHECK(CjkWordMerge::merge(p.words, p.rows, p.pool, p.glyphs, 7, scan, false, w, r, pool, spans), "merge ok");
+  CHECK(w.size() == 3, "基 and the glued token merged");
+  CHECK(w.size() == 3 && std::strcmp(pool.data() + w[1].lookupOffset, "基础") == 0, "lookup is the word alone");
+  CHECK(w.size() == 3 && w[1].lookupLen == std::strlen("基础"), "lookup length matches");
+}
+
+static void testCjkMergeAfterOpeningQuote() {
+  std::printf("testCjkMergeAfterOpeningQuote\n");
+  const char* chars[] = {"础\xE2\x80\x9D", "\xE2\x80\x9C出", "版", "人"};
+  CjkPage p = mkCjkPage(chars, 4, 10);
+  p.glyphs = {{0, 2}, {2, 2}, {4, 1}, {5, 1}};
+  // 出版 starts past the quote; 础人 cannot start inside a letter.
+  std::vector<CjkWordMerge::ScanWord> scan = {{3, 2}};
+  std::vector<WordSelectNavigator::WordInfo> w;
+  std::vector<WordSelectNavigator::Row> r;
+  std::string pool;
+  std::vector<CjkWordMerge::Span> spans;
+  CHECK(CjkWordMerge::merge(p.words, p.rows, p.pool, p.glyphs, 6, scan, false, w, r, pool, spans), "merge ok");
+  CHECK(w.size() == 3, "础” | “出版 | 人");
+  CHECK(w.size() == 3 && std::strcmp(pool.data() + w[1].lookupOffset, "出版") == 0, "lookup drops the quote");
+  CHECK(w.size() == 3 && w[1].lookupLen == std::strlen("出版"), "lookup length matches");
+
+  const char* mid[] = {"英國", "人"};
+  CjkPage q = mkCjkPage(mid, 2, 10);
+  q.glyphs = {{0, 2}, {2, 1}};
+  scan = {{1, 2}};
+  CHECK(CjkWordMerge::merge(q.words, q.rows, q.pool, q.glyphs, 3, scan, false, w, r, pool, spans), "merge ok");
+  CHECK(w.size() == 2, "a word starting mid-letter is not merged");
+}
+
 static void testCjkMergeAcrossRowsIsPair() {
   std::printf("testCjkMergeAcrossRowsIsPair\n");
   const char* chars[] = {"今", "日", "は", "晴", "れ"};
@@ -1929,6 +1972,8 @@ int main() {
   testVerticalPageNavigation();
   testBeginMultiSelectAtRejectsOutOfRange();
   testCjkMergeJoinsWord();
+  testCjkMergeLookupStopsAtWordEnd();
+  testCjkMergeAfterOpeningQuote();
   testCjkMergeAcrossRowsIsPair();
   testCjkMergeSkipsMisalignedWord();
   testCjkMergeVerticalGrowsDownColumn();
