@@ -211,6 +211,8 @@ void DictionaryWordSelectActivity::onEnter() {
   const bool consumeInitialConfirm = mappedInput.isPressed(MappedInputManager::Button::Confirm);
   // Book text is all one font; no IPA runs here, so the second slot defaults to the first.
   navigator.setFonts(SETTINGS.getReaderFontId());
+  // The page's blocks were laid out at this spacing (readerRenderSpec); the highlight redraws match.
+  navigator.setTracking(SETTINGS.getReaderCharacterSpacing());
   {
     // Heading lines laid out at a built-in size of their own get that size's band height.
     uint8_t sizedHeights[std::size(BuiltinFontSizes::POINTS)] = {};
@@ -1233,7 +1235,7 @@ void DictionaryWordSelectActivity::emitContinueResult() {
 int DictionaryWordSelectActivity::measureGlossWidth(void* ctx, const char* text, EpdFontFamily::Style style, bool) {
   auto* self = static_cast<DictionaryWordSelectActivity*>(ctx);
   // Only ever called from inside DictGloss::fit, which only runs with a gloss allocated.
-  return self->renderer.getTextAdvanceX(self->gloss_->fontId, text, style);
+  return self->renderer.getTextAdvanceX(self->gloss_->fontId, text, style, self->gloss_->tracking);
 }
 
 void DictionaryWordSelectActivity::resolveGlossFont() {
@@ -1257,9 +1259,11 @@ void DictionaryWordSelectActivity::resolveGlossFont() {
   const int fontId = SETTINGS.getDefinitionFontId();
   // Same row pitch as the definition page (DictionaryDefinitionActivity::getLineHeight).
   const int lineHeight = renderer.getLineHeight(fontId, SETTINGS.getDefinitionLineCompression());
-  if (fontId == gloss_->fontId && lineHeight == gloss_->lineHeight) return;
+  const int8_t tracking = SETTINGS.getDefinitionCharacterSpacing();
+  if (fontId == gloss_->fontId && lineHeight == gloss_->lineHeight && tracking == gloss_->tracking) return;
 
   gloss_->fontId = fontId;
+  gloss_->tracking = tracking;
   gloss_->lineHeight = lineHeight;
   gloss_->height = DictGloss::GlossResult::kMaxRows * gloss_->lineHeight + 2 * (kGlossPad + kGlossFrame);
   // Height budget for an enlarged cell: the rows it spans, over the font's own ascender, which is
@@ -1979,7 +1983,7 @@ bool DictionaryWordSelectActivity::updateGloss(int currIdx, int selectionLineHei
       planGlossCells(token.c_str(), gloss_->raw);
 
       const DictLayout::Measurer measure{this, &DictionaryWordSelectActivity::measureGlossWidth};
-      const DictLayout::WrapMetrics wrapMetrics{gloss_->wrapWidth, 0, 0};
+      const DictLayout::WrapMetrics wrapMetrics{gloss_->wrapWidth, 0, 0, gloss_->tracking};
       // Columns only when there are cells: with the character enlarged beside it, the reading gets
       // a row of its own so the eye finds it in the same place on every move, and the variant is
       // dropped from the text exactly when it is being drawn as a cell instead.
@@ -2226,23 +2230,28 @@ void DictionaryWordSelectActivity::drawGloss() {
         // piece is drawn with the terminator moved onto its end byte and put straight back — no
         // second buffer on a path that runs per cursor move. x advances by the measured width of
         // what was just drawn, so the row still reads as one continuous line.
+        // No tracking across the style joins: the wrapper measured each style's run on its own.
+        const int8_t tr = gloss_->tracking;
         int x = textX;
         if (boldStart > 0) {
           const char saved = row[boldStart];
           row[boldStart] = '\0';
-          renderer.drawText(gloss_->fontId, x, textY, row, true);
-          x += renderer.getTextAdvanceX(gloss_->fontId, row, EpdFontFamily::REGULAR);
+          renderer.drawText(gloss_->fontId, x, textY, row, true, EpdFontFamily::REGULAR, BidiUtils::BidiBaseDir::AUTO,
+                            tr);
+          x += renderer.getTextAdvanceX(gloss_->fontId, row, EpdFontFamily::REGULAR, tr);
           row[boldStart] = saved;
         }
         char* const run = row + boldStart;
         const char saved = run[boldLen];
         run[boldLen] = '\0';
-        renderer.drawText(gloss_->fontId, x, textY, run, true, EpdFontFamily::BOLD);
-        x += renderer.getTextAdvanceX(gloss_->fontId, run, EpdFontFamily::BOLD);
+        renderer.drawText(gloss_->fontId, x, textY, run, true, EpdFontFamily::BOLD, BidiUtils::BidiBaseDir::AUTO, tr);
+        x += renderer.getTextAdvanceX(gloss_->fontId, run, EpdFontFamily::BOLD, tr);
         run[boldLen] = saved;
-        renderer.drawText(gloss_->fontId, x, textY, run + boldLen, true);
+        renderer.drawText(gloss_->fontId, x, textY, run + boldLen, true, EpdFontFamily::REGULAR,
+                          BidiUtils::BidiBaseDir::AUTO, tr);
       } else {
-        renderer.drawText(gloss_->fontId, textX, textY, row, true);
+        renderer.drawText(gloss_->fontId, textX, textY, row, true, EpdFontFamily::REGULAR, BidiUtils::BidiBaseDir::AUTO,
+                          gloss_->tracking);
       }
       textY += gloss_->lineHeight;
     }

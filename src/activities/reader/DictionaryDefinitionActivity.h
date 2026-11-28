@@ -242,6 +242,8 @@ class DictionaryDefinitionActivity final : public Activity {
   // SD-font resolver trampoline + registry name lookup (SdCardFontSystem.cpp:47) on every
   // call, and the layout/render/word-extract paths query it per segment and per token.
   int defFontId_ = 0;
+  // Extra px between glyphs on this page (getDefinitionCharacterSpacing), resolved with defFontId_.
+  int8_t tracking_ = 0;
   // True when the current definition carries markup DictHtmlRenderer can parse — HTML
   // (sametypesequence=h) or XDXF (=x). Not named defIsHtml_: both formats share one tag table,
   // and treating XDXF as non-markup is exactly the bug that drew its tags on screen as text.
@@ -350,6 +352,8 @@ class DictionaryDefinitionActivity final : public Activity {
   int getMixedWidth(std::vector<IpaTextSpan>& ipaRuns, const char* text, EpdFontFamily::Style style);
   // Width measurement adapter injected into DictLayout::wrapSpans. ctx is `this`.
   static int measureWidthAdapter(void* ctx, const char* text, EpdFontFamily::Style style, bool isIpa);
+  // getTextWidth's ink extent plus the tracking drawText puts between the glyphs.
+  int trackedInkWidth(int fontId, const char* text, EpdFontFamily::Style style) const;
   // Line sink injected into DictLayout::wrapSpans: keeps collectTargetPage_'s
   // lines, counts the rest. ctx is `this`.
   static void collectLineSink(void* ctx, DictLayout::LayoutLine&& line);

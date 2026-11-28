@@ -67,21 +67,12 @@ inline SettingInfo buildFontSizeSetting(const SdCardFontRegistry* registry) {
   return s;
 }
 
-// Point sizes the definition font size setting offers, ascending. "Same as book" follows the
-// family of whichever book is open, which may differ from the global one listed here, so it
-// offers the whole range and each family snaps to what it has (a TTF renders it exactly).
-// The built-in families exist only at BUILTIN_READER_POINT_SIZES.
+// Point sizes the definition font size setting offers, ascending (dictFontPointSizeList).
 inline std::vector<uint8_t> dictFontPointSizes() {
-  std::vector<uint8_t> sizes;
-  if (SETTINGS.dictionaryFontFamily == CrossPointSettings::DICT_FONT_MATCH_READER) {
-    sizes.reserve(CrossPointSettings::DICT_FONT_POINT_MAX - CrossPointSettings::DICT_FONT_POINT_MIN + 1);
-    for (uint8_t pt = CrossPointSettings::DICT_FONT_POINT_MIN; pt <= CrossPointSettings::DICT_FONT_POINT_MAX; ++pt) {
-      sizes.push_back(pt);
-    }
-  } else {
-    sizes.assign(std::begin(BUILTIN_READER_POINT_SIZES), std::end(BUILTIN_READER_POINT_SIZES));
-  }
-  return sizes;
+  size_t count = 0;
+  const uint8_t* list =
+      dictFontPointSizeList(SETTINGS.dictionaryFontFamily == CrossPointSettings::DICT_FONT_MATCH_READER, count);
+  return {list, list + count};
 }
 
 // The definition font size row. Persisted through kPersistedSettings ("dictionaryFontPointSize"),
@@ -194,50 +185,63 @@ inline SettingInfo buildFontFamilySetting(const SdCardFontRegistry* registry) {
   return s;
 }
 
-// Build the dictionary selector setting dynamically, mirroring buildFontFamilySetting.
-// Options are "None" (index 0) plus each installed dictionary's folder name. The choice
-// is persisted in dictionary.bin (not the settings file) via Dictionary, so this entry
-// uses a getter/setter and no valuePtr — the generic toJson/fromJson loop skips it. On device the entry is
-// special-cased to open DictionarySelectActivity; on web it renders as a dropdown.
-inline SettingInfo buildDictionarySetting(const DictionaryRegistry* registry) {
+// Row name per dictionary language group (DictLang order: Other, Chinese, Japanese).
+inline constexpr StrId DICT_LANG_ROW_IDS[] = {StrId::STR_DICT_LANG_EN, StrId::STR_DICT_LANG_ZH,
+                                              StrId::STR_DICT_LANG_JA};
+inline constexpr const char* DICT_LANG_ROW_KEYS[] = {"dictionaryEn", "dictionaryZh", "dictionaryJa"};
+
+// Index of the language group a dictionary row edits, or -1 when `id` is not one.
+inline int dictLangForRow(const StrId id) {
+  for (size_t i = 0; i < std::size(DICT_LANG_ROW_IDS); i++) {
+    if (DICT_LANG_ROW_IDS[i] == id) return static_cast<int>(i);
+  }
+  return -1;
+}
+
+// One language group's default dictionary, mirroring buildFontFamilySetting. Options are that
+// group's installed dictionaries ("None" alone when it has none). The choice is persisted in
+// dictionary-<lang>.bin (not the settings file) via Dictionary, so this entry uses a getter/setter
+// and no valuePtr: the generic toJson/fromJson loop skips it. Choosing one also makes it the
+// global dictionary, which applies where no book language is known. On device the entry opens
+// DictionarySelectActivity; on web it renders as a dropdown.
+inline SettingInfo buildDictLangSetting(const DictionaryRegistry* registry, const DictLang lang) {
   std::vector<std::string> options;
-  std::vector<std::string> basePaths;  // parallel to options[1..]; option index i -> basePaths[i-1]
-  options.push_back(I18N.get(StrId::STR_DICT_NONE));
+  std::vector<std::string> basePaths;  // parallel to options
   if (registry) {
     const auto& entries = registry->getEntries();
-    options.reserve(entries.size() + 1);
+    options.reserve(entries.size());
     basePaths.reserve(entries.size());
     for (const auto& e : entries) {
+      if (e.lang != lang) continue;
       options.push_back(e.name);
       basePaths.push_back(e.basePath);
     }
   }
+  if (options.empty()) options.push_back(I18N.get(StrId::STR_DICT_NONE));
 
+  const auto langIndex = static_cast<uint8_t>(lang);
   SettingInfo s;
-  s.nameId = StrId::STR_DICTIONARY;
+  s.nameId = DICT_LANG_ROW_IDS[langIndex];
   s.type = SettingType::ENUM;
   s.enumStringValues = std::move(options);
-  s.key = "dictionary";
+  s.key = DICT_LANG_ROW_KEYS[langIndex];
   s.category = StrId::STR_READER_DICTIONARY;
 
   s.dyn = std::make_shared<SettingInfo::DynamicAccessors>();
-  s.dyn->valueGetter = [basePaths]() -> uint8_t {
-    const std::string active = Dictionary::readDictPath(nullptr);
-    if (active.empty()) return 0;
+  s.dyn->valueGetter = [basePaths, langIndex]() -> uint8_t {
+    if (basePaths.empty()) return 0;
+    const std::string active = resolveLangDictPath(langIndex);
     for (size_t i = 0; i < basePaths.size(); i++) {
-      if (basePaths[i] == active) return static_cast<uint8_t>(i + 1);
+      if (basePaths[i] == active) return static_cast<uint8_t>(i);
     }
-    return 0;  // active dictionary no longer installed -> show "None"
+    return 0;
   };
 
-  s.dyn->valueSetter = [basePaths](uint8_t v) {
-    if (v == 0 || v > basePaths.size()) {
-      Dictionary::saveGlobalDictPath("");  // clear selection
-    } else {
-      const std::string& path = basePaths[v - 1];
-      Dictionary::saveLangDictPath(static_cast<uint8_t>(DictionaryRegistry::langForBasePath(path)), path.c_str());
-      Dictionary::saveGlobalDictPath(path.c_str());
-    }
+  s.dyn->valueSetter = [basePaths, langIndex](uint8_t v) {
+    if (v >= basePaths.size()) return;
+    const std::string& path = basePaths[v];
+    Dictionary::saveLangDictPath(langIndex, path.c_str());
+    Dictionary::saveGlobalDictPath(path.c_str());
   };
 
   return s;
@@ -272,7 +276,14 @@ inline bool finalizeSetting(SettingInfo& s, const SdCardFontRegistry* registry,
   // Tilt page turn needs the QMI8658 IMU (X3).
   if (id == StrId::STR_TILT_PAGE_TURN && !halTiltSensor.isAvailable()) return false;
   if ((id == StrId::STR_DBL_CLICK_PWR || id == StrId::STR_DBL_CLICK_BACK) && BoardConfig::hasHomeKey()) return false;
-  if (id == StrId::STR_DICTIONARY && dictRegistry) s = buildDictionarySetting(dictRegistry);
+  // Japanese and Chinese rows show only when that group has a dictionary installed; the English
+  // row stays so a card with no dictionaries still shows where they go.
+  if (const int lang = dictLangForRow(id); lang >= 0 && dictRegistry) {
+    if (lang != static_cast<int>(DictLang::Other) && dictRegistry->firstIndexInLang(static_cast<DictLang>(lang)) < 0) {
+      return false;
+    }
+    s = buildDictLangSetting(dictRegistry, static_cast<DictLang>(lang));
+  }
   // Frontlit and lightless variants of a board share one binary (EEGO A4); presence is the
   // I2C probe result from Frontlight.begin(). UI-only: persistence walks kPersistedSettings,
   // so the probe never drops a saved key.
@@ -440,6 +451,10 @@ inline void forEachSetting(const SdCardFontRegistry* registry, const DictionaryR
   v.push_back(SettingInfo::Value(StrId::STR_DICT_FONT_SIZE, &CrossPointSettings::dictionaryFontPointSize,
                                  {CrossPointSettings::DICT_FONT_POINT_MIN, CrossPointSettings::DICT_FONT_POINT_MAX, 1},
                                  "dictionaryFontPointSize", StrId::STR_READER_DICTIONARY));
+  v.push_back(SettingInfo::Enum(StrId::STR_DICT_CHAR_SPACING, &CrossPointSettings::dictCharacterSpacing,
+                                {StrId::STR_SPACING_MINUS_2, StrId::STR_SPACING_MINUS_1, StrId::STR_SPACING_ZERO,
+                                 StrId::STR_SPACING_PLUS_1, StrId::STR_SPACING_PLUS_2},
+                                "dictCharacterSpacing", StrId::STR_READER_DICTIONARY));
   // "lineHeight": fromJson() maps the older named-step keys (lineSpacing, V2, V3).
   v.push_back(SettingInfo::Enum(StrId::STR_LINE_SPACING, &CrossPointSettings::lineSpacing,
                                 std::vector<StrId>(std::begin(LINE_SPACING_IDS), std::end(LINE_SPACING_IDS)),
@@ -531,10 +546,12 @@ inline void forEachSetting(const SdCardFontRegistry* registry, const DictionaryR
   v.push_back(SettingInfo::Toggle(StrId::STR_NIGHT_MODE, &CrossPointSettings::screenInverted, "screenInverted",
                                   StrId::STR_READER_TEXT));
   // --- Reader > Dictionary sub-group (category STR_READER_DICTIONARY) ---
-  // The dictionary selector is special-cased on Confirm (opens DictionarySelectActivity); the
+  // The dictionary rows are special-cased on Confirm (open DictionarySelectActivity); the
   // marker-by-dwell options are a device-only action row added in SettingsActivity. Placeholder
-  // dictionary entry (no installed dictionaries); replaced per-call with a registry-aware version.
-  v.push_back(buildDictionarySetting(nullptr));
+  // entries (no installed dictionaries); replaced per-call with registry-aware versions.
+  v.push_back(buildDictLangSetting(nullptr, DictLang::Other));
+  v.push_back(buildDictLangSetting(nullptr, DictLang::Japanese));
+  v.push_back(buildDictLangSetting(nullptr, DictLang::Chinese));
   v.push_back(SettingInfo::Value(
       StrId::STR_LOOKUP_HIST_CAP, &CrossPointSettings::lookupHistoryCap,
       {CrossPointSettings::HIST_CAP_MIN, CrossPointSettings::HIST_CAP_UNLIMITED, CrossPointSettings::HIST_CAP_STEP},
@@ -890,10 +907,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   // allocation is what aborted (and rebooted the device) when settings were saved at low heap;
   // see SettingsPersistence.h. Keep headroom above the real count.
   //
-  // Derived, not guessed: 107 push_back sites in forEachSetting. One is the Home-key loop
+  // Derived, not guessed: 112 push_back sites in forEachSetting. One is the Home-key loop
   // (3 rows), one the 4-row Control Center tile loop, and the two shortPwrBtn branches never
-  // both compile, so at most 111 rows. 116 keeps headroom for the next few rows.
-  constexpr size_t kSettingCount = 116;
+  // both compile, so at most 116 rows. 120 keeps headroom for the next few rows.
+  constexpr size_t kSettingCount = 120;
   v.reserve(kSettingCount);
   forEachSetting(registry, dictRegistry,
                  SettingSink{&v, [](void* ctx, SettingInfo&& s) {

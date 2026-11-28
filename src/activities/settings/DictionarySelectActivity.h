@@ -12,9 +12,15 @@
 
 class DictionarySelectActivity final : public Activity {
  public:
+  // Settings mode (empty bookCachePath) edits the default of language group `settingsLang`
+  // (DictLang as uint8_t) and lists only that group; `titleId` names the row that opened it.
   explicit DictionarySelectActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                    std::string bookCachePath = "")
-      : Activity("DictionarySelect", renderer, mappedInput), bookCachePath(std::move(bookCachePath)) {}
+                                    std::string bookCachePath = "", uint8_t settingsLang = 0,
+                                    StrId titleId = StrId::STR_DICTIONARY)
+      : Activity("DictionarySelect", renderer, mappedInput),
+        bookCachePath(std::move(bookCachePath)),
+        settingsLang(settingsLang),
+        titleId(titleId) {}
 
   void onEnter() override;
   void onExit() override;
@@ -34,6 +40,11 @@ class DictionarySelectActivity final : public Activity {
   // Index into the full list including "None" at position 0.
   int selectedIndex = 0;
   int totalItems = 0;
+  // 1 when the "None" row is hidden (settings mode with dictionaries to choose from: a language
+  // always resolves to one of its dictionaries, so None would not turn lookups off), else 0.
+  // List rows are model indices minus this.
+  int rowOffset = 0;
+  int rowCount() const { return totalItems - rowOffset; }
 
   // Whether we are showing the metadata info screen for the highlighted dictionary.
   bool showingInfo = false;
@@ -50,6 +61,10 @@ class DictionarySelectActivity final : public Activity {
 
   // Non-empty when launched from reader menu (per-book override mode).
   std::string bookCachePath;
+  uint8_t settingsLang = 0;
+  StrId titleId = StrId::STR_DICTIONARY;
+  // Settings mode: the language group's current default, marked "Selected".
+  std::string settingsLangPath;
   // Active per-book dictionary path loaded on enter; empty = "Use Global".
   std::string currentBookDictPath;
   // Augmented "Use Global" label showing the global dict name, e.g. "Use Global (dict-en-en)".

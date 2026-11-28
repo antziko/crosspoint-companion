@@ -785,7 +785,8 @@ void WordSelectNavigator::drawSingleHighlight(const GfxRenderer& renderer, int l
   // Same rect renderHighlightDifferential snapshots and restores — they must not diverge.
   const Rect band = boundsForWord(wordIndex, lineHeight, &renderer);
   renderer.fillRect(band.x, band.y, band.width, band.height, true);
-  renderer.drawText(fontIdFor(*w), w->screenX, drawYFor(*w), getDisplay(*w), false, w->style);
+  renderer.drawText(fontIdFor(*w), w->screenX, drawYFor(*w), getDisplay(*w), false, w->style,
+                    BidiUtils::BidiBaseDir::AUTO, tracking_);
 }
 
 void WordSelectNavigator::drawHollowHighlight(const GfxRenderer& renderer, int lineHeight, int wordIndex) const {
@@ -801,7 +802,8 @@ void WordSelectNavigator::drawHollowHighlight(const GfxRenderer& renderer, int l
   const int x = w->screenX;
   const int width = w->width;
   renderer.fillRect(x, band.y, width, band.height, false);
-  renderer.drawText(fontIdFor(*w), w->screenX, drawYFor(*w), getDisplay(*w), true, w->style);
+  renderer.drawText(fontIdFor(*w), w->screenX, drawYFor(*w), getDisplay(*w), true, w->style,
+                    BidiUtils::BidiBaseDir::AUTO, tracking_);
   renderer.drawRect(x, band.y, width, band.height, 2, true);
 }
 

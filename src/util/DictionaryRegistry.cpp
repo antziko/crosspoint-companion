@@ -161,11 +161,7 @@ int DictionaryRegistry::indexOfHash(const uint32_t hash) const {
   return -1;
 }
 
-void applyBookDictLang(const uint8_t lang) {
-  if (lang == Dictionary::kNoBookLang) {
-    Dictionary::setBookLang(Dictionary::kNoBookLang, nullptr);
-    return;
-  }
+std::string resolveLangDictPath(const uint8_t lang) {
   const auto want = static_cast<DictLang>(lang);
   const auto inGroup = [&](const std::string& path) {
     const int idx = dictionaryRegistry.indexOf(path);
@@ -177,6 +173,15 @@ void applyBookDictLang(const uint8_t lang) {
     const int first = dictionaryRegistry.firstIndexInLang(want);
     path = first >= 0 ? dictionaryRegistry.getEntries()[first].basePath : std::string();
   }
+  return path;
+}
+
+void applyBookDictLang(const uint8_t lang) {
+  if (lang == Dictionary::kNoBookLang) {
+    Dictionary::setBookLang(Dictionary::kNoBookLang, nullptr);
+    return;
+  }
+  const std::string path = resolveLangDictPath(lang);
   Dictionary::setBookLang(lang, path.c_str());
   LOG_DBG("DREG", "book dictionary group %u -> %s", static_cast<unsigned>(lang),
           path.empty() ? "(global)" : path.c_str());

@@ -36,19 +36,14 @@ void DictionarySelectActivity::onEnter() {
   scanDictionaries();
 
   if (bookCachePath.empty()) {
-    // Settings mode: validate global path, pre-select from SETTINGS.
+    // Settings mode: drop a stale global path, then pre-select the language group's current default.
     Dictionary::isValidDictionary();
-
-    selectedIndex = 0;  // default: None
-    {
-      const std::string activePath = Dictionary::readDictPath();
-      if (!activePath.empty()) {
-        for (int i = 0; i < static_cast<int>(dictFolders.size()); i++) {
-          if (folderForIndex(i + 1) == activePath) {
-            selectedIndex = i + 1;
-            break;
-          }
-        }
+    settingsLangPath = resolveLangDictPath(settingsLang);
+    selectedIndex = 0;
+    for (int i = 0; i < static_cast<int>(dictFolders.size()); i++) {
+      if (folderForIndex(i + 1) == settingsLangPath) {
+        selectedIndex = i + 1;
+        break;
       }
     }
   } else {
@@ -95,6 +90,8 @@ void DictionarySelectActivity::onEnter() {
   }
 
   totalItems = 1 + static_cast<int>(dictFolders.size());
+  rowOffset = bookCachePath.empty() && !dictFolders.empty() ? 1 : 0;
+  if (selectedIndex < rowOffset) selectedIndex = rowOffset;
   showingInfo = false;
   infoBar_.layout(renderer, mappedInput.hasTouch(), UI_10_FONT_ID, 2);
   rawBar_.layout(renderer, mappedInput.hasTouch(), UI_10_FONT_ID, 1);
@@ -119,12 +116,13 @@ void DictionarySelectActivity::scanDictionaries() {
   const auto& entries = dictionaryRegistry.getEntries();
   dictFolders.reserve(entries.size());
   dictStems.reserve(entries.size());
-  // Per-book mode lists only the book's language group, unless that group has nothing installed.
-  const uint8_t bookLang = bookCachePath.empty() ? Dictionary::kNoBookLang : Dictionary::bookLang();
-  const bool filter =
-      bookLang != Dictionary::kNoBookLang && dictionaryRegistry.firstIndexInLang(static_cast<DictLang>(bookLang)) >= 0;
+  // Settings mode lists only the language group it edits. Per-book mode lists only the book's
+  // language group, unless that group has nothing installed.
+  const uint8_t lang = bookCachePath.empty() ? settingsLang : Dictionary::bookLang();
+  const bool filter = bookCachePath.empty() || (lang != Dictionary::kNoBookLang &&
+                                                dictionaryRegistry.firstIndexInLang(static_cast<DictLang>(lang)) >= 0);
   for (const auto& e : entries) {
-    if (filter && e.lang != static_cast<DictLang>(bookLang)) continue;
+    if (filter && e.lang != static_cast<DictLang>(lang)) continue;
     dictFolders.push_back(e.name);
     dictStems.push_back(e.stem);
   }
@@ -159,10 +157,11 @@ void DictionarySelectActivity::applySelection() {
   std::string folder = folderForIndex(selectedIndex);
 
   if (bookCachePath.empty()) {
-    // Settings mode: update global dictionary.bin, and remember the choice for its language group.
-    if (!folder.empty()) {
-      Dictionary::saveLangDictPath(static_cast<uint8_t>(DictionaryRegistry::langForBasePath(folder)), folder.c_str());
-    }
+    // Settings mode: the language group's default, which also becomes the global dictionary
+    // (used where no book language is known).
+    if (folder.empty()) return;
+    Dictionary::saveLangDictPath(settingsLang, folder.c_str());
+    settingsLangPath = folder;
     if (Dictionary::readDictPath() == folder) return;
     Dictionary::saveGlobalDictPath(folder.c_str());
   } else {
@@ -228,8 +227,8 @@ void DictionarySelectActivity::loop() {
   int holdY = 0;
   if (mappedInput.wasScreenLongPress(holdX, holdY)) {
     const int heldRow = listTouch_.indexAt(renderer, holdX, holdY);
-    if (heldRow > 0) {
-      selectedIndex = heldRow;
+    if (heldRow >= 0 && heldRow + rowOffset > 0) {
+      selectedIndex = heldRow + rowOffset;
       showInfoForSelected();
     }
     return;
@@ -241,7 +240,7 @@ void DictionarySelectActivity::loop() {
   int tapX = 0;
   int tapY = 0;
   const int tappedRow = mappedInput.wasScreenTapped(tapX, tapY) ? listTouch_.touchRow(renderer, tapX, tapY) : -1;
-  if (tappedRow >= 0) selectedIndex = tappedRow;
+  if (tappedRow >= 0) selectedIndex = tappedRow + rowOffset;
 
   if ((mappedInput.wasReleased(MappedInputManager::Button::Confirm) && mappedInput.getHeldTime() < VIEW_INFO_MS) ||
       tappedRow >= 0) {
@@ -275,28 +274,29 @@ void DictionarySelectActivity::loop() {
   const int pageItems = UITheme::getNumberOfItemsPerPage(renderer, true, false, true, false);
 
   buttonNavigator.onNextRelease([this] {
-    selectedIndex = ButtonNavigator::nextIndex(selectedIndex, totalItems);
+    selectedIndex = rowOffset + ButtonNavigator::nextIndex(selectedIndex - rowOffset, rowCount());
     requestUpdate();
   });
 
   buttonNavigator.onPreviousRelease([this] {
-    selectedIndex = ButtonNavigator::previousIndex(selectedIndex, totalItems);
+    selectedIndex = rowOffset + ButtonNavigator::previousIndex(selectedIndex - rowOffset, rowCount());
     requestUpdate();
   });
 
   buttonNavigator.onNextContinuous([this, pageItems] {
-    selectedIndex = ButtonNavigator::nextPageIndex(selectedIndex, totalItems, pageItems);
+    selectedIndex = rowOffset + ButtonNavigator::nextPageIndex(selectedIndex - rowOffset, rowCount(), pageItems);
     requestUpdate();
   });
 
   buttonNavigator.onPreviousContinuous([this, pageItems] {
-    selectedIndex = ButtonNavigator::previousPageIndex(selectedIndex, totalItems, pageItems);
+    selectedIndex = rowOffset + ButtonNavigator::previousPageIndex(selectedIndex - rowOffset, rowCount(), pageItems);
     requestUpdate();
   });
   // A swipe pages like a held side key, wrapping at both ends.
   if (const int step = listSwipeStep(mappedInput)) {
-    selectedIndex = step > 0 ? ButtonNavigator::nextPageIndex(selectedIndex, totalItems, pageItems)
-                             : ButtonNavigator::previousPageIndex(selectedIndex, totalItems, pageItems);
+    const int row = selectedIndex - rowOffset;
+    selectedIndex = rowOffset + (step > 0 ? ButtonNavigator::nextPageIndex(row, rowCount(), pageItems)
+                                          : ButtonNavigator::previousPageIndex(row, rowCount(), pageItems));
     requestUpdate();
   }
 }
@@ -470,7 +470,7 @@ void DictionarySelectActivity::render(RenderLock&&) {
   }
 
   // --- Picker screen ---
-  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), tr(STR_DICTIONARY));
+  GUI.drawHeader(renderer, UITheme::getInstance().getSafeHeaderRect(renderer), I18N.get(titleId));
 
   const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 
@@ -483,15 +483,15 @@ void DictionarySelectActivity::render(RenderLock&&) {
     UITheme::drawCenteredText(renderer, safe, UI_10_FONT_ID, textY, tr(STR_DICT_NONE_FOUND));
   }
 
-  listTouch_.record(Rect{safe.x, contentTop, safe.width, contentHeight}, totalItems, selectedIndex);
+  listTouch_.record(Rect{safe.x, contentTop, safe.width, contentHeight}, rowCount(), selectedIndex - rowOffset);
   GUI.drawList(
-      renderer, Rect{safe.x, contentTop, safe.width, contentHeight}, totalItems, selectedIndex,
-      [this](int index) { return std::string(nameForIndex(index)); }, nullptr, nullptr,
-      [this](int index) -> std::string {
+      renderer, Rect{safe.x, contentTop, safe.width, contentHeight}, rowCount(), selectedIndex - rowOffset,
+      [this](int row) { return std::string(nameForIndex(row + rowOffset)); }, nullptr, nullptr,
+      [this](int row) -> std::string {
         // Show "Selected" marker for the currently active dictionary.
-        // In per-book mode compare against currentBookDictPath; in settings mode against global.
-        std::string folder = folderForIndex(index);
-        const std::string activePath = bookCachePath.empty() ? Dictionary::readDictPath() : currentBookDictPath;
+        // In per-book mode compare against currentBookDictPath; in settings mode against the language default.
+        std::string folder = folderForIndex(row + rowOffset);
+        const std::string& activePath = bookCachePath.empty() ? settingsLangPath : currentBookDictPath;
         if (folder.empty() && activePath.empty()) return tr(STR_SELECTED);
         if (!folder.empty() && folder == activePath) return tr(STR_SELECTED);
         return "";

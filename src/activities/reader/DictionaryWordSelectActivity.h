@@ -448,6 +448,7 @@ class DictionaryWordSelectActivity final : public Activity {
     // fixed: the size can come and go mid-session (see that function).
     int fontId = 0;
     int lineHeight = 0;
+    int8_t tracking = 0;  // getDefinitionCharacterSpacing, resolved with fontId
     int height = 0;
     int ascender = 0;      // the enlarged cell's own height unit
     int maxCellScale = 0;  // largest replication factor the box's height allows

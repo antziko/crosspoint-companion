@@ -38,7 +38,9 @@ namespace {
 // v16: built-in Noto Serif removed, so fontFamily 0 is Noto Sans; older files stored 0 Noto Serif
 //      (now the "NotoSerif" SD family) and 1 Noto Sans.
 // v17: lineSpacing and dictLineSpacing are percent steps; older files hold the six named steps.
-constexpr uint8_t READER_SETTINGS_FILE_VERSION = 17;
+// v18: appended dictFontPointSize; older files use the global definition font size.
+// v19: appended dictCharacterSpacing; older files use the global definition character spacing.
+constexpr uint8_t READER_SETTINGS_FILE_VERSION = 19;
 constexpr size_t LEGACY_SD_FONT_FAMILY_NAME_SIZE = 32;
 // Oldest layout load() still understands; everything from here up is read field by field.
 constexpr uint8_t READER_SETTINGS_MIN_READABLE_VERSION = 5;
@@ -73,7 +75,9 @@ bool load(const std::string& cachePath, CrossPointSettings::ReaderOverride& out)
   // Written under an older numbering; carry the book's choice across rather than letting it shift
   // a step (and needlessly re-paginate).
   if (version < 17) {
-    out.lineSpacing = CrossPointSettings::remapLegacyLineSpacing(out.lineSpacing, version < 7 ? 4 : version == 7 ? 5 : 6);
+    out.lineSpacing = CrossPointSettings::remapLegacyLineSpacing(out.lineSpacing, version < 7    ? 4
+                                                                                  : version == 7 ? 5
+                                                                                                 : 6);
   }
   serialization::readPod(f, out.paragraphAlignment);
   serialization::readPod(f, out.hyphenationEnabled);
@@ -143,6 +147,21 @@ bool load(const std::string& cachePath, CrossPointSettings::ReaderOverride& out)
     serialization::readPod(f, out.textWeight);
     if (out.textWeight > CrossPointSettings::TEXT_WEIGHT_MAX) out.textWeight = CrossPointSettings::TEXT_WEIGHT_OFFSET;
   }
+  out.dictFontPointSize = CrossPointSettings::ReaderOverride::DICT_FONT_SIZE_GLOBAL;
+  if (version >= 18) {
+    serialization::readPod(f, out.dictFontPointSize);
+    if (out.dictFontPointSize < CrossPointSettings::DICT_FONT_POINT_MIN ||
+        out.dictFontPointSize > CrossPointSettings::DICT_FONT_POINT_MAX) {
+      out.dictFontPointSize = CrossPointSettings::ReaderOverride::DICT_FONT_SIZE_GLOBAL;
+    }
+  }
+  out.dictCharacterSpacing = CrossPointSettings::ReaderOverride::DICT_CHAR_SPACING_GLOBAL;
+  if (version >= 19) {
+    serialization::readPod(f, out.dictCharacterSpacing);
+    if (out.dictCharacterSpacing > CrossPointSettings::CHARACTER_SPACING_MAX) {
+      out.dictCharacterSpacing = CrossPointSettings::ReaderOverride::DICT_CHAR_SPACING_GLOBAL;
+    }
+  }
   if (version < 16) {
     if (out.fontFamily == 0 && out.sdFontFamilyName[0] == '\0') {
       strncpy(out.sdFontFamilyName, "NotoSerif", sizeof(out.sdFontFamilyName) - 1);
@@ -181,6 +200,8 @@ bool write(const std::string& cachePath, const CrossPointSettings::ReaderOverrid
   serialization::writePod(f, ov.inlineGlossEnabled);
   serialization::writePod(f, ov.dictLineSpacing);
   serialization::writePod(f, ov.textWeight);
+  serialization::writePod(f, ov.dictFontPointSize);
+  serialization::writePod(f, ov.dictCharacterSpacing);
   return true;
 }
 

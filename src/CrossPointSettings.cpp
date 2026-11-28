@@ -521,7 +521,10 @@ int CrossPointSettings::getEffectiveRefreshFrequency() const {
 }
 
 uint8_t CrossPointSettings::getDefinitionPointSize() const {
-  return std::clamp(dictionaryFontPointSize, DICT_FONT_POINT_MIN, DICT_FONT_POINT_MAX);
+  const uint8_t pt = readerOverride.active && readerOverride.dictFontPointSize != ReaderOverride::DICT_FONT_SIZE_GLOBAL
+                         ? readerOverride.dictFontPointSize
+                         : dictionaryFontPointSize;
+  return std::clamp(pt, DICT_FONT_POINT_MIN, DICT_FONT_POINT_MAX);
 }
 
 int CrossPointSettings::getDefinitionFontId() const {
@@ -640,6 +643,14 @@ uint8_t CrossPointSettings::getReaderParagraphIndent() const {
 
 uint8_t CrossPointSettings::getReaderWordSpacing() const {
   return readerOverride.active ? readerOverride.wordSpacing : wordSpacing;
+}
+
+int8_t CrossPointSettings::getDefinitionCharacterSpacing() const {
+  uint8_t v = dictCharacterSpacing;
+  if (readerOverride.active && readerOverride.dictCharacterSpacing <= CHARACTER_SPACING_MAX) {
+    v = readerOverride.dictCharacterSpacing;
+  }
+  return static_cast<int8_t>(std::min(v, CHARACTER_SPACING_MAX) - CHARACTER_SPACING_OFFSET);
 }
 
 int8_t CrossPointSettings::getReaderCharacterSpacing() const {

@@ -72,6 +72,8 @@ class TextSettingsActivity final : public UiTabListActivity {
     WordSelectButtons,
     InlineGloss,
     DictLineSpacing,
+    DictFontSize,
+    DictCharSpacing,
     Count
   };
 

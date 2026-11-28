@@ -34,7 +34,8 @@ constexpr StrId LAYOUT_ROW_NAME_IDS[] = {
 constexpr StrId STYLE_ROW_NAME_IDS[] = {StrId::STR_FOCUS_READING,     StrId::STR_HYPHENATION,
                                         StrId::STR_EMBEDDED_STYLE,    StrId::STR_TEXT_AA,
                                         StrId::STR_TEXT_WEIGHT,       StrId::STR_WORD_SELECT_BUTTONS,
-                                        StrId::STR_DICT_INLINE_GLOSS, StrId::STR_DICT_LINE_SPACING};
+                                        StrId::STR_DICT_INLINE_GLOSS, StrId::STR_DICT_LINE_SPACING,
+                                        StrId::STR_DICT_FONT_SIZE,    StrId::STR_DICT_CHAR_SPACING};
 
 // LOCAL(feat): Hold Confirm this long on a Font-tab row to pin/unpin (vs a tap = commit).
 constexpr unsigned long kPinHoldMs = 700;
@@ -72,6 +73,14 @@ constexpr StrId CHARACTER_SPACING_IDS[] = {StrId::STR_SPACING_MINUS_2, StrId::ST
                                            StrId::STR_SPACING_PLUS_2};
 static_assert(std::size(CHARACTER_SPACING_IDS) == CrossPointSettings::CHARACTER_SPACING_MAX + 1,
               "CHARACTER_SPACING_IDS must cover every stored tracking value");
+
+// "Use Global (+1 px)": the per-book dictionary spacing row's inherit option.
+std::string dictCharSpacingGlobalLabel() {
+  const uint8_t g = std::min(SETTINGS.dictCharacterSpacing, CrossPointSettings::CHARACTER_SPACING_MAX);
+  char buf[48];
+  snprintf(buf, sizeof(buf), "%s (%s)", tr(STR_DICT_USE_GLOBAL), I18N.get(CHARACTER_SPACING_IDS[g]));
+  return buf;
+}
 // Indices map straight onto the stored 0..6 value, which getReaderTextWeight() offsets to -3..+3.
 constexpr StrId TEXT_WEIGHT_IDS[] = {
     StrId::STR_TEXT_WEIGHT_MINUS_3, StrId::STR_TEXT_WEIGHT_MINUS_2, StrId::STR_TEXT_WEIGHT_MINUS_1, StrId::STR_NORMAL,
@@ -125,8 +134,8 @@ TextSettingsActivity::TextSettingsActivity(GfxRenderer& renderer, MappedInputMan
     const auto row = static_cast<StyleRow>(r);
     // Word-select button pair, gloss box and dictionary spacing are per-book override fields: book
     // modes only (the global gloss default lives in the Dictionary settings).
-    if (!bookMode() &&
-        (row == StyleRow::WordSelectButtons || row == StyleRow::InlineGloss || row == StyleRow::DictLineSpacing)) {
+    if (!bookMode() && (row == StyleRow::WordSelectButtons || row == StyleRow::InlineGloss ||
+                        row == StyleRow::DictLineSpacing || row == StyleRow::DictFontSize)) {
       continue;
     }
     // Only vector (TTF/OTF) fonts can change weight, and only PSRAM builds load them.
@@ -846,6 +855,52 @@ void TextSettingsActivity::confirmStyleRow(int row) {
       requestUpdate();
       return;
     }
+    case StyleRow::DictFontSize: {
+      // Dictionary screens only, like DictLineSpacing. Index 0 = the global size.
+      size_t count = 0;
+      const uint8_t* sizes =
+          dictFontPointSizeList(SETTINGS.dictionaryFontFamily == CrossPointSettings::DICT_FONT_MATCH_READER, count);
+      std::vector<std::string> labels;
+      labels.reserve(count + 1);
+      char buf[48];
+      snprintf(buf, sizeof(buf), "%s (%u pt)", tr(STR_DICT_USE_GLOBAL),
+               static_cast<unsigned>(SETTINGS.dictionaryFontPointSize));
+      labels.emplace_back(buf);
+      int cur = 0;
+      const uint8_t bookPt = book_.dictFontPointSize;
+      const uint8_t snapped = bookPt != CrossPointSettings::ReaderOverride::DICT_FONT_SIZE_GLOBAL
+                                  ? snapToNearestPointSize(sizes, count, bookPt)
+                                  : 0;
+      for (size_t i = 0; i < count; i++) {
+        snprintf(buf, sizeof(buf), tr(STR_POINT_SIZE_VALUE_FORMAT), static_cast<unsigned>(sizes[i]));
+        labels.emplace_back(buf);
+        if (sizes[i] == snapped) cur = static_cast<int>(i) + 1;
+      }
+      optionPopup_.show(StrId::STR_DICT_FONT_SIZE, labels, cur, [this, sizes, count](int idx) {
+        book_.dictFontPointSize = idx > 0 && static_cast<size_t>(idx) <= count
+                                      ? sizes[idx - 1]
+                                      : CrossPointSettings::ReaderOverride::DICT_FONT_SIZE_GLOBAL;
+        persist();
+      });
+      requestUpdate();
+      return;
+    }
+    case StyleRow::DictCharSpacing: {
+      // Dictionary screens only, like DictLineSpacing. Index 0 = the global spacing.
+      std::vector<std::string> labels;
+      labels.reserve(std::size(CHARACTER_SPACING_IDS) + 1);
+      labels.push_back(dictCharSpacingGlobalLabel());
+      for (const StrId id : CHARACTER_SPACING_IDS) labels.emplace_back(I18N.get(id));
+      const uint8_t v = book_.dictCharacterSpacing;
+      const int cur = v <= CrossPointSettings::CHARACTER_SPACING_MAX ? v + 1 : 0;
+      optionPopup_.show(StrId::STR_DICT_CHAR_SPACING, labels, cur, [this](int idx) {
+        book_.dictCharacterSpacing =
+            idx > 0 ? static_cast<uint8_t>(idx - 1) : CrossPointSettings::ReaderOverride::DICT_CHAR_SPACING_GLOBAL;
+        persist();
+      });
+      requestUpdate();
+      return;
+    }
     case StyleRow::AntiAliasing:
       // Tri-state picker, not a toggle: negating it made Sharp unreachable (!2 == 0).
       optionPopup_.show(StrId::STR_TEXT_AA, TEXT_AA_IDS, static_cast<int>(std::size(TEXT_AA_IDS)), *f_.textAntiAliasing,
@@ -887,6 +942,21 @@ std::string TextSettingsActivity::styleValueText(int row) const {
       return book_.dictLineSpacing < CrossPointSettings::LINE_COMPRESSION_COUNT
                  ? I18N.get(DICT_LINE_SPACING_IDS[book_.dictLineSpacing + 1])
                  : tr(STR_SAME_AS_TEXT);
+    case StyleRow::DictCharSpacing: {
+      const uint8_t v = book_.dictCharacterSpacing;
+      return v <= CrossPointSettings::CHARACTER_SPACING_MAX ? std::string(I18N.get(CHARACTER_SPACING_IDS[v]))
+                                                            : dictCharSpacingGlobalLabel();
+    }
+    case StyleRow::DictFontSize: {
+      char buf[48];
+      if (book_.dictFontPointSize == CrossPointSettings::ReaderOverride::DICT_FONT_SIZE_GLOBAL) {
+        snprintf(buf, sizeof(buf), "%s (%u pt)", tr(STR_DICT_USE_GLOBAL),
+                 static_cast<unsigned>(SETTINGS.dictionaryFontPointSize));
+      } else {
+        snprintf(buf, sizeof(buf), tr(STR_POINT_SIZE_VALUE_FORMAT), static_cast<unsigned>(book_.dictFontPointSize));
+      }
+      return buf;
+    }
     case StyleRow::AntiAliasing: {
       const uint8_t v = *f_.textAntiAliasing;
       return v < std::size(TEXT_AA_IDS) ? I18N.get(TEXT_AA_IDS[v]) : I18N.get(StrId::STR_TEXT_AA_ANTIALIASED);
@@ -930,7 +1000,8 @@ bool TextSettingsActivity::focusedRowHasNoPreview() const {
   if (ringPos() == 0 || tab_ != Tab::Style) return false;
   const StyleRow row = static_cast<StyleRow>(styleRowAt(ringPos() - 1));
   return row == StyleRow::Hyphenation || row == StyleRow::EmbeddedStyle || row == StyleRow::AntiAliasing ||
-         row == StyleRow::WordSelectButtons || row == StyleRow::InlineGloss || row == StyleRow::DictLineSpacing;
+         row == StyleRow::WordSelectButtons || row == StyleRow::InlineGloss || row == StyleRow::DictLineSpacing ||
+         row == StyleRow::DictFontSize || row == StyleRow::DictCharSpacing;
 }
 
 void TextSettingsActivity::switchTab(int direction) {

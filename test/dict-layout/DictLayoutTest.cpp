@@ -42,6 +42,17 @@ static int fakeMeasure(void* /*ctx*/, const char* text, EpdFontFamily::Style /*s
   return static_cast<int>(std::strlen(text));
 }
 
+// fakeMeasure plus kTracking px between adjacent non-space bytes, as drawText tracks glyphs.
+static constexpr int kTracking = 2;
+static int trackedMeasure(void* /*ctx*/, const char* text, EpdFontFamily::Style /*style*/, bool /*isIpa*/) {
+  int w = 0;
+  for (size_t i = 0; text[i]; i++) {
+    w++;
+    if (i > 0 && text[i] != ' ' && text[i - 1] != ' ') w += kTracking;
+  }
+  return w;
+}
+
 static StyledSpan mkSpan(const char* text, bool newlineBefore = false, bool bold = false, bool italic = false,
                          uint8_t indentLevel = 0, bool isListItem = false) {
   StyledSpan s;
@@ -159,6 +170,28 @@ static void testAdjacentSameStyleMerges() {
   DictLayout::wrapSpans(spans, DictLayout::WrapMetrics{100, 0, 0}, meas, out);
   CHECK(out.size() == 1, "one line");
   if (out.size() == 1) CHECK(out[0].segments.size() == 1, "same-style segments merge");
+}
+
+// Every line, measured whole the way it is drawn, must fit: the per-codepoint break and the
+// same-style merge both have to account for the tracking between glyphs.
+static void testTrackedLinesFit() {
+  std::printf("testTrackedLinesFit\n");
+  const DictLayout::Measurer meas{nullptr, &trackedMeasure};
+  constexpr int kWidth = 15;
+  const DictLayout::WrapMetrics metrics{kWidth, 0, 0, kTracking};
+  const auto checkFit = [&](const std::vector<DictLayout::LayoutLine>& out, const char* what) {
+    for (const auto& line : out) {
+      CHECK(trackedMeasure(nullptr, lineText(line).c_str(), EpdFontFamily::REGULAR, false) <= kWidth, what);
+    }
+  };
+  std::vector<DictLayout::LayoutLine> out;
+  DictLayout::wrapSpans({mkSpan("abcdefghijklmnopqrstuvwxyz")}, metrics, meas, out);
+  CHECK(out.size() > 1, "long token breaks");
+  checkFit(out, "broken token fits with tracking");
+  DictLayout::wrapSpans({mkSpan("abc"), mkSpan("def")}, metrics, meas, out);
+  checkFit(out, "merged same-style spans fit with tracking");
+  DictLayout::wrapSpans({mkSpan("ab cd"), mkSpan("efghijklmnop")}, metrics, meas, out);
+  checkFit(out, "token joined to the line fits with tracking");
 }
 
 static void testPaginate() {
@@ -287,6 +320,7 @@ int main() {
   testNewlineBeforeStartsLine();
   testStyleAndListIndent();
   testAdjacentSameStyleMerges();
+  testTrackedLinesFit();
   testPaginate();
   testPageCollectorMatchesOracle();
   testIpaWordMovesWhole();

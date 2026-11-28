@@ -432,6 +432,13 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     // DICT_LINE_SPACING_SAME_AS_TEXT to follow lineSpacing above.
     static constexpr uint8_t DICT_LINE_SPACING_SAME_AS_TEXT = 0xFF;
     uint8_t dictLineSpacing = DICT_LINE_SPACING_SAME_AS_TEXT;
+    // Definition font point size for this book, or DICT_FONT_SIZE_GLOBAL to use dictionaryFontPointSize.
+    static constexpr uint8_t DICT_FONT_SIZE_GLOBAL = 0;
+    uint8_t dictFontPointSize = DICT_FONT_SIZE_GLOBAL;
+    // Definition character spacing for this book (CHARACTER_SPACING_OFFSET-based), or
+    // DICT_CHAR_SPACING_GLOBAL to use dictCharacterSpacing.
+    static constexpr uint8_t DICT_CHAR_SPACING_GLOBAL = 0xFF;
+    uint8_t dictCharacterSpacing = DICT_CHAR_SPACING_GLOBAL;
   };
 
   // Night mode: inverted output polarity for the whole UI, resolved once per render
@@ -606,6 +613,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   static constexpr uint8_t CHARACTER_SPACING_OFFSET = 2;
   static constexpr uint8_t CHARACTER_SPACING_MAX = 4;
   uint8_t characterSpacing = CHARACTER_SPACING_OFFSET;
+  // Character spacing of the definition page and gloss box, same encoding as characterSpacing.
+  uint8_t dictCharacterSpacing = CHARACTER_SPACING_OFFSET;
   // Stroke thickness of TTF/OTF reader fonts. Stored unsigned; 0..6 maps to -3..+3 steps
   // (0 = the design weight) through getReaderTextWeight().
   static constexpr uint8_t TEXT_WEIGHT_OFFSET = 3;
@@ -847,7 +856,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // string means "use a built-in font"). Returned pointer is owned by settings.
   const char* getReaderSdFontFamilyName() const;
   int getDefinitionFontId() const;
-  // Point size the definition viewer asks for: dictionaryFontPointSize, clamped to its range.
+  // Point size the definition viewer asks for: the book's dictFontPointSize when set, else
+  // dictionaryFontPointSize, clamped to its range.
   // Used by the dictionary to make an SD family resident at that size (the font id
   // resolver cannot load anything itself — see getDefinitionFontId()).
   uint8_t getDefinitionPointSize() const;
@@ -881,6 +891,9 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t getReaderWordSpacing() const;
   // Stored 0..4 as signed -2..+2 px of tracking.
   int8_t getReaderCharacterSpacing() const;
+  // Extra px between glyphs on the definition page and gloss box (-2..+2): the book's
+  // dictCharacterSpacing when set, else dictCharacterSpacing.
+  int8_t getDefinitionCharacterSpacing() const;
   int8_t getReaderTextWeight() const;
   uint8_t getReaderEmbeddedStyle() const;
   uint8_t getReaderTextAntiAliasing() const;

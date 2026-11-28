@@ -15,6 +15,7 @@ Wrapper::Wrapper(const WrapMetrics& metrics, const Measurer& measure, const Line
     : maxWidth_(metrics.maxWidth),
       indentStep_(metrics.indentStep),
       bulletWidth_(metrics.bulletWidth),
+      tracking_(metrics.tracking),
       measure_(measure),
       sink_(sink),
       cov_(cov) {
@@ -59,7 +60,10 @@ void Wrapper::startLine(uint8_t indent, bool listItem) {
 void Wrapper::appendToLine(const char* text, size_t len, EpdFontFamily::Style style, bool isIpa, int width) {
   if (!currentLine_.segments.empty() && currentLine_.segments.back().style == style &&
       currentLine_.segments.back().isIpa == isIpa) {
-    if (!appendNoThrow(currentLine_.segments.back().text, text, len)) {
+    std::string& seg = currentLine_.segments.back().text;
+    // Merged, the two pieces draw as one string, which tracks the glyphs either side of the join.
+    if (!seg.empty() && seg.back() != ' ' && len > 0 && text[0] != ' ') width += tracking_;
+    if (!appendNoThrow(seg, text, len)) {
       oom_ = true;
       return;
     }
@@ -80,6 +84,12 @@ void Wrapper::appendToLine(const char* text, size_t len, EpdFontFamily::Style st
     }
   }
   currentX_ += width;
+}
+
+int Wrapper::joinGap(const char* text) const {
+  if (tracking_ <= 0 || currentLine_.segments.empty() || !text || text[0] == '\0' || text[0] == ' ') return 0;
+  const std::string& last = currentLine_.segments.back().text;
+  return !last.empty() && last.back() != ' ' ? tracking_ : 0;
 }
 
 void Wrapper::appendMixed(const char* text, EpdFontFamily::Style style, const int forceWordIpa) {
@@ -124,13 +134,16 @@ void Wrapper::breakToken(const char* tok, EpdFontFamily::Style style, uint8_t in
     char cpBuf[5];
     const int cpLen = utf8EncodeCodepoint(cp, cpBuf);
     cpBuf[cpLen] = '\0';  // measure_ takes a C string
-    const int cpWidth = measure_(cpBuf, style, cpIsIpa);
+    // Measured alone, a codepoint carries none of the tracking it gets beside its neighbour.
+    const int cpBase = measure_(cpBuf, style, cpIsIpa);
+    int cpWidth = cpBase + (pending_.empty() ? joinGap(cpBuf) : (cp == ' ' ? 0 : tracking_));
     if (!pending_.empty() && currentX_ + pendingWidth + cpWidth > maxWidth_) {
       appendMixed(pending_.c_str(), style, force);
       flushLine();
       startLine(indentLevel, false);
       pending_.clear();
       pendingWidth = 0;
+      cpWidth = cpBase;
     }
     if (!appendNoThrow(pending_, cpBuf, static_cast<size_t>(cpLen))) {
       oom_ = true;
@@ -163,7 +176,7 @@ void Wrapper::onSpan(const StyledSpan& span) {
   }
 
   const int spanWidth = getMixedWidth(span.text, style);
-  if (currentX_ + spanWidth <= maxWidth_) {
+  if (currentX_ + joinGap(span.text) + spanWidth <= maxWidth_) {
     // Fast path: entire span fits on the current line.
     appendMixed(span.text, style);
   } else {
@@ -190,7 +203,7 @@ void Wrapper::onSpan(const StyledSpan& span) {
 
       bool lineIsEmpty = currentLine_.segments.empty();
       bool useSpace = !lineIsEmpty && hadSpace;
-      const int tokWidth = getMixedWidth(tok_.c_str(), style);
+      const int tokWidth = getMixedWidth(tok_.c_str(), style) + (useSpace ? 0 : joinGap(tok_.c_str()));
       const int spaceWidth = useSpace ? measure_(" ", style, false) : 0;
 
       if (currentX_ + spaceWidth + tokWidth > maxWidth_ && !lineIsEmpty) {

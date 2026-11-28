@@ -18,6 +18,17 @@ inline constexpr uint8_t BUILTIN_READER_POINT_SIZES[] = {12, 14, 16, 18};
 // Vector (.ttf/.otf) fonts offer every whole point size from 8 through 22.
 inline constexpr uint8_t VECTOR_READER_POINT_SIZES[] = {8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22};
 
+// Point sizes the definition font offers, ascending. Following the book's family it offers the
+// whole vector range and each family snaps to what it has; the built-in family has its own set.
+inline const uint8_t* dictFontPointSizeList(const bool followsBookFamily, size_t& count) {
+  if (followsBookFamily) {
+    count = sizeof(VECTOR_READER_POINT_SIZES);
+    return VECTOR_READER_POINT_SIZES;
+  }
+  count = sizeof(BUILTIN_READER_POINT_SIZES);
+  return BUILTIN_READER_POINT_SIZES;
+}
+
 // Point sizes selectable for the active reader font, ascending: the vector set
 // or installed .cpfont sizes for a known SD family, otherwise the built-in set.
 // Never returns empty.

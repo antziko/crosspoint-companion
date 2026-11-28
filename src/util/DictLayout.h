@@ -46,6 +46,9 @@ struct WrapMetrics {
   int maxWidth = 0;
   int indentStep = 0;
   int bulletWidth = 0;
+  // Extra px the measurer adds between adjacent glyphs (never across a space). Only the
+  // per-codepoint break in breakToken needs it: whole strings are measured with it included.
+  int tracking = 0;
 };
 
 // Receives each completed display line as it is produced, in order. The callee
@@ -90,10 +93,14 @@ class Wrapper {
   // forceWordIpa: -1 classifies each word; 0/1 forces it (a piece of an already-classified word).
   void appendMixed(const char* text, EpdFontFamily::Style style, int forceWordIpa = -1);
   void breakToken(const char* tok, EpdFontFamily::Style style, uint8_t indentLevel);
+  // Tracking `text` may gain at its join with the line so far, for the fit checks. An upper
+  // bound: appendToLine adds it only when the two merge into one segment.
+  int joinGap(const char* text) const;
 
   const int maxWidth_;
   const int indentStep_;
   const int bulletWidth_;
+  const int tracking_;
   Measurer measure_;
   LineSink sink_;
   IpaFontCoverage cov_;

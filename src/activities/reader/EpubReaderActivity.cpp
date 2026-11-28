@@ -456,6 +456,8 @@ void EpubReaderActivity::onEnter() {
       bookOverride.focusReadingEnabled = SETTINGS.focusReadingEnabled;
       bookOverride.inlineGlossEnabled = SETTINGS.dictInlineGlossEnabled;
       bookOverride.dictLineSpacing = CrossPointSettings::ReaderOverride::DICT_LINE_SPACING_SAME_AS_TEXT;
+      bookOverride.dictFontPointSize = CrossPointSettings::ReaderOverride::DICT_FONT_SIZE_GLOBAL;
+      bookOverride.dictCharacterSpacing = CrossPointSettings::ReaderOverride::DICT_CHAR_SPACING_GLOBAL;
       static_assert(sizeof(bookOverride.sdFontFamilyName) == sizeof(SETTINGS.sdFontFamilyName),
                     "sdFontFamilyName size mismatch");
       strncpy(bookOverride.sdFontFamilyName, SETTINGS.sdFontFamilyName, sizeof(bookOverride.sdFontFamilyName) - 1);
@@ -5274,6 +5276,8 @@ void EpubReaderActivity::syncBookOverrideFromGlobals() {
   ov.focusReadingEnabled = SETTINGS.focusReadingEnabled;
   ov.inlineGlossEnabled = SETTINGS.dictInlineGlossEnabled;
   ov.dictLineSpacing = CrossPointSettings::ReaderOverride::DICT_LINE_SPACING_SAME_AS_TEXT;
+  ov.dictFontPointSize = CrossPointSettings::ReaderOverride::DICT_FONT_SIZE_GLOBAL;
+  ov.dictCharacterSpacing = CrossPointSettings::ReaderOverride::DICT_CHAR_SPACING_GLOBAL;
   static_assert(sizeof(ov.sdFontFamilyName) == sizeof(SETTINGS.sdFontFamilyName), "sdFontFamilyName size mismatch");
   strncpy(ov.sdFontFamilyName, SETTINGS.sdFontFamilyName, sizeof(ov.sdFontFamilyName) - 1);
   ov.sdFontFamilyName[sizeof(ov.sdFontFamilyName) - 1] = '\0';

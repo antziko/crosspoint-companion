@@ -161,6 +161,8 @@ class WordSelectNavigator {
     ipaFontId_ = ipaFontId != 0 ? ipaFontId : bodyFontId;
     ipaDy_ = ipaFontId_ != bodyFontId_ ? ipaDy : 0;
   }
+  // Extra px between glyphs when a highlighted word is redrawn; match what the page drew with.
+  void setTracking(const int8_t tracking) { tracking_ = tracking; }
   int fontIdFor(const WordInfo& w) const {
     if (w.isIpa) return ipaFontId_;
     return w.sizeIndex ? BuiltinFontSizes::FONT_IDS[w.sizeIndex - 1] : bodyFontId_;
@@ -425,6 +427,7 @@ class WordSelectNavigator {
   // raised glyph is neither clipped by the inverse fill nor left behind by a differential
   // restore, which only repaints boundsForWord's rect.
   int ipaDy_ = 0;
+  int8_t tracking_ = 0;
   uint8_t sizedLineHeights_[std::size(BuiltinFontSizes::POINTS)] = {};
   bool skipStopwords_ = true;
   bool vertical_ = false;

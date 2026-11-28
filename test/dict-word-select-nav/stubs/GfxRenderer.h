@@ -32,7 +32,7 @@ class GfxRenderer {
   void invertRect(int /*x*/, int /*y*/, int /*width*/, int /*height*/) const {}
 
   void drawText(int /*fontId*/, int x, int y, const char* text, bool /*black*/ = true, uint8_t /*style*/ = 0,
-                BidiUtils::BidiBaseDir /*baseDir*/ = BidiUtils::BidiBaseDir::AUTO) const {
+                BidiUtils::BidiBaseDir /*baseDir*/ = BidiUtils::BidiBaseDir::AUTO, int8_t /*tracking*/ = 0) const {
     if (drawCallCount < MAX_DRAW_CALLS) {
       drawCalls[drawCallCount] = {x, y, text};
     }

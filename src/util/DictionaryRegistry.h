@@ -198,3 +198,7 @@ extern DictionaryRegistry dictionaryRegistry;
 // nothing installed leaves the book unfiltered on the global dictionary. Pass
 // Dictionary::kNoBookLang when no book is open. UI task only.
 void applyBookDictLang(uint8_t lang);
+
+// The default dictionary of language group `lang` as applyBookDictLang resolves it, or empty when
+// that group has nothing installed. Reads the SD card; UI task only.
+std::string resolveLangDictPath(uint8_t lang);

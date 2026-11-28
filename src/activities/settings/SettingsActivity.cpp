@@ -358,11 +358,12 @@ void SettingsActivity::toggleSelectedSetting() {
   } else if (setting.type == SettingType::ENUM && setting.dyn && setting.dyn->valueGetter && setting.dyn->valueSetter) {
     // LOCAL(feat-dictionary): font-family no longer launches FontSelectionActivity from here — it is
     // hidden from the flat Reader list (inTextSettings) and now lives in the Text Settings Font tab (#2605).
-    if (setting.nameId == StrId::STR_DICTIONARY) {
+    if (const int lang = dictLangForRow(setting.nameId); lang >= 0) {
       // Launch the dictionary picker (rich metadata/preparation flow) instead of cycling.
-      // The picker writes the selection to dictionary.bin itself; just refresh on return.
+      // The picker writes the selection itself; just refresh on return.
       startActivityForResultNoThrow<DictionarySelectActivity>([this](const ActivityResult&) { rebuildSettings(); },
-                                                              renderer, mappedInput);
+                                                              renderer, mappedInput, std::string(),
+                                                              static_cast<uint8_t>(lang), setting.nameId);
       return;
     }
     if (setting.nameId == StrId::STR_DICT_FONT_SIZE) {

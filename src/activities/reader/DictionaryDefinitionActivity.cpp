@@ -443,6 +443,7 @@ void DictionaryDefinitionActivity::wrapText() {
 
   // Resolve the per-definition invariants once (see defFontId_ / defIsMarkup_).
   defFontId_ = SETTINGS.getDefinitionFontId();
+  tracking_ = SETTINGS.getDefinitionCharacterSpacing();
   const DictInfo info = Dictionary::readInfo(foundLocation.folderPath.c_str());
   // 'h' is HTML, 'x' is XDXF. Both go to DictHtmlRenderer, which registers the two tag
   // vocabularies in one table (DictHtmlRenderer::classify). XDXF used to miss this test and
@@ -1058,14 +1059,14 @@ int DictionaryDefinitionActivity::getMixedWidth(std::vector<IpaTextSpan>& ipaRun
   // measure it directly rather than copying it onto a heap that has a few KB left.
   if (!text || !text[0]) return 0;
   const IpaFontCoverage cov = ipaCoverage();
-  if (!textHasIpa(text, cov)) return renderer.getTextAdvanceX(defFontId_, text, style);
+  if (!textHasIpa(text, cov)) return renderer.getTextAdvanceX(defFontId_, text, style, tracking_);
   ipaRuns.clear();
   if (!splitIpaRuns(text, ipaRuns, cov)) {
     collectOom_ = true;
     return 0;
   }
   return std::accumulate(ipaRuns.begin(), ipaRuns.end(), 0, [&](int sum, const IpaTextSpan& run) {
-    return sum + renderer.getTextAdvanceX(run.isIpa ? ipaFontId() : defFontId_, run.text.c_str(), style);
+    return sum + renderer.getTextAdvanceX(run.isIpa ? ipaFontId() : defFontId_, run.text.c_str(), style, tracking_);
   });
 }
 
@@ -1084,7 +1085,22 @@ int DictionaryDefinitionActivity::measureWidthAdapter(void* ctx, const char* tex
                                                       bool isIpa) {
   auto* self = static_cast<DictionaryDefinitionActivity*>(ctx);
   const int fontId = isIpa ? self->ipaFontId() : self->defFontId_;
-  return self->renderer.getTextAdvanceX(fontId, text, style);
+  return self->renderer.getTextAdvanceX(fontId, text, style, self->tracking_);
+}
+
+int DictionaryDefinitionActivity::trackedInkWidth(const int fontId, const char* text,
+                                                  const EpdFontFamily::Style style) const {
+  const int ink = renderer.getTextWidth(fontId, text, style);
+  if (tracking_ == 0) return ink;
+  int gaps = 0;
+  uint32_t prev = 0;
+  const auto* p = reinterpret_cast<const uint8_t*>(text);
+  uint32_t cp;
+  while ((cp = utf8NextCodepoint(&p))) {
+    if (prev != 0 && prev != ' ' && cp != ' ') gaps++;
+    prev = cp;
+  }
+  return std::max(0, ink + gaps * tracking_);
 }
 
 void DictionaryDefinitionActivity::wrapHtml() {
@@ -1101,7 +1117,7 @@ void DictionaryDefinitionActivity::wrapHtml() {
   // nor all pages of lines (here) is ever materialized.
   DictLayout::Measurer measure{this, &DictionaryDefinitionActivity::measureWidthAdapter};
   DictLayout::LineSink lineSink{this, &DictionaryDefinitionActivity::collectLineSink};
-  DictLayout::Wrapper wrapper(DictLayout::WrapMetrics{maxWidth, indentStep, bulletWidth}, measure, lineSink,
+  DictLayout::Wrapper wrapper(DictLayout::WrapMetrics{maxWidth, indentStep, bulletWidth, tracking_}, measure, lineSink,
                               ipaCoverage());
 
   // Renderer is a reused activity member (3.1-A): renderFromFileStreaming resets
@@ -1365,7 +1381,7 @@ void DictionaryDefinitionActivity::extractWordsFromLayout() {
         const size_t tokLen = static_cast<size_t>(p - tokStart);
         std::string tok(tokStart, tokLen);
 
-        const int tokAdvanceX = renderer.getTextAdvanceX(segFontId, tok.c_str(), seg.style);
+        const int tokAdvanceX = renderer.getTextAdvanceX(segFontId, tok.c_str(), seg.style, tracking_);
 
         // One cursor stop per part, on the same dash rule the reading page uses, so
         // "word--word" is two selectable words here too. Unlike the reading page these
@@ -1380,9 +1396,11 @@ void DictionaryDefinitionActivity::extractWordsFromLayout() {
           if (cleaned.empty()) continue;
           // Only a split token needs its prefix measured to place the part; the common case
           // is one part at offset 0, where that measurement would be wasted work.
-          const int partOffsetX =
-              partStart == 0 ? 0 : renderer.getTextAdvanceX(segFontId, tok.substr(0, partStart).c_str(), seg.style);
-          const int partWidth = renderer.getTextWidth(segFontId, part.c_str(), seg.style);
+          const int partOffsetX = partStart == 0 ? 0
+                                                 : renderer.getTextAdvanceX(segFontId, tok.substr(0, partStart).c_str(),
+                                                                            seg.style, tracking_) +
+                                                       tracking_;
+          const int partWidth = trackedInkWidth(segFontId, part.c_str(), seg.style);
           uint16_t tokOff = WordSelectNavigator::poolAppend(textPool, part.c_str(), part.size());
           uint16_t cleanedOff = WordSelectNavigator::poolAppend(textPool, cleaned.c_str(), cleaned.size());
           WordSelectNavigator::WordInfo wi;
@@ -1406,6 +1424,7 @@ void DictionaryDefinitionActivity::extractWordsFromLayout() {
   LOG_DBG("DDA", "extractWords: %u words in %lums", static_cast<unsigned>(words.size()), millis() - t0);
   // WordInfo carries only the isIpa flag; the navigator resolves it against these two.
   navigator.setFonts(defFontId_, ipaFontId(), ipaBaselineOffset());
+  navigator.setTracking(tracking_);
   navigator.load(std::move(words), std::move(rows), std::move(textPool));
 }
 
@@ -2440,9 +2459,9 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
         const int segFontId = seg.isIpa ? ipaFontId() : defFontId_;
         const int segY = seg.isIpa ? y + ipaDy : y;
         const char* segText = pagePool_.data() + seg.offset;
-        renderer.drawText(segFontId, x, segY, segText, true, seg.style);
+        renderer.drawText(segFontId, x, segY, segText, true, seg.style, BidiUtils::BidiBaseDir::AUTO, tracking_);
         if ((seg.style & EpdFontFamily::UNDERLINE) != 0) {
-          const int segWidth = renderer.getTextWidth(segFontId, segText, seg.style);
+          const int segWidth = trackedInkWidth(segFontId, segText, seg.style);
           const int underlineY = segY + renderer.getFontAscenderSize(segFontId) + 2;
           renderer.drawLine(x, underlineY, x + segWidth, underlineY, true);
         }
@@ -2452,11 +2471,13 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
         for (int m = 0; m < noteSpanCount_; m++) {
           const DictNotes::Span& sp = noteSpans_[m];
           if (sp.segIndex != segIndex) continue;
-          const int preW = sp.byteStart == 0 ? 0
-                                             : renderer.getTextAdvanceX(
-                                                   segFontId, std::string(segText, sp.byteStart).c_str(), seg.style);
-          const int spanW =
-              renderer.getTextAdvanceX(segFontId, std::string(segText + sp.byteStart, sp.byteLen).c_str(), seg.style);
+          const int preW = sp.byteStart == 0
+                               ? 0
+                               : renderer.getTextAdvanceX(segFontId, std::string(segText, sp.byteStart).c_str(),
+                                                          seg.style, tracking_) +
+                                     (segText[sp.byteStart - 1] == ' ' || segText[sp.byteStart] == ' ' ? 0 : tracking_);
+          const int spanW = renderer.getTextAdvanceX(segFontId, std::string(segText + sp.byteStart, sp.byteLen).c_str(),
+                                                     seg.style, tracking_);
           if (spanW <= 0) continue;
           if (SETTINGS.quoteHighlightStyle == CrossPointSettings::QUOTE_STYLE_UNDERLINE) {
             renderer.fillRect(x + preW, y + lineHeight - kNoteUnderlineThickness, spanW, kNoteUnderlineThickness, true);
@@ -2469,7 +2490,7 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
           }
         }
         segIndex++;
-        x += renderer.getTextAdvanceX(segFontId, segText, seg.style);
+        x += renderer.getTextAdvanceX(segFontId, segText, seg.style, tracking_);
       }
     }
 

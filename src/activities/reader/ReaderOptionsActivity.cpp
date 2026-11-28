@@ -41,13 +41,23 @@ enum ItemIndex : int {
   FURIGANA = 14,
   INLINE_GLOSS = 15,
   DICT_LINE_SPACING = 16,
+  DICT_FONT_SIZE = 17,
+  DICT_CHAR_SPACING = 18,
 };
 
+// Stored 0..CHARACTER_SPACING_MAX, displayed -2..+2 px.
+constexpr StrId DICT_CHAR_SPACING_LABELS[] = {StrId::STR_SPACING_MINUS_2, StrId::STR_SPACING_MINUS_1,
+                                              StrId::STR_SPACING_ZERO, StrId::STR_SPACING_PLUS_1,
+                                              StrId::STR_SPACING_PLUS_2};
+static_assert(std::size(DICT_CHAR_SPACING_LABELS) == CrossPointSettings::CHARACTER_SPACING_MAX + 1,
+              "dictionary character spacing labels");
+
 // Display order: the CJK rows sit above More Text Settings, which stays last.
-constexpr ItemIndex ROW_ORDER[] = {
-    FONT_FAMILY, FONT_SIZE,     LINE_SPACING,        PARA_ALIGNMENT, HYPHENATION,       EXTRA_SPACING,
-    PARA_INDENT, SCREEN_MARGIN, WORD_SELECT_BUTTONS, INLINE_GLOSS,   DICT_LINE_SPACING, FOCUS_READING,
-    MIN_SESSION, BOOK_LANGUAGE, VERTICAL_TEXT,       FURIGANA,       MORE_TEXT_SETTINGS};
+constexpr ItemIndex ROW_ORDER[] = {FONT_FAMILY,         FONT_SIZE,     LINE_SPACING,      PARA_ALIGNMENT,
+                                   HYPHENATION,         EXTRA_SPACING, PARA_INDENT,       SCREEN_MARGIN,
+                                   WORD_SELECT_BUTTONS, INLINE_GLOSS,  DICT_LINE_SPACING, DICT_FONT_SIZE,
+                                   DICT_CHAR_SPACING,   FOCUS_READING, MIN_SESSION,       BOOK_LANGUAGE,
+                                   VERTICAL_TEXT,       FURIGANA,      MORE_TEXT_SETTINGS};
 
 constexpr StrId BOOK_LANGUAGE_LABELS[] = {StrId::STR_BOOK_LANG_AUTO, StrId::STR_BOOK_LANG_JA,
                                           StrId::STR_BOOK_LANG_ZH_HANS, StrId::STR_BOOK_LANG_ZH_HANT,
@@ -354,6 +364,32 @@ void ReaderOptionsActivity::cycleCurrentItem() {
       }
       break;
     }
+    case DICT_CHAR_SPACING: {
+      // Global, then -2..+2 px, then back.
+      const uint8_t v = localOverride.dictCharacterSpacing;
+      localOverride.dictCharacterSpacing = v > CrossPointSettings::CHARACTER_SPACING_MAX ? 0
+                                           : v == CrossPointSettings::CHARACTER_SPACING_MAX
+                                               ? CrossPointSettings::ReaderOverride::DICT_CHAR_SPACING_GLOBAL
+                                               : static_cast<uint8_t>(v + 1);
+      break;
+    }
+    case DICT_FONT_SIZE: {
+      // Global, then each size the definition family offers, then back.
+      size_t count = 0;
+      const uint8_t* sizes =
+          dictFontPointSizeList(SETTINGS.dictionaryFontFamily == CrossPointSettings::DICT_FONT_MATCH_READER, count);
+      const uint8_t v = localOverride.dictFontPointSize;
+      uint8_t next = sizes[0];
+      if (v != CrossPointSettings::ReaderOverride::DICT_FONT_SIZE_GLOBAL) {
+        const uint8_t cur = snapToNearestPointSize(sizes, count, v);
+        next = cur == sizes[count - 1] ? CrossPointSettings::ReaderOverride::DICT_FONT_SIZE_GLOBAL : cur;
+        for (size_t i = 0; i + 1 < count; i++) {
+          if (sizes[i] == cur) next = sizes[i + 1];
+        }
+      }
+      localOverride.dictFontPointSize = next;
+      break;
+    }
     case MIN_SESSION: {
       // Find current position in cycle table and advance by one.
       int pos = 0;
@@ -374,7 +410,7 @@ void ReaderOptionsActivity::cycleCurrentItem() {
   // WORD_SELECT_BUTTONS (input mapping) appear nowhere in PreviewKey, so they keep the
   // cheap list-only repaint.
   if (currentItem() != MIN_SESSION && currentItem() != WORD_SELECT_BUTTONS && currentItem() != INLINE_GLOSS &&
-      currentItem() != DICT_LINE_SPACING) {
+      currentItem() != DICT_LINE_SPACING && currentItem() != DICT_FONT_SIZE && currentItem() != DICT_CHAR_SPACING) {
     fullRedraw_ = true;
   }
   // A size change must reload the resident SD font at the new size, or getReaderFontId()
@@ -415,6 +451,10 @@ const char* ReaderOptionsActivity::getItemName(const int index) const {
       return tr(STR_DICT_INLINE_GLOSS);
     case DICT_LINE_SPACING:
       return tr(STR_DICT_LINE_SPACING);
+    case DICT_FONT_SIZE:
+      return tr(STR_DICT_FONT_SIZE);
+    case DICT_CHAR_SPACING:
+      return tr(STR_DICT_CHAR_SPACING);
     case FOCUS_READING:
       return tr(STR_FOCUS_READING);
     case MIN_SESSION:
@@ -481,6 +521,25 @@ std::string ReaderOptionsActivity::getItemValue(const int index) const {
       return localOverride.dictLineSpacing < CrossPointSettings::LINE_COMPRESSION_COUNT
                  ? I18N.get(LINE_SPACING_IDS[localOverride.dictLineSpacing])
                  : tr(STR_SAME_AS_TEXT);
+    case DICT_CHAR_SPACING: {
+      const uint8_t v = localOverride.dictCharacterSpacing;
+      if (v <= CrossPointSettings::CHARACTER_SPACING_MAX) return I18N.get(DICT_CHAR_SPACING_LABELS[v]);
+      const uint8_t g = std::min(SETTINGS.dictCharacterSpacing, CrossPointSettings::CHARACTER_SPACING_MAX);
+      char buf[48];
+      snprintf(buf, sizeof(buf), "%s (%s)", tr(STR_DICT_USE_GLOBAL), I18N.get(DICT_CHAR_SPACING_LABELS[g]));
+      return buf;
+    }
+    case DICT_FONT_SIZE: {
+      char buf[48];
+      if (localOverride.dictFontPointSize == CrossPointSettings::ReaderOverride::DICT_FONT_SIZE_GLOBAL) {
+        snprintf(buf, sizeof(buf), "%s (%u pt)", tr(STR_DICT_USE_GLOBAL),
+                 static_cast<unsigned>(SETTINGS.dictionaryFontPointSize));
+      } else {
+        snprintf(buf, sizeof(buf), tr(STR_POINT_SIZE_VALUE_FORMAT),
+                 static_cast<unsigned>(localOverride.dictFontPointSize));
+      }
+      return buf;
+    }
     case MIN_SESSION: {
       const uint8_t v = localOverride.minSessionMinutes;
       if (v == CrossPointSettings::ReaderOverride::MIN_SESSION_USE_GLOBAL) {
